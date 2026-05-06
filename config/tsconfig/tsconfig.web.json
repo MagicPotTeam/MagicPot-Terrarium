@@ -1,0 +1,31 @@
+{
+  "extends": "@electron-toolkit/tsconfig/tsconfig.web.json",
+  "include": [
+    "../../packages/app/src/preload/index.d.ts",
+    "../../packages/app/src/vite-env.d.ts",
+    "../../packages/app/src/renderer/src/env.d.ts",
+    "../../packages/app/src/renderer/src/i18next.d.ts",
+    "../../packages/app/src/renderer/src/mui-theme.d.ts",
+    "../../packages/app/src/renderer/src/**/*",
+    "../../packages/app/src/renderer/src/**/*.tsx",
+    "../../packages/app/src/shared/**/*"
+  ],
+  "compilerOptions": {
+    "composite": true,
+    "jsx": "react-jsx",
+    "baseUrl": "../..",
+    "paths": {
+      "@renderer/*": [
+        "packages/app/src/renderer/src/*"
+      ],
+      "@shared/*": [
+        "packages/app/src/shared/*"
+      ]
+    },
+    "noUnusedParameters": false,
+    "noUnusedLocals": false,
+    "noImplicitAny": false,
+    "resolveJsonModule": true,
+    "esModuleInterop": true
+  }
+}

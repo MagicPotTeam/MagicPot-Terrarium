@@ -1,0 +1,586 @@
+{
+  "22": {
+    "inputs": {
+      "preprocessor": "AnyLineArtPreprocessor_aux",
+      "resolution": ["35", 0],
+      "image": ["42", 0]
+    },
+    "class_type": "AIO_Preprocessor",
+    "_meta": {
+      "title": "AIO Aux Preprocessor"
+    }
+  },
+  "23": {
+    "inputs": {
+      "preprocessor": "DepthAnythingV2Preprocessor",
+      "resolution": ["31", 0],
+      "image": ["450", 0]
+    },
+    "class_type": "AIO_Preprocessor",
+    "_meta": {
+      "title": "AIO Aux Preprocessor"
+    }
+  },
+  "24": {
+    "inputs": {
+      "resize_mode": "Just Resize",
+      "image": ["450", 0]
+    },
+    "class_type": "easy imagePixelPerfect",
+    "_meta": {
+      "title": "图像完美像素"
+    }
+  },
+  "25": {
+    "inputs": {
+      "strength": 0.3,
+      "start_percent": 0,
+      "end_percent": ["400", 0],
+      "positive": ["352", 0],
+      "negative": ["63", 0],
+      "control_net": ["70", 0],
+      "vae_optional": ["73", 2],
+      "image": ["33", 0]
+    },
+    "class_type": "ACN_AdvancedControlNetApply_v2",
+    "_meta": {
+      "title": "应用ControlNet"
+    }
+  },
+  "26": {
+    "inputs": {
+      "strength": 0.3,
+      "start_percent": 0,
+      "end_percent": ["400", 0],
+      "positive": ["45", 0],
+      "negative": ["45", 1],
+      "control_net": ["75", 0],
+      "vae_optional": ["73", 2],
+      "image": ["69", 0]
+    },
+    "class_type": "ACN_AdvancedControlNetApply_v2",
+    "_meta": {
+      "title": "应用ControlNet"
+    }
+  },
+  "31": {
+    "inputs": {
+      "resize_mode": "Just Resize",
+      "image": ["450", 0]
+    },
+    "class_type": "easy imagePixelPerfect",
+    "_meta": {
+      "title": "图像完美像素"
+    }
+  },
+  "32": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": ["60", 0],
+      "get_image_size": ["68", 0]
+    },
+    "class_type": "ImageResizeKJ",
+    "_meta": {
+      "title": "Resize Image (deprecated)"
+    }
+  },
+  "33": {
+    "inputs": {
+      "preprocessor": "DepthAnythingV2Preprocessor",
+      "resolution": ["34", 0],
+      "image": ["42", 0]
+    },
+    "class_type": "AIO_Preprocessor",
+    "_meta": {
+      "title": "AIO Aux Preprocessor"
+    }
+  },
+  "34": {
+    "inputs": {
+      "resize_mode": "Just Resize",
+      "image": ["42", 0]
+    },
+    "class_type": "easy imagePixelPerfect",
+    "_meta": {
+      "title": "图像完美像素"
+    }
+  },
+  "35": {
+    "inputs": {
+      "resize_mode": "Just Resize",
+      "image": ["42", 0]
+    },
+    "class_type": "easy imagePixelPerfect",
+    "_meta": {
+      "title": "图像完美像素"
+    }
+  },
+  "38": {
+    "inputs": {
+      "pixels": ["450", 0],
+      "vae": ["73", 2]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE编码"
+    }
+  },
+  "42": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": ["68", 0]
+    },
+    "class_type": "ImageResizeKJ",
+    "_meta": {
+      "title": "Resize Image (deprecated)"
+    }
+  },
+  "43": {
+    "inputs": {
+      "images": ["68", 0]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "44": {
+    "inputs": {
+      "strength": 0.3,
+      "start_percent": 0,
+      "end_percent": ["400", 0],
+      "positive": ["25", 0],
+      "negative": ["25", 1],
+      "control_net": ["75", 0],
+      "vae_optional": ["73", 2],
+      "image": ["22", 0]
+    },
+    "class_type": "ACN_AdvancedControlNetApply_v2",
+    "_meta": {
+      "title": "应用ControlNet"
+    }
+  },
+  "45": {
+    "inputs": {
+      "strength": 0.3,
+      "start_percent": 0,
+      "end_percent": ["400", 0],
+      "positive": ["352", 0],
+      "negative": ["63", 0],
+      "control_net": ["70", 0],
+      "vae_optional": ["73", 2],
+      "image": ["23", 0]
+    },
+    "class_type": "ACN_AdvancedControlNetApply_v2",
+    "_meta": {
+      "title": "应用ControlNet"
+    }
+  },
+  "46": {
+    "inputs": {
+      "samples": ["74", 0],
+      "vae": ["73", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "47": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": ["46", 0],
+      "get_image_size": ["68", 0]
+    },
+    "class_type": "ImageResizeKJ",
+    "_meta": {
+      "title": "Resize Image (deprecated)"
+    }
+  },
+  "48": {
+    "inputs": {
+      "pixels": ["42", 0],
+      "vae": ["73", 2]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE编码"
+    }
+  },
+  "59": {
+    "inputs": {
+      "extra": "{\"show_headings\":true,\"show_descriptions\":false,\"mode\":\"*\"}",
+      "ㅤ": "Stable Diffusion",
+      "info_comma_padding_backtrack": "",
+      "Prompt word wrap length limit": 20,
+      "enable_emphasis": true,
+      "info_RNG": "",
+      "RNG": "gpu",
+      "ㅤㅤ": "Compute Settings",
+      "info_disable_nan_check": "",
+      "disable_nan_check": true,
+      "ㅤㅤㅤ": "Sampler parameters",
+      "info_eta_ancestral": "",
+      "eta": 1,
+      "info_s_churn": "",
+      "s_churn": 0,
+      "info_s_tmin": "",
+      "s_tmin": 0,
+      "info_s_tmax": "",
+      "s_tmax": 0,
+      "info_s_noise": "",
+      "s_noise": 1,
+      "info_eta_noise_seed_delta": "",
+      "ENSD": 0,
+      "info_skip_early_cond": "",
+      "skip_early_cond": 0,
+      "info_sgm_noise_multiplier": "",
+      "sgm_noise_multiplier": false,
+      "info_upcast_sampling": "",
+      "upcast_sampling": true,
+      "ㅤㅤㅤㅤ": "Optimizations",
+      "info_NGMS": "",
+      "NGMS": 0,
+      "info_NGMS_all_steps": "",
+      "NGMS all steps": false,
+      "info_pad_cond_uncond": "",
+      "pad_cond_uncond": false,
+      "info_batch_cond_uncond": "",
+      "batch_cond_uncond": true,
+      "ㅤㅤㅤㅤㅤ": "Compatibility",
+      "info_use_prev_scheduling": "",
+      "Use previous prompt editing timelines": true,
+      "ㅤㅤㅤㅤㅤㅤ": "Experimental",
+      "info_use_CFGDenoiser": "",
+      "Use CFGDenoiser": false,
+      "info_debug": "",
+      "debug": false,
+      "*": ["73", 0]
+    },
+    "class_type": "smZ Settings",
+    "_meta": {
+      "title": "Settings (smZ)"
+    }
+  },
+  "60": {
+    "inputs": {
+      "samples": ["376", 0],
+      "vae": ["73", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "63": {
+    "inputs": {
+      "text": ["365", 0],
+      "parser": "A1111",
+      "mean_normalization": true,
+      "multi_conditioning": true,
+      "use_old_emphasis_implementation": false,
+      "with_SDXL": false,
+      "ascore": 6,
+      "width": 1024,
+      "height": 1024,
+      "crop_w": 0,
+      "crop_h": 0,
+      "target_width": 1024,
+      "target_height": 1024,
+      "text_g": "",
+      "text_l": "",
+      "smZ_steps": 1,
+      "clip": ["67", 1]
+    },
+    "class_type": "smZ CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode++"
+    }
+  },
+  "64": {
+    "inputs": {
+      "lora_name": "YXYYIL.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": ["72", 0],
+      "clip": ["72", 1]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA"
+    }
+  },
+  "65": {
+    "inputs": {
+      "lora_name": "YXYYIL.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": ["64", 0],
+      "clip": ["64", 1]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA"
+    }
+  },
+  "66": {
+    "inputs": {
+      "lora_name": "YXYYIL.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": ["65", 0],
+      "clip": ["65", 1]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA"
+    }
+  },
+  "67": {
+    "inputs": {
+      "lora_name": "YXYYIL.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": ["66", 0],
+      "clip": ["66", 1]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA"
+    }
+  },
+  "68": {
+    "inputs": {
+      "index": 1,
+      "value1": ["388", 0]
+    },
+    "class_type": "easy anythingIndexSwitch",
+    "_meta": {
+      "title": "编号切换"
+    }
+  },
+  "69": {
+    "inputs": {
+      "preprocessor": "AnyLineArtPreprocessor_aux",
+      "resolution": ["24", 0],
+      "image": ["450", 0]
+    },
+    "class_type": "AIO_Preprocessor",
+    "_meta": {
+      "title": "AIO Aux Preprocessor"
+    }
+  },
+  "70": {
+    "inputs": {
+      "name": "Chenkin-UniControl-XL.safetensors",
+      "control_type": "fuse(实验性功能)"
+    },
+    "class_type": "ACN_ControlNet++LoaderSingle",
+    "_meta": {
+      "title": "加载ControlNet模型"
+    }
+  },
+  "71": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": ["32", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "72": {
+    "inputs": {
+      "lora_name": "QQIL.safetensors",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": ["59", 0],
+      "clip": ["73", 1]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA"
+    }
+  },
+  "73": {
+    "inputs": {
+      "ckpt_name": "ChenkinNoob-XL-V0.5.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Checkpoint加载器（简易）"
+    }
+  },
+  "74": {
+    "inputs": {
+      "seed": ["449", 0],
+      "steps": 36,
+      "cfg": 7,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "sgm_uniform",
+      "denoise": ["413", 0],
+      "model": ["67", 0],
+      "positive": ["44", 0],
+      "negative": ["44", 1],
+      "latent_image": ["48", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "75": {
+    "inputs": {
+      "name": "Chenkin-UniControl-XL.safetensors",
+      "control_type": "fuse(实验性功能)"
+    },
+    "class_type": "ACN_ControlNet++LoaderSingle",
+    "_meta": {
+      "title": "加载ControlNet模型"
+    }
+  },
+  "352": {
+    "inputs": {
+      "text": ["366", 0],
+      "parser": "A1111",
+      "mean_normalization": true,
+      "multi_conditioning": true,
+      "use_old_emphasis_implementation": false,
+      "with_SDXL": false,
+      "ascore": 6,
+      "width": 1024,
+      "height": 1024,
+      "crop_w": 0,
+      "crop_h": 0,
+      "target_width": 1024,
+      "target_height": 1024,
+      "text_g": "",
+      "text_l": "",
+      "smZ_steps": 1,
+      "clip": ["67", 1]
+    },
+    "class_type": "smZ CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode++"
+    }
+  },
+  "365": {
+    "inputs": {
+      "value": ""
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "字符串（多行）"
+    }
+  },
+  "366": {
+    "inputs": {
+      "value": ""
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "字符串（多行）"
+    }
+  },
+  "376": {
+    "inputs": {
+      "seed": ["449", 0],
+      "steps": 24,
+      "cfg": 5,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "sgm_uniform",
+      "denoise": ["401", 1],
+      "model": ["67", 0],
+      "positive": ["26", 0],
+      "negative": ["26", 1],
+      "latent_image": ["38", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "388": {
+    "inputs": {
+      "image": "pasted/image (8).png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "394": {
+    "inputs": {
+      "value": 0.55
+    },
+    "class_type": "easy float",
+    "_meta": {
+      "title": "浮点数"
+    }
+  },
+  "400": {
+    "inputs": {
+      "value": 0.8
+    },
+    "class_type": "easy float",
+    "_meta": {
+      "title": "浮点数"
+    }
+  },
+  "401": {
+    "inputs": {
+      "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))",
+      "a": ["413", 0],
+      "b": ["394", 0]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "Math Expression 🐍"
+    }
+  },
+  "413": {
+    "inputs": {
+      "value": 0.8
+    },
+    "class_type": "easy float",
+    "_meta": {
+      "title": "浮点数"
+    }
+  },
+  "449": {
+    "inputs": {
+      "value": 0
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "整数"
+    }
+  },
+  "450": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "scale_by": 1.5,
+      "image": ["46", 0]
+    },
+    "class_type": "ImageScaleBy",
+    "_meta": {
+      "title": "缩放图像（比例）"
+    }
+  }
+}

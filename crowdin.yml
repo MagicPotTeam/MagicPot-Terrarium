@@ -1,0 +1,3 @@
+files:
+  - source: /packages/app/src/shared/locales/zh-CN/*.json
+    translation: /packages/app/src/shared/locales/%locale%/%original_file_name%

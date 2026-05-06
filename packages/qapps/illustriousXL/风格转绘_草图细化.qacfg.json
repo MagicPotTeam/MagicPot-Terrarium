@@ -1,0 +1,107 @@
+{
+  "icon": "",
+  "inputs": [
+    {
+      "label": "模型设置",
+      "component": "Section",
+      "defaultExpanded": false,
+      "gridStyle": "wide"
+    },
+    {
+      "label": "Checkpoint加载器",
+      "slot": "$.73.inputs.ckpt_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "UniControl-XL（线稿）",
+      "slot": "$.75.inputs.name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "UniControl-XL（深度）",
+      "slot": "$.70.inputs.name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "生成参数",
+      "component": "Section",
+      "defaultExpanded": true,
+      "gridStyle": "wide"
+    },
+    {
+      "label": "Controlnet",
+      "slot": "$.400.inputs.value",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "component": "InputSlider"
+    },
+    {
+      "label": "重绘幅度",
+      "slot": "$.413.inputs.value",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "component": "InputSlider"
+    },
+    {
+      "label": "加载图像",
+      "slot": "$.388.inputs.image",
+      "component": "InputComfyImage"
+    },
+    {
+      "label": "正面提示词",
+      "slot": "$.366.inputs.value",
+      "component": "InputPrompt",
+      "suffixPrompt": ""
+    },
+    {
+      "label": "负面提示词",
+      "slot": "$.365.inputs.value",
+      "component": "InputPrompt",
+      "suffixPrompt": ""
+    },
+    {
+      "label": "加载LoRA",
+      "component": "InputLoRAChain",
+      "outputModelSlots": ["$.74.inputs.model", "$.376.inputs.model"],
+      "outputClipSlots": ["$.63.inputs.clip", "$.352.inputs.clip"],
+      "inputModel": ["59", 0],
+      "inputClip": ["73", 1]
+    },
+    {
+      "label": "随机种",
+      "slot": "$.449.inputs.value",
+      "component": "InputSeed"
+    }
+  ],
+  "autoInputs": [],
+  "customNodeUrls": [
+    "https://github.com/Fannovel16/comfyui_controlnet_aux",
+    "https://github.com/yolain/ComfyUI-Easy-Use",
+    "https://github.com/kijai/ComfyUI-KJNodes",
+    "https://github.com/shiimizu/ComfyUI_smZNodes",
+    "https://github.com/chinoll/ComfyUI-Advanced-ControlNet"
+  ],
+  "outputNodeIds": ["71"],
+  "requiredModels": [
+    {
+      "name": "Chenkin-UniControl-XL.safetensors",
+      "size": "2.5 GB",
+      "dir": "models/controlnet",
+      "url": "https://modelscope.cn/models/ChenkinNoob/Chenkin-UniControl-XL/resolve/master/Chenkin-UniControl-XL.safetensors"
+    },
+    {
+      "name": "MTEED.pth",
+      "size": "248 KB",
+      "dir": "custom_nodes/comfyui_controlnet_aux/ckpts/TheMistoAI/MistoLine/Anyline",
+      "url": "https://hf-mirror.com/TheMistoAI/MistoLine/resolve/main/Anyline/MTEED.pth"
+    },
+    {
+      "name": "depth_anything_v2_vitl.pth",
+      "size": "1.3 GB",
+      "dir": "custom_nodes/comfyui_controlnet_aux/ckpts/depth-anything/Depth-Anything-V2-Large",
+      "url": "https://modelscope.cn/models/depth-anything/Depth-Anything-V2-Large/resolve/master/depth_anything_v2_vitl.pth"
+    }
+  ]
+}

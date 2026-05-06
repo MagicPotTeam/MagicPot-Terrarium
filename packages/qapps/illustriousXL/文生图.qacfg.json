@@ -1,0 +1,63 @@
+{
+  "icon": "",
+  "inputs": [
+    {
+      "label": "模型设置",
+      "component": "Section",
+      "defaultExpanded": false,
+      "gridStyle": "wide"
+    },
+    {
+      "label": "Checkpoint加载器",
+      "slot": "$.363.inputs.ckpt_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "生成参数",
+      "component": "Section",
+      "defaultExpanded": true,
+      "gridStyle": "wide"
+    },
+    {
+      "label": "图片尺寸",
+      "component": "InputImageSize",
+      "seperateSlots": true,
+      "widthSlot": "$.373.inputs.value",
+      "heightSlot": "$.374.inputs.value"
+    },
+    {
+      "label": "正面提示词",
+      "slot": "$.369.inputs.value",
+      "component": "InputPrompt",
+      "suffixPrompt": ""
+    },
+    {
+      "label": "负面提示词",
+      "slot": "$.370.inputs.value",
+      "component": "InputPrompt",
+      "suffixPrompt": ""
+    },
+    {
+      "label": "加载LoRA",
+      "component": "InputLoRAChain",
+      "outputModelSlots": ["$.174.inputs.model", "$.175.inputs.model"],
+      "outputClipSlots": ["$.165.inputs.clip", "$.350.inputs.clip"],
+      "inputModel": ["162", 0],
+      "inputClip": ["363", 1]
+    },
+    {
+      "label": "随机种",
+      "slot": "$.449.inputs.value",
+      "component": "InputSeed"
+    }
+  ],
+  "autoInputs": [],
+  "customNodeUrls": [
+    "https://github.com/Fannovel16/comfyui_controlnet_aux",
+    "https://github.com/yolain/ComfyUI-Easy-Use",
+    "https://github.com/kijai/ComfyUI-KJNodes",
+    "https://github.com/shiimizu/ComfyUI_smZNodes"
+  ],
+  "outputNodeIds": ["172"],
+  "requiredModels": []
+}

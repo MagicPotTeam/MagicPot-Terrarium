@@ -1,0 +1,118 @@
+{
+  "icon": "",
+  "inputs": [
+    {
+      "label": "模型设置",
+      "component": "Section",
+      "defaultExpanded": false,
+      "gridStyle": "wide"
+    },
+    {
+      "label": "UNet加载器",
+      "slot": "$.40.inputs.unet_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "CLIP加载器",
+      "slot": "$.42.inputs.clip_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "加载VAE",
+      "slot": "$.43.inputs.vae_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "Anyline-Controlnet",
+      "slot": "$.44.inputs.control_net_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "Depth-Controlnet",
+      "slot": "$.45.inputs.control_net_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "生成参数",
+      "component": "Section",
+      "defaultExpanded": true,
+      "gridStyle": "wide"
+    },
+    {
+      "label": "加载图像",
+      "slot": "$.39.inputs.image",
+      "component": "InputComfyImage"
+    },
+    {
+      "label": "正面提示词",
+      "slot": "$.47.inputs.value",
+      "component": "InputPrompt",
+      "suffixPrompt": ""
+    },
+    {
+      "label": "负面提示词",
+      "slot": "$.49.inputs.value",
+      "component": "InputPrompt",
+      "suffixPrompt": ""
+    },
+    {
+      "label": "加载LoRA",
+      "component": "InputLoRAChain",
+      "outputModelSlots": ["$.50.inputs.model"],
+      "outputClipSlots": ["$.33.inputs.clip", "$.14.inputs.clip"],
+      "inputModel": ["41", 0],
+      "inputClip": ["42", 0]
+    },
+    {
+      "label": "随机种",
+      "slot": "$.34.inputs.value",
+      "component": "InputSeed"
+    }
+  ],
+  "autoInputs": [],
+  "customNodeUrls": [
+    "https://github.com/Fannovel16/comfyui_controlnet_aux",
+    "https://github.com/pythongosssss/ComfyUI-Custom-Scripts",
+    "https://github.com/yolain/ComfyUI-Easy-Use",
+    "https://github.com/kijai/ComfyUI-KJNodes"
+  ],
+  "outputNodeIds": ["51"],
+  "requiredModels": [
+    {
+      "name": "qwen_image_fp8_e4m3fn.safetensors",
+      "size": "19 GB",
+      "dir": "models/unet",
+      "url": "https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors"
+    },
+    {
+      "name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "size": "8.7 GB",
+      "dir": "models/clip",
+      "url": "https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"
+    },
+    {
+      "name": "qwen_image_vae.safetensors",
+      "size": "0.2 GB",
+      "dir": "models/vae",
+      "url": "https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/vae/qwen_image_vae.safetensors"
+    },
+    {
+      "name": "Qwen-Image-InstantX-ControlNet-Union.safetensors",
+      "size": "3.3 GB",
+      "dir": "models/controlnet",
+      "url": "https://modelscope.cn/models/Comfy-Org/Qwen-Image-InstantX-ControlNets/resolve/master/split_files/controlnet/Qwen-Image-InstantX-ControlNet-Union.safetensors"
+    },
+    {
+      "name": "MTEED.pth",
+      "size": "248 KB",
+      "dir": "custom_nodes/comfyui_controlnet_aux/ckpts/TheMistoAI/MistoLine/Anyline",
+      "url": "https://hf-mirror.com/TheMistoAI/MistoLine/resolve/main/Anyline/MTEED.pth"
+    },
+    {
+      "name": "depth_anything_v2_vitl.pth",
+      "size": "1.3 GB",
+      "dir": "custom_nodes/comfyui_controlnet_aux/ckpts/depth-anything/Depth-Anything-V2-Large",
+      "url": "https://modelscope.cn/models/depth-anything/Depth-Anything-V2-Large/resolve/master/depth_anything_v2_vitl.pth"
+    }
+  ]
+}

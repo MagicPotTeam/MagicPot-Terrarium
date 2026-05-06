@@ -1,0 +1,625 @@
+{
+  "$ref": "#/definitions/QAppCfg",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "JsonPath": {
+      "type": "string"
+    },
+    "QAppCfg": {
+      "additionalProperties": false,
+      "description": "Quick App Creative Fabrication Graph",
+      "properties": {
+        "autoInputs": {
+          "items": {
+            "$ref": "#/definitions/QAppCfgAuto"
+          },
+          "type": "array"
+        },
+        "batchProcess": {
+          "additionalProperties": false,
+          "description": "批量处理配置 启用后，快应用会显示\"批量处理\"按钮",
+          "properties": {
+            "batchImageInputSlot": {
+              "$ref": "#/definitions/JsonPath",
+              "description": "批量工作流中图片输入的 JSON Path（可选） 如果 batchWorkflow 使用了不同的节点 ID，需要指定这个字段 如果未指定，将使用 imageInputSlot"
+            },
+            "batchWorkflow": {
+              "description": "批量处理专用工作流文件名（可选） 如果指定，批量处理时会使用这个工作流而不是默认工作流 这对于需要编译时间的工作流很有用（如 TorchCompile） 文件名相对于当前快应用所在目录",
+              "type": "string"
+            },
+            "enabled": {
+              "description": "是否启用批量处理",
+              "type": "boolean"
+            },
+            "imageInputSlot": {
+              "$ref": "#/definitions/JsonPath",
+              "description": "图片输入的 JSON Path 批量处理时会自动替换这个 slot 的值为待处理的图片"
+            }
+          },
+          "required": ["enabled", "imageInputSlot"],
+          "type": "object"
+        },
+        "customNodeUrls": {
+          "description": "ComfyUI 自定义节点 URL 列表 如果 QApp 的 workflow 中使用了自定义节点，则可以在此处指定自定义节点的 URL 在这里定义后，检测到有节点不存在，则提示用户安装该节点",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "icon": {
+          "type": "string"
+        },
+        "inputs": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/QAppCfgInput"
+              },
+              {
+                "$ref": "#/definitions/QAppCfgSection"
+              },
+              {
+                "$ref": "#/definitions/QAppCfgDescription"
+              }
+            ]
+          },
+          "type": "array"
+        },
+        "outputNodeIds": {
+          "description": "输出节点 ID 列表 当 outputNodeIds 不为空时， QApp 只会把 outputNodeIds 节点的输出作为结果显示",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["icon", "inputs"],
+      "type": "object"
+    },
+    "QAppCfgAuto": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/QAppCfgAutoSeed"
+        },
+        {
+          "$ref": "#/definitions/QAppCfgAutoLLMAPI"
+        }
+      ]
+    },
+    "QAppCfgAutoBase<\"AutoSeed\">": {
+      "additionalProperties": false,
+      "properties": {
+        "component": {
+          "const": "AutoSeed",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "slot": {
+          "$ref": "#/definitions/JsonPath"
+        }
+      },
+      "required": ["component", "label", "slot"],
+      "type": "object"
+    },
+    "QAppCfgAutoLLMAPI": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "const": "AutoLLMAPI",
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "needVisionModel": {
+              "type": "boolean"
+            },
+            "nodeSlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "seperateSlots": {
+              "const": false,
+              "type": "boolean"
+            }
+          },
+          "required": ["component", "label", "nodeSlot"],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "apiKeySlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "baseUrlSlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "component": {
+              "const": "AutoLLMAPI",
+              "type": "string"
+            },
+            "isOllamaSlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "label": {
+              "type": "string"
+            },
+            "modelNameSlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "needVisionModel": {
+              "type": "boolean"
+            },
+            "seperateSlots": {
+              "const": true,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "apiKeySlot",
+            "baseUrlSlot",
+            "component",
+            "isOllamaSlot",
+            "label",
+            "modelNameSlot",
+            "seperateSlots"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "QAppCfgAutoSeed": {
+      "$ref": "#/definitions/QAppCfgAutoBase%3C%22AutoSeed%22%3E"
+    },
+    "QAppCfgDescription": {
+      "additionalProperties": false,
+      "properties": {
+        "component": {
+          "const": "Description",
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "variant": {
+          "enum": ["info", "warning", "error", "success"],
+          "type": "string"
+        }
+      },
+      "required": ["label", "component", "title", "variant", "description"],
+      "type": "object"
+    },
+    "QAppCfgInput": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/QAppCfgInputPrompt"
+        },
+        {
+          "$ref": "#/definitions/QAppCfgInputComfyImage"
+        },
+        {
+          "$ref": "#/definitions/QAppCfgInputComfyImageMask"
+        },
+        {
+          "$ref": "#/definitions/QAppCfgInputSeed"
+        },
+        {
+          "$ref": "#/definitions/QAppCfgInputNumber"
+        },
+        {
+          "$ref": "#/definitions/QAppCfgInputText"
+        },
+        {
+          "$ref": "#/definitions/QAppCfgInputComfySelect"
+        },
+        {
+          "$ref": "#/definitions/QAppCfgInputImageSize"
+        },
+        {
+          "$ref": "#/definitions/QAppCfgInputSlider"
+        },
+        {
+          "$ref": "#/definitions/QAppCfgInputLoRAChain"
+        },
+        {
+          "$ref": "#/definitions/QAppCfgInputLLMAPI"
+        }
+      ]
+    },
+    "QAppCfgInputBase<\"InputComfyImage\">": {
+      "additionalProperties": false,
+      "description": "QAppCfgInputBase 是 QAppCfgInput 的基类 用于快速构建 QAppCfgInput 的子类型",
+      "properties": {
+        "component": {
+          "const": "InputComfyImage",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "slot": {
+          "$ref": "#/definitions/JsonPath"
+        }
+      },
+      "required": ["component", "label", "slot"],
+      "type": "object"
+    },
+    "QAppCfgInputBase<\"InputComfyImageMask\">": {
+      "additionalProperties": false,
+      "description": "QAppCfgInputBase 是 QAppCfgInput 的基类 用于快速构建 QAppCfgInput 的子类型",
+      "properties": {
+        "component": {
+          "const": "InputComfyImageMask",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "slot": {
+          "$ref": "#/definitions/JsonPath"
+        }
+      },
+      "required": ["component", "label", "slot"],
+      "type": "object"
+    },
+    "QAppCfgInputBase<\"InputComfySelect\">": {
+      "additionalProperties": false,
+      "description": "QAppCfgInputBase 是 QAppCfgInput 的基类 用于快速构建 QAppCfgInput 的子类型",
+      "properties": {
+        "component": {
+          "const": "InputComfySelect",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "slot": {
+          "$ref": "#/definitions/JsonPath"
+        }
+      },
+      "required": ["component", "label", "slot"],
+      "type": "object"
+    },
+    "QAppCfgInputBase<\"InputSeed\">": {
+      "additionalProperties": false,
+      "description": "QAppCfgInputBase 是 QAppCfgInput 的基类 用于快速构建 QAppCfgInput 的子类型",
+      "properties": {
+        "component": {
+          "const": "InputSeed",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "slot": {
+          "$ref": "#/definitions/JsonPath"
+        }
+      },
+      "required": ["component", "label", "slot"],
+      "type": "object"
+    },
+    "QAppCfgInputComfyImage": {
+      "$ref": "#/definitions/QAppCfgInputBase%3C%22InputComfyImage%22%3E"
+    },
+    "QAppCfgInputComfyImageMask": {
+      "$ref": "#/definitions/QAppCfgInputBase%3C%22InputComfyImageMask%22%3E"
+    },
+    "QAppCfgInputComfySelect": {
+      "$ref": "#/definitions/QAppCfgInputBase%3C%22InputComfySelect%22%3E"
+    },
+    "QAppCfgInputImageSize": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "const": "InputImageSize",
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "nodeSlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "seperateSlots": {
+              "const": false,
+              "type": "boolean"
+            }
+          },
+          "required": ["component", "label", "nodeSlot"],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "const": "InputImageSize",
+              "type": "string"
+            },
+            "heightSlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "label": {
+              "type": "string"
+            },
+            "seperateSlots": {
+              "const": true,
+              "type": "boolean"
+            },
+            "widthSlot": {
+              "$ref": "#/definitions/JsonPath"
+            }
+          },
+          "required": ["component", "heightSlot", "label", "seperateSlots", "widthSlot"],
+          "type": "object"
+        }
+      ]
+    },
+    "QAppCfgInputLLMAPI": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "const": "InputLLMAPI",
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "needVisionModel": {
+              "type": "boolean"
+            },
+            "nodeSlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "seperateSlots": {
+              "const": false,
+              "type": "boolean"
+            }
+          },
+          "required": ["component", "label", "nodeSlot"],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "apiKeySlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "baseUrlSlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "component": {
+              "const": "InputLLMAPI",
+              "type": "string"
+            },
+            "isOllamaSlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "label": {
+              "type": "string"
+            },
+            "modelNameSlot": {
+              "$ref": "#/definitions/JsonPath"
+            },
+            "needVisionModel": {
+              "type": "boolean"
+            },
+            "seperateSlots": {
+              "const": true,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "apiKeySlot",
+            "baseUrlSlot",
+            "component",
+            "isOllamaSlot",
+            "label",
+            "modelNameSlot",
+            "seperateSlots"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "QAppCfgInputLoRAChain": {
+      "additionalProperties": false,
+      "properties": {
+        "component": {
+          "const": "InputLoRAChain",
+          "type": "string"
+        },
+        "inputClip": {
+          "items": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "inputModel": {
+          "items": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "label": {
+          "type": "string"
+        },
+        "outputClipSlots": {
+          "items": {
+            "$ref": "#/definitions/JsonPath"
+          },
+          "type": "array"
+        },
+        "outputModelSlots": {
+          "items": {
+            "$ref": "#/definitions/JsonPath"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "component",
+        "inputClip",
+        "inputModel",
+        "label",
+        "outputClipSlots",
+        "outputModelSlots"
+      ],
+      "type": "object"
+    },
+    "QAppCfgInputNumber": {
+      "additionalProperties": false,
+      "properties": {
+        "component": {
+          "const": "InputNumber",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "max": {
+          "type": "number"
+        },
+        "min": {
+          "type": "number"
+        },
+        "slot": {
+          "$ref": "#/definitions/JsonPath"
+        },
+        "step": {
+          "type": "number"
+        }
+      },
+      "required": ["component", "label", "slot"],
+      "type": "object"
+    },
+    "QAppCfgInputPrompt": {
+      "additionalProperties": false,
+      "properties": {
+        "component": {
+          "const": "InputPrompt",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "maxLength": {
+          "description": "提示词最大长度限制，如果小于等于 0 ，则不限制",
+          "type": "number"
+        },
+        "placeholder": {
+          "type": "string"
+        },
+        "promptDescription": {
+          "description": "提示词描述，用于生成随机提示词",
+          "type": "string"
+        },
+        "slot": {
+          "$ref": "#/definitions/JsonPath"
+        },
+        "suffixPrompt": {
+          "type": "string"
+        }
+      },
+      "required": ["component", "label", "slot"],
+      "type": "object"
+    },
+    "QAppCfgInputSeed": {
+      "$ref": "#/definitions/QAppCfgInputBase%3C%22InputSeed%22%3E"
+    },
+    "QAppCfgInputSlider": {
+      "additionalProperties": false,
+      "properties": {
+        "component": {
+          "const": "InputSlider",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "max": {
+          "type": "number"
+        },
+        "min": {
+          "type": "number"
+        },
+        "slot": {
+          "$ref": "#/definitions/JsonPath"
+        },
+        "step": {
+          "type": "number"
+        }
+      },
+      "required": ["component", "label", "max", "min", "slot", "step"],
+      "type": "object"
+    },
+    "QAppCfgInputText": {
+      "additionalProperties": false,
+      "properties": {
+        "component": {
+          "const": "InputText",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "placeholder": {
+          "type": "string"
+        },
+        "slot": {
+          "$ref": "#/definitions/JsonPath"
+        }
+      },
+      "required": ["component", "label", "slot"],
+      "type": "object"
+    },
+    "QAppCfgSection": {
+      "additionalProperties": false,
+      "properties": {
+        "component": {
+          "const": "Section",
+          "type": "string"
+        },
+        "defaultExpanded": {
+          "type": "boolean"
+        },
+        "gridStyle": {
+          "enum": ["wide", "split"],
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": ["label", "component"],
+      "type": "object"
+    }
+  }
+}

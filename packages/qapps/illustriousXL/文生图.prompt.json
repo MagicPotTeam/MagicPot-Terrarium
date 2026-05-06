@@ -1,0 +1,402 @@
+{
+  "140": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": ["163", 0],
+      "get_image_size": ["180", 0]
+    },
+    "class_type": "ImageResizeKJ",
+    "_meta": {
+      "title": "Resize Image (deprecated)"
+    }
+  },
+  "146": {
+    "inputs": {
+      "pixels": ["450", 0],
+      "vae": ["363", 2]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE编码"
+    }
+  },
+  "150": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": ["180", 0]
+    },
+    "class_type": "ImageResizeKJ",
+    "_meta": {
+      "title": "Resize Image (deprecated)"
+    }
+  },
+  "152": {
+    "inputs": {
+      "samples": ["174", 0],
+      "vae": ["363", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "153": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": ["152", 0],
+      "get_image_size": ["180", 0]
+    },
+    "class_type": "ImageResizeKJ",
+    "_meta": {
+      "title": "Resize Image (deprecated)"
+    }
+  },
+  "154": {
+    "inputs": {
+      "pixels": ["150", 0],
+      "vae": ["363", 2]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE编码"
+    }
+  },
+  "156": {
+    "inputs": {
+      "samples": ["380", 0],
+      "vae": ["363", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "157": {
+    "inputs": {
+      "width": ["373", 0],
+      "height": ["374", 0],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像"
+    }
+  },
+  "158": {
+    "inputs": {
+      "text": "",
+      "clip": ["363", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "162": {
+    "inputs": {
+      "extra": "{\"show_headings\":true,\"show_descriptions\":false,\"mode\":\"*\"}",
+      "ㅤ": "Stable Diffusion",
+      "info_comma_padding_backtrack": "",
+      "Prompt word wrap length limit": 20,
+      "enable_emphasis": true,
+      "info_RNG": "",
+      "RNG": "gpu",
+      "ㅤㅤ": "Compute Settings",
+      "info_disable_nan_check": "",
+      "disable_nan_check": true,
+      "ㅤㅤㅤ": "Sampler parameters",
+      "info_eta_ancestral": "",
+      "eta": 1,
+      "info_s_churn": "",
+      "s_churn": 0,
+      "info_s_tmin": "",
+      "s_tmin": 0,
+      "info_s_tmax": "",
+      "s_tmax": 0,
+      "info_s_noise": "",
+      "s_noise": 1,
+      "info_eta_noise_seed_delta": "",
+      "ENSD": 0,
+      "info_skip_early_cond": "",
+      "skip_early_cond": 0,
+      "info_sgm_noise_multiplier": "",
+      "sgm_noise_multiplier": false,
+      "info_upcast_sampling": "",
+      "upcast_sampling": true,
+      "ㅤㅤㅤㅤ": "Optimizations",
+      "info_NGMS": "",
+      "NGMS": 0,
+      "info_NGMS_all_steps": "",
+      "NGMS all steps": false,
+      "info_pad_cond_uncond": "",
+      "pad_cond_uncond": false,
+      "info_batch_cond_uncond": "",
+      "batch_cond_uncond": true,
+      "ㅤㅤㅤㅤㅤ": "Compatibility",
+      "info_use_prev_scheduling": "",
+      "Use previous prompt editing timelines": true,
+      "ㅤㅤㅤㅤㅤㅤ": "Experimental",
+      "info_use_CFGDenoiser": "",
+      "Use CFGDenoiser": false,
+      "info_debug": "",
+      "debug": false,
+      "*": ["363", 0]
+    },
+    "class_type": "smZ Settings",
+    "_meta": {
+      "title": "Settings (smZ)"
+    }
+  },
+  "163": {
+    "inputs": {
+      "samples": ["175", 0],
+      "vae": ["363", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "165": {
+    "inputs": {
+      "text": ["370", 0],
+      "parser": "A1111",
+      "mean_normalization": true,
+      "multi_conditioning": true,
+      "use_old_emphasis_implementation": false,
+      "with_SDXL": false,
+      "ascore": 6,
+      "width": 1024,
+      "height": 1024,
+      "crop_w": 0,
+      "crop_h": 0,
+      "target_width": 1024,
+      "target_height": 1024,
+      "text_g": "",
+      "text_l": "",
+      "smZ_steps": 1,
+      "clip": ["363", 1]
+    },
+    "class_type": "smZ CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode++"
+    }
+  },
+  "172": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": ["140", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "174": {
+    "inputs": {
+      "seed": ["449", 0],
+      "steps": 36,
+      "cfg": 7,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "sgm_uniform",
+      "denoise": ["395", 0],
+      "model": ["162", 0],
+      "positive": ["350", 0],
+      "negative": ["165", 0],
+      "latent_image": ["154", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "175": {
+    "inputs": {
+      "seed": ["449", 0],
+      "steps": 24,
+      "cfg": 5,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "sgm_uniform",
+      "denoise": ["396", 1],
+      "model": ["162", 0],
+      "positive": ["350", 0],
+      "negative": ["165", 0],
+      "latent_image": ["146", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "177": {
+    "inputs": {
+      "images": ["180", 0]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "180": {
+    "inputs": {
+      "index": 0,
+      "value0": ["156", 0]
+    },
+    "class_type": "easy anythingIndexSwitch",
+    "_meta": {
+      "title": "编号切换"
+    }
+  },
+  "350": {
+    "inputs": {
+      "text": ["369", 0],
+      "parser": "A1111",
+      "mean_normalization": true,
+      "multi_conditioning": true,
+      "use_old_emphasis_implementation": false,
+      "with_SDXL": false,
+      "ascore": 6,
+      "width": 1024,
+      "height": 1024,
+      "crop_w": 0,
+      "crop_h": 0,
+      "target_width": 1024,
+      "target_height": 1024,
+      "text_g": "",
+      "text_l": "",
+      "smZ_steps": 1,
+      "clip": ["363", 1]
+    },
+    "class_type": "smZ CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode++"
+    }
+  },
+  "363": {
+    "inputs": {
+      "ckpt_name": "ChenkinNoob-XL-V0.5.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Checkpoint加载器（简易）"
+    }
+  },
+  "369": {
+    "inputs": {
+      "value": ""
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "字符串（多行）"
+    }
+  },
+  "370": {
+    "inputs": {
+      "value": ""
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "字符串（多行）"
+    }
+  },
+  "373": {
+    "inputs": {
+      "value": 1024
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "整数"
+    }
+  },
+  "374": {
+    "inputs": {
+      "value": 1024
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "整数"
+    }
+  },
+  "380": {
+    "inputs": {
+      "seed": ["449", 0],
+      "steps": 1,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1,
+      "model": ["162", 0],
+      "positive": ["158", 0],
+      "negative": ["158", 0],
+      "latent_image": ["157", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "393": {
+    "inputs": {
+      "value": 0.55
+    },
+    "class_type": "easy float",
+    "_meta": {
+      "title": "浮点数"
+    }
+  },
+  "395": {
+    "inputs": {
+      "value": 1
+    },
+    "class_type": "easy float",
+    "_meta": {
+      "title": "浮点数"
+    }
+  },
+  "396": {
+    "inputs": {
+      "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))",
+      "a": ["395", 0],
+      "b": ["393", 0]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "Math Expression 🐍"
+    }
+  },
+  "449": {
+    "inputs": {
+      "value": 0
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "整数"
+    }
+  },
+  "450": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "scale_by": 1.5,
+      "image": ["152", 0]
+    },
+    "class_type": "ImageScaleBy",
+    "_meta": {
+      "title": "缩放图像（比例）"
+    }
+  }
+}

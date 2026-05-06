@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The ref to CI
+        type: string
+        default: 'refs/heads/master'
+      fallback_ref:
+        description: Fallback ref when the primary ref is unavailable
+        type: string
+        default: ''
+
+jobs:
+  test-lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve checkout ref
+        id: resolve-ref
+        shell: bash
+        run: |
+          ref="${{ inputs.ref }}"
+          fallback_ref="${{ inputs.fallback_ref }}"
+          resolved_ref="$ref"
+
+          if [[ -n "$fallback_ref" && "$ref" =~ ^refs/pull/[0-9]+/merge$ ]]; then
+            repo_url="https://github.com/${{ github.repository }}.git"
+            if ! git ls-remote --exit-code "$repo_url" "$ref" >/dev/null 2>&1; then
+              echo "Merge ref $ref is unavailable; falling back to $fallback_ref"
+              resolved_ref="$fallback_ref"
+            fi
+          fi
+
+          echo "ref=$resolved_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve-ref.outputs.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Test
+        run: npm run test
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck

@@ -1,0 +1,117 @@
+{
+  "icon": "",
+  "inputs": [
+    {
+      "label": "模型设置",
+      "component": "Section",
+      "defaultExpanded": false,
+      "gridStyle": "wide"
+    },
+    {
+      "label": "UNet加载器",
+      "slot": "$.113.inputs.unet_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "CLIP加载器",
+      "slot": "$.115.inputs.clip_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "加载VAE",
+      "slot": "$.116.inputs.vae_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "Lightning LoRA",
+      "slot": "$.114.inputs.lora_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "多角度 LoRA",
+      "slot": "$.119.inputs.lora_name",
+      "component": "InputComfySelect"
+    },
+    {
+      "label": "生成参数",
+      "component": "Section",
+      "defaultExpanded": true,
+      "gridStyle": "wide"
+    },
+    {
+      "label": "加载图像",
+      "slot": "$.41.inputs.image",
+      "component": "InputComfyImage"
+    },
+    {
+      "label": "水平角度",
+      "slot": "$.152.inputs.horizontal_angle",
+      "min": 0,
+      "max": 360,
+      "step": 1,
+      "component": "InputSlider"
+    },
+    {
+      "label": "垂直角度",
+      "slot": "$.152.inputs.vertical_angle",
+      "min": -30,
+      "max": 60,
+      "step": 1,
+      "component": "InputSlider"
+    },
+    {
+      "label": "缩放",
+      "slot": "$.152.inputs.zoom",
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "component": "InputSlider"
+    }
+  ],
+  "autoInputs": [
+    {
+      "label": "随机种子",
+      "slot": "$.128.inputs.seed",
+      "component": "AutoSeed"
+    }
+  ],
+  "customNodeUrls": ["https://github.com/RyoJerryYu/ComfyUI-qwenmultiangle"],
+  "outputNodeIds": ["9"],
+  "isHidden": false,
+  "requiredModels": [
+    {
+      "name": "qwen_image_edit_2511_fp8mixed.safetensors",
+      "size": "12 GB",
+      "dir": "models/unet",
+      "url": "https://modelscope.cn/models/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/master/split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors"
+    },
+    {
+      "name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "size": "8.7 GB",
+      "dir": "models/clip",
+      "url": "https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"
+    },
+    {
+      "name": "qwen_image_vae.safetensors",
+      "size": "0.2 GB",
+      "dir": "models/vae",
+      "url": "https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/vae/qwen_image_vae.safetensors"
+    },
+    {
+      "name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "size": "1.5 GB",
+      "dir": "models/loras",
+      "url": "https://modelscope.cn/models/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/master/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+    },
+    {
+      "name": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
+      "size": "0.3 GB",
+      "dir": "models/loras",
+      "url": "https://modelscope.cn/models/fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA/resolve/master/qwen-image-edit-2511-multiple-angles-lora.safetensors"
+    }
+  ],
+  "batchProcess": {
+    "enabled": true,
+    "imageInputSlot": "$.41.inputs.image"
+  }
+}

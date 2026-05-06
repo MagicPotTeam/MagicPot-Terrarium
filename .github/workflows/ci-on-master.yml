@@ -1,0 +1,17 @@
+name: CI On Master
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+jobs:
+  ci:
+    uses: ./.github/workflows/call-ci.yml
+    with:
+      ref: ${{ github.ref }}
+  build:
+    uses: ./.github/workflows/call-build.yml
+    with:
+      ref: ${{ github.ref }}

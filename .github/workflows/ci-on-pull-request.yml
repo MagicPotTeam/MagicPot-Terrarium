@@ -1,0 +1,20 @@
+name: CI On Pull Request
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - '**'
+
+jobs:
+  ci:
+    uses: ./.github/workflows/call-ci.yml
+    with:
+      ref: ${{ github.ref }}
+      fallback_ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  build:
+    uses: ./.github/workflows/call-build.yml
+    with:
+      ref: ${{ github.ref }}
+      fallback_ref: ${{ github.event.pull_request.head.sha || github.sha }}

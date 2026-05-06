@@ -1,0 +1,51 @@
+{
+  "[typescript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[javascript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[json]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "json.schemas": [
+    {
+      "fileMatch": ["**/*.qacfg.json"],
+      "url": "./.vscode/QAppCfg.json"
+    }
+  ],
+  "i18n-ally.localesPaths": ["packages/app/src/shared/locales"],
+  "i18n-ally.keystyle": "nested",
+  "i18n-ally.displayLanguage": "zh-CN",
+  "i18n-ally.enabledFrameworks": ["react-i18next"],
+  "prettier.configPath": "config/prettier/prettier.config.cjs",
+  "prettier.ignorePath": "config/prettier/prettierignore",
+  "files.watcherExclude": {
+    "**/vendor/comfyui/**": true,
+    "**/dist/**": true,
+    "**/node_modules/**": true,
+    "**/aiengineelectron-dev/**": true,
+    "**/out/**": true,
+    "**/packages/runtime-assets/build/**": true
+  },
+  "search.exclude": {
+    "**/vendor/comfyui": true,
+    "**/dist": true,
+    "**/node_modules": true,
+    "**/aiengineelectron-dev": true,
+    "**/out": true,
+    "**/packages/runtime-assets/build": true
+  },
+  "typescript.tsserver.watchOptions": {
+    "excludeDirectories": [
+      "vendor/comfyui",
+      "dist",
+      "node_modules",
+      "aiengineelectron-dev",
+      "out",
+      "packages/runtime-assets/build"
+    ]
+  },
+  "git.repositoryScanMaxDepth": 5,
+  "git.ignoredRepositories": ["vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager"]
+}

@@ -1,0 +1,68 @@
+node_modules
+dist
+out
+.DS_Store
+.eslintcache
+*.log*
+config.json
+/dev_debug
+
+# ComfyUI runtime checkout and local data. Tracked gitlinks under this tree stay versioned.
+/vendor/comfyui/
+
+# ComfyUI junction directories (symlinks to comfyui_data/, fully ignored)
+/vendor/comfyui/ComfyUI/models
+/vendor/comfyui/ComfyUI/input
+/vendor/comfyui/ComfyUI/output
+/vendor/comfyui/ComfyUI/user/default/workflows
+/vendor/comfyui/ComfyUI/workflows
+/vendor/comfyui/ComfyUI/custom_nodes
+
+# ComfyUI external data (completely ignored, personal data)
+/vendor/comfyui/comfyui_data/
+
+# ComfyUI other external dirs (legacy flat paths, fully ignored)
+/vendor/comfyui/models/
+/vendor/comfyui/input/
+/vendor/comfyui/output/
+/vendor/comfyui/workflows/
+
+# ComfyUI portable runtime files (not for version control)
+/vendor/comfyui/python_embeded/
+/vendor/comfyui/custom_nodes/
+/vendor/comfyui/update/
+/vendor/comfyui/*.bat
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+# Temporary & Generated files
+*.tsbuildinfo
+*.txt
+.cache/
+.codex-tmp/
+.staging/
+tmp-canvas-*
+config.json.bak*
+config.json.broken*
+temp_*.json
+m.json
+r.json
+runninghub_models.json
+electron.vite.config.js
+electron.vite.config.d.ts
+electron.vite.config.*.mjs
+config/electron/electron.vite.config.js
+config/electron/electron.vite.config.d.ts
+config/electron/electron.vite.config.*.mjs
+
+# Dev AppData User Profile
+aiengineelectron-dev/
+
+# Documentation
+# Architecture, migration, and verification docs are part of the repository deliverables.
+
+# Local-only files (not for version control)
+read_only .md
+record.json
