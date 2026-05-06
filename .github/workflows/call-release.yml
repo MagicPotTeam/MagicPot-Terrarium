@@ -24,7 +24,6 @@ jobs:
       actions: read
     outputs:
       github_release_url: ${{ steps.create_release.outputs.url }}
-      download_url: ${{ steps.upload_to_oss.outputs.url }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -51,78 +50,19 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefer-offline --no-audit
 
-      - name: Build package
-        run: |
-          npm run build:pure
-          npx cross-env PACKAGE_MODE=pure npm run package:win
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: release/${{ inputs.tag_name }}
-          name: ${{ inputs.release_name }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          files: |
-            dist/pure/*-win.zip
-            dist/pure/*-setup.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload to Aliyun OSS
-        id: upload_to_oss
-        uses: tvrcgo/oss-action@master
-        with:
-          key-id: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
-          key-secret: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-          region: ${{ vars.ALIYUN_OSS_REGION }}
-          bucket: ${{ vars.ALIYUN_OSS_BUCKET }}
-          assets: |
-            dist/pure/*-win.zip:/dist/
-
-  release-macos:
-    #
-    runs-on: macos-latest
-    permissions:
-      contents: write
-      actions: read
-    outputs:
-      github_release_url: ${{ steps.create_release.outputs.url }}
-      download_url: ${{ steps.upload_to_oss.outputs.url }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Cache Electron
+      - name: Cache embedded Python downloads
         uses: actions/cache@v4
         with:
-          path: |
-            ~/Library/Caches/electron
-            ~/Library/Caches/electron-builder
-          key: ${{ runner.os }}-electron-cache-${{ hashFiles('**/package-lock.json') }}
+          path: .cache/embedded-python
+          key: ${{ runner.os }}-embedded-python-${{ hashFiles('scripts/prepare-embedded-python.mjs') }}
           restore-keys: |
-            ${{ runner.os }}-electron-cache-
-
-      - name: Install dependencies
-        run: npm ci --prefer-offline --no-audit
+            ${{ runner.os }}-embedded-python-
 
       - name: Build package
         run: |
-          npm run build:pure
-          npx cross-env PACKAGE_MODE=pure npm run package:mac
+          npm run build:embedded
+          npm run prepare:embedded
+          npx cross-env PACKAGE_MODE=embedded npm run package:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -136,25 +76,13 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: |
-            dist/pure/*-mac.zip
-            dist/pure/*.dmg
+            dist/embedded/*-win.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload to Aliyun OSS
-        id: upload_to_oss
-        uses: tvrcgo/oss-action@master
-        with:
-          key-id: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
-          key-secret: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-          region: ${{ vars.ALIYUN_OSS_REGION }}
-          bucket: ${{ vars.ALIYUN_OSS_BUCKET }}
-          assets: |
-            dist/pure/*-mac.zip:/dist/
 
   send-to-discord:
     runs-on: ubuntu-latest
-    needs: [release-windows, release-macos]
+    needs: [release-windows]
     steps:
       - name: Send to Discord
         uses: tsickert/discord-webhook@v7.0.0
@@ -168,7 +96,3 @@ jobs:
             ${{ inputs.release_name }}
             github release url:
             ${{ needs.release-windows.outputs.github_release_url }}
-            ${{ needs.release-macos.outputs.github_release_url }}
-            download url:
-            ${{ needs.release-windows.outputs.download_url }}
-            ${{ needs.release-macos.outputs.download_url }}

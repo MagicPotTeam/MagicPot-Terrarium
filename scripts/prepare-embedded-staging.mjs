@@ -8,7 +8,9 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
 const portableSrc = path.join(repoRoot, 'vendor', 'comfyui')
 const stagingRoot = path.join(repoRoot, '.staging', 'embedded')
-const localComfyRepo = path.join(portableSrc, 'ComfyUI')
+const localComfyRepo = fs.existsSync(path.join(portableSrc, 'ComfyUI'))
+  ? fs.realpathSync(path.join(portableSrc, 'ComfyUI'))
+  : path.join(portableSrc, 'ComfyUI')
 const comfyDst = path.join(stagingRoot, 'ComfyUI')
 const customNodesSrc = path.join(portableSrc, 'comfyui_data', 'custom_nodes')
 const customNodesDst = path.join(comfyDst, 'custom_nodes')
@@ -60,6 +62,7 @@ function cloneFreshComfySource() {
   runGit(['checkout', '--detach', commit], { cwd: comfyDst, inherit: true })
 
   removeDir(path.join(comfyDst, '.git'))
+  removeRepositoryMetadata(comfyDst)
 }
 
 function pathParts(root, targetPath) {
@@ -71,12 +74,48 @@ function shouldSkipCache(parts, fileName) {
   return parts.includes('__pycache__') || fileName.endsWith('.pyc')
 }
 
+function shouldSkipRepositoryMetadata(parts, fileName) {
+  return (
+    parts.includes('.git') ||
+    parts.includes('.github') ||
+    parts.includes('.gitlab') ||
+    fileName === '.gitmodules' ||
+    fileName === '.gitattributes' ||
+    fileName === '.gitignore'
+  )
+}
+
 function shouldSkipCustomNodeSource(sourcePath, fileName) {
   const parts = pathParts(customNodesSrc, sourcePath)
-  if (parts.includes('.git')) {
+  if (shouldSkipRepositoryMetadata(parts, fileName)) {
     return true
   }
   return shouldSkipCache(parts, fileName)
+}
+
+function removeRepositoryMetadata(root) {
+  if (!fs.existsSync(root)) {
+    return
+  }
+
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const entryPath = path.join(root, entry.name)
+    if (entry.isDirectory()) {
+      if (entry.name === '.git' || entry.name === '.github' || entry.name === '.gitlab') {
+        fs.rmSync(entryPath, { recursive: true, force: true })
+        continue
+      }
+      removeRepositoryMetadata(entryPath)
+      continue
+    }
+
+    if (
+      entry.isFile() &&
+      (entry.name === '.gitmodules' || entry.name === '.gitattributes' || entry.name === '.gitignore')
+    ) {
+      fs.rmSync(entryPath, { force: true })
+    }
+  }
 }
 
 function copyTree(source, destination, shouldSkip = () => false) {
@@ -164,6 +203,7 @@ function main() {
 
   cloneFreshComfySource()
   copyTree(customNodesSrc, customNodesDst, shouldSkipCustomNodeSource)
+  removeRepositoryMetadata(customNodesDst)
 
   validateStaging()
   console.log(`[prepare-embedded-staging] Wrote ${comfyDst}`)

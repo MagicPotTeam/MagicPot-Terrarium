@@ -21,11 +21,6 @@ const embeddedPythonStageFiles = {
   filter: ['**/*', '!**/__pycache__/*', '!**/*.pyc']
 }
 
-const windowsVcRedistStageFile = {
-  from: 'vendor/windows/VC_redist.x64.exe',
-  to: 'drivers/VC_redist.x64.exe'
-}
-
 const comfySourceFile = (relativePath) => ({
   from: `${comfySourceDir}/${relativePath}`,
   to: `${packagedComfyDir}/${relativePath}`
@@ -43,8 +38,7 @@ const modeMap = {
       comfySourceFile('run_nvidia_gpu.bat'),
       comfySourceFile('run_nvidia_gpu_fast_fp16_accumulation.bat'),
       comfySourceFile('advanced'),
-      comfySourceFile('update'),
-      windowsVcRedistStageFile
+      comfySourceFile('update')
     ],
     winTarget: ['dir', 'zip'], // NSIS 不适合大包（python_embeded 文件过多）
     nsis: {
