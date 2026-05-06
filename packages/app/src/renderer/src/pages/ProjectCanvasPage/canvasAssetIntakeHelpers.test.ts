@@ -11,6 +11,7 @@ import {
   buildCanvasImagePlaceholderAsset,
   getCanvasImagePreviewMaxSideForBatch,
   hydrateCanvasImageItemForCanvas,
+  loadImageFromSrc,
   readCanvasImageBlobMetadata
 } from './canvasAssetIntakeHelpers'
 import { isCanvasImageDeferredPlaceholderPreview } from './canvasImageAssetUtils'
@@ -89,10 +90,13 @@ describe('canvasAssetIntakeHelpers', () => {
 
   const nextLoadedWidth = 2048
   const nextLoadedHeight = 1024
+  let lastMockImage: HTMLImageElement | null = null
 
   beforeEach(() => {
+    lastMockImage = null
     window.Image = function MockImage() {
       const image = document.createElement('img')
+      lastMockImage = image
       Object.defineProperty(image, 'naturalWidth', { configurable: true, value: nextLoadedWidth })
       Object.defineProperty(image, 'naturalHeight', {
         configurable: true,
@@ -132,6 +136,18 @@ describe('canvasAssetIntakeHelpers', () => {
     HTMLCanvasElement.prototype.toBlob = originalToBlob
     HTMLCanvasElement.prototype.toDataURL = originalToDataURL
     vi.restoreAllMocks()
+  })
+
+  it('does not force CORS mode for local media image loads', async () => {
+    await loadImageFromSrc('local-media:///C:/demo/reference.png')
+
+    expect(lastMockImage?.crossOrigin).not.toBe('anonymous')
+  })
+
+  it('uses anonymous CORS for remote image loads', async () => {
+    await loadImageFromSrc('https://example.test/reference.png')
+
+    expect(lastMockImage?.crossOrigin).toBe('anonymous')
   })
 
   it('builds a scaled HTML image preview for large raster sources', async () => {

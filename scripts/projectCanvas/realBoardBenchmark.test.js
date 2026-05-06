@@ -86,10 +86,9 @@ describe('realBoardBenchmark acceptance gates', () => {
       corpusRoot: 'C:/images',
       scenarioMode: 'mixed',
       benchmarkImageCount: 3000,
-      scenarioRoot:
-        'C:/Users/17290/Desktop/MagicPot-dev-trash/run-1/real-board/real-corpus/mixed-3000',
+      scenarioRoot: 'C:/repo/.magicpot-trash/run-1/real-board/real-corpus/mixed-3000',
       reportPath:
-        'C:/Users/17290/Desktop/MagicPot-dev-trash/run-1/real-board/real-corpus/mixed-3000/real-board-benchmark-report.json',
+        'C:/repo/.magicpot-trash/run-1/real-board/real-corpus/mixed-3000/real-board-benchmark-report.json',
       corpus: {
         label: 'real-corpus',
         root: 'C:/images',

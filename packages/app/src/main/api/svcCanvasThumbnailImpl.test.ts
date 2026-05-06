@@ -1,5 +1,4 @@
 import * as fs from 'fs'
-import * as os from 'os'
 import * as path from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CanvasThumbnailManifest } from '@shared/api/svcCanvasThumbnail'
@@ -31,11 +30,7 @@ function getDesktopTrashRoot(): string {
     return process.env.MAGICPOT_TEST_TRASH_ROOT
   }
 
-  if (process.env.USERPROFILE) {
-    return path.join(process.env.USERPROFILE, 'Desktop', 'MagicPot-dev-trash', 'cache-ipc-worker')
-  }
-
-  return path.join(os.tmpdir(), 'MagicPot-dev-trash', 'cache-ipc-worker')
+  return path.join(process.cwd(), '.magicpot-trash', 'cache-ipc-worker')
 }
 
 function createManifest(cacheKey = SAFE_CACHE_KEY): CanvasThumbnailManifest {

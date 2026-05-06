@@ -1,5 +1,4 @@
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -10,7 +9,13 @@ import {
   runVerifyMode
 } from './create-open-candidate.mjs'
 
-const trashRoot = path.join(os.homedir(), 'Desktop', 'magicpot-open-private-test-trash')
+const possiblePrivateRepoRoot = path.resolve(process.cwd(), '..', '..')
+const workspaceRoot =
+  path.basename(path.dirname(process.cwd())) === 'open' &&
+  fs.existsSync(path.join(possiblePrivateRepoRoot, 'private', 'codex'))
+    ? possiblePrivateRepoRoot
+    : process.cwd()
+const trashRoot = path.join(workspaceRoot, '.magicpot-trash')
 const testRoots = []
 
 const makeCandidate = () => {
@@ -62,6 +67,9 @@ describe('create-open-candidate policy', () => {
     expect(getOpenCandidateExclusionReason('.npmrc')).toBe('npm auth/config file')
     expect(getOpenCandidateExclusionReason('.eslintcache')).toBe(
       'generated dependency/build output'
+    )
+    expect(getOpenCandidateExclusionReason('.magicpot-trash/run/log.txt')).toBe(
+      'local generated artifacts'
     )
     expect(getOpenCandidateExclusionReason('.git')).toBe('git metadata')
     expect(getOpenCandidateExclusionReason('auth.json')).toBe('local auth material')

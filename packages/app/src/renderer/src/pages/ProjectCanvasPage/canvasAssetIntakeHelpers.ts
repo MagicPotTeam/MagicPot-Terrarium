@@ -457,10 +457,14 @@ export async function readFileAsDataURL(file: File): Promise<string> {
   })
 }
 
+function shouldUseAnonymousCrossOrigin(src: string): boolean {
+  return !/^(data:|blob:|file:\/\/|local-media:\/\/)/i.test(src.trim())
+}
+
 export function loadImageFromSrc(src: string): Promise<LoadedCanvasImage> {
   return new Promise((resolve, reject) => {
     const img = new window.Image()
-    if (!src.startsWith('data:') && !src.startsWith('blob:')) {
+    if (shouldUseAnonymousCrossOrigin(src)) {
       img.crossOrigin = 'anonymous'
     }
     img.onload = () => {

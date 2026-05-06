@@ -4,20 +4,21 @@ import { resolveNodeTestArtifactPath, resolveNodeTestArtifactRoot } from './node
 
 afterEach(() => {
   delete process.env['MAGICPOT_TEST_DESKTOP_PATH']
+  delete process.env['MAGICPOT_TEST_ARTIFACT_BASE']
 })
 
 describe('nodeTestArtifacts', () => {
-  it('keeps disposable node test artifacts under Desktop/MagicPot-dev-trash/<run-id>', () => {
-    expect(resolveNodeTestArtifactRoot()).toMatch(/MagicPot-dev-trash[\\/][^\\/]+$/)
+  it('keeps disposable node test artifacts under repo .magicpot-trash/<run-id>', () => {
+    expect(resolveNodeTestArtifactRoot()).toMatch(/\.magicpot-trash[\\/][^\\/]+$/)
     expect(resolveNodeTestArtifactPath('logs', 'run.json')).toBe(
       join(resolveNodeTestArtifactRoot(), 'node-tests', 'logs', 'run.json')
     )
   })
 
-  it('honors the standardized desktop override for node-only test artifacts', () => {
-    process.env['MAGICPOT_TEST_DESKTOP_PATH'] = 'D:/Redirected/Desktop'
+  it('honors the standardized artifact base override for node-only test artifacts', () => {
+    process.env['MAGICPOT_TEST_ARTIFACT_BASE'] = 'D:/Redirected/MagicPot'
     const root = resolveNodeTestArtifactRoot()
 
-    expect(root).toMatch(/^D:[\\/]+Redirected[\\/]+Desktop[\\/]+MagicPot-dev-trash[\\/]+[^\\/]+$/)
+    expect(root).toMatch(/^D:[\\/]+Redirected[\\/]+MagicPot[\\/]+\.magicpot-trash[\\/]+[^\\/]+$/)
   })
 })

@@ -49,11 +49,13 @@ describe('chatMediaDir', () => {
       throw new Error(`Unexpected app.getPath(${name})`)
     })
     delete process.env['MAGICPOT_TEST_AUTOMATED_RUN']
+    delete process.env['MAGICPOT_TEST_ARTIFACT_BASE']
     delete process.env['MAGICPOT_TEST_RUN_ID']
   })
 
   afterEach(async () => {
     delete process.env['MAGICPOT_TEST_AUTOMATED_RUN']
+    delete process.env['MAGICPOT_TEST_ARTIFACT_BASE']
     delete process.env['MAGICPOT_TEST_RUN_ID']
     appMock.getPath.mockReset()
     appMock.getAppPath.mockReset()
@@ -70,23 +72,16 @@ describe('chatMediaDir', () => {
     await expect(fs.access(mediaDir)).resolves.toBeUndefined()
   })
 
-  it('routes automated runs into Desktop/MagicPot-dev-trash/<run-id>/llm-proxy/chat-media', async () => {
+  it('routes automated runs into repo .magicpot-trash/<run-id>/llm-proxy/chat-media', async () => {
     process.env['MAGICPOT_TEST_AUTOMATED_RUN'] = '1'
+    process.env['MAGICPOT_TEST_ARTIFACT_BASE'] = tempRoot
     process.env['MAGICPOT_TEST_RUN_ID'] = 'run-789'
 
     const module = await loadModule()
     const mediaDir = module.getChatMediaDir('Alice Team')
 
     expect(mediaDir).toBe(
-      path.join(
-        tempRoot,
-        'Desktop',
-        'MagicPot-dev-trash',
-        'run-789',
-        'llm-proxy',
-        'chat-media',
-        'alice-team'
-      )
+      path.join(tempRoot, '.magicpot-trash', 'run-789', 'llm-proxy', 'chat-media', 'alice-team')
     )
     await expect(fs.access(mediaDir)).resolves.toBeUndefined()
   })

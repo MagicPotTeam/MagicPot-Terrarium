@@ -48,7 +48,7 @@ async function writeProbeArtifacts(root) {
       {
         runId: RUN_ID,
         generatedAt: new Date().toISOString(),
-        purpose: 'Confirm Desktop/MagicPot-dev-trash writes do not trigger npm run dev rebuilds.'
+  purpose: 'Confirm .magicpot-trash writes do not trigger npm run dev rebuilds.'
       },
       null,
       2

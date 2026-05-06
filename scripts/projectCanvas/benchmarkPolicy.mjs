@@ -1,8 +1,9 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
-import os from 'node:os'
+import fs from 'node:fs'
 import path from 'node:path'
 
 const SAFE_RUN_ID_PATTERN = /[^a-zA-Z0-9_-]+/g
+const TEST_ARTIFACT_ROOT_DIR = '.magicpot-trash'
 
 function createDefaultRunId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -10,7 +11,20 @@ function createDefaultRunId(prefix) {
 
 function resolveBenchmarkDesktopPath() {
   const configuredDesktopPath = `${process.env.MAGICPOT_TEST_DESKTOP_PATH ?? ''}`.trim()
-  return configuredDesktopPath || path.join(os.homedir(), 'Desktop')
+  if (configuredDesktopPath) {
+    return configuredDesktopPath
+  }
+
+  const cwd = process.cwd()
+  const possiblePrivateRepoRoot = path.resolve(cwd, '..', '..')
+  if (
+    path.basename(path.dirname(cwd)) === 'open' &&
+    fs.existsSync(path.join(possiblePrivateRepoRoot, 'private', 'codex'))
+  ) {
+    return possiblePrivateRepoRoot
+  }
+
+  return cwd
 }
 
 export function resolveProjectCanvasBenchmarkDesktopPath() {
@@ -69,7 +83,7 @@ export function buildNonIntrusiveTestWindowEnv(runId) {
 function resolveDefaultProjectCanvasArtifactRoot(runId) {
   return path.join(
     resolveProjectCanvasBenchmarkDesktopPath(),
-    'MagicPot-dev-trash',
+    TEST_ARTIFACT_ROOT_DIR,
     sanitizeProjectCanvasRunId(runId)
   )
 }

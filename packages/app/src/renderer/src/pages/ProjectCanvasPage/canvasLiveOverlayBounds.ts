@@ -6,6 +6,13 @@ import { getCanvasItemBounds } from './projectCanvasPageShared'
 import type { CanvasItem } from './types'
 
 export const CANVAS_LIVE_VISUAL_BOUNDS_CHANGE_EVENT = 'canvas:live-visual-bounds-change'
+const CANVAS_LIVE_BOUNDS_MIN_REVISION_INTERVAL_MS = 32
+const CANVAS_LIVE_BOUNDS_MAX_DEFERRED_FRAMES = 3
+
+type CanvasViewportRect = {
+  left: number
+  top: number
+}
 
 type StageNodeLike = {
   getClientRect?: () => CanvasExportBounds
@@ -39,14 +46,15 @@ export function dispatchCanvasLiveVisualBoundsChange(itemIds?: string[]) {
 
 function getOverlayStageRect(
   canvasContainer: HTMLDivElement | null,
-  item: CanvasItem
+  item: CanvasItem,
+  getContainerRect?: () => CanvasViewportRect | null
 ): CanvasExportBounds | null {
   if (!canvasContainer) return null
 
   const element = findCanvasItemOverlayElement(canvasContainer, item)
   if (!element) return null
 
-  const containerRect = canvasContainer.getBoundingClientRect()
+  const containerRect = getContainerRect?.() ?? canvasContainer.getBoundingClientRect()
   const elementRect = element.getBoundingClientRect()
 
   return {
@@ -75,6 +83,7 @@ function getCanvasItemVisualBounds(
   item: CanvasItem,
   options: {
     canvasContainer: HTMLDivElement | null
+    getOverlayContainerRect?: () => CanvasViewportRect | null
     stagePos: { x: number; y: number }
     stageRef: React.RefObject<StageRefLike | null>
     stageScale: number
@@ -88,7 +97,7 @@ function getCanvasItemVisualBounds(
     item.type === 'model3d' ||
     item.type === 'html'
   ) {
-    const overlayRect = getOverlayStageRect(canvasContainer, item)
+    const overlayRect = getOverlayStageRect(canvasContainer, item, options.getOverlayContainerRect)
     if (overlayRect && overlayRect.width > 0 && overlayRect.height > 0) {
       return stageRectToCanvasBounds(overlayRect, stagePos, stageScale)
     }
@@ -120,13 +129,37 @@ function getCanvasItemsVisualBounds(
 ): CanvasExportBounds | null {
   if (items.length === 0) return null
 
+  let overlayContainerRect: CanvasViewportRect | null | undefined
+  const getOverlayContainerRect = () => {
+    if (overlayContainerRect !== undefined) {
+      return overlayContainerRect
+    }
+
+    const canvasContainer = options.canvasContainer
+    if (!canvasContainer) {
+      overlayContainerRect = null
+      return null
+    }
+
+    const rect = canvasContainer.getBoundingClientRect()
+    overlayContainerRect = {
+      left: rect.left,
+      top: rect.top
+    }
+    return overlayContainerRect
+  }
+
   let minX = Infinity
   let minY = Infinity
   let maxX = -Infinity
   let maxY = -Infinity
+  const visualBoundsOptions = {
+    ...options,
+    getOverlayContainerRect
+  }
 
   for (const item of items) {
-    const bounds = getCanvasItemVisualBounds(item, options)
+    const bounds = getCanvasItemVisualBounds(item, visualBoundsOptions)
     if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue
     minX = Math.min(minX, bounds.x)
     minY = Math.min(minY, bounds.y)
@@ -161,6 +194,8 @@ export function useLiveSelectionOverlayGroups<TGroup extends SelectionOverlayGro
   const { canvasContainerRef, selectionOverlayGroups, stagePos, stageRef, stageScale } = options
   const [revision, setRevision] = React.useState(0)
   const scheduledFrameRef = React.useRef<number | null>(null)
+  const lastRevisionAtRef = React.useRef(Number.NEGATIVE_INFINITY)
+  const deferredRevisionFrameCountRef = React.useRef(0)
 
   const trackedItemIds = React.useMemo(
     () =>
@@ -169,13 +204,28 @@ export function useLiveSelectionOverlayGroups<TGroup extends SelectionOverlayGro
   )
 
   React.useEffect(() => {
+    const commitRevision = (timestamp: number) => {
+      const now = Number.isFinite(timestamp) ? timestamp : performance.now()
+      scheduledFrameRef.current = null
+
+      if (
+        now - lastRevisionAtRef.current < CANVAS_LIVE_BOUNDS_MIN_REVISION_INTERVAL_MS &&
+        deferredRevisionFrameCountRef.current < CANVAS_LIVE_BOUNDS_MAX_DEFERRED_FRAMES
+      ) {
+        deferredRevisionFrameCountRef.current += 1
+        scheduledFrameRef.current = window.requestAnimationFrame(commitRevision)
+        return
+      }
+
+      deferredRevisionFrameCountRef.current = 0
+      lastRevisionAtRef.current = now
+      setRevision((current) => current + 1)
+    }
+
     const scheduleRevision = () => {
       if (scheduledFrameRef.current !== null) return
 
-      scheduledFrameRef.current = window.requestAnimationFrame(() => {
-        scheduledFrameRef.current = null
-        setRevision((current) => current + 1)
-      })
+      scheduledFrameRef.current = window.requestAnimationFrame(commitRevision)
     }
 
     const handleLiveBoundsChange = (event: Event) => {
@@ -201,6 +251,7 @@ export function useLiveSelectionOverlayGroups<TGroup extends SelectionOverlayGro
         window.cancelAnimationFrame(scheduledFrameRef.current)
         scheduledFrameRef.current = null
       }
+      deferredRevisionFrameCountRef.current = 0
     }
   }, [trackedItemIds])
 
@@ -216,6 +267,7 @@ export function useLiveSelectionOverlayGroups<TGroup extends SelectionOverlayGro
 
         return liveBounds ? { ...group, bounds: liveBounds } : group
       }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- revision invalidates cached live DOM measurements.
     [canvasContainerRef, revision, selectionOverlayGroups, stagePos, stageRef, stageScale]
   )
 }

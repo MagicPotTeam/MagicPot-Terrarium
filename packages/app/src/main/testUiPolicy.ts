@@ -1,3 +1,4 @@
+import { existsSync } from 'fs'
 import { posix as pathPosix, sep, win32 as pathWin32 } from 'path'
 
 export type TestUiWindowMode =
@@ -77,7 +78,7 @@ export type ResolveTestArtifactPathParams = {
 }
 
 const TEST_UI_POLICY_LOG_PREFIX = '[TestUiPolicy]'
-const TEST_UI_ARTIFACT_ROOT_DIR = 'MagicPot-dev-trash'
+const TEST_UI_ARTIFACT_ROOT_DIR = '.magicpot-trash'
 const TEST_UI_RUN_ID_SAFE_PATTERN = /[^a-zA-Z0-9_-]+/g
 
 function logTestUiPolicyDecision(context: string, details: Record<string, unknown>): void {
@@ -115,6 +116,25 @@ function joinWithPathStyle(root: string, ...segments: string[]): string {
 
 function resolveWithPathStyle(root: string, ...segments: string[]): string {
   return getPathModuleForValue(root, ...segments).resolve(root, ...segments)
+}
+
+function resolveDefaultArtifactBasePath(): string {
+  const configuredBase = normalizeTrimmed(process.env['MAGICPOT_TEST_ARTIFACT_BASE'])
+  if (configuredBase) {
+    return configuredBase
+  }
+
+  const cwd = process.cwd()
+  const pathModule = getPathModuleForValue(cwd)
+  const possiblePrivateRepoRoot = pathModule.resolve(cwd, '..', '..')
+  if (
+    pathModule.basename(pathModule.dirname(cwd)) === 'open' &&
+    existsSync(pathModule.join(possiblePrivateRepoRoot, 'private', 'codex'))
+  ) {
+    return possiblePrivateRepoRoot
+  }
+
+  return cwd
 }
 function normalizeDisplaySet(
   displays: TestUiDisplayLike[]
@@ -450,24 +470,25 @@ export function resolveTestArtifactRoot(params: {
     return params.tempPath
   }
 
-  const normalizedDesktopRoot = joinWithPathStyle(
-    params.desktopPath,
+  const artifactBasePath = resolveDefaultArtifactBasePath()
+  const normalizedArtifactRoot = joinWithPathStyle(
+    artifactBasePath,
     TEST_UI_ARTIFACT_ROOT_DIR,
     sanitizeTestUiRunId(params.policy.runId)
   )
 
   const overrideValue = normalizeTrimmed(params.policy.artifactRootOverride)
   if (overrideValue) {
-    const overridePathModule = getPathModuleForValue(normalizedDesktopRoot, overrideValue)
+    const overridePathModule = getPathModuleForValue(normalizedArtifactRoot, overrideValue)
     const absoluteOverride = overridePathModule.isAbsolute(overrideValue)
     const overrideCandidate = absoluteOverride
       ? overridePathModule.resolve(overrideValue)
-      : overridePathModule.resolve(normalizedDesktopRoot, overrideValue)
+      : overridePathModule.resolve(normalizedArtifactRoot, overrideValue)
 
-    if (isInsideDirectory(overrideCandidate, normalizedDesktopRoot)) {
+    if (isInsideDirectory(overrideCandidate, normalizedArtifactRoot)) {
       logTestUiPolicyDecision('artifact-root', {
         reason: 'override-accepted',
-        desktopRoot: normalizedDesktopRoot,
+        artifactRoot: normalizedArtifactRoot,
         override: overrideCandidate
       })
       return overrideCandidate
@@ -475,12 +496,12 @@ export function resolveTestArtifactRoot(params: {
 
     logTestUiPolicyDecision('artifact-root', {
       reason: 'override-out-of-bound',
-      desktopRoot: normalizedDesktopRoot,
+      artifactRoot: normalizedArtifactRoot,
       override: overrideCandidate
     })
   }
 
-  return normalizedDesktopRoot
+  return normalizedArtifactRoot
 }
 
 export function resolveTestArtifactPath(params: ResolveTestArtifactPathParams): string {

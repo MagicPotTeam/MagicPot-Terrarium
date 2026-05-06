@@ -13,6 +13,11 @@ type SelectionBounds = {
   height: number
 }
 
+type CanvasViewportRect = {
+  left: number
+  top: number
+}
+
 type CanvasSyncDetail = {
   x: number
   y: number
@@ -89,13 +94,14 @@ function getCanvasPointFromClient(
   stagePos: { x: number; y: number },
   stageScale: number,
   clientX: number,
-  clientY: number
+  clientY: number,
+  viewportRect?: CanvasViewportRect | null
 ) {
   if (!canvasContainer) {
     return null
   }
 
-  const rect = canvasContainer.getBoundingClientRect()
+  const rect = viewportRect ?? canvasContainer.getBoundingClientRect()
   const scale = Math.max(Math.abs(stageScale), 0.0001)
 
   return {
@@ -298,6 +304,7 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
   const previewedItemIdsRef = React.useRef<Set<string>>(new Set())
   const pendingPreviewBoundsRef = React.useRef<SelectionBounds | null>(null)
   const previewBoundsFrameRef = React.useRef<number | null>(null)
+  const pointerCanvasViewportRectRef = React.useRef<CanvasViewportRect | null>(null)
   const windowPointerMoveHandlerRef = React.useRef<(event: PointerEvent) => void>(() => {})
   const windowPointerUpHandlerRef = React.useRef<(event: PointerEvent) => void>(() => {})
   const detachWindowPointerListenersRef = React.useRef<(() => void) | null>(null)
@@ -397,6 +404,31 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
     }
   }, [])
 
+  const clearPointerCanvasViewportRect = React.useCallback(() => {
+    pointerCanvasViewportRectRef.current = null
+  }, [])
+
+  const capturePointerCanvasViewportRect = React.useCallback(() => {
+    const canvasContainer = canvasContainerRef.current
+    if (!canvasContainer) {
+      pointerCanvasViewportRectRef.current = null
+      return null
+    }
+
+    const rect = canvasContainer.getBoundingClientRect()
+    const nextViewportRect = {
+      left: rect.left,
+      top: rect.top
+    }
+    pointerCanvasViewportRectRef.current = nextViewportRect
+    return nextViewportRect
+  }, [canvasContainerRef])
+
+  const getPointerCanvasViewportRect = React.useCallback(
+    () => pointerCanvasViewportRectRef.current ?? capturePointerCanvasViewportRect(),
+    [capturePointerCanvasViewportRect]
+  )
+
   const cancelPreviewBoundsFrame = React.useCallback(() => {
     if (previewBoundsFrameRef.current == null) {
       return
@@ -477,10 +509,16 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
   React.useEffect(() => {
     return () => {
       detachWindowPointerListeners()
+      clearPointerCanvasViewportRect()
       cancelPreviewBoundsFrame()
       clearItemPreviewTransforms(true)
     }
-  }, [cancelPreviewBoundsFrame, clearItemPreviewTransforms, detachWindowPointerListeners])
+  }, [
+    cancelPreviewBoundsFrame,
+    clearItemPreviewTransforms,
+    clearPointerCanvasViewportRect,
+    detachWindowPointerListeners
+  ])
 
   React.useEffect(() => {
     if (livePreviewSyncItems.length === 0 || sessionRef.current) {
@@ -549,6 +587,7 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
       sessionRef.current = null
       draftBoundsRef.current = null
       detachWindowPointerListeners()
+      clearPointerCanvasViewportRect()
       flushPreviewBoundsChange()
 
       if (!session || !nextBounds || !baseBounds) {
@@ -603,6 +642,7 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
     [
       baseBounds,
       clearItemPreviewTransforms,
+      clearPointerCanvasViewportRect,
       detachWindowPointerListeners,
       emitPreviewBoundsChange,
       flushPreviewBoundsChange,
@@ -618,12 +658,14 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
     }
 
     const stageTransform = getLiveStageSnapshot()
+    const pointerViewportRect = getPointerCanvasViewportRect()
     const point = getCanvasPointFromClient(
       canvasContainerRef.current,
       stageTransform.pos,
       stageTransform.scale,
       event.clientX,
-      event.clientY
+      event.clientY,
+      pointerViewportRect
     )
     if (!point) {
       return
@@ -664,6 +706,7 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
       event.preventDefault()
       event.stopPropagation()
 
+      capturePointerCanvasViewportRect()
       sessionRef.current = {
         kind: 'resize',
         pointerId: event.pointerId,
@@ -678,6 +721,7 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
     [
       attachWindowPointerListeners,
       baseBounds,
+      capturePointerCanvasViewportRect,
       emitPreviewBoundsChange,
       resizeEnabled,
       syncOverlayViewportPosition
@@ -691,14 +735,17 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
       }
 
       const stageTransform = getLiveStageSnapshot()
+      const pointerViewportRect = capturePointerCanvasViewportRect()
       const point = getCanvasPointFromClient(
         canvasContainerRef.current,
         stageTransform.pos,
         stageTransform.scale,
         event.clientX,
-        event.clientY
+        event.clientY,
+        pointerViewportRect
       )
       if (!point) {
+        clearPointerCanvasViewportRect()
         return
       }
 
@@ -720,6 +767,8 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
       attachWindowPointerListeners,
       baseBounds,
       canvasContainerRef,
+      capturePointerCanvasViewportRect,
+      clearPointerCanvasViewportRect,
       emitPreviewBoundsChange,
       getLiveStageSnapshot,
       syncOverlayViewportPosition

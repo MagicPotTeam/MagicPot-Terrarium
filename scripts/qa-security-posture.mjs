@@ -18,12 +18,10 @@ import {
 } from './projectCanvas/benchmarkPolicy.mjs'
 
 const repoRoot = process.cwd()
-const trashRoot = path.resolve(
-  path.join(resolveProjectCanvasBenchmarkDesktopPath(), 'MagicPot-dev-trash')
-)
+const trashRoot = path.resolve(path.join(resolveProjectCanvasBenchmarkDesktopPath(), '.magicpot-trash'))
 const execFileAsync = promisify(execFile)
 const ROOT_RUNTIME_TRASH_DIR_PATTERNS = [
-  /^MagicPot-dev-trash$/i,
+  /^\.magicpot-trash$/i,
   /^(?:automationSchemes|customChecks)$/i,
   /^(?:node-tests|screenshots?|test-results|playwright-report|artifacts?|benchmark-results)$/i,
   /^(?:startup-smoke|magicpot-(?:overlay|webgl|video|real-board)-benchmark)[-_].*/i
@@ -35,7 +33,7 @@ const ROOT_RUNTIME_TRASH_ALLOWLIST = new Set([
 const checks = [
   {
     file: 'packages/app/src/main/testUiPolicy.ts',
-    mustInclude: ['sanitizeTestUiRunId', 'MagicPot-dev-trash', 'secondary-or-offscreen']
+    mustInclude: ['sanitizeTestUiRunId', '.magicpot-trash', 'secondary-or-offscreen']
   },
   {
     file: 'packages/app/src/main/testWindowRuntime.ts',
@@ -130,7 +128,7 @@ const checks = [
       './benchmarkPolicy.mjs',
       'buildNonIntrusiveTestWindowEnv',
       'resolveProjectCanvasArtifactRoot',
-      'MagicPot-dev-trash',
+      '.magicpot-trash',
       'WATCH_EVENT_PATTERN'
     ]
   },

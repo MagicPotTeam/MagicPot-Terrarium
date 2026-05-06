@@ -191,7 +191,11 @@ const SUPPORTED_IMAGE_EXTENSIONS = new Set([
 ])
 const SEEDED_HIRES_IMAGE_SIZE = 1536
 const SEEDED_HIRES_BLOCK_SIZE = 64
-const FORBIDDEN_CORPUS_PATH_SEGMENTS = new Set(['magicpot-dev-trash', 'codex-trash'])
+const FORBIDDEN_CORPUS_PATH_SEGMENTS = new Set([
+  '.magicpot-trash',
+  'magicpot-dev-trash',
+  'codex-trash'
+])
 const execFileAsync = promisify(execFile)
 
 let crcTable = null

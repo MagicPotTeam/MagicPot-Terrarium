@@ -31,7 +31,6 @@ const CustomSkillManagerPage = lazyWithRetry(
   () => import('./pages/QuickAppPage/CustomSkillManagerPage')
 )
 const ChatPage = lazyWithRetry(() => import('./pages/ChatPage/ChatPage'))
-const ComfyUIAppBuilderPage = lazyWithRetry(() => import('./pages/ComfyUIAppBuilderPage'))
 const AppLogPage = lazyWithRetry(() => import('./pages/AppLogPage'))
 
 export type PageType =
@@ -49,7 +48,6 @@ export type PageType =
   | 'project_canvas'
   | 'project_webgl_legacy'
   | 'chat'
-  | 'comfyui_builder'
   | 'language'
 
 export interface RouteConfig {
@@ -156,15 +154,6 @@ export const routes: RouteConfig[] = [
     Icon: ChatIcon,
     Page: ChatPage,
     showInSidebar: true
-  },
-  {
-    id: 'comfyui_builder',
-    path: '/comfyui-builder',
-    label: 'APP Builder',
-    labelKey: 'menu.comfyui_builder',
-    Icon: ComfyIcon,
-    Page: ComfyUIAppBuilderPage,
-    showInSidebar: false
   },
   {
     id: 'settings',

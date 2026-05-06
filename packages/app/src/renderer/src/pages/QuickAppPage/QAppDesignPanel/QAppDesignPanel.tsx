@@ -52,14 +52,11 @@ import {
   Edit,
   DeleteOutline as DeleteOutlineIcon,
   Search as SearchIcon,
-  DashboardCustomize as DashboardCustomizeIcon,
   ErrorOutline as ErrorOutlineIcon,
   FolderOpen as FolderOpenIcon,
   UploadFile as UploadFileIcon
 } from '@mui/icons-material'
 import { QAppMenuItem } from '@shared/api/svcQApp'
-import { useAppDispatch, useAppSelector } from '@renderer/store'
-import { openTab, setActiveTab } from '@renderer/store/slices/layoutSlice'
 import { inferQAppCategory, normalizeQAppCategory, type QAppCategory } from '@shared/qApp/category'
 import { getQAppCategoryOptions } from './qAppCategoryOptions'
 
@@ -329,11 +326,10 @@ const QAppDesignPanel: React.FC = () => {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const location = useLocation()
-  const dispatch = useAppDispatch()
-  const openTabs = useAppSelector((state) => state.layout.openTabs)
   const { notifyError, notifyWarning } = useMessage()
   const { workflow: globalWorkflow, qAppCfg, setWorkflow, setQAppCfg } = useQAppContext()
   const { config, buildEnv, configUtils } = useConfig()
+  const configRef = useRef<Config | undefined>(config)
 
   const [isPopUpOpen, setIsPopUpOpen] = useState(false)
   const [qAppList, setQAppList] = useState<QAppMenuItem[]>([])
@@ -351,6 +347,12 @@ const QAppDesignPanel: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const autoLoadedRouteQAppRef = useRef<string | null>(null)
   const refreshRequestIdRef = useRef(0)
+  const useRemoteComfyUI = config?.use_remote_comfyui
+  const remoteServerOrigin = config?.remote_llm_server_config?.server_origin
+
+  useEffect(() => {
+    configRef.current = config
+  }, [config])
 
   const designState = useQAppDesignState(setQAppCfg, globalWorkflow, qAppCfg)
   const qAppCategoryOptions = useMemo(() => getQAppCategoryOptions(t), [t])
@@ -367,19 +369,6 @@ const QAppDesignPanel: React.FC = () => {
   const {
     state: { objectInfos }
   } = useComfyStatus()
-
-  const openRouteTab = useCallback(
-    (id: string, label: string, routePath: string) => {
-      const has = openTabs.some((tab) => tab.id === id)
-      if (has) {
-        dispatch(setActiveTab(id))
-      } else {
-        dispatch(openTab({ id, label, routePath, closable: true }))
-      }
-      navigate(routePath)
-    },
-    [dispatch, navigate, openTabs]
-  )
 
   // ----------------------------------------------------------------
   // 加载列表 (核心修复：增加 silent 参数)
@@ -401,10 +390,10 @@ const QAppDesignPanel: React.FC = () => {
         }
 
         // 合并远程快应用
-        if (config?.use_remote_comfyui) {
-          const remoteOrigin = config.remote_llm_server_config?.server_origin
+        if (useRemoteComfyUI) {
+          const remoteOrigin = remoteServerOrigin
           if (remoteOrigin) {
-            fetchRemoteQAppList(remoteOrigin, config)
+            fetchRemoteQAppList(remoteOrigin, configRef.current)
               .then((remoteItems) => {
                 if (requestId !== refreshRequestIdRef.current) {
                   return
@@ -431,7 +420,7 @@ const QAppDesignPanel: React.FC = () => {
         }
       }
     },
-    [config?.use_remote_comfyui, config?.remote_llm_server_config?.server_origin]
+    [remoteServerOrigin, useRemoteComfyUI]
   )
 
   useEffect(() => {
@@ -449,10 +438,6 @@ const QAppDesignPanel: React.FC = () => {
     }
     api().svcShell.openPath(dirPath)
   }
-
-  const handleOpenComfyUIBuilder = useCallback(() => {
-    openRouteTab('tab-comfyui-builder', t('menu.comfyui_builder'), '/comfyui-builder')
-  }, [openRouteTab, t])
 
   const applyImportedWorkflow = useCallback(
     async (loadedWorkflow: unknown) => {
@@ -738,24 +723,6 @@ const QAppDesignPanel: React.FC = () => {
               />
             </Box>
             <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }}>
-              <Button
-                variant="outlined"
-                size="small"
-                startIcon={<DashboardCustomizeIcon sx={{ fontSize: 18 }} />}
-                onClick={handleOpenComfyUIBuilder}
-                sx={{
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  fontSize: 13,
-                  borderRadius: 2,
-                  borderColor: 'divider',
-                  color: 'text.primary',
-                  px: 1.5,
-                  '&:hover': { borderColor: 'text.secondary', bgcolor: 'action.hover' }
-                }}
-              >
-                {t('qapp.design.open_app_builder', { defaultValue: 'APP Builder' })}
-              </Button>
               <Button
                 variant="outlined"
                 size="small"

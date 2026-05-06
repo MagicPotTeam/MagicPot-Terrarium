@@ -6,6 +6,7 @@ out
 *.log*
 config.json
 /dev_debug
+/.magicpot-trash/
 
 # ComfyUI source submodules are tracked as gitlinks. Runtime data stays ignored.
 /vendor/comfyui/*

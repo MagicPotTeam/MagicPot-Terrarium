@@ -4,14 +4,11 @@ import { Box, Paper, Typography, Button, Stack } from '@mui/material'
 import {
   Terminal as TerminalIcon,
   PlayArrow as PlayArrowIcon,
-  Stop as StopIcon,
-  DashboardCustomize as DashboardCustomizeIcon
+  Stop as StopIcon
 } from '@mui/icons-material'
 import { api } from '@renderer/utils/windowUtils'
 import { useComfyProcess } from '@renderer/store/hooks/comfyProcess'
-import { useAppDispatch, useAppSelector } from '@renderer/store'
-import { openTab, setActiveTab } from '@renderer/store/slices/layoutSlice'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation } from 'react-router-dom'
 import { isServerStreamingError } from '@shared/api/apiUtils/streaming'
 import { useTranslation } from 'react-i18next'
 import { useTheme } from '@mui/material/styles'
@@ -28,26 +25,10 @@ const TerminalPage: React.FC = () => {
   const consoleScrollbarTrack = isLight ? '#e5e7eb' : '#161b22'
   const consoleScrollbarThumb = isLight ? '#c0c8d2' : '#30363d'
   const location = useLocation()
-  const navigate = useNavigate()
-  const dispatch = useAppDispatch()
-  const openTabs = useAppSelector((state) => state.layout.openTabs)
   const { state, setPid, setIsRunning, addOutput } = useComfyProcess()
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true)
   const outputRef = useRef<HTMLDivElement>(null)
   const autoStartRef = useRef(false)
-
-  const openRouteTab = useCallback(
-    (id: string, label: string, routePath: string) => {
-      const has = openTabs.some((tab) => tab.id === id)
-      if (has) {
-        dispatch(setActiveTab(id))
-      } else {
-        dispatch(openTab({ id, label, routePath, closable: true }))
-      }
-      navigate(routePath)
-    },
-    [dispatch, navigate, openTabs]
-  )
 
   // 检查是否滚动到底部
   const isScrolledToBottom = () => {
@@ -167,15 +148,6 @@ const TerminalPage: React.FC = () => {
             <Box />
 
             <Stack direction="row" spacing={2}>
-              <Button
-                variant="outlined"
-                startIcon={<DashboardCustomizeIcon />}
-                onClick={() =>
-                  openRouteTab('tab-comfyui-builder', t('menu.comfyui_builder'), '/comfyui-builder')
-                }
-              >
-                {t('menu.comfyui_builder')}
-              </Button>
               <Button
                 variant="contained"
                 color="success"

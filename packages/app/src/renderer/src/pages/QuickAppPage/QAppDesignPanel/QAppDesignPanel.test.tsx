@@ -67,8 +67,6 @@ vi.mock('react-i18next', async () => ({
     t: (key: string, options?: { defaultValue?: string }) =>
       (
         ({
-          'qapp.design.open_app_builder': 'Open App Builder',
-          'qapp.design.open_app_builder_desc': 'Open the bundled ComfyUI app builder.',
           'qapp.design.load_workflow': 'Load Workflow',
           'qapp.design.load_qapp_as_template': 'Load Quick App as Template',
           'qapp.design.set_custom_node_urls': 'Set Custom Node URLs',
@@ -377,7 +375,7 @@ describe('QAppDesignPanel', () => {
     })
   })
 
-  it('keeps the two primary cards before the bundled quick app cards', async () => {
+  it('keeps the workflow import action before the bundled quick app cards', async () => {
     const { default: Tested } = await import('./QAppDesignPanel')
 
     render(
@@ -390,13 +388,10 @@ describe('QAppDesignPanel', () => {
       </Provider>
     )
 
-    const appBuilder = await screen.findByText('Open App Builder')
-    const loadWorkflow = screen.getByText('Load Workflow')
+    expect(screen.queryByText('Open App Builder')).toBeNull()
+    const loadWorkflow = await screen.findByText('Load Workflow')
     const bundledApp = screen.getByText(/Qwen/)
 
-    expect(
-      appBuilder.compareDocumentPosition(bundledApp) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
     expect(
       loadWorkflow.compareDocumentPosition(bundledApp) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()

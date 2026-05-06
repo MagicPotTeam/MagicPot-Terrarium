@@ -1,11 +1,16 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const repoRoot = process.cwd()
-const trashRoot = path.join(os.homedir(), 'Desktop', 'magicpot-open-private-test-trash')
+const possiblePrivateRepoRoot = path.resolve(repoRoot, '..', '..')
+const workspaceRoot =
+  path.basename(path.dirname(repoRoot)) === 'open' &&
+  fs.existsSync(path.join(possiblePrivateRepoRoot, 'private', 'codex'))
+    ? possiblePrivateRepoRoot
+    : repoRoot
+const trashRoot = path.join(workspaceRoot, '.magicpot-trash')
 const defaultCandidatePath = path.join(trashRoot, 'magicpot-open-candidate')
 const textExtensions = new Set([
   '.cjs',
@@ -130,6 +135,9 @@ export const getOpenCandidateExclusionReason = (file, mode = '100644') => {
   }
   if (lower === '.git' || lower.includes('/.git/')) {
     return 'git metadata'
+  }
+  if (lower === '.magicpot-trash' || lower.startsWith('.magicpot-trash/')) {
+    return 'local generated artifacts'
   }
   if (normalized === '.gitmodules') {
     return 'submodule metadata'

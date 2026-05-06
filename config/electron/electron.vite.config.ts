@@ -9,7 +9,7 @@ const generatedRuntimeWatchIgnores = [
   '**/.staging/**',
   '**/.eslintcache',
   '**/aiengineelectron-dev/**',
-  '**/MagicPot-dev-trash/**',
+  '**/.magicpot-trash/**',
   '**/vendor/comfyui/**',
   '**/benchmark-results/**',
   '**/node-tests/**',

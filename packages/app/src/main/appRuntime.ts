@@ -95,6 +95,7 @@ function registerLocalMediaScheme(): void {
       privileges: {
         standard: true,
         secure: true,
+        corsEnabled: true,
         supportFetchAPI: true,
         stream: true,
         bypassCSP: true
@@ -103,13 +104,31 @@ function registerLocalMediaScheme(): void {
   ])
 }
 
+export function withLocalMediaCorsHeaders(response: Response): Response {
+  const headers = new Headers(response.headers)
+  headers.set('Access-Control-Allow-Origin', '*')
+  headers.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+  headers.set('Access-Control-Allow-Headers', 'Range, Content-Type')
+  headers.set('Cross-Origin-Resource-Policy', 'cross-origin')
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  })
+}
+
 async function handleLocalMediaRequest(request: Request): Promise<Response> {
   try {
+    if (request.method === 'OPTIONS') {
+      return withLocalMediaCorsHeaders(new Response(null, { status: 204 }))
+    }
+
     const fileUrl = toFileUrl(normalizeLocalFilePath(request.url))
-    return net.fetch(fileUrl)
+    return withLocalMediaCorsHeaders(await net.fetch(fileUrl))
   } catch (error) {
     console.error('[App] local-media: 处理失败:', error)
-    return new Response('Internal error', { status: 500 })
+    return withLocalMediaCorsHeaders(new Response('Internal error', { status: 500 }))
   }
 }
 
