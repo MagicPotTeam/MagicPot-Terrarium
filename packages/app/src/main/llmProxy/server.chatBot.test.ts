@@ -127,7 +127,7 @@ vi.mock('../mcp/platform/httpBridge', () => ({
   )
 }))
 
-import { startLLMProxyServer, stopLLMProxyServer } from './server'
+import { getLLMProxyServerStatus, startLLMProxyServer, stopLLMProxyServer } from './server'
 
 const waitForServer = async (port: number): Promise<void> => {
   const deadline = Date.now() + 5000
@@ -149,11 +149,23 @@ const waitForServer = async (port: number): Promise<void> => {
   throw new Error(`Timed out waiting for test server on port ${port}`)
 }
 
+const waitForListeningPort = async (): Promise<number> => {
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    const status = getLLMProxyServerStatus()
+    if (status.running && typeof status.port === 'number' && status.port > 0) {
+      return status.port
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  throw new Error('Timed out waiting for test server to bind a port')
+}
+
 describe('LLM proxy server legacy bot removal', () => {
   let port = 0
 
   beforeEach(async () => {
-    port = 39100 + Math.floor(Math.random() * 500)
+    port = 0
     testArtifactDir = await createNodeTestArtifactDir('llm-proxy-server')
     currentConfig = {
       ...DEFAULT_CONFIG,
@@ -192,6 +204,7 @@ describe('LLM proxy server legacy bot removal', () => {
     chatMock.mockClear()
     callToolMock.mockClear()
     startLLMProxyServer()
+    port = await waitForListeningPort()
     await waitForServer(port)
   })
 
