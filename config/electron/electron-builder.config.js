@@ -79,7 +79,7 @@ const modeMap = {
       artifactName: '${productName}-${version}-setup.${ext}',
       shortcutName: '${productName}',
       uninstallDisplayName: '${productName}',
-      include: `${buildResourcesDir}/uninstaller.nsh` // 自定义卸载脚本，询问是否删除配置文件
+      include: `${buildResourcesDir}/pure-installer.nsh` // pure installer options plus uninstall cleanup
     }
   }
 }
