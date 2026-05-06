@@ -14,7 +14,7 @@ const sources = [
   {
     name: 'ComfyUI',
     url: 'https://github.com/Comfy-Org/ComfyUI.git',
-    commit: 'a7d82baa06e6b2e3d19c38c244118909fe270d49',
+    commit: '6bcd8b96ab4650db6e834dcbb54357ebf72edfe6',
     relativePath: 'vendor/comfyui/ComfyUI'
   },
   {
@@ -32,13 +32,14 @@ const sources = [
   {
     name: 'ComfyUI-Easy-Use',
     url: 'https://github.com/yolain/ComfyUI-Easy-Use.git',
-    commit: 'd60b61d5759b020eff3356b3d395a1adb5456869',
+    commit: '130c1b5796d9876a5f853fa0bea88e808cfda4ad',
     relativePath: 'vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use'
   },
   {
     name: 'ComfyUI-Easy-Use-Frontend',
     url: 'https://github.com/yolain/ComfyUI-Easy-Use-Frontend.git',
-    commit: 'f78544d39ec3e5ee829bccf91218d2d7a6aad705',
+    commit: '8b95a4210032072773929b7c8176c43804ebf6ee',
+    parentRelativePath: 'vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use',
     relativePath:
       'vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use/ComfyUI-Easy-Use-Frontend'
   },
@@ -51,19 +52,19 @@ const sources = [
   {
     name: 'ComfyUI-KJNodes',
     url: 'https://github.com/kijai/ComfyUI-KJNodes.git',
-    commit: '6dfca48e00a573a47ffde438afce3ed32ae8474f',
+    commit: '9c3255f39cd2ea0ebf94a2016af4bd2e5d6eb91b',
     relativePath: 'vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-KJNodes'
   },
   {
     name: 'ComfyUI-Manager',
     url: 'https://github.com/Comfy-Org/ComfyUI-Manager.git',
-    commit: 'c94236a6145742610805e9e357b555c270f7cccf',
+    commit: '8d5c12037f873c2f9e059e4f9c409a2835a9b8cf',
     relativePath: 'vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager'
   },
   {
     name: 'ComfyUI-qwenmultiangle',
     url: 'https://github.com/jtydhr88/ComfyUI-qwenmultiangle.git',
-    commit: 'bf2d8fed247638afb2f3ede031f1056219ab1043',
+    commit: '6f93d9b15a50c07c13411734723fe5cae287e7aa',
     relativePath: 'vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-qwenmultiangle'
   },
   {
@@ -75,7 +76,7 @@ const sources = [
   {
     name: 'comfyui_controlnet_aux',
     url: 'https://github.com/Fannovel16/comfyui_controlnet_aux.git',
-    commit: '95a13e2e5d8f8ae57583fbebb0be1f670889858b',
+    commit: 'e8b689a513c3e6b63edc44066560ca5919c0576e',
     relativePath: 'vendor/comfyui/comfyui_data/custom_nodes/comfyui_controlnet_aux'
   },
   {
@@ -145,25 +146,49 @@ function fetchCommit(targetPath, commit) {
 function prepareSource(source) {
   const targetPath = assertInsideVendor(path.join(repoRoot, toNative(source.relativePath)))
   if (dryRun) {
-    console.log(`${source.name}: ${source.commit} ${source.url} -> ${source.relativePath}`)
+    const sourceType = source.parentRelativePath ? 'nested submodule' : 'submodule'
+    console.log(
+      `${source.name}: ${sourceType} ${source.commit} ${source.url} -> ${source.relativePath}`
+    )
     return
   }
 
   fs.mkdirSync(path.dirname(targetPath), { recursive: true })
 
-  if (force && fs.existsSync(targetPath)) {
+  if (
+    !source.parentRelativePath &&
+    force &&
+    fs.existsSync(targetPath) &&
+    !isGitWorktree(targetPath)
+  ) {
     fs.rmSync(targetPath, { recursive: true, force: true })
   }
 
-  if (!fs.existsSync(targetPath)) {
-    runGit(['clone', '--no-tags', '--filter=blob:none', source.url, targetPath], { inherit: true })
+  if (source.parentRelativePath) {
+    const parentPath = assertInsideVendor(path.join(repoRoot, toNative(source.parentRelativePath)))
+    if (!isGitWorktree(parentPath)) {
+      throw new Error(`Missing parent submodule for ${source.name}: ${source.parentRelativePath}`)
+    }
+    runGit(['-C', parentPath, 'submodule', 'sync', '--recursive'], { inherit: true })
+    runGit(['-C', parentPath, 'submodule', 'update', '--init', '--recursive'], { inherit: true })
+  } else {
+    if (fs.existsSync(targetPath) && !isGitWorktree(targetPath)) {
+      throw new Error(
+        `${source.relativePath} exists but is not a git submodule. Move it aside or rerun with --force.`
+      )
+    }
+    runGit(['submodule', 'sync', '--', source.relativePath], { inherit: true })
+    runGit(
+      ['submodule', 'update', '--init', ...(force ? ['--force'] : []), '--', source.relativePath],
+      {
+        inherit: true
+      }
+    )
   }
 
-  if (!isGitWorktree(targetPath)) {
-    fs.rmSync(targetPath, { recursive: true, force: true })
-    runGit(['clone', '--no-tags', '--filter=blob:none', source.url, targetPath], { inherit: true })
+  if (!fs.existsSync(targetPath) || !isGitWorktree(targetPath)) {
+    throw new Error(`Missing source submodule for ${source.name}: ${source.relativePath}`)
   }
-
   runGit(['-C', targetPath, 'remote', 'set-url', 'origin', source.url], { inherit: true })
   if (currentCommit(targetPath) !== source.commit) {
     fetchCommit(targetPath, source.commit)

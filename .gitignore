@@ -7,8 +7,26 @@ out
 config.json
 /dev_debug
 
-# ComfyUI runtime checkout and local data. Tracked gitlinks under this tree stay versioned.
-/vendor/comfyui/
+# ComfyUI source submodules are tracked as gitlinks. Runtime data stays ignored.
+/vendor/comfyui/*
+!/vendor/comfyui/README.md
+!/vendor/comfyui/ComfyUI
+!/vendor/comfyui/comfyui_data/
+/vendor/comfyui/comfyui_data/*
+!/vendor/comfyui/comfyui_data/custom_nodes/
+/vendor/comfyui/comfyui_data/custom_nodes/*
+!/vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Advanced-ControlNet
+!/vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Custom-Scripts
+!/vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use
+!/vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Inspyrenet-Rembg
+!/vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-KJNodes
+!/vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager
+!/vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-SeedVR2_VideoUpscaler
+!/vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-qwenmultiangle
+!/vendor/comfyui/comfyui_data/custom_nodes/ComfyUI_smZNodes
+!/vendor/comfyui/comfyui_data/custom_nodes/comfyui_LLM_party
+!/vendor/comfyui/comfyui_data/custom_nodes/comfyui_controlnet_aux
+!/vendor/comfyui/comfyui_data/custom_nodes/z-tipo-extension
 
 # ComfyUI junction directories (symlinks to comfyui_data/, fully ignored)
 /vendor/comfyui/ComfyUI/models
@@ -18,8 +36,7 @@ config.json
 /vendor/comfyui/ComfyUI/workflows
 /vendor/comfyui/ComfyUI/custom_nodes
 
-# ComfyUI external data (completely ignored, personal data)
-/vendor/comfyui/comfyui_data/
+# ComfyUI external data is ignored by default above, except allowlisted source gitlinks.
 
 # ComfyUI other external dirs (legacy flat paths, fully ignored)
 /vendor/comfyui/models/

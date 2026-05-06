@@ -1,0 +1,41 @@
+[submodule "vendor/comfyui/ComfyUI"]
+	path = vendor/comfyui/ComfyUI
+	url = https://github.com/Comfy-Org/ComfyUI.git
+	ignore = dirty
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Advanced-ControlNet"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Advanced-ControlNet
+	url = https://github.com/chinoll/ComfyUI-Advanced-ControlNet.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Custom-Scripts"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Custom-Scripts
+	url = https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use
+	url = https://github.com/yolain/ComfyUI-Easy-Use.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Inspyrenet-Rembg"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Inspyrenet-Rembg
+	url = https://github.com/john-mnz/ComfyUI-Inspyrenet-Rembg.git
+	ignore = dirty
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-KJNodes"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-KJNodes
+	url = https://github.com/kijai/ComfyUI-KJNodes.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager
+	url = https://github.com/Comfy-Org/ComfyUI-Manager.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-qwenmultiangle"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-qwenmultiangle
+	url = https://github.com/jtydhr88/ComfyUI-qwenmultiangle.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-SeedVR2_VideoUpscaler"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-SeedVR2_VideoUpscaler
+	url = https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/comfyui_controlnet_aux"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/comfyui_controlnet_aux
+	url = https://github.com/Fannovel16/comfyui_controlnet_aux.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/comfyui_LLM_party"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/comfyui_LLM_party
+	url = https://github.com/heshengtao/comfyui_LLM_party.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI_smZNodes"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI_smZNodes
+	url = https://github.com/shiimizu/ComfyUI_smZNodes.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/z-tipo-extension"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/z-tipo-extension
+	url = https://github.com/KohakuBlueleaf/z-tipo-extension.git
