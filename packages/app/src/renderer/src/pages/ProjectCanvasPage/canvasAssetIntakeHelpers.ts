@@ -465,7 +465,7 @@ function shouldUseAnonymousCrossOrigin(src: string): boolean {
   return !/^(data:|blob:|file:\/\/|local-media:\/\/)/i.test(src.trim())
 }
 
-export function loadImageFromSrc(src: string): Promise<LoadedCanvasImage> {
+function loadImageElementFromSrc(src: string, logSource = src): Promise<LoadedCanvasImage> {
   return new Promise((resolve, reject) => {
     const img = new window.Image()
     if (shouldUseAnonymousCrossOrigin(src)) {
@@ -479,11 +479,16 @@ export function loadImageFromSrc(src: string): Promise<LoadedCanvasImage> {
     img.onerror = () => {
       img.onload = null
       img.onerror = null
-      console.error('[Canvas] Failed to load image source:', describeCanvasImageSource(src))
+      console.error('[Canvas] Failed to load image source:', describeCanvasImageSource(logSource))
       reject(new Error('Failed to load image'))
     }
     img.src = src
   })
+}
+
+export async function loadImageFromSrc(src: string): Promise<LoadedCanvasImage> {
+  const localObjectUrl = await createCanvasLocalImageObjectUrl(src)
+  return await loadImageElementFromSrc(localObjectUrl ?? src, src)
 }
 
 async function createComfyImageObjectUrl(item: CanvasImageItem): Promise<string | null> {

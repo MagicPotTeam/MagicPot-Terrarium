@@ -32,6 +32,11 @@ import { isCanvasThumbnailSetFresh, pickBestCanvasThumbnailLevel } from '../canv
 import type { CanvasImageThumbnailLevel, CanvasImageThumbnailSet } from '../canvasThumbnailTypes'
 import { PROJECT_CANVAS_MIN_STAGE_SCALE } from '../projectCanvasViewportScale'
 import type { ProjectCanvasWebGLRuntimeMetrics } from '../projectCanvasWebGLRuntimeState'
+import {
+  canReadCanvasLocalImageSource,
+  createCanvasLocalImageObjectUrl,
+  readCanvasLocalImageBlobFromSource
+} from '../canvasLocalImageSource'
 
 type ProjectCanvasWebGLImageLayerProps = {
   items: CanvasImageItem[]
@@ -296,7 +301,7 @@ function shouldForceSelectedSourceTextureUpgrade(
   )
 }
 
-function loadImageElement(
+function loadImageElementDirect(
   src: string,
   options: { crossOrigin?: 'anonymous' | null } = {}
 ): Promise<HTMLImageElement> {
@@ -309,6 +314,19 @@ function loadImageElement(
     image.onerror = () => reject(new Error('Failed to load downscaled source texture.'))
     image.src = src
   })
+}
+
+function loadImageElement(
+  src: string,
+  options: { crossOrigin?: 'anonymous' | null } = {}
+): Promise<HTMLImageElement> {
+  if (!canReadCanvasLocalImageSource(src)) {
+    return loadImageElementDirect(src, options)
+  }
+
+  return createCanvasLocalImageObjectUrl(src).then((localObjectUrl) =>
+    loadImageElementDirect(localObjectUrl ?? src, options)
+  )
 }
 
 function resolveBoundedSourceTextureSize(width: number, height: number) {
@@ -462,12 +480,17 @@ async function loadBoundedSourceTextureFromUrl({
     return null
   }
 
-  const response = await fetch(src)
-  if (!response.ok && response.status !== 0) {
-    throw new Error(`Failed to fetch bounded source texture: ${response.status}`)
+  const localBlob = await readCanvasLocalImageBlobFromSource(src)
+  let blob = localBlob
+  if (!blob) {
+    const response = await fetch(src)
+    if (!response.ok && response.status !== 0) {
+      throw new Error(`Failed to fetch bounded source texture: ${response.status}`)
+    }
+
+    blob = await response.blob()
   }
 
-  const blob = await response.blob()
   return createImageBitmap(blob, {
     resizeWidth: targetSize.width,
     resizeHeight: targetSize.height,
@@ -1653,11 +1676,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
-      const img = new Image()
-      if (shouldUseAnonymousCrossOrigin(item.src)) {
-        img.crossOrigin = 'anonymous'
-      }
-
       if (mode === 'source-upgrade') {
         activeSourceUpgradeCountRef.current += 1
         activeSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
@@ -1667,7 +1685,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         pendingLoadSrcByIdRef.current.set(item.id, item.src)
       }
 
-      img.onload = () => {
+      const handleImageLoad = (img: HTMLImageElement) => {
         clearPendingLoad(item.id, item.src)
         void (async () => {
           let resolvedImage: CanvasImageAsset = img
@@ -1694,7 +1712,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           }
         })()
       }
-      img.onerror = () => {
+
+      const handleImageError = () => {
         clearPendingLoad(item.id, item.src)
         finishInitialLoad()
         finishSourceUpgrade()
@@ -1711,7 +1730,28 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           scheduleImageVersionUpdate()
         }
       }
-      img.src = item.src
+
+      const startImageElementLoad = (resolvedSrc: string) => {
+        const img = new Image()
+        if (shouldUseAnonymousCrossOrigin(item.src)) {
+          img.crossOrigin = 'anonymous'
+        }
+        img.onload = () => handleImageLoad(img)
+        img.onerror = handleImageError
+        img.src = resolvedSrc
+      }
+
+      if (canReadCanvasLocalImageSource(item.src)) {
+        void createCanvasLocalImageObjectUrl(item.src)
+          .then((localObjectUrl) => {
+            startImageElementLoad(localObjectUrl ?? item.src)
+          })
+          .catch(() => {
+            startImageElementLoad(item.src)
+          })
+      } else {
+        startImageElementLoad(item.src)
+      }
     }
 
     function pumpInitialImageLoadQueue() {

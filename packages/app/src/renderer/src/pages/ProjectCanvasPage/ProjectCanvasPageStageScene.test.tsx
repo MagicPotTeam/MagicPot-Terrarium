@@ -705,6 +705,15 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       '[data-project-canvas-high-res-image-layer="dom"] img[data-canvas-source-image-preview="true"]'
     )
     expect(highResImage?.getAttribute('src')).toBe('file:///image-jumbo-webgl-source.png')
+
+    const highResLayer = document.querySelector(
+      '[data-project-canvas-high-res-image-layer="dom"]'
+    ) as HTMLElement | null
+    expect(highResLayer).not.toBeNull()
+    act(() => {
+      root.setAttribute('data-project-canvas-marquee-active', 'true')
+    })
+    expect(getComputedStyle(highResLayer as HTMLElement).display).not.toBe('none')
   })
 
   it('budgets jumbo source overlays by visible pixels instead of a four item cap', async () => {
@@ -1421,7 +1430,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(syncViewportSpy).toHaveBeenCalledWith({ x: 96, y: 72 }, 1.25)
   })
 
-  it('temporarily suspends DOM image interaction overlays during marquee selection', async () => {
+  it('keeps DOM image interaction overlays visible during marquee selection while suppressing chrome', async () => {
     const selectedItem = createImageItem('image-selected')
     const siblingItem = createImageItem('image-sibling')
     siblingItem.x = 420
@@ -1444,11 +1453,15 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     )
 
     await waitFor(() => {
-      expect(imageInteractionOverlayProps.size).toBe(0)
+      expect(imageInteractionOverlayProps.has(selectedItem.id)).toBe(true)
     })
     expect(canvasPlaceholderProps.has(selectedItem.id)).toBe(false)
     expect(canvasPlaceholderProps.has(siblingItem.id)).toBe(true)
     expect(canvasPlaceholderProps.get(siblingItem.id)?.visualVariant).toBe('transparent')
+    expect(imageInteractionOverlayProps.get(selectedItem.id)?.isSelected).toBe(false)
+    expect(imageInteractionOverlayProps.get(selectedItem.id)?.showTransformer).toBe(false)
+    expect(imageInteractionOverlayProps.get(selectedItem.id)?.isDraggable).toBe(false)
+    expect(imageInteractionOverlayProps.get(selectedItem.id)?.allowPointerPassthrough).toBe(true)
   })
 
   it('keeps DOM image interaction overlays mounted for zero-size marquee noise', async () => {
@@ -1479,7 +1492,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(canvasPlaceholderProps.has(selectedItem.id)).toBe(false)
   })
 
-  it('hides proxy hit layers while the canvas marquee flag is active', async () => {
+  it('keeps proxy hit layers visible while the canvas marquee flag is active', async () => {
     const selectedItem = createImageItem('image-marquee-proxy-selected')
     const siblingItem = createImageItem('image-marquee-proxy-sibling')
     siblingItem.x = 420
@@ -1509,7 +1522,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       root.setAttribute('data-project-canvas-marquee-active', 'true')
     })
 
-    expect(getComputedStyle(proxyLayer).display).toBe('none')
+    expect(getComputedStyle(proxyLayer).display).not.toBe('none')
   })
 
   it('does not rerender proxy placeholders when only marquee bounds change', async () => {

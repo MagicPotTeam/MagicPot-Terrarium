@@ -293,6 +293,87 @@ describe('useCanvasAssetIntake', () => {
     }
   })
 
+  it('builds real previews for lazy-tail local files when the source File is still available', async () => {
+    const originalImageCtor = window.Image
+    const originalCreateImageBitmap = globalThis.createImageBitmap
+    const loadedSources: string[] = []
+    const tailPreview = {
+      width: 192,
+      height: 108,
+      close: vi.fn()
+    } as unknown as ImageBitmap
+    const createImageBitmapMock = vi.fn(
+      async () => tailPreview
+    ) as unknown as typeof createImageBitmap
+
+    Object.defineProperty(globalThis, 'createImageBitmap', {
+      configurable: true,
+      value: createImageBitmapMock
+    })
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'width', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'height', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        get: () => '',
+        set: (value: string) => {
+          loadedSources.push(value)
+          window.setTimeout(() => image.onload?.(new Event('load')), 0)
+        }
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const sources: CanvasImageSourceInput[] = Array.from(
+        { length: PROJECT_CANVAS_IMAGE_LAZY_IMPORT_THRESHOLD + 1 },
+        (_, index) => {
+          const lazyTail = index >= PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT
+          return {
+            src: `local-media:///C:/real-board/file-tail-${index}.png`,
+            fileName: `file-tail-${index}.png`,
+            sizeBytes: 1024 + index,
+            sourceWidthHint: 320,
+            sourceHeightHint: 180,
+            ...(lazyTail
+              ? { sourceFile: new File([new Uint8Array([1, 2, 3, 4])], `file-tail-${index}.png`) }
+              : {})
+          }
+        }
+      )
+      const onComplete = vi.fn()
+
+      render(<LargeImageBatchHarness sources={sources} onComplete={onComplete} />)
+
+      await waitFor(
+        () => {
+          expect(onComplete).toHaveBeenCalledTimes(1)
+        },
+        { timeout: 5000 }
+      )
+
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem[]]
+      const imageItems = items.filter((item): item is CanvasImageItem => item.type === 'image')
+      expect(loadedSources).toHaveLength(PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT)
+      expect(createImageBitmapMock).toHaveBeenCalled()
+      expect(imageItems[PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT].image).toBe(tailPreview)
+    } finally {
+      window.Image = originalImageCtor
+      if (originalCreateImageBitmap) {
+        Object.defineProperty(globalThis, 'createImageBitmap', {
+          configurable: true,
+          value: originalCreateImageBitmap
+        })
+      } else {
+        delete (globalThis as unknown as { createImageBitmap?: typeof createImageBitmap })
+          .createImageBitmap
+      }
+    }
+  })
+
   it('does not block lazy-tail imports on cold thumbnail generation', async () => {
     const originalImageCtor = window.Image
     const originalApi = window.api
@@ -706,6 +787,99 @@ describe('useCanvasAssetIntake', () => {
       expect(imageItems[0].image).toBe(previewBitmap)
     } finally {
       window.Image = originalImageCtor
+      if (originalCreateImageBitmap) {
+        Object.defineProperty(globalThis, 'createImageBitmap', {
+          configurable: true,
+          value: originalCreateImageBitmap
+        })
+      } else {
+        delete (globalThis as unknown as { createImageBitmap?: typeof createImageBitmap })
+          .createImageBitmap
+      }
+      if (originalFetch) {
+        Object.defineProperty(globalThis, 'fetch', {
+          configurable: true,
+          value: originalFetch
+        })
+      } else {
+        delete (globalThis as unknown as { fetch?: typeof fetch }).fetch
+      }
+    }
+  })
+
+  it('reads local-media deferred previews through svcFs when the file bridge is available', async () => {
+    const originalApi = window.api
+    const originalCreateImageBitmap = globalThis.createImageBitmap
+    const originalFetch = globalThis.fetch
+    const readImageFromPath = vi.fn(async () => ({
+      image: new Uint8Array([1, 2, 3, 4]),
+      filename: 'huge-from-bridge.png'
+    }))
+    const previewBitmap = {
+      width: 2048,
+      height: 1255,
+      close: vi.fn()
+    } as unknown as ImageBitmap
+    const createImageBitmapMock = vi.fn(
+      async () => previewBitmap
+    ) as unknown as typeof createImageBitmap
+    const fetchMock = vi.fn()
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcFs: {
+          readImageFromPath
+        }
+      }
+    })
+    Object.defineProperty(globalThis, 'createImageBitmap', {
+      configurable: true,
+      value: createImageBitmapMock
+    })
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      value: fetchMock
+    })
+
+    try {
+      const hugeSource = {
+        src: 'local-media:///C:/real-board/huge-from-bridge.png',
+        fileName: 'huge-from-bridge.png',
+        sizeBytes: 90 * 1024 * 1024,
+        sourceWidthHint: 19_717,
+        sourceHeightHint: 12_079
+      }
+      const onComplete = vi.fn()
+
+      render(<LargeImageBatchHarness sources={[hugeSource]} onComplete={onComplete} />)
+
+      await waitFor(
+        () => {
+          expect(onComplete).toHaveBeenCalledTimes(1)
+        },
+        { timeout: 5000 }
+      )
+
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem[]]
+      const imageItems = items.filter((item): item is CanvasImageItem => item.type === 'image')
+      expect(readImageFromPath).toHaveBeenCalledWith({
+        fullPath: 'C:/real-board/huge-from-bridge.png'
+      })
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(createImageBitmapMock).toHaveBeenCalledWith(expect.any(Blob), {
+        resizeWidth: 2048,
+        resizeHeight: 1255,
+        resizeQuality: 'high'
+      })
+      expect(imageItems[0].image).toBe(previewBitmap)
+    } finally {
+      Object.defineProperty(window, 'api', {
+        configurable: true,
+        writable: true,
+        value: originalApi
+      })
       if (originalCreateImageBitmap) {
         Object.defineProperty(globalThis, 'createImageBitmap', {
           configurable: true,

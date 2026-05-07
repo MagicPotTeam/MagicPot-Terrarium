@@ -9,6 +9,7 @@ import { extractModelArchive } from './modelArchive'
 import { materializePsdFile } from './psdImport'
 import { resolveCanvas3DRenderActivationDelay } from './canvas3DRenderActivation'
 import { getCanvasLocalMediaSourceUrl, getElectronCanvasFilePath } from './canvasLocalFileSource'
+import { readCanvasLocalImageBlobFromSource } from './canvasLocalImageSource'
 import {
   createCanvasFileItemDraft,
   createCanvasHtmlItemDraft,
@@ -512,6 +513,11 @@ async function resolveDeferredCanvasImagePreviewBlob(
     return source.sourceFile
   }
 
+  const localBlob = await readCanvasLocalImageBlobFromSource(source.src, source.fileName)
+  if (localBlob) {
+    return localBlob
+  }
+
   if (typeof fetch !== 'function' || !canFetchDeferredCanvasImagePreviewSource(source.src)) {
     return null
   }
@@ -617,13 +623,15 @@ async function buildDeferredCanvasImageStreamEntry({
   sourceIndex,
   maxPreviewSide,
   fitImageToCanvasSize,
-  resolveInitialDisplayAsset = true
+  resolveInitialDisplayAsset = true,
+  resolveInitialThumbnail = resolveInitialDisplayAsset
 }: {
   source: NormalizedCanvasImageSource
   sourceIndex: number
   maxPreviewSide: number
   fitImageToCanvasSize: (width: number, height: number) => { width: number; height: number }
   resolveInitialDisplayAsset?: boolean
+  resolveInitialThumbnail?: boolean
 }): Promise<CanvasImageStreamEntry> {
   const shouldDeferFullDecode = shouldDeferCanvasImageSourceFullDecode(source)
   const hasDimensionHints =
@@ -636,7 +644,7 @@ async function buildDeferredCanvasImageStreamEntry({
       : PROJECT_CANVAS_IMAGE_LAZY_IMPORT_DEFAULT_SOURCE_EDGE
   )
   const fittedSize = fitImageToCanvasSize(sourceWidth, sourceHeight)
-  const thumbnailPreview = resolveInitialDisplayAsset
+  const thumbnailPreview = resolveInitialThumbnail
     ? await resolveCanvasImageIntakeThumbnail({
         source,
         maxPreviewSide
@@ -650,7 +658,7 @@ async function buildDeferredCanvasImageStreamEntry({
           sourceHeight,
           maxPreviewSide
         })
-      : shouldDeferFullDecode && resolveInitialDisplayAsset
+      : resolveInitialDisplayAsset
         ? await buildDeferredCanvasImagePreview({
             source,
             sourceWidth,
@@ -1270,18 +1278,17 @@ export function useCanvasAssetIntake({
           PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY,
           async (source, sourceIndex) => {
             try {
-              if (
-                shouldDeferCanvasImageSourceFullDecode(source) ||
-                (lazyImportTail && sourceIndex >= PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT)
-              ) {
+              const isLazyTail =
+                lazyImportTail && sourceIndex >= PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT
+              const shouldResolveLazyTailDisplayAsset = isLazyTail && Boolean(source.sourceFile)
+              if (shouldDeferCanvasImageSourceFullDecode(source) || isLazyTail) {
                 return buildDeferredCanvasImageStreamEntry({
                   source,
                   sourceIndex,
                   maxPreviewSide,
                   fitImageToCanvasSize,
-                  resolveInitialDisplayAsset: !(
-                    lazyImportTail && sourceIndex >= PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT
-                  )
+                  resolveInitialDisplayAsset: !isLazyTail || shouldResolveLazyTailDisplayAsset,
+                  resolveInitialThumbnail: !isLazyTail
                 })
               }
 
