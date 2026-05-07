@@ -190,6 +190,41 @@ function validateStaging() {
   }
 }
 
+function applySeedVr2CpuDeviceFallback() {
+  const memoryManagerPath = path.join(
+    customNodesDst,
+    'ComfyUI-SeedVR2_VideoUpscaler',
+    'src',
+    'optimization',
+    'memory_manager.py'
+  )
+  if (!fs.existsSync(memoryManagerPath)) {
+    return
+  }
+
+  const source = fs.readFileSync(memoryManagerPath, 'utf8')
+  if (source.includes('SeedVR2 schema definitions index the first device')) {
+    return
+  }
+
+  const patched = source.replace(
+    /(\n\s*result\.extend\(devs\)\r?\n\s*)return result if result else \[\]/,
+    `$1if result:
+        return result
+
+    # SeedVR2 schema definitions index the first device during ComfyUI's quick test.
+    # GitHub-hosted Windows release runners are CPU-only, so keep registration alive.
+    return ["cpu"]`
+  )
+
+  if (patched === source) {
+    throw new Error(`Could not apply SeedVR2 CPU device fallback: ${memoryManagerPath}`)
+  }
+
+  fs.writeFileSync(memoryManagerPath, patched, 'utf8')
+  console.log('[prepare-embedded-staging] Applied SeedVR2 CPU device fallback')
+}
+
 function main() {
   if (!fs.existsSync(localComfyRepo)) {
     throw new Error(`Missing ComfyUI source repo: ${localComfyRepo}`)
@@ -204,6 +239,7 @@ function main() {
   cloneFreshComfySource()
   copyTree(customNodesSrc, customNodesDst, shouldSkipCustomNodeSource)
   removeRepositoryMetadata(customNodesDst)
+  applySeedVr2CpuDeviceFallback()
 
   validateStaging()
   console.log(`[prepare-embedded-staging] Wrote ${comfyDst}`)
