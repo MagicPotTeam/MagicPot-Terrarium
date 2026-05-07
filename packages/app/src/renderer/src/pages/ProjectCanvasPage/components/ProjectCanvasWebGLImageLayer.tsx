@@ -87,11 +87,11 @@ export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES = 128 * 1024 * 1024
 export const PROJECT_CANVAS_WEBGL_SELECTED_RESIDENT_LIMIT = 64
 export const PROJECT_CANVAS_WEBGL_SELECTED_PROTECTED_LIMIT = 32
 const PROJECT_CANVAS_WEBGL_IMAGE_VISIBLE_OVERSCAN_PX = 320
-const VIEWPORT_RECONCILE_DEBOUNCE_MS = 80
+const VIEWPORT_RECONCILE_DEBOUNCE_MS = 48
 const PROJECT_CANVAS_WEBGL_METRICS_THROTTLE_MS = 250
 export const PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_MAX_SIDE = 4096
-const PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_CONCURRENCY = 1
-const PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_VIEWPORT_IDLE_DELAY_MS = 140
+const PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_CONCURRENCY = 2
+const PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_VIEWPORT_IDLE_DELAY_MS = 80
 const PROJECT_CANVAS_WEBGL_IMAGE_VERSION_INTERACTION_MAX_DEFER_MS = 180
 const PROJECT_CANVAS_WEBGL_THUMBNAIL_UPGRADE_CONCURRENCY = 6
 const PROJECT_CANVAS_WEBGL_THUMBNAIL_LOD_SCREEN_GAIN = 1.5
@@ -99,9 +99,11 @@ const PROJECT_CANVAS_WEBGL_THUMBNAIL_LOD_TEXTURE_BUDGET_RATIO = 0.75
 const PROJECT_CANVAS_WEBGL_DENSE_SOURCE_UPGRADE_CANDIDATE_LIMIT = 96
 const PROJECT_CANVAS_WEBGL_DENSE_SOURCE_UPGRADE_MAX_SCALE = 0.5
 const PROJECT_CANVAS_WEBGL_IMAGE_ELEMENT_SOURCE_DECODE_MAX_BYTES = 256 * 1024 * 1024
+const PROJECT_CANVAS_WEBGL_IMAGE_ELEMENT_LOAD_TIMEOUT_MS = 15_000
+const PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS = 12_000
 export const PROJECT_CANVAS_WEBGL_INITIAL_IMAGE_LOAD_CONCURRENCY = 8
-export const PROJECT_CANVAS_WEBGL_SPRITE_RECONCILE_BATCH_SIZE = 8
-export const PROJECT_CANVAS_WEBGL_OVERVIEW_SPRITE_RECONCILE_BATCH_SIZE = 64
+export const PROJECT_CANVAS_WEBGL_SPRITE_RECONCILE_BATCH_SIZE = 16
+export const PROJECT_CANVAS_WEBGL_OVERVIEW_SPRITE_RECONCILE_BATCH_SIZE = 128
 const PROJECT_CANVAS_WEBGL_SOURCE_OVERVIEW_MAX_SCALE =
   PROJECT_CANVAS_IMAGE_LOD_OVERVIEW_SOURCE_SUPPRESSION_MAX_SCALE
 const PROJECT_CANVAS_WEBGL_OVERVIEW_BATCH_MAX_SCALE = 0.25
@@ -153,6 +155,54 @@ function getProjectCanvasSpriteReconcileBatchSize(stageScale: number) {
 function shouldSuppressIntermediateOverviewRender(stageScale: number) {
   const safeScale = Math.max(Math.abs(stageScale), PROJECT_CANVAS_MIN_STAGE_SCALE)
   return safeScale <= PROJECT_CANVAS_WEBGL_OVERVIEW_BATCH_MAX_SCALE
+}
+
+function closeCanvasImageAssetIfPossible(value: unknown) {
+  const close = (value as { close?: unknown } | null | undefined)?.close
+  if (typeof close === 'function') {
+    close.call(value)
+  }
+}
+
+function withProjectCanvasWebGLTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string
+): Promise<T> {
+  let settled = false
+
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      reject(new Error(message))
+    }, timeoutMs)
+
+    promise.then(
+      (value) => {
+        if (settled) {
+          closeCanvasImageAssetIfPossible(value)
+          return
+        }
+
+        settled = true
+        window.clearTimeout(timeoutId)
+        resolve(value)
+      },
+      (error) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        window.clearTimeout(timeoutId)
+        reject(error)
+      }
+    )
+  })
 }
 
 function getPreviewVisibilityBounds(preview: ProjectCanvasImagePreview) {
@@ -307,11 +357,34 @@ function loadImageElementDirect(
 ): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image()
+    let settled = false
+    const timeoutId = window.setTimeout(() => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      image.onload = null
+      image.onerror = null
+      reject(new Error('Timed out loading image element.'))
+    }, PROJECT_CANVAS_WEBGL_IMAGE_ELEMENT_LOAD_TIMEOUT_MS)
+    const settle = (callback: () => void) => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      window.clearTimeout(timeoutId)
+      image.onload = null
+      image.onerror = null
+      callback()
+    }
     if (options.crossOrigin) {
       image.crossOrigin = options.crossOrigin
     }
-    image.onload = () => resolve(image)
-    image.onerror = () => reject(new Error('Failed to load downscaled source texture.'))
+    image.onload = () => settle(() => resolve(image))
+    image.onerror = () =>
+      settle(() => reject(new Error('Failed to load downscaled source texture.')))
     image.src = src
   })
 }
@@ -639,6 +712,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const lastReportedMetricsRef = useRef<ProjectCanvasWebGLImageLayerMetrics | null>(null)
   const spriteReconcileFrameRef = useRef<number | null>(null)
   const imageVersionFrameRef = useRef<number | null>(null)
+  const imageElementLoadTimeoutsRef = useRef<Set<number>>(new Set())
   const metricsRef = useRef<ProjectCanvasWebGLImageLayerMetrics>({
     isInitialized: false,
     imageCount: 0,
@@ -1094,6 +1168,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         clearTimeout(imageVersionDeferredTimerRef.current)
         imageVersionDeferredTimerRef.current = null
       }
+      imageElementLoadTimeoutsRef.current.forEach((timeoutId) => {
+        window.clearTimeout(timeoutId)
+      })
+      imageElementLoadTimeoutsRef.current.clear()
     }
   }, [])
 
@@ -1280,6 +1358,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         window.cancelAnimationFrame(imageVersionFrameRef.current)
         imageVersionFrameRef.current = null
       }
+      imageElementLoadTimeoutsRef.current.forEach((timeoutId) => {
+        window.clearTimeout(timeoutId)
+      })
+      imageElementLoadTimeoutsRef.current.clear()
 
       hasDeferredImageVersionUpdateRef.current = false
       pendingLoads.clear()
@@ -1630,11 +1712,15 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           try {
             let resolvedImage: CanvasImageAsset | null = null
             try {
-              resolvedImage = await loadBoundedSourceTextureFromUrl({
-                src: item.src,
-                sourceWidth: item.sourceWidth ?? item.width,
-                sourceHeight: item.sourceHeight ?? item.height
-              })
+              resolvedImage = await withProjectCanvasWebGLTimeout(
+                loadBoundedSourceTextureFromUrl({
+                  src: item.src,
+                  sourceWidth: item.sourceWidth ?? item.width,
+                  sourceHeight: item.sourceHeight ?? item.height
+                }),
+                PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS,
+                'Timed out loading bounded source texture.'
+              )
             } catch {
               resolvedImage = null
             }
@@ -1642,10 +1728,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               !resolvedImage &&
               sourceDecodeByteSize <= PROJECT_CANVAS_WEBGL_IMAGE_ELEMENT_SOURCE_DECODE_MAX_BYTES
             ) {
-              resolvedImage = await loadBoundedSourceTextureViaImageElement({
-                src: item.src,
-                useAnonymousCrossOrigin: shouldUseAnonymousCrossOrigin(item.src)
-              })
+              resolvedImage = await withProjectCanvasWebGLTimeout(
+                loadBoundedSourceTextureViaImageElement({
+                  src: item.src,
+                  useAnonymousCrossOrigin: shouldUseAnonymousCrossOrigin(item.src)
+                }),
+                PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS,
+                'Timed out loading bounded source texture through an image element.'
+              )
             }
             clearPendingLoad(item.id, item.src)
             finishInitialLoad()
@@ -1691,7 +1781,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           let resolvedImage: CanvasImageAsset = img
           if (mode === 'source-upgrade') {
             try {
-              resolvedImage = await downscaleSourceTextureForWebGL(img)
+              resolvedImage = await withProjectCanvasWebGLTimeout(
+                downscaleSourceTextureForWebGL(img),
+                PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS,
+                'Timed out downscaling source texture.'
+              )
             } catch {
               resolvedImage = img
             }
@@ -1733,11 +1827,36 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       const startImageElementLoad = (resolvedSrc: string) => {
         const img = new Image()
+        let settled = false
+        const timeoutId = window.setTimeout(() => {
+          if (settled) {
+            return
+          }
+
+          settled = true
+          imageElementLoadTimeoutsRef.current.delete(timeoutId)
+          img.onload = null
+          img.onerror = null
+          handleImageError()
+        }, PROJECT_CANVAS_WEBGL_IMAGE_ELEMENT_LOAD_TIMEOUT_MS)
+        imageElementLoadTimeoutsRef.current.add(timeoutId)
+        const settleImageElementLoad = (callback: () => void) => {
+          if (settled) {
+            return
+          }
+
+          settled = true
+          window.clearTimeout(timeoutId)
+          imageElementLoadTimeoutsRef.current.delete(timeoutId)
+          img.onload = null
+          img.onerror = null
+          callback()
+        }
         if (shouldUseAnonymousCrossOrigin(item.src)) {
           img.crossOrigin = 'anonymous'
         }
-        img.onload = () => handleImageLoad(img)
-        img.onerror = handleImageError
+        img.onload = () => settleImageElementLoad(() => handleImageLoad(img))
+        img.onerror = () => settleImageElementLoad(handleImageError)
         img.src = resolvedSrc
       }
 
@@ -2259,6 +2378,30 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         (shouldPinSelectedItems && selectedIds?.has(item.id) ? 1_000_000 : 0) - distanceFromCenter
       )
     }
+    const compareResidentCandidateItems = (left: CanvasImageItem, right: CanvasImageItem) => {
+      const leftSelectedRank = shouldPinSelectedItems && selectedIds?.has(left.id) ? 1 : 0
+      const rightSelectedRank = shouldPinSelectedItems && selectedIds?.has(right.id) ? 1 : 0
+      if (leftSelectedRank !== rightSelectedRank) {
+        return rightSelectedRank - leftSelectedRank
+      }
+
+      const leftPreviewRank = previewStateRef.current.has(left.id) ? 1 : 0
+      const rightPreviewRank = previewStateRef.current.has(right.id) ? 1 : 0
+      if (leftPreviewRank !== rightPreviewRank) {
+        return rightPreviewRank - leftPreviewRank
+      }
+
+      const leftBounds = getCanvasItemBounds(left)
+      const rightBounds = getCanvasItemBounds(right)
+      if (leftBounds.minY !== rightBounds.minY) {
+        return leftBounds.minY - rightBounds.minY
+      }
+      if (leftBounds.minX !== rightBounds.minX) {
+        return leftBounds.minX - rightBounds.minX
+      }
+
+      return left.zIndex - right.zIndex
+    }
     sourceUpgradeQueueRef.current = sourceUpgradeQueueRef.current
       .map((entry) => {
         const item = itemById.get(entry.itemId)
@@ -2272,9 +2415,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         residentCandidateItems.push(item)
       }
     })
-    const orderedItems = residentCandidateItems.sort(
-      (left, right) => getSourceUpgradePriority(right) - getSourceUpgradePriority(left)
-    )
+    const orderedItems = residentCandidateItems.sort(compareResidentCandidateItems)
     const residentTargetIds = new Set<string>()
     const addResidentTarget = (itemId: string) => {
       if (
