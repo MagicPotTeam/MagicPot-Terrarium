@@ -160,6 +160,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: release/${{ inputs.tag_name }}
+          target_commitish: ${{ inputs.ref }}
           name: ${{ inputs.release_name }}
           draft: false
           prerelease: false

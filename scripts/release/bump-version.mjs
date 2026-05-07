@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..', '..')
 const packageJsonPath = path.join(repoRoot, 'package.json')
+const packageLockPath = path.join(repoRoot, 'package-lock.json')
 
 function parseVersion(version) {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version)
@@ -41,6 +42,21 @@ function bumpMajorVersion(currentVersion) {
   return versionToString(versionArray)
 }
 
+function writeJsonFile(filePath, value) {
+  writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+}
+
+function updatePackageLockVersion(newVersion) {
+  const packageLock = JSON.parse(readFileSync(packageLockPath, 'utf8'))
+  packageLock.version = newVersion
+
+  if (packageLock.packages?.['']) {
+    packageLock.packages[''].version = newVersion
+  }
+
+  writeJsonFile(packageLockPath, packageLock)
+}
+
 function main(argv = process.argv.slice(2)) {
   const dryRun = argv.includes('--dry-run')
   const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'))
@@ -55,7 +71,8 @@ function main(argv = process.argv.slice(2)) {
   }
 
   packageJson.version = newVersion
-  writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8')
+  writeJsonFile(packageJsonPath, packageJson)
+  updatePackageLockVersion(newVersion)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
