@@ -3412,6 +3412,88 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     }
   }, 30000)
 
+  it('loads source-only local-media images through svcFs object URLs', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const originalApi = window.api
+    const originalCreateObjectURL = URL.createObjectURL
+    const attemptedSrcs: string[] = []
+    const readImageFromPath = vi.fn(async () => ({
+      image: new Uint8Array([1, 2, 3, 4]),
+      filename: 'source-only.png'
+    }))
+    const createObjectURLMock = vi.fn((_blob: Blob) => 'blob:webgl-local-image')
+
+    class MockImage {
+      onload: null | (() => void) = null
+      onerror: null | (() => void) = null
+      crossOrigin: string | null = null
+      naturalWidth = 640
+      naturalHeight = 360
+      width = 640
+      height = 360
+      private _src = ''
+
+      set src(value: string) {
+        this._src = value
+        attemptedSrcs.push(value)
+        window.setTimeout(() => this.onload?.(), 0)
+      }
+
+      get src() {
+        return this._src
+      }
+    }
+
+    URL.createObjectURL = createObjectURLMock as unknown as typeof URL.createObjectURL
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcFs: {
+          readImageFromPath
+        }
+      }
+    })
+    vi.stubGlobal('Image', MockImage as unknown as typeof Image)
+
+    try {
+      render(
+        <ProjectCanvasWebGLImageLayer
+          items={[
+            createItem({
+              id: 'image-local-source-only',
+              src: 'local-media:///C:/real-board/source-only.png',
+              fileName: 'source-only.png',
+              image: undefined as unknown as HTMLImageElement
+            })
+          ]}
+          stagePos={{ x: 0, y: 0 }}
+          stageScale={1}
+          stageSize={{ width: 1280, height: 720 }}
+        />
+      )
+
+      await waitFor(
+        () => {
+          expect(readImageFromPath).toHaveBeenCalledWith({
+            fullPath: 'C:/real-board/source-only.png'
+          })
+          expect(attemptedSrcs).toEqual(['blob:webgl-local-image'])
+          expect(getLiveSpriteByLabel('image-local-source-only')?.texture.width).toBe(640)
+        },
+        { timeout: 15000 }
+      )
+    } finally {
+      vi.unstubAllGlobals()
+      URL.createObjectURL = originalCreateObjectURL
+      Object.defineProperty(window, 'api', {
+        configurable: true,
+        writable: true,
+        value: originalApi
+      })
+    }
+  }, 30000)
+
   it('falls back to an image element when bounded source fetch fails', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []

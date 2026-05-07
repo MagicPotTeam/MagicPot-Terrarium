@@ -220,6 +220,52 @@ describe('canvasAssetIntakeHelpers', () => {
     expect(getCanvasImagePreviewMaxSideForBatch(Number.NaN)).toBe(CANVAS_IMAGE_PROXY_MAX_SIDE)
   })
 
+  it('loads dropped local-media images through svcFs object URLs before decoding', async () => {
+    const loadedSources: string[] = []
+    window.Image = function MockImage() {
+      const image = createImage(640, 360)
+      let currentSrc = ''
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        get: () => currentSrc,
+        set: (value: string) => {
+          currentSrc = value
+          loadedSources.push(value)
+          queueMicrotask(() => image.onload?.(new Event('load')))
+        }
+      })
+
+      return image
+    } as unknown as typeof Image
+
+    const readImageFromPath = vi.fn(async () => ({
+      image: new Uint8Array([1, 2, 3, 4]),
+      filename: 'reference.png'
+    }))
+    const createObjectUrl = vi.fn((_blob: Blob) => 'blob:local-image')
+    URL.createObjectURL = createObjectUrl as unknown as typeof URL.createObjectURL
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcFs: {
+          readImageFromPath
+        }
+      }
+    })
+
+    const loaded = await loadImageFromSrc('local-media:///C:/assets/reference.png')
+
+    expect(readImageFromPath).toHaveBeenCalledWith({ fullPath: 'C:/assets/reference.png' })
+    expect(createObjectUrl).toHaveBeenCalled()
+    expect(loadedSources).toEqual(['blob:local-image'])
+    expect(loaded).toMatchObject({
+      width: 640,
+      height: 360
+    })
+  })
+
   it('marks generated deferred placeholder assets so selected WebGL images do not show them as previews', async () => {
     const placeholder = await buildCanvasImagePlaceholderAsset({ width: 512, height: 314 })
 

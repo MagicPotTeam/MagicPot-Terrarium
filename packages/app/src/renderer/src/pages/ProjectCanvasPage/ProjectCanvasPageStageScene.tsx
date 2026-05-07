@@ -70,7 +70,7 @@ const CANVAS_TEXT_TRANSFORM_MIN_FONT_SIZE = 8
 const CANVAS_ANNOTATION_TRANSFORM_MIN_SIZE = 20
 const CANVAS_ANNOTATION_TEXT_TRANSFORM_MIN_FONT_SIZE = 8
 const PROJECT_CANVAS_DENSE_WEBGL_IMAGE_PROXY_LIMIT = 256
-const PROJECT_CANVAS_SELECTION_RECT_HIDE_IMAGE_LAYER_THRESHOLD_PX = 3
+const PROJECT_CANVAS_SELECTION_RECT_ACTIVE_THRESHOLD_PX = 3
 const PROJECT_CANVAS_HIGH_RES_DOM_IMAGE_MIN_SOURCE_RATIO = 1.25
 const PROJECT_CANVAS_HIGH_RES_DOM_IMAGE_VIEWPORT_PIXEL_BUDGET_MULTIPLIER = 8
 const PROJECT_CANVAS_HIGH_RES_DOM_IMAGE_MIN_VISIBLE_SCREEN_AREA = 160 * 160
@@ -1279,14 +1279,13 @@ export default function ProjectCanvasPageStageScene(props: any) {
     () => new Set(placeholderProxyImageItems.map((item) => item.id)),
     [placeholderProxyImageItems]
   )
-  const shouldHideImageInteractionLayerForSelectionRect =
+  const shouldSuppressSelectionChromeForSelectionRect =
     selectionRect != null &&
-    (selectionRect.w > PROJECT_CANVAS_SELECTION_RECT_HIDE_IMAGE_LAYER_THRESHOLD_PX ||
-      selectionRect.h > PROJECT_CANVAS_SELECTION_RECT_HIDE_IMAGE_LAYER_THRESHOLD_PX)
-  const shouldRenderImageInteractionLayer =
-    interactiveImageOverlayItems.length > 0 &&
-    !shouldHideImageInteractionLayerForSelectionRect &&
-    !suppressSelectionChromeAfterMarquee
+    (selectionRect.w > PROJECT_CANVAS_SELECTION_RECT_ACTIVE_THRESHOLD_PX ||
+      selectionRect.h > PROJECT_CANVAS_SELECTION_RECT_ACTIVE_THRESHOLD_PX)
+  const shouldSuppressSelectionChrome =
+    shouldSuppressSelectionChromeForSelectionRect || suppressSelectionChromeAfterMarquee
+  const shouldRenderImageInteractionLayer = interactiveImageOverlayItems.length > 0
   const { activeRegionSelectionImageItem, multiSelectionTransformItems, selectedSingleItem } =
     React.useMemo(() => {
       let nextActiveRegionSelectionImageItem: CanvasImageItem | null = null
@@ -2907,16 +2906,22 @@ export default function ProjectCanvasPageStageScene(props: any) {
         }),
         '&[data-project-canvas-marquee-active="true"] [data-project-canvas-image-interaction-layer="dom"]':
           {
-            display: 'none'
+            pointerEvents: 'none'
           },
         '&[data-project-canvas-marquee-active="true"] [data-project-canvas-proxy-layer="dom"]': {
-          display: 'none'
+          pointerEvents: 'none'
         },
         '&[data-project-canvas-marquee-active="true"] [data-project-canvas-high-res-image-layer="dom"]':
           {
-            display: 'none'
+            pointerEvents: 'none'
           },
-        '&[data-project-canvas-marquee-active="true"] [data-project-canvas-rect-interaction-layer]':
+        '&[data-project-canvas-marquee-active="true"] [data-canvas-overlay="image-interaction"], &[data-project-canvas-marquee-active="true"] [data-canvas-overlay="rect-interaction"]':
+          {
+            pointerEvents: 'none !important',
+            outline: 'none !important',
+            boxShadow: 'none !important'
+          },
+        '&[data-project-canvas-marquee-active="true"] [data-canvas-image-handle], &[data-project-canvas-marquee-active="true"] [data-canvas-image-rotate-hotspot], &[data-project-canvas-marquee-active="true"] [data-canvas-rect-handle], &[data-project-canvas-marquee-active="true"] [data-canvas-rect-rotate-hotspot]':
           {
             display: 'none'
           },
@@ -3069,6 +3074,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
                 const isSelected = selectedIds.has(imageItem.id) && tool === 'select'
                 const imageRuntimeRoute = getImageRuntimeRoute(imageItem)
                 const suppressDomImagePreview = imageRuntimeRoute === 'webgl-primary'
+                const shouldShowSelectionChrome = isSelected && !shouldSuppressSelectionChrome
 
                 return (
                   <Box
@@ -3091,14 +3097,21 @@ export default function ProjectCanvasPageStageScene(props: any) {
                     <ProjectCanvasImageInteractionOverlay
                       canvasContainerRef={canvasContainerRef}
                       item={imageItem}
-                      isSelected={isSelected}
+                      isSelected={shouldShowSelectionChrome}
                       selectedCount={selectedIds.size}
                       renderMode={imageRuntimeRoute}
                       suppressImagePreview={suppressDomImagePreview}
                       preferDomImagePreview={false}
-                      showTransformer={tool === 'select' && selectedIds.size === 1 && isSelected}
-                      isDraggable={tool === 'select' && !imageItem.locked}
-                      allowPointerPassthrough={tool === 'hand'}
+                      showTransformer={
+                        tool === 'select' &&
+                        selectedIds.size === 1 &&
+                        isSelected &&
+                        !shouldSuppressSelectionChrome
+                      }
+                      isDraggable={
+                        tool === 'select' && !imageItem.locked && !shouldSuppressSelectionChrome
+                      }
+                      allowPointerPassthrough={tool === 'hand' || shouldSuppressSelectionChrome}
                       stagePos={stagePos}
                       stageScale={stageScale}
                       stagePosRef={stagePosRef}
