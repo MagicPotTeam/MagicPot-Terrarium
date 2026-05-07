@@ -1238,7 +1238,8 @@ export default function ProjectCanvasPageStageScene(props: any) {
           shouldUseDenseWebglImageProxyBudget &&
           !shouldKeepFallbackProxy &&
           !isSingleSelectedImage &&
-          !isActivePlaceholderDrag
+          !isActivePlaceholderDrag &&
+          tool !== 'select'
         ) {
           continue
         }

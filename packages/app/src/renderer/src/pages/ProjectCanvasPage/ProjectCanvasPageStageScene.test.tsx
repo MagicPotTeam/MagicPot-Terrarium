@@ -1255,7 +1255,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(canvasPlaceholderProps.get(siblingItem.id)?.visualVariant).toBe('transparent')
   })
 
-  it('suppresses per-image WebGL hit proxies for dense selected image boards', async () => {
+  it('keeps transparent WebGL hit proxies for dense selected image boards', async () => {
     const items = Array.from({ length: 300 }, (_, index) => {
       const item = createImageItem(`dense-image-${index}`)
       item.x = (index % 30) * 220
@@ -1277,10 +1277,20 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
 
     const root = screen.getByTestId('project-canvas-stage-root')
     expect(root).toHaveAttribute('data-project-canvas-dense-webgl-image-proxy-mode', 'true')
-    expect(root).toHaveAttribute('data-project-canvas-proxy-layer-candidate-count', '0')
+    expect(root).toHaveAttribute(
+      'data-project-canvas-proxy-layer-candidate-count',
+      `${items.length}`
+    )
     expect(root).toHaveAttribute('data-project-canvas-image-interaction-overlay-count', '0')
-    expect(root).toHaveAttribute('data-project-canvas-placeholder-image-proxy-count', '0')
-    expect(canvasPlaceholderProps.size).toBe(0)
+    expect(root).toHaveAttribute(
+      'data-project-canvas-placeholder-image-proxy-count',
+      `${items.length}`
+    )
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.size).toBe(items.length)
+    })
+    expect(canvasPlaceholderProps.get(items[0].id)?.visualVariant).toBe('transparent')
+    expect(canvasPlaceholderProps.get(items[0].id)?.isDraggable).toBe(true)
     expect(imageInteractionOverlayProps.size).toBe(0)
     expect(screen.getByTestId('mock-multi-selection-transform-overlay')).toBeInTheDocument()
   })
@@ -1312,15 +1322,24 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
 
     const root = screen.getByTestId('project-canvas-stage-root')
     expect(root).toHaveAttribute('data-project-canvas-dense-webgl-image-proxy-mode', 'true')
-    expect(root).toHaveAttribute('data-project-canvas-proxy-layer-candidate-count', '0')
+    expect(root).toHaveAttribute(
+      'data-project-canvas-proxy-layer-candidate-count',
+      `${items.length - 1}`
+    )
     expect(root).toHaveAttribute('data-project-canvas-image-interaction-overlay-count', '1')
-    expect(root).toHaveAttribute('data-project-canvas-placeholder-image-proxy-count', '0')
-    expect(canvasPlaceholderProps.size).toBe(0)
+    expect(root).toHaveAttribute(
+      'data-project-canvas-placeholder-image-proxy-count',
+      `${items.length - 1}`
+    )
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.size).toBe(items.length - 1)
+    })
+    expect(canvasPlaceholderProps.get(items[1].id)?.visualVariant).toBe('transparent')
     expect(imageInteractionOverlayProps.size).toBe(1)
     expect(imageInteractionOverlayProps.get(selectedItem.id)?.isSelected).toBe(true)
   })
 
-  it('suppresses unloaded fallback hit proxies on dense boards while WebGL catches up', async () => {
+  it('keeps unloaded fallback hit proxies selectable on dense boards while WebGL catches up', async () => {
     const items = Array.from({ length: 300 }, (_, index) => {
       const item = createImageItem(`dense-unloaded-image-${index}`)
       item.x = (index % 30) * 220
@@ -1328,11 +1347,18 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       item.zIndex = index
       return item
     })
+    const setSelectedIds = vi.fn()
     webglReady = true
     webglLoadedIds = new Set()
     webglResidentIds = new Set()
 
-    render(<ProjectCanvasPageStageScene {...createBaseProps(items)} selectedIds={new Set()} />)
+    render(
+      <ProjectCanvasPageStageScene
+        {...createBaseProps(items)}
+        selectedIds={new Set()}
+        setSelectedIds={setSelectedIds}
+      />
+    )
 
     await waitFor(() => {
       expect(latestWebGLItems).toHaveLength(items.length)
@@ -1341,11 +1367,33 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const root = screen.getByTestId('project-canvas-stage-root')
     expect(root).toHaveAttribute('data-project-canvas-dense-webgl-image-proxy-mode', 'true')
     expect(root).toHaveAttribute('data-project-canvas-fallback-image-count', `${items.length}`)
-    expect(root).toHaveAttribute('data-project-canvas-proxy-layer-candidate-count', '0')
+    expect(root).toHaveAttribute(
+      'data-project-canvas-proxy-layer-candidate-count',
+      `${items.length}`
+    )
     expect(root).toHaveAttribute('data-project-canvas-image-interaction-overlay-count', '0')
-    expect(root).toHaveAttribute('data-project-canvas-placeholder-image-proxy-count', '0')
-    expect(canvasPlaceholderProps.size).toBe(0)
+    expect(root).toHaveAttribute(
+      'data-project-canvas-placeholder-image-proxy-count',
+      `${items.length}`
+    )
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.size).toBe(items.length)
+    })
     expect(imageInteractionOverlayProps.size).toBe(0)
+    expect(canvasPlaceholderProps.get(items[0].id)?.isDraggable).toBe(true)
+
+    act(() => {
+      ;(
+        canvasPlaceholderProps.get(items[0].id)?.onSelect as
+          | ((additiveSelection?: boolean) => void)
+          | undefined
+      )?.(false)
+    })
+
+    const updateSelection = setSelectedIds.mock.calls[0]?.[0] as
+      | ((prev: Set<string>) => Set<string>)
+      | undefined
+    expect(updateSelection?.(new Set())).toEqual(new Set([items[0].id]))
   })
 
   it('suspends WebGL image proxy content and multi-selection transform chrome during viewport interaction', async () => {
