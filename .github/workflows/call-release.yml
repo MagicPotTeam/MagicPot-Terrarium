@@ -60,11 +60,12 @@ jobs:
 
       - name: Build package
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+
           npm run build:embedded
           npm run prepare:embedded
-          npx cross-env PACKAGE_MODE=embedded npm run package:win
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          npx cross-env PACKAGE_MODE=embedded npm run package:win -- --publish never
 
       - name: Create Release
         id: create_release
