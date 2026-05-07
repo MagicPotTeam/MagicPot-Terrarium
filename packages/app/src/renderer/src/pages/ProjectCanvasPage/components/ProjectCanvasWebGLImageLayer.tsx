@@ -2440,7 +2440,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     const spriteReconcileBatchSize = getProjectCanvasSpriteReconcileBatchSize(safeScale)
     const shouldBatchNewSpriteCreation = residentCandidateImageCount >= spriteReconcileBatchSize * 2
     let newSpriteCreationBudget = shouldBatchNewSpriteCreation
-      ? spriteReconcileBatchSize
+      ? spriteReconcileFrameRef.current === null
+        ? spriteReconcileBatchSize
+        : 0
       : Number.POSITIVE_INFINITY
     let deferredNewSpriteCount = 0
     let residentCandidateTextureBytes = 0
