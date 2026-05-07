@@ -11,8 +11,13 @@ env:
 jobs:
   check-commits:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
-      has_commits: ${{ steps.check-commits.outputs.has_commits }}
+      release_mode: ${{ steps.check-commits.outputs.release_mode }}
+      tag_name: ${{ steps.check-commits.outputs.tag_name }}
+      release_name: ${{ steps.check-commits.outputs.release_name }}
+      ref: ${{ steps.check-commits.outputs.ref }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -21,8 +26,43 @@ jobs:
 
       - name: Check for new commits
         id: check-commits
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LAST_RELEASE_COMMIT=$(git log --oneline --grep="^release: " origin/master | head -1 | cut -d' ' -f1)
+          LAST_RELEASE_COMMIT=$(git log --format=%H --grep="^release: " origin/master | head -1)
+
+          if [ -n "$LAST_RELEASE_COMMIT" ]; then
+            LAST_RELEASE_SUBJECT=$(git log -1 --format=%s "$LAST_RELEASE_COMMIT")
+            if [[ "$LAST_RELEASE_SUBJECT" =~ ^release:\ Nightly\ Release\ ([0-9]{4})-([0-9]{2})-([0-9]{2})\ -\ ([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+              RELEASE_DATE="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+              VERSION="${BASH_REMATCH[4]}"
+              TAG_NAME="nightly-${BASH_REMATCH[1]}${BASH_REMATCH[2]}${BASH_REMATCH[3]}-${VERSION}"
+              RELEASE_NAME="Nightly Release ${RELEASE_DATE} - ${VERSION}"
+              RELEASE_JSON=$(gh release view "release/${TAG_NAME}" \
+                --json isDraft,assets \
+                --jq '{isDraft: .isDraft, assetCount: (.assets | length)}' 2>/dev/null || true)
+
+              if [ -z "$RELEASE_JSON" ]; then
+                echo "Latest release commit has no GitHub release, retrying ${TAG_NAME}"
+                echo "release_mode=retry" >> "$GITHUB_OUTPUT"
+                echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+                echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
+                echo "ref=refs/heads/master" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              IS_DRAFT=$(echo "$RELEASE_JSON" | jq -r '.isDraft')
+              ASSET_COUNT=$(echo "$RELEASE_JSON" | jq -r '.assetCount')
+              if [ "$IS_DRAFT" = "true" ] || [ "$ASSET_COUNT" -eq 0 ]; then
+                echo "Latest release ${TAG_NAME} is incomplete, retrying without bumping"
+                echo "release_mode=retry" >> "$GITHUB_OUTPUT"
+                echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+                echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
+                echo "ref=refs/heads/master" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+          fi
 
           if [ -z "$LAST_RELEASE_COMMIT" ]; then
             COMMITS=$(git log --oneline origin/master | wc -l)
@@ -32,22 +72,22 @@ jobs:
 
           if [ "$COMMITS" -eq 0 ]; then
             echo "No new commits found on master, skipping workflow"
-            echo "has_commits=false" >> "$GITHUB_OUTPUT"
+            echo "release_mode=skip" >> "$GITHUB_OUTPUT"
           else
             echo "Found $COMMITS new commits, continuing workflow"
-            echo "has_commits=true" >> "$GITHUB_OUTPUT"
+            echo "release_mode=bump" >> "$GITHUB_OUTPUT"
           fi
 
   ci:
     needs: check-commits
-    if: needs.check-commits.outputs.has_commits == 'true'
+    if: needs.check-commits.outputs.release_mode == 'bump'
     uses: ./.github/workflows/call-ci.yml
     with:
       ref: refs/heads/master
 
   build:
     needs: check-commits
-    if: needs.check-commits.outputs.has_commits == 'true'
+    if: needs.check-commits.outputs.release_mode == 'bump'
     uses: ./.github/workflows/call-build.yml
     with:
       ref: refs/heads/master
@@ -57,7 +97,7 @@ jobs:
       - check-commits
       - ci
       - build
-    if: needs.check-commits.outputs.has_commits == 'true'
+    if: needs.check-commits.outputs.release_mode == 'bump'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -180,11 +220,25 @@ jobs:
 
   release:
     needs: bump-version
+    if: needs.bump-version.result == 'success'
     uses: ./.github/workflows/call-release.yml
     with:
       tag_name: ${{ needs.bump-version.outputs.tag_name }}
       release_name: ${{ needs.bump-version.outputs.release_name }}
       ref: ${{ needs.bump-version.outputs.ref }}
+    secrets: inherit
+    permissions:
+      actions: read
+      contents: write
+
+  release-existing:
+    needs: check-commits
+    if: needs.check-commits.outputs.release_mode == 'retry'
+    uses: ./.github/workflows/call-release.yml
+    with:
+      tag_name: ${{ needs.check-commits.outputs.tag_name }}
+      release_name: ${{ needs.check-commits.outputs.release_name }}
+      ref: ${{ needs.check-commits.outputs.ref }}
     secrets: inherit
     permissions:
       actions: read
