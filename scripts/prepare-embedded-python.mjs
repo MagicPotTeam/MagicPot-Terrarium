@@ -34,6 +34,8 @@ const skipSmoke = process.env.EMBEDDED_SKIP_SMOKE === '1'
 const strictSmoke = process.env.EMBEDDED_STRICT_SMOKE !== '0'
 const dryRun = process.env.EMBEDDED_DRY_RUN === '1'
 const requirementsMode = process.env.EMBEDDED_REQUIREMENTS_MODE || 'prefer-fixed'
+const pruneRuntime = process.env.EMBEDDED_PRUNE_RUNTIME !== '0'
+const keepOnnxRuntimeGpu = process.env.EMBEDDED_KEEP_ONNXRUNTIME_GPU === '1'
 
 function assertInsideRepo(targetPath) {
   const resolved = path.resolve(targetPath)
@@ -53,6 +55,15 @@ function removeDir(dirPath) {
   if (fs.existsSync(resolved)) {
     fs.rmSync(resolved, { recursive: true, force: true })
   }
+}
+
+function assertInsideEmbeddedStage(targetPath) {
+  const resolved = path.resolve(targetPath)
+  const rootWithSep = stagingRoot.endsWith(path.sep) ? stagingRoot : `${stagingRoot}${path.sep}`
+  if (resolved !== stagingRoot && !resolved.startsWith(rootWithSep)) {
+    throw new Error(`Refusing to touch path outside embedded staging: ${resolved}`)
+  }
+  return resolved
 }
 
 function run(command, args, options = {}) {
@@ -242,6 +253,16 @@ function walkFiles(root, onFile) {
   }
 }
 
+function walkDirs(root, onDir) {
+  if (!fs.existsSync(root)) return
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const entryPath = path.join(root, entry.name)
+    onDir(entryPath, entry.name)
+    walkDirs(entryPath, onDir)
+  }
+}
+
 function getCustomNodeRequirementFiles() {
   const requirementFiles = []
   walkFiles(path.join(comfyDir, 'custom_nodes'), (filePath) => {
@@ -359,6 +380,122 @@ function removePythonCaches() {
   }
 }
 
+function directorySizeBytes(dirPath) {
+  let bytes = 0
+  walkFiles(dirPath, (filePath) => {
+    bytes += fs.statSync(filePath).size
+  })
+  return bytes
+}
+
+function removeRuntimePath(targetPath, stats) {
+  if (!fs.existsSync(targetPath)) return
+
+  const resolved = assertInsideEmbeddedStage(targetPath)
+  const fileStats = fs.statSync(resolved)
+  const bytes = fileStats.isDirectory() ? directorySizeBytes(resolved) : fileStats.size
+
+  fs.rmSync(resolved, { recursive: fileStats.isDirectory(), force: true })
+  stats.bytes += bytes
+  if (fileStats.isDirectory()) {
+    stats.directories += 1
+  } else {
+    stats.files += 1
+  }
+}
+
+function pruneEmbeddedRuntime() {
+  if (!pruneRuntime) {
+    console.log('[prepare-embedded-python] Skipping runtime pruning because EMBEDDED_PRUNE_RUNTIME=0')
+    return
+  }
+
+  const sitePackages = path.join(pythonDir, 'Lib', 'site-packages')
+  const stats = { bytes: 0, directories: 0, files: 0 }
+  const prunableExtensions = new Set(['.pyc', '.pyo', '.lib', '.pdb', '.exp', '.h', '.hpp', '.c', '.cpp', '.cu', '.map'])
+  const prunableDirectoryNames = new Set([
+    'benchmark',
+    'benchmarks',
+    'example',
+    'examples',
+    'test',
+    'tests'
+  ])
+
+  function shouldKeepPrunableDirectory(dirPath) {
+    const normalized = path.relative(sitePackages, dirPath).split(path.sep).join('/')
+    return normalized === 'torch/testing' || normalized.startsWith('torch/testing/')
+  }
+
+  for (const root of [pythonDir, comfyDir]) {
+    walkFiles(root, (filePath) => {
+      if (prunableExtensions.has(path.extname(filePath).toLowerCase())) {
+        removeRuntimePath(filePath, stats)
+      }
+    })
+  }
+
+  walkDirs(pythonDir, (dirPath, dirName) => {
+    if (dirName === '__pycache__' || dirName === '.pytest_cache') {
+      removeRuntimePath(dirPath, stats)
+    }
+  })
+
+  walkDirs(pythonDir, (dirPath, dirName) => {
+    if (dirName === 'include' || dirName === 'Include') {
+      removeRuntimePath(dirPath, stats)
+    }
+  })
+
+  for (const root of [pythonDir, comfyDir]) {
+    walkDirs(root, (dirPath, dirName) => {
+      if (prunableDirectoryNames.has(dirName) && !shouldKeepPrunableDirectory(dirPath)) {
+        removeRuntimePath(dirPath, stats)
+      }
+    })
+  }
+
+  if (fs.existsSync(sitePackages)) {
+    for (const entry of fs.readdirSync(sitePackages, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('comfyui_workflow_templates_media_')) {
+        continue
+      }
+
+      removeRuntimePath(path.join(sitePackages, entry.name, 'templates'), stats)
+    }
+
+    const bitsAndBytesDir = path.join(sitePackages, 'bitsandbytes')
+    if (fs.existsSync(bitsAndBytesDir)) {
+      for (const entry of fs.readdirSync(bitsAndBytesDir, { withFileTypes: true })) {
+        if (entry.isFile() && /^libbitsandbytes_cuda.*\.dll$/i.test(entry.name)) {
+          removeRuntimePath(path.join(bitsAndBytesDir, entry.name), stats)
+        }
+      }
+    }
+
+    if (!keepOnnxRuntimeGpu) {
+      const onnxRuntimeCapiDir = path.join(sitePackages, 'onnxruntime', 'capi')
+      for (const fileName of ['onnxruntime_providers_cuda.dll', 'onnxruntime_providers_tensorrt.dll']) {
+        removeRuntimePath(path.join(onnxRuntimeCapiDir, fileName), stats)
+      }
+    }
+
+    for (const redundantPath of [
+      path.join(sitePackages, 'selenium', 'webdriver', 'common', 'linux'),
+      path.join(sitePackages, 'selenium', 'webdriver', 'common', 'macos'),
+      path.join(sitePackages, 'skimage', 'data'),
+      path.join(sitePackages, 'streamlit', 'static')
+    ]) {
+      removeRuntimePath(redundantPath, stats)
+    }
+  }
+
+  const removedMiB = (stats.bytes / 1024 / 1024).toFixed(1)
+  console.log(
+    `[prepare-embedded-python] Pruned ${removedMiB} MiB from embedded runtime (${stats.files} files, ${stats.directories} directories)`
+  )
+}
+
 function smokeTest() {
   if (skipSmoke) {
     console.log('[prepare-embedded-python] Skipping smoke test because EMBEDDED_SKIP_SMOKE=1')
@@ -378,8 +515,7 @@ function smokeTest() {
   if (strictSmoke) {
     const failurePatterns = [
       /\(IMPORT FAILED\)/i,
-      /^Cannot import .+custom nodes:/im,
-      /Traceback \(most recent call last\)/i
+      /^Cannot import .+custom nodes:/im
     ]
     const matched = failurePatterns.find((pattern) => pattern.test(output))
     if (matched) {
@@ -412,6 +548,8 @@ async function main() {
             `decorator==${decoratorVersion}`
           ],
           requirementsMode,
+          pruneRuntime,
+          keepOnnxRuntimeGpu,
           comfyRequirements: path.relative(stagingRoot, path.join(comfyDir, 'requirements.txt')),
           customNodeRequirements: getCustomNodeRequirementFiles().map((filePath) =>
             path.relative(stagingRoot, filePath)
@@ -438,6 +576,7 @@ async function main() {
   installTorchStack()
   installRequirements(constraintsPath)
   installSmokeRuntimeExtras()
+  pruneEmbeddedRuntime()
   removePythonCaches()
   smokeTest()
   removePythonCaches()

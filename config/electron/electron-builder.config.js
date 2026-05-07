@@ -40,7 +40,7 @@ const modeMap = {
       comfySourceFile('advanced'),
       comfySourceFile('update')
     ],
-    winTarget: ['dir', 'zip'], // NSIS 不适合大包（python_embeded 文件过多）
+    winTarget: ['dir', '7z'],
     nsis: {
       oneClick: false, // 允许选择安装目录 (对于大包建议 false)
       allowToChangeInstallationDirectory: true,
@@ -108,7 +108,18 @@ const config = {
     buildResources: buildResourcesDir,
     output: modeConfig.distDir
   },
-  files: ['out', 'README.md', 'LICENSE'],
+  files: [
+    'out',
+    'README.md',
+    'LICENSE',
+    '!**/*.map',
+    '!**/demo/**',
+    '!**/demos/**',
+    '!**/example/**',
+    '!**/examples/**',
+    '!**/test/**',
+    '!**/tests/**'
+  ],
   extraFiles: bundledContentExtraFiles,
   asar: true,
   asarUnpack: ['**/*.safetensors', '**/*.ckpt', '**/*.pt', '**/*.pth', '**/models/**/*'],

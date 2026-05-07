@@ -24,6 +24,24 @@ function ensurePlaceholderFile(dirPath, fileName) {
   }
 }
 
+function pruneElectronLocales(unpackDir) {
+  const localesDir = path.join(unpackDir, 'locales')
+  if (!fs.existsSync(localesDir)) return
+
+  const keepLocales = new Set(['en-US.pak', 'zh-CN.pak', 'zh-TW.pak'])
+  let removed = 0
+  for (const fileName of fs.readdirSync(localesDir)) {
+    if (keepLocales.has(fileName)) continue
+    const localePath = path.join(localesDir, fileName)
+    if (fs.statSync(localePath).isFile()) {
+      fs.rmSync(localePath, { force: true })
+      removed += 1
+    }
+  }
+
+  console.log(`[afterPack] Pruned ${removed} Electron locale files`)
+}
+
 exports.default = async function (context) {
   // 只在 embedded 模式下运行
   if (process.env.PACKAGE_MODE !== 'embedded') return
@@ -101,4 +119,6 @@ exports.default = async function (context) {
     fs.copyFileSync(readmeSrc, readmeDst)
     console.log(`[afterPack] Copied README to root: ${readmeDst}`)
   }
+
+  pruneElectronLocales(unpackDir)
 }

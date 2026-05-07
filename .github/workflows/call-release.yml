@@ -76,41 +76,44 @@ jobs:
           New-Item -ItemType Directory -Force -Path $assetsDir | Out-Null
           Get-ChildItem -LiteralPath $assetsDir -Force | Remove-Item -Force
 
-          $zipFiles = @(Get-ChildItem -LiteralPath 'dist/embedded' -Filter '*-win.zip' -File)
-          if ($zipFiles.Count -ne 1) {
-            throw "Expected exactly one Windows ZIP, found $($zipFiles.Count)"
+          $archiveFiles = @(
+            Get-ChildItem -LiteralPath 'dist/embedded' -File |
+              Where-Object { $_.Name -like '*-win.7z' -or $_.Name -like '*-win.zip' }
+          )
+          if ($archiveFiles.Count -ne 1) {
+            throw "Expected exactly one Windows archive, found $($archiveFiles.Count)"
           }
 
-          $zip = $zipFiles[0]
+          $archive = $archiveFiles[0]
           [int64]$maxPartBytes = [int64]1900 * 1024 * 1024
           [int64]$githubLimitBytes = [int64]2147483648
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip.FullName).Hash.ToLowerInvariant()
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive.FullName).Hash.ToLowerInvariant()
 
           Set-Content `
-            -LiteralPath (Join-Path $assetsDir "$($zip.Name).sha256") `
-            -Value "$hash  $($zip.Name)"
+            -LiteralPath (Join-Path $assetsDir "$($archive.Name).sha256") `
+            -Value "$hash  $($archive.Name)"
 
-          if ($zip.Length -lt $githubLimitBytes) {
-            Copy-Item -LiteralPath $zip.FullName -Destination (Join-Path $assetsDir $zip.Name)
+          if ($archive.Length -lt $githubLimitBytes) {
+            Copy-Item -LiteralPath $archive.FullName -Destination (Join-Path $assetsDir $archive.Name)
             Set-Content `
-              -LiteralPath (Join-Path $assetsDir "$($zip.Name).parts.txt") `
+              -LiteralPath (Join-Path $assetsDir "$($archive.Name).parts.txt") `
               -Value @(
-                "file=$($zip.Name)"
+                "file=$($archive.Name)"
                 "sha256=$hash"
                 "parts=1"
-                "This ZIP is below GitHub's single-asset size limit and does not need reassembly."
+                "This archive is below GitHub's single-asset size limit and does not need reassembly."
               )
             Get-ChildItem -LiteralPath $assetsDir | Select-Object Name,Length
             exit 0
           }
 
           $buffer = New-Object byte[] (4 * 1024 * 1024)
-          $inputStream = [System.IO.File]::OpenRead($zip.FullName)
+          $inputStream = [System.IO.File]::OpenRead($archive.FullName)
           $partNames = @()
 
           try {
             while ($inputStream.Position -lt $inputStream.Length) {
-              $partName = "{0}.{1:D3}" -f $zip.Name, ($partNames.Count + 1)
+              $partName = "{0}.{1:D3}" -f $archive.Name, ($partNames.Count + 1)
               $partPath = Join-Path $assetsDir $partName
               $partNames += $partName
               $outputStream = [System.IO.File]::Create($partPath)
@@ -142,15 +145,15 @@ jobs:
 
           $cmdParts = $partNames -join '+'
           Set-Content `
-            -LiteralPath (Join-Path $assetsDir "$($zip.Name).parts.txt") `
+            -LiteralPath (Join-Path $assetsDir "$($archive.Name).parts.txt") `
             -Value @(
-              "file=$($zip.Name)"
+              "file=$($archive.Name)"
               "sha256=$hash"
               "parts=$($partNames.Count)"
               "Download every numbered part, then reassemble in order before extracting."
               "Windows cmd example:"
-              "copy /b $cmdParts $($zip.Name)"
-              "After reassembly, verify the SHA256 against $($zip.Name).sha256."
+              "copy /b $cmdParts $($archive.Name)"
+              "After reassembly, verify the SHA256 against $($archive.Name).sha256."
             )
 
           Get-ChildItem -LiteralPath $assetsDir | Select-Object Name,Length
@@ -166,7 +169,7 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body: |
-            Windows embedded builds may be split because GitHub Release assets must be smaller than 2 GiB.
+            Windows embedded builds are distributed as `.7z` archives and may be split because GitHub Release assets must be smaller than 2 GiB.
             If numbered `.001`, `.002`, ... files are present, download all parts and follow the matching `.parts.txt` instructions before extracting.
           files: |
             dist/release-assets/*
