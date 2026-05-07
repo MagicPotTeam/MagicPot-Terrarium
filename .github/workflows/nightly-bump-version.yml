@@ -30,6 +30,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           LAST_RELEASE_COMMIT=$(git log --format=%H --grep="^release: " origin/master | head -1)
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
 
           if [ -n "$LAST_RELEASE_COMMIT" ]; then
             LAST_RELEASE_SUBJECT=$(git log -1 --format=%s "$LAST_RELEASE_COMMIT")
@@ -42,24 +43,26 @@ jobs:
                 --json isDraft,assets \
                 --jq '{isDraft: .isDraft, assetCount: (.assets | length)}' 2>/dev/null || true)
 
-              if [ -z "$RELEASE_JSON" ]; then
+              if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
+                echo "Latest release ${TAG_NAME} does not match package.json ${PACKAGE_VERSION}, not retrying it"
+              elif [ -z "$RELEASE_JSON" ]; then
                 echo "Latest release commit has no GitHub release, retrying ${TAG_NAME}"
                 echo "release_mode=retry" >> "$GITHUB_OUTPUT"
                 echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
                 echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
                 echo "ref=refs/heads/master" >> "$GITHUB_OUTPUT"
                 exit 0
-              fi
-
-              IS_DRAFT=$(echo "$RELEASE_JSON" | jq -r '.isDraft')
-              ASSET_COUNT=$(echo "$RELEASE_JSON" | jq -r '.assetCount')
-              if [ "$IS_DRAFT" = "true" ] || [ "$ASSET_COUNT" -eq 0 ]; then
-                echo "Latest release ${TAG_NAME} is incomplete, retrying without bumping"
-                echo "release_mode=retry" >> "$GITHUB_OUTPUT"
-                echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
-                echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
-                echo "ref=refs/heads/master" >> "$GITHUB_OUTPUT"
-                exit 0
+              else
+                IS_DRAFT=$(echo "$RELEASE_JSON" | jq -r '.isDraft')
+                ASSET_COUNT=$(echo "$RELEASE_JSON" | jq -r '.assetCount')
+                if [ "$IS_DRAFT" = "true" ] || [ "$ASSET_COUNT" -eq 0 ]; then
+                  echo "Latest release ${TAG_NAME} is incomplete, retrying without bumping"
+                  echo "release_mode=retry" >> "$GITHUB_OUTPUT"
+                  echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+                  echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
+                  echo "ref=refs/heads/master" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
               fi
             fi
           fi
