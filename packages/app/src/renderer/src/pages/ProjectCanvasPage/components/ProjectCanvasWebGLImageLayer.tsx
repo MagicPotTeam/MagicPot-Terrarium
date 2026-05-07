@@ -693,7 +693,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const spriteUsageCounterRef = useRef(0)
   const rafRef = useRef<number | null>(null)
   const activeItemCountRef = useRef(0)
-  const textureScaleModeRef = useRef<'nearest' | 'linear'>(getProjectCanvasTextureScaleMode())
   const stagePosRef = useRef(stagePos)
   const stageScaleRef = useRef(stageScale)
   const stageSizeRef = useRef(stageSize)
@@ -1058,9 +1057,17 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       runtimeFailureHandlerRef.current?.(error)
       return
     }
+    const lastRenderDurationMs = Math.max(0, window.performance.now() - startedAt)
+    if (isViewportInteractingRef.current) {
+      metricsRef.current.renderCount += 1
+      metricsRef.current.lastRenderDurationMs = lastRenderDurationMs
+      hasDeferredMetricsReportRef.current = true
+      return
+    }
+
     reportMetrics({
       renderCount: metricsRef.current.renderCount + 1,
-      lastRenderDurationMs: Math.max(0, window.performance.now() - startedAt)
+      lastRenderDurationMs
     })
   }, [reportMetrics])
 
@@ -1236,13 +1243,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
-      const nextScaleMode = getProjectCanvasTextureScaleMode()
-      if (textureScaleModeRef.current !== nextScaleMode) {
-        textureScaleModeRef.current = nextScaleMode
-        spriteRecordsRef.current.forEach((record) => {
-          applyProjectCanvasTextureScaleMode(record)
-        })
-      }
       world.position.set(pos.x, pos.y)
       world.scale.set(scale)
       renderApp()

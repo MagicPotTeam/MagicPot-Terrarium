@@ -1311,11 +1311,13 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
   it('defers metrics reports while viewport interaction is active', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
     const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
     const stableItems = [createItem({ id: 'image-metrics-interacting' })]
 
     const { rerender } = render(
       <ProjectCanvasWebGLImageLayer
+        ref={ref}
         items={stableItems}
         stagePos={{ x: 0, y: 0 }}
         stageScale={1}
@@ -1327,10 +1329,16 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
     await waitFor(
       () => {
+        expect(ref.current).not.toBeNull()
         expect(createdSprites).toHaveLength(1)
       },
       { timeout: 15000 }
     )
+
+    act(() => {
+      ref.current?.syncViewport({ x: 96, y: 72 }, 1.25)
+      ref.current?.syncViewport({ x: 120, y: 96 }, 1.25)
+    })
 
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 300))
@@ -1340,6 +1348,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
     rerender(
       <ProjectCanvasWebGLImageLayer
+        ref={ref}
         items={stableItems}
         stagePos={{ x: 0, y: 0 }}
         stageScale={1}
@@ -1353,7 +1362,10 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       () => {
         expect(
           metricsCalls.some(
-            (metrics) => metrics.imageCount === 1 && metrics.residentImageCount === 1
+            (metrics) =>
+              metrics.imageCount === 1 &&
+              metrics.residentImageCount === 1 &&
+              metrics.renderCount >= 2
           )
         ).toBe(true)
       },
