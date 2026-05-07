@@ -7,6 +7,10 @@ import {
 } from '../canvasImageDisplayUtils'
 import { resolveCanvasImageLodDecision } from '../canvasImageLodPolicy'
 import { getCanvasImageAssetSize } from '../canvasImageAssetUtils'
+import {
+  canReadCanvasLocalImageSource,
+  createCanvasLocalImageObjectUrl
+} from '../canvasLocalImageSource'
 
 type CanvasImageDomPreviewProps = {
   item: CanvasImageItem
@@ -109,6 +113,11 @@ export default function CanvasImageDomPreview({
 }: CanvasImageDomPreviewProps) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   const [canvasReady, setCanvasReady] = React.useState(false)
+  const [materializedSource, setMaterializedSource] = React.useState<{
+    originalSrc: string
+    objectUrl: string | null
+    failed: boolean
+  } | null>(null)
   const hasImageAsset = Boolean(item.image)
   const shouldDrawAssetCanvas = hasImageAsset && !sourceImagePreview
 
@@ -145,10 +154,53 @@ export default function CanvasImageDomPreview({
   const shouldRenderFallbackImage =
     hasImageAsset && !canvasReady && lodDecision.shouldUseSourceTexture
   const shouldRenderSourceImage = sourceImagePreview || shouldRenderFallbackImage
+  const shouldMaterializeLocalSource =
+    shouldRenderSourceImage && canReadCanvasLocalImageSource(item.src)
   const fallbackLayout = React.useMemo(
     () => (shouldRenderSourceImage ? resolveCanvasImageDomPreviewLayout(item) : null),
     [item, shouldRenderSourceImage]
   )
+  const materializedObjectUrl =
+    materializedSource?.originalSrc === item.src ? materializedSource.objectUrl : null
+  const materializedFailed =
+    materializedSource?.originalSrc === item.src ? materializedSource.failed : false
+  const previewImageSrc = shouldMaterializeLocalSource
+    ? (materializedObjectUrl ?? (materializedFailed ? item.src : null))
+    : item.src
+
+  React.useEffect(() => {
+    if (!shouldMaterializeLocalSource) {
+      setMaterializedSource(null)
+      return
+    }
+
+    let cancelled = false
+    let objectUrl: string | null = null
+    setMaterializedSource(null)
+
+    void createCanvasLocalImageObjectUrl(item.src, item.fileName).then((resolvedSrc) => {
+      objectUrl = resolvedSrc
+      if (cancelled) {
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl)
+        }
+        return
+      }
+
+      setMaterializedSource({
+        originalSrc: item.src,
+        objectUrl,
+        failed: !objectUrl
+      })
+    })
+
+    return () => {
+      cancelled = true
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl)
+      }
+    }
+  }, [item.fileName, item.src, shouldMaterializeLocalSource])
 
   return (
     <Box
@@ -178,10 +230,10 @@ export default function CanvasImageDomPreview({
           }}
         />
       ) : null}
-      {shouldRenderSourceImage ? (
+      {shouldRenderSourceImage && previewImageSrc ? (
         <Box
           component="img"
-          src={item.src}
+          src={previewImageSrc}
           alt=""
           draggable={false}
           loading="lazy"

@@ -146,6 +146,34 @@ describe('CanvasItemPlaceholder', () => {
     )
   })
 
+  it('uses the source image for image fallback placeholders without a decoded asset', () => {
+    const item = createImageItem()
+
+    render(
+      <CanvasItemPlaceholder
+        canvasContainerRef={React.createRef<HTMLDivElement>()}
+        item={item}
+        isSelected={false}
+        visualVariant="image-fallback"
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        onSelect={vi.fn()}
+        onDragEnd={vi.fn()}
+        onTransformEnd={vi.fn()}
+      />
+    )
+
+    const previewContent = rectOverlayProps.at(-1)?.previewContent as
+      | React.ReactElement<{
+          previewMode?: string
+          sourceImagePreview?: boolean
+        }>
+      | undefined
+
+    expect(previewContent?.props.previewMode).toBe('image-fallback')
+    expect(previewContent?.props.sourceImagePreview).toBe(true)
+  })
+
   it('restores the body cursor on mouse leave instead of forcing default', () => {
     render(
       <CanvasItemPlaceholder

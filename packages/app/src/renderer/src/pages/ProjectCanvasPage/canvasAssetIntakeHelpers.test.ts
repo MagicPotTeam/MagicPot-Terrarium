@@ -84,6 +84,7 @@ describe('canvasAssetIntakeHelpers', () => {
   const originalToBlob = HTMLCanvasElement.prototype.toBlob
   const originalToDataURL = HTMLCanvasElement.prototype.toDataURL
   const originalCreateObjectURL = URL.createObjectURL
+  const originalRevokeObjectURL = URL.revokeObjectURL
   const originalCreateImageBitmap = globalThis.createImageBitmap
   const originalApi = window.api
 
@@ -118,6 +119,7 @@ describe('canvasAssetIntakeHelpers', () => {
   afterEach(() => {
     window.Image = originalImageCtor
     URL.createObjectURL = originalCreateObjectURL
+    URL.revokeObjectURL = originalRevokeObjectURL
     Object.defineProperty(globalThis, 'createImageBitmap', {
       configurable: true,
       writable: true,
@@ -336,6 +338,79 @@ describe('canvasAssetIntakeHelpers', () => {
     })
   })
 
+  it('rehydrates persisted local images through svcFs when local-media image loading is blocked', async () => {
+    const readImageFromPath = vi.fn(async () => ({
+      image: new Uint8Array([1, 2, 3, 4]),
+      filename: 'reference.png'
+    }))
+    const createObjectUrl = vi.fn(() => 'blob:recovered-local-image')
+    const revokeObjectUrl = vi.fn()
+    URL.createObjectURL = createObjectUrl as unknown as typeof URL.createObjectURL
+    URL.revokeObjectURL = revokeObjectUrl as unknown as typeof URL.revokeObjectURL
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcFs: {
+          readImageFromPath
+        }
+      }
+    })
+
+    const loadedImage = createImage(640, 360)
+    const loadImageFromSrc = vi.fn(async (src: string) => {
+      if (src === 'local-media:///C:/assets/reference.png') {
+        throw new Error('blocked local-media')
+      }
+      if (src === 'blob:recovered-local-image') {
+        return {
+          img: loadedImage,
+          width: 640,
+          height: 360
+        }
+      }
+
+      throw new Error(`Unexpected source load: ${src}`)
+    })
+
+    const item: CanvasImageItem = {
+      id: 'image-local-1',
+      type: 'image',
+      src: 'local-media:///C:/assets/reference.png',
+      fileName: 'reference.png',
+      x: 0,
+      y: 0,
+      width: 320,
+      height: 180,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 1,
+      locked: false,
+      hasAlpha: false,
+      sizeBytes: 4
+    }
+
+    const hydrated = await hydrateCanvasImageItemForCanvas({
+      item,
+      loadImageFromSrc,
+      maxPreviewSide: CANVAS_IMAGE_PROXY_MAX_SIDE
+    })
+
+    expect(readImageFromPath).toHaveBeenCalledWith({ fullPath: 'C:/assets/reference.png' })
+    expect(loadImageFromSrc).toHaveBeenNthCalledWith(1, 'local-media:///C:/assets/reference.png')
+    expect(loadImageFromSrc).toHaveBeenNthCalledWith(2, 'blob:recovered-local-image')
+    expect(revokeObjectUrl).toHaveBeenCalledWith('blob:recovered-local-image')
+    expect(hydrated).toMatchObject({
+      id: 'image-local-1',
+      src: 'local-media:///C:/assets/reference.png',
+      image: loadedImage,
+      sourceWidth: 640,
+      sourceHeight: 360
+    })
+  })
+
   it('rehydrates local images from warm thumbnail cache without loading the source image', async () => {
     const sourceIdentity = buildCanvasImageSourceIdentity({
       canonicalPath: 'C:/assets/reference.png',
@@ -444,6 +519,100 @@ describe('canvasAssetIntakeHelpers', () => {
 
     expect(loadImageFromSrc).toHaveBeenCalledTimes(1)
     expect(loadImageFromSrc).toHaveBeenCalledWith('local-media:///cache/reference/512.webp')
+    expect(hydrated).toMatchObject({
+      id: 'image-reference-1',
+      src: 'local-media:///C:/assets/reference.png',
+      image: thumbnailImage,
+      thumbnailSet
+    })
+  })
+
+  it('recovers warm thumbnail previews through svcFs when local-media loading is blocked', async () => {
+    const sourceIdentity = buildCanvasImageSourceIdentity({
+      canonicalPath: 'C:/assets/reference.png',
+      sizeBytes: 4096,
+      lastModifiedMs: 123456
+    })
+    expect(sourceIdentity).not.toBeNull()
+
+    const thumbnailSet = createCanvasThumbnailSet({
+      identity: sourceIdentity!,
+      levels: ([128, 256, 512, 1024, 2048] as const).map((maxSide) => ({
+        maxSide,
+        src: `local-media:///cache/reference/${maxSide}.webp`,
+        filename: `${maxSide}.webp`,
+        mimeType: 'image/webp',
+        width: maxSide,
+        height: maxSide / 2,
+        sizeBytes: maxSide
+      })),
+      now: new Date('2026-05-02T00:00:00.000Z')
+    })
+    const readImageFromPath = vi.fn(async () => ({
+      image: new Uint8Array([1, 2, 3, 4]),
+      filename: '512.webp'
+    }))
+    const createObjectUrl = vi.fn(() => 'blob:recovered-thumbnail')
+    const revokeObjectUrl = vi.fn()
+    URL.createObjectURL = createObjectUrl as unknown as typeof URL.createObjectURL
+    URL.revokeObjectURL = revokeObjectUrl as unknown as typeof URL.revokeObjectURL
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcCanvasThumbnail: {
+          readThumbnailManifest: vi.fn(async () => ({
+            manifest: canvasThumbnailManifestFromSet(thumbnailSet)
+          }))
+        },
+        svcFs: {
+          readImageFromPath
+        }
+      }
+    })
+
+    const thumbnailImage = createImage(512, 256)
+    const loadImageFromSrc = vi.fn(async (src: string) => {
+      if (src === 'local-media:///cache/reference/512.webp') {
+        throw new Error('blocked thumbnail')
+      }
+      if (src === 'blob:recovered-thumbnail') {
+        return {
+          img: thumbnailImage,
+          width: 512,
+          height: 256
+        }
+      }
+
+      throw new Error(`Unexpected source load: ${src}`)
+    })
+
+    const item: CanvasImageItem = {
+      id: 'image-reference-1',
+      type: 'image',
+      src: 'local-media:///C:/assets/reference.png',
+      fileName: 'reference.png',
+      sourceIdentity: sourceIdentity!,
+      x: 0,
+      y: 0,
+      width: 1024,
+      height: 512,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 1,
+      locked: false,
+      sourceWidth: 4096,
+      sourceHeight: 2048
+    }
+
+    const hydrated = await hydrateCanvasImageItemForCanvas({ item, loadImageFromSrc })
+
+    expect(readImageFromPath).toHaveBeenCalledWith({ fullPath: 'cache/reference/512.webp' })
+    expect(loadImageFromSrc).toHaveBeenNthCalledWith(1, 'local-media:///cache/reference/512.webp')
+    expect(loadImageFromSrc).toHaveBeenNthCalledWith(2, 'blob:recovered-thumbnail')
+    expect(revokeObjectUrl).toHaveBeenCalledWith('blob:recovered-thumbnail')
     expect(hydrated).toMatchObject({
       id: 'image-reference-1',
       src: 'local-media:///C:/assets/reference.png',

@@ -2696,6 +2696,67 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(imageInteractionOverlayProps.get(item.id)?.suppressImagePreview).toBe(false)
   })
 
+  it('keeps unselected fallback images visible through the DOM placeholder proxy', async () => {
+    const item = createImageItem('image-fallback-unselected')
+    item.image = undefined
+    webglReady = true
+    webglLoadedIds = new Set()
+    webglResidentIds = new Set()
+
+    render(
+      <ProjectCanvasPageStageScene
+        {...createBaseProps([item])}
+        tool="select"
+        selectedIds={new Set()}
+      />
+    )
+
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.has(item.id)).toBe(true)
+    })
+
+    const root = screen.getByTestId('project-canvas-stage-root')
+    expect(root).toHaveAttribute('data-project-canvas-fallback-image-count', '1')
+    expect(root).toHaveAttribute('data-project-canvas-unloaded-fallback-image-count', '1')
+    expect(imageInteractionOverlayProps.has(item.id)).toBe(false)
+    expect(canvasPlaceholderProps.get(item.id)?.isSelected).toBe(false)
+    expect(canvasPlaceholderProps.get(item.id)?.renderMode).toBe('dom-placeholder-proxy')
+    expect(canvasPlaceholderProps.get(item.id)?.visualVariant).toBe('image-fallback')
+  })
+
+  it('keeps multi-selected fallback images visible while a large selection rect is present', async () => {
+    const imageItem = createImageItem('image-fallback-multi-selected')
+    const shapeItem = createAnnotationItem('shape-fallback-multi-selected')
+    shapeItem.x = 900
+    webglReady = true
+    webglLoadedIds = new Set()
+    webglResidentIds = new Set()
+
+    render(
+      <ProjectCanvasPageStageScene
+        {...createBaseProps([imageItem, shapeItem])}
+        tool="select"
+        selectedIds={new Set([imageItem.id, shapeItem.id])}
+        selectionRect={{
+          startX: 40,
+          startY: 60,
+          x: 40,
+          y: 60,
+          w: 920,
+          h: 180
+        }}
+      />
+    )
+
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.has(imageItem.id)).toBe(true)
+    })
+
+    expect(imageInteractionOverlayProps.has(imageItem.id)).toBe(false)
+    expect(canvasPlaceholderProps.get(imageItem.id)?.isSelected).toBe(true)
+    expect(canvasPlaceholderProps.get(imageItem.id)?.visualVariant).toBe('image-fallback')
+  })
+
   it('routes a selected fallback image through the DOM image interaction overlay', async () => {
     const item = createImageItem('image-placeholder-dom')
     const handleTransformEnd = vi.fn()

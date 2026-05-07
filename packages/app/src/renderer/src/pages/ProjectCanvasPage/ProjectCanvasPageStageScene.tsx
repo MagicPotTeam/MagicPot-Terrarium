@@ -1233,6 +1233,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
           (!webglImageLayerReady ||
             imageFallbackReason === 'failed' ||
             imageFallbackReason === 'unsupported')
+        const activeRuntimeRoute = runtimeRoute ?? 'fallback-image-proxy'
         if (
           shouldUseDenseWebglImageProxyBudget &&
           !shouldKeepFallbackProxy &&
@@ -1246,7 +1247,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
           ? 'placeholder-hit-proxy'
           : resolveProjectCanvasImageInteractionMode({
               item: renderableItem.item,
-              runtimeRoute: runtimeRoute ?? 'fallback-image-proxy',
+              runtimeRoute: activeRuntimeRoute,
               tool,
               isSingleSelected: isSingleSelectedImage
             })
@@ -2561,17 +2562,21 @@ export default function ProjectCanvasPageStageScene(props: any) {
         }
 
         if (item.type === 'image') {
-          const imageRuntimeRoute = getImageRuntimeRoute(item as CanvasImageItem)
+          const imageItem = item as CanvasImageItem
+          const imageRuntimeRoute = getImageRuntimeRoute(imageItem)
           const imageFallbackReason = imageFallbackReasonById.get(item.id)
+          const canRenderImagePreview =
+            Boolean(imageItem.image) || (tool === 'select' && !!imageItem.src)
           const imageProxyVisualVariant =
-            imageRuntimeRoute === 'webgl-primary' || imageFallbackReason === 'unloaded'
+            imageRuntimeRoute === 'webgl-primary' ||
+            (!canRenderImagePreview && imageFallbackReason === 'unloaded')
               ? 'transparent'
               : 'image-fallback'
           return (
             <CanvasItemPlaceholder
               key={item.id}
               canvasContainerRef={canvasContainerRef}
-              item={item as CanvasImageItem}
+              item={imageItem}
               isSelected={isSelected}
               isDraggable={tool === 'select' && !(item as CanvasImageItem).locked}
               allowPointerPassthrough={tool === 'hand'}

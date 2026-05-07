@@ -1,5 +1,5 @@
 import React from 'react'
-import { render } from '@testing-library/react'
+import { render, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import CanvasImageDomPreview, {
@@ -9,6 +9,9 @@ import type { CanvasImageItem } from '../types'
 
 const originalGetContext = HTMLCanvasElement.prototype.getContext
 const originalDevicePixelRatio = window.devicePixelRatio
+const originalCreateObjectURL = URL.createObjectURL
+const originalRevokeObjectURL = URL.revokeObjectURL
+const originalApi = window.api
 
 function createImage(width: number, height: number) {
   const image = document.createElement('img')
@@ -57,10 +60,18 @@ function mockCanvas2DContext() {
 
 afterEach(() => {
   HTMLCanvasElement.prototype.getContext = originalGetContext
+  URL.createObjectURL = originalCreateObjectURL
+  URL.revokeObjectURL = originalRevokeObjectURL
+  Object.defineProperty(window, 'api', {
+    configurable: true,
+    writable: true,
+    value: originalApi
+  })
   Object.defineProperty(window, 'devicePixelRatio', {
     configurable: true,
     value: originalDevicePixelRatio
   })
+  vi.restoreAllMocks()
 })
 
 describe('CanvasImageDomPreview', () => {
@@ -159,6 +170,45 @@ describe('CanvasImageDomPreview', () => {
       'data-canvas-source-image-preview',
       'true'
     )
+  })
+
+  it('materializes local source previews through svcFs before rendering the image', async () => {
+    const readImageFromPath = vi.fn(async () => ({
+      image: new Uint8Array([1, 2, 3, 4]),
+      filename: 'huge.png'
+    }))
+    const createObjectUrl = vi.fn(() => 'blob:materialized-preview')
+    const revokeObjectUrl = vi.fn()
+    URL.createObjectURL = createObjectUrl as unknown as typeof URL.createObjectURL
+    URL.revokeObjectURL = revokeObjectUrl as unknown as typeof URL.revokeObjectURL
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcFs: {
+          readImageFromPath
+        }
+      }
+    })
+
+    const { unmount } = render(
+      <CanvasImageDomPreview
+        item={createItem({ image: undefined as unknown as CanvasImageItem['image'] })}
+        previewMode="high-res-source"
+        sourceImagePreview
+        stageScale={1}
+      />
+    )
+
+    expect(document.querySelector('img')).toBeNull()
+    await waitFor(() => {
+      expect(document.querySelector('img')?.getAttribute('src')).toBe('blob:materialized-preview')
+    })
+    expect(readImageFromPath).toHaveBeenCalledWith({ fullPath: 'C:/real-board/huge.png' })
+
+    unmount()
+
+    expect(revokeObjectUrl).toHaveBeenCalledWith('blob:materialized-preview')
   })
 
   it('keeps original source previews smoothly sampled at extreme zoom', () => {

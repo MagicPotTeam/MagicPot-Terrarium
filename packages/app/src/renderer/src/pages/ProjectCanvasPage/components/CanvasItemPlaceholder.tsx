@@ -113,7 +113,12 @@ const CanvasItemPlaceholder: React.FC<CanvasItemPlaceholderProps> = ({
     }
 
     return (
-      <CanvasImageDomPreview item={item} previewMode="image-fallback" stageScale={stageScale} />
+      <CanvasImageDomPreview
+        item={item}
+        previewMode="image-fallback"
+        stageScale={stageScale}
+        sourceImagePreview={!item.image}
+      />
     )
   }, [item, stageScale, visualVariant])
 
