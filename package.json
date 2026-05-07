@@ -4,13 +4,13 @@
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",
-  "homepage": "https://github.com/MagicPotTeam/MagicPot",
+  "homepage": "https://github.com/MagicPotTeam/magicpot-open",
   "repository": {
     "type": "git",
-    "url": "https://github.com/MagicPotTeam/MagicPot.git"
+    "url": "https://github.com/MagicPotTeam/magicpot-open.git"
   },
   "bugs": {
-    "url": "https://github.com/MagicPotTeam/MagicPot/issues"
+    "url": "https://github.com/MagicPotTeam/magicpot-open/issues"
   },
   "license": "AGPL-3.0-only",
   "scripts": {

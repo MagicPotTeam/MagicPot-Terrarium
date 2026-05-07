@@ -19,7 +19,7 @@ import ExternalLink from '@renderer/components/ExternalLInk'
 import { PACKAGE_VERSION } from '@shared/config/viteEnv'
 import { useTranslation } from 'react-i18next'
 
-const SOURCE_CODE_URL = 'https://github.com/MagicPotTeam/MagicPot'
+const SOURCE_CODE_URL = 'https://github.com/MagicPotTeam/magicpot-open'
 const LICENSE_URL = `${SOURCE_CODE_URL}/blob/master/LICENSE`
 
 const PanelAbout: React.FC<PanelProps> = ({ settingsValue, saveSettings }: PanelProps) => {
