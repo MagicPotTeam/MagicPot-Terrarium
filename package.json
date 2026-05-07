@@ -52,6 +52,7 @@
     "release:pure": "npm run build:pure && cross-env PACKAGE_MODE=pure npm run package:all",
     "release:embedded": "npm run release:embedded:win",
     "release:embedded:win": "npm run build:embedded && npm run prepare:embedded && cross-env PACKAGE_MODE=embedded npm run package:win",
+    "release:update-submodules": "node scripts/release/update-embedded-submodules.mjs",
     "test:node": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.node.config.mjs",
     "test:web:heavy:qapp-design": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/QAppDesignPanel.test.tsx",
     "test:web:heavy:custom-skill-manager": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/pages/QuickAppPage/CustomSkillManagerPage.test.tsx",

@@ -83,6 +83,9 @@ jobs:
       - name: Bump version
         run: node ./scripts/release/bump-version.mjs
 
+      - name: Update embedded submodules
+        run: npm run release:update-submodules
+
       - name: Generate release metadata
         id: tag-version
         run: |
@@ -100,7 +103,7 @@ jobs:
 
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add package.json
+          git add package.json scripts/comfy/embedded-sources.json vendor/comfyui
           git commit -m "$COMMIT_MESSAGE"
           git push --force origin HEAD:$RELEASE_BRANCH
 
