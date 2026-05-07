@@ -36,6 +36,7 @@ const dryRun = process.env.EMBEDDED_DRY_RUN === '1'
 const requirementsMode = process.env.EMBEDDED_REQUIREMENTS_MODE || 'prefer-fixed'
 const pruneRuntime = process.env.EMBEDDED_PRUNE_RUNTIME !== '0'
 const keepOnnxRuntimeGpu = process.env.EMBEDDED_KEEP_ONNXRUNTIME_GPU === '1'
+const keepTorchMultiGpuSolver = process.env.EMBEDDED_KEEP_TORCH_MULTI_GPU_SOLVER === '1'
 
 function assertInsideRepo(targetPath) {
   const resolved = path.resolve(targetPath)
@@ -412,7 +413,20 @@ function pruneEmbeddedRuntime() {
 
   const sitePackages = path.join(pythonDir, 'Lib', 'site-packages')
   const stats = { bytes: 0, directories: 0, files: 0 }
-  const prunableExtensions = new Set(['.pyc', '.pyo', '.lib', '.pdb', '.exp', '.h', '.hpp', '.c', '.cpp', '.cu', '.map'])
+  const prunableExtensions = new Set([
+    '.pyc',
+    '.pyo',
+    '.lib',
+    '.pdb',
+    '.exp',
+    '.h',
+    '.hpp',
+    '.c',
+    '.cpp',
+    '.cu',
+    '.map',
+    '.chm'
+  ])
   const prunableDirectoryNames = new Set([
     'benchmark',
     'benchmarks',
@@ -480,7 +494,15 @@ function pruneEmbeddedRuntime() {
       }
     }
 
+    removeRuntimePath(path.join(sitePackages, 'torch', 'bin', 'protoc.exe'), stats)
+    removeRuntimePath(path.join(sitePackages, 'torch', 'lib', 'nvperf_host.dll'), stats)
+    if (!keepTorchMultiGpuSolver) {
+      removeRuntimePath(path.join(sitePackages, 'torch', 'lib', 'cusolverMg64_12.dll'), stats)
+    }
+
     for (const redundantPath of [
+      path.join(pythonDir, 'share', 'jupyter'),
+      path.join(sitePackages, 'pydeck', 'nbextension'),
       path.join(sitePackages, 'selenium', 'webdriver', 'common', 'linux'),
       path.join(sitePackages, 'selenium', 'webdriver', 'common', 'macos'),
       path.join(sitePackages, 'skimage', 'data'),
@@ -550,6 +572,7 @@ async function main() {
           requirementsMode,
           pruneRuntime,
           keepOnnxRuntimeGpu,
+          keepTorchMultiGpuSolver,
           comfyRequirements: path.relative(stagingRoot, path.join(comfyDir, 'requirements.txt')),
           customNodeRequirements: getCustomNodeRequirementFiles().map((filePath) =>
             path.relative(stagingRoot, filePath)
