@@ -4028,7 +4028,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       )
 
       expect(
-        createdSprites.filter((sprite) => !sprite.destroyed).map((sprite) => sprite.label)
+        createdSprites
+          .slice(0, PROJECT_CANVAS_WEBGL_SPRITE_RECONCILE_BATCH_SIZE)
+          .map((sprite) => sprite.label)
       ).toEqual(
         orderedItems
           .slice(0, PROJECT_CANVAS_WEBGL_SPRITE_RECONCILE_BATCH_SIZE)

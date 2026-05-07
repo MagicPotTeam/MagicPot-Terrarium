@@ -80,7 +80,7 @@ describe('useCanvasStageInteraction', () => {
       .__canvasInteractionTrace
   })
 
-  it('batches middle-mouse pan updates into a single frame commit', () => {
+  it('applies middle-mouse pan transforms immediately while deferring React state', () => {
     const rafCallbacks = new Map<number, FrameRequestCallback>()
     let rafId = 0
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation(
@@ -117,6 +117,8 @@ describe('useCanvasStageInteraction', () => {
     })
 
     expect(options.stagePosRef.current).toEqual({ x: 35, y: 49 })
+    expect(onViewportChange).toHaveBeenCalledTimes(2)
+    expect(onViewportChange).toHaveBeenLastCalledWith({ x: 35, y: 49 }, 1)
     expect(options.setStagePos).not.toHaveBeenCalled()
     expect(rafCallbacks.size).toBe(1)
 
@@ -124,7 +126,7 @@ describe('useCanvasStageInteraction', () => {
       rafCallbacks.values().next().value?.(16)
     })
 
-    expect(onViewportChange).toHaveBeenCalledTimes(1)
+    expect(onViewportChange).toHaveBeenCalledTimes(2)
     expect(onViewportChange).toHaveBeenLastCalledWith({ x: 35, y: 49 }, 1)
     expect(options.setStagePos).not.toHaveBeenCalled()
 
@@ -134,6 +136,35 @@ describe('useCanvasStageInteraction', () => {
 
     expect(options.setStagePos).toHaveBeenCalledTimes(1)
     expect(options.setStagePos).toHaveBeenLastCalledWith({ x: 35, y: 49 })
+
+    unmount()
+  })
+
+  it('continues middle-mouse panning from global move events outside the stage', () => {
+    const onViewportChange = vi.fn()
+    const options = createOptions({ onViewportChange })
+    const { result, unmount } = renderHook(() => useCanvasStageInteraction(options))
+
+    act(() => {
+      result.current.handleStageMouseDown({
+        evt: new MouseEvent('mousedown', { button: 1, clientX: 100, clientY: 120 }),
+        type: 'mousedown'
+      })
+    })
+
+    act(() => {
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 160, clientY: 190 }))
+    })
+
+    expect(options.stagePosRef.current).toEqual({ x: 60, y: 70 })
+    expect(onViewportChange).toHaveBeenCalledWith({ x: 60, y: 70 }, 1)
+    expect(options.setStagePos).not.toHaveBeenCalled()
+
+    act(() => {
+      window.dispatchEvent(new MouseEvent('mouseup'))
+    })
+
+    expect(options.setStagePos).toHaveBeenCalledWith({ x: 60, y: 70 })
 
     unmount()
   })

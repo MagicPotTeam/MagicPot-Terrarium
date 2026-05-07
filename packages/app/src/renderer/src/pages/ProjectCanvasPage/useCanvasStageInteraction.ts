@@ -120,7 +120,7 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
     onViewportInteractionStart,
     onViewportInteractionEnd,
     handleOpenCanvasTargetDialog,
-    // Optional: called every rAF during pan/zoom to drive DOM transforms directly,
+    // Optional: called during pan/zoom to drive DOM transforms directly,
     // skipping React setState on the hot path. setState still happens on pointer-up.
     onViewportChange,
     // Optional: called every rAF during selection drag to drive DOM directly,
@@ -252,6 +252,25 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
     stageScaleRef,
     syncCanvasRuntimeViewport
   ])
+
+  const applyPanViewportDelta = useCallback(
+    (clientX: number, clientY: number) => {
+      const dx = clientX - lastPanPosRef.current.x
+      const dy = clientY - lastPanPosRef.current.y
+      if (dx === 0 && dy === 0) {
+        return
+      }
+
+      lastPanPosRef.current = { x: clientX, y: clientY }
+      stagePosRef.current = {
+        x: stagePosRef.current.x + dx,
+        y: stagePosRef.current.y + dy
+      }
+      syncCanvasRuntimeViewport()
+      applyViewportChange(stagePosRef.current, stageScaleRef.current)
+    },
+    [applyViewportChange, lastPanPosRef, stagePosRef, stageScaleRef, syncCanvasRuntimeViewport]
+  )
 
   const scheduleViewportCommit = useCallback(() => {
     if (viewportCommitFrameRef.current != null) {
@@ -571,16 +590,30 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
         lastPanPosRef.current = { x: event.evt.clientX, y: event.evt.clientY }
         event.evt.preventDefault()
 
+        const handleGlobalPointerMove = (moveEvent: MouseEvent | PointerEvent) => {
+          if (!isPanningRef.current) {
+            return
+          }
+
+          moveEvent.preventDefault()
+          applyPanViewportDelta(moveEvent.clientX, moveEvent.clientY)
+          scheduleViewportCommit()
+        }
+
         const handleGlobalPointerUp = () => {
           isMiddleMouseRef.current = false
           isPanningRef.current = false
           endViewportInteraction(true)
           setIsPanning(false)
+          window.removeEventListener('pointermove', handleGlobalPointerMove)
+          window.removeEventListener('mousemove', handleGlobalPointerMove)
           window.removeEventListener('pointerup', handleGlobalPointerUp)
           window.removeEventListener('pointercancel', handleGlobalPointerUp)
           window.removeEventListener('mouseup', handleGlobalPointerUp)
         }
 
+        window.addEventListener('pointermove', handleGlobalPointerMove, { passive: false })
+        window.addEventListener('mousemove', handleGlobalPointerMove, { passive: false })
         window.addEventListener('pointerup', handleGlobalPointerUp)
         window.addEventListener('pointercancel', handleGlobalPointerUp)
         window.addEventListener('mouseup', handleGlobalPointerUp)
@@ -691,6 +724,7 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
     },
     [
       annoTool,
+      applyPanViewportDelta,
       beginViewportInteraction,
       canvasContainerRef,
       clearPointerCanvasViewportRect,
@@ -701,6 +735,7 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
       isSelectionRectDraggingRef,
       isMiddleMouseRef,
       lastPanPosRef,
+      scheduleViewportCommit,
       selectedIds,
       setDrawingState,
       setIsPanning,
@@ -714,14 +749,8 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
   const handleStageMouseMove = useCallback(
     (event: CanvasStageMouseEvent) => {
       if (isPanningRef.current) {
-        const dx = event.evt.clientX - lastPanPosRef.current.x
-        const dy = event.evt.clientY - lastPanPosRef.current.y
-        lastPanPosRef.current = { x: event.evt.clientX, y: event.evt.clientY }
-        stagePosRef.current = {
-          x: stagePosRef.current.x + dx,
-          y: stagePosRef.current.y + dy
-        }
-        syncCanvasRuntimeViewport()
+        event.evt.preventDefault()
+        applyPanViewportDelta(event.evt.clientX, event.evt.clientY)
         scheduleViewportCommit()
         return
       }
@@ -808,15 +837,14 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
       canvasContainerRef,
       drawingState,
       getPointerCanvasViewportRect,
-      lastPanPosRef,
       onSelectionRectChangeRef,
+      applyPanViewportDelta,
       scheduleSelectionRectCommit,
       scheduleViewportCommit,
       setDrawingState,
       setSelectionMarqueeActive,
       stagePosRef,
       stageScaleRef,
-      syncCanvasRuntimeViewport,
       updateCanvasInteractionDebug
     ]
   )
