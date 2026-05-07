@@ -1,9 +1,10 @@
 import React from 'react'
 import { Box } from '@mui/material'
 import type { CanvasImageItem } from '../types'
-import type {
-  ProjectCanvasImagePreview,
-  ProjectCanvasImageRuntimeRoute
+import {
+  getProjectCanvasRenderTransformKey,
+  type ProjectCanvasImagePreview,
+  type ProjectCanvasImageRuntimeRoute
 } from '../projectCanvasRenderBoundary'
 import { findCanvasSelectionToolbar } from '../canvasDomOverlayLookup'
 import type { SelectionActionStackPlacement } from '../canvasSelectionLayoutUtils'
@@ -604,8 +605,7 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
   const elementRef = React.useRef<HTMLDivElement | null>(null)
   const sessionRef = React.useRef<InteractionSession | null>(null)
   const draftTransformRef = React.useRef<CanvasImageTransform | null>(null)
-  const pendingPreviewRef = React.useRef<ProjectCanvasImagePreview | null>(null)
-  const previewCommitFrameRef = React.useRef<number | null>(null)
+  const lastEmittedPreviewKeyRef = React.useRef<string | null>(null)
   const pointerCanvasViewportRectRef = React.useRef<CanvasViewportRect | null>(null)
   const windowPointerMoveHandlerRef = React.useRef<(event: PointerEvent) => void>(() => {})
   const windowPointerUpHandlerRef = React.useRef<(event: PointerEvent) => void>(() => {})
@@ -685,51 +685,28 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
           scheduleCanvasSync(item.id, preview)
         }
       }
+      lastEmittedPreviewKeyRef.current = getProjectCanvasRenderTransformKey(preview)
       onPreviewChange?.(item.id, preview)
     },
     [broadcastDomPreviewSync, item.id, onPreviewChange]
   )
 
-  const cancelPendingPreviewCommit = React.useCallback(() => {
-    if (previewCommitFrameRef.current == null) {
-      return
-    }
-
-    window.cancelAnimationFrame(previewCommitFrameRef.current)
-    previewCommitFrameRef.current = null
-  }, [])
-
   const flushPendingPreviewChange = React.useCallback(
-    (nextTransform?: CanvasImageTransform) => {
-      cancelPendingPreviewCommit()
-      const preview = nextTransform ? buildPreview(item, nextTransform) : pendingPreviewRef.current
-      pendingPreviewRef.current = null
-      if (!preview) {
+    (nextTransform: CanvasImageTransform) => {
+      const preview = buildPreview(item, nextTransform)
+      const previewKey = getProjectCanvasRenderTransformKey(preview)
+      if (lastEmittedPreviewKeyRef.current === previewKey) {
         return
       }
 
       emitPreviewChangeNow(preview, { immediateSync: true })
     },
-    [cancelPendingPreviewCommit, emitPreviewChangeNow, item]
+    [emitPreviewChangeNow, item]
   )
 
   const schedulePreviewChange = React.useCallback(
     (transform: CanvasImageTransform) => {
-      pendingPreviewRef.current = buildPreview(item, transform)
-      if (previewCommitFrameRef.current != null) {
-        return
-      }
-
-      previewCommitFrameRef.current = window.requestAnimationFrame(() => {
-        previewCommitFrameRef.current = null
-        const preview = pendingPreviewRef.current
-        pendingPreviewRef.current = null
-        if (!preview) {
-          return
-        }
-
-        emitPreviewChangeNow(preview)
-      })
+      emitPreviewChangeNow(buildPreview(item, transform), { immediateSync: true })
     },
     [emitPreviewChangeNow, item]
   )
@@ -772,8 +749,7 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
 
   React.useEffect(() => {
     return () => {
-      cancelPendingPreviewCommit()
-      pendingPreviewRef.current = null
+      lastEmittedPreviewKeyRef.current = null
       shouldSelectOnDragFinishRef.current = false
       clearPointerCanvasViewportRect()
       if (broadcastDomPreviewSync) {
@@ -783,7 +759,6 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
     }
   }, [
     broadcastDomPreviewSync,
-    cancelPendingPreviewCommit,
     clearPointerCanvasViewportRect,
     item.id,
     onPreviewChange,

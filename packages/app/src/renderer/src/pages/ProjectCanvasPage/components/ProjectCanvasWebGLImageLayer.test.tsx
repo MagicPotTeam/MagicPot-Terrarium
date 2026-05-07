@@ -488,11 +488,13 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     await waitFor(
       () => {
         expect(ref.current).not.toBeNull()
+        expect(createdApplications).toHaveLength(1)
         expect(createdSprites).toHaveLength(1)
       },
       { timeout: 15000 }
     )
 
+    const app = createdApplications[0]
     const sprite = createdSprites[0]
 
     expect(sprite.position.x).toBe(24)
@@ -500,6 +502,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(sprite.scale.x).toBe(2)
     expect(sprite.scale.y).toBe(2)
 
+    const renderCountBeforePreview = app.render.mock.calls.length
     act(() => {
       ref.current?.syncItemPreview('image-1', {
         x: 80,
@@ -517,7 +520,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(sprite.scale.x).toBe(3)
     expect(sprite.scale.y).toBe(1)
     expect(sprite.rotation).toBeCloseTo(Math.PI / 12)
+    expect(app.render).toHaveBeenCalledTimes(renderCountBeforePreview + 1)
 
+    const renderCountBeforeClear = app.render.mock.calls.length
     act(() => {
       ref.current?.syncItemPreview('image-1', null)
     })
@@ -527,6 +532,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(sprite.scale.x).toBe(2)
     expect(sprite.scale.y).toBe(2)
     expect(sprite.rotation).toBe(0)
+    expect(app.render).toHaveBeenCalledTimes(renderCountBeforeClear + 1)
   }, 15000)
 
   it('recreates sprite state when the texture key changes', async () => {

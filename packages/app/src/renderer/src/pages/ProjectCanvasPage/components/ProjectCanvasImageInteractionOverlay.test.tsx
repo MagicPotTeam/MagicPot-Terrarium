@@ -723,7 +723,7 @@ describe('ProjectCanvasImageInteractionOverlay', () => {
     expect(onDragEnd).toHaveBeenCalledWith('image-1', 140, 170, expect.any(Object))
   })
 
-  it('batches drag previews into a single animation frame and flushes the latest transform on pointerup', () => {
+  it('emits drag previews immediately so the WebGL image body follows the frame', () => {
     const rafCallbacks = new Map<number, FrameRequestCallback>()
     let rafId = 0
     const requestAnimationFrameSpy = vi
@@ -785,16 +785,26 @@ describe('ProjectCanvasImageInteractionOverlay', () => {
       fireEvent.pointerMove(window, { pointerId: 15, clientX: 150, clientY: 190 })
       fireEvent.pointerMove(window, { pointerId: 15, clientX: 180, clientY: 210 })
 
-      expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(baselineRafCallCount + 1)
-      expect(rafCallbacks.size).toBe(1)
-      expect(onPreviewChange).not.toHaveBeenCalled()
+      expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(baselineRafCallCount)
+      expect(rafCallbacks.size).toBe(0)
+      expect(onPreviewChange).toHaveBeenCalledTimes(2)
+      expect(onPreviewChange).toHaveBeenLastCalledWith('image-1', {
+        x: 170,
+        y: 190,
+        width: 200,
+        height: 120,
+        scaleX: 1,
+        scaleY: 1,
+        rotation: 0
+      })
 
       fireEvent.pointerUp(window, { pointerId: 15, clientX: 180, clientY: 210 })
 
       expect(cancelAnimationFrameSpy.mock.calls.length).toBeGreaterThanOrEqual(
-        baselineCancelRafCallCount + 1
+        baselineCancelRafCallCount
       )
       expect(rafCallbacks.size).toBe(0)
+      expect(onPreviewChange).toHaveBeenCalledTimes(2)
       expect(onPreviewChange).toHaveBeenLastCalledWith('image-1', {
         x: 170,
         y: 190,

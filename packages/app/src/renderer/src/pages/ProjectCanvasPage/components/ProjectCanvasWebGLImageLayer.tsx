@@ -1540,7 +1540,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             record.transformKey = getProjectCanvasRenderTransformKey(renderItem)
           }
           markSpriteRecordUsed(record)
-          scheduleRender()
+          cancelScheduledRender()
+          renderApp()
           return
         }
 
@@ -1552,13 +1553,15 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         )
         record.transformKey = getProjectCanvasRenderTransformKey(preview)
         markSpriteRecordUsed(record)
-        scheduleRender()
+        cancelScheduledRender()
+        renderApp()
       }
     }),
     [
       applyViewportTransform,
+      cancelScheduledRender,
       markSpriteRecordUsed,
-      scheduleRender,
+      renderApp,
       scheduleViewportReconcile,
       setViewportInteractingState
     ]
