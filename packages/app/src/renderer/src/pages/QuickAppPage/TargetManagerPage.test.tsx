@@ -64,6 +64,9 @@ const renderPage = async () => {
   )
 
   await waitFor(() => expect(listTargetSchemesMock).toHaveBeenCalled())
+  await waitFor(() =>
+    expect(screen.queryByText('Loading target schemes...')).not.toBeInTheDocument()
+  )
 }
 
 const openCreateDialog = async () => {
