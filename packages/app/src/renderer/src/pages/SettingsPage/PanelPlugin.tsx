@@ -668,18 +668,21 @@ const HunyuanSection: React.FC<HunyuanSectionProps> = ({ saveSettings, settingsV
                 value={settingsValue.aigc3d_config?.tencent_secret_id || ''}
                 onChange={(value) => saveSettings({ aigc3d_config: { tencent_secret_id: value } })}
                 placeholder="AKID..."
+                updateMode="change"
               />
               <InputText
                 label={qt('quickapp_api.tencent_secret_key', '腾讯云 SecretKey')}
                 value={settingsValue.aigc3d_config?.tencent_secret_key || ''}
                 onChange={(value) => saveSettings({ aigc3d_config: { tencent_secret_key: value } })}
                 placeholder={qt('quickapp_api.tencent_secret_key_placeholder', '请输入 SecretKey')}
+                updateMode="change"
               />
               <InputText
                 label={qt('quickapp_api.api_region', '腾讯云 API 地域')}
                 value={settingsValue.aigc3d_config?.api_region || ''}
                 onChange={(value) => saveSettings({ aigc3d_config: { api_region: value } })}
                 placeholder="ap-guangzhou"
+                updateMode="change"
               />
               <Typography color="text.secondary" variant="caption">
                 {qt('quickapp_api.api_region_hint', `留空时默认使用 ${DEFAULT_HY3D_API_REGION}。`)}
@@ -694,18 +697,21 @@ const HunyuanSection: React.FC<HunyuanSectionProps> = ({ saveSettings, settingsV
                 value={settingsValue.aigc3d_config?.cos_bucket || ''}
                 onChange={(value) => saveSettings({ aigc3d_config: { cos_bucket: value } })}
                 placeholder="examplebucket-1250000000"
+                updateMode="change"
               />
               <InputText
                 label={qt('quickapp_api.cos_region', 'COS 地域')}
                 value={settingsValue.aigc3d_config?.cos_region || ''}
                 onChange={(value) => saveSettings({ aigc3d_config: { cos_region: value } })}
                 placeholder="ap-guangzhou"
+                updateMode="change"
               />
               <InputText
                 label={qt('quickapp_api.cos_key_prefix', 'COS Key 前缀')}
                 value={settingsValue.aigc3d_config?.cos_key_prefix || 'magicpot/hunyuan3d'}
                 onChange={(value) => saveSettings({ aigc3d_config: { cos_key_prefix: value } })}
                 placeholder="magicpot/hunyuan3d"
+                updateMode="change"
               />
             </Stack>
           </Box>

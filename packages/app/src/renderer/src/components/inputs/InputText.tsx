@@ -6,6 +6,7 @@ type InputTextProps = InputProps<string> & {
   placeholder: string
   errorText?: string
   shrinkLabel?: boolean
+  updateMode?: 'blur' | 'change'
 }
 
 const InputText: React.FC<InputTextProps> = ({
@@ -15,7 +16,8 @@ const InputText: React.FC<InputTextProps> = ({
   placeholder,
   Icon,
   errorText,
-  shrinkLabel
+  shrinkLabel,
+  updateMode
 }) => {
   return (
     <BaseInputTextField
@@ -29,6 +31,7 @@ const InputText: React.FC<InputTextProps> = ({
       placeholder={placeholder}
       Icon={Icon}
       shrinkLabel={shrinkLabel}
+      updateMode={updateMode}
     />
   )
 }
