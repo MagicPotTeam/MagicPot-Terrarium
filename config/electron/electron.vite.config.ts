@@ -57,7 +57,7 @@ export default defineConfig({
     publicDir: resolve('packages/app/src/renderer/public'),
     server: {
       port: 5173,
-      strictPort: true,
+      strictPort: false,
       watch: {
         ignored: generatedRuntimeWatchIgnores
       }
