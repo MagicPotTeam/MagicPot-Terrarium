@@ -29,7 +29,12 @@ import {
 import { ServerStreaming } from '@shared/api/apiUtils/streaming'
 import { getConfig } from '../config/config'
 import { Config, LLMAPIProfile, resolveCustomSkillContextMessageLimit } from '@shared/config/config'
-import { findHunyuan3DQAppProfile, getQAppApiProfiles } from '@shared/config/apiProfileSelectors'
+import {
+  findHunyuan3DQAppProfile,
+  getQAppApiProfiles,
+  isConfiguredHunyuan3DProfile,
+  isHunyuan3DCompatibleProfile
+} from '@shared/config/apiProfileSelectors'
 import {
   cliFromProfile,
   describeFetchFailure,
@@ -905,12 +910,28 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   // Keep per-endpoint round-robin counters stable across requests so load-balanced profile selection stays deterministic.
   private static loadBalancingCounters: Map<string, number> = new Map()
 
-  private findHunyuan3DProfile(config: Config): LLMAPIProfile | undefined {
+  private findHunyuan3DProfile(config: Config, profileId?: string): LLMAPIProfile | undefined {
+    const requestedProfileId = profileId?.trim()
+    if (requestedProfileId) {
+      const requestedProfile = getQAppApiProfiles(config).find(
+        (profile) =>
+          profile.id === requestedProfileId &&
+          isHunyuan3DCompatibleProfile(profile) &&
+          isConfiguredHunyuan3DProfile(profile)
+      )
+      if (requestedProfile) {
+        return requestedProfile
+      }
+    }
+
     return findHunyuan3DQAppProfile(config)
   }
 
-  private readHunyuan3DCredentials(config: Config): { secretId: string; secretKey: string } {
-    const hunyuanProfile = this.findHunyuan3DProfile(config)
+  private readHunyuan3DCredentials(
+    config: Config,
+    profileId?: string
+  ): { secretId: string; secretKey: string } {
+    const hunyuanProfile = this.findHunyuan3DProfile(config, profileId)
     return {
       secretId: normalizeConfiguredSecret(
         hunyuanProfile?.tencent_secret_id || config.aigc3d_config?.tencent_secret_id
@@ -921,8 +942,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     }
   }
 
-  private getHunyuan3DCredentials(config: Config): { secretId: string; secretKey: string } {
-    const { secretId, secretKey } = this.readHunyuan3DCredentials(config)
+  private getHunyuan3DCredentials(
+    config: Config,
+    profileId?: string
+  ): { secretId: string; secretKey: string } {
+    const { secretId, secretKey } = this.readHunyuan3DCredentials(config, profileId)
 
     const missing: string[] = []
     if (!secretId) missing.push('SecretId')
@@ -934,14 +958,23 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     return { secretId, secretKey }
   }
 
-  private getHunyuan3DCosConfig(config: Config): {
+  private getHunyuan3DCosConfig(
+    config: Config,
+    profileId?: string
+  ): {
     bucket: string
     region: string
     keyPrefix: string
   } {
-    const bucket = config.aigc3d_config?.cos_bucket?.trim() || ''
-    const region = config.aigc3d_config?.cos_region?.trim() || ''
-    const keyPrefix = config.aigc3d_config?.cos_key_prefix?.trim() || 'magicpot/hunyuan3d'
+    const hunyuanProfile = this.findHunyuan3DProfile(config, profileId)
+    const bucket =
+      hunyuanProfile?.cos_bucket?.trim() || config.aigc3d_config?.cos_bucket?.trim() || ''
+    const region =
+      hunyuanProfile?.cos_region?.trim() || config.aigc3d_config?.cos_region?.trim() || ''
+    const keyPrefix =
+      hunyuanProfile?.cos_key_prefix?.trim() ||
+      config.aigc3d_config?.cos_key_prefix?.trim() ||
+      'magicpot/hunyuan3d'
 
     const missing: string[] = []
     if (!bucket) missing.push('COS Bucket')
@@ -953,8 +986,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     return { bucket, region, keyPrefix }
   }
 
-  private getHunyuan3DApiRegion(config: Config): string {
-    return config.aigc3d_config?.api_region?.trim() || DEFAULT_HY3D_API_REGION
+  private getHunyuan3DApiRegion(config: Config, profileId?: string): string {
+    const hunyuanProfile = this.findHunyuan3DProfile(config, profileId)
+    return (
+      hunyuanProfile?.api_region?.trim() ||
+      config.aigc3d_config?.api_region?.trim() ||
+      DEFAULT_HY3D_API_REGION
+    )
   }
 
   private async buildBigModelOcrFilePayload(attachment: ChatAttachment): Promise<string> {
@@ -1789,11 +1827,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   }
 
   clearHy3DCosPrefix = async (
-    _req: LLMClearHy3DCosPrefixReq
+    req: LLMClearHy3DCosPrefixReq
   ): Promise<LLMClearHy3DCosPrefixResp> => {
     const config = getConfig()
-    const credentials = this.getHunyuan3DCredentials(config)
-    const cosConfig = this.getHunyuan3DCosConfig(config)
+    const profileId = typeof req.profileId === 'string' ? req.profileId : undefined
+    const credentials = this.getHunyuan3DCredentials(config, profileId)
+    const cosConfig = this.getHunyuan3DCosConfig(config, profileId)
 
     try {
       return await clearHy3dCosPrefix(credentials, cosConfig)

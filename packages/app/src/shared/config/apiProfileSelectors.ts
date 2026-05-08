@@ -12,6 +12,9 @@ export const getQAppApiProfiles = (config: Config): LLMAPIProfile[] => {
 export const isConfiguredApiProfile = (profile: LLMAPIProfile): boolean =>
   isRunnableProfile(profile)
 
+const hasConfiguredHunyuan3DSecretCredentials = (profile: LLMAPIProfile): boolean =>
+  Boolean(profile.tencent_secret_id?.trim() && profile.tencent_secret_key?.trim())
+
 export const isVisionCapableApiProfile = (profile: LLMAPIProfile): boolean => {
   const modelUse = resolveProfileModelUse(profile)
   return (
@@ -30,11 +33,14 @@ export const isHunyuan3DCompatibleProfile = (profile: LLMAPIProfile): boolean =>
   return (
     modelName.includes('hunyuan3d') ||
     (modelName.includes('hunyuan') && baseUrl.includes('ai3d.cloud.tencent.com')) ||
-    baseUrl.includes('ai3d.cloud.tencent.com')
+    baseUrl.includes('ai3d.cloud.tencent.com') ||
+    baseUrl.includes('hunyuan.cloud.tencent.com')
   )
 }
 
+export const isConfiguredHunyuan3DProfile = (profile: LLMAPIProfile): boolean =>
+  isHunyuan3DCompatibleProfile(profile) &&
+  (isConfiguredApiProfile(profile) || hasConfiguredHunyuan3DSecretCredentials(profile))
+
 export const findHunyuan3DQAppProfile = (config: Config): LLMAPIProfile | undefined =>
-  getQAppApiProfiles(config).find(
-    (profile) => isConfiguredApiProfile(profile) && isHunyuan3DCompatibleProfile(profile)
-  )
+  getQAppApiProfiles(config).find(isConfiguredHunyuan3DProfile)

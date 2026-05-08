@@ -1,8 +1,15 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import { createEmptyCustomSkill, getCustomSkillValidationIssues } from './PanelLLM'
 import PanelLLM from './PanelLLM'
+
+const showMessageBoxMock = vi.fn()
+const clearHy3DCosPrefixMock = vi.fn()
+const notifyInfoMock = vi.fn(() => 'message-key')
+const notifySuccessMock = vi.fn()
+const notifyWarningMock = vi.fn()
+const closeMessageMock = vi.fn()
 
 let currentLanguage = 'en-US'
 let translations: Record<string, string> = {
@@ -30,7 +37,23 @@ vi.mock('react-i18next', () => ({
 }))
 
 vi.mock('@renderer/utils/windowUtils', () => ({
-  api: () => ({})
+  api: () => ({
+    svcDialog: {
+      showMessageBox: showMessageBoxMock
+    },
+    svcLLMProxy: {
+      clearHy3DCosPrefix: clearHy3DCosPrefixMock
+    }
+  })
+}))
+
+vi.mock('@renderer/hooks/useMessage', () => ({
+  useMessage: () => ({
+    notifyInfo: notifyInfoMock,
+    notifySuccess: notifySuccessMock,
+    notifyWarning: notifyWarningMock,
+    closeMessage: closeMessageMock
+  })
 }))
 
 const buildSettingsWithProfile = (profile: Record<string, unknown>) => ({
@@ -439,6 +462,114 @@ describe('PanelLLM Agent API settings', () => {
           ]
         }
       }
+    })
+  })
+
+  it('switches an API profile to the Hunyuan3D preset', () => {
+    const saveSettings = vi.fn()
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({})}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    fireEvent.mouseDown(screen.getByLabelText('Call Type'))
+    fireEvent.click(screen.getByRole('option', { name: 'Hunyuan3D' }))
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'profile-1',
+            model_name: 'Hunyuan3D Pro',
+            base_url: 'https://api.ai3d.cloud.tencent.com',
+            api_key: 'sk-test',
+            provider: 'default',
+            model_use: 'default',
+            api_region: 'ap-guangzhou',
+            cos_region: 'ap-guangzhou',
+            cos_key_prefix: 'magicpot/hunyuan3d'
+          })
+        ]
+      }
+    })
+  })
+
+  it('edits Hunyuan3D Tencent and COS fields in the profile card', () => {
+    const saveSettings = vi.fn()
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'Hunyuan3D Pro',
+          base_url: 'https://api.ai3d.cloud.tencent.com',
+          api_key: '',
+          tencent_secret_id: '',
+          tencent_secret_key: '',
+          api_region: 'ap-guangzhou',
+          cos_bucket: '',
+          cos_region: 'ap-guangzhou',
+          cos_key_prefix: 'magicpot/hunyuan3d'
+        })}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    fireEvent.change(screen.getByLabelText('Tencent SecretId'), {
+      target: { value: 'secret-id' }
+    })
+    fireEvent.blur(screen.getByLabelText('Tencent SecretId'))
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'profile-1',
+            tencent_secret_id: 'secret-id'
+          })
+        ]
+      }
+    })
+  })
+
+  it('clears the selected Hunyuan3D profile COS prefix', async () => {
+    showMessageBoxMock.mockResolvedValue({ response: 1 })
+    clearHy3DCosPrefixMock.mockResolvedValue({
+      bucket: 'magicpot-1314265479',
+      region: 'ap-guangzhou',
+      keyPrefix: 'magicpot/hunyuan3d',
+      matchedCount: 2,
+      deletedCount: 2,
+      errorCount: 0
+    })
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'Hunyuan3D Pro',
+          base_url: 'https://api.ai3d.cloud.tencent.com',
+          api_key: '',
+          tencent_secret_id: 'secret-id',
+          tencent_secret_key: 'secret-key',
+          api_region: 'ap-guangzhou',
+          cos_bucket: 'magicpot-1314265479',
+          cos_region: 'ap-guangzhou',
+          cos_key_prefix: 'magicpot/hunyuan3d'
+        })}
+        saveSettings={vi.fn()}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear Current Prefix' }))
+
+    await waitFor(() => {
+      expect(clearHy3DCosPrefixMock).toHaveBeenCalledWith({ profileId: 'profile-1' })
+      expect(notifySuccessMock).toHaveBeenCalledWith('Cleared 2 objects.')
     })
   })
 

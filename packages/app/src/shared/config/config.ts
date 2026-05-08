@@ -40,6 +40,10 @@ export type LLMAPIProfile = {
   model_use?: LLMModelUseOption
   tencent_secret_id?: string
   tencent_secret_key?: string
+  api_region?: string
+  cos_bucket?: string
+  cos_region?: string
+  cos_key_prefix?: string
   backup_api_keys?: string[]
   is_ollama?: boolean
   is_vision_model?: boolean

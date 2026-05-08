@@ -122,13 +122,31 @@ vi.mock('./PanelLLM', () => ({
     profiles
   }: {
     title: string
-    profiles?: Array<{ auth_mode?: string; model_name?: string; api_key?: string }>
+    profiles?: Array<{
+      auth_mode?: string
+      model_name?: string
+      base_url?: string
+      api_key?: string
+      tencent_secret_id?: string
+      tencent_secret_key?: string
+      api_region?: string
+      cos_bucket?: string
+      cos_region?: string
+      cos_key_prefix?: string
+    }>
   }) => (
     <div
       data-testid="api-profiles-section"
       data-first-profile-api-key={profiles?.[0]?.api_key ?? ''}
       data-first-profile-auth-mode={profiles?.[0]?.auth_mode ?? ''}
+      data-first-profile-base-url={profiles?.[0]?.base_url ?? ''}
+      data-first-profile-cos-bucket={profiles?.[0]?.cos_bucket ?? ''}
+      data-first-profile-cos-key-prefix={profiles?.[0]?.cos_key_prefix ?? ''}
+      data-first-profile-cos-region={profiles?.[0]?.cos_region ?? ''}
+      data-first-profile-api-region={profiles?.[0]?.api_region ?? ''}
       data-first-profile-model={profiles?.[0]?.model_name ?? ''}
+      data-first-profile-secret-id={profiles?.[0]?.tencent_secret_id ?? ''}
+      data-first-profile-secret-key={profiles?.[0]?.tencent_secret_key ?? ''}
       data-profile-count={profiles?.length ?? 0}
     >
       {title}
@@ -149,36 +167,7 @@ describe('PanelPlugin', () => {
     translations = buildEnglishTranslations()
   })
 
-  it('renders the Quick App-specific Hunyuan3D guidance', () => {
-    render(
-      <PanelPlugin
-        settingsValue={{
-          ...DEFAULT_CONFIG,
-          plugin_config: {
-            ...DEFAULT_CONFIG.plugin_config!,
-            api_profiles: [
-              {
-                id: 'quick-profile',
-                model_name: 'Quick Model',
-                base_url: 'https://quick.example/v1',
-                api_key: 'quick-key'
-              }
-            ]
-          }
-        }}
-        saveSettings={vi.fn()}
-      />
-    )
-
-    expect(screen.getByText('Hunyuan3D (Quick App)')).toBeTruthy()
-    expect(
-      screen.getByText(
-        'Choose Hunyuan3D from the Quick Apps panel on the right. The Tencent Cloud credentials configured here are used to turn the uploaded reference image into a 3D model.'
-      )
-    ).toBeTruthy()
-  })
-
-  it('saves a dedicated Tencent API region without disturbing COS region settings', () => {
+  it('migrates legacy Hunyuan3D settings into a Quick App API profile card', async () => {
     const saveSettings = vi.fn()
 
     render(
@@ -187,8 +176,12 @@ describe('PanelPlugin', () => {
           ...DEFAULT_CONFIG,
           aigc3d_config: {
             ...DEFAULT_CONFIG.aigc3d_config!,
-            api_region: '',
-            cos_region: 'ap-guangzhou'
+            tencent_secret_id: 'secret-id',
+            tencent_secret_key: 'secret-key',
+            api_region: 'ap-shanghai',
+            cos_bucket: 'magicpot-1314265479',
+            cos_region: 'ap-guangzhou',
+            cos_key_prefix: 'magicpot/hunyuan3d'
           },
           plugin_config: {
             ...DEFAULT_CONFIG.plugin_config!,
@@ -199,13 +192,39 @@ describe('PanelPlugin', () => {
       />
     )
 
-    const apiRegionInput = screen.getByLabelText('Tencent API Region')
-    fireEvent.change(apiRegionInput, {
-      target: { value: 'ap-shanghai' }
-    })
-    fireEvent.blur(apiRegionInput)
+    const section = screen.getByTestId('api-profiles-section')
+    expect(section).toHaveAttribute('data-profile-count', '1')
+    expect(section).toHaveAttribute('data-first-profile-model', 'Hunyuan3D Pro')
+    expect(section).toHaveAttribute(
+      'data-first-profile-base-url',
+      'https://api.ai3d.cloud.tencent.com'
+    )
+    expect(section).toHaveAttribute('data-first-profile-secret-id', 'secret-id')
+    expect(section).toHaveAttribute('data-first-profile-secret-key', 'secret-key')
+    expect(section).toHaveAttribute('data-first-profile-api-region', 'ap-shanghai')
+    expect(section).toHaveAttribute('data-first-profile-cos-bucket', 'magicpot-1314265479')
+    expect(section).toHaveAttribute('data-first-profile-cos-region', 'ap-guangzhou')
+    expect(section).toHaveAttribute('data-first-profile-cos-key-prefix', 'magicpot/hunyuan3d')
 
-    expect(saveSettings).toHaveBeenCalledWith({ aigc3d_config: { api_region: 'ap-shanghai' } })
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledWith({
+        plugin_config: {
+          api_profiles: [
+            expect.objectContaining({
+              id: 'legacy-hunyuan3d-profile',
+              model_name: 'Hunyuan3D Pro',
+              base_url: 'https://api.ai3d.cloud.tencent.com',
+              tencent_secret_id: 'secret-id',
+              tencent_secret_key: 'secret-key',
+              api_region: 'ap-shanghai',
+              cos_bucket: 'magicpot-1314265479',
+              cos_region: 'ap-guangzhou',
+              cos_key_prefix: 'magicpot/hunyuan3d'
+            })
+          ]
+        }
+      })
+    })
   })
 
   it('saves quick app prompt translation system and user prompts separately', () => {
@@ -295,112 +314,6 @@ describe('PanelPlugin', () => {
     })
   })
 
-  it('clears the configured Hunyuan3D COS prefix after confirmation', async () => {
-    showMessageBoxMock.mockResolvedValue({ response: 1 })
-    clearHy3DCosPrefixMock.mockResolvedValue({
-      bucket: 'magicpot-1314265479',
-      region: 'ap-guangzhou',
-      keyPrefix: 'magicpot/hunyuan3d',
-      matchedCount: 2,
-      deletedCount: 2,
-      errorCount: 0
-    })
-
-    render(
-      <PanelPlugin
-        settingsValue={{
-          ...DEFAULT_CONFIG,
-          aigc3d_config: {
-            ...DEFAULT_CONFIG.aigc3d_config!,
-            tencent_secret_id: 'secret-id',
-            tencent_secret_key: 'secret-key',
-            cos_bucket: 'magicpot-1314265479',
-            cos_region: 'ap-guangzhou',
-            cos_key_prefix: 'magicpot/hunyuan3d'
-          },
-          plugin_config: {
-            ...DEFAULT_CONFIG.plugin_config!,
-            api_profiles: []
-          }
-        }}
-        saveSettings={vi.fn()}
-      />
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: 'Clear Current Prefix' }))
-
-    await waitFor(() => {
-      expect(showMessageBoxMock).toHaveBeenCalled()
-      expect(clearHy3DCosPrefixMock).toHaveBeenCalledWith({})
-      expect(notifySuccessMock).toHaveBeenCalledWith('Cleared 2 objects.')
-    })
-  })
-
-  it('shows the normalized COS prefix when the configured value collapses to slash-only input', async () => {
-    showMessageBoxMock.mockResolvedValue({ response: 0 })
-
-    render(
-      <PanelPlugin
-        settingsValue={{
-          ...DEFAULT_CONFIG,
-          aigc3d_config: {
-            ...DEFAULT_CONFIG.aigc3d_config!,
-            tencent_secret_id: 'secret-id',
-            tencent_secret_key: 'secret-key',
-            cos_bucket: 'magicpot-1314265479',
-            cos_region: 'ap-guangzhou',
-            cos_key_prefix: '/'
-          },
-          plugin_config: {
-            ...DEFAULT_CONFIG.plugin_config!,
-            api_profiles: []
-          }
-        }}
-        saveSettings={vi.fn()}
-      />
-    )
-
-    expect(screen.getByText('Prefix: magicpot/hunyuan3d')).toBeTruthy()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Clear Current Prefix' }))
-
-    await waitFor(() => {
-      expect(showMessageBoxMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          detail: expect.stringContaining('Prefix: magicpot/hunyuan3d')
-        })
-      )
-    })
-
-    expect(clearHy3DCosPrefixMock).not.toHaveBeenCalled()
-  })
-
-  it('disables COS cleanup until the required Tencent settings are configured', () => {
-    render(
-      <PanelPlugin
-        settingsValue={{
-          ...DEFAULT_CONFIG,
-          aigc3d_config: {
-            ...DEFAULT_CONFIG.aigc3d_config!,
-            cos_key_prefix: 'magicpot/hunyuan3d'
-          },
-          plugin_config: {
-            ...DEFAULT_CONFIG.plugin_config!,
-            api_profiles: []
-          }
-        }}
-        saveSettings={vi.fn()}
-      />
-    )
-
-    expect(screen.getByRole('button', { name: 'Clear Current Prefix' })).toBeDisabled()
-    expect(
-      screen.getByText(
-        'SecretId, SecretKey, COS bucket, and COS region are required before clearing.'
-      )
-    ).toBeTruthy()
-  })
-
   it('falls back to localized Chinese defaults when zh-CN translations are missing', () => {
     currentLanguage = 'zh-CN'
     translations = {}
@@ -419,112 +332,6 @@ describe('PanelPlugin', () => {
     )
 
     expect(screen.queryByText('quickapp_api.api_profiles_section')).toBeNull()
-    expect(screen.queryByText('quickapp_api.hunyuan_title')).toBeNull()
-    expect(screen.getByText('Hunyuan3D（快应用）')).toBeTruthy()
-  })
-
-  it('does not call clearHy3DCosPrefix when the user cancels the confirmation dialog', async () => {
-    showMessageBoxMock.mockResolvedValue({ response: 0 })
-
-    render(
-      <PanelPlugin
-        settingsValue={{
-          ...DEFAULT_CONFIG,
-          aigc3d_config: {
-            ...DEFAULT_CONFIG.aigc3d_config!,
-            tencent_secret_id: 'secret-id',
-            tencent_secret_key: 'secret-key',
-            cos_bucket: 'magicpot-1314265479',
-            cos_region: 'ap-guangzhou',
-            cos_key_prefix: 'magicpot/hunyuan3d'
-          },
-          plugin_config: {
-            ...DEFAULT_CONFIG.plugin_config!,
-            api_profiles: []
-          }
-        }}
-        saveSettings={vi.fn()}
-      />
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: 'Clear Current Prefix' }))
-
-    await waitFor(() => {
-      expect(showMessageBoxMock).toHaveBeenCalled()
-    })
-
-    expect(clearHy3DCosPrefixMock).not.toHaveBeenCalled()
-    expect(notifySuccessMock).not.toHaveBeenCalled()
-  })
-
-  it('shows a warning when COS cleanup has partial errors', async () => {
-    showMessageBoxMock.mockResolvedValue({ response: 1 })
-    clearHy3DCosPrefixMock.mockResolvedValue({
-      bucket: 'magicpot-1314265479',
-      region: 'ap-guangzhou',
-      keyPrefix: 'magicpot/hunyuan3d',
-      matchedCount: 5,
-      deletedCount: 3,
-      errorCount: 2
-    })
-
-    render(
-      <PanelPlugin
-        settingsValue={{
-          ...DEFAULT_CONFIG,
-          aigc3d_config: {
-            ...DEFAULT_CONFIG.aigc3d_config!,
-            tencent_secret_id: 'secret-id',
-            tencent_secret_key: 'secret-key',
-            cos_bucket: 'magicpot-1314265479',
-            cos_region: 'ap-guangzhou',
-            cos_key_prefix: 'magicpot/hunyuan3d'
-          },
-          plugin_config: {
-            ...DEFAULT_CONFIG.plugin_config!,
-            api_profiles: []
-          }
-        }}
-        saveSettings={vi.fn()}
-      />
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: 'Clear Current Prefix' }))
-
-    await waitFor(() => {
-      expect(notifyWarningMock).toHaveBeenCalledWith(expect.stringContaining('3'))
-    })
-  })
-
-  it('shows a warning when COS cleanup API call fails', async () => {
-    showMessageBoxMock.mockResolvedValue({ response: 1 })
-    clearHy3DCosPrefixMock.mockRejectedValue(new Error('Network error'))
-
-    render(
-      <PanelPlugin
-        settingsValue={{
-          ...DEFAULT_CONFIG,
-          aigc3d_config: {
-            ...DEFAULT_CONFIG.aigc3d_config!,
-            tencent_secret_id: 'secret-id',
-            tencent_secret_key: 'secret-key',
-            cos_bucket: 'magicpot-1314265479',
-            cos_region: 'ap-guangzhou',
-            cos_key_prefix: 'magicpot/hunyuan3d'
-          },
-          plugin_config: {
-            ...DEFAULT_CONFIG.plugin_config!,
-            api_profiles: []
-          }
-        }}
-        saveSettings={vi.fn()}
-      />
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: 'Clear Current Prefix' }))
-
-    await waitFor(() => {
-      expect(notifyWarningMock).toHaveBeenCalledWith('Network error')
-    })
+    expect(screen.getByText('快应用 API 设置')).toBeTruthy()
   })
 })

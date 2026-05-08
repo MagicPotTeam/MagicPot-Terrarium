@@ -1,7 +1,6 @@
 ﻿import React from 'react'
 import { Box, Stack, Alert, Typography, Collapse, Divider, Button } from '@mui/material'
 import SettingSection from './components/SettingSection'
-import DeleteSweepOutlinedIcon from '@mui/icons-material/DeleteSweepOutlined'
 import InputSwitch from '@renderer/components/inputs/InputSwitch'
 import InputTextArea from '@renderer/components/inputs/InputTextArea'
 import InputText from '@renderer/components/inputs/InputText'
@@ -11,11 +10,13 @@ import InputPath from '@renderer/components/inputs/InputPath'
 import { PanelProps } from './PanelProps'
 import { useTranslation } from 'react-i18next'
 import { LLMAPIProfile } from '@shared/config/config'
-import { getQAppApiProfiles, isVisionCapableApiProfile } from '@shared/config/apiProfileSelectors'
+import {
+  getQAppApiProfiles,
+  isHunyuan3DCompatibleProfile,
+  isVisionCapableApiProfile
+} from '@shared/config/apiProfileSelectors'
 import { ApiProfilesSection, createEmptyProfile } from './PanelLLM'
 import { getQAppPromptSettings } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/qAppPromptSettings'
-import { useMessage } from '@renderer/hooks/useMessage'
-import { api } from '@renderer/utils/windowUtils'
 import {
   createEmptyDuplicateCheckVisualModel,
   DEFAULT_DUPLICATE_CHECK_SETTINGS,
@@ -43,13 +44,50 @@ const stripExternalAuthProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
   return nextProfile
 }
 
-type HunyuanSectionProps = {
-  saveSettings: SaveSettings
-  settingsValue: PanelProps['settingsValue']
-}
-
+const HUNYUAN_AI3D_BASE_URL = 'https://api.ai3d.cloud.tencent.com'
 const DEFAULT_HY3D_COS_PREFIX = 'magicpot/hunyuan3d'
 const DEFAULT_HY3D_API_REGION = 'ap-guangzhou'
+const LEGACY_HUNYUAN_PROFILE_ID = 'legacy-hunyuan3d-profile'
+
+const buildLegacyHunyuanProfile = (
+  settingsValue: PanelProps['settingsValue']
+): LLMAPIProfile | null => {
+  const legacy = settingsValue.aigc3d_config
+  const legacyKeyPrefix = legacy?.cos_key_prefix?.trim() || ''
+  const hasCustomKeyPrefix = Boolean(legacyKeyPrefix && legacyKeyPrefix !== DEFAULT_HY3D_COS_PREFIX)
+
+  if (
+    !legacy ||
+    !(
+      legacy.tencent_secret_id?.trim() ||
+      legacy.tencent_secret_key?.trim() ||
+      legacy.api_region?.trim() ||
+      legacy.cos_bucket?.trim() ||
+      legacy.cos_region?.trim() ||
+      hasCustomKeyPrefix
+    )
+  ) {
+    return null
+  }
+
+  return {
+    id: LEGACY_HUNYUAN_PROFILE_ID,
+    model_name: 'Hunyuan3D Pro',
+    base_url: HUNYUAN_AI3D_BASE_URL,
+    api_key: '',
+    provider: 'default',
+    model_use: 'default',
+    is_ollama: false,
+    is_vision_model: false,
+    is_ocr_model: false,
+    tencent_secret_id: legacy.tencent_secret_id || '',
+    tencent_secret_key: legacy.tencent_secret_key || '',
+    api_region: legacy.api_region || DEFAULT_HY3D_API_REGION,
+    cos_bucket: legacy.cos_bucket || '',
+    cos_region: legacy.cos_region || DEFAULT_HY3D_API_REGION,
+    cos_key_prefix: legacyKeyPrefix || DEFAULT_HY3D_COS_PREFIX
+  }
+}
 
 const quickAppSectionSurfaceSx = {
   borderRadius: 3,
@@ -541,223 +579,6 @@ const DuplicateCheckSection: React.FC<DuplicateCheckSectionProps> = ({
   )
 }
 
-const normalizeHy3dCosPrefix = (value?: string): string =>
-  value?.trim().replace(/^\/+|\/+$/g, '') || DEFAULT_HY3D_COS_PREFIX
-
-const HunyuanSection: React.FC<HunyuanSectionProps> = ({ saveSettings, settingsValue }) => {
-  const { t, i18n } = useTranslation()
-  const { notifyInfo, notifySuccess, notifyWarning, closeMessage } = useMessage()
-  const isChineseUi = i18n.language?.toLowerCase().startsWith('zh')
-  const [isClearingCosPrefix, setIsClearingCosPrefix] = React.useState(false)
-  const qt = React.useCallback(
-    (key: string, fallback: string) => {
-      const value = t(key)
-      return isChineseUi && value === key ? fallback : value
-    },
-    [isChineseUi, t]
-  )
-
-  const configuredSecretId = settingsValue.aigc3d_config?.tencent_secret_id?.trim() || ''
-  const configuredSecretKey = settingsValue.aigc3d_config?.tencent_secret_key?.trim() || ''
-  const configuredApiRegion = settingsValue.aigc3d_config?.api_region?.trim() || ''
-  const configuredBucket = settingsValue.aigc3d_config?.cos_bucket?.trim() || ''
-  const configuredRegion = settingsValue.aigc3d_config?.cos_region?.trim() || ''
-  const configuredKeyPrefix = settingsValue.aigc3d_config?.cos_key_prefix || DEFAULT_HY3D_COS_PREFIX
-  const effectiveKeyPrefix = normalizeHy3dCosPrefix(configuredKeyPrefix)
-  const canClearCosPrefix = !!(
-    configuredSecretId &&
-    configuredSecretKey &&
-    configuredBucket &&
-    configuredRegion
-  )
-
-  const handleClearCosPrefix = React.useCallback(async () => {
-    const dialogResult = await api().svcDialog.showMessageBox({
-      type: 'warning',
-      title: qt('quickapp_api.clear_cos_dialog_title', '清理 Hunyuan3D COS 缓存'),
-      message: qt(
-        'quickapp_api.clear_cos_dialog_message',
-        '将删除当前 Hunyuan3D Prefix 下的所有对象，此操作不可恢复。'
-      ),
-      detail: [
-        `Bucket: ${configuredBucket}`,
-        `Region: ${configuredRegion}`,
-        `Prefix: ${effectiveKeyPrefix}`
-      ].join('\n'),
-      buttons: [
-        qt('quickapp_api.clear_cos_cancel', '取消'),
-        qt('quickapp_api.clear_cos_confirm', '确认清理')
-      ],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true
-    })
-
-    if (dialogResult.response !== 1) {
-      return
-    }
-
-    const messageKey = notifyInfo(
-      qt('quickapp_api.clear_cos_progress', '正在清理 Hunyuan3D COS 缓存...'),
-      null
-    )
-    setIsClearingCosPrefix(true)
-
-    try {
-      const result = await api().svcLLMProxy.clearHy3DCosPrefix({})
-
-      if (result.matchedCount === 0) {
-        notifySuccess(qt('quickapp_api.clear_cos_empty', '当前 Prefix 下没有可清理的对象。'))
-      } else if (result.errorCount > 0) {
-        notifyWarning(
-          t('quickapp_api.clear_cos_partial', {
-            deletedCount: result.deletedCount,
-            errorCount: result.errorCount,
-            defaultValue: `已删除 ${result.deletedCount} 个对象，另有 ${result.errorCount} 个对象删除失败。`
-          })
-        )
-      } else {
-        notifySuccess(
-          t('quickapp_api.clear_cos_success', {
-            deletedCount: result.deletedCount,
-            defaultValue: `已清理 ${result.deletedCount} 个对象。`
-          })
-        )
-      }
-    } catch (error) {
-      notifyWarning(
-        error instanceof Error
-          ? error.message
-          : qt('quickapp_api.clear_cos_failed', '清理 Hunyuan3D COS 缓存失败。')
-      )
-    } finally {
-      setIsClearingCosPrefix(false)
-      closeMessage(messageKey)
-    }
-  }, [
-    closeMessage,
-    configuredBucket,
-    configuredRegion,
-    effectiveKeyPrefix,
-    notifyInfo,
-    notifySuccess,
-    notifyWarning,
-    t,
-    qt
-  ])
-
-  return (
-    <SettingSection title={qt('quickapp_api.hunyuan_title', 'Hunyuan3D（快应用）')}>
-      <Box sx={quickAppSectionSurfaceSx}>
-        <Stack divider={<Divider sx={quickAppSectionDividerSx} />} spacing={0}>
-          <Box sx={quickAppSectionPaneSx}>
-            <Alert severity="info">
-              <Typography variant="body2">
-                {qt(
-                  'quickapp_api.hunyuan_info',
-                  '在右侧快应用面板中选择 Hunyuan3D。此处配置的腾讯云凭证会用于将上传的参考图转换为 3D 模型。'
-                )}
-              </Typography>
-            </Alert>
-          </Box>
-
-          <Box sx={quickAppSectionPaneSx}>
-            <Stack spacing={2}>
-              <InputText
-                label={qt('quickapp_api.tencent_secret_id', '腾讯云 SecretId')}
-                value={settingsValue.aigc3d_config?.tencent_secret_id || ''}
-                onChange={(value) => saveSettings({ aigc3d_config: { tencent_secret_id: value } })}
-                placeholder="AKID..."
-                updateMode="change"
-              />
-              <InputText
-                label={qt('quickapp_api.tencent_secret_key', '腾讯云 SecretKey')}
-                value={settingsValue.aigc3d_config?.tencent_secret_key || ''}
-                onChange={(value) => saveSettings({ aigc3d_config: { tencent_secret_key: value } })}
-                placeholder={qt('quickapp_api.tencent_secret_key_placeholder', '请输入 SecretKey')}
-                updateMode="change"
-              />
-              <InputText
-                label={qt('quickapp_api.api_region', '腾讯云 API 地域')}
-                value={settingsValue.aigc3d_config?.api_region || ''}
-                onChange={(value) => saveSettings({ aigc3d_config: { api_region: value } })}
-                placeholder="ap-guangzhou"
-                updateMode="change"
-              />
-              <Typography color="text.secondary" variant="caption">
-                {qt('quickapp_api.api_region_hint', `留空时默认使用 ${DEFAULT_HY3D_API_REGION}。`)}
-              </Typography>
-            </Stack>
-          </Box>
-
-          <Box sx={quickAppSectionPaneSx}>
-            <Stack spacing={2}>
-              <InputText
-                label={qt('quickapp_api.cos_bucket', 'COS Bucket')}
-                value={settingsValue.aigc3d_config?.cos_bucket || ''}
-                onChange={(value) => saveSettings({ aigc3d_config: { cos_bucket: value } })}
-                placeholder="examplebucket-1250000000"
-                updateMode="change"
-              />
-              <InputText
-                label={qt('quickapp_api.cos_region', 'COS 地域')}
-                value={settingsValue.aigc3d_config?.cos_region || ''}
-                onChange={(value) => saveSettings({ aigc3d_config: { cos_region: value } })}
-                placeholder="ap-guangzhou"
-                updateMode="change"
-              />
-              <InputText
-                label={qt('quickapp_api.cos_key_prefix', 'COS Key 前缀')}
-                value={settingsValue.aigc3d_config?.cos_key_prefix || 'magicpot/hunyuan3d'}
-                onChange={(value) => saveSettings({ aigc3d_config: { cos_key_prefix: value } })}
-                placeholder="magicpot/hunyuan3d"
-                updateMode="change"
-              />
-            </Stack>
-          </Box>
-
-          <Box sx={quickAppSectionPaneSx}>
-            <Stack spacing={2}>
-              <Alert severity="warning">
-                <Typography variant="body2">
-                  {qt(
-                    'quickapp_api.clear_cos_hint',
-                    '清理按钮只会删除当前 Prefix 下的对象，不会清空整个 Bucket。'
-                  )}
-                </Typography>
-              </Alert>
-              <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
-                <Button
-                  color="warning"
-                  disabled={!canClearCosPrefix || isClearingCosPrefix}
-                  onClick={() => void handleClearCosPrefix()}
-                  startIcon={<DeleteSweepOutlinedIcon />}
-                  variant="outlined"
-                >
-                  {isClearingCosPrefix
-                    ? qt('quickapp_api.clear_cos_loading', '清理中...')
-                    : qt('quickapp_api.clear_cos_button', '清理当前 Prefix')}
-                </Button>
-                <Typography color="text.secondary" variant="body2">
-                  {`Prefix: ${effectiveKeyPrefix}`}
-                </Typography>
-              </Box>
-              {!canClearCosPrefix && (
-                <Typography color="text.secondary" variant="caption">
-                  {qt(
-                    'quickapp_api.clear_cos_requirements',
-                    '填写 SecretId、SecretKey、COS Bucket 和 COS 地域后，才可以执行清理。'
-                  )}
-                </Typography>
-              )}
-            </Stack>
-          </Box>
-        </Stack>
-      </Box>
-    </SettingSection>
-  )
-}
-
 const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: PanelProps) => {
   const { t, i18n } = useTranslation()
   const isChineseUi = i18n.language?.toLowerCase().startsWith('zh')
@@ -765,8 +586,6 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
     () => settingsValue.plugin_config?.api_profiles ?? [],
     [settingsValue.plugin_config?.api_profiles]
   )
-  const pluginProfileCards = pluginProfiles
-  const qAppProfiles = React.useMemo(() => getQAppApiProfiles(settingsValue), [settingsValue])
   const qt = React.useCallback(
     (key: string, fallback: string) => {
       const value = t(key)
@@ -786,28 +605,88 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
     [saveSettings]
   )
 
+  const legacyHunyuanProfile = React.useMemo(
+    () => buildLegacyHunyuanProfile(settingsValue),
+    [settingsValue]
+  )
+  const shouldUseLegacyHunyuanProfile = React.useMemo(
+    () =>
+      Boolean(
+        legacyHunyuanProfile &&
+        !pluginProfiles.some((profile) => isHunyuan3DCompatibleProfile(profile))
+      ),
+    [legacyHunyuanProfile, pluginProfiles]
+  )
+  const effectivePluginProfiles = React.useMemo(
+    () =>
+      shouldUseLegacyHunyuanProfile && legacyHunyuanProfile
+        ? [...pluginProfiles, legacyHunyuanProfile]
+        : pluginProfiles,
+    [legacyHunyuanProfile, pluginProfiles, shouldUseLegacyHunyuanProfile]
+  )
+  const pluginProfileCards = effectivePluginProfiles
+  const qAppProfiles = React.useMemo(
+    () =>
+      effectivePluginProfiles.length > 0
+        ? effectivePluginProfiles
+        : getQAppApiProfiles(settingsValue),
+    [effectivePluginProfiles, settingsValue]
+  )
+
+  React.useEffect(() => {
+    if (!settingsValue.use_remote_llm && shouldUseLegacyHunyuanProfile && legacyHunyuanProfile) {
+      savePluginProfiles([...pluginProfiles, legacyHunyuanProfile])
+    }
+  }, [
+    legacyHunyuanProfile,
+    pluginProfiles,
+    savePluginProfiles,
+    settingsValue.use_remote_llm,
+    shouldUseLegacyHunyuanProfile
+  ])
+
   const handleSetPluginApiProfile = React.useCallback(
     (profileId: string, nextProfile: LLMAPIProfile) => {
-      savePluginProfiles(upsertProfile(pluginProfiles, profileId, nextProfile))
+      savePluginProfiles(upsertProfile(effectivePluginProfiles, profileId, nextProfile))
     },
-    [pluginProfiles, savePluginProfiles]
+    [effectivePluginProfiles, savePluginProfiles]
   )
 
   const handleDeletePluginApiProfile = React.useCallback(
     (profileId: string) => {
-      savePluginProfiles(pluginProfiles.filter((profile) => profile.id !== profileId))
+      const deletedProfile = effectivePluginProfiles.find((profile) => profile.id === profileId)
+      const nextProfiles = effectivePluginProfiles.filter((profile) => profile.id !== profileId)
+
+      if (deletedProfile && legacyHunyuanProfile && isHunyuan3DCompatibleProfile(deletedProfile)) {
+        saveSettings({
+          plugin_config: {
+            api_profiles: nextProfiles
+          },
+          aigc3d_config: {
+            tencent_secret_id: '',
+            tencent_secret_key: '',
+            api_region: '',
+            cos_bucket: '',
+            cos_region: '',
+            cos_key_prefix: ''
+          }
+        })
+        return
+      }
+
+      savePluginProfiles(nextProfiles)
     },
-    [pluginProfiles, savePluginProfiles]
+    [effectivePluginProfiles, legacyHunyuanProfile, savePluginProfiles, saveSettings]
   )
 
   const handleAddPluginApiProfile = React.useCallback(() => {
-    savePluginProfiles([...pluginProfiles, createEmptyProfile()])
-  }, [pluginProfiles, savePluginProfiles])
+    savePluginProfiles([...effectivePluginProfiles, createEmptyProfile()])
+  }, [effectivePluginProfiles, savePluginProfiles])
 
   const handleClonePluginApiProfile = React.useCallback(
     (profile: LLMAPIProfile) => {
       savePluginProfiles([
-        ...pluginProfiles,
+        ...effectivePluginProfiles,
         {
           ...stripExternalAuthProfile(profile),
           id: crypto.randomUUID(),
@@ -815,7 +694,7 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
         }
       ])
     },
-    [pluginProfiles, savePluginProfiles]
+    [effectivePluginProfiles, savePluginProfiles]
   )
 
   const apiProfileOptions = React.useMemo(() => {
@@ -1003,12 +882,6 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
       <Box sx={{ mt: 3 }}>
         <DuplicateCheckSection saveSettings={saveSettings} settingsValue={settingsValue} />
       </Box>
-
-      {!settingsValue.use_remote_llm && (
-        <Box sx={{ mt: 3 }}>
-          <HunyuanSection saveSettings={saveSettings} settingsValue={settingsValue} />
-        </Box>
-      )}
     </Box>
   )
 }

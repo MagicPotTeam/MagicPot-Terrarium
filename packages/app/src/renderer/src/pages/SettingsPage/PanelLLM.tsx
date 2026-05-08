@@ -2,6 +2,7 @@
 import React from 'react'
 import { Alert, Box, Button, IconButton, Stack, TextField, Typography } from '@mui/material'
 import { Add as AddIcon, Delete } from '@mui/icons-material'
+import DeleteSweepOutlinedIcon from '@mui/icons-material/DeleteSweepOutlined'
 import { useTheme } from '@mui/material/styles'
 import { useTranslation } from 'react-i18next'
 import InputSwitch from '@renderer/components/inputs/InputSwitch'
@@ -10,8 +11,10 @@ import InputText from '@renderer/components/inputs/InputText'
 import InputTextArea from '@renderer/components/inputs/InputTextArea'
 import InputSelect from '@renderer/components/inputs/InputSelect'
 import { api } from '@renderer/utils/windowUtils'
+import { useMessage } from '@renderer/hooks/useMessage'
 import SettingSection from './components/SettingSection'
 import type { PanelProps } from './PanelProps'
+import { isHunyuan3DCompatibleProfile } from '@shared/config/apiProfileSelectors'
 import {
   getSuggestedModelCatalog,
   isOllamaUrl,
@@ -43,7 +46,11 @@ export type SaveSettings = (value: DeepPartial<Config>) => void
 const DEFAULT_PROVIDER_OPTION = 'default' as const
 const DEFAULT_MODEL_USE_OPTION = 'default' as const
 const OFFICIAL_OPENAI_BASE_URL = 'https://api.openai.com/v1'
+const HUNYUAN_AI3D_BASE_URL = 'https://api.ai3d.cloud.tencent.com'
+const DEFAULT_HY3D_COS_PREFIX = 'magicpot/hunyuan3d'
+const DEFAULT_HY3D_API_REGION = 'ap-guangzhou'
 const LOCAL_DUPLICATE_CHECK_MODEL_ID_PREFIX = 'agent-local:'
+type ProfileCallTypeSelectValue = LLMProfileCallType | 'hunyuan3d'
 
 export const createEmptyProfile = (): LLMAPIProfile => ({
   id: crypto.randomUUID(),
@@ -166,14 +173,54 @@ const stripExternalAuthProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
   return nextProfile
 }
 
+const stripHunyuan3DProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
+  const {
+    tencent_secret_id: _tencentSecretId,
+    tencent_secret_key: _tencentSecretKey,
+    api_region: _apiRegion,
+    cos_bucket: _cosBucket,
+    cos_region: _cosRegion,
+    cos_key_prefix: _cosKeyPrefix,
+    ...nextProfile
+  } = profile
+
+  return nextProfile
+}
+
+const applyHunyuan3DPresetToProfile = (profile: LLMAPIProfile): LLMAPIProfile => ({
+  ...stripLocalModelProfile(stripExternalAuthProfile(profile)),
+  call_type: undefined,
+  model_name: isHunyuan3DCompatibleProfile(profile)
+    ? profile.model_name?.trim() || 'Hunyuan3D Pro'
+    : 'Hunyuan3D Pro',
+  base_url: HUNYUAN_AI3D_BASE_URL,
+  api_key: profile.api_key || '',
+  backup_api_keys: undefined,
+  provider: DEFAULT_PROVIDER_OPTION,
+  deployment: undefined,
+  model_use: DEFAULT_MODEL_USE_OPTION,
+  is_ollama: false,
+  is_vision_model: false,
+  is_ocr_model: false,
+  tencent_secret_id: profile.tencent_secret_id || '',
+  tencent_secret_key: profile.tencent_secret_key || '',
+  api_region: profile.api_region || DEFAULT_HY3D_API_REGION,
+  cos_bucket: profile.cos_bucket || '',
+  cos_region: profile.cos_region || DEFAULT_HY3D_API_REGION,
+  cos_key_prefix: profile.cos_key_prefix || DEFAULT_HY3D_COS_PREFIX
+})
+
+const normalizeHy3dCosPrefix = (value?: string): string =>
+  value?.trim().replace(/^\/+|\/+$/g, '') || DEFAULT_HY3D_COS_PREFIX
+
 const applyCallTypeToProfile = (
   profile: LLMAPIProfile,
-  callType: LLMProfileCallType
+  callType: ProfileCallTypeSelectValue
 ): LLMAPIProfile => {
   switch (callType) {
     case 'local':
       return {
-        ...stripExternalAuthProfile(profile),
+        ...stripHunyuan3DProfile(stripExternalAuthProfile(profile)),
         call_type: 'local',
         base_url: '',
         api_key: '',
@@ -183,10 +230,12 @@ const applyCallTypeToProfile = (
         deployment: undefined,
         local_model_path: normalizeLocalModelPath(profile.local_model_path)
       }
+    case 'hunyuan3d':
+      return applyHunyuan3DPresetToProfile(profile)
     case 'api':
     default:
       return {
-        ...stripLocalModelProfile(stripExternalAuthProfile(profile)),
+        ...stripHunyuan3DProfile(stripLocalModelProfile(stripExternalAuthProfile(profile))),
         call_type: undefined,
         local_model_path: undefined
       }
@@ -364,9 +413,15 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   t
 }) => {
   const theme = useTheme()
+  const { notifyInfo, notifySuccess, notifyWarning, closeMessage } = useMessage()
   const isLight = theme.palette.mode === 'light'
   const copy = (chinese: string, english: string) => (isChineseUi ? chinese : english)
-  const profileCallType = resolveProfileCallType(profile)
+  const resolvedProfileCallType = resolveProfileCallType(profile)
+  const isHunyuan3DCallType =
+    resolvedProfileCallType !== 'local' && isHunyuan3DCompatibleProfile(profile)
+  const profileCallType: ProfileCallTypeSelectValue = isHunyuan3DCallType
+    ? 'hunyuan3d'
+    : resolvedProfileCallType
   const effectiveDeployment = resolveProfileDeployment(profile)
   const effectiveProvider =
     resolveProfileProvider(profile) || getDefaultProviderForDeployment(effectiveDeployment)
@@ -381,11 +436,17 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   const isLocalCallType = profileCallType === 'local'
   const showApiKeyInput = !isLocalCallType && effectiveProvider !== 'ollama'
   const showBackupKeys =
-    !isLocalCallType && effectiveDeployment === 'cloud' && effectiveProvider !== 'ollama'
+    !isLocalCallType &&
+    !isHunyuan3DCallType &&
+    effectiveDeployment === 'cloud' &&
+    effectiveProvider !== 'ollama'
   const showBaseUrlInput = !isLocalCallType
-  const baseUrlPlaceholder = getSuggestedBaseUrl(effectiveProvider, effectiveDeployment)
-  const apiKeyPlaceholder =
-    effectiveProvider === 'ollama'
+  const baseUrlPlaceholder = isHunyuan3DCallType
+    ? HUNYUAN_AI3D_BASE_URL
+    : getSuggestedBaseUrl(effectiveProvider, effectiveDeployment)
+  const apiKeyPlaceholder = isHunyuan3DCallType
+    ? copy('可选：Hunyuan3D API Key', 'Optional Hunyuan3D API Key')
+    : effectiveProvider === 'ollama'
       ? copy('Ollama 本地服务无需密钥', 'No API key needed for Ollama')
       : effectiveDeployment === 'local'
         ? copy('本地服务如无鉴权可留空', 'Optional for local servers without auth')
@@ -415,6 +476,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   ]
   const callTypeOptions = [
     { label: copy('API模型', 'API Model'), value: 'api' },
+    { label: 'Hunyuan3D', value: 'hunyuan3d' },
     { label: copy('本地模型', 'Local Model'), value: 'local' }
   ]
   const localModelPath = normalizeLocalModelPath(profile.local_model_path)
@@ -425,12 +487,24 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           'Only .onnx local models are supported right now.'
         )
       : undefined
+  const configuredHy3dSecretId = profile.tencent_secret_id?.trim() || ''
+  const configuredHy3dSecretKey = profile.tencent_secret_key?.trim() || ''
+  const configuredHy3dBucket = profile.cos_bucket?.trim() || ''
+  const configuredHy3dRegion = profile.cos_region?.trim() || ''
+  const effectiveHy3dKeyPrefix = normalizeHy3dCosPrefix(profile.cos_key_prefix)
+  const canClearHy3dCosPrefix = Boolean(
+    configuredHy3dSecretId &&
+    configuredHy3dSecretKey &&
+    configuredHy3dBucket &&
+    configuredHy3dRegion
+  )
+  const [isClearingHy3dCosPrefix, setIsClearingHy3dCosPrefix] = React.useState(false)
 
   const updateProfile = (nextProfile: LLMAPIProfile) => {
     const nextCallType = resolveProfileCallType(nextProfile)
     if (nextCallType === 'local') {
       onUpdate(profile.id, {
-        ...stripExternalAuthProfile(nextProfile),
+        ...stripHunyuan3DProfile(stripExternalAuthProfile(nextProfile)),
         call_type: 'local',
         base_url: '',
         api_key: '',
@@ -493,6 +567,74 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     [profile, updateProfile]
   )
 
+  const handleClearHy3dCosPrefix = React.useCallback(async () => {
+    const dialogResult = await api().svcDialog.showMessageBox({
+      type: 'warning',
+      title: copy('清理 Hunyuan3D COS 缓存', 'Clear Hunyuan3D COS Cache'),
+      message: copy(
+        '将删除当前 Hunyuan3D Prefix 下的所有对象，此操作不可恢复。',
+        'This will delete all objects under the current Hunyuan3D prefix.'
+      ),
+      detail: [
+        `Bucket: ${configuredHy3dBucket}`,
+        `Region: ${configuredHy3dRegion}`,
+        `Prefix: ${effectiveHy3dKeyPrefix}`
+      ].join('\n'),
+      buttons: [copy('取消', 'Cancel'), copy('确认清理', 'Clear')],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    })
+
+    if (dialogResult.response !== 1) {
+      return
+    }
+
+    const messageKey = notifyInfo(
+      copy('正在清理 Hunyuan3D COS 缓存...', 'Clearing Hunyuan3D COS cache...'),
+      null
+    )
+    setIsClearingHy3dCosPrefix(true)
+
+    try {
+      const result = await api().svcLLMProxy.clearHy3DCosPrefix({ profileId: profile.id })
+
+      if (result.matchedCount === 0) {
+        notifySuccess(copy('当前 Prefix 下没有可清理的对象。', 'No objects were found.'))
+      } else if (result.errorCount > 0) {
+        notifyWarning(
+          copy(
+            `已删除 ${result.deletedCount} 个对象，另有 ${result.errorCount} 个对象删除失败。`,
+            `Deleted ${result.deletedCount} objects, but ${result.errorCount} objects failed.`
+          )
+        )
+      } else {
+        notifySuccess(
+          copy(`已清理 ${result.deletedCount} 个对象。`, `Cleared ${result.deletedCount} objects.`)
+        )
+      }
+    } catch (error) {
+      notifyWarning(
+        error instanceof Error
+          ? error.message
+          : copy('清理 Hunyuan3D COS 缓存失败。', 'Failed to clear the Hunyuan3D COS cache.')
+      )
+    } finally {
+      setIsClearingHy3dCosPrefix(false)
+      closeMessage(messageKey)
+    }
+  }, [
+    closeMessage,
+    configuredHy3dBucket,
+    configuredHy3dRegion,
+    copy,
+    effectiveHy3dKeyPrefix,
+    notifyInfo,
+    notifySuccess,
+    notifyWarning,
+    profile.id
+  ])
+
   return (
     <Box
       sx={{
@@ -520,7 +662,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           label={copy('调用类型', 'Call Type')}
           value={profileCallType}
           onChange={(value) =>
-            updateProfile(applyCallTypeToProfile(profile, value as LLMProfileCallType))
+            updateProfile(applyCallTypeToProfile(profile, value as ProfileCallTypeSelectValue))
           }
           items={callTypeOptions}
         />
@@ -582,9 +724,11 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
         {showApiKeyInput && (
           <InputText
             label={
-              effectiveDeployment === 'local'
-                ? copy('API 密钥（可选）', 'API Key (Optional)')
-                : copy('API 密钥', t('llm.api_key'))
+              isHunyuan3DCallType
+                ? copy('Hunyuan3D API Key（可选）', 'Hunyuan3D API Key (Optional)')
+                : effectiveDeployment === 'local'
+                  ? copy('API 密钥（可选）', 'API Key (Optional)')
+                  : copy('API 密钥', t('llm.api_key'))
             }
             value={profile.api_key}
             onChange={(value) =>
@@ -596,6 +740,105 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
             placeholder={apiKeyPlaceholder}
             shrinkLabel
           />
+        )}
+
+        {isHunyuan3DCallType && (
+          <>
+            <Alert severity="info">
+              <Typography variant="body2">
+                {copy(
+                  '腾讯云 SecretId/SecretKey 用于 Hunyuan3D 任务与 COS 上传；Hunyuan3D API Key 仅在对应 API 通道可用时使用。',
+                  'Tencent SecretId/SecretKey are used for Hunyuan3D jobs and COS uploads. The Hunyuan3D API Key is optional and only used by supported API flows.'
+                )}
+              </Typography>
+            </Alert>
+            <InputText
+              label={copy('腾讯云 SecretId', 'Tencent SecretId')}
+              value={profile.tencent_secret_id || ''}
+              onChange={(value) => updateProfile({ ...profile, tencent_secret_id: value })}
+              placeholder="AKID..."
+              shrinkLabel
+              updateMode="change"
+            />
+            <InputText
+              label={copy('腾讯云 SecretKey', 'Tencent SecretKey')}
+              value={profile.tencent_secret_key || ''}
+              onChange={(value) => updateProfile({ ...profile, tencent_secret_key: value })}
+              placeholder={copy('请输入 SecretKey', 'Enter SecretKey')}
+              shrinkLabel
+              updateMode="change"
+            />
+            <InputText
+              label={copy('腾讯云 API 地域', 'Tencent API Region')}
+              value={profile.api_region || ''}
+              onChange={(value) => updateProfile({ ...profile, api_region: value })}
+              placeholder={DEFAULT_HY3D_API_REGION}
+              shrinkLabel
+              updateMode="change"
+            />
+            <Typography color="text.secondary" variant="caption">
+              {copy(
+                `留空时默认使用 ${DEFAULT_HY3D_API_REGION}。`,
+                `Defaults to ${DEFAULT_HY3D_API_REGION} when empty.`
+              )}
+            </Typography>
+            <InputText
+              label="COS Bucket"
+              value={profile.cos_bucket || ''}
+              onChange={(value) => updateProfile({ ...profile, cos_bucket: value })}
+              placeholder="examplebucket-1250000000"
+              shrinkLabel
+              updateMode="change"
+            />
+            <InputText
+              label={copy('COS 地域', 'COS Region')}
+              value={profile.cos_region || ''}
+              onChange={(value) => updateProfile({ ...profile, cos_region: value })}
+              placeholder={DEFAULT_HY3D_API_REGION}
+              shrinkLabel
+              updateMode="change"
+            />
+            <InputText
+              label={copy('COS Key 前缀', 'COS Key Prefix')}
+              value={profile.cos_key_prefix || DEFAULT_HY3D_COS_PREFIX}
+              onChange={(value) => updateProfile({ ...profile, cos_key_prefix: value })}
+              placeholder={DEFAULT_HY3D_COS_PREFIX}
+              shrinkLabel
+              updateMode="change"
+            />
+            <Alert severity="warning">
+              <Typography variant="body2">
+                {copy(
+                  '清理按钮只会删除当前 Prefix 下的对象，不会清空整个 Bucket。',
+                  'The clear button removes objects only under the current prefix, not the entire bucket.'
+                )}
+              </Typography>
+            </Alert>
+            <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Button
+                color="warning"
+                disabled={!canClearHy3dCosPrefix || isClearingHy3dCosPrefix}
+                onClick={() => void handleClearHy3dCosPrefix()}
+                startIcon={<DeleteSweepOutlinedIcon />}
+                variant="outlined"
+              >
+                {isClearingHy3dCosPrefix
+                  ? copy('清理中...', 'Clearing...')
+                  : copy('清理当前 Prefix', 'Clear Current Prefix')}
+              </Button>
+              <Typography color="text.secondary" variant="body2">
+                {`Prefix: ${effectiveHy3dKeyPrefix}`}
+              </Typography>
+            </Box>
+            {!canClearHy3dCosPrefix && (
+              <Typography color="text.secondary" variant="caption">
+                {copy(
+                  '填写 SecretId、SecretKey、COS Bucket 和 COS 地域后，才可以执行清理。',
+                  'SecretId, SecretKey, COS bucket, and COS region are required before clearing.'
+                )}
+              </Typography>
+            )}
+          </>
         )}
 
         {showBackupKeys && (

@@ -262,7 +262,9 @@ export type LLMSignHy3DModelResp = {
   expiresAt: string
 }
 
-export type LLMClearHy3DCosPrefixReq = {}
+export type LLMClearHy3DCosPrefixReq = {
+  profileId?: string
+}
 
 export type LLMClearHy3DCosPrefixResp = {
   bucket: string

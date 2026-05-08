@@ -2164,6 +2164,56 @@ describe('LLMProxySvcImpl', () => {
     })
   })
 
+  it('clears the selected Hunyuan3D quick app profile COS prefix', async () => {
+    clearHy3dCosPrefixMock.mockResolvedValue({
+      bucket: 'profile-bucket-1250000000',
+      region: 'ap-shanghai',
+      keyPrefix: 'profiles/hy3d',
+      matchedCount: 1,
+      deletedCount: 1,
+      errorCount: 0
+    })
+
+    mockConfig({
+      aigc3d_config: {
+        ...DEFAULT_CONFIG.aigc3d_config!,
+        tencent_secret_id: 'legacy-secret-id',
+        tencent_secret_key: 'legacy-secret-key',
+        cos_bucket: 'legacy-bucket-1250000000',
+        cos_region: 'ap-guangzhou',
+        cos_key_prefix: 'legacy/hy3d'
+      },
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'plugin-hunyuan',
+            model_name: 'Hunyuan3D Pro',
+            base_url: 'https://api.ai3d.cloud.tencent.com',
+            api_key: '',
+            tencent_secret_id: 'profile-secret-id',
+            tencent_secret_key: 'profile-secret-key',
+            cos_bucket: 'profile-bucket-1250000000',
+            cos_region: 'ap-shanghai',
+            cos_key_prefix: 'profiles/hy3d'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    await svc.clearHy3DCosPrefix({ profileId: 'plugin-hunyuan' })
+
+    expect(clearHy3dCosPrefixMock).toHaveBeenCalledWith(
+      { secretId: 'profile-secret-id', secretKey: 'profile-secret-key' },
+      {
+        bucket: 'profile-bucket-1250000000',
+        region: 'ap-shanghai',
+        keyPrefix: 'profiles/hy3d'
+      }
+    )
+  })
+
   it('uploads a local model file via uploadHy3DModel', async () => {
     uploadLocalHy3dModelMock.mockResolvedValue({
       url: 'https://cos.example/signed-url',

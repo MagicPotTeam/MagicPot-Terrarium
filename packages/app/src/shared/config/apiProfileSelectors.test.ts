@@ -3,6 +3,7 @@ import { DEFAULT_CONFIG } from './config'
 import {
   findHunyuan3DQAppProfile,
   getQAppApiProfiles,
+  isConfiguredHunyuan3DProfile,
   isVisionCapableApiProfile
 } from './apiProfileSelectors'
 
@@ -183,6 +184,27 @@ describe('apiProfileSelectors', () => {
     }
 
     expect(findHunyuan3DQAppProfile(config)?.id).toBe('agent-hunyuan')
+  })
+
+  it('treats Hunyuan3D Tencent credential profiles as configured without an API key', () => {
+    const profile = {
+      id: 'plugin-hunyuan-sdk',
+      model_name: 'Hunyuan3D Pro',
+      base_url: 'https://api.ai3d.cloud.tencent.com',
+      api_key: '',
+      tencent_secret_id: 'secret-id',
+      tencent_secret_key: 'secret-key'
+    }
+    const config = {
+      ...DEFAULT_CONFIG,
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [profile]
+      }
+    }
+
+    expect(isConfiguredHunyuan3DProfile(profile)).toBe(true)
+    expect(findHunyuan3DQAppProfile(config)?.id).toBe('plugin-hunyuan-sdk')
   })
 
   it('treats explicit vision profiles as vision-capable for quick app prompt helpers', () => {
