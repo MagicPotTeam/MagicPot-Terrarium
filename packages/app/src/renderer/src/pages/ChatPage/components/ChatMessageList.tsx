@@ -646,7 +646,7 @@ const UserMessageEditForm: React.FC<{
           <Button
             variant="contained"
             size="small"
-            disabled={!editingContent.trim() || editingContent.trim() === message.content}
+            disabled={!editingContent.trim()}
             onClick={() => {
               const newContent = editingContent.trim()
               if (!newContent) return

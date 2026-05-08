@@ -29,6 +29,9 @@ const buildChatMessageList = (
   options?: {
     active?: boolean
     isLoading?: boolean
+    editingMessageIndex?: number | null
+    editingContent?: string
+    onSendEditedMessage?: ReturnType<typeof vi.fn>
     onDownloadAttachment?: ReturnType<typeof vi.fn>
   }
 ) => (
@@ -37,11 +40,11 @@ const buildChatMessageList = (
       active={options?.active}
       currentSession={currentSession}
       isLoading={options?.isLoading ?? false}
-      editingMessageIndex={null}
-      editingContent=""
+      editingMessageIndex={options?.editingMessageIndex ?? null}
+      editingContent={options?.editingContent ?? ''}
       onSetEditingIndex={vi.fn()}
       onSetEditingContent={vi.fn()}
-      onSendEditedMessage={vi.fn()}
+      onSendEditedMessage={options?.onSendEditedMessage ?? vi.fn()}
       onPreviewImage={vi.fn()}
       onImageContextMenu={vi.fn()}
       onDownloadAttachment={options?.onDownloadAttachment ?? vi.fn()}
@@ -57,6 +60,9 @@ const renderChatMessageList = (
   options?: {
     active?: boolean
     isLoading?: boolean
+    editingMessageIndex?: number | null
+    editingContent?: string
+    onSendEditedMessage?: ReturnType<typeof vi.fn>
     onDownloadAttachment?: ReturnType<typeof vi.fn>
   }
 ) => render(buildChatMessageList(currentSession, options))
@@ -171,6 +177,49 @@ describe('ChatMessageList text selection and reply actions', () => {
 
     expect(writeTextMock).toHaveBeenCalledWith('Copy this reply.')
     expect(notifySuccessMock).toHaveBeenCalledWith('\u56de\u7b54\u5df2\u590d\u5236')
+  })
+
+  it('allows resubmitting an edited user message without changing its text', () => {
+    const onSendEditedMessage = vi.fn()
+    const attachment: ChatAttachment = {
+      type: 'image',
+      url: 'local-media:///demo/reference.png',
+      fileName: 'reference.png'
+    }
+    const session: ChatSession = {
+      id: 'session-resubmit-unchanged-edit',
+      title: 'Resubmit unchanged edit',
+      messages: [
+        {
+          role: 'user',
+          content: 'Try the same prompt again.',
+          attachments: [attachment],
+          hiddenContext: 'canvas context'
+        },
+        {
+          role: 'assistant',
+          content: 'First reply.'
+        }
+      ]
+    }
+
+    renderChatMessageList(session, {
+      editingMessageIndex: 0,
+      editingContent: 'Try the same prompt again.',
+      onSendEditedMessage
+    })
+
+    const submitButton = screen.getByRole('button', { name: '提交' })
+    expect(submitButton).not.toBeDisabled()
+
+    fireEvent.click(submitButton)
+
+    expect(onSendEditedMessage).toHaveBeenCalledWith(
+      'Try the same prompt again.',
+      [attachment],
+      'canvas context',
+      []
+    )
   })
 
   it('downloads assistant replies from the icon menu using the previous user context', () => {
