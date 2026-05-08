@@ -129,8 +129,10 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   return (
     <Box
       ref={chatContainerRef}
+      data-testid="chat-message-list"
       sx={{
         flex: 1,
+        minHeight: 0,
         overflow: 'auto',
         overflowX: 'hidden',
         display: 'flex',

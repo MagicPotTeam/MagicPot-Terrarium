@@ -699,3 +699,26 @@ describe('ChatMessageList text selection and reply actions', () => {
     })
   })
 })
+
+describe('ChatMessageList layout', () => {
+  it('allows long replies to scroll instead of pushing the composer out', () => {
+    renderChatMessageList({
+      id: 'session-long-reply',
+      title: 'Long reply',
+      messages: [
+        {
+          role: 'assistant',
+          content: Array.from({ length: 60 }, (_, index) => `${index + 1}. long reply line`).join(
+            '\n'
+          )
+        }
+      ]
+    })
+
+    expect(screen.getByTestId('chat-message-list')).toHaveStyle({
+      flex: '1',
+      minHeight: '0',
+      overflow: 'auto'
+    })
+  })
+})

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ThemeProvider } from '@mui/material'
 import { theme } from '@renderer/theme'
@@ -347,6 +347,29 @@ describe('ChatComposer', () => {
     expect(textarea).toHaveValue('hello Xworld')
     expect(textarea.selectionStart).toBe(7)
     expect(textarea.selectionEnd).toBe(7)
+  })
+
+  it('infers the middle insertion caret when selection events are stale', () => {
+    render(<ControlledChatComposer initialValue={'line 1\nline 2\nline 3'} />)
+
+    const textarea = screen.getByTestId('chat-composer-input') as HTMLTextAreaElement
+    act(() => {
+      textarea.focus()
+    })
+    textarea.setSelectionRange(7, 7)
+
+    fireEvent.change(textarea, {
+      target: {
+        value: 'line 1\nXline 2\nline 3',
+        selectionStart: 21,
+        selectionEnd: 21,
+        selectionDirection: 'none'
+      }
+    })
+
+    expect(textarea).toHaveValue('line 1\nXline 2\nline 3')
+    expect(textarea.selectionStart).toBe(8)
+    expect(textarea.selectionEnd).toBe(8)
   })
 
   it('keeps the middle caret through parent rerenders before typing', () => {

@@ -121,41 +121,77 @@ const readInputSelectionSnapshot = (
   }
 }
 
-const inferSelectionAfterControlledInputChange = (
+const inferSelectionFromValueDiff = (
   previousValue: string,
-  previousSelection: InputSelectionSnapshot | null,
-  nextValue: string,
-  rawSelection: InputSelectionSnapshot
-): InputSelectionSnapshot => {
-  if (!previousSelection || previousSelection.value !== previousValue) {
-    return rawSelection
+  nextValue: string
+): InputSelectionSnapshot | null => {
+  if (previousValue === nextValue) {
+    return null
   }
 
-  const rawSelectionAtEnd =
-    rawSelection.start === nextValue.length && rawSelection.end === nextValue.length
-  const previousSelectionWasInsideText = previousSelection.start < previousValue.length
-  if (!rawSelectionAtEnd || !previousSelectionWasInsideText) {
-    return rawSelection
+  let prefixLength = 0
+  while (
+    prefixLength < previousValue.length &&
+    prefixLength < nextValue.length &&
+    previousValue[prefixLength] === nextValue[prefixLength]
+  ) {
+    prefixLength += 1
   }
 
-  const prefix = previousValue.slice(0, previousSelection.start)
-  const suffix = previousValue.slice(previousSelection.end)
-  if (!nextValue.startsWith(prefix) || !nextValue.endsWith(suffix)) {
-    return rawSelection
+  let previousSuffixIndex = previousValue.length
+  let nextSuffixIndex = nextValue.length
+  while (
+    previousSuffixIndex > prefixLength &&
+    nextSuffixIndex > prefixLength &&
+    previousValue[previousSuffixIndex - 1] === nextValue[nextSuffixIndex - 1]
+  ) {
+    previousSuffixIndex -= 1
+    nextSuffixIndex -= 1
   }
 
-  const insertedLength = nextValue.length - prefix.length - suffix.length
-  if (insertedLength < 0) {
-    return rawSelection
-  }
-
-  const inferredPosition = prefix.length + insertedLength
+  const insertedLength = Math.max(0, nextSuffixIndex - prefixLength)
+  const inferredPosition = prefixLength + insertedLength
   return {
     value: nextValue,
     start: inferredPosition,
     end: inferredPosition,
     direction: 'none'
   }
+}
+
+const inferSelectionAfterControlledInputChange = (
+  previousValue: string,
+  previousSelection: InputSelectionSnapshot | null,
+  nextValue: string,
+  rawSelection: InputSelectionSnapshot
+): InputSelectionSnapshot => {
+  const rawSelectionAtEnd =
+    rawSelection.start === nextValue.length && rawSelection.end === nextValue.length
+  if (!rawSelectionAtEnd || previousValue === nextValue) {
+    return rawSelection
+  }
+
+  if (
+    previousSelection?.value === previousValue &&
+    previousSelection.start < previousValue.length
+  ) {
+    const prefix = previousValue.slice(0, previousSelection.start)
+    const suffix = previousValue.slice(previousSelection.end)
+    if (nextValue.startsWith(prefix) && nextValue.endsWith(suffix)) {
+      const insertedLength = nextValue.length - prefix.length - suffix.length
+      if (insertedLength >= 0) {
+        const inferredPosition = prefix.length + insertedLength
+        return {
+          value: nextValue,
+          start: inferredPosition,
+          end: inferredPosition,
+          direction: 'none'
+        }
+      }
+    }
+  }
+
+  return inferSelectionFromValueDiff(previousValue, nextValue) ?? rawSelection
 }
 
 const buildToolCommandDraft = (tool: MagicPotAppToolDescriptor): string =>
@@ -221,6 +257,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   const isComposingInputRef = useRef(false)
   const latestInputSelectionRef = useRef<InputSelectionSnapshot | null>(null)
   const pendingInputSelectionRef = useRef<InputSelectionSnapshot | null>(null)
+  const beforeInputSelectionRef = useRef<InputSelectionSnapshot | null>(null)
   const [addMenuAnchorEl, setAddMenuAnchorEl] = useState<HTMLElement | null>(null)
   const [textareaMaxHeight, setTextareaMaxHeight] = useState<number | undefined>(undefined)
   const [attachmentPreviewMaxHeight, setAttachmentPreviewMaxHeight] = useState<number | undefined>(
@@ -283,23 +320,45 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     recalcMaxHeight()
   }, [visiblePendingAttachmentEntries.length, recalcMaxHeight])
 
+  const restoreInputSelection = useCallback(
+    (selection: InputSelectionSnapshot) => {
+      const input = composerInputRef.current
+      if (!input || document.activeElement !== input || input.value !== selection.value)
+        return false
+
+      const maxPosition = input.value.length
+      const nextSelection = {
+        ...selection,
+        start: Math.min(selection.start, maxPosition),
+        end: Math.min(selection.end, maxPosition)
+      }
+
+      input.setSelectionRange(nextSelection.start, nextSelection.end, nextSelection.direction)
+      latestInputSelectionRef.current = nextSelection
+      return true
+    },
+    [composerInputRef]
+  )
+
   useLayoutEffect(() => {
     const pendingSelection = pendingInputSelectionRef.current
     const selection = pendingSelection ?? latestInputSelectionRef.current
     if (!selection) return
 
-    const input = composerInputRef.current
     pendingInputSelectionRef.current = null
+    const input = composerInputRef.current
     if (!input || document.activeElement !== input) return
     if (!pendingSelection && (isComposingInputRef.current || input.value !== selection.value))
       return
 
-    const maxPosition = input.value.length
-    input.setSelectionRange(
-      Math.min(selection.start, maxPosition),
-      Math.min(selection.end, maxPosition),
-      selection.direction
-    )
+    restoreInputSelection(selection)
+    if (!pendingSelection || typeof window.requestAnimationFrame !== 'function') return
+
+    const frameId = window.requestAnimationFrame(() => {
+      restoreInputSelection(selection)
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
   })
 
   const handleInputSelectionChange = (
@@ -308,12 +367,21 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     latestInputSelectionRef.current = readInputSelectionSnapshot(event.currentTarget)
   }
 
+  const handleBeforeInput = (event: React.FormEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    beforeInputSelectionRef.current = readInputSelectionSnapshot(event.currentTarget)
+  }
+
   const handleInputChange = (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const previousValue = committedInputValueRef.current
     const nextValue = event.target.value
+    const selectionBeforeInput =
+      beforeInputSelectionRef.current?.value === previousValue
+        ? beforeInputSelectionRef.current
+        : null
+    beforeInputSelectionRef.current = null
     const nextSelection = inferSelectionAfterControlledInputChange(
       previousValue,
-      latestInputSelectionRef.current,
+      selectionBeforeInput ?? latestInputSelectionRef.current,
       nextValue,
       readInputSelectionSnapshot(event.target)
     )
@@ -682,8 +750,10 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
               inputProps={{
                 'data-testid': 'chat-composer-input',
                 onFocus: handleInputSelectionChange,
+                onBeforeInput: handleBeforeInput,
                 onKeyUp: handleInputSelectionChange,
                 onMouseUp: handleInputSelectionChange,
+                onClick: handleInputSelectionChange,
                 onSelect: handleInputSelectionChange,
                 onCompositionStart: handleCompositionStart,
                 onCompositionEnd: handleCompositionEnd,
