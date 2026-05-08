@@ -85,76 +85,17 @@ jobs:
           }
 
           $archive = $archiveFiles[0]
-          [int64]$maxPartBytes = [int64]1900 * 1024 * 1024
           [int64]$githubLimitBytes = [int64]2147483648
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive.FullName).Hash.ToLowerInvariant()
 
+          if ($archive.Length -ge $githubLimitBytes) {
+            throw "Windows archive exceeds GitHub's single-asset size limit: $($archive.Name) is $($archive.Length) bytes"
+          }
+
+          Copy-Item -LiteralPath $archive.FullName -Destination (Join-Path $assetsDir $archive.Name)
           Set-Content `
             -LiteralPath (Join-Path $assetsDir "$($archive.Name).sha256") `
             -Value "$hash  $($archive.Name)"
-
-          if ($archive.Length -lt $githubLimitBytes) {
-            Copy-Item -LiteralPath $archive.FullName -Destination (Join-Path $assetsDir $archive.Name)
-            Set-Content `
-              -LiteralPath (Join-Path $assetsDir "$($archive.Name).parts.txt") `
-              -Value @(
-                "file=$($archive.Name)"
-                "sha256=$hash"
-                "parts=1"
-                "This archive is below GitHub's single-asset size limit and does not need reassembly."
-              )
-            Get-ChildItem -LiteralPath $assetsDir | Select-Object Name,Length
-            exit 0
-          }
-
-          $buffer = New-Object byte[] (4 * 1024 * 1024)
-          $inputStream = [System.IO.File]::OpenRead($archive.FullName)
-          $partNames = @()
-
-          try {
-            while ($inputStream.Position -lt $inputStream.Length) {
-              $partName = "{0}.{1:D3}" -f $archive.Name, ($partNames.Count + 1)
-              $partPath = Join-Path $assetsDir $partName
-              $partNames += $partName
-              $outputStream = [System.IO.File]::Create($partPath)
-
-              try {
-                [int64]$remaining = [Math]::Min($maxPartBytes, $inputStream.Length - $inputStream.Position)
-                while ($remaining -gt 0) {
-                  [int64]$readLength = [Math]::Min([int64]$buffer.Length, $remaining)
-                  $read = $inputStream.Read($buffer, 0, [int]$readLength)
-                  if ($read -le 0) {
-                    break
-                  }
-
-                  $outputStream.Write($buffer, 0, $read)
-                  $remaining -= $read
-                }
-              } finally {
-                $outputStream.Dispose()
-              }
-
-              $part = Get-Item -LiteralPath $partPath
-              if ($part.Length -ge $githubLimitBytes) {
-                throw "Split part exceeds GitHub release asset limit: $partPath"
-              }
-            }
-          } finally {
-            $inputStream.Dispose()
-          }
-
-          $cmdParts = $partNames -join '+'
-          Set-Content `
-            -LiteralPath (Join-Path $assetsDir "$($archive.Name).parts.txt") `
-            -Value @(
-              "file=$($archive.Name)"
-              "sha256=$hash"
-              "parts=$($partNames.Count)"
-              "Download every numbered part, then reassemble in order before extracting."
-              "Windows cmd example:"
-              "copy /b $cmdParts $($archive.Name)"
-              "After reassembly, verify the SHA256 against $($archive.Name).sha256."
-            )
 
           Get-ChildItem -LiteralPath $assetsDir | Select-Object Name,Length
 
@@ -169,8 +110,8 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body: |
-            Windows embedded builds are distributed as `.7z` archives and may be split because GitHub Release assets must be smaller than 2 GiB.
-            If numbered `.001`, `.002`, ... files are present, download all parts and follow the matching `.parts.txt` instructions before extracting.
+            Windows embedded builds are distributed as single `.7z` archives.
+            A `.sha256` file is included for archive integrity verification.
           files: |
             dist/release-assets/*
         env:
