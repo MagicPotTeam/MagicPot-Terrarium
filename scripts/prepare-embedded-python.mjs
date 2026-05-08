@@ -37,6 +37,8 @@ const requirementsMode = process.env.EMBEDDED_REQUIREMENTS_MODE || 'prefer-fixed
 const pruneRuntime = process.env.EMBEDDED_PRUNE_RUNTIME !== '0'
 const keepOnnxRuntimeGpu = process.env.EMBEDDED_KEEP_ONNXRUNTIME_GPU === '1'
 const keepTorchMultiGpuSolver = process.env.EMBEDDED_KEEP_TORCH_MULTI_GPU_SOLVER === '1'
+const keepTorchNvrtcAlt = process.env.EMBEDDED_KEEP_TORCH_NVRTC_ALT === '1'
+const keepUvInstaller = process.env.EMBEDDED_KEEP_UV_INSTALLER === '1'
 
 function assertInsideRepo(targetPath) {
   const resolved = path.resolve(targetPath)
@@ -499,10 +501,27 @@ function pruneEmbeddedRuntime() {
     if (!keepTorchMultiGpuSolver) {
       removeRuntimePath(path.join(sitePackages, 'torch', 'lib', 'cusolverMg64_12.dll'), stats)
     }
+    if (!keepTorchNvrtcAlt) {
+      removeRuntimePath(path.join(sitePackages, 'torch', 'lib', 'nvrtc64_130_0.alt.dll'), stats)
+    }
+
+    if (!keepUvInstaller) {
+      for (const fileName of ['uv.exe', 'uvw.exe', 'uvx.exe']) {
+        removeRuntimePath(path.join(pythonDir, 'Scripts', fileName), stats)
+      }
+
+      removeRuntimePath(path.join(sitePackages, 'uv'), stats)
+      for (const entry of fs.readdirSync(sitePackages, { withFileTypes: true })) {
+        if (entry.isDirectory() && /^uv-.+\.dist-info$/i.test(entry.name)) {
+          removeRuntimePath(path.join(sitePackages, entry.name), stats)
+        }
+      }
+    }
 
     for (const redundantPath of [
       path.join(pythonDir, 'share', 'jupyter'),
       path.join(sitePackages, 'pydeck', 'nbextension'),
+      path.join(sitePackages, 'comfyui_frontend_package', 'static', 'assets', 'video-BvOHf4P9.mp4'),
       path.join(sitePackages, 'selenium', 'webdriver', 'common', 'linux'),
       path.join(sitePackages, 'selenium', 'webdriver', 'common', 'macos'),
       path.join(sitePackages, 'skimage', 'data'),
@@ -573,6 +592,8 @@ async function main() {
           pruneRuntime,
           keepOnnxRuntimeGpu,
           keepTorchMultiGpuSolver,
+          keepTorchNvrtcAlt,
+          keepUvInstaller,
           comfyRequirements: path.relative(stagingRoot, path.join(comfyDir, 'requirements.txt')),
           customNodeRequirements: getCustomNodeRequirementFiles().map((filePath) =>
             path.relative(stagingRoot, filePath)
