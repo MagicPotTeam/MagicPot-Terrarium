@@ -44,7 +44,8 @@ jobs:
                 --jq '{isDraft: .isDraft, assetCount: (.assets | length)}' 2>/dev/null || true)
 
               if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
-                echo "Latest release ${TAG_NAME} does not match package.json ${PACKAGE_VERSION}, not retrying it"
+                echo "Latest release ${TAG_NAME} does not match package.json ${PACKAGE_VERSION}, ignoring it"
+                LAST_RELEASE_COMMIT=""
               elif [ -z "$RELEASE_JSON" ]; then
                 echo "Latest release commit has no GitHub release, retrying ${TAG_NAME}"
                 echo "release_mode=retry" >> "$GITHUB_OUTPUT"
@@ -68,10 +69,12 @@ jobs:
           fi
 
           if [ -z "$LAST_RELEASE_COMMIT" ]; then
-            COMMITS=$(git log --oneline origin/master | wc -l)
-          else
-            COMMITS=$(git log --oneline "${LAST_RELEASE_COMMIT}..origin/master" | wc -l)
+            echo "No release commit matches package.json ${PACKAGE_VERSION}; creating the initial release without bumping"
+            echo "release_mode=initial" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          COMMITS=$(git log --oneline "${LAST_RELEASE_COMMIT}..origin/master" | wc -l)
 
           if [ "$COMMITS" -eq 0 ]; then
             echo "No new commits found on master, skipping workflow"
@@ -83,14 +86,14 @@ jobs:
 
   ci:
     needs: check-commits
-    if: needs.check-commits.outputs.release_mode == 'bump'
+    if: needs.check-commits.outputs.release_mode == 'bump' || needs.check-commits.outputs.release_mode == 'initial'
     uses: ./.github/workflows/call-ci.yml
     with:
       ref: refs/heads/master
 
   build:
     needs: check-commits
-    if: needs.check-commits.outputs.release_mode == 'bump'
+    if: needs.check-commits.outputs.release_mode == 'bump' || needs.check-commits.outputs.release_mode == 'initial'
     uses: ./.github/workflows/call-build.yml
     with:
       ref: refs/heads/master
@@ -100,7 +103,7 @@ jobs:
       - check-commits
       - ci
       - build
-    if: needs.check-commits.outputs.release_mode == 'bump'
+    if: needs.check-commits.outputs.release_mode == 'bump' || needs.check-commits.outputs.release_mode == 'initial'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -126,7 +129,13 @@ jobs:
           git checkout -B "$RELEASE_BRANCH" origin/master
 
       - name: Bump version
-        run: node ./scripts/release/bump-version.mjs
+        run: |
+          if [ "${{ needs.check-commits.outputs.release_mode }}" = "initial" ]; then
+            echo "Initial release uses the existing package.json version."
+            exit 0
+          fi
+
+          node ./scripts/release/bump-version.mjs
 
       - name: Update embedded submodules
         run: npm run release:update-submodules
@@ -149,7 +158,7 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add package.json package-lock.json scripts/comfy/embedded-sources.json vendor/comfyui
-          git commit -m "$COMMIT_MESSAGE"
+          git commit --allow-empty -m "$COMMIT_MESSAGE"
           COMMIT_SHA=$(git rev-parse HEAD)
           git push --force origin HEAD:$RELEASE_BRANCH
 
@@ -172,6 +181,7 @@ jobs:
           Automated nightly release PR.
 
           - Source branch: \`$RELEASE_BRANCH\`
+          - Release mode: \`${{ needs.check-commits.outputs.release_mode }}\`
           - Triggered by: \`${{ github.workflow }}\`
           - Run: \`${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\`
           - Merge policy: this PR is merged only after the release package is built and uploaded successfully.
