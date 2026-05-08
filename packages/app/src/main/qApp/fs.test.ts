@@ -373,7 +373,7 @@ describe('QAppFSCli with memfs', () => {
       expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.qacfg.json`))).toBe(false)
     })
 
-    it('rejects deleting bundled-only qApps', async () => {
+    it('deletes bundled-only qApps from the bundled qApp directory', async () => {
       const fsp = await import('node:fs/promises')
       await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
       await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
@@ -388,8 +388,20 @@ describe('QAppFSCli with memfs', () => {
       )
 
       const cli = new QAppFSCli()
-      await expect(cli.deleteQApp(key)).rejects.toThrow('read-only')
-      expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.qacfg.json`))).toBe(true)
+      await cli.deleteQApp(key)
+
+      expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.qacfg.json`))).toBe(false)
+      expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.prompt.json`))).toBe(false)
+      expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.manifest.json`))).toBe(false)
+    })
+
+    it('rejects deleting missing qApps', async () => {
+      const fsp = await import('node:fs/promises')
+      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
+      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+
+      const cli = new QAppFSCli()
+      await expect(cli.deleteQApp('missing/app')).rejects.toThrow('not found')
     })
   })
 

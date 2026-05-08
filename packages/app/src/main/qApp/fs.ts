@@ -378,26 +378,37 @@ export class QAppFSCli {
 
   async deleteQApp(key: string): Promise<void> {
     await this.prepareQAppStorage()
-    const qAppDir = await this.getWritableQAppDir()
-    const { basePath, qAppPath, workflowPath, manifestPath } = this.getQAppPaths(qAppDir, key)
-    const hasDirectory = await exists(basePath)
-    const hasBundle = (await exists(qAppPath)) || (await exists(workflowPath))
+    const deleteFromDir = async (qAppDir: string): Promise<boolean> => {
+      const { basePath, qAppPath, workflowPath, manifestPath } = this.getQAppPaths(qAppDir, key)
+      const hasDirectory = await exists(basePath)
+      const hasBundle = (await exists(qAppPath)) || (await exists(workflowPath))
 
-    if (!hasDirectory && !hasBundle) {
-      throw new Error(`QApp ${key} is read-only`)
-    }
-
-    if (hasDirectory) {
-      const stat = await fs.stat(basePath)
-      if (stat.isDirectory()) {
-        await fs.rm(basePath, { recursive: true, force: true })
-        return
+      if (!hasDirectory && !hasBundle) {
+        return false
       }
+
+      if (hasDirectory) {
+        const stat = await fs.stat(basePath)
+        if (stat.isDirectory()) {
+          await fs.rm(basePath, { recursive: true, force: true })
+          return true
+        }
+      }
+
+      if (await exists(qAppPath)) await fs.unlink(qAppPath)
+      if (await exists(workflowPath)) await fs.unlink(workflowPath)
+      if (await exists(manifestPath)) await fs.unlink(manifestPath)
+      return true
     }
 
-    if (await exists(qAppPath)) await fs.unlink(qAppPath)
-    if (await exists(workflowPath)) await fs.unlink(workflowPath)
-    if (await exists(manifestPath)) await fs.unlink(manifestPath)
+    if (await deleteFromDir(await this.getWritableQAppDir())) {
+      return
+    }
+    if (await deleteFromDir(await this.getBuiltinQAppDir())) {
+      return
+    }
+
+    throw new Error(`QApp ${key} not found`)
   }
 
   async renameQApp(key: string, name: string): Promise<void> {
