@@ -86,16 +86,12 @@ jobs:
 
           $archive = $archiveFiles[0]
           [int64]$githubLimitBytes = [int64]2147483648
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive.FullName).Hash.ToLowerInvariant()
 
           if ($archive.Length -ge $githubLimitBytes) {
             throw "Windows archive exceeds GitHub's single-asset size limit: $($archive.Name) is $($archive.Length) bytes"
           }
 
           Copy-Item -LiteralPath $archive.FullName -Destination (Join-Path $assetsDir $archive.Name)
-          Set-Content `
-            -LiteralPath (Join-Path $assetsDir "$($archive.Name).sha256") `
-            -Value "$hash  $($archive.Name)"
 
           Get-ChildItem -LiteralPath $assetsDir | Select-Object Name,Length
 
@@ -111,7 +107,6 @@ jobs:
           generate_release_notes: true
           body: |
             Windows embedded builds are distributed as single `.7z` archives.
-            A `.sha256` file is included for archive integrity verification.
           files: |
             dist/release-assets/*
         env:
