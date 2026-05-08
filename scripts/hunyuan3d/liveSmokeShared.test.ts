@@ -51,7 +51,7 @@ describe('getRapidSmokeConfig', () => {
         secretId: 'sid',
         secretKey: 'skey'
       },
-      apiRegion: 'ap-shanghai',
+      apiRegion: 'ap-guangzhou',
       cos: {
         bucket: 'bucket-a',
         region: 'ap-shanghai',

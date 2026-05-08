@@ -216,7 +216,7 @@
     "tencent_secret_key": "Tencent SecretKey",
     "tencent_secret_key_placeholder": "Please enter the SecretKey",
     "api_region": "Tencent API Region",
-    "api_region_hint": "When left empty, MagicPot falls back to the COS region.",
+    "api_region_hint": "When left empty, MagicPot uses ap-guangzhou.",
     "cos_bucket": "COS Bucket",
     "cos_region": "COS Region",
     "cos_key_prefix": "COS Key Prefix",

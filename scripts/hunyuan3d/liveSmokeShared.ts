@@ -23,6 +23,8 @@ export type HunyuanProSmokeConfig = {
   modelName: string
 }
 
+const DEFAULT_HY3D_API_REGION = 'ap-guangzhou'
+
 const normalizeModeValue = (value: string): string =>
   String(value || '')
     .trim()
@@ -68,9 +70,7 @@ export const getRapidSmokeConfig = (config: Partial<Config>): HunyuanRapidSmokeC
 
   const secretId = String(aigc3dConfig?.tencent_secret_id || '').trim()
   const secretKey = String(aigc3dConfig?.tencent_secret_key || '').trim()
-  const apiRegion = String(
-    aigc3dConfig?.api_region || aigc3dConfig?.cos_region || 'ap-guangzhou'
-  ).trim()
+  const apiRegion = String(aigc3dConfig?.api_region || '').trim() || DEFAULT_HY3D_API_REGION
   const cosBucket = String(aigc3dConfig?.cos_bucket || '').trim()
   const cosRegion = String(aigc3dConfig?.cos_region || '').trim()
   const cosKeyPrefix = normalizeSmokePrefix(aigc3dConfig?.cos_key_prefix)

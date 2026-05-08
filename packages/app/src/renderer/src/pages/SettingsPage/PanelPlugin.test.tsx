@@ -48,7 +48,7 @@ const buildEnglishTranslations = (): Record<string, string> => ({
     'Choose Hunyuan3D from the Quick Apps panel on the right. The Tencent Cloud credentials configured here are used to turn the uploaded reference image into a 3D model.',
   'quickapp_api.open_quickapp_api': 'Open Quick App API',
   'quickapp_api.api_region': 'Tencent API Region',
-  'quickapp_api.api_region_hint': 'When left empty, MagicPot falls back to the COS region.',
+  'quickapp_api.api_region_hint': 'When left empty, MagicPot uses ap-guangzhou.',
   'quickapp_api.clear_cos_button': 'Clear Current Prefix',
   'quickapp_api.clear_cos_loading': 'Clearing...',
   'quickapp_api.clear_cos_dialog_title': 'Clear Hunyuan3D COS Cache',

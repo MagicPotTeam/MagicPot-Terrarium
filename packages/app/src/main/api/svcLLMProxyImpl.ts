@@ -78,6 +78,8 @@ const decodeHy3dProfileSegment = (value?: string): string => {
 const isMockFetchFunction = (value: unknown): value is FetchImpl =>
   typeof value === 'function' && 'mock' in (value as unknown as { mock?: unknown })
 
+const DEFAULT_HY3D_API_REGION = 'ap-guangzhou'
+
 const applySkillRuntimeContextMessageLimit = (req: LLMChatReq): LLMChatReq => {
   if (!req.skillRuntime) {
     return req
@@ -952,9 +954,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   }
 
   private getHunyuan3DApiRegion(config: Config): string {
-    return (
-      config.aigc3d_config?.api_region?.trim() || config.aigc3d_config?.cos_region?.trim() || ''
-    )
+    return config.aigc3d_config?.api_region?.trim() || DEFAULT_HY3D_API_REGION
   }
 
   private async buildBigModelOcrFilePayload(attachment: ChatAttachment): Promise<string> {

@@ -49,6 +49,7 @@ type HunyuanSectionProps = {
 }
 
 const DEFAULT_HY3D_COS_PREFIX = 'magicpot/hunyuan3d'
+const DEFAULT_HY3D_API_REGION = 'ap-guangzhou'
 
 const quickAppSectionSurfaceSx = {
   borderRadius: 3,
@@ -562,7 +563,6 @@ const HunyuanSection: React.FC<HunyuanSectionProps> = ({ saveSettings, settingsV
   const configuredBucket = settingsValue.aigc3d_config?.cos_bucket?.trim() || ''
   const configuredRegion = settingsValue.aigc3d_config?.cos_region?.trim() || ''
   const configuredKeyPrefix = settingsValue.aigc3d_config?.cos_key_prefix || DEFAULT_HY3D_COS_PREFIX
-  const effectiveApiRegion = configuredApiRegion || configuredRegion
   const effectiveKeyPrefix = normalizeHy3dCosPrefix(configuredKeyPrefix)
   const canClearCosPrefix = !!(
     configuredSecretId &&
@@ -682,10 +682,7 @@ const HunyuanSection: React.FC<HunyuanSectionProps> = ({ saveSettings, settingsV
                 placeholder="ap-guangzhou"
               />
               <Typography color="text.secondary" variant="caption">
-                {qt(
-                  'quickapp_api.api_region_hint',
-                  `留空时会先回退到 COS 地域。当前生效值：${effectiveApiRegion || '未配置'}`
-                )}
+                {qt('quickapp_api.api_region_hint', `留空时默认使用 ${DEFAULT_HY3D_API_REGION}。`)}
               </Typography>
             </Stack>
           </Box>

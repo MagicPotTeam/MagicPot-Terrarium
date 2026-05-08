@@ -1861,7 +1861,7 @@ describe('LLMProxySvcImpl', () => {
     )
   })
 
-  it('throws when neither Tencent API region nor COS region is configured', async () => {
+  it('uses ap-guangzhou when neither Tencent API region nor COS region is configured', async () => {
     generateFromMessagesMock.mockResolvedValue('[Generated 3D Model](https://example.com/cup.glb)')
 
     mockConfig({
@@ -1875,17 +1875,21 @@ describe('LLMProxySvcImpl', () => {
     })
 
     const svc = new LLMProxySvcImpl()
-    await expect(
-      svc.chat({
-        profileId: 'hunyuan3d-pro::SubmitHunyuanTo3DRapidJob',
-        messages: [{ role: 'user', content: 'missing region' }]
-      })
-    ).rejects.toThrow('COS')
+    await svc.chat({
+      profileId: 'hunyuan3d-pro::SubmitHunyuanTo3DRapidJob',
+      messages: [{ role: 'user', content: 'missing region' }]
+    })
 
-    expect(Hunyuan3DClientMock).not.toHaveBeenCalled()
+    expect(Hunyuan3DClientMock).toHaveBeenCalledWith(
+      '',
+      '',
+      'secret-id',
+      'secret-key',
+      'ap-guangzhou'
+    )
   })
 
-  it('falls back to the COS region when a dedicated Tencent API region is not configured', async () => {
+  it('does not reuse the COS region when a dedicated Tencent API region is not configured', async () => {
     generateFromMessagesMock.mockResolvedValue('[Generated 3D Model](https://example.com/cup.glb)')
 
     mockConfig({
@@ -1901,7 +1905,7 @@ describe('LLMProxySvcImpl', () => {
     const svc = new LLMProxySvcImpl()
     await svc.chat({
       profileId: 'hunyuan3d-pro::SubmitHunyuanTo3DRapidJob',
-      messages: [{ role: 'user', content: 'fallback to cos region' }]
+      messages: [{ role: 'user', content: 'default api region' }]
     })
 
     expect(Hunyuan3DClientMock).toHaveBeenCalledWith(
@@ -1909,7 +1913,7 @@ describe('LLMProxySvcImpl', () => {
       '',
       'secret-id',
       'secret-key',
-      'ap-singapore'
+      'ap-guangzhou'
     )
   })
 
@@ -1948,7 +1952,7 @@ describe('LLMProxySvcImpl', () => {
       'https://proxy.example',
       '',
       '',
-      ''
+      'ap-guangzhou'
     )
     expect(generateFromMessagesMock).toHaveBeenCalledWith(
       [{ role: 'user', content: 'api token pro path' }],
@@ -2031,7 +2035,7 @@ describe('LLMProxySvcImpl', () => {
       'https://proxy.example/v1',
       '',
       '',
-      ''
+      'ap-guangzhou'
     )
 
     const [submitUrl, submitInit] = fetchMock.mock.calls[0]
