@@ -81,7 +81,16 @@ const UNIT_BOX_EDGES_GEOMETRY = new THREE.EdgesGeometry(UNIT_BOX_GEOMETRY)
 const UNIT_PLANE_GEOMETRY = new THREE.PlaneGeometry(1, 1)
 
 const CANVAS_3D_STAGE_VISIBLE_OVERSCAN_PX = 240
-const ENABLE_CANVAS_3D_STAGE_VIEWPORT_FREEZE = true
+const ENABLE_CANVAS_3D_STAGE_VIEWPORT_FREEZE = false
+const FREEZE_FRAME_CONTENT_SAMPLE_SIZE = 96
+
+export const CANVAS_3D_STAGE_GL_OPTIONS = {
+  alpha: true,
+  antialias: false,
+  powerPreference: 'high-performance',
+  preserveDrawingBuffer: false,
+  stencil: false
+} as const
 
 type Canvas3DStageViewportSummary = {
   visibleItemIds: Set<string>
@@ -106,13 +115,14 @@ type Canvas3DStageFreezeFrameTransform = {
   transform: string
 }
 
-const resolveCanvas3DStageViewportSummary = ({
+export const resolveCanvas3DStageViewportSummary = ({
   items,
   selectedIds,
   stagePos,
   stageScale,
   stageSize,
-  overscanPx = CANVAS_3D_STAGE_VISIBLE_OVERSCAN_PX
+  overscanPx = CANVAS_3D_STAGE_VISIBLE_OVERSCAN_PX,
+  skipViewportCulling = false
 }: {
   items: CanvasModel3DItem[]
   selectedIds: ReadonlySet<string>
@@ -120,8 +130,9 @@ const resolveCanvas3DStageViewportSummary = ({
   stageScale: number
   stageSize: { width: number; height: number }
   overscanPx?: number
+  skipViewportCulling?: boolean
 }): Canvas3DStageViewportSummary => {
-  if (items.length === 0 || stageSize.width <= 0 || stageSize.height <= 0) {
+  if (items.length === 0 || stageSize.width <= 0 || stageSize.height <= 0 || skipViewportCulling) {
     return {
       visibleItemIds: new Set(items.map((item) => item.id)),
       viewportCulledCount: 0
@@ -177,6 +188,46 @@ const createCanvas3DStageViewportState = ({
     height: stageSize.height
   }
 })
+
+const hasCanvas3DStageFreezeFrameContent = (
+  snapshotCanvas: HTMLCanvasElement,
+  snapshotContext: CanvasRenderingContext2D
+) => {
+  const width = snapshotCanvas.width
+  const height = snapshotCanvas.height
+  if (width <= 0 || height <= 0) {
+    return false
+  }
+
+  const sampleWidth = Math.max(1, Math.min(FREEZE_FRAME_CONTENT_SAMPLE_SIZE, width))
+  const sampleHeight = Math.max(1, Math.min(FREEZE_FRAME_CONTENT_SAMPLE_SIZE, height))
+  let sampleContext = snapshotContext
+
+  if (sampleWidth !== width || sampleHeight !== height) {
+    const sampleCanvas = document.createElement('canvas')
+    sampleCanvas.width = sampleWidth
+    sampleCanvas.height = sampleHeight
+    const nextSampleContext = sampleCanvas.getContext('2d')
+    if (!nextSampleContext) {
+      return true
+    }
+
+    nextSampleContext.drawImage(snapshotCanvas, 0, 0, sampleWidth, sampleHeight)
+    sampleContext = nextSampleContext
+  }
+
+  try {
+    const pixels = sampleContext.getImageData(0, 0, sampleWidth, sampleHeight).data
+    for (let alphaIndex = 3; alphaIndex < pixels.length; alphaIndex += 4) {
+      if (pixels[alphaIndex] > 0) {
+        return true
+      }
+    }
+    return false
+  } catch {
+    return true
+  }
+}
 
 export const resolveCanvas3DStageFreezeFrameTransform = ({
   snapshotViewport,
@@ -1278,9 +1329,10 @@ const Canvas3DStage: React.FC<Canvas3DStageProps> = ({
         selectedIds,
         stagePos,
         stageScale,
-        stageSize
+        stageSize,
+        skipViewportCulling: isViewportInteracting
       }),
-    [items, selectedIds, stagePos, stageScale, stageSize]
+    [isViewportInteracting, items, selectedIds, stagePos, stageScale, stageSize]
   )
   const viewportVisibleItems = useMemo(
     () => items.filter((item) => visibleItemIds.has(item.id)),
@@ -1458,6 +1510,10 @@ const Canvas3DStage: React.FC<Canvas3DStageProps> = ({
     try {
       context.clearRect(0, 0, snapshotCanvas.width, snapshotCanvas.height)
       context.drawImage(sourceCanvas, 0, 0)
+      if (!hasCanvas3DStageFreezeFrameContent(snapshotCanvas, context)) {
+        setFreezeFrameSnapshot(null)
+        return
+      }
       setFreezeFrameSnapshot({
         canvas: snapshotCanvas,
         viewport: createCanvas3DStageViewportState(nextViewport)
@@ -1607,13 +1663,7 @@ const Canvas3DStage: React.FC<Canvas3DStageProps> = ({
         orthographic
         frameloop={stageFrameloop}
         dpr={adaptiveDpr}
-        gl={{
-          alpha: true,
-          antialias: false,
-          powerPreference: 'high-performance',
-          preserveDrawingBuffer: false,
-          stencil: false
-        }}
+        gl={CANVAS_3D_STAGE_GL_OPTIONS}
         camera={{
           position: [0, 0, 1000],
           zoom: Math.max(stageScale, PROJECT_CANVAS_MIN_STAGE_SCALE),

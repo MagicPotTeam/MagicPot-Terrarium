@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
 
-import { resolveCanvas3DStageModelVisualMode, syncCanvas3DStageCamera } from './Canvas3DStage'
+import {
+  resolveCanvas3DStageModelVisualMode,
+  resolveCanvas3DStageViewportSummary,
+  syncCanvas3DStageCamera
+} from './Canvas3DStage'
 import { PROJECT_CANVAS_MIN_STAGE_SCALE } from '../projectCanvasViewportScale'
+import type { CanvasModel3DItem } from '../types'
 
 describe('syncCanvas3DStageCamera', () => {
   it('updates orthographic stage cameras using the current viewport transform', () => {
@@ -76,5 +81,44 @@ describe('syncCanvas3DStageCamera', () => {
         hasPreviewTexture: true
       })
     ).toBe('live-model')
+  })
+
+  it('keeps model items renderable during imperative viewport scrolls', () => {
+    const offscreenModel: CanvasModel3DItem = {
+      id: 'model-offscreen',
+      type: 'model3d',
+      src: 'model.glb',
+      fileName: 'model.glb',
+      x: 4000,
+      y: 3000,
+      width: 240,
+      height: 240,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 1,
+      locked: false
+    }
+
+    expect(
+      resolveCanvas3DStageViewportSummary({
+        items: [offscreenModel],
+        selectedIds: new Set(),
+        stagePos: { x: 0, y: 0 },
+        stageScale: 1,
+        stageSize: { width: 800, height: 600 }
+      }).visibleItemIds.has(offscreenModel.id)
+    ).toBe(false)
+
+    expect(
+      resolveCanvas3DStageViewportSummary({
+        items: [offscreenModel],
+        selectedIds: new Set(),
+        stagePos: { x: 0, y: 0 },
+        stageScale: 1,
+        stageSize: { width: 800, height: 600 },
+        skipViewportCulling: true
+      }).visibleItemIds.has(offscreenModel.id)
+    ).toBe(true)
   })
 })
