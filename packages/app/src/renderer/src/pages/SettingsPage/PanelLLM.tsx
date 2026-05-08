@@ -416,6 +416,11 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   const { notifyInfo, notifySuccess, notifyWarning, closeMessage } = useMessage()
   const isLight = theme.palette.mode === 'light'
   const copy = (chinese: string, english: string) => (isChineseUi ? chinese : english)
+  const quickAppText = React.useCallback(
+    (key: string, defaultValue: string, values: Record<string, string | number> = {}) =>
+      t(`quickapp_api.${key}`, { defaultValue, ...values }),
+    [t]
+  )
   const resolvedProfileCallType = resolveProfileCallType(profile)
   const isHunyuan3DCallType =
     resolvedProfileCallType !== 'local' && isHunyuan3DCompatibleProfile(profile)
@@ -445,7 +450,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     ? HUNYUAN_AI3D_BASE_URL
     : getSuggestedBaseUrl(effectiveProvider, effectiveDeployment)
   const apiKeyPlaceholder = isHunyuan3DCallType
-    ? copy('可选：Hunyuan3D API Key', 'Optional Hunyuan3D API Key')
+    ? quickAppText('hunyuan_api_key_placeholder', 'Optional Hunyuan3D API Key')
     : effectiveProvider === 'ollama'
       ? copy('Ollama 本地服务无需密钥', 'No API key needed for Ollama')
       : effectiveDeployment === 'local'
@@ -570,17 +575,20 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   const handleClearHy3dCosPrefix = React.useCallback(async () => {
     const dialogResult = await api().svcDialog.showMessageBox({
       type: 'warning',
-      title: copy('清理 Hunyuan3D COS 缓存', 'Clear Hunyuan3D COS Cache'),
-      message: copy(
-        '将删除当前 Hunyuan3D Prefix 下的所有对象，此操作不可恢复。',
-        'This will delete all objects under the current Hunyuan3D prefix.'
+      title: quickAppText('clear_cos_dialog_title', 'Clear Hunyuan3D COS Cache'),
+      message: quickAppText(
+        'clear_cos_dialog_message',
+        'This will delete all objects under the current Hunyuan3D prefix and cannot be undone.'
       ),
       detail: [
         `Bucket: ${configuredHy3dBucket}`,
         `Region: ${configuredHy3dRegion}`,
         `Prefix: ${effectiveHy3dKeyPrefix}`
       ].join('\n'),
-      buttons: [copy('取消', 'Cancel'), copy('确认清理', 'Clear')],
+      buttons: [
+        quickAppText('clear_cos_cancel', 'Cancel'),
+        quickAppText('clear_cos_confirm', 'Clear')
+      ],
       defaultId: 0,
       cancelId: 0,
       noLink: true
@@ -591,7 +599,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     }
 
     const messageKey = notifyInfo(
-      copy('正在清理 Hunyuan3D COS 缓存...', 'Clearing Hunyuan3D COS cache...'),
+      quickAppText('clear_cos_progress', 'Clearing Hunyuan3D COS cache...'),
       null
     )
     setIsClearingHy3dCosPrefix(true)
@@ -600,24 +608,29 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
       const result = await api().svcLLMProxy.clearHy3DCosPrefix({ profileId: profile.id })
 
       if (result.matchedCount === 0) {
-        notifySuccess(copy('当前 Prefix 下没有可清理的对象。', 'No objects were found.'))
+        notifySuccess(
+          quickAppText('clear_cos_empty', 'No objects were found under the current prefix.')
+        )
       } else if (result.errorCount > 0) {
         notifyWarning(
-          copy(
-            `已删除 ${result.deletedCount} 个对象，另有 ${result.errorCount} 个对象删除失败。`,
-            `Deleted ${result.deletedCount} objects, but ${result.errorCount} objects failed.`
+          quickAppText(
+            'clear_cos_partial',
+            'Deleted {{deletedCount}} objects, but {{errorCount}} objects failed to delete.',
+            { deletedCount: result.deletedCount, errorCount: result.errorCount }
           )
         )
       } else {
         notifySuccess(
-          copy(`已清理 ${result.deletedCount} 个对象。`, `Cleared ${result.deletedCount} objects.`)
+          quickAppText('clear_cos_success', 'Cleared {{deletedCount}} objects.', {
+            deletedCount: result.deletedCount
+          })
         )
       }
     } catch (error) {
       notifyWarning(
         error instanceof Error
           ? error.message
-          : copy('清理 Hunyuan3D COS 缓存失败。', 'Failed to clear the Hunyuan3D COS cache.')
+          : quickAppText('clear_cos_failed', 'Failed to clear the Hunyuan3D COS cache.')
       )
     } finally {
       setIsClearingHy3dCosPrefix(false)
@@ -627,12 +640,12 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     closeMessage,
     configuredHy3dBucket,
     configuredHy3dRegion,
-    copy,
     effectiveHy3dKeyPrefix,
     notifyInfo,
     notifySuccess,
     notifyWarning,
-    profile.id
+    profile.id,
+    quickAppText
   ])
 
   return (
@@ -725,7 +738,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           <InputText
             label={
               isHunyuan3DCallType
-                ? copy('Hunyuan3D API Key（可选）', 'Hunyuan3D API Key (Optional)')
+                ? quickAppText('hunyuan_api_key_optional', 'Hunyuan3D API Key (Optional)')
                 : effectiveDeployment === 'local'
                   ? copy('API 密钥（可选）', 'API Key (Optional)')
                   : copy('API 密钥', t('llm.api_key'))
@@ -746,14 +759,14 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           <>
             <Alert severity="info">
               <Typography variant="body2">
-                {copy(
-                  '腾讯云 SecretId/SecretKey 用于 Hunyuan3D 任务与 COS 上传；Hunyuan3D API Key 仅在对应 API 通道可用时使用。',
+                {quickAppText(
+                  'hunyuan_profile_credentials_info',
                   'Tencent SecretId/SecretKey are used for Hunyuan3D jobs and COS uploads. The Hunyuan3D API Key is optional and only used by supported API flows.'
                 )}
               </Typography>
             </Alert>
             <InputText
-              label={copy('腾讯云 SecretId', 'Tencent SecretId')}
+              label={quickAppText('tencent_secret_id', 'Tencent SecretId')}
               value={profile.tencent_secret_id || ''}
               onChange={(value) => updateProfile({ ...profile, tencent_secret_id: value })}
               placeholder="AKID..."
@@ -761,15 +774,18 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
               updateMode="change"
             />
             <InputText
-              label={copy('腾讯云 SecretKey', 'Tencent SecretKey')}
+              label={quickAppText('tencent_secret_key', 'Tencent SecretKey')}
               value={profile.tencent_secret_key || ''}
               onChange={(value) => updateProfile({ ...profile, tencent_secret_key: value })}
-              placeholder={copy('请输入 SecretKey', 'Enter SecretKey')}
+              placeholder={quickAppText(
+                'tencent_secret_key_placeholder',
+                'Please enter the SecretKey'
+              )}
               shrinkLabel
               updateMode="change"
             />
             <InputText
-              label={copy('腾讯云 API 地域', 'Tencent API Region')}
+              label={quickAppText('api_region', 'Tencent API Region')}
               value={profile.api_region || ''}
               onChange={(value) => updateProfile({ ...profile, api_region: value })}
               placeholder={DEFAULT_HY3D_API_REGION}
@@ -777,13 +793,13 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
               updateMode="change"
             />
             <Typography color="text.secondary" variant="caption">
-              {copy(
-                `留空时默认使用 ${DEFAULT_HY3D_API_REGION}。`,
-                `Defaults to ${DEFAULT_HY3D_API_REGION} when empty.`
+              {quickAppText(
+                'api_region_hint',
+                `When left empty, MagicPot uses ${DEFAULT_HY3D_API_REGION}.`
               )}
             </Typography>
             <InputText
-              label="COS Bucket"
+              label={quickAppText('cos_bucket', 'COS Bucket')}
               value={profile.cos_bucket || ''}
               onChange={(value) => updateProfile({ ...profile, cos_bucket: value })}
               placeholder="examplebucket-1250000000"
@@ -791,7 +807,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
               updateMode="change"
             />
             <InputText
-              label={copy('COS 地域', 'COS Region')}
+              label={quickAppText('cos_region', 'COS Region')}
               value={profile.cos_region || ''}
               onChange={(value) => updateProfile({ ...profile, cos_region: value })}
               placeholder={DEFAULT_HY3D_API_REGION}
@@ -799,7 +815,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
               updateMode="change"
             />
             <InputText
-              label={copy('COS Key 前缀', 'COS Key Prefix')}
+              label={quickAppText('cos_key_prefix', 'COS Key Prefix')}
               value={profile.cos_key_prefix || DEFAULT_HY3D_COS_PREFIX}
               onChange={(value) => updateProfile({ ...profile, cos_key_prefix: value })}
               placeholder={DEFAULT_HY3D_COS_PREFIX}
@@ -808,8 +824,8 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
             />
             <Alert severity="warning">
               <Typography variant="body2">
-                {copy(
-                  '清理按钮只会删除当前 Prefix 下的对象，不会清空整个 Bucket。',
+                {quickAppText(
+                  'clear_cos_hint',
                   'The clear button removes objects only under the current prefix, not the entire bucket.'
                 )}
               </Typography>
@@ -823,8 +839,8 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
                 variant="outlined"
               >
                 {isClearingHy3dCosPrefix
-                  ? copy('清理中...', 'Clearing...')
-                  : copy('清理当前 Prefix', 'Clear Current Prefix')}
+                  ? quickAppText('clear_cos_loading', 'Clearing...')
+                  : quickAppText('clear_cos_button', 'Clear Current Prefix')}
               </Button>
               <Typography color="text.secondary" variant="body2">
                 {`Prefix: ${effectiveHy3dKeyPrefix}`}
@@ -832,8 +848,8 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
             </Box>
             {!canClearHy3dCosPrefix && (
               <Typography color="text.secondary" variant="caption">
-                {copy(
-                  '填写 SecretId、SecretKey、COS Bucket 和 COS 地域后，才可以执行清理。',
+                {quickAppText(
+                  'clear_cos_requirements',
                   'SecretId, SecretKey, COS bucket, and COS region are required before clearing.'
                 )}
               </Typography>

@@ -29,10 +29,19 @@ let translations: Record<string, string> = {
   'llm.add_api_profile': 'Add API Profile'
 }
 
+type TranslationOptions = Record<string, unknown> & { defaultValue?: string }
+
+const interpolateTranslation = (template: string, options?: TranslationOptions): string =>
+  template.replace(/{{\s*(\w+)\s*}}/g, (_match, key: string) => {
+    const value = options?.[key]
+    return value === undefined || value === null ? '' : String(value)
+  })
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     i18n: { language: currentLanguage },
-    t: (key: string) => translations[key] ?? key
+    t: (key: string, options?: TranslationOptions) =>
+      interpolateTranslation(translations[key] ?? options?.defaultValue ?? key, options)
   })
 }))
 
