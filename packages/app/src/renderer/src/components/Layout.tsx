@@ -36,6 +36,7 @@ const SIDE_PANEL_MAX_WIDTH = 840
 const RIGHT_PANEL_MIN_WIDTH = 360
 const RIGHT_PANEL_MAX_WIDTH = 1024
 const BOTTOM_PANEL_DEFAULT_HEIGHT = 220
+const ROUTE_TAB_SYNC_DELAY_MS = 50
 
 export const clampSidePanelWidth = (currentWidth: number, delta: number): number =>
   Math.max(SIDE_PANEL_MIN_WIDTH, Math.min(SIDE_PANEL_MAX_WIDTH, currentWidth + delta))
@@ -108,6 +109,15 @@ export const shouldPersistCurrentRoute = (
   }
 
   return normalizeProjectCanvasRoutePath(currentRoute) === pendingStartupRoutePath
+}
+
+export const resolveHashRoutePath = (hash: string): string => {
+  const routePath = hash.replace(/^#/, '').trim()
+  if (!routePath) {
+    return '/'
+  }
+
+  return normalizeProjectCanvasRoutePath(routePath.startsWith('/') ? routePath : `/${routePath}`)
 }
 
 type ResizeDirection = 'side' | 'bottom' | 'right' | null
@@ -206,16 +216,28 @@ const Layout: React.FC = () => {
       return
     }
 
-    const routeTabId = resolveTabIdForCurrentRoute(
-      currentRoute,
-      location.pathname,
-      location.search,
-      openTabs
-    )
-    if (routeTabId && routeTabId !== activeTabId) {
-      dispatch(setActiveTab(routeTabId))
+    const syncTimerId = window.setTimeout(() => {
+      const hashRoutePath = resolveHashRoutePath(window.location.hash)
+      if (hashRoutePath && hashRoutePath !== currentRoute) {
+        navigate(hashRoutePath, { replace: true })
+        return
+      }
+
+      const routeTabId = resolveTabIdForCurrentRoute(
+        currentRoute,
+        location.pathname,
+        location.search,
+        openTabs
+      )
+      if (routeTabId && routeTabId !== activeTabId) {
+        dispatch(setActiveTab(routeTabId))
+      }
+    }, ROUTE_TAB_SYNC_DELAY_MS)
+
+    return () => {
+      window.clearTimeout(syncTimerId)
     }
-  }, [activeTabId, currentRoute, dispatch, location.pathname, location.search, openTabs])
+  }, [activeTabId, currentRoute, dispatch, location.pathname, location.search, navigate, openTabs])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {

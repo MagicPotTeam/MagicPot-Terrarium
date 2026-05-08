@@ -4,6 +4,7 @@ import {
   clampSidePanelWidth,
   resolveTabIdForCurrentRoute,
   resolveStartupRouteTarget,
+  resolveHashRoutePath,
   SIDE_PANEL_DEFAULT_WIDTH,
   shouldPersistCurrentRoute,
   shouldAutoCloseProjectSidePanel
@@ -99,6 +100,15 @@ describe('Layout route sync helpers', () => {
       shouldPersistCurrentRoute('/canvas?id=tab-project-42', '/canvas?id=tab-project-42')
     ).toBe(true)
     expect(shouldPersistCurrentRoute(null, '/settings')).toBe(true)
+  })
+
+  it('normalizes the browser hash route used to catch stale HashRouter locations', () => {
+    expect(resolveHashRoutePath('')).toBe('/')
+    expect(resolveHashRoutePath('#/settings')).toBe('/settings')
+    expect(resolveHashRoutePath('#qappdesign')).toBe('/qappdesign')
+    expect(resolveHashRoutePath('#/project-webgl?id=tab-project-42')).toBe(
+      '/canvas?id=tab-project-42'
+    )
   })
 
   it('auto-closes the quick app side panel only when first entering a project tab', () => {

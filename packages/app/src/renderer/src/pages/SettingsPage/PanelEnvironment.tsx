@@ -8,7 +8,6 @@ import {
   MenuItem,
   Alert,
   AlertTitle,
-  Collapse,
   Divider,
   TextField
 } from '@mui/material'
@@ -19,7 +18,6 @@ import EnvironmentInfo from './components/EnvironmentInfo'
 import DataStorageInfo from './components/DataStorageInfo'
 import PureConfigNotSetCallout from '@renderer/components/PureConfigNotSetCallout'
 import InputPath from '@renderer/components/inputs/InputPath'
-import { TransitionGroup } from 'react-transition-group'
 import { ConfigUtils } from '@shared/config/configUtils'
 import {
   Config,
@@ -76,6 +74,8 @@ type ManagedCanvasSnapshot = {
   groupBranches: CanvasGroupBranch[]
   binding: CanvasFigmaBinding | null
 }
+
+const DEFERRED_ENVIRONMENT_RENDER_DELAY_MS = 80
 
 const createProxyAccessTokenId = (): string =>
   globalThis.crypto?.randomUUID?.() ||
@@ -392,8 +392,11 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
   // const { t } = useI18n()
   const { t, i18n } = useTranslation()
   const isChineseUi = i18n.language?.toLowerCase().startsWith('zh') ?? true
-  const text = (fallbackChinese: string, fallbackEnglish: string) =>
-    isChineseUi ? fallbackChinese : fallbackEnglish
+  const text = useCallback(
+    (fallbackChinese: string, fallbackEnglish: string) =>
+      isChineseUi ? fallbackChinese : fallbackEnglish,
+    [isChineseUi]
+  )
 
   const configUtils = new ConfigUtils(settingsValue, buildEnv, window.path)
   const appRootDir = buildEnv.pathMap.file
@@ -427,6 +430,7 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
   const [figmaBindingError, setFigmaBindingError] = useState<string | null>(null)
   const lastActiveProjectId = useAppSelector((state) => state.layout.lastActiveProjectId)
   const openTabs = useAppSelector((state) => state.layout.openTabs)
+  const [renderDeferredSections, setRenderDeferredSections] = useState(false)
   const [proxyUsageState, setProxyUsageState] = useState<{
     running: boolean
     port?: number
@@ -473,8 +477,19 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
   )
 
   useEffect(() => {
+    const timerId = window.setTimeout(
+      () => setRenderDeferredSections(true),
+      DEFERRED_ENVIRONMENT_RENDER_DELAY_MS
+    )
+
+    return () => window.clearTimeout(timerId)
+  }, [])
+
+  useEffect(() => {
+    if (!renderDeferredSections) return
+
     void refreshProxyUsage(true)
-  }, [refreshProxyUsage, settingsValue.local_llm_server_config])
+  }, [refreshProxyUsage, renderDeferredSections, settingsValue.local_llm_server_config])
 
   const persistManagedCanvasSnapshot = useCallback(async (snapshot: ManagedCanvasSnapshot) => {
     await saveCanvasItems(
@@ -529,7 +544,7 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
   useEffect(() => {
     let cancelled = false
 
-    if (!lastActiveProjectId) {
+    if (!renderDeferredSections || !lastActiveProjectId) {
       setManagedCanvasSnapshot(null)
       return () => {
         cancelled = true
@@ -564,7 +579,7 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
     return () => {
       cancelled = true
     }
-  }, [lastActiveProjectId, managedCanvasLabel])
+  }, [lastActiveProjectId, managedCanvasLabel, renderDeferredSections])
 
   useEffect(() => {
     setFigmaBindingDraft(
@@ -1011,8 +1026,8 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
 
   return (
     <Box sx={{ p: 3 }}>
-      <TransitionGroup>
-        <Collapse key="comfy_mode">
+      <>
+        <Box key="comfy_mode">
           <SettingSection title={t('environment.comfy_mode_title')}>
             <Alert severity="info">
               <AlertTitle>{t('environment.comfy_mode_info_title')}</AlertTitle>
@@ -1026,10 +1041,10 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
               onChange={(value) => saveSettings({ use_remote_comfyui: value })}
             />
           </SettingSection>
-        </Collapse>
+        </Box>
 
         {settingsValue.use_remote_comfyui && (
-          <Collapse key="remote_comfyui">
+          <Box key="remote_comfyui">
             <SettingSection title={t('environment.remote_comfyui_title')}>
               <InputText
                 label={t('environment.remote_comfyui_origin_label')}
@@ -1055,649 +1070,666 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
                 placeholder={t('environment.placeholder_remote_comfyui_mapping_dir')}
               />
             </SettingSection>
-          </Collapse>
+          </Box>
         )}
 
-        <Collapse key="proxy_mode">
+        <Box key="proxy_mode">
           <ProxyModeSection
             saveSettings={saveSettings}
             settingsValue={settingsValue}
             t={t}
             text={text}
           />
-        </Collapse>
+        </Box>
 
-        <Collapse key="proxy_usage">
-          <SettingSection
-            title={text('代理使用情况', 'Proxy Usage')}
-            action={
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<RefreshIcon />}
-                onClick={() => void refreshProxyUsage()}
-                disabled={proxyUsageLoading}
+        {renderDeferredSections && (
+          <>
+            <Box key="proxy_usage">
+              <SettingSection
+                title={text('代理使用情况', 'Proxy Usage')}
+                action={
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<RefreshIcon />}
+                    onClick={() => void refreshProxyUsage()}
+                    disabled={proxyUsageLoading}
+                  >
+                    {text('刷新统计', 'Refresh Stats')}
+                  </Button>
+                }
               >
-                {text('刷新统计', 'Refresh Stats')}
-              </Button>
-            }
-          >
-            <Stack spacing={1.5}>
-              <Alert severity={proxyUsageState.running ? 'info' : 'warning'}>
-                <Typography variant="body2">
-                  {proxyUsageState.running
-                    ? text(
-                        `当前已启用本次运行统计，端口 ${proxyUsageState.port || 3721}`,
-                        `Live session stats are available on port ${proxyUsageState.port || 3721}`
-                      )
-                    : text(
-                        '代理服务当前未运行，因此这里只显示已持久化的资源统计。',
-                        'The proxy server is not running, so only persisted resource stats are shown.'
-                      )}
-                </Typography>
-              </Alert>
-
-              {localProxyAccessTokens.length > 0 ? (
                 <Stack spacing={1.5}>
-                  {localProxyAccessTokens.map((entry, index) => {
-                    const usageEntry = proxyUsageByTokenId.get(entry.id)
-                    const displayLabel = getDisplayProxyAccessTokenLabel(entry, index, text)
-                    return (
-                      <Box
-                        key={`usage-${entry.id}`}
-                        sx={{
-                          border: '1px solid',
-                          borderColor: 'divider',
-                          borderRadius: 2,
-                          p: 1.5
-                        }}
-                      >
-                        <Stack spacing={1}>
-                          <Typography variant="subtitle2">{displayLabel || entry.id}</Typography>
+                  <Alert severity={proxyUsageState.running ? 'info' : 'warning'}>
+                    <Typography variant="body2">
+                      {proxyUsageState.running
+                        ? text(
+                            `当前已启用本次运行统计，端口 ${proxyUsageState.port || 3721}`,
+                            `Live session stats are available on port ${proxyUsageState.port || 3721}`
+                          )
+                        : text(
+                            '代理服务当前未运行，因此这里只显示已持久化的资源统计。',
+                            'The proxy server is not running, so only persisted resource stats are shown.'
+                          )}
+                    </Typography>
+                  </Alert>
+
+                  {localProxyAccessTokens.length > 0 ? (
+                    <Stack spacing={1.5}>
+                      {localProxyAccessTokens.map((entry, index) => {
+                        const usageEntry = proxyUsageByTokenId.get(entry.id)
+                        const displayLabel = getDisplayProxyAccessTokenLabel(entry, index, text)
+                        return (
                           <Box
+                            key={`usage-${entry.id}`}
                             sx={{
-                              display: 'grid',
-                              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-                              gap: 1
+                              border: '1px solid',
+                              borderColor: 'divider',
+                              borderRadius: 2,
+                              p: 1.5
                             }}
                           >
-                            <Typography variant="caption">
-                              {text('请求数', 'Requests')}: {usageEntry?.requestCount || 0}
-                            </Typography>
-                            <Typography variant="caption">
-                              {text('聊天', 'Chat')}: {usageEntry?.chatRequestCount || 0}
-                            </Typography>
-                            <Typography variant="caption">
-                              OpenAI: {usageEntry?.openAiRequestCount || 0}
-                            </Typography>
-                            <Typography variant="caption">
-                              QApp:{' '}
-                              {(usageEntry?.quickAppListRequestCount || 0) +
-                                (usageEntry?.quickAppGetRequestCount || 0)}
-                            </Typography>
-                            <Typography variant="caption">
-                              {text('下载数', 'Downloads')}: {usageEntry?.mediaDownloadCount || 0}
-                            </Typography>
-                            <Typography variant="caption">
-                              {text('生成资源', 'Generated Media')}:{' '}
-                              {usageEntry?.generatedMediaCount || 0}
-                            </Typography>
-                            <Typography variant="caption">
-                              {text('已存资源', 'Stored Media')}:{' '}
-                              {usageEntry?.storedMediaCount || 0}
-                            </Typography>
-                            <Typography variant="caption">
-                              {text('已存大小', 'Stored Size')}:{' '}
-                              {formatProxyUsageBytes(usageEntry?.storedMediaBytes || 0)}
-                            </Typography>
+                            <Stack spacing={1}>
+                              <Typography variant="subtitle2">
+                                {displayLabel || entry.id}
+                              </Typography>
+                              <Box
+                                sx={{
+                                  display: 'grid',
+                                  gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                                  gap: 1
+                                }}
+                              >
+                                <Typography variant="caption">
+                                  {text('请求数', 'Requests')}: {usageEntry?.requestCount || 0}
+                                </Typography>
+                                <Typography variant="caption">
+                                  {text('聊天', 'Chat')}: {usageEntry?.chatRequestCount || 0}
+                                </Typography>
+                                <Typography variant="caption">
+                                  OpenAI: {usageEntry?.openAiRequestCount || 0}
+                                </Typography>
+                                <Typography variant="caption">
+                                  QApp:{' '}
+                                  {(usageEntry?.quickAppListRequestCount || 0) +
+                                    (usageEntry?.quickAppGetRequestCount || 0)}
+                                </Typography>
+                                <Typography variant="caption">
+                                  {text('下载数', 'Downloads')}:{' '}
+                                  {usageEntry?.mediaDownloadCount || 0}
+                                </Typography>
+                                <Typography variant="caption">
+                                  {text('生成资源', 'Generated Media')}:{' '}
+                                  {usageEntry?.generatedMediaCount || 0}
+                                </Typography>
+                                <Typography variant="caption">
+                                  {text('已存资源', 'Stored Media')}:{' '}
+                                  {usageEntry?.storedMediaCount || 0}
+                                </Typography>
+                                <Typography variant="caption">
+                                  {text('已存大小', 'Stored Size')}:{' '}
+                                  {formatProxyUsageBytes(usageEntry?.storedMediaBytes || 0)}
+                                </Typography>
+                              </Box>
+                              <Typography variant="caption" color="text.secondary">
+                                {text('最后活跃', 'Last Active')}:{' '}
+                                {formatProxyUsageTime(usageEntry?.lastSeenAt)}
+                                {usageEntry?.lastRequesterAddress
+                                  ? ` / IP ${usageEntry.lastRequesterAddress}`
+                                  : ''}
+                                {usageEntry?.lastProfileId ? ` / ${usageEntry.lastProfileId}` : ''}
+                              </Typography>
+                            </Stack>
                           </Box>
-                          <Typography variant="caption" color="text.secondary">
-                            {text('最后活跃', 'Last Active')}:{' '}
-                            {formatProxyUsageTime(usageEntry?.lastSeenAt)}
-                            {usageEntry?.lastRequesterAddress
-                              ? ` / IP ${usageEntry.lastRequesterAddress}`
-                              : ''}
-                            {usageEntry?.lastProfileId ? ` / ${usageEntry.lastProfileId}` : ''}
-                          </Typography>
-                        </Stack>
-                      </Box>
-                    )
-                  })}
+                        )
+                      })}
+                    </Stack>
+                  ) : (
+                    <Alert severity="warning">
+                      <Typography variant="body2">
+                        {text(
+                          '请先添加代理访问令牌，才能查看按令牌拆分的使用情况。',
+                          'Add proxy access tokens first to view per-token usage.'
+                        )}
+                      </Typography>
+                    </Alert>
+                  )}
                 </Stack>
-              ) : (
-                <Alert severity="warning">
-                  <Typography variant="body2">
+              </SettingSection>
+            </Box>
+
+            <Box key="pure_config_not_set">
+              <PureConfigNotSetCallout needNavigate={false} />
+            </Box>
+
+            <Box key="remote_config_not_set">
+              <RemoteConfigNotSetCallout needNavigate={false} />
+            </Box>
+
+            <Box key="data_storage">
+              <SettingSection title={text('数据根目录', 'Data directory')}>
+                <DataStorageInfo />
+              </SettingSection>
+            </Box>
+
+            {!settingsValue.use_remote_comfyui && (
+              <Box key="monitor">
+                <SettingSection title={t('environment.monitor_title')}>
+                  <EnvironmentInfo />
+                </SettingSection>
+              </Box>
+            )}
+
+            {!settingsValue.use_remote_comfyui && (
+              <Box key="setup">
+                <SettingSection
+                  title={t('environment.setup_title')}
+                  action={
+                    <Stack direction="row" spacing={1}>
+                      <DropdownButton
+                        variant="outlined"
+                        size="small"
+                        startIcon={<CodeIcon />}
+                        buttonChildren={t('environment.setup_quick')}
+                      >
+                        {({ handleClose }) =>
+                          fastSettingTemplates.map((template) => (
+                            <MenuItem
+                              key={template.key}
+                              onClick={() => {
+                                handleFastSetting(template.key)
+                                handleClose()
+                              }}
+                            >
+                              {template.name}
+                            </MenuItem>
+                          ))
+                        }
+                      </DropdownButton>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        startIcon={<RefreshIcon />}
+                        onClick={handleResetAllPaths}
+                      >
+                        {t('environment.setup_reset_paths')}
+                      </Button>
+                    </Stack>
+                  }
+                >
+                  <InputPath
+                    label={t('environment.python_cmd_label')}
+                    value={settingsValue.local_comfyui_config.python_cmd.trim()}
+                    Icon={CodeIcon}
+                    pathType="file"
+                    defaultTo={configUtils.getPythonCmd()[0]}
+                    onChange={(value) =>
+                      saveSettings({
+                        local_comfyui_config: { python_cmd: toEmbeddedRelativePath(value) }
+                      })
+                    }
+                    placeholder={
+                      configUtils.getPythonCmd()[0] || t('environment.placeholder_python')
+                    }
+                    errorText={
+                      !configUtils.isPythonCmdAvailable()
+                        ? t('environment.err_pure_need_python')
+                        : undefined
+                    }
+                  />
+
+                  <InputPath
+                    label={t('environment.comfy_dir_label')}
+                    value={settingsValue.local_comfyui_config.comfyui_dir.trim()}
+                    Icon={FolderIcon}
+                    pathType="directory"
+                    defaultTo={configUtils.getComfyUIDir()[0]}
+                    onChange={(value) =>
+                      saveSettings({
+                        local_comfyui_config: { comfyui_dir: toEmbeddedRelativePath(value) }
+                      })
+                    }
+                    placeholder={
+                      configUtils.getComfyUIDir()[0] || t('environment.placeholder_comfy')
+                    }
+                    errorText={
+                      !configUtils.isComfyUIDirAvailable()
+                        ? t('environment.err_pure_need_comfy')
+                        : undefined
+                    }
+                  />
+
+                  <InputText
+                    label={t('environment.comfy_port_label')}
+                    value={settingsValue.local_comfyui_config.comfyui_port}
+                    Icon={CodeIcon}
+                    onChange={(value) =>
+                      saveSettings({ local_comfyui_config: { comfyui_port: value } })
+                    }
+                    placeholder={configUtils.getComfyUIPort()}
+                  />
+
+                  <InputText
+                    label={t('environment.comfy_args_label')}
+                    value={settingsValue.local_comfyui_config.comfyui_args?.join(' ') || ''}
+                    Icon={CodeIcon}
+                    onChange={(value) =>
+                      saveSettings({ local_comfyui_config: { comfyui_args: splitSpace(value) } })
+                    }
+                    placeholder={configUtils.getComfyUIArgs().join(' ')}
+                  />
+                </SettingSection>
+              </Box>
+            )}
+
+            {configUtils.isComfyUIDirAvailable() && (
+              <Box key="models">
+                <SettingSection
+                  title={t('environment.models_title')}
+                  action={
+                    <Stack direction="row" spacing={1}>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        startIcon={<RefreshIcon />}
+                        onClick={handleLoadExtraModelPaths}
+                      >
+                        {t('environment.models_load_extra_yaml')}
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        startIcon={<RefreshIcon />}
+                        onClick={handleResetAllPaths}
+                      >
+                        {t('environment.models_reset_paths')}
+                      </Button>
+                    </Stack>
+                  }
+                >
+                  <Typography variant="caption" sx={{ ml: 0.5 }}>
+                    {t('environment.models_relative_tip')}
+                  </Typography>
+
+                  <InputPath
+                    label={t('environment.checkpoints_label')}
+                    value={settingsValue.checkpoints_dir.trim()}
+                    Icon={FolderIcon}
+                    pathType="directory"
+                    relativeTo={configUtils.getComfyUIDir()[0]}
+                    onChange={(value) => saveSettings({ checkpoints_dir: value })}
+                    placeholder={t('environment.placeholder_rel_or_abs')}
+                  />
+                  <InputPath
+                    label={t('environment.clip_label')}
+                    value={settingsValue.clip_dir.trim()}
+                    Icon={FolderIcon}
+                    pathType="directory"
+                    relativeTo={configUtils.getComfyUIDir()[0]}
+                    onChange={(value) => saveSettings({ clip_dir: value })}
+                    placeholder={t('environment.placeholder_rel_or_abs')}
+                  />
+                  <InputPath
+                    label={t('environment.vae_label')}
+                    value={settingsValue.vae_dir.trim()}
+                    Icon={FolderIcon}
+                    pathType="directory"
+                    relativeTo={configUtils.getComfyUIDir()[0]}
+                    onChange={(value) => saveSettings({ vae_dir: value })}
+                    placeholder={t('environment.placeholder_rel_or_abs')}
+                  />
+                  <InputPath
+                    label={t('environment.lora_label')}
+                    value={settingsValue.lora_dir.trim()}
+                    Icon={FolderIcon}
+                    pathType="directory"
+                    relativeTo={configUtils.getComfyUIDir()[0]}
+                    onChange={(value) => saveSettings({ lora_dir: value })}
+                    placeholder={t('environment.placeholder_rel_or_abs')}
+                  />
+                  <InputPath
+                    label={t('environment.controlnet_label')}
+                    value={settingsValue.controlnet_dir.trim()}
+                    Icon={FolderIcon}
+                    pathType="directory"
+                    relativeTo={configUtils.getComfyUIDir()[0]}
+                    onChange={(value) => saveSettings({ controlnet_dir: value })}
+                    placeholder={t('environment.placeholder_rel_or_abs')}
+                  />
+                  <InputPath
+                    label={t('environment.diffusion_models_label')}
+                    value={settingsValue.diffusion_models_dir.trim()}
+                    Icon={FolderIcon}
+                    pathType="directory"
+                    relativeTo={configUtils.getComfyUIDir()[0]}
+                    onChange={(value) => saveSettings({ diffusion_models_dir: value })}
+                    placeholder={t('environment.placeholder_rel_or_abs')}
+                  />
+                  <InputPath
+                    label={t('environment.unet_label')}
+                    value={settingsValue.unet_dir.trim()}
+                    Icon={FolderIcon}
+                    pathType="directory"
+                    relativeTo={configUtils.getComfyUIDir()[0]}
+                    onChange={(value) => saveSettings({ unet_dir: value })}
+                    placeholder={t('environment.placeholder_rel_or_abs')}
+                  />
+                  <InputPath
+                    label={t('environment.upscale_models_label')}
+                    value={settingsValue.upscale_models_dir.trim()}
+                    Icon={FolderIcon}
+                    pathType="directory"
+                    relativeTo={configUtils.getComfyUIDir()[0]}
+                    onChange={(value) => saveSettings({ upscale_models_dir: value })}
+                    placeholder={t('environment.placeholder_rel_or_abs')}
+                  />
+                  <InputPath
+                    label={t('environment.output_label')}
+                    value={settingsValue.output_dir.trim()}
+                    Icon={FolderIcon}
+                    pathType="directory"
+                    relativeTo={configUtils.getComfyUIDir()[0]}
+                    onChange={(value) => saveSettings({ output_dir: value })}
+                    placeholder={t('environment.placeholder_rel_or_abs')}
+                  />
+                  <InputPath
+                    label={t('environment.workflow_label')}
+                    value={settingsValue.workflow_dir.trim()}
+                    Icon={FolderIcon}
+                    pathType="directory"
+                    relativeTo={configUtils.getComfyUIDir()[0]}
+                    onChange={(value) => saveSettings({ workflow_dir: value })}
+                    placeholder={t('environment.placeholder_rel_or_abs')}
+                  />
+                </SettingSection>
+              </Box>
+            )}
+
+            <Box key="dcc_bridge">
+              <SettingSection title={text('DCC 桥接', 'DCC Bridge')}>
+                <Alert severity="info">
+                  <AlertTitle>{text('文件夹目标', 'Folder Targets')}</AlertTitle>
+                  <Typography sx={{ whiteSpace: 'pre-line', wordBreak: 'break-all' }}>
                     {text(
-                      '请先添加代理访问令牌，才能查看按令牌拆分的使用情况。',
-                      'Add proxy access tokens first to view per-token usage.'
+                      'Unity：指向项目的 Assets 文件夹，或 Assets 下的某个子文件夹。\nUnreal：指向 Auto Reimport 使用的监视源文件夹。',
+                      'Unity: point this at the project Assets folder or a subfolder inside Assets.\nUnreal: point this at a watched source folder used by Auto Reimport.'
                     )}
                   </Typography>
                 </Alert>
-              )}
-            </Stack>
-          </SettingSection>
-        </Collapse>
 
-        <Collapse key="pure_config_not_set">
-          <PureConfigNotSetCallout needNavigate={false} />
-        </Collapse>
-
-        <Collapse key="remote_config_not_set">
-          <RemoteConfigNotSetCallout needNavigate={false} />
-        </Collapse>
-
-        <Collapse key="data_storage">
-          <SettingSection title={text('数据根目录', 'Data directory')}>
-            <DataStorageInfo />
-          </SettingSection>
-        </Collapse>
-
-        {!settingsValue.use_remote_comfyui && (
-          <Collapse key="monitor">
-            <SettingSection title={t('environment.monitor_title')}>
-              <EnvironmentInfo />
-            </SettingSection>
-          </Collapse>
-        )}
-
-        {!settingsValue.use_remote_comfyui && (
-          <Collapse key="setup">
-            <SettingSection
-              title={t('environment.setup_title')}
-              action={
-                <Stack direction="row" spacing={1}>
-                  <DropdownButton
-                    variant="outlined"
-                    size="small"
-                    startIcon={<CodeIcon />}
-                    buttonChildren={t('environment.setup_quick')}
-                  >
-                    {({ handleClose }) =>
-                      fastSettingTemplates.map((template) => (
-                        <MenuItem
-                          key={template.key}
-                          onClick={() => {
-                            handleFastSetting(template.key)
-                            handleClose()
-                          }}
-                        >
-                          {template.name}
-                        </MenuItem>
-                      ))
-                    }
-                  </DropdownButton>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<RefreshIcon />}
-                    onClick={handleResetAllPaths}
-                  >
-                    {t('environment.setup_reset_paths')}
-                  </Button>
-                </Stack>
-              }
-            >
-              <InputPath
-                label={t('environment.python_cmd_label')}
-                value={settingsValue.local_comfyui_config.python_cmd.trim()}
-                Icon={CodeIcon}
-                pathType="file"
-                defaultTo={configUtils.getPythonCmd()[0]}
-                onChange={(value) =>
-                  saveSettings({
-                    local_comfyui_config: { python_cmd: toEmbeddedRelativePath(value) }
-                  })
-                }
-                placeholder={configUtils.getPythonCmd()[0] || t('environment.placeholder_python')}
-                errorText={
-                  !configUtils.isPythonCmdAvailable()
-                    ? t('environment.err_pure_need_python')
-                    : undefined
-                }
-              />
-
-              <InputPath
-                label={t('environment.comfy_dir_label')}
-                value={settingsValue.local_comfyui_config.comfyui_dir.trim()}
-                Icon={FolderIcon}
-                pathType="directory"
-                defaultTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) =>
-                  saveSettings({
-                    local_comfyui_config: { comfyui_dir: toEmbeddedRelativePath(value) }
-                  })
-                }
-                placeholder={configUtils.getComfyUIDir()[0] || t('environment.placeholder_comfy')}
-                errorText={
-                  !configUtils.isComfyUIDirAvailable()
-                    ? t('environment.err_pure_need_comfy')
-                    : undefined
-                }
-              />
-
-              <InputText
-                label={t('environment.comfy_port_label')}
-                value={settingsValue.local_comfyui_config.comfyui_port}
-                Icon={CodeIcon}
-                onChange={(value) =>
-                  saveSettings({ local_comfyui_config: { comfyui_port: value } })
-                }
-                placeholder={configUtils.getComfyUIPort()}
-              />
-
-              <InputText
-                label={t('environment.comfy_args_label')}
-                value={settingsValue.local_comfyui_config.comfyui_args?.join(' ') || ''}
-                Icon={CodeIcon}
-                onChange={(value) =>
-                  saveSettings({ local_comfyui_config: { comfyui_args: splitSpace(value) } })
-                }
-                placeholder={configUtils.getComfyUIArgs().join(' ')}
-              />
-            </SettingSection>
-          </Collapse>
-        )}
-
-        {configUtils.isComfyUIDirAvailable() && (
-          <Collapse key="models">
-            <SettingSection
-              title={t('environment.models_title')}
-              action={
-                <Stack direction="row" spacing={1}>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<RefreshIcon />}
-                    onClick={handleLoadExtraModelPaths}
-                  >
-                    {t('environment.models_load_extra_yaml')}
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<RefreshIcon />}
-                    onClick={handleResetAllPaths}
-                  >
-                    {t('environment.models_reset_paths')}
-                  </Button>
-                </Stack>
-              }
-            >
-              <Typography variant="caption" sx={{ ml: 0.5 }}>
-                {t('environment.models_relative_tip')}
-              </Typography>
-
-              <InputPath
-                label={t('environment.checkpoints_label')}
-                value={settingsValue.checkpoints_dir.trim()}
-                Icon={FolderIcon}
-                pathType="directory"
-                relativeTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) => saveSettings({ checkpoints_dir: value })}
-                placeholder={t('environment.placeholder_rel_or_abs')}
-              />
-              <InputPath
-                label={t('environment.clip_label')}
-                value={settingsValue.clip_dir.trim()}
-                Icon={FolderIcon}
-                pathType="directory"
-                relativeTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) => saveSettings({ clip_dir: value })}
-                placeholder={t('environment.placeholder_rel_or_abs')}
-              />
-              <InputPath
-                label={t('environment.vae_label')}
-                value={settingsValue.vae_dir.trim()}
-                Icon={FolderIcon}
-                pathType="directory"
-                relativeTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) => saveSettings({ vae_dir: value })}
-                placeholder={t('environment.placeholder_rel_or_abs')}
-              />
-              <InputPath
-                label={t('environment.lora_label')}
-                value={settingsValue.lora_dir.trim()}
-                Icon={FolderIcon}
-                pathType="directory"
-                relativeTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) => saveSettings({ lora_dir: value })}
-                placeholder={t('environment.placeholder_rel_or_abs')}
-              />
-              <InputPath
-                label={t('environment.controlnet_label')}
-                value={settingsValue.controlnet_dir.trim()}
-                Icon={FolderIcon}
-                pathType="directory"
-                relativeTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) => saveSettings({ controlnet_dir: value })}
-                placeholder={t('environment.placeholder_rel_or_abs')}
-              />
-              <InputPath
-                label={t('environment.diffusion_models_label')}
-                value={settingsValue.diffusion_models_dir.trim()}
-                Icon={FolderIcon}
-                pathType="directory"
-                relativeTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) => saveSettings({ diffusion_models_dir: value })}
-                placeholder={t('environment.placeholder_rel_or_abs')}
-              />
-              <InputPath
-                label={t('environment.unet_label')}
-                value={settingsValue.unet_dir.trim()}
-                Icon={FolderIcon}
-                pathType="directory"
-                relativeTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) => saveSettings({ unet_dir: value })}
-                placeholder={t('environment.placeholder_rel_or_abs')}
-              />
-              <InputPath
-                label={t('environment.upscale_models_label')}
-                value={settingsValue.upscale_models_dir.trim()}
-                Icon={FolderIcon}
-                pathType="directory"
-                relativeTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) => saveSettings({ upscale_models_dir: value })}
-                placeholder={t('environment.placeholder_rel_or_abs')}
-              />
-              <InputPath
-                label={t('environment.output_label')}
-                value={settingsValue.output_dir.trim()}
-                Icon={FolderIcon}
-                pathType="directory"
-                relativeTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) => saveSettings({ output_dir: value })}
-                placeholder={t('environment.placeholder_rel_or_abs')}
-              />
-              <InputPath
-                label={t('environment.workflow_label')}
-                value={settingsValue.workflow_dir.trim()}
-                Icon={FolderIcon}
-                pathType="directory"
-                relativeTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) => saveSettings({ workflow_dir: value })}
-                placeholder={t('environment.placeholder_rel_or_abs')}
-              />
-            </SettingSection>
-          </Collapse>
-        )}
-
-        <Collapse key="dcc_bridge">
-          <SettingSection title={text('DCC 桥接', 'DCC Bridge')}>
-            <Alert severity="info">
-              <AlertTitle>{text('文件夹目标', 'Folder Targets')}</AlertTitle>
-              <Typography sx={{ whiteSpace: 'pre-line', wordBreak: 'break-all' }}>
-                {text(
-                  'Unity：指向项目的 Assets 文件夹，或 Assets 下的某个子文件夹。\nUnreal：指向 Auto Reimport 使用的监视源文件夹。',
-                  'Unity: point this at the project Assets folder or a subfolder inside Assets.\nUnreal: point this at a watched source folder used by Auto Reimport.'
-                )}
-              </Typography>
-            </Alert>
-
-            <InputPath
-              label={text('Unity 桥接文件夹', 'Unity bridge folder')}
-              value={settingsValue.dcc_bridge_config.unity_export_dir.trim()}
-              Icon={FolderIcon}
-              pathType="directory"
-              onChange={(value) => saveSettings({ dcc_bridge_config: { unity_export_dir: value } })}
-              placeholder={text(
-                '例如：C:/MyUnityProject/Assets/MagicPot',
-                'C:/MyUnityProject/Assets/MagicPot'
-              )}
-            />
-
-            <InputPath
-              label={text('Unreal 桥接文件夹', 'Unreal bridge folder')}
-              value={settingsValue.dcc_bridge_config.unreal_export_dir.trim()}
-              Icon={FolderIcon}
-              pathType="directory"
-              onChange={(value) =>
-                saveSettings({ dcc_bridge_config: { unreal_export_dir: value } })
-              }
-              placeholder={text(
-                '例如：D:/MyUnrealProject/BridgeInbox',
-                'D:/MyUnrealProject/BridgeInbox'
-              )}
-            />
-          </SettingSection>
-        </Collapse>
-
-        <Collapse key="adobe_bridge">
-          <SettingSection title={text('Adobe 桥接', 'Adobe Bridge')}>
-            <Alert severity="info">
-              <AlertTitle>{text('文件夹导入目标', 'Folder Inbox Targets')}</AlertTitle>
-              <Typography sx={{ whiteSpace: 'pre-line', wordBreak: 'break-all' }}>
-                {text(
-                  'After Effects / Premiere Pro：指向工作流可导入的文件夹。MagicPot 会把资源复制到 MagicPotImports，并在旁边写入清单。',
-                  'After Effects / Premiere Pro: point this at a folder your workflow can import from. MagicPot will copy assets into MagicPotImports and write a manifest beside them.'
-                )}
-              </Typography>
-            </Alert>
-
-            <InputPath
-              label={text('After Effects 导出文件夹', 'After Effects bridge folder')}
-              value={(settingsValue.adobe_bridge_config?.after_effects_export_dir || '').trim()}
-              Icon={FolderIcon}
-              pathType="directory"
-              onChange={(value) =>
-                saveSettings({ adobe_bridge_config: { after_effects_export_dir: value } })
-              }
-              placeholder={text(
-                '例如：D:/Creative/AfterEffects/BridgeInbox',
-                'D:/Creative/AfterEffects/BridgeInbox'
-              )}
-            />
-
-            <InputPath
-              label={text('Premiere Pro 导出文件夹', 'Premiere Pro bridge folder')}
-              value={(settingsValue.adobe_bridge_config?.premiere_export_dir || '').trim()}
-              Icon={FolderIcon}
-              pathType="directory"
-              onChange={(value) =>
-                saveSettings({ adobe_bridge_config: { premiere_export_dir: value } })
-              }
-              placeholder={text(
-                '例如：D:/Creative/Premiere/BridgeInbox',
-                'D:/Creative/Premiere/BridgeInbox'
-              )}
-            />
-          </SettingSection>
-        </Collapse>
-        <Collapse key="figma_bridge">
-          <SettingSection
-            title={text('\u0046\u0069\u0067\u006d\u0061 \u63a5\u5165', 'Figma Integration')}
-          >
-            <Alert
-              severity={
-                settingsValue.figma_config?.personal_access_token?.trim() ? 'success' : 'warning'
-              }
-            >
-              <AlertTitle>
-                {settingsValue.figma_config?.personal_access_token?.trim()
-                  ? text('Figma API 已配置', 'Figma API configured')
-                  : text('请先配置 Figma API', 'Set up Figma API first')}
-              </AlertTitle>
-              <Typography sx={{ whiteSpace: 'pre-line', wordBreak: 'break-all' }}>
-                {text(
-                  '在这里配置一次 Figma Personal Access Token 后，画布里就可以绑定某个 Figma 文件，后续由 MagicPot 主动拉取同步，并按设置自动检查更新。\n发送到 Figma 仍然会继续走剪贴板粘贴流程。',
-                  'Configure your Figma Personal Access Token here once. Then each canvas can bind a Figma file, sync it on demand from MagicPot, and automatically check for updates.\nSend to Figma still uses the clipboard paste flow.'
-                )}
-              </Typography>
-            </Alert>
-
-            <Stack spacing={2.5} sx={{ mt: 2 }}>
-              <TextField
-                fullWidth
-                type="password"
-                autoComplete="off"
-                label={text('Figma Personal Access Token', 'Figma Personal Access Token')}
-                value={settingsValue.figma_config?.personal_access_token || ''}
-                onChange={(event) =>
-                  saveSettings({
-                    figma_config: { personal_access_token: event.target.value }
-                  })
-                }
-                placeholder="figd_********************************"
-                helperText={text(
-                  '用于画布绑定 Figma 文件、手动同步和自动检查更新。',
-                  'Used for canvas-side Figma binding, manual sync, and automatic update checks.'
-                )}
-              />
-
-              <Box
-                sx={{
-                  display: 'grid',
-                  gap: 2,
-                  gridTemplateColumns: {
-                    xs: '1fr',
-                    md: 'minmax(260px, 1fr) minmax(220px, 320px)'
-                  }
-                }}
-              >
-                <InputSwitch
-                  label={text(
-                    '自动检查已绑定 Figma 文件更新',
-                    'Automatically check bound Figma files'
-                  )}
-                  value={settingsValue.figma_config?.auto_check_updates ?? true}
+                <InputPath
+                  label={text('Unity 桥接文件夹', 'Unity bridge folder')}
+                  value={settingsValue.dcc_bridge_config.unity_export_dir.trim()}
+                  Icon={FolderIcon}
+                  pathType="directory"
                   onChange={(value) =>
-                    saveSettings({
-                      figma_config: { auto_check_updates: value }
-                    })
+                    saveSettings({ dcc_bridge_config: { unity_export_dir: value } })
                   }
-                  tooltip={text(
-                    '开启后，画布侧已绑定的 Figma 文件会由 MagicPot 按间隔自动检查是否有新版本。',
-                    'When enabled, MagicPot automatically checks bound Figma files for updates on the canvas side.'
+                  placeholder={text(
+                    '例如：C:/MyUnityProject/Assets/MagicPot',
+                    'C:/MyUnityProject/Assets/MagicPot'
                   )}
                 />
 
-                <TextField
-                  fullWidth
-                  type="number"
-                  label={text('检查间隔（分钟）', 'Check interval (minutes)')}
-                  value={String(settingsValue.figma_config?.auto_check_interval_minutes ?? 15)}
-                  onChange={(event) => {
-                    const parsed = parseInt(event.target.value, 10)
-                    saveSettings({
-                      figma_config: {
-                        auto_check_interval_minutes: Number.isFinite(parsed)
-                          ? Math.min(1440, Math.max(5, parsed))
-                          : 15
-                      }
-                    })
-                  }}
-                  inputProps={{ min: 5, max: 1440, step: 1 }}
-                  helperText={text(
-                    '建议 5 到 60 分钟；绑定文件的自动检查会使用这个全局间隔。',
-                    'Recommended range: 5 to 60 minutes. Bound-file auto checks use this global interval.'
+                <InputPath
+                  label={text('Unreal 桥接文件夹', 'Unreal bridge folder')}
+                  value={settingsValue.dcc_bridge_config.unreal_export_dir.trim()}
+                  Icon={FolderIcon}
+                  pathType="directory"
+                  onChange={(value) =>
+                    saveSettings({ dcc_bridge_config: { unreal_export_dir: value } })
+                  }
+                  placeholder={text(
+                    '例如：D:/MyUnrealProject/BridgeInbox',
+                    'D:/MyUnrealProject/BridgeInbox'
                   )}
                 />
-              </Box>
+              </SettingSection>
+            </Box>
 
-              <Divider />
-
-              <Alert severity={lastActiveProjectId ? 'info' : 'warning'} variant="outlined">
-                <AlertTitle>
-                  {lastActiveProjectId
-                    ? text('当前画布绑定', 'Current canvas binding')
-                    : text('未打开画布', 'No canvas open')}
-                </AlertTitle>
-                <Typography variant="body2" sx={{ whiteSpace: 'pre-line' }}>
-                  {lastActiveProjectId
-                    ? currentCanvasBinding
-                      ? text(
-                          `当前操作对象：${managedCanvasLabel}\n绑定文件：${currentCanvasBinding.fileName}`,
-                          `Current target: ${managedCanvasLabel}\nBound file: ${currentCanvasBinding.fileName}`
-                        )
-                      : text(
-                          `当前操作对象：${managedCanvasLabel}\n尚未绑定 Figma 文件。`,
-                          `Current target: ${managedCanvasLabel}\nNo Figma file is bound yet.`
-                        )
-                    : text(
-                        '请先打开一个画布项目，再到这里管理该画布的 Figma 绑定和同步。',
-                        'Open a canvas project first, then manage that canvas Figma binding here.'
-                      )}
-                </Typography>
-              </Alert>
-
-              {lastActiveProjectId && displayedFigmaBinding?.updateAvailable && (
-                <Typography variant="body2" color="warning.main" sx={{ fontWeight: 600 }}>
-                  {text(
-                    '检测到已绑定 Figma 有更新，可在下方面板里同步。',
-                    'A newer bound Figma version is available. Use the panel below to sync it.'
-                  )}
-                </Typography>
-              )}
-
-              {lastActiveProjectId && (
-                <FigmaBindingDialog
-                  variant="inline"
-                  open
-                  accessTokenConfigured={Boolean(figmaAccessToken)}
-                  busyAction={figmaBusyAction}
-                  error={figmaBindingError}
-                  fileKeyOrUrl={figmaFileKeyOrUrlInput}
-                  binding={displayedFigmaBinding}
-                  globalAutoCheckEnabled={figmaGlobalAutoCheckEnabled}
-                  globalAutoCheckIntervalMinutes={figmaAutoCheckIntervalMinutes}
-                  onFileKeyOrUrlChange={setFigmaFileKeyOrUrlInput}
-                  onPageNodeIdChange={handleFigmaDraftPageChange}
-                  onAutoCheckUpdatesChange={handleFigmaDraftAutoCheckUpdatesChange}
-                  onResolve={() => void handleResolveFigmaBinding()}
-                  onBind={() => void handleSaveFigmaBinding()}
-                  onSync={() => void handleSyncFigmaBinding()}
-                  onCheck={() => void handleCheckFigmaUpdate()}
-                  onUnbind={() => void handleUnbindFigmaBinding()}
-                  onClose={handleCloseFigmaBindingDialog}
-                />
-              )}
-
-              <Stack
-                direction={{ xs: 'column', sm: 'row' }}
-                spacing={1.5}
-                alignItems={{ xs: 'stretch', sm: 'center' }}
-                sx={{ display: 'none' }}
-              >
-                <Button
-                  variant="outlined"
-                  startIcon={<CodeIcon />}
-                  onClick={() => void handleOpenFigmaBindingDialog()}
-                  disabled={!lastActiveProjectId}
-                >
-                  {text('管理当前画布绑定', 'Manage Current Canvas Binding')}
-                </Button>
-                {currentCanvasBinding?.updateAvailable && (
-                  <Typography variant="body2" color="warning.main" sx={{ fontWeight: 600 }}>
+            <Box key="adobe_bridge">
+              <SettingSection title={text('Adobe 桥接', 'Adobe Bridge')}>
+                <Alert severity="info">
+                  <AlertTitle>{text('文件夹导入目标', 'Folder Inbox Targets')}</AlertTitle>
+                  <Typography sx={{ whiteSpace: 'pre-line', wordBreak: 'break-all' }}>
                     {text(
-                      '检测到已绑定 Figma 有更新，可在上面的对话框里同步。',
-                      'A newer bound Figma version is available. Open the dialog above to sync it.'
+                      'After Effects / Premiere Pro：指向工作流可导入的文件夹。MagicPot 会把资源复制到 MagicPotImports，并在旁边写入清单。',
+                      'After Effects / Premiere Pro: point this at a folder your workflow can import from. MagicPot will copy assets into MagicPotImports and write a manifest beside them.'
                     )}
                   </Typography>
-                )}
-              </Stack>
-            </Stack>
-          </SettingSection>
-        </Collapse>
-      </TransitionGroup>
+                </Alert>
 
-      <FigmaBindingDialog
-        open={figmaBindingDialogOpen}
-        accessTokenConfigured={Boolean(figmaAccessToken)}
-        busyAction={figmaBusyAction}
-        error={figmaBindingError}
-        fileKeyOrUrl={figmaFileKeyOrUrlInput}
-        binding={figmaBindingDraft || currentCanvasBinding}
-        globalAutoCheckEnabled={figmaGlobalAutoCheckEnabled}
-        globalAutoCheckIntervalMinutes={figmaAutoCheckIntervalMinutes}
-        onFileKeyOrUrlChange={setFigmaFileKeyOrUrlInput}
-        onPageNodeIdChange={handleFigmaDraftPageChange}
-        onAutoCheckUpdatesChange={handleFigmaDraftAutoCheckUpdatesChange}
-        onResolve={() => void handleResolveFigmaBinding()}
-        onBind={() => void handleSaveFigmaBinding()}
-        onSync={() => void handleSyncFigmaBinding()}
-        onCheck={() => void handleCheckFigmaUpdate()}
-        onUnbind={() => void handleUnbindFigmaBinding()}
-        onClose={handleCloseFigmaBindingDialog}
-      />
+                <InputPath
+                  label={text('After Effects 导出文件夹', 'After Effects bridge folder')}
+                  value={(settingsValue.adobe_bridge_config?.after_effects_export_dir || '').trim()}
+                  Icon={FolderIcon}
+                  pathType="directory"
+                  onChange={(value) =>
+                    saveSettings({ adobe_bridge_config: { after_effects_export_dir: value } })
+                  }
+                  placeholder={text(
+                    '例如：D:/Creative/AfterEffects/BridgeInbox',
+                    'D:/Creative/AfterEffects/BridgeInbox'
+                  )}
+                />
+
+                <InputPath
+                  label={text('Premiere Pro 导出文件夹', 'Premiere Pro bridge folder')}
+                  value={(settingsValue.adobe_bridge_config?.premiere_export_dir || '').trim()}
+                  Icon={FolderIcon}
+                  pathType="directory"
+                  onChange={(value) =>
+                    saveSettings({ adobe_bridge_config: { premiere_export_dir: value } })
+                  }
+                  placeholder={text(
+                    '例如：D:/Creative/Premiere/BridgeInbox',
+                    'D:/Creative/Premiere/BridgeInbox'
+                  )}
+                />
+              </SettingSection>
+            </Box>
+            <Box key="figma_bridge">
+              <SettingSection
+                title={text('\u0046\u0069\u0067\u006d\u0061 \u63a5\u5165', 'Figma Integration')}
+              >
+                <Alert
+                  severity={
+                    settingsValue.figma_config?.personal_access_token?.trim()
+                      ? 'success'
+                      : 'warning'
+                  }
+                >
+                  <AlertTitle>
+                    {settingsValue.figma_config?.personal_access_token?.trim()
+                      ? text('Figma API 已配置', 'Figma API configured')
+                      : text('请先配置 Figma API', 'Set up Figma API first')}
+                  </AlertTitle>
+                  <Typography sx={{ whiteSpace: 'pre-line', wordBreak: 'break-all' }}>
+                    {text(
+                      '在这里配置一次 Figma Personal Access Token 后，画布里就可以绑定某个 Figma 文件，后续由 MagicPot 主动拉取同步，并按设置自动检查更新。\n发送到 Figma 仍然会继续走剪贴板粘贴流程。',
+                      'Configure your Figma Personal Access Token here once. Then each canvas can bind a Figma file, sync it on demand from MagicPot, and automatically check for updates.\nSend to Figma still uses the clipboard paste flow.'
+                    )}
+                  </Typography>
+                </Alert>
+
+                <Stack spacing={2.5} sx={{ mt: 2 }}>
+                  <TextField
+                    fullWidth
+                    type="password"
+                    autoComplete="off"
+                    label={text('Figma Personal Access Token', 'Figma Personal Access Token')}
+                    value={settingsValue.figma_config?.personal_access_token || ''}
+                    onChange={(event) =>
+                      saveSettings({
+                        figma_config: { personal_access_token: event.target.value }
+                      })
+                    }
+                    placeholder="figd_********************************"
+                    helperText={text(
+                      '用于画布绑定 Figma 文件、手动同步和自动检查更新。',
+                      'Used for canvas-side Figma binding, manual sync, and automatic update checks.'
+                    )}
+                  />
+
+                  <Box
+                    sx={{
+                      display: 'grid',
+                      gap: 2,
+                      gridTemplateColumns: {
+                        xs: '1fr',
+                        md: 'minmax(260px, 1fr) minmax(220px, 320px)'
+                      }
+                    }}
+                  >
+                    <InputSwitch
+                      label={text(
+                        '自动检查已绑定 Figma 文件更新',
+                        'Automatically check bound Figma files'
+                      )}
+                      value={settingsValue.figma_config?.auto_check_updates ?? true}
+                      onChange={(value) =>
+                        saveSettings({
+                          figma_config: { auto_check_updates: value }
+                        })
+                      }
+                      tooltip={text(
+                        '开启后，画布侧已绑定的 Figma 文件会由 MagicPot 按间隔自动检查是否有新版本。',
+                        'When enabled, MagicPot automatically checks bound Figma files for updates on the canvas side.'
+                      )}
+                    />
+
+                    <TextField
+                      fullWidth
+                      type="number"
+                      label={text('检查间隔（分钟）', 'Check interval (minutes)')}
+                      value={String(settingsValue.figma_config?.auto_check_interval_minutes ?? 15)}
+                      onChange={(event) => {
+                        const parsed = parseInt(event.target.value, 10)
+                        saveSettings({
+                          figma_config: {
+                            auto_check_interval_minutes: Number.isFinite(parsed)
+                              ? Math.min(1440, Math.max(5, parsed))
+                              : 15
+                          }
+                        })
+                      }}
+                      inputProps={{ min: 5, max: 1440, step: 1 }}
+                      helperText={text(
+                        '建议 5 到 60 分钟；绑定文件的自动检查会使用这个全局间隔。',
+                        'Recommended range: 5 to 60 minutes. Bound-file auto checks use this global interval.'
+                      )}
+                    />
+                  </Box>
+
+                  <Divider />
+
+                  <Alert severity={lastActiveProjectId ? 'info' : 'warning'} variant="outlined">
+                    <AlertTitle>
+                      {lastActiveProjectId
+                        ? text('当前画布绑定', 'Current canvas binding')
+                        : text('未打开画布', 'No canvas open')}
+                    </AlertTitle>
+                    <Typography variant="body2" sx={{ whiteSpace: 'pre-line' }}>
+                      {lastActiveProjectId
+                        ? currentCanvasBinding
+                          ? text(
+                              `当前操作对象：${managedCanvasLabel}\n绑定文件：${currentCanvasBinding.fileName}`,
+                              `Current target: ${managedCanvasLabel}\nBound file: ${currentCanvasBinding.fileName}`
+                            )
+                          : text(
+                              `当前操作对象：${managedCanvasLabel}\n尚未绑定 Figma 文件。`,
+                              `Current target: ${managedCanvasLabel}\nNo Figma file is bound yet.`
+                            )
+                        : text(
+                            '请先打开一个画布项目，再到这里管理该画布的 Figma 绑定和同步。',
+                            'Open a canvas project first, then manage that canvas Figma binding here.'
+                          )}
+                    </Typography>
+                  </Alert>
+
+                  {lastActiveProjectId && displayedFigmaBinding?.updateAvailable && (
+                    <Typography variant="body2" color="warning.main" sx={{ fontWeight: 600 }}>
+                      {text(
+                        '检测到已绑定 Figma 有更新，可在下方面板里同步。',
+                        'A newer bound Figma version is available. Use the panel below to sync it.'
+                      )}
+                    </Typography>
+                  )}
+
+                  {lastActiveProjectId && (
+                    <FigmaBindingDialog
+                      variant="inline"
+                      open
+                      accessTokenConfigured={Boolean(figmaAccessToken)}
+                      busyAction={figmaBusyAction}
+                      error={figmaBindingError}
+                      fileKeyOrUrl={figmaFileKeyOrUrlInput}
+                      binding={displayedFigmaBinding}
+                      globalAutoCheckEnabled={figmaGlobalAutoCheckEnabled}
+                      globalAutoCheckIntervalMinutes={figmaAutoCheckIntervalMinutes}
+                      onFileKeyOrUrlChange={setFigmaFileKeyOrUrlInput}
+                      onPageNodeIdChange={handleFigmaDraftPageChange}
+                      onAutoCheckUpdatesChange={handleFigmaDraftAutoCheckUpdatesChange}
+                      onResolve={() => void handleResolveFigmaBinding()}
+                      onBind={() => void handleSaveFigmaBinding()}
+                      onSync={() => void handleSyncFigmaBinding()}
+                      onCheck={() => void handleCheckFigmaUpdate()}
+                      onUnbind={() => void handleUnbindFigmaBinding()}
+                      onClose={handleCloseFigmaBindingDialog}
+                    />
+                  )}
+
+                  <Stack
+                    direction={{ xs: 'column', sm: 'row' }}
+                    spacing={1.5}
+                    alignItems={{ xs: 'stretch', sm: 'center' }}
+                    sx={{ display: 'none' }}
+                  >
+                    <Button
+                      variant="outlined"
+                      startIcon={<CodeIcon />}
+                      onClick={() => void handleOpenFigmaBindingDialog()}
+                      disabled={!lastActiveProjectId}
+                    >
+                      {text('管理当前画布绑定', 'Manage Current Canvas Binding')}
+                    </Button>
+                    {currentCanvasBinding?.updateAvailable && (
+                      <Typography variant="body2" color="warning.main" sx={{ fontWeight: 600 }}>
+                        {text(
+                          '检测到已绑定 Figma 有更新，可在上面的对话框里同步。',
+                          'A newer bound Figma version is available. Open the dialog above to sync it.'
+                        )}
+                      </Typography>
+                    )}
+                  </Stack>
+                </Stack>
+              </SettingSection>
+            </Box>
+          </>
+        )}
+      </>
+
+      {renderDeferredSections && (
+        <FigmaBindingDialog
+          open={figmaBindingDialogOpen}
+          accessTokenConfigured={Boolean(figmaAccessToken)}
+          busyAction={figmaBusyAction}
+          error={figmaBindingError}
+          fileKeyOrUrl={figmaFileKeyOrUrlInput}
+          binding={figmaBindingDraft || currentCanvasBinding}
+          globalAutoCheckEnabled={figmaGlobalAutoCheckEnabled}
+          globalAutoCheckIntervalMinutes={figmaAutoCheckIntervalMinutes}
+          onFileKeyOrUrlChange={setFigmaFileKeyOrUrlInput}
+          onPageNodeIdChange={handleFigmaDraftPageChange}
+          onAutoCheckUpdatesChange={handleFigmaDraftAutoCheckUpdatesChange}
+          onResolve={() => void handleResolveFigmaBinding()}
+          onBind={() => void handleSaveFigmaBinding()}
+          onSync={() => void handleSyncFigmaBinding()}
+          onCheck={() => void handleCheckFigmaUpdate()}
+          onUnbind={() => void handleUnbindFigmaBinding()}
+          onClose={handleCloseFigmaBindingDialog}
+        />
+      )}
 
       <FastSettingErrorModal
         errorMessage={fastSettingErrorMessage}
