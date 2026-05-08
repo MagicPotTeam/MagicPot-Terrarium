@@ -783,7 +783,7 @@
     "tencent_secret_key": "腾讯云 SecretKey",
     "tencent_secret_key_placeholder": "请输入 SecretKey",
     "api_region": "腾讯云 API 地域",
-    "api_region_hint": "留空时会先回退到 COS 地域，再回退到 ap-guangzhou。",
+    "api_region_hint": "留空时会先回退到 COS 地域。",
     "cos_bucket": "COS Bucket",
     "cos_region": "COS Region",
     "cos_key_prefix": "COS Key 前缀",
