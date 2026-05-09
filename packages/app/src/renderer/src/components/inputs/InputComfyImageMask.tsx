@@ -94,11 +94,24 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
     return image
   }, [internalValue])
 
+  const handleClear = useCallback(() => {
+    setModalOpen(false)
+    setInternalValue('')
+    onChange('')
+    setPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev)
+      return null
+    })
+  }, [onChange])
+
   useEffect(() => {
     let active = true
     ;(async () => {
       if (!internalValue) {
-        setPreviewUrl(null)
+        setPreviewUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev)
+          return null
+        })
         return
       }
       try {
@@ -152,6 +165,7 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
       isLoading={isLoading}
       previewUrl={previewUrl}
       doUpload={doUpload}
+      onClear={handleClear}
       buttonSlot={
         previewUrl && (
           <ModalLayout buttonText="Open Mask Editor" open={modalOpen} setOpen={setModalOpen}>

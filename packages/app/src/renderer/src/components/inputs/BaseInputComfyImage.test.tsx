@@ -248,6 +248,54 @@ describe('BaseInputComfyImage', () => {
     })
   })
 
+  it('calls onClear from the preview delete button', () => {
+    const onClear = vi.fn()
+
+    render(
+      <BaseInputComfyImage
+        label="Image"
+        internalValue="demo.png"
+        isLoading={false}
+        previewUrl="blob:preview"
+        doUpload={vi.fn()}
+        onClear={onClear}
+        placeholder="Drop an image"
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'input.image.clear' }))
+
+    expect(onClear).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the paste-target highlight when deleting the preview', () => {
+    const ControlledInput = () => {
+      const [previewUrl, setPreviewUrl] = React.useState<string | null>('blob:preview')
+      return (
+        <BaseInputComfyImage
+          label="Image"
+          internalValue={previewUrl ? 'demo.png' : ''}
+          isLoading={false}
+          previewUrl={previewUrl}
+          doUpload={vi.fn()}
+          onClear={() => setPreviewUrl(null)}
+          placeholder="Drop an image"
+        />
+      )
+    }
+
+    render(<ControlledInput />)
+
+    const dropZone = screen.getByRole('img', { name: 'demo.png' }).closest('[tabindex="0"]')
+    expect(dropZone).toBeTruthy()
+    fireEvent.mouseEnter(dropZone as Element)
+
+    fireEvent.click(screen.getByRole('button', { name: 'input.image.clear' }))
+
+    expect(screen.getByText('Drop an image')).toBeInTheDocument()
+    expect(screen.queryByText('input.image.paste_hint')).not.toBeInTheDocument()
+  })
+
   it('uploads a pasted image while the load area is hovered', async () => {
     const doUpload = vi.fn().mockResolvedValue(undefined)
 

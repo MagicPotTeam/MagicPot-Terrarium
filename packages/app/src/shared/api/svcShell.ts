@@ -4,6 +4,7 @@
  */
 
 import { ServiceDefSheet } from './apiUtils/serviceDefSheet'
+import { ServerStreaming } from './apiUtils/streaming'
 
 export type DownloadFileReq = {
   url: string
@@ -15,6 +16,19 @@ export type DownloadFileResp = {
   fullPath: string
   alreadyExists: boolean
 }
+
+export type DownloadFileProgressEvent =
+  | {
+      type: 'progress'
+      downloadedBytes: number
+      totalBytes?: number
+      percent?: number
+      bytesPerSecond: number
+    }
+  | {
+      type: 'complete'
+      result: DownloadFileResp
+    }
 
 export type EnsureDirectoryReq = {
   path: string
@@ -44,6 +58,10 @@ export type ShellSvc = {
   fileExistsBatch(paths: string[]): Promise<boolean[]>
   ensureDirectory(req: EnsureDirectoryReq): Promise<EnsureDirectoryResp>
   downloadFile(req: DownloadFileReq): Promise<DownloadFileResp>
+  downloadFileWithProgress(
+    req: DownloadFileReq,
+    resp: ServerStreaming<DownloadFileProgressEvent>
+  ): Promise<void>
   installGitRepository(req: InstallGitRepositoryReq): Promise<InstallGitRepositoryResp>
 }
 
@@ -71,6 +89,9 @@ export const shellSvcDef: ServiceDefSheet<ShellSvc> = {
   },
   downloadFile: {
     type: 'unary'
+  },
+  downloadFileWithProgress: {
+    type: 'serverStreaming'
   },
   installGitRepository: {
     type: 'unary'

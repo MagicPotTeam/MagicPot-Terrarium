@@ -1,6 +1,6 @@
 import React from 'react'
-import { Box, IconButton, Typography } from '@mui/material'
-import { UploadOutlined } from '@mui/icons-material'
+import { Box, IconButton, Tooltip, Typography } from '@mui/material'
+import { DeleteOutline, UploadOutlined } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
 import { useMessage } from '@renderer/hooks/useMessage'
 import {
@@ -23,6 +23,7 @@ type BaseInputComfyImageProps = {
   doUpload: (file: File) => Promise<void>
   placeholder: string
   buttonSlot?: React.ReactNode
+  onClear?: () => void
 }
 
 const isPasteShortcut = (
@@ -49,6 +50,7 @@ const BaseInputComfyImage: React.FC<BaseInputComfyImageProps> = ({
   placeholder,
   Icon,
   buttonSlot,
+  onClear,
   doUpload
 }) => {
   const { t } = useTranslation()
@@ -89,7 +91,19 @@ const BaseInputComfyImage: React.FC<BaseInputComfyImageProps> = ({
   }, [])
 
   const handleSelectClick = () => {
+    if (isLoading) return
     fileInputRef.current?.click()
+  }
+
+  const handleClearClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (isLoading) return
+    setIsDragging(false)
+    setIsHovered(false)
+    setIsKeyboardFocused(false)
+    containerRef.current?.blur()
+    onClear?.()
   }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -269,18 +283,46 @@ const BaseInputComfyImage: React.FC<BaseInputComfyImageProps> = ({
         }}
       >
         {previewUrl ? (
-          <img
-            src={previewUrl}
-            alt={internalValue}
-            style={{
-              display: 'block',
-              maxWidth: '100%',
-              maxHeight: '100%',
-              width: 'auto',
-              height: 'auto',
-              objectFit: 'contain'
-            }}
-          />
+          <>
+            {onClear && (
+              <Tooltip title={t('input.image.clear')}>
+                <IconButton
+                  aria-label={t('input.image.clear')}
+                  size="small"
+                  onClick={handleClearClick}
+                  disabled={isLoading}
+                  sx={{
+                    position: 'absolute',
+                    top: 6,
+                    right: 6,
+                    zIndex: 1,
+                    width: 26,
+                    height: 26,
+                    bgcolor: 'rgba(0,0,0,0.6)',
+                    color: '#ff4d4f',
+                    '&:hover': {
+                      bgcolor: 'rgba(0,0,0,0.8)',
+                      color: '#ff4d4f'
+                    }
+                  }}
+                >
+                  <DeleteOutline sx={{ fontSize: 15 }} />
+                </IconButton>
+              </Tooltip>
+            )}
+            <img
+              src={previewUrl}
+              alt={internalValue}
+              style={{
+                display: 'block',
+                maxWidth: '100%',
+                maxHeight: '100%',
+                width: 'auto',
+                height: 'auto',
+                objectFit: 'contain'
+              }}
+            />
+          </>
         ) : (
           <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
             <IconButton color="default" disabled={isLoading}>

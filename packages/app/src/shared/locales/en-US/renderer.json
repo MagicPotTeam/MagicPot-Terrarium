@@ -563,6 +563,7 @@
       "missing_models_subtitle": "Missing Model Files",
       "put_to": "Place in: {{dir}}",
       "download": "Download",
+      "downloading": "Downloading",
       "open_directory": "Open Folder",
       "open_link": "Open Link",
       "model_exists": "Model file already exists",
@@ -834,7 +835,8 @@
       "photoshop_loaded": "Loaded image from the Photoshop clipboard",
       "photoshop_load_failed_log": "Failed to load image from Photoshop:",
       "load_failed_short": "Load failed: {{error}}",
-      "load_from_photoshop": "Load from Photoshop"
+      "load_from_photoshop": "Load from Photoshop",
+      "clear": "Delete image"
     }
   },
   "project": {

@@ -1,11 +1,30 @@
 import React from 'react'
 import { render, fireEvent, waitFor, screen } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import InputComfyImage from './InputComfyImage'
 import {
   QAPP_IMAGE_DRAG_MIME,
   UNSUPPORTED_INTERNAL_FILE_DROP_MESSAGE
 } from '@renderer/utils/droppedImageUtils'
+
+const apiMocks = vi.hoisted(() => ({
+  getView: vi.fn(),
+  uploadImage: vi.fn(),
+  loadImageFromPhotoshop: vi.fn()
+}))
+
+vi.mock('@renderer/utils/windowUtils', () => ({
+  api: () => ({
+    svcComfy: {
+      getView: apiMocks.getView,
+      uploadImage: apiMocks.uploadImage
+    },
+    svcPhotoshop: {
+      loadImageFromPhotoshop: apiMocks.loadImageFromPhotoshop
+    }
+  })
+}))
+
+import InputComfyImage from './InputComfyImage'
 
 const notifyErrorMock = vi.fn()
 const notifySuccessMock = vi.fn()
@@ -34,6 +53,9 @@ describe('InputComfyImage', () => {
   beforeEach(() => {
     notifyErrorMock.mockReset()
     notifySuccessMock.mockReset()
+    apiMocks.getView.mockReset()
+    apiMocks.uploadImage.mockReset()
+    apiMocks.loadImageFromPhotoshop.mockReset()
   })
 
   it('rejects unsupported external files with a clear error from the Quick App image-input path', async () => {
@@ -94,5 +116,51 @@ describe('InputComfyImage', () => {
     })
 
     expect(notifyErrorMock.mock.calls[0][0]).toBe(UNSUPPORTED_INTERNAL_FILE_DROP_MESSAGE)
+  })
+
+  it('clears a selected image from the preview delete button', async () => {
+    const createObjectURLMock = vi.fn(() => 'blob:preview')
+    const revokeObjectURLMock = vi.fn()
+
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURLMock
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURLMock
+    })
+
+    apiMocks.getView.mockResolvedValue({ result: new Uint8Array([1, 2, 3]) })
+    const changes: string[] = []
+
+    const ControlledInput = () => {
+      const [value, setValue] = React.useState('demo.png')
+      return (
+        <InputComfyImage
+          label="Quick App Image"
+          value={value}
+          onChange={(nextValue) => {
+            changes.push(nextValue)
+            setValue(nextValue)
+          }}
+          placeholder="Drop an image"
+        />
+      )
+    }
+
+    render(<ControlledInput />)
+
+    expect(await screen.findByRole('img', { name: 'demo.png' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'input.image.clear' }))
+
+    await waitFor(() => {
+      expect(changes).toContain('')
+    })
+
+    expect(screen.queryByRole('img', { name: 'demo.png' })).not.toBeInTheDocument()
+    expect(screen.getByText('Drop an image')).toBeInTheDocument()
+    expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:preview')
   })
 })
