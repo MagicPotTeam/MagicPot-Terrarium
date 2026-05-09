@@ -3,6 +3,7 @@ import os from 'os'
 import path from 'path'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 
+import { DownloadFileProgressEvent } from '@shared/api/svcShell'
 import { ShellSvcImpl } from './svcShellImpl'
 
 function makeStats({
@@ -106,6 +107,52 @@ describe('ShellSvcImpl', () => {
 
     expect(result.alreadyExists).toBe(false)
     expect(fs.readFileSync(result.fullPath)).toEqual(Buffer.from(bytes))
+
+    await fs.promises.rm(tempDir, { recursive: true, force: true })
+  })
+
+  it('emits download progress while streaming files', async () => {
+    const tempDir = await makeTempDir('magicpot-shell-download-progress')
+    const bytes = new Uint8Array([1, 2, 3, 4, 5])
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(bytes, {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-length': String(bytes.byteLength) }
+          })
+      )
+    )
+
+    const events: DownloadFileProgressEvent[] = []
+    const svc = new ShellSvcImpl()
+    await svc.downloadFileWithProgress(
+      {
+        url: 'https://example.com/model.bin',
+        outputDir: tempDir,
+        filename: 'model.bin'
+      },
+      { onData: (event) => events.push(event) }
+    )
+
+    const progressEvents = events.filter((event) => event.type === 'progress')
+    const completeEvent = events.find((event) => event.type === 'complete')
+
+    expect(progressEvents.length).toBeGreaterThan(0)
+    expect(progressEvents.at(-1)).toMatchObject({
+      downloadedBytes: bytes.byteLength,
+      totalBytes: bytes.byteLength,
+      percent: 100
+    })
+    expect(progressEvents.at(-1)?.bytesPerSecond).toBeGreaterThan(0)
+    expect(completeEvent).toMatchObject({
+      type: 'complete',
+      result: {
+        alreadyExists: false
+      }
+    })
 
     await fs.promises.rm(tempDir, { recursive: true, force: true })
   })

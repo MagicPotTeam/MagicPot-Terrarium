@@ -1,5 +1,6 @@
 import {
   DownloadFileReq,
+  DownloadFileProgressEvent,
   DownloadFileResp,
   EnsureDirectoryReq,
   EnsureDirectoryResp,
@@ -7,12 +8,13 @@ import {
   InstallGitRepositoryResp,
   ShellSvc
 } from '@shared/api/svcShell'
+import { ServerStreaming } from '@shared/api/apiUtils/streaming'
 import { spawn } from 'child_process'
 import { shell } from 'electron'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { Readable } from 'stream'
+import { Readable, Transform } from 'stream'
 import { pipeline } from 'stream/promises'
 
 function isLocallyAvailable(filePath: string): boolean {
@@ -48,6 +50,16 @@ function trimErrorOutput(value: string): string {
     return trimmed
   }
   return `${trimmed.slice(0, 1000)}...`
+}
+
+function getContentLength(headers: Headers): number | undefined {
+  const value = headers.get('content-length')
+  if (!value) {
+    return undefined
+  }
+
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
 }
 
 function runGitClone(url: string, targetDir: string): Promise<void> {
@@ -99,7 +111,10 @@ export class ShellSvcImpl implements ShellSvc {
     await fs.promises.mkdir(resolvedPath, { recursive: true })
     return { path: resolvedPath }
   }
-  downloadFile = async (req: DownloadFileReq): Promise<DownloadFileResp> => {
+  private downloadFileInternal = async (
+    req: DownloadFileReq,
+    onProgress?: (event: Extract<DownloadFileProgressEvent, { type: 'progress' }>) => void
+  ): Promise<DownloadFileResp> => {
     const url = requireHttpUrl(req.url)
     const filename = sanitizePathSegment(req.filename)
     if (!filename) {
@@ -122,12 +137,52 @@ export class ShellSvcImpl implements ShellSvc {
       throw new Error('Download failed: empty response body')
     }
 
+    const totalBytes = getContentLength(response.headers)
+    let downloadedBytes = 0
+    const startTime = Date.now()
+    let lastProgressAt = 0
+    const emitProgress = (force = false) => {
+      if (!onProgress) {
+        return
+      }
+
+      const now = Date.now()
+      if (!force && now - lastProgressAt < 250) {
+        return
+      }
+
+      lastProgressAt = now
+      const elapsedSeconds = Math.max((now - startTime) / 1000, 0.001)
+      onProgress({
+        type: 'progress',
+        downloadedBytes,
+        ...(totalBytes ? { totalBytes } : {}),
+        ...(totalBytes
+          ? { percent: Math.min(100, Math.round((downloadedBytes / totalBytes) * 100)) }
+          : {}),
+        bytesPerSecond: Math.round(downloadedBytes / elapsedSeconds)
+      })
+    }
+
     const tempPath = `${fullPath}.download-${process.pid}-${Date.now()}`
     try {
+      emitProgress(true)
       await pipeline(
         Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
+        new Transform({
+          transform(
+            chunk: Buffer,
+            _encoding: BufferEncoding,
+            callback: (error?: Error | null, data?: Buffer) => void
+          ) {
+            downloadedBytes += chunk.length
+            emitProgress()
+            callback(null, chunk)
+          }
+        }),
         fs.createWriteStream(tempPath)
       )
+      emitProgress(true)
       await fs.promises.rename(tempPath, fullPath)
     } catch (error) {
       await fs.promises.rm(tempPath, { force: true }).catch(() => undefined)
@@ -135,6 +190,16 @@ export class ShellSvcImpl implements ShellSvc {
     }
 
     return { fullPath, alreadyExists: false }
+  }
+  downloadFile = async (req: DownloadFileReq): Promise<DownloadFileResp> => {
+    return this.downloadFileInternal(req)
+  }
+  downloadFileWithProgress = async (
+    req: DownloadFileReq,
+    resp: ServerStreaming<DownloadFileProgressEvent>
+  ): Promise<void> => {
+    const result = await this.downloadFileInternal(req, (event) => resp.onData(event))
+    resp.onData({ type: 'complete', result })
   }
   installGitRepository = async (
     req: InstallGitRepositoryReq

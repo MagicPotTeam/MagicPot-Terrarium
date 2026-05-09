@@ -563,6 +563,7 @@
       "missing_models_subtitle": "Missing Model Files",
       "put_to": "Place in: {{dir}}",
       "download": "Download",
+      "downloading": "Downloading",
       "open_directory": "Open Folder",
       "open_link": "Open Link",
       "model_exists": "Model file already exists",

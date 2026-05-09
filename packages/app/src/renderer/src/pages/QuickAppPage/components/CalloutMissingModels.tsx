@@ -1,4 +1,4 @@
-import { Box, Button, CircularProgress, Stack, Typography } from '@mui/material'
+import { Box, Button, Stack, Typography } from '@mui/material'
 import {
   CloudDownload as CloudDownloadIcon,
   FolderOpen as FolderOpenIcon,
@@ -7,6 +7,7 @@ import {
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { api } from '@renderer/utils/windowUtils'
+import { DownloadFileProgressEvent, DownloadFileResp } from '@shared/api/svcShell'
 import { QAppRequiredModel } from '@shared/qApp/cfgTypes'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -14,6 +15,33 @@ import { checkRequiredModels, type MissingRequiredModel } from '../utils/qAppDep
 
 type CalloutMissingModelsProps = {
   requiredModels?: QAppRequiredModel[]
+}
+
+type ModelDownloadProgress = Extract<DownloadFileProgressEvent, { type: 'progress' }>
+
+const formatBytes = (bytes: number) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0 B'
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+
+  const digits = unitIndex === 0 || value >= 10 ? 0 : 1
+  return `${value.toFixed(digits)} ${units[unitIndex]}`
+}
+
+const formatDownloadButtonText = (progress: ModelDownloadProgress, downloadingLabel: string) => {
+  const speed = `${formatBytes(progress.bytesPerSecond)}/s`
+  if (progress.percent !== undefined) {
+    return `${progress.percent}% | ${speed}`
+  }
+  return `${downloadingLabel} | ${speed}`
 }
 
 export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsProps) => {
@@ -25,6 +53,9 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
   const [missingModels, setMissingModels] = useState<MissingRequiredModel[]>([])
   const busyModelKeysRef = useRef<Set<string>>(new Set())
   const [busyModelKeys, setBusyModelKeys] = useState<Set<string>>(new Set())
+  const [downloadProgressByKey, setDownloadProgressByKey] = useState<
+    Record<string, ModelDownloadProgress>
+  >({})
 
   useEffect(() => {
     if (!requiredModels || requiredModels.length === 0) {
@@ -81,6 +112,18 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
     setBusyModelKeys(next)
   }
 
+  const setDownloadProgress = (key: string, progress: ModelDownloadProgress) => {
+    setDownloadProgressByKey((prev) => ({ ...prev, [key]: progress }))
+  }
+
+  const clearDownloadProgress = (key: string) => {
+    setDownloadProgressByKey((prev) => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  }
+
   const openModelDir = async (item: MissingRequiredModel) => {
     const key = getModelKey(item)
     if (!addBusyModelKey(key)) {
@@ -105,11 +148,26 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
       return
     }
     try {
-      const result = await api().svcShell.downloadFile({
-        url: item.model.url,
-        outputDir: item.dirPath,
-        filename: item.model.name
-      })
+      let result: DownloadFileResp | undefined
+      await api().svcShell.downloadFileWithProgress(
+        {
+          url: item.model.url,
+          outputDir: item.dirPath,
+          filename: item.model.name
+        },
+        {
+          onData: (event) => {
+            if (event.type === 'progress') {
+              setDownloadProgress(key, event)
+            } else {
+              result = event.result
+            }
+          }
+        }
+      )
+      if (!result) {
+        throw new Error('Download completed without a result')
+      }
       notifySuccess(
         result.alreadyExists
           ? t('qapp.callout.model_exists')
@@ -119,6 +177,7 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
     } catch (error) {
       notifyError(t('qapp.callout.model_download_failed', { error: String(error) }))
     } finally {
+      clearDownloadProgress(key)
       removeBusyModelKey(key)
     }
   }
@@ -155,6 +214,11 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
           const { model, displayDir } = item
           const key = getModelKey(item)
           const busy = busyModelKeys.has(key)
+          const downloadProgress = downloadProgressByKey[key]
+          const progressWidth =
+            downloadProgress?.percent === undefined
+              ? '100%'
+              : `${Math.max(4, Math.min(100, downloadProgress.percent))}%`
           const urlFileName = getUrlFileName(model.url)
           const needsRename = urlFileName && urlFileName !== model.name
 
@@ -196,13 +260,68 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
                 <Button
                   size="small"
                   variant="contained"
-                  startIcon={
-                    busy ? <CircularProgress size={14} color="inherit" /> : <CloudDownloadIcon />
-                  }
+                  startIcon={downloadProgress ? undefined : <CloudDownloadIcon />}
                   disabled={busy}
                   onClick={() => void downloadModel(item)}
+                  sx={{
+                    minWidth: downloadProgress ? 156 : undefined,
+                    overflow: 'hidden',
+                    position: 'relative',
+                    ...(downloadProgress
+                      ? {
+                          '&.Mui-disabled': {
+                            bgcolor: '#6f5cff',
+                            color: '#fff'
+                          },
+                          '&::before': {
+                            content: '""',
+                            position: 'absolute',
+                            left: 0,
+                            top: 0,
+                            bottom: 0,
+                            width: progressWidth,
+                            bgcolor:
+                              downloadProgress.percent === undefined
+                                ? 'rgba(255,255,255,0.18)'
+                                : 'rgba(255,255,255,0.24)',
+                            transition: 'width 0.2s ease'
+                          },
+                          ...(downloadProgress.percent === undefined
+                            ? {
+                                '&::after': {
+                                  animation: 'qapp-download-progress-sweep 1.2s linear infinite',
+                                  bgcolor: 'rgba(255,255,255,0.12)',
+                                  content: '""',
+                                  inset: 0,
+                                  position: 'absolute',
+                                  transform: 'translateX(-100%)',
+                                  width: '60%'
+                                },
+                                '@keyframes qapp-download-progress-sweep': {
+                                  '0%': { transform: 'translateX(-100%)' },
+                                  '100%': { transform: 'translateX(220%)' }
+                                }
+                              }
+                            : {})
+                        }
+                      : {})
+                  }}
                 >
-                  {t('qapp.callout.download')}
+                  {downloadProgress ? (
+                    <Box
+                      component="span"
+                      sx={{
+                        fontVariantNumeric: 'tabular-nums',
+                        position: 'relative',
+                        whiteSpace: 'nowrap',
+                        zIndex: 1
+                      }}
+                    >
+                      {formatDownloadButtonText(downloadProgress, t('qapp.callout.downloading'))}
+                    </Box>
+                  ) : (
+                    t('qapp.callout.download')
+                  )}
                 </Button>
                 <Button
                   size="small"

@@ -466,6 +466,7 @@
       "missing_models_subtitle": "Missing Model Files",
       "put_to": "放到: {{dir}}",
       "download": "下载",
+      "downloading": "\u4e0b\u8f7d\u4e2d",
       "open_directory": "打开目录",
       "open_link": "打开链接",
       "model_exists": "模型文件已存在",
