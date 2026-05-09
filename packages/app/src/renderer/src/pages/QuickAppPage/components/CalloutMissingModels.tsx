@@ -1,52 +1,30 @@
-import { Box, Stack, Typography } from '@mui/material'
-import { CloudDownload as CloudDownloadIcon } from '@mui/icons-material'
-import ExternalLink from '@renderer/components/ExternalLInk'
+import { Box, Button, CircularProgress, Stack, Typography } from '@mui/material'
+import {
+  CloudDownload as CloudDownloadIcon,
+  FolderOpen as FolderOpenIcon,
+  OpenInNew as OpenInNewIcon
+} from '@mui/icons-material'
+import { useConfig } from '@renderer/hooks/useConfig'
+import { useMessage } from '@renderer/hooks/useMessage'
+import { api } from '@renderer/utils/windowUtils'
 import { QAppRequiredModel } from '@shared/qApp/cfgTypes'
 import { useEffect, useRef, useState } from 'react'
-import { api } from '@renderer/utils/windowUtils'
-import { useConfig } from '@renderer/hooks/useConfig'
+import { useTranslation } from 'react-i18next'
+import { checkRequiredModels, type MissingRequiredModel } from '../utils/qAppDependencyCheck'
 
 type CalloutMissingModelsProps = {
   requiredModels?: QAppRequiredModel[]
 }
 
-type MissingRequiredModel = {
-  model: QAppRequiredModel
-  displayDir: string
-}
-
-function getModelBaseDir(model: QAppRequiredModel): NonNullable<QAppRequiredModel['baseDir']> {
-  return model.baseDir ?? 'comfyui'
-}
-
-function resolveRequiredModelPath(
-  model: QAppRequiredModel,
-  comfyDir: string,
-  homeDir: string
-): string {
-  const rootDir = getModelBaseDir(model) === 'userHome' ? homeDir : comfyDir
-  return window.path.join(rootDir, model.dir, model.name)
-}
-
-function formatRequiredModelDir(model: QAppRequiredModel, homeDir: string): string {
-  if (getModelBaseDir(model) === 'userHome') {
-    return window.path.join(homeDir, model.dir)
-  }
-
-  const relativeDir = model.dir.replace(/\//g, '\\')
-  return `ComfyUI\\${relativeDir}`
-}
-
-/**
- * 缺失模型提示
- *
- * 检测快应用所需的模型文件是否存在，如果缺失则显示提示。
- */
 export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsProps) => {
+  const { t } = useTranslation()
   const { configUtils } = useConfig()
+  const { notifySuccess, notifyError } = useMessage()
   const configUtilsRef = useRef(configUtils)
   configUtilsRef.current = configUtils
   const [missingModels, setMissingModels] = useState<MissingRequiredModel[]>([])
+  const busyModelKeysRef = useRef<Set<string>>(new Set())
+  const [busyModelKeys, setBusyModelKeys] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     if (!requiredModels || requiredModels.length === 0) {
@@ -55,34 +33,12 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
     }
 
     const checkModels = async () => {
-      const [comfyDir, available] = configUtilsRef.current.getComfyUIDir()
-      if (!available) {
-        setMissingModels([])
-        return
-      }
-
-      const needsHomeDir = requiredModels.some((m) => getModelBaseDir(m) === 'userHome')
-      const homeDir = needsHomeDir ? await api().svcShell.getHomeDir() : ''
-      const resolvedModels = requiredModels.map((model) => ({
-        model,
-        filePath: resolveRequiredModelPath(model, comfyDir, homeDir),
-        displayDir: formatRequiredModelDir(model, homeDir)
-      }))
-
-      const results = await api().svcShell.fileExistsBatch(resolvedModels.map((m) => m.filePath))
-      setMissingModels(
-        resolvedModels
-          .filter((_, i) => !results[i])
-          .map(({ model, displayDir }) => ({ model, displayDir }))
-      )
+      setMissingModels(await checkRequiredModels(requiredModels, configUtilsRef.current))
     }
 
     checkModels()
 
-    // 每 10 秒自动重新检测，下载完模型后无需重启应用
     const interval = setInterval(checkModels, 10_000)
-
-    // 窗口获得焦点时也重新检测
     const onFocus = () => checkModels()
     window.addEventListener('focus', onFocus)
 
@@ -96,12 +52,74 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
     return null
   }
 
-  // 提取 URL 文件名用于对比
   const getUrlFileName = (url: string) => {
     try {
       return decodeURIComponent(new URL(url).pathname.split('/').pop() || '')
     } catch {
       return ''
+    }
+  }
+
+  const getModelKey = (item: MissingRequiredModel) =>
+    `${item.model.baseDir ?? 'comfyui'}:${item.model.dir}:${item.model.name}`
+
+  const addBusyModelKey = (key: string) => {
+    if (busyModelKeysRef.current.has(key)) {
+      return false
+    }
+    const next = new Set(busyModelKeysRef.current)
+    next.add(key)
+    busyModelKeysRef.current = next
+    setBusyModelKeys(next)
+    return true
+  }
+
+  const removeBusyModelKey = (key: string) => {
+    const next = new Set(busyModelKeysRef.current)
+    next.delete(key)
+    busyModelKeysRef.current = next
+    setBusyModelKeys(next)
+  }
+
+  const openModelDir = async (item: MissingRequiredModel) => {
+    const key = getModelKey(item)
+    if (!addBusyModelKey(key)) {
+      return
+    }
+    try {
+      await api().svcShell.ensureDirectory({ path: item.dirPath })
+      const openError = await api().svcShell.openPath(item.dirPath)
+      if (openError) {
+        notifyError(openError)
+      }
+    } catch (error) {
+      notifyError(t('qapp.callout.open_directory_failed', { error: String(error) }))
+    } finally {
+      removeBusyModelKey(key)
+    }
+  }
+
+  const downloadModel = async (item: MissingRequiredModel) => {
+    const key = getModelKey(item)
+    if (!addBusyModelKey(key)) {
+      return
+    }
+    try {
+      const result = await api().svcShell.downloadFile({
+        url: item.model.url,
+        outputDir: item.dirPath,
+        filename: item.model.name
+      })
+      notifySuccess(
+        result.alreadyExists
+          ? t('qapp.callout.model_exists')
+          : t('qapp.callout.model_downloaded', { name: item.model.name })
+      )
+      setMissingModels((prev) => prev.filter((model) => getModelKey(model) !== key))
+    } catch (error) {
+      notifyError(t('qapp.callout.model_download_failed', { error: String(error) }))
+    } finally {
+      removeBusyModelKey(key)
     }
   }
 
@@ -120,28 +138,29 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
         mb: 2
       }}
     >
-      {/* 标题区 */}
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
         <CloudDownloadIcon sx={{ fontSize: 40, color: amber }} />
         <Box>
           <Typography variant="h6" sx={{ fontWeight: 700, color: '#fff', lineHeight: 1.2 }}>
-            缺少模型文件
+            {t('qapp.callout.missing_models_title')}
           </Typography>
           <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.5)' }}>
-            Missing Model Files
+            {t('qapp.callout.missing_models_subtitle')}
           </Typography>
         </Box>
       </Box>
 
-      {/* 模型列表 */}
       <Stack spacing={1.5}>
-        {missingModels.map(({ model, displayDir }) => {
+        {missingModels.map((item) => {
+          const { model, displayDir } = item
+          const key = getModelKey(item)
+          const busy = busyModelKeys.has(key)
           const urlFileName = getUrlFileName(model.url)
           const needsRename = urlFileName && urlFileName !== model.name
 
           return (
             <Box
-              key={`${model.baseDir ?? 'comfyui'}:${model.dir}:${model.name}`}
+              key={key}
               sx={{
                 p: 1.5,
                 borderRadius: 1.5,
@@ -155,7 +174,6 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
                 transition: 'all 0.2s ease'
               }}
             >
-              {/* 文件名 + 大小 */}
               <Typography variant="subtitle2" sx={{ fontWeight: 600, color: '#fff' }}>
                 {model.name}
                 <Typography
@@ -167,39 +185,44 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
                 </Typography>
               </Typography>
 
-              {/* 目录路径 + 下载链接 */}
-              <Box
-                sx={{
-                  display: 'flex',
-                  alignItems: 'baseline',
-                  justifyContent: 'space-between',
-                  gap: 1.5,
-                  mt: 0.3
-                }}
+              <Typography
+                variant="caption"
+                sx={{ display: 'block', color: 'rgba(255,255,255,0.45)', wordBreak: 'break-all' }}
               >
-                <Typography
-                  variant="caption"
-                  sx={{ color: 'rgba(255,255,255,0.45)', wordBreak: 'break-all' }}
-                >
-                  放到: {displayDir}
-                </Typography>
-                <ExternalLink href={model.url}>
-                  <Typography
-                    component="span"
-                    sx={{
-                      color: '#4da6ff',
-                      fontWeight: 600,
-                      fontSize: '0.85rem',
-                      whiteSpace: 'nowrap',
-                      '&:hover': { textDecoration: 'underline' }
-                    }}
-                  >
-                    下载链接
-                  </Typography>
-                </ExternalLink>
-              </Box>
+                {t('qapp.callout.put_to', { dir: displayDir })}
+              </Typography>
 
-              {/* 重命名提示 */}
+              <Stack direction="row" spacing={1} sx={{ mt: 1.25, flexWrap: 'wrap', rowGap: 1 }}>
+                <Button
+                  size="small"
+                  variant="contained"
+                  startIcon={
+                    busy ? <CircularProgress size={14} color="inherit" /> : <CloudDownloadIcon />
+                  }
+                  disabled={busy}
+                  onClick={() => void downloadModel(item)}
+                >
+                  {t('qapp.callout.download')}
+                </Button>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<FolderOpenIcon />}
+                  disabled={busy}
+                  onClick={() => void openModelDir(item)}
+                >
+                  {t('qapp.callout.open_directory')}
+                </Button>
+                <Button
+                  size="small"
+                  variant="text"
+                  startIcon={<OpenInNewIcon />}
+                  onClick={() => void api().svcShell.openExternal(model.url)}
+                >
+                  {t('qapp.callout.open_link')}
+                </Button>
+              </Stack>
+
               {needsRename && (
                 <Typography
                   variant="caption"
@@ -210,7 +233,7 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
                     fontWeight: 500
                   }}
                 >
-                  下载后请重命名为{' '}
+                  {t('qapp.callout.rename_model_hint')}{' '}
                   <Typography
                     component="span"
                     variant="caption"

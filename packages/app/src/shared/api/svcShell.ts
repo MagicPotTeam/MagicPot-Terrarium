@@ -5,6 +5,36 @@
 
 import { ServiceDefSheet } from './apiUtils/serviceDefSheet'
 
+export type DownloadFileReq = {
+  url: string
+  outputDir: string
+  filename: string
+}
+
+export type DownloadFileResp = {
+  fullPath: string
+  alreadyExists: boolean
+}
+
+export type EnsureDirectoryReq = {
+  path: string
+}
+
+export type EnsureDirectoryResp = {
+  path: string
+}
+
+export type InstallGitRepositoryReq = {
+  url: string
+  outputDir: string
+  directoryName: string
+}
+
+export type InstallGitRepositoryResp = {
+  targetDir: string
+  alreadyExists: boolean
+}
+
 export type ShellSvc = {
   openPath(path: string): Promise<string>
   showItemInFolder(path: string): Promise<void>
@@ -12,6 +42,9 @@ export type ShellSvc = {
   getHomeDir(): Promise<string>
   fileExists(path: string): Promise<boolean>
   fileExistsBatch(paths: string[]): Promise<boolean[]>
+  ensureDirectory(req: EnsureDirectoryReq): Promise<EnsureDirectoryResp>
+  downloadFile(req: DownloadFileReq): Promise<DownloadFileResp>
+  installGitRepository(req: InstallGitRepositoryReq): Promise<InstallGitRepositoryResp>
 }
 
 export const shellSvcDef: ServiceDefSheet<ShellSvc> = {
@@ -31,6 +64,15 @@ export const shellSvcDef: ServiceDefSheet<ShellSvc> = {
     type: 'unary'
   },
   fileExistsBatch: {
+    type: 'unary'
+  },
+  ensureDirectory: {
+    type: 'unary'
+  },
+  downloadFile: {
+    type: 'unary'
+  },
+  installGitRepository: {
     type: 'unary'
   }
 }

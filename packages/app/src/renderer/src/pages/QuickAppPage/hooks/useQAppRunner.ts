@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useConfig } from '@renderer/hooks/useConfig'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { useComfyStatus } from '@renderer/store/hooks/comfyStatus'
 import { api } from '@renderer/utils/windowUtils'
@@ -18,6 +19,10 @@ import { buildQAppSubmitWorkflowRequest } from '../utils/qAppSubmitWorkflow'
 import { waitForQAppPromptResult } from '../utils/qAppPromptResult'
 import { readPendingQAppGenerationSessionId } from '../utils/qAppTaskPackBridge'
 import { resolveQAppSessionKey } from '../utils/qAppSessionIdentity'
+import {
+  checkQAppDependencies,
+  hasBlockingQAppDependencyIssues
+} from '../utils/qAppDependencyCheck'
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null
@@ -85,14 +90,17 @@ export const useQAppRunner = (projectId?: string) => {
     validate,
     buildWorkflow,
     buildSubmitExtraData,
+    workflow,
     qAppCfg,
     currentQAppKey,
     submitClientId,
     submitSessionKey
   } = useQAppContext()
+  const { configUtils } = useConfig()
   const {
-    state: { isConnected, isRunning },
+    state: { isConnected, isRunning, objectInfos },
     setIsRunning,
+    setObjectInfos,
     appendResults,
     setErrorPromptStatus
   } = useComfyStatus()
@@ -174,6 +182,50 @@ export const useQAppRunner = (projectId?: string) => {
     ]
   )
 
+  const runDependencyPreflight = useCallback(async (): Promise<boolean> => {
+    let latestObjectInfos = objectInfos
+    if (isConnected && Object.keys(latestObjectInfos || {}).length === 0) {
+      try {
+        latestObjectInfos = await api().svcComfy.getObjectInfo({})
+        setObjectInfos(latestObjectInfos)
+      } catch (error) {
+        console.warn('[qAppDependencyPreflight] failed to refresh object info:', error)
+      }
+    }
+
+    const report = await checkQAppDependencies({
+      cfg: qAppCfg,
+      workflow,
+      objectInfos: latestObjectInfos,
+      configUtils
+    })
+
+    if (!hasBlockingQAppDependencyIssues(report)) {
+      return true
+    }
+
+    const parts: string[] = []
+    if (report.missingModels.length > 0) {
+      parts.push(
+        t('qapp.callout.preflight_missing_models', {
+          count: report.missingModels.length,
+          names: report.missingModels.map((item) => item.model.name).join(', ')
+        })
+      )
+    }
+    if (report.missingNodeClasses.length > 0) {
+      parts.push(
+        t('qapp.callout.preflight_missing_nodes', {
+          count: report.missingNodeClasses.length,
+          names: report.missingNodeClasses.join(', ')
+        })
+      )
+    }
+
+    notifyError(t('qapp.callout.preflight_failed', { items: parts.join(', ') }))
+    return false
+  }, [configUtils, isConnected, notifyError, objectInfos, qAppCfg, setObjectInfos, t, workflow])
+
   useEffect(() => {
     const qAppKey = currentQAppKey?.trim()
     if (!qAppKey || !isConnected) return
@@ -220,6 +272,7 @@ export const useQAppRunner = (projectId?: string) => {
     }
 
     try {
+      if (!(await runDependencyPreflight())) return
       if (!(await validate())) return
 
       setIsRunning(true)
@@ -264,6 +317,7 @@ export const useQAppRunner = (projectId?: string) => {
     notifyError,
     processPromptResult,
     projectId,
+    runDependencyPreflight,
     setIsRunning,
     submitClientId,
     submitSessionKey,
