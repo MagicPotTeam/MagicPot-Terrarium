@@ -97,11 +97,23 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
     }
   }
 
+  const handleClear = useCallback(() => {
+    setInternalValue('')
+    onChange('')
+    setPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev)
+      return null
+    })
+  }, [onChange])
+
   useEffect(() => {
     let active = true
     ;(async () => {
       if (!internalValue) {
-        setPreviewUrl(null)
+        setPreviewUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev)
+          return null
+        })
         return
       }
       try {
@@ -119,7 +131,10 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
         if (active) {
           setInternalValue('')
           onChange('')
-          setPreviewUrl(null)
+          setPreviewUrl((prev) => {
+            if (prev) URL.revokeObjectURL(prev)
+            return null
+          })
         }
       }
     })()
@@ -137,6 +152,7 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
       isLoading={isLoading}
       previewUrl={previewUrl}
       doUpload={doUpload}
+      onClear={handleClear}
       buttonSlot={
         <Button
           size="small"

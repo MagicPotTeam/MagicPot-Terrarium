@@ -640,7 +640,8 @@
       "photoshop_loaded": "已从 Photoshop 加载图像",
       "photoshop_load_failed_log": "从 Photoshop 加载图像失败：",
       "load_failed_short": "加载失败：{{error}}",
-      "load_from_photoshop": "从 Photoshop 加载"
+      "load_from_photoshop": "从 Photoshop 加载",
+      "clear": "\u5220\u9664\u56fe\u50cf"
     }
   },
   "project": {
