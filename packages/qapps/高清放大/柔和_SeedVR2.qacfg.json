@@ -16,10 +16,10 @@
   },
   "requiredModels": [
     {
-      "name": "seedvr2_ema_7b_sharp_fp16.safetensors",
+      "name": "seedvr2_ema_7b_fp16.safetensors",
       "size": "15.4 GB",
       "dir": "models/SEEDVR2",
-      "url": "https://modelscope.cn/models/numz/SeedVR2_comfyUI/resolve/master/seedvr2_ema_7b_sharp_fp16.safetensors"
+      "url": "https://modelscope.cn/models/numz/SeedVR2_comfyUI/resolve/master/seedvr2_ema_7b_fp16.safetensors"
     },
     {
       "name": "ema_vae_fp16.safetensors",
