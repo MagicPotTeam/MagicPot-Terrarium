@@ -78,6 +78,49 @@ const cloneQAppCacheEntry = (entry: QAppCacheEntry): QAppCacheEntry => ({
   formState: new Map(entry.formState)
 })
 
+const isPlainQAppValueRecord = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+const qAppInputValueEquals = (left: unknown, right: unknown): boolean => {
+  if (Object.is(left, right)) {
+    return true
+  }
+
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false
+    }
+
+    return left.every((item, index) => qAppInputValueEquals(item, right[index]))
+  }
+
+  if (isPlainQAppValueRecord(left) || isPlainQAppValueRecord(right)) {
+    if (!isPlainQAppValueRecord(left) || !isPlainQAppValueRecord(right)) {
+      return false
+    }
+
+    const leftKeys = Object.keys(left)
+    const rightKeys = Object.keys(right)
+    if (leftKeys.length !== rightKeys.length) {
+      return false
+    }
+
+    return leftKeys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(right, key) &&
+        qAppInputValueEquals(left[key], right[key])
+    )
+  }
+
+  return false
+}
+
 export const QAppContextProvider = ({
   qAppKey,
   skipServerFetch,
@@ -147,7 +190,7 @@ export const QAppContextProvider = ({
   const setFormStateValue = useCallback((key: string, value: unknown) => {
     setFormState((prev) => {
       const current = prev.get(key)
-      if (current === value) {
+      if (prev.has(key) && qAppInputValueEquals(current, value)) {
         return prev
       }
       const next = new Map(prev)
@@ -727,16 +770,16 @@ export const useQAppInputState = <T,>(
   // 仅在 storedValue 变化时同步到本地 value（外部 → 本地）
   useEffect(() => {
     // 如果 storedValue 与上一次不同，需要更新
-    if (storedValue !== prevStoredValueRef.current) {
+    if (!qAppInputValueEquals(storedValue, prevStoredValueRef.current)) {
       prevStoredValueRef.current = storedValue
       if (storedValue !== undefined) {
         // storedValue 有值，更新本地 value
-        if (storedValue !== valueRef.current) {
+        if (!qAppInputValueEquals(storedValue, valueRef.current)) {
           setValue(storedValue)
         }
       } else {
         // storedValue 变为 undefined，重置为 defaultValue
-        if (valueRef.current !== defaultValue) {
+        if (!qAppInputValueEquals(valueRef.current, defaultValue)) {
           setValue(defaultValue)
           setFormStateValue(formKey, defaultValue)
         }
@@ -745,7 +788,7 @@ export const useQAppInputState = <T,>(
   }, [storedValue, defaultValue, formKey, setFormStateValue])
 
   useEffect(() => {
-    const defaultValueChanged = defaultValue !== prevDefaultValueRef.current
+    const defaultValueChanged = !qAppInputValueEquals(defaultValue, prevDefaultValueRef.current)
     const formKeyChanged = formKey !== prevFormKeyRef.current
 
     if (!defaultValueChanged && !formKeyChanged) {
@@ -756,13 +799,13 @@ export const useQAppInputState = <T,>(
     prevFormKeyRef.current = formKey
 
     if (storedValue !== undefined) {
-      if (storedValue !== valueRef.current || formKeyChanged) {
+      if (!qAppInputValueEquals(storedValue, valueRef.current) || formKeyChanged) {
         setValue(storedValue)
       }
       return
     }
 
-    if (valueRef.current !== defaultValue || formKeyChanged) {
+    if (!qAppInputValueEquals(valueRef.current, defaultValue) || formKeyChanged) {
       setValue(defaultValue)
     }
     setFormStateValue(formKey, defaultValue)
@@ -770,7 +813,7 @@ export const useQAppInputState = <T,>(
 
   const updateValue = useCallback(
     (next: T) => {
-      setValue(next)
+      setValue((prev) => (qAppInputValueEquals(prev, next) ? prev : next))
       setFormStateValue(formKey, next)
     },
     [formKey, setFormStateValue]
