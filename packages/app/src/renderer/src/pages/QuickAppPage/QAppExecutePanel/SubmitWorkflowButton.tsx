@@ -1,5 +1,7 @@
 import { Image as ImageIcon } from '@mui/icons-material'
 import { Alert, Button, CircularProgress } from '@mui/material'
+import { writeSelectedLoraTriggerWordFiles } from '@renderer/components/inputs/loraTriggerWordFiles'
+import { useConfig } from '@renderer/hooks/useConfig'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { useComfyStatus } from '@renderer/store/hooks/comfyStatus'
 import { api } from '@renderer/utils/windowUtils'
@@ -51,8 +53,9 @@ const SubmitWorkflowButton: React.FC<SubmitWorkflowButtonProps> = ({
   buildWorkflow
 }) => {
   const { t } = useTranslation()
-  const { currentQAppKey, buildSubmitExtraData, submitClientId, submitSessionKey } =
+  const { currentQAppKey, buildSubmitExtraData, formState, submitClientId, submitSessionKey } =
     useQAppContext()
+  const { configUtils } = useConfig()
   const { notifySuccess, notifyError } = useMessage()
   const [status, setStatus] = useState<string>('')
   const {
@@ -165,6 +168,12 @@ const SubmitWorkflowButton: React.FC<SubmitWorkflowButtonProps> = ({
           }
         )
         return
+      }
+
+      try {
+        await writeSelectedLoraTriggerWordFiles({ formState, configUtils })
+      } catch (error) {
+        console.warn('[LoRA trigger words] failed to write sidecar files:', error)
       }
 
       appendResults(resultItems)

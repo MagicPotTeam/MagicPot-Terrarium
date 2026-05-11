@@ -1,13 +1,28 @@
-import React from 'react'
+import React, { useCallback, useEffect, useImperativeHandle, useMemo, useState } from 'react'
 import { setJsonPath, getJsonPath } from '@shared/utils/jsonPath'
 import { ExeInputBuilder, ExeInputProps } from './types'
-import { useImperativeHandle } from 'react'
 import InputLoRAChain, { LoRAConfig } from '@renderer/components/inputs/InputLoRAChain'
 import { findFieldOptions } from '@shared/comfy/funcs'
-import { useQAppInputState } from '../../components/QAppContext'
+import { useQAppContext, useQAppInputState } from '../../components/QAppContext'
 import { WorkflowInputRef, Workflow } from '@shared/comfy/types'
+import { ConfigUtils } from '@shared/config/configUtils'
+import {
+  appendPromptTriggerWords,
+  normalizeTriggerWords,
+  readLoraTriggerWordsMap,
+  updateLoraTriggerWordsMap,
+  writeLoraTriggerWordsMap
+} from '@renderer/components/inputs/loraTriggerWords'
+import {
+  listLoraModelOptions,
+  readLoraTriggerWordsSidecar
+} from '@renderer/components/inputs/loraTriggerWordFiles'
 
 const keyLoraLoader = 'LoraLoader'
+
+const isNegativePromptLabel = (label: string): boolean =>
+  /negative|\u8d1f\u9762|\u53cd\u5411|\u4e0d\u8981|\u6392\u9664/i.test(label)
+
 const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow) => {
   const { label, outputModelSlots, outputClipSlots, inputModel, inputClip } = cfg
 
@@ -15,9 +30,81 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
 
   const formKey = `${label}-${outputModelSlots.join('|')}-${outputClipSlots.join('|')}`
 
-  const QAppInputLoRAChain: React.FC<ExeInputProps> = ({ objectInfos, ref }) => {
-    const options = findFieldOptions(objectInfos, keyLoraLoader, 'lora_name')
+  const QAppInputLoRAChain: React.FC<ExeInputProps> = ({ objectInfos, config, buildEnv, ref }) => {
+    const configUtils = useMemo(
+      () => new ConfigUtils(config, buildEnv, window.path),
+      [buildEnv, config]
+    )
+    const objectInfoOptions = findFieldOptions(objectInfos, keyLoraLoader, 'lora_name')
+    const [fallbackOptions, setFallbackOptions] = useState<string[]>([])
+    const options = objectInfoOptions.length > 0 ? objectInfoOptions : fallbackOptions
     const [loraInputs, setLoraInputs] = useQAppInputState<LoRAConfig[]>(formKey, [])
+    const { qAppCfg, formState, setFormStateValue } = useQAppContext()
+
+    useEffect(() => {
+      if (objectInfoOptions.length > 0) {
+        return
+      }
+
+      let cancelled = false
+      void listLoraModelOptions(configUtils).then((modelOptions) => {
+        if (!cancelled) {
+          setFallbackOptions(modelOptions)
+        }
+      })
+
+      return () => {
+        cancelled = true
+      }
+    }, [configUtils, objectInfoOptions.length])
+
+    const primaryPromptSlot = useMemo(() => {
+      const promptInputs = qAppCfg?.inputs.filter((input) => input.component === 'InputPrompt')
+      const primaryPromptInput =
+        promptInputs?.find((input) => !isNegativePromptLabel(input.label)) ?? promptInputs?.[0]
+      return primaryPromptInput?.slot
+    }, [qAppCfg])
+
+    const appendLoraTriggerWordsToPrompt = useCallback(
+      async (loraName: string, preferredTriggerWords?: string) => {
+        let triggerWords = normalizeTriggerWords(
+          preferredTriggerWords || readLoraTriggerWordsMap()[loraName] || ''
+        )
+        if (!triggerWords) {
+          triggerWords = await readLoraTriggerWordsSidecar(loraName, configUtils)
+        }
+        if (!triggerWords) {
+          return
+        }
+
+        writeLoraTriggerWordsMap(
+          updateLoraTriggerWordsMap(readLoraTriggerWordsMap(), loraName, triggerWords)
+        )
+
+        if (!primaryPromptSlot) {
+          return triggerWords
+        }
+
+        const storedPrompt = formState.get(primaryPromptSlot)
+        let currentPrompt = typeof storedPrompt === 'string' ? storedPrompt : ''
+        if (!currentPrompt) {
+          try {
+            const defaultPrompt = getJsonPath(primaryPromptSlot, workflow)
+            currentPrompt = typeof defaultPrompt === 'string' ? defaultPrompt : ''
+          } catch {
+            currentPrompt = ''
+          }
+        }
+
+        const nextPrompt = appendPromptTriggerWords(currentPrompt, triggerWords)
+        if (nextPrompt !== currentPrompt) {
+          setFormStateValue(primaryPromptSlot, nextPrompt)
+        }
+
+        return triggerWords
+      },
+      [configUtils, formState, primaryPromptSlot, setFormStateValue]
+    )
 
     useImperativeHandle(
       ref,
@@ -209,6 +296,7 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
         value={loraInputs}
         onChange={(v) => setLoraInputs(v)}
         lora_options={options}
+        onLoraSelected={appendLoraTriggerWordsToPrompt}
       />
     )
   }
