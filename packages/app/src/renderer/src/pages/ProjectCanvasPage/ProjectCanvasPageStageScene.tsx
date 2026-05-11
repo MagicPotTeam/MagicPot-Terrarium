@@ -21,6 +21,7 @@ import {
   dispatchCanvasLiveVisualBoundsChange,
   useLiveSelectionOverlayGroups
 } from './canvasLiveOverlayBounds'
+import { CANVAS_NEW_RESULT_HINT_EVENT, type CanvasNewResultHintDetail } from './canvasNewResultHint'
 import { measureCanvasAnnotationTextHeight, measureCanvasTextBoxHeight } from './canvasTextLayout'
 import {
   ProjectCanvasPageSceneGrid,
@@ -77,6 +78,8 @@ const PROJECT_CANVAS_HIGH_RES_DOM_IMAGE_MIN_VISIBLE_SCREEN_AREA = 160 * 160
 const PROJECT_CANVAS_HIGH_RES_DOM_IMAGE_SOURCE_PIXEL_BUDGET = 96 * 1024 * 1024
 const PROJECT_CANVAS_HIGH_RES_DOM_IMAGE_DENSE_VIEW_MAX_SCALE = 1
 const PROJECT_CANVAS_HIGH_RES_DOM_IMAGE_DENSE_VIEW_CANDIDATE_LIMIT = 16
+const PROJECT_CANVAS_NEW_RESULT_HINT_DURATION_MS = 8000
+const PROJECT_CANVAS_NEW_RESULT_HINT_OUTLINE_SCREEN_PX = 4
 
 function getProjectCanvasDomImageDeviceScale() {
   return Math.min(4, Math.max(1, window.devicePixelRatio || 1))
@@ -220,6 +223,47 @@ function buildCanvasImageDomTransform(
   item: Pick<CanvasImageItem, 'x' | 'y' | 'rotation' | 'scaleX' | 'scaleY'>
 ) {
   return `translate3d(${item.x}px, ${item.y}px, 0) rotate(${item.rotation}deg) scale(${item.scaleX}, ${item.scaleY})`
+}
+
+function resolveNewResultHintOutlineWidth(stageScale: number) {
+  const safeScale = Math.max(0.001, Math.abs(stageScale))
+  return PROJECT_CANVAS_NEW_RESULT_HINT_OUTLINE_SCREEN_PX / safeScale
+}
+
+function CanvasNewResultHintOverlay({
+  item,
+  stageScale
+}: {
+  item: CanvasImageItem
+  stageScale: number
+}) {
+  const overlayItem = React.useMemo(() => getCanvasPlaceholderInteractionOverlayItem(item), [item])
+  const outlineWidth = resolveNewResultHintOutlineWidth(stageScale)
+
+  return (
+    <Box
+      data-canvas-overlay="new-result-hint"
+      data-canvas-item-id={item.id}
+      sx={{
+        position: 'absolute',
+        left: 0,
+        top: 0,
+        width: overlayItem.width,
+        height: overlayItem.height,
+        transform: buildCanvasImageDomTransform(overlayItem),
+        transformOrigin: '0 0',
+        pointerEvents: 'none',
+        zIndex: overlayItem.zIndex + 2,
+        borderRadius: `${Math.max(2, 4 / Math.max(0.001, Math.abs(stageScale)))}px`,
+        outline: `${outlineWidth}px solid rgba(245, 158, 11, 0.98)`,
+        boxShadow: [
+          `0 0 0 ${outlineWidth * 0.55}px rgba(255, 255, 255, 0.92)`,
+          `0 0 ${outlineWidth * 5}px ${outlineWidth}px rgba(245, 158, 11, 0.44)`
+        ].join(', '),
+        boxSizing: 'border-box'
+      }}
+    />
+  )
 }
 
 function shouldUseHighResolutionDomSourcePreview(item: CanvasImageItem, stageScale: number) {
@@ -821,6 +865,64 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const totalCanvasImageItemCount = React.useMemo(
     () => allCanvasItems.reduce((count, item) => count + (item.type === 'image' ? 1 : 0), 0),
     [allCanvasItems]
+  )
+  const [newResultHintIds, setNewResultHintIds] = React.useState<Set<string>>(new Set())
+  const newResultHintTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  React.useEffect(() => {
+    const hintTimers = newResultHintTimersRef.current
+
+    const removeHint = (itemId: string) => {
+      setNewResultHintIds((previousIds) => {
+        if (!previousIds.has(itemId)) {
+          return previousIds
+        }
+        const nextIds = new Set(previousIds)
+        nextIds.delete(itemId)
+        return nextIds
+      })
+    }
+
+    const handleNewResultHint = (event: Event) => {
+      const detail = (event as CustomEvent<CanvasNewResultHintDetail>).detail
+      if (!detail?.itemId) {
+        return
+      }
+
+      setNewResultHintIds((previousIds) => {
+        const nextIds = new Set(previousIds)
+        nextIds.add(detail.itemId)
+        return nextIds
+      })
+
+      const previousTimer = hintTimers.get(detail.itemId)
+      if (previousTimer != null) {
+        clearTimeout(previousTimer)
+      }
+      const timer = setTimeout(() => {
+        hintTimers.delete(detail.itemId)
+        removeHint(detail.itemId)
+      }, PROJECT_CANVAS_NEW_RESULT_HINT_DURATION_MS)
+      hintTimers.set(detail.itemId, timer)
+    }
+
+    window.addEventListener(CANVAS_NEW_RESULT_HINT_EVENT, handleNewResultHint)
+
+    return () => {
+      window.removeEventListener(CANVAS_NEW_RESULT_HINT_EVENT, handleNewResultHint)
+      hintTimers.forEach((timer) => clearTimeout(timer))
+      hintTimers.clear()
+    }
+  }, [])
+
+  const newResultHintItems = React.useMemo(
+    () =>
+      allCanvasItems
+        .filter(
+          (item): item is CanvasImageItem => item.type === 'image' && newResultHintIds.has(item.id)
+        )
+        .sort((left, right) => left.zIndex - right.zIndex),
+    [allCanvasItems, newResultHintIds]
   )
   const domPreviewSyncParentIdSet = React.useMemo(() => {
     const parentIds = new Set<string>()
@@ -2828,6 +2930,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
       data-project-canvas-render-surface-summary={JSON.stringify(renderSurfaceSummary)}
       data-project-canvas-webgl-primary-image-count={renderSurfaceSummary.webglImageItems}
       data-project-canvas-high-res-dom-image-count={highResolutionDomImagePreviewItems.length}
+      data-project-canvas-new-result-hint-count={newResultHintItems.length}
       data-project-canvas-budget-downgraded-image-count={
         renderSurfaceSummary.budgetDowngradedImageItems
       }
@@ -3013,6 +3116,27 @@ export default function ProjectCanvasPageStageScene(props: any) {
                       sourceImagePreview
                     />
                   </Box>
+                ))}
+              </div>
+            </Box>
+          )}
+          {newResultHintItems.length > 0 && (
+            <Box
+              data-project-canvas-new-result-hint-layer="dom"
+              sx={{
+                position: 'absolute',
+                inset: 0,
+                overflow: 'visible',
+                pointerEvents: 'none'
+              }}
+            >
+              <div ref={registerViewportLayer} style={STAGE_VIEWPORT_LAYER_BASE_STYLE}>
+                {newResultHintItems.map((imageItem) => (
+                  <CanvasNewResultHintOverlay
+                    key={imageItem.id}
+                    item={imageItem}
+                    stageScale={stageScale}
+                  />
                 ))}
               </div>
             </Box>

@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import type { CanvasImageItem, CanvasModel3DItem, CanvasTextItem, CanvasVideoItem } from './types'
+import { CANVAS_NEW_RESULT_HINT_EVENT, type CanvasNewResultHintDetail } from './canvasNewResultHint'
 
 type AddImageToCanvasFn = (
   src: string,
@@ -104,6 +105,7 @@ export function useCanvasCustomAddEvents({
           sourceHeight?: number
           sourceWidthHint?: number
           sourceHeightHint?: number
+          newResultHint?: 'quickapp'
           onAdded?: (item: CanvasImageItem) => void
         }>
       ).detail
@@ -135,6 +137,18 @@ export function useCanvasCustomAddEvents({
         })
         if (!addedItem) return
         detail.onAdded?.(addedItem)
+        if (detail.newResultHint === 'quickapp') {
+          window.dispatchEvent(
+            new CustomEvent<CanvasNewResultHintDetail>(CANVAS_NEW_RESULT_HINT_EVENT, {
+              detail: {
+                itemId: addedItem.id,
+                canvasId,
+                generationSessionId: detail.generationSessionId,
+                source: 'quickapp'
+              }
+            })
+          )
+        }
 
         handleAppendGenerationTraceCandidate({
           canvasId,

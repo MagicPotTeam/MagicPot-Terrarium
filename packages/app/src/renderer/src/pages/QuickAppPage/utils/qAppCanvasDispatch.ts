@@ -59,6 +59,7 @@ export const dispatchQAppResultsToCanvas = (
             fileName: item.fileItem.filename,
             projectId,
             generationSessionId,
+            newResultHint: 'quickapp',
             select: false,
             promptId: item.promptId,
             fileItem: item.fileItem,

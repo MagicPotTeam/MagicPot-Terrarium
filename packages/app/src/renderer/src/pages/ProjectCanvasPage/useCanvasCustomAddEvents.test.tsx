@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useCanvasCustomAddEvents } from './useCanvasCustomAddEvents'
 import type { CanvasImageItem } from './types'
+import { CANVAS_NEW_RESULT_HINT_EVENT, type CanvasNewResultHintDetail } from './canvasNewResultHint'
 
 describe('useCanvasCustomAddEvents', () => {
   afterEach(() => {
@@ -108,5 +109,60 @@ describe('useCanvasCustomAddEvents', () => {
     await waitFor(() => {
       expect(onAdded).toHaveBeenCalledWith(addedImage)
     })
+  })
+
+  it('emits a new-result hint event for quick app images after the canvas item is created', async () => {
+    const addedImage = {
+      id: 'image-1',
+      src: 'blob:image-1',
+      fileName: 'image-1.png'
+    } as CanvasImageItem
+    const addImageToCanvas = vi.fn(async () => addedImage)
+    const hintDetails: CanvasNewResultHintDetail[] = []
+    const onHint = (event: Event) => {
+      hintDetails.push((event as CustomEvent<CanvasNewResultHintDetail>).detail)
+    }
+
+    window.addEventListener(CANVAS_NEW_RESULT_HINT_EVENT, onHint)
+
+    try {
+      renderHook(() =>
+        useCanvasCustomAddEvents({
+          canvasId: 'canvas-1',
+          addImageToCanvas,
+          addImagesToCanvas: vi.fn(async () => undefined),
+          addVideoToCanvas: vi.fn(),
+          addModel3DUrlToCanvas: vi.fn(() => null),
+          addTextToCanvas: vi.fn(),
+          handleAppendGenerationTraceCandidate: vi.fn()
+        })
+      )
+
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent('canvas:add-image', {
+            detail: {
+              src: 'blob:image-1',
+              projectId: 'canvas-1',
+              generationSessionId: 'session-1',
+              newResultHint: 'quickapp'
+            }
+          })
+        )
+      })
+
+      await waitFor(() => {
+        expect(hintDetails).toEqual([
+          {
+            itemId: 'image-1',
+            canvasId: 'canvas-1',
+            generationSessionId: 'session-1',
+            source: 'quickapp'
+          }
+        ])
+      })
+    } finally {
+      window.removeEventListener(CANVAS_NEW_RESULT_HINT_EVENT, onHint)
+    }
   })
 })

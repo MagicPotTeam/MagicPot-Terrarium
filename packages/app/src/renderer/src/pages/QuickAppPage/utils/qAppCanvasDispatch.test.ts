@@ -50,6 +50,7 @@ describe('dispatchQAppResultsToCanvas', () => {
       fileName: 'image-1.png',
       projectId: 'project-1',
       generationSessionId: 'generation-session-1',
+      newResultHint: 'quickapp',
       select: false,
       promptId: 'prompt-1',
       fileItem: { filename: 'image-1.png', type: 'output' },
