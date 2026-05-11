@@ -9,17 +9,17 @@
     },
     {
       "label": "Checkpoint加载器",
-      "slot": "$.73.inputs.ckpt_name",
+      "slot": "$.221.inputs.ckpt_name",
       "component": "InputComfySelect"
     },
     {
       "label": "UniControl-XL（线稿）",
-      "slot": "$.75.inputs.name",
+      "slot": "$.219.inputs.name",
       "component": "InputComfySelect"
     },
     {
       "label": "UniControl-XL（深度）",
-      "slot": "$.70.inputs.name",
+      "slot": "$.220.inputs.name",
       "component": "InputComfySelect"
     },
     {
@@ -30,7 +30,7 @@
     },
     {
       "label": "Controlnet",
-      "slot": "$.400.inputs.value",
+      "slot": "$.218.inputs.value",
       "min": 0,
       "max": 1,
       "step": 0.01,
@@ -38,7 +38,7 @@
     },
     {
       "label": "重绘幅度",
-      "slot": "$.413.inputs.value",
+      "slot": "$.216.inputs.value",
       "min": 0,
       "max": 1,
       "step": 0.01,
@@ -46,51 +46,45 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.388.inputs.image",
+      "slot": "$.222.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "正面提示词",
-      "slot": "$.366.inputs.value",
+      "slot": "$.213.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.365.inputs.value",
+      "slot": "$.212.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "加载LoRA",
-      "component": "InputLoRAChain",
-      "outputModelSlots": ["$.74.inputs.model", "$.376.inputs.model"],
-      "outputClipSlots": ["$.63.inputs.clip", "$.352.inputs.clip"],
-      "inputModel": ["59", 0],
-      "inputClip": ["73", 1]
+      "slot": "$.223.inputs.lora_name",
+      "component": "InputComfySelect"
     },
     {
       "label": "随机种",
-      "slot": "$.449.inputs.value",
+      "slot": "$.211.inputs.value",
       "component": "InputSeed"
     }
   ],
   "autoInputs": [],
   "customNodeUrls": [
     "https://github.com/Fannovel16/comfyui_controlnet_aux",
+    "https://github.com/pythongosssss/ComfyUI-Custom-Scripts",
     "https://github.com/yolain/ComfyUI-Easy-Use",
     "https://github.com/kijai/ComfyUI-KJNodes",
     "https://github.com/shiimizu/ComfyUI_smZNodes",
     "https://github.com/chinoll/ComfyUI-Advanced-ControlNet"
   ],
-  "outputNodeIds": ["71"],
+  "outputNodeIds": [
+    "224"
+  ],
   "requiredModels": [
-    {
-      "name": "Chenkin-UniControl-XL.safetensors",
-      "size": "2.5 GB",
-      "dir": "models/controlnet",
-      "url": "https://modelscope.cn/models/ChenkinNoob/Chenkin-UniControl-XL/resolve/master/Chenkin-UniControl-XL.safetensors"
-    },
     {
       "name": "MTEED.pth",
       "size": "248 KB",
@@ -102,6 +96,18 @@
       "size": "1.3 GB",
       "dir": "custom_nodes/comfyui_controlnet_aux/ckpts/depth-anything/Depth-Anything-V2-Large",
       "url": "https://modelscope.cn/models/depth-anything/Depth-Anything-V2-Large/resolve/master/depth_anything_v2_vitl.pth"
+    },
+    {
+      "name": "Chenkin-UniControl-XL.safetensors",
+      "size": "2.5 GB",
+      "dir": "models/controlnet",
+      "url": "https://modelscope.cn/models/ChenkinNoob/Chenkin-UniControl-XL/resolve/master/Chenkin-UniControl-XL.safetensors"
+    },
+    {
+      "name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "size": "1.5 GB",
+      "dir": "models/loras",
+      "url": "https://modelscope.cn/models/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/master/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
     }
   ]
 }

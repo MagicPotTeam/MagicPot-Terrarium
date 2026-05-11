@@ -9,17 +9,17 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.45.inputs.unet_name",
+      "slot": "$.324.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.40.inputs.clip_name",
+      "slot": "$.319.inputs.clip_name",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.44.inputs.vae_name",
+      "slot": "$.323.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
@@ -32,32 +32,29 @@
       "label": "图片尺寸",
       "component": "InputImageSize",
       "seperateSlots": true,
-      "widthSlot": "$.32.inputs.value",
-      "heightSlot": "$.33.inputs.value"
+      "widthSlot": "$.311.inputs.value",
+      "heightSlot": "$.312.inputs.value"
     },
     {
       "label": "正面提示词",
-      "slot": "$.49.inputs.value",
+      "slot": "$.327.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.42.inputs.value",
+      "slot": "$.321.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "加载LoRA",
-      "component": "InputLoRAChain",
-      "outputModelSlots": ["$.46.inputs.model"],
-      "outputClipSlots": ["$.30.inputs.clip", "$.31.inputs.clip"],
-      "inputModel": ["41", 0],
-      "inputClip": ["40", 0]
+      "slot": "$.330.inputs.lora_name",
+      "component": "InputComfySelect"
     },
     {
       "label": "随机种",
-      "slot": "$.35.inputs.value",
+      "slot": "$.314.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -65,16 +62,13 @@
   "customNodeUrls": [
     "https://github.com/kijai/ComfyUI-KJNodes",
     "https://github.com/yolain/ComfyUI-Easy-Use",
-    "https://github.com/pythongosssss/ComfyUI-Custom-Scripts"
+    "https://github.com/pythongosssss/ComfyUI-Custom-Scripts",
+    "https://github.com/Fannovel16/comfyui_controlnet_aux"
   ],
-  "outputNodeIds": ["50"],
+  "outputNodeIds": [
+    "328"
+  ],
   "requiredModels": [
-    {
-      "name": "qwen_image_fp8_e4m3fn.safetensors",
-      "size": "19 GB",
-      "dir": "models/unet",
-      "url": "https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors"
-    },
     {
       "name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
       "size": "8.7 GB",
@@ -86,6 +80,18 @@
       "size": "0.2 GB",
       "dir": "models/vae",
       "url": "https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/vae/qwen_image_vae.safetensors"
+    },
+    {
+      "name": "qwen_image_fp8_e4m3fn.safetensors",
+      "size": "19 GB",
+      "dir": "models/unet",
+      "url": "https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors"
+    },
+    {
+      "name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "size": "1.5 GB",
+      "dir": "models/loras",
+      "url": "https://modelscope.cn/models/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/master/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
     }
   ]
 }

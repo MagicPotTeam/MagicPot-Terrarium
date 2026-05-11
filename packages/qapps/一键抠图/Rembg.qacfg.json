@@ -3,12 +3,14 @@
   "inputs": [
     {
       "label": "加载图像",
-      "slot": "$.12.inputs.image",
+      "slot": "$.341.inputs.image",
       "component": "InputComfyImage"
     }
   ],
   "autoInputs": [],
-  "customNodeUrls": ["https://github.com/john-mnz/ComfyUI-Inspyrenet-Rembg"],
+  "customNodeUrls": [
+    "https://github.com/john-mnz/ComfyUI-Inspyrenet-Rembg"
+  ],
   "requiredModels": [
     {
       "name": "ckpt_base.pth",
@@ -18,5 +20,7 @@
       "url": "https://hf-mirror.com/datasets/chaodu001/ComfyUI_LayerStyle_All_models_download/resolve/main/transparent-background/ckpt_base.pth"
     }
   ],
-  "outputNodeIds": ["10"]
+  "outputNodeIds": [
+    "343"
+  ]
 }
