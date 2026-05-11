@@ -1,14 +1,19 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  AUTO_SAVED_CHAT_IMAGE_TRACKER_LIMIT,
+  autoSavedChatImageTracker,
+  buildAutoSavedChatImageKey,
   buildHy3dProfileId,
   clearScopedExternalLoadingSessionIds,
   getBaseProfileId,
   getDownloadFileNameFromUrl,
+  hasAutoSavedChatImageKey,
   isModel3DUrl,
   normalizeChatProfileIdForStorage,
   readScopedExternalLoadingSessionIds,
   readScopedLoadingSessionIds,
+  recordAutoSavedChatImageKey,
   scopedStorageKey,
   STORAGE_KEY_EXTERNAL_LOADING_IDS,
   STORAGE_KEY_LOADING_IDS,
@@ -19,6 +24,7 @@ import { DEFAULT_PARAMS } from './hy3d/types'
 beforeEach(() => {
   localStorage.clear()
   clearScopedExternalLoadingSessionIds()
+  autoSavedChatImageTracker.clear()
 })
 
 describe('buildHy3dProfileId', () => {
@@ -89,6 +95,48 @@ describe('download file name hints', () => {
   it('treats extensionless signed urls with a filename query hint as model links', () => {
     expect(
       isModel3DUrl('https://example.com/download?id=model-2&filename=generated-mesh.fbx')
+    ).toBe(true)
+  })
+})
+
+describe('auto-saved chat image tracker', () => {
+  it('builds and stores compact keys without retaining data urls', () => {
+    const dataUrl = `data:image/png;base64,${'a'.repeat(4096)}`
+    const key = buildAutoSavedChatImageKey({
+      sessionId: 'session-1',
+      messageIndex: 2,
+      attachmentIndex: 3,
+      url: dataUrl
+    })
+
+    recordAutoSavedChatImageKey(key)
+
+    expect(hasAutoSavedChatImageKey(key)).toBe(true)
+    expect(key).toContain('session-1:m2:a3:')
+    expect(key).not.toContain(dataUrl)
+    expect([...autoSavedChatImageTracker]).toEqual([key])
+    expect([...autoSavedChatImageTracker].some((storedKey) => storedKey.includes(dataUrl))).toBe(
+      false
+    )
+  })
+
+  it('compacts legacy raw url inputs and enforces the cache bound', () => {
+    const firstUrl = 'data:image/png;base64,first-image'
+    autoSavedChatImageTracker.add(firstUrl)
+
+    expect(autoSavedChatImageTracker.has(firstUrl)).toBe(true)
+    expect([...autoSavedChatImageTracker].some((storedKey) => storedKey.includes(firstUrl))).toBe(
+      false
+    )
+
+    for (let index = 0; index < AUTO_SAVED_CHAT_IMAGE_TRACKER_LIMIT + 1; index += 1) {
+      autoSavedChatImageTracker.add(`data:image/png;base64,image-${index}`)
+    }
+
+    expect(autoSavedChatImageTracker.size).toBe(AUTO_SAVED_CHAT_IMAGE_TRACKER_LIMIT)
+    expect(autoSavedChatImageTracker.has(firstUrl)).toBe(false)
+    expect(
+      [...autoSavedChatImageTracker].every((storedKey) => !storedKey.startsWith('data:'))
     ).toBe(true)
   })
 })

@@ -32,7 +32,6 @@ import {
 } from '@renderer/utils/fileUtils'
 import {
   loadAllSessions,
-  saveAllSessions,
   saveSessionToDB,
   deleteSessionFromDB,
   deleteSessionDraftBackup,
@@ -44,14 +43,16 @@ import {
   type ChatSessionDraft
 } from './chatStorage'
 import {
-  autoSavedChatImageTracker,
+  buildAutoSavedChatImageKey,
   buildHy3dProfileId,
   getBaseProfileId,
   getDownloadFileNameFromUrl,
+  hasAutoSavedChatImageKey,
   HUNYUAN_3D_PROFILE_ID,
   normalizeChatProfileIdForStorage,
   normalizeLocalMediaUrl,
   readScopedExternalLoadingSessionIds,
+  recordAutoSavedChatImageKey,
   scopedStorageKey,
   STORAGE_KEY_CURRENT_SESSION_ID,
   STORAGE_KEY_LOADING_IDS,
@@ -581,6 +582,12 @@ const readImageDimensionsFromUrl = async (
     image.src = url
   })
 
+const revokeBlobUrl = (url?: string): void => {
+  if (!url?.startsWith('blob:')) return
+  if (typeof URL === 'undefined' || typeof URL.revokeObjectURL !== 'function') return
+  URL.revokeObjectURL(url)
+}
+
 const buildImageChatAttachmentFromFile = async (
   file: File,
   preferredUrl?: string,
@@ -592,6 +599,9 @@ const buildImageChatAttachmentFromFile = async (
   const previewUrl = fileToBlobUrl(file)
   const dimensions = await readImageDimensionsFromUrl(previewUrl)
   const attachmentUrl = preferredUrl || (filePath ? `file://${filePath}` : previewUrl)
+  if (previewUrl !== attachmentUrl) {
+    revokeBlobUrl(previewUrl)
+  }
 
   return {
     type: 'image',
@@ -745,16 +755,81 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
   const skipSaveRef = useRef(false)
   const sessionsRef = useRef<ChatSession[]>([])
+  const autoSaveScanInitializedRef = useRef(false)
+  const autoSaveScanCursorBySessionIdRef = useRef<Map<string, number>>(new Map())
   const setSessions = useCallback<React.Dispatch<React.SetStateAction<ChatSession[]>>>((value) => {
-    setSessionsState((prev) => {
-      const next = typeof value === 'function' ? value(prev) : value
-      sessionsRef.current = next
-      return next
-    })
+    const next = typeof value === 'function' ? value(sessionsRef.current) : value
+    sessionsRef.current = next
+    setSessionsState(next)
   }, [])
-  useEffect(() => {
-    sessionsRef.current = sessions
-  }, [sessions])
+  const persistCurrentSessionSnapshot = useCallback(
+    async (sessionId: string, label = ''): Promise<void> => {
+      try {
+        const session = sessionsRef.current.find((candidate) => candidate.id === sessionId)
+        if (!session) {
+          return
+        }
+
+        await saveSessionToDB(session, storageScope)
+        emitPreviewRefresh()
+        console.log(`[ChatPage] persistCurrentSessionSnapshot(${label}): saved`)
+      } catch (e) {
+        console.warn('[ChatPage] persistCurrentSessionSnapshot failed:', e)
+      }
+    },
+    [emitPreviewRefresh, storageScope]
+  )
+  const persistAssistantAttachmentFileReference = useCallback(
+    (sessionId: string, messageIndex: number, attachmentIndex: number, savedPath: string) => {
+      const savedUrl = `file://${savedPath}`
+      let sessionToPersist: ChatSession | null = null
+
+      setSessions((prev) => {
+        let changed = false
+        const next = prev.map((session) => {
+          if (session.id !== sessionId) return session
+
+          const message = session.messages[messageIndex]
+          const attachment = message?.attachments?.[attachmentIndex]
+          if (!message || !attachment || attachment.url === savedUrl) {
+            return session
+          }
+
+          const attachments = [...(message.attachments || [])]
+          attachments[attachmentIndex] = {
+            ...attachment,
+            url: savedUrl
+          }
+
+          const messages = [...session.messages]
+          messages[messageIndex] = {
+            ...message,
+            attachments
+          }
+
+          const updatedSession = {
+            ...session,
+            messages
+          }
+          sessionToPersist = updatedSession
+          changed = true
+          return updatedSession
+        })
+
+        return changed ? next : prev
+      })
+
+      if (!sessionToPersist) {
+        return
+      }
+
+      skipSaveRef.current = true
+      saveSessionToDB(sessionToPersist, storageScope).catch((error) => {
+        console.warn('[ChatPage] persistAssistantAttachmentFileReference failed:', error)
+      })
+    },
+    [storageScope]
+  )
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(() => {
     try {
       return localStorage.getItem(currentSessionStorageKey) || null
@@ -766,9 +841,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const isMountedRef = useRef(true)
   const selectSessionRef = useRef<(sessionId: string) => void>(() => {})
   const pendingSessionIdRef = useRef<string | null>(null)
-  useEffect(() => {
-    currentSessionIdRef.current = currentSessionId
-  }, [currentSessionId])
   useEffect(
     () => () => {
       isMountedRef.current = false
@@ -807,6 +879,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   const setActiveSessionId = useCallback(
     (sessionId: string | null) => {
+      currentSessionIdRef.current = sessionId
       setCurrentSessionId(sessionId)
       try {
         if (sessionId) {
@@ -2072,6 +2145,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         content: string
         attachments?: ChatAttachment[]
         hiddenContext?: string
+        targetSessionId?: string
+        forcedSkillId?: string | null
+        forcedProfileId?: string | null
       }) => Promise<void>)
     | null
   >(null)
@@ -2179,14 +2255,45 @@ const ChatPage: React.FC<ChatPageProps> = ({
   useEffect(() => {
     if (!sessionsLoaded || sessions.length === 0) return
 
+    const scanCursorBySessionId = autoSaveScanCursorBySessionIdRef.current
+    if (!autoSaveScanInitializedRef.current) {
+      scanCursorBySessionId.clear()
+      for (const session of sessions) {
+        scanCursorBySessionId.set(session.id, session.messages.length)
+      }
+      autoSaveScanInitializedRef.current = true
+      return
+    }
+
     const autoSaveAssistantImages = async () => {
       for (const session of sessions) {
-        for (const message of session.messages) {
+        const previousCursor = scanCursorBySessionId.get(session.id) ?? 0
+        const startIndex = Math.max(0, previousCursor - 1)
+        scanCursorBySessionId.set(session.id, session.messages.length)
+
+        for (
+          let messageIndex = startIndex;
+          messageIndex < session.messages.length;
+          messageIndex++
+        ) {
+          const message = session.messages[messageIndex]
           if (message.role === 'assistant' && message.attachments) {
-            for (const attachment of message.attachments) {
+            for (
+              let attachmentIndex = 0;
+              attachmentIndex < message.attachments.length;
+              attachmentIndex++
+            ) {
+              const attachment = message.attachments[attachmentIndex]
               if (attachment.type === 'image' && attachment.url) {
-                if (autoSavedChatImageTracker.has(attachment.url)) continue
-                autoSavedChatImageTracker.add(attachment.url)
+                if (/^file:\/\//i.test(attachment.url)) continue
+                const trackerKey = buildAutoSavedChatImageKey({
+                  sessionId: session.id,
+                  messageIndex,
+                  attachmentIndex,
+                  url: attachment.url
+                })
+                if (hasAutoSavedChatImageKey(trackerKey)) continue
+                recordAutoSavedChatImageKey(trackerKey)
 
                 try {
                   const DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
@@ -2205,6 +2312,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     fileName,
                     dir: targetDir
                   })
+                  if (res.savedPath) {
+                    persistAssistantAttachmentFileReference(
+                      session.id,
+                      messageIndex,
+                      attachmentIndex,
+                      res.savedPath
+                    )
+                  }
                   console.log(`[自动保存] Agent 图片已保存到 ${res.savedPath}`)
                 } catch (error) {
                   console.error('[自动保存] Agent 图片保存失败:', error)
@@ -2217,7 +2332,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
 
     autoSaveAssistantImages()
-  }, [sessions, sessionsLoaded, config.download_dir])
+  }, [sessions, sessionsLoaded, config.download_dir, persistAssistantAttachmentFileReference])
 
   // ==================== 持久化 sessions 到 IndexedDB ====================
   useEffect(() => {
@@ -2939,18 +3054,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
           return
         }
 
-        window.setTimeout(() => {
-          window.dispatchEvent(
-            new CustomEvent('send-to-agent', {
-              detail: {
-                targetScope: storageScope,
-                text: initialMessage || '',
-                attachments: initialAttachments,
-                autoSend: true
-              }
-            })
-          )
-        }, 0)
+        void sendMessageRef.current?.({
+          content: initialMessage || '',
+          attachments: initialAttachments,
+          targetSessionId: session.id,
+          forcedSkillId: customEvent.detail?.skillId ?? session.skillId ?? null,
+          forcedProfileId: customEvent.detail?.profileId ?? null
+        })
       })
     }
     const handleToggleHistory = (event: Event): void => {
@@ -3319,11 +3429,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
       attachments?: ChatAttachment[]
       hiddenContext?: string
       baseMessages?: ChatMessage[]
+      targetSessionId?: string
+      forcedSkillId?: string | null
       forcedProfileId?: string | null
       hy3dParams?: ReturnType<typeof getHy3dParams>
     }) => {
-      const targetSessionId = currentSessionIdRef.current
-      const cs = sessions.find((s) => s.id === targetSessionId)
+      const targetSessionId = overrides?.targetSessionId ?? currentSessionIdRef.current
+      const cs = sessionsRef.current.find((s) => s.id === targetSessionId)
 
       const msgContent = overrides ? overrides.content : inputValueRef.current.trim()
       const msgAttachments = overrides
@@ -3342,7 +3454,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
 
-      const activeSkillId = resolveAvailableSkillId(cs.skillId || selectedSkillId)
+      const activeSkillId = resolveAvailableSkillId(
+        overrides?.forcedSkillId ?? cs.skillId ?? selectedSkillId
+      )
       const activeSkill = findCustomSkillById(customSkills, activeSkillId)
       const rawAttachments = mergeChatAttachmentsWithSkillReferenceAttachments(
         msgAttachments,
@@ -3406,7 +3520,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         overrides?.forcedProfileId ??
         (activeExternalAgentSkill
           ? null
-          : resolveProfileIdForSkill(activeSkillId, selectedProfileId || cs.profileId))
+          : resolveProfileIdForSkill(activeSkillId, cs.profileId || selectedProfileId, {
+              preferConfiguredProfile: Boolean(overrides?.forcedSkillId)
+            }))
       if (getBaseProfileId(profileId) === HUNYUAN_3D_PROFILE_ID) {
         const hp = overrides?.hy3dParams
           ? await refreshHy3dModelUrlIfNeeded(overrides.hy3dParams)
@@ -3561,31 +3677,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
       )
 
       // 同步保存到 IndexedDB
-      ;(async () => {
-        try {
-          const stored = await loadAllSessions(storageScope)
-          const withUserMsg = userMsgUpdater(stored)
-          const withPlaceholder = placeholderUpdater(withUserMsg)
-          await saveAllSessions(withPlaceholder, storageScope)
-          emitPreviewRefresh()
-        } catch (e) {
-          console.warn('[ChatPage] 保存用户消息+占位符到 IndexedDB 失败:', e)
-        }
-      })()
+      skipSaveRef.current = true
+      void persistCurrentSessionSnapshot(targetSessionId, 'request-placeholder')
 
       const persistSessionsToStorage = async (
-        updater: (prev: ChatSession[]) => ChatSession[],
+        _updater: (prev: ChatSession[]) => ChatSession[],
         label = ''
       ): Promise<void> => {
-        try {
-          const stored = await loadAllSessions(storageScope)
-          const updated = updater(stored)
-          await saveAllSessions(updated, storageScope)
-          emitPreviewRefresh()
-          console.log(`[ChatPage] persistSessionsToStorage(${label}): saved`)
-        } catch (e) {
-          console.warn('[ChatPage] persistSessionsToStorage failed:', e)
-        }
+        skipSaveRef.current = true
+        await persistCurrentSessionSnapshot(targetSessionId, label)
       }
 
       const buildRequestMessageWithRuntimeContext = (requestMessage: ChatMessage): ChatMessage =>
@@ -4428,9 +4528,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const removeAttachment = (index: number) => {
     setPendingAttachments((prev) => {
       const attachment = prev[index]
-      if (attachment && attachment.url.startsWith('blob:')) {
-        URL.revokeObjectURL(attachment.url)
-      }
+      revokeBlobUrl(attachment?.url)
       return prev.filter((_, i) => i !== index)
     })
   }

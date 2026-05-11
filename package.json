@@ -59,6 +59,7 @@
     "test:web:heavy:panel-plugin": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.test.tsx",
     "test:web:heavy:panel-llm": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.test.tsx",
     "test:web:heavy:chat-agent-skill": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/pages/ChatPage/ChatPage.agentSkill.test.tsx",
+    "test:web:stress:chat-memory": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/pages/ChatPage/ChatPage.memoryStress.test.ts --pool=forks --maxWorkers=1",
     "test:web:heavy:image-edit-panel": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/components/ImageCanvas/components/ImageEditPanel/ImageEditPanel.test.tsx",
     "test:web:heavy:image-viewer": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/components/ImageCanvas/ImageViewer.test.tsx",
     "test:web:heavy:side-panel": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/components/SidePanel.test.tsx",

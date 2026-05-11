@@ -13,8 +13,31 @@ class FakeIDBObjectStore {
   constructor(
     private stores: StoreMap,
     private storeName: string,
-    private state: { failGetAllOnce: boolean }
+    private state: { failGetAllOnce: boolean; getAllCount: number; getCount: number }
   ) {}
+
+  get(key: string): {
+    result?: unknown
+    error?: DOMException
+    onsuccess?: () => void
+    onerror?: () => void
+  } {
+    const request: {
+      result?: unknown
+      error?: DOMException
+      onsuccess?: () => void
+      onerror?: () => void
+    } = {}
+
+    setTimeout(() => {
+      this.state.getCount += 1
+      const value = this.stores.get(this.storeName)?.get(key)
+      request.result = value === undefined ? undefined : cloneValue(value)
+      request.onsuccess?.()
+    }, 0)
+
+    return request
+  }
 
   getAll(): {
     result?: unknown[]
@@ -30,6 +53,7 @@ class FakeIDBObjectStore {
     } = {}
 
     setTimeout(() => {
+      this.state.getAllCount += 1
       if (this.state.failGetAllOnce) {
         this.state.failGetAllOnce = false
         const error = new Error(
@@ -74,7 +98,7 @@ class FakeIDBTransaction {
 
   constructor(
     private stores: StoreMap,
-    private state: { failGetAllOnce: boolean }
+    private state: { failGetAllOnce: boolean; getAllCount: number; getCount: number }
   ) {
     setTimeout(() => {
       this.oncomplete?.()
@@ -96,7 +120,7 @@ class FakeIDBDatabase {
 
   constructor(
     private stores: StoreMap,
-    private state: { failGetAllOnce: boolean }
+    private state: { failGetAllOnce: boolean; getAllCount: number; getCount: number }
   ) {
     this.objectStoreNames = {
       contains: (name: string) => this.stores.has(name)
@@ -120,13 +144,14 @@ class FakeIDBDatabase {
 }
 
 function createFakeIndexedDb() {
-  const state = { failGetAllOnce: true }
+  const state = { failGetAllOnce: true, getAllCount: 0, getCount: 0 }
   const deletedNames: string[] = []
   let stores: StoreMap = new Map()
   let database: FakeIDBDatabase | null = null
 
   return {
     deletedNames,
+    state,
     api: {
       open: (_name: string, _version: number) => {
         const request: {
@@ -181,6 +206,63 @@ describe('chatStorage', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     localStorage.clear()
+  })
+
+  it('loads a single normalized session by id without reading every session', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+
+    const storage = await import('./chatStorage')
+
+    await storage.saveSessionToDB(
+      {
+        id: 'session-1',
+        title: 'Target session',
+        messages: [],
+        pendingSessionUrl: 'https://example.test/session-1'
+      } as import('./chatStorage').ChatSession & { pendingSessionUrl: string },
+      'default'
+    )
+    await storage.saveSessionToDB(
+      {
+        id: 'session-2',
+        title: 'Other session',
+        messages: []
+      },
+      'default'
+    )
+
+    await expect(storage.loadSessionFromDB('session-1', 'default')).resolves.toMatchObject({
+      id: 'session-1',
+      title: 'Target session',
+      messages: [],
+      sessionUrl: 'https://example.test/session-1',
+      storageScope: 'default'
+    })
+    expect(fakeIndexedDb.state.getCount).toBe(1)
+    expect(fakeIndexedDb.state.getAllCount).toBe(0)
+    expect(fakeIndexedDb.deletedNames).toEqual([])
+  })
+
+  it('returns null for missing sessions and sessions in another storage scope', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+
+    const storage = await import('./chatStorage')
+
+    await storage.saveSessionToDB(
+      {
+        id: 'session-1',
+        title: 'Scoped session',
+        messages: []
+      },
+      'workspace-a'
+    )
+
+    await expect(storage.loadSessionFromDB('session-1', 'default')).resolves.toBeNull()
+    await expect(storage.loadSessionFromDB('missing-session', 'workspace-a')).resolves.toBeNull()
+    expect(fakeIndexedDb.state.getCount).toBe(2)
+    expect(fakeIndexedDb.state.getAllCount).toBe(0)
   })
 
   it('resets corrupted IndexedDB storage after fatal read errors and accepts future saves', async () => {

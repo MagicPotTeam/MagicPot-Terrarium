@@ -1,5 +1,5 @@
 import { win32 as pathWin32 } from 'path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   assessTestWindowPlacement,
   createTestUiRunId,
@@ -306,21 +306,7 @@ describe('resolveTestWindowOverride', () => {
 })
 
 describe('resolveTestArtifactPath', () => {
-  const previousArtifactBase = process.env.MAGICPOT_TEST_ARTIFACT_BASE
-
-  beforeEach(() => {
-    process.env.MAGICPOT_TEST_ARTIFACT_BASE = 'C:/Users/test/MagicPot'
-  })
-
-  afterEach(() => {
-    if (previousArtifactBase === undefined) {
-      delete process.env.MAGICPOT_TEST_ARTIFACT_BASE
-    } else {
-      process.env.MAGICPOT_TEST_ARTIFACT_BASE = previousArtifactBase
-    }
-  })
-
-  it('routes disposable artifacts into repo .magicpot-trash/<run-id>', () => {
+  it('routes disposable artifacts into desktop Codex-Junk/MagicPot/<run-id>', () => {
     expect(
       resolveTestArtifactRoot({
         desktopPath: 'C:/Users/test/Desktop',
@@ -331,7 +317,7 @@ describe('resolveTestArtifactPath', () => {
           artifactRootOverride: undefined
         }
       })
-    ).toBe(pathWin32.join('C:/Users/test/MagicPot', '.magicpot-trash', 'run-123'))
+    ).toBe(pathWin32.join('C:/Users/test/Desktop', 'Codex-Junk', 'MagicPot', 'run-123'))
 
     expect(
       resolveTestArtifactPath({
@@ -346,8 +332,9 @@ describe('resolveTestArtifactPath', () => {
       })
     ).toBe(
       pathWin32.join(
-        'C:/Users/test/MagicPot',
-        '.magicpot-trash',
+        'C:/Users/test/Desktop',
+        'Codex-Junk',
+        'MagicPot',
         'run-123',
         'traces',
         'window.json'
@@ -369,7 +356,7 @@ describe('resolveTestArtifactPath', () => {
     ).toBe('C:/Temp')
   })
 
-  it('rejects automated artifact overrides outside the repo trash root', () => {
+  it('rejects automated artifact overrides outside the desktop Codex-Junk root', () => {
     expect(
       resolveTestArtifactRoot({
         desktopPath: 'C:/Users/test/Desktop',
@@ -380,7 +367,7 @@ describe('resolveTestArtifactPath', () => {
           artifactRootOverride: 'D:/scratch/outside-root'
         }
       })
-    ).toBe(pathWin32.join('C:/Users/test/MagicPot', '.magicpot-trash', 'run-123'))
+    ).toBe(pathWin32.join('C:/Users/test/Desktop', 'Codex-Junk', 'MagicPot', 'run-123'))
   })
 
   it('treats Windows absolute override paths consistently on non-Windows hosts', async () => {
@@ -407,7 +394,7 @@ describe('resolveTestArtifactPath', () => {
             artifactRootOverride: 'D:/scratch/outside-root'
           }
         })
-      ).toBe(pathWin32.join('C:/Users/test/MagicPot', '.magicpot-trash', 'run-123'))
+      ).toBe(pathWin32.join('C:/Users/test/Desktop', 'Codex-Junk', 'MagicPot', 'run-123'))
     } finally {
       vi.doUnmock('path')
       vi.resetModules()
@@ -425,10 +412,10 @@ describe('resolveTestArtifactPath', () => {
           artifactRootOverride: undefined
         }
       })
-    ).toBe(pathWin32.join('C:/Users/test/MagicPot', '.magicpot-trash', 'desktop-takeover'))
+    ).toBe(pathWin32.join('C:/Users/test/Desktop', 'Codex-Junk', 'MagicPot', 'desktop-takeover'))
   })
 
-  it('allows automated artifact overrides only inside the repo trash root', () => {
+  it('allows automated artifact overrides only inside the desktop Codex-Junk root', () => {
     expect(
       resolveTestArtifactRoot({
         desktopPath: 'C:/Users/test/Desktop',
@@ -440,7 +427,14 @@ describe('resolveTestArtifactPath', () => {
         }
       })
     ).toBe(
-      pathWin32.join('C:/Users/test/MagicPot', '.magicpot-trash', 'run-123', 'nested', 'debug')
+      pathWin32.join(
+        'C:/Users/test/Desktop',
+        'Codex-Junk',
+        'MagicPot',
+        'run-123',
+        'nested',
+        'debug'
+      )
     )
   })
 
@@ -458,8 +452,9 @@ describe('resolveTestArtifactPath', () => {
       })
     ).toBe(
       pathWin32.join(
-        'C:/Users/test/MagicPot',
-        '.magicpot-trash',
+        'C:/Users/test/Desktop',
+        'Codex-Junk',
+        'MagicPot',
         'run-123',
         'traces',
         'unsafe',

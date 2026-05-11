@@ -1,6 +1,60 @@
-import type { BrowserWindow } from 'electron'
+import type { BrowserWindow, RenderProcessGoneDetails } from 'electron'
 
-export function attachRendererDiagnostics(window: BrowserWindow): void {
+type RendererDiagnosticsOptions = {
+  recoverRenderer?: (window: BrowserWindow, details: RenderProcessGoneDetails) => void
+}
+
+const RECOVERABLE_RENDERER_GONE_REASONS = new Set(['oom', 'crashed'])
+
+export function shouldRecoverRendererProcess(details: RenderProcessGoneDetails): boolean {
+  return RECOVERABLE_RENDERER_GONE_REASONS.has(details.reason)
+}
+
+function reloadRenderer(window: BrowserWindow, details: RenderProcessGoneDetails): void {
+  if (window.isDestroyed()) {
+    console.warn('[App] Renderer recovery skipped because the window is already destroyed', details)
+    return
+  }
+
+  if (window.webContents.isDestroyed()) {
+    console.warn(
+      '[App] Renderer recovery skipped because webContents is already destroyed',
+      details
+    )
+    return
+  }
+
+  console.warn('[App] Renderer exited unexpectedly; reloading the window to recover', {
+    reason: details.reason,
+    exitCode: details.exitCode
+  })
+
+  try {
+    window.webContents.reload()
+  } catch (error) {
+    console.error('[App] Renderer recovery reload failed', error)
+  }
+}
+
+export function handleRendererProcessGone(
+  window: BrowserWindow,
+  details: RenderProcessGoneDetails,
+  options: RendererDiagnosticsOptions = {}
+): void {
+  console.error('[App] Renderer process gone', details)
+
+  if (!shouldRecoverRendererProcess(details)) {
+    return
+  }
+
+  const recoverRenderer = options.recoverRenderer ?? reloadRenderer
+  recoverRenderer(window, details)
+}
+
+export function attachRendererDiagnostics(
+  window: BrowserWindow,
+  options: RendererDiagnosticsOptions = {}
+): void {
   window.webContents.on('did-start-loading', () => {
     console.info('[App] Renderer started loading')
   })
@@ -22,7 +76,7 @@ export function attachRendererDiagnostics(window: BrowserWindow): void {
   )
 
   window.webContents.on('render-process-gone', (_event, details) => {
-    console.error('[App] Renderer process gone', details)
+    handleRendererProcessGone(window, details, options)
   })
 
   window.webContents.on('unresponsive', () => {

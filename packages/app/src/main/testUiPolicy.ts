@@ -1,4 +1,3 @@
-import { existsSync } from 'fs'
 import { posix as pathPosix, sep, win32 as pathWin32 } from 'path'
 
 export type TestUiWindowMode =
@@ -78,7 +77,8 @@ export type ResolveTestArtifactPathParams = {
 }
 
 const TEST_UI_POLICY_LOG_PREFIX = '[TestUiPolicy]'
-const TEST_UI_ARTIFACT_ROOT_DIR = '.magicpot-trash'
+const TEST_UI_ARTIFACT_ROOT_DIR = 'Codex-Junk'
+const TEST_UI_ARTIFACT_PROJECT_DIR = 'MagicPot'
 const TEST_UI_RUN_ID_SAFE_PATTERN = /[^a-zA-Z0-9_-]+/g
 
 function logTestUiPolicyDecision(context: string, details: Record<string, unknown>): void {
@@ -118,23 +118,8 @@ function resolveWithPathStyle(root: string, ...segments: string[]): string {
   return getPathModuleForValue(root, ...segments).resolve(root, ...segments)
 }
 
-function resolveDefaultArtifactBasePath(): string {
-  const configuredBase = normalizeTrimmed(process.env['MAGICPOT_TEST_ARTIFACT_BASE'])
-  if (configuredBase) {
-    return configuredBase
-  }
-
-  const cwd = process.cwd()
-  const pathModule = getPathModuleForValue(cwd)
-  const possiblePrivateRepoRoot = pathModule.resolve(cwd, '..', '..')
-  if (
-    pathModule.basename(pathModule.dirname(cwd)) === 'open' &&
-    existsSync(pathModule.join(possiblePrivateRepoRoot, 'private', 'codex'))
-  ) {
-    return possiblePrivateRepoRoot
-  }
-
-  return cwd
+function resolveDefaultArtifactBasePath(desktopPath: string): string {
+  return resolveConfiguredDesktopPath(desktopPath)
 }
 function normalizeDisplaySet(
   displays: TestUiDisplayLike[]
@@ -470,10 +455,11 @@ export function resolveTestArtifactRoot(params: {
     return params.tempPath
   }
 
-  const artifactBasePath = resolveDefaultArtifactBasePath()
+  const artifactBasePath = resolveDefaultArtifactBasePath(params.desktopPath)
   const normalizedArtifactRoot = joinWithPathStyle(
     artifactBasePath,
     TEST_UI_ARTIFACT_ROOT_DIR,
+    TEST_UI_ARTIFACT_PROJECT_DIR,
     sanitizeTestUiRunId(params.policy.runId)
   )
 

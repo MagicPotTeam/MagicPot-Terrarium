@@ -72,7 +72,100 @@ export const MODEL3D_FILE_EXTENSIONS = [
 export const scopedStorageKey = (baseKey: string, scope: string): string =>
   scope === 'default' ? baseKey : `${baseKey}.${scope}`
 
-export const autoSavedChatImageTracker = new Set<string>()
+export const AUTO_SAVED_CHAT_IMAGE_TRACKER_LIMIT = 512
+
+export interface AutoSavedChatImageKeyParts {
+  sessionId: string
+  messageIndex: number
+  attachmentIndex: number
+  url: string
+}
+
+export const getAutoSavedChatImageShortHash = (value: string): string => {
+  let hash = 0x811c9dc5
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+
+  return (hash >>> 0).toString(36).padStart(7, '0').slice(0, 8)
+}
+
+export const buildAutoSavedChatImageKey = ({
+  sessionId,
+  messageIndex,
+  attachmentIndex,
+  url
+}: AutoSavedChatImageKeyParts): string =>
+  [
+    'chat-img',
+    encodeURIComponent(sessionId || 'unknown'),
+    `m${Math.max(0, messageIndex)}`,
+    `a${Math.max(0, attachmentIndex)}`,
+    getAutoSavedChatImageShortHash(url)
+  ].join(':')
+
+const compactAutoSavedChatImageTrackerKey = (value: string): string =>
+  value.startsWith('chat-img:') ? value : `chat-img:legacy:${getAutoSavedChatImageShortHash(value)}`
+
+class BoundedAutoSavedChatImageTracker implements Iterable<string> {
+  private readonly keys = new Set<string>()
+
+  constructor(private readonly limit: number) {}
+
+  get size(): number {
+    return this.keys.size
+  }
+
+  add(value: string): this {
+    const key = compactAutoSavedChatImageTrackerKey(value)
+
+    if (this.keys.has(key)) {
+      return this
+    }
+
+    this.keys.add(key)
+
+    while (this.keys.size > this.limit) {
+      const oldestKey = this.keys.values().next().value
+      if (typeof oldestKey !== 'string') break
+      this.keys.delete(oldestKey)
+    }
+
+    return this
+  }
+
+  clear(): void {
+    this.keys.clear()
+  }
+
+  delete(value: string): boolean {
+    return this.keys.delete(compactAutoSavedChatImageTrackerKey(value))
+  }
+
+  has(value: string): boolean {
+    return this.keys.has(compactAutoSavedChatImageTrackerKey(value))
+  }
+
+  values(): IterableIterator<string> {
+    return this.keys.values()
+  }
+
+  [Symbol.iterator](): IterableIterator<string> {
+    return this.values()
+  }
+}
+
+export const autoSavedChatImageTracker = new BoundedAutoSavedChatImageTracker(
+  AUTO_SAVED_CHAT_IMAGE_TRACKER_LIMIT
+)
+
+export const recordAutoSavedChatImageKey = (key: string): void => {
+  autoSavedChatImageTracker.add(key)
+}
+
+export const hasAutoSavedChatImageKey = (key: string): boolean => autoSavedChatImageTracker.has(key)
 
 const readStoredSessionIds = (storageKey: string): string[] => {
   try {

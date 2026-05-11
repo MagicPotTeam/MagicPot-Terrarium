@@ -429,6 +429,46 @@ export async function loadAllSessions(scope = 'default'): Promise<ChatSession[]>
   }
 }
 
+/** Load a single session by ID without scanning the whole store. */
+export async function loadSessionFromDB(
+  sessionId: string,
+  scope = 'default'
+): Promise<ChatSession | null> {
+  if (!(await ensureStorageAvailable())) {
+    return null
+  }
+
+  try {
+    const db = await openDB()
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readonly')
+      const store = tx.objectStore(STORE_NAME)
+      const request = store.get(sessionId)
+      request.onsuccess = () => {
+        const session = request.result as LegacyChatSession | undefined
+        if (!session) {
+          resolve(null)
+          return
+        }
+
+        const targetScope = normalizeScope(scope)
+        if (normalizeScope(session.storageScope) !== targetScope) {
+          resolve(null)
+          return
+        }
+
+        resolve(normalizeSession(session, targetScope))
+      }
+      request.onerror = () =>
+        reject(createStorageError(request.error, 'IndexedDB failed to load the chat session.'))
+    })
+  } catch (error) {
+    const storageError = createStorageError(error, 'IndexedDB failed to load the chat session.')
+    await handleStorageFailure(storageError, 'loadSession failed')
+    return null
+  }
+}
+
 /** Save a single session (upsert) - efficient for single-session updates. */
 export async function saveSessionToDB(session: ChatSession, scope = 'default'): Promise<void> {
   if (!(await ensureStorageAvailable())) {
