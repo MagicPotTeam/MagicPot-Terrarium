@@ -18,6 +18,16 @@ import { getDroppedImageDropError, getDroppedImageFile } from '@renderer/utils/d
 const REPLACE_DESCRIPTION = '{{description}}'
 const REPLACE_PROMPT = '{{prompt}}'
 
+const buildPromptWithPreset = (presetPrompt: string, value: string): string => {
+  const trimmedPresetPrompt = presetPrompt.trim()
+  const trimmedValue = value.trim()
+
+  if (!trimmedPresetPrompt) return value
+  if (!trimmedValue) return trimmedPresetPrompt
+
+  return `${trimmedPresetPrompt}, ${trimmedValue}`
+}
+
 const buildTranslationRequest = (
   systemPromptTemplate: string,
   userPromptTemplate: string,
@@ -72,10 +82,11 @@ const buildExeInputPrompt: ExeInputBuilder<'InputPrompt'> = (
   if (typeof defaultValue !== 'string') {
     throw new Error(`defaultValue of slot ${slot} is not a string`)
   }
+  const defaultInputValue = buildPromptWithPreset(suffixPrompt || '', defaultValue)
   const id = `QAppInputPrompt-${label}`
 
   const QAppPromptInput: React.FC<ExeInputProps> = ({ ref, ...props }) => {
-    const [value, setValue] = useQAppInputState<string>(slot, defaultValue)
+    const [value, setValue] = useQAppInputState<string>(slot, defaultInputValue)
     const { config } = useConfig()
     const { notifyWarning } = useMessage()
     const { t } = useTranslation()
@@ -92,8 +103,7 @@ const buildExeInputPrompt: ExeInputBuilder<'InputPrompt'> = (
       () => ({
         id,
         modifyWorkflow: (workflow) => {
-          const finalValue = suffixPrompt ? `${value}, ${suffixPrompt}` : value
-          setJsonPath(slot, workflow, finalValue)
+          setJsonPath(slot, workflow, value)
         },
         validate: (workflow) => {
           if (maxLength && maxLength > 0 && value.length > maxLength) {
@@ -102,7 +112,7 @@ const buildExeInputPrompt: ExeInputBuilder<'InputPrompt'> = (
           return ''
         }
       }),
-      [value, t]
+      [t, value]
     )
 
     const resolveImageInterrogationCli = () => {

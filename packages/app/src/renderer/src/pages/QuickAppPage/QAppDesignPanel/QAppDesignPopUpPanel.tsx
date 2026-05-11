@@ -81,6 +81,13 @@ type QAppDesignPopUpPanelProps = {
 const DROPPABLE_AUTO = 'design-auto-items'
 const DROPPABLE_INPUT = 'design-input-items'
 
+const getQAppGroupName = (key?: string): string => {
+  if (!key) return ''
+
+  const parts = key.replace(/\\/g, '/').split('/').filter(Boolean)
+  return parts.length > 1 ? parts.slice(0, -1).join(' / ') : ''
+}
+
 export const QAppDesignPopUpPanel = ({
   open,
   onClose,
@@ -119,6 +126,9 @@ export const QAppDesignPopUpPanel = ({
   const [showPreview, setShowPreview] = useState(false)
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false)
   const categoryOptions = getQAppCategoryOptions(t)
+  const qAppName = initialName || t('qapp.design.untitled_qapp', { defaultValue: '未命名快应用' })
+  const qAppGroupName = getQAppGroupName(initialKey)
+  const title = qAppGroupName ? `${qAppGroupName} / ${qAppName}` : qAppName
 
   // 记录打开时的初始状态快照，用于检测是否有未保存的更改
   const initialSnapshot = useRef<string>('')
@@ -218,12 +228,18 @@ export const QAppDesignPopUpPanel = ({
           sx={{
             flexShrink: 0,
             display: 'flex',
-            justifyContent: 'flex-end',
+            justifyContent: 'space-between',
             alignItems: 'center',
+            gap: 2,
             borderBottom: 1,
             borderColor: 'divider'
           }}
         >
+          <Box sx={{ minWidth: 0 }}>
+            <Typography variant="subtitle1" fontWeight={600} noWrap>
+              {title}
+            </Typography>
+          </Box>
           <IconButton onClick={handleAttemptClose} size="small">
             <Close />
           </IconButton>

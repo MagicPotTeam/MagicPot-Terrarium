@@ -13,7 +13,7 @@ const fileToDataUrlMock = vi.fn()
 const getDroppedImageDropErrorMock = vi.fn()
 const getDroppedImageFileMock = vi.fn()
 
-let mockInputState = 'source prompt'
+let mockInputState: string | undefined = 'source prompt'
 let mockPromptSettings = {
   usePromptTranslation: true,
   promptTranslationSystemPrompt: 'Translate the following prompt to English.',
@@ -26,7 +26,10 @@ let mockPromptSettings = {
 }
 
 vi.mock('../../components/QAppContext', () => ({
-  useQAppInputState: () => [mockInputState, setValueMock]
+  useQAppInputState: (_key: string, initialValue: string) => [
+    mockInputState ?? initialValue,
+    setValueMock
+  ]
 }))
 
 vi.mock('@renderer/hooks/useConfig', () => ({
@@ -190,6 +193,40 @@ describe('buildExeInputPrompt', () => {
     })
     expect(setValueMock).toHaveBeenCalledWith('translated prompt')
     expect(ref.current?.validate(workflow)).toBe('')
+  })
+
+  it('uses the preset prompt as editable initial input', () => {
+    mockInputState = undefined
+    const workflow = {
+      1: {
+        class_type: 'CLIPTextEncode',
+        inputs: {
+          text: 'a girl'
+        }
+      }
+    } as any
+
+    const Component = buildExeInputPrompt(
+      {
+        label: 'Prompt',
+        component: 'InputPrompt',
+        slot: '$.1.inputs.text',
+        suffixPrompt: 'best quality, high detail'
+      },
+      workflow
+    )
+
+    const ref = createRef<ExeInputRef>()
+    const { getByTestId, queryByText } = render(
+      <Component ref={ref} objectInfos={{} as any} config={{} as any} buildEnv={{} as any} />
+    )
+
+    expect(queryByText('预设提示词')).toBeNull()
+    expect(getByTestId('prompt-value').textContent).toBe('best quality, high detail, a girl')
+
+    ref.current?.modifyWorkflow(workflow)
+
+    expect(workflow[1].inputs.text).toBe('best quality, high detail, a girl')
   })
 
   it('keeps placeholder-based templates working as before', async () => {

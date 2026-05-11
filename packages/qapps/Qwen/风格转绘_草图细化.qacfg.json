@@ -9,27 +9,27 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.88.inputs.unet_name",
+      "slot": "$.37.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.92.inputs.clip_name",
+      "slot": "$.41.inputs.clip_name",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.93.inputs.vae_name",
+      "slot": "$.42.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Anyline-Controlnet",
-      "slot": "$.89.inputs.control_net_name",
+      "slot": "$.38.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Depth-Controlnet",
-      "slot": "$.90.inputs.control_net_name",
+      "slot": "$.39.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
@@ -41,10 +41,21 @@
     {
       "label": "LoRA",
       "component": "InputLoRAChain",
-      "outputModelSlots": ["$.98.inputs.model"],
-      "outputClipSlots": ["$.81.inputs.clip", "$.82.inputs.clip"],
-      "inputModel": ["91", 0],
-      "inputClip": ["92", 0]
+      "outputModelSlots": [
+        "$.47.inputs.model"
+      ],
+      "outputClipSlots": [
+        "$.30.inputs.clip",
+        "$.31.inputs.clip"
+      ],
+      "inputModel": [
+        "40",
+        0
+      ],
+      "inputClip": [
+        "41",
+        0
+      ]
     },
     {
       "label": "生成参数",
@@ -54,7 +65,7 @@
     },
     {
       "label": "Controlnet",
-      "slot": "$.85.inputs.value",
+      "slot": "$.34.inputs.value",
       "min": 0,
       "max": 1,
       "step": 0.01,
@@ -62,7 +73,7 @@
     },
     {
       "label": "重绘幅度",
-      "slot": "$.86.inputs.value",
+      "slot": "$.35.inputs.value",
       "min": 0,
       "max": 1,
       "step": 0.01,
@@ -70,24 +81,24 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.102.inputs.image",
+      "slot": "$.51.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "正面提示词",
-      "slot": "$.96.inputs.value",
+      "slot": "$.45.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.97.inputs.value",
+      "slot": "$.46.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.83.inputs.value",
+      "slot": "$.32.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -98,7 +109,9 @@
     "https://github.com/yolain/ComfyUI-Easy-Use",
     "https://github.com/kijai/ComfyUI-KJNodes"
   ],
-  "outputNodeIds": ["99"],
+  "outputNodeIds": [
+    "48"
+  ],
   "isHidden": false,
   "requiredModels": [
     {

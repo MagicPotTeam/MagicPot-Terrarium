@@ -22,7 +22,7 @@ const DsnInputPrompt: QAppDesignComponent<'InputPrompt'> = ({
 }: QAppDesignProps<'InputPrompt'>) => {
   const { label, InputLabel } = useInputLabel(value?.label, id, 'InputPrompt', onDelete)
   const [slot, setSlot] = useState<string | null>(value?.slot || null)
-  const [suffixPrompt, setSuffixPrompt] = useState<string>(value?.suffixPrompt || '')
+  const [presetPrompt, setPresetPrompt] = useState<string>(value?.suffixPrompt || '')
 
   useEffect(() => {
     if (!slot) {
@@ -32,10 +32,10 @@ const DsnInputPrompt: QAppDesignComponent<'InputPrompt'> = ({
       label,
       slot,
       component: 'InputPrompt',
-      suffixPrompt
+      suffixPrompt: presetPrompt
     }
     setValue(value satisfies QAppCfgInputPrompt)
-  }, [label, slot, suffixPrompt, setValue])
+  }, [label, slot, presetPrompt, setValue])
 
   return (
     <DsnComponentLayout>
@@ -50,10 +50,10 @@ const DsnInputPrompt: QAppDesignComponent<'InputPrompt'> = ({
         allowFieldCondition={allowFieldCondition}
       />
       <InputTextArea
-        value={suffixPrompt}
-        onChange={setSuffixPrompt}
-        label="提示词后缀"
-        placeholder="提示词后缀..."
+        value={presetPrompt}
+        onChange={setPresetPrompt}
+        label="预设提示词"
+        placeholder="一般填写质量词，会显示在用户输入前面"
       />
     </DsnComponentLayout>
   )
