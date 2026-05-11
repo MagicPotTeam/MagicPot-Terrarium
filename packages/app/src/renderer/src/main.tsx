@@ -51,6 +51,25 @@ function scheduleDevReload(reason: unknown): void {
 
 installPerformanceMeasureGuard()
 
+function forceStartupHomeRoute(): void {
+  if (!store.getState().layout.startupRestorePending) {
+    return
+  }
+
+  const hash = window.location.hash.trim()
+  if (!hash || hash === '#/' || hash === '#') {
+    return
+  }
+
+  window.history.replaceState(
+    null,
+    document.title,
+    `${window.location.pathname}${window.location.search}#/`
+  )
+}
+
+forceStartupHomeRoute()
+
 const RootMode = import.meta.env.DEV ? Fragment : StrictMode
 
 // emotion cache

@@ -6,12 +6,25 @@ import {
 
 // Activity Bar 左侧面板 ID
 export type SidePanelId = 'explorer' | 'quickapp' | null
+type BottomPanelTabId = 'terminal' | 'comfyui' | 'elements'
 
 export interface TabItem {
   id: string
   label: string
   routePath: string // 对应 routes.ts 中的 path
   closable: boolean
+}
+
+export interface PersistedLayoutState {
+  activeSidePanel: SidePanelId
+  sidePanelWidth: number
+  rightPanelVisible: boolean
+  bottomPanelVisible: boolean
+  bottomPanelActiveTab: BottomPanelTabId
+  openTabs: TabItem[]
+  activeTabId: string
+  lastActiveProjectId?: string | null
+  lastRoutePath: string
 }
 
 const SYSTEM_TAB_ROUTE_PATHS: Record<string, string> = {
@@ -95,7 +108,7 @@ export interface LayoutState {
 
   // Bottom Panel
   bottomPanelVisible: boolean
-  bottomPanelActiveTab: 'terminal' | 'comfyui' | 'elements'
+  bottomPanelActiveTab: BottomPanelTabId
   bottomPanelMaximized: boolean
 
   // Main Area Tabs
@@ -106,17 +119,20 @@ export interface LayoutState {
 
   // 当前路由路径（用于恢复上次页面）
   lastRoutePath: string
+
+  startupRestorePending: boolean
+  startupRestoreSnapshot: PersistedLayoutState | null
 }
 
 const LAYOUT_STORAGE_KEY = 'layout.state'
 const APP_LAUNCH_MARKER_KEY = 'app.hasLaunched'
 
 // 从 localStorage 恢复状态
-function loadState(): Partial<LayoutState> {
+function loadState(): Partial<PersistedLayoutState> {
   try {
     const saved = localStorage.getItem(LAYOUT_STORAGE_KEY)
     if (saved) {
-      const parsed = JSON.parse(saved) as Partial<LayoutState> & { openTabs?: unknown }
+      const parsed = JSON.parse(saved) as Partial<PersistedLayoutState> & { openTabs?: unknown }
       return {
         ...parsed,
         openTabs: normalizeSavedTabs(parsed.openTabs)
@@ -143,6 +159,7 @@ function detectFirstLaunch(): boolean {
 
 const savedState = loadState()
 const isFirstLaunch = detectFirstLaunch()
+const hasSavedLayoutState = Object.keys(savedState).length > 0
 
 const defaultTab: TabItem = {
   id: 'tab-home',
@@ -151,53 +168,114 @@ const defaultTab: TabItem = {
   closable: true
 }
 
-const initialState: LayoutState = {
-  activeSidePanel: (() => {
-    const savedSidePanel = savedState.activeSidePanel as string | undefined
-    if (savedSidePanel === 'hunyuan3d') return 'quickapp'
-    if (savedSidePanel === 'explorer' || savedSidePanel === 'quickapp') return savedSidePanel
-    return 'quickapp'
-  })(),
-  sidePanelWidth: savedState.sidePanelWidth ?? 460,
-  projectEntrySidePanelIntent: null,
-
-  rightPanelVisible: savedState.rightPanelVisible ?? true,
-
-  bottomPanelVisible: isFirstLaunch ? false : (savedState.bottomPanelVisible ?? false),
-  bottomPanelActiveTab: savedState.bottomPanelActiveTab ?? 'terminal',
-  bottomPanelMaximized: false, // 不恢复最大化状态
-
-  openTabs: savedState.openTabs ?? [],
-  activeTabId:
-    typeof savedState.activeTabId === 'string' &&
-    isRestorableTabId(savedState.activeTabId, savedState.openTabs ?? [])
-      ? savedState.activeTabId
-      : '',
-
-  lastActiveProjectId: savedState.lastActiveProjectId ?? null,
-
-  lastRoutePath:
-    typeof savedState.lastRoutePath === 'string' &&
-    REMOVED_SYSTEM_ROUTE_PATHS.has(savedState.lastRoutePath.trim())
-      ? '/'
-      : normalizeProjectCanvasRoutePath(savedState.lastRoutePath ?? '/')
+function normalizeSavedSidePanel(value: unknown): SidePanelId {
+  if (value === 'hunyuan3d') return 'quickapp'
+  if (value === 'explorer' || value === 'quickapp') return value
+  return 'quickapp'
 }
+
+function normalizeSavedBottomPanelTab(value: unknown): BottomPanelTabId {
+  if (value === 'terminal' || value === 'comfyui' || value === 'elements') {
+    return value
+  }
+  return 'terminal'
+}
+
+function normalizeSavedRoutePath(value: unknown): string {
+  if (typeof value === 'string' && REMOVED_SYSTEM_ROUTE_PATHS.has(value.trim())) {
+    return '/'
+  }
+
+  return normalizeProjectCanvasRoutePath(typeof value === 'string' ? value : '/')
+}
+
+function buildSavedLayoutSnapshot(
+  state: Partial<PersistedLayoutState>,
+  firstLaunch: boolean
+): PersistedLayoutState {
+  const openTabs = state.openTabs ?? []
+
+  return {
+    activeSidePanel: normalizeSavedSidePanel(state.activeSidePanel),
+    sidePanelWidth: state.sidePanelWidth ?? 460,
+    rightPanelVisible: state.rightPanelVisible ?? true,
+    bottomPanelVisible: firstLaunch ? false : (state.bottomPanelVisible ?? false),
+    bottomPanelActiveTab: normalizeSavedBottomPanelTab(state.bottomPanelActiveTab),
+    openTabs,
+    activeTabId:
+      typeof state.activeTabId === 'string' && isRestorableTabId(state.activeTabId, openTabs)
+        ? state.activeTabId
+        : '',
+    lastActiveProjectId: state.lastActiveProjectId ?? null,
+    lastRoutePath: normalizeSavedRoutePath(state.lastRoutePath)
+  }
+}
+
+const savedLayoutSnapshot = buildSavedLayoutSnapshot(savedState, isFirstLaunch)
+
+const initialState: LayoutState = hasSavedLayoutState
+  ? {
+      activeSidePanel: null,
+      sidePanelWidth: savedLayoutSnapshot.sidePanelWidth,
+      projectEntrySidePanelIntent: null,
+
+      rightPanelVisible: false,
+
+      bottomPanelVisible: false,
+      bottomPanelActiveTab: savedLayoutSnapshot.bottomPanelActiveTab,
+      bottomPanelMaximized: false,
+
+      openTabs: [],
+      activeTabId: defaultTab.id,
+
+      lastActiveProjectId: null,
+      lastRoutePath: '/',
+
+      startupRestorePending: true,
+      startupRestoreSnapshot: savedLayoutSnapshot
+    }
+  : {
+      activeSidePanel: savedLayoutSnapshot.activeSidePanel,
+      sidePanelWidth: savedLayoutSnapshot.sidePanelWidth,
+      projectEntrySidePanelIntent: null,
+
+      rightPanelVisible: savedLayoutSnapshot.rightPanelVisible,
+
+      bottomPanelVisible: savedLayoutSnapshot.bottomPanelVisible,
+      bottomPanelActiveTab: savedLayoutSnapshot.bottomPanelActiveTab,
+      bottomPanelMaximized: false, // 不恢复最大化状态
+
+      openTabs: savedLayoutSnapshot.openTabs,
+      activeTabId: savedLayoutSnapshot.activeTabId,
+
+      lastActiveProjectId: savedLayoutSnapshot.lastActiveProjectId,
+
+      lastRoutePath: savedLayoutSnapshot.lastRoutePath,
+
+      startupRestorePending: false,
+      startupRestoreSnapshot: null
+    }
 
 // 保存状态到 localStorage
 function saveState(state: LayoutState): void {
   try {
+    const stateToPersist =
+      state.startupRestorePending && state.startupRestoreSnapshot
+        ? state.startupRestoreSnapshot
+        : state
+
     localStorage.setItem(
       LAYOUT_STORAGE_KEY,
       JSON.stringify({
-        activeSidePanel: state.activeSidePanel,
-        sidePanelWidth: state.sidePanelWidth,
-        rightPanelVisible: state.rightPanelVisible,
-        bottomPanelVisible: state.bottomPanelVisible,
-        bottomPanelActiveTab: state.bottomPanelActiveTab,
-        openTabs: state.openTabs,
-        activeTabId: state.activeTabId,
-        lastActiveProjectId: state.lastActiveProjectId,
-        lastRoutePath: state.lastRoutePath
+        activeSidePanel: stateToPersist.activeSidePanel,
+        sidePanelWidth: stateToPersist.sidePanelWidth,
+        rightPanelVisible: stateToPersist.rightPanelVisible,
+        bottomPanelVisible: stateToPersist.bottomPanelVisible,
+        bottomPanelActiveTab: stateToPersist.bottomPanelActiveTab,
+        openTabs: stateToPersist.openTabs,
+        activeTabId: stateToPersist.activeTabId,
+        lastActiveProjectId: stateToPersist.lastActiveProjectId,
+        lastRoutePath: stateToPersist.lastRoutePath
       })
     )
   } catch {
@@ -321,6 +399,26 @@ const layoutSlice = createSlice({
     },
     setLastRoutePath(state, action: PayloadAction<string>) {
       state.lastRoutePath = action.payload
+    },
+    completeStartupRestore(state) {
+      const snapshot = state.startupRestoreSnapshot
+      state.startupRestorePending = false
+      state.startupRestoreSnapshot = null
+
+      if (!snapshot) {
+        return
+      }
+
+      state.activeSidePanel = snapshot.activeSidePanel
+      state.sidePanelWidth = snapshot.sidePanelWidth
+      state.rightPanelVisible = snapshot.rightPanelVisible
+      state.bottomPanelVisible = snapshot.bottomPanelVisible
+      state.bottomPanelActiveTab = snapshot.bottomPanelActiveTab
+      state.bottomPanelMaximized = false
+      state.openTabs = snapshot.openTabs
+      state.activeTabId = snapshot.activeTabId
+      state.lastActiveProjectId = snapshot.lastActiveProjectId
+      state.lastRoutePath = snapshot.lastRoutePath
     }
   }
 })
@@ -342,7 +440,8 @@ export const {
   setActiveTab,
   reorderTabs,
   updateTabLabel,
-  setLastRoutePath
+  setLastRoutePath,
+  completeStartupRestore
 } = layoutSlice.actions
 
 export { saveState }

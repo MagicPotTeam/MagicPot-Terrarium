@@ -3,6 +3,7 @@ import {
   clampRightPanelWidth,
   clampSidePanelWidth,
   resolveTabIdForCurrentRoute,
+  resolveStartupFallbackRoutePath,
   resolveStartupRouteTarget,
   resolveHashRoutePath,
   SIDE_PANEL_DEFAULT_WIDTH,
@@ -92,6 +93,30 @@ describe('Layout route sync helpers', () => {
       resolveStartupRouteTarget('/canvas?id=tab-project-42', '/canvas?id=tab-project-42')
     ).toBe(null)
     expect(resolveStartupRouteTarget('/', '/')).toBeNull()
+  })
+
+  it('falls back to the active tab route when the saved startup route is home', () => {
+    expect(resolveStartupRouteTarget('/', '/', '/canvas?id=tab-project-42')).toBe(
+      '/canvas?id=tab-project-42'
+    )
+    expect(resolveStartupRouteTarget('/', '/', '/settings')).toBe('/settings')
+    expect(resolveStartupRouteTarget('/settings', '/', '/canvas?id=tab-project-42')).toBe(
+      '/settings'
+    )
+  })
+
+  it('derives a startup fallback route from the active tab', () => {
+    expect(
+      resolveStartupFallbackRoutePath('tab-project-42', [
+        {
+          id: 'tab-project-42',
+          label: '42',
+          routePath: `${PROJECT_CANVAS_ROUTE_PATH}?id=tab-project-42`,
+          closable: true
+        }
+      ])
+    ).toBe(`${PROJECT_CANVAS_ROUTE_PATH}?id=tab-project-42`)
+    expect(resolveStartupFallbackRoutePath('tab-settings', [])).toBe('/settings')
   })
 
   it('defers current route persistence until the startup restore navigation has landed', () => {

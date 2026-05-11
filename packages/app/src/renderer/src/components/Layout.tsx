@@ -15,6 +15,7 @@ import {
   closeSidePanel,
   clearProjectEntrySidePanelIntent,
   setActiveTab,
+  completeStartupRestore,
   resolveTabRoutePath,
   type TabItem
 } from '../store/slices/layoutSlice'
@@ -37,6 +38,7 @@ const RIGHT_PANEL_MIN_WIDTH = 360
 const RIGHT_PANEL_MAX_WIDTH = 1024
 const BOTTOM_PANEL_DEFAULT_HEIGHT = 220
 const ROUTE_TAB_SYNC_DELAY_MS = 50
+export const STARTUP_HOME_PAINT_DELAY_MS = 160
 
 export const clampSidePanelWidth = (currentWidth: number, delta: number): number =>
   Math.max(SIDE_PANEL_MIN_WIDTH, Math.min(SIDE_PANEL_MAX_WIDTH, currentWidth + delta))
@@ -85,19 +87,30 @@ export const shouldAutoCloseProjectSidePanel = (
 
 export const resolveStartupRouteTarget = (
   lastRoutePath: string,
-  currentRoute: string
+  currentRoute: string,
+  fallbackRoutePath = ''
 ): string | null => {
   const normalizedSavedRoute = normalizeProjectCanvasRoutePath(lastRoutePath)
   const normalizedCurrentRoute = normalizeProjectCanvasRoutePath(currentRoute)
-  if (
-    !normalizedSavedRoute ||
-    normalizedSavedRoute === '/' ||
-    normalizedSavedRoute === normalizedCurrentRoute
-  ) {
+  const normalizedFallbackRoute = normalizeProjectCanvasRoutePath(fallbackRoutePath)
+  const restoreRoute =
+    normalizedSavedRoute && normalizedSavedRoute !== '/'
+      ? normalizedSavedRoute
+      : normalizedFallbackRoute
+
+  if (!restoreRoute || restoreRoute === '/' || restoreRoute === normalizedCurrentRoute) {
     return null
   }
 
-  return normalizedSavedRoute
+  return restoreRoute
+}
+
+export const resolveStartupFallbackRoutePath = (
+  activeTabId: string,
+  openTabs: TabItem[]
+): string => {
+  const activeTab = openTabs.find((tab) => tab.id === activeTabId)
+  return resolveTabRoutePath(activeTab ?? { id: activeTabId })
 }
 
 export const shouldPersistCurrentRoute = (
@@ -118,6 +131,30 @@ export const resolveHashRoutePath = (hash: string): string => {
   }
 
   return normalizeProjectCanvasRoutePath(routePath.startsWith('/') ? routePath : `/${routePath}`)
+}
+
+export const scheduleStartupRestoreAfterHomePaint = (callback: () => void): (() => void) => {
+  let cancelled = false
+  let firstFrameId = 0
+  let secondFrameId = 0
+  let timerId = 0
+
+  firstFrameId = window.requestAnimationFrame(() => {
+    secondFrameId = window.requestAnimationFrame(() => {
+      timerId = window.setTimeout(() => {
+        if (!cancelled) {
+          callback()
+        }
+      }, STARTUP_HOME_PAINT_DELAY_MS)
+    })
+  })
+
+  return () => {
+    cancelled = true
+    window.cancelAnimationFrame(firstFrameId)
+    window.cancelAnimationFrame(secondFrameId)
+    window.clearTimeout(timerId)
+  }
 }
 
 type ResizeDirection = 'side' | 'bottom' | 'right' | null
@@ -179,16 +216,55 @@ const Layout: React.FC = () => {
   const lastRoutePath = useAppSelector((s) => s.layout.lastRoutePath)
   const activeTabId = useAppSelector((s) => s.layout.activeTabId)
   const openTabs = useAppSelector((s) => s.layout.openTabs)
+  const startupRestorePending = useAppSelector((s) => s.layout.startupRestorePending)
+  const startupRestoreSnapshot = useAppSelector((s) => s.layout.startupRestoreSnapshot)
 
   const navigate = useNavigate()
   const location = useLocation()
   const currentRoute = `${location.pathname}${location.search}${location.hash}`
 
   const hasRestoredRoute = useRef(false)
-  const pendingStartupRoutePathRef = useRef(resolveStartupRouteTarget(lastRoutePath, currentRoute))
+  const pendingStartupRoutePathRef = useRef(
+    startupRestorePending
+      ? null
+      : resolveStartupRouteTarget(
+          lastRoutePath,
+          currentRoute,
+          resolveStartupFallbackRoutePath(activeTabId, openTabs)
+        )
+  )
   useEffect(() => {
     if (hasRestoredRoute.current) {
-      return
+      return undefined
+    }
+
+    if (startupRestorePending) {
+      return scheduleStartupRestoreAfterHomePaint(() => {
+        if (hasRestoredRoute.current) {
+          return
+        }
+
+        hasRestoredRoute.current = true
+        const startupFallbackRoutePath = startupRestoreSnapshot
+          ? resolveStartupFallbackRoutePath(
+              startupRestoreSnapshot.activeTabId,
+              startupRestoreSnapshot.openTabs
+            )
+          : ''
+        const startupRoutePath = resolveStartupRouteTarget(
+          startupRestoreSnapshot?.lastRoutePath ?? '/',
+          currentRoute,
+          startupFallbackRoutePath
+        )
+        pendingStartupRoutePathRef.current = startupRoutePath
+
+        if (startupRoutePath) {
+          navigate(startupRoutePath, { replace: true })
+          return
+        }
+
+        dispatch(completeStartupRestore())
+      })
     }
 
     hasRestoredRoute.current = true
@@ -196,6 +272,7 @@ const Layout: React.FC = () => {
     if (startupRoutePath) {
       navigate(startupRoutePath, { replace: true })
     }
+    return undefined
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -207,12 +284,16 @@ const Layout: React.FC = () => {
       return
     }
 
+    if (startupRestorePending) {
+      dispatch(completeStartupRestore())
+    }
+
     pendingStartupRoutePathRef.current = null
     dispatch(setLastRoutePath(normalizeProjectCanvasRoutePath(currentRoute)))
-  }, [currentRoute, dispatch])
+  }, [currentRoute, dispatch, startupRestorePending])
 
   useEffect(() => {
-    if (!hasRestoredRoute.current) {
+    if (!hasRestoredRoute.current || startupRestorePending) {
       return
     }
 
@@ -237,7 +318,16 @@ const Layout: React.FC = () => {
     return () => {
       window.clearTimeout(syncTimerId)
     }
-  }, [activeTabId, currentRoute, dispatch, location.pathname, location.search, navigate, openTabs])
+  }, [
+    activeTabId,
+    currentRoute,
+    dispatch,
+    location.pathname,
+    location.search,
+    navigate,
+    openTabs,
+    startupRestorePending
+  ])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -390,8 +480,8 @@ const Layout: React.FC = () => {
     }
   }, [activeSidePanel, dispatch, isProjectRoute, isProjectTab, projectEntrySidePanelIntent])
 
-  const effectSidePanel = isProjectTab ? activeSidePanel : null
-  const effectRightPanelVisible = isProjectTab ? rightPanelVisible : false
+  const effectSidePanel = isProjectTab && isProjectRoute ? activeSidePanel : null
+  const effectRightPanelVisible = isProjectTab && isProjectRoute ? rightPanelVisible : false
 
   useEffect(() => {
     const emitRemeasure = () => {
