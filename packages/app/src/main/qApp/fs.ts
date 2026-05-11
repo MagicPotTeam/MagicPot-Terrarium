@@ -331,11 +331,42 @@ export class QAppFSCli {
     for (const source of sources) {
       const tree = await this.buildTree(source.dir, source.isBuiltin)
       for (const item of tree) {
-        merged.set(item.key, item)
+        const existing = merged.get(item.key)
+        merged.set(item.key, existing ? this.mergeQAppMenuItem(existing, item) : item)
       }
     }
 
     return Array.from(merged.values())
+  }
+
+  private mergeQAppMenuItems(
+    baseItems: QAppMenuItem[] = [],
+    overrideItems: QAppMenuItem[] = []
+  ): QAppMenuItem[] {
+    const merged = new Map<string, QAppMenuItem>()
+
+    for (const item of baseItems) {
+      merged.set(item.key, item)
+    }
+
+    for (const item of overrideItems) {
+      const existing = merged.get(item.key)
+      merged.set(item.key, existing ? this.mergeQAppMenuItem(existing, item) : item)
+    }
+
+    return Array.from(merged.values())
+  }
+
+  private mergeQAppMenuItem(baseItem: QAppMenuItem, overrideItem: QAppMenuItem): QAppMenuItem {
+    if (baseItem.isDirectory && overrideItem.isDirectory) {
+      return {
+        ...baseItem,
+        ...overrideItem,
+        children: this.mergeQAppMenuItems(baseItem.children, overrideItem.children)
+      }
+    }
+
+    return overrideItem
   }
 
   async getQApp(key: string): Promise<QAppBundleData> {

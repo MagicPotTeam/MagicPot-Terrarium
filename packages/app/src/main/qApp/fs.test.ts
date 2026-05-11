@@ -175,6 +175,47 @@ describe('QAppFSCli with memfs', () => {
       expect(shared?.icon).toBe('user.png')
     })
 
+    it('merges userData overrides into bundled folders without hiding bundled siblings', async () => {
+      const fsp = await import('node:fs/promises')
+      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
+      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+
+      await writeBundle(
+        BUILTIN_QAPPS_DIR,
+        'Shared/App',
+        { icon: 'builtin-app.png', inputs: [] },
+        minimalWorkflow(),
+        JSON.stringify({ name: 'App', version: '1.0.0', source: 'builtin' }, null, 2)
+      )
+      await writeBundle(
+        BUILTIN_QAPPS_DIR,
+        'Shared/Other',
+        { icon: 'builtin-other.png', inputs: [] },
+        minimalWorkflow(),
+        JSON.stringify({ name: 'Other', version: '1.0.0', source: 'builtin' }, null, 2)
+      )
+      await writeBundle(
+        USER_QAPPS_DIR,
+        'Shared/App',
+        { icon: 'user-app.png', inputs: [] },
+        minimalWorkflow(),
+        JSON.stringify({ name: 'App', version: '1.0.0', source: 'local' }, null, 2)
+      )
+
+      const cli = new QAppFSCli()
+      const items = await cli.listQAppKeys()
+      const sharedDir = findItemByKey(items, 'Shared')
+      const app = findItemByKey(items, 'Shared/App')
+      const other = findItemByKey(items, 'Shared/Other')
+
+      expect(sharedDir?.isDirectory).toBe(true)
+      expect(sharedDir?.children).toHaveLength(2)
+      expect(app?.isBuiltin).toBe(false)
+      expect(app?.icon).toBe('user-app.png')
+      expect(other?.isBuiltin).toBe(true)
+      expect(other?.icon).toBe('builtin-other.png')
+    })
+
     it('migrates legacy root qApps with non-builtin manifests into userData', async () => {
       const fsp = await import('node:fs/promises')
       await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
