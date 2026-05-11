@@ -3172,6 +3172,37 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(props.handleStageMouseDown).not.toHaveBeenCalled()
   })
 
+  it('does not start marquee fallback capture from the text item drag toolbar', () => {
+    const props = createBaseProps([])
+
+    render(<ProjectCanvasPageStageScene {...props} />)
+
+    const stageRoot = screen.getByTestId('project-canvas-stage-root')
+    const toolbar = document.createElement('div')
+    toolbar.className = 'textlike-action-toolbar'
+    const dragButton = document.createElement('button')
+    dragButton.draggable = true
+    toolbar.appendChild(dragButton)
+    stageRoot.appendChild(toolbar)
+
+    fireEvent.pointerDown(dragButton, {
+      button: 0,
+      buttons: 1,
+      clientX: 240,
+      clientY: 180,
+      pointerId: 12,
+      pointerType: 'mouse'
+    })
+    fireEvent.mouseDown(dragButton, {
+      button: 0,
+      buttons: 1,
+      clientX: 240,
+      clientY: 180
+    })
+
+    expect(props.handleStageMouseDown).not.toHaveBeenCalled()
+  })
+
   it('keeps marquee move and mouseup events flowing when the drag starts on the stage surface and crosses a proxy placeholder', async () => {
     const item = createFileItem('file-marquee-proxy')
     const props = createBaseProps([item])

@@ -15,6 +15,16 @@ type CanvasFileActionToolbarProps = {
 
 const DRAG_TOOLTIP = 'Drag file node'
 
+const stopToolbarPointerPropagation = (
+  event:
+    | React.MouseEvent<HTMLElement>
+    | React.PointerEvent<HTMLElement>
+    | React.TouchEvent<HTMLElement>
+) => {
+  event.stopPropagation()
+  event.nativeEvent.stopImmediatePropagation?.()
+}
+
 export default function CanvasFileActionToolbar({
   position,
   onDragStart,
@@ -45,7 +55,9 @@ export default function CanvasFileActionToolbar({
         p: 0.5,
         gap: 0.5
       }}
-      onPointerDownCapture={(event) => event.stopPropagation()}
+      onPointerDownCapture={stopToolbarPointerPropagation}
+      onMouseDownCapture={stopToolbarPointerPropagation}
+      onTouchStartCapture={stopToolbarPointerPropagation}
     >
       <Tooltip title={DRAG_TOOLTIP}>
         <IconButton

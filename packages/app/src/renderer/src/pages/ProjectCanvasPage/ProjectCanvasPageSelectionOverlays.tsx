@@ -86,6 +86,16 @@ type StageRefLike = {
   getStage?: () => StageLike | null
 }
 
+const stopCanvasToolbarPointerPropagation = (
+  event:
+    | React.MouseEvent<HTMLElement>
+    | React.PointerEvent<HTMLElement>
+    | React.TouchEvent<HTMLElement>
+) => {
+  event.stopPropagation()
+  event.nativeEvent.stopImmediatePropagation?.()
+}
+
 type SelectionToolbarKind = 'blob' | 'file' | 'group' | 'image' | 'multi' | 'textlike'
 type GroupChipPlacement =
   | 'above-toolbar'
@@ -1203,7 +1213,9 @@ export default function ProjectCanvasPageSelectionOverlays({
             pointerEvents: 'auto',
             zIndex: 140
           }}
-          onPointerDownCapture={(event) => event.stopPropagation()}
+          onPointerDownCapture={stopCanvasToolbarPointerPropagation}
+          onMouseDownCapture={stopCanvasToolbarPointerPropagation}
+          onTouchStartCapture={stopCanvasToolbarPointerPropagation}
         >
           <Box
             onClick={() => handleFocusGroup(group)}
@@ -1288,7 +1300,9 @@ export default function ProjectCanvasPageSelectionOverlays({
           p: 0.5,
           gap: 0.5
         }}
-        onPointerDownCapture={(event) => event.stopPropagation()}
+        onPointerDownCapture={stopCanvasToolbarPointerPropagation}
+        onMouseDownCapture={stopCanvasToolbarPointerPropagation}
+        onTouchStartCapture={stopCanvasToolbarPointerPropagation}
       >
         <Tooltip title={'\u62d6\u62fd\u63d0\u53d6\u8d44\u6e90'}>
           <IconButton
@@ -1417,7 +1431,9 @@ export default function ProjectCanvasPageSelectionOverlays({
           p: 0.5,
           gap: 0.5
         }}
-        onPointerDownCapture={(event) => event.stopPropagation()}
+        onPointerDownCapture={stopCanvasToolbarPointerPropagation}
+        onMouseDownCapture={stopCanvasToolbarPointerPropagation}
+        onTouchStartCapture={stopCanvasToolbarPointerPropagation}
       >
         {selectedBlobItem.type === 'model3d' && (
           <Tooltip title={'\u62d6\u62fd\u63d0\u53d6\u8d44\u6e90'}>
@@ -1557,7 +1573,9 @@ export default function ProjectCanvasPageSelectionOverlays({
           p: 0.5,
           gap: 0.5
         }}
-        onPointerDownCapture={(event) => event.stopPropagation()}
+        onPointerDownCapture={stopCanvasToolbarPointerPropagation}
+        onMouseDownCapture={stopCanvasToolbarPointerPropagation}
+        onTouchStartCapture={stopCanvasToolbarPointerPropagation}
       >
         <Tooltip title={'\u62d6\u62fd\u63d0\u53d6\u8d44\u6e90'}>
           <IconButton
@@ -1565,18 +1583,22 @@ export default function ProjectCanvasPageSelectionOverlays({
             draggable
             onDragStart={(event) => {
               const objectUrl = getQuickCanvasItemsImageUrl([selectedTextLike])
-              if (!objectUrl) return
+              const promptId = (
+                selectedTextLike as (CanvasTextItem | CanvasAnnotationItem) & {
+                  promptId?: string
+                }
+              ).promptId
 
               setCanvasDragPayload(
                 event.dataTransfer,
                 buildCanvasDragPayload([selectedTextLike], {
-                  objectUrl,
-                  previewImageUrl: objectUrl,
-                  promptId: (
-                    selectedTextLike as (CanvasTextItem | CanvasAnnotationItem) & {
-                      promptId?: string
-                    }
-                  ).promptId
+                  ...(objectUrl
+                    ? {
+                        objectUrl,
+                        previewImageUrl: objectUrl
+                      }
+                    : {}),
+                  ...(promptId ? { promptId } : {})
                 })
               )
             }}
@@ -1656,7 +1678,9 @@ export default function ProjectCanvasPageSelectionOverlays({
           p: 0.5,
           gap: 0.5
         }}
-        onPointerDownCapture={(event) => event.stopPropagation()}
+        onPointerDownCapture={stopCanvasToolbarPointerPropagation}
+        onMouseDownCapture={stopCanvasToolbarPointerPropagation}
+        onTouchStartCapture={stopCanvasToolbarPointerPropagation}
       >
         <Tooltip title={fileExportActionLabel}>
           <IconButton

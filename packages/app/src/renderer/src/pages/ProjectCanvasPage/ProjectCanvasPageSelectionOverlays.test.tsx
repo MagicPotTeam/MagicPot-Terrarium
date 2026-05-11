@@ -1401,6 +1401,105 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
     canvasContainer.remove()
   })
 
+  it('starts text selection drags even before the preview image is cached', async () => {
+    const canvasContainer = document.createElement('div')
+    Object.defineProperty(canvasContainer, 'clientWidth', {
+      configurable: true,
+      value: 800
+    })
+    Object.defineProperty(canvasContainer, 'clientHeight', {
+      configurable: true,
+      value: 600
+    })
+    document.body.appendChild(canvasContainer)
+
+    const stage = {
+      findOne: vi.fn(() => null)
+    }
+    const stageRef = {
+      current: {
+        getStage: () => stage
+      }
+    } as unknown as React.RefObject<KonvaStage | null>
+    const textDragPayload: CanvasDragPayload = {
+      sourceCanvasId: 'canvas-1',
+      textContent: 'Canvas text'
+    }
+    const buildCanvasDragPayload = vi.fn(() => textDragPayload)
+    const setCanvasDragPayload = vi.fn()
+
+    render(
+      <ThemeProvider theme={theme}>
+        <ProjectCanvasPageSelectionOverlays
+          tool="select"
+          selectionOverlayGroups={[]}
+          exactSelectedGroup={null}
+          stagePos={{ x: 0, y: 0 }}
+          stageScale={1}
+          stageSize={{ width: 800, height: 600 }}
+          selectedIds={new Set(['text-1'])}
+          items={[createTextItem()]}
+          stageRef={stageRef}
+          canvasContainerRef={{ current: canvasContainer }}
+          lastClickedId="text-1"
+          mediaCaptionActionLabel="Edit caption"
+          legacySelectionToolbarEnabled={false}
+          groupCreateLabel="Group"
+          handleFocusGroup={vi.fn()}
+          buildCanvasDragPayload={buildCanvasDragPayload}
+          setCanvasDragPayload={setCanvasDragPayload}
+          handleFlipImage={vi.fn()}
+          handleCropImage={vi.fn()}
+          handleCopyCanvasImage={vi.fn()}
+          handleDownloadCanvasImage={vi.fn()}
+          handleOpenAgentSendMenu={vi.fn()}
+          handleOpenMediaCaptionEditor={vi.fn()}
+          handleSendCanvasItemsToAgent={vi.fn()}
+          handleToggleVideoPlayback={vi.fn()}
+          handleOpenModel3DViewer={vi.fn()}
+          handleOpenDccExportMenu={vi.fn()}
+          handleDownloadBlobItem={vi.fn()}
+          handleCopyCanvasItemsAsImage={vi.fn()}
+          handleDownloadCanvasItemsAsImage={vi.fn()}
+          getQuickCanvasItemsImageUrl={vi.fn(() => null)}
+          prepareQuickCanvasItemsImageUrl={vi.fn(async () => null)}
+          handleGenerateCanvasItems={vi.fn()}
+          handleCreateGroup={vi.fn()}
+          Model3DIcon={() => null}
+          ExportIcon={() => null}
+        />
+      </ThemeProvider>
+    )
+
+    const dragButton = await waitFor(() => {
+      const button = canvasContainer.querySelector(
+        '.textlike-action-toolbar button[draggable="true"]'
+      ) as HTMLButtonElement | null
+      expect(button).toBeTruthy()
+      return button as HTMLButtonElement
+    })
+
+    const dataTransfer = {
+      setData: vi.fn(),
+      effectAllowed: 'all'
+    } as unknown as DataTransfer
+
+    const canvasMouseDown = vi.fn()
+    canvasContainer.addEventListener('mousedown', canvasMouseDown)
+
+    fireEvent.mouseDown(dragButton, { button: 0 })
+    fireEvent.dragStart(dragButton, { dataTransfer })
+
+    expect(canvasMouseDown).not.toHaveBeenCalled()
+    expect(buildCanvasDragPayload).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: 'text-1' })],
+      {}
+    )
+    expect(setCanvasDragPayload).toHaveBeenCalledWith(dataTransfer, textDragPayload)
+
+    canvasContainer.remove()
+  })
+
   it('positions the text toolbar below the selected text element', async () => {
     const canvasContainer = document.createElement('div')
     Object.defineProperty(canvasContainer, 'clientWidth', {

@@ -5,10 +5,7 @@ import styled from '@emotion/styled'
 import BaseInputTextField from './BaseInputTextField'
 import CircularProgress from '@mui/material/CircularProgress'
 import PromptTagEditor from './PromptTagEditor'
-import {
-  getDroppedTextContent,
-  parseInternalImageDragPayload
-} from '@renderer/utils/droppedImageUtils'
+import { getDroppedTextContent } from '@renderer/utils/droppedImageUtils'
 
 const EndAdornmentClose = styled(Box)`
   display: flex;
@@ -55,14 +52,14 @@ const InputTextAreaFunctional: React.FC<InputTextAreaFunctionalProps> = ({
   const slotProps: TextFieldSlotsAndSlotProps<InputBaseProps>['slotProps'] = {}
   slotProps.htmlInput = {
     onDragOver: (event: React.DragEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      if (parseInternalImageDragPayload(event.dataTransfer)?.attachments?.length) return
-      if (!getDroppedTextContent(event.dataTransfer)) return
+      const droppedText = getDroppedTextContent(event.dataTransfer)
+      if (!droppedText) return
+
       event.preventDefault()
       event.stopPropagation()
       event.dataTransfer.dropEffect = 'copy'
     },
     onDrop: (event: React.DragEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      if (parseInternalImageDragPayload(event.dataTransfer)?.attachments?.length) return
       const droppedText = getDroppedTextContent(event.dataTransfer)
       if (!droppedText) return
 

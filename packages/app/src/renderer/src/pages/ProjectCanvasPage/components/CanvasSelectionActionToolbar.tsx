@@ -52,6 +52,16 @@ type ToolbarActionButtonProps = {
   onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void
 }
 
+const stopToolbarPointerPropagation = (
+  event:
+    | React.MouseEvent<HTMLElement>
+    | React.PointerEvent<HTMLElement>
+    | React.TouchEvent<HTMLElement>
+) => {
+  event.stopPropagation()
+  event.nativeEvent.stopImmediatePropagation?.()
+}
+
 function getToolbarContainerSx(position: SelectionActionStackPosition) {
   return {
     position: 'absolute',
@@ -144,7 +154,9 @@ export default function CanvasSelectionActionToolbar({
     <Box
       className={exactSelectedGroup ? 'group-action-toolbar' : 'selection-action-stack'}
       sx={getToolbarContainerSx(toolbarPosition)}
-      onPointerDownCapture={(event) => event.stopPropagation()}
+      onPointerDownCapture={stopToolbarPointerPropagation}
+      onMouseDownCapture={stopToolbarPointerPropagation}
+      onTouchStartCapture={stopToolbarPointerPropagation}
     >
       <ToolbarActionButton
         className="drag-action-button"

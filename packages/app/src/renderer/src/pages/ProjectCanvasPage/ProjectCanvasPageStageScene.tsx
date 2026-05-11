@@ -124,8 +124,11 @@ const STAGE_MARQUEE_FALLBACK_BLOCKING_SELECTORS = [
   '[data-canvas-multi-select-handle]',
   '.image-action-toolbar',
   '.blob-item-action-toolbar',
+  '.file-action-toolbar',
   '.file-item-action-toolbar',
+  '.group-action-toolbar',
   '.text-item-action-toolbar',
+  '.textlike-action-toolbar',
   '.selection-action-stack'
 ] as const
 

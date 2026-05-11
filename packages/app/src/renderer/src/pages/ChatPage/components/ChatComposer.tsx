@@ -42,6 +42,7 @@ import {
   detectDisplayFileKind,
   getFileBadgeText
 } from '@renderer/utils/fileDisplay'
+import { getDroppedTextContent } from '@renderer/utils/droppedImageUtils'
 import { getVisibleChatAttachmentEntries } from '../chatAttachmentVisibility'
 import type { MagicPotAppToolDescriptor } from '@shared/app/types'
 
@@ -409,6 +410,61 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     }
   }
 
+  const handleInputDragOver = (event: React.DragEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    if (disabled) return
+    if (!getDroppedTextContent(event.dataTransfer)) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'copy'
+  }
+
+  const handleInputDrop = (event: React.DragEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    if (disabled) return
+
+    const droppedText = getDroppedTextContent(event.dataTransfer)
+    if (!droppedText) return
+
+    event.preventDefault()
+    event.stopPropagation()
+
+    const target = event.currentTarget
+    const baseValue = target.value ?? committedInputValueRef.current
+    const selectionStart =
+      typeof target.selectionStart === 'number' ? target.selectionStart : baseValue.length
+    const selectionEnd =
+      typeof target.selectionEnd === 'number' ? target.selectionEnd : selectionStart
+    const nextValue =
+      baseValue.slice(0, selectionStart) + droppedText + baseValue.slice(selectionEnd)
+    const nextSelectionPosition = selectionStart + droppedText.length
+    const nextSelection: InputSelectionSnapshot = {
+      value: nextValue,
+      start: nextSelectionPosition,
+      end: nextSelectionPosition,
+      direction: 'none'
+    }
+
+    committedInputValueRef.current = nextValue
+    latestInputSelectionRef.current = nextSelection
+    pendingInputSelectionRef.current = nextSelection
+    onInputChange(nextValue)
+
+    const restoreDropSelection = () => {
+      if (document.activeElement !== target) {
+        target.focus()
+      }
+      if (target.value === nextValue) {
+        target.setSelectionRange(nextSelectionPosition, nextSelectionPosition)
+      }
+    }
+
+    if (typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(restoreDropSelection)
+    } else {
+      restoreDropSelection()
+    }
+  }
+
   const handleInsertToolCommand = (tool: MagicPotAppToolDescriptor) => {
     onInputChange(buildToolCommandDraft(tool))
     composerInputRef.current?.focus()
@@ -757,6 +813,8 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                 onSelect: handleInputSelectionChange,
                 onCompositionStart: handleCompositionStart,
                 onCompositionEnd: handleCompositionEnd,
+                onDragOver: handleInputDragOver,
+                onDrop: handleInputDrop,
                 style: {
                   minHeight: `${MIN_TEXTAREA_HEIGHT}px`,
                   maxHeight: resolvedTextareaMaxHeight,

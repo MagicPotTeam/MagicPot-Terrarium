@@ -51,6 +51,16 @@ type LegacyActionButtonProps = {
   onClick?: (event: React.MouseEvent<HTMLDivElement>) => void
 }
 
+const stopToolbarPointerPropagation = (
+  event:
+    | React.MouseEvent<HTMLElement>
+    | React.PointerEvent<HTMLElement>
+    | React.TouchEvent<HTMLElement>
+) => {
+  event.stopPropagation()
+  event.nativeEvent.stopImmediatePropagation?.()
+}
+
 const STACK_BUTTON_SX = {
   width: SELECTION_ACTION_BUTTON_WIDTH,
   minHeight: SELECTION_ACTION_BUTTON_HEIGHT,
@@ -186,7 +196,9 @@ export default function CanvasMultiSelectionOverlay({
             p: 0.5,
             gap: 0.5
           }}
-          onPointerDownCapture={(event) => event.stopPropagation()}
+          onPointerDownCapture={stopToolbarPointerPropagation}
+          onMouseDownCapture={stopToolbarPointerPropagation}
+          onTouchStartCapture={stopToolbarPointerPropagation}
         >
           <Tooltip title={dragLabel}>
             <IconButton
@@ -246,7 +258,9 @@ export default function CanvasMultiSelectionOverlay({
             pointerEvents: 'auto',
             zIndex: 130
           }}
-          onPointerDownCapture={(event) => event.stopPropagation()}
+          onPointerDownCapture={stopToolbarPointerPropagation}
+          onMouseDownCapture={stopToolbarPointerPropagation}
+          onTouchStartCapture={stopToolbarPointerPropagation}
         >
           <LegacyActionButton
             className="drag-action-button"

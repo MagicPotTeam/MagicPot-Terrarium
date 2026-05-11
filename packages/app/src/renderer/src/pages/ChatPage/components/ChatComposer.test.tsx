@@ -4,6 +4,7 @@ import { ThemeProvider } from '@mui/material'
 import { theme } from '@renderer/theme'
 import ChatComposer from './ChatComposer'
 import { useRef, useState } from 'react'
+import { QAPP_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -43,6 +44,12 @@ function ControlledChatComposer({
     </ThemeProvider>
   )
 }
+
+const createDataTransfer = (data: Record<string, string>) =>
+  ({
+    getData: (key: string) => data[key] || '',
+    dropEffect: 'none'
+  }) as unknown as DataTransfer
 
 describe('ChatComposer', () => {
   const createRect = (top: number, height: number): DOMRect =>
@@ -386,6 +393,61 @@ describe('ChatComposer', () => {
 
     expect(textarea.selectionStart).toBe(6)
     expect(textarea.selectionEnd).toBe(6)
+  })
+
+  it('inserts dropped internal canvas text at the input caret', () => {
+    const parentDragOver = vi.fn()
+    const parentDrop = vi.fn()
+
+    render(
+      <div onDragOver={parentDragOver} onDrop={parentDrop}>
+        <ControlledChatComposer initialValue="hello world" />
+      </div>
+    )
+
+    const textarea = screen.getByTestId('chat-composer-input') as HTMLTextAreaElement
+    act(() => {
+      textarea.focus()
+      textarea.setSelectionRange(6, 6)
+    })
+
+    const dataTransfer = createDataTransfer({
+      [QAPP_IMAGE_DRAG_MIME]: JSON.stringify({
+        itemTypes: ['text'],
+        textContent: 'dropped '
+      })
+    })
+
+    fireEvent.dragOver(textarea, { dataTransfer })
+    fireEvent.drop(textarea, { dataTransfer })
+
+    expect(textarea).toHaveValue('hello dropped world')
+    expect(textarea.selectionStart).toBe(14)
+    expect(textarea.selectionEnd).toBe(14)
+    expect(parentDragOver).not.toHaveBeenCalled()
+    expect(parentDrop).not.toHaveBeenCalled()
+  })
+
+  it('lets non-text internal drops bubble to the chat page drop handler', () => {
+    const parentDrop = vi.fn()
+
+    render(
+      <div onDrop={parentDrop}>
+        <ControlledChatComposer initialValue="" />
+      </div>
+    )
+
+    const textarea = screen.getByTestId('chat-composer-input') as HTMLTextAreaElement
+    const dataTransfer = createDataTransfer({
+      [QAPP_IMAGE_DRAG_MIME]: JSON.stringify({
+        itemTypes: ['image'],
+        objectUrl: 'blob:canvas-image'
+      })
+    })
+
+    fireEvent.drop(textarea, { dataTransfer })
+
+    expect(parentDrop).toHaveBeenCalledTimes(1)
   })
 
   it('uses the full chat panel height budget for long input', () => {
