@@ -237,6 +237,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr merge "${{ needs.bump-version.outputs.pr_number }}" \
+            --repo "${{ github.repository }}" \
             --squash \
             --delete-branch=false \
             --subject "${{ needs.bump-version.outputs.commit_message }}" \
