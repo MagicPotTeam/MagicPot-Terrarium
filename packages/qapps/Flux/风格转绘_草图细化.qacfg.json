@@ -38,6 +38,31 @@
       "component": "InputComfySelect"
     },
     {
+      "label": "LoRA",
+      "component": "Section",
+      "defaultExpanded": false,
+      "gridStyle": "wide"
+    },
+    {
+      "label": "LoRA",
+      "component": "InputLoRAChain",
+      "outputModelSlots": [
+        "$.119.inputs.model"
+      ],
+      "outputClipSlots": [
+        "$.134.inputs.clip",
+        "$.135.inputs.clip"
+      ],
+      "inputModel": [
+        "145",
+        0
+      ],
+      "inputClip": [
+        "124",
+        0
+      ]
+    },
+    {
       "label": "生成参数",
       "component": "Section",
       "defaultExpanded": true,
