@@ -3,7 +3,7 @@ import { QAppDesignComponent, QAppDesignProps } from './types'
 import DsnComponentLayout from './components/DsnComponentLayout'
 import { useInputLabel } from './components/InputLabel'
 import InputNodeSelect from './components/InputNodeSelect'
-import { Typography } from '@mui/material'
+import { Alert, Typography } from '@mui/material'
 import { conditionNodeLoRALoader } from './conditions'
 import { getJsonPath, JsonPath } from '@shared/utils/jsonPath'
 import {
@@ -348,6 +348,10 @@ const DsnInputLoRAChain: QAppDesignComponent<'InputLoRAChain'> = ({
         mode="node"
         allowNodeCondition={conditionNodeLoRALoader}
       />
+      <Alert severity="info" variant="outlined">
+        这里不会固定显示 LoRA 节点。用户在执行页选择 LoRA 后，生成时才会自动创建 LoraLoader；如果
+        API 流自带 LoRA，请选其中一个 LoraLoader，不选 LoRA 时会跳过原 LoRA。
+      </Alert>
       {!nodeSlot && (
         <Typography variant="body1">
           请先选择一个LoRA链节点, 自动计算得出工作流中的 LoRA 链

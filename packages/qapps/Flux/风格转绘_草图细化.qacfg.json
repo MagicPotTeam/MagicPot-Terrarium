@@ -9,32 +9,32 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.145.inputs.unet_name",
+      "slot": "$.198.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.124.inputs.clip_name1",
+      "slot": "$.177.inputs.clip_name1",
       "component": "InputComfySelect"
     },
     {
       "label": "T5XXL加载器",
-      "slot": "$.124.inputs.clip_name2",
+      "slot": "$.177.inputs.clip_name2",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.125.inputs.vae_name",
+      "slot": "$.178.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Anyline-Controlnet-Flux",
-      "slot": "$.123.inputs.control_net_name",
+      "slot": "$.176.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Depth-Controlnet-Flux",
-      "slot": "$.108.inputs.control_net_name",
+      "slot": "$.161.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
@@ -46,21 +46,10 @@
     {
       "label": "LoRA",
       "component": "InputLoRAChain",
-      "outputModelSlots": [
-        "$.119.inputs.model"
-      ],
-      "outputClipSlots": [
-        "$.134.inputs.clip",
-        "$.135.inputs.clip"
-      ],
-      "inputModel": [
-        "145",
-        0
-      ],
-      "inputClip": [
-        "124",
-        0
-      ]
+      "outputModelSlots": ["$.172.inputs.model"],
+      "outputClipSlots": ["$.187.inputs.clip", "$.188.inputs.clip"],
+      "inputModel": ["198", 0],
+      "inputClip": ["177", 0]
     },
     {
       "label": "生成参数",
@@ -70,7 +59,7 @@
     },
     {
       "label": "Controlnet",
-      "slot": "$.139.inputs.value",
+      "slot": "$.192.inputs.value",
       "min": 0,
       "max": 1,
       "step": 0.01,
@@ -78,7 +67,7 @@
     },
     {
       "label": "重绘幅度",
-      "slot": "$.140.inputs.value",
+      "slot": "$.193.inputs.value",
       "min": 0,
       "max": 1,
       "step": 0.01,
@@ -86,18 +75,18 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.146.inputs.image",
+      "slot": "$.199.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "提示词",
-      "slot": "$.137.inputs.value",
+      "slot": "$.190.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.136.inputs.value",
+      "slot": "$.189.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -108,11 +97,15 @@
     "https://github.com/yolain/ComfyUI-Easy-Use",
     "https://github.com/kijai/ComfyUI-KJNodes"
   ],
-  "outputNodeIds": [
-    "142"
-  ],
+  "outputNodeIds": ["195"],
   "isHidden": false,
   "requiredModels": [
+    {
+      "name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "size": "1.5 GB",
+      "dir": "models/loras",
+      "url": "https://modelscope.cn/models/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/master/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+    },
     {
       "name": "MTEED.pth",
       "size": "248 KB",

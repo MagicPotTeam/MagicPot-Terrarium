@@ -9,17 +9,17 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.324.inputs.unet_name",
+      "slot": "$.45.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.319.inputs.clip_name",
+      "slot": "$.40.inputs.clip_name",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.323.inputs.vae_name",
+      "slot": "$.44.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
@@ -31,22 +31,10 @@
     {
       "label": "LoRA",
       "component": "InputLoRAChain",
-      "outputModelSlots": [
-        "$.320.inputs.model"
-      ],
-      "outputClipSlots": [
-        "$.306.inputs.clip",
-        "$.309.inputs.clip",
-        "$.310.inputs.clip"
-      ],
-      "inputModel": [
-        "324",
-        0
-      ],
-      "inputClip": [
-        "319",
-        0
-      ]
+      "outputModelSlots": ["$.46.inputs.model"],
+      "outputClipSlots": ["$.30.inputs.clip", "$.31.inputs.clip"],
+      "inputModel": ["41", 0],
+      "inputClip": ["40", 0]
     },
     {
       "label": "生成参数",
@@ -58,24 +46,24 @@
       "label": "图片尺寸",
       "component": "InputImageSize",
       "seperateSlots": true,
-      "widthSlot": "$.311.inputs.value",
-      "heightSlot": "$.312.inputs.value"
+      "widthSlot": "$.32.inputs.value",
+      "heightSlot": "$.33.inputs.value"
     },
     {
       "label": "正面提示词",
-      "slot": "$.327.inputs.value",
+      "slot": "$.48.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.321.inputs.value",
+      "slot": "$.42.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.314.inputs.value",
+      "slot": "$.35.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -86,9 +74,7 @@
     "https://github.com/pythongosssss/ComfyUI-Custom-Scripts",
     "https://github.com/Fannovel16/comfyui_controlnet_aux"
   ],
-  "outputNodeIds": [
-    "328"
-  ],
+  "outputNodeIds": ["49"],
   "requiredModels": [
     {
       "name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",

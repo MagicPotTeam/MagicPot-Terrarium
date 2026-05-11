@@ -190,6 +190,14 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
       return nodeId === id
     })
     if (allAllowedFieldWithNodeId.length === 0) {
+      if (nodeId === defaultNodeId && defaultField && defaultField in node.inputs) {
+        return [
+          {
+            label: defaultField,
+            value: defaultField
+          }
+        ]
+      }
       notifyWarning(`未能从 ComfyUI 获得节点 ${nodeId} 的输入字段信息`)
       return []
     }
@@ -200,7 +208,7 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
       }
     })
     return fieldOptions
-  }, [nodeId, workflow, allAllowedNodeIdAndField, mode, notifyWarning])
+  }, [nodeId, workflow, allAllowedNodeIdAndField, mode, notifyWarning, defaultNodeId, defaultField])
 
   const [field, setField] = useState<string>(() => {
     if (defaultField) {
