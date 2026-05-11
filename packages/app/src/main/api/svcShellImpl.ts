@@ -141,8 +141,9 @@ export class ShellSvcImpl implements ShellSvc {
     let downloadedBytes = 0
     const startTime = Date.now()
     let lastProgressAt = 0
+    let canEmitProgress = Boolean(onProgress)
     const emitProgress = (force = false) => {
-      if (!onProgress) {
+      if (!onProgress || !canEmitProgress) {
         return
       }
 
@@ -153,7 +154,7 @@ export class ShellSvcImpl implements ShellSvc {
 
       lastProgressAt = now
       const elapsedSeconds = Math.max((now - startTime) / 1000, 0.001)
-      onProgress({
+      const event: Extract<DownloadFileProgressEvent, { type: 'progress' }> = {
         type: 'progress',
         downloadedBytes,
         ...(totalBytes ? { totalBytes } : {}),
@@ -161,7 +162,13 @@ export class ShellSvcImpl implements ShellSvc {
           ? { percent: Math.min(100, Math.round((downloadedBytes / totalBytes) * 100)) }
           : {}),
         bytesPerSecond: Math.round(downloadedBytes / elapsedSeconds)
-      })
+      }
+      try {
+        onProgress(event)
+      } catch (error) {
+        canEmitProgress = false
+        console.warn('[ShellSvc] Download progress listener is unavailable:', error)
+      }
     }
 
     const tempPath = `${fullPath}.download-${process.pid}-${Date.now()}`
@@ -199,7 +206,11 @@ export class ShellSvcImpl implements ShellSvc {
     resp: ServerStreaming<DownloadFileProgressEvent>
   ): Promise<void> => {
     const result = await this.downloadFileInternal(req, (event) => resp.onData(event))
-    resp.onData({ type: 'complete', result })
+    try {
+      resp.onData({ type: 'complete', result })
+    } catch (error) {
+      console.warn('[ShellSvc] Download completion listener is unavailable:', error)
+    }
   }
   installGitRepository = async (
     req: InstallGitRepositoryReq

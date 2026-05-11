@@ -22,7 +22,8 @@ import {
   setActiveTab,
   resolveTabRoutePath
 } from '../store/slices/layoutSlice'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
+import { isProjectCanvasRoutePath } from '../pages/ProjectCanvasPage/projectCanvasRouting'
 const ACTIVITY_BAR_WIDTH = 48
 const ACTIVITY_BAR_ICON_SIZE = 24
 const DARK_INACTIVE_ICON_COLOR = '#808694'
@@ -33,6 +34,7 @@ const ActivityBar: React.FC = () => {
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
+  const location = useLocation()
   const activeSidePanel = useAppSelector((state) => state.layout.activeSidePanel)
   const activeTabId = useAppSelector((state) => state.layout.activeTabId)
   const openTabs = useAppSelector((state) => state.layout.openTabs)
@@ -40,8 +42,10 @@ const ActivityBar: React.FC = () => {
   const rightPanelVisible = useAppSelector((state) => state.layout.rightPanelVisible)
   const lastActiveProjectId = useAppSelector((state) => state.layout.lastActiveProjectId)
   const isProjectTab = activeTabId?.startsWith('tab-project-')
-  const effectSidePanel = isProjectTab ? activeSidePanel : null
-  const effectRightPanelVisible = isProjectTab ? rightPanelVisible : false
+  const isProjectCanvasRoute = isProjectCanvasRoutePath(location.pathname)
+  const isProjectCanvasActive = Boolean(isProjectTab && isProjectCanvasRoute)
+  const effectSidePanel = isProjectCanvasActive ? activeSidePanel : null
+  const effectRightPanelVisible = isProjectCanvasActive ? rightPanelVisible : false
   const projectEntryActive = activeTabId === 'tab-home' || Boolean(isProjectTab)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const iconSx = (active: boolean) => (theme: any) => ({
@@ -79,28 +83,33 @@ const ActivityBar: React.FC = () => {
   }
 
   const switchBackToLastProject = () => {
-    if (!activeTabId?.startsWith('tab-project-')) {
-      if (lastActiveProjectId) {
-        const targetTab = openTabs.find((tab) => tab.id === lastActiveProjectId)
-        if (targetTab) {
-          dispatch(setActiveTab(targetTab.id))
-          navigate(resolveTabRoutePath(targetTab))
-          return true
-        }
+    if (activeTabId?.startsWith('tab-project-')) {
+      if (!isProjectCanvasRoute) {
+        const activeProjectTab = openTabs.find((tab) => tab.id === activeTabId)
+        navigate(resolveTabRoutePath(activeProjectTab ?? { id: activeTabId }))
       }
 
-      const projectTabs = openTabs.filter((tab) => tab.id.startsWith('tab-project-'))
-      if (projectTabs.length > 0) {
-        const fallback = projectTabs[projectTabs.length - 1]
-        dispatch(setActiveTab(fallback.id))
-        navigate(resolveTabRoutePath(fallback))
-        return true
-      }
-
-      return false
+      return true
     }
 
-    return true
+    if (lastActiveProjectId) {
+      const targetTab = openTabs.find((tab) => tab.id === lastActiveProjectId)
+      if (targetTab) {
+        dispatch(setActiveTab(targetTab.id))
+        navigate(resolveTabRoutePath(targetTab))
+        return true
+      }
+    }
+
+    const projectTabs = openTabs.filter((tab) => tab.id.startsWith('tab-project-'))
+    if (projectTabs.length > 0) {
+      const fallback = projectTabs[projectTabs.length - 1]
+      dispatch(setActiveTab(fallback.id))
+      navigate(resolveTabRoutePath(fallback))
+      return true
+    }
+
+    return false
   }
 
   return (
@@ -151,7 +160,7 @@ const ActivityBar: React.FC = () => {
               <Box
                 data-testid="activity-bar-quickapp"
                 onClick={() => {
-                  if (isProjectTab) {
+                  if (isProjectCanvasActive) {
                     if (activeSidePanel === 'quickapp') {
                       dispatch(closeSidePanel())
                     } else {
@@ -172,7 +181,7 @@ const ActivityBar: React.FC = () => {
               <Box
                 data-testid="activity-bar-agent"
                 onClick={() => {
-                  if (isProjectTab) {
+                  if (isProjectCanvasActive) {
                     if (rightPanelVisible) {
                       dispatch(closeRightPanel())
                     } else {

@@ -1,7 +1,10 @@
 {
   "16": {
     "inputs": {
-      "image": ["35", 0]
+      "image": [
+        "33",
+        0
+      ]
     },
     "class_type": "GetImageSize",
     "_meta": {
@@ -12,9 +15,18 @@
     "inputs": {
       "max_shift": 1.15,
       "base_shift": 0.5000000000000001,
-      "width": ["16", 0],
-      "height": ["16", 1],
-      "model": ["34", 0]
+      "width": [
+        "16",
+        0
+      ],
+      "height": [
+        "16",
+        1
+      ],
+      "model": [
+        "48",
+        0
+      ]
     },
     "class_type": "ModelSamplingFlux",
     "_meta": {
@@ -23,16 +35,34 @@
   },
   "22": {
     "inputs": {
-      "seed": ["43", 0],
+      "seed": [
+        "40",
+        0
+      ],
       "steps": 36,
       "cfg": 1,
       "sampler_name": "dpmpp_2m",
       "scheduler": "sgm_uniform",
-      "denoise": ["44", 0],
-      "model": ["21", 0],
-      "positive": ["37", 0],
-      "negative": ["36", 0],
-      "latent_image": ["50", 0]
+      "denoise": [
+        "41",
+        0
+      ],
+      "model": [
+        "21",
+        0
+      ],
+      "positive": [
+        "35",
+        0
+      ],
+      "negative": [
+        "34",
+        0
+      ],
+      "latent_image": [
+        "47",
+        0
+      ]
     },
     "class_type": "KSampler",
     "_meta": {
@@ -41,8 +71,14 @@
   },
   "23": {
     "inputs": {
-      "samples": ["22", 0],
-      "vae": ["29", 0]
+      "samples": [
+        "22",
+        0
+      ],
+      "vae": [
+        "28",
+        0
+      ]
     },
     "class_type": "VAEDecode",
     "_meta": {
@@ -63,16 +99,6 @@
   },
   "28": {
     "inputs": {
-      "unet_name": "flux1-dev-fp8-e4m3fn.safetensors",
-      "weight_dtype": "default"
-    },
-    "class_type": "UNETLoader",
-    "_meta": {
-      "title": "UNet加载器"
-    }
-  },
-  "29": {
-    "inputs": {
       "vae_name": "ae.safetensors"
     },
     "class_type": "VAELoader",
@@ -80,20 +106,32 @@
       "title": "加载VAE"
     }
   },
-  "30": {
+  "29": {
     "inputs": {
-      "samples": ["42", 0],
-      "vae": ["29", 0]
+      "samples": [
+        "39",
+        0
+      ],
+      "vae": [
+        "28",
+        0
+      ]
     },
     "class_type": "VAEDecode",
     "_meta": {
       "title": "VAE解码"
     }
   },
-  "31": {
+  "30": {
     "inputs": {
-      "width": ["40", 0],
-      "height": ["41", 0],
+      "width": [
+        "37",
+        0
+      ],
+      "height": [
+        "38",
+        0
+      ],
       "batch_size": 1
     },
     "class_type": "EmptyLatentImage",
@@ -101,60 +139,62 @@
       "title": "空Latent图像"
     }
   },
-  "32": {
+  "31": {
     "inputs": {
       "text": "",
-      "clip": ["26", 0]
+      "clip": [
+        "26",
+        0
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
       "title": "CLIP文本编码"
     }
   },
-  "34": {
-    "inputs": {
-      "lora_name": "3cf0dadc9f136cce01fd5b1a4fe362fd.safetensors",
-      "strength_model": 0.8000000000000002,
-      "strength_clip": 0.8000000000000002,
-      "model": ["28", 0],
-      "clip": ["26", 0]
-    },
-    "class_type": "LoraLoader",
-    "_meta": {
-      "title": "加载LoRA"
-    }
-  },
-  "35": {
+  "33": {
     "inputs": {
       "index": 0,
-      "value0": ["30", 0]
+      "value0": [
+        "29",
+        0
+      ]
     },
     "class_type": "easy anythingIndexSwitch",
     "_meta": {
       "title": "编号切换"
     }
   },
-  "36": {
+  "34": {
     "inputs": {
       "text": "",
-      "clip": ["34", 1]
+      "clip": [
+        "48",
+        1
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
       "title": "CLIP文本编码"
     }
   },
-  "37": {
+  "35": {
     "inputs": {
-      "text": ["38", 0],
-      "clip": ["34", 1]
+      "text": [
+        "36",
+        0
+      ],
+      "clip": [
+        "48",
+        1
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
       "title": "CLIP文本编码"
     }
   },
-  "38": {
+  "36": {
     "inputs": {
       "value": ""
     },
@@ -163,52 +203,58 @@
       "title": "字符串（多行）"
     }
   },
+  "37": {
+    "inputs": {
+      "value": 1024
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "整数"
+    }
+  },
+  "38": {
+    "inputs": {
+      "value": 1024
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "整数"
+    }
+  },
   "39": {
     "inputs": {
-      "model_name": "realesrganX4plusAnime_v1.pt"
-    },
-    "class_type": "UpscaleModelLoader",
-    "_meta": {
-      "title": "加载放大模型"
-    }
-  },
-  "40": {
-    "inputs": {
-      "value": 1024
-    },
-    "class_type": "PrimitiveInt",
-    "_meta": {
-      "title": "整数"
-    }
-  },
-  "41": {
-    "inputs": {
-      "value": 1024
-    },
-    "class_type": "PrimitiveInt",
-    "_meta": {
-      "title": "整数"
-    }
-  },
-  "42": {
-    "inputs": {
-      "seed": ["43", 0],
+      "seed": [
+        "40",
+        0
+      ],
       "steps": 1,
       "cfg": 1,
       "sampler_name": "euler",
       "scheduler": "normal",
       "denoise": 1,
-      "model": ["28", 0],
-      "positive": ["32", 0],
-      "negative": ["32", 0],
-      "latent_image": ["31", 0]
+      "model": [
+        "49",
+        0
+      ],
+      "positive": [
+        "31",
+        0
+      ],
+      "negative": [
+        "31",
+        0
+      ],
+      "latent_image": [
+        "30",
+        0
+      ]
     },
     "class_type": "KSampler",
     "_meta": {
       "title": "K采样器"
     }
   },
-  "43": {
+  "40": {
     "inputs": {
       "value": 0
     },
@@ -217,7 +263,7 @@
       "title": "整数"
     }
   },
-  "44": {
+  "41": {
     "inputs": {
       "value": 1
     },
@@ -226,18 +272,24 @@
       "title": "浮点数"
     }
   },
-  "45": {
+  "42": {
     "inputs": {
       "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))",
-      "a": ["44", 0],
-      "b": ["46", 0]
+      "a": [
+        "41",
+        0
+      ],
+      "b": [
+        "43",
+        0
+      ]
     },
     "class_type": "MathExpression|pysssss",
     "_meta": {
       "title": "Math Expression 🐍"
     }
   },
-  "46": {
+  "43": {
     "inputs": {
       "value": 0.55
     },
@@ -246,33 +298,74 @@
       "title": "浮点数"
     }
   },
-  "48": {
+  "45": {
     "inputs": {
       "filename_prefix": "ComfyUI",
-      "images": ["23", 0]
+      "images": [
+        "23",
+        0
+      ]
     },
     "class_type": "SaveImage",
     "_meta": {
       "title": "保存图像"
     }
   },
-  "49": {
+  "46": {
     "inputs": {
-      "images": ["35", 0]
+      "images": [
+        "33",
+        0
+      ]
     },
     "class_type": "PreviewImage",
     "_meta": {
       "title": "预览图像"
     }
   },
-  "50": {
+  "47": {
     "inputs": {
-      "pixels": ["35", 0],
-      "vae": ["29", 0]
+      "pixels": [
+        "33",
+        0
+      ],
+      "vae": [
+        "28",
+        0
+      ]
     },
     "class_type": "VAEEncode",
     "_meta": {
       "title": "VAE编码"
+    }
+  },
+  "48": {
+    "inputs": {
+      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "strength_model": 0.8000000000000002,
+      "strength_clip": 0.8000000000000002,
+      "model": [
+        "49",
+        0
+      ],
+      "clip": [
+        "26",
+        0
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA"
+    }
+  },
+  "49": {
+    "inputs": {
+      "unet_name": "flux1-dev-fp8-e4m3fn.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
     }
   }
 }

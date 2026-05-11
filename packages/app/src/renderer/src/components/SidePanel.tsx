@@ -595,10 +595,8 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
   const dispatch = useAppDispatch()
   const openTabs = useAppSelector((s) => s.layout.openTabs)
   const [currentQAppKey, setCurrentQAppKey] = useState<string>(() => readCurrentQAppKey(projectId))
-  const [runner, setRunner] = useState<{ run: () => Promise<void>; isRunning: boolean }>({
-    run: async () => {},
-    isRunning: false
-  })
+  const runnerRef = useRef<() => Promise<void>>(async () => {})
+  const [runnerIsRunning, setRunnerIsRunning] = useState(false)
   const [hy3dParams, setHy3dParams] = useState<import('../pages/ChatPage/hy3d/types').Hy3dParams>(
     () => getHy3dParams()
   )
@@ -635,10 +633,8 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
   )
 
   const handleRunReady = useCallback((runFn: () => Promise<void>, isRunning: boolean) => {
-    setRunner((prev) => {
-      if (prev.run === runFn && prev.isRunning === isRunning) return prev
-      return { run: runFn, isRunning }
-    })
+    runnerRef.current = runFn
+    setRunnerIsRunning((prev) => (prev === isRunning ? prev : isRunning))
   }, [])
 
   useEffect(() => {
@@ -971,7 +967,7 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
           return
         }
 
-        runner.run()
+        runnerRef.current()
         return
       }
 
@@ -990,9 +986,9 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
         return
       }
 
-      runner.run()
+      runnerRef.current()
     },
-    [currentQAppKey, handleHy3dGenerate, runner]
+    [currentQAppKey, handleHy3dGenerate]
   )
 
   const showHunyuanHint =
@@ -1032,7 +1028,7 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
             setCurrentQAppKey={setCurrentQAppKey}
             activeCategory={activeCategory}
             onRunClick={handleRunClick}
-            isRunning={runner.isRunning}
+            isRunning={runnerIsRunning}
             renderExpandedContent={renderExpandedContent}
           />
         </Suspense>

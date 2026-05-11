@@ -1,10 +1,12 @@
 import React from 'react'
-import { act, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import BottomPanel from './BottomPanel'
 
 const dispatchMock = vi.fn()
+const clearOutputMock = vi.fn()
+let bottomPanelActiveTab = 'elements'
 
 vi.mock('../store', () => ({
   useAppDispatch: () => dispatchMock,
@@ -12,7 +14,7 @@ vi.mock('../store', () => ({
     selector({
       layout: {
         bottomPanelVisible: true,
-        bottomPanelActiveTab: 'elements',
+        bottomPanelActiveTab,
         bottomPanelMaximized: false
       }
     })
@@ -43,10 +45,12 @@ vi.mock('@renderer/store/hooks/comfyProcess', () => ({
     state: {
       isRunning: false,
       pid: 0,
-      output: []
+      output: ['[comfyui] previous run line']
     },
-    handleStartServer: vi.fn(),
-    handleStopServer: vi.fn()
+    setPid: vi.fn(),
+    setIsRunning: vi.fn(),
+    addOutput: vi.fn(),
+    clearOutput: clearOutputMock
   })
 }))
 
@@ -62,6 +66,8 @@ function expectRowValue(label: string, value: string): void {
 describe('BottomPanel element info', () => {
   beforeEach(() => {
     dispatchMock.mockClear()
+    clearOutputMock.mockClear()
+    bottomPanelActiveTab = 'elements'
   })
 
   it('renders richer image, video, and 3D inspection fields with fallback values', async () => {
@@ -286,5 +292,15 @@ describe('BottomPanel element info', () => {
     expect(screen.getByTestId('element-panel-render-limit').textContent).toContain(
       '\u5df2\u9009 75 \u4e2a\u5143\u7d20'
     )
+  })
+
+  it('allows clearing the dedicated ComfyUI log panel', () => {
+    bottomPanelActiveTab = 'comfyui'
+
+    render(<BottomPanel />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'terminal.clear' }))
+
+    expect(clearOutputMock).toHaveBeenCalledTimes(1)
   })
 })

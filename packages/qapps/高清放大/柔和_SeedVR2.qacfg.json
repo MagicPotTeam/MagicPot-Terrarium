@@ -3,29 +3,33 @@
   "inputs": [
     {
       "label": "加载图像",
-      "slot": "$.2.inputs.image",
+      "slot": "$.332.inputs.image",
       "component": "InputComfyImage"
     }
   ],
   "autoInputs": [],
-  "customNodeUrls": ["https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler"],
-  "outputNodeIds": ["8"],
+  "customNodeUrls": [
+    "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler"
+  ],
+  "outputNodeIds": [
+    "335"
+  ],
   "batchProcess": {
     "enabled": true,
-    "imageInputSlot": "$.2.inputs.image"
+    "imageInputSlot": "$.332.inputs.image"
   },
   "requiredModels": [
-    {
-      "name": "seedvr2_ema_7b_sharp_fp16.safetensors",
-      "size": "15.4 GB",
-      "dir": "models/SEEDVR2",
-      "url": "https://modelscope.cn/models/numz/SeedVR2_comfyUI/resolve/master/seedvr2_ema_7b_sharp_fp16.safetensors"
-    },
     {
       "name": "ema_vae_fp16.safetensors",
       "size": "0.5 GB",
       "dir": "models/SEEDVR2",
       "url": "https://modelscope.cn/models/numz/SeedVR2_comfyUI/resolve/master/ema_vae_fp16.safetensors"
+    },
+    {
+      "name": "seedvr2_ema_7b_fp16.safetensors",
+      "size": "15.4 GB",
+      "dir": "models/SEEDVR2",
+      "url": "https://modelscope.cn/models/numz/SeedVR2_comfyUI/resolve/master/seedvr2_ema_7b_fp16.safetensors"
     }
   ]
 }

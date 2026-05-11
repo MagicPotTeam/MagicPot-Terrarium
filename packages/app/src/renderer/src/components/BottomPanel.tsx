@@ -923,7 +923,7 @@ const ComfyUIPanel: React.FC = () => {
   const { t } = useTranslation()
   const theme = useTheme()
   const consolePalette = getConsolePalette(theme.palette.mode as 'light' | 'dark')
-  const { state, setPid, setIsRunning, addOutput } = useComfyProcess()
+  const { state, setPid, setIsRunning, addOutput, clearOutput } = useComfyProcess()
   const shouldAutoScroll = useRef(true)
   const outputRef = useRef<HTMLPreElement>(null)
 
@@ -1045,6 +1045,15 @@ const ComfyUIPanel: React.FC = () => {
               <StopIcon sx={{ fontSize: 16 }} />
             </IconButton>
           </span>
+        </Tooltip>
+        <Tooltip title={t('terminal.clear')}>
+          <IconButton
+            size="small"
+            onClick={clearOutput}
+            sx={{ p: 0.3, color: consolePalette.toolbarIcon, '&:hover': { color: '#f87171' } }}
+          >
+            <ClearIcon sx={{ fontSize: 14 }} />
+          </IconButton>
         </Tooltip>
       </Box>
 

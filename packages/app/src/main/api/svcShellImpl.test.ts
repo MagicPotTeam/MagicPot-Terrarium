@@ -157,6 +157,52 @@ describe('ShellSvcImpl', () => {
     await fs.promises.rm(tempDir, { recursive: true, force: true })
   })
 
+  it('continues downloading when the progress listener disconnects', async () => {
+    const tempDir = await makeTempDir('magicpot-shell-download-progress-disconnect')
+    const bytes = new Uint8Array([1, 2, 3, 4, 5, 6])
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(bytes, {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-length': String(bytes.byteLength) }
+          })
+      )
+    )
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const events: DownloadFileProgressEvent[] = []
+    const svc = new ShellSvcImpl()
+    await svc.downloadFileWithProgress(
+      {
+        url: 'https://example.com/model.bin',
+        outputDir: tempDir,
+        filename: 'model.bin'
+      },
+      {
+        onData: (event) => {
+          if (event.type === 'progress') {
+            throw new Error('port closed')
+          }
+          events.push(event)
+        }
+      }
+    )
+
+    const completeEvent = events.find((event) => event.type === 'complete')
+    expect(completeEvent).toMatchObject({
+      type: 'complete',
+      result: {
+        alreadyExists: false
+      }
+    })
+    expect(fs.readFileSync(path.join(tempDir, 'model.bin'))).toEqual(Buffer.from(bytes))
+
+    await fs.promises.rm(tempDir, { recursive: true, force: true })
+  })
+
   it('does not clone custom nodes over an existing non-empty directory', async () => {
     const tempDir = await makeTempDir('magicpot-shell-git')
     const targetDir = path.join(tempDir, 'ComfyUI-Test-Node')

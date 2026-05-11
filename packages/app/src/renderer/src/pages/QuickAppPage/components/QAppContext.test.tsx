@@ -42,6 +42,21 @@ const InputStateProbe = ({ formKey, defaultValue }: { formKey: string; defaultVa
   )
 }
 
+type SizeValue = {
+  width: number
+  height: number
+}
+
+const ObjectInputStateProbe = ({ width, height }: SizeValue) => {
+  const [value] = useQAppInputState<SizeValue>('size', { width, height })
+
+  return createElement(
+    'div',
+    { 'data-testid': 'object-probe-value' },
+    `${value.width}x${value.height}`
+  )
+}
+
 const SubmitIdentityProbe = ({
   clientId,
   sessionKey
@@ -200,6 +215,35 @@ describe('useQAppInputState', () => {
     )
 
     expect(screen.getByTestId('probe-value').textContent).toBe('manual override')
+  })
+
+  it('does not persist equivalent object defaults on rerender', () => {
+    const { rerender } = render(
+      <QAppContextProvider qAppKey="demo" skipServerFetch={true}>
+        <ObjectInputStateProbe width={512} height={512} />
+      </QAppContextProvider>
+    )
+
+    expect(screen.getByTestId('object-probe-value').textContent).toBe('512x512')
+
+    rerender(
+      <QAppContextProvider qAppKey="demo" skipServerFetch={true}>
+        <ObjectInputStateProbe width={512} height={512} />
+      </QAppContextProvider>
+    )
+    rerender(
+      <QAppContextProvider qAppKey="demo" skipServerFetch={true}>
+        <ObjectInputStateProbe width={512} height={512} />
+      </QAppContextProvider>
+    )
+
+    expect(getGlobalQAppCache()).toEqual({
+      demo: {
+        cfg: null,
+        workflow: null,
+        formState: {}
+      }
+    })
   })
 })
 

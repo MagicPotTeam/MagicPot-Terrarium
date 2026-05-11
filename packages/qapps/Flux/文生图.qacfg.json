@@ -2,10 +2,10 @@
   "icon": "",
   "requiredModels": [
     {
-      "name": "flux1-dev-fp8-e4m3fn.safetensors",
-      "size": "11 GB",
-      "dir": "models/unet",
-      "url": "https://modelscope.cn/models/AI-ModelScope/flux-fp8/resolve/master/flux1-dev-fp8-e4m3fn.safetensors"
+      "name": "clip_l.safetensors",
+      "size": "0.2 GB",
+      "dir": "models/clip",
+      "url": "https://modelscope.cn/models/comfyanonymous/flux_text_encoders/resolve/master/clip_l.safetensors"
     },
     {
       "name": "t5xxl_fp8_e4m3fn.safetensors",
@@ -14,16 +14,22 @@
       "url": "https://modelscope.cn/models/comfyanonymous/flux_text_encoders/resolve/master/t5xxl_fp8_e4m3fn.safetensors"
     },
     {
-      "name": "clip_l.safetensors",
-      "size": "0.2 GB",
-      "dir": "models/clip",
-      "url": "https://modelscope.cn/models/comfyanonymous/flux_text_encoders/resolve/master/clip_l.safetensors"
-    },
-    {
       "name": "ae.safetensors",
       "size": "0.3 GB",
       "dir": "models/vae",
       "url": "https://modelscope.cn/models/black-forest-labs/FLUX.1-dev/resolve/master/ae.safetensors"
+    },
+    {
+      "name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "size": "1.5 GB",
+      "dir": "models/loras",
+      "url": "https://modelscope.cn/models/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/master/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+    },
+    {
+      "name": "flux1-dev-fp8-e4m3fn.safetensors",
+      "size": "11 GB",
+      "dir": "models/unet",
+      "url": "https://modelscope.cn/models/AI-ModelScope/flux-fp8/resolve/master/flux1-dev-fp8-e4m3fn.safetensors"
     }
   ],
   "inputs": [
@@ -35,7 +41,7 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.28.inputs.unet_name",
+      "slot": "$.49.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
@@ -50,7 +56,7 @@
     },
     {
       "label": "加载VAE",
-      "slot": "$.29.inputs.vae_name",
+      "slot": "$.28.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
@@ -63,26 +69,23 @@
       "label": "图片尺寸",
       "component": "InputImageSize",
       "seperateSlots": true,
-      "widthSlot": "$.40.inputs.value",
-      "heightSlot": "$.41.inputs.value"
+      "widthSlot": "$.37.inputs.value",
+      "heightSlot": "$.38.inputs.value"
     },
     {
       "label": "提示词",
-      "slot": "$.38.inputs.value",
+      "slot": "$.36.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "加载LoRA",
-      "component": "InputLoRAChain",
-      "outputModelSlots": ["$.21.inputs.model"],
-      "outputClipSlots": ["$.36.inputs.clip", "$.37.inputs.clip"],
-      "inputModel": ["28", 0],
-      "inputClip": ["26", 0]
+      "slot": "$.48.inputs.lora_name",
+      "component": "InputComfySelect"
     },
     {
       "label": "随机种",
-      "slot": "$.43.inputs.value",
+      "slot": "$.40.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -93,5 +96,7 @@
     "https://github.com/pythongosssss/ComfyUI-Custom-Scripts",
     "https://github.com/Fannovel16/comfyui_controlnet_aux"
   ],
-  "outputNodeIds": ["48"]
+  "outputNodeIds": [
+    "45"
+  ]
 }

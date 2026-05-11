@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ActivityBar from './ActivityBar'
 import { theme } from '@renderer/theme'
 import layoutSlice from '@renderer/store/slices/layoutSlice'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { PROJECT_CANVAS_ROUTE_PATH } from '../pages/ProjectCanvasPage/projectCanvasRouting'
 
 const navigateMock = vi.fn()
@@ -33,6 +33,7 @@ vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
   return {
     ...actual,
+    useLocation: vi.fn(),
     useNavigate: vi.fn()
   }
 })
@@ -66,6 +67,13 @@ describe('ActivityBar', () => {
   beforeEach(() => {
     navigateMock.mockReset()
     vi.mocked(useNavigate).mockReturnValue(navigateMock)
+    vi.mocked(useLocation).mockReturnValue({
+      pathname: PROJECT_CANVAS_ROUTE_PATH,
+      search: '?id=tab-project-1',
+      hash: '',
+      state: null,
+      key: 'canvas'
+    })
   })
 
   it('does not render the left-bottom tagging toolkit entry', () => {
@@ -175,6 +183,67 @@ describe('ActivityBar', () => {
   it('keeps quick app visible when the agent entry is clicked from another tab', () => {
     const store = createMockStore({
       activeTabId: 'tab-design',
+      activeSidePanel: 'quickapp',
+      rightPanelVisible: false
+    })
+
+    render(
+      <Provider store={store}>
+        <ThemeProvider theme={theme}>
+          <ActivityBar />
+        </ThemeProvider>
+      </Provider>
+    )
+
+    fireEvent.click(screen.getByTestId('activity-bar-agent'))
+
+    expect(store.getState().layout.activeTabId).toBe('tab-project-1')
+    expect(store.getState().layout.activeSidePanel).toBe('quickapp')
+    expect(store.getState().layout.rightPanelVisible).toBe(true)
+    expect(navigateMock).toHaveBeenCalledWith(`${PROJECT_CANVAS_ROUTE_PATH}?id=tab-project-1`)
+  })
+
+  it('switches back to the canvas when quick app is clicked from another route on the active project tab', () => {
+    vi.mocked(useLocation).mockReturnValue({
+      pathname: '/model',
+      search: '',
+      hash: '',
+      state: null,
+      key: 'model'
+    })
+    const store = createMockStore({
+      activeTabId: 'tab-project-1',
+      activeSidePanel: 'quickapp',
+      rightPanelVisible: true
+    })
+
+    render(
+      <Provider store={store}>
+        <ThemeProvider theme={theme}>
+          <ActivityBar />
+        </ThemeProvider>
+      </Provider>
+    )
+
+    fireEvent.click(screen.getByTestId('activity-bar-quickapp'))
+
+    expect(store.getState().layout.activeTabId).toBe('tab-project-1')
+    expect(store.getState().layout.activeSidePanel).toBe('quickapp')
+    expect(store.getState().layout.projectEntrySidePanelIntent).toBe('quickapp')
+    expect(store.getState().layout.rightPanelVisible).toBe(true)
+    expect(navigateMock).toHaveBeenCalledWith(`${PROJECT_CANVAS_ROUTE_PATH}?id=tab-project-1`)
+  })
+
+  it('switches back to the canvas when agent is clicked from another route on the active project tab', () => {
+    vi.mocked(useLocation).mockReturnValue({
+      pathname: '/model',
+      search: '',
+      hash: '',
+      state: null,
+      key: 'model'
+    })
+    const store = createMockStore({
+      activeTabId: 'tab-project-1',
       activeSidePanel: 'quickapp',
       rightPanelVisible: false
     })

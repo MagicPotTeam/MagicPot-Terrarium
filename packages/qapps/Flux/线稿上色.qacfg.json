@@ -9,32 +9,32 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.28.inputs.unet_name",
+      "slot": "$.90.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.27.inputs.clip_name1",
+      "slot": "$.74.inputs.clip_name1",
       "component": "InputComfySelect"
     },
     {
       "label": "T5XXL加载器",
-      "slot": "$.27.inputs.clip_name2",
+      "slot": "$.74.inputs.clip_name2",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.29.inputs.vae_name",
+      "slot": "$.75.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Anyline-Controlnet-Flux",
-      "slot": "$.26.inputs.control_net_name",
+      "slot": "$.73.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Depth-Controlnet-Flux",
-      "slot": "$.10.inputs.control_net_name",
+      "slot": "$.58.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
@@ -45,26 +45,23 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.41.inputs.image",
+      "slot": "$.91.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "提示词",
-      "slot": "$.38.inputs.value",
+      "slot": "$.83.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "加载LoRA",
-      "component": "InputLoRAChain",
-      "outputModelSlots": ["$.22.inputs.model"],
-      "outputClipSlots": ["$.17.inputs.clip", "$.39.inputs.clip"],
-      "inputModel": ["28", 0],
-      "inputClip": ["27", 0]
+      "slot": "$.92.inputs.lora_name",
+      "component": "InputComfySelect"
     },
     {
       "label": "随机种",
-      "slot": "$.42.inputs.value",
+      "slot": "$.85.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -75,38 +72,10 @@
     "https://github.com/yolain/ComfyUI-Easy-Use",
     "https://github.com/kijai/ComfyUI-KJNodes"
   ],
-  "outputNodeIds": ["47"],
+  "outputNodeIds": [
+    "86"
+  ],
   "requiredModels": [
-    {
-      "name": "flux1-dev-fp8-e4m3fn.safetensors",
-      "size": "11 GB",
-      "dir": "models/unet",
-      "url": "https://modelscope.cn/models/AI-ModelScope/flux-fp8/resolve/master/flux1-dev-fp8-e4m3fn.safetensors"
-    },
-    {
-      "name": "t5xxl_fp8_e4m3fn.safetensors",
-      "size": "4.6 GB",
-      "dir": "models/clip",
-      "url": "https://modelscope.cn/models/comfyanonymous/flux_text_encoders/resolve/master/t5xxl_fp8_e4m3fn.safetensors"
-    },
-    {
-      "name": "clip_l.safetensors",
-      "size": "0.2 GB",
-      "dir": "models/clip",
-      "url": "https://modelscope.cn/models/comfyanonymous/flux_text_encoders/resolve/master/clip_l.safetensors"
-    },
-    {
-      "name": "ae.safetensors",
-      "size": "0.3 GB",
-      "dir": "models/vae",
-      "url": "https://modelscope.cn/models/black-forest-labs/FLUX.1-dev/resolve/master/ae.safetensors"
-    },
-    {
-      "name": "FLUX.1-dev-ControlNet-Union-Pro-2.0.safetensors",
-      "size": "4 GB",
-      "dir": "models/controlnet",
-      "url": "https://modelscope.cn/models/LiblibAI/FLUX.1-dev-ControlNet-Union-Pro-2.0/resolve/master/diffusion_pytorch_model.safetensors"
-    },
     {
       "name": "MTEED.pth",
       "size": "248 KB",
@@ -118,6 +87,42 @@
       "size": "1.3 GB",
       "dir": "custom_nodes/comfyui_controlnet_aux/ckpts/depth-anything/Depth-Anything-V2-Large",
       "url": "https://modelscope.cn/models/depth-anything/Depth-Anything-V2-Large/resolve/master/depth_anything_v2_vitl.pth"
+    },
+    {
+      "name": "FLUX.1-dev-ControlNet-Union-Pro-2.0.safetensors",
+      "size": "4 GB",
+      "dir": "models/controlnet",
+      "url": "https://modelscope.cn/models/LiblibAI/FLUX.1-dev-ControlNet-Union-Pro-2.0/resolve/master/diffusion_pytorch_model.safetensors"
+    },
+    {
+      "name": "clip_l.safetensors",
+      "size": "0.2 GB",
+      "dir": "models/clip",
+      "url": "https://modelscope.cn/models/comfyanonymous/flux_text_encoders/resolve/master/clip_l.safetensors"
+    },
+    {
+      "name": "t5xxl_fp8_e4m3fn.safetensors",
+      "size": "4.6 GB",
+      "dir": "models/clip",
+      "url": "https://modelscope.cn/models/comfyanonymous/flux_text_encoders/resolve/master/t5xxl_fp8_e4m3fn.safetensors"
+    },
+    {
+      "name": "ae.safetensors",
+      "size": "0.3 GB",
+      "dir": "models/vae",
+      "url": "https://modelscope.cn/models/black-forest-labs/FLUX.1-dev/resolve/master/ae.safetensors"
+    },
+    {
+      "name": "flux1-dev-fp8-e4m3fn.safetensors",
+      "size": "11 GB",
+      "dir": "models/unet",
+      "url": "https://modelscope.cn/models/AI-ModelScope/flux-fp8/resolve/master/flux1-dev-fp8-e4m3fn.safetensors"
+    },
+    {
+      "name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "size": "1.5 GB",
+      "dir": "models/loras",
+      "url": "https://modelscope.cn/models/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/master/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
     }
   ]
 }

@@ -1,29 +1,5 @@
 {
-  "2": {
-    "inputs": {
-      "image": "example.png"
-    },
-    "class_type": "LoadImage",
-    "_meta": {
-      "title": "加载图像"
-    }
-  },
-  "3": {
-    "inputs": {
-      "model": "seedvr2_ema_7b_sharp_fp16.safetensors",
-      "device": "cuda:0",
-      "blocks_to_swap": 36,
-      "swap_io_components": false,
-      "offload_device": "cpu",
-      "cache_model": false,
-      "attention_mode": "sdpa"
-    },
-    "class_type": "SeedVR2LoadDiTModel",
-    "_meta": {
-      "title": "SeedVR2 (Down)Load DiT Model"
-    }
-  },
-  "4": {
+  "331": {
     "inputs": {
       "model": "ema_vae_fp16.safetensors",
       "device": "cuda:0",
@@ -42,7 +18,31 @@
       "title": "SeedVR2 (Down)Load VAE Model"
     }
   },
-  "6": {
+  "332": {
+    "inputs": {
+      "image": "1 (1).png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "333": {
+    "inputs": {
+      "model": "seedvr2_ema_7b_fp16.safetensors",
+      "device": "cuda:0",
+      "blocks_to_swap": 36,
+      "swap_io_components": false,
+      "offload_device": "cpu",
+      "cache_model": false,
+      "attention_mode": "sdpa"
+    },
+    "class_type": "SeedVR2LoadDiTModel",
+    "_meta": {
+      "title": "SeedVR2 (Down)Load DiT Model"
+    }
+  },
+  "334": {
     "inputs": {
       "seed": 42,
       "resolution": 4096,
@@ -56,29 +56,31 @@
       "latent_noise_scale": 0,
       "offload_device": "cpu",
       "enable_debug": false,
-      "image": ["7", 0],
-      "dit": ["3", 0],
-      "vae": ["4", 0]
+      "image": [
+        "332",
+        0
+      ],
+      "dit": [
+        "333",
+        0
+      ],
+      "vae": [
+        "331",
+        0
+      ]
     },
     "class_type": "SeedVR2VideoUpscaler",
     "_meta": {
-      "title": "SeedVR2 Video Upscaler (v2.5.20)"
+      "title": "SeedVR2 Video Upscaler (v2.5.24)"
     }
   },
-  "7": {
-    "inputs": {
-      "image": ["2", 0],
-      "alpha": ["2", 1]
-    },
-    "class_type": "JoinImageWithAlpha",
-    "_meta": {
-      "title": "合并图像Alpha"
-    }
-  },
-  "8": {
+  "335": {
     "inputs": {
       "filename_prefix": "ComfyUI",
-      "images": ["6", 0]
+      "images": [
+        "334",
+        0
+      ]
     },
     "class_type": "SaveImage",
     "_meta": {
