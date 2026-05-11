@@ -9,7 +9,7 @@ import { useMessage } from '@renderer/hooks/useMessage'
 import { api } from '@renderer/utils/windowUtils'
 import { DownloadFileProgressEvent, DownloadFileResp } from '@shared/api/svcShell'
 import { QAppRequiredModel } from '@shared/qApp/cfgTypes'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { checkRequiredModels, type MissingRequiredModel } from '../utils/qAppDependencyCheck'
 
@@ -18,6 +18,89 @@ type CalloutMissingModelsProps = {
 }
 
 type ModelDownloadProgress = Extract<DownloadFileProgressEvent, { type: 'progress' }>
+
+type ModelDownloadSnapshot = {
+  busyKeys: Set<string>
+  progressByKey: Record<string, ModelDownloadProgress>
+  settledVersion: number
+}
+
+const modelDownloadListeners = new Set<() => void>()
+const activeModelDownloads = new Map<string, Promise<DownloadFileResp>>()
+let modelDownloadProgressByKey: Record<string, ModelDownloadProgress> = {}
+let modelDownloadSettledVersion = 0
+
+const getModelKey = (item: MissingRequiredModel) =>
+  `${item.model.baseDir ?? 'comfyui'}:${item.model.dir}:${item.model.name}`
+
+const getModelDownloadSnapshot = (): ModelDownloadSnapshot => ({
+  busyKeys: new Set(activeModelDownloads.keys()),
+  progressByKey: { ...modelDownloadProgressByKey },
+  settledVersion: modelDownloadSettledVersion
+})
+
+const subscribeModelDownloads = (listener: () => void) => {
+  modelDownloadListeners.add(listener)
+  return () => {
+    modelDownloadListeners.delete(listener)
+  }
+}
+
+const emitModelDownloadChange = () => {
+  modelDownloadListeners.forEach((listener) => listener())
+}
+
+const startModelDownload = (
+  item: MissingRequiredModel
+): { promise: Promise<DownloadFileResp>; started: boolean } => {
+  const key = getModelKey(item)
+  const activeDownload = activeModelDownloads.get(key)
+  if (activeDownload) {
+    return { promise: activeDownload, started: false }
+  }
+
+  let result: DownloadFileResp | undefined
+  const promise = api()
+    .svcShell.downloadFileWithProgress(
+      {
+        url: item.model.url,
+        outputDir: item.dirPath,
+        filename: item.model.name
+      },
+      {
+        onData: (event) => {
+          if (event.type === 'progress') {
+            modelDownloadProgressByKey = { ...modelDownloadProgressByKey, [key]: event }
+            emitModelDownloadChange()
+          } else {
+            result = event.result
+          }
+        }
+      }
+    )
+    .then(() => {
+      if (!result) {
+        throw new Error('Download completed without a result')
+      }
+      return result
+    })
+
+  activeModelDownloads.set(key, promise)
+  emitModelDownloadChange()
+
+  void promise
+    .finally(() => {
+      const nextProgress = { ...modelDownloadProgressByKey }
+      delete nextProgress[key]
+      modelDownloadProgressByKey = nextProgress
+      activeModelDownloads.delete(key)
+      modelDownloadSettledVersion += 1
+      emitModelDownloadChange()
+    })
+    .catch(() => undefined)
+
+  return { promise, started: true }
+}
 
 const formatBytes = (bytes: number) => {
   if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -48,36 +131,58 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
   const { t } = useTranslation()
   const { configUtils } = useConfig()
   const { notifySuccess, notifyError } = useMessage()
+  const isMountedRef = useRef(false)
   const configUtilsRef = useRef(configUtils)
   configUtilsRef.current = configUtils
   const [missingModels, setMissingModels] = useState<MissingRequiredModel[]>([])
-  const busyModelKeysRef = useRef<Set<string>>(new Set())
-  const [busyModelKeys, setBusyModelKeys] = useState<Set<string>>(new Set())
-  const [downloadProgressByKey, setDownloadProgressByKey] = useState<
-    Record<string, ModelDownloadProgress>
-  >({})
+  const [downloadSnapshot, setDownloadSnapshot] = useState(getModelDownloadSnapshot)
 
   useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
+
+  const refreshMissingModels = useCallback(async () => {
     if (!requiredModels || requiredModels.length === 0) {
-      setMissingModels([])
+      if (isMountedRef.current) {
+        setMissingModels([])
+      }
       return
     }
 
-    const checkModels = async () => {
-      setMissingModels(await checkRequiredModels(requiredModels, configUtilsRef.current))
+    const nextMissingModels = await checkRequiredModels(requiredModels, configUtilsRef.current)
+    if (isMountedRef.current) {
+      setMissingModels(nextMissingModels)
     }
+  }, [requiredModels])
 
-    checkModels()
+  useEffect(() => {
+    return subscribeModelDownloads(() => {
+      setDownloadSnapshot(getModelDownloadSnapshot())
+    })
+  }, [])
 
-    const interval = setInterval(checkModels, 10_000)
-    const onFocus = () => checkModels()
+  useEffect(() => {
+    void refreshMissingModels()
+
+    const interval = setInterval(() => void refreshMissingModels(), 10_000)
+    const onFocus = () => void refreshMissingModels()
     window.addEventListener('focus', onFocus)
 
     return () => {
       clearInterval(interval)
       window.removeEventListener('focus', onFocus)
     }
-  }, [requiredModels])
+  }, [refreshMissingModels])
+
+  useEffect(() => {
+    if (downloadSnapshot.settledVersion === 0) {
+      return
+    }
+    void refreshMissingModels()
+  }, [downloadSnapshot.settledVersion, refreshMissingModels])
 
   if (missingModels.length === 0) {
     return null
@@ -91,44 +196,7 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
     }
   }
 
-  const getModelKey = (item: MissingRequiredModel) =>
-    `${item.model.baseDir ?? 'comfyui'}:${item.model.dir}:${item.model.name}`
-
-  const addBusyModelKey = (key: string) => {
-    if (busyModelKeysRef.current.has(key)) {
-      return false
-    }
-    const next = new Set(busyModelKeysRef.current)
-    next.add(key)
-    busyModelKeysRef.current = next
-    setBusyModelKeys(next)
-    return true
-  }
-
-  const removeBusyModelKey = (key: string) => {
-    const next = new Set(busyModelKeysRef.current)
-    next.delete(key)
-    busyModelKeysRef.current = next
-    setBusyModelKeys(next)
-  }
-
-  const setDownloadProgress = (key: string, progress: ModelDownloadProgress) => {
-    setDownloadProgressByKey((prev) => ({ ...prev, [key]: progress }))
-  }
-
-  const clearDownloadProgress = (key: string) => {
-    setDownloadProgressByKey((prev) => {
-      const next = { ...prev }
-      delete next[key]
-      return next
-    })
-  }
-
   const openModelDir = async (item: MissingRequiredModel) => {
-    const key = getModelKey(item)
-    if (!addBusyModelKey(key)) {
-      return
-    }
     try {
       await api().svcShell.ensureDirectory({ path: item.dirPath })
       const openError = await api().svcShell.openPath(item.dirPath)
@@ -137,48 +205,29 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
       }
     } catch (error) {
       notifyError(t('qapp.callout.open_directory_failed', { error: String(error) }))
-    } finally {
-      removeBusyModelKey(key)
     }
   }
 
   const downloadModel = async (item: MissingRequiredModel) => {
     const key = getModelKey(item)
-    if (!addBusyModelKey(key)) {
+    const { promise, started } = startModelDownload(item)
+    if (!started) {
       return
     }
     try {
-      let result: DownloadFileResp | undefined
-      await api().svcShell.downloadFileWithProgress(
-        {
-          url: item.model.url,
-          outputDir: item.dirPath,
-          filename: item.model.name
-        },
-        {
-          onData: (event) => {
-            if (event.type === 'progress') {
-              setDownloadProgress(key, event)
-            } else {
-              result = event.result
-            }
-          }
-        }
-      )
-      if (!result) {
-        throw new Error('Download completed without a result')
+      const result = await promise
+      if (isMountedRef.current) {
+        notifySuccess(
+          result.alreadyExists
+            ? t('qapp.callout.model_exists')
+            : t('qapp.callout.model_downloaded', { name: item.model.name })
+        )
+        setMissingModels((prev) => prev.filter((model) => getModelKey(model) !== key))
       }
-      notifySuccess(
-        result.alreadyExists
-          ? t('qapp.callout.model_exists')
-          : t('qapp.callout.model_downloaded', { name: item.model.name })
-      )
-      setMissingModels((prev) => prev.filter((model) => getModelKey(model) !== key))
     } catch (error) {
-      notifyError(t('qapp.callout.model_download_failed', { error: String(error) }))
-    } finally {
-      clearDownloadProgress(key)
-      removeBusyModelKey(key)
+      if (isMountedRef.current) {
+        notifyError(t('qapp.callout.model_download_failed', { error: String(error) }))
+      }
     }
   }
 
@@ -213,8 +262,16 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
         {missingModels.map((item) => {
           const { model, displayDir } = item
           const key = getModelKey(item)
-          const busy = busyModelKeys.has(key)
-          const downloadProgress = downloadProgressByKey[key]
+          const busy = downloadSnapshot.busyKeys.has(key)
+          const downloadProgress =
+            downloadSnapshot.progressByKey[key] ||
+            (busy
+              ? ({
+                  type: 'progress',
+                  downloadedBytes: 0,
+                  bytesPerSecond: 0
+                } satisfies ModelDownloadProgress)
+              : undefined)
           const progressWidth =
             downloadProgress?.percent === undefined
               ? '100%'
