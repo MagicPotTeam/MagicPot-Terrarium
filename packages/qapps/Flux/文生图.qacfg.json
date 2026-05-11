@@ -20,12 +20,6 @@
       "url": "https://modelscope.cn/models/black-forest-labs/FLUX.1-dev/resolve/master/ae.safetensors"
     },
     {
-      "name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
-      "size": "1.5 GB",
-      "dir": "models/loras",
-      "url": "https://modelscope.cn/models/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/master/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
-    },
-    {
       "name": "flux1-dev-fp8-e4m3fn.safetensors",
       "size": "11 GB",
       "dir": "models/unet",
@@ -77,11 +71,6 @@
       "slot": "$.36.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
-    },
-    {
-      "label": "加载LoRA",
-      "slot": "$.48.inputs.lora_name",
-      "component": "InputComfySelect"
     },
     {
       "label": "随机种",

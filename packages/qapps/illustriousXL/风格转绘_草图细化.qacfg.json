@@ -62,11 +62,6 @@
       "suffixPrompt": ""
     },
     {
-      "label": "加载LoRA",
-      "slot": "$.223.inputs.lora_name",
-      "component": "InputComfySelect"
-    },
-    {
       "label": "随机种",
       "slot": "$.211.inputs.value",
       "component": "InputSeed"
@@ -102,12 +97,6 @@
       "size": "2.5 GB",
       "dir": "models/controlnet",
       "url": "https://modelscope.cn/models/ChenkinNoob/Chenkin-UniControl-XL/resolve/master/Chenkin-UniControl-XL.safetensors"
-    },
-    {
-      "name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
-      "size": "1.5 GB",
-      "dir": "models/loras",
-      "url": "https://modelscope.cn/models/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/master/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
     }
   ]
 }

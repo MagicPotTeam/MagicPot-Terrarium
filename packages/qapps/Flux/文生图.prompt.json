@@ -24,7 +24,7 @@
         1
       ],
       "model": [
-        "48",
+        "49",
         0
       ]
     },
@@ -169,8 +169,8 @@
     "inputs": {
       "text": "",
       "clip": [
-        "48",
-        1
+        "26",
+        0
       ]
     },
     "class_type": "CLIPTextEncode",
@@ -185,8 +185,8 @@
         0
       ],
       "clip": [
-        "48",
-        1
+        "26",
+        0
       ]
     },
     "class_type": "CLIPTextEncode",
@@ -337,25 +337,6 @@
     "class_type": "VAEEncode",
     "_meta": {
       "title": "VAE编码"
-    }
-  },
-  "48": {
-    "inputs": {
-      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
-      "strength_model": 0.8000000000000002,
-      "strength_clip": 0.8000000000000002,
-      "model": [
-        "49",
-        0
-      ],
-      "clip": [
-        "26",
-        0
-      ]
-    },
-    "class_type": "LoraLoader",
-    "_meta": {
-      "title": "加载LoRA"
     }
   },
   "49": {

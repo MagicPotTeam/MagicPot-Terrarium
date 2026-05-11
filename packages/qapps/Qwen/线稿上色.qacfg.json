@@ -56,11 +56,6 @@
       "suffixPrompt": ""
     },
     {
-      "label": "加载LoRA",
-      "slot": "$.278.inputs.lora_name",
-      "component": "InputComfySelect"
-    },
-    {
       "label": "随机种",
       "slot": "$.260.inputs.value",
       "component": "InputSeed"
@@ -112,12 +107,6 @@
       "size": "3.3 GB",
       "dir": "models/controlnet",
       "url": "https://modelscope.cn/models/Comfy-Org/Qwen-Image-InstantX-ControlNets/resolve/master/split_files/controlnet/Qwen-Image-InstantX-ControlNet-Union.safetensors"
-    },
-    {
-      "name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
-      "size": "1.5 GB",
-      "dir": "models/loras",
-      "url": "https://modelscope.cn/models/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/master/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
     }
   ]
 }

@@ -126,8 +126,8 @@
         0
       ],
       "clip": [
-        "278",
-        1
+        "263",
+        0
       ]
     },
     "class_type": "CLIPTextEncode",
@@ -307,8 +307,8 @@
         0
       ],
       "clip": [
-        "278",
-        1
+        "263",
+        0
       ]
     },
     "class_type": "CLIPTextEncode",
@@ -419,7 +419,7 @@
         0
       ],
       "model": [
-        "278",
+        "262",
         0
       ],
       "positive": [
@@ -546,25 +546,6 @@
     "class_type": "easy float",
     "_meta": {
       "title": "浮点数"
-    }
-  },
-  "278": {
-    "inputs": {
-      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
-      "strength_model": 0.8000000000000002,
-      "strength_clip": 0.8000000000000002,
-      "model": [
-        "262",
-        0
-      ],
-      "clip": [
-        "263",
-        0
-      ]
-    },
-    "class_type": "LoraLoader",
-    "_meta": {
-      "title": "加载LoRA"
     }
   },
   "279": {

@@ -313,7 +313,7 @@
       "text_l": "",
       "smZ_steps": 1,
       "clip": [
-        "53",
+        "49",
         1
       ]
     },
@@ -363,7 +363,7 @@
         0
       ],
       "model": [
-        "53",
+        "31",
         0
       ],
       "positive": [
@@ -399,7 +399,7 @@
         0
       ],
       "model": [
-        "53",
+        "31",
         0
       ],
       "positive": [
@@ -442,7 +442,7 @@
       "text_l": "",
       "smZ_steps": 1,
       "clip": [
-        "53",
+        "49",
         1
       ]
     },
@@ -624,25 +624,6 @@
     "class_type": "PrimitiveStringMultiline",
     "_meta": {
       "title": "字符串（多行）"
-    }
-  },
-  "53": {
-    "inputs": {
-      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
-      "strength_model": 0,
-      "strength_clip": 0,
-      "model": [
-        "31",
-        0
-      ],
-      "clip": [
-        "49",
-        1
-      ]
-    },
-    "class_type": "LoraLoader",
-    "_meta": {
-      "title": "加载LoRA"
     }
   },
   "54": {

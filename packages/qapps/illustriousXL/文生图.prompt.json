@@ -269,7 +269,7 @@
       "text_l": "",
       "smZ_steps": 1,
       "clip": [
-        "176",
+        "175",
         1
       ]
     },
@@ -306,7 +306,7 @@
         0
       ],
       "model": [
-        "176",
+        "150",
         0
       ],
       "positive": [
@@ -342,7 +342,7 @@
         1
       ],
       "model": [
-        "176",
+        "150",
         0
       ],
       "positive": [
@@ -410,7 +410,7 @@
       "text_l": "",
       "smZ_steps": 1,
       "clip": [
-        "176",
+        "175",
         1
       ]
     },
@@ -549,25 +549,6 @@
     "class_type": "CheckpointLoaderSimple",
     "_meta": {
       "title": "Checkpoint加载器（简易）"
-    }
-  },
-  "176": {
-    "inputs": {
-      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
-      "strength_model": 0,
-      "strength_clip": 0,
-      "model": [
-        "150",
-        0
-      ],
-      "clip": [
-        "175",
-        1
-      ]
-    },
-    "class_type": "LoraLoader",
-    "_meta": {
-      "title": "加载LoRA"
     }
   },
   "177": {
