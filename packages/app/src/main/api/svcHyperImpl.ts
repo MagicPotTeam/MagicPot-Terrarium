@@ -424,14 +424,14 @@ export class HyperSvcImpl implements HyperSvc {
       try {
         const result = await this.runCommandSync({
           command: 'cmd',
-          args: ['/c', 'netstat -ano | findstr :' + comfyPort]
+          args: ['/c', 'netstat -ano -p tcp']
         })
 
         if (result.stdOut.trim()) {
           // 解析 netstat 输出获取 PID
           const lines = result.stdOut.split('\n')
           for (const line of lines) {
-            if (line.includes(':' + comfyPort)) {
+            if (line.toUpperCase().includes('LISTENING') && line.includes(':' + comfyPort)) {
               const parts = line.trim().split(/\s+/)
               const pid = parseInt(parts[parts.length - 1])
               if (!isNaN(pid)) {
