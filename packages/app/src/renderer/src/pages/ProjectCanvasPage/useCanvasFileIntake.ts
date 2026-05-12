@@ -86,13 +86,6 @@ type AddFileToCanvasFn = (
   }
 ) => Promise<unknown>
 type AddVideoToCanvasFn = (file: File) => Promise<unknown> | unknown
-type AddHtmlToCanvasFn = (
-  htmlData: string,
-  options?: {
-    clientX?: number
-    clientY?: number
-  }
-) => void
 type AddTextToCanvasFn = (text: string, clientX?: number, clientY?: number) => void
 
 type AddOcrResultToCanvasFn = (options: {
@@ -303,7 +296,6 @@ type UseCanvasFileIntakeOptions = {
   addVideoToCanvas: AddVideoToCanvasFn
   addFileToCanvas: AddFileToCanvasFn
   addOcrResultToCanvas: AddOcrResultToCanvasFn
-  addHtmlToCanvas: AddHtmlToCanvasFn
   addTextToCanvas: AddTextToCanvasFn
   handleImportCanvasSceneFile: ImportCanvasSceneFileFn
   handleImportPsdFile: ImportPsdFileFn
@@ -466,6 +458,17 @@ function normalizeClipboardHtmlText(html: string): string {
 
   if (typeof DOMParser !== 'undefined') {
     const doc = new DOMParser().parseFromString(trimmed, 'text/html')
+    const tableRows = Array.from(doc.body?.querySelectorAll('tr') || [])
+      .map((row) =>
+        Array.from(row.querySelectorAll('th,td'))
+          .map((cell) => cell.textContent?.trim() || '')
+          .join('\t')
+      )
+      .filter((row) => row.trim())
+    if (tableRows.length > 0) {
+      return tableRows.join('\n')
+    }
+
     const text = doc.body?.textContent?.trim()
     if (text) {
       return text
@@ -500,135 +503,6 @@ function getClipboardPlainText(clipboardData?: DataTransfer | null): string {
   return normalizeClipboardHtmlText(clipboardData.getData('text/html'))
 }
 
-function escapeClipboardHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
-function buildClipboardTableHtml(text: string): string {
-  const normalized = text.replace(/\r\n?/g, '\n').trim()
-  if (!normalized || !normalized.includes('\n') || !normalized.includes('\t')) {
-    return ''
-  }
-
-  const rows = normalized.split('\n').map((row) => row.split('\t').map((cell) => cell.trim()))
-  const columnCount = rows[0]?.length ?? 0
-  if (rows.length < 2 || columnCount < 2 || rows.some((row) => row.length !== columnCount)) {
-    return ''
-  }
-
-  const rowHtml = rows
-    .map(
-      (cells) =>
-        `<tr>${cells
-          .map(
-            (cell) =>
-              `<td style="border:1px solid #d1d5db;padding:8px 10px;vertical-align:top;">${escapeClipboardHtml(
-                cell
-              )}</td>`
-          )
-          .join('')}</tr>`
-    )
-    .join('')
-
-  return `
-    <div style="width:100%;height:100%;padding:12px;box-sizing:border-box;background:#ffffff;color:#111827;font:14px/1.5 system-ui,sans-serif;">
-      <table style="width:100%;border-collapse:collapse;border-spacing:0;background:#ffffff;">
-        <tbody>${rowHtml}</tbody>
-      </table>
-    </div>
-  `.trim()
-}
-
-function sanitizeClipboardHtml(html: string): string {
-  const trimmed = html.trim()
-  if (!trimmed) {
-    return ''
-  }
-
-  if (typeof DOMParser === 'undefined') {
-    return trimmed
-  }
-
-  const doc = new DOMParser().parseFromString(trimmed, 'text/html')
-  const body = doc.body
-  if (!body) {
-    return trimmed
-  }
-
-  body
-    .querySelectorAll('script,style,link,meta,title,iframe,object,embed,base')
-    .forEach((node) => node.remove())
-
-  for (const element of Array.from(body.querySelectorAll<HTMLElement>('*'))) {
-    for (const attribute of Array.from(element.attributes)) {
-      const name = attribute.name.toLowerCase()
-      const value = attribute.value.trim()
-
-      if (name.startsWith('on')) {
-        element.removeAttribute(attribute.name)
-        continue
-      }
-
-      if (
-        (name === 'href' || name === 'src' || name === 'xlink:href') &&
-        /^javascript:/i.test(value)
-      ) {
-        element.removeAttribute(attribute.name)
-        continue
-      }
-
-      if (name === 'style' && /(expression\s*\(|url\s*\(\s*['"]?\s*javascript:)/i.test(value)) {
-        element.removeAttribute(attribute.name)
-      }
-    }
-  }
-
-  return body.innerHTML.trim()
-}
-
-function shouldUseClipboardHtml(html: string, plainText = ''): boolean {
-  const trimmed = html.trim()
-  if (!trimmed) {
-    return false
-  }
-
-  if (/<table[\s>]/i.test(trimmed) || plainText.includes('\t')) {
-    return true
-  }
-
-  if (typeof DOMParser === 'undefined') {
-    return false
-  }
-
-  const doc = new DOMParser().parseFromString(trimmed, 'text/html')
-  return Boolean(doc.body?.querySelector('ul,ol,blockquote,pre,code,img,figure'))
-}
-
-function getStructuredClipboardHtmlFromPayload(html: string, plainText = ''): string {
-  const sanitizedHtml = shouldUseClipboardHtml(html, plainText) ? sanitizeClipboardHtml(html) : ''
-  if (sanitizedHtml) {
-    return sanitizedHtml
-  }
-
-  return buildClipboardTableHtml(plainText)
-}
-
-function getStructuredClipboardHtml(clipboardData?: Pick<DataTransfer, 'getData'> | null): string {
-  if (!clipboardData) {
-    return ''
-  }
-
-  return getStructuredClipboardHtmlFromPayload(
-    clipboardData.getData('text/html'),
-    getDirectClipboardPlainText(clipboardData)
-  )
-}
-
 export function useCanvasFileIntake({
   canvasId,
   canvasContainerRef,
@@ -641,7 +515,6 @@ export function useCanvasFileIntake({
   addVideoToCanvas,
   addFileToCanvas,
   addOcrResultToCanvas,
-  addHtmlToCanvas,
   addTextToCanvas,
   handleImportCanvasSceneFile,
   handleImportPsdFile,
@@ -1072,16 +945,6 @@ export function useCanvasFileIntake({
           return
         }
 
-        const structuredHtml = getStructuredClipboardHtml(dropDataTransfer)
-        if (structuredHtml) {
-          focusCanvasStage()
-          addHtmlToCanvas(structuredHtml, {
-            clientX,
-            clientY
-          })
-          return
-        }
-
         if (!text) {
           text =
             dropDataTransfer.getData('text') ||
@@ -1103,7 +966,6 @@ export function useCanvasFileIntake({
     },
     [
       addFileToCanvas,
-      addHtmlToCanvas,
       addImageToCanvas,
       addModel3DToCanvas,
       addModel3DUrlToCanvas,
@@ -1264,12 +1126,6 @@ export function useCanvasFileIntake({
         }
       }
 
-      const structuredClipboardHtml = getStructuredClipboardHtml(clipboardData)
-      if (structuredClipboardHtml) {
-        addHtmlToCanvas(structuredClipboardHtml)
-        return true
-      }
-
       if (!clipboardItems || clipboardItems.length === 0) {
         const directClipboardText = getClipboardPlainText(clipboardData)
         if (directClipboardText) {
@@ -1323,7 +1179,6 @@ export function useCanvasFileIntake({
       return false
     },
     [
-      addHtmlToCanvas,
       addImageToCanvas,
       addImagesToCanvas,
       addTextToCanvas,
@@ -1402,24 +1257,17 @@ export function useCanvasFileIntake({
             ? await (await clipItem.getType('text/plain')).text()
             : ''
 
-          if (clipItem.types.includes('text/html')) {
-            const html = await (await clipItem.getType('text/html')).text()
-            const structuredClipboardHtml = getStructuredClipboardHtmlFromPayload(html, plainText)
-            if (structuredClipboardHtml) {
-              addHtmlToCanvas(structuredClipboardHtml)
-              return true
-            }
-          }
-
-          const tabularTextHtml = buildClipboardTableHtml(plainText)
-          if (tabularTextHtml) {
-            addHtmlToCanvas(tabularTextHtml)
+          if (plainText.trim()) {
+            addTextToCanvas(plainText.trim())
             return true
           }
 
-          if (clipItem.types.includes('text/plain')) {
-            if (plainText.trim()) {
-              addTextToCanvas(plainText.trim())
+          if (clipItem.types.includes('text/html')) {
+            const htmlText = normalizeClipboardHtmlText(
+              await (await clipItem.getType('text/html')).text()
+            )
+            if (htmlText.trim()) {
+              addTextToCanvas(htmlText.trim())
               return true
             }
           }
@@ -1432,11 +1280,6 @@ export function useCanvasFileIntake({
     try {
       if (typeof navigator.clipboard.readText === 'function') {
         const text = await navigator.clipboard.readText()
-        const tabularTextHtml = buildClipboardTableHtml(text)
-        if (tabularTextHtml) {
-          addHtmlToCanvas(tabularTextHtml)
-          return true
-        }
         if (text.trim()) {
           addTextToCanvas(text.trim())
           return true
@@ -1447,14 +1290,7 @@ export function useCanvasFileIntake({
     }
 
     return false
-  }, [
-    addHtmlToCanvas,
-    addImageToCanvas,
-    addImagesToCanvas,
-    addTextToCanvas,
-    handleFile,
-    readFileAsDataURL
-  ])
+  }, [addImageToCanvas, addImagesToCanvas, addTextToCanvas, handleFile, readFileAsDataURL])
 
   const handleNativeClipboardPaste = useCallback(async () => {
     try {
@@ -1475,33 +1311,26 @@ export function useCanvasFileIntake({
         return true
       }
 
-      if (typeof hyperSvc.readClipboardHtml === 'function') {
-        const nativeClipboardHtml = await hyperSvc.readClipboardHtml({})
-        const structuredClipboardHtml = getStructuredClipboardHtmlFromPayload(
-          nativeClipboardHtml.html
-        )
-        if (structuredClipboardHtml) {
-          addHtmlToCanvas(structuredClipboardHtml)
-          return true
-        }
-      }
-
       const nativeClipboardText = await hyperSvc.readClipboardText({})
-      const tabularTextHtml = buildClipboardTableHtml(nativeClipboardText.text)
-      if (tabularTextHtml) {
-        addHtmlToCanvas(tabularTextHtml)
-        return true
-      }
       if (nativeClipboardText.text.trim()) {
         addTextToCanvas(nativeClipboardText.text.trim())
         return true
+      }
+
+      if (typeof hyperSvc.readClipboardHtml === 'function') {
+        const nativeClipboardHtml = await hyperSvc.readClipboardHtml({})
+        const htmlText = normalizeClipboardHtmlText(nativeClipboardHtml.html)
+        if (htmlText.trim()) {
+          addTextToCanvas(htmlText.trim())
+          return true
+        }
       }
     } catch {
       // Ignore native clipboard access failures and continue.
     }
 
     return false
-  }, [addHtmlToCanvas, addImageToCanvas, addTextToCanvas, readFileAsDataURL])
+  }, [addImageToCanvas, addTextToCanvas, readFileAsDataURL])
 
   const handlePasteFromClipboard = useCallback(
     async (event?: ClipboardEvent) => {

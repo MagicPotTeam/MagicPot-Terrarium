@@ -139,7 +139,6 @@ function FileIntakeHarness({
   addTextToCanvas,
   addImageToCanvas = vi.fn().mockResolvedValue(undefined),
   addImagesToCanvas = vi.fn().mockResolvedValue(undefined),
-  addHtmlToCanvas = vi.fn(),
   addFileToCanvas = vi.fn().mockResolvedValue(undefined),
   notifyWarning = vi.fn(),
   onImageBatchImportProgress = vi.fn(),
@@ -150,7 +149,6 @@ function FileIntakeHarness({
   addTextToCanvas: ReturnType<typeof vi.fn>
   addImageToCanvas?: ReturnType<typeof vi.fn>
   addImagesToCanvas?: ReturnType<typeof vi.fn>
-  addHtmlToCanvas?: ReturnType<typeof vi.fn>
   addFileToCanvas?: ReturnType<typeof vi.fn>
   notifyWarning?: ReturnType<typeof vi.fn>
   onImageBatchImportProgress?: ReturnType<typeof vi.fn>
@@ -173,7 +171,6 @@ function FileIntakeHarness({
     addVideoToCanvas: vi.fn().mockResolvedValue(undefined),
     addFileToCanvas,
     addOcrResultToCanvas: vi.fn().mockResolvedValue(undefined),
-    addHtmlToCanvas,
     addTextToCanvas,
     handleImportCanvasSceneFile: vi.fn().mockResolvedValue(undefined),
     handleImportPsdFile: vi.fn().mockResolvedValue(undefined),
@@ -430,16 +427,13 @@ describe('useCanvasFileIntake', () => {
     })
   })
 
-  it('pastes structured clipboard HTML as a canvas html item', async () => {
+  it('pastes structured clipboard HTML as canvas text', async () => {
     const addTextToCanvas = vi.fn()
-    const addHtmlToCanvas = vi.fn()
     const clipboard = window.navigator.clipboard as unknown as ClipboardMock
     clipboard.read.mockRejectedValue(new Error('blocked'))
     clipboard.readText.mockRejectedValue(new Error('blocked'))
 
-    render(
-      <FileIntakeHarness addTextToCanvas={addTextToCanvas} addHtmlToCanvas={addHtmlToCanvas} />
-    )
+    render(<FileIntakeHarness addTextToCanvas={addTextToCanvas} />)
 
     const canvas = screen.getByTestId('canvas-paste-surface')
     canvas.focus()
@@ -453,11 +447,8 @@ describe('useCanvasFileIntake', () => {
     )
 
     await waitFor(() => {
-      expect(addHtmlToCanvas).toHaveBeenCalledTimes(1)
+      expect(addTextToCanvas).toHaveBeenCalledWith('Name\tScore\nAlice\t95')
     })
-
-    expect(addTextToCanvas).not.toHaveBeenCalled()
-    expect(addHtmlToCanvas.mock.calls[0]?.[0]).toContain('<table')
   })
 
   it('accepts pasted clipboard files for canvas-supported office/text formats', async () => {
@@ -997,24 +988,19 @@ describe('useCanvasFileIntake', () => {
     ])
   })
 
-  it('falls back to navigator clipboard text and preserves tabular data as html', async () => {
+  it('falls back to navigator clipboard text and keeps tabular data as text', async () => {
     const addTextToCanvas = vi.fn()
-    const addHtmlToCanvas = vi.fn()
     const clipboard = window.navigator.clipboard as unknown as ClipboardMock
     clipboard.read.mockRejectedValue(new Error('blocked'))
     clipboard.readText.mockResolvedValue('Name\tScore\nAlice\t95')
 
-    render(
-      <FileIntakeHarness addTextToCanvas={addTextToCanvas} addHtmlToCanvas={addHtmlToCanvas} />
-    )
+    render(<FileIntakeHarness addTextToCanvas={addTextToCanvas} />)
 
     fireEvent.keyDown(window, { key: 'v', code: 'KeyV', ctrlKey: true })
 
     await waitFor(() => {
-      expect(addHtmlToCanvas).toHaveBeenCalledTimes(1)
+      expect(addTextToCanvas).toHaveBeenCalledWith('Name\tScore\nAlice\t95')
     })
-
-    expect(addTextToCanvas).not.toHaveBeenCalled()
   })
 
   it('falls back to the native clipboard API when web clipboard access is unavailable', async () => {
@@ -1034,9 +1020,8 @@ describe('useCanvasFileIntake', () => {
     })
   })
 
-  it('falls back to native clipboard HTML for structured external tables', async () => {
+  it('falls back to native clipboard HTML as plain canvas text', async () => {
     const addTextToCanvas = vi.fn()
-    const addHtmlToCanvas = vi.fn()
     const clipboard = window.navigator.clipboard as unknown as ClipboardMock
     const nativeClipboard = window.api.svcHyper as unknown as NativeClipboardMock
     clipboard.read.mockRejectedValue(new Error('blocked'))
@@ -1046,21 +1031,13 @@ describe('useCanvasFileIntake', () => {
     })
     nativeClipboard.readClipboardText.mockResolvedValue({ text: '' })
 
-    render(
-      <FileIntakeHarness
-        addTextToCanvas={addTextToCanvas}
-        addHtmlToCanvas={addHtmlToCanvas}
-        initialCanvasActive={false}
-      />
-    )
+    render(<FileIntakeHarness addTextToCanvas={addTextToCanvas} initialCanvasActive={false} />)
 
     fireEvent.keyDown(window, { key: 'v', code: 'KeyV', ctrlKey: true })
 
     await waitFor(() => {
-      expect(addHtmlToCanvas).toHaveBeenCalledTimes(1)
+      expect(addTextToCanvas).toHaveBeenCalledWith('Name\tScore\nAlice\t95')
     })
-
-    expect(addTextToCanvas).not.toHaveBeenCalled()
   })
 
   it('accepts a native paste event routed through the hidden canvas paste proxy', async () => {
