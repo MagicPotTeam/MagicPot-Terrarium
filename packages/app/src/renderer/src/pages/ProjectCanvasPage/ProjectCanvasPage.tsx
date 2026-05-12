@@ -1209,7 +1209,6 @@ const ProjectCanvasPage: React.FC = () => {
       addVideoToCanvas,
       addFileToCanvas,
       addOcrResultToCanvas,
-      addHtmlToCanvas,
       addTextToCanvas,
       handleImportCanvasSceneFile,
       handleImportPsdFile,
