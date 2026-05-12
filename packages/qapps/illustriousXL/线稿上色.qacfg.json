@@ -9,17 +9,17 @@
     },
     {
       "label": "Checkpoint加载器",
-      "slot": "$.49.inputs.ckpt_name",
+      "slot": "$.108.inputs.ckpt_name",
       "component": "InputComfySelect"
     },
     {
       "label": "UniControl-XL（线稿）",
-      "slot": "$.42.inputs.name",
+      "slot": "$.101.inputs.name",
       "component": "InputComfySelect"
     },
     {
       "label": "UniControl-XL（深度）",
-      "slot": "$.43.inputs.name",
+      "slot": "$.102.inputs.name",
       "component": "InputComfySelect"
     },
     {
@@ -32,18 +32,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.31.inputs.*"
+        "$.97.inputs.model",
+        "$.98.inputs.model"
       ],
       "outputClipSlots": [
-        "$.35.inputs.clip",
-        "$.40.inputs.clip"
+        "$.94.inputs.clip",
+        "$.99.inputs.clip"
       ],
       "inputModel": [
-        "49",
+        "90",
         0
       ],
       "inputClip": [
-        "49",
+        "108",
         1
       ]
     },
@@ -55,24 +56,24 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.47.inputs.image",
+      "slot": "$.106.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "正面提示词",
-      "slot": "$.51.inputs.value",
+      "slot": "$.110.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.52.inputs.value",
+      "slot": "$.111.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.41.inputs.value",
+      "slot": "$.100.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -86,7 +87,7 @@
     "https://github.com/chinoll/ComfyUI-Advanced-ControlNet"
   ],
   "outputNodeIds": [
-    "37"
+    "96"
   ],
   "requiredModels": [
     {

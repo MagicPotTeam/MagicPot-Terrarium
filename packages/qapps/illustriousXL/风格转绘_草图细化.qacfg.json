@@ -9,17 +9,17 @@
     },
     {
       "label": "Checkpoint加载器",
-      "slot": "$.221.inputs.ckpt_name",
+      "slot": "$.174.inputs.ckpt_name",
       "component": "InputComfySelect"
     },
     {
       "label": "UniControl-XL（线稿）",
-      "slot": "$.219.inputs.name",
+      "slot": "$.172.inputs.name",
       "component": "InputComfySelect"
     },
     {
       "label": "UniControl-XL（深度）",
-      "slot": "$.220.inputs.name",
+      "slot": "$.173.inputs.name",
       "component": "InputComfySelect"
     },
     {
@@ -32,18 +32,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.202.inputs.*"
+        "$.162.inputs.model",
+        "$.167.inputs.model"
       ],
       "outputClipSlots": [
-        "$.206.inputs.clip",
-        "$.210.inputs.clip"
+        "$.159.inputs.clip",
+        "$.163.inputs.clip"
       ],
       "inputModel": [
-        "221",
+        "155",
         0
       ],
       "inputClip": [
-        "221",
+        "174",
         1
       ]
     },
@@ -55,7 +56,7 @@
     },
     {
       "label": "Controlnet",
-      "slot": "$.218.inputs.value",
+      "slot": "$.169.inputs.value",
       "min": 0,
       "max": 1,
       "step": 0.01,
@@ -63,7 +64,7 @@
     },
     {
       "label": "重绘幅度",
-      "slot": "$.216.inputs.value",
+      "slot": "$.171.inputs.value",
       "min": 0,
       "max": 1,
       "step": 0.01,
@@ -71,24 +72,24 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.222.inputs.image",
+      "slot": "$.175.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "正面提示词",
-      "slot": "$.213.inputs.value",
+      "slot": "$.166.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.212.inputs.value",
+      "slot": "$.165.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.211.inputs.value",
+      "slot": "$.164.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -102,7 +103,7 @@
     "https://github.com/chinoll/ComfyUI-Advanced-ControlNet"
   ],
   "outputNodeIds": [
-    "224"
+    "177"
   ],
   "requiredModels": [
     {

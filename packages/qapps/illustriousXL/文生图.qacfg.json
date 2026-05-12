@@ -9,7 +9,7 @@
     },
     {
       "label": "Checkpoint加载器",
-      "slot": "$.175.inputs.ckpt_name",
+      "slot": "$.57.inputs.ckpt_name",
       "component": "InputComfySelect"
     },
     {
@@ -22,19 +22,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.150.inputs.*"
+        "$.32.inputs.*"
       ],
       "outputClipSlots": [
-        "$.146.inputs.clip",
-        "$.153.inputs.clip",
-        "$.162.inputs.clip"
+        "$.28.inputs.clip",
+        "$.35.inputs.clip",
+        "$.44.inputs.clip"
       ],
       "inputModel": [
-        "175",
+        "57",
         0
       ],
       "inputClip": [
-        "175",
+        "57",
         1
       ]
     },
@@ -48,24 +48,24 @@
       "label": "图片尺寸",
       "component": "InputImageSize",
       "seperateSlots": true,
-      "widthSlot": "$.166.inputs.value",
-      "heightSlot": "$.167.inputs.value"
+      "widthSlot": "$.48.inputs.value",
+      "heightSlot": "$.49.inputs.value"
     },
     {
       "label": "正面提示词",
-      "slot": "$.164.inputs.value",
+      "slot": "$.46.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.165.inputs.value",
+      "slot": "$.47.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.163.inputs.value",
+      "slot": "$.45.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -79,7 +79,7 @@
     "https://github.com/chinoll/ComfyUI-Advanced-ControlNet"
   ],
   "outputNodeIds": [
-    "155"
+    "37"
   ],
   "requiredModels": [
     {

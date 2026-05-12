@@ -1,18 +1,18 @@
 {
-  "341": {
+  "1": {
     "inputs": {
-      "image": "example.png"
+      "image": ""
     },
     "class_type": "LoadImage",
     "_meta": {
       "title": "加载图像"
     }
   },
-  "342": {
+  "2": {
     "inputs": {
       "torchscript_jit": "default",
       "image": [
-        "341",
+        "1",
         0
       ]
     },
@@ -21,11 +21,11 @@
       "title": "Inspyrenet Rembg"
     }
   },
-  "343": {
+  "3": {
     "inputs": {
       "filename_prefix": "ComfyUI",
       "images": [
-        "342",
+        "2",
         0
       ]
     },

@@ -1,5 +1,5 @@
 {
-  "124": {
+  "6": {
     "inputs": {
       "width": 1536,
       "height": 1536,
@@ -8,7 +8,7 @@
       "divisible_by": 2,
       "crop": "disabled",
       "image": [
-        "140",
+        "22",
         0
       ]
     },
@@ -17,7 +17,7 @@
       "title": "Resize Image (deprecated)"
     }
   },
-  "128": {
+  "10": {
     "inputs": {
       "width": 1024,
       "height": 1024,
@@ -26,11 +26,11 @@
       "divisible_by": 2,
       "crop": "disabled",
       "image": [
-        "151",
+        "33",
         0
       ],
       "get_image_size": [
-        "161",
+        "43",
         0
       ]
     },
@@ -39,14 +39,14 @@
       "title": "Resize Image (deprecated)"
     }
   },
-  "134": {
+  "16": {
     "inputs": {
       "pixels": [
-        "124",
+        "6",
         0
       ],
       "vae": [
-        "175",
+        "57",
         2
       ]
     },
@@ -55,7 +55,7 @@
       "title": "VAE编码"
     }
   },
-  "138": {
+  "20": {
     "inputs": {
       "width": 1024,
       "height": 1024,
@@ -64,7 +64,7 @@
       "divisible_by": 2,
       "crop": "disabled",
       "image": [
-        "161",
+        "43",
         0
       ]
     },
@@ -73,14 +73,14 @@
       "title": "Resize Image (deprecated)"
     }
   },
-  "140": {
+  "22": {
     "inputs": {
       "samples": [
-        "156",
+        "38",
         0
       ],
       "vae": [
-        "175",
+        "57",
         2
       ]
     },
@@ -89,7 +89,7 @@
       "title": "VAE解码"
     }
   },
-  "141": {
+  "23": {
     "inputs": {
       "width": 1024,
       "height": 1024,
@@ -98,11 +98,11 @@
       "divisible_by": 2,
       "crop": "disabled",
       "image": [
-        "140",
+        "22",
         0
       ],
       "get_image_size": [
-        "161",
+        "43",
         0
       ]
     },
@@ -111,14 +111,14 @@
       "title": "Resize Image (deprecated)"
     }
   },
-  "142": {
+  "24": {
     "inputs": {
       "pixels": [
-        "138",
+        "20",
         0
       ],
       "vae": [
-        "175",
+        "57",
         2
       ]
     },
@@ -127,14 +127,14 @@
       "title": "VAE编码"
     }
   },
-  "144": {
+  "26": {
     "inputs": {
       "samples": [
-        "168",
+        "50",
         0
       ],
       "vae": [
-        "175",
+        "57",
         2
       ]
     },
@@ -143,14 +143,14 @@
       "title": "VAE解码"
     }
   },
-  "145": {
+  "27": {
     "inputs": {
       "width": [
-        "166",
+        "48",
         0
       ],
       "height": [
-        "167",
+        "49",
         0
       ],
       "batch_size": 1
@@ -160,11 +160,11 @@
       "title": "空Latent图像"
     }
   },
-  "146": {
+  "28": {
     "inputs": {
       "text": "",
       "clip": [
-        "175",
+        "57",
         1
       ]
     },
@@ -173,7 +173,7 @@
       "title": "CLIP文本编码"
     }
   },
-  "150": {
+  "32": {
     "inputs": {
       "extra": "{\"show_headings\":true,\"show_descriptions\":false,\"mode\":\"*\"}",
       "ㅤ": "Stable Diffusion",
@@ -222,7 +222,7 @@
       "info_debug": "",
       "debug": false,
       "*": [
-        "175",
+        "57",
         0
       ]
     },
@@ -231,14 +231,14 @@
       "title": "Settings (smZ)"
     }
   },
-  "151": {
+  "33": {
     "inputs": {
       "samples": [
-        "157",
+        "39",
         0
       ],
       "vae": [
-        "175",
+        "57",
         2
       ]
     },
@@ -247,10 +247,10 @@
       "title": "VAE解码"
     }
   },
-  "153": {
+  "35": {
     "inputs": {
       "text": [
-        "165",
+        "47",
         0
       ],
       "parser": "A1111",
@@ -269,7 +269,7 @@
       "text_l": "",
       "smZ_steps": 1,
       "clip": [
-        "175",
+        "58",
         1
       ]
     },
@@ -278,11 +278,11 @@
       "title": "CLIP Text Encode++"
     }
   },
-  "155": {
+  "37": {
     "inputs": {
       "filename_prefix": "ComfyUI",
       "images": [
-        "128",
+        "10",
         0
       ]
     },
@@ -291,10 +291,10 @@
       "title": "保存图像"
     }
   },
-  "156": {
+  "38": {
     "inputs": {
       "seed": [
-        "163",
+        "45",
         0
       ],
       "steps": 36,
@@ -302,23 +302,23 @@
       "sampler_name": "dpmpp_2m",
       "scheduler": "sgm_uniform",
       "denoise": [
-        "171",
+        "53",
         0
       ],
       "model": [
-        "150",
+        "58",
         0
       ],
       "positive": [
-        "162",
+        "44",
         0
       ],
       "negative": [
-        "153",
+        "35",
         0
       ],
       "latent_image": [
-        "142",
+        "24",
         0
       ]
     },
@@ -327,10 +327,10 @@
       "title": "K采样器"
     }
   },
-  "157": {
+  "39": {
     "inputs": {
       "seed": [
-        "163",
+        "45",
         0
       ],
       "steps": 24,
@@ -338,23 +338,23 @@
       "sampler_name": "dpmpp_2m",
       "scheduler": "sgm_uniform",
       "denoise": [
-        "172",
+        "54",
         1
       ],
       "model": [
-        "150",
+        "58",
         0
       ],
       "positive": [
-        "162",
+        "44",
         0
       ],
       "negative": [
-        "153",
+        "35",
         0
       ],
       "latent_image": [
-        "134",
+        "16",
         0
       ]
     },
@@ -363,10 +363,10 @@
       "title": "K采样器"
     }
   },
-  "158": {
+  "40": {
     "inputs": {
       "images": [
-        "161",
+        "43",
         0
       ]
     },
@@ -375,11 +375,11 @@
       "title": "预览图像"
     }
   },
-  "161": {
+  "43": {
     "inputs": {
       "index": 0,
       "value0": [
-        "144",
+        "26",
         0
       ]
     },
@@ -388,10 +388,10 @@
       "title": "编号切换"
     }
   },
-  "162": {
+  "44": {
     "inputs": {
       "text": [
-        "164",
+        "46",
         0
       ],
       "parser": "A1111",
@@ -410,7 +410,7 @@
       "text_l": "",
       "smZ_steps": 1,
       "clip": [
-        "175",
+        "58",
         1
       ]
     },
@@ -419,7 +419,7 @@
       "title": "CLIP Text Encode++"
     }
   },
-  "163": {
+  "45": {
     "inputs": {
       "value": 0
     },
@@ -428,7 +428,7 @@
       "title": "整数"
     }
   },
-  "164": {
+  "46": {
     "inputs": {
       "value": ""
     },
@@ -437,7 +437,7 @@
       "title": "字符串（多行）"
     }
   },
-  "165": {
+  "47": {
     "inputs": {
       "value": ""
     },
@@ -446,7 +446,7 @@
       "title": "字符串（多行）"
     }
   },
-  "166": {
+  "48": {
     "inputs": {
       "value": 1024
     },
@@ -455,7 +455,7 @@
       "title": "整数"
     }
   },
-  "167": {
+  "49": {
     "inputs": {
       "value": 1024
     },
@@ -464,10 +464,10 @@
       "title": "整数"
     }
   },
-  "168": {
+  "50": {
     "inputs": {
       "seed": [
-        "163",
+        "45",
         0
       ],
       "steps": 1,
@@ -476,19 +476,19 @@
       "scheduler": "normal",
       "denoise": 1,
       "model": [
-        "150",
+        "32",
         0
       ],
       "positive": [
-        "146",
+        "28",
         0
       ],
       "negative": [
-        "146",
+        "28",
         0
       ],
       "latent_image": [
-        "145",
+        "27",
         0
       ]
     },
@@ -497,7 +497,7 @@
       "title": "K采样器"
     }
   },
-  "170": {
+  "52": {
     "inputs": {
       "value": 0.55
     },
@@ -506,7 +506,7 @@
       "title": "浮点数"
     }
   },
-  "171": {
+  "53": {
     "inputs": {
       "value": 1
     },
@@ -515,15 +515,15 @@
       "title": "浮点数"
     }
   },
-  "172": {
+  "54": {
     "inputs": {
       "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))",
       "a": [
-        "171",
+        "53",
         0
       ],
       "b": [
-        "170",
+        "52",
         0
       ]
     },
@@ -532,7 +532,7 @@
       "title": "Math Expression 🐍"
     }
   },
-  "174": {
+  "56": {
     "inputs": {
       "name": "Chenkin-UniControl-XL.safetensors",
       "control_type": "fuse (chenkincontrol-only)"
@@ -542,16 +542,35 @@
       "title": "Load ControlNet++ Model (Single) 🛂🅐🅒🅝"
     }
   },
-  "175": {
+  "57": {
     "inputs": {
-      "ckpt_name": "马上用\\novaPixelsXL_v30.safetensors"
+      "ckpt_name": ""
     },
     "class_type": "CheckpointLoaderSimple",
     "_meta": {
       "title": "Checkpoint加载器（简易）"
     }
   },
-  "177": {
+  "58": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": [
+        "32",
+        0
+      ],
+      "clip": [
+        "57",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA"
+    }
+  },
+  "59": {
     "inputs": {
       "name": "Chenkin-UniControl-XL.safetensors",
       "control_type": "fuse (chenkincontrol-only)"

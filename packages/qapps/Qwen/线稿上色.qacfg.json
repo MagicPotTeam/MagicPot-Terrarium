@@ -41,10 +41,21 @@
     {
       "label": "LoRA",
       "component": "InputLoRAChain",
-      "outputModelSlots": ["$.42.inputs.model"],
-      "outputClipSlots": ["$.13.inputs.clip", "$.31.inputs.clip"],
-      "inputModel": ["34", 0],
-      "inputClip": ["35", 0]
+      "outputModelSlots": [
+        "$.42.inputs.model"
+      ],
+      "outputClipSlots": [
+        "$.13.inputs.clip",
+        "$.31.inputs.clip"
+      ],
+      "inputModel": [
+        "34",
+        0
+      ],
+      "inputClip": [
+        "35",
+        0
+      ]
     },
     {
       "label": "生成参数",
@@ -82,7 +93,9 @@
     "https://github.com/yolain/ComfyUI-Easy-Use",
     "https://github.com/kijai/ComfyUI-KJNodes"
   ],
-  "outputNodeIds": ["43"],
+  "outputNodeIds": [
+    "43"
+  ],
   "requiredModels": [
     {
       "name": "MTEED.pth",

@@ -1,9 +1,9 @@
 {
-  "148": {
+  "178": {
     "inputs": {
       "filename_prefix": "Qwen_Edit_2511",
       "images": [
-        "162",
+        "191",
         0
       ]
     },
@@ -12,7 +12,7 @@
       "title": "保存图像"
     }
   },
-  "149": {
+  "179": {
     "inputs": {
       "image": ""
     },
@@ -21,7 +21,7 @@
       "title": "加载图像"
     }
   },
-  "150": {
+  "180": {
     "inputs": {
       "unet_name": "qwen_image_edit_2511_fp8mixed.safetensors",
       "weight_dtype": "default"
@@ -31,12 +31,12 @@
       "title": "UNet加载器"
     }
   },
-  "151": {
+  "181": {
     "inputs": {
       "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
       "strength_model": 1,
       "model": [
-        "150",
+        "180",
         0
       ]
     },
@@ -45,7 +45,7 @@
       "title": "加载LoRA (Lightning)"
     }
   },
-  "152": {
+  "182": {
     "inputs": {
       "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
       "type": "qwen_image",
@@ -56,7 +56,7 @@
       "title": "加载CLIP"
     }
   },
-  "153": {
+  "183": {
     "inputs": {
       "vae_name": "qwen_image_vae.safetensors"
     },
@@ -65,33 +65,12 @@
       "title": "加载VAE"
     }
   },
-  "154": {
-    "inputs": {
-      "prompt": "",
-      "clip": [
-        "152",
-        0
-      ],
-      "vae": [
-        "153",
-        0
-      ],
-      "image1": [
-        "160",
-        0
-      ]
-    },
-    "class_type": "TextEncodeQwenImageEditPlus",
-    "_meta": {
-      "title": "TextEncodeQwenImageEditPlus (Negative)"
-    }
-  },
-  "155": {
+  "184": {
     "inputs": {
       "lora_name": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
       "strength_model": 1,
       "model": [
-        "151",
+        "181",
         0
       ]
     },
@@ -100,11 +79,11 @@
       "title": "加载LoRA (多角度)"
     }
   },
-  "156": {
+  "185": {
     "inputs": {
       "reference_latents_method": "index_timestep_zero",
       "conditioning": [
-        "165",
+        "194",
         0
       ]
     },
@@ -113,11 +92,11 @@
       "title": "FluxKontextMultiReferenceLatentMethod"
     }
   },
-  "157": {
+  "186": {
     "inputs": {
       "shift": 3.1,
       "model": [
-        "155",
+        "184",
         0
       ]
     },
@@ -126,11 +105,11 @@
       "title": "采样算法(AuraFlow)"
     }
   },
-  "158": {
+  "187": {
     "inputs": {
       "reference_latents_method": "index_timestep_zero",
       "conditioning": [
-        "154",
+        "195",
         0
       ]
     },
@@ -139,11 +118,11 @@
       "title": "FluxKontextMultiReferenceLatentMethod"
     }
   },
-  "159": {
+  "188": {
     "inputs": {
       "strength": 1,
       "model": [
-        "157",
+        "186",
         0
       ]
     },
@@ -152,10 +131,10 @@
       "title": "CFGNorm"
     }
   },
-  "160": {
+  "189": {
     "inputs": {
       "image": [
-        "149",
+        "179",
         0
       ]
     },
@@ -164,14 +143,14 @@
       "title": "FluxKontextImageScale"
     }
   },
-  "161": {
+  "190": {
     "inputs": {
       "pixels": [
-        "160",
+        "189",
         0
       ],
       "vae": [
-        "153",
+        "183",
         0
       ]
     },
@@ -180,14 +159,14 @@
       "title": "VAE编码"
     }
   },
-  "162": {
+  "191": {
     "inputs": {
       "samples": [
-        "163",
+        "192",
         0
       ],
       "vae": [
-        "153",
+        "183",
         0
       ]
     },
@@ -196,7 +175,7 @@
       "title": "VAE解码"
     }
   },
-  "163": {
+  "192": {
     "inputs": {
       "seed": 513600792086494,
       "steps": 4,
@@ -205,19 +184,19 @@
       "scheduler": "simple",
       "denoise": 1,
       "model": [
-        "159",
+        "188",
         0
       ],
       "positive": [
-        "156",
+        "185",
         0
       ],
       "negative": [
-        "158",
+        "187",
         0
       ],
       "latent_image": [
-        "161",
+        "190",
         0
       ]
     },
@@ -226,7 +205,7 @@
       "title": "K采样器"
     }
   },
-  "164": {
+  "193": {
     "inputs": {
       "horizontal_angle": 77,
       "vertical_angle": 27,
@@ -234,7 +213,7 @@
       "default_prompts": false,
       "camera_view": false,
       "image": [
-        "149",
+        "179",
         0
       ]
     },
@@ -243,28 +222,49 @@
       "title": "Qwen多角度相机"
     }
   },
-  "165": {
+  "194": {
     "inputs": {
       "prompt": [
-        "164",
+        "193",
         0
       ],
       "clip": [
-        "152",
+        "182",
         0
       ],
       "vae": [
-        "153",
+        "183",
         0
       ],
       "image1": [
-        "160",
+        "189",
         0
       ]
     },
     "class_type": "TextEncodeQwenImageEditPlus",
     "_meta": {
       "title": "TextEncodeQwenImageEditPlus (Positive)"
+    }
+  },
+  "195": {
+    "inputs": {
+      "prompt": "",
+      "clip": [
+        "182",
+        0
+      ],
+      "vae": [
+        "183",
+        0
+      ],
+      "image1": [
+        "189",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus (Negative)"
     }
   }
 }

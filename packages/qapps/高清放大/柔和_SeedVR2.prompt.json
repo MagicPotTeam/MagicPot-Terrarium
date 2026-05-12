@@ -1,5 +1,5 @@
 {
-  "331": {
+  "1": {
     "inputs": {
       "model": "ema_vae_fp16.safetensors",
       "device": "cuda:0",
@@ -18,16 +18,16 @@
       "title": "SeedVR2 (Down)Load VAE Model"
     }
   },
-  "332": {
+  "2": {
     "inputs": {
-      "image": "1 (1).png"
+      "image": ""
     },
     "class_type": "LoadImage",
     "_meta": {
       "title": "加载图像"
     }
   },
-  "333": {
+  "3": {
     "inputs": {
       "model": "seedvr2_ema_7b_fp16.safetensors",
       "device": "cuda:0",
@@ -42,7 +42,7 @@
       "title": "SeedVR2 (Down)Load DiT Model"
     }
   },
-  "334": {
+  "4": {
     "inputs": {
       "seed": 42,
       "resolution": 4096,
@@ -57,15 +57,15 @@
       "offload_device": "cpu",
       "enable_debug": false,
       "image": [
-        "332",
+        "2",
         0
       ],
       "dit": [
-        "333",
+        "3",
         0
       ],
       "vae": [
-        "331",
+        "1",
         0
       ]
     },
@@ -74,11 +74,11 @@
       "title": "SeedVR2 Video Upscaler (v2.5.24)"
     }
   },
-  "335": {
+  "5": {
     "inputs": {
       "filename_prefix": "ComfyUI",
       "images": [
-        "334",
+        "4",
         0
       ]
     },

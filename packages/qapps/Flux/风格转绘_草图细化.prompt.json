@@ -1,16 +1,22 @@
 {
-  "152": {
+  "1": {
     "inputs": {
       "preprocessor": "AnyLineArtPreprocessor_aux",
-      "resolution": ["166", 0],
-      "image": ["185", 0]
+      "resolution": [
+        "15",
+        0
+      ],
+      "image": [
+        "34",
+        0
+      ]
     },
     "class_type": "AIO_Preprocessor",
     "_meta": {
       "title": "AIO Aux Preprocessor"
     }
   },
-  "161": {
+  "10": {
     "inputs": {
       "control_net_name": "FLUX.1-dev-ControlNet-Union-Pro-2.0.safetensors"
     },
@@ -19,104 +25,170 @@
       "title": "加载ControlNet模型"
     }
   },
-  "164": {
+  "13": {
     "inputs": {
       "preprocessor": "DepthAnythingV2Preprocessor",
-      "resolution": ["165", 0],
-      "image": ["185", 0]
+      "resolution": [
+        "14",
+        0
+      ],
+      "image": [
+        "34",
+        0
+      ]
     },
     "class_type": "AIO_Preprocessor",
     "_meta": {
       "title": "AIO Aux Preprocessor"
     }
   },
-  "165": {
+  "14": {
     "inputs": {
       "resize_mode": "Just Resize",
-      "image": ["185", 0]
+      "image": [
+        "34",
+        0
+      ]
     },
     "class_type": "easy imagePixelPerfect",
     "_meta": {
       "title": "图像完美像素"
     }
   },
-  "166": {
+  "15": {
     "inputs": {
       "resize_mode": "Just Resize",
-      "image": ["185", 0]
+      "image": [
+        "34",
+        0
+      ]
     },
     "class_type": "easy imagePixelPerfect",
     "_meta": {
       "title": "图像完美像素"
     }
   },
-  "167": {
+  "16": {
     "inputs": {
-      "image": ["185", 0]
+      "image": [
+        "34",
+        0
+      ]
     },
     "class_type": "GetImageSize",
     "_meta": {
       "title": "获取图像尺寸"
     }
   },
-  "170": {
+  "19": {
     "inputs": {
       "strength": 0.3,
       "start_percent": 0,
-      "end_percent": ["193", 0],
-      "positive": ["186", 0],
-      "negative": ["186", 1],
-      "control_net": ["176", 0],
-      "vae": ["178", 0],
-      "image": ["152", 0]
+      "end_percent": [
+        "42",
+        0
+      ],
+      "positive": [
+        "35",
+        0
+      ],
+      "negative": [
+        "35",
+        1
+      ],
+      "control_net": [
+        "25",
+        0
+      ],
+      "vae": [
+        "27",
+        0
+      ],
+      "image": [
+        "1",
+        0
+      ]
     },
     "class_type": "ControlNetApplySD3",
     "_meta": {
       "title": "应用ControlNet"
     }
   },
-  "172": {
+  "21": {
     "inputs": {
       "max_shift": 1.15,
       "base_shift": 0.5000000000000001,
-      "width": ["167", 0],
-      "height": ["167", 1],
-      "model": ["200", 0]
+      "width": [
+        "16",
+        0
+      ],
+      "height": [
+        "16",
+        1
+      ],
+      "model": [
+        "47",
+        0
+      ]
     },
     "class_type": "ModelSamplingFlux",
     "_meta": {
       "title": "采样算法（Flux）"
     }
   },
-  "173": {
+  "22": {
     "inputs": {
-      "seed": ["189", 0],
+      "seed": [
+        "38",
+        0
+      ],
       "steps": 36,
       "cfg": 1,
       "sampler_name": "dpmpp_2m",
       "scheduler": "sgm_uniform",
-      "denoise": ["192", 0],
-      "model": ["172", 0],
-      "positive": ["170", 0],
-      "negative": ["170", 1],
-      "latent_image": ["197", 0]
+      "denoise": [
+        "41",
+        0
+      ],
+      "model": [
+        "21",
+        0
+      ],
+      "positive": [
+        "19",
+        0
+      ],
+      "negative": [
+        "19",
+        1
+      ],
+      "latent_image": [
+        "46",
+        0
+      ]
     },
     "class_type": "KSampler",
     "_meta": {
       "title": "K采样器"
     }
   },
-  "174": {
+  "23": {
     "inputs": {
-      "samples": ["173", 0],
-      "vae": ["178", 0]
+      "samples": [
+        "22",
+        0
+      ],
+      "vae": [
+        "27",
+        0
+      ]
     },
     "class_type": "VAEDecode",
     "_meta": {
       "title": "VAE解码"
     }
   },
-  "176": {
+  "25": {
     "inputs": {
       "control_net_name": "FLUX.1-dev-ControlNet-Union-Pro-2.0.safetensors"
     },
@@ -125,7 +197,7 @@
       "title": "加载ControlNet模型"
     }
   },
-  "177": {
+  "26": {
     "inputs": {
       "clip_name1": "clip_l.safetensors",
       "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
@@ -137,7 +209,7 @@
       "title": "双CLIP加载器"
     }
   },
-  "178": {
+  "27": {
     "inputs": {
       "vae_name": "ae.safetensors"
     },
@@ -146,53 +218,83 @@
       "title": "加载VAE"
     }
   },
-  "185": {
+  "34": {
     "inputs": {
       "index": 1,
-      "value1": ["199", 0]
+      "value1": [
+        "48",
+        0
+      ]
     },
     "class_type": "easy anythingIndexSwitch",
     "_meta": {
       "title": "编号切换"
     }
   },
-  "186": {
+  "35": {
     "inputs": {
       "strength": 0.3,
       "start_percent": 0,
-      "end_percent": ["193", 0],
-      "positive": ["187", 0],
-      "negative": ["188", 0],
-      "control_net": ["161", 0],
-      "vae": ["178", 0],
-      "image": ["164", 0]
+      "end_percent": [
+        "42",
+        0
+      ],
+      "positive": [
+        "36",
+        0
+      ],
+      "negative": [
+        "37",
+        0
+      ],
+      "control_net": [
+        "10",
+        0
+      ],
+      "vae": [
+        "27",
+        0
+      ],
+      "image": [
+        "13",
+        0
+      ]
     },
     "class_type": "ControlNetApplySD3",
     "_meta": {
       "title": "应用ControlNet"
     }
   },
-  "187": {
+  "36": {
     "inputs": {
-      "text": ["190", 0],
-      "clip": ["200", 1]
+      "text": [
+        "39",
+        0
+      ],
+      "clip": [
+        "26",
+        0
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
       "title": "CLIP文本编码"
     }
   },
-  "188": {
+  "37": {
     "inputs": {
       "text": "",
-      "clip": ["200", 1]
+      "clip": [
+        "26",
+        0
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
       "title": "CLIP文本编码"
     }
   },
-  "189": {
+  "38": {
     "inputs": {
       "value": 0
     },
@@ -201,7 +303,7 @@
       "title": "整数"
     }
   },
-  "190": {
+  "39": {
     "inputs": {
       "value": ""
     },
@@ -210,16 +312,7 @@
       "title": "字符串（多行）"
     }
   },
-  "191": {
-    "inputs": {
-      "value": 0.55
-    },
-    "class_type": "easy float",
-    "_meta": {
-      "title": "浮点数"
-    }
-  },
-  "192": {
+  "41": {
     "inputs": {
       "value": 0.8
     },
@@ -228,7 +321,7 @@
       "title": "浮点数"
     }
   },
-  "193": {
+  "42": {
     "inputs": {
       "value": 0.8
     },
@@ -237,47 +330,48 @@
       "title": "浮点数"
     }
   },
-  "194": {
-    "inputs": {
-      "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))",
-      "a": ["192", 0],
-      "b": ["191", 0]
-    },
-    "class_type": "MathExpression|pysssss",
-    "_meta": {
-      "title": "Math Expression 🐍"
-    }
-  },
-  "195": {
+  "44": {
     "inputs": {
       "filename_prefix": "ComfyUI",
-      "images": ["174", 0]
+      "images": [
+        "23",
+        0
+      ]
     },
     "class_type": "SaveImage",
     "_meta": {
       "title": "保存图像"
     }
   },
-  "196": {
+  "45": {
     "inputs": {
-      "images": ["185", 0]
+      "images": [
+        "34",
+        0
+      ]
     },
     "class_type": "PreviewImage",
     "_meta": {
       "title": "预览图像"
     }
   },
-  "197": {
+  "46": {
     "inputs": {
-      "pixels": ["185", 0],
-      "vae": ["178", 0]
+      "pixels": [
+        "34",
+        0
+      ],
+      "vae": [
+        "27",
+        0
+      ]
     },
     "class_type": "VAEEncode",
     "_meta": {
       "title": "VAE编码"
     }
   },
-  "198": {
+  "47": {
     "inputs": {
       "unet_name": "flux1-dev-fp8-e4m3fn.safetensors",
       "weight_dtype": "default"
@@ -287,26 +381,13 @@
       "title": "UNet加载器"
     }
   },
-  "199": {
+  "48": {
     "inputs": {
-      "image": "1 (1).png"
+      "image": ""
     },
     "class_type": "LoadImage",
     "_meta": {
       "title": "加载图像"
-    }
-  },
-  "200": {
-    "inputs": {
-      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
-      "strength_model": 0.8000000000000002,
-      "strength_clip": 0.8000000000000002,
-      "model": ["198", 0],
-      "clip": ["177", 0]
-    },
-    "class_type": "LoraLoader",
-    "_meta": {
-      "title": "加载LoRA"
     }
   }
 }

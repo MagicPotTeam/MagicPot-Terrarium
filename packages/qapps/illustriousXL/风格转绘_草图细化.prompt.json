@@ -1,13 +1,13 @@
 {
-  "166": {
+  "119": {
     "inputs": {
       "preprocessor": "AnyLineArtPreprocessor_aux",
       "resolution": [
-        "178",
+        "131",
         0
       ],
       "image": [
-        "185",
+        "138",
         0
       ]
     },
@@ -16,15 +16,15 @@
       "title": "AIO Aux Preprocessor"
     }
   },
-  "167": {
+  "120": {
     "inputs": {
       "preprocessor": "DepthAnythingV2Preprocessor",
       "resolution": [
-        "174",
+        "127",
         0
       ],
       "image": [
-        "171",
+        "124",
         0
       ]
     },
@@ -33,11 +33,11 @@
       "title": "AIO Aux Preprocessor"
     }
   },
-  "168": {
+  "121": {
     "inputs": {
       "resize_mode": "Just Resize",
       "image": [
-        "171",
+        "124",
         0
       ]
     },
@@ -46,32 +46,32 @@
       "title": "图像完美像素"
     }
   },
-  "169": {
+  "122": {
     "inputs": {
       "strength": 0.3,
       "start_percent": 0,
       "end_percent": [
-        "216",
+        "169",
         0
       ],
       "positive": [
-        "210",
+        "163",
         0
       ],
       "negative": [
-        "206",
+        "159",
         0
       ],
       "control_net": [
-        "220",
+        "173",
         0
       ],
       "vae": [
-        "221",
+        "174",
         2
       ],
       "image": [
-        "176",
+        "129",
         0
       ]
     },
@@ -80,32 +80,32 @@
       "title": "应用ControlNet"
     }
   },
-  "170": {
+  "123": {
     "inputs": {
       "strength": 0.3,
       "start_percent": 0,
       "end_percent": [
-        "216",
+        "169",
         0
       ],
       "positive": [
-        "188",
+        "141",
         0
       ],
       "negative": [
-        "188",
+        "141",
         1
       ],
       "control_net": [
-        "219",
+        "172",
         0
       ],
       "vae": [
-        "221",
+        "174",
         2
       ],
       "image": [
-        "208",
+        "161",
         0
       ]
     },
@@ -114,7 +114,7 @@
       "title": "应用ControlNet"
     }
   },
-  "171": {
+  "124": {
     "inputs": {
       "width": 1536,
       "height": 1536,
@@ -123,7 +123,7 @@
       "divisible_by": 2,
       "crop": "disabled",
       "image": [
-        "189",
+        "142",
         0
       ]
     },
@@ -132,11 +132,11 @@
       "title": "Resize Image (deprecated)"
     }
   },
-  "174": {
+  "127": {
     "inputs": {
       "resize_mode": "Just Resize",
       "image": [
-        "171",
+        "124",
         0
       ]
     },
@@ -145,7 +145,7 @@
       "title": "图像完美像素"
     }
   },
-  "175": {
+  "128": {
     "inputs": {
       "width": 1024,
       "height": 1024,
@@ -154,11 +154,11 @@
       "divisible_by": 2,
       "crop": "disabled",
       "image": [
-        "203",
+        "156",
         0
       ],
       "get_image_size": [
-        "207",
+        "160",
         0
       ]
     },
@@ -167,15 +167,15 @@
       "title": "Resize Image (deprecated)"
     }
   },
-  "176": {
+  "129": {
     "inputs": {
       "preprocessor": "DepthAnythingV2Preprocessor",
       "resolution": [
-        "177",
+        "130",
         0
       ],
       "image": [
-        "185",
+        "138",
         0
       ]
     },
@@ -184,11 +184,11 @@
       "title": "AIO Aux Preprocessor"
     }
   },
-  "177": {
+  "130": {
     "inputs": {
       "resize_mode": "Just Resize",
       "image": [
-        "185",
+        "138",
         0
       ]
     },
@@ -197,11 +197,11 @@
       "title": "图像完美像素"
     }
   },
-  "178": {
+  "131": {
     "inputs": {
       "resize_mode": "Just Resize",
       "image": [
-        "185",
+        "138",
         0
       ]
     },
@@ -210,14 +210,14 @@
       "title": "图像完美像素"
     }
   },
-  "181": {
+  "134": {
     "inputs": {
       "pixels": [
-        "171",
+        "124",
         0
       ],
       "vae": [
-        "221",
+        "174",
         2
       ]
     },
@@ -226,7 +226,7 @@
       "title": "VAE编码"
     }
   },
-  "185": {
+  "138": {
     "inputs": {
       "width": 1024,
       "height": 1024,
@@ -235,7 +235,7 @@
       "divisible_by": 2,
       "crop": "disabled",
       "image": [
-        "207",
+        "160",
         0
       ]
     },
@@ -244,10 +244,10 @@
       "title": "Resize Image (deprecated)"
     }
   },
-  "186": {
+  "139": {
     "inputs": {
       "images": [
-        "207",
+        "160",
         0
       ]
     },
@@ -256,32 +256,32 @@
       "title": "预览图像"
     }
   },
-  "187": {
+  "140": {
     "inputs": {
       "strength": 0.3,
       "start_percent": 0,
       "end_percent": [
-        "216",
+        "169",
         0
       ],
       "positive": [
-        "169",
+        "122",
         0
       ],
       "negative": [
-        "169",
+        "122",
         1
       ],
       "control_net": [
-        "219",
+        "172",
         0
       ],
       "vae": [
-        "221",
+        "174",
         2
       ],
       "image": [
-        "166",
+        "119",
         0
       ]
     },
@@ -290,32 +290,32 @@
       "title": "应用ControlNet"
     }
   },
-  "188": {
+  "141": {
     "inputs": {
       "strength": 0.3,
       "start_percent": 0,
       "end_percent": [
-        "216",
+        "169",
         0
       ],
       "positive": [
-        "210",
+        "163",
         0
       ],
       "negative": [
-        "206",
+        "159",
         0
       ],
       "control_net": [
-        "220",
+        "173",
         0
       ],
       "vae": [
-        "221",
+        "174",
         2
       ],
       "image": [
-        "167",
+        "120",
         0
       ]
     },
@@ -324,14 +324,14 @@
       "title": "应用ControlNet"
     }
   },
-  "189": {
+  "142": {
     "inputs": {
       "samples": [
-        "209",
+        "162",
         0
       ],
       "vae": [
-        "221",
+        "174",
         2
       ]
     },
@@ -340,7 +340,7 @@
       "title": "VAE解码"
     }
   },
-  "190": {
+  "143": {
     "inputs": {
       "width": 1024,
       "height": 1024,
@@ -349,11 +349,11 @@
       "divisible_by": 2,
       "crop": "disabled",
       "image": [
-        "189",
+        "142",
         0
       ],
       "get_image_size": [
-        "207",
+        "160",
         0
       ]
     },
@@ -362,14 +362,14 @@
       "title": "Resize Image (deprecated)"
     }
   },
-  "191": {
+  "144": {
     "inputs": {
       "pixels": [
-        "185",
+        "138",
         0
       ],
       "vae": [
-        "221",
+        "174",
         2
       ]
     },
@@ -378,7 +378,7 @@
       "title": "VAE编码"
     }
   },
-  "202": {
+  "155": {
     "inputs": {
       "extra": "{\"show_headings\":true,\"show_descriptions\":false,\"mode\":\"*\"}",
       "ㅤ": "Stable Diffusion",
@@ -427,7 +427,7 @@
       "info_debug": "",
       "debug": false,
       "*": [
-        "221",
+        "174",
         0
       ]
     },
@@ -436,14 +436,14 @@
       "title": "Settings (smZ)"
     }
   },
-  "203": {
+  "156": {
     "inputs": {
       "samples": [
-        "214",
+        "167",
         0
       ],
       "vae": [
-        "221",
+        "174",
         2
       ]
     },
@@ -452,10 +452,10 @@
       "title": "VAE解码"
     }
   },
-  "206": {
+  "159": {
     "inputs": {
       "text": [
-        "212",
+        "165",
         0
       ],
       "parser": "A1111",
@@ -474,7 +474,7 @@
       "text_l": "",
       "smZ_steps": 1,
       "clip": [
-        "221",
+        "176",
         1
       ]
     },
@@ -483,11 +483,11 @@
       "title": "CLIP Text Encode++"
     }
   },
-  "207": {
+  "160": {
     "inputs": {
       "index": 1,
       "value1": [
-        "222",
+        "175",
         0
       ]
     },
@@ -496,15 +496,15 @@
       "title": "编号切换"
     }
   },
-  "208": {
+  "161": {
     "inputs": {
       "preprocessor": "AnyLineArtPreprocessor_aux",
       "resolution": [
-        "168",
+        "121",
         0
       ],
       "image": [
-        "171",
+        "124",
         0
       ]
     },
@@ -513,10 +513,10 @@
       "title": "AIO Aux Preprocessor"
     }
   },
-  "209": {
+  "162": {
     "inputs": {
       "seed": [
-        "211",
+        "164",
         0
       ],
       "steps": 36,
@@ -524,23 +524,23 @@
       "sampler_name": "dpmpp_2m",
       "scheduler": "sgm_uniform",
       "denoise": [
-        "218",
+        "171",
         0
       ],
       "model": [
-        "202",
+        "176",
         0
       ],
       "positive": [
-        "187",
+        "140",
         0
       ],
       "negative": [
-        "187",
+        "140",
         1
       ],
       "latent_image": [
-        "191",
+        "144",
         0
       ]
     },
@@ -549,10 +549,10 @@
       "title": "K采样器"
     }
   },
-  "210": {
+  "163": {
     "inputs": {
       "text": [
-        "213",
+        "166",
         0
       ],
       "parser": "A1111",
@@ -571,7 +571,7 @@
       "text_l": "",
       "smZ_steps": 1,
       "clip": [
-        "221",
+        "176",
         1
       ]
     },
@@ -580,7 +580,7 @@
       "title": "CLIP Text Encode++"
     }
   },
-  "211": {
+  "164": {
     "inputs": {
       "value": 0
     },
@@ -589,7 +589,7 @@
       "title": "整数"
     }
   },
-  "212": {
+  "165": {
     "inputs": {
       "value": ""
     },
@@ -598,7 +598,7 @@
       "title": "字符串（多行）"
     }
   },
-  "213": {
+  "166": {
     "inputs": {
       "value": ""
     },
@@ -607,10 +607,10 @@
       "title": "字符串（多行）"
     }
   },
-  "214": {
+  "167": {
     "inputs": {
       "seed": [
-        "211",
+        "164",
         0
       ],
       "steps": 24,
@@ -618,23 +618,23 @@
       "sampler_name": "dpmpp_2m",
       "scheduler": "sgm_uniform",
       "denoise": [
-        "217",
+        "170",
         1
       ],
       "model": [
-        "202",
+        "176",
         0
       ],
       "positive": [
-        "170",
+        "123",
         0
       ],
       "negative": [
-        "170",
+        "123",
         1
       ],
       "latent_image": [
-        "181",
+        "134",
         0
       ]
     },
@@ -643,7 +643,7 @@
       "title": "K采样器"
     }
   },
-  "215": {
+  "168": {
     "inputs": {
       "value": 0.55
     },
@@ -652,7 +652,7 @@
       "title": "浮点数"
     }
   },
-  "216": {
+  "169": {
     "inputs": {
       "value": 0.8
     },
@@ -661,15 +661,15 @@
       "title": "浮点数"
     }
   },
-  "217": {
+  "170": {
     "inputs": {
       "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))",
       "a": [
-        "218",
+        "171",
         0
       ],
       "b": [
-        "215",
+        "168",
         0
       ]
     },
@@ -678,7 +678,7 @@
       "title": "Math Expression 🐍"
     }
   },
-  "218": {
+  "171": {
     "inputs": {
       "value": 0.8
     },
@@ -687,7 +687,7 @@
       "title": "浮点数"
     }
   },
-  "219": {
+  "172": {
     "inputs": {
       "name": "Chenkin-UniControl-XL.safetensors",
       "control_type": "fuse (chenkincontrol-only)"
@@ -697,7 +697,7 @@
       "title": "Load ControlNet++ Model (Single) 🛂🅐🅒🅝"
     }
   },
-  "220": {
+  "173": {
     "inputs": {
       "name": "Chenkin-UniControl-XL.safetensors",
       "control_type": "fuse (chenkincontrol-only)"
@@ -707,29 +707,48 @@
       "title": "Load ControlNet++ Model (Single) 🛂🅐🅒🅝"
     }
   },
-  "221": {
+  "174": {
     "inputs": {
-      "ckpt_name": "马上用\\novaPixelsXL_v30.safetensors"
+      "ckpt_name": ""
     },
     "class_type": "CheckpointLoaderSimple",
     "_meta": {
       "title": "Checkpoint加载器（简易）"
     }
   },
-  "222": {
+  "175": {
     "inputs": {
-      "image": "1 (1).png"
+      "image": ""
     },
     "class_type": "LoadImage",
     "_meta": {
       "title": "加载图像"
     }
   },
-  "224": {
+  "176": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 0,
+      "strength_clip": 0,
+      "model": [
+        "155",
+        0
+      ],
+      "clip": [
+        "174",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA"
+    }
+  },
+  "177": {
     "inputs": {
       "filename_prefix": "ComfyUI",
       "images": [
-        "175",
+        "128",
         0
       ]
     },

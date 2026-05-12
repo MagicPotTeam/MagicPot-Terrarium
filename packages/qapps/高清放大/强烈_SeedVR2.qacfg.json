@@ -3,7 +3,7 @@
   "inputs": [
     {
       "label": "加载图像",
-      "slot": "$.339.inputs.image",
+      "slot": "$.4.inputs.image",
       "component": "InputComfyImage"
     }
   ],
@@ -12,11 +12,11 @@
     "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler"
   ],
   "outputNodeIds": [
-    "340"
+    "5"
   ],
   "batchProcess": {
     "enabled": true,
-    "imageInputSlot": "$.339.inputs.image"
+    "imageInputSlot": "$.4.inputs.image"
   },
   "requiredModels": [
     {

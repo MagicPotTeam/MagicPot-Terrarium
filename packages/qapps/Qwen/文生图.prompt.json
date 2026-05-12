@@ -1,5 +1,5 @@
 {
-  "17": {
+  "212": {
     "inputs": {
       "width": 1024,
       "height": 1024,
@@ -7,47 +7,74 @@
       "keep_proportion": true,
       "divisible_by": 2,
       "crop": "disabled",
-      "image": ["29", 0]
+      "image": [
+        "224",
+        0
+      ]
     },
     "class_type": "ImageResizeKJ",
     "_meta": {
       "title": "Resize Image (deprecated)"
     }
   },
-  "20": {
+  "215": {
     "inputs": {
-      "samples": ["46", 0],
-      "vae": ["44", 0]
+      "samples": [
+        "241",
+        0
+      ],
+      "vae": [
+        "239",
+        0
+      ]
     },
     "class_type": "VAEDecode",
     "_meta": {
       "title": "VAE解码"
     }
   },
-  "21": {
+  "216": {
     "inputs": {
-      "pixels": ["17", 0],
-      "vae": ["44", 0]
+      "pixels": [
+        "212",
+        0
+      ],
+      "vae": [
+        "239",
+        0
+      ]
     },
     "class_type": "VAEEncode",
     "_meta": {
       "title": "VAE编码"
     }
   },
-  "25": {
+  "220": {
     "inputs": {
-      "samples": ["34", 0],
-      "vae": ["44", 0]
+      "samples": [
+        "229",
+        0
+      ],
+      "vae": [
+        "239",
+        0
+      ]
     },
     "class_type": "VAEDecode",
     "_meta": {
       "title": "VAE解码"
     }
   },
-  "26": {
+  "221": {
     "inputs": {
-      "width": ["32", 0],
-      "height": ["33", 0],
+      "width": [
+        "227",
+        0
+      ],
+      "height": [
+        "228",
+        0
+      ],
       "batch_size": 1
     },
     "class_type": "EmptyLatentImage",
@@ -55,47 +82,65 @@
       "title": "空Latent图像"
     }
   },
-  "27": {
+  "222": {
     "inputs": {
       "text": "",
-      "clip": ["40", 0]
+      "clip": [
+        "235",
+        0
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
       "title": "CLIP文本编码"
     }
   },
-  "29": {
+  "224": {
     "inputs": {
       "index": 0,
-      "value0": ["25", 0]
+      "value0": [
+        "220",
+        0
+      ]
     },
     "class_type": "easy anythingIndexSwitch",
     "_meta": {
       "title": "编号切换"
     }
   },
-  "30": {
+  "225": {
     "inputs": {
-      "text": ["42", 0],
-      "clip": ["51", 1]
+      "text": [
+        "237",
+        0
+      ],
+      "clip": [
+        "246",
+        1
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
       "title": "CLIP文本编码"
     }
   },
-  "31": {
+  "226": {
     "inputs": {
-      "text": ["48", 0],
-      "clip": ["51", 1]
+      "text": [
+        "243",
+        0
+      ],
+      "clip": [
+        "246",
+        1
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
       "title": "CLIP文本编码"
     }
   },
-  "32": {
+  "227": {
     "inputs": {
       "value": 1024
     },
@@ -104,7 +149,7 @@
       "title": "整数"
     }
   },
-  "33": {
+  "228": {
     "inputs": {
       "value": 1024
     },
@@ -113,25 +158,40 @@
       "title": "整数"
     }
   },
-  "34": {
+  "229": {
     "inputs": {
-      "seed": ["35", 0],
+      "seed": [
+        "230",
+        0
+      ],
       "steps": 1,
       "cfg": 1,
       "sampler_name": "euler",
       "scheduler": "normal",
       "denoise": 1,
-      "model": ["41", 0],
-      "positive": ["27", 0],
-      "negative": ["27", 0],
-      "latent_image": ["26", 0]
+      "model": [
+        "236",
+        0
+      ],
+      "positive": [
+        "222",
+        0
+      ],
+      "negative": [
+        "222",
+        0
+      ],
+      "latent_image": [
+        "221",
+        0
+      ]
     },
     "class_type": "KSampler",
     "_meta": {
       "title": "K采样器"
     }
   },
-  "35": {
+  "230": {
     "inputs": {
       "value": 0
     },
@@ -140,7 +200,7 @@
       "title": "整数"
     }
   },
-  "36": {
+  "231": {
     "inputs": {
       "value": 1
     },
@@ -149,18 +209,24 @@
       "title": "浮点数"
     }
   },
-  "37": {
+  "232": {
     "inputs": {
       "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))",
-      "a": ["36", 0],
-      "b": ["38", 0]
+      "a": [
+        "231",
+        0
+      ],
+      "b": [
+        "233",
+        0
+      ]
     },
     "class_type": "MathExpression|pysssss",
     "_meta": {
       "title": "Math Expression 🐍"
     }
   },
-  "38": {
+  "233": {
     "inputs": {
       "value": 0.55
     },
@@ -169,7 +235,7 @@
       "title": "浮点数"
     }
   },
-  "40": {
+  "235": {
     "inputs": {
       "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
       "type": "qwen_image",
@@ -180,17 +246,20 @@
       "title": "加载CLIP"
     }
   },
-  "41": {
+  "236": {
     "inputs": {
       "shift": 3.1,
-      "model": ["45", 0]
+      "model": [
+        "240",
+        0
+      ]
     },
     "class_type": "ModelSamplingAuraFlow",
     "_meta": {
       "title": "采样算法（AuraFlow）"
     }
   },
-  "42": {
+  "237": {
     "inputs": {
       "value": ""
     },
@@ -199,7 +268,7 @@
       "title": "字符串（多行）"
     }
   },
-  "44": {
+  "239": {
     "inputs": {
       "vae_name": "qwen_image_vae.safetensors"
     },
@@ -208,7 +277,7 @@
       "title": "加载VAE"
     }
   },
-  "45": {
+  "240": {
     "inputs": {
       "unet_name": "qwen_image_fp8_e4m3fn.safetensors",
       "weight_dtype": "default"
@@ -218,25 +287,43 @@
       "title": "UNet加载器"
     }
   },
-  "46": {
+  "241": {
     "inputs": {
-      "seed": ["35", 0],
+      "seed": [
+        "230",
+        0
+      ],
       "steps": 36,
       "cfg": 2.5,
       "sampler_name": "dpmpp_2m",
       "scheduler": "sgm_uniform",
-      "denoise": ["36", 0],
-      "model": ["51", 0],
-      "positive": ["31", 0],
-      "negative": ["30", 0],
-      "latent_image": ["21", 0]
+      "denoise": [
+        "231",
+        0
+      ],
+      "model": [
+        "246",
+        0
+      ],
+      "positive": [
+        "226",
+        0
+      ],
+      "negative": [
+        "225",
+        0
+      ],
+      "latent_image": [
+        "216",
+        0
+      ]
     },
     "class_type": "KSampler",
     "_meta": {
       "title": "K采样器"
     }
   },
-  "47": {
+  "242": {
     "inputs": {
       "width": 1024,
       "height": 1024,
@@ -244,15 +331,21 @@
       "keep_proportion": true,
       "divisible_by": 2,
       "crop": "disabled",
-      "image": ["20", 0],
-      "get_image_size": ["29", 0]
+      "image": [
+        "215",
+        0
+      ],
+      "get_image_size": [
+        "224",
+        0
+      ]
     },
     "class_type": "ImageResizeKJ",
     "_meta": {
       "title": "Resize Image (deprecated)"
     }
   },
-  "48": {
+  "243": {
     "inputs": {
       "value": ""
     },
@@ -261,32 +354,44 @@
       "title": "字符串（多行）"
     }
   },
-  "49": {
+  "244": {
     "inputs": {
       "filename_prefix": "ComfyUI",
-      "images": ["47", 0]
+      "images": [
+        "242",
+        0
+      ]
     },
     "class_type": "SaveImage",
     "_meta": {
       "title": "保存图像"
     }
   },
-  "50": {
+  "245": {
     "inputs": {
-      "images": ["29", 0]
+      "images": [
+        "224",
+        0
+      ]
     },
     "class_type": "PreviewImage",
     "_meta": {
       "title": "预览图像"
     }
   },
-  "51": {
+  "246": {
     "inputs": {
-      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "lora_name": "",
       "strength_model": 0.8000000000000002,
       "strength_clip": 0.8000000000000002,
-      "model": ["41", 0],
-      "clip": ["40", 0]
+      "model": [
+        "236",
+        0
+      ],
+      "clip": [
+        "235",
+        0
+      ]
     },
     "class_type": "LoraLoader",
     "_meta": {

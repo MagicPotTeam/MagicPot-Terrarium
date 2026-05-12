@@ -9,27 +9,27 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.150.inputs.unet_name",
+      "slot": "$.180.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.152.inputs.clip_name",
+      "slot": "$.182.inputs.clip_name",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.153.inputs.vae_name",
+      "slot": "$.183.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Lightning LoRA",
-      "slot": "$.151.inputs.lora_name",
+      "slot": "$.181.inputs.lora_name",
       "component": "InputComfySelect"
     },
     {
       "label": "多角度 LoRA",
-      "slot": "$.155.inputs.lora_name",
+      "slot": "$.184.inputs.lora_name",
       "component": "InputComfySelect"
     },
     {
@@ -40,12 +40,12 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.149.inputs.image",
+      "slot": "$.179.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "水平角度",
-      "slot": "$.164.inputs.horizontal_angle",
+      "slot": "$.193.inputs.horizontal_angle",
       "min": 0,
       "max": 360,
       "step": 1,
@@ -53,7 +53,7 @@
     },
     {
       "label": "垂直角度",
-      "slot": "$.164.inputs.vertical_angle",
+      "slot": "$.193.inputs.vertical_angle",
       "min": -30,
       "max": 60,
       "step": 1,
@@ -61,7 +61,7 @@
     },
     {
       "label": "缩放",
-      "slot": "$.164.inputs.zoom",
+      "slot": "$.193.inputs.zoom",
       "min": 0,
       "max": 10,
       "step": 0.1,
@@ -71,7 +71,7 @@
   "autoInputs": [
     {
       "label": "随机种子",
-      "slot": "$.163.inputs.seed",
+      "slot": "$.192.inputs.seed",
       "component": "AutoSeed"
     }
   ],
@@ -79,7 +79,7 @@
     "https://github.com/RyoJerryYu/ComfyUI-qwenmultiangle"
   ],
   "outputNodeIds": [
-    "148"
+    "178"
   ],
   "isHidden": false,
   "requiredModels": [
@@ -116,6 +116,6 @@
   ],
   "batchProcess": {
     "enabled": true,
-    "imageInputSlot": "$.149.inputs.image"
+    "imageInputSlot": "$.179.inputs.image"
   }
 }
