@@ -11,6 +11,7 @@ type SourceIdentityInput = {
   canonicalPath: string
   sizeBytes: number
   lastModifiedMs: number
+  cacheRootDir?: string
 }
 
 const CACHE_KEY_PREFIX = 'thumb'
@@ -63,7 +64,8 @@ export function buildCanvasImageSourceIdentity(
       canonicalPath,
       sizeBytes,
       lastModifiedMs
-    })
+    }),
+    ...(input.cacheRootDir?.trim() ? { cacheRootDir: input.cacheRootDir.trim() } : {})
   }
 }
 

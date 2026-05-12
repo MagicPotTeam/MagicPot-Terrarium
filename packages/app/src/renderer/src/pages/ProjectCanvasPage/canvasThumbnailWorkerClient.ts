@@ -363,6 +363,7 @@ async function writeThumbnailSetToCache({
   try {
     const persistedResponse = await bridge.writeThumbnailSet({
       cacheKey: identity.cacheKey,
+      ...(identity.cacheRootDir ? { cacheRootDir: identity.cacheRootDir } : {}),
       manifest: canvasThumbnailManifestFromSet(transientSet),
       files: await buildWriteFiles(levels)
     })
@@ -392,7 +393,10 @@ export async function readWarmCanvasThumbnailSet(
   }
 
   try {
-    const response = await bridge.readThumbnailManifest({ cacheKey: identity.cacheKey })
+    const response = await bridge.readThumbnailManifest({
+      cacheKey: identity.cacheKey,
+      ...(identity.cacheRootDir ? { cacheRootDir: identity.cacheRootDir } : {})
+    })
     const manifest = extractManifestFromReadResponse(response)
     if (!manifest) {
       return { status: 'cache-miss', thumbnailSet: null, manifest: null }

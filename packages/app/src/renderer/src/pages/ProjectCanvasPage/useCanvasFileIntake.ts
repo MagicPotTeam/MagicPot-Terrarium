@@ -14,7 +14,7 @@ import {
 } from '@renderer/utils/droppedImageUtils'
 import type { ChatAttachment, OCRResult } from '@shared/api/svcLLMProxy'
 import type { FileItem } from '@shared/comfy/types'
-import { isCanvasFile } from './canvasStorage'
+import { getProjectCanvasLocation, isCanvasFile } from './canvasStorage'
 import { collectDroppedDirectoryFiles } from './dropDirectory'
 import { extractModelPackageFiles } from './modelArchive'
 import { isPsdImportFile } from './psdImport'
@@ -325,8 +325,20 @@ const CLIPBOARD_FILE_EXTENSION_BY_MIME: Record<string, string> = {
   'text/plain': '.txt'
 }
 
+async function resolveCanvasThumbnailCacheRoot(canvasId?: string): Promise<string | undefined> {
+  if (!canvasId || !window.path || typeof window.path.join !== 'function') {
+    return undefined
+  }
+
+  const location = await getProjectCanvasLocation(canvasId)
+  return location
+    ? window.path.join(location.projectRootDir, '.cache', 'canvas-thumbnails')
+    : undefined
+}
+
 async function resolveCanvasImageLocalSourceIdentity(
-  file: File
+  file: File,
+  cacheRootDir?: string
 ): Promise<CanvasImageSourceIdentity | undefined> {
   const thumbnailService = window.api?.svcCanvasThumbnail
   if (!thumbnailService?.getSourceFileMetadata) {
@@ -348,7 +360,8 @@ async function resolveCanvasImageLocalSourceIdentity(
       buildCanvasImageSourceIdentity({
         canonicalPath: metadata.canonicalPath,
         sizeBytes: metadata.sizeBytes,
-        lastModifiedMs: metadata.lastModifiedMs
+        lastModifiedMs: metadata.lastModifiedMs,
+        cacheRootDir
       }) ?? undefined
     )
   } catch (error) {
@@ -698,7 +711,8 @@ export function useCanvasFileIntake({
         resolveImageFileSource(file),
         readCanvasImageBlobMetadata(file)
       ])
-      const sourceIdentity = await resolveCanvasImageLocalSourceIdentity(file)
+      const thumbnailCacheRoot = await resolveCanvasThumbnailCacheRoot(canvasId)
+      const sourceIdentity = await resolveCanvasImageLocalSourceIdentity(file, thumbnailCacheRoot)
       const source: CanvasImageSourceObject = {
         src,
         fileName: file.name,
@@ -717,7 +731,7 @@ export function useCanvasFileIntake({
 
       return source
     },
-    [resolveImageFileSource]
+    [canvasId, resolveImageFileSource]
   )
 
   const resolveImageFileSourceInputs = useCallback(

@@ -4,6 +4,7 @@ import { ResultCardComponent, ResultCardProps } from './types'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { useEffect } from 'react'
 import { api } from '@renderer/utils/windowUtils'
+import { resolveProjectResourceDir } from '@renderer/utils/projectResourcePaths'
 
 // 记录已经自动保存过的文本，防止组件重新挂载时重复保存
 const autoSavedTextTracker = new Set<string>()
@@ -23,14 +24,15 @@ const ResultCardText: ResultCardComponent<'text'> = ({
 
     const autoSaveText = async () => {
       try {
-        const DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
-        const downloadDir = localStorage.getItem(DOWNLOAD_DIR_KEY) || config.download_dir
-
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
         const fileName = `qapp_auto_${timestamp}.txt`
 
         const data = new TextEncoder().encode(result.text)
-        const targetDir = downloadDir ? window.path.join(downloadDir, 'AutoSave') : undefined
+        const targetDir = resolveProjectResourceDir({
+          config: { download_dir: config.download_dir },
+          projectId: result.projectId,
+          segments: ['AutoSave', 'QuickApp', 'Texts']
+        })
 
         const res = await api().svcHyper.saveImageToDir({
           // re-using this for raw buffer saving
@@ -45,7 +47,7 @@ const ResultCardText: ResultCardComponent<'text'> = ({
     }
 
     autoSaveText()
-  }, [result.text, config.download_dir])
+  }, [result.text, result.projectId, config.download_dir])
 
   return (
     <ResultCardLayout

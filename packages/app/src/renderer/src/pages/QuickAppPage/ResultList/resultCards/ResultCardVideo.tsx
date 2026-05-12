@@ -6,7 +6,7 @@ import {
 } from '@mui/icons-material'
 import { Box } from '@mui/material'
 import { ConfigUtils } from '@shared/config/configUtils'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import ModalLayout from '@renderer/components/ModalLayout'
 import { downloadFile, extractWorkflowFromImage } from '@renderer/utils/fileUtils'
 import { api } from '@renderer/utils/windowUtils'
@@ -18,6 +18,9 @@ import { resolveImportedWorkflow } from '@renderer/utils/resolveImportedWorkflow
 import ResultCardLayout from './components/ResultCardLayout'
 import ResultIconButtonBase from './components/ResultIconButtonBase'
 import { ResultCardComponent, ResultCardProps } from './types'
+import { resolveProjectResourceDir } from '@renderer/utils/projectResourcePaths'
+
+const autoSavedVideoTracker = new Set<string>()
 
 const ResultCardVideo: ResultCardComponent<'video'> = ({
   result,
@@ -33,6 +36,37 @@ const ResultCardVideo: ResultCardComponent<'video'> = ({
   const fileName = result.fileItem.filename || `qapp_video_${index + 1}.mp4`
   const outputDir = configUtils.getOutputDir()
   const isDraggableResult = Boolean(result.objectUrl && result.objectUrl.trim())
+
+  useEffect(() => {
+    if (!result.objectUrl.trim() || autoSavedVideoTracker.has(result.objectUrl)) return
+    autoSavedVideoTracker.add(result.objectUrl)
+
+    const autoSaveVideo = async () => {
+      try {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+        const extension = fileName.match(/\.[^.]+$/)?.[0] || '.mp4'
+        const autoFileName = `qapp_auto_${timestamp}${extension}`
+        const response = await fetch(result.objectUrl)
+        const blob = await response.blob()
+        const arrayBuffer = await blob.arrayBuffer()
+        const targetDir = resolveProjectResourceDir({
+          config: { download_dir: config.download_dir },
+          projectId: result.projectId,
+          segments: ['AutoSave', 'QuickApp', 'Videos']
+        })
+
+        await api().svcHyper.saveImageToDir({
+          data: new Uint8Array(arrayBuffer),
+          fileName: autoFileName,
+          dir: targetDir
+        })
+      } catch (error) {
+        console.error('[AutoSave] Failed to save quick app video:', error)
+      }
+    }
+
+    autoSaveVideo()
+  }, [config.download_dir, fileName, result.objectUrl, result.projectId])
 
   const handleLoadQApp = async () => {
     try {

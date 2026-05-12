@@ -405,6 +405,9 @@ const LoadingFallback: React.FC = () => (
 
 // Kept temporarily to avoid risky large-file churn while the shared runner is rolled out.
 
+const scopeResultItemsToProject = (resultItems: ResultItem[], projectId?: string): ResultItem[] =>
+  projectId ? resultItems.map((item) => ({ ...item, projectId })) : resultItems
+
 const useLegacyQAppRunner = (projectId?: string) => {
   const { t } = useTranslation()
   const {
@@ -513,9 +516,10 @@ const useLegacyQAppRunner = (projectId?: string) => {
         return
       }
 
-      appendResults(resultItems)
+      const scopedResultItems = scopeResultItemsToProject(resultItems, projectId)
+      appendResults(scopedResultItems)
 
-      const canvasDispatchCounts = dispatchQAppResultsToCanvas(resultItems, projectId)
+      const canvasDispatchCounts = dispatchQAppResultsToCanvas(scopedResultItems, projectId)
 
       const summary = summarizeGeneratedResults(resultItems)
       if (canvasDispatchCounts.totalCount > 0) {

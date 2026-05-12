@@ -9,6 +9,7 @@ export type CanvasImageSourceIdentity = {
   sizeBytes: number
   lastModifiedMs: number
   cacheKey: string
+  cacheRootDir?: string
 }
 
 export type CanvasImageThumbnailLevel = {
@@ -95,9 +96,11 @@ export type CanvasThumbnailWriteSetResponse =
 export type CanvasThumbnailIpcBridge = {
   readThumbnailManifest?: (input: {
     cacheKey: string
+    cacheRootDir?: string
   }) => Promise<CanvasThumbnailReadManifestResponse>
   writeThumbnailSet?: (input: {
     cacheKey: string
+    cacheRootDir?: string
     manifest: CanvasThumbnailManifestLike
     files: CanvasThumbnailCacheWriteFile[]
   }) => Promise<CanvasThumbnailWriteSetResponse>

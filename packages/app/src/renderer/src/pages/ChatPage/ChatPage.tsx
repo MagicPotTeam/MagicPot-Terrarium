@@ -155,6 +155,10 @@ import {
 } from './chatToolExecution'
 import { getQAppPromptSettings } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/qAppPromptSettings'
 import { emitProjectTraceRuntimeEvent } from '@renderer/features/projectTrace/projectTraceRuntime'
+import {
+  resolveProjectIdFromStorageScope,
+  resolveProjectResourceDir
+} from '@renderer/utils/projectResourcePaths'
 
 // Hooks
 import { useImagePreview } from './hooks/useImagePreview'
@@ -2296,11 +2300,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 recordAutoSavedChatImageKey(trackerKey)
 
                 try {
-                  const DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
-                  const downloadDir = localStorage.getItem(DOWNLOAD_DIR_KEY) || config.download_dir
-                  const targetDir = downloadDir
-                    ? window.path.join(downloadDir, 'AutoSave')
-                    : undefined
+                  const targetDir = resolveProjectResourceDir({
+                    config: { download_dir: config.download_dir },
+                    projectId: resolveProjectIdFromStorageScope(storageScope),
+                    segments: ['AutoSave', 'Agent']
+                  })
                   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
                   const fileName = `agent_auto_${timestamp}.png`
                   const response = await fetch(attachment.url)
@@ -2332,7 +2336,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
 
     autoSaveAssistantImages()
-  }, [sessions, sessionsLoaded, config.download_dir, persistAssistantAttachmentFileReference])
+  }, [
+    sessions,
+    sessionsLoaded,
+    config.download_dir,
+    persistAssistantAttachmentFileReference,
+    storageScope
+  ])
 
   // ==================== 持久化 sessions 到 IndexedDB ====================
   useEffect(() => {

@@ -17,6 +17,7 @@ import { useQAppContext } from '../../components/QAppContext'
 import { compareWorkflows } from '@renderer/utils/qappUtils'
 import { resolveImportedWorkflow } from '@renderer/utils/resolveImportedWorkflow'
 import { INTERNAL_IMAGE_DRAG_PREFIX, QAPP_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
+import { resolveProjectResourceDir } from '@renderer/utils/projectResourcePaths'
 
 // 记录已经自动保存过的图片，防止组件重新挂载时重复保存
 const autoSavedImageTracker = new Set<string>()
@@ -46,9 +47,6 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
 
     const autoSaveImage = async () => {
       try {
-        const DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
-        const downloadDir = localStorage.getItem(DOWNLOAD_DIR_KEY) || config.download_dir
-
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
         const fileName = `qapp_auto_${timestamp}.png`
 
@@ -57,7 +55,11 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
         const arrayBuffer = await blob.arrayBuffer()
         const data = new Uint8Array(arrayBuffer)
 
-        const targetDir = downloadDir ? window.path.join(downloadDir, 'AutoSave') : undefined
+        const targetDir = resolveProjectResourceDir({
+          config: { download_dir: config.download_dir },
+          projectId: result.projectId,
+          segments: ['AutoSave', 'QuickApp', 'Images']
+        })
 
         const res = await api().svcHyper.saveImageToDir({
           data,
@@ -71,7 +73,7 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
     }
 
     autoSaveImage()
-  }, [result.objectUrl, config.download_dir])
+  }, [result.objectUrl, result.projectId, config.download_dir])
 
   const handleCopyImage = async () => {
     try {

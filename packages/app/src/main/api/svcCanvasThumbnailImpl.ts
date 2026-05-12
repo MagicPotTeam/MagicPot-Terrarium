@@ -4,6 +4,7 @@ import * as path from 'path'
 import { pathToFileURL } from 'node:url'
 import type {
   CanvasThumbnailManifest,
+  CanvasThumbnailCacheRootReq,
   CanvasThumbnailNativeReq,
   CanvasThumbnailNativeResp,
   CanvasThumbnailReadManifestReq,
@@ -21,7 +22,12 @@ const CACHE_FILE_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,159}\.(?:png|webp)$/i
 const MANIFEST_FILENAME = 'manifest.json'
 const SUPPORTED_THUMBNAIL_MIME_TYPES = new Set(['image/png', 'image/webp'])
 
-function getCacheRoot(): string {
+function getCacheRoot(cacheRootDir?: string): string {
+  const explicitRoot = cacheRootDir?.trim()
+  if (explicitRoot) {
+    return path.resolve(explicitRoot)
+  }
+
   return path.join(app.getPath('userData'), THUMBNAIL_CACHE_DIRNAME)
 }
 
@@ -46,9 +52,9 @@ function assertPathInsideRoot(root: string, target: string): void {
   throw new Error(`Canvas thumbnail cache path escaped root: ${target}`)
 }
 
-function getCacheEntryDir(cacheKey: string): string {
+function getCacheEntryDir(cacheKey: string, cacheRootDir?: string): string {
   assertSafeCacheKey(cacheKey)
-  const cacheRoot = getCacheRoot()
+  const cacheRoot = getCacheRoot(cacheRootDir)
   const entryDir = path.resolve(cacheRoot, cacheKey)
   assertPathInsideRoot(cacheRoot, entryDir)
   return entryDir
@@ -105,8 +111,11 @@ function validateManifest(
   return manifest
 }
 
-function normalizeManifestFileUrls(manifest: CanvasThumbnailManifest): CanvasThumbnailManifest {
-  const entryDir = getCacheEntryDir(manifest.cacheKey)
+function normalizeManifestFileUrls(
+  manifest: CanvasThumbnailManifest,
+  cacheRootDir?: string
+): CanvasThumbnailManifest {
+  const entryDir = getCacheEntryDir(manifest.cacheKey, cacheRootDir)
   return {
     ...manifest,
     levels: manifest.levels.map((level) => ({
@@ -157,8 +166,10 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
     }
   }
 
-  getThumbnailCacheRoot = async (): Promise<{ cacheRoot: string }> => {
-    const cacheRoot = getCacheRoot()
+  getThumbnailCacheRoot = async (
+    req?: CanvasThumbnailCacheRootReq
+  ): Promise<{ cacheRoot: string }> => {
+    const cacheRoot = getCacheRoot(req?.cacheRootDir)
     fs.mkdirSync(cacheRoot, { recursive: true })
     return { cacheRoot }
   }
@@ -166,7 +177,7 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
   readThumbnailManifest = async (
     req: CanvasThumbnailReadManifestReq
   ): Promise<CanvasThumbnailReadManifestResp> => {
-    const entryDir = getCacheEntryDir(req.cacheKey)
+    const entryDir = getCacheEntryDir(req.cacheKey, req.cacheRootDir)
     const manifest = readJsonFile<CanvasThumbnailManifest>(path.join(entryDir, MANIFEST_FILENAME))
     if (!manifest) {
       return { manifest: null }
@@ -179,7 +190,7 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
       return { manifest: null }
     }
 
-    const normalized = normalizeManifestFileUrls(validated)
+    const normalized = normalizeManifestFileUrls(validated, req.cacheRootDir)
     const hasAllFiles = normalized.levels.every((level) =>
       fs.existsSync(getCacheFilePath(entryDir, level.filename))
     )
@@ -189,7 +200,7 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
   writeThumbnailSet = async (
     req: CanvasThumbnailWriteSetReq
   ): Promise<CanvasThumbnailWriteSetResp> => {
-    const entryDir = getCacheEntryDir(req.cacheKey)
+    const entryDir = getCacheEntryDir(req.cacheKey, req.cacheRootDir)
     const manifest = validateManifest(req.manifest, req.cacheKey)
     const expectedFilenames = new Set(manifest.levels.map((level) => level.filename))
     const writtenFilenames = new Set<string>()
@@ -225,7 +236,7 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
     fs.writeFileSync(tempManifestPath, JSON.stringify(manifestToPersist, null, 2), 'utf8')
     fs.renameSync(tempManifestPath, manifestPath)
 
-    return { manifest: normalizeManifestFileUrls(manifestToPersist) }
+    return { manifest: normalizeManifestFileUrls(manifestToPersist, req.cacheRootDir) }
   }
 
   createNativeThumbnail = async (

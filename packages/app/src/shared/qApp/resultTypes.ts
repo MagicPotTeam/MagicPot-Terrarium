@@ -4,6 +4,7 @@ export type ResultItemBase<ItemType extends string> = {
   id: string
   promptId: string
   type: ItemType
+  projectId?: string
 }
 
 export type ResultItemImage = ResultItemBase<'image'> & {

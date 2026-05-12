@@ -85,6 +85,9 @@ const summarizeGeneratedResults = (resultItems: ResultItem[]) => {
   return parts.join('、')
 }
 
+const scopeResultItemsToProject = (resultItems: ResultItem[], projectId?: string): ResultItem[] =>
+  projectId ? resultItems.map((item) => ({ ...item, projectId })) : resultItems
+
 export const useQAppRunner = (projectId?: string) => {
   const { t } = useTranslation()
   const {
@@ -144,7 +147,8 @@ export const useQAppRunner = (projectId?: string) => {
         return
       }
 
-      appendResults(resultItems)
+      const scopedResultItems = scopeResultItemsToProject(resultItems, projectId)
+      appendResults(scopedResultItems)
 
       try {
         await writeSelectedLoraTriggerWordFiles({ formState, configUtils })
@@ -154,7 +158,7 @@ export const useQAppRunner = (projectId?: string) => {
 
       const generationSessionId = readPendingQAppGenerationSessionId(qAppKey)
       const canvasDispatchCounts = dispatchQAppResultsToCanvas(
-        resultItems,
+        scopedResultItems,
         projectId,
         generationSessionId ?? undefined
       )

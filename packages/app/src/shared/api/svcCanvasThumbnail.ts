@@ -11,7 +11,9 @@ export type CanvasThumbnailSourceFileMetadataResp = {
   lastModifiedMs: number
 }
 
-export type CanvasThumbnailCacheRootReq = Record<string, never>
+export type CanvasThumbnailCacheRootReq = {
+  cacheRootDir?: string
+}
 
 export type CanvasThumbnailCacheRootResp = {
   cacheRoot: string
@@ -40,6 +42,7 @@ export type CanvasThumbnailManifest = {
 
 export type CanvasThumbnailReadManifestReq = {
   cacheKey: string
+  cacheRootDir?: string
 }
 
 export type CanvasThumbnailReadManifestResp = {
@@ -53,6 +56,7 @@ export type CanvasThumbnailWriteFile = {
 
 export type CanvasThumbnailWriteSetReq = {
   cacheKey: string
+  cacheRootDir?: string
   manifest: CanvasThumbnailManifest
   files: CanvasThumbnailWriteFile[]
 }

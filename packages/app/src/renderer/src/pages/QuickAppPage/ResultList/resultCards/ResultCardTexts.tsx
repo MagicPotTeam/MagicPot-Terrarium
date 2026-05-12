@@ -7,6 +7,7 @@ import ResultIconButtonBase from './components/ResultIconButtonBase'
 import ModalLayout from '@renderer/components/ModalLayout'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { api } from '@renderer/utils/windowUtils'
+import { resolveProjectResourceDir } from '@renderer/utils/projectResourcePaths'
 
 // 记录已经自动保存过的多文本结果，防止组件重新挂载时重复保存
 const autoSavedTextsTracker = new Set<string>()
@@ -28,9 +29,6 @@ const ResultCardTexts: ResultCardComponent<'texts'> = ({
 
     const autoSaveTexts = async () => {
       try {
-        const DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
-        const downloadDir = localStorage.getItem(DOWNLOAD_DIR_KEY) || config.download_dir
-
         const combinedText = result.resultItems
           .map((item) => `[${item.nodeTitle} (${item.nodeId})]\n${item.text}`)
           .join('\n\n---\n\n')
@@ -39,7 +37,11 @@ const ResultCardTexts: ResultCardComponent<'texts'> = ({
         const fileName = `qapp_auto_${timestamp}.txt`
 
         const data = new TextEncoder().encode(combinedText)
-        const targetDir = downloadDir ? window.path.join(downloadDir, 'AutoSave') : undefined
+        const targetDir = resolveProjectResourceDir({
+          config: { download_dir: config.download_dir },
+          projectId: result.projectId,
+          segments: ['AutoSave', 'QuickApp', 'Texts']
+        })
 
         const res = await api().svcHyper.saveImageToDir({
           data,
@@ -53,7 +55,7 @@ const ResultCardTexts: ResultCardComponent<'texts'> = ({
     }
 
     autoSaveTexts()
-  }, [result.resultItems, config.download_dir])
+  }, [result.resultItems, result.projectId, config.download_dir])
 
   let thumbnailResult = result.resultItems
   if (thumbnailResult.length > 5) {
