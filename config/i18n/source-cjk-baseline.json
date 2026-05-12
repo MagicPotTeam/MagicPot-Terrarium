@@ -641,6 +641,12 @@
     {
       "file": "packages/app/src/renderer/src/components/inputs/InputLoRAChain.tsx",
       "kind": "string",
+      "value": "触发词备注",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/inputs/InputLoRAChain.tsx",
+      "kind": "string",
       "value": "请添加 Lora",
       "count": 1
     },
@@ -648,6 +654,18 @@
       "file": "packages/app/src/renderer/src/components/inputs/InputLoRAChain.tsx",
       "kind": "string",
       "value": "输入搜索或选择...",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/inputs/InputLoRAChain.tsx",
+      "kind": "string",
+      "value": "填写该 LoRA 的触发词",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/inputs/InputLoRAChain.tsx",
+      "kind": "string",
+      "value": "选择该 LoRA 时会自动追加到提示词",
       "count": 1
     },
     {
@@ -1848,12 +1866,6 @@
       "file": "packages/app/src/renderer/src/pages/ChatPage/ChatPage.tsx",
       "kind": "string",
       "value": "[自动保存] Agent 图片保存失败:",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/ChatPage/ChatPage.tsx",
-      "kind": "string",
-      "value": "[ChatPage] 保存用户消息+占位符到 IndexedDB 失败:",
       "count": 1
     },
     {
@@ -9369,30 +9381,6 @@
       "count": 1
     },
     {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/components/CalloutMissingModels.tsx",
-      "kind": "jsx-text",
-      "value": "放到:",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/components/CalloutMissingModels.tsx",
-      "kind": "jsx-text",
-      "value": "缺少模型文件",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/components/CalloutMissingModels.tsx",
-      "kind": "jsx-text",
-      "value": "下载后请重命名为",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/components/CalloutMissingModels.tsx",
-      "kind": "jsx-text",
-      "value": "下载链接",
-      "count": 1
-    },
-    {
       "file": "packages/app/src/renderer/src/pages/QuickAppPage/components/CustomWorkshopTabs.tsx",
       "kind": "string",
       "value": "创建",
@@ -10714,6 +10702,12 @@
     },
     {
       "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputLoRAChain.tsx",
+      "kind": "jsx-text",
+      "value": "这里不会固定显示 LoRA 节点。用户在执行页选择 LoRA 后，生成时才会自动创建 LoraLoader；如果 API 流自带 LoRA，请选其中一个 LoraLoader，不选 LoRA 时会跳过原 LoRA。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputLoRAChain.tsx",
       "kind": "string",
       "value": "选择一个LoRA链节点",
       "count": 1
@@ -10738,62 +10732,14 @@
     },
     {
       "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputPrompt.tsx",
-      "kind": "jsx-text",
-      "value": "例如：”生成图片背景“、”生成新的室内装修样式”等。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputPrompt.tsx",
-      "kind": "jsx-text",
-      "value": "提示词最大长度限制，如果小于等于 0 ，则不限制。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputPrompt.tsx",
-      "kind": "jsx-text",
-      "value": "在使用随机提示词生成时，会用到以下描述，可以使生成的提示词更加符合功能需求。",
+      "kind": "string",
+      "value": "一般填写质量词，会显示在用户输入前面",
       "count": 1
     },
     {
       "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputPrompt.tsx",
       "kind": "string",
-      "value": "提示词后缀",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputPrompt.tsx",
-      "kind": "string",
-      "value": "提示词后缀...",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputPrompt.tsx",
-      "kind": "string",
-      "value": "提示词描述",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputPrompt.tsx",
-      "kind": "string",
-      "value": "提示词最大长度限制",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputPrompt.tsx",
-      "kind": "string",
-      "value": "添加 LLM 生成描述",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputPrompt.tsx",
-      "kind": "string",
-      "value": "添加提示词最大长度限制",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/qAppDesignInputs/DsnInputPrompt.tsx",
-      "kind": "string",
-      "value": "这段提示词用于描述什么...",
+      "value": "预设提示词",
       "count": 1
     },
     {
@@ -11040,6 +10986,12 @@
       "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/QAppDesignPopUpPanel.tsx",
       "kind": "string",
       "value": "未保存的更改",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/QAppDesignPopUpPanel.tsx",
+      "kind": "string",
+      "value": "未命名快应用",
       "count": 1
     },
     {
@@ -12617,12 +12569,6 @@
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
       "kind": "string",
-      "value": "当前 Prefix 下没有可清理的对象。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
       "value": "当前还没有单独配置快应用 API，所以快应用会暂时复用 Agent API 档案。如果你希望快应用单独使用别的模型，可以在这里额外添加。",
       "count": 1
     },
@@ -12654,12 +12600,6 @@
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
       "kind": "string",
       "value": "检查应用会与图像、视频、3D 并列显示。这里可以配置默认检查策略、缓存、GPU/CUDA 与 ONNX 视觉模型。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "将删除当前 Hunyuan3D Prefix 下的所有对象，此操作不可恢复。",
       "count": 1
     },
     {
@@ -12821,54 +12761,6 @@
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
       "kind": "string",
-      "value": "清理 Hunyuan3D COS 缓存",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "清理 Hunyuan3D COS 缓存失败。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "清理按钮只会删除当前 Prefix 下的对象，不会清空整个 Bucket。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "清理当前 Prefix",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "清理中...",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "请输入 SecretKey",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "取消",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "确认清理",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
       "value": "删除模型",
       "count": 1
     },
@@ -12923,43 +12815,13 @@
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
       "kind": "string",
-      "value": "腾讯云 API 地域",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "腾讯云 SecretId",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "腾讯云 SecretKey",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
       "value": "添加视觉模型",
       "count": 1
     },
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
       "kind": "string",
-      "value": "填写 SecretId、SecretKey、COS Bucket 和 COS 地域后，才可以执行清理。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
       "value": "图片扩展名",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "未配置",
       "count": 1
     },
     {
@@ -12989,31 +12851,7 @@
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
       "kind": "string",
-      "value": "在右侧快应用面板中选择 Hunyuan3D。此处配置的腾讯云凭证会用于将上传的参考图转换为 3D 模型。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "正在清理 Hunyuan3D COS 缓存...",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
       "value": "至少需要配置一个视觉模型。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "COS 地域",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "COS Key 前缀",
       "count": 1
     },
     {
@@ -13026,12 +12864,6 @@
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
       "kind": "string",
       "value": "GPU 不可用时自动回退 CPU",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelPlugin.tsx",
-      "kind": "string",
-      "value": "Hunyuan3D（快应用）",
       "count": 1
     },
     {

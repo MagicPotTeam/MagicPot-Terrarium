@@ -36,17 +36,15 @@ describe('userDataDirectory', () => {
     })
     delete process.env['MAGICPOT_USER_DATA_DIR']
     delete process.env['MAGICPOT_TEST_AUTOMATED_RUN']
-    delete process.env['MAGICPOT_TEST_ARTIFACT_BASE']
-    delete process.env['MAGICPOT_TEST_RUN_ID']
     delete process.env['MAGICPOT_TEST_DESKTOP_PATH']
+    delete process.env['MAGICPOT_TEST_RUN_ID']
   })
 
   afterEach(async () => {
     delete process.env['MAGICPOT_USER_DATA_DIR']
     delete process.env['MAGICPOT_TEST_AUTOMATED_RUN']
-    delete process.env['MAGICPOT_TEST_ARTIFACT_BASE']
-    delete process.env['MAGICPOT_TEST_RUN_ID']
     delete process.env['MAGICPOT_TEST_DESKTOP_PATH']
+    delete process.env['MAGICPOT_TEST_RUN_ID']
     appMock.getPath.mockReset()
     cwdSpy?.mockRestore()
     cwdSpy = null
@@ -141,7 +139,7 @@ describe('userDataDirectory', () => {
     const resolved = module.resolveStartupUserDataDirectory()
 
     expect(resolved).toEqual({
-      path: path.join(tempRoot, '.magicpot-trash', 'run-456', 'userData'),
+      path: path.join(tempRoot, 'Desktop', 'Codex-Junk', 'MagicPot', 'run-456', 'userData'),
       source: 'default'
     })
   })
@@ -155,7 +153,7 @@ describe('userDataDirectory', () => {
     const resolved = module.resolveStartupUserDataDirectory()
 
     expect(resolved).toEqual({
-      path: path.join(tempRoot, '.magicpot-trash', 'run-789', 'userData'),
+      path: path.join(tempRoot, 'Desktop', 'Codex-Junk', 'MagicPot', 'run-789', 'userData'),
       source: 'default'
     })
   })
@@ -169,21 +167,36 @@ describe('userDataDirectory', () => {
     const resolved = module.resolveStartupUserDataDirectory()
 
     expect(resolved).toEqual({
-      path: path.join(tempRoot, '.magicpot-trash', 'run-987', 'debug-session', 'userData'),
+      path: path.join(
+        tempRoot,
+        'Desktop',
+        'Codex-Junk',
+        'MagicPot',
+        'run-987',
+        'debug-session',
+        'userData'
+      ),
       source: 'env'
     })
   })
 
-  it('honors the standardized artifact base override for automated artifact routing', async () => {
+  it('honors the standardized desktop override for automated artifact routing', async () => {
     process.env['MAGICPOT_TEST_AUTOMATED_RUN'] = '1'
     process.env['MAGICPOT_TEST_RUN_ID'] = 'run-654'
-    process.env['MAGICPOT_TEST_ARTIFACT_BASE'] = path.join(tempRoot, 'RedirectedRoot')
+    process.env['MAGICPOT_TEST_DESKTOP_PATH'] = path.join(tempRoot, 'RedirectedDesktop')
 
     const module = await loadModule()
     const resolved = module.resolveStartupUserDataDirectory()
 
     expect(resolved).toEqual({
-      path: path.join(tempRoot, 'RedirectedRoot', '.magicpot-trash', 'run-654', 'userData'),
+      path: path.join(
+        tempRoot,
+        'RedirectedDesktop',
+        'Codex-Junk',
+        'MagicPot',
+        'run-654',
+        'userData'
+      ),
       source: 'default'
     })
   })

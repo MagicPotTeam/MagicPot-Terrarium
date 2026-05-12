@@ -82,7 +82,7 @@ vi.mock('electron', () => ({
 
 const ORIGINAL_ENV = {
   MAGICPOT_TEST_AUTOMATED_RUN: process.env['MAGICPOT_TEST_AUTOMATED_RUN'],
-  MAGICPOT_TEST_ARTIFACT_BASE: process.env['MAGICPOT_TEST_ARTIFACT_BASE'],
+  MAGICPOT_TEST_DESKTOP_PATH: process.env['MAGICPOT_TEST_DESKTOP_PATH'],
   MAGICPOT_TEST_UI_MODE: process.env['MAGICPOT_TEST_UI_MODE'],
   MAGICPOT_TEST_WINDOW_MODE: process.env['MAGICPOT_TEST_WINDOW_MODE'],
   MAGICPOT_TEST_NO_FOCUS: process.env['MAGICPOT_TEST_NO_FOCUS'],
@@ -155,8 +155,7 @@ beforeEach(() => {
 })
 
 describe('resolveScreenshotTempDir', () => {
-  it('uses repo .magicpot-trash/<run-id> during automated test runs', async () => {
-    process.env['MAGICPOT_TEST_ARTIFACT_BASE'] = 'C:/Users/test/MagicPot'
+  it('uses desktop Codex-Junk/MagicPot/<run-id> during automated test runs', async () => {
     const { resolveScreenshotTempDir } = await loadModule()
 
     expect(
@@ -166,7 +165,9 @@ describe('resolveScreenshotTempDir', () => {
         automatedTestRun: true,
         runId: 'run-123'
       })
-    ).toBe(pathWin32.join('C:/Users/test/MagicPot', '.magicpot-trash', 'run-123', 'screenshot'))
+    ).toBe(
+      pathWin32.join('C:/Users/test/Desktop', 'Codex-Junk', 'MagicPot', 'run-123', 'screenshot')
+    )
   })
 
   it('uses the system temp directory outside automated runs', async () => {
