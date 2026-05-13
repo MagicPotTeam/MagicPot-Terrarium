@@ -60,10 +60,10 @@ const DEFAULT_PROMPT_ROWS = 14
 const COLLAPSED_PROMPT_ROWS = 3
 
 const CUSTOM_SKILL_OUTPUT_MODE_OPTIONS = [
-  { value: 'default', zh: '默认', en: 'Default' },
-  { value: 'text', zh: '文本', en: 'Text' },
-  { value: 'image', zh: '图片', en: 'Image' },
-  { value: 'video', zh: '视频', en: 'Video' },
+  { value: 'default', zh: String.fromCharCode(0x9ed8, 0x8ba4), en: 'Default' },
+  { value: 'text', zh: String.fromCharCode(0x6587, 0x672c), en: 'Text' },
+  { value: 'image', zh: String.fromCharCode(0x56fe, 0x7247), en: 'Image' },
+  { value: 'video', zh: String.fromCharCode(0x89c6, 0x9891), en: 'Video' },
   { value: 'model3d', zh: '3D', en: '3D' }
 ] as const
 

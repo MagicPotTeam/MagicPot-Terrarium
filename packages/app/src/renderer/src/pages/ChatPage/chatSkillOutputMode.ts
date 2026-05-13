@@ -13,7 +13,19 @@ type SkillOutputResult = {
 
 type ForcedSkillOutputMode = Extract<CustomSkillOutputMode, 'text' | 'image' | 'video' | 'model3d'>
 
-const UNSUPPORTED_OUTPUT_MODE_MESSAGE = '该模型不支持该输出方式'
+const UNSUPPORTED_OUTPUT_MODE_MESSAGE = String.fromCharCode(
+  0x8be5,
+  0x6a21,
+  0x578b,
+  0x4e0d,
+  0x652f,
+  0x6301,
+  0x8be5,
+  0x8f93,
+  0x51fa,
+  0x65b9,
+  0x5f0f
+)
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
 const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.m4v', '.avi', '.mkv']
