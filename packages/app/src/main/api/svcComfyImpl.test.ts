@@ -191,6 +191,63 @@ describe('ComfySvcImpl', () => {
 
       randomUuidSpy.mockRestore()
     })
+
+    it('strips UI-only nodes before posting the prompt to ComfyUI', async () => {
+      const svc = new ComfySvcImpl()
+      ;(
+        svc as unknown as { cli: () => { objectInfo: () => Promise<Record<string, unknown>> } }
+      ).cli = () =>
+        ({
+          objectInfo: vi.fn().mockResolvedValue({})
+        }) as never
+
+      const postPromptSpy = vi.spyOn(svc, 'postPrompt').mockResolvedValue({
+        prompt_id: 'prompt-4'
+      })
+
+      await svc.submitWorkflow({
+        prompt: {
+          '10': {
+            class_type: 'SeedVR2VideoUpscaler',
+            inputs: {
+              image: ['31', 0]
+            }
+          },
+          '18': {
+            class_type: 'Note',
+            inputs: {
+              value: 'Enable to upscale alpha/mask channel along with RGB channel.'
+            }
+          },
+          '31': {
+            class_type: 'LoadImage',
+            inputs: {
+              image: 'input.png'
+            }
+          }
+        },
+        clientId: 'renderer-qapp'
+      })
+
+      expect(postPromptSpy).toHaveBeenCalledWith({
+        prompt: {
+          '10': {
+            class_type: 'SeedVR2VideoUpscaler',
+            inputs: {
+              image: ['31', 0]
+            }
+          },
+          '31': {
+            class_type: 'LoadImage',
+            inputs: {
+              image: 'input.png'
+            }
+          }
+        },
+        client_id: 'renderer-qapp',
+        extra_data: undefined
+      })
+    })
   })
 
   describe('connectWs', () => {

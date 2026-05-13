@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { fileItemToValue, findNotInstalledNodeInfo, valueToFileItem } from './funcs'
+import {
+  fileItemToValue,
+  findNotInstalledNodeInfo,
+  normalizeExecutableWorkflow,
+  parseAllNodeIdAndField,
+  valueToFileItem
+} from './funcs'
 import { ObjectInfoMap, Workflow } from './types'
 
 describe('valueToFileItem', () => {
@@ -65,5 +71,45 @@ describe('findNotInstalledNodeCls', () => {
     }
     // Note 和 Reroute 应该被排除，只有 Node1 应该被标记为未安装
     expect(findNotInstalledNodeInfo(workflow, objectInfos)).toEqual(['Node1'])
+  })
+})
+
+describe('normalizeExecutableWorkflow', () => {
+  it('removes Note nodes before a workflow is submitted', () => {
+    const workflow: Workflow = {
+      '1': { class_type: 'LoadImage', inputs: { image: 'input.png' } },
+      '18': { class_type: 'Note', inputs: { value: 'This is a UI-only note.' } },
+      '5': { class_type: 'SaveImage', inputs: { images: ['1', 0] } }
+    }
+
+    expect(normalizeExecutableWorkflow(workflow)).toEqual({
+      '1': { class_type: 'LoadImage', inputs: { image: 'input.png' } },
+      '5': { class_type: 'SaveImage', inputs: { images: ['1', 0] } }
+    })
+  })
+
+  it('removes Reroute nodes and reconnects downstream inputs to their source', () => {
+    const workflow: Workflow = {
+      '1': { class_type: 'LoadImage', inputs: { image: 'input.png' } },
+      '2': { class_type: 'Reroute', inputs: { input: ['1', 0] } },
+      '3': { class_type: 'Reroute', inputs: { input: ['2', 0] } },
+      '5': { class_type: 'SaveImage', inputs: { images: ['3', 0] } }
+    }
+
+    expect(normalizeExecutableWorkflow(workflow)).toEqual({
+      '1': { class_type: 'LoadImage', inputs: { image: 'input.png' } },
+      '5': { class_type: 'SaveImage', inputs: { images: ['1', 0] } }
+    })
+  })
+})
+
+describe('parseAllNodeIdAndField', () => {
+  it('does not offer UI-only nodes as selectable workflow inputs', () => {
+    const workflow: Workflow = {
+      '1': { class_type: 'LoadImage', inputs: { image: 'input.png' } },
+      '18': { class_type: 'Note', inputs: { value: 'This is a UI-only note.' } }
+    }
+
+    expect(parseAllNodeIdAndField(workflow)).toEqual([{ nodeId: '1', field: 'image' }])
   })
 })

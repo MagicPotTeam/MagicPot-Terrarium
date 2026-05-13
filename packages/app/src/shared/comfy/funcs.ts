@@ -1,5 +1,5 @@
 import { JsonPath, parseJsonPath } from '@shared/utils/jsonPath'
-import { ObjectInfoMap, FileItem, Workflow } from './types'
+import { ObjectInfoMap, FileItem, Workflow, WorkflowInputRef, WorkflowInputValue } from './types'
 
 /**
  * Find the comfy input option list by class type and field
@@ -137,6 +137,7 @@ export const fieldByJsonPath = (jsonPath: JsonPath, workflow: Workflow): string 
 export function parseAllNodeIdAndField(workflow: Workflow): { nodeId: string; field: string }[] {
   return Object.entries(workflow)
     .filter(([key]) => !key.startsWith('__')) // Filter out metadata keys
+    .filter(([, node]) => !isComfyFrontendOnlyNodeClassType(node.class_type))
     .flatMap(([nodeId, node]) => {
       return Object.keys(node.inputs).map((field) => {
         return { nodeId, field }
@@ -148,7 +149,110 @@ export function parseAllNodeIdAndField(workflow: Workflow): { nodeId: string; fi
  * ComfyUI 内置核心节点列表
  * 这些节点是 ComfyUI 自带的，不需要安装，应该被排除在未安装节点检查之外
  */
-const COMFYUI_BUILTIN_NODES = new Set(['Note', 'Reroute'])
+export const COMFYUI_FRONTEND_ONLY_NODE_TYPES = new Set(['Note', 'Reroute'])
+
+const COMFYUI_BUILTIN_NODES = COMFYUI_FRONTEND_ONLY_NODE_TYPES
+
+export function isComfyFrontendOnlyNodeClassType(classType: string | undefined): boolean {
+  return !!classType && COMFYUI_FRONTEND_ONLY_NODE_TYPES.has(classType)
+}
+
+function isWorkflowInputRef(value: unknown): value is WorkflowInputRef {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    (typeof value[0] === 'string' || typeof value[0] === 'number') &&
+    typeof value[1] === 'number'
+  )
+}
+
+function normalizeWorkflowInputRef(value: WorkflowInputRef): WorkflowInputRef {
+  return [String(value[0]), value[1]]
+}
+
+function getFirstInputRef(node: { inputs?: Record<string, unknown> }): WorkflowInputRef | null {
+  for (const inputValue of Object.values(node.inputs ?? {})) {
+    if (isWorkflowInputRef(inputValue)) {
+      return normalizeWorkflowInputRef(inputValue)
+    }
+  }
+  return null
+}
+
+function resolveExecutableInputRef(
+  workflow: Workflow,
+  inputRef: WorkflowInputRef,
+  visitedNodeIds: Set<string> = new Set()
+): WorkflowInputRef | null {
+  const normalizedRef = normalizeWorkflowInputRef(inputRef)
+  const [sourceNodeId] = normalizedRef
+  const sourceNode = workflow[sourceNodeId]
+
+  if (!sourceNode) {
+    return normalizedRef
+  }
+
+  if (sourceNode.class_type === 'Reroute') {
+    if (visitedNodeIds.has(sourceNodeId)) {
+      return null
+    }
+    visitedNodeIds.add(sourceNodeId)
+
+    const rerouteInputRef = getFirstInputRef(sourceNode)
+    return rerouteInputRef
+      ? resolveExecutableInputRef(workflow, rerouteInputRef, visitedNodeIds)
+      : null
+  }
+
+  if (isComfyFrontendOnlyNodeClassType(sourceNode.class_type)) {
+    return null
+  }
+
+  return normalizedRef
+}
+
+/**
+ * Remove ComfyUI UI-only nodes from an API prompt.
+ *
+ * GUI exports can contain nodes such as Note and Reroute. They are useful in the
+ * editor, but ComfyUI's prompt endpoint does not execute them and reports
+ * "Node type not found" when they are submitted as class_type entries.
+ */
+export function normalizeExecutableWorkflow(workflow: Workflow): Workflow {
+  const normalized: Workflow = {}
+  const normalizedRecord = normalized as unknown as Record<string, unknown>
+
+  for (const [nodeId, node] of Object.entries(workflow)) {
+    if (nodeId.startsWith('__')) {
+      normalizedRecord[nodeId] = node
+      continue
+    }
+
+    if (isComfyFrontendOnlyNodeClassType(node.class_type)) {
+      continue
+    }
+
+    const inputs: Record<string, WorkflowInputValue> = {}
+    for (const [inputName, inputValue] of Object.entries(node.inputs)) {
+      if (isWorkflowInputRef(inputValue)) {
+        const resolvedInputRef = resolveExecutableInputRef(workflow, inputValue)
+        if (resolvedInputRef) {
+          inputs[inputName] = resolvedInputRef
+        }
+        continue
+      }
+
+      inputs[inputName] = inputValue
+    }
+
+    normalized[nodeId] = {
+      ...node,
+      inputs
+    }
+  }
+
+  return normalized
+}
 
 /**
  * Find the not installed node class type in the workflow

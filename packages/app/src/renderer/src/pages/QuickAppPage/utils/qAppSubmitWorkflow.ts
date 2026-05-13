@@ -1,4 +1,5 @@
 import type { SubmitWorkflowReq } from '@shared/api/svcComfy'
+import { normalizeExecutableWorkflow } from '@shared/comfy/funcs'
 import type { Workflow } from '@shared/comfy/types'
 import type { JsonDict } from '@shared/utils/utilTypes'
 
@@ -18,7 +19,7 @@ const cleanString = (value?: string | null): string | undefined => {
 export const buildQAppSubmitWorkflowRequest = (
   options: BuildQAppSubmitWorkflowRequestOptions
 ): SubmitWorkflowReq => ({
-  prompt: options.prompt,
+  prompt: normalizeExecutableWorkflow(options.prompt),
   ...(cleanString(options.qAppKey) ? { qAppKey: cleanString(options.qAppKey) } : {}),
   ...(cleanString(options.clientId) ? { clientId: cleanString(options.clientId) } : {}),
   ...(cleanString(options.sessionKey) ? { sessionKey: cleanString(options.sessionKey) } : {}),

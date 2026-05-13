@@ -40,6 +40,7 @@ import { useMessage } from '@renderer/hooks/useMessage'
 import { useComfyEventCallback } from '@renderer/hooks/useComfyEvent'
 import { api } from '@renderer/utils/windowUtils'
 import { QAppMenuItem } from '@shared/api/svcQApp'
+import { isComfyFrontendOnlyNodeClassType } from '@shared/comfy/funcs'
 import type { Config } from '@shared/config/config'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useTranslation } from 'react-i18next'
@@ -1098,7 +1099,11 @@ export default function QAppMenu({
 
           // 如果是 LoRA 相关节点，不计入匹配（因为这些节点可能被动态增减）
           const classType = String(templateNode.class_type)
-          if (classType === 'LoraLoader' || classType === 'LoraLoaderModelOnly') {
+          if (
+            classType === 'LoraLoader' ||
+            classType === 'LoraLoaderModelOnly' ||
+            isComfyFrontendOnlyNodeClassType(classType)
+          ) {
             skipped++
             continue
           }
@@ -1116,7 +1121,11 @@ export default function QAppMenu({
         const imageNonLoraKeys = imageKeys.filter((k) => {
           const n = imageWf[k] as Record<string, unknown> | undefined
           const ct = String(n?.class_type || '')
-          return ct !== 'LoraLoader' && ct !== 'LoraLoaderModelOnly'
+          return (
+            ct !== 'LoraLoader' &&
+            ct !== 'LoraLoaderModelOnly' &&
+            !isComfyFrontendOnlyNodeClassType(ct)
+          )
         })
         const sizeDiffRatio =
           Math.abs(imageNonLoraKeys.length - coreTemplateNodes) / coreTemplateNodes

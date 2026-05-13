@@ -14,6 +14,7 @@ import { QAppCfg } from '@shared/qApp/cfgTypes'
 import { Workflow } from '@shared/comfy/types'
 import { isGuiWorkflow } from '@shared/comfy/guiWorkflowToPrompt'
 import { convertGuiWorkflowToPrompt } from '@shared/comfy/guiWorkflowToPrompt'
+import { normalizeExecutableWorkflow } from '@shared/comfy/funcs'
 import { isWorkflow } from '@shared/comfy/typeGuards'
 import { exists } from '../utils/fileUtils'
 import { QAppMenuItem } from '@shared/api/svcQApp'
@@ -276,7 +277,7 @@ export class QAppFSCli {
         const workflowPath = path.join(currentDir, `${name}.prompt.json`)
         const workflowData = JSON.parse(stripBom(await fs.readFile(workflowPath, 'utf8')))
         const workflow = isWorkflow(workflowData)
-          ? workflowData
+          ? normalizeExecutableWorkflow(workflowData)
           : isGuiWorkflow(workflowData)
             ? convertGuiWorkflowToPrompt(workflowData)
             : null
@@ -388,7 +389,7 @@ export class QAppFSCli {
         source: sources[i].isBuiltin ? 'builtin' : 'local'
       })
       if (isWorkflow(workflow)) {
-        return { cfg: qAppCfg, workflow, manifest }
+        return { cfg: qAppCfg, workflow: normalizeExecutableWorkflow(workflow), manifest }
       }
       if (isGuiWorkflow(workflow)) {
         const converted = convertGuiWorkflowToPrompt(workflow)

@@ -1,4 +1,5 @@
 import { buildQAppCfgFromAppMode, extractAppModeMetadata } from '@shared/comfy/appModeInterop'
+import { normalizeExecutableWorkflow } from '@shared/comfy/funcs'
 import { convertGuiWorkflowToPrompt, isGuiWorkflow } from '@shared/comfy/guiWorkflowToPrompt'
 import { isWorkflow } from '@shared/comfy/typeGuards'
 import { ObjectInfoMap, Workflow } from '@shared/comfy/types'
@@ -74,6 +75,8 @@ export async function resolveImportedWorkflow(
 ): Promise<ResolveImportedWorkflowResult> {
   const { prompt: promptCandidate, gui } = unwrapCandidates(input)
   let workflow: Workflow | undefined = promptCandidate
+    ? normalizeExecutableWorkflow(promptCandidate)
+    : undefined
   let objectInfos = options.objectInfos
 
   if (!workflow && gui) {

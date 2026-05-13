@@ -33,4 +33,44 @@ describe('buildQAppSubmitWorkflowRequest', () => {
       prompt: {} as never
     })
   })
+
+  it('removes ComfyUI front-end-only nodes before submission', () => {
+    const request = buildQAppSubmitWorkflowRequest({
+      prompt: {
+        '10': {
+          class_type: 'SeedVR2VideoUpscaler',
+          inputs: {
+            image: ['31', 0]
+          }
+        },
+        '18': {
+          class_type: 'Note',
+          inputs: {
+            value: 'Enable to upscale alpha/mask channel along with RGB channel.'
+          }
+        },
+        '31': {
+          class_type: 'LoadImage',
+          inputs: {
+            image: 'input.png'
+          }
+        }
+      }
+    })
+
+    expect(request.prompt).toEqual({
+      '10': {
+        class_type: 'SeedVR2VideoUpscaler',
+        inputs: {
+          image: ['31', 0]
+        }
+      },
+      '31': {
+        class_type: 'LoadImage',
+        inputs: {
+          image: 'input.png'
+        }
+      }
+    })
+  })
 })

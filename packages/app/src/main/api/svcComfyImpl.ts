@@ -46,6 +46,7 @@ import { comfyEventToTaskEvent, extractPromptId, taskToComfyQueueItem } from '..
 import { sleep } from '@shared/utils/utilFuncs'
 import { ComfyQueueResp, Workflow } from '@shared/comfy/types'
 import { processWorkflowLoras } from '../comfy/loraBypass'
+import { normalizeExecutableWorkflow } from '@shared/comfy/funcs'
 
 // Map to store qAppKey by task ID (for later retrieval when loading quick app)
 const taskQAppKeyMap = new Map<string, string>()
@@ -212,10 +213,10 @@ export class ComfySvcImpl implements ComfySvc {
     const workflowClientId = resolveWorkflowClientId(req)
 
     // 处理缺失的 LoRA：获取可用 LoRA 列表，绕过不存在的 LoRA 节点
-    let processedPrompt = req.prompt
+    let processedPrompt = normalizeExecutableWorkflow(req.prompt)
     try {
       const objectInfo = await this.cli().objectInfo()
-      const result = processWorkflowLoras(req.prompt, objectInfo)
+      const result = processWorkflowLoras(processedPrompt, objectInfo)
       processedPrompt = result.workflow
     } catch (error) {
       console.warn('[submitWorkflow] Failed to process LoRA bypass:', error)
