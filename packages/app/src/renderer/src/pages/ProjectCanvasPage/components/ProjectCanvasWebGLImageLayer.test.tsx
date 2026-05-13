@@ -199,6 +199,8 @@ function installPixiMock() {
 
         let scaleMode: 'nearest' | 'linear' = 'linear'
         const source = {
+          destroyed: false,
+          unload: vi.fn(),
           image,
           get scaleMode() {
             textureScaleModeReadCount += 1
@@ -533,6 +535,62 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(sprite.scale.y).toBe(2)
     expect(sprite.rotation).toBe(0)
     expect(app.render).toHaveBeenCalledTimes(renderCountBeforeClear + 1)
+  }, 15000)
+
+  it('refreshes the texture source when a tiny preview grows back to visible size', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+
+    render(
+      <ProjectCanvasWebGLImageLayer
+        ref={ref}
+        items={[createItem()]}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 1280, height: 720 }}
+      />
+    )
+
+    await waitFor(
+      () => {
+        expect(ref.current).not.toBeNull()
+        expect(createdSprites).toHaveLength(1)
+      },
+      { timeout: 15000 }
+    )
+
+    const sprite = createdSprites[0]
+    const source = sprite.texture.source as { unload: ReturnType<typeof vi.fn> }
+
+    act(() => {
+      ref.current?.syncItemPreview('image-1', {
+        x: 24,
+        y: 36,
+        width: 200,
+        height: 120,
+        scaleX: 0.1,
+        scaleY: 0.1,
+        rotation: 0
+      })
+    })
+
+    expect(source.unload).not.toHaveBeenCalled()
+
+    act(() => {
+      ref.current?.syncItemPreview('image-1', {
+        x: 24,
+        y: 36,
+        width: 200,
+        height: 120,
+        scaleX: 1,
+        scaleY: 1,
+        rotation: 0
+      })
+    })
+
+    expect(source.unload).toHaveBeenCalledTimes(1)
+    expect(sprite.scale.x).toBe(2)
+    expect(sprite.scale.y).toBe(2)
   }, 15000)
 
   it('recreates sprite state when the texture key changes', async () => {

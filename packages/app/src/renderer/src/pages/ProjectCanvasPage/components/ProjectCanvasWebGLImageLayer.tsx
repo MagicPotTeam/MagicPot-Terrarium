@@ -67,6 +67,7 @@ type SpriteRecord = {
   textureHeight: number
   textureByteSize: number
   lastUsedAt: number
+  sawTinyPreview: boolean
 }
 
 type SourceUpgradeQueueEntry = {
@@ -101,6 +102,8 @@ const PROJECT_CANVAS_WEBGL_DENSE_SOURCE_UPGRADE_MAX_SCALE = 0.5
 const PROJECT_CANVAS_WEBGL_IMAGE_ELEMENT_SOURCE_DECODE_MAX_BYTES = 256 * 1024 * 1024
 const PROJECT_CANVAS_WEBGL_IMAGE_ELEMENT_LOAD_TIMEOUT_MS = 15_000
 const PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS = 12_000
+const PROJECT_CANVAS_WEBGL_TINY_PREVIEW_SCREEN_EDGE_PX = 24
+const PROJECT_CANVAS_WEBGL_TINY_PREVIEW_RECOVERY_SCREEN_EDGE_PX = 48
 export const PROJECT_CANVAS_WEBGL_INITIAL_IMAGE_LOAD_CONCURRENCY = 8
 export const PROJECT_CANVAS_WEBGL_SPRITE_RECONCILE_BATCH_SIZE = 16
 export const PROJECT_CANVAS_WEBGL_OVERVIEW_SPRITE_RECONCILE_BATCH_SIZE = 128
@@ -262,6 +265,51 @@ function applyProjectCanvasTextureScaleMode(record: SpriteRecord) {
   if (textureSource.scaleMode !== nextScaleMode) {
     textureSource.scaleMode = nextScaleMode
   }
+}
+
+function getProjectCanvasPreviewScreenMaxEdge(
+  preview: ProjectCanvasImagePreview,
+  stageScale: number
+) {
+  const safeScale = Math.max(Math.abs(stageScale), PROJECT_CANVAS_MIN_STAGE_SCALE)
+  return (
+    Math.max(Math.abs(preview.width * preview.scaleX), Math.abs(preview.height * preview.scaleY)) *
+    safeScale
+  )
+}
+
+function isProjectCanvasTinyPreview(preview: ProjectCanvasImagePreview, stageScale: number) {
+  return (
+    getProjectCanvasPreviewScreenMaxEdge(preview, stageScale) <=
+    PROJECT_CANVAS_WEBGL_TINY_PREVIEW_SCREEN_EDGE_PX
+  )
+}
+
+function refreshProjectCanvasTextureAfterTinyPreview(
+  record: SpriteRecord,
+  preview: ProjectCanvasImagePreview,
+  stageScale: number
+) {
+  const screenMaxEdge = getProjectCanvasPreviewScreenMaxEdge(preview, stageScale)
+  if (screenMaxEdge <= PROJECT_CANVAS_WEBGL_TINY_PREVIEW_SCREEN_EDGE_PX) {
+    record.sawTinyPreview = true
+    return
+  }
+
+  if (
+    !record.sawTinyPreview ||
+    screenMaxEdge < PROJECT_CANVAS_WEBGL_TINY_PREVIEW_RECOVERY_SCREEN_EDGE_PX
+  ) {
+    return
+  }
+
+  const textureSource = (record.sourceTexture ?? record.texture).source as
+    | { destroyed?: boolean; unload?: () => void }
+    | undefined
+  if (textureSource && !textureSource.destroyed && typeof textureSource.unload === 'function') {
+    textureSource.unload()
+  }
+  record.sawTinyPreview = false
 }
 
 function getProjectCanvasRenderDeviceScale() {
@@ -1532,6 +1580,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           previewStateRef.current.delete(itemId)
           const renderItem = renderItemsRef.current.get(itemId)
           if (renderItem) {
+            refreshProjectCanvasTextureAfterTinyPreview(record, renderItem, stageScaleRef.current)
             applySpriteTransform(
               record.sprite,
               { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
@@ -1546,6 +1595,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         }
 
         previewStateRef.current.set(itemId, preview)
+        refreshProjectCanvasTextureAfterTinyPreview(record, preview, stageScaleRef.current)
         applySpriteTransform(
           record.sprite,
           { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
@@ -2559,6 +2609,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           )
           existingRecord.transformKey = transformKey
         }
+        refreshProjectCanvasTextureAfterTinyPreview(
+          existingRecord,
+          transformState,
+          stageScaleRef.current
+        )
         markSpriteRecordUsed(existingRecord)
         return
       }
@@ -2649,7 +2704,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           textureWidth,
           textureHeight,
           textureByteSize,
-          lastUsedAt: 0
+          lastUsedAt: 0,
+          sawTinyPreview: isProjectCanvasTinyPreview(transformState, stageScaleRef.current)
         })
         if (shouldBatchNewSpriteCreation) {
           newSpriteCreationBudget -= 1
