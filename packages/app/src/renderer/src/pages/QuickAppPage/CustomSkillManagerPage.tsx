@@ -59,6 +59,54 @@ import {
 const DEFAULT_PROMPT_ROWS = 14
 const COLLAPSED_PROMPT_ROWS = 3
 
+const CUSTOM_SKILL_OUTPUT_MODE_OPTIONS = [
+  { value: 'default', zh: '默认', en: 'Default' },
+  { value: 'text', zh: '文本', en: 'Text' },
+  { value: 'image', zh: '图片', en: 'Image' },
+  { value: 'video', zh: '视频', en: 'Video' },
+  { value: 'model3d', zh: '3D', en: '3D' }
+] as const
+
+type WorkshopOutputMode = (typeof CUSTOM_SKILL_OUTPUT_MODE_OPTIONS)[number]['value']
+
+const normalizeWorkshopOutputMode = (
+  value: NonNullable<CustomSkill['execution']>['outputMode'] | undefined
+): WorkshopOutputMode => {
+  switch (value) {
+    case 'default':
+    case 'text':
+    case 'image':
+    case 'video':
+    case 'model3d':
+      return value
+    case 'chat':
+    case 'sidecar':
+    case 'structured':
+      return 'text'
+    default:
+      return 'default'
+  }
+}
+
+const normalizeWorkshopSkillOutputMode = (skill: CustomSkill): CustomSkill => {
+  if (isBuiltInSkillId(skill.id)) {
+    return skill
+  }
+
+  const outputMode = skill.execution?.outputMode
+  if (outputMode !== 'chat' && outputMode !== 'sidecar' && outputMode !== 'structured') {
+    return skill
+  }
+
+  return {
+    ...skill,
+    execution: {
+      ...(skill.execution || {}),
+      outputMode: 'text'
+    }
+  }
+}
+
 // ==========================================
 // 样式常量
 // ==========================================
@@ -86,15 +134,17 @@ const getSkillReferenceAttachmentLabel = (
   return attachment.fileName ? `${prefix} - ${attachment.fileName}` : prefix
 }
 
-const sanitizeSkillEditorState = (skill: CustomSkill): CustomSkill =>
-  skill.type === 'agent'
+const sanitizeSkillEditorState = (skill: CustomSkill): CustomSkill => {
+  const normalizedSkill = normalizeWorkshopSkillOutputMode(skill)
+  return normalizedSkill.type === 'agent'
     ? {
-        ...skill,
+        ...normalizedSkill,
         prompt: '',
         instructions: undefined,
         referenceAttachments: []
       }
-    : skill
+    : normalizedSkill
+}
 
 type QuickAppPromptPatch = {
   plugin_config: {
@@ -436,7 +486,7 @@ const CustomSkillManagerPage: React.FC = () => {
 
   const mergeDefaultSkills = useCallback(
     (skills: CustomSkill[]) =>
-      mergeBuiltInSkills(skills, {
+      mergeBuiltInSkills(skills.map(normalizeWorkshopSkillOutputMode), {
         language,
         config
       }),
@@ -732,7 +782,7 @@ const CustomSkillManagerPage: React.FC = () => {
       execution: {
         mode: 'inherit',
         allowHistory: true,
-        outputMode: 'chat',
+        outputMode: 'default',
         fallbackStrategy: 'default',
         persistSessionUrl: true,
         contextMessageLimit: 'all'
@@ -1704,7 +1754,7 @@ const CustomSkillManagerPage: React.FC = () => {
               label={t('custom_workshop.skill_output_mode_label', {
                 defaultValue: uiText('输出模式', 'Output Mode')
               })}
-              value={selectedSkill?.execution?.outputMode || 'chat'}
+              value={normalizeWorkshopOutputMode(selectedSkill?.execution?.outputMode)}
               onChange={(event) =>
                 handleUpdateSelectedSkillExecution({
                   outputMode: event.target.value as NonNullable<
@@ -1716,9 +1766,11 @@ const CustomSkillManagerPage: React.FC = () => {
               sx={workshopFieldSx}
               fullWidth
             >
-              <option value="chat">{uiText('聊天文本', 'chat')}</option>
-              <option value="sidecar">{uiText('附属文本', 'sidecar')}</option>
-              <option value="structured">{uiText('结构化输出', 'structured')}</option>
+              {CUSTOM_SKILL_OUTPUT_MODE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {uiText(option.zh, option.en)}
+                </option>
+              ))}
             </TextField>
             <TextField
               select

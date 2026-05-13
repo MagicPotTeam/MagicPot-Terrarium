@@ -72,7 +72,15 @@ export type SkillReferenceAttachment = {
 }
 
 export type CustomSkillExecutionMode = 'inherit' | 'isolated'
-export type CustomSkillOutputMode = 'chat' | 'sidecar' | 'structured'
+export type CustomSkillOutputMode =
+  | 'default'
+  | 'text'
+  | 'image'
+  | 'video'
+  | 'model3d'
+  | 'chat'
+  | 'sidecar'
+  | 'structured'
 export type CustomSkillFallbackStrategy = 'default' | 'smaller-batches' | 'single-file'
 export type CustomSkillContextMessageLimit = 0 | 3 | 5 | 10 | 'all'
 export type CustomSkillOutputSchema = JsonValue

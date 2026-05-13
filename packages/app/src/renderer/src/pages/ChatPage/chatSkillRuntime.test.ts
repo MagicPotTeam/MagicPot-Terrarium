@@ -45,7 +45,7 @@ describe('chatSkillRuntime', () => {
       expect.objectContaining({
         mode: 'inherit',
         allowHistory: true,
-        outputMode: 'chat',
+        outputMode: 'default',
         fallbackStrategy: 'default',
         persistSessionUrl: true
       })
@@ -75,7 +75,7 @@ describe('chatSkillRuntime', () => {
       expect.objectContaining({
         mode: 'inherit',
         allowHistory: true,
-        outputMode: 'chat',
+        outputMode: 'default',
         fallbackStrategy: 'default',
         persistSessionUrl: true
       })
@@ -403,11 +403,11 @@ describe('chatSkillRuntime', () => {
         resourceUris: []
       })
     ])
-    expect(serializeSkillRuntimeSpec(runtime)).toEqual({
+    expect(serializeSkillRuntimeSpec(runtime)).toMatchObject({
       skillId: 'ops-review',
       execution: expect.objectContaining({
         mode: 'inherit',
-        outputMode: 'chat'
+        outputMode: 'default'
       }),
       bindings: [
         expect.objectContaining({

@@ -56,7 +56,7 @@ const DEFAULT_EXECUTION_POLICY: Required<Omit<CustomSkillExecutionPolicy, 'conte
   {
     mode: 'inherit',
     allowHistory: true,
-    outputMode: 'chat',
+    outputMode: 'default',
     fallbackStrategy: 'default',
     persistSessionUrl: true
   }
@@ -282,8 +282,30 @@ export const buildSkillRuntimeCapabilityContext = (
 ): string | undefined => {
   const lines: string[] = []
 
-  if (runtime.execution.outputMode !== 'chat') {
-    lines.push(`Skill output mode: ${runtime.execution.outputMode}.`)
+  switch (runtime.execution.outputMode) {
+    case 'text':
+      lines.push('Skill output mode: text. Return text only; do not return generated media.')
+      break
+    case 'image':
+      lines.push(
+        'Skill output mode: image. Return only actual image output. A text description is not a completed image deliverable.'
+      )
+      break
+    case 'video':
+      lines.push(
+        'Skill output mode: video. Return only actual video output. A text description is not a completed video deliverable.'
+      )
+      break
+    case 'model3d':
+      lines.push(
+        'Skill output mode: 3D. Return only actual 3D model output. A text description is not a completed 3D deliverable.'
+      )
+      break
+    case 'chat':
+    case 'default':
+      break
+    default:
+      lines.push(`Skill output mode: ${runtime.execution.outputMode}.`)
   }
 
   if (runtime.execution.outputMode === 'structured' && runtime.outputSchema) {

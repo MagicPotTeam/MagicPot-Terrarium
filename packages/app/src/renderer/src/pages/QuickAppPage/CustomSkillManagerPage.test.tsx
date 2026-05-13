@@ -428,6 +428,18 @@ describe('CustomSkillManagerPage', () => {
       fireEvent.click(screen.getByTestId('custom-skill-card-skill-2'))
 
       const editDialog = await screen.findByTestId('custom-skill-edit-dialog')
+      const outputModeSelect = within(editDialog).getByLabelText('Output Mode')
+      const outputModeOptions = within(outputModeSelect).getAllByRole(
+        'option'
+      ) as HTMLOptionElement[]
+      expect(outputModeOptions.map((option) => option.value)).toEqual([
+        'default',
+        'text',
+        'image',
+        'video',
+        'model3d'
+      ])
+
       fireEvent.change(within(editDialog).getByLabelText('Input Strategy'), {
         target: { value: 'single-file' }
       })
@@ -591,7 +603,7 @@ describe('CustomSkillManagerPage', () => {
         target: { value: '0' }
       })
       fireEvent.change(within(editDialog).getByLabelText('Output Mode'), {
-        target: { value: 'structured' }
+        target: { value: 'image' }
       })
 
       await waitFor(() =>
@@ -608,7 +620,7 @@ describe('CustomSkillManagerPage', () => {
                 mode: 'isolated',
                 allowHistory: false,
                 contextMessageLimit: 0,
-                outputMode: 'structured'
+                outputMode: 'image'
               })
             })
           ])
@@ -795,6 +807,9 @@ describe('CustomSkillManagerPage', () => {
               prompt: 'Collect loose inspiration notes.',
               instructions: expect.objectContaining({
                 systemPrompt: 'Collect loose inspiration notes.'
+              }),
+              execution: expect.objectContaining({
+                outputMode: 'default'
               })
             })
           ])

@@ -25,6 +25,10 @@ import {
   getRemoteLlmServerOrigin
 } from '@renderer/utils/llmProfileUtils'
 import { normalizeLocalMediaUrl } from './chatPageShared'
+import {
+  applySkillOutputModeContract,
+  resolveSkillOutputImageGenerationOptions
+} from './chatSkillOutputMode'
 
 type ChatRequestPayload = {
   messages: Array<{
@@ -360,6 +364,10 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
     input.externalAgentSkill?.type === 'agent'
       ? input.externalAgentSkill.prompt?.trim() || input.systemPrompt?.trim() || undefined
       : input.systemPrompt?.trim() || input.externalAgentSkill?.prompt?.trim() || undefined
+  const requestImageGenerationOptions = resolveSkillOutputImageGenerationOptions(
+    input.skillRuntime?.execution?.outputMode,
+    input.imageGenerationOptions
+  )
 
   return {
     messages: input.messages.map((message) => ({
@@ -373,8 +381,8 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
     ...(input.reasoningEffort && input.externalAgentSkill?.type !== 'agent'
       ? { reasoningEffort: input.reasoningEffort }
       : {}),
-    ...(input.imageGenerationOptions && input.externalAgentSkill?.type !== 'agent'
-      ? { imageGenerationOptions: input.imageGenerationOptions }
+    ...(requestImageGenerationOptions && input.externalAgentSkill?.type !== 'agent'
+      ? { imageGenerationOptions: requestImageGenerationOptions }
       : {}),
     ...(input.skillRuntime ? { skillRuntime: input.skillRuntime } : {}),
     sessionUrl: input.sessionUrl,
@@ -941,15 +949,16 @@ const requestLocalChatCompletionStream = async (
 const dispatchChatCompletionRequest = async (
   input: RequestChatCompletionInput
 ): Promise<RequestChatCompletionResult> => {
+  let result: RequestChatCompletionResult
   if (input.externalAgentSkill?.type === 'agent') {
-    return requestExternalAgentSkillCompletion(input)
+    result = await requestExternalAgentSkillCompletion(input)
+  } else if (input.config.use_remote_llm) {
+    result = await requestRemoteChatCompletion(input)
+  } else {
+    result = await requestLocalChatCompletion(input)
   }
 
-  if (input.config.use_remote_llm) {
-    return requestRemoteChatCompletion(input)
-  }
-
-  return requestLocalChatCompletion(input)
+  return applySkillOutputModeContract(result, input.skillRuntime?.execution?.outputMode)
 }
 
 const dispatchChatCompletionStreamRequest = async (
@@ -1120,8 +1129,18 @@ export const requestChatCompletionStream = async (
       shouldSkipInlineAttachmentSummary(input.config, input.profileId, attachment)
   })
 
-  return dispatchChatCompletionStreamRequest({
+  const result = await dispatchChatCompletionStreamRequest({
     ...input,
     messages: requestMessages
   })
+
+  const normalizedResult = applySkillOutputModeContract(
+    result.result,
+    input.skillRuntime?.execution?.outputMode
+  )
+
+  return {
+    result: normalizedResult,
+    response: normalizedResult.content
+  }
 }
