@@ -23,15 +23,18 @@ function cleanupPort(port: MessagePortMain, handleResult: Promise<void>): Promis
   return handleResult
     .catch((error) => {
       console.error('cleanupPort error', error)
-      const transportError: ServerStreamingError = isServerStreamingError(error)
-        ? error
-        : {
-            message: error.toString() || 'Unknown error'
-          }
+      const transportError: ServerStreamingError = {
+        message:
+          error instanceof Error
+            ? error.message
+            : isServerStreamingError(error)
+              ? error.message
+              : error.toString() || 'Unknown error'
+      }
       const transport: ServerStreamingTransport<void> = {
         error: transportError
       }
-      if (isJsonDict(error)) {
+      if (isJsonDict(error) && !(error instanceof Error)) {
         transport.error.payload = error
       }
       port.postMessage(transport)

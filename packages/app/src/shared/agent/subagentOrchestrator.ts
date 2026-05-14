@@ -140,7 +140,7 @@ const createAbortError = (reason?: unknown): Error => {
   return error
 }
 
-const isAbortError = (error: unknown): boolean => {
+const isAbortError = (error: unknown): error is Error => {
   if (!(error instanceof Error)) return false
   return error.name === 'AbortError' || /aborted|cancelled/i.test(error.message)
 }
@@ -256,7 +256,7 @@ const selectRunnableTaskBatch = (
     batch.push(taskRecord)
   }
 
-  return batch.length > 0 ? batch : runnableTasks.slice(0, 1)
+  return batch
 }
 
 const executeSingleTask = async (
@@ -456,7 +456,7 @@ const runOrchestratedLoop = async (
     if (!isAbortError(error)) {
       throw error
     }
-    const messageText = error instanceof Error ? error.message : String(error)
+    const messageText = error.message
     subagentRegistry.cancelRun(runId, messageText || 'Subagent run cancelled.')
     const cancelledRun = subagentRegistry.getRun(runId)
     if (!cancelledRun) {
