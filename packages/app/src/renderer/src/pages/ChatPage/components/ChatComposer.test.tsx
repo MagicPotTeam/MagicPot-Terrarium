@@ -14,10 +14,16 @@ vi.mock('react-i18next', () => ({
 
 function ControlledChatComposer({
   initialValue,
-  renderNonce
+  renderNonce,
+  isLoading = false,
+  disabled = false,
+  onSend = vi.fn()
 }: {
   initialValue: string
   renderNonce?: number
+  isLoading?: boolean
+  disabled?: boolean
+  onSend?: () => void
 }) {
   const [value, setValue] = useState(initialValue)
   const inputRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null)
@@ -27,14 +33,14 @@ function ControlledChatComposer({
       <ChatComposer
         inputValue={value}
         onInputChange={setValue}
-        onSend={vi.fn()}
+        onSend={onSend}
         onUploadFile={vi.fn()}
         pendingAttachments={[]}
         uploadProgress={{}}
         onRemoveAttachment={vi.fn()}
-        isLoading={false}
+        isLoading={isLoading}
         onStopGenerating={vi.fn()}
-        disabled={false}
+        disabled={disabled}
         composerInputRef={inputRef}
         onPreviewImage={vi.fn()}
       />
@@ -311,6 +317,64 @@ describe('ChatComposer', () => {
       overflowX: 'hidden',
       resize: 'none'
     })
+  })
+
+  it('renders a single native textarea for composer input', () => {
+    const { container } = render(<ControlledChatComposer initialValue="hello" />)
+
+    const textarea = screen.getByTestId('chat-composer-input')
+
+    expect(textarea.tagName).toBe('TEXTAREA')
+    expect(container.querySelectorAll('textarea')).toHaveLength(1)
+  })
+
+  it('does not send on Enter while IME composition is active', () => {
+    const onSend = vi.fn()
+    render(<ControlledChatComposer initialValue="draft" onSend={onSend} />)
+
+    const textarea = screen.getByTestId('chat-composer-input') as HTMLTextAreaElement
+
+    fireEvent.compositionStart(textarea)
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', charCode: 13 })
+
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('keeps the input editable while generation is loading', () => {
+    const onInputChange = vi.fn()
+    render(
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          inputValue="draft"
+          onInputChange={onInputChange}
+          onSend={vi.fn()}
+          onUploadFile={vi.fn()}
+          pendingAttachments={[]}
+          uploadProgress={{}}
+          onRemoveAttachment={vi.fn()}
+          isLoading
+          onStopGenerating={vi.fn()}
+          disabled={false}
+          composerInputRef={{ current: null }}
+          onPreviewImage={vi.fn()}
+        />
+      </ThemeProvider>
+    )
+
+    const textarea = screen.getByTestId('chat-composer-input') as HTMLTextAreaElement
+
+    expect(textarea).not.toBeDisabled()
+
+    fireEvent.change(textarea, {
+      target: {
+        value: 'draft update',
+        selectionStart: 12,
+        selectionEnd: 12,
+        selectionDirection: 'none'
+      }
+    })
+
+    expect(onInputChange).toHaveBeenCalledWith('draft update')
   })
 
   it('keeps the caret at the edit position when typing in the middle', () => {

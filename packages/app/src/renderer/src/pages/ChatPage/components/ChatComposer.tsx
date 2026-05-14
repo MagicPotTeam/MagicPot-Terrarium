@@ -1,4 +1,11 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState
+} from 'react'
 import {
   Box,
   TextField,
@@ -13,6 +20,7 @@ import {
   Menu,
   MenuItem
 } from '@mui/material'
+import type { InputBaseComponentProps } from '@mui/material/InputBase'
 import {
   Send as SendIcon,
   Add as AddIcon,
@@ -97,6 +105,60 @@ const COMPOSER_VERTICAL_OVERHEAD = 140
 const MIN_ATTACHMENT_PREVIEW_HEIGHT = 88
 const MAX_ATTACHMENT_PREVIEW_HEIGHT = 240
 const ATTACHMENT_PREVIEW_HEIGHT_RATIO = 0.32
+
+const parseCssPixelValue = (value: unknown): number | null => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value !== 'string') return null
+
+  const parsed = Number.parseFloat(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+const StableNativeTextarea = React.forwardRef<HTMLTextAreaElement, InputBaseComponentProps>(
+  function StableNativeTextarea(props, forwardedRef) {
+    const { ownerState: _ownerState, style, value, defaultValue, onInput, rows, ...rest } = props
+    const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+
+    useImperativeHandle(forwardedRef, () => textareaRef.current as HTMLTextAreaElement)
+
+    const resizeTextarea = useCallback(() => {
+      const textarea = textareaRef.current
+      if (!textarea) return
+
+      const resolvedStyle = style as React.CSSProperties | undefined
+      const minHeight = parseCssPixelValue(resolvedStyle?.minHeight) ?? MIN_TEXTAREA_HEIGHT
+      const maxHeight = parseCssPixelValue(resolvedStyle?.maxHeight)
+
+      textarea.style.height = 'auto'
+      const nextHeight =
+        maxHeight == null
+          ? Math.max(minHeight, textarea.scrollHeight)
+          : Math.max(minHeight, Math.min(textarea.scrollHeight, maxHeight))
+      textarea.style.height = `${nextHeight}px`
+    }, [style])
+
+    useLayoutEffect(() => {
+      resizeTextarea()
+    }, [resizeTextarea, value, defaultValue])
+
+    const handleInput = (event: React.FormEvent<HTMLTextAreaElement>) => {
+      resizeTextarea()
+      ;(onInput as React.FormEventHandler<HTMLTextAreaElement> | undefined)?.(event)
+    }
+
+    return (
+      <textarea
+        {...(rest as React.TextareaHTMLAttributes<HTMLTextAreaElement>)}
+        ref={textareaRef}
+        rows={typeof rows === 'number' ? rows : 1}
+        value={value as string | number | readonly string[] | undefined}
+        defaultValue={defaultValue as string | number | readonly string[] | undefined}
+        onInput={handleInput}
+        style={style as React.CSSProperties | undefined}
+      />
+    )
+  }
+)
 
 type InputSelectionSnapshot = {
   value: string
@@ -404,6 +466,12 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   }
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
+    const nativeEvent = event.nativeEvent as KeyboardEvent & { isComposing?: boolean }
+    const isImeComposing =
+      isComposingInputRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229
+
+    if (isImeComposing) return
+
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       onSend()
@@ -741,8 +809,6 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
           <Box sx={{ width: '100%', minHeight: 0, mb: 1 }}>
             <TextField
               fullWidth
-              multiline
-              minRows={1}
               inputRef={composerInputRef}
               value={inputValue}
               onChange={handleInputChange}
@@ -752,6 +818,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
               variant="standard"
               InputProps={{
                 disableUnderline: true,
+                inputComponent: StableNativeTextarea as React.ElementType<InputBaseComponentProps>,
                 startAdornment: selectedSkillName ? (
                   <Box
                     contentEditable={false}
@@ -805,6 +872,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
               }}
               inputProps={{
                 'data-testid': 'chat-composer-input',
+                rows: 1,
                 onFocus: handleInputSelectionChange,
                 onBeforeInput: handleBeforeInput,
                 onKeyUp: handleInputSelectionChange,
@@ -826,12 +894,20 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                 }
               }}
               sx={{
-                '& .MuiInputBase-root.MuiInputBase-multiline': {
+                '& .MuiInputBase-root': {
                   alignItems: 'flex-start',
                   maxHeight: resolvedTextareaMaxHeight,
                   overflow: 'hidden',
                   display: 'flex',
-                  flexWrap: 'wrap'
+                  flexWrap: 'wrap',
+                  '&:focus': {
+                    outline: 'none',
+                    boxShadow: 'none'
+                  },
+                  '&:focus-within': {
+                    outline: 'none',
+                    boxShadow: 'none'
+                  }
                 },
                 '& .MuiInputBase-input': {
                   py: 0.5,
@@ -846,16 +922,6 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   flex: '1 1 auto',
                   minWidth: 100,
                   '&:focus': {
-                    outline: 'none',
-                    boxShadow: 'none'
-                  }
-                },
-                '& .MuiInputBase-root': {
-                  '&:focus': {
-                    outline: 'none',
-                    boxShadow: 'none'
-                  },
-                  '&:focus-within': {
                     outline: 'none',
                     boxShadow: 'none'
                   }
