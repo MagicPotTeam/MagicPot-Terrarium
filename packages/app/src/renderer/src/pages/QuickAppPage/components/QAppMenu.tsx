@@ -301,6 +301,7 @@ const CascadingMenuItem = memo(
     const displayName = getDisplayName(qAppItem.name) || getDisplayName(qAppItem.key)
     const itemRef = useRef<HTMLDivElement | null>(null)
     const [isPinned, setIsPinned] = useState(false)
+    const canCancelRun = isBuiltinDuplicateCheckQApp(qAppItem.key) && Boolean(isRunning)
 
     // 进度条状态
     const [progress, setProgress] = useState(0)
@@ -470,14 +471,14 @@ const CascadingMenuItem = memo(
                   p: 0.5,
                   flexShrink: 0,
                   ml: 0.5,
-                  color: isRunning ? '#fff' : '#7E73FD',
-                  bgcolor: isRunning ? '#d32f2f' : '#ffffff',
+                  color: canCancelRun ? '#fff' : '#7E73FD',
+                  bgcolor: canCancelRun ? '#d32f2f' : '#ffffff',
                   borderRadius: 1,
                   boxShadow: '0 2px 4px rgba(0,0,0,0.15)',
                   transition:
                     'background-color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease',
                   '&:hover': {
-                    bgcolor: isRunning ? '#b71c1c' : '#f8f8f8',
+                    bgcolor: canCancelRun ? '#b71c1c' : '#f8f8f8',
                     transform: 'scale(1.12)',
                     boxShadow: '0 4px 8px rgba(0,0,0,0.2)'
                   },
@@ -486,7 +487,7 @@ const CascadingMenuItem = memo(
                   }
                 }}
               >
-                {isRunning ? (
+                {canCancelRun ? (
                   <Box sx={{ width: 10, height: 10, bgcolor: '#fff', borderRadius: 0.5 }} />
                 ) : (
                   <PlayArrowIcon sx={{ fontSize: 20 }} />

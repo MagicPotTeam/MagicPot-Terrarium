@@ -189,6 +189,21 @@ const renderInlineDropMenu = () =>
     </ThemeProvider>
   )
 
+const renderRunnableMenu = (isRunning: boolean, onRunClick = vi.fn()) => ({
+  onRunClick,
+  ...render(
+    <ThemeProvider theme={theme}>
+      <QAppMenu
+        currentQAppKey="alpha"
+        setCurrentQAppKey={setCurrentQAppKeyMock}
+        activeCategory="image"
+        onRunClick={onRunClick}
+        isRunning={isRunning}
+      />
+    </ThemeProvider>
+  )
+})
+
 beforeEach(() => {
   setCurrentQAppKeyMock.mockClear()
   navigateMock.mockClear()
@@ -343,6 +358,19 @@ describe('QAppMenu', () => {
     })
 
     expect(menuRoot).toHaveAttribute('data-dragging-over', 'false')
+  })
+
+  it('keeps the normal quick app run button as a run action while running', async () => {
+    const { onRunClick } = renderRunnableMenu(true)
+
+    const playIcon = await screen.findByTestId('PlayArrowIcon')
+    const runButton = playIcon.closest('button')
+
+    expect(runButton).toBeTruthy()
+
+    fireEvent.click(runButton!)
+
+    expect(onRunClick).toHaveBeenCalledWith('alpha')
   })
 
   it('restores the matching Hunyuan3D quick app and parameters from an internal 3d drag', async () => {
