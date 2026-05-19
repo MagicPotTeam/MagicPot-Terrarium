@@ -161,7 +161,7 @@ export type QAppRequiredModel = {
   /** 文件大小描述 */
   size: string
   /** Base directory for dir. Defaults to ComfyUI. */
-  baseDir?: 'comfyui' | 'userHome'
+  baseDir?: 'comfyui' | 'portableHome'
   /** 模型放置目录（相对于 baseDir 对应目录），如 models/unet */
   dir: string
   /** 下载链接 */

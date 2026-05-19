@@ -15,7 +15,7 @@
     {
       "name": "ckpt_base.pth",
       "size": "368 MB",
-      "baseDir": "userHome",
+      "baseDir": "portableHome",
       "dir": ".transparent-background",
       "url": "https://hf-mirror.com/datasets/chaodu001/ComfyUI_LayerStyle_All_models_download/resolve/main/transparent-background/ckpt_base.pth"
     }

@@ -122,6 +122,10 @@ export class ConfigUtils {
     return `http://localhost:${port}`
   }
 
+  getPortablePythonHomeDir(): string {
+    return this.path.join(this.buildEnv.pathMap.data, 'runtime', 'home')
+  }
+
   // 所有 ComfyUI 子目录统一逻辑：
   // 如果为绝对路径，则直接返回
   // 否则，返回相对于 ComfyUI 目录的相对路径

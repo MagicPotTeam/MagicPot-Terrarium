@@ -68,7 +68,7 @@ const runtimeModelExpectations = {
   },
   'ckpt_base.pth': {
     dir: '.transparent-background',
-    baseDir: 'userHome'
+    baseDir: 'portableHome'
   }
 } as const
 

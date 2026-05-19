@@ -72,7 +72,7 @@ const ModelItem: React.FC<{
           sx={{ minWidth: 132 }}
         >
           <MenuItem value="comfyui">ComfyUI</MenuItem>
-          <MenuItem value="userHome">User home</MenuItem>
+          <MenuItem value="portableHome">Portable home</MenuItem>
         </Select>
         <TextField
           size="small"

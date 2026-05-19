@@ -631,6 +631,11 @@
     "QAppRequiredModel": {
       "additionalProperties": false,
       "properties": {
+        "baseDir": {
+          "description": "Base directory for dir. Defaults to ComfyUI.",
+          "enum": ["comfyui", "portableHome"],
+          "type": "string"
+        },
         "dir": {
           "description": "模型放置目录（相对于 ComfyUI 目录），如 models/unet",
           "type": "string"

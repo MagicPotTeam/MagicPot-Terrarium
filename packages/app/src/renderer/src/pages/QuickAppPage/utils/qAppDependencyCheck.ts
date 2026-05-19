@@ -35,15 +35,13 @@ export function getRequiredModelBaseDir(
 export function resolveRequiredModelPaths(
   model: QAppRequiredModel,
   comfyDir: string,
-  homeDir: string
+  portableHomeDir: string
 ): { filePath: string; dirPath: string; displayDir: string } {
-  const rootDir = getRequiredModelBaseDir(model) === 'userHome' ? homeDir : comfyDir
+  const baseDir = getRequiredModelBaseDir(model)
+  const rootDir = baseDir === 'portableHome' ? portableHomeDir : comfyDir
   const dirPath = window.path.join(rootDir, model.dir)
   const filePath = window.path.join(dirPath, model.name)
-  const displayDir =
-    getRequiredModelBaseDir(model) === 'userHome'
-      ? dirPath
-      : `ComfyUI\\${model.dir.replace(/\//g, '\\')}`
+  const displayDir = baseDir === 'comfyui' ? `ComfyUI\\${model.dir.replace(/\//g, '\\')}` : dirPath
 
   return { filePath, dirPath, displayDir }
 }
@@ -103,11 +101,10 @@ export async function checkRequiredModels(
     return []
   }
 
-  const needsHomeDir = requiredModels.some((model) => getRequiredModelBaseDir(model) === 'userHome')
-  const homeDir = needsHomeDir ? await api().svcShell.getHomeDir() : ''
+  const portableHomeDir = configUtils.getPortablePythonHomeDir()
   const resolvedModels = requiredModels.map((model) => ({
     model,
-    ...resolveRequiredModelPaths(model, comfyDir, homeDir)
+    ...resolveRequiredModelPaths(model, comfyDir, portableHomeDir)
   }))
   const exists = await api().svcShell.fileExistsBatch(resolvedModels.map((model) => model.filePath))
 
