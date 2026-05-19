@@ -1,4 +1,4 @@
-import { Api, apiDef } from '@shared/api'
+import { Api, BaseApi, apiDef } from '@shared/api'
 import { AdobeBridgeSvcImpl } from './svcAdobeBridgeImpl'
 import { StateSvcImpl } from './svcStateImpl'
 import { ComfySvcImpl } from './svcComfyImpl'
@@ -19,9 +19,10 @@ import { FsSvcImpl } from './svcFsImpl'
 import { DccBridgeSvcImpl } from './svcDccBridgeImpl'
 import { DuplicateCheckSvcImpl } from './svcDuplicateCheckImpl'
 import { registerIpcServer } from '@shared/api/createServer/registerIpcServer'
+import { createApiExtensionServices } from './extensionServices'
 
 export const createServer = (): Api => {
-  return {
+  const baseApi: BaseApi = {
     svcAdobeBridge: new AdobeBridgeSvcImpl(),
     svcState: new StateSvcImpl(),
     svcHyper: new HyperSvcImpl(),
@@ -41,6 +42,11 @@ export const createServer = (): Api => {
     svcFs: new FsSvcImpl(),
     svcDccBridge: new DccBridgeSvcImpl(),
     svcDuplicateCheck: new DuplicateCheckSvcImpl()
+  }
+
+  return {
+    ...baseApi,
+    ...createApiExtensionServices({ baseApi })
   }
 }
 

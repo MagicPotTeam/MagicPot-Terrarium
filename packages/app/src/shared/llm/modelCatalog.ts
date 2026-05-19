@@ -1,4 +1,5 @@
 import type { LLMDeployment, LLMModelUse, LLMProvider } from '@shared/config/config'
+import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 
 export type ModelCatalogOption = {
   label: string
@@ -90,10 +91,29 @@ const dedupeOptions = (options: ModelCatalogOption[]): ModelCatalogOption[] => {
 }
 
 export function getSuggestedModelCatalog(options: {
+  authMode?: string
   deployment: LLMDeployment
   modelUse: LLMModelUse
   provider: LLMProvider
+  codexCurrentModelName?: string | null
+  codexDiscoveredModelNames?: readonly (string | ModelCatalogOption | null | undefined)[]
+  codexObservedModelNames?: readonly (string | ModelCatalogOption | null | undefined)[]
 }): ModelCatalogOption[] {
+  for (const extension of sharedHostExtensionApiV1.llmProfiles) {
+    const catalog = extension.buildModelCatalog?.({
+      authMode: options.authMode,
+      deployment: options.deployment,
+      modelUse: options.modelUse,
+      provider: options.provider,
+      currentModelName: options.codexCurrentModelName,
+      discoveredModelNames: options.codexDiscoveredModelNames,
+      observedModelNames: options.codexObservedModelNames
+    })
+    if (catalog) {
+      return catalog
+    }
+  }
+
   if (options.provider === 'openai') {
     return toOptions(OPENAI_MODEL_NAMES)
   }

@@ -893,6 +893,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
 }
 
 type ApiProfilesSectionProps = {
+  action?: React.ReactNode
   onAdd: () => void
   onClone: (profile: LLMAPIProfile) => void
   onDelete: (profileId: string) => void
@@ -904,6 +905,7 @@ type ApiProfilesSectionProps = {
 }
 
 export const ApiProfilesSection: React.FC<ApiProfilesSectionProps> = ({
+  action,
   onAdd,
   onClone,
   onDelete,
@@ -914,7 +916,10 @@ export const ApiProfilesSection: React.FC<ApiProfilesSectionProps> = ({
   title
 }) => {
   return (
-    <SettingSection title={title || (isChineseUi ? 'Agent线程配置' : t('llm.profile_title'))}>
+    <SettingSection
+      action={action}
+      title={title || (isChineseUi ? 'Agent线程配置' : t('llm.profile_title'))}
+    >
       <Box
         sx={{
           display: 'grid',

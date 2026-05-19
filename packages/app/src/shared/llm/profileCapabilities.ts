@@ -1,4 +1,5 @@
 import type { LLMDeployment, LLMProviderOption } from '@shared/config/config'
+import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 
 export type LLMReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -85,11 +86,25 @@ export const getReasoningEffortLabel = (effort: LLMReasoningEffort): string => {
 export const resolveChatProfileCapabilities = (
   profile?: ChatCapabilityProfile | null
 ): ChatProfileCapabilities => {
+  const applyExtensions = (baseCapabilities: ChatProfileCapabilities): ChatProfileCapabilities => {
+    let nextCapabilities = baseCapabilities
+    for (const extension of sharedHostExtensionApiV1.llmProfiles) {
+      const resolved = extension.resolveCapabilities?.(profile, nextCapabilities)
+      if (resolved) {
+        nextCapabilities = {
+          ...nextCapabilities,
+          ...resolved
+        }
+      }
+    }
+    return nextCapabilities
+  }
+
   if (!isOpenAICompatibleProfile(profile)) {
-    return {
+    return applyExtensions({
       reasoningEfforts: [],
       supportsAutoContextCompression: false
-    }
+    })
   }
 
   const modelName = normalizeModelName(profile?.model_name)
@@ -148,7 +163,7 @@ export const resolveChatProfileCapabilities = (
       )
     : undefined
 
-  return {
+  return applyExtensions({
     reasoningEfforts: normalizedEfforts,
     ...(normalizedDefaultReasoningEffort
       ? { defaultReasoningEffort: normalizedDefaultReasoningEffort }
@@ -156,7 +171,7 @@ export const resolveChatProfileCapabilities = (
     ...(contextWindowTokens ? { contextWindowTokens } : {}),
     ...(contextBudgetTokens ? { contextBudgetTokens } : {}),
     supportsAutoContextCompression: Boolean(contextBudgetTokens)
-  }
+  })
 }
 
 export const normalizeReasoningEffort = (

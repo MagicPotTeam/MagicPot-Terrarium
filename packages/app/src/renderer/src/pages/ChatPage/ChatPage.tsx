@@ -156,9 +156,9 @@ import {
 import { getQAppPromptSettings } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/qAppPromptSettings'
 import { emitProjectTraceRuntimeEvent } from '@renderer/features/projectTrace/projectTraceRuntime'
 import {
-  resolveProjectIdFromStorageScope,
-  resolveProjectResourceDir
-} from '@renderer/utils/projectResourcePaths'
+  resolveAssistantImageAutoSaveDir,
+  resolveChatReasoningPreferenceKey
+} from './chatPageExtensions'
 
 // Hooks
 import { useImagePreview } from './hooks/useImagePreview'
@@ -462,21 +462,6 @@ const normalizeReasoningPreferenceMap = (
           Boolean(entry[0]?.trim()) && Boolean(entry[1])
       )
   )
-
-const resolveReasoningPreferenceKey = (
-  profileId: string | null | undefined,
-  profile?: ChatCapabilityProfile | null
-): string | null => {
-  const baseProfileId = getBaseProfileId(profileId)
-  if (baseProfileId) {
-    return baseProfileId
-  }
-
-  const modelName = String(profile?.model_name || '')
-    .trim()
-    .toLowerCase()
-  return modelName || null
-}
 
 const dispatchReasoningEffortSync = (map: Record<string, LLMReasoningEffort>) => {
   window.dispatchEvent(
@@ -1945,7 +1930,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [selectedCapabilityProfile]
   )
   const selectedReasoningProfileKey = useMemo(
-    () => resolveReasoningPreferenceKey(selectedProfileId, selectedCapabilityProfile),
+    () => resolveChatReasoningPreferenceKey(selectedProfileId, selectedCapabilityProfile),
     [selectedCapabilityProfile, selectedProfileId]
   )
   const selectedReasoningEffort = useMemo(() => {
@@ -2319,10 +2304,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 recordAutoSavedChatImageKey(trackerKey)
 
                 try {
-                  const targetDir = resolveProjectResourceDir({
+                  const targetDir = resolveAssistantImageAutoSaveDir({
                     config: { download_dir: config.download_dir },
-                    projectId: resolveProjectIdFromStorageScope(storageScope),
-                    segments: ['AutoSave', 'Agent']
+                    storageScope
                   })
                   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
                   const fileName = `agent_auto_${timestamp}.png`

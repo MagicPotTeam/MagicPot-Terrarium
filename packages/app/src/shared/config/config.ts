@@ -12,7 +12,7 @@ export type LLMModelUse = 'chat' | 'agent' | 'multimodal' | 'vision' | 'ocr' | '
 export type LLMProviderOption = LLMProvider | 'default'
 export type LLMModelUseOption = LLMModelUse | 'default'
 export type LLMProfileAuthMode = string
-export type LLMProfileCallType = 'api' | 'local'
+export type LLMProfileCallType = 'api' | 'local' | (string & {})
 export type TaggerProviderId = 'wdtagger' | 'cl_tagger' | 'paddle_ocr'
 export type TaggerProviderOption = TaggerProviderId | 'default'
 export type TaggerRuntimeCacheScope = 'profile' | 'provider' | 'endpoint'
@@ -35,6 +35,7 @@ export type LLMAPIProfile = {
   auth_mode?: LLMProfileAuthMode
   auth_account_email?: string
   auth_connected_at?: string
+  codex_fast_mode?: boolean
   provider?: LLMProviderOption
   deployment?: LLMDeployment
   model_use?: LLMModelUseOption

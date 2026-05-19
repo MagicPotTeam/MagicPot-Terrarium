@@ -10,11 +10,7 @@ import InputPath from '@renderer/components/inputs/InputPath'
 import { PanelProps } from './PanelProps'
 import { useTranslation } from 'react-i18next'
 import { LLMAPIProfile } from '@shared/config/config'
-import {
-  getQAppApiProfiles,
-  isHunyuan3DCompatibleProfile,
-  isVisionCapableApiProfile
-} from '@shared/config/apiProfileSelectors'
+import { isVisionCapableApiProfile } from '@shared/config/apiProfileSelectors'
 import { ApiProfilesSection, createEmptyProfile } from './PanelLLM'
 import { getQAppPromptSettings } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/qAppPromptSettings'
 import {
@@ -24,6 +20,14 @@ import {
   type DuplicateCheckSettings,
   type DuplicateCheckVisualModelConfig
 } from '@shared/duplicateCheck/types'
+import {
+  buildClearedQuickAppLegacyHunyuanConfig,
+  buildQuickAppLegacyHunyuanProfile,
+  getQuickAppApiProfilesSectionAction,
+  isQuickAppLegacyHunyuanProfile,
+  prepareClonedQuickAppProfile,
+  resolveQuickAppApiProfileLists
+} from './settingsPageExtensions'
 
 type SaveSettings = PanelProps['saveSettings']
 
@@ -42,51 +46,6 @@ const stripExternalAuthProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
   } = profile
 
   return nextProfile
-}
-
-const HUNYUAN_AI3D_BASE_URL = 'https://api.ai3d.cloud.tencent.com'
-const DEFAULT_HY3D_COS_PREFIX = 'magicpot/hunyuan3d'
-const DEFAULT_HY3D_API_REGION = 'ap-guangzhou'
-const LEGACY_HUNYUAN_PROFILE_ID = 'legacy-hunyuan3d-profile'
-
-const buildLegacyHunyuanProfile = (
-  settingsValue: PanelProps['settingsValue']
-): LLMAPIProfile | null => {
-  const legacy = settingsValue.aigc3d_config
-  const legacyKeyPrefix = legacy?.cos_key_prefix?.trim() || ''
-  const hasCustomKeyPrefix = Boolean(legacyKeyPrefix && legacyKeyPrefix !== DEFAULT_HY3D_COS_PREFIX)
-
-  if (
-    !legacy ||
-    !(
-      legacy.tencent_secret_id?.trim() ||
-      legacy.tencent_secret_key?.trim() ||
-      legacy.api_region?.trim() ||
-      legacy.cos_bucket?.trim() ||
-      legacy.cos_region?.trim() ||
-      hasCustomKeyPrefix
-    )
-  ) {
-    return null
-  }
-
-  return {
-    id: LEGACY_HUNYUAN_PROFILE_ID,
-    model_name: 'Hunyuan3D Pro',
-    base_url: HUNYUAN_AI3D_BASE_URL,
-    api_key: '',
-    provider: 'default',
-    model_use: 'default',
-    is_ollama: false,
-    is_vision_model: false,
-    is_ocr_model: false,
-    tencent_secret_id: legacy.tencent_secret_id || '',
-    tencent_secret_key: legacy.tencent_secret_key || '',
-    api_region: legacy.api_region || DEFAULT_HY3D_API_REGION,
-    cos_bucket: legacy.cos_bucket || '',
-    cos_region: legacy.cos_region || DEFAULT_HY3D_API_REGION,
-    cos_key_prefix: legacyKeyPrefix || DEFAULT_HY3D_COS_PREFIX
-  }
 }
 
 const quickAppSectionSurfaceSx = {
@@ -606,14 +565,14 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
   )
 
   const legacyHunyuanProfile = React.useMemo(
-    () => buildLegacyHunyuanProfile(settingsValue),
+    () => buildQuickAppLegacyHunyuanProfile(settingsValue),
     [settingsValue]
   )
   const shouldUseLegacyHunyuanProfile = React.useMemo(
     () =>
       Boolean(
         legacyHunyuanProfile &&
-        !pluginProfiles.some((profile) => isHunyuan3DCompatibleProfile(profile))
+        !pluginProfiles.some((profile) => isQuickAppLegacyHunyuanProfile(profile))
       ),
     [legacyHunyuanProfile, pluginProfiles]
   )
@@ -624,13 +583,22 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
         : pluginProfiles,
     [legacyHunyuanProfile, pluginProfiles, shouldUseLegacyHunyuanProfile]
   )
-  const pluginProfileCards = effectivePluginProfiles
-  const qAppProfiles = React.useMemo(
+  const { pluginProfileCards, qAppProfiles } = React.useMemo(
     () =>
-      effectivePluginProfiles.length > 0
-        ? effectivePluginProfiles
-        : getQAppApiProfiles(settingsValue),
+      resolveQuickAppApiProfileLists({
+        effectivePluginProfiles,
+        settingsValue
+      }),
     [effectivePluginProfiles, settingsValue]
+  )
+  const apiProfilesSectionAction = React.useMemo(
+    () =>
+      getQuickAppApiProfilesSectionAction({
+        effectivePluginProfiles,
+        isChineseUi,
+        savePluginProfiles
+      }),
+    [effectivePluginProfiles, isChineseUi, savePluginProfiles]
   )
 
   React.useEffect(() => {
@@ -657,19 +625,16 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
       const deletedProfile = effectivePluginProfiles.find((profile) => profile.id === profileId)
       const nextProfiles = effectivePluginProfiles.filter((profile) => profile.id !== profileId)
 
-      if (deletedProfile && legacyHunyuanProfile && isHunyuan3DCompatibleProfile(deletedProfile)) {
+      if (
+        deletedProfile &&
+        legacyHunyuanProfile &&
+        isQuickAppLegacyHunyuanProfile(deletedProfile)
+      ) {
         saveSettings({
           plugin_config: {
             api_profiles: nextProfiles
           },
-          aigc3d_config: {
-            tencent_secret_id: '',
-            tencent_secret_key: '',
-            api_region: '',
-            cos_bucket: '',
-            cos_region: '',
-            cos_key_prefix: ''
-          }
+          aigc3d_config: buildClearedQuickAppLegacyHunyuanConfig()
         })
         return
       }
@@ -687,11 +652,11 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
     (profile: LLMAPIProfile) => {
       savePluginProfiles([
         ...effectivePluginProfiles,
-        {
+        prepareClonedQuickAppProfile(profile, {
           ...stripExternalAuthProfile(profile),
           id: crypto.randomUUID(),
           api_key: ''
-        }
+        })
       ])
     },
     [effectivePluginProfiles, savePluginProfiles]
@@ -742,6 +707,7 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
 
       {!settingsValue.use_remote_llm && (
         <ApiProfilesSection
+          action={apiProfilesSectionAction}
           title={qt('quickapp_api.api_profiles_section', '快应用 API 设置')}
           onAdd={handleAddPluginApiProfile}
           onClone={handleClonePluginApiProfile}

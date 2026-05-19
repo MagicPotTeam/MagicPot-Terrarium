@@ -68,6 +68,7 @@ import { validateStructuredSkillOutput } from './skillRuntimeStructuredOutput'
 import { syncMcpClientManager } from '../mcp/runtime'
 import fs from 'node:fs/promises'
 import { isLocalFileSource } from '../utils/localFileUrl'
+import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
 // Browser automation snapshots may arrive through file URLs; normalize them before downstream handling.
 
 const decodeHy3dProfileSegment = (value?: string): string => {
@@ -910,6 +911,17 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   // Keep per-endpoint round-robin counters stable across requests so load-balanced profile selection stays deterministic.
   private static loadBalancingCounters: Map<string, number> = new Map()
 
+  private normalizeRequestedProfileId(profileId: string | undefined): string | undefined {
+    let nextProfileId = profileId
+    for (const extension of mainHostExtensionApiV1.llmProxy) {
+      const resolvedProfileId = extension.normalizeRequestedProfileId?.(nextProfileId)
+      if (resolvedProfileId !== undefined) {
+        nextProfileId = resolvedProfileId
+      }
+    }
+    return nextProfileId
+  }
+
   private findHunyuan3DProfile(config: Config, profileId?: string): LLMAPIProfile | undefined {
     const requestedProfileId = profileId?.trim()
     if (requestedProfileId) {
@@ -1300,7 +1312,21 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     throwIfAborted(options?.signal)
     req = applySkillRuntimeContextMessageLimit(req)
     const config = getConfig()
-    const requestedProfileId = req.profileId
+    const requestedProfileId = this.normalizeRequestedProfileId(req.profileId)
+
+    for (const extension of mainHostExtensionApiV1.llmProxy) {
+      const extensionResponse = await extension.handleChatRequest?.(req, {
+        config,
+        fetchImpl: this.getFetchImpl(),
+        rawProfileId: req.profileId,
+        requestedProfileId,
+        signal: options?.signal
+      })
+      if (extensionResponse) {
+        throwIfAborted(options?.signal)
+        return extensionResponse
+      }
+    }
 
     const [
       baseProfileId,
@@ -1484,9 +1510,20 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       return await this.chatViaBigModelOcr(req, profileWithSelectedKey, options)
     }
 
-    const cli = cliFromProfile(profileWithSelectedKey, {
-      fetchImpl: this.getFetchImpl()
-    })
+    const extensionContext = {
+      config,
+      fetchImpl: this.getFetchImpl(),
+      rawProfileId: req.profileId,
+      requestedProfileId,
+      signal: options?.signal
+    }
+    const cli =
+      mainHostExtensionApiV1.llmProxy
+        .map((extension) => extension.createCli?.(profileWithSelectedKey, extensionContext))
+        .find((client) => Boolean(client)) ??
+      cliFromProfile(profileWithSelectedKey, {
+        fetchImpl: this.getFetchImpl()
+      })
     if (!cli) {
       throw new Error('Unable to create an LLM client.')
     }
