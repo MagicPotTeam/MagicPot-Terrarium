@@ -176,12 +176,50 @@ describe('CanvasAnnotationOverlay', () => {
       )
     })
 
-    expect(overlay?.style.transform).toContain('translate3d(200px, 172px, 0)')
+    expect(overlay?.style.transform).toContain('translate3d(180px, 172px, 0)')
+    expect(overlay?.style.width).toBe('200px')
 
     act(() => {
       window.dispatchEvent(new CustomEvent(`canvas-reset-${parentItem.id}`))
     })
 
     expect(overlay?.style.transform).toContain('translate3d(120px, 152px, 0)')
+  })
+
+  it('scales attached caption preview layout with parent resize sync', () => {
+    const parentItem = createParentImageItem()
+    const annotationItem = createAttachedCaptionItem()
+
+    const { container } = render(
+      <CanvasAnnotationOverlay
+        item={annotationItem}
+        attachedParentItem={parentItem}
+        stageScale={1}
+      />
+    )
+
+    const overlay = container.querySelector(
+      `[data-canvas-overlay="annotation"][data-canvas-item-id="${annotationItem.id}"]`
+    ) as HTMLElement | null
+    const textNode = container.querySelector('[data-canvas-annotation-text]') as HTMLElement | null
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(`canvas-sync-${parentItem.id}`, {
+          detail: {
+            x: 180,
+            y: 60,
+            rotation: 0,
+            scaleX: 6,
+            scaleY: 6
+          }
+        })
+      )
+    })
+
+    expect(overlay?.style.transform).toContain('translate3d(180px, 672px, 0)')
+    expect(overlay?.style.width).toBe('1200px')
+    expect(overlay?.style.height).toBe('288px')
+    expect(textNode).toHaveStyle({ fontSize: '168px' })
   })
 })

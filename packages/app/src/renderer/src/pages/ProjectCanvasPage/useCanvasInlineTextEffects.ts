@@ -2,6 +2,9 @@ import { useEffect, type Dispatch, type RefObject, type SetStateAction } from 'r
 
 import {
   pruneOrphanAttachedCaptions,
+  resolveCanvasItemAttachmentScale,
+  resolveAttachedCaptionDraftLayout,
+  resolveAttachedCaptionScaleBasis,
   type AttachedCaptionAnnotation
 } from './canvasAttachedCaptionUtils'
 import type { InlineTextEditState } from './ProjectCanvasPageInlineTextEditor'
@@ -44,6 +47,7 @@ const TEXT_ITEM_MIN_EDITOR_WIDTH = 200
 const TEXT_ITEM_MIN_EDITOR_HEIGHT = 60
 const INLINE_TEXT_RESIZE_EPSILON = 2
 const INLINE_TEXT_POSITION_EPSILON = 0.5
+const INLINE_TEXT_SIZE_EPSILON = 0.5
 
 export function getCanvasItemFallbackBounds(item: CanvasItem): CanvasItemVisualBounds {
   return {
@@ -263,17 +267,44 @@ export function useCanvasInlineTextEffects({
 
         const parentBounds =
           getCanvasItemVisualBounds(parentItem) ?? getCanvasItemFallbackBounds(parentItem)
-        const nextPosition = resolveAttachedCaptionPosition(parentBounds, attachedAnnotation.width)
+        const parentScale = resolveCanvasItemAttachmentScale(parentItem)
+        const scaleBasis = resolveAttachedCaptionScaleBasis(parentScale, attachedAnnotation)
+        const nextLayout = resolveAttachedCaptionDraftLayout(parentBounds, {
+          parentScale,
+          baseScale: scaleBasis.baseScale,
+          baseFontSize: scaleBasis.baseFontSize,
+          baseHeight: scaleBasis.baseHeight
+        })
 
         if (
-          Math.abs(attachedAnnotation.x - nextPosition.x) < INLINE_TEXT_POSITION_EPSILON &&
-          Math.abs(attachedAnnotation.y - nextPosition.y) < INLINE_TEXT_POSITION_EPSILON
+          Math.abs(attachedAnnotation.x - nextLayout.x) < INLINE_TEXT_POSITION_EPSILON &&
+          Math.abs(attachedAnnotation.y - nextLayout.y) < INLINE_TEXT_POSITION_EPSILON &&
+          Math.abs(attachedAnnotation.width - nextLayout.width) < INLINE_TEXT_SIZE_EPSILON &&
+          Math.abs(attachedAnnotation.height - nextLayout.height) < INLINE_TEXT_SIZE_EPSILON &&
+          Math.abs((attachedAnnotation.fontSize || 0) - nextLayout.fontSize) <
+            INLINE_TEXT_SIZE_EPSILON &&
+          Math.abs((attachedAnnotation.attachmentBaseScale || 0) - scaleBasis.baseScale) <
+            INLINE_TEXT_SIZE_EPSILON &&
+          Math.abs((attachedAnnotation.attachmentBaseFontSize || 0) - scaleBasis.baseFontSize) <
+            INLINE_TEXT_SIZE_EPSILON &&
+          Math.abs((attachedAnnotation.attachmentBaseHeight || 0) - scaleBasis.baseHeight) <
+            INLINE_TEXT_SIZE_EPSILON
         ) {
           return item
         }
 
         changed = true
-        return { ...attachedAnnotation, x: nextPosition.x, y: nextPosition.y }
+        return {
+          ...attachedAnnotation,
+          x: nextLayout.x,
+          y: nextLayout.y,
+          width: nextLayout.width,
+          height: nextLayout.height,
+          fontSize: nextLayout.fontSize,
+          attachmentBaseScale: scaleBasis.baseScale,
+          attachmentBaseFontSize: scaleBasis.baseFontSize,
+          attachmentBaseHeight: scaleBasis.baseHeight
+        }
       })
 
       return changed ? nextItems : previousItems
@@ -296,18 +327,50 @@ export function useCanvasInlineTextEffects({
 
     const parentBounds =
       getCanvasItemVisualBounds(parentItem) ?? getCanvasItemFallbackBounds(parentItem)
-    const nextPosition = resolveAttachedCaptionPosition(parentBounds, inlineTextEdit.w)
+    const parentScale = resolveCanvasItemAttachmentScale(parentItem)
+    const scaleBasis = resolveAttachedCaptionScaleBasis(parentScale, {
+      fontSize: inlineTextEdit.fontSize,
+      height: inlineTextEdit.h,
+      attachmentBaseScale: inlineTextEdit.attachmentBaseScale,
+      attachmentBaseFontSize: inlineTextEdit.attachmentBaseFontSize,
+      attachmentBaseHeight: inlineTextEdit.attachmentBaseHeight
+    })
+    const nextLayout = resolveAttachedCaptionDraftLayout(parentBounds, {
+      parentScale,
+      baseScale: scaleBasis.baseScale,
+      baseFontSize: scaleBasis.baseFontSize,
+      baseHeight: scaleBasis.baseHeight
+    })
 
     if (
-      Math.abs(inlineTextEdit.x - nextPosition.x) < INLINE_TEXT_POSITION_EPSILON &&
-      Math.abs(inlineTextEdit.y - nextPosition.y) < INLINE_TEXT_POSITION_EPSILON
+      Math.abs(inlineTextEdit.x - nextLayout.x) < INLINE_TEXT_POSITION_EPSILON &&
+      Math.abs(inlineTextEdit.y - nextLayout.y) < INLINE_TEXT_POSITION_EPSILON &&
+      Math.abs(inlineTextEdit.w - nextLayout.width) < INLINE_TEXT_SIZE_EPSILON &&
+      Math.abs(inlineTextEdit.h - nextLayout.height) < INLINE_TEXT_SIZE_EPSILON &&
+      Math.abs((inlineTextEdit.fontSize || 0) - nextLayout.fontSize) < INLINE_TEXT_SIZE_EPSILON &&
+      Math.abs((inlineTextEdit.attachmentBaseScale || 0) - scaleBasis.baseScale) <
+        INLINE_TEXT_SIZE_EPSILON &&
+      Math.abs((inlineTextEdit.attachmentBaseFontSize || 0) - scaleBasis.baseFontSize) <
+        INLINE_TEXT_SIZE_EPSILON &&
+      Math.abs((inlineTextEdit.attachmentBaseHeight || 0) - scaleBasis.baseHeight) <
+        INLINE_TEXT_SIZE_EPSILON
     ) {
       return
     }
 
     setInlineTextEdit((previous) =>
       previous && previous.attachedToId === parentItem.id
-        ? { ...previous, x: nextPosition.x, y: nextPosition.y }
+        ? {
+            ...previous,
+            x: nextLayout.x,
+            y: nextLayout.y,
+            w: nextLayout.width,
+            h: nextLayout.height,
+            fontSize: nextLayout.fontSize,
+            attachmentBaseScale: scaleBasis.baseScale,
+            attachmentBaseFontSize: scaleBasis.baseFontSize,
+            attachmentBaseHeight: scaleBasis.baseHeight
+          }
         : previous
     )
   }, [getCanvasItemVisualBounds, inlineTextEdit, items, setInlineTextEdit])

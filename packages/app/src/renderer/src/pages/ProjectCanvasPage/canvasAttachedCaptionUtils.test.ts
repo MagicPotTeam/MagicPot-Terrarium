@@ -3,7 +3,10 @@ import type { CanvasAnnotationItem, CanvasImageItem, CanvasItem } from './types'
 import {
   collectCascadeDeletedCanvasItemIds,
   pruneOrphanAttachedCaptions,
-  removeCanvasItemsWithAttachedCaptions
+  resolveCanvasItemAttachmentScale,
+  removeCanvasItemsWithAttachedCaptions,
+  resolveAttachedCaptionDraftLayout,
+  resolveAttachedCaptionScaleBasis
 } from './canvasAttachedCaptionUtils'
 
 function createImageItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
@@ -105,5 +108,76 @@ describe('canvasAttachedCaptionUtils', () => {
     const nextItems = pruneOrphanAttachedCaptions(items)
 
     expect(nextItems.map((item) => item.id)).toEqual(['image-1', 'caption-1', 'free-anno'])
+  })
+
+  it('sizes new attached captions from the current parent bounds', () => {
+    const layout = resolveAttachedCaptionDraftLayout({
+      x: 100,
+      y: 40,
+      width: 2048,
+      height: 2048
+    })
+
+    expect(layout).toEqual({
+      x: 100,
+      y: 2100,
+      width: 2048,
+      height: 193,
+      fontSize: 113
+    })
+  })
+
+  it('keeps the previous minimum size for small parent bounds', () => {
+    const layout = resolveAttachedCaptionDraftLayout({
+      x: 100,
+      y: 40,
+      width: 80,
+      height: 80
+    })
+
+    expect(layout).toEqual({
+      x: 60,
+      y: 132,
+      width: 160,
+      height: 48,
+      fontSize: 28
+    })
+  })
+
+  it('scales attached caption text from the stored parent scale basis', () => {
+    const layout = resolveAttachedCaptionDraftLayout(
+      {
+        x: 24,
+        y: 36,
+        width: 960,
+        height: 540
+      },
+      {
+        parentScale: 6,
+        baseScale: 1,
+        baseFontSize: 28,
+        baseHeight: 48
+      }
+    )
+
+    expect(layout).toEqual({
+      x: 24,
+      y: 588,
+      width: 960,
+      height: 288,
+      fontSize: 168
+    })
+  })
+
+  it('uses the first observed small scale as the basis for legacy captions', () => {
+    const parentScale = resolveCanvasItemAttachmentScale(
+      createImageItem({ scaleX: 0.25, scaleY: 0.25 })
+    )
+
+    expect(resolveAttachedCaptionScaleBasis(parentScale, { fontSize: 28, height: 48 })).toEqual({
+      baseScale: 0.25,
+      baseFontSize: 28,
+      baseHeight: 48
+    })
   })
 })

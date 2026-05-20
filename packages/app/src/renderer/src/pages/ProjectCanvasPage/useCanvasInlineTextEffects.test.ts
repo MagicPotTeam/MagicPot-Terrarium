@@ -1,3 +1,5 @@
+import React from 'react'
+import { render, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('react-konva', () => ({
@@ -13,9 +15,10 @@ import {
   getCanvasItemFallbackBounds,
   resolveAttachedCaptionPosition,
   resolveInlineTextViewportShift,
-  shouldClearInlineTextEdit
+  shouldClearInlineTextEdit,
+  useCanvasInlineTextEffects
 } from './useCanvasInlineTextEffects'
-import type { CanvasImageItem } from './types'
+import type { CanvasAnnotationItem, CanvasImageItem, CanvasItem } from './types'
 
 function createImageItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
   return {
@@ -46,6 +49,62 @@ function createInlineTextEdit(overrides: Partial<InlineTextEditState> = {}): Inl
     isNew: false,
     ...overrides
   }
+}
+
+function createAttachedCaptionItem(
+  overrides: Partial<CanvasAnnotationItem> = {}
+): CanvasAnnotationItem {
+  return {
+    id: 'caption-1',
+    type: 'annotation',
+    shape: 'text-anno',
+    stroke: '#ef4444',
+    fillOpacity: 0,
+    strokeWidth: 0,
+    label: '',
+    text: 'caption',
+    fontSize: 28,
+    x: 24,
+    y: 138,
+    width: 160,
+    height: 48,
+    rotation: 0,
+    scaleX: 1,
+    scaleY: 1,
+    zIndex: 1,
+    locked: false,
+    attachedToId: 'image-1',
+    attachmentPlacement: 'bottom-center',
+    ...overrides
+  }
+}
+
+function CanvasInlineTextEffectsProbe({
+  initialItems
+}: {
+  initialItems: CanvasItem[]
+}): React.ReactElement {
+  const [items, setItems] = React.useState<CanvasItem[]>(initialItems)
+  const inlineTextAreaRef = React.useRef<HTMLTextAreaElement | null>(null)
+
+  useCanvasInlineTextEffects({
+    getCanvasItemVisualBounds: () => null,
+    inlineTextAreaRef,
+    inlineTextEdit: null,
+    itemIdSet: new Set(items.map((item) => item.id)),
+    items,
+    setInlineTextEdit: vi.fn(),
+    setItems,
+    setStagePos: vi.fn(),
+    stagePos: { x: 0, y: 0 },
+    stageScale: 1,
+    stageSize: { width: 900, height: 640 }
+  })
+
+  return React.createElement('div', {
+    'data-testid': 'items',
+    'data-items': JSON.stringify(items)
+  })
 }
 
 describe('getCanvasItemFallbackBounds', () => {
@@ -161,6 +220,44 @@ describe('resolveInlineTextViewportShift', () => {
     ).toEqual({
       x: -104,
       y: -24
+    })
+  })
+})
+
+describe('useCanvasInlineTextEffects', () => {
+  it('resizes attached captions when the parent item is scaled', async () => {
+    const image = createImageItem({
+      width: 160,
+      height: 90,
+      scaleX: 6,
+      scaleY: 6
+    })
+    const caption = createAttachedCaptionItem()
+
+    const { getByTestId } = render(
+      React.createElement(CanvasInlineTextEffectsProbe, {
+        initialItems: [image, caption]
+      })
+    )
+
+    await waitFor(() => {
+      const items = JSON.parse(
+        getByTestId('items').getAttribute('data-items') || '[]'
+      ) as CanvasItem[]
+      const resizedCaption = items.find(
+        (item): item is CanvasAnnotationItem => item.id === caption.id && item.type === 'annotation'
+      )
+
+      expect(resizedCaption).toMatchObject({
+        x: 24,
+        y: 588,
+        width: 960,
+        height: 288,
+        fontSize: 168,
+        attachmentBaseScale: 1,
+        attachmentBaseFontSize: 28,
+        attachmentBaseHeight: 48
+      })
     })
   })
 })

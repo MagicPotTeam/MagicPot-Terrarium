@@ -226,6 +226,9 @@ export interface CanvasAnnotationItem extends CanvasItemBase {
   attachedToId?: string
   attachmentPlacement?: 'bottom-center'
   attachmentRole?: 'constraint' | 'tagging-result'
+  attachmentBaseScale?: number
+  attachmentBaseFontSize?: number
+  attachmentBaseHeight?: number
 }
 
 // ─── 联合类型 ───

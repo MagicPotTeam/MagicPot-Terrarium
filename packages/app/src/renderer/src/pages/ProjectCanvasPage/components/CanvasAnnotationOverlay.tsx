@@ -2,6 +2,11 @@ import React from 'react'
 import { Box } from '@mui/material'
 import { getCanvasItemBounds } from '../projectCanvasPageShared'
 import { measureCanvasAnnotationTextHeight } from '../canvasTextLayout'
+import {
+  resolveCanvasItemAttachmentScale,
+  resolveAttachedCaptionDraftLayout,
+  resolveAttachedCaptionScaleBasis
+} from '../canvasAttachedCaptionUtils'
 import type { CanvasAnnotationItem, CanvasItem } from '../types'
 import type { CanvasSyncDetail } from './canvasSync'
 
@@ -149,16 +154,6 @@ function resolveCanvasItemVisualBounds(item: CanvasItem) {
   }
 }
 
-function resolveAttachedCaptionPosition(
-  parentBounds: ReturnType<typeof resolveCanvasItemVisualBounds>,
-  captionWidth: number
-) {
-  return {
-    x: parentBounds.x + (parentBounds.width - captionWidth) / 2,
-    y: parentBounds.y + parentBounds.height + 12
-  }
-}
-
 function fitAnnotationLabelFontSize(
   label: string,
   width: number,
@@ -235,9 +230,12 @@ const CanvasAnnotationOverlay: React.FC<CanvasAnnotationOverlayProps> = ({
 }) => {
   const overlayRef = React.useRef<HTMLDivElement | null>(null)
   const [previewTransform, setPreviewTransform] = React.useState<CanvasSyncDetail | null>(null)
-  const [attachedPreviewPosition, setAttachedPreviewPosition] = React.useState<{
+  const [attachedPreviewLayout, setAttachedPreviewLayout] = React.useState<{
     x: number
     y: number
+    width: number
+    height: number
+    fontSize: number
   } | null>(null)
   const previewTransformRef = React.useRef<CanvasSyncDetail | null>(previewTransform)
 
@@ -330,7 +328,7 @@ const CanvasAnnotationOverlay: React.FC<CanvasAnnotationOverlayProps> = ({
       item.attachedToId !== attachedParentItem.id ||
       item.attachmentPlacement !== 'bottom-center'
     ) {
-      setAttachedPreviewPosition(null)
+      setAttachedPreviewLayout(null)
       return
     }
 
@@ -349,11 +347,20 @@ const CanvasAnnotationOverlay: React.FC<CanvasAnnotationOverlayProps> = ({
         scaleY: detail.scaleY
       }
       const parentBounds = resolveCanvasItemVisualBounds(parentPreviewItem)
-      setAttachedPreviewPosition(resolveAttachedCaptionPosition(parentBounds, item.width))
+      const parentScale = resolveCanvasItemAttachmentScale(parentPreviewItem)
+      const scaleBasis = resolveAttachedCaptionScaleBasis(parentScale, item)
+      setAttachedPreviewLayout(
+        resolveAttachedCaptionDraftLayout(parentBounds, {
+          parentScale,
+          baseScale: scaleBasis.baseScale,
+          baseFontSize: scaleBasis.baseFontSize,
+          baseHeight: scaleBasis.baseHeight
+        })
+      )
     }
 
     const handleCanvasReset = () => {
-      setAttachedPreviewPosition(null)
+      setAttachedPreviewLayout(null)
     }
 
     window.addEventListener(`canvas-sync-${attachedParentItem.id}`, handleCanvasSync)
@@ -363,11 +370,20 @@ const CanvasAnnotationOverlay: React.FC<CanvasAnnotationOverlayProps> = ({
       window.removeEventListener(`canvas-sync-${attachedParentItem.id}`, handleCanvasSync)
       window.removeEventListener(`canvas-reset-${attachedParentItem.id}`, handleCanvasReset)
     }
-  }, [attachedParentItem, item.attachedToId, item.attachmentPlacement, item.width])
+  }, [attachedParentItem, item])
 
   React.useEffect(() => {
-    setAttachedPreviewPosition(null)
-  }, [attachedParentItem?.id, item.attachedToId, item.id, item.width, item.x, item.y])
+    setAttachedPreviewLayout(null)
+  }, [
+    attachedParentItem?.id,
+    item.attachedToId,
+    item.id,
+    item.width,
+    item.height,
+    item.fontSize,
+    item.x,
+    item.y
+  ])
 
   const previewItem = React.useMemo(
     () =>
@@ -386,14 +402,17 @@ const CanvasAnnotationOverlay: React.FC<CanvasAnnotationOverlayProps> = ({
 
   const renderedItem = React.useMemo(
     () =>
-      attachedPreviewPosition && !previewTransform
+      attachedPreviewLayout && !previewTransform
         ? {
             ...previewItem,
-            x: attachedPreviewPosition.x,
-            y: attachedPreviewPosition.y
+            x: attachedPreviewLayout.x,
+            y: attachedPreviewLayout.y,
+            width: attachedPreviewLayout.width,
+            height: attachedPreviewLayout.height,
+            fontSize: attachedPreviewLayout.fontSize
           }
         : previewItem,
-    [attachedPreviewPosition, previewItem, previewTransform]
+    [attachedPreviewLayout, previewItem, previewTransform]
   )
 
   const shape = resolveCanvasAnnotationShape(renderedItem)

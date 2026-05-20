@@ -1,7 +1,11 @@
 import { useCallback, type Dispatch, type SetStateAction } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useCanvasMediaActions } from './useCanvasMediaActions'
-import type { AttachedCaptionAnnotation } from './canvasAttachedCaptionUtils'
+import {
+  resolveCanvasItemAttachmentScale,
+  resolveAttachedCaptionDraftLayout,
+  type AttachedCaptionAnnotation
+} from './canvasAttachedCaptionUtils'
 import type { InlineTextEditState } from './ProjectCanvasPageInlineTextEditor'
 import type { CanvasExportBounds } from './groupPlaybackUtils'
 import type { CanvasTool, SendCanvasItemsToAgentOptions } from './projectCanvasPageShared'
@@ -94,7 +98,10 @@ export function useCanvasSelectionActions({
           isNew: false,
           fontSize: existingCaption.fontSize || 28,
           attachedToId: existingCaption.attachedToId,
-          attachmentPlacement: existingCaption.attachmentPlacement || 'bottom-center'
+          attachmentPlacement: existingCaption.attachmentPlacement || 'bottom-center',
+          attachmentBaseScale: existingCaption.attachmentBaseScale,
+          attachmentBaseFontSize: existingCaption.attachmentBaseFontSize,
+          attachmentBaseHeight: existingCaption.attachmentBaseHeight
         })
         return
       }
@@ -105,21 +112,28 @@ export function useCanvasSelectionActions({
         width: Math.max(1, targetItem.width * Math.abs(targetItem.scaleX || 1)),
         height: Math.max(1, targetItem.height * Math.abs(targetItem.scaleY || 1))
       }
-      const initialWidth = Math.max(160, Math.min(360, Math.max(targetBounds.width, 160)))
+      const attachmentBaseScale = resolveCanvasItemAttachmentScale(targetItem)
+      const captionLayout = resolveAttachedCaptionDraftLayout(targetBounds, {
+        parentScale: attachmentBaseScale,
+        baseScale: attachmentBaseScale
+      })
 
       setTool('select')
       setSelectedIds(new Set())
       setInlineTextEdit({
         id: `anno-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        x: targetBounds.x + (targetBounds.width - initialWidth) / 2,
-        y: targetBounds.y + targetBounds.height + 12,
-        w: initialWidth,
-        h: 48,
+        x: captionLayout.x,
+        y: captionLayout.y,
+        w: captionLayout.width,
+        h: captionLayout.height,
         text: '',
         isNew: true,
-        fontSize: 28,
+        fontSize: captionLayout.fontSize,
         attachedToId: targetItem.id,
         attachmentPlacement: 'bottom-center',
+        attachmentBaseScale,
+        attachmentBaseFontSize: captionLayout.fontSize,
+        attachmentBaseHeight: captionLayout.height,
         _createdAt: Date.now()
       })
     },
