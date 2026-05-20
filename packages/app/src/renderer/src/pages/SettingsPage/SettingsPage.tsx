@@ -96,13 +96,6 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
         description: t('settings.tab_descs.environment')
       },
       {
-        label: tabText('settings.tabs.llm', 'Agent线程配置', 'Agent Threads'),
-        value: 'llm',
-        icon: <Code sx={{ fontSize: 18 }} />,
-        Panel: PanelLLM,
-        description: tabText('settings.tab_descs.llm', 'Agent线程配置', 'Agent thread settings')
-      },
-      {
         label: tabText('settings.tabs.plugin', '快应用 API', 'Quick App API'),
         value: 'plugin',
         icon: <ExtensionIcon sx={{ fontSize: 18 }} />,
@@ -112,6 +105,13 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
           '快应用 API 配置',
           'Quick App API settings'
         )
+      },
+      {
+        label: tabText('settings.tabs.llm', 'Agent线程配置', 'Agent Threads'),
+        value: 'llm',
+        icon: <Code sx={{ fontSize: 18 }} />,
+        Panel: PanelLLM,
+        description: tabText('settings.tab_descs.llm', 'Agent线程配置', 'Agent thread settings')
       },
       {
         label: localizedText('settings.tabs.mcp', 'MCP'),
