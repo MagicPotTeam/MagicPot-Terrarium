@@ -618,7 +618,7 @@ describe('requestChatCompletion', () => {
       text: async () =>
         JSON.stringify({
           error:
-            'Unauthorized LLM proxy request. Provide Authorization: Bearer <token> or X-MagicPot-Proxy-Token.'
+            'Unauthorized LLM proxy request. Provide Authorization: Bearer <token>, X-MagicPot-Proxy-Token, or legacy X-MagicPot-Bot-Secret/X-Bot-Secret.'
         })
     })
     vi.stubGlobal('fetch', fetchMock)

@@ -37,6 +37,7 @@ let llmProxySvc: LLMProxySvcImpl | null = null
 const testUiPolicy = resolveTestUiPolicy(readTestUiEnv())
 const CANVAS_SYNC_REMOVED_ERROR =
   'Canvas mirroring has been removed. Remote agents can only access content explicitly attached to the current request.'
+const LEGACY_CHAT_ENDPOINTS = new Set(['/api/bot/message', '/api/bot/chat', '/api/message'])
 
 function getLlmProxyTempDir(scope?: string): string {
   const baseTempDir = resolveTestArtifactPath({
@@ -352,6 +353,13 @@ const cleanString = (value?: string | null): string | undefined => {
   return normalized || undefined
 }
 
+const cleanUnknownString = (value: unknown): string | undefined => {
+  if (typeof value === 'string' || typeof value === 'number') {
+    return cleanString(String(value))
+  }
+  return undefined
+}
+
 const firstHeaderValue = (value?: string | string[]): string | undefined => {
   if (Array.isArray(value)) {
     return cleanString(value[0])
@@ -369,6 +377,11 @@ const getBearerToken = (header?: string | string[]): string | undefined => {
   return cleanString(match?.[1])
 }
 
+const getLegacyBotSecretToken = (
+  headers: Record<string, string | string[] | undefined>
+): string | undefined =>
+  firstHeaderValue(headers['x-magicpot-bot-secret']) || firstHeaderValue(headers['x-bot-secret'])
+
 const isLocalSecretRequestAuthorized = (
   headers: Record<string, string | string[] | undefined>,
   secret?: string | null
@@ -381,9 +394,7 @@ const isLocalSecretRequestAuthorized = (
     return true
   }
 
-  const customToken =
-    firstHeaderValue(headers['x-magicpot-bot-secret']) || firstHeaderValue(headers['x-bot-secret'])
-  return customToken === normalizedSecret
+  return getLegacyBotSecretToken(headers) === normalizedSecret
 }
 
 const normalizeLlmProxyAccessTokenEntry = (
@@ -451,7 +462,9 @@ const resolveLlmProxyAccessIdentity = (
   }
 
   const requestedToken =
-    getBearerToken(headers.authorization) || firstHeaderValue(headers['x-magicpot-proxy-token'])
+    getBearerToken(headers.authorization) ||
+    firstHeaderValue(headers['x-magicpot-proxy-token']) ||
+    getLegacyBotSecretToken(headers)
 
   if (!requestedToken) {
     return null
@@ -466,7 +479,7 @@ const writeUnauthorizedLlmProxyResponse = (res: http.ServerResponse): void => {
   res.end(
     JSON.stringify({
       error:
-        'Unauthorized LLM proxy request. Provide Authorization: Bearer <token> or X-MagicPot-Proxy-Token.'
+        'Unauthorized LLM proxy request. Provide Authorization: Bearer <token>, X-MagicPot-Proxy-Token, or legacy X-MagicPot-Bot-Secret/X-Bot-Secret.'
     })
   )
 }
@@ -561,6 +574,137 @@ const normalizeAssistantRouteInput = (value: {
     }) as AssistantRoute
   )
 
+type AssistantRouteInput = Parameters<typeof normalizeAssistantRouteInput>[0]
+
+type ProxyChatRequestData = {
+  messages: ChatMessage[]
+  route?: AssistantRouteInput
+  systemPrompt?: string
+  skillRuntime?: LLMChatSkillRuntime
+  profileId?: string
+  profileScope?: LLMProfileScope
+  sessionUrl?: string
+  conversationId?: string
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const readRequestBody = async (req: http.IncomingMessage): Promise<string> => {
+  let body = ''
+  for await (const chunk of req) {
+    body += chunk
+  }
+  return body
+}
+
+const normalizeLegacyMessageContent = (value: unknown): string | undefined => {
+  if (typeof value === 'string' || typeof value === 'number') {
+    return cleanUnknownString(value)
+  }
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+
+  const textContent = value
+    .map((part) => (isRecord(part) ? cleanUnknownString(part.text) : undefined))
+    .filter((part): part is string => Boolean(part))
+    .join(' ')
+  return textContent || undefined
+}
+
+const normalizeLegacyChatMessages = (reqData: Record<string, unknown>): ChatMessage[] => {
+  if (Array.isArray(reqData.messages)) {
+    const messages = reqData.messages
+      .map((message): ChatMessage | null => {
+        if (typeof message === 'string' || typeof message === 'number') {
+          const content = cleanUnknownString(message)
+          if (content === undefined) {
+            return null
+          }
+          return {
+            role: 'user',
+            content
+          }
+        }
+        if (!isRecord(message)) {
+          return null
+        }
+
+        const role =
+          message.role === 'system' || message.role === 'assistant' ? message.role : 'user'
+        const content = normalizeLegacyMessageContent(
+          message.content ?? message.message ?? message.text
+        )
+        if (content === undefined) {
+          return null
+        }
+
+        return {
+          role,
+          content,
+          attachments: Array.isArray(message.attachments)
+            ? (message.attachments as ChatMessage['attachments'])
+            : undefined,
+          ocrResult: isRecord(message.ocrResult)
+            ? (message.ocrResult as ChatMessage['ocrResult'])
+            : undefined,
+          hiddenContext: cleanUnknownString(message.hiddenContext)
+        }
+      })
+      .filter((message): message is ChatMessage => Boolean(message))
+    if (messages.length > 0) {
+      return messages
+    }
+  }
+
+  const content =
+    cleanUnknownString(reqData.message) ||
+    cleanUnknownString(reqData.content) ||
+    cleanUnknownString(reqData.text)
+  return content
+    ? [
+        {
+          role: 'user',
+          content
+        }
+      ]
+    : []
+}
+
+const normalizeLegacyRouteInput = (
+  reqData: Record<string, unknown>
+): AssistantRouteInput | undefined => {
+  const route = isRecord(reqData.route) ? reqData.route : undefined
+  const routeInput: AssistantRouteInput = {
+    channel: cleanUnknownString(route?.channel) || cleanUnknownString(reqData.channel),
+    scopeType: cleanUnknownString(route?.scopeType) || cleanUnknownString(reqData.scopeType),
+    scopeId: cleanUnknownString(route?.scopeId) || cleanUnknownString(reqData.scopeId),
+    threadId: cleanUnknownString(route?.threadId) || cleanUnknownString(reqData.threadId),
+    senderId: cleanUnknownString(route?.senderId) || cleanUnknownString(reqData.senderId),
+    senderName: cleanUnknownString(route?.senderName) || cleanUnknownString(reqData.senderName)
+  }
+
+  return route || Object.values(routeInput).some(Boolean) ? routeInput : undefined
+}
+
+const normalizeLegacyChatRequest = (reqData: Record<string, unknown>): ProxyChatRequestData => ({
+  messages: normalizeLegacyChatMessages(reqData),
+  route: normalizeLegacyRouteInput(reqData),
+  systemPrompt: cleanUnknownString(reqData.systemPrompt),
+  skillRuntime: isRecord(reqData.skillRuntime)
+    ? (reqData.skillRuntime as LLMChatSkillRuntime)
+    : undefined,
+  profileId: cleanUnknownString(reqData.profileId),
+  profileScope:
+    reqData.profileScope === 'qapp' || reqData.profileScope === 'agent'
+      ? reqData.profileScope
+      : undefined,
+  sessionUrl: cleanUnknownString(reqData.sessionUrl),
+  conversationId:
+    cleanUnknownString(reqData.conversationId) || cleanUnknownString(reqData.sessionId)
+})
+
 const buildMcpJsonRpcError = (id: string | number | null, code: number, message: string) => ({
   jsonrpc: '2.0',
   id,
@@ -574,6 +718,80 @@ const normalizeMcpAcceptHeader = (req: http.IncomingMessage): void => {
   const accept = cleanString(req.headers.accept)
   if (!accept || accept === '*/*') {
     req.headers.accept = 'application/json, text/event-stream'
+  }
+}
+
+const handleProxyChatRequest = async ({
+  req,
+  res,
+  port,
+  accessIdentity,
+  reqData,
+  includeLegacyAliases = false
+}: {
+  req: http.IncomingMessage
+  res: http.ServerResponse
+  port: number
+  accessIdentity: LlmProxyConfiguredAccessToken
+  reqData: ProxyChatRequestData
+  includeLegacyAliases?: boolean
+}): Promise<void> => {
+  const abortBridge = createRequestAbortBridge(req, res)
+  try {
+    const normalizedRoute = reqData.route ? normalizeAssistantRouteInput(reqData.route) : undefined
+    recordLlmProxyAccessUsage(accessIdentity, {
+      activity: 'chat',
+      requesterAddress: getRequesterAddress(req),
+      profileId: reqData.profileId
+    })
+    const result = await getLLMProxySvc().chat(
+      {
+        messages: reqData.messages,
+        route: normalizedRoute,
+        systemPrompt: reqData.systemPrompt,
+        skillRuntime: reqData.skillRuntime,
+        profileId: reqData.profileId,
+        profileScope: reqData.profileScope,
+        sessionUrl: reqData.sessionUrl,
+        conversationId: namespaceProxyConversationId(accessIdentity, reqData.conversationId)
+      },
+      {
+        signal: abortBridge.signal
+      }
+    )
+    if (abortBridge.signal.aborted || res.destroyed) {
+      return
+    }
+    // Rewrite file:// URLs for web and remote clients.
+    const host = req.headers.host || `${getLocalIPAddress()}:${port}`
+    const requesterAddress = getRequesterAddress(req)
+    const protocol =
+      (req.headers['x-forwarded-proto'] as string) ||
+      (req.socket && 'encrypted' in req.socket && req.socket.encrypted ? 'https' : 'http')
+    rewriteResultUrls(
+      result,
+      host,
+      protocol,
+      accessIdentity,
+      requesterAddress,
+      accessIdentity.resourceScope
+    )
+    const responseBody = includeLegacyAliases
+      ? {
+          ...result,
+          reply: result.content,
+          message: result.content
+        }
+      : result
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(responseBody))
+  } catch (error) {
+    if (abortBridge.signal.aborted || isAbortError(error)) {
+      return
+    }
+    throw error
+  } finally {
+    abortBridge.cleanup()
   }
 }
 
@@ -655,6 +873,7 @@ export function startLLMProxyServer(): void {
       'Access-Control-Allow-Headers',
       'Content-Type, Authorization, X-MagicPot-Bot-Secret, X-Bot-Secret, X-MagicPot-Proxy-Token'
     )
+    res.setHeader('Access-Control-Expose-Headers', 'X-MagicPot-Stream-Fallback')
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
@@ -667,7 +886,7 @@ export function startLLMProxyServer(): void {
 
     try {
       // Health check.
-      if (pathname === '/api/status' && req.method === 'GET') {
+      if ((pathname === '/api/status' || pathname === '/api/bot/status') && req.method === 'GET') {
         const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
         if (!accessIdentity) {
           writeUnauthorizedLlmProxyResponse(res)
@@ -678,8 +897,19 @@ export function startLLMProxyServer(): void {
           requesterAddress: getRequesterAddress(req)
         })
         const status = await getLLMProxySvc().serverStatus({})
+        const responseBody =
+          pathname === '/api/bot/status'
+            ? {
+                ...status,
+                compatibility: {
+                  endpoint: '/api/status',
+                  legacyEndpoint: '/api/bot/status',
+                  chatEndpoint: '/api/chat'
+                }
+              }
+            : status
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(status))
+        res.end(JSON.stringify(responseBody))
         return
       }
 
@@ -857,8 +1087,15 @@ export function startLLMProxyServer(): void {
           return
         }
         req.resume()
-        res.writeHead(410, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: CANVAS_SYNC_REMOVED_ERROR }))
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            ok: true,
+            mirrored: false,
+            error: CANVAS_SYNC_REMOVED_ERROR,
+            hint: 'Canvas mirroring is no longer available. Attach required files to the chat request instead.'
+          })
+        )
         return
       }
 
@@ -927,20 +1164,10 @@ export function startLLMProxyServer(): void {
           writeUnauthorizedLlmProxyResponse(res)
           return
         }
-        let body = ''
-        for await (const chunk of req) {
-          body += chunk
-        }
+        const body = await readRequestBody(req)
         const reqData = JSON.parse(body) as {
           messages: ChatMessage[]
-          route?: {
-            channel?: string
-            scopeType?: AssistantScopeType
-            scopeId?: string
-            threadId?: string
-            senderId?: string
-            senderName?: string
-          }
+          route?: AssistantRouteInput
           systemPrompt?: string
           skillRuntime?: LLMChatSkillRuntime
           profileId?: string
@@ -948,58 +1175,32 @@ export function startLLMProxyServer(): void {
           sessionUrl?: string
           conversationId?: string
         }
-        const abortBridge = createRequestAbortBridge(req, res)
-        try {
-          const normalizedRoute = reqData.route
-            ? normalizeAssistantRouteInput(reqData.route)
-            : undefined
-          recordLlmProxyAccessUsage(accessIdentity, {
-            activity: 'chat',
-            requesterAddress: getRequesterAddress(req),
-            profileId: reqData.profileId
-          })
-          const result = await getLLMProxySvc().chat(
-            {
-              messages: reqData.messages,
-              route: normalizedRoute,
-              systemPrompt: reqData.systemPrompt,
-              skillRuntime: reqData.skillRuntime,
-              profileId: reqData.profileId,
-              profileScope: reqData.profileScope,
-              sessionUrl: reqData.sessionUrl,
-              conversationId: namespaceProxyConversationId(accessIdentity, reqData.conversationId)
-            },
-            {
-              signal: abortBridge.signal
-            }
-          )
-          if (abortBridge.signal.aborted || res.destroyed) {
-            return
-          }
-          // Rewrite file:// URLs for web and remote clients.
-          const host = req.headers.host || `${getLocalIPAddress()}:${port}`
-          const requesterAddress = getRequesterAddress(req)
-          const protocol =
-            (req.headers['x-forwarded-proto'] as string) ||
-            (req.socket && 'encrypted' in req.socket && req.socket.encrypted ? 'https' : 'http')
-          rewriteResultUrls(
-            result,
-            host,
-            protocol,
-            accessIdentity,
-            requesterAddress,
-            accessIdentity.resourceScope
-          )
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(result))
-        } catch (error) {
-          if (abortBridge.signal.aborted || isAbortError(error)) {
-            return
-          }
-          throw error
-        } finally {
-          abortBridge.cleanup()
+        await handleProxyChatRequest({ req, res, port, accessIdentity, reqData })
+        return
+      }
+
+      if (LEGACY_CHAT_ENDPOINTS.has(pathname) && req.method === 'POST') {
+        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
+        if (!accessIdentity) {
+          writeUnauthorizedLlmProxyResponse(res)
+          return
         }
+        const body = await readRequestBody(req)
+        const parsedBody = (body ? JSON.parse(body) : {}) as unknown
+        const reqData = normalizeLegacyChatRequest(isRecord(parsedBody) ? parsedBody : {})
+        if (reqData.messages.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Missing message content or messages.' }))
+          return
+        }
+        await handleProxyChatRequest({
+          req,
+          res,
+          port,
+          accessIdentity,
+          reqData,
+          includeLegacyAliases: true
+        })
         return
       }
       // OpenAI-compatible endpoint: /v1/chat/completions
@@ -1120,7 +1321,11 @@ export function startLLMProxyServer(): void {
               total_tokens: 0
             }
           }
-          res.writeHead(200, { 'Content-Type': 'application/json' })
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+          if (reqData.stream) {
+            headers['X-MagicPot-Stream-Fallback'] = 'non-stream-json'
+          }
+          res.writeHead(200, headers)
           res.end(JSON.stringify(response))
         } catch (error) {
           if (abortBridge.signal.aborted || isAbortError(error)) {
