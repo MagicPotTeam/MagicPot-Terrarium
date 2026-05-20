@@ -218,18 +218,24 @@ const applyCallTypeToProfile = (
   callType: ProfileCallTypeSelectValue
 ): LLMAPIProfile => {
   switch (callType) {
-    case 'local':
+    case 'local': {
+      const isCurrentLocalProfile = resolveProfileCallType(profile) === 'local'
       return {
         ...stripHunyuan3DProfile(stripExternalAuthProfile(profile)),
         call_type: 'local',
+        model_name: isCurrentLocalProfile ? profile.model_name : '',
         base_url: '',
         api_key: '',
         backup_api_keys: undefined,
         is_ollama: false,
         provider: DEFAULT_PROVIDER_OPTION,
         deployment: undefined,
+        model_use: isCurrentLocalProfile ? profile.model_use : DEFAULT_MODEL_USE_OPTION,
+        is_vision_model: isCurrentLocalProfile ? profile.is_vision_model : false,
+        is_ocr_model: isCurrentLocalProfile ? profile.is_ocr_model : false,
         local_model_path: normalizeLocalModelPath(profile.local_model_path)
       }
+    }
     case 'hunyuan3d':
       return applyHunyuan3DPresetToProfile(profile)
     case 'api':
@@ -237,13 +243,21 @@ const applyCallTypeToProfile = (
       const apiProfile = stripHunyuan3DProfile(
         stripLocalModelProfile(stripExternalAuthProfile(profile))
       )
-      const isSpecializedApiProfile = isHunyuan3DCompatibleProfile(profile)
+      const shouldResetApiProfile =
+        isHunyuan3DCompatibleProfile(profile) || resolveProfileCallType(profile) === 'local'
       return {
         ...apiProfile,
         call_type: undefined,
-        model_name: isSpecializedApiProfile ? '' : apiProfile.model_name,
-        base_url: isSpecializedApiProfile ? OFFICIAL_OPENAI_BASE_URL : apiProfile.base_url,
-        local_model_path: undefined
+        model_name: shouldResetApiProfile ? '' : apiProfile.model_name,
+        base_url: shouldResetApiProfile ? OFFICIAL_OPENAI_BASE_URL : apiProfile.base_url,
+        api_key: shouldResetApiProfile ? '' : apiProfile.api_key,
+        backup_api_keys: shouldResetApiProfile ? undefined : apiProfile.backup_api_keys,
+        provider: DEFAULT_PROVIDER_OPTION,
+        deployment: undefined,
+        model_use: shouldResetApiProfile ? DEFAULT_MODEL_USE_OPTION : apiProfile.model_use,
+        is_ollama: false,
+        is_vision_model: shouldResetApiProfile ? false : apiProfile.is_vision_model,
+        is_ocr_model: shouldResetApiProfile ? false : apiProfile.is_ocr_model
       }
     }
   }
@@ -552,6 +566,10 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     })
   }
 
+  const handleCallTypeChange = (callType: ProfileCallTypeSelectValue) => {
+    onUpdate(profile.id, applyCallTypeToProfile(profile, callType))
+  }
+
   const applyModelUseOptionToProfile = (
     nextProfile: LLMAPIProfile,
     modelUse: LLMModelUseOption
@@ -681,9 +699,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
         <InputSelect
           label={copy('调用类型', 'Call Type')}
           value={profileCallType}
-          onChange={(value) =>
-            updateProfile(applyCallTypeToProfile(profile, value as ProfileCallTypeSelectValue))
-          }
+          onChange={(value) => handleCallTypeChange(value as ProfileCallTypeSelectValue)}
           items={callTypeOptions}
         />
 
