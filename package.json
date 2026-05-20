@@ -186,7 +186,7 @@
     "rollup-plugin-obfuscator": "^1.1.0",
     "ts-json-schema-generator": "^2.4.0",
     "typescript": "^5.8.3",
-    "vite": "^7.0.5",
+    "vite": "^7.3.3",
     "vitest": "^3.2.4"
   },
   "optionalDependencies": {
