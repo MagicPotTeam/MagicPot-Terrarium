@@ -9,7 +9,8 @@ import {
   buildCanvasAgentAttachmentManifest,
   buildCanvasAgentGroupCompletionPrompt,
   expandCanvasItemsForAgentSend,
-  getCanvasBlobItemMimeType
+  getCanvasBlobItemMimeType,
+  materializeCanvasAgentAttachmentItems
 } from './canvasAgentAttachmentUtils'
 import { resolveActiveAgentScope } from './canvasPageLocalStateUtils'
 import { sanitizeFilePart } from './canvasExportNamingUtils'
@@ -96,8 +97,9 @@ export function useCanvasBridgeActions({
 
       const supplementalImageAttachments: ChatAttachment[] = []
       const expandedTargetItems = expandCanvasItemsForAgentSend(targetItems, items)
-      const baseAttachments = buildCanvasAgentAttachments(expandedTargetItems)
-      const attachmentManifest = buildCanvasAgentAttachmentManifest(expandedTargetItems)
+      const attachmentItems = await materializeCanvasAgentAttachmentItems(expandedTargetItems)
+      const baseAttachments = buildCanvasAgentAttachments(attachmentItems)
+      const attachmentManifest = buildCanvasAgentAttachmentManifest(attachmentItems)
       const supplementalPromptParts: string[] = []
       const promptText = includeCanvasPromptText
         ? extractPromptTextFromCanvasItems(expandedTargetItems)
