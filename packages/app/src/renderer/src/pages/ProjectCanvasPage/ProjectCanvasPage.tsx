@@ -1954,6 +1954,7 @@ const ProjectCanvasPage: React.FC = () => {
     canvasTargetTargetName,
     canvasTargetTargetItemCount,
     canvasTargetUserIntent,
+    canvasActiveRef,
     canvasContainerRef,
     clampStageScale,
     clearConfirmOpen,
