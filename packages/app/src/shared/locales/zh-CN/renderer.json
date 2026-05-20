@@ -601,6 +601,7 @@
     "skill_prompt_bound": "发送消息时会自动附带当前技能绑定的 Prompt。",
     "agent_skill_active": "外部技能已激活",
     "agent_skill_active_desc": "模型选择器已隐藏，消息将直接发送到选中的 Agent 技能。",
+    "reply_model": "模型：{{model}}",
     "copy_reply": "复制回复",
     "reply_copied": "已复制回复",
     "drag_reply_to_canvas": "拖拽回复到画布"

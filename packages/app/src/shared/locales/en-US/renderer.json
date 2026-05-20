@@ -652,6 +652,7 @@
     "skill_prompt_bound": "The bound skill prompt will be sent automatically with your message.",
     "agent_skill_active": "External skill active",
     "agent_skill_active_desc": "The model selector is hidden and messages go directly to the selected Agent skill.",
+    "reply_model": "Model: {{model}}",
     "history_title": "History",
     "search_placeholder": "Search conversations...",
     "no_results": "No matching conversations found",

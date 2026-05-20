@@ -3568,12 +3568,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }
       }
 
-      const activeProfile =
-        activeSkill && profileId
-          ? availableProfiles.find((profile) => profile.id === profileId) ||
-            availableProfiles.find((profile) => profile.id === getBaseProfileId(profileId)) ||
-            null
-          : null
+      const baseProfileId = getBaseProfileId(profileId)
+      const activeProfile = profileId
+        ? availableProfiles.find((profile) => profile.id === profileId) ||
+          availableProfiles.find((profile) => profile.id === baseProfileId) ||
+          null
+        : null
+      const responseModelName =
+        (activeProfile?.model_name || baseProfileId || '').trim() || undefined
       const skillAttachmentSupport =
         activeSkill && activeProfile
           ? inspectSkillAttachmentSupport(rawAttachments, activeProfile)
@@ -3585,7 +3587,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         notifyWarning(
           buildSkillAttachmentUnsupportedMessage({
             skillName: activeSkill?.skillName,
-            profileName: activeProfile?.model_name || getBaseProfileId(profileId),
+            profileName: activeProfile?.model_name || baseProfileId,
             supportsImages: skillAttachmentSupport.supportsImages,
             supportsDocuments: skillAttachmentSupport.supportsDocuments,
             unsupportedImages: skillAttachmentSupport.unsupportedImages,
@@ -3688,7 +3690,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
 
       const placeholderUpdater = withLatestContextCompression((prev: ChatSession[]) =>
-        appendAssistantPlaceholderToSession(prev, targetSessionId)
+        appendAssistantPlaceholderToSession(
+          prev,
+          targetSessionId,
+          explicitToolCommand ? undefined : responseModelName
+        )
       )
       setSessions(placeholderUpdater)
       updateLoadingStatus(
@@ -4101,7 +4107,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   attachments: singleResult.result.attachments,
                   ocrResult: singleResult.result.ocrResult
                 },
-                undefined,
+                responseModelName,
                 {
                   skillId: activeSkillRuntime.skill?.id
                 }
@@ -4139,7 +4145,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                         content: responseContent
                       })
                     },
-                    undefined,
+                    responseModelName,
                     {
                       skillId: activeSkillRuntime.skill?.id
                     }
@@ -4198,7 +4204,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   attachments: result.attachments,
                   ocrResult: result.ocrResult
                 },
-                undefined,
+                responseModelName,
                 {
                   skillId: activeSkillRuntime.skill?.id
                 }
@@ -4245,7 +4251,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   role: 'assistant',
                   content: streamedResponse,
                   ...(streamedAttachments.length > 0 ? { attachments: streamedAttachments } : {}),
-                  ...(streamedOcrResult ? { ocrResult: streamedOcrResult } : {})
+                  ...(streamedOcrResult ? { ocrResult: streamedOcrResult } : {}),
+                  ...(responseModelName ? { modelName: responseModelName } : {})
                 },
                 sessionUrl: executionContext.shouldPersistSessionUrl ? streamedSessionUrl : null
               })

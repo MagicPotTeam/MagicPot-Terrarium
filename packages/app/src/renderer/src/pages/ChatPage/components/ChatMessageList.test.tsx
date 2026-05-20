@@ -159,6 +159,22 @@ describe('ChatMessageList text selection and reply actions', () => {
     expect(text.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
+  it('shows which model produced an assistant reply', () => {
+    renderChatMessageList({
+      id: 'session-reply-model',
+      title: 'Reply model',
+      messages: [
+        {
+          role: 'assistant',
+          content: 'This reply has a model label.',
+          modelName: 'GPT-4o'
+        }
+      ]
+    })
+
+    expect(screen.getByTestId('assistant-model-label')).toHaveTextContent('Model: GPT-4o')
+  })
+
   it('copies the assistant reply from the action bar', () => {
     renderChatMessageList({
       id: 'session-copy-reply',

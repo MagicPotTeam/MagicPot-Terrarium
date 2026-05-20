@@ -715,6 +715,29 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
+  it('stores the responding model name on assistant replies', async () => {
+    renderChatPage()
+
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+    await dispatchNewSession({
+      profileId: 'vision-model',
+      initialMessage: 'Annotate the responder.'
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => {
+      const currentSession = readCurrentSessionState()
+      expect(currentSession?.messages[1]).toEqual(
+        expect.objectContaining({
+          role: 'assistant',
+          content: 'default reply',
+          modelName: 'Vision Model'
+        })
+      )
+    })
+  })
+
   it('applies external send-to-agent input only to the matching targetScope', async () => {
     render(
       <ThemeProvider theme={theme}>
