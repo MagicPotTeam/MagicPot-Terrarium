@@ -101,7 +101,7 @@ export const useQAppRunner = (projectId?: string) => {
     submitClientId,
     submitSessionKey
   } = useQAppContext()
-  const { configUtils } = useConfig()
+  const { config, configUtils } = useConfig()
   const {
     state: { isConnected, isRunning, objectInfos },
     setIsRunning,
@@ -211,7 +211,8 @@ export const useQAppRunner = (projectId?: string) => {
       cfg: qAppCfg,
       workflow,
       objectInfos: latestObjectInfos,
-      configUtils
+      configUtils,
+      config
     })
 
     if (!hasBlockingQAppDependencyIssues(report)) {
@@ -238,7 +239,17 @@ export const useQAppRunner = (projectId?: string) => {
 
     notifyError(t('qapp.callout.preflight_failed', { items: parts.join(', ') }))
     return false
-  }, [configUtils, isConnected, notifyError, objectInfos, qAppCfg, setObjectInfos, t, workflow])
+  }, [
+    config,
+    configUtils,
+    isConnected,
+    notifyError,
+    objectInfos,
+    qAppCfg,
+    setObjectInfos,
+    t,
+    workflow
+  ])
 
   useEffect(() => {
     const qAppKey = currentQAppKey?.trim()

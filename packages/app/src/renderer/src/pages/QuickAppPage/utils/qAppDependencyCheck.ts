@@ -1,6 +1,7 @@
 import { api } from '@renderer/utils/windowUtils'
 import { findNotInstalledNodeInfo } from '@shared/comfy/funcs'
 import type { ObjectInfoMap, Workflow } from '@shared/comfy/types'
+import type { Config } from '@shared/config/config'
 import type { ConfigUtils } from '@shared/config/configUtils'
 import type { QAppCfg, QAppRequiredModel } from '@shared/qApp/cfgTypes'
 
@@ -25,6 +26,8 @@ export type QAppDependencyReport = {
   missingNodeClasses: string[]
   customNodes: QAppCustomNodeDependency[]
 }
+
+type QAppDependencyCheckConfig = Pick<Config, 'use_remote_comfyui'>
 
 export function getRequiredModelBaseDir(
   model: QAppRequiredModel
@@ -90,9 +93,14 @@ export function resolveCustomNodeDependency(
 
 export async function checkRequiredModels(
   requiredModels: QAppRequiredModel[] | undefined,
-  configUtils: ConfigUtils
+  configUtils: ConfigUtils,
+  config: QAppDependencyCheckConfig
 ): Promise<MissingRequiredModel[]> {
   if (!requiredModels || requiredModels.length === 0) {
+    return []
+  }
+
+  if (config.use_remote_comfyui) {
     return []
   }
 
@@ -138,9 +146,14 @@ export async function checkQAppDependencies(options: {
   workflow: Workflow | null | undefined
   objectInfos: ObjectInfoMap
   configUtils: ConfigUtils
+  config: QAppDependencyCheckConfig
 }): Promise<QAppDependencyReport> {
   const cfg = options.cfg
-  const missingModels = await checkRequiredModels(cfg?.requiredModels, options.configUtils)
+  const missingModels = await checkRequiredModels(
+    cfg?.requiredModels,
+    options.configUtils,
+    options.config
+  )
   const customNodes = await checkCustomNodeDependencies(cfg?.customNodeUrls, options.configUtils)
   const hasObjectInfos = options.objectInfos && Object.keys(options.objectInfos).length > 0
   const missingNodeClasses =

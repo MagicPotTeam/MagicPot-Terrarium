@@ -129,11 +129,16 @@ const formatDownloadButtonText = (progress: ModelDownloadProgress, downloadingLa
 
 export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsProps) => {
   const { t } = useTranslation()
-  const { configUtils } = useConfig()
+  const { config, configUtils } = useConfig()
   const { notifySuccess, notifyError } = useMessage()
   const isMountedRef = useRef(false)
+  const configRef = useRef(config)
   const configUtilsRef = useRef(configUtils)
+  const requiredModelsRef = useRef(requiredModels)
+  const refreshVersionRef = useRef(0)
+  configRef.current = config
   configUtilsRef.current = configUtils
+  requiredModelsRef.current = requiredModels
   const [missingModels, setMissingModels] = useState<MissingRequiredModel[]>([])
   const [downloadSnapshot, setDownloadSnapshot] = useState(getModelDownloadSnapshot)
 
@@ -145,18 +150,36 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
   }, [])
 
   const refreshMissingModels = useCallback(async () => {
+    const refreshVersion = refreshVersionRef.current + 1
+    refreshVersionRef.current = refreshVersion
+    const requestRemoteMode = configRef.current.use_remote_comfyui
+    const requestRequiredModels = requiredModels
+
     if (!requiredModels || requiredModels.length === 0) {
-      if (isMountedRef.current) {
+      if (
+        isMountedRef.current &&
+        refreshVersion === refreshVersionRef.current &&
+        requestRequiredModels === requiredModelsRef.current
+      ) {
         setMissingModels([])
       }
       return
     }
 
-    const nextMissingModels = await checkRequiredModels(requiredModels, configUtilsRef.current)
-    if (isMountedRef.current) {
+    const nextMissingModels = await checkRequiredModels(
+      requiredModels,
+      configUtilsRef.current,
+      configRef.current
+    )
+    if (
+      isMountedRef.current &&
+      refreshVersion === refreshVersionRef.current &&
+      requestRemoteMode === configRef.current.use_remote_comfyui &&
+      requestRequiredModels === requiredModelsRef.current
+    ) {
       setMissingModels(nextMissingModels)
     }
-  }, [requiredModels])
+  }, [config.use_remote_comfyui, requiredModels])
 
   useEffect(() => {
     return subscribeModelDownloads(() => {
