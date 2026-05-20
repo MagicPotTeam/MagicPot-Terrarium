@@ -16,6 +16,7 @@ import {
   resolveAttachedCaptionPosition,
   resolveInlineTextViewportShift,
   shouldClearInlineTextEdit,
+  shouldAutoFitInlineAnnotationEditorFont,
   useCanvasInlineTextEffects
 } from './useCanvasInlineTextEffects'
 import type { CanvasAnnotationItem, CanvasImageItem, CanvasItem } from './types'
@@ -166,6 +167,32 @@ describe('shouldClearInlineTextEdit', () => {
   })
 })
 
+describe('shouldAutoFitInlineAnnotationEditorFont', () => {
+  it('keeps free annotation editors eligible for font fitting', () => {
+    expect(
+      shouldAutoFitInlineAnnotationEditorFont(
+        createInlineTextEdit({
+          id: 'anno-free',
+          isNew: true
+        })
+      )
+    ).toBe(true)
+  })
+
+  it('does not auto-fit attached caption editors', () => {
+    expect(
+      shouldAutoFitInlineAnnotationEditorFont(
+        createInlineTextEdit({
+          id: 'anno-attached',
+          isNew: true,
+          attachedToId: 'image-1',
+          attachmentPlacement: 'bottom-center'
+        })
+      )
+    ).toBe(false)
+  })
+})
+
 describe('resolveInlineTextViewportShift', () => {
   it('returns null when the editor already fits inside the viewport', () => {
     expect(
@@ -221,6 +248,26 @@ describe('resolveInlineTextViewportShift', () => {
       x: -104,
       y: -24
     })
+  })
+
+  it('does not shift the stage for new attached caption editors that overflow the viewport', () => {
+    expect(
+      resolveInlineTextViewportShift({
+        inlineTextEdit: createInlineTextEdit({
+          id: 'anno-new-caption',
+          x: 780,
+          y: 560,
+          w: 200,
+          h: 80,
+          isNew: true,
+          attachedToId: 'image-1',
+          attachmentPlacement: 'bottom-center'
+        }),
+        stagePos: { x: 0, y: 0 },
+        stageScale: 1,
+        stageSize: { width: 900, height: 640 }
+      })
+    ).toBeNull()
   })
 })
 

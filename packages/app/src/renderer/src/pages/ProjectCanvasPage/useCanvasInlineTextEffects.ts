@@ -8,10 +8,7 @@ import {
   type AttachedCaptionAnnotation
 } from './canvasAttachedCaptionUtils'
 import type { InlineTextEditState } from './ProjectCanvasPageInlineTextEditor'
-import {
-  INLINE_MEDIA_CAPTION_BOTTOM_CLEARANCE,
-  INLINE_TEXT_EDIT_SCREEN_MARGIN
-} from './projectCanvasPageShared'
+import { INLINE_TEXT_EDIT_SCREEN_MARGIN } from './projectCanvasPageShared'
 import type { CanvasItem } from './types'
 
 export type CanvasItemVisualBounds = {
@@ -80,6 +77,14 @@ export function shouldClearInlineTextEdit(
   return !inlineTextEdit.isNew && !itemIdSet.has(inlineTextEdit.id)
 }
 
+export function shouldAutoFitInlineAnnotationEditorFont(
+  inlineTextEdit: InlineTextEditState | null
+): inlineTextEdit is InlineTextEditState {
+  return Boolean(
+    inlineTextEdit && inlineTextEdit.id.startsWith('anno-') && !inlineTextEdit.attachedToId
+  )
+}
+
 export function resolveInlineTextViewportShift({
   inlineTextEdit,
   stagePos,
@@ -87,6 +92,10 @@ export function resolveInlineTextViewportShift({
   stageSize
 }: ResolveInlineTextViewportShiftOptions): { x: number; y: number } | null {
   if (!inlineTextEdit.isNew) {
+    return null
+  }
+
+  if (inlineTextEdit.attachedToId) {
     return null
   }
 
@@ -99,9 +108,6 @@ export function resolveInlineTextViewportShift({
     inlineTextEdit.h * stageScale,
     isTextItem ? TEXT_ITEM_MIN_EDITOR_HEIGHT : 10
   )
-  const bottomClearance = inlineTextEdit.attachedToId
-    ? INLINE_MEDIA_CAPTION_BOTTOM_CLEARANCE
-    : INLINE_TEXT_EDIT_SCREEN_MARGIN
   const left = stagePos.x + inlineTextEdit.x * stageScale
   const top = stagePos.y + inlineTextEdit.y * stageScale
   const right = left + editorWidth
@@ -118,8 +124,8 @@ export function resolveInlineTextViewportShift({
 
   if (top < INLINE_TEXT_EDIT_SCREEN_MARGIN) {
     nextStageY += INLINE_TEXT_EDIT_SCREEN_MARGIN - top
-  } else if (bottom > stageSize.height - bottomClearance) {
-    nextStageY -= bottom - (stageSize.height - bottomClearance)
+  } else if (bottom > stageSize.height - INLINE_TEXT_EDIT_SCREEN_MARGIN) {
+    nextStageY -= bottom - (stageSize.height - INLINE_TEXT_EDIT_SCREEN_MARGIN)
   }
 
   if (
@@ -166,7 +172,7 @@ export function useCanvasInlineTextEffects({
   }, [inlineTextAreaRef, inlineTextEditId])
 
   useEffect(() => {
-    if (!inlineTextEdit || !inlineTextEdit.id.startsWith('anno-')) return
+    if (!shouldAutoFitInlineAnnotationEditorFont(inlineTextEdit)) return
 
     const element = inlineTextAreaRef.current
     if (!element || !element.value) return
@@ -204,6 +210,7 @@ export function useCanvasInlineTextEffects({
   useEffect(() => {
     const element = inlineTextAreaRef.current
     if (!element || !inlineTextEditId || inlineTextEditId.startsWith('text-')) return
+    if (inlineTextEdit?.attachedToId) return
     if (typeof ResizeObserver === 'undefined') return
 
     const observer = new ResizeObserver((entries) => {
@@ -228,7 +235,13 @@ export function useCanvasInlineTextEffects({
 
     observer.observe(element)
     return () => observer.disconnect()
-  }, [inlineTextAreaRef, inlineTextEditId, setInlineTextEdit, stageScale])
+  }, [
+    inlineTextAreaRef,
+    inlineTextEdit?.attachedToId,
+    inlineTextEditId,
+    setInlineTextEdit,
+    stageScale
+  ])
 
   useEffect(() => {
     if (!inlineTextEdit) return
