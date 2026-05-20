@@ -882,10 +882,6 @@ const AssistantMessageBubble: React.FC<{
   theme
 }) => {
   const visibleAttachments = sortReportBundleAttachmentsForDisplay(message.attachments)
-  const modelName = message.modelName?.trim()
-  const modelLabel = modelName
-    ? t('chat.reply_model', { model: modelName, defaultValue: `Model: ${modelName}` })
-    : ''
   const loadingProgress = formatChatLoadingStatusProgress(loadingStatus)
   const showLoadingStatus = isLoading && Boolean(loadingStatus?.label)
 
@@ -899,24 +895,6 @@ const AssistantMessageBubble: React.FC<{
           overflowWrap: 'break-word'
         }}
       >
-        {modelName ? (
-          <Typography
-            data-testid="assistant-model-label"
-            variant="caption"
-            sx={{
-              display: 'flex',
-              width: 'fit-content',
-              mb: 0.75,
-              color: 'text.secondary',
-              fontSize: 12,
-              lineHeight: 1.4,
-              fontWeight: 500,
-              userSelect: 'text'
-            }}
-          >
-            {modelLabel}
-          </Typography>
-        ) : null}
         {/* AI 附件 */}
         {visibleAttachments.length > 0 && (
           <Box sx={{ mb: message.content ? 1.5 : 0 }}>
