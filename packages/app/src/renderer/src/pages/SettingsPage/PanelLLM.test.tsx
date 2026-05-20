@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import { createEmptyCustomSkill, getCustomSkillValidationIssues } from './PanelLLM'
@@ -505,6 +505,60 @@ describe('PanelLLM Agent API settings', () => {
         ]
       }
     })
+  })
+
+  it('switches a Hunyuan3D preset back to a generic API model and clears Tencent fields', () => {
+    const saveSettings = vi.fn()
+    const { container, rerender } = render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'Hunyuan3D Pro',
+          base_url: 'https://api.ai3d.cloud.tencent.com',
+          api_key: 'hy-token',
+          tencent_secret_id: 'secret-id',
+          tencent_secret_key: 'secret-key',
+          api_region: 'ap-shanghai',
+          cos_bucket: 'magicpot-1314265479',
+          cos_region: 'ap-guangzhou',
+          cos_key_prefix: 'magicpot/hunyuan3d'
+        })}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    expect(screen.getByLabelText('Call Type')).toHaveTextContent('Hunyuan3D')
+
+    fireEvent.mouseDown(screen.getByLabelText('Call Type'))
+    fireEvent.click(screen.getByRole('option', { name: 'API Model' }))
+
+    const savedProfile = saveSettings.mock.lastCall?.[0].llm_config.api_profiles[0]
+    expect(savedProfile).toEqual(
+      expect.objectContaining({
+        id: 'profile-1',
+        model_name: '',
+        base_url: 'https://api.openai.com/v1',
+        api_key: 'hy-token',
+        provider: 'default',
+        is_ollama: false
+      })
+    )
+    expect(savedProfile.call_type).toBeUndefined()
+    expect(savedProfile).not.toHaveProperty('tencent_secret_id')
+    expect(savedProfile).not.toHaveProperty('tencent_secret_key')
+    expect(savedProfile).not.toHaveProperty('api_region')
+    expect(savedProfile).not.toHaveProperty('cos_bucket')
+    expect(savedProfile).not.toHaveProperty('cos_region')
+    expect(savedProfile).not.toHaveProperty('cos_key_prefix')
+
+    rerender(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile(savedProfile)}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+    expect(within(container).getByLabelText('Call Type')).toHaveTextContent('API Model')
   })
 
   it('edits Hunyuan3D Tencent and COS fields in the profile card', () => {

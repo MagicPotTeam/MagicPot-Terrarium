@@ -233,12 +233,19 @@ const applyCallTypeToProfile = (
     case 'hunyuan3d':
       return applyHunyuan3DPresetToProfile(profile)
     case 'api':
-    default:
+    default: {
+      const apiProfile = stripHunyuan3DProfile(
+        stripLocalModelProfile(stripExternalAuthProfile(profile))
+      )
+      const isSpecializedApiProfile = isHunyuan3DCompatibleProfile(profile)
       return {
-        ...stripHunyuan3DProfile(stripLocalModelProfile(stripExternalAuthProfile(profile))),
+        ...apiProfile,
         call_type: undefined,
+        model_name: isSpecializedApiProfile ? '' : apiProfile.model_name,
+        base_url: isSpecializedApiProfile ? OFFICIAL_OPENAI_BASE_URL : apiProfile.base_url,
         local_model_path: undefined
       }
+    }
   }
 }
 
