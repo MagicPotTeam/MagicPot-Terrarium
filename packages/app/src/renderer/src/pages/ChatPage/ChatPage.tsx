@@ -211,6 +211,7 @@ type ExternalConfirmationRequest = ChatPendingConfirmation & {
 }
 
 const HY3D_SIGNED_URL_REFRESH_BUFFER_MS = 5 * 60 * 1000
+const CHAT_INPUT_STATE_COMMIT_DELAY_MS = 80
 const CHAT_DRAFT_PERSIST_DELAY_MS = 200
 const CHAT_MODEL3D_EXTENSIONS = ['.glb', '.gltf', '.obj', '.fbx', '.dae', '.3ds', '.ply', '.stl']
 const STORAGE_KEY_REASONING_EFFORT = 'chat.reasoningEffort'
@@ -1161,6 +1162,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const pendingHiddenContextRef = useRef(pendingHiddenContext)
   const pendingExternalSendToAgentRef = useRef<ExternalSendToAgentDetail[]>([])
   const isApplyingDraftRef = useRef(false)
+  const inputValueCommitTimerRef = useRef<number | null>(null)
   const composerDraftSessionIdRef = useRef<string | null>(currentSessionIdRef.current)
   const composerDraftMutationRef = useRef<{ sessionId: string | null; updatedAt: number }>({
     sessionId: currentSessionIdRef.current,
@@ -1173,6 +1175,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
     composerDraftMutationRef.current = {
       sessionId: currentSessionIdRef.current,
       updatedAt: Date.now()
+    }
+  }, [])
+
+  const clearScheduledInputValueCommit = useCallback(() => {
+    if (inputValueCommitTimerRef.current != null) {
+      window.clearTimeout(inputValueCommitTimerRef.current)
+      inputValueCommitTimerRef.current = null
     }
   }, [])
 
@@ -1198,17 +1207,37 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   const setInputValue = useCallback<React.Dispatch<React.SetStateAction<string>>>(
     (value) => {
-      setInputValueState((prev) => {
-        const next = typeof value === 'function' ? value(prev) : value
-        inputValueRef.current = next
-        if (next !== prev) {
-          markComposerDraftMutated()
-        }
-        return next
-      })
+      clearScheduledInputValueCommit()
+      const previous = inputValueRef.current
+      const next = typeof value === 'function' ? value(previous) : value
+      inputValueRef.current = next
+      if (next !== previous) {
+        markComposerDraftMutated()
+      }
+      setInputValueState((prev) => (prev === next ? prev : next))
     },
-    [markComposerDraftMutated]
+    [clearScheduledInputValueCommit, markComposerDraftMutated]
   )
+
+  const handleComposerInputChange = useCallback(
+    (nextValue: string) => {
+      const previous = inputValueRef.current
+      inputValueRef.current = nextValue
+      if (nextValue !== previous) {
+        markComposerDraftMutated()
+      }
+
+      clearScheduledInputValueCommit()
+      inputValueCommitTimerRef.current = window.setTimeout(() => {
+        inputValueCommitTimerRef.current = null
+        const latestValue = inputValueRef.current
+        setInputValueState((prev) => (prev === latestValue ? prev : latestValue))
+      }, CHAT_INPUT_STATE_COMMIT_DELAY_MS)
+    },
+    [clearScheduledInputValueCommit, markComposerDraftMutated]
+  )
+
+  useEffect(() => clearScheduledInputValueCommit, [clearScheduledInputValueCommit])
   const setPendingAttachments = useCallback<React.Dispatch<React.SetStateAction<ChatAttachment[]>>>(
     (value) => {
       setPendingAttachmentsState((prev) => {
@@ -4887,7 +4916,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               <ChatComposer
                 active={active}
                 inputValue={inputValue}
-                onInputChange={setInputValue}
+                onInputChange={handleComposerInputChange}
                 onSend={handleSendCurrentMessage}
                 onUploadFile={handleUploadFile}
                 pendingAttachments={composerPendingAttachments}
@@ -4898,6 +4927,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 disabled={!currentSession}
                 composerInputRef={composerInputRef}
                 onPreviewImage={imagePreview.setPreviewImage}
+                inputSyncKey={currentSessionId || 'no-session'}
                 selectedSkillName={
                   selectedCustomSkill ? getCustomSkillName(selectedCustomSkill) : undefined
                 }

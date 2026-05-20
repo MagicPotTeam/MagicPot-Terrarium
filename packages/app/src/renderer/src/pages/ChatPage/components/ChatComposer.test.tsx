@@ -340,6 +340,193 @@ describe('ChatComposer', () => {
     expect(onSend).not.toHaveBeenCalled()
   })
 
+  it('does not restore selection while Chinese IME composition is active', () => {
+    const setSelectionRangeSpy = vi.spyOn(HTMLTextAreaElement.prototype, 'setSelectionRange')
+    render(<ControlledChatComposer initialValue="" />)
+
+    const textarea = screen.getByTestId('chat-composer-input') as HTMLTextAreaElement
+    fireEvent.focus(textarea)
+    fireEvent.compositionStart(textarea)
+
+    fireEvent.change(textarea, {
+      target: {
+        value: 'ni',
+        selectionStart: 2,
+        selectionEnd: 2,
+        selectionDirection: 'none'
+      }
+    })
+
+    expect(textarea).toHaveValue('ni')
+    expect(setSelectionRangeSpy).not.toHaveBeenCalled()
+
+    setSelectionRangeSpy.mockRestore()
+  })
+
+  it('keeps Chinese IME draft text when the parent value is stale during composition', () => {
+    const onInputChange = vi.fn()
+    const inputRef = { current: null }
+    const { rerender } = render(
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          inputValue=""
+          onInputChange={onInputChange}
+          onSend={vi.fn()}
+          onUploadFile={vi.fn()}
+          pendingAttachments={[]}
+          uploadProgress={{}}
+          onRemoveAttachment={vi.fn()}
+          isLoading={false}
+          onStopGenerating={vi.fn()}
+          disabled={false}
+          composerInputRef={inputRef}
+          onPreviewImage={vi.fn()}
+        />
+      </ThemeProvider>
+    )
+
+    const textarea = screen.getByTestId('chat-composer-input') as HTMLTextAreaElement
+    fireEvent.focus(textarea)
+    fireEvent.compositionStart(textarea)
+    fireEvent.change(textarea, {
+      target: {
+        value: 'ni',
+        selectionStart: 2,
+        selectionEnd: 2,
+        selectionDirection: 'none'
+      }
+    })
+
+    rerender(
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          inputValue=""
+          onInputChange={onInputChange}
+          onSend={vi.fn()}
+          onUploadFile={vi.fn()}
+          pendingAttachments={[]}
+          uploadProgress={{}}
+          onRemoveAttachment={vi.fn()}
+          isLoading={false}
+          onStopGenerating={vi.fn()}
+          disabled={false}
+          composerInputRef={inputRef}
+          onPreviewImage={vi.fn()}
+        />
+      </ThemeProvider>
+    )
+
+    expect(textarea).toHaveValue('ni')
+
+    fireEvent.change(textarea, {
+      target: {
+        value: '你',
+        selectionStart: 1,
+        selectionEnd: 1,
+        selectionDirection: 'none'
+      }
+    })
+    fireEvent.compositionEnd(textarea)
+
+    expect(textarea).toHaveValue('你')
+    expect(onInputChange).toHaveBeenLastCalledWith('你')
+  })
+
+  it('does not replace active Chinese IME text with an older parent value', () => {
+    const onInputChange = vi.fn()
+    const inputRef = { current: null }
+    const renderComposer = (inputValue: string) => (
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          inputValue={inputValue}
+          onInputChange={onInputChange}
+          onSend={vi.fn()}
+          onUploadFile={vi.fn()}
+          pendingAttachments={[]}
+          uploadProgress={{}}
+          onRemoveAttachment={vi.fn()}
+          isLoading={false}
+          onStopGenerating={vi.fn()}
+          disabled={false}
+          composerInputRef={inputRef}
+          onPreviewImage={vi.fn()}
+        />
+      </ThemeProvider>
+    )
+    const { rerender } = render(renderComposer(''))
+
+    const textarea = screen.getByTestId('chat-composer-input') as HTMLTextAreaElement
+    fireEvent.focus(textarea)
+    fireEvent.compositionStart(textarea)
+    fireEvent.change(textarea, {
+      target: {
+        value: 'ni',
+        selectionStart: 2,
+        selectionEnd: 2,
+        selectionDirection: 'none'
+      }
+    })
+
+    rerender(renderComposer('n'))
+
+    expect(textarea).toHaveValue('ni')
+
+    fireEvent.change(textarea, {
+      target: {
+        value: '你',
+        selectionStart: 1,
+        selectionEnd: 1,
+        selectionDirection: 'none'
+      }
+    })
+    fireEvent.compositionEnd(textarea)
+
+    expect(textarea).toHaveValue('你')
+    expect(onInputChange).toHaveBeenLastCalledWith('你')
+  })
+
+  it('resets the local draft when the input sync key changes with the same parent value', () => {
+    const onInputChange = vi.fn()
+    const inputRef = { current: null }
+    const renderComposer = (inputSyncKey: string) => (
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          inputValue=""
+          inputSyncKey={inputSyncKey}
+          onInputChange={onInputChange}
+          onSend={vi.fn()}
+          onUploadFile={vi.fn()}
+          pendingAttachments={[]}
+          uploadProgress={{}}
+          onRemoveAttachment={vi.fn()}
+          isLoading={false}
+          onStopGenerating={vi.fn()}
+          disabled={false}
+          composerInputRef={inputRef}
+          onPreviewImage={vi.fn()}
+        />
+      </ThemeProvider>
+    )
+
+    const { rerender } = render(renderComposer('session-a'))
+
+    const textarea = screen.getByTestId('chat-composer-input') as HTMLTextAreaElement
+    fireEvent.change(textarea, {
+      target: {
+        value: 'stale draft',
+        selectionStart: 11,
+        selectionEnd: 11,
+        selectionDirection: 'none'
+      }
+    })
+
+    expect(textarea).toHaveValue('stale draft')
+
+    rerender(renderComposer('session-b'))
+
+    expect(textarea).toHaveValue('')
+  })
+
   it('keeps the input editable while generation is loading', () => {
     const onInputChange = vi.fn()
     render(
