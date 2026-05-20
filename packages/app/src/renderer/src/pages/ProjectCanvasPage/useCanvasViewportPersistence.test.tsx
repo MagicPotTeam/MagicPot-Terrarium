@@ -203,6 +203,104 @@ describe('useCanvasViewportPersistence', () => {
     })
   })
 
+  it('does not save an empty canvas when unmounted during restore and restores again after remount', async () => {
+    const pendingRestore = createDeferred<{
+      items: CanvasItem[]
+      groups: CanvasGroup[]
+      groupBranches: CanvasGroupBranch[]
+      figmaBinding: CanvasFigmaBinding | null
+    }>()
+    const restoredItem = createImageItem({ id: 'route-return-image' })
+
+    mockLoadCanvasItems.mockReturnValueOnce(pendingRestore.promise).mockResolvedValueOnce({
+      items: [restoredItem],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    const hydrateCanvasImageItemForCanvas = vi.fn(async (item: CanvasImageItem) => item)
+    const handleImportFiles = vi.fn()
+    const addModel3DToCanvas = vi.fn()
+    const addVideoToCanvas = vi.fn()
+
+    const renderPersistenceHook = () =>
+      renderHook(() => {
+        const [items, setItems] = React.useState<CanvasItem[]>([])
+        const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+        const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+        const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+        const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+        const [stageScale, setStageScale] = React.useState(1)
+        const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+
+        useCanvasViewportPersistence({
+          config: DEFAULT_CONFIG,
+          canvasId: 'canvas-route-return-test',
+          items,
+          groups,
+          groupBranches,
+          selectedIds,
+          figmaBinding,
+          stagePos,
+          stageScale,
+          stageSize: { width: 1280, height: 720 },
+          maxFitStageScale: 2,
+          clampStageScale: (value: number) => value,
+          getCanvasItemsVisualBounds: () => null,
+          hydrateCanvasImageItemForCanvas,
+          nextZIndexRef: React.useRef(1),
+          setItems,
+          setItemsWithHistory: setItems,
+          setGroups,
+          setGroupBranches,
+          setSelectedIds,
+          setStagePos,
+          setStageScale,
+          setFigmaBinding,
+          handleImportFiles,
+          addModel3DToCanvas,
+          addVideoToCanvas
+        })
+
+        return { items }
+      })
+
+    const firstMount = renderPersistenceHook()
+
+    expect(mockLoadCanvasItems).toHaveBeenCalledWith('canvas-route-return-test')
+
+    firstMount.unmount()
+
+    await act(async () => {
+      pendingRestore.resolve({
+        items: [createImageItem({ id: 'abandoned-route-image' })],
+        groups: [],
+        groupBranches: [],
+        figmaBinding: null
+      })
+      await pendingRestore.promise
+      await Promise.resolve()
+    })
+
+    expect(mockSaveCanvasItems).not.toHaveBeenCalledWith(
+      [],
+      'canvas-route-return-test',
+      [],
+      [],
+      null
+    )
+
+    const secondMount = renderPersistenceHook()
+
+    await waitFor(() => {
+      expect(secondMount.result.current.items).toHaveLength(1)
+    })
+
+    expect(secondMount.result.current.items[0]).toMatchObject(restoredItem)
+    expect(mockLoadCanvasItems).toHaveBeenCalledTimes(2)
+    expect(mockLoadCanvasItems).toHaveBeenLastCalledWith('canvas-route-return-test')
+  })
+
   it('persists locally without attempting automatic remote canvas sync, even in remote mode', async () => {
     vi.useFakeTimers()
     const fetchMock = vi.fn()
@@ -297,6 +395,107 @@ describe('useCanvasViewportPersistence', () => {
       )
     ).toBe(true)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('serializes autosaves so an older slow save cannot overwrite newer canvas state', async () => {
+    vi.useFakeTimers()
+    mockLoadCanvasItems.mockResolvedValue({
+      items: [],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    const firstSave = createDeferred<void>()
+    mockSaveCanvasItems.mockReturnValueOnce(firstSave.promise).mockResolvedValue(undefined)
+
+    const { result } = renderHook(() => {
+      const [items, setItems] = React.useState<CanvasItem[]>([])
+      const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+      const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+      const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+      const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+      const [stageScale, setStageScale] = React.useState(1)
+      const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+
+      useCanvasViewportPersistence({
+        config: DEFAULT_CONFIG,
+        canvasId: 'canvas-serialized-save-test',
+        items,
+        groups,
+        groupBranches,
+        selectedIds,
+        figmaBinding,
+        stagePos,
+        stageScale,
+        stageSize: { width: 1280, height: 720 },
+        maxFitStageScale: 2,
+        clampStageScale: (value: number) => value,
+        getCanvasItemsVisualBounds: () => null,
+        hydrateCanvasImageItemForCanvas: vi.fn(async (item) => item),
+        nextZIndexRef: { current: 1 },
+        setItems,
+        setItemsWithHistory: setItems,
+        setGroups,
+        setGroupBranches,
+        setSelectedIds,
+        setStagePos,
+        setStageScale,
+        setFigmaBinding,
+        handleImportFiles: vi.fn(),
+        addModel3DToCanvas: vi.fn(),
+        addVideoToCanvas: vi.fn()
+      })
+
+      return { setItems }
+    })
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    mockSaveCanvasItems.mockClear()
+
+    act(() => {
+      result.current.setItems([createImageItem({ id: 'slow-save-image' })])
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+      await Promise.resolve()
+    })
+
+    expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+    expect(mockSaveCanvasItems).toHaveBeenLastCalledWith(
+      [expect.objectContaining({ id: 'slow-save-image' })],
+      'canvas-serialized-save-test',
+      [],
+      [],
+      null
+    )
+
+    act(() => {
+      result.current.setItems([createImageItem({ id: 'newer-save-image' })])
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+      await Promise.resolve()
+    })
+
+    expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      firstSave.resolve()
+      await firstSave.promise
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+    expect(mockSaveCanvasItems).toHaveBeenLastCalledWith(
+      [expect.objectContaining({ id: 'newer-save-image' })],
+      'canvas-serialized-save-test',
+      [],
+      [],
+      null
+    )
   })
 
   it('defers automatic canvas saves while large image import is active', async () => {

@@ -101,6 +101,7 @@ export interface CanvasImageItem extends CanvasItemBase {
   type: 'image'
   src: string // data URL or object URL
   fileName?: string
+  sourceFile?: Blob
   sizeBytes?: number
   hasAlpha?: boolean
   image?: CanvasImageAsset
@@ -119,6 +120,7 @@ export interface CanvasModel3DItem extends CanvasItemBase {
   type: 'model3d'
   src: string // object URL or file path
   fileName: string
+  sourceFile?: Blob
   hy3dQuickAppKey?: string
   hy3dParams?: Hy3dParams
   hy3dMediaState?: Hy3dMediaState
@@ -130,6 +132,7 @@ export interface CanvasVideoItem extends CanvasItemBase {
   type: 'video'
   src: string // object URL or file path
   fileName: string
+  sourceFile?: Blob
   playing: boolean
   muted: boolean
   volume: number
@@ -166,6 +169,7 @@ export interface CanvasFileItem extends CanvasItemBase {
   type: 'file'
   src: string // object URL or file path
   fileName: string
+  sourceFile?: Blob
   mimeType: string
   fileKind: CanvasFileKind
   sizeBytes?: number

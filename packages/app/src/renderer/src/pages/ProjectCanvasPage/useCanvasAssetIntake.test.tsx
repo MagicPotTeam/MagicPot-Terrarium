@@ -1125,6 +1125,56 @@ describe('useCanvasAssetIntake', () => {
     }
   })
 
+  it('preserves the original source File blob on the canvas image item', async () => {
+    const originalImageCtor = window.Image
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'width', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'height', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        get: () => '',
+        set: () => {
+          window.setTimeout(() => image.onload?.(new Event('load')), 0)
+        }
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const sourceFile = new Blob(['original-image-bytes'], { type: 'image/png' })
+      const onComplete = vi.fn()
+
+      render(
+        <SingleImageHarness
+          src="blob:qapp-image-with-source-file"
+          onComplete={onComplete}
+          options={{
+            fileName: 'qapp-result.png',
+            sourceFile
+          }}
+        />
+      )
+
+      await waitFor(() => {
+        expect(onComplete).toHaveBeenCalledTimes(1)
+      })
+
+      const [items, result] = onComplete.mock.calls[0] as [
+        CanvasItem[],
+        CanvasImageItem | null | undefined
+      ]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+
+      expect(result?.sourceFile).toBe(sourceFile)
+      expect(imageItem?.sourceFile).toBe(sourceFile)
+    } finally {
+      window.Image = originalImageCtor
+    }
+  })
+
   it('binds the imported .mpcanvas path as the current save target when opening into an empty canvas', async () => {
     const file = new File(['{}'], 'opened-file.mpcanvas', {
       type: 'application/json'

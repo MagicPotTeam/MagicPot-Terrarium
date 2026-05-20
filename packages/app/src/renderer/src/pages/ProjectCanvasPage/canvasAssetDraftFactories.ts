@@ -63,6 +63,7 @@ export function createCanvasImageItemDraft(
     src: string
     image?: CanvasImageAsset
     fileName?: string
+    sourceFile?: Blob
     sizeBytes?: number
     hasAlpha?: boolean
     sourceWidth?: number
@@ -83,6 +84,7 @@ export function createCanvasImageItemDraft(
     type: 'image',
     src: options.src,
     ...(options.fileName ? { fileName: options.fileName } : {}),
+    ...(options.sourceFile ? { sourceFile: options.sourceFile } : {}),
     ...(typeof options.sizeBytes === 'number' ? { sizeBytes: options.sizeBytes } : {}),
     ...(typeof options.hasAlpha === 'boolean' ? { hasAlpha: options.hasAlpha } : {}),
     ...(options.image ? { image: options.image } : {}),
@@ -106,6 +108,7 @@ export function createCanvasFileItemDraft(
   options: BaseCanvasItemDraftOptions & {
     src: string
     fileName: string
+    sourceFile?: Blob
     mimeType: string
     fileKind: CanvasFileItem['fileKind']
     sizeBytes?: number
@@ -130,6 +133,7 @@ export function createCanvasFileItemDraft(
     type: 'file',
     src: options.src,
     fileName: options.fileName,
+    ...(options.sourceFile ? { sourceFile: options.sourceFile } : {}),
     mimeType: options.mimeType,
     fileKind: options.fileKind,
     ...(typeof options.sizeBytes === 'number' ? { sizeBytes: options.sizeBytes } : {}),
@@ -152,6 +156,7 @@ export function createCanvasModel3DItemDraft(
   options: BaseCanvasItemDraftOptions & {
     src: string
     fileName: string
+    sourceFile?: Blob
     textures?: Record<string, string>
     hy3dQuickAppKey?: CanvasModel3DItem['hy3dQuickAppKey']
     hy3dParams?: CanvasModel3DItem['hy3dParams']
@@ -163,6 +168,7 @@ export function createCanvasModel3DItemDraft(
     type: 'model3d',
     src: options.src,
     fileName: options.fileName,
+    ...(options.sourceFile ? { sourceFile: options.sourceFile } : {}),
     ...(options.textures ? { textures: options.textures } : {}),
     ...(options.hy3dQuickAppKey ? { hy3dQuickAppKey: options.hy3dQuickAppKey } : {}),
     ...(options.hy3dParams ? { hy3dParams: options.hy3dParams } : {}),
@@ -190,6 +196,7 @@ export function createCanvasVideoItemDraft(
   options: BaseCanvasItemDraftOptions & {
     src: string
     fileName: string
+    sourceFile?: Blob
     playing?: boolean
     muted?: boolean
     volume?: number
@@ -202,6 +209,7 @@ export function createCanvasVideoItemDraft(
     type: 'video',
     src: options.src,
     fileName: options.fileName,
+    ...(options.sourceFile ? { sourceFile: options.sourceFile } : {}),
     playing: options.playing ?? false,
     muted: options.muted ?? true,
     volume: options.volume ?? 0.5,
