@@ -6,14 +6,20 @@ on:
     branches:
       - '**'
 
+permissions: {}
+
 jobs:
   ci:
+    permissions:
+      contents: read
     uses: ./.github/workflows/call-ci.yml
     with:
       ref: ${{ github.ref }}
       fallback_ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
   build:
+    permissions:
+      contents: read
     uses: ./.github/workflows/call-build.yml
     with:
       ref: ${{ github.ref }}

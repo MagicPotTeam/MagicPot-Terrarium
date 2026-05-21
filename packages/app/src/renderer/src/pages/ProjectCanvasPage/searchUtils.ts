@@ -1,4 +1,5 @@
 import type { CanvasAnnotationItem, CanvasItem, CanvasItemType } from './types'
+import { stripHtmlToText } from '@renderer/utils/htmlText'
 
 export type CanvasSearchFilter = 'all' | 'text' | 'image' | 'video' | 'model3d'
 
@@ -32,15 +33,6 @@ function truncateText(value: string, maxLength: number): string {
   const trimmed = value.trim()
   if (trimmed.length <= maxLength) return trimmed
   return `${trimmed.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`
-}
-
-function stripHtml(html: string): string {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
 }
 
 function getSourceName(src: string): string {
@@ -180,7 +172,7 @@ function getSearchDescriptor(item: CanvasItem): SearchDescriptor {
     }
   }
 
-  const htmlText = item.type === 'html' ? stripHtml(item.htmlData) : ''
+  const htmlText = item.type === 'html' ? stripHtmlToText(item.htmlData) : ''
   return {
     filterType,
     title: truncateText(htmlText, 48),

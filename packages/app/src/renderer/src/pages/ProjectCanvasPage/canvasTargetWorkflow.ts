@@ -48,6 +48,7 @@ import {
   normalizeCanvasTargetEvidenceMode,
   resolveCanvasTargetEvidencePolicy
 } from './canvasTargetEvidence'
+import { createTimestampedSecureId } from './secureId'
 
 type BoundsResolver = (item: CanvasItem) => {
   x: number
@@ -261,7 +262,7 @@ const DEFAULT_CANVAS_TARGET_TASK =
   'Work on the selected MagicPot canvas region against the provided local target scheme and user intent. Coordinate the candidate models as needed, keep outputs grounded in the canvas context, and avoid destructive or auto-fix actions unless the user explicitly requests them.'
 
 function createCanvasTargetId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return createTimestampedSecureId(prefix)
 }
 
 function stripCodeFences(value: string): string {

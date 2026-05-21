@@ -105,12 +105,43 @@ const normalizeModelUse = (modelUse?: string): LLMModelUse | undefined => {
   }
 }
 
+const getBaseUrlHostname = (value: string): string | null => {
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return null
+
+  const parseHostname = (candidate: string): string | null => {
+    try {
+      return new URL(candidate).hostname.toLowerCase()
+    } catch {
+      return null
+    }
+  }
+
+  return (
+    parseHostname(normalized) ||
+    (/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized) ? null : parseHostname(`https://${normalized}`))
+  )
+}
+
+const hostnameMatchesDomain = (hostname: string, domain: string): boolean =>
+  hostname === domain || hostname.endsWith(`.${domain}`)
+
 export const isGeminiUrl = (url: string): boolean => {
-  return url.includes('generativelanguage.googleapis.com') || url.includes('googleapis.com')
+  const hostname = getBaseUrlHostname(url)
+  return Boolean(
+    hostname &&
+    (hostnameMatchesDomain(hostname, 'generativelanguage.googleapis.com') ||
+      hostnameMatchesDomain(hostname, 'googleapis.com'))
+  )
 }
 
 export const isClaudeUrl = (url: string): boolean => {
-  return url.includes('anthropic.com') || url.includes('claude')
+  const hostname = getBaseUrlHostname(url)
+  return Boolean(
+    hostname &&
+    (hostnameMatchesDomain(hostname, 'anthropic.com') ||
+      hostnameMatchesDomain(hostname, 'claude.ai'))
+  )
 }
 
 export const isOllamaUrl = (url: string): boolean => {
