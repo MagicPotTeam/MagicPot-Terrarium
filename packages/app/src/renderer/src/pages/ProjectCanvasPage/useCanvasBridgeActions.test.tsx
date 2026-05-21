@@ -229,4 +229,65 @@ describe('useCanvasBridgeActions', () => {
       toDataURLSpy.mockRestore()
     }
   })
+
+  it('does not fall back to the full original or a snapshot when cropped image materialization fails', async () => {
+    const dispatchEventSpy = vi.spyOn(window, 'dispatchEvent')
+    const sourceCanvas = document.createElement('canvas')
+    sourceCanvas.width = 100
+    sourceCanvas.height = 80
+    const selected = createImageItem('selected-image', 'selected.jpg', {
+      image: sourceCanvas,
+      sourceWidth: 100,
+      sourceHeight: 80,
+      width: 30,
+      height: 40,
+      crop: { x: 10, y: 20, width: 30, height: 40 }
+    })
+    const getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null)
+    const renderSnapshot = vi.fn(async () => 'data:image/png;base64,cropped-snapshot')
+    const notifyError = vi.fn()
+
+    try {
+      const { result } = renderHook(() =>
+        useCanvasBridgeActions({
+          canvasId: 'canvas-1',
+          projectName: 'MagicPot Demo',
+          items: [selected],
+          groups: [],
+          notifySuccess: vi.fn(),
+          notifyError,
+          extractPromptTextFromCanvasItems: (targetItems) =>
+            targetItems.map((item) => `${item.id}:${item.type}`).join('\n'),
+          renderCanvasItemsImageDataUrl: renderSnapshot,
+          renderCanvasItemsSvgMarkup: vi.fn(async () => '<svg />')
+        })
+      )
+
+      await act(async () => {
+        await result.current.handleSendCanvasItemsToAgent([selected], 'canvas-1.agent-2')
+        vi.runAllTimers()
+      })
+
+      const sendEvents = dispatchEventSpy.mock.calls
+        .map(
+          ([event]) =>
+            event as CustomEvent<{
+              attachment?: {
+                fileName?: string
+                url?: string
+                hiddenFromChatView?: boolean
+              }
+            }>
+        )
+        .filter((event) => event.type === 'send-to-agent')
+      const attachmentEvents = sendEvents.filter((event) => event.detail?.attachment)
+
+      expect(attachmentEvents).toEqual([])
+      expect(renderSnapshot).not.toHaveBeenCalled()
+      expect(notifyError).toHaveBeenCalledWith('canvas.agent_send_cropped_image_failed')
+    } finally {
+      dispatchEventSpy.mockRestore()
+      getContextSpy.mockRestore()
+    }
+  })
 })

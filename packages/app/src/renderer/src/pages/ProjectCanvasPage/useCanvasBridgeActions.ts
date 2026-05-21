@@ -8,6 +8,7 @@ import {
   buildCanvasAgentAttachments,
   buildCanvasAgentAttachmentManifest,
   buildCanvasAgentGroupCompletionPrompt,
+  buildCanvasImageCropSourceMetadata,
   expandCanvasItemsForAgentSend,
   getCanvasBlobItemMimeType,
   materializeCanvasAgentAttachmentItems
@@ -101,6 +102,21 @@ export function useCanvasBridgeActions({
       const baseAttachments = buildCanvasAgentAttachments(attachmentItems)
       const attachmentManifest = buildCanvasAgentAttachmentManifest(attachmentItems)
       const supplementalPromptParts: string[] = []
+      const croppedImageItemIds = new Set(
+        expandedTargetItems.flatMap((item) =>
+          item.type === 'image' && buildCanvasImageCropSourceMetadata(item) ? [item.id] : []
+        )
+      )
+      const materializedCroppedImageItemIds = new Set(
+        attachmentItems.flatMap((item) =>
+          item.type === 'image' && croppedImageItemIds.has(item.id) ? [item.id] : []
+        )
+      )
+      const hasFailedCroppedImageAttachments =
+        croppedImageItemIds.size > 0 &&
+        Array.from(croppedImageItemIds).some(
+          (itemId) => !materializedCroppedImageItemIds.has(itemId)
+        )
       const promptText = includeCanvasPromptText
         ? extractPromptTextFromCanvasItems(expandedTargetItems)
         : ''
@@ -111,7 +127,17 @@ export function useCanvasBridgeActions({
         (attachment) => attachment.type === 'image'
       )
       const shouldIncludeSelectionSnapshot =
-        !hasDirectImageAttachments || targetItems.some((item) => item.type !== 'image')
+        !hasFailedCroppedImageAttachments &&
+        (!hasDirectImageAttachments || targetItems.some((item) => item.type !== 'image'))
+
+      if (hasFailedCroppedImageAttachments) {
+        notifyError(
+          t('canvas.agent_send_cropped_image_failed', {
+            defaultValue:
+              'Failed to send the cropped image. Please try cropping again before sending it to Agent.'
+          })
+        )
+      }
 
       if (shouldIncludeSelectionSnapshot) {
         try {
@@ -228,7 +254,9 @@ export function useCanvasBridgeActions({
       getActiveAgentPaneScope,
       groups,
       items,
-      renderCanvasItemsImageDataUrl
+      notifyError,
+      renderCanvasItemsImageDataUrl,
+      t
     ]
   )
 

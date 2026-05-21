@@ -3,6 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const getViewMock = vi.fn()
 const readImageFromPathMock = vi.fn()
 const readFileFromPathMock = vi.fn()
+const { loadImageFromSrcMock } = vi.hoisted(() => ({
+  loadImageFromSrcMock: vi.fn()
+}))
+const originalGetContext = HTMLCanvasElement.prototype.getContext
+const originalToDataURL = HTMLCanvasElement.prototype.toDataURL
 
 vi.mock('./windowUtils', () => ({
   api: () => ({
@@ -16,6 +21,10 @@ vi.mock('./windowUtils', () => ({
   })
 }))
 
+vi.mock('@renderer/pages/ProjectCanvasPage/canvasAssetIntakeHelpers', () => ({
+  loadImageFromSrc: loadImageFromSrcMock
+}))
+
 import {
   AGENT_IMAGE_DRAG_MIME,
   getDroppedAttachmentFile,
@@ -23,8 +32,10 @@ import {
   getDroppedImageDropError,
   getDroppedImageFile,
   getQuickAppWorkflowImportError,
+  hasInternalCanvasImageCropSourceAttachment,
   INTERNAL_IMAGE_DRAG_PREFIX,
   isImageOnlyInternalDragPayload,
+  materializeInternalImageDragAttachment,
   parseInternalImageDragPayload,
   QAPP_IMAGE_DRAG_MIME,
   UNSUPPORTED_INTERNAL_FILE_DROP_MESSAGE
@@ -42,6 +53,9 @@ describe('droppedImageUtils', () => {
     getViewMock.mockReset()
     readImageFromPathMock.mockReset()
     readFileFromPathMock.mockReset()
+    loadImageFromSrcMock.mockReset()
+    HTMLCanvasElement.prototype.getContext = originalGetContext
+    HTMLCanvasElement.prototype.toDataURL = originalToDataURL
     vi.unstubAllGlobals()
   })
 
@@ -363,6 +377,68 @@ describe('droppedImageUtils', () => {
     ).toBe('Dragged prompt text')
   })
 
+  it('does not expose internal image payload text as composer drop text', () => {
+    expect(
+      getDroppedTextContent(
+        createDataTransfer({
+          [QAPP_IMAGE_DRAG_MIME]: JSON.stringify({
+            itemTypes: ['image'],
+            textContent: 'caption context',
+            attachments: [
+              {
+                type: 'image',
+                url: 'local-media:///C:/MagicPot/source.jpg',
+                fileName: 'source.png',
+                mimeType: 'image/png',
+                metadata: {
+                  magicpotCanvasCropSource: {
+                    url: 'local-media:///C:/MagicPot/source.jpg',
+                    fileName: 'source.png',
+                    sourceWidth: 100,
+                    sourceHeight: 80,
+                    crop: { x: 10, y: 20, width: 30, height: 40 }
+                  }
+                }
+              }
+            ]
+          }),
+          'text/plain': 'caption context'
+        })
+      )
+    ).toBeNull()
+  })
+
+  it('detects internal canvas crop metadata so callers can avoid full-image fallbacks', () => {
+    const payload = parseInternalImageDragPayload(
+      createDataTransfer({
+        [QAPP_IMAGE_DRAG_MIME]: JSON.stringify({
+          objectUrl: 'local-media:///C:/MagicPot/source.jpg',
+          itemTypes: ['image'],
+          attachments: [
+            {
+              type: 'image',
+              url: 'local-media:///C:/MagicPot/source.jpg',
+              fileName: 'source.png',
+              mimeType: 'image/png',
+              metadata: {
+                magicpotCanvasCropSource: {
+                  url: 'local-media:///C:/MagicPot/source.jpg',
+                  fileName: 'source.png',
+                  sourceWidth: 100,
+                  sourceHeight: 80,
+                  crop: { x: 10, y: 20, width: 30, height: 40 }
+                }
+              }
+            }
+          ]
+        })
+      })
+    )
+
+    expect(payload).toBeTruthy()
+    expect(payload && hasInternalCanvasImageCropSourceAttachment(payload)).toBe(true)
+  })
+
   it('parses hidden text content for internal drag payloads without exposing it as dropped text', () => {
     const payload = parseInternalImageDragPayload(
       createDataTransfer({
@@ -443,6 +519,187 @@ describe('droppedImageUtils', () => {
     })
     expect(file?.name).toBe('agent.png')
     expect(file?.type).toBe('image/png')
+  })
+
+  it('recrops lightweight internal canvas image attachments from the original source', async () => {
+    readImageFromPathMock.mockResolvedValue({
+      image: new Uint8Array([9, 8, 7]),
+      filename: 'source.jpg'
+    })
+    const bitmap = {
+      width: 100,
+      height: 80,
+      close: vi.fn()
+    } as unknown as ImageBitmap
+    const createImageBitmapMock = vi.fn().mockResolvedValue(bitmap)
+    vi.stubGlobal('createImageBitmap', createImageBitmapMock)
+    const drawImage = vi.fn()
+    HTMLCanvasElement.prototype.getContext = (() =>
+      ({
+        drawImage
+      }) as unknown as CanvasRenderingContext2D) as unknown as typeof HTMLCanvasElement.prototype.getContext
+    HTMLCanvasElement.prototype.toDataURL = vi.fn(() => 'data:image/png;base64,Y2xlYXI=')
+
+    const file = await getDroppedImageFile(
+      createDataTransfer({
+        [QAPP_IMAGE_DRAG_MIME]: JSON.stringify({
+          itemTypes: ['image'],
+          attachments: [
+            {
+              type: 'image',
+              url: 'local-media:///C:/MagicPot/source.jpg',
+              fileName: 'source.png',
+              mimeType: 'image/png',
+              sourceWidth: 30,
+              sourceHeight: 40,
+              metadata: {
+                magicpotCanvasCropSource: {
+                  url: 'local-media:///C:/MagicPot/source.jpg',
+                  fileName: 'source.png',
+                  sourceWidth: 100,
+                  sourceHeight: 80,
+                  crop: { x: 10, y: 20, width: 30, height: 40 }
+                }
+              }
+            }
+          ]
+        })
+      })
+    )
+
+    expect(readImageFromPathMock).toHaveBeenCalledWith({
+      fullPath: 'C:/MagicPot/source.jpg'
+    })
+    expect(createImageBitmapMock).toHaveBeenCalled()
+    expect(drawImage).toHaveBeenCalledWith(bitmap, 10, 20, 30, 40, 0, 0, 30, 40)
+    expect(bitmap.close).toHaveBeenCalled()
+    expect(file?.name).toBe('source.png')
+    expect(file?.type).toBe('image/png')
+    expect(file?.size).toBeGreaterThan(0)
+  })
+
+  it('recrops through the canvas image loader if file payload decoding fails', async () => {
+    readImageFromPathMock.mockRejectedValue(new Error('source missing'))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fallbackImage = document.createElement('img')
+    loadImageFromSrcMock.mockResolvedValue({
+      img: fallbackImage,
+      width: 100,
+      height: 80
+    })
+    const drawImage = vi.fn()
+    HTMLCanvasElement.prototype.getContext = (() =>
+      ({
+        drawImage
+      }) as unknown as CanvasRenderingContext2D) as unknown as typeof HTMLCanvasElement.prototype.getContext
+    HTMLCanvasElement.prototype.toDataURL = vi.fn(() => 'data:image/png;base64,Y2FudmFz')
+
+    const materialized = await materializeInternalImageDragAttachment({
+      type: 'image',
+      url: 'local-media:///C:/MagicPot/source.jpg',
+      fileName: 'source.png',
+      mimeType: 'image/png',
+      sourceWidth: 30,
+      sourceHeight: 40,
+      metadata: {
+        magicpotCanvasCropSource: {
+          url: 'local-media:///C:/MagicPot/source.jpg',
+          fileName: 'source.png',
+          sourceWidth: 100,
+          sourceHeight: 80,
+          crop: { x: 10, y: 20, width: 30, height: 40 }
+        }
+      }
+    })
+
+    expect(readImageFromPathMock).toHaveBeenCalledWith({
+      fullPath: 'C:/MagicPot/source.jpg'
+    })
+    expect(loadImageFromSrcMock).toHaveBeenCalledWith('local-media:///C:/MagicPot/source.jpg')
+    expect(drawImage).toHaveBeenCalledWith(fallbackImage, 10, 20, 30, 40, 0, 0, 30, 40)
+    expect(materialized).toEqual(
+      expect.objectContaining({
+        type: 'image',
+        url: 'data:image/png;base64,Y2FudmFz',
+        fileName: 'source.png',
+        mimeType: 'image/png',
+        sourceWidth: 30,
+        sourceHeight: 40
+      })
+    )
+    expect(materialized).not.toBeNull()
+    if (!materialized) {
+      throw new Error('Expected cropped image attachment to materialize')
+    }
+    expect(materialized.metadata).toBeUndefined()
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[DropImage] failed to decode cropped canvas source through file payload; retrying canvas loader:',
+      expect.any(Error)
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('drops cropped canvas attachments instead of falling back to the full source on crop failure', async () => {
+    readImageFromPathMock.mockRejectedValue(new Error('source missing'))
+    loadImageFromSrcMock.mockRejectedValue(new Error('loader missing'))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const materialized = await materializeInternalImageDragAttachment({
+      type: 'image',
+      url: 'local-media:///C:/MagicPot/source.jpg',
+      fileName: 'source.png',
+      mimeType: 'image/png',
+      sourceWidth: 30,
+      sourceHeight: 40,
+      metadata: {
+        magicpotCanvasCropSource: {
+          url: 'local-media:///C:/MagicPot/source.jpg',
+          fileName: 'source.png',
+          sourceWidth: 100,
+          sourceHeight: 80,
+          crop: { x: 10, y: 20, width: 30, height: 40 }
+        }
+      }
+    })
+
+    expect(materialized).toBeNull()
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[DropImage] failed to crop internal canvas image from original source:',
+      expect.any(Error)
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('keeps legacy objectUrl precedence for non-cropped internal image attachments', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toBe('data:image/png;base64,b3ZlcnZpZXc=')
+      return {
+        ok: true,
+        blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const file = await getDroppedImageFile(
+      createDataTransfer({
+        [QAPP_IMAGE_DRAG_MIME]: JSON.stringify({
+          objectUrl: 'data:image/png;base64,b3ZlcnZpZXc=',
+          itemTypes: ['image'],
+          attachments: [
+            {
+              type: 'image',
+              url: 'data:image/png;base64,aXRlbQ==',
+              fileName: 'item.png',
+              mimeType: 'image/png'
+            }
+          ]
+        })
+      })
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(file?.name).toBe('qapp-image.png')
+    expect(file?.size).toBe(3)
   })
 
   it('materializes dropped local-media file attachments through the fs service', async () => {

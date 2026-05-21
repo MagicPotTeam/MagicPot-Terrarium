@@ -3647,6 +3647,82 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(setCroppingImageId).toHaveBeenCalledWith(null)
   })
 
+  it('flattens confirmed image crops into the canvas item source data', async () => {
+    const cropItem = {
+      ...createImageItem('crop-target'),
+      sourceWidth: 200,
+      sourceHeight: 120
+    }
+    const setItemsWithHistory = vi.fn()
+    const setTool = vi.fn()
+    const setCroppingImageId = vi.fn()
+    const setSelectedIds = vi.fn()
+    const drawImage = vi.fn()
+    const getContextSpy = vi
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as never)
+    const toDataURLSpy = vi
+      .spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+      .mockReturnValue('data:image/png;base64,cropped-canvas-source')
+
+    try {
+      render(
+        <ProjectCanvasPageStageScene
+          {...createBaseProps([cropItem])}
+          tool="crop-select"
+          croppingImageId={cropItem.id}
+          setItemsWithHistory={setItemsWithHistory}
+          setTool={setTool}
+          setCroppingImageId={setCroppingImageId}
+          setSelectedIds={setSelectedIds}
+        />
+      )
+
+      act(() => {
+        ;(
+          cropOverlayProps.get(cropItem.id)?.onConfirm as
+            | ((updates: Partial<CanvasImageItem>) => void)
+            | undefined
+        )?.({
+          x: 132,
+          y: 156,
+          width: 80,
+          height: 60,
+          scaleX: 1,
+          scaleY: 1,
+          crop: { x: 20, y: 10, width: 80, height: 60 }
+        })
+      })
+
+      await waitFor(() => expect(setItemsWithHistory).toHaveBeenCalledTimes(1))
+      const updateItems = setItemsWithHistory.mock.calls[0][0] as (
+        prev: CanvasImageItem[]
+      ) => CanvasImageItem[]
+      const [flattenedItem] = updateItems([cropItem])
+
+      expect(flattenedItem).toEqual(
+        expect.objectContaining({
+          id: cropItem.id,
+          x: 132,
+          y: 156,
+          src: 'data:image/png;base64,cropped-canvas-source',
+          fileName: 'crop-target.png',
+          sourceWidth: 80,
+          sourceHeight: 60,
+          width: 80,
+          height: 60
+        })
+      )
+      expect(flattenedItem).not.toHaveProperty('crop')
+      expect(flattenedItem).not.toHaveProperty('image')
+      expect(drawImage).toHaveBeenCalledWith(cropItem.image, 20, 10, 80, 60, 0, 0, 80, 60)
+      expect(toDataURLSpy).toHaveBeenCalledWith('image/png')
+    } finally {
+      getContextSpy.mockRestore()
+      toDataURLSpy.mockRestore()
+    }
+  })
+
   it('cancels crop mode without mutating history', async () => {
     const cropItem = createImageItem('crop-target')
     const setItemsWithHistory = vi.fn()
