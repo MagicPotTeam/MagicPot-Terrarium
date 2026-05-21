@@ -128,9 +128,9 @@ const config = {
     defaultArch: 'x64',
     extraFiles: modeConfig.winExtraFiles,
     target: modeConfig.winTarget,
-    // 禁用代码签名，避免 winCodeSign 符号链接权限问题
-    sign: null,
-    signDlls: false
+    signtoolOptions: {
+      sign: null
+    }
   },
   nsis: modeConfig.nsis,
   mac: {
