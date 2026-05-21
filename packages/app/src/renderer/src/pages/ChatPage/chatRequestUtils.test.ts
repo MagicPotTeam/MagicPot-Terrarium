@@ -457,7 +457,7 @@ describe('requestChatCompletion', () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (
         url ===
-        'local-media:///C:/client-user-data/renderer-state/project-canvas/Canvas-Project__canvas-1/assets/images/sprite.png'
+        'local-media:///C:/client-user-data/renderer-state/project-canvas/.Canvas-Project__canvas-1/assets/images/sprite.png'
       ) {
         return {
           ok: true,
@@ -487,7 +487,7 @@ describe('requestChatCompletion', () => {
             attachments: [
               {
                 type: 'image',
-                url: 'local-media:///C:/client-user-data/renderer-state/project-canvas/Canvas-Project__canvas-1/assets/images/sprite.png',
+                url: 'local-media:///C:/client-user-data/renderer-state/project-canvas/.Canvas-Project__canvas-1/assets/images/sprite.png',
                 fileName: 'sprite.png',
                 mimeType: 'image/png'
               }
@@ -618,7 +618,7 @@ describe('requestChatCompletion', () => {
       text: async () =>
         JSON.stringify({
           error:
-            'Unauthorized LLM proxy request. Provide Authorization: Bearer <token> or X-MagicPot-Proxy-Token.'
+            'Unauthorized LLM proxy request. Provide Authorization: Bearer <token>, X-MagicPot-Proxy-Token, or legacy X-MagicPot-Bot-Secret/X-Bot-Secret.'
         })
     })
     vi.stubGlobal('fetch', fetchMock)

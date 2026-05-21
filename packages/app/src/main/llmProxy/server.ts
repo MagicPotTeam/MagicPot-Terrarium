@@ -37,6 +37,7 @@ let llmProxySvc: LLMProxySvcImpl | null = null
 const testUiPolicy = resolveTestUiPolicy(readTestUiEnv())
 const CANVAS_SYNC_REMOVED_ERROR =
   'Canvas mirroring has been removed. Remote agents can only access content explicitly attached to the current request.'
+const LEGACY_CHAT_ENDPOINTS = new Set(['/api/bot/message', '/api/bot/chat', '/api/message'])
 
 function getLlmProxyTempDir(scope?: string): string {
   const baseTempDir = resolveTestArtifactPath({
@@ -103,14 +104,72 @@ const getRequesterAddress = (req: http.IncomingMessage): string => {
   return candidate.replace(/^::ffff:/i, '')
 }
 
+const isSafeProxyAssetNameChar = (char: string): boolean => {
+  const code = char.charCodeAt(0)
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    char === '.' ||
+    char === '_' ||
+    char === '-'
+  )
+}
+
+const trimProxyAssetNameEdges = (value: string): string => {
+  let start = 0
+  let end = value.length
+
+  while (start < end && (value[start] === '-' || value[start] === '.')) {
+    start += 1
+  }
+  while (end > start && (value[end - 1] === '-' || value[end - 1] === '.')) {
+    end -= 1
+  }
+
+  return value.slice(start, end)
+}
+
+const stripProxyAssetExtension = (value: string): string => {
+  const extensionIndex = value.lastIndexOf('.')
+  return extensionIndex > 0 ? value.slice(0, extensionIndex) : value
+}
+
 const sanitizeProxyAssetFileStem = (value?: string | null): string => {
-  const normalized = String(value || '')
-    .trim()
-    .replace(/\.[^.]+$/, '')
-    .replace(/[^a-zA-Z0-9._-]+/g, '-')
-    .replace(/-{2,}/g, '-')
-    .replace(/^[-.]+|[-.]+$/g, '')
-  return normalized || 'asset'
+  const source = stripProxyAssetExtension(String(value || '').trim())
+  let normalized = ''
+  let lastWasDash = false
+
+  for (const char of source) {
+    if (isSafeProxyAssetNameChar(char)) {
+      normalized += char
+      lastWasDash = char === '-'
+      continue
+    }
+
+    if (!lastWasDash) {
+      normalized += '-'
+      lastWasDash = true
+    }
+  }
+
+  return trimProxyAssetNameEdges(normalized) || 'asset'
+}
+
+const sanitizeProxyAssetExtension = (value: string): string => {
+  const source = value.toLowerCase()
+  if (!source.startsWith('.') || source.length < 2 || source.length > 13) {
+    return ''
+  }
+
+  for (let i = 1; i < source.length; i += 1) {
+    const code = source.charCodeAt(i)
+    if (!((code >= 48 && code <= 57) || (code >= 97 && code <= 122))) {
+      return ''
+    }
+  }
+
+  return source
 }
 
 const buildProxyMediaAccessSignature = (
@@ -162,6 +221,107 @@ const buildProxyImagePath = (
   return `${pathname}?${params.toString()}`
 }
 
+const getProxyMediaSourceRoots = (resourceScope?: string): string[] => {
+  const roots = [getChatMediaDir(resourceScope), getChatMediaDir()]
+
+  try {
+    const downloadDir = getConfig().download_dir
+    if (typeof downloadDir === 'string' && downloadDir.trim()) {
+      roots.push(downloadDir)
+    }
+  } catch {
+    // Config may be unavailable while the proxy is starting up.
+  }
+
+  return Array.from(new Set(roots.map((root) => path.resolve(root))))
+}
+
+const normalizeRealPathForComparison = (value: string): string => {
+  let normalized = ''
+  for (const char of value) {
+    normalized += char === '\\' ? '/' : char
+  }
+  while (normalized.length > 1 && normalized.endsWith('/')) {
+    normalized = normalized.slice(0, -1)
+  }
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+const stageAllowedProxyMediaSource = (
+  sourceUrl: string,
+  resourceScope?: string
+): { filename: string; size: number } | null => {
+  const sourcePath = path.resolve(normalizeLocalFilePath(sourceUrl))
+
+  for (const sourceRoot of getProxyMediaSourceRoots(resourceScope)) {
+    const resolvedSourceRoot = path.resolve(sourceRoot)
+    const sourceRelativePath = path.relative(resolvedSourceRoot, sourcePath)
+    let realSourceRoot: string
+    let safeSourcePath = sourceRelativePath
+    try {
+      realSourceRoot = fs.realpathSync(resolvedSourceRoot)
+      safeSourcePath = fs.realpathSync(path.resolve(realSourceRoot, safeSourcePath))
+    } catch {
+      continue
+    }
+
+    if (!safeSourcePath.startsWith(realSourceRoot)) {
+      continue
+    }
+    const comparableRoot = normalizeRealPathForComparison(realSourceRoot)
+    const comparableSourcePath = normalizeRealPathForComparison(safeSourcePath)
+    if (
+      comparableSourcePath !== comparableRoot &&
+      !comparableSourcePath.startsWith(`${comparableRoot}/`)
+    ) {
+      continue
+    }
+
+    const sourceStat = fs.statSync(safeSourcePath)
+    if (!sourceStat.isFile()) {
+      return null
+    }
+
+    const rawExtension = path.extname(safeSourcePath)
+    const extension = sanitizeProxyAssetExtension(rawExtension)
+    const fileStem = sanitizeProxyAssetFileStem(path.basename(safeSourcePath, rawExtension))
+    const stagedFilename = `${fileStem}-${randomUUID()}${extension}`
+    const targetDir = getChatMediaDir(resourceScope)
+    const targetPath = path.join(targetDir, stagedFilename)
+
+    if (path.resolve(safeSourcePath) !== path.resolve(targetPath)) {
+      fs.copyFileSync(safeSourcePath, targetPath)
+    }
+
+    return {
+      filename: stagedFilename,
+      size: sourceStat.size
+    }
+  }
+
+  return null
+}
+
+const trimLeadingSlash = (value: string): string => (value.startsWith('/') ? value.slice(1) : value)
+
+const normalizeOpenAiCompatibleImageUrl = (value?: string): string | null => {
+  const source = String(value || '').trim()
+  if (!source || source.includes('\n') || source.includes('\r')) {
+    return null
+  }
+
+  if (source.startsWith('data:image/') || isLocalFileSource(source)) {
+    return source
+  }
+
+  try {
+    const parsed = new URL(source)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.toString() : null
+  } catch {
+    return null
+  }
+}
+
 const buildScopedProxyMediaUrl = (
   sourceUrl: string,
   host: string,
@@ -181,30 +341,19 @@ const buildScopedProxyMediaUrl = (
     return cached
   }
 
-  const normalizedSourcePath = normalizeLocalFilePath(sourceUrl)
-  const fallbackFilename = path.basename(normalizedSourcePath)
-  let proxiedUrl = `${protocol}://${host}/${buildProxyImagePath(fallbackFilename, undefined, accessToken, requesterAddress).replace(/^\//, '')}`
+  const fallbackFilename = `${sanitizeProxyAssetFileStem(sourceUrl)}.png`
+  let proxiedUrl = `${protocol}://${host}/${trimLeadingSlash(buildProxyImagePath(fallbackFilename, undefined, accessToken, requesterAddress))}`
 
   try {
-    if (normalizedSourcePath && fs.existsSync(normalizedSourcePath)) {
-      const extension = path.extname(normalizedSourcePath)
-      const fileStem = sanitizeProxyAssetFileStem(path.basename(normalizedSourcePath, extension))
-      const stagedFilename = `${fileStem}-${randomUUID()}${extension}`
-      const targetDir = getChatMediaDir(resourceScope)
-      const targetPath = path.join(targetDir, stagedFilename)
-      const sourceStat = fs.statSync(normalizedSourcePath)
-
-      if (path.resolve(normalizedSourcePath) !== path.resolve(targetPath)) {
-        fs.copyFileSync(normalizedSourcePath, targetPath)
-      }
-
+    const stagedMedia = stageAllowedProxyMediaSource(sourceUrl, resourceScope)
+    if (stagedMedia) {
       recordLlmProxyAccessUsage(accessToken, {
         activity: 'media-generated',
         requesterAddress,
-        generatedMediaBytes: sourceStat.size
+        generatedMediaBytes: stagedMedia.size
       })
 
-      proxiedUrl = `${protocol}://${host}/${buildProxyImagePath(stagedFilename, resourceScope, accessToken, requesterAddress).replace(/^\//, '')}`
+      proxiedUrl = `${protocol}://${host}/${trimLeadingSlash(buildProxyImagePath(stagedMedia.filename, resourceScope, accessToken, requesterAddress))}`
     }
   } catch (error) {
     console.warn('[LLMProxyServer] Failed to stage local media for remote access:', error)
@@ -352,6 +501,13 @@ const cleanString = (value?: string | null): string | undefined => {
   return normalized || undefined
 }
 
+const cleanUnknownString = (value: unknown): string | undefined => {
+  if (typeof value === 'string' || typeof value === 'number') {
+    return cleanString(String(value))
+  }
+  return undefined
+}
+
 const firstHeaderValue = (value?: string | string[]): string | undefined => {
   if (Array.isArray(value)) {
     return cleanString(value[0])
@@ -369,6 +525,11 @@ const getBearerToken = (header?: string | string[]): string | undefined => {
   return cleanString(match?.[1])
 }
 
+const getLegacyBotSecretToken = (
+  headers: Record<string, string | string[] | undefined>
+): string | undefined =>
+  firstHeaderValue(headers['x-magicpot-bot-secret']) || firstHeaderValue(headers['x-bot-secret'])
+
 const isLocalSecretRequestAuthorized = (
   headers: Record<string, string | string[] | undefined>,
   secret?: string | null
@@ -381,9 +542,7 @@ const isLocalSecretRequestAuthorized = (
     return true
   }
 
-  const customToken =
-    firstHeaderValue(headers['x-magicpot-bot-secret']) || firstHeaderValue(headers['x-bot-secret'])
-  return customToken === normalizedSecret
+  return getLegacyBotSecretToken(headers) === normalizedSecret
 }
 
 const normalizeLlmProxyAccessTokenEntry = (
@@ -451,7 +610,9 @@ const resolveLlmProxyAccessIdentity = (
   }
 
   const requestedToken =
-    getBearerToken(headers.authorization) || firstHeaderValue(headers['x-magicpot-proxy-token'])
+    getBearerToken(headers.authorization) ||
+    firstHeaderValue(headers['x-magicpot-proxy-token']) ||
+    getLegacyBotSecretToken(headers)
 
   if (!requestedToken) {
     return null
@@ -466,7 +627,7 @@ const writeUnauthorizedLlmProxyResponse = (res: http.ServerResponse): void => {
   res.end(
     JSON.stringify({
       error:
-        'Unauthorized LLM proxy request. Provide Authorization: Bearer <token> or X-MagicPot-Proxy-Token.'
+        'Unauthorized LLM proxy request. Provide Authorization: Bearer <token>, X-MagicPot-Proxy-Token, or legacy X-MagicPot-Bot-Secret/X-Bot-Secret.'
     })
   )
 }
@@ -561,6 +722,137 @@ const normalizeAssistantRouteInput = (value: {
     }) as AssistantRoute
   )
 
+type AssistantRouteInput = Parameters<typeof normalizeAssistantRouteInput>[0]
+
+type ProxyChatRequestData = {
+  messages: ChatMessage[]
+  route?: AssistantRouteInput
+  systemPrompt?: string
+  skillRuntime?: LLMChatSkillRuntime
+  profileId?: string
+  profileScope?: LLMProfileScope
+  sessionUrl?: string
+  conversationId?: string
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const readRequestBody = async (req: http.IncomingMessage): Promise<string> => {
+  let body = ''
+  for await (const chunk of req) {
+    body += chunk
+  }
+  return body
+}
+
+const normalizeLegacyMessageContent = (value: unknown): string | undefined => {
+  if (typeof value === 'string' || typeof value === 'number') {
+    return cleanUnknownString(value)
+  }
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+
+  const textContent = value
+    .map((part) => (isRecord(part) ? cleanUnknownString(part.text) : undefined))
+    .filter((part): part is string => Boolean(part))
+    .join(' ')
+  return textContent || undefined
+}
+
+const normalizeLegacyChatMessages = (reqData: Record<string, unknown>): ChatMessage[] => {
+  if (Array.isArray(reqData.messages)) {
+    const messages = reqData.messages
+      .map((message): ChatMessage | null => {
+        if (typeof message === 'string' || typeof message === 'number') {
+          const content = cleanUnknownString(message)
+          if (content === undefined) {
+            return null
+          }
+          return {
+            role: 'user',
+            content
+          }
+        }
+        if (!isRecord(message)) {
+          return null
+        }
+
+        const role =
+          message.role === 'system' || message.role === 'assistant' ? message.role : 'user'
+        const content = normalizeLegacyMessageContent(
+          message.content ?? message.message ?? message.text
+        )
+        if (content === undefined) {
+          return null
+        }
+
+        return {
+          role,
+          content,
+          attachments: Array.isArray(message.attachments)
+            ? (message.attachments as ChatMessage['attachments'])
+            : undefined,
+          ocrResult: isRecord(message.ocrResult)
+            ? (message.ocrResult as ChatMessage['ocrResult'])
+            : undefined,
+          hiddenContext: cleanUnknownString(message.hiddenContext)
+        }
+      })
+      .filter((message): message is ChatMessage => Boolean(message))
+    if (messages.length > 0) {
+      return messages
+    }
+  }
+
+  const content =
+    cleanUnknownString(reqData.message) ||
+    cleanUnknownString(reqData.content) ||
+    cleanUnknownString(reqData.text)
+  return content
+    ? [
+        {
+          role: 'user',
+          content
+        }
+      ]
+    : []
+}
+
+const normalizeLegacyRouteInput = (
+  reqData: Record<string, unknown>
+): AssistantRouteInput | undefined => {
+  const route = isRecord(reqData.route) ? reqData.route : undefined
+  const routeInput: AssistantRouteInput = {
+    channel: cleanUnknownString(route?.channel) || cleanUnknownString(reqData.channel),
+    scopeType: cleanUnknownString(route?.scopeType) || cleanUnknownString(reqData.scopeType),
+    scopeId: cleanUnknownString(route?.scopeId) || cleanUnknownString(reqData.scopeId),
+    threadId: cleanUnknownString(route?.threadId) || cleanUnknownString(reqData.threadId),
+    senderId: cleanUnknownString(route?.senderId) || cleanUnknownString(reqData.senderId),
+    senderName: cleanUnknownString(route?.senderName) || cleanUnknownString(reqData.senderName)
+  }
+
+  return route || Object.values(routeInput).some(Boolean) ? routeInput : undefined
+}
+
+const normalizeLegacyChatRequest = (reqData: Record<string, unknown>): ProxyChatRequestData => ({
+  messages: normalizeLegacyChatMessages(reqData),
+  route: normalizeLegacyRouteInput(reqData),
+  systemPrompt: cleanUnknownString(reqData.systemPrompt),
+  skillRuntime: isRecord(reqData.skillRuntime)
+    ? (reqData.skillRuntime as LLMChatSkillRuntime)
+    : undefined,
+  profileId: cleanUnknownString(reqData.profileId),
+  profileScope:
+    reqData.profileScope === 'qapp' || reqData.profileScope === 'agent'
+      ? reqData.profileScope
+      : undefined,
+  sessionUrl: cleanUnknownString(reqData.sessionUrl),
+  conversationId:
+    cleanUnknownString(reqData.conversationId) || cleanUnknownString(reqData.sessionId)
+})
+
 const buildMcpJsonRpcError = (id: string | number | null, code: number, message: string) => ({
   jsonrpc: '2.0',
   id,
@@ -574,6 +866,80 @@ const normalizeMcpAcceptHeader = (req: http.IncomingMessage): void => {
   const accept = cleanString(req.headers.accept)
   if (!accept || accept === '*/*') {
     req.headers.accept = 'application/json, text/event-stream'
+  }
+}
+
+const handleProxyChatRequest = async ({
+  req,
+  res,
+  port,
+  accessIdentity,
+  reqData,
+  includeLegacyAliases = false
+}: {
+  req: http.IncomingMessage
+  res: http.ServerResponse
+  port: number
+  accessIdentity: LlmProxyConfiguredAccessToken
+  reqData: ProxyChatRequestData
+  includeLegacyAliases?: boolean
+}): Promise<void> => {
+  const abortBridge = createRequestAbortBridge(req, res)
+  try {
+    const normalizedRoute = reqData.route ? normalizeAssistantRouteInput(reqData.route) : undefined
+    recordLlmProxyAccessUsage(accessIdentity, {
+      activity: 'chat',
+      requesterAddress: getRequesterAddress(req),
+      profileId: reqData.profileId
+    })
+    const result = await getLLMProxySvc().chat(
+      {
+        messages: reqData.messages,
+        route: normalizedRoute,
+        systemPrompt: reqData.systemPrompt,
+        skillRuntime: reqData.skillRuntime,
+        profileId: reqData.profileId,
+        profileScope: reqData.profileScope,
+        sessionUrl: reqData.sessionUrl,
+        conversationId: namespaceProxyConversationId(accessIdentity, reqData.conversationId)
+      },
+      {
+        signal: abortBridge.signal
+      }
+    )
+    if (abortBridge.signal.aborted || res.destroyed) {
+      return
+    }
+    // Rewrite file:// URLs for web and remote clients.
+    const host = req.headers.host || `${getLocalIPAddress()}:${port}`
+    const requesterAddress = getRequesterAddress(req)
+    const protocol =
+      (req.headers['x-forwarded-proto'] as string) ||
+      (req.socket && 'encrypted' in req.socket && req.socket.encrypted ? 'https' : 'http')
+    rewriteResultUrls(
+      result,
+      host,
+      protocol,
+      accessIdentity,
+      requesterAddress,
+      accessIdentity.resourceScope
+    )
+    const responseBody = includeLegacyAliases
+      ? {
+          ...result,
+          reply: result.content,
+          message: result.content
+        }
+      : result
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(responseBody))
+  } catch (error) {
+    if (abortBridge.signal.aborted || isAbortError(error)) {
+      return
+    }
+    throw error
+  } finally {
+    abortBridge.cleanup()
   }
 }
 
@@ -655,6 +1021,7 @@ export function startLLMProxyServer(): void {
       'Access-Control-Allow-Headers',
       'Content-Type, Authorization, X-MagicPot-Bot-Secret, X-Bot-Secret, X-MagicPot-Proxy-Token'
     )
+    res.setHeader('Access-Control-Expose-Headers', 'X-MagicPot-Stream-Fallback')
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
@@ -667,7 +1034,7 @@ export function startLLMProxyServer(): void {
 
     try {
       // Health check.
-      if (pathname === '/api/status' && req.method === 'GET') {
+      if ((pathname === '/api/status' || pathname === '/api/bot/status') && req.method === 'GET') {
         const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
         if (!accessIdentity) {
           writeUnauthorizedLlmProxyResponse(res)
@@ -678,8 +1045,19 @@ export function startLLMProxyServer(): void {
           requesterAddress: getRequesterAddress(req)
         })
         const status = await getLLMProxySvc().serverStatus({})
+        const responseBody =
+          pathname === '/api/bot/status'
+            ? {
+                ...status,
+                compatibility: {
+                  endpoint: '/api/status',
+                  legacyEndpoint: '/api/bot/status',
+                  chatEndpoint: '/api/chat'
+                }
+              }
+            : status
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(status))
+        res.end(JSON.stringify(responseBody))
         return
       }
 
@@ -857,8 +1235,15 @@ export function startLLMProxyServer(): void {
           return
         }
         req.resume()
-        res.writeHead(410, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: CANVAS_SYNC_REMOVED_ERROR }))
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            ok: true,
+            mirrored: false,
+            error: CANVAS_SYNC_REMOVED_ERROR,
+            hint: 'Canvas mirroring is no longer available. Attach required files to the chat request instead.'
+          })
+        )
         return
       }
 
@@ -927,20 +1312,10 @@ export function startLLMProxyServer(): void {
           writeUnauthorizedLlmProxyResponse(res)
           return
         }
-        let body = ''
-        for await (const chunk of req) {
-          body += chunk
-        }
+        const body = await readRequestBody(req)
         const reqData = JSON.parse(body) as {
           messages: ChatMessage[]
-          route?: {
-            channel?: string
-            scopeType?: AssistantScopeType
-            scopeId?: string
-            threadId?: string
-            senderId?: string
-            senderName?: string
-          }
+          route?: AssistantRouteInput
           systemPrompt?: string
           skillRuntime?: LLMChatSkillRuntime
           profileId?: string
@@ -948,58 +1323,32 @@ export function startLLMProxyServer(): void {
           sessionUrl?: string
           conversationId?: string
         }
-        const abortBridge = createRequestAbortBridge(req, res)
-        try {
-          const normalizedRoute = reqData.route
-            ? normalizeAssistantRouteInput(reqData.route)
-            : undefined
-          recordLlmProxyAccessUsage(accessIdentity, {
-            activity: 'chat',
-            requesterAddress: getRequesterAddress(req),
-            profileId: reqData.profileId
-          })
-          const result = await getLLMProxySvc().chat(
-            {
-              messages: reqData.messages,
-              route: normalizedRoute,
-              systemPrompt: reqData.systemPrompt,
-              skillRuntime: reqData.skillRuntime,
-              profileId: reqData.profileId,
-              profileScope: reqData.profileScope,
-              sessionUrl: reqData.sessionUrl,
-              conversationId: namespaceProxyConversationId(accessIdentity, reqData.conversationId)
-            },
-            {
-              signal: abortBridge.signal
-            }
-          )
-          if (abortBridge.signal.aborted || res.destroyed) {
-            return
-          }
-          // Rewrite file:// URLs for web and remote clients.
-          const host = req.headers.host || `${getLocalIPAddress()}:${port}`
-          const requesterAddress = getRequesterAddress(req)
-          const protocol =
-            (req.headers['x-forwarded-proto'] as string) ||
-            (req.socket && 'encrypted' in req.socket && req.socket.encrypted ? 'https' : 'http')
-          rewriteResultUrls(
-            result,
-            host,
-            protocol,
-            accessIdentity,
-            requesterAddress,
-            accessIdentity.resourceScope
-          )
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(result))
-        } catch (error) {
-          if (abortBridge.signal.aborted || isAbortError(error)) {
-            return
-          }
-          throw error
-        } finally {
-          abortBridge.cleanup()
+        await handleProxyChatRequest({ req, res, port, accessIdentity, reqData })
+        return
+      }
+
+      if (LEGACY_CHAT_ENDPOINTS.has(pathname) && req.method === 'POST') {
+        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
+        if (!accessIdentity) {
+          writeUnauthorizedLlmProxyResponse(res)
+          return
         }
+        const body = await readRequestBody(req)
+        const parsedBody = (body ? JSON.parse(body) : {}) as unknown
+        const reqData = normalizeLegacyChatRequest(isRecord(parsedBody) ? parsedBody : {})
+        if (reqData.messages.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Missing message content or messages.' }))
+          return
+        }
+        await handleProxyChatRequest({
+          req,
+          res,
+          port,
+          accessIdentity,
+          reqData,
+          includeLegacyAliases: true
+        })
         return
       }
       // OpenAI-compatible endpoint: /v1/chat/completions
@@ -1042,9 +1391,13 @@ export function startLLMProxyServer(): void {
               if (part.type === 'text' && part.text) {
                 textContent += part.text
               } else if (part.type === 'image_url' && part.image_url?.url) {
+                const imageUrl = normalizeOpenAiCompatibleImageUrl(part.image_url.url)
+                if (!imageUrl) {
+                  continue
+                }
                 attachments.push({
                   type: 'image',
-                  url: part.image_url.url,
+                  url: imageUrl,
                   mimeType: 'image/jpeg'
                 })
               }
@@ -1120,7 +1473,11 @@ export function startLLMProxyServer(): void {
               total_tokens: 0
             }
           }
-          res.writeHead(200, { 'Content-Type': 'application/json' })
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+          if (reqData.stream) {
+            headers['X-MagicPot-Stream-Fallback'] = 'non-stream-json'
+          }
+          res.writeHead(200, headers)
           res.end(JSON.stringify(response))
         } catch (error) {
           if (abortBridge.signal.aborted || isAbortError(error)) {
@@ -1246,7 +1603,7 @@ export function startLLMProxyServer(): void {
       res.writeHead(500, { 'Content-Type': 'application/json' })
       res.end(
         JSON.stringify({
-          error: error instanceof Error ? error.message : String(error)
+          error: 'Internal server error.'
         })
       )
     }

@@ -4,7 +4,7 @@ import { app } from 'electron'
 
 export const USER_DATA_OVERRIDE_ENV = 'MAGICPOT_USER_DATA_DIR'
 export const USER_DATA_DIRNAME = 'aiengineelectron'
-export const DEV_USER_DATA_DIRNAME = 'aiengineelectron-dev'
+export const DEV_USER_DATA_DIRNAME = '.aiengineelectron-dev'
 export const USER_DATA_BOOTSTRAP_FILENAME = 'user-data-bootstrap.json'
 
 type BootstrapLike = {

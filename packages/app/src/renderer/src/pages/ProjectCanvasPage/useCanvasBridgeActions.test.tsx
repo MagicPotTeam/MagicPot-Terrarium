@@ -31,7 +31,11 @@ vi.mock('../ChatPage/chatVideoAttachmentUtils', () => ({
   }))
 }))
 
-function createImageItem(id: string, fileName: string): CanvasImageItem {
+function createImageItem(
+  id: string,
+  fileName: string,
+  overrides: Partial<CanvasImageItem> = {}
+): CanvasImageItem {
   return {
     id,
     type: 'image',
@@ -48,7 +52,8 @@ function createImageItem(id: string, fileName: string): CanvasImageItem {
     scaleX: 1,
     scaleY: 1,
     zIndex: 0,
-    locked: false
+    locked: false,
+    ...overrides
   }
 }
 
@@ -140,6 +145,149 @@ describe('useCanvasBridgeActions', () => {
       expect(promptEvent?.detail?.hiddenText).not.toContain('fileName="unrelated.png"')
     } finally {
       dispatchEventSpy.mockRestore()
+    }
+  })
+
+  it('sends cropped image attachments as exported visible PNGs without changing canvas item semantics', async () => {
+    const dispatchEventSpy = vi.spyOn(window, 'dispatchEvent')
+    const sourceCanvas = document.createElement('canvas')
+    sourceCanvas.width = 100
+    sourceCanvas.height = 80
+    const selected = createImageItem('selected-image', 'selected.jpg', {
+      image: sourceCanvas,
+      sourceWidth: 100,
+      sourceHeight: 80,
+      width: 30,
+      height: 40,
+      crop: { x: 10, y: 20, width: 30, height: 40 }
+    })
+    const drawImage = vi.fn()
+    const getContextSpy = vi
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as never)
+    const toDataURLSpy = vi
+      .spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+      .mockReturnValue('data:image/png;base64,cropped-visible')
+
+    try {
+      const { result } = renderHook(() =>
+        useCanvasBridgeActions({
+          canvasId: 'canvas-1',
+          projectName: 'MagicPot Demo',
+          items: [selected],
+          groups: [],
+          notifySuccess: vi.fn(),
+          notifyError: vi.fn(),
+          extractPromptTextFromCanvasItems: (targetItems) =>
+            targetItems.map((item) => `${item.id}:${item.type}`).join('\n'),
+          renderCanvasItemsImageDataUrl: vi.fn(async () => 'data:image/png;base64,snapshot'),
+          renderCanvasItemsSvgMarkup: vi.fn(async () => '<svg />')
+        })
+      )
+
+      await act(async () => {
+        await result.current.handleSendCanvasItemsToAgent([selected], 'canvas-1.agent-2')
+        vi.runAllTimers()
+      })
+
+      const sendEvents = dispatchEventSpy.mock.calls
+        .map(
+          ([event]) =>
+            event as CustomEvent<{
+              attachment?: {
+                fileName?: string
+                url?: string
+                sourceWidth?: number
+                sourceHeight?: number
+              }
+              hiddenText?: string
+            }>
+        )
+        .filter((event) => event.type === 'send-to-agent')
+      const imageAttachment = sendEvents.find(
+        (event) => event.detail?.attachment?.fileName === 'selected.png'
+      )?.detail?.attachment
+
+      expect(imageAttachment).toEqual(
+        expect.objectContaining({
+          url: 'data:image/png;base64,cropped-visible',
+          fileName: 'selected.png',
+          sourceWidth: 30,
+          sourceHeight: 40
+        })
+      )
+      expect(drawImage).toHaveBeenCalledWith(sourceCanvas, 10, 20, 30, 40, 0, 0, 30, 40)
+      expect(toDataURLSpy).toHaveBeenCalledWith('image/png')
+      expect(selected.src).toBe('local-media:///C:/MagicPot/selected.jpg')
+      expect(selected.crop).toEqual({ x: 10, y: 20, width: 30, height: 40 })
+      expect(sendEvents.find((event) => event.detail?.hiddenText)?.detail?.hiddenText).toContain(
+        'dimensions=30x40'
+      )
+    } finally {
+      dispatchEventSpy.mockRestore()
+      getContextSpy.mockRestore()
+      toDataURLSpy.mockRestore()
+    }
+  })
+
+  it('does not fall back to the full original or a snapshot when cropped image materialization fails', async () => {
+    const dispatchEventSpy = vi.spyOn(window, 'dispatchEvent')
+    const sourceCanvas = document.createElement('canvas')
+    sourceCanvas.width = 100
+    sourceCanvas.height = 80
+    const selected = createImageItem('selected-image', 'selected.jpg', {
+      image: sourceCanvas,
+      sourceWidth: 100,
+      sourceHeight: 80,
+      width: 30,
+      height: 40,
+      crop: { x: 10, y: 20, width: 30, height: 40 }
+    })
+    const getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null)
+    const renderSnapshot = vi.fn(async () => 'data:image/png;base64,cropped-snapshot')
+    const notifyError = vi.fn()
+
+    try {
+      const { result } = renderHook(() =>
+        useCanvasBridgeActions({
+          canvasId: 'canvas-1',
+          projectName: 'MagicPot Demo',
+          items: [selected],
+          groups: [],
+          notifySuccess: vi.fn(),
+          notifyError,
+          extractPromptTextFromCanvasItems: (targetItems) =>
+            targetItems.map((item) => `${item.id}:${item.type}`).join('\n'),
+          renderCanvasItemsImageDataUrl: renderSnapshot,
+          renderCanvasItemsSvgMarkup: vi.fn(async () => '<svg />')
+        })
+      )
+
+      await act(async () => {
+        await result.current.handleSendCanvasItemsToAgent([selected], 'canvas-1.agent-2')
+        vi.runAllTimers()
+      })
+
+      const sendEvents = dispatchEventSpy.mock.calls
+        .map(
+          ([event]) =>
+            event as CustomEvent<{
+              attachment?: {
+                fileName?: string
+                url?: string
+                hiddenFromChatView?: boolean
+              }
+            }>
+        )
+        .filter((event) => event.type === 'send-to-agent')
+      const attachmentEvents = sendEvents.filter((event) => event.detail?.attachment)
+
+      expect(attachmentEvents).toEqual([])
+      expect(renderSnapshot).not.toHaveBeenCalled()
+      expect(notifyError).toHaveBeenCalledWith('canvas.agent_send_cropped_image_failed')
+    } finally {
+      dispatchEventSpy.mockRestore()
+      getContextSpy.mockRestore()
     }
   })
 })

@@ -5,9 +5,9 @@
  * (images and videos downloaded from chat responses).
  *
  * Priority:
- * 1. Configured download directory: <download_dir>/chat_media/
- * 2. ComfyUI output folder (if exists): <appDir>/vendor/comfyui/ComfyUI/output/chat_media/
- * 3. Fallback: <appDir>/chat_media/
+ * 1. Configured download directory: <download_dir>/.chat_media/
+ * 2. ComfyUI output folder (if exists): <appDir>/vendor/comfyui/ComfyUI/output/.chat_media/
+ * 3. Fallback: <appDir>/.chat_media/
  */
 
 import path from 'path'
@@ -17,6 +17,7 @@ import { getConfig } from '../config/config'
 import { readTestUiEnv, resolveTestArtifactPath, resolveTestUiPolicy } from '../testUiPolicy'
 
 let cachedBaseMediaDir: string | null = null
+const CHAT_MEDIA_ROOT_DIR = '.chat_media'
 
 export const resetChatMediaDirCacheForTests = (): void => {
   cachedBaseMediaDir = null
@@ -57,7 +58,7 @@ export const resolveBaseChatMediaDir = (): string => {
   try {
     const config = getConfig()
     if (!cachedBaseMediaDir && config.download_dir && fs.existsSync(config.download_dir)) {
-      cachedBaseMediaDir = path.join(config.download_dir, 'chat_media')
+      cachedBaseMediaDir = path.join(config.download_dir, CHAT_MEDIA_ROOT_DIR)
     }
   } catch {
     // Config may not be initialized yet, fallback to default
@@ -75,8 +76,8 @@ export const resolveBaseChatMediaDir = (): string => {
       .find((candidate) => fs.existsSync(candidate))
 
     cachedBaseMediaDir = comfyOutputDir
-      ? path.join(comfyOutputDir, 'chat_media')
-      : path.join(appDir, 'chat_media')
+      ? path.join(comfyOutputDir, CHAT_MEDIA_ROOT_DIR)
+      : path.join(appDir, CHAT_MEDIA_ROOT_DIR)
   }
 
   if (!fs.existsSync(cachedBaseMediaDir)) {

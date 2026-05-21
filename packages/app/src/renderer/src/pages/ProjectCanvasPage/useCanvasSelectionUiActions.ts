@@ -5,7 +5,10 @@ import { cloneHy3dMediaState } from '../ChatPage/hy3d/types'
 import {
   buildCanvasAgentAttachmentManifest,
   buildCanvasAgentAttachments,
-  expandCanvasItemsForAgentSend
+  buildCanvasImageCropSourceMetadata,
+  CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY,
+  expandCanvasItemsForAgentSend,
+  materializeCanvasAgentAttachmentItemsSync
 } from './canvasAgentAttachmentUtils'
 import { isCanvasAdditiveSelectionModifier } from './canvasSelectionModifiers'
 import { FILLED_ANNOTATION_OPACITY, type CanvasDragPayload } from './projectCanvasPageShared'
@@ -30,6 +33,33 @@ type CanvasImageContextMenuEvent =
       evt: CanvasContextMenuNativeEvent
       cancelBubble?: boolean
     }
+
+const CANVAS_DRAG_FALLBACK_TEXT = 'MagicPot canvas asset'
+const MAX_CANVAS_DRAG_TEXT_PLAIN_LENGTH = 2000
+
+type CanvasDragPayloadBuildOptions = {
+  objectUrl?: string
+  previewImageUrl?: string
+  promptId?: string
+}
+
+function getSafeCanvasDragPlainText(payload: CanvasDragPayload): string {
+  const textContent =
+    typeof payload.textContent === 'string' && payload.textContent.trim()
+      ? payload.textContent.trim()
+      : ''
+
+  if (
+    !textContent ||
+    textContent.length > MAX_CANVAS_DRAG_TEXT_PLAIN_LENGTH ||
+    textContent.startsWith('MAGICPOT_DRAG::') ||
+    textContent.includes('data:image')
+  ) {
+    return CANVAS_DRAG_FALLBACK_TEXT
+  }
+
+  return textContent
+}
 
 function getCanvasImageContextMenuNativeEvent(
   event: CanvasImageContextMenuEvent
@@ -520,16 +550,56 @@ Return shape:
   )
 
   const buildCanvasDragPayload = useCallback(
-    (
-      targetItems: CanvasItem[],
-      options?: {
-        objectUrl?: string
-        previewImageUrl?: string
-        promptId?: string
-      }
-    ): CanvasDragPayload => {
+    (targetItems: CanvasItem[], options?: CanvasDragPayloadBuildOptions): CanvasDragPayload => {
       const expandedTargetItems = expandCanvasItemsForAgentSend(targetItems, items)
-      const attachments = buildCanvasAgentAttachments(expandedTargetItems)
+      const attachmentSourceItems = materializeCanvasAgentAttachmentItemsSync(expandedTargetItems)
+      const dragManifestItems = attachmentSourceItems.map((item) => {
+        if (item.type !== 'image') return item
+
+        const cropSource = buildCanvasImageCropSourceMetadata(item)
+        if (!cropSource) return item
+
+        const outputWidth = Math.max(1, Math.round(cropSource.crop.width))
+        const outputHeight = Math.max(1, Math.round(cropSource.crop.height))
+        const { crop: _crop, ...itemWithoutCrop } = item
+        return {
+          ...itemWithoutCrop,
+          fileName: cropSource.fileName,
+          sourceWidth: outputWidth,
+          sourceHeight: outputHeight,
+          width: outputWidth,
+          height: outputHeight
+        } as CanvasImageItem
+      })
+      const originalImageItems = attachmentSourceItems.filter(
+        (item): item is CanvasImageItem => item.type === 'image'
+      )
+      let imageAttachmentIndex = 0
+      const attachments = buildCanvasAgentAttachments(dragManifestItems).map((attachment) => {
+        if (attachment.type !== 'image') return attachment
+
+        const sourceItem = originalImageItems[imageAttachmentIndex++]
+        const cropSource = sourceItem ? buildCanvasImageCropSourceMetadata(sourceItem) : null
+        if (!cropSource) return attachment
+
+        return {
+          ...attachment,
+          url: cropSource.url,
+          fileName: cropSource.fileName,
+          mimeType: 'image/png',
+          sizeBytes: undefined,
+          sourceWidth: Math.max(1, Math.round(cropSource.crop.width)),
+          sourceHeight: Math.max(1, Math.round(cropSource.crop.height)),
+          metadata: {
+            ...(attachment.metadata || {}),
+            [CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY]: cropSource
+          }
+        }
+      })
+      const singleDragImageItem =
+        dragManifestItems.length === 1 && dragManifestItems[0]?.type === 'image'
+          ? (dragManifestItems[0] as CanvasImageItem)
+          : null
       const hy3dSourceItem =
         targetItems.length === 1 && targetItems[0]?.type === 'model3d'
           ? (targetItems[0] as CanvasModel3DItem)
@@ -552,15 +622,18 @@ Return shape:
           : undefined
 
       return {
-        objectUrl: options?.objectUrl?.trim() ? options.objectUrl : undefined,
-        previewImageUrl: options?.previewImageUrl?.trim() ? options.previewImageUrl : undefined,
+        objectUrl:
+          singleDragImageItem?.src || (options?.objectUrl?.trim() ? options.objectUrl : undefined),
+        previewImageUrl:
+          singleDragImageItem?.src ||
+          (options?.previewImageUrl?.trim() ? options.previewImageUrl : undefined),
         promptId: options?.promptId?.trim() ? options.promptId : undefined,
         sourceCanvasId: canvasId,
         attachments: attachments.length > 0 ? attachments : undefined,
         itemTypes,
         textContent: extractPromptTextFromCanvasItems(expandedTargetItems).trim() || undefined,
         hiddenTextContent:
-          buildCanvasAgentAttachmentManifest(expandedTargetItems).trim() || undefined,
+          buildCanvasAgentAttachmentManifest(dragManifestItems).trim() || undefined,
         ...(hy3dSourceItem?.hy3dQuickAppKey
           ? { hy3dQuickAppKey: hy3dSourceItem.hy3dQuickAppKey }
           : {}),
@@ -577,12 +650,7 @@ Return shape:
     (dataTransfer: DataTransfer, payload: CanvasDragPayload) => {
       const payloadStr = JSON.stringify(payload)
       dataTransfer.setData('application/x-qapp-image', payloadStr)
-      dataTransfer.setData(
-        'text/plain',
-        typeof payload.textContent === 'string' && payload.textContent.trim()
-          ? payload.textContent
-          : `MAGICPOT_DRAG::${payloadStr}`
-      )
+      dataTransfer.setData('text/plain', getSafeCanvasDragPlainText(payload))
       dataTransfer.effectAllowed = 'copy'
     },
     []

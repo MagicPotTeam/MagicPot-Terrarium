@@ -161,7 +161,7 @@ const waitForListeningPort = async (): Promise<number> => {
   throw new Error('Timed out waiting for test server to bind a port')
 }
 
-describe('LLM proxy server legacy bot removal', () => {
+describe('LLM proxy server legacy compatibility', () => {
   let port = 0
 
   beforeEach(async () => {
@@ -214,7 +214,7 @@ describe('LLM proxy server legacy bot removal', () => {
     testArtifactDir = ''
   })
 
-  it('falls through retired /api/bot endpoints to the default 404 handler', async () => {
+  it('maps legacy /api/bot/status to the current status endpoint', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/bot/status`, {
       headers: {
         Authorization: 'Bearer proxy-secret'
@@ -222,10 +222,191 @@ describe('LLM proxy server legacy bot removal', () => {
     })
     const body = await response.json()
 
-    expect(response.status).toBe(404)
-    expect(body).toEqual({
-      error: 'Not Found',
-      path: '/api/bot/status'
+    expect(response.status).toBe(200)
+    expect(body).toMatchObject({
+      online: true,
+      compatibility: {
+        endpoint: '/api/status',
+        legacyEndpoint: '/api/bot/status',
+        chatEndpoint: '/api/chat'
+      }
+    })
+  })
+
+  it('accepts legacy bot secret headers as proxy tokens', async () => {
+    for (const headerName of ['X-MagicPot-Bot-Secret', 'X-Bot-Secret']) {
+      chatRequestCapture = null
+      const response = await fetch(`http://127.0.0.1:${port}/api/bot/message`, {
+        method: 'POST',
+        headers: {
+          [headerName]: 'proxy-secret',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ message: `hello through ${headerName}` })
+      })
+      const body = await response.json()
+
+      expect(response.status).toBe(200)
+      expect(body).toMatchObject({
+        content: 'chat ok',
+        reply: 'chat ok',
+        message: 'chat ok'
+      })
+      expect(chatRequestCapture).toMatchObject({
+        messages: [{ role: 'user', content: `hello through ${headerName}` }]
+      })
+    }
+  })
+
+  it('normalizes legacy bot/message payloads through the current chat flow', async () => {
+    const legacyCases = [
+      {
+        endpoint: '/api/bot/message',
+        body: {
+          message: 'from message',
+          systemPrompt: 'legacy system',
+          sessionId: 'legacy-session',
+          channel: 'canvas',
+          scopeType: 'thread',
+          scopeId: 'canvas-1',
+          threadId: 'agent-2',
+          senderId: 'user-1',
+          senderName: 'Ada'
+        },
+        expectedRequest: {
+          messages: [{ role: 'user', content: 'from message' }],
+          systemPrompt: 'legacy system',
+          conversationId: 'proxy:canvas-agent-2:legacy-session',
+          route: {
+            channel: 'canvas',
+            scopeType: 'thread',
+            scopeId: 'canvas-1',
+            threadId: 'agent-2',
+            senderId: 'user-1',
+            senderName: 'Ada'
+          }
+        }
+      },
+      {
+        endpoint: '/api/bot/chat',
+        body: {
+          messages: [{ role: 'user', content: 'from messages' }],
+          conversationId: 'legacy-conversation',
+          route: {
+            channel: 'generic',
+            scopeType: 'thread',
+            scopeId: 'chat-session-1',
+            threadId: 'chat-session-1'
+          }
+        },
+        expectedRequest: {
+          messages: [{ role: 'user', content: 'from messages' }],
+          conversationId: 'proxy:canvas-agent-2:legacy-conversation',
+          route: {
+            channel: 'generic',
+            scopeType: 'thread',
+            scopeId: 'chat-session-1',
+            threadId: 'chat-session-1'
+          }
+        }
+      },
+      {
+        endpoint: '/api/message',
+        body: { content: 'from content' },
+        expectedRequest: {
+          messages: [{ role: 'user', content: 'from content' }]
+        }
+      },
+      {
+        endpoint: '/api/message',
+        body: { text: 'from text' },
+        expectedRequest: {
+          messages: [{ role: 'user', content: 'from text' }]
+        }
+      }
+    ]
+
+    for (const legacyCase of legacyCases) {
+      chatRequestCapture = null
+      const response = await fetch(`http://127.0.0.1:${port}${legacyCase.endpoint}`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer proxy-secret',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(legacyCase.body)
+      })
+      const body = await response.json()
+
+      expect(response.status).toBe(200)
+      expect(body).toMatchObject({
+        content: 'chat ok',
+        reply: 'chat ok',
+        message: 'chat ok'
+      })
+      expect(chatRequestCapture).toMatchObject(legacyCase.expectedRequest)
+    }
+  })
+
+  it('handles legacy payload edge cases predictably', async () => {
+    for (const rawBody of ['', '[]']) {
+      const response = await fetch(`http://127.0.0.1:${port}/api/bot/message`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer proxy-secret',
+          'Content-Type': 'application/json'
+        },
+        body: rawBody
+      })
+      const body = await response.json()
+
+      expect(response.status).toBe(400)
+      expect(body).toEqual({ error: 'Missing message content or messages.' })
+    }
+
+    chatRequestCapture = null
+    const response = await fetch(`http://127.0.0.1:${port}/api/bot/message`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer proxy-secret',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        message: 'fallback should not be used',
+        messages: [
+          'string message',
+          7,
+          null,
+          '',
+          {
+            role: 'assistant',
+            content: [
+              { type: 'text', text: 'part one' },
+              { text: ' part two' },
+              { type: 'image_url', image_url: { url: 'https://example.invalid/reference.png' } }
+            ]
+          },
+          { role: 'system', text: 42 },
+          { role: 'unknown', content: '' },
+          { not: 'a message' }
+        ],
+        profileId: 123,
+        profileScope: 'qapp'
+      })
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(body.reply).toBe('chat ok')
+    expect(chatRequestCapture).toMatchObject({
+      messages: [
+        { role: 'user', content: 'string message' },
+        { role: 'user', content: '7' },
+        { role: 'assistant', content: 'part one part two' },
+        { role: 'system', content: '42' }
+      ],
+      profileId: '123',
+      profileScope: 'qapp'
     })
   })
 
@@ -351,6 +532,32 @@ describe('LLM proxy server legacy bot removal', () => {
     })
     expect(body.content).toContain('/api/images/canvas-agent-2/')
     expect(body.content).not.toContain(rawLocalMediaPath)
+
+    const signedMediaResponse = await fetch(body.imageUrl)
+    expect(signedMediaResponse.status).toBe(200)
+    expect(await signedMediaResponse.text()).toBe('png-bytes')
+
+    const unsignedScopedUrl = new URL(body.imageUrl)
+    unsignedScopedUrl.search = ''
+    const noTokenResponse = await fetch(String(unsignedScopedUrl))
+    expect(noTokenResponse.status).toBe(401)
+
+    const wrongTokenResponse = await fetch(String(unsignedScopedUrl), {
+      headers: {
+        Authorization: 'Bearer wrong-token'
+      }
+    })
+    expect(wrongTokenResponse.status).toBe(401)
+
+    const wrongScopeUrl = new URL(unsignedScopedUrl)
+    wrongScopeUrl.pathname = wrongScopeUrl.pathname.replace('/canvas-agent-2/', '/other-scope/')
+    const wrongScopeResponse = await fetch(String(wrongScopeUrl), {
+      headers: {
+        Authorization: 'Bearer proxy-secret'
+      }
+    })
+    expect(wrongScopeResponse.status).toBe(401)
+
     expect(chatRequestCapture).toMatchObject({
       route: {
         channel: 'canvas',
@@ -361,7 +568,50 @@ describe('LLM proxy server legacy bot removal', () => {
     })
   })
 
-  it('hard-disables canvas sync while keeping /api/chat route forwarding intact', async () => {
+  it('returns ordinary JSON when OpenAI-compatible clients request streaming', async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer proxy-secret',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'profile-1',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'system prompt' },
+          { role: 'user', content: 'hello' }
+        ]
+      })
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('x-magicpot-stream-fallback')).toBe('non-stream-json')
+    expect(response.headers.get('access-control-expose-headers')).toContain(
+      'X-MagicPot-Stream-Fallback'
+    )
+    expect(body).toMatchObject({
+      object: 'chat.completion',
+      model: 'profile-1',
+      choices: [
+        {
+          message: {
+            role: 'assistant',
+            content: 'chat ok'
+          },
+          finish_reason: 'stop'
+        }
+      ]
+    })
+    expect(chatRequestCapture).toMatchObject({
+      messages: [{ role: 'user', content: 'hello' }],
+      systemPrompt: 'system prompt',
+      profileId: 'profile-1'
+    })
+  })
+
+  it('returns a canvas sync no-op while keeping /api/chat route forwarding intact', async () => {
     const syncResponse = await fetch(`http://127.0.0.1:${port}/api/canvas/sync`, {
       method: 'POST',
       headers: {
@@ -371,7 +621,7 @@ describe('LLM proxy server legacy bot removal', () => {
       body: JSON.stringify({
         projectId: 'canvas-1',
         paneId: 'agent-2',
-        storageDirName: 'Canvas-Project__canvas-1',
+        storageDirName: '.Canvas-Project__canvas-1',
         route: {
           channel: 'canvas',
           scopeType: 'thread',
@@ -392,10 +642,12 @@ describe('LLM proxy server legacy bot removal', () => {
     })
     const syncBody = await syncResponse.json()
 
-    expect(syncResponse.status).toBe(410)
-    expect(syncBody).toEqual({
-      error:
-        'Canvas mirroring has been removed. Remote agents can only access content explicitly attached to the current request.'
+    expect(syncResponse.status).toBe(200)
+    expect(syncBody).toMatchObject({
+      ok: true,
+      mirrored: false,
+      error: expect.stringContaining('Canvas mirroring has been removed.'),
+      hint: expect.stringContaining('Attach required files')
     })
     await expect(fs.stat(path.join(testArtifactDir, 'remote-canvas-sync'))).rejects.toThrow()
 

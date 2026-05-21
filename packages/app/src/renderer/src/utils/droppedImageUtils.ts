@@ -11,10 +11,12 @@ import {
   getDownloadFileNameFromUrl,
   normalizeLocalMediaUrl
 } from '@renderer/pages/ChatPage/chatPageShared'
+import { loadImageFromSrc } from '@renderer/pages/ProjectCanvasPage/canvasAssetIntakeHelpers'
 
 export const QAPP_IMAGE_DRAG_MIME = 'application/x-qapp-image'
 export const AGENT_IMAGE_DRAG_MIME = 'application/x-ai-image'
 export const INTERNAL_IMAGE_DRAG_PREFIX = 'MAGICPOT_DRAG::'
+export const CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY = 'magicpotCanvasCropSource'
 export const UNSUPPORTED_INTERNAL_FILE_DROP_MESSAGE = '提交的元素含有该功能不知道格式，请重新选择。'
 
 type InternalDragItemType = 'annotation' | 'file' | 'html' | 'image' | 'model3d' | 'text' | 'video'
@@ -123,6 +125,61 @@ const isHy3dImageAttachment = (value: unknown): value is Hy3dImageAttachment =>
   (value as { type?: unknown }).type === 'image' &&
   typeof (value as { url?: unknown }).url === 'string'
 
+type CanvasImageCropSourceMetadata = {
+  url: string
+  fileName?: string
+  sourceWidth: number
+  sourceHeight: number
+  crop: { x: number; y: number; width: number; height: number }
+}
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === 'object' && !Array.isArray(value)
+
+const getPositiveFiniteNumber = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+
+const parseCanvasImageCropSourceMetadata = (
+  value: unknown
+): CanvasImageCropSourceMetadata | null => {
+  if (!isPlainRecord(value)) return null
+
+  const crop = isPlainRecord(value.crop) ? value.crop : null
+  const sourceWidth = getPositiveFiniteNumber(value.sourceWidth)
+  const sourceHeight = getPositiveFiniteNumber(value.sourceHeight)
+  const cropX = typeof crop?.x === 'number' && Number.isFinite(crop.x) ? crop.x : undefined
+  const cropY = typeof crop?.y === 'number' && Number.isFinite(crop.y) ? crop.y : undefined
+  const cropWidth = getPositiveFiniteNumber(crop?.width)
+  const cropHeight = getPositiveFiniteNumber(crop?.height)
+
+  if (
+    typeof value.url !== 'string' ||
+    !value.url.trim() ||
+    !sourceWidth ||
+    !sourceHeight ||
+    cropX === undefined ||
+    cropY === undefined ||
+    !cropWidth ||
+    !cropHeight
+  ) {
+    return null
+  }
+
+  return {
+    url: value.url,
+    fileName:
+      typeof value.fileName === 'string' && value.fileName.trim() ? value.fileName : undefined,
+    sourceWidth,
+    sourceHeight,
+    crop: {
+      x: cropX,
+      y: cropY,
+      width: cropWidth,
+      height: cropHeight
+    }
+  }
+}
+
 const parseHy3dMediaState = (value: unknown): Hy3dMediaState | undefined => {
   if (!value || typeof value !== 'object') {
     return undefined
@@ -218,7 +275,10 @@ const parsePayload = (raw: string): InternalImageDragPayload | null => {
               reportBundleLabel:
                 typeof (attachment as ChatAttachment).reportBundleLabel === 'string'
                   ? (attachment as ChatAttachment).reportBundleLabel
-                  : undefined
+                  : undefined,
+              ...(isPlainRecord((attachment as ChatAttachment).metadata)
+                ? { metadata: { ...(attachment as ChatAttachment).metadata } }
+                : {})
             } satisfies ChatAttachment
           ]
         })
@@ -428,6 +488,10 @@ const inferMimeTypeFromFileName = (fileName: string): string => {
 }
 
 const inferFileNameFromUrl = (url: string, fallback: string): string => {
+  if (url.startsWith('data:')) {
+    return fallback
+  }
+
   const localPath = decodeLocalImagePath(url)
   if (localPath) {
     const segments = localPath.split(/[\\/]/).filter(Boolean)
@@ -460,15 +524,213 @@ const loadImageFileFromUrl = async (url: string, fallbackFileName: string): Prom
   }
 
   const blob = await response.blob()
-  const fileName = inferFileNameFromUrl(url, fallbackFileName)
+  const fileName = url.trim().toLowerCase().startsWith('data:')
+    ? fallbackFileName
+    : inferFileNameFromUrl(url, fallbackFileName)
   return new File([blob], fileName, {
     type: blob.type || inferMimeTypeFromFileName(fileName)
   })
 }
 
+const estimateDataUrlByteSize = (dataUrl: string): number | undefined => {
+  const commaIndex = dataUrl.indexOf(',')
+  if (commaIndex < 0) return undefined
+
+  const payload = dataUrl.slice(commaIndex + 1)
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor((payload.length * 3) / 4) - padding)
+}
+
+type LoadedDropImageSource = {
+  image: CanvasImageSource
+  width: number
+  height: number
+  close?: () => void
+}
+
+const loadImageSourceFromFile = async (file: File): Promise<LoadedDropImageSource> => {
+  if (typeof createImageBitmap === 'function') {
+    const image = await createImageBitmap(file)
+    return {
+      image,
+      width: image.width,
+      height: image.height,
+      close: () => image.close()
+    }
+  }
+
+  if (typeof document === 'undefined' || typeof URL === 'undefined') {
+    throw new Error('Cannot decode image in this environment')
+  }
+
+  const objectUrl = URL.createObjectURL(file)
+  const image = new Image()
+  const loaded = new Promise<HTMLImageElement>((resolve, reject) => {
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('Failed to decode dropped image'))
+  })
+  image.src = objectUrl
+
+  try {
+    const loadedImage = await loaded
+    return {
+      image: loadedImage,
+      width: loadedImage.naturalWidth || loadedImage.width,
+      height: loadedImage.naturalHeight || loadedImage.height,
+      close: () => URL.revokeObjectURL(objectUrl)
+    }
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl)
+    throw error
+  }
+}
+
+const loadImageSourceFromCanvasLoader = async (url: string): Promise<LoadedDropImageSource> => {
+  const loaded = await loadImageFromSrc(url)
+  return {
+    image: loaded.img,
+    width: loaded.width,
+    height: loaded.height
+  }
+}
+
+const cropImageAttachmentFromSource = async (
+  cropSource: CanvasImageCropSourceMetadata,
+  fallbackFileName: string
+): Promise<ChatAttachment> => {
+  if (typeof document === 'undefined') {
+    throw new Error('Cannot crop image without a document')
+  }
+
+  const sourceImage: LoadedDropImageSource = await (async (): Promise<LoadedDropImageSource> => {
+    try {
+      const file = await loadImageFileFromUrl(cropSource.url, fallbackFileName)
+      return await loadImageSourceFromFile(file)
+    } catch (error) {
+      console.warn(
+        '[DropImage] failed to decode cropped canvas source through file payload; retrying canvas loader:',
+        error
+      )
+      return await loadImageSourceFromCanvasLoader(cropSource.url)
+    }
+  })()
+  const outputWidth = Math.max(1, Math.round(cropSource.crop.width))
+  const outputHeight = Math.max(1, Math.round(cropSource.crop.height))
+  const scaleX = sourceImage.width / cropSource.sourceWidth
+  const scaleY = sourceImage.height / cropSource.sourceHeight
+  const canvas = document.createElement('canvas')
+  canvas.width = outputWidth
+  canvas.height = outputHeight
+
+  try {
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('Cannot create image crop canvas')
+
+    context.drawImage(
+      sourceImage.image,
+      cropSource.crop.x * scaleX,
+      cropSource.crop.y * scaleY,
+      cropSource.crop.width * scaleX,
+      cropSource.crop.height * scaleY,
+      0,
+      0,
+      outputWidth,
+      outputHeight
+    )
+
+    const url = canvas.toDataURL('image/png')
+    return {
+      type: 'image',
+      url,
+      mimeType: 'image/png',
+      fileName: cropSource.fileName || fallbackFileName,
+      sizeBytes: estimateDataUrlByteSize(url),
+      sourceWidth: outputWidth,
+      sourceHeight: outputHeight
+    }
+  } finally {
+    sourceImage.close?.()
+  }
+}
+
+export const materializeInternalImageDragAttachment = async (
+  attachment: ChatAttachment
+): Promise<ChatAttachment | null> => {
+  if (attachment.type !== 'image') return attachment
+
+  const cropSource = parseCanvasImageCropSourceMetadata(
+    attachment.metadata?.[CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY]
+  )
+  if (!cropSource) return attachment
+
+  try {
+    const croppedAttachment = await cropImageAttachmentFromSource(
+      cropSource,
+      attachment.fileName || cropSource.fileName || 'canvas-image.png'
+    )
+    const metadata = isPlainRecord(attachment.metadata) ? { ...attachment.metadata } : undefined
+    if (metadata) {
+      delete metadata[CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY]
+    }
+
+    const materializedAttachment: ChatAttachment = {
+      ...attachment,
+      ...croppedAttachment
+    }
+    if (metadata && Object.keys(metadata).length > 0) {
+      materializedAttachment.metadata = metadata
+    } else {
+      delete materializedAttachment.metadata
+    }
+    return materializedAttachment
+  } catch (error) {
+    console.warn('[DropImage] failed to crop internal canvas image from original source:', error)
+    return null
+  }
+}
+
+export const materializeInternalImageDragAttachments = async (
+  attachments: ChatAttachment[]
+): Promise<ChatAttachment[]> => {
+  const materialized = await Promise.all(attachments.map(materializeInternalImageDragAttachment))
+  return materialized.filter((attachment): attachment is ChatAttachment => Boolean(attachment))
+}
+
+export const hasInternalCanvasImageCropSourceAttachment = (
+  payload: InternalImageDragPayload
+): boolean =>
+  Boolean(
+    payload.attachments?.some(
+      (attachment) =>
+        attachment.type === 'image' &&
+        parseCanvasImageCropSourceMetadata(
+          attachment.metadata?.[CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY]
+        )
+    )
+  )
+
 const loadImageFileFromInternalPayload = async (
   payload: InternalImageDragPayload
 ): Promise<File | null> => {
+  const croppedImageAttachments =
+    payload.attachments?.filter(
+      (attachment) =>
+        attachment.type === 'image' &&
+        parseCanvasImageCropSourceMetadata(
+          attachment.metadata?.[CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY]
+        )
+    ) || []
+  if (croppedImageAttachments.length === 1) {
+    const materializedAttachment = await materializeInternalImageDragAttachment(
+      croppedImageAttachments[0]
+    )
+    if (!materializedAttachment) return null
+    return loadImageFileFromUrl(
+      materializedAttachment.url,
+      materializedAttachment.fileName || 'canvas-image.png'
+    )
+  }
+
   const fallbackFileName =
     payload.fileItem?.filename ||
     (payload.promptId ? `qapp-${payload.promptId}.png` : 'qapp-image.png')
@@ -546,8 +808,11 @@ export const getDroppedAttachmentFile = async (
 
 export const getDroppedTextContent = (dataTransfer: DragDataReader): string | null => {
   const internalPayload = parseInternalImageDragPayload(dataTransfer)
-  if (internalPayload?.textContent?.trim()) {
+  if (internalPayload?.textContent?.trim() && internalPayload.itemTypes?.includes('text')) {
     return internalPayload.textContent
+  }
+  if (internalPayload) {
+    return null
   }
 
   const plainText = dataTransfer.getData('text/plain')

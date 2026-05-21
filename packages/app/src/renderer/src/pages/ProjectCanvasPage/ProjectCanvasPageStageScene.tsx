@@ -42,6 +42,7 @@ import {
   summarizeProjectCanvasRuntimeSurfaces,
   type ProjectCanvasImagePreview
 } from './projectCanvasRenderBoundary'
+import { materializeCanvasImageAttachmentSource } from './canvasAgentAttachmentUtils'
 import { getCanvasItemBounds, isFillableAnnotationShape } from './projectCanvasPageShared'
 import { getCanvasThumbnailRuntimeMetrics } from './canvasThumbnailWorkerClient'
 import {
@@ -1987,12 +1988,40 @@ export default function ProjectCanvasPageStageScene(props: any) {
     [setInlineTextEdit, setSelectedIds]
   )
   const handleCropConfirm = React.useCallback(
-    (item: CanvasImageItem, updates: Partial<CanvasImageItem>) => {
+    async (item: CanvasImageItem, updates: Partial<CanvasImageItem>) => {
       lastClickedIdRef.current = item.id
       setSelectedIds(new Set([item.id]))
+      const croppedItem = { ...item, ...updates } as CanvasImageItem
+      const flattenedCropSource = updates.crop
+        ? await materializeCanvasImageAttachmentSource(croppedItem).catch((error) => {
+            console.warn('[Canvas] Failed to flatten cropped image item:', error)
+            return null
+          })
+        : null
+
       setItemsWithHistory((prev: CanvasItem[]) =>
         prev.map((i) => {
           if (i.id === item.id) {
+            if (flattenedCropSource) {
+              const {
+                crop: _crop,
+                image: _image,
+                sourceFile: _sourceFile,
+                sourceIdentity: _sourceIdentity,
+                thumbnailSet: _thumbnailSet,
+                ...itemWithoutSourcePreview
+              } = { ...i, ...updates } as CanvasImageItem
+
+              return {
+                ...itemWithoutSourcePreview,
+                src: flattenedCropSource.src,
+                fileName: flattenedCropSource.fileName,
+                sizeBytes: flattenedCropSource.sizeBytes,
+                sourceWidth: flattenedCropSource.sourceWidth,
+                sourceHeight: flattenedCropSource.sourceHeight
+              }
+            }
+
             return { ...i, ...updates }
           }
 
@@ -3183,7 +3212,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
                   return
                 }
 
-                handleCropConfirm(activeRegionSelectionImageItem, updates)
+                void handleCropConfirm(activeRegionSelectionImageItem, updates)
               }}
               onCancel={tool === 'extract-select' ? handleExtractCancel : handleCropCancel}
             />

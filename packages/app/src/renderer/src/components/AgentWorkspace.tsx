@@ -241,9 +241,14 @@ const buildPanePreview = (
   }
 
   if (latestMessage?.content) {
+    const assistantModelName =
+      latestMessage.role === 'assistant' ? latestMessage.modelName?.trim() : ''
     return {
       title: compactText(latestMessage.content, paneLabel),
-      subtitle: latestMessage.role === 'assistant' ? strings.latestReply : strings.latestPrompt,
+      subtitle:
+        latestMessage.role === 'assistant'
+          ? assistantModelName || strings.latestReply
+          : strings.latestPrompt,
       status
     }
   }

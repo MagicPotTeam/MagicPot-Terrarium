@@ -160,7 +160,7 @@ describe('llmProfileUtils helpers', () => {
         { status: 401, statusText: 'Unauthorized' } as Pick<Response, 'status' | 'statusText'>,
         JSON.stringify({
           error:
-            'Unauthorized LLM proxy request. Provide Authorization: Bearer <token> or X-MagicPot-Proxy-Token.'
+            'Unauthorized LLM proxy request. Provide Authorization: Bearer <token>, X-MagicPot-Proxy-Token, or legacy X-MagicPot-Bot-Secret/X-Bot-Secret.'
         })
       )
     ).toContain('access token matches the server configuration')

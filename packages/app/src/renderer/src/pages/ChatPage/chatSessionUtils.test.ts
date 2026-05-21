@@ -259,6 +259,19 @@ describe('chatSessionUtils session updaters', () => {
     ])
   })
 
+  it('preserves the responding model on streamed assistant placeholders', () => {
+    const withPlaceholder = appendAssistantPlaceholderToSession(baseSessions, '2', 'GPT-4o')
+    const withDelta = appendAssistantDeltaToSession(withPlaceholder, {
+      sessionId: '2',
+      delta: 'partial reply'
+    })
+
+    expect(withDelta[1].messages).toEqual([
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'partial reply', modelName: 'GPT-4o' }
+    ])
+  })
+
   it('replaces the last message and keeps the session url in sync', () => {
     const withPlaceholder = appendAssistantPlaceholderToSession(baseSessions, '2')
     const updated = replaceLastMessageInSession(withPlaceholder, {

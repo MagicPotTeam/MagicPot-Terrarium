@@ -77,6 +77,21 @@ config/electron/electron.vite.config.*.mjs
 
 # Dev AppData User Profile
 aiengineelectron-dev/
+.aiengineelectron-dev/
+
+# Generated project/cache roots when the global project root points at this repo
+Codex-Junk/
+.Codex-Junk/
+AutoSave/
+.AutoSave/
+chat_media/
+.chat_media/
+report_bundles/
+.report_bundles/
+canvas-target-failures/
+.canvas-target-failures/
+*__tab-project-*/
+.*__tab-project-*/
 
 # Documentation
 # Architecture, migration, and verification docs are part of the repository deliverables.

@@ -217,6 +217,15 @@ describe('useCanvasKeyboardShortcuts', () => {
     expect(handleUndo).toHaveBeenCalledTimes(1)
   })
 
+  it('switches to the text annotation tool with the T shortcut', () => {
+    render(<KeyboardShortcutHarness handleUndo={vi.fn()} />)
+
+    fireEvent.keyDown(window, { key: 't', code: 'KeyT' })
+
+    expect(screen.getByText('Tool: annotate')).toBeInTheDocument()
+    expect(screen.getByText('Anno: text-anno')).toBeInTheDocument()
+  })
+
   it('handles Ctrl+Z by key code when the active layout does not report latin key text', () => {
     const handleUndo = vi.fn()
 

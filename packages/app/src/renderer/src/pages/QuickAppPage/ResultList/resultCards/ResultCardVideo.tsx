@@ -52,7 +52,7 @@ const ResultCardVideo: ResultCardComponent<'video'> = ({
         const targetDir = resolveProjectResourceDir({
           config: { download_dir: config.download_dir },
           projectId: result.projectId,
-          segments: ['AutoSave', 'QuickApp', 'Videos']
+          segments: ['.AutoSave', 'QuickApp', 'Videos']
         })
 
         await api().svcHyper.saveImageToDir({
@@ -61,7 +61,7 @@ const ResultCardVideo: ResultCardComponent<'video'> = ({
           dir: targetDir
         })
       } catch (error) {
-        console.error('[AutoSave] Failed to save quick app video:', error)
+        console.error('[.AutoSave] Failed to save quick app video:', error)
       }
     }
 

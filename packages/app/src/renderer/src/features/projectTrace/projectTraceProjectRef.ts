@@ -1,4 +1,5 @@
 import type { ProjectTraceProjectRef } from '@shared/projectTrace'
+import { normalizeGeneratedRootDirName } from '@shared/projectStorage'
 import { buildProjectStorageDirName, getProjectById } from '../../pages/MainPage/projectStore'
 import { getProjectCanvasLocation } from '../../pages/ProjectCanvasPage/canvasStorage'
 
@@ -8,7 +9,8 @@ export async function resolveCanvasProjectTraceProjectRef(
 ): Promise<ProjectTraceProjectRef> {
   const project = getProjectById(canvasId)
   const projectStorageDirName =
-    project?.storageDirName || buildProjectStorageDirName(projectName || canvasId, canvasId)
+    (project?.storageDirName ? normalizeGeneratedRootDirName(project.storageDirName) : '') ||
+    buildProjectStorageDirName(projectName || canvasId, canvasId)
   const location = await getProjectCanvasLocation(canvasId).catch(() => null)
 
   return {

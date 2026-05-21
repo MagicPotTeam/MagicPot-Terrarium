@@ -4,7 +4,7 @@ import { createHash } from 'crypto'
 import JSZip from 'jszip'
 import type { BuildEnv } from '@shared/config/buildEnv'
 import type { Config } from '@shared/config/config'
-import { buildProjectStorageDirName } from '@shared/projectStorage'
+import { buildProjectStorageDirName, normalizeGeneratedRootDirName } from '@shared/projectStorage'
 import {
   PROJECT_TRACE_DIR_NAME,
   PROJECT_TRACE_DOCUMENT_FILENAME,
@@ -1191,7 +1191,7 @@ export class ProjectTraceFSCli {
 
   private resolveProjectStorageDirName(project: ProjectTraceProjectRef): string {
     return (
-      project.projectStorageDirName?.trim() ||
+      normalizeGeneratedRootDirName(project.projectStorageDirName || '') ||
       buildProjectStorageDirName(project.projectName || project.projectId, project.projectId)
     )
   }
@@ -1202,14 +1202,22 @@ export class ProjectTraceFSCli {
     }
 
     const storageDirName = this.resolveProjectStorageDirName(project)
-    const projectRoot = project.projectRootDir?.trim()
-      ? path.resolve(project.projectRootDir)
+    const requestedProjectRoot = project.projectRootDir?.trim()
+    let projectRoot = requestedProjectRoot
+      ? path.resolve(requestedProjectRoot)
       : path.resolve(
           path.join(
             this.config.download_dir?.trim() || this.getFallbackProjectStorageRoot(),
             storageDirName
           )
         )
+
+    if (
+      requestedProjectRoot &&
+      normalizeGeneratedRootDirName(path.basename(projectRoot)) === storageDirName
+    ) {
+      projectRoot = path.resolve(path.dirname(projectRoot), storageDirName)
+    }
 
     if (!path.isAbsolute(projectRoot)) {
       throw new Error('Project trace root must be an absolute path.')

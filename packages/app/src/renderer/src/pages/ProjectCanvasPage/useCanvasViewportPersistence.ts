@@ -139,6 +139,8 @@ export function useCanvasViewportPersistence({
   })
   const pendingCanvasSaveTimerRef = useRef<number | null>(null)
   const hasPendingCanvasChangesRef = useRef(false)
+  const canvasSaveInFlightRef = useRef<Promise<void> | null>(null)
+  const saveAgainAfterInFlightRef = useRef(false)
   const lastStructuralCanvasSignatureRef = useRef<string | null>(null)
   const isRestoringRef = useRef(false)
   const suspendAutoSaveRef = useRef(suspendAutoSave)
@@ -295,18 +297,34 @@ export function useCanvasViewportPersistence({
     if (isRestoringRef.current) return Promise.resolve()
 
     clearPendingCanvasSave()
-    hasPendingCanvasChangesRef.current = false
 
-    const snapshot = latestPersistedCanvasStateRef.current
-    return Promise.resolve(
-      saveCanvasItems(
-        snapshot.items,
-        canvasId,
-        snapshot.groups,
-        snapshot.groupBranches,
-        snapshot.figmaBinding
-      )
-    )
+    if (canvasSaveInFlightRef.current) {
+      saveAgainAfterInFlightRef.current = true
+      hasPendingCanvasChangesRef.current = false
+      return canvasSaveInFlightRef.current
+    }
+
+    const drainCanvasSaves = async () => {
+      try {
+        do {
+          saveAgainAfterInFlightRef.current = false
+          hasPendingCanvasChangesRef.current = false
+          const snapshot = latestPersistedCanvasStateRef.current
+          await saveCanvasItems(
+            snapshot.items,
+            canvasId,
+            snapshot.groups,
+            snapshot.groupBranches,
+            snapshot.figmaBinding
+          )
+        } while (saveAgainAfterInFlightRef.current || hasPendingCanvasChangesRef.current)
+      } finally {
+        canvasSaveInFlightRef.current = null
+      }
+    }
+
+    canvasSaveInFlightRef.current = drainCanvasSaves()
+    return canvasSaveInFlightRef.current
   }, [canvasId, clearPendingCanvasSave])
 
   useEffect(() => {
@@ -487,16 +505,7 @@ export function useCanvasViewportPersistence({
       }
 
       clearPendingCanvasSave()
-      const snapshot = latestPersistedCanvasStateRef.current
-      void Promise.resolve(
-        saveCanvasItems(
-          snapshot.items,
-          canvasId,
-          snapshot.groups,
-          snapshot.groupBranches,
-          snapshot.figmaBinding
-        )
-      )
+      void persistLatestCanvasState()
     },
     [canvasId, clearPendingCanvasSave, persistLatestCanvasState]
   )

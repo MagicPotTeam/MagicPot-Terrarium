@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as path from 'path'
 import {
   CANVAS_FILE_VERSION,
+  clearCanvasItems,
   exportCanvasFile,
   exportCanvasFileAsStandalone,
   importCanvasFile,
@@ -785,6 +786,242 @@ describe('canvasStorage provenance metadata', () => {
     })
   })
 
+  it('persists qApp sourceFile data when the temporary blob URL is no longer readable', async () => {
+    const sourceFile = new Blob([new TextEncoder().encode('qapp-source-binary')], {
+      type: 'image/png'
+    })
+    const fetchMock = vi.fn(async () => {
+      return {
+        ok: false,
+        arrayBuffer: async () => new ArrayBuffer(0)
+      } as Response
+    })
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      writable: true,
+      value: fetchMock
+    })
+    URL.createObjectURL = vi.fn(() => 'blob:restored-qapp-source') as typeof URL.createObjectURL
+
+    const items = [
+      {
+        id: 'image-qapp-source-1',
+        type: 'image',
+        x: 24,
+        y: 48,
+        width: 320,
+        height: 240,
+        rotation: 0,
+        scaleX: 1,
+        scaleY: 1,
+        zIndex: 1,
+        locked: false,
+        src: 'blob:revoked-qapp-source',
+        fileName: 'qapp-source.png',
+        sourceFile
+      } as CanvasItem
+    ]
+
+    await saveCanvasItems(items, 'qapp-source-file-test')
+    const restored = await loadCanvasItems('qapp-source-file-test')
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(restored.items).toHaveLength(1)
+    expect(restored.items[0]).toMatchObject({
+      id: 'image-qapp-source-1',
+      type: 'image',
+      src: 'blob:restored-qapp-source'
+    })
+  })
+
+  it('persists media sourceFile data when a video object URL is no longer readable', async () => {
+    const sourceFile = new Blob([new TextEncoder().encode('video-source-binary')], {
+      type: 'video/mp4'
+    })
+    const fetchMock = vi.fn(async () => {
+      return {
+        ok: false,
+        arrayBuffer: async () => new ArrayBuffer(0)
+      } as Response
+    })
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      writable: true,
+      value: fetchMock
+    })
+    URL.createObjectURL = vi.fn(() => 'blob:restored-video-source') as typeof URL.createObjectURL
+
+    const items = [
+      {
+        id: 'video-source-1',
+        type: 'video',
+        x: 24,
+        y: 48,
+        width: 320,
+        height: 180,
+        rotation: 0,
+        scaleX: 1,
+        scaleY: 1,
+        zIndex: 1,
+        locked: false,
+        src: 'blob:revoked-video-source',
+        fileName: 'clip.mp4',
+        sourceFile,
+        playing: false,
+        muted: true,
+        volume: 0.5
+      } as CanvasItem
+    ]
+
+    await saveCanvasItems(items, 'media-source-file-test')
+    const restored = await loadCanvasItems('media-source-file-test')
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(restored.items).toHaveLength(1)
+    expect(restored.items[0]).toMatchObject({
+      id: 'video-source-1',
+      type: 'video',
+      src: 'blob:restored-video-source'
+    })
+  })
+
+  it('does not replace a valid snapshot when a blob-backed image cannot persist binary data', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fetchMock = vi.fn(async () => {
+      return {
+        ok: false,
+        arrayBuffer: async () => new ArrayBuffer(0)
+      } as Response
+    })
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      writable: true,
+      value: fetchMock
+    })
+    URL.createObjectURL = vi.fn(() => 'blob:restored-stable-image') as typeof URL.createObjectURL
+
+    const stableItem = {
+      id: 'image-stable-1',
+      type: 'image',
+      x: 24,
+      y: 48,
+      width: 320,
+      height: 240,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 1,
+      locked: false,
+      src: 'blob:stable-source',
+      fileName: 'stable.png',
+      sourceFile: new Blob([new TextEncoder().encode('stable-binary')], { type: 'image/png' })
+    } as CanvasItem
+    await saveCanvasItems([stableItem], 'failed-save-consistency-test')
+
+    const brokenItem = {
+      ...stableItem,
+      src: 'blob:missing-source',
+      fileName: 'missing.png',
+      sourceFile: undefined
+    } as CanvasItem
+    await saveCanvasItems([brokenItem], 'failed-save-consistency-test')
+    const restored = await loadCanvasItems('failed-save-consistency-test')
+
+    expect(errorSpy).toHaveBeenCalled()
+    expect(restored.items).toHaveLength(1)
+    expect(restored.items[0]).toMatchObject({
+      id: 'image-stable-1',
+      type: 'image',
+      fileName: 'stable.png',
+      src: 'blob:restored-stable-image'
+    })
+  })
+
+  it('keeps blob payloads isolated between canvas store keys', async () => {
+    let restoredUrlIndex = 0
+    URL.createObjectURL = vi.fn(
+      () => `blob:restored-isolated-${++restoredUrlIndex}`
+    ) as typeof URL.createObjectURL
+
+    const itemA = {
+      id: 'image-canvas-a',
+      type: 'image',
+      x: 24,
+      y: 48,
+      width: 320,
+      height: 240,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 1,
+      locked: false,
+      src: 'blob:canvas-a-source',
+      fileName: 'canvas-a.png',
+      sourceFile: new Blob([new TextEncoder().encode('canvas-a-binary')], {
+        type: 'image/png'
+      })
+    } as CanvasItem
+    const itemB = {
+      ...itemA,
+      id: 'image-canvas-b',
+      src: 'blob:canvas-b-source',
+      fileName: 'canvas-b.png',
+      sourceFile: new Blob([new TextEncoder().encode('canvas-b-binary')], {
+        type: 'image/png'
+      })
+    } as CanvasItem
+
+    await saveCanvasItems([itemA], 'canvas-a')
+    await saveCanvasItems([itemB], 'canvas-b')
+
+    const restoredA = await loadCanvasItems('canvas-a')
+    const restoredB = await loadCanvasItems('canvas-b')
+
+    expect(restoredA.items).toHaveLength(1)
+    expect(restoredA.items[0]).toMatchObject({ id: 'image-canvas-a', type: 'image' })
+    expect(restoredB.items).toHaveLength(1)
+    expect(restoredB.items[0]).toMatchObject({ id: 'image-canvas-b', type: 'image' })
+  })
+
+  it('clears only the current canvas blob payloads', async () => {
+    URL.createObjectURL = vi.fn(() => 'blob:restored-after-clear') as typeof URL.createObjectURL
+
+    const itemA = {
+      id: 'image-clear-a',
+      type: 'image',
+      x: 24,
+      y: 48,
+      width: 320,
+      height: 240,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 1,
+      locked: false,
+      src: 'blob:clear-a-source',
+      fileName: 'clear-a.png',
+      sourceFile: new Blob([new TextEncoder().encode('clear-a-binary')], { type: 'image/png' })
+    } as CanvasItem
+    const itemB = {
+      ...itemA,
+      id: 'image-clear-b',
+      src: 'blob:clear-b-source',
+      fileName: 'clear-b.png',
+      sourceFile: new Blob([new TextEncoder().encode('clear-b-binary')], { type: 'image/png' })
+    } as CanvasItem
+
+    await saveCanvasItems([itemA], 'clear-canvas-a')
+    await saveCanvasItems([itemB], 'clear-canvas-b')
+    await clearCanvasItems('clear-canvas-a')
+
+    const restoredA = await loadCanvasItems('clear-canvas-a')
+    const restoredB = await loadCanvasItems('clear-canvas-b')
+
+    expect(restoredA.items).toEqual([])
+    expect(restoredB.items).toHaveLength(1)
+    expect(restoredB.items[0]).toMatchObject({ id: 'image-clear-b', type: 'image' })
+  })
+
   it('restores canvas items from the project canvas file when a new dev origin has an empty IndexedDB', async () => {
     const blobPayload = new TextEncoder().encode('mirror-image-binary').buffer
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -896,7 +1133,7 @@ describe('canvasStorage provenance metadata', () => {
       userDataDir,
       'renderer-state',
       'project-canvas',
-      'mirror-fallback-test__mirror-fallback-test',
+      '.mirror-fallback-test__mirror-fallback-test',
       'project.mpcanvas'
     )
     const projectCanvasJson = JSON.parse(textFiles.get(projectCanvasPath) || '{}') as {
@@ -928,11 +1165,12 @@ describe('canvasStorage provenance metadata', () => {
       id: 'image-blob-mirror-1',
       type: 'image',
       fileName: 'generated-image.png',
-      src: 'local-media:///C:/mock-user-data/renderer-state/project-canvas/mirror-fallback-test__mirror-fallback-test/assets/images/image-blob-mirror-1__generated-image.png'
+      src: 'local-media:///C:/mock-user-data/renderer-state/project-canvas/.mirror-fallback-test__mirror-fallback-test/assets/images/image-blob-mirror-1__generated-image.png'
     })
   })
 
   it('does not rewrite project canvas items to missing asset refs when binary staging fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const fetchMock = vi.fn(async () => {
       return {
         ok: false,
@@ -1013,15 +1251,13 @@ describe('canvasStorage provenance metadata', () => {
       userDataDir,
       'renderer-state',
       'project-canvas',
-      'unresolved-project-asset-test__unresolved-project-asset-test',
+      '.unresolved-project-asset-test__unresolved-project-asset-test',
       'project.mpcanvas'
     )
-    const projectCanvasJson = JSON.parse(textFiles.get(projectCanvasPath) || '{}') as {
-      items?: Array<{ src?: string }>
-    }
 
     expect(binaryFiles.size).toBe(0)
-    expect(projectCanvasJson.items?.[0]?.src).toBe('blob:unreadable-source')
+    expect(textFiles.has(projectCanvasPath)).toBe(false)
+    expect(errorSpy).toHaveBeenCalled()
   })
 
   it('normalizes legacy relative project asset refs from IndexedDB into local-media URLs', async () => {
@@ -1083,7 +1319,92 @@ describe('canvasStorage provenance metadata', () => {
       id: 'image-legacy-1',
       type: 'image',
       fileName: 'legacy.png',
-      src: 'local-media:///C:/mock-user-data-legacy/renderer-state/project-canvas/legacy-relative-idb-test__legacy-relative-idb-test/assets/images/image-legacy-1__legacy.png'
+      src: 'local-media:///C:/mock-user-data-legacy/renderer-state/project-canvas/.legacy-relative-idb-test__legacy-relative-idb-test/assets/images/image-legacy-1__legacy.png'
+    })
+  })
+
+  it('loads existing project canvas files from the legacy unhidden project root', async () => {
+    const userDataDir = 'C:\\mock-user-data-legacy-root'
+    const legacyProjectRootDir = path.win32.join(
+      userDataDir,
+      'renderer-state',
+      'project-canvas',
+      'legacy-root-test__legacy-root-test'
+    )
+    const textFiles = new Map<string, string>([
+      [
+        path.win32.join(legacyProjectRootDir, 'project.mpcanvas'),
+        JSON.stringify({
+          magic: 'MAGICPOT_CANVAS',
+          version: CANVAS_FILE_VERSION,
+          createdAt: '2026-05-21T00:00:00.000Z',
+          storageMode: 'project',
+          items: [
+            {
+              id: 'text-legacy-root',
+              type: 'text',
+              x: 10,
+              y: 20,
+              width: 120,
+              height: 48,
+              rotation: 0,
+              scaleX: 1,
+              scaleY: 1,
+              zIndex: 1,
+              locked: false,
+              text: 'legacy root'
+            }
+          ]
+        })
+      ]
+    ])
+
+    Object.defineProperty(window, 'path', {
+      configurable: true,
+      writable: true,
+      value: {
+        join: (...segments: string[]) => path.win32.join(...segments),
+        basename: (targetPath: string) => path.win32.basename(targetPath),
+        dirname: (targetPath: string) => path.win32.dirname(targetPath)
+      } as unknown as Window['path']
+    })
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcState: {
+          getUserDataDirectoryState: vi.fn(async () => ({
+            state: {
+              currentPath: userDataDir,
+              defaultPath: userDataDir,
+              isCustom: false,
+              source: 'default'
+            }
+          }))
+        },
+        svcFs: {
+          readTextFile: vi.fn(async ({ fullPath }) => {
+            const content = textFiles.get(fullPath)
+            if (content === undefined) {
+              throw new Error(`File not found: ${fullPath}`)
+            }
+            return {
+              content,
+              filename: path.win32.basename(fullPath)
+            }
+          })
+        }
+      } as unknown as Window['api']
+    })
+
+    const restored = await loadCanvasItems('legacy-root-test')
+
+    expect(restored.items).toHaveLength(1)
+    expect(restored.items[0]).toMatchObject({
+      id: 'text-legacy-root',
+      type: 'text',
+      text: 'legacy root'
     })
   })
 
@@ -1251,7 +1572,7 @@ describe('canvasStorage provenance metadata', () => {
       userDataDir,
       'renderer-state',
       'project-canvas',
-      'project-crop-cache-test__project-crop-cache-test',
+      '.project-crop-cache-test__project-crop-cache-test',
       'project.mpcanvas'
     )
     const projectCanvasJson = JSON.parse(textFiles.get(projectCanvasPath) || '{}') as {
@@ -1278,7 +1599,7 @@ describe('canvasStorage provenance metadata', () => {
           userDataDir,
           'renderer-state',
           'project-canvas',
-          'project-crop-cache-test__project-crop-cache-test',
+          '.project-crop-cache-test__project-crop-cache-test',
           'assets',
           'images',
           'image-crop-1__photo.jpg'
@@ -1297,7 +1618,7 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.items[0]).toMatchObject({
       id: 'image-crop-1',
       type: 'image',
-      src: 'local-media:///C:/mock-user-data-crop/renderer-state/project-canvas/project-crop-cache-test__project-crop-cache-test/assets/images/image-crop-1__photo.jpg',
+      src: 'local-media:///C:/mock-user-data-crop/renderer-state/project-canvas/.project-crop-cache-test__project-crop-cache-test/assets/images/image-crop-1__photo.jpg',
       sourceWidth: 320,
       sourceHeight: 180
     })
@@ -1432,7 +1753,7 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.items).toHaveLength(1)
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       '[Canvas Storage] Project asset missing:',
-      'c:/mock-user-data-missing/renderer-state/project-canvas/project-missing-test__project-missing-test/assets/images/image-project-missing-1__missing-image.png'
+      'c:/mock-user-data-missing/renderer-state/project-canvas/.project-missing-test__project-missing-test/assets/images/image-project-missing-1__missing-image.png'
     )
   })
 

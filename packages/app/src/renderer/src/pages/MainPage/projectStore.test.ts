@@ -14,6 +14,12 @@ describe('projectStore', () => {
     localStorage.clear()
   })
 
+  it('prefixes generated project storage root names with a dot', () => {
+    expect(buildProjectStorageDirName('Project 1', 'tab-project-1')).toBe(
+      '.Project 1__tab-project-1'
+    )
+  })
+
   it('migrates the legacy homepage project list into the unified project registry', () => {
     localStorage.setItem(
       LEGACY_PROJECTS_STORAGE_KEY,
@@ -35,6 +41,43 @@ describe('projectStore', () => {
       }
     ])
     expect(JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY) || '[]')).toHaveLength(1)
+  })
+
+  it('normalizes stored legacy project root names to hidden generated roots', () => {
+    localStorage.setItem(
+      PROJECTS_STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: 'tab-project-1',
+          name: 'Project 1',
+          createdAt: 1711324800000,
+          updatedAt: 1711324800000,
+          canvasStorageKey: 'tab-project-1',
+          chatStorageScopePrefix: 'tab-project-1',
+          defaultQAppKey: '',
+          storageDirName: 'Project 1__tab-project-1'
+        }
+      ])
+    )
+
+    expect(listProjects()[0]?.storageDirName).toBe('.Project 1__tab-project-1')
+  })
+
+  it('falls back to a generated hidden project root when stored root names are invalid', () => {
+    localStorage.setItem(
+      PROJECTS_STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: 'tab-project-1',
+          name: 'Project 1',
+          createdAt: 1711324800000,
+          updatedAt: 1711324800000,
+          storageDirName: '...'
+        }
+      ])
+    )
+
+    expect(listProjects()[0]?.storageDirName).toBe('.Project 1__tab-project-1')
   })
 
   it('tracks the default quick app selection inside the unified project record', () => {

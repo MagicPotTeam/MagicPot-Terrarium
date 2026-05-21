@@ -1299,6 +1299,111 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
     canvasContainer.remove()
   })
 
+  it('uses the image source for image resource drags', async () => {
+    const canvasContainer = document.createElement('div')
+    Object.defineProperty(canvasContainer, 'clientWidth', {
+      configurable: true,
+      value: 800
+    })
+    Object.defineProperty(canvasContainer, 'clientHeight', {
+      configurable: true,
+      value: 600
+    })
+    document.body.appendChild(canvasContainer)
+
+    const selectedImage = createImageItem({
+      src: 'local-media:///C:/MagicPot/source.png',
+      fileName: 'source.png'
+    })
+    const stage = {
+      findOne: vi.fn(() => null)
+    }
+    const stageRef = {
+      current: {
+        getStage: () => stage
+      }
+    } as unknown as React.RefObject<KonvaStage | null>
+    const buildCanvasDragPayload = vi.fn(
+      (): CanvasDragPayload => ({
+        sourceCanvasId: 'canvas-1'
+      })
+    )
+    const setCanvasDragPayload = vi.fn()
+    const prepareQuickCanvasItemsImageUrl = vi.fn(async () => 'blob:visible-image')
+    const getQuickCanvasItemsImageUrl = vi.fn(() => 'blob:visible-image')
+
+    render(
+      <ThemeProvider theme={theme}>
+        <ProjectCanvasPageSelectionOverlays
+          tool="select"
+          selectionOverlayGroups={[]}
+          exactSelectedGroup={null}
+          stagePos={{ x: 0, y: 0 }}
+          stageScale={1}
+          stageSize={{ width: 800, height: 600 }}
+          selectedIds={new Set(['image-1'])}
+          items={[selectedImage]}
+          stageRef={stageRef}
+          canvasContainerRef={{ current: canvasContainer }}
+          lastClickedId="image-1"
+          mediaCaptionActionLabel="Edit caption"
+          legacySelectionToolbarEnabled={false}
+          groupCreateLabel="Group"
+          handleFocusGroup={vi.fn()}
+          buildCanvasDragPayload={buildCanvasDragPayload}
+          setCanvasDragPayload={setCanvasDragPayload}
+          handleFlipImage={vi.fn()}
+          handleCropImage={vi.fn()}
+          handleCopyCanvasImage={vi.fn()}
+          handleDownloadCanvasImage={vi.fn()}
+          handleOpenAgentSendMenu={vi.fn()}
+          handleOpenMediaCaptionEditor={vi.fn()}
+          handleSendCanvasItemsToAgent={vi.fn()}
+          handleToggleVideoPlayback={vi.fn()}
+          handleOpenModel3DViewer={vi.fn()}
+          handleOpenDccExportMenu={vi.fn()}
+          handleDownloadBlobItem={vi.fn()}
+          handleCopyCanvasItemsAsImage={vi.fn()}
+          handleDownloadCanvasItemsAsImage={vi.fn()}
+          getQuickCanvasItemsImageUrl={getQuickCanvasItemsImageUrl}
+          prepareQuickCanvasItemsImageUrl={prepareQuickCanvasItemsImageUrl}
+          handleGenerateCanvasItems={vi.fn()}
+          handleCreateGroup={vi.fn()}
+          Model3DIcon={() => null}
+          ExportIcon={() => null}
+        />
+      </ThemeProvider>
+    )
+
+    await waitFor(() => {
+      expect(canvasContainer.querySelector('.image-action-toolbar')).toBeTruthy()
+    })
+
+    const dragButton = canvasContainer.querySelector(
+      '.canvas-image-drag-button'
+    ) as HTMLButtonElement | null
+    expect(dragButton).toBeTruthy()
+
+    const dataTransfer = {
+      setData: vi.fn(),
+      effectAllowed: 'all'
+    } as unknown as DataTransfer
+
+    fireEvent.dragStart(dragButton as HTMLButtonElement, { dataTransfer })
+
+    expect(prepareQuickCanvasItemsImageUrl).not.toHaveBeenCalled()
+    expect(getQuickCanvasItemsImageUrl).not.toHaveBeenCalled()
+    expect(buildCanvasDragPayload).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: 'image-1' })],
+      expect.objectContaining({
+        objectUrl: 'local-media:///C:/MagicPot/source.png'
+      })
+    )
+    expect(setCanvasDragPayload).toHaveBeenCalled()
+
+    canvasContainer.remove()
+  })
+
   it('prepares and reuses a cached quick drag preview for text selections', async () => {
     const canvasContainer = document.createElement('div')
     Object.defineProperty(canvasContainer, 'clientWidth', {

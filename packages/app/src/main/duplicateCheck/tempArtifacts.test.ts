@@ -22,7 +22,7 @@ afterEach(() => {
 })
 
 describe('resolveDuplicateCheckTempRoot', () => {
-  it('uses desktop Codex-Junk/MagicPot/<run-id> during automated test runs', () => {
+  it('uses desktop .Codex-Junk/MagicPot/<run-id> during automated test runs', () => {
     process.env['MAGICPOT_TEST_AUTOMATED_RUN'] = '1'
     process.env['MAGICPOT_TEST_DESKTOP_PATH'] = path.join(os.homedir(), 'MagicPotDesktop')
     process.env['MAGICPOT_TEST_RUN_ID'] = 'run-123'
@@ -33,7 +33,7 @@ describe('resolveDuplicateCheckTempRoot', () => {
       path.join(
         os.homedir(),
         'MagicPotDesktop',
-        'Codex-Junk',
+        '.Codex-Junk',
         'MagicPot',
         'run-123',
         'duplicate-check'

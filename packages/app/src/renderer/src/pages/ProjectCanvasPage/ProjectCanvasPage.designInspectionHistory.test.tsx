@@ -1766,14 +1766,13 @@ describe('ProjectCanvasPage generation-first entry', () => {
         height: 136,
         scaleX: 1.15,
         scaleY: 1.1,
-        crop: expect.objectContaining({
-          x: 10,
-          y: 6,
-          width: 300,
-          height: 224
-        })
+        src: 'data:image/png;base64,mock-canvas',
+        fileName: 'crop-target.png',
+        sourceWidth: 300,
+        sourceHeight: 224
       })
     )
+    expect(savedTargetImage).not.toHaveProperty('crop')
     expect(savedPeerImage).toEqual(
       expect.objectContaining({
         id: 'image-2',

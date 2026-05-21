@@ -2,12 +2,17 @@ import type {
   CanvasAnnotationItem,
   CanvasFileItem,
   CanvasGroup,
+  CanvasImageAsset,
   CanvasImageItem,
   CanvasItem,
   CanvasModel3DItem,
   CanvasVideoItem
 } from './types'
 import { isConstraintAttachedCaptionAnnotation } from './canvasAttachedCaptionUtils'
+import { loadImageFromSrc } from './canvasAssetIntakeHelpers'
+import { getCanvasImageAssetSize } from './canvasImageAssetUtils'
+import { estimateDataUrlByteSize } from './canvasImageMetadata'
+import { normalizeCanvasImageDisplayCrop } from './canvasImageDisplayUtils'
 
 export type CanvasAgentAttachment = {
   type: 'image' | 'file' | 'video' | 'model3d'
@@ -21,6 +26,17 @@ export type CanvasAgentAttachment = {
   reportBundleRole?: CanvasFileItem['reportBundleRole']
   reportBundleRefName?: CanvasFileItem['reportBundleRefName']
   reportBundleManifestUrl?: CanvasFileItem['reportBundleManifestUrl']
+  metadata?: Record<string, unknown>
+}
+
+export const CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY = 'magicpotCanvasCropSource'
+
+export type CanvasImageCropSourceMetadata = {
+  url: string
+  fileName: string
+  sourceWidth: number
+  sourceHeight: number
+  crop: { x: number; y: number; width: number; height: number }
 }
 
 export type CanvasLayoutRequestMessage = {
@@ -174,6 +190,295 @@ function getCanvasImageMimeType(item: Pick<CanvasImageItem, 'fileName' | 'src'>)
   if (lowerFileName.endsWith('.svg')) return 'image/svg+xml'
   if (lowerFileName.endsWith('.ico')) return 'image/x-icon'
   return 'image/png'
+}
+
+type MaterializedCanvasImageAttachmentSource = {
+  src: string
+  fileName: string
+  sizeBytes?: number
+  sourceWidth: number
+  sourceHeight: number
+}
+
+function getPositiveNumber(value: number | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
+}
+
+function getPngFileName(fileName: string): string {
+  const trimmed = fileName.trim()
+  if (!trimmed) return 'canvas-image.png'
+
+  const withoutExtension = trimmed.replace(/\.[^./\\]+$/, '')
+  return `${withoutExtension || 'canvas-image'}.png`
+}
+
+function isFullSourceCrop(
+  crop: NonNullable<CanvasImageItem['crop']>,
+  sourceWidth: number,
+  sourceHeight: number
+): boolean {
+  return crop.x === 0 && crop.y === 0 && crop.width === sourceWidth && crop.height === sourceHeight
+}
+
+async function resolveCanvasImageAttachmentSourceAsset(
+  item: CanvasImageItem,
+  sourceWidth: number,
+  sourceHeight: number
+): Promise<{ image: CanvasImageAsset; width: number; height: number } | null> {
+  const itemImageSize = getCanvasImageAssetSize(item.image)
+  if (
+    item.image &&
+    itemImageSize.width > 0 &&
+    itemImageSize.height > 0 &&
+    Math.abs(itemImageSize.width - sourceWidth) <= 1 &&
+    Math.abs(itemImageSize.height - sourceHeight) <= 1
+  ) {
+    return {
+      image: item.image,
+      width: itemImageSize.width,
+      height: itemImageSize.height
+    }
+  }
+
+  const loaded = await loadImageFromSrc(item.src)
+  if (loaded.width <= 0 || loaded.height <= 0) {
+    return null
+  }
+
+  return {
+    image: loaded.img,
+    width: loaded.width,
+    height: loaded.height
+  }
+}
+
+function resolveCanvasImageAttachmentSourceSize(item: CanvasImageItem): {
+  sourceWidth: number | null
+  sourceHeight: number | null
+} {
+  const initialImageSize = getCanvasImageAssetSize(item.image)
+  const sourceWidth =
+    getPositiveNumber(item.sourceWidth) ??
+    getPositiveNumber(initialImageSize.width) ??
+    getPositiveNumber(item.width)
+  const sourceHeight =
+    getPositiveNumber(item.sourceHeight) ??
+    getPositiveNumber(initialImageSize.height) ??
+    getPositiveNumber(item.height)
+
+  return { sourceWidth, sourceHeight }
+}
+
+function materializeCanvasImageAttachmentSourceFromAsset(
+  item: CanvasImageItem,
+  sourceAsset: { image: CanvasImageAsset; width: number; height: number },
+  sourceWidth: number,
+  sourceHeight: number
+): MaterializedCanvasImageAttachmentSource | null {
+  if (!item.crop || typeof document === 'undefined') return null
+
+  const sourceCrop = normalizeCanvasImageDisplayCrop(item.crop, sourceWidth, sourceHeight)
+  if (!sourceCrop || isFullSourceCrop(sourceCrop, sourceWidth, sourceHeight)) {
+    return null
+  }
+
+  const scaleX = sourceAsset.width / sourceWidth
+  const scaleY = sourceAsset.height / sourceHeight
+  const cropX = sourceCrop.x * scaleX
+  const cropY = sourceCrop.y * scaleY
+  const cropWidth = sourceCrop.width * scaleX
+  const cropHeight = sourceCrop.height * scaleY
+  const outputWidth = Math.max(1, Math.round(sourceCrop.width))
+  const outputHeight = Math.max(1, Math.round(sourceCrop.height))
+
+  const canvas = document.createElement('canvas')
+  canvas.width = outputWidth
+  canvas.height = outputHeight
+  const context = canvas.getContext('2d')
+  if (!context) return null
+
+  context.drawImage(
+    sourceAsset.image,
+    cropX,
+    cropY,
+    cropWidth,
+    cropHeight,
+    0,
+    0,
+    outputWidth,
+    outputHeight
+  )
+
+  const src = canvas.toDataURL('image/png')
+  return {
+    src,
+    fileName: getPngFileName(item.fileName?.trim() || inferFileNameFromUrl(item.src, item.id)),
+    sizeBytes: estimateDataUrlByteSize(src),
+    sourceWidth: outputWidth,
+    sourceHeight: outputHeight
+  }
+}
+
+export function buildCanvasImageCropSourceMetadata(
+  item: CanvasImageItem
+): CanvasImageCropSourceMetadata | null {
+  if (!item.crop) return null
+
+  const { sourceWidth, sourceHeight } = resolveCanvasImageAttachmentSourceSize(item)
+  if (!sourceWidth || !sourceHeight) return null
+
+  const sourceCrop = normalizeCanvasImageDisplayCrop(item.crop, sourceWidth, sourceHeight)
+  if (!sourceCrop || isFullSourceCrop(sourceCrop, sourceWidth, sourceHeight)) {
+    return null
+  }
+
+  return {
+    url: toLocalMediaUrl(item.src),
+    fileName: getPngFileName(item.fileName?.trim() || inferFileNameFromUrl(item.src, item.id)),
+    sourceWidth,
+    sourceHeight,
+    crop: {
+      x: sourceCrop.x,
+      y: sourceCrop.y,
+      width: sourceCrop.width,
+      height: sourceCrop.height
+    }
+  }
+}
+
+export function materializeCanvasImageAttachmentSourceSync(
+  item: CanvasImageItem
+): MaterializedCanvasImageAttachmentSource | null {
+  if (!item.crop || !item.image) return null
+
+  const { sourceWidth, sourceHeight } = resolveCanvasImageAttachmentSourceSize(item)
+  if (!sourceWidth || !sourceHeight) return null
+
+  const itemImageSize = getCanvasImageAssetSize(item.image)
+  const itemImageAspect = itemImageSize.width / itemImageSize.height
+  const sourceAspect = sourceWidth / sourceHeight
+  if (
+    itemImageSize.width <= 0 ||
+    itemImageSize.height <= 0 ||
+    Math.abs(itemImageSize.width - sourceWidth) > 1 ||
+    Math.abs(itemImageSize.height - sourceHeight) > 1 ||
+    !Number.isFinite(itemImageAspect) ||
+    !Number.isFinite(sourceAspect) ||
+    sourceAspect <= 0 ||
+    Math.abs(itemImageAspect - sourceAspect) / sourceAspect > 0.05
+  ) {
+    return null
+  }
+
+  return materializeCanvasImageAttachmentSourceFromAsset(
+    item,
+    {
+      image: item.image,
+      width: itemImageSize.width,
+      height: itemImageSize.height
+    },
+    sourceWidth,
+    sourceHeight
+  )
+}
+
+export async function materializeCanvasImageAttachmentSource(
+  item: CanvasImageItem
+): Promise<MaterializedCanvasImageAttachmentSource | null> {
+  if (!item.crop || typeof document === 'undefined') return null
+
+  let { sourceWidth, sourceHeight } = resolveCanvasImageAttachmentSourceSize(item)
+
+  if (!sourceWidth || !sourceHeight) {
+    const loaded = await loadImageFromSrc(item.src)
+    sourceWidth = getPositiveNumber(loaded.width)
+    sourceHeight = getPositiveNumber(loaded.height)
+  }
+
+  if (!sourceWidth || !sourceHeight) return null
+
+  const sourceAsset = await resolveCanvasImageAttachmentSourceAsset(item, sourceWidth, sourceHeight)
+  if (!sourceAsset) return null
+
+  return materializeCanvasImageAttachmentSourceFromAsset(
+    item,
+    sourceAsset,
+    sourceWidth,
+    sourceHeight
+  )
+}
+
+export async function materializeCanvasAgentAttachmentItems(
+  items: CanvasItem[]
+): Promise<CanvasItem[]> {
+  const materializedItems: CanvasItem[] = []
+
+  for (const item of items) {
+    if (item.type !== 'image' || !item.crop) {
+      materializedItems.push(item)
+      continue
+    }
+
+    const cropSource = buildCanvasImageCropSourceMetadata(item)
+    try {
+      const source = await materializeCanvasImageAttachmentSource(item)
+      if (!source) {
+        if (!cropSource) {
+          materializedItems.push(item)
+        }
+        continue
+      }
+
+      const { crop: _crop, ...itemWithoutCrop } = item
+      materializedItems.push({
+        ...itemWithoutCrop,
+        src: source.src,
+        fileName: source.fileName,
+        sizeBytes: source.sizeBytes,
+        sourceWidth: source.sourceWidth,
+        sourceHeight: source.sourceHeight,
+        width: source.sourceWidth,
+        height: source.sourceHeight
+      })
+    } catch (error) {
+      console.warn('[SendToAgent] failed to export cropped canvas image attachment:', error)
+      if (!cropSource) {
+        materializedItems.push(item)
+      }
+    }
+  }
+
+  return materializedItems
+}
+
+export function materializeCanvasAgentAttachmentItemsSync(items: CanvasItem[]): CanvasItem[] {
+  let hasMaterializedItem = false
+  const materializedItems = items.map((item) => {
+    if (item.type !== 'image' || !item.crop) return item
+
+    try {
+      const source = materializeCanvasImageAttachmentSourceSync(item)
+      if (!source) return item
+
+      hasMaterializedItem = true
+      const { crop: _crop, ...itemWithoutCrop } = item
+      return {
+        ...itemWithoutCrop,
+        src: source.src,
+        fileName: source.fileName,
+        sizeBytes: source.sizeBytes,
+        sourceWidth: source.sourceWidth,
+        sourceHeight: source.sourceHeight,
+        width: source.sourceWidth,
+        height: source.sourceHeight
+      }
+    } catch (error) {
+      console.warn('[CanvasDrag] failed to export cropped canvas image attachment:', error)
+      return item
+    }
+  })
+
+  return hasMaterializedItem ? materializedItems : items
 }
 
 export function buildCanvasFileAttachment(item: CanvasFileItem): CanvasAgentAttachment {

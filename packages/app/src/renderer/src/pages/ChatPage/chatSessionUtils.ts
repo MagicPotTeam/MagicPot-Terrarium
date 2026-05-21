@@ -108,11 +108,19 @@ export const applyUserMessageToSession = (
 
 export const appendAssistantPlaceholderToSession = (
   sessions: ChatSession[],
-  sessionId: string
+  sessionId: string,
+  modelName?: string
 ): ChatSession[] =>
   updateSessionById(sessions, sessionId, (session) => ({
     ...session,
-    messages: [...session.messages, { role: 'assistant', content: '' }]
+    messages: [
+      ...session.messages,
+      {
+        role: 'assistant',
+        content: '',
+        ...(modelName ? { modelName } : {})
+      }
+    ]
   }))
 
 export const appendAssistantDeltaToSession = (

@@ -24,6 +24,20 @@ const replaceInvalidProjectPathCharacters = (value: string): string => {
 
 const normalizeText = (value: unknown): string => String(value ?? '').trim()
 
+export function prefixGeneratedRootDirName(value: string): string {
+  const normalized = normalizeText(value)
+  return normalized.startsWith('.') ? normalized : `.${normalized}`
+}
+
+export function unprefixGeneratedRootDirName(value: string): string {
+  return normalizeText(value).replace(/^\.+/, '')
+}
+
+export function normalizeGeneratedRootDirName(value: string): string {
+  const unprefixed = unprefixGeneratedRootDirName(value)
+  return unprefixed ? prefixGeneratedRootDirName(unprefixed) : ''
+}
+
 export function sanitizeProjectPathPart(value: string, fallback: string): string {
   const normalized = normalizeText(value).replace(/\s+/g, ' ')
   const sanitized = replaceInvalidProjectPathCharacters(normalized)
@@ -38,5 +52,5 @@ export function sanitizeProjectPathPart(value: string, fallback: string): string
 export function buildProjectStorageDirName(projectName: string, projectId: string): string {
   const safeName = sanitizeProjectPathPart(projectName, 'project')
   const safeId = sanitizeProjectPathPart(projectId, 'project')
-  return `${safeName}__${safeId}`
+  return prefixGeneratedRootDirName(`${safeName}__${safeId}`)
 }

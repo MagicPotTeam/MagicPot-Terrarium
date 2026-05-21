@@ -1,5 +1,5 @@
 import React from 'react'
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -367,38 +367,56 @@ vi.mock('./components/ImageContextMenu', () => ({
 }))
 
 vi.mock('./components/ChatComposer', () => ({
-  default: ({
+  default: function ChatComposerMock({
     inputValue,
     onInputChange,
+    onSend,
     onUploadFile,
     pendingAttachments,
     selectedSkillName,
-    modelSelectorSlot
+    modelSelectorSlot,
+    inputSyncKey
   }: {
     inputValue: string
     onInputChange: (value: string) => void
+    onSend: () => void
     onUploadFile: () => void
     pendingAttachments: ChatAttachment[]
     selectedSkillName?: string
     modelSelectorSlot?: React.ReactNode
-  }) => (
-    <div data-testid="chat-composer-mock">
-      <div>{selectedSkillName || 'no-skill'}</div>
-      <input
-        data-testid="chat-composer-input-mock"
-        value={inputValue}
-        onChange={(event) => onInputChange(event.target.value)}
-      />
-      <button type="button" data-testid="chat-composer-upload-mock" onClick={onUploadFile}>
-        upload
-      </button>
-      <div data-testid="chat-composer-attachment-count">{pendingAttachments.length}</div>
-      <div data-testid="chat-composer-attachment-names">
-        {pendingAttachments.map((attachment) => attachment.fileName || attachment.url).join('|')}
+    inputSyncKey?: string
+  }) {
+    const [draftValue, setDraftValue] = React.useState(inputValue)
+
+    React.useEffect(() => {
+      setDraftValue(inputValue)
+    }, [inputSyncKey, inputValue])
+
+    return (
+      <div data-testid="chat-composer-mock">
+        <div>{selectedSkillName || 'no-skill'}</div>
+        <input
+          data-testid="chat-composer-input-mock"
+          value={draftValue}
+          onChange={(event) => {
+            setDraftValue(event.target.value)
+            onInputChange(event.target.value)
+          }}
+        />
+        <button type="button" data-testid="chat-composer-upload-mock" onClick={onUploadFile}>
+          upload
+        </button>
+        <button type="button" data-testid="chat-composer-send-mock" onClick={onSend}>
+          send
+        </button>
+        <div data-testid="chat-composer-attachment-count">{pendingAttachments.length}</div>
+        <div data-testid="chat-composer-attachment-names">
+          {pendingAttachments.map((attachment) => attachment.fileName || attachment.url).join('|')}
+        </div>
+        {modelSelectorSlot}
       </div>
-      {modelSelectorSlot}
-    </div>
-  )
+    )
+  }
 }))
 
 vi.mock('./components/ChatMessageList', () => ({
@@ -652,6 +670,45 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
+  it('does not rerender the message list synchronously while typing in the composer', async () => {
+    renderChatPage()
+
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+
+    hoisted.chatMessageListMock.mockClear()
+    const input = screen.getByTestId('chat-composer-input-mock')
+
+    fireEvent.change(input, { target: { value: 'typing without list work' } })
+
+    expect(input).toHaveValue('typing without list work')
+    expect(hoisted.chatMessageListMock).not.toHaveBeenCalled()
+
+    await waitFor(() => {
+      expect(hoisted.chatMessageListMock).toHaveBeenCalled()
+    })
+  })
+
+  it('sends the latest composer ref before the delayed input state commit', async () => {
+    renderChatPage()
+
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'send before debounce commit' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const messages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]?.messages as
+      | Array<{ role?: string; content?: string }>
+      | undefined
+    expect(messages?.[messages.length - 1]).toEqual(
+      expect.objectContaining({ role: 'user', content: 'send before debounce commit' })
+    )
+  })
+
   it('clears stale persisted loading placeholders after restart', async () => {
     const staleSession: ChatSession = {
       id: 'stale-loading-session',
@@ -712,6 +769,29 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => {
       const currentSession = readCurrentSessionState()
       expect(currentSession?.profileId).toBe('vision-model')
+    })
+  })
+
+  it('stores the responding model name on assistant replies', async () => {
+    renderChatPage()
+
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+    await dispatchNewSession({
+      profileId: 'vision-model',
+      initialMessage: 'Annotate the responder.'
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => {
+      const currentSession = readCurrentSessionState()
+      expect(currentSession?.messages[1]).toEqual(
+        expect.objectContaining({
+          role: 'assistant',
+          content: 'default reply',
+          modelName: 'Vision Model'
+        })
+      )
     })
   })
 

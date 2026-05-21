@@ -141,6 +141,29 @@ describe('AgentWorkspace', () => {
     })
   })
 
+  it('uses the assistant model name instead of the latest-reply label in pane previews', async () => {
+    loadAllSessionsMock.mockResolvedValue([
+      {
+        id: 'session-model-preview',
+        title: 'Model preview',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'Model-specific answer',
+            modelName: 'gpt-5.5'
+          }
+        ]
+      }
+    ])
+
+    renderWorkspace()
+
+    await waitFor(() => {
+      expect(screen.getByText('Model-specific answer')).toBeInTheDocument()
+      expect(screen.getByText('gpt-5.5')).toBeInTheDocument()
+    })
+  })
+
   it('dispatches scope termination before closing a pane', async () => {
     const terminateScope = vi.fn()
     window.addEventListener('chat:terminate-scope', terminateScope as EventListener)

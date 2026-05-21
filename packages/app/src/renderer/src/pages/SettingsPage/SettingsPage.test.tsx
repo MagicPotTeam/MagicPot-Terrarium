@@ -100,8 +100,14 @@ describe('SettingsPage', () => {
   it('shows the Agent thread settings, Quick App API, and MCP tabs in the Chinese UI', async () => {
     render(<SettingsPage />)
 
-    expect(await screen.findByText('Agent线程配置')).toBeTruthy()
-    expect(screen.getByText('\u5feb\u5e94\u7528 API')).toBeTruthy()
+    const agentTab = await screen.findByText('Agent线程配置')
+    const quickAppTab = screen.getByText('\u5feb\u5e94\u7528 API')
+
+    expect(agentTab).toBeTruthy()
+    expect(quickAppTab).toBeTruthy()
+    expect(
+      quickAppTab.compareDocumentPosition(agentTab) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
     expect(screen.getByText('MCP')).toBeTruthy()
     expect(screen.queryByTestId('panel-assistant')).toBeNull()
   })

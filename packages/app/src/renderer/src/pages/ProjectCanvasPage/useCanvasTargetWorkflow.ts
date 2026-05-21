@@ -131,6 +131,7 @@ type NotifyFn = (message: string) => unknown
 
 const PROJECT_TRACE_DRAFT_TAG = 'draft'
 const PROJECT_TRACE_REFERENCE_READY_TAG = 'reference-ready'
+const CANVAS_TARGET_FAILURES_ROOT_DIR = '.canvas-target-failures'
 
 function getProjectTraceSvc(): ProjectTraceSvc | null {
   return (
@@ -1092,8 +1093,8 @@ async function persistCanvasTargetFailureArchive(options: {
   if (!svcFs || typeof svcFs.writeTextFile !== 'function') return
 
   const outputPath = window.path?.join
-    ? window.path.join(options.baseDir, 'canvas-target-failures', options.runId)
-    : `${options.baseDir.replace(/[\\/]+$/g, '')}/canvas-target-failures/${options.runId}`
+    ? window.path.join(options.baseDir, CANVAS_TARGET_FAILURES_ROOT_DIR, options.runId)
+    : `${options.baseDir.replace(/[\\/]+$/g, '')}/${CANVAS_TARGET_FAILURES_ROOT_DIR}/${options.runId}`
 
   const payload = {
     runId: options.runId,

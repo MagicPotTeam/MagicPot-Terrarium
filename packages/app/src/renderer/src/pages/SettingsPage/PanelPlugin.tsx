@@ -64,6 +64,49 @@ const quickAppSectionDividerSx = {
     theme.palette.mode === 'light' ? 'rgba(17, 24, 39, 0.08)' : 'rgba(255, 255, 255, 0.06)'
 }
 
+const quickAppSectionTwoColumnSx = {
+  display: { xs: 'block', lg: 'flex' }
+}
+
+const quickAppSectionColumnPaneSx = {
+  ...quickAppSectionPaneSx,
+  flex: 1,
+  minWidth: 0
+}
+
+const quickAppSectionPairedGridSx = {
+  ...quickAppSectionPaneSx,
+  position: 'relative',
+  display: 'grid',
+  gridTemplateColumns: { xs: '1fr', lg: 'minmax(0, 1fr) minmax(0, 1fr)' },
+  columnGap: { xs: 0, lg: 5 },
+  rowGap: 2,
+  '& > *': {
+    minWidth: 0
+  },
+  '&::before': {
+    content: '""',
+    position: 'absolute',
+    display: { xs: 'none', lg: 'block' },
+    top: 0,
+    bottom: 0,
+    left: '50%',
+    borderLeft: '1px solid',
+    borderColor: (theme) =>
+      theme.palette.mode === 'light' ? 'rgba(17, 24, 39, 0.08)' : 'rgba(255, 255, 255, 0.06)'
+  }
+}
+
+const quickAppSectionMobileDividerSx = {
+  ...quickAppSectionDividerSx,
+  display: { xs: 'block', lg: 'none' }
+}
+
+const quickAppSectionDesktopDividerSx = {
+  ...quickAppSectionDividerSx,
+  display: { xs: 'none', lg: 'block' }
+}
+
 type DuplicateCheckSectionProps = {
   saveSettings: SaveSettings
   settingsValue: PanelProps['settingsValue']
@@ -170,13 +213,19 @@ const DuplicateCheckSection: React.FC<DuplicateCheckSectionProps> = ({
             </Alert>
           </Box>
 
-          <Box sx={quickAppSectionPaneSx}>
-            <Stack spacing={2}>
-              <InputSwitch
-                label={qt('quickapp_api.duplicate_check_enabled', '启用重复图检查')}
-                value={duplicateSettings.enabled}
-                onChange={(value) => saveDuplicateCheckSettings({ enabled: value })}
-              />
+          <Box sx={quickAppSectionPairedGridSx}>
+            <InputSwitch
+              label={qt('quickapp_api.duplicate_check_enabled', '启用重复图检查')}
+              value={duplicateSettings.enabled}
+              onChange={(value) => saveDuplicateCheckSettings({ enabled: value })}
+            />
+            <InputSwitch
+              label={qt('quickapp_api.duplicate_check_use_cache', '启用缓存')}
+              value={duplicateSettings.enableCache}
+              onChange={(value) => saveDuplicateCheckSettings({ enableCache: value })}
+            />
+
+            <Box>
               <InputSelect
                 label={qt('quickapp_api.duplicate_check_default_preset', '默认阈值预设')}
                 value={duplicateSettings.defaultPreset}
@@ -200,97 +249,98 @@ const DuplicateCheckSection: React.FC<DuplicateCheckSectionProps> = ({
                   }
                 ]}
               />
-              <Typography color="text.secondary" variant="caption">
+              <Typography color="text.secondary" variant="caption" sx={{ display: 'block', mt: 1 }}>
                 {qt(
                   'quickapp_api.duplicate_check_preset_summary',
                   `当前预设：哈希 ${presetSummary.hashDistance} / 疑似哈希 ${presetSummary.uncertainHashDistance} / 视觉 ${presetSummary.visualSimilarity.toFixed(2)} / 鲁棒性 ${presetSummary.robustnessSimilarity.toFixed(2)}`
                 )}
               </Typography>
-              <InputSwitch
-                label={qt('quickapp_api.duplicate_check_method_hash', '默认启用哈希检查')}
-                value={duplicateSettings.defaultMethods.includes('hash')}
-                onChange={(value) => toggleDefaultMethod('hash', value)}
-              />
-              <InputSwitch
-                label={qt('quickapp_api.duplicate_check_method_visual', '默认启用视觉模型检查')}
-                value={duplicateSettings.defaultMethods.includes('visual')}
-                onChange={(value) => toggleDefaultMethod('visual', value)}
-              />
-              <InputSwitch
-                label={qt('quickapp_api.duplicate_check_method_robust', '默认启用鲁棒性复核')}
-                value={duplicateSettings.defaultMethods.includes('robust')}
-                onChange={(value) => toggleDefaultMethod('robust', value)}
-              />
-            </Stack>
-          </Box>
+            </Box>
+            <InputSwitch
+              label={qt('quickapp_api.duplicate_check_recursive', '默认递归扫描子目录')}
+              value={duplicateSettings.recursiveScan}
+              onChange={(value) => saveDuplicateCheckSettings({ recursiveScan: value })}
+            />
 
-          <Box sx={quickAppSectionPaneSx}>
-            <Stack spacing={2}>
-              <InputSwitch
-                label={qt('quickapp_api.duplicate_check_use_cache', '启用缓存')}
-                value={duplicateSettings.enableCache}
-                onChange={(value) => saveDuplicateCheckSettings({ enableCache: value })}
-              />
-              <InputSwitch
-                label={qt('quickapp_api.duplicate_check_recursive', '默认递归扫描子目录')}
-                value={duplicateSettings.recursiveScan}
-                onChange={(value) => saveDuplicateCheckSettings({ recursiveScan: value })}
-              />
-              <InputSwitch
-                label={qt('quickapp_api.duplicate_check_image_only', '默认只扫描图片文件')}
-                value={duplicateSettings.imageOnlyScan}
-                onChange={(value) => saveDuplicateCheckSettings({ imageOnlyScan: value })}
-              />
-              <InputSwitch
-                label={qt('quickapp_api.duplicate_check_exclude_self', '默认排除自身')}
-                value={duplicateSettings.excludeSelf}
-                onChange={(value) => saveDuplicateCheckSettings({ excludeSelf: value })}
-              />
-              <InputPath
-                label={qt('quickapp_api.duplicate_check_cache_dir', '缓存目录')}
-                value={duplicateSettings.cacheDir || ''}
-                onChange={(value) => saveDuplicateCheckSettings({ cacheDir: value })}
-                pathType="directory"
-                placeholder={qt(
-                  'quickapp_api.duplicate_check_cache_dir_placeholder',
-                  '留空则使用应用默认缓存目录'
-                )}
-              />
-              <InputText
-                label={qt('quickapp_api.duplicate_check_extensions', '图片扩展名')}
-                value={duplicateSettings.imageExtensions.join(', ')}
-                onChange={(value) =>
-                  saveDuplicateCheckSettings({
-                    imageExtensions: value
-                      .split(',')
-                      .map((item) => item.trim())
-                      .filter(Boolean)
-                  })
-                }
-                placeholder=".png, .jpg, .jpeg, .webp"
-              />
-            </Stack>
-          </Box>
+            <InputSwitch
+              label={qt('quickapp_api.duplicate_check_method_hash', '默认启用哈希检查')}
+              value={duplicateSettings.defaultMethods.includes('hash')}
+              onChange={(value) => toggleDefaultMethod('hash', value)}
+            />
+            <InputSwitch
+              label={qt('quickapp_api.duplicate_check_image_only', '默认只扫描图片文件')}
+              value={duplicateSettings.imageOnlyScan}
+              onChange={(value) => saveDuplicateCheckSettings({ imageOnlyScan: value })}
+            />
 
-          <Box sx={quickAppSectionPaneSx}>
-            <Stack spacing={2}>
-              <InputSwitch
-                label={qt('quickapp_api.duplicate_check_gpu', '启用 GPU / CUDA 加速')}
-                value={duplicateSettings.gpuAcceleration}
-                onChange={(value) => saveDuplicateCheckSettings({ gpuAcceleration: value })}
-              />
-              <InputSwitch
-                label={qt('quickapp_api.duplicate_check_fallback_cpu', 'GPU 不可用时自动回退 CPU')}
-                value={duplicateSettings.fallbackToCpu}
-                onChange={(value) => saveDuplicateCheckSettings({ fallbackToCpu: value })}
-              />
+            <InputSwitch
+              label={qt('quickapp_api.duplicate_check_method_visual', '默认启用视觉模型检查')}
+              value={duplicateSettings.defaultMethods.includes('visual')}
+              onChange={(value) => toggleDefaultMethod('visual', value)}
+            />
+            <InputSwitch
+              label={qt('quickapp_api.duplicate_check_exclude_self', '默认排除自身')}
+              value={duplicateSettings.excludeSelf}
+              onChange={(value) => saveDuplicateCheckSettings({ excludeSelf: value })}
+            />
+
+            <InputSwitch
+              label={qt('quickapp_api.duplicate_check_method_robust', '默认启用鲁棒性复核')}
+              value={duplicateSettings.defaultMethods.includes('robust')}
+              onChange={(value) => toggleDefaultMethod('robust', value)}
+            />
+            <InputPath
+              label={qt('quickapp_api.duplicate_check_cache_dir', '缓存目录')}
+              value={duplicateSettings.cacheDir || ''}
+              onChange={(value) => saveDuplicateCheckSettings({ cacheDir: value })}
+              pathType="directory"
+              placeholder={qt(
+                'quickapp_api.duplicate_check_cache_dir_placeholder',
+                '留空则使用应用默认缓存目录'
+              )}
+            />
+
+            <InputSwitch
+              label={qt('quickapp_api.duplicate_check_gpu', '启用 GPU / CUDA 加速')}
+              value={duplicateSettings.gpuAcceleration}
+              onChange={(value) => saveDuplicateCheckSettings({ gpuAcceleration: value })}
+            />
+            <InputText
+              label={qt('quickapp_api.duplicate_check_extensions', '图片扩展名')}
+              value={duplicateSettings.imageExtensions.join(', ')}
+              onChange={(value) =>
+                saveDuplicateCheckSettings({
+                  imageExtensions: value
+                    .split(',')
+                    .map((item) => item.trim())
+                    .filter(Boolean)
+                })
+              }
+              placeholder=".png, .jpg, .jpeg, .webp"
+            />
+
+            <InputSwitch
+              label={qt('quickapp_api.duplicate_check_fallback_cpu', 'GPU 不可用时自动回退 CPU')}
+              value={duplicateSettings.fallbackToCpu}
+              onChange={(value) => saveDuplicateCheckSettings({ fallbackToCpu: value })}
+            />
+            <InputNumber
+              label={qt('quickapp_api.duplicate_check_max_concurrency', '并发数')}
+              value={duplicateSettings.maxConcurrency}
+              min={1}
+              max={32}
+              step={1}
+              onChange={(value) => saveDuplicateCheckSettings({ maxConcurrency: value })}
+            />
+
+            <Box>
               <InputSwitch
                 label={qt('quickapp_api.duplicate_check_reuse_python', '复用 ComfyUI Python 环境')}
                 value={duplicateSettings.reuseComfyPython}
                 onChange={(value) => saveDuplicateCheckSettings({ reuseComfyPython: value })}
               />
               <Collapse in={!duplicateSettings.reuseComfyPython}>
-                <Box sx={{ pt: 1 }}>
+                <Box sx={{ pt: 2 }}>
                   <InputPath
                     label={qt('quickapp_api.duplicate_check_python_override', 'Python 命令路径')}
                     value={duplicateSettings.pythonCommandOverride || ''}
@@ -305,23 +355,15 @@ const DuplicateCheckSection: React.FC<DuplicateCheckSectionProps> = ({
                   />
                 </Box>
               </Collapse>
-              <InputNumber
-                label={qt('quickapp_api.duplicate_check_max_concurrency', '并发数')}
-                value={duplicateSettings.maxConcurrency}
-                min={1}
-                max={32}
-                step={1}
-                onChange={(value) => saveDuplicateCheckSettings({ maxConcurrency: value })}
-              />
-              <InputNumber
-                label={qt('quickapp_api.duplicate_check_batch_size', '视觉模型批大小')}
-                value={duplicateSettings.batchSize}
-                min={1}
-                max={128}
-                step={1}
-                onChange={(value) => saveDuplicateCheckSettings({ batchSize: value })}
-              />
-            </Stack>
+            </Box>
+            <InputNumber
+              label={qt('quickapp_api.duplicate_check_batch_size', '视觉模型批大小')}
+              value={duplicateSettings.batchSize}
+              min={1}
+              max={128}
+              step={1}
+              onChange={(value) => saveDuplicateCheckSettings({ batchSize: value })}
+            />
           </Box>
 
           <Box sx={quickAppSectionPaneSx}>
@@ -722,8 +764,8 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
       <Box sx={{ mt: 3 }}>
         <SettingSection title={qt('quickapp_api.prompt_title', '快应用 Prompt 输入设置')}>
           <Box sx={quickAppSectionSurfaceSx}>
-            <Box sx={{ display: { xs: 'block', lg: 'flex' } }}>
-              <Box sx={{ ...quickAppSectionPaneSx, flex: 1 }}>
+            <Box sx={quickAppSectionTwoColumnSx}>
+              <Box sx={quickAppSectionColumnPaneSx}>
                 <InputSwitch
                   label={qt('quickapp_api.use_prompt_translation', '启用快应用 Prompt 翻译')}
                   value={qAppPromptSettings.usePromptTranslation}
@@ -777,14 +819,10 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
                 </Collapse>
               </Box>
 
-              <Divider sx={{ ...quickAppSectionDividerSx, display: { xs: 'block', lg: 'none' } }} />
-              <Divider
-                orientation="vertical"
-                flexItem
-                sx={{ ...quickAppSectionDividerSx, display: { xs: 'none', lg: 'block' } }}
-              />
+              <Divider sx={quickAppSectionMobileDividerSx} />
+              <Divider orientation="vertical" flexItem sx={quickAppSectionDesktopDividerSx} />
 
-              <Box sx={{ ...quickAppSectionPaneSx, flex: 1 }}>
+              <Box sx={quickAppSectionColumnPaneSx}>
                 <InputSwitch
                   label={qt('quickapp_api.use_image_interrogation', '启用快应用图片反推')}
                   value={qAppPromptSettings.useImageInterrogation}

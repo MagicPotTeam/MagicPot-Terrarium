@@ -34,6 +34,7 @@ type CanvasTargetBundleMaterialization = {
 }
 
 const CANVAS_TARGET_MAX_FINAL_CHAT_TEXT_CHARS = 12_000
+const REPORT_BUNDLES_ROOT_DIR = '.report_bundles'
 
 function formatMetadataItem(label: string, value: string, isChineseUi: boolean): string {
   return `- **${label}**${isChineseUi ? '：' : ': '}${value}`
@@ -1052,7 +1053,7 @@ export async function materializeCanvasTargetAgentMessagePayload(
     stageReportAttachment.fileName || buildStageReportFileName(options.stage)
 
   const bundleId = `canvas-target-${options.stage.id || buildSafeFileStem(options.stage.label, options.stage.kind)}`
-  const bundleDir = joinBundlePath(options.bundleRootDir, 'report_bundles', bundleId)
+  const bundleDir = joinBundlePath(options.bundleRootDir, REPORT_BUNDLES_ROOT_DIR, bundleId)
   const bundleImagesDir = joinBundlePath(bundleDir, 'images')
   const manifestPath = joinBundlePath(bundleDir, 'manifest.json')
   const manifestUrl = toLocalMediaUrl(manifestPath)

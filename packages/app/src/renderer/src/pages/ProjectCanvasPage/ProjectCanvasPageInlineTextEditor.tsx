@@ -27,6 +27,9 @@ export type InlineTextEditState = {
   fill?: string
   attachedToId?: string
   attachmentPlacement?: 'bottom-center'
+  attachmentBaseScale?: number
+  attachmentBaseFontSize?: number
+  attachmentBaseHeight?: number
   _createdAt?: number
 }
 
@@ -145,6 +148,21 @@ export default function ProjectCanvasPageInlineTextEditor({
         bestFontSize = snappedFontSize
       }
 
+      const nextAttachmentBaseFontSize =
+        inlineTextEdit.attachmentBaseFontSize && inlineTextEdit.fontSize
+          ? Math.max(
+              1,
+              (inlineTextEdit.attachmentBaseFontSize * bestFontSize) / inlineTextEdit.fontSize
+            )
+          : inlineTextEdit.attachmentBaseFontSize
+      const attachmentScaleBasisAttrs = inlineTextEdit.attachedToId
+        ? {
+            attachmentBaseScale: inlineTextEdit.attachmentBaseScale,
+            attachmentBaseFontSize: nextAttachmentBaseFontSize,
+            attachmentBaseHeight: inlineTextEdit.attachmentBaseHeight
+          }
+        : {}
+
       const newItem: AttachedCaptionAnnotation = {
         id: inlineTextEdit.id,
         type: 'annotation',
@@ -166,7 +184,8 @@ export default function ProjectCanvasPageInlineTextEditor({
         fontSize: bestFontSize,
         fontWeight: inlineTextEdit.fontWeight,
         attachedToId: inlineTextEdit.attachedToId,
-        attachmentPlacement: inlineTextEdit.attachmentPlacement
+        attachmentPlacement: inlineTextEdit.attachmentPlacement,
+        ...attachmentScaleBasisAttrs
       }
 
       setItemsWithHistory((previousItems) => {
@@ -181,7 +200,8 @@ export default function ProjectCanvasPageInlineTextEditor({
                   width: finalWidth,
                   height: finalHeight,
                   scaleX: 1,
-                  scaleY: 1
+                  scaleY: 1,
+                  ...attachmentScaleBasisAttrs
                 }
               : item
           ) as CanvasItem[]

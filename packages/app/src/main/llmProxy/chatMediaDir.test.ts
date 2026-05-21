@@ -68,11 +68,11 @@ describe('chatMediaDir', () => {
     const module = await loadModule()
     const mediaDir = module.getChatMediaDir('Alice Team')
 
-    expect(mediaDir).toBe(path.join(tempRoot, 'downloads', 'chat_media', 'alice-team'))
+    expect(mediaDir).toBe(path.join(tempRoot, 'downloads', '.chat_media', 'alice-team'))
     await expect(fs.access(mediaDir)).resolves.toBeUndefined()
   })
 
-  it('routes automated runs into desktop Codex-Junk/MagicPot/<run-id>/llm-proxy/chat-media', async () => {
+  it('routes automated runs into desktop .Codex-Junk/MagicPot/<run-id>/llm-proxy/chat-media', async () => {
     process.env['MAGICPOT_TEST_AUTOMATED_RUN'] = '1'
     process.env['MAGICPOT_TEST_RUN_ID'] = 'run-789'
 
@@ -83,7 +83,7 @@ describe('chatMediaDir', () => {
       path.join(
         tempRoot,
         'Desktop',
-        'Codex-Junk',
+        '.Codex-Junk',
         'MagicPot',
         'run-789',
         'llm-proxy',

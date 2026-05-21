@@ -7,11 +7,11 @@ afterEach(() => {
 })
 
 describe('nodeTestArtifacts', () => {
-  it('keeps disposable node test artifacts under desktop Codex-Junk/MagicPot/<run-id>', async () => {
+  it('keeps disposable node test artifacts under desktop .Codex-Junk/MagicPot/<run-id>', async () => {
     const { resolveNodeTestArtifactPath, resolveNodeTestArtifactRoot } =
       await import('./nodeTestArtifacts')
 
-    expect(resolveNodeTestArtifactRoot()).toMatch(/[\\/]Codex-Junk[\\/]MagicPot[\\/]run-[^\\/]+$/)
+    expect(resolveNodeTestArtifactRoot()).toMatch(/[\\/]\.Codex-Junk[\\/]MagicPot[\\/]run-[^\\/]+$/)
     expect(resolveNodeTestArtifactPath('logs', 'run.json')).toBe(
       join(resolveNodeTestArtifactRoot(), 'node-tests', 'logs', 'run.json')
     )
@@ -23,7 +23,7 @@ describe('nodeTestArtifacts', () => {
     const root = resolveNodeTestArtifactRoot()
 
     expect(root).toMatch(
-      /^D:[\\/]+Redirected[\\/]+Desktop[\\/]+Codex-Junk[\\/]+MagicPot[\\/]+[^\\/]+$/
+      /^D:[\\/]+Redirected[\\/]+Desktop[\\/]+\.Codex-Junk[\\/]+MagicPot[\\/]+[^\\/]+$/
     )
   })
 })

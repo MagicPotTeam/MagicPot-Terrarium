@@ -240,7 +240,7 @@ describe('authorizeMagicPotMcpToolInvocation', () => {
     const decision = runtimeModule.authorizeMagicPotMcpToolInvocation({
       actor: 'assistant:session-1',
       action: 'file.read',
-      target: 'C:/tmp/remote-canvas-sync/default/Canvas-Project__canvas-1/project.mpcanvas',
+      target: 'C:/tmp/remote-canvas-sync/default/.Canvas-Project__canvas-1/project.mpcanvas',
       metadata: {
         route: {
           channel: 'canvas',
@@ -248,8 +248,8 @@ describe('authorizeMagicPotMcpToolInvocation', () => {
           scopeId: 'canvas-1',
           threadId: 'agent-2'
         },
-        mirroredCanvasRootDir: 'C:/tmp/remote-canvas-sync/default/Canvas-Project__canvas-1',
-        filePath: 'C:/tmp/remote-canvas-sync/default/Canvas-Project__canvas-1/project.mpcanvas'
+        mirroredCanvasRootDir: 'C:/tmp/remote-canvas-sync/default/.Canvas-Project__canvas-1',
+        filePath: 'C:/tmp/remote-canvas-sync/default/.Canvas-Project__canvas-1/project.mpcanvas'
       }
     })
 
@@ -263,7 +263,7 @@ describe('authorizeMagicPotMcpToolInvocation', () => {
     const decision = runtimeModule.authorizeMagicPotMcpToolInvocation({
       actor: 'assistant:session-1',
       action: 'file.read',
-      target: 'C:/tmp/server-canvas/default/Canvas-Project__canvas-1/project.mpcanvas',
+      target: 'C:/tmp/server-canvas/default/.Canvas-Project__canvas-1/project.mpcanvas',
       metadata: {
         route: {
           channel: 'canvas',
@@ -271,8 +271,8 @@ describe('authorizeMagicPotMcpToolInvocation', () => {
           scopeId: 'canvas-1',
           threadId: 'agent-2'
         },
-        serverCanvasRootDir: 'C:/tmp/server-canvas/default/Canvas-Project__canvas-1',
-        filePath: 'C:/tmp/server-canvas/default/Canvas-Project__canvas-1/project.mpcanvas'
+        serverCanvasRootDir: 'C:/tmp/server-canvas/default/.Canvas-Project__canvas-1',
+        filePath: 'C:/tmp/server-canvas/default/.Canvas-Project__canvas-1/project.mpcanvas'
       }
     })
 

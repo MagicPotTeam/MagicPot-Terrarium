@@ -141,7 +141,7 @@ describe('canvas agent attachments', () => {
         reportBundleId: 'bundle-1',
         reportBundleRole: 'primary-report',
         reportBundleRefName: 'canvas-target-report.md',
-        reportBundleManifestUrl: 'local-media:///C:/magicpot/report_bundles/bundle-1/manifest.json'
+        reportBundleManifestUrl: 'local-media:///C:/magicpot/.report_bundles/bundle-1/manifest.json'
       })
     )
 
@@ -154,7 +154,7 @@ describe('canvas agent attachments', () => {
       reportBundleId: 'bundle-1',
       reportBundleRole: 'primary-report',
       reportBundleRefName: 'canvas-target-report.md',
-      reportBundleManifestUrl: 'local-media:///C:/magicpot/report_bundles/bundle-1/manifest.json'
+      reportBundleManifestUrl: 'local-media:///C:/magicpot/.report_bundles/bundle-1/manifest.json'
     })
   })
 
