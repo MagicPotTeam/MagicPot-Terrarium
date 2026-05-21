@@ -12,6 +12,7 @@ import type {
 import type { CanvasFigmaBinding } from '@shared/figma'
 import { restoreGlobalQAppCache } from '../QuickAppPage/components/QAppContext'
 import { buildProjectStorageDirName, getProjectById } from '../MainPage/projectStore'
+import { normalizeGeneratedRootDirName, unprefixGeneratedRootDirName } from '@shared/projectStorage'
 import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
 import { sanitizeFilePart } from './canvasExportNamingUtils'
@@ -48,8 +49,10 @@ type CanvasSnapshot = {
 
 type ProjectCanvasLocation = {
   projectRootDir: string
+  legacyProjectRootDir?: string
   canvasFilename: string
   canvasFullPath: string
+  legacyCanvasFullPath?: string
   assetDir: string
 }
 
@@ -762,7 +765,16 @@ async function resolveProjectStorageRootPath(): Promise<string | null> {
 
 function resolveProjectStorageDirName(storeKey: string): string {
   const project = getProjectById(storeKey)
-  return project?.storageDirName || buildProjectStorageDirName(project?.name || storeKey, storeKey)
+  const normalizedStoredDirName = project?.storageDirName
+    ? normalizeGeneratedRootDirName(project.storageDirName)
+    : ''
+  return normalizedStoredDirName || buildProjectStorageDirName(project?.name || storeKey, storeKey)
+}
+
+function resolveLegacyProjectStorageDirName(storeKey: string): string | null {
+  const currentName = resolveProjectStorageDirName(storeKey)
+  const legacyName = unprefixGeneratedRootDirName(currentName)
+  return legacyName && legacyName !== currentName ? legacyName : null
 }
 
 export async function getProjectCanvasLocation(
@@ -774,10 +786,18 @@ export async function getProjectCanvasLocation(
   }
 
   const projectRootDir = window.path.join(rootPath, resolveProjectStorageDirName(storeKey))
+  const legacyStorageDirName = resolveLegacyProjectStorageDirName(storeKey)
+  const legacyProjectRootDir = legacyStorageDirName
+    ? window.path.join(rootPath, legacyStorageDirName)
+    : undefined
   return {
     projectRootDir,
+    ...(legacyProjectRootDir ? { legacyProjectRootDir } : {}),
     canvasFilename: PROJECT_CANVAS_FILENAME,
     canvasFullPath: window.path.join(projectRootDir, PROJECT_CANVAS_FILENAME),
+    ...(legacyProjectRootDir
+      ? { legacyCanvasFullPath: window.path.join(legacyProjectRootDir, PROJECT_CANVAS_FILENAME) }
+      : {}),
     assetDir: window.path.join(projectRootDir, PROJECT_ASSET_DIRNAME)
   }
 }
@@ -1138,7 +1158,12 @@ async function loadCanvasItemsFromProjectFile(storeKey: string): Promise<CanvasS
     return null
   }
 
-  return await readCanvasItemsFromProjectFile(location.canvasFullPath)
+  return (
+    (await readCanvasItemsFromProjectFile(location.canvasFullPath)) ||
+    (location.legacyCanvasFullPath
+      ? await readCanvasItemsFromProjectFile(location.legacyCanvasFullPath)
+      : null)
+  )
 }
 
 // Guess MIME types.

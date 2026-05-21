@@ -26,7 +26,7 @@ const {
   showItemInFolderMock: vi.fn(),
   listQAppCfgsMock: vi.fn().mockResolvedValue({ qApps: [] }),
   getQAppCfgMock: vi.fn(),
-  saveImageToDirMock: vi.fn().mockResolvedValue({ savedPath: 'C:/downloads/AutoSave/qapp.png' }),
+  saveImageToDirMock: vi.fn().mockResolvedValue({ savedPath: 'C:/downloads/.AutoSave/qapp.png' }),
   writeImageToClipboardMock: vi.fn().mockResolvedValue({ success: true }),
   sendImageToPhotoshopMock: vi.fn().mockResolvedValue({ success: true }),
   showOpenDialogMock: vi.fn(),

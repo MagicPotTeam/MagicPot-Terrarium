@@ -1,4 +1,5 @@
 import type { Config } from '@shared/config/config'
+import { normalizeGeneratedRootDirName } from '@shared/projectStorage'
 import { buildProjectStorageDirName, getProjectById } from '@renderer/pages/MainPage/projectStore'
 
 const DEFAULT_PROJECT_ID = 'default'
@@ -43,8 +44,11 @@ export function resolveProjectStorageDirName(
 ): string {
   const normalizedProjectId = normalizeText(projectId) || DEFAULT_PROJECT_ID
   const project = getProjectById(normalizedProjectId)
-  if (project?.storageDirName) {
-    return project.storageDirName
+  const normalizedStoredDirName = project?.storageDirName
+    ? normalizeGeneratedRootDirName(project.storageDirName)
+    : ''
+  if (normalizedStoredDirName) {
+    return normalizedStoredDirName
   }
 
   const normalizedProjectName = normalizeText(projectName) || project?.name || DEFAULT_PROJECT_NAME

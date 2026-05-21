@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { CanvasTargetReport, CanvasTargetReportStage } from '@shared/canvasTarget'
 import {
@@ -63,6 +63,10 @@ function createReport(stage: CanvasTargetReportStage): CanvasTargetReport {
 }
 
 describe('canvasTargetAgentArtifacts', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   it('builds a draggable markdown attachment for stage results', () => {
     const stage = createStage()
     const payload = buildCanvasTargetAgentMessagePayload({
@@ -421,7 +425,7 @@ describe('canvasTargetAgentArtifacts', () => {
       reportBundleRole: 'primary-report',
       reportBundleId: 'canvas-target-stage-1',
       reportBundleManifestUrl:
-        'local-media:///C:/bundle-cache/report_bundles/canvas-target-stage-1/manifest.json'
+        'local-media:///C:/bundle-cache/.report_bundles/canvas-target-stage-1/manifest.json'
     })
     expect(payload.attachments[1]).toMatchObject({
       type: 'image',
@@ -430,13 +434,13 @@ describe('canvasTargetAgentArtifacts', () => {
     })
     expect(writeTextFile).toHaveBeenCalledWith(
       expect.objectContaining({
-        outputPath: 'C:/bundle-cache/report_bundles/canvas-target-stage-1',
+        outputPath: 'C:/bundle-cache/.report_bundles/canvas-target-stage-1',
         filename: 'manifest.json'
       })
     )
     expect(saveImageToPath).toHaveBeenCalledWith(
       expect.objectContaining({
-        outputPath: 'C:/bundle-cache/report_bundles/canvas-target-stage-1/images'
+        outputPath: 'C:/bundle-cache/.report_bundles/canvas-target-stage-1/images'
       })
     )
   })

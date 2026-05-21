@@ -79,8 +79,8 @@ describe('projectTraceRuntime', () => {
       project: {
         projectId: 'project-1',
         projectName: 'Project',
-        projectStorageDirName: 'Project__project-1',
-        projectRootDir: 'C:\\Users\\alice\\Projects\\Project__project-1'
+        projectStorageDirName: '.Project__project-1',
+        projectRootDir: 'C:\\Users\\alice\\Projects\\.Project__project-1'
       },
       traceId: 'trace-1'
     })

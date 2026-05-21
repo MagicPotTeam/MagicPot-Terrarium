@@ -27,7 +27,7 @@ const SKIP_SEGMENTS = new Set([
   'node_modules',
   'dist',
   'out',
-  'aiengineelectron-dev',
+  '.aiengineelectron-dev',
   'comfyui'
 ])
 const PRIVATE_USE_CHAR_PATTERN = /[\uE000-\uF8FF]/

@@ -621,7 +621,7 @@ describe('LLM proxy server legacy compatibility', () => {
       body: JSON.stringify({
         projectId: 'canvas-1',
         paneId: 'agent-2',
-        storageDirName: 'Canvas-Project__canvas-1',
+        storageDirName: '.Canvas-Project__canvas-1',
         route: {
           channel: 'canvas',
           scopeType: 'thread',

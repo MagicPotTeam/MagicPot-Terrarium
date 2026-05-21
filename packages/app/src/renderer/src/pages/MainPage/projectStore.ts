@@ -1,4 +1,4 @@
-import { buildProjectStorageDirName } from '@shared/projectStorage'
+import { buildProjectStorageDirName, normalizeGeneratedRootDirName } from '@shared/projectStorage'
 
 export const PROJECTS_STORAGE_KEY = 'magicpot.projects.v1'
 export const LEGACY_PROJECTS_STORAGE_KEY = 'ai_engine_projects'
@@ -31,6 +31,19 @@ const normalizeTimestamp = (value: unknown, fallback: number): number => {
 const normalizeOptionalTimestamp = (value: unknown): number | undefined => {
   const parsed = Number(value)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+}
+
+const normalizeStoredProjectStorageDirName = (
+  value: unknown,
+  projectName: string,
+  projectId: string
+): string => {
+  const stored = normalizeText(value)
+  if (!stored) {
+    return buildProjectStorageDirName(projectName, projectId)
+  }
+
+  return normalizeGeneratedRootDirName(stored) || buildProjectStorageDirName(projectName, projectId)
 }
 
 const readStoredProjectQAppKey = (projectId: string): string => {
@@ -82,9 +95,11 @@ const toProjectRecord = (
     chatStorageScopePrefix:
       normalizeText((value as ProjectRecord | undefined)?.chatStorageScopePrefix) || id,
     defaultQAppKey,
-    storageDirName:
-      normalizeText((value as ProjectRecord | undefined)?.storageDirName) ||
-      buildProjectStorageDirName(name, id),
+    storageDirName: normalizeStoredProjectStorageDirName(
+      (value as ProjectRecord | undefined)?.storageDirName,
+      name,
+      id
+    ),
     ...(lastOpenedAt !== undefined ? { lastOpenedAt } : {})
   }
 }

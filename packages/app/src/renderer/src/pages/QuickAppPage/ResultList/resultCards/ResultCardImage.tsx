@@ -58,7 +58,7 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
         const targetDir = resolveProjectResourceDir({
           config: { download_dir: config.download_dir },
           projectId: result.projectId,
-          segments: ['AutoSave', 'QuickApp', 'Images']
+          segments: ['.AutoSave', 'QuickApp', 'Images']
         })
 
         const res = await api().svcHyper.saveImageToDir({

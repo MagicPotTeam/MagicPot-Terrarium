@@ -43,6 +43,6 @@ export const resolveAssistantImageAutoSaveDir = (options: {
   return resolveProjectResourceDir({
     config: { download_dir: options.config.download_dir },
     projectId: resolveProjectIdFromStorageScope(options.storageScope),
-    segments: ['AutoSave', 'Agent']
+    segments: ['.AutoSave', 'Agent']
   })
 }

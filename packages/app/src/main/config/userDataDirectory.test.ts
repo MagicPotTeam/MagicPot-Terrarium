@@ -91,7 +91,7 @@ describe('userDataDirectory', () => {
     ).toBe('{"workspace":true}')
     const bootstrap = JSON.parse(
       await fs.readFile(
-        path.join(tempRoot, 'aiengineelectron-dev', 'user-data-bootstrap.json'),
+        path.join(tempRoot, '.aiengineelectron-dev', 'user-data-bootstrap.json'),
         'utf8'
       )
     ) as { customUserDataDir: string }
@@ -139,7 +139,7 @@ describe('userDataDirectory', () => {
     const resolved = module.resolveStartupUserDataDirectory()
 
     expect(resolved).toEqual({
-      path: path.join(tempRoot, 'Desktop', 'Codex-Junk', 'MagicPot', 'run-456', 'userData'),
+      path: path.join(tempRoot, 'Desktop', '.Codex-Junk', 'MagicPot', 'run-456', 'userData'),
       source: 'default'
     })
   })
@@ -153,7 +153,7 @@ describe('userDataDirectory', () => {
     const resolved = module.resolveStartupUserDataDirectory()
 
     expect(resolved).toEqual({
-      path: path.join(tempRoot, 'Desktop', 'Codex-Junk', 'MagicPot', 'run-789', 'userData'),
+      path: path.join(tempRoot, 'Desktop', '.Codex-Junk', 'MagicPot', 'run-789', 'userData'),
       source: 'default'
     })
   })
@@ -170,7 +170,7 @@ describe('userDataDirectory', () => {
       path: path.join(
         tempRoot,
         'Desktop',
-        'Codex-Junk',
+        '.Codex-Junk',
         'MagicPot',
         'run-987',
         'debug-session',
@@ -192,7 +192,7 @@ describe('userDataDirectory', () => {
       path: path.join(
         tempRoot,
         'RedirectedDesktop',
-        'Codex-Junk',
+        '.Codex-Junk',
         'MagicPot',
         'run-654',
         'userData'

@@ -1133,7 +1133,7 @@ describe('canvasStorage provenance metadata', () => {
       userDataDir,
       'renderer-state',
       'project-canvas',
-      'mirror-fallback-test__mirror-fallback-test',
+      '.mirror-fallback-test__mirror-fallback-test',
       'project.mpcanvas'
     )
     const projectCanvasJson = JSON.parse(textFiles.get(projectCanvasPath) || '{}') as {
@@ -1165,7 +1165,7 @@ describe('canvasStorage provenance metadata', () => {
       id: 'image-blob-mirror-1',
       type: 'image',
       fileName: 'generated-image.png',
-      src: 'local-media:///C:/mock-user-data/renderer-state/project-canvas/mirror-fallback-test__mirror-fallback-test/assets/images/image-blob-mirror-1__generated-image.png'
+      src: 'local-media:///C:/mock-user-data/renderer-state/project-canvas/.mirror-fallback-test__mirror-fallback-test/assets/images/image-blob-mirror-1__generated-image.png'
     })
   })
 
@@ -1251,7 +1251,7 @@ describe('canvasStorage provenance metadata', () => {
       userDataDir,
       'renderer-state',
       'project-canvas',
-      'unresolved-project-asset-test__unresolved-project-asset-test',
+      '.unresolved-project-asset-test__unresolved-project-asset-test',
       'project.mpcanvas'
     )
 
@@ -1319,7 +1319,92 @@ describe('canvasStorage provenance metadata', () => {
       id: 'image-legacy-1',
       type: 'image',
       fileName: 'legacy.png',
-      src: 'local-media:///C:/mock-user-data-legacy/renderer-state/project-canvas/legacy-relative-idb-test__legacy-relative-idb-test/assets/images/image-legacy-1__legacy.png'
+      src: 'local-media:///C:/mock-user-data-legacy/renderer-state/project-canvas/.legacy-relative-idb-test__legacy-relative-idb-test/assets/images/image-legacy-1__legacy.png'
+    })
+  })
+
+  it('loads existing project canvas files from the legacy unhidden project root', async () => {
+    const userDataDir = 'C:\\mock-user-data-legacy-root'
+    const legacyProjectRootDir = path.win32.join(
+      userDataDir,
+      'renderer-state',
+      'project-canvas',
+      'legacy-root-test__legacy-root-test'
+    )
+    const textFiles = new Map<string, string>([
+      [
+        path.win32.join(legacyProjectRootDir, 'project.mpcanvas'),
+        JSON.stringify({
+          magic: 'MAGICPOT_CANVAS',
+          version: CANVAS_FILE_VERSION,
+          createdAt: '2026-05-21T00:00:00.000Z',
+          storageMode: 'project',
+          items: [
+            {
+              id: 'text-legacy-root',
+              type: 'text',
+              x: 10,
+              y: 20,
+              width: 120,
+              height: 48,
+              rotation: 0,
+              scaleX: 1,
+              scaleY: 1,
+              zIndex: 1,
+              locked: false,
+              text: 'legacy root'
+            }
+          ]
+        })
+      ]
+    ])
+
+    Object.defineProperty(window, 'path', {
+      configurable: true,
+      writable: true,
+      value: {
+        join: (...segments: string[]) => path.win32.join(...segments),
+        basename: (targetPath: string) => path.win32.basename(targetPath),
+        dirname: (targetPath: string) => path.win32.dirname(targetPath)
+      } as unknown as Window['path']
+    })
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcState: {
+          getUserDataDirectoryState: vi.fn(async () => ({
+            state: {
+              currentPath: userDataDir,
+              defaultPath: userDataDir,
+              isCustom: false,
+              source: 'default'
+            }
+          }))
+        },
+        svcFs: {
+          readTextFile: vi.fn(async ({ fullPath }) => {
+            const content = textFiles.get(fullPath)
+            if (content === undefined) {
+              throw new Error(`File not found: ${fullPath}`)
+            }
+            return {
+              content,
+              filename: path.win32.basename(fullPath)
+            }
+          })
+        }
+      } as unknown as Window['api']
+    })
+
+    const restored = await loadCanvasItems('legacy-root-test')
+
+    expect(restored.items).toHaveLength(1)
+    expect(restored.items[0]).toMatchObject({
+      id: 'text-legacy-root',
+      type: 'text',
+      text: 'legacy root'
     })
   })
 
@@ -1487,7 +1572,7 @@ describe('canvasStorage provenance metadata', () => {
       userDataDir,
       'renderer-state',
       'project-canvas',
-      'project-crop-cache-test__project-crop-cache-test',
+      '.project-crop-cache-test__project-crop-cache-test',
       'project.mpcanvas'
     )
     const projectCanvasJson = JSON.parse(textFiles.get(projectCanvasPath) || '{}') as {
@@ -1514,7 +1599,7 @@ describe('canvasStorage provenance metadata', () => {
           userDataDir,
           'renderer-state',
           'project-canvas',
-          'project-crop-cache-test__project-crop-cache-test',
+          '.project-crop-cache-test__project-crop-cache-test',
           'assets',
           'images',
           'image-crop-1__photo.jpg'
@@ -1533,7 +1618,7 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.items[0]).toMatchObject({
       id: 'image-crop-1',
       type: 'image',
-      src: 'local-media:///C:/mock-user-data-crop/renderer-state/project-canvas/project-crop-cache-test__project-crop-cache-test/assets/images/image-crop-1__photo.jpg',
+      src: 'local-media:///C:/mock-user-data-crop/renderer-state/project-canvas/.project-crop-cache-test__project-crop-cache-test/assets/images/image-crop-1__photo.jpg',
       sourceWidth: 320,
       sourceHeight: 180
     })
@@ -1668,7 +1753,7 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.items).toHaveLength(1)
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       '[Canvas Storage] Project asset missing:',
-      'c:/mock-user-data-missing/renderer-state/project-canvas/project-missing-test__project-missing-test/assets/images/image-project-missing-1__missing-image.png'
+      'c:/mock-user-data-missing/renderer-state/project-canvas/.project-missing-test__project-missing-test/assets/images/image-project-missing-1__missing-image.png'
     )
   })
 

@@ -306,7 +306,7 @@ describe('resolveTestWindowOverride', () => {
 })
 
 describe('resolveTestArtifactPath', () => {
-  it('routes disposable artifacts into desktop Codex-Junk/MagicPot/<run-id>', () => {
+  it('routes disposable artifacts into desktop .Codex-Junk/MagicPot/<run-id>', () => {
     expect(
       resolveTestArtifactRoot({
         desktopPath: 'C:/Users/test/Desktop',
@@ -317,7 +317,7 @@ describe('resolveTestArtifactPath', () => {
           artifactRootOverride: undefined
         }
       })
-    ).toBe(pathWin32.join('C:/Users/test/Desktop', 'Codex-Junk', 'MagicPot', 'run-123'))
+    ).toBe(pathWin32.join('C:/Users/test/Desktop', '.Codex-Junk', 'MagicPot', 'run-123'))
 
     expect(
       resolveTestArtifactPath({
@@ -333,7 +333,7 @@ describe('resolveTestArtifactPath', () => {
     ).toBe(
       pathWin32.join(
         'C:/Users/test/Desktop',
-        'Codex-Junk',
+        '.Codex-Junk',
         'MagicPot',
         'run-123',
         'traces',
@@ -356,7 +356,7 @@ describe('resolveTestArtifactPath', () => {
     ).toBe('C:/Temp')
   })
 
-  it('rejects automated artifact overrides outside the desktop Codex-Junk root', () => {
+  it('rejects automated artifact overrides outside the desktop .Codex-Junk root', () => {
     expect(
       resolveTestArtifactRoot({
         desktopPath: 'C:/Users/test/Desktop',
@@ -367,7 +367,7 @@ describe('resolveTestArtifactPath', () => {
           artifactRootOverride: 'D:/scratch/outside-root'
         }
       })
-    ).toBe(pathWin32.join('C:/Users/test/Desktop', 'Codex-Junk', 'MagicPot', 'run-123'))
+    ).toBe(pathWin32.join('C:/Users/test/Desktop', '.Codex-Junk', 'MagicPot', 'run-123'))
   })
 
   it('treats Windows absolute override paths consistently on non-Windows hosts', async () => {
@@ -394,7 +394,7 @@ describe('resolveTestArtifactPath', () => {
             artifactRootOverride: 'D:/scratch/outside-root'
           }
         })
-      ).toBe(pathWin32.join('C:/Users/test/Desktop', 'Codex-Junk', 'MagicPot', 'run-123'))
+      ).toBe(pathWin32.join('C:/Users/test/Desktop', '.Codex-Junk', 'MagicPot', 'run-123'))
     } finally {
       vi.doUnmock('path')
       vi.resetModules()
@@ -412,10 +412,10 @@ describe('resolveTestArtifactPath', () => {
           artifactRootOverride: undefined
         }
       })
-    ).toBe(pathWin32.join('C:/Users/test/Desktop', 'Codex-Junk', 'MagicPot', 'desktop-takeover'))
+    ).toBe(pathWin32.join('C:/Users/test/Desktop', '.Codex-Junk', 'MagicPot', 'desktop-takeover'))
   })
 
-  it('allows automated artifact overrides only inside the desktop Codex-Junk root', () => {
+  it('allows automated artifact overrides only inside the desktop .Codex-Junk root', () => {
     expect(
       resolveTestArtifactRoot({
         desktopPath: 'C:/Users/test/Desktop',
@@ -429,7 +429,7 @@ describe('resolveTestArtifactPath', () => {
     ).toBe(
       pathWin32.join(
         'C:/Users/test/Desktop',
-        'Codex-Junk',
+        '.Codex-Junk',
         'MagicPot',
         'run-123',
         'nested',
@@ -453,7 +453,7 @@ describe('resolveTestArtifactPath', () => {
     ).toBe(
       pathWin32.join(
         'C:/Users/test/Desktop',
-        'Codex-Junk',
+        '.Codex-Junk',
         'MagicPot',
         'run-123',
         'traces',

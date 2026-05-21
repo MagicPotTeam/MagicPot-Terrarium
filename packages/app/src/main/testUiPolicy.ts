@@ -77,7 +77,7 @@ export type ResolveTestArtifactPathParams = {
 }
 
 const TEST_UI_POLICY_LOG_PREFIX = '[TestUiPolicy]'
-const TEST_UI_ARTIFACT_ROOT_DIR = 'Codex-Junk'
+const TEST_UI_ARTIFACT_ROOT_DIR = '.Codex-Junk'
 const TEST_UI_ARTIFACT_PROJECT_DIR = 'MagicPot'
 const TEST_UI_RUN_ID_SAFE_PATTERN = /[^a-zA-Z0-9_-]+/g
 

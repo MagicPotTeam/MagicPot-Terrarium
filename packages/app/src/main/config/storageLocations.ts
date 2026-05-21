@@ -6,6 +6,7 @@ import type { BuildEnv } from '@shared/config/buildEnv'
 import type { Config } from '@shared/config/config'
 import { getBuildEnv } from './buildEnv'
 import { getConfig } from './config'
+import { DEV_USER_DATA_DIRNAME } from './portablePaths'
 import { getDefaultUserDataDirectory } from './userDataDirectory'
 
 const USER_DATA_DIRNAME = 'aiengineelectron'
@@ -59,7 +60,7 @@ function buildDefaultLocation(buildEnv: BuildEnv): StorageLocationSeed {
       id: 'default-development',
       kind: 'default-development',
       isCurrent: false,
-      userDataDir: path.join(process.cwd(), 'aiengineelectron-dev'),
+      userDataDir: path.join(process.cwd(), DEV_USER_DATA_DIRNAME),
       fileRootDir: process.cwd()
     }
   }

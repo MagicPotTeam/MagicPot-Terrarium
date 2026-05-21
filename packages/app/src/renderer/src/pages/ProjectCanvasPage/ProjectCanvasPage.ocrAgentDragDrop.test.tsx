@@ -664,14 +664,14 @@ describe('ProjectCanvasPage OCR agent drag/drop integration', () => {
                 attachments: [
                   {
                     type: 'file',
-                    url: 'local-media:///C:/demo/report_bundles/bundle-1/canvas-target-主控规划.md',
+                    url: 'local-media:///C:/demo/.report_bundles/bundle-1/canvas-target-主控规划.md',
                     fileName: 'canvas-target-主控规划.md',
                     mimeType: 'text/markdown',
                     reportBundleId: 'bundle-1',
                     reportBundleRole: 'primary-report',
                     reportBundleRefName: 'canvas-target-主控规划.md',
                     reportBundleManifestUrl:
-                      'local-media:///C:/demo/report_bundles/bundle-1/manifest.json',
+                      'local-media:///C:/demo/.report_bundles/bundle-1/manifest.json',
                     reportBundleLabel: '主控规划'
                   }
                 ]

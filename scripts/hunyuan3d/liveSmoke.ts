@@ -55,7 +55,7 @@ const { uploadBufferedHy3dModel, signHy3dCosModel, clearHy3dCosPrefix } = (
     : (cosModule as { default?: HunyuanCosModule }).default!
 ) as HunyuanCosModule
 
-const DEFAULT_CONFIG_PATH = path.join(process.cwd(), 'aiengineelectron-dev', 'config.json')
+const DEFAULT_CONFIG_PATH = path.join(process.cwd(), '.aiengineelectron-dev', 'config.json')
 const RAPID_PROMPT = 'a simple white ceramic mug with a smooth surface'
 const PRO_PROMPT = 'a simple white ceramic mug with a smooth surface'
 const MAX_RAPID_SMOKE_ATTEMPTS = 3

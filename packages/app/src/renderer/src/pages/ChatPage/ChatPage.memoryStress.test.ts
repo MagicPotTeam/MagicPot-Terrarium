@@ -239,7 +239,7 @@ const resolveStressLogDir = (): string => {
     /[^a-zA-Z0-9_.-]+/g,
     '-'
   )
-  return join(homedir(), 'Desktop', 'Codex-Junk', 'MagicPot-OOM', runId)
+  return join(homedir(), 'Desktop', '.Codex-Junk', 'MagicPot-OOM', runId)
 }
 
 const writeStressLog = (name: string, payload: Record<string, unknown>): void => {
