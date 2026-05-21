@@ -12,6 +12,7 @@ import {
   normalizeLocalMediaUrl
 } from '@renderer/pages/ChatPage/chatPageShared'
 import { loadImageFromSrc } from '@renderer/pages/ProjectCanvasPage/canvasAssetIntakeHelpers'
+import { stripHtmlToText } from './htmlText'
 
 export const QAPP_IMAGE_DRAG_MIME = 'application/x-qapp-image'
 export const AGENT_IMAGE_DRAG_MIME = 'application/x-ai-image'
@@ -827,7 +828,7 @@ export const getDroppedTextContent = (dataTransfer: DragDataReader): string | nu
 
   const htmlText = dataTransfer.getData('text/html')
   if (htmlText.trim()) {
-    const strippedText = htmlText.replace(/<[^>]*>?/gm, '').trim()
+    const strippedText = stripHtmlToText(htmlText)
     return strippedText || null
   }
 

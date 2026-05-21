@@ -40,6 +40,7 @@ type FigmaApiImagesResponse = {
 
 const FIGMA_API_ORIGIN = 'https://api.figma.com/v1'
 const FIGMA_IMAGE_BATCH_SIZE = 20
+const FIGMA_HOSTNAME = 'figma.com'
 
 function ensureAccessToken(accessToken: string): string {
   const normalized = accessToken.trim()
@@ -49,7 +50,10 @@ function ensureAccessToken(accessToken: string): string {
   return normalized
 }
 
-function normalizeFigmaFileKey(input: string): string {
+const isFigmaHostname = (hostname: string): boolean =>
+  hostname === FIGMA_HOSTNAME || hostname.endsWith(`.${FIGMA_HOSTNAME}`)
+
+export function normalizeFigmaFileKey(input: string): string {
   const trimmed = input.trim()
   if (!trimmed) {
     throw new Error('Figma file link or file key is required.')
@@ -58,6 +62,9 @@ function normalizeFigmaFileKey(input: string): string {
   const tryParseUrl = (value: string): string | null => {
     try {
       const url = new URL(value)
+      if (!isFigmaHostname(url.hostname.toLowerCase())) {
+        return null
+      }
       const match = url.pathname.match(/\/(?:file|design|proto|board)\/([A-Za-z0-9]+)(?:[/?#]|$)/i)
       return match?.[1] ?? null
     } catch {
@@ -67,12 +74,14 @@ function normalizeFigmaFileKey(input: string): string {
 
   const parsedFromUrl =
     tryParseUrl(trimmed) ||
-    (trimmed.includes('figma.com/')
-      ? tryParseUrl(`https://${trimmed.replace(/^https?:\/\//i, '')}`)
-      : null)
+    (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? null : tryParseUrl(`https://${trimmed}`))
 
   if (parsedFromUrl) {
     return parsedFromUrl
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    throw new Error('Figma file URL must use figma.com.')
   }
 
   return trimmed

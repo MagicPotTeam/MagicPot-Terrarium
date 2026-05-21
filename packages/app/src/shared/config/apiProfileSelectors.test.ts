@@ -4,6 +4,7 @@ import {
   findHunyuan3DQAppProfile,
   getQAppApiProfiles,
   isConfiguredHunyuan3DProfile,
+  isHunyuan3DCompatibleProfile,
   isVisionCapableApiProfile
 } from './apiProfileSelectors'
 
@@ -205,6 +206,25 @@ describe('apiProfileSelectors', () => {
 
     expect(isConfiguredHunyuan3DProfile(profile)).toBe(true)
     expect(findHunyuan3DQAppProfile(config)?.id).toBe('plugin-hunyuan-sdk')
+  })
+
+  it('matches Hunyuan3D Tencent endpoints by hostname only', () => {
+    expect(
+      isHunyuan3DCompatibleProfile({
+        id: 'hunyuan',
+        model_name: 'hunyuan',
+        base_url: 'https://ai3d.cloud.tencent.com/v1',
+        api_key: 'secret'
+      })
+    ).toBe(true)
+    expect(
+      isHunyuan3DCompatibleProfile({
+        id: 'spoofed',
+        model_name: 'hunyuan',
+        base_url: 'https://gateway.example/ai3d.cloud.tencent.com/v1',
+        api_key: 'secret'
+      })
+    ).toBe(false)
   })
 
   it('treats explicit vision profiles as vision-capable for quick app prompt helpers', () => {

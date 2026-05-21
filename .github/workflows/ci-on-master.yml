@@ -6,12 +6,18 @@ on:
     branches:
       - master
 
+permissions: {}
+
 jobs:
   ci:
+    permissions:
+      contents: read
     uses: ./.github/workflows/call-ci.yml
     with:
       ref: ${{ github.ref }}
   build:
+    permissions:
+      contents: read
     uses: ./.github/workflows/call-build.yml
     with:
       ref: ${{ github.ref }}

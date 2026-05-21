@@ -322,7 +322,7 @@ export function isModelArchiveFile(filename: string): boolean {
 export const ALL_ACCEPT = [
   'image/*',
   ...PSD_IMPORT_EXTENSIONS,
-  ...MODEL_IMPORT_EXTENSIONS.map((e) => e.replace('.', '.')),
-  ...FILE_IMPORT_EXTENSIONS.map((e) => e.replace('.', '.')),
+  ...MODEL_IMPORT_EXTENSIONS,
+  ...FILE_IMPORT_EXTENSIONS,
   'video/*'
 ].join(',')

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ClaudeAPICli, GeminiAPICli, OllamaAPICli, OpenAIAPICli } from './clients'
 import {
   cliFromProfile,
+  isClaudeUrl,
+  isGeminiUrl,
   isOllamaProfile,
   isOllamaUrl,
   isRunnableProfile,
@@ -156,6 +158,13 @@ describe('shared llm ollama compatibility', () => {
     }
 
     expect(cliFromProfile(profile)).toBeInstanceOf(GeminiAPICli)
+  })
+
+  it('matches Gemini and Claude providers by hostname only', () => {
+    expect(isGeminiUrl('generativelanguage.googleapis.com/v1beta')).toBe(true)
+    expect(isGeminiUrl('https://evil.example/generativelanguage.googleapis.com/v1beta')).toBe(false)
+    expect(isClaudeUrl('https://api.anthropic.com/v1/messages')).toBe(true)
+    expect(isClaudeUrl('https://gateway.example/claude/v1/messages')).toBe(false)
   })
 
   it('allows local OpenAI-compatible gateways without API keys', () => {

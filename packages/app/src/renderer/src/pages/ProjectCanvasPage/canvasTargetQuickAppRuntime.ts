@@ -18,6 +18,7 @@ import { transformResults } from '../QuickAppPage/ResultList/resultTransformers'
 import { dispatchQAppResultsToCanvas } from '../QuickAppPage/utils/qAppCanvasDispatch'
 import { buildQAppSubmitWorkflowRequest } from '../QuickAppPage/utils/qAppSubmitWorkflow'
 import { waitForQAppPromptResult } from '../QuickAppPage/utils/qAppPromptResult'
+import { createSecureIdSegment, createSecureRandomUint32 } from './secureId'
 import type {
   CanvasTargetOutputTarget,
   CanvasTargetQuickAppAction,
@@ -66,7 +67,7 @@ const toWorkflowJson = (workflow: Workflow): JsonDict => workflow as unknown as 
 
 const normalizeLabelKey = (value: string | undefined): string => value?.trim().toLowerCase() || ''
 
-const randomSeed = () => Math.floor(Math.random() * 0xffffffff)
+const randomSeed = () => createSecureRandomUint32()
 
 const looksLikeTransferableUrl = (value: string): boolean =>
   /^(data|blob|https?|file|local-media):/i.test(value.trim())
@@ -742,9 +743,7 @@ export async function runCanvasTargetQuickAppAction(
       qAppKey: options.action.qAppKey,
       sessionKey:
         options.generationSessionId ||
-        `canvas-target-${options.projectId || 'canvas'}-${Date.now()}-${Math.random()
-          .toString(36)
-          .slice(2, 8)}`
+        `canvas-target-${options.projectId || 'canvas'}-${Date.now()}-${createSecureIdSegment()}`
     })
   )
 

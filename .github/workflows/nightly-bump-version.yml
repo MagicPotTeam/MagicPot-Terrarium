@@ -5,6 +5,8 @@ on:
     - cron: '0 19 * * 0' # Every Monday at 03:00 Beijing time.
   workflow_dispatch:
 
+permissions: {}
+
 env:
   RELEASE_BRANCH: release/nightly
 
@@ -87,6 +89,8 @@ jobs:
   ci:
     needs: check-commits
     if: needs.check-commits.outputs.release_mode == 'bump' || needs.check-commits.outputs.release_mode == 'initial'
+    permissions:
+      contents: read
     uses: ./.github/workflows/call-ci.yml
     with:
       ref: refs/heads/master
@@ -94,6 +98,8 @@ jobs:
   build:
     needs: check-commits
     if: needs.check-commits.outputs.release_mode == 'bump' || needs.check-commits.outputs.release_mode == 'initial'
+    permissions:
+      contents: read
     uses: ./.github/workflows/call-build.yml
     with:
       ref: refs/heads/master

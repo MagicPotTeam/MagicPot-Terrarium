@@ -15,7 +15,7 @@ import { app, clipboard, nativeImage } from 'electron'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { shell } from 'electron'
-import { exec } from 'child_process'
+import { exec, execFile } from 'child_process'
 import { promisify } from 'util'
 import * as os from 'os'
 import { getQueue } from '../queue/taskQueue'
@@ -31,7 +31,22 @@ import { normalizeLocalFilePath } from '../utils/localFileUrl'
 
 const inflateAsync = promisify(zlib.inflate)
 const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
 const testUiPolicy = resolveTestUiPolicy(readTestUiEnv())
+
+const escapeAppleScriptString = (value: string): string =>
+  value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+
+const buildPhotoshopJavaScriptAppleScript = (jsxScript: string): string =>
+  [
+    'tell application "Adobe Photoshop"',
+    '  activate',
+    `  do javascript "${escapeAppleScriptString(jsxScript)}"`,
+    'end tell'
+  ].join('\n')
+
+const runAppleScript = (appleScript: string, timeout = 10000) =>
+  execFileAsync('osascript', ['-e', appleScript], { timeout })
 
 const getPhotoshopTempDir = async (): Promise<string> => {
   const tempDir = resolveTestArtifactPath({
@@ -102,12 +117,7 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
 
   private async isPhotoshopRunningMac(): Promise<boolean> {
     try {
-      const { stdout } = await execAsync(
-        `osascript -e 'application "Adobe Photoshop" is running'`,
-        {
-          timeout: 5000
-        }
-      )
+      const { stdout } = await runAppleScript('application "Adobe Photoshop" is running', 5000)
       return stdout.trim().toLowerCase() === 'true'
     } catch {
       return false
@@ -307,15 +317,7 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
       '}'
     ].join('\n')
 
-    const appleScript = [
-      'tell application "Adobe Photoshop"',
-      '  activate',
-      '  do javascript "' + jsxScript.replace(/"/g, '\\"') + '"',
-      'end tell'
-    ].join('\n')
-
-    const command = `osascript -e '${appleScript.replace(/'/g, "'\\''")}'`
-    const { stderr } = await execAsync(command, { timeout: 10000 })
+    const { stderr } = await runAppleScript(buildPhotoshopJavaScriptAppleScript(jsxScript))
 
     if (stderr) {
       throw new Error(stderr)
@@ -943,15 +945,7 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
     ].join('\n')
 
     // Use osascript to invoke Photoshop.
-    const appleScript = [
-      'tell application "Adobe Photoshop"',
-      '  activate',
-      '  do javascript "' + jsxScript.replace(/"/g, '\\"') + '"',
-      'end tell'
-    ].join('\n')
-
-    const command = `osascript -e '${appleScript.replace(/'/g, "'\\''")}'`
-    const { stdout, stderr } = await execAsync(command, { timeout: 10000 })
+    const { stderr } = await runAppleScript(buildPhotoshopJavaScriptAppleScript(jsxScript))
 
     if (stderr) {
       throw new Error(stderr)

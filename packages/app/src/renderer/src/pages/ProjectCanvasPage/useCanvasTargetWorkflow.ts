@@ -77,6 +77,7 @@ import {
   type CanvasTargetQuickAppDraft,
   type CanvasTargetStageDraft
 } from './canvasTargetTypes'
+import { createTimestampedSecureId } from './secureId'
 import {
   buildCanvasTargetHistoryTargetRecord,
   materializeCanvasTargetQuickAppsForOptions,
@@ -1046,7 +1047,7 @@ async function presentCanvasTargetFinalResult(options: {
 }
 
 function createCanvasTargetRunId(): string {
-  return `canvas-target-run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return createTimestampedSecureId('canvas-target-run')
 }
 
 function createCanvasTargetArtifactId(stageId: string, suffix: string): string {

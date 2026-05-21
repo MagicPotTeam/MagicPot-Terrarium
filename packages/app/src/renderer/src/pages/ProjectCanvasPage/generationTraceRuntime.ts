@@ -8,9 +8,10 @@ import {
   type GenerationTraceCandidateEntry,
   type GenerationTraceRecord
 } from './generationTraceStorage'
+import { createTimestampedSecureId } from './secureId'
 
 export function createGenerationTraceSessionId(): string {
-  return `generation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return createTimestampedSecureId('generation')
 }
 
 type BeginGenerationTraceSessionOptions = {
@@ -69,7 +70,7 @@ export function appendGenerationTraceCandidate(
     id:
       options.candidate.id?.trim() ||
       options.candidate.canvasItemId?.trim() ||
-      `candidate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      createTimestampedSecureId('candidate'),
     canvasItemId: options.candidate.canvasItemId,
     fileName: options.candidate.fileName,
     src: options.candidate.src,
