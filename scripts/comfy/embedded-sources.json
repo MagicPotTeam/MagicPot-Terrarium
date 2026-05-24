@@ -3,7 +3,7 @@
     {
       "name": "ComfyUI",
       "url": "https://github.com/Comfy-Org/ComfyUI.git",
-      "commit": "7c4d95d1bc2ef178937d203aa81070db0b172a92",
+      "commit": "ea62dc11c9a10dae52186fdcc3da033eb46018a1",
       "relativePath": "vendor/comfyui/ComfyUI"
     },
     {
@@ -40,13 +40,13 @@
     {
       "name": "ComfyUI-KJNodes",
       "url": "https://github.com/kijai/ComfyUI-KJNodes.git",
-      "commit": "7fa13228c4e3ad1d6b31f8db69a37fbee29f0851",
+      "commit": "450dc91069e28496bbd67bd657f820ef0cb8d5ba",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-KJNodes"
     },
     {
       "name": "ComfyUI-Manager",
       "url": "https://github.com/Comfy-Org/ComfyUI-Manager.git",
-      "commit": "a2c41a2a21ffff3c8f1dfc6da2010967ef87538e",
+      "commit": "88141919929379cc23e0379d27113f1b92b63b44",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager"
     },
     {
