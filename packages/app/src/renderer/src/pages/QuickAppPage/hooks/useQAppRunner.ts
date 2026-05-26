@@ -88,6 +88,32 @@ const summarizeGeneratedResults = (resultItems: ResultItem[]) => {
 const scopeResultItemsToProject = (resultItems: ResultItem[], projectId?: string): ResultItem[] =>
   projectId ? resultItems.map((item) => ({ ...item, projectId })) : resultItems
 
+const MAX_PROMPT_RESULT_KEY_COUNT = 200
+const activePromptResultKeys = new Set<string>()
+const handledPromptResultKeys = new Set<string>()
+
+const normalizePromptResultKeyPart = (value?: string): string => {
+  const trimmed = value?.trim()
+  return trimmed || 'default'
+}
+
+const buildPromptResultKey = (qAppKey: string, projectId: string | undefined, promptId: string) =>
+  [
+    normalizePromptResultKeyPart(projectId),
+    normalizePromptResultKeyPart(qAppKey),
+    normalizePromptResultKeyPart(promptId)
+  ].join(':')
+
+const rememberHandledPromptResultKey = (key: string): void => {
+  handledPromptResultKeys.add(key)
+  if (handledPromptResultKeys.size <= MAX_PROMPT_RESULT_KEY_COUNT) return
+
+  const oldestKey = handledPromptResultKeys.values().next().value
+  if (oldestKey) {
+    handledPromptResultKeys.delete(oldestKey)
+  }
+}
+
 export const useQAppRunner = (projectId?: string) => {
   const { t } = useTranslation()
   const {
@@ -115,72 +141,83 @@ export const useQAppRunner = (projectId?: string) => {
   const processPromptResult = useCallback(
     async (promptId: string, result: ComfyHistory) => {
       const qAppKey = currentQAppKey || ''
+      const promptResultKey = buildPromptResultKey(qAppKey, projectId, promptId)
 
-      if (result.status.status_str === 'error') {
-        clearPendingQAppRun(qAppKey, projectId)
-        setErrorPromptStatus(promptId, result.status)
-
-        for (const message of result.status.messages) {
-          if (message[0] === 'prompt_error') {
-            notifyError(
-              `${t('quickapp.generate.error')}: ${formatQAppErrorMessage(message[1].error.message)}`
-            )
-          }
-
-          if (message[0] === 'execution_error') {
-            notifyError(
-              `${t('quickapp.generate.error')}: ${formatQAppErrorMessage(
-                message[1].exception_message
-              )}`
-            )
-          }
-        }
-
+      if (handledPromptResultKeys.has(promptResultKey)) {
         return
       }
-
-      const resultItems = await transformResults(promptId, result, qAppCfg?.outputNodeIds)
-
-      if (!resultItems || resultItems.length === 0) {
-        clearPendingQAppRun(qAppKey, projectId)
-        notifyError('工作流执行完成，但没有生成任何输出。请检查工作流配置是否正确。')
-        return
-      }
-
-      const scopedResultItems = scopeResultItemsToProject(resultItems, projectId)
-      appendResults(scopedResultItems)
+      rememberHandledPromptResultKey(promptResultKey)
 
       try {
-        await writeSelectedLoraTriggerWordFiles({ formState, configUtils })
+        if (result.status.status_str === 'error') {
+          clearPendingQAppRun(qAppKey, projectId)
+          setErrorPromptStatus(promptId, result.status)
+
+          for (const message of result.status.messages) {
+            if (message[0] === 'prompt_error') {
+              notifyError(
+                `${t('quickapp.generate.error')}: ${formatQAppErrorMessage(message[1].error.message)}`
+              )
+            }
+
+            if (message[0] === 'execution_error') {
+              notifyError(
+                `${t('quickapp.generate.error')}: ${formatQAppErrorMessage(
+                  message[1].exception_message
+                )}`
+              )
+            }
+          }
+
+          return
+        }
+
+        const resultItems = await transformResults(promptId, result, qAppCfg?.outputNodeIds)
+
+        if (!resultItems || resultItems.length === 0) {
+          clearPendingQAppRun(qAppKey, projectId)
+          notifyError('工作流执行完成，但没有生成任何输出。请检查工作流配置是否正确。')
+          return
+        }
+
+        const scopedResultItems = scopeResultItemsToProject(resultItems, projectId)
+        appendResults(scopedResultItems)
+
+        try {
+          await writeSelectedLoraTriggerWordFiles({ formState, configUtils })
+        } catch (error) {
+          console.warn('[LoRA trigger words] failed to write sidecar files:', error)
+        }
+
+        const generationSessionId = readPendingQAppGenerationSessionId(qAppKey)
+        const canvasDispatchCounts = dispatchQAppResultsToCanvas(
+          scopedResultItems,
+          projectId,
+          generationSessionId ?? undefined
+        )
+
+        clearPendingQAppRun(qAppKey, projectId)
+
+        const summary = summarizeGeneratedResults(resultItems)
+        if (canvasDispatchCounts.totalCount > 0) {
+          notifySuccess(
+            summary
+              ? `跑完喽，已将 ${summary} 放进参考区。`
+              : `跑完喽，已生成 ${resultItems.length} 个结果。`
+          )
+        } else {
+          notifySuccess(
+            summary
+              ? `工作流执行完成，已生成 ${summary}。`
+              : `工作流执行完成，已生成 ${resultItems.length} 个结果。`
+          )
+        }
+
+        console.log(`${t('quickapp.generate.complete')} - 生成了 ${resultItems.length} 个结果`)
       } catch (error) {
-        console.warn('[LoRA trigger words] failed to write sidecar files:', error)
+        handledPromptResultKeys.delete(promptResultKey)
+        throw error
       }
-
-      const generationSessionId = readPendingQAppGenerationSessionId(qAppKey)
-      const canvasDispatchCounts = dispatchQAppResultsToCanvas(
-        scopedResultItems,
-        projectId,
-        generationSessionId ?? undefined
-      )
-
-      clearPendingQAppRun(qAppKey, projectId)
-
-      const summary = summarizeGeneratedResults(resultItems)
-      if (canvasDispatchCounts.totalCount > 0) {
-        notifySuccess(
-          summary
-            ? `跑完喽，已将 ${summary} 放进参考区。`
-            : `跑完喽，已生成 ${resultItems.length} 个结果。`
-        )
-      } else {
-        notifySuccess(
-          summary
-            ? `工作流执行完成，已生成 ${summary}。`
-            : `工作流执行完成，已生成 ${resultItems.length} 个结果。`
-        )
-      }
-
-      console.log(`${t('quickapp.generate.complete')} - 生成了 ${resultItems.length} 个结果`)
     },
     [
       appendResults,
@@ -257,10 +294,15 @@ export const useQAppRunner = (projectId?: string) => {
 
     const pendingRun = readPendingQAppRun(qAppKey, projectId)
     if (!pendingRun) return
+
+    const promptResultKey = buildPromptResultKey(qAppKey, projectId, pendingRun.promptId)
     if (recoveringPromptIdsRef.current.has(pendingRun.promptId)) return
+    if (activePromptResultKeys.has(promptResultKey)) return
+    if (handledPromptResultKeys.has(promptResultKey)) return
 
     let cancelled = false
     recoveringPromptIdsRef.current.add(pendingRun.promptId)
+    activePromptResultKeys.add(promptResultKey)
     setIsRunning(true)
 
     void (async () => {
@@ -274,6 +316,7 @@ export const useQAppRunner = (projectId?: string) => {
         }
       } finally {
         recoveringPromptIdsRef.current.delete(pendingRun.promptId)
+        activePromptResultKeys.delete(promptResultKey)
         if (!cancelled) {
           setIsRunning(false)
         }
@@ -282,6 +325,7 @@ export const useQAppRunner = (projectId?: string) => {
 
     return () => {
       cancelled = true
+      activePromptResultKeys.delete(promptResultKey)
     }
   }, [currentQAppKey, isConnected, notifyError, processPromptResult, projectId, setIsRunning, t])
 
@@ -319,16 +363,23 @@ export const useQAppRunner = (projectId?: string) => {
         })
       )
 
-      writePendingQAppRun({
-        promptId: prompt_id,
-        qAppKey: currentQAppKey || '',
-        projectId
-      })
+      const promptResultKey = buildPromptResultKey(currentQAppKey || '', projectId, prompt_id)
+      activePromptResultKeys.add(promptResultKey)
 
-      setIsRunning(false)
+      try {
+        writePendingQAppRun({
+          promptId: prompt_id,
+          qAppKey: currentQAppKey || '',
+          projectId
+        })
 
-      const result = await waitForQAppPromptResult(api().svcComfy, prompt_id)
-      await processPromptResult(prompt_id, result)
+        setIsRunning(false)
+
+        const result = await waitForQAppPromptResult(api().svcComfy, prompt_id)
+        await processPromptResult(prompt_id, result)
+      } finally {
+        activePromptResultKeys.delete(promptResultKey)
+      }
     } catch (error) {
       notifyError(`${t('quickapp.generate.error')}: ${formatQAppErrorMessage(error)}`)
     } finally {
