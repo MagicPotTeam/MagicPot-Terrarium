@@ -1,6 +1,6 @@
 {
   "name": "aiengineelectron",
-  "version": "1.0.107",
+  "version": "1.0.108",
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",
