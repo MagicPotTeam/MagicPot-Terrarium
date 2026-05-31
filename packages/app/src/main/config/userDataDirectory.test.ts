@@ -237,7 +237,7 @@ describe('userDataDirectory', () => {
   it('migrates legacy app-root data into the packaged default user data directory', async () => {
     appMock.isPackaged = true
     const appDataRoot = path.join(tempRoot, 'AppData', 'Roaming')
-    const installRoot = path.join(tempRoot, 'Programs', 'magicpot-pure')
+    const installRoot = path.join(tempRoot, 'Programs', 'magicpot')
     setResourcesPath(path.join(installRoot, 'resources'))
     appMock.getPath.mockImplementation((name: string) => {
       if (name === 'appData') {
@@ -277,7 +277,7 @@ describe('userDataDirectory', () => {
   it('honors a legacy app-root bootstrap custom userData override', async () => {
     appMock.isPackaged = true
     const appDataRoot = path.join(tempRoot, 'AppData', 'Roaming')
-    const installRoot = path.join(tempRoot, 'Programs', 'magicpot-pure')
+    const installRoot = path.join(tempRoot, 'Programs', 'magicpot')
     const customDataDir = path.join(tempRoot, 'StableUserData')
     setResourcesPath(path.join(installRoot, 'resources'))
     appMock.getPath.mockImplementation((name: string) => {

@@ -296,7 +296,31 @@
     "warranty_label": "Warranty",
     "warranty_text": "This program is provided AS IS, without warranty of any kind.",
     "developer_name": "MagicPotTeam",
-    "license_name": "AGPL-3.0"
+    "license_name": "AGPL-3.0",
+    "update": {
+      "title": "GitHub Updates",
+      "version_unknown": "unknown",
+      "detail_idle": "Packaged builds can check GitHub Releases.",
+      "detail_available": "Version {{version}} is available.",
+      "detail_downloaded": "Version {{version}} is ready to install.",
+      "detail_downloading": "Downloading {{percent}}%.",
+      "detail_not_available": "This app is up to date.",
+      "detail_unsupported": "Auto-update is available only in packaged builds.",
+      "action_check": "Check for updates",
+      "action_download": "Download update",
+      "action_install": "Restart and install",
+      "state": {
+        "idle": "Ready",
+        "unsupported": "Unavailable",
+        "checking": "Checking",
+        "available": "Available",
+        "not_available": "Up to date",
+        "downloading": "Downloading",
+        "downloaded": "Ready",
+        "installing": "Installing",
+        "error": "Error"
+      }
+    }
   },
   "terminal": {
     "title_ready": "Terminal is ready. Run a command to start...",

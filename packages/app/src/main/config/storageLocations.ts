@@ -100,20 +100,14 @@ function buildStandardInstallLocations(): StorageLocationSeed[] {
     return []
   }
 
+  const fileRootDir = path.join(localAppData, 'Programs', 'magicpot')
   return [
     {
-      id: 'standard-installed-pure',
-      kind: 'standard-installed-pure',
+      id: 'standard-installed',
+      kind: 'standard-installed',
       isCurrent: false,
-      userDataDir: path.join(localAppData, 'Programs', 'magicpot-pure', USER_DATA_DIRNAME),
-      fileRootDir: path.join(localAppData, 'Programs', 'magicpot-pure')
-    },
-    {
-      id: 'standard-installed-embedded',
-      kind: 'standard-installed-embedded',
-      isCurrent: false,
-      userDataDir: path.join(localAppData, 'Programs', 'magicpot-embedded', USER_DATA_DIRNAME),
-      fileRootDir: path.join(localAppData, 'Programs', 'magicpot-embedded')
+      userDataDir: path.join(fileRootDir, USER_DATA_DIRNAME),
+      fileRootDir
     }
   ]
 }

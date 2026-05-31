@@ -18,6 +18,7 @@ import { PysssssSvc, pysssssSvcDef } from './svcPysssss'
 import { QAppSvc, qAppSvcDef } from './svcQApp'
 import { ShellSvc, shellSvcDef } from './svcShell'
 import { StateSvc, stateSvcDef } from './svcState'
+import { AppUpdateSvc, appUpdateSvcDef } from './svcAppUpdate'
 import { apiExtensionDef, type ApiExtensionServices } from './extensionServices'
 
 export type BaseApi = {
@@ -40,6 +41,7 @@ export type BaseApi = {
   svcFs: FsSvc
   svcDccBridge: DccBridgeSvc
   svcDuplicateCheck: DuplicateCheckSvc
+  svcAppUpdate: AppUpdateSvc
 }
 
 export type Api = BaseApi & ApiExtensionServices
@@ -64,5 +66,6 @@ export const apiDef: ApiDefSheet<Api> = {
   svcFs: fsSvcDef,
   svcDccBridge: dccBridgeSvcDef,
   svcDuplicateCheck: duplicateCheckSvcDef,
+  svcAppUpdate: appUpdateSvcDef,
   ...apiExtensionDef
 }

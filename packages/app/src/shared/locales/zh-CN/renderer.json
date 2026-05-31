@@ -199,7 +199,31 @@
     "warranty_label": "担保",
     "warranty_text": "本程序按“原样”提供，不附带任何形式的担保。",
     "developer_name": "MagicPotTeam",
-    "license_name": "AGPL-3.0"
+    "license_name": "AGPL-3.0",
+    "update": {
+      "title": "GitHub 更新",
+      "version_unknown": "未知",
+      "detail_idle": "打包版可以检查 GitHub Release。",
+      "detail_available": "发现新版本 {{version}}。",
+      "detail_downloaded": "新版本 {{version}} 已准备安装。",
+      "detail_downloading": "正在下载 {{percent}}%。",
+      "detail_not_available": "当前已是最新版本。",
+      "detail_unsupported": "自动更新仅在打包版可用。",
+      "action_check": "检查更新",
+      "action_download": "下载更新",
+      "action_install": "重启并安装",
+      "state": {
+        "idle": "就绪",
+        "unsupported": "不可用",
+        "checking": "检查中",
+        "available": "可更新",
+        "not_available": "已最新",
+        "downloading": "\u4e0b\u8f7d\u4e2d",
+        "downloaded": "已下载",
+        "installing": "安装中",
+        "error": "错误"
+      }
+    }
   },
   "terminal": {
     "title_ready": "终端就绪，输入命令开始...",

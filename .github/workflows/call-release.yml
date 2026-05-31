@@ -30,6 +30,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: recursive
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -58,7 +59,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-embedded-python-
 
-      - name: Build package
+      - name: Build embedded package
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
@@ -66,6 +67,14 @@ jobs:
           npm run build:embedded
           npm run prepare:embedded
           npx cross-env PACKAGE_MODE=embedded npm run package:win -- --publish never
+
+      - name: Build pure package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          npm run build:pure
+          npx cross-env PACKAGE_MODE=pure npm run package:win -- --publish never
 
       - name: Prepare release assets
         shell: pwsh
@@ -76,22 +85,41 @@ jobs:
           New-Item -ItemType Directory -Force -Path $assetsDir | Out-Null
           Get-ChildItem -LiteralPath $assetsDir -Force | Remove-Item -Force
 
-          $archiveFiles = @(
+          $embeddedArchives = @(
             Get-ChildItem -LiteralPath 'dist/embedded' -File |
-              Where-Object { $_.Name -like '*-win.7z' -or $_.Name -like '*-win.zip' }
+              Where-Object { $_.Name -like 'magicpot-*-win.7z' }
           )
-          if ($archiveFiles.Count -ne 1) {
-            throw "Expected exactly one Windows archive, found $($archiveFiles.Count)"
+          if ($embeddedArchives.Count -ne 1) {
+            throw "Expected exactly one embedded Windows .7z archive, found $($embeddedArchives.Count)"
           }
 
-          $archive = $archiveFiles[0]
+          $pureSetups = @(
+            Get-ChildItem -LiteralPath 'dist/pure' -File |
+              Where-Object { $_.Name -like 'magicpot-*-setup.exe' }
+          )
+          if ($pureSetups.Count -ne 1) {
+            throw "Expected exactly one pure setup.exe, found $($pureSetups.Count)"
+          }
+
+          $pureBlockmaps = @(
+            Get-ChildItem -LiteralPath 'dist/pure' -File |
+              Where-Object { $_.Name -like 'magicpot-*-setup.exe.blockmap' }
+          )
+          if ($pureBlockmaps.Count -ne 1) {
+            throw "Expected exactly one pure setup.exe.blockmap, found $($pureBlockmaps.Count)"
+          }
+
+          $pureLatest = Get-Item -LiteralPath 'dist/pure/latest.yml'
+
+          $releaseFiles = @($embeddedArchives[0], $pureSetups[0], $pureBlockmaps[0], $pureLatest)
           [int64]$githubLimitBytes = [int64]2147483648
 
-          if ($archive.Length -ge $githubLimitBytes) {
-            throw "Windows archive exceeds GitHub's single-asset size limit: $($archive.Name) is $($archive.Length) bytes"
+          foreach ($releaseFile in $releaseFiles) {
+            if ($releaseFile.Length -ge $githubLimitBytes) {
+              throw "Release asset exceeds GitHub's single-asset size limit: $($releaseFile.Name) is $($releaseFile.Length) bytes"
+            }
+            Copy-Item -LiteralPath $releaseFile.FullName -Destination (Join-Path $assetsDir $releaseFile.Name)
           }
-
-          Copy-Item -LiteralPath $archive.FullName -Destination (Join-Path $assetsDir $archive.Name)
 
           Get-ChildItem -LiteralPath $assetsDir | Select-Object Name,Length
 
@@ -106,7 +134,9 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body: |
-            Windows embedded builds are distributed as single `.7z` archives.
+            Windows releases include:
+            - embedded `.7z` for first-time full runtime delivery
+            - `setup.exe`, `.blockmap`, and `latest.yml` for app-body auto-updates
           files: |
             dist/release-assets/*
         env:

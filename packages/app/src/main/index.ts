@@ -13,6 +13,7 @@ import { beforeQuit, beforeShow } from './lifeCycle'
 import { createMainWindow } from './mainWindow'
 import { startQAppWatcher, stopQAppWatcher } from './qApp/watcher'
 import { cleanupScreenshotManager, initScreenshotManager } from './screenshot/screenshotManager'
+import { initializeAppUpdateManager, isAppUpdateInstallInProgress } from './appUpdate/updateManager'
 
 const startupUserData = resolveStartupUserDataDirectory()
 fs.mkdirSync(startupUserData.path, { recursive: true })
@@ -73,6 +74,7 @@ function initializeWindowServices(): void {
   console.log('[App] 截图管理器已启动')
   startQAppWatcher(mainWindow)
   console.log('[App] 快应用目录监视已启动')
+  void initializeAppUpdateManager()
 }
 
 function openMainWindow(): void {
@@ -109,6 +111,12 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', async (event) => {
   console.log('[App] 应用即将退出...')
+  if (isAppUpdateInstallInProgress()) {
+    cleanupScreenshotManager()
+    stopQAppWatcher()
+    return
+  }
+
   event.preventDefault()
   cleanupScreenshotManager()
   stopQAppWatcher()

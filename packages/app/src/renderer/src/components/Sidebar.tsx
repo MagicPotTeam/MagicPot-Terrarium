@@ -11,7 +11,7 @@ import {
 } from '@mui/material'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PageType, getSidebarRoutes, getIdByPath, getPathById } from '../routes'
-import { BUILD_MODE, PACKAGE_VERSION } from '@shared/config/viteEnv'
+import { PACKAGE_VERSION } from '@shared/config/viteEnv'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { TransitionGroup } from 'react-transition-group'
 import SidebarCollapseProvider from './SidebarCollapseProvider'
@@ -231,7 +231,7 @@ const SidebarInner: React.FC = () => {
               whiteSpace: 'nowrap'
             }}
           >
-            Magic Pot {BUILD_MODE} {PACKAGE_VERSION}
+            Magic Pot {PACKAGE_VERSION}
           </Box>
         )}
       </Box>

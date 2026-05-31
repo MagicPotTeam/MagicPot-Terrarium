@@ -254,7 +254,7 @@ describe('svcStateImpl', () => {
     const tempRoot = await createNodeTestArtifactDir('state-storage')
     const currentDataDir = path.join(tempRoot, 'current-data')
     const currentFileRoot = path.join(tempRoot, 'current-root')
-    const installedRoot = path.join(tempRoot, 'LocalAppData', 'Programs', 'magicpot-pure')
+    const installedRoot = path.join(tempRoot, 'LocalAppData', 'Programs', 'magicpot')
     const installedDataDir = path.join(installedRoot, 'aiengineelectron')
     const oldLocalAppData = process.env['LOCALAPPDATA']
     try {
@@ -293,7 +293,7 @@ describe('svcStateImpl', () => {
       expect(response.locations).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            kind: 'standard-installed-pure',
+            kind: 'standard-installed',
             userDataDir: installedDataDir,
             configExists: true,
             qAppsExists: true,
@@ -316,7 +316,7 @@ describe('svcStateImpl', () => {
     const tempRoot = await createNodeTestArtifactDir('state-legacy-storage')
     const currentDataDir = path.join(tempRoot, 'current-data')
     const currentFileRoot = path.join(tempRoot, 'current-root')
-    const legacyRoot = path.join(tempRoot, 'Programs', 'magicpot-pure')
+    const legacyRoot = path.join(tempRoot, 'Programs', 'magicpot')
     const legacyDataDir = path.join(legacyRoot, 'aiengineelectron')
     const originalResourcesPath = process.resourcesPath
     Object.defineProperty(process, 'resourcesPath', {

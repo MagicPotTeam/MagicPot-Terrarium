@@ -186,7 +186,7 @@ export class ConfigUtils {
    */
   getQAppDir(): string {
     // 始终使用项目根目录的 qApps 文件夹（开发环境是 process.cwd()，生产环境是 resources 的父目录）
-    // 即用户请求的 Local/Programs/magicpot-pure 目录下
+    // 即用户请求的 Local/Programs/magicpot 目录下
     return this.path.join(this.buildEnv.pathMap.data, 'qApps')
   }
 

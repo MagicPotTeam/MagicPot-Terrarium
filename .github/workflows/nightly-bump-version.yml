@@ -41,7 +41,7 @@ jobs:
               RELEASE_NAME="Nightly Release ${RELEASE_DATE} - ${VERSION}"
               RELEASE_JSON=$(gh release view "release/${TAG_NAME}" \
                 --json isDraft,assets \
-                --jq '{isDraft: .isDraft, assetCount: (.assets | length)}' 2>/dev/null || true)
+                --jq '{isDraft: .isDraft, assetNames: [.assets[].name]}' 2>/dev/null || true)
 
               if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
                 echo "Latest release ${TAG_NAME} does not match package.json ${PACKAGE_VERSION}, ignoring it"
@@ -55,9 +55,19 @@ jobs:
                 exit 0
               else
                 IS_DRAFT=$(echo "$RELEASE_JSON" | jq -r '.isDraft')
-                ASSET_COUNT=$(echo "$RELEASE_JSON" | jq -r '.assetCount')
-                if [ "$IS_DRAFT" = "true" ] || [ "$ASSET_COUNT" -eq 0 ]; then
-                  echo "Latest release ${TAG_NAME} is incomplete, retrying without bumping"
+                MISSING_ASSETS=$(echo "$RELEASE_JSON" | jq -r '
+                  .assetNames as $names |
+                  [
+                    {"label":"embedded .7z","ok": any($names[]; test("^magicpot-.*-win\\.7z$"))},
+                    {"label":"setup.exe","ok": any($names[]; test("^magicpot-.*-setup\\.exe$"))},
+                    {"label":"blockmap","ok": any($names[]; test("^magicpot-.*-setup\\.exe\\.blockmap$"))},
+                    {"label":"latest.yml","ok": any($names[]; . == "latest.yml")}
+                  ] |
+                  map(select(.ok | not) | .label) |
+                  join(", ")
+                ')
+                if [ "$IS_DRAFT" = "true" ] || [ -n "$MISSING_ASSETS" ]; then
+                  echo "Latest release ${TAG_NAME} is incomplete, retrying without bumping. Missing: ${MISSING_ASSETS:-none}"
                   echo "release_mode=retry" >> "$GITHUB_OUTPUT"
                   echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
                   echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
