@@ -55,12 +55,32 @@ vi.mock('../api/svcLLMProxyImpl', () => ({
       return await chatMock(req)
     }
 
-    async listProfiles(): Promise<{ profiles: never[] }> {
-      return { profiles: [] }
+    async listProfiles(): Promise<{
+      profiles: Array<{
+        id: string
+        model_name: string
+        deployment?: 'cloud' | 'local'
+        model_use?: 'chat' | 'agent' | 'multimodal' | 'vision' | 'ocr' | 'image'
+        is_vision_model?: boolean
+        is_ocr_model?: boolean
+      }>
+    }> {
+      return {
+        profiles: [
+          {
+            id: 'agent-gpt',
+            model_name: 'GPT Remote',
+            deployment: 'cloud',
+            model_use: 'chat',
+            is_vision_model: false,
+            is_ocr_model: false
+          }
+        ]
+      }
     }
 
-    async serverStatus(): Promise<{ online: boolean }> {
-      return { online: true }
+    async serverStatus(): Promise<{ online: boolean; version: string; availableProfiles: number }> {
+      return { online: true, version: 'test', availableProfiles: 1 }
     }
   }
 }))
@@ -185,6 +205,20 @@ describe('LLM proxy server legacy compatibility', () => {
         ],
         access_token: ''
       },
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'agent-gpt',
+            model_name: 'GPT Remote',
+            base_url: 'https://api.openai.com/v1',
+            api_key: 'sk-test',
+            provider: 'openai',
+            deployment: 'cloud',
+            model_use: 'chat'
+          }
+        ]
+      },
       mcp_config: {
         ...DEFAULT_CONFIG.mcp_config,
         server: {
@@ -221,11 +255,53 @@ describe('LLM proxy server legacy compatibility', () => {
     expect(response.status).toBe(200)
     expect(body).toMatchObject({
       online: true,
+      ok: true,
+      status: 'online',
       compatibility: {
         endpoint: '/api/status',
         legacyEndpoint: '/api/bot/status',
-        chatEndpoint: '/api/chat'
+        chatEndpoint: '/api/chat',
+        legacyChatEndpoints: ['/api/bot/message', '/api/bot/chat', '/api/message'],
+        profileEndpoint: '/api/profiles'
+      },
+      profiles: [
+        expect.objectContaining({
+          id: 'agent-gpt',
+          profileId: 'agent-gpt',
+          modelName: 'GPT Remote',
+          base_url: '',
+          api_key: ''
+        })
+      ]
+    })
+  })
+
+  it('returns compatibility aliases from /api/profiles', async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/profiles`, {
+      headers: {
+        Authorization: 'Bearer proxy-secret'
       }
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(body).toMatchObject({
+      profiles: [
+        expect.objectContaining({
+          id: 'agent-gpt',
+          profileId: 'agent-gpt',
+          profile_id: 'agent-gpt',
+          model_name: 'GPT Remote',
+          modelName: 'GPT Remote',
+          name: 'GPT Remote',
+          label: 'GPT Remote',
+          base_url: '',
+          api_key: ''
+        })
+      ],
+      availableProfiles: [expect.objectContaining({ id: 'agent-gpt' })],
+      models: [expect.objectContaining({ id: 'agent-gpt' })],
+      data: [expect.objectContaining({ id: 'agent-gpt' })]
     })
   })
 

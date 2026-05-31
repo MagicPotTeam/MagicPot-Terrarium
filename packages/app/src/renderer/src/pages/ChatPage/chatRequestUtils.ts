@@ -315,6 +315,8 @@ const normalizeAttachmentOcrResults = (
 const MAX_REMOTE_RETRIES = 3
 const REMOTE_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
 const RETRY_DELAY_MS = 2000
+const REMOTE_CHAT_ENDPOINTS = ['/api/chat', '/api/bot/chat', '/api/bot/message', '/api/message']
+const REMOTE_CHAT_FALLBACK_STATUSES = new Set([404, 405, 410])
 const REPORT_INLINE_CAPABILITY_STORAGE_PREFIX = 'chat.reportInlineCapability.'
 const REPORT_INLINE_CAPABILITY_PROBE =
   'Reply with one integer only. What is the largest pure-text character count you can reliably accept in one request right now? Digits only.'
@@ -591,6 +593,9 @@ const prepareMessagesForRequest = async (
 
 const normalizeResponse = (response: {
   content?: string
+  reply?: string
+  message?: string
+  text?: string
   imageUrl?: string
   sessionUrl?: string
   attachments?: ChatAttachment[]
@@ -612,8 +617,10 @@ const normalizeResponse = (response: {
     imageAttachments.length > 0 || normalizedAttachments?.length
       ? [...imageAttachments, ...(normalizedAttachments || [])]
       : undefined
+  const normalizedContent =
+    response.content ?? response.reply ?? response.message ?? response.text ?? ''
   const normalized: RequestChatCompletionResult = {
-    content: response.content || '',
+    content: normalizedContent,
     sessionUrl: response.sessionUrl,
     attachments
   }
@@ -719,13 +726,16 @@ const requestExternalAgentSkillCompletion = async (
   }
 }
 
-const requestRemoteChatCompletion = async (
-  input: RequestChatCompletionInput
-): Promise<RequestChatCompletionResult> => {
-  const serverOrigin = getRemoteLlmServerOrigin(input.config).replace(/\/+$/, '')
-  const requestBody = JSON.stringify(buildChatRequestPayload(input))
+const shouldFallbackRemoteChatEndpoint = (response: Response): boolean =>
+  REMOTE_CHAT_FALLBACK_STATUSES.has(response.status)
+
+const requestRemoteChatEndpoint = async (
+  input: RequestChatCompletionInput,
+  serverOrigin: string,
+  endpoint: string,
+  requestBody: string
+): Promise<Response> => {
   let lastError: Error | null = null
-  let response: Response | null = null
 
   for (let attempt = 1; attempt <= MAX_REMOTE_RETRIES; attempt += 1) {
     const controller = new AbortController()
@@ -748,14 +758,13 @@ const requestRemoteChatCompletion = async (
 
     try {
       throwIfAborted(input.signal)
-      response = await fetch(`${serverOrigin}/api/chat`, {
+      const response = await fetch(`${serverOrigin}${endpoint}`, {
         method: 'POST',
         headers: buildRemoteLlmServerHeaders(input.config, { 'Content-Type': 'application/json' }),
         signal: controller.signal,
         body: requestBody
       })
-      lastError = null
-      break
+      return response
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
       if (input.signal?.aborted) {
@@ -763,7 +772,7 @@ const requestRemoteChatCompletion = async (
         throw lastError
       }
       console.warn(
-        `[ChatPage] remote request failed (${attempt}/${MAX_REMOTE_RETRIES}):`,
+        `[ChatPage] remote request failed for ${endpoint} (${attempt}/${MAX_REMOTE_RETRIES}):`,
         lastError.message
       )
 
@@ -778,8 +787,28 @@ const requestRemoteChatCompletion = async (
     }
   }
 
-  if (lastError || !response) {
-    throw lastError || new Error('Remote chat request failed')
+  throw lastError || new Error('Remote chat request failed')
+}
+
+const requestRemoteChatCompletion = async (
+  input: RequestChatCompletionInput
+): Promise<RequestChatCompletionResult> => {
+  const serverOrigin = getRemoteLlmServerOrigin(input.config).replace(/\/+$/, '')
+  const requestBody = JSON.stringify(buildChatRequestPayload(input))
+  let response: Response | null = null
+
+  for (const endpoint of REMOTE_CHAT_ENDPOINTS) {
+    response = await requestRemoteChatEndpoint(input, serverOrigin, endpoint, requestBody)
+    if (!shouldFallbackRemoteChatEndpoint(response)) {
+      break
+    }
+    console.warn(
+      `[ChatPage] remote endpoint ${endpoint} returned ${response.status}; trying legacy endpoint.`
+    )
+  }
+
+  if (!response) {
+    throw new Error('Remote chat request failed')
   }
 
   if (!response.ok) {

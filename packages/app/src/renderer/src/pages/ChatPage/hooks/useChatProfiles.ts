@@ -5,7 +5,8 @@ import {
   buildRemoteLlmServerErrorMessage,
   buildRemoteLlmServerHeaders,
   getRemoteLlmServerAccessToken,
-  getRemoteLlmServerOrigin
+  getRemoteLlmServerOrigin,
+  normalizeRemoteLlmProfiles
 } from '@renderer/utils/llmProfileUtils'
 
 /**
@@ -19,15 +20,17 @@ export function useChatProfiles(config: Config, isReady: boolean, enabled: boole
     [config]
   )
   const remoteLlmServerAccessToken = useMemo(() => getRemoteLlmServerAccessToken(config), [config])
+  const remoteLlmServerHeaders = useMemo(() => buildRemoteLlmServerHeaders(config), [config])
+  const useRemoteLlm = Boolean(config?.use_remote_llm)
 
   useEffect(() => {
-    if (!enabled || !config?.use_remote_llm) return
+    if (!enabled || !useRemoteLlm) return
 
     let cancelled = false
     const ac = new AbortController()
     const tid = setTimeout(() => ac.abort(), 30000)
     fetch(`${remoteLlmServerOrigin}/api/profiles`, {
-      headers: buildRemoteLlmServerHeaders(config),
+      headers: remoteLlmServerHeaders,
       signal: ac.signal
     })
       .then(async (res) => {
@@ -39,8 +42,7 @@ export function useChatProfiles(config: Config, isReady: boolean, enabled: boole
       .then((data) => {
         if (cancelled) return
         console.log('[ChatPage] Remote LLM profiles', data)
-        const profiles = data?.profiles || data || []
-        setRemoteProfiles(Array.isArray(profiles) ? profiles : [])
+        setRemoteProfiles(normalizeRemoteLlmProfiles(data))
       })
       .catch((err) => {
         if (cancelled) return
@@ -54,7 +56,14 @@ export function useChatProfiles(config: Config, isReady: boolean, enabled: boole
       ac.abort()
       clearTimeout(tid)
     }
-  }, [config?.use_remote_llm, enabled, remoteLlmServerAccessToken, remoteLlmServerOrigin, isReady])
+  }, [
+    enabled,
+    remoteLlmServerAccessToken,
+    remoteLlmServerHeaders,
+    remoteLlmServerOrigin,
+    isReady,
+    useRemoteLlm
+  ])
 
   const availableProfiles = useMemo(
     () => buildChatAvailableProfiles(config, remoteProfiles),

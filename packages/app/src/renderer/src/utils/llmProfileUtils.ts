@@ -12,6 +12,19 @@ export const getRemoteLlmServerOrigin = (config?: Config): string =>
 export const getRemoteLlmServerAccessToken = (config?: Config): string =>
   config?.remote_llm_server_config?.access_token?.trim() || ''
 
+const REMOTE_LLM_AUTH_HEADER_NAMES = [
+  'authorization',
+  'x-magicpot-proxy-token',
+  'x-magicpot-bot-secret',
+  'x-bot-secret'
+]
+
+const hasRemoteLlmAuthHeader = (headers: Record<string, string>): boolean =>
+  Object.entries(headers).some(
+    ([name, value]) =>
+      REMOTE_LLM_AUTH_HEADER_NAMES.includes(name.toLowerCase()) && value.trim().length > 0
+  )
+
 export const buildRemoteLlmServerHeaders = (
   config?: Config,
   headers: Record<string, string> = {}
@@ -21,14 +34,130 @@ export const buildRemoteLlmServerHeaders = (
     return headers
   }
 
-  if (headers.Authorization || headers.authorization) {
+  if (hasRemoteLlmAuthHeader(headers)) {
     return headers
   }
 
   return {
     ...headers,
-    Authorization: `Bearer ${token}`
+    Authorization: `Bearer ${token}`,
+    'X-MagicPot-Proxy-Token': token,
+    'X-MagicPot-Bot-Secret': token,
+    'X-Bot-Secret': token
   }
+}
+
+const isRemoteProfileRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const cleanRemoteProfileString = (value: unknown): string | undefined => {
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    return undefined
+  }
+
+  const normalized = String(value).trim()
+  return normalized || undefined
+}
+
+const collectRemoteProfileCandidatesFromMap = (value: Record<string, unknown>): unknown[] =>
+  Object.entries(value).map(([id, profile]) =>
+    isRemoteProfileRecord(profile)
+      ? { id, ...profile }
+      : { id, model_name: cleanRemoteProfileString(profile) || id }
+  )
+
+const collectRemoteProfileCandidates = (data: unknown): unknown[] => {
+  if (Array.isArray(data)) {
+    return data
+  }
+  if (!isRemoteProfileRecord(data)) {
+    return []
+  }
+
+  for (const key of ['profiles', 'availableProfiles', 'models', 'data']) {
+    const value = data[key]
+    if (Array.isArray(value)) {
+      return value
+    }
+    if (isRemoteProfileRecord(value)) {
+      return collectRemoteProfileCandidatesFromMap(value)
+    }
+  }
+
+  return []
+}
+
+const normalizeRemoteProfile = (profile: unknown): LLMAPIProfile | null => {
+  if (typeof profile === 'string' || typeof profile === 'number') {
+    const id = cleanRemoteProfileString(profile)
+    return id
+      ? {
+          id,
+          model_name: id,
+          base_url: '',
+          api_key: ''
+        }
+      : null
+  }
+  if (!isRemoteProfileRecord(profile)) {
+    return null
+  }
+
+  const id = cleanRemoteProfileString(
+    profile.id ?? profile.profileId ?? profile.profile_id ?? profile.model ?? profile.name
+  )
+  if (!id) {
+    return null
+  }
+
+  const modelName =
+    cleanRemoteProfileString(
+      profile.model_name ??
+        profile.modelName ??
+        profile.displayName ??
+        profile.label ??
+        profile.name ??
+        profile.model
+    ) || id
+
+  const passthroughProfile = { ...profile }
+  for (const aliasKey of [
+    'profileId',
+    'profile_id',
+    'modelName',
+    'displayName',
+    'label',
+    'name',
+    'model',
+    'baseUrl',
+    'apiKey'
+  ]) {
+    delete passthroughProfile[aliasKey]
+  }
+
+  return {
+    ...passthroughProfile,
+    id,
+    model_name: modelName,
+    base_url: cleanRemoteProfileString(profile.base_url ?? profile.baseUrl) || '',
+    api_key: cleanRemoteProfileString(profile.api_key ?? profile.apiKey) || ''
+  } as LLMAPIProfile
+}
+
+export const normalizeRemoteLlmProfiles = (data: unknown): LLMAPIProfile[] => {
+  const seen = new Set<string>()
+  const profiles: LLMAPIProfile[] = []
+
+  for (const candidate of collectRemoteProfileCandidates(data)) {
+    const profile = normalizeRemoteProfile(candidate)
+    if (!profile || seen.has(profile.id)) {
+      continue
+    }
+    seen.add(profile.id)
+    profiles.push(profile)
+  }
+
+  return profiles
 }
 
 const extractRemoteLlmServerErrorDetail = (bodyText?: string): string | undefined => {

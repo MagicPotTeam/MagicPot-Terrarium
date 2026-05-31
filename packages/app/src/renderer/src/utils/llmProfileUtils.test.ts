@@ -7,6 +7,7 @@ import {
   getProfileDisplayName,
   getRemoteLlmServerAccessToken,
   getRemoteLlmServerOrigin,
+  normalizeRemoteLlmProfiles,
   resolveAvailableChatProfileId
 } from './llmProfileUtils'
 
@@ -129,12 +130,15 @@ describe('llmProfileUtils helpers', () => {
     expect(getRemoteLlmServerAccessToken(config)).toBe('proxy-secret')
   })
 
-  it('injects a bearer token for remote server requests when configured', () => {
+  it('injects current and legacy proxy tokens for remote server requests when configured', () => {
     const config = createConfig()
     config.remote_llm_server_config.access_token = 'proxy-secret'
 
     expect(buildRemoteLlmServerHeaders(config)).toEqual({
-      Authorization: 'Bearer proxy-secret'
+      Authorization: 'Bearer proxy-secret',
+      'X-MagicPot-Proxy-Token': 'proxy-secret',
+      'X-MagicPot-Bot-Secret': 'proxy-secret',
+      'X-Bot-Secret': 'proxy-secret'
     })
     expect(
       buildRemoteLlmServerHeaders(config, {
@@ -142,7 +146,10 @@ describe('llmProfileUtils helpers', () => {
       })
     ).toEqual({
       'Content-Type': 'application/json',
-      Authorization: 'Bearer proxy-secret'
+      Authorization: 'Bearer proxy-secret',
+      'X-MagicPot-Proxy-Token': 'proxy-secret',
+      'X-MagicPot-Bot-Secret': 'proxy-secret',
+      'X-Bot-Secret': 'proxy-secret'
     })
     expect(
       buildRemoteLlmServerHeaders(config, {
@@ -150,6 +157,23 @@ describe('llmProfileUtils helpers', () => {
       })
     ).toEqual({
       Authorization: 'Bearer existing-token'
+    })
+    expect(
+      buildRemoteLlmServerHeaders(config, {
+        'X-Bot-Secret': 'legacy-token'
+      })
+    ).toEqual({
+      'X-Bot-Secret': 'legacy-token'
+    })
+    expect(
+      buildRemoteLlmServerHeaders(config, {
+        Authorization: ''
+      })
+    ).toEqual({
+      Authorization: 'Bearer proxy-secret',
+      'X-MagicPot-Proxy-Token': 'proxy-secret',
+      'X-MagicPot-Bot-Secret': 'proxy-secret',
+      'X-Bot-Secret': 'proxy-secret'
     })
   })
 
@@ -177,6 +201,42 @@ describe('llmProfileUtils helpers', () => {
         '{"message":"upstream exploded"}'
       )
     ).toContain('Server message: upstream exploded')
+  })
+
+  it('normalizes current and legacy remote profile response shapes', () => {
+    expect(
+      normalizeRemoteLlmProfiles({
+        profiles: [
+          { id: 'agent-gpt', model_name: 'GPT', deployment: 'cloud' },
+          { profileId: 'agent-claude', modelName: 'Claude' },
+          'agent-gemini',
+          { id: '' },
+          null
+        ]
+      })
+    ).toEqual([
+      {
+        id: 'agent-gpt',
+        model_name: 'GPT',
+        base_url: '',
+        api_key: '',
+        deployment: 'cloud'
+      },
+      { id: 'agent-claude', model_name: 'Claude', base_url: '', api_key: '' },
+      { id: 'agent-gemini', model_name: 'agent-gemini', base_url: '', api_key: '' }
+    ])
+
+    expect(
+      normalizeRemoteLlmProfiles({
+        availableProfiles: {
+          remoteOne: { modelName: 'Remote One' },
+          remoteTwo: 'Remote Two'
+        }
+      })
+    ).toEqual([
+      { id: 'remoteOne', model_name: 'Remote One', base_url: '', api_key: '' },
+      { id: 'remoteTwo', model_name: 'Remote Two', base_url: '', api_key: '' }
+    ])
   })
 
   it('returns a readable profile name fallback', () => {
