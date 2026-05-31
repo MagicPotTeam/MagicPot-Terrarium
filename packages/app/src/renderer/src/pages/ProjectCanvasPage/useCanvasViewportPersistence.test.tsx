@@ -267,7 +267,9 @@ describe('useCanvasViewportPersistence', () => {
 
     const firstMount = renderPersistenceHook()
 
-    expect(mockLoadCanvasItems).toHaveBeenCalledWith('canvas-route-return-test')
+    await waitFor(() => {
+      expect(mockLoadCanvasItems).toHaveBeenCalledWith('canvas-route-return-test')
+    })
 
     firstMount.unmount()
 
@@ -380,20 +382,22 @@ describe('useCanvasViewportPersistence', () => {
       await Promise.resolve()
     })
 
-    expect(
-      mockSaveCanvasItems.mock.calls.some(
-        ([savedItems, savedCanvasId]) =>
-          savedCanvasId === 'canvas-sync-test' &&
-          Array.isArray(savedItems) &&
-          savedItems.some(
-            (item) =>
-              typeof item === 'object' &&
-              item !== null &&
-              'id' in item &&
-              item.id === 'sync-image-1'
-          )
-      )
-    ).toBe(true)
+    await vi.waitFor(() => {
+      expect(
+        mockSaveCanvasItems.mock.calls.some(
+          ([savedItems, savedCanvasId]) =>
+            savedCanvasId === 'canvas-sync-test' &&
+            Array.isArray(savedItems) &&
+            savedItems.some(
+              (item) =>
+                typeof item === 'object' &&
+                item !== null &&
+                'id' in item &&
+                item.id === 'sync-image-1'
+            )
+        )
+      ).toBe(true)
+    })
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -496,6 +500,104 @@ describe('useCanvasViewportPersistence', () => {
       [],
       null
     )
+  })
+
+  it('waits for a pending save before restoring the same canvas after remount', async () => {
+    const canvasId = 'canvas-remount-pending-save-test'
+    const pendingSave = createDeferred<void>()
+    mockLoadCanvasItems.mockResolvedValue({
+      items: [],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+
+    const hydrateCanvasImageItemForCanvas = vi.fn(async (item: CanvasImageItem) => item)
+    const clampStageScale = (value: number) => value
+    const getCanvasItemsVisualBounds = () => null
+    const handleImportFiles = vi.fn()
+    const addModel3DToCanvas = vi.fn()
+    const addVideoToCanvas = vi.fn()
+
+    const renderPersistenceHook = () =>
+      renderHook(() => {
+        const [items, setItems] = React.useState<CanvasItem[]>([])
+        const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+        const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+        const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+        const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+        const [stageScale, setStageScale] = React.useState(1)
+        const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+        const nextZIndexRef = React.useRef(1)
+
+        useCanvasViewportPersistence({
+          config: DEFAULT_CONFIG,
+          canvasId,
+          items,
+          groups,
+          groupBranches,
+          selectedIds,
+          figmaBinding,
+          stagePos,
+          stageScale,
+          stageSize: { width: 1280, height: 720 },
+          maxFitStageScale: 2,
+          clampStageScale,
+          getCanvasItemsVisualBounds,
+          hydrateCanvasImageItemForCanvas,
+          nextZIndexRef,
+          setItems,
+          setItemsWithHistory: setItems,
+          setGroups,
+          setGroupBranches,
+          setSelectedIds,
+          setStagePos,
+          setStageScale,
+          setFigmaBinding,
+          handleImportFiles,
+          addModel3DToCanvas,
+          addVideoToCanvas
+        })
+
+        return { setItems }
+      })
+
+    const firstMount = renderPersistenceHook()
+
+    await waitFor(() => {
+      expect(mockLoadCanvasItems).toHaveBeenCalledWith(canvasId)
+    })
+    mockLoadCanvasItems.mockClear()
+    mockSaveCanvasItems.mockClear()
+    mockSaveCanvasItems.mockReturnValueOnce(pendingSave.promise).mockResolvedValue(undefined)
+
+    act(() => {
+      firstMount.result.current.setItems([createImageItem({ id: 'pending-save-image' })])
+    })
+
+    await waitFor(() => {
+      expect(mockSaveCanvasItems).toHaveBeenCalledWith(
+        [expect.objectContaining({ id: 'pending-save-image' })],
+        canvasId,
+        [],
+        [],
+        null
+      )
+    })
+
+    firstMount.unmount()
+    const secondMount = renderPersistenceHook()
+
+    expect(mockLoadCanvasItems).not.toHaveBeenCalled()
+
+    pendingSave.resolve()
+    await pendingSave.promise
+
+    await waitFor(() => {
+      expect(mockLoadCanvasItems).toHaveBeenCalledWith(canvasId)
+    })
+
+    secondMount.unmount()
   })
 
   it('defers automatic canvas saves while large image import is active', async () => {

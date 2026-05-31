@@ -75,7 +75,7 @@ describe('Model3DOverlay', () => {
     })
   })
 
-  it('revokes texture object URLs when they are replaced and when the overlay unmounts', async () => {
+  it('keeps imported texture object URLs alive across project tab unmounts', async () => {
     function Harness() {
       const [item, setItem] = React.useState<CanvasModel3DItem>(baseItem)
 
@@ -110,6 +110,45 @@ describe('Model3DOverlay', () => {
     })
     expect(URL.revokeObjectURL).not.toHaveBeenCalled()
 
+    unmount()
+
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('revokes replaced texture object URLs without revoking the current texture on unmount', async () => {
+    function Harness() {
+      const [item, setItem] = React.useState<CanvasModel3DItem>(baseItem)
+
+      return (
+        <Model3DOverlay
+          item={item}
+          isSelected={false}
+          stagePos={{ x: 0, y: 0 }}
+          stageScale={1}
+          onSelect={vi.fn()}
+          onUpdateTextures={(_, textures) => {
+            setItem((previousItem) => ({ ...previousItem, textures }))
+          }}
+        />
+      )
+    }
+
+    const { unmount } = render(<Harness />)
+
+    fireEvent.click(screen.getByRole('button', { name: /import textures/i }))
+    expect(createdInput).not.toBeNull()
+    Object.defineProperty(createdInput, 'files', {
+      configurable: true,
+      value: [new File(['first'], 'albedo.png', { type: 'image/png' })]
+    })
+    await act(async () => {
+      createdInput?.onchange?.(new Event('change'))
+    })
+
+    await waitFor(() => {
+      expect(URL.createObjectURL).toHaveBeenCalledTimes(1)
+    })
+
     fireEvent.click(screen.getByRole('button', { name: /import textures/i }))
     expect(createdInput).not.toBeNull()
     Object.defineProperty(createdInput, 'files', {
@@ -126,6 +165,6 @@ describe('Model3DOverlay', () => {
 
     unmount()
 
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:texture-2')
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith('blob:texture-2')
   })
 })
