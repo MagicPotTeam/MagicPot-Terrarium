@@ -8,6 +8,15 @@ const appMock = {
   isPackaged: false
 }
 
+const originalResourcesPath = process.resourcesPath
+
+function setResourcesPath(value: string | undefined): void {
+  Object.defineProperty(process, 'resourcesPath', {
+    configurable: true,
+    value
+  })
+}
+
 vi.mock('electron', () => ({
   app: appMock
 }))
@@ -25,6 +34,7 @@ describe('userDataDirectory', () => {
     tempRoot = await createNodeTestArtifactDir('user-data-directory')
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(tempRoot)
     appMock.isPackaged = false
+    setResourcesPath(path.join(tempRoot, 'resources'))
     appMock.getPath.mockImplementation((name: string) => {
       if (name === 'desktop') {
         return path.join(tempRoot, 'Desktop')
@@ -46,6 +56,7 @@ describe('userDataDirectory', () => {
     delete process.env['MAGICPOT_TEST_DESKTOP_PATH']
     delete process.env['MAGICPOT_TEST_RUN_ID']
     appMock.getPath.mockReset()
+    setResourcesPath(originalResourcesPath)
     cwdSpy?.mockRestore()
     cwdSpy = null
     await fs.rm(tempRoot, { recursive: true, force: true })
@@ -198,6 +209,101 @@ describe('userDataDirectory', () => {
         'userData'
       ),
       source: 'default'
+    })
+  })
+
+  it('keeps packaged default user data outside the installation directory', async () => {
+    appMock.isPackaged = true
+    appMock.getPath.mockImplementation((name: string) => {
+      if (name === 'appData') {
+        return path.join(tempRoot, 'AppData', 'Roaming')
+      }
+      if (name === 'desktop') {
+        return path.join(tempRoot, 'Desktop')
+      }
+      if (name === 'temp') {
+        return path.join(tempRoot, 'Temp')
+      }
+      throw new Error(`Unexpected app.getPath(${name})`)
+    })
+
+    const module = await loadModule()
+
+    expect(module.getDefaultUserDataDirectory()).toBe(
+      path.join(tempRoot, 'AppData', 'Roaming', 'MagicPot', 'aiengineelectron')
+    )
+  })
+
+  it('migrates legacy app-root data into the packaged default user data directory', async () => {
+    appMock.isPackaged = true
+    const appDataRoot = path.join(tempRoot, 'AppData', 'Roaming')
+    const installRoot = path.join(tempRoot, 'Programs', 'magicpot-pure')
+    setResourcesPath(path.join(installRoot, 'resources'))
+    appMock.getPath.mockImplementation((name: string) => {
+      if (name === 'appData') {
+        return appDataRoot
+      }
+      if (name === 'desktop') {
+        return path.join(tempRoot, 'Desktop')
+      }
+      if (name === 'temp') {
+        return path.join(tempRoot, 'Temp')
+      }
+      throw new Error(`Unexpected app.getPath(${name})`)
+    })
+
+    const legacyDataDir = path.join(installRoot, 'aiengineelectron')
+    const defaultDataDir = path.join(appDataRoot, 'MagicPot', 'aiengineelectron')
+    await fs.mkdir(path.join(legacyDataDir, 'customSkills'), { recursive: true })
+    await fs.writeFile(path.join(legacyDataDir, 'config.json'), '{"api":true}', 'utf8')
+    await fs.writeFile(
+      path.join(legacyDataDir, 'customSkills', 'agent.skill.json'),
+      '{"skill":true}',
+      'utf8'
+    )
+
+    const module = await loadModule()
+    const resolved = module.resolveStartupUserDataDirectory()
+    const secondResolved = module.resolveStartupUserDataDirectory()
+
+    expect(resolved).toEqual({ path: defaultDataDir, source: 'default' })
+    expect(secondResolved).toEqual({ path: defaultDataDir, source: 'default' })
+    expect(await fs.readFile(path.join(defaultDataDir, 'config.json'), 'utf8')).toBe('{"api":true}')
+    expect(
+      await fs.readFile(path.join(defaultDataDir, 'customSkills', 'agent.skill.json'), 'utf8')
+    ).toBe('{"skill":true}')
+  })
+
+  it('honors a legacy app-root bootstrap custom userData override', async () => {
+    appMock.isPackaged = true
+    const appDataRoot = path.join(tempRoot, 'AppData', 'Roaming')
+    const installRoot = path.join(tempRoot, 'Programs', 'magicpot-pure')
+    const customDataDir = path.join(tempRoot, 'StableUserData')
+    setResourcesPath(path.join(installRoot, 'resources'))
+    appMock.getPath.mockImplementation((name: string) => {
+      if (name === 'appData') {
+        return appDataRoot
+      }
+      if (name === 'desktop') {
+        return path.join(tempRoot, 'Desktop')
+      }
+      if (name === 'temp') {
+        return path.join(tempRoot, 'Temp')
+      }
+      throw new Error(`Unexpected app.getPath(${name})`)
+    })
+    await fs.mkdir(path.join(installRoot, 'aiengineelectron'), { recursive: true })
+    await fs.writeFile(
+      path.join(installRoot, 'aiengineelectron', 'user-data-bootstrap.json'),
+      JSON.stringify({ customUserDataDir: customDataDir }),
+      'utf8'
+    )
+
+    const module = await loadModule()
+
+    expect(module.resolveStartupUserDataDirectory()).toEqual({
+      path: path.resolve(customDataDir),
+      source: 'persisted'
     })
   })
 })

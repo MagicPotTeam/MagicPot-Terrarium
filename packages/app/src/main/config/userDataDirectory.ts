@@ -10,7 +10,9 @@ import {
 } from '../testUiPolicy'
 import {
   getDefaultPortableUserDataDirectory,
+  getLegacyPortableUserDataDirectory,
   getPortableUserDataBootstrapPath,
+  getPortableUserDataBootstrapPaths,
   USER_DATA_BOOTSTRAP_FILENAME,
   USER_DATA_OVERRIDE_ENV
 } from './portablePaths'
@@ -105,6 +107,18 @@ function copyDirectorySync(sourceDir: string, targetDir: string): void {
   }
 }
 
+function directoryHasEntriesSync(targetPath: string): boolean {
+  if (!pathExistsSync(targetPath)) {
+    return false
+  }
+
+  try {
+    return fs.statSync(targetPath).isDirectory() && fs.readdirSync(targetPath).length > 0
+  } catch {
+    return false
+  }
+}
+
 function getBootstrapFilePath(): string {
   return getPortableUserDataBootstrapPath()
 }
@@ -118,21 +132,29 @@ async function ensureBootstrapParent(): Promise<void> {
 }
 
 function readBootstrapSync(): BootstrapState {
-  const bootstrapPath = getBootstrapFilePath()
-  if (!pathExistsSync(bootstrapPath)) {
-    return {}
+  for (const bootstrapPath of getPortableUserDataBootstrapPaths()) {
+    if (!pathExistsSync(bootstrapPath)) {
+      continue
+    }
+
+    try {
+      const raw = JSON.parse(sanitizeText(fs.readFileSync(bootstrapPath, 'utf8'))) as BootstrapState
+      const normalized = {
+        customUserDataDir: cleanPath(raw.customUserDataDir) ?? undefined,
+        pendingMigrationFrom: cleanPath(raw.pendingMigrationFrom) ?? undefined
+      }
+      if (normalized.customUserDataDir || normalized.pendingMigrationFrom) {
+        if (!isSamePath(bootstrapPath, getBootstrapFilePath())) {
+          writeBootstrapSync(normalized)
+        }
+        return normalized
+      }
+    } catch (error) {
+      console.error(`[UserData] Failed to read bootstrap file ${bootstrapPath}:`, error)
+    }
   }
 
-  try {
-    const raw = JSON.parse(sanitizeText(fs.readFileSync(bootstrapPath, 'utf8'))) as BootstrapState
-    return {
-      customUserDataDir: cleanPath(raw.customUserDataDir) ?? undefined,
-      pendingMigrationFrom: cleanPath(raw.pendingMigrationFrom) ?? undefined
-    }
-  } catch (error) {
-    console.error('[UserData] Failed to read bootstrap file:', error)
-    return {}
-  }
+  return {}
 }
 
 function writeBootstrapSync(state: BootstrapState): void {
@@ -228,6 +250,29 @@ function maybeMigratePendingDataSync(bootstrap: BootstrapState): void {
   writeBootstrapSync({ customUserDataDir: bootstrap.customUserDataDir })
 }
 
+function maybeMigrateLegacyDefaultDataSync(): void {
+  const legacyDir = getLegacyPortableUserDataDirectory()
+  if (!legacyDir || !directoryHasEntriesSync(legacyDir)) {
+    return
+  }
+
+  const defaultDir = getDefaultUserDataDirectory()
+  if (
+    isSamePath(legacyDir, defaultDir) ||
+    classifyDirectorySync(defaultDir) === 'existing-user-data'
+  ) {
+    return
+  }
+
+  fs.mkdirSync(defaultDir, { recursive: true })
+  copyDirectorySync(legacyDir, defaultDir)
+}
+
+function resolveDefaultUserDataDirectoryWithMigration(): string {
+  maybeMigrateLegacyDefaultDataSync()
+  return getDefaultUserDataDirectory()
+}
+
 function resolveAutomatedUserDataRoot(): string | null {
   const testUiPolicy = resolveTestUiPolicy(readTestUiEnv())
   if (!testUiPolicy.automatedRun) {
@@ -296,7 +341,7 @@ export function resolveStartupUserDataDirectory(): ResolvedStartupUserDataDirect
     return { path: persistedPath, source: 'persisted' }
   }
 
-  return { path: getDefaultUserDataDirectory(), source: 'default' }
+  return { path: resolveDefaultUserDataDirectoryWithMigration(), source: 'default' }
 }
 
 export function getCurrentUserDataDirectoryState(

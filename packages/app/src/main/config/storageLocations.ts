@@ -6,7 +6,7 @@ import type { BuildEnv } from '@shared/config/buildEnv'
 import type { Config } from '@shared/config/config'
 import { getBuildEnv } from './buildEnv'
 import { getConfig } from './config'
-import { DEV_USER_DATA_DIRNAME } from './portablePaths'
+import { DEV_USER_DATA_DIRNAME, getLegacyPortableUserDataDirectory } from './portablePaths'
 import { getDefaultUserDataDirectory } from './userDataDirectory'
 
 const USER_DATA_DIRNAME = 'aiengineelectron'
@@ -70,8 +70,27 @@ function buildDefaultLocation(buildEnv: BuildEnv): StorageLocationSeed {
     id: 'default-production',
     kind: 'default-production',
     isCurrent: false,
-    userDataDir: path.join(fileRootDir, USER_DATA_DIRNAME),
+    userDataDir: getDefaultUserDataDirectory(),
     fileRootDir
+  }
+}
+
+function buildLegacyAppRootLocation(buildEnv: BuildEnv): StorageLocationSeed | null {
+  if (buildEnv.env.build === 'development') {
+    return null
+  }
+
+  const legacyDir = getLegacyPortableUserDataDirectory()
+  if (!legacyDir) {
+    return null
+  }
+
+  return {
+    id: 'legacy-app-root',
+    kind: 'legacy-app-root',
+    isCurrent: false,
+    userDataDir: legacyDir,
+    fileRootDir: path.join(process.resourcesPath, '..')
   }
 }
 
@@ -189,8 +208,9 @@ export async function getStorageLocations(): Promise<StorageLocationSnapshot[]> 
   const seeds = [
     buildCurrentLocation(config, buildEnv),
     buildDefaultLocation(buildEnv),
+    buildLegacyAppRootLocation(buildEnv),
     ...buildStandardInstallLocations()
-  ]
+  ].filter((seed): seed is StorageLocationSeed => Boolean(seed))
 
   for (const seed of seeds) {
     const key = normalizePathKey(seed.userDataDir)

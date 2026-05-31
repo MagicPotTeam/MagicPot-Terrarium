@@ -52,6 +52,7 @@ export type StorageLocationKind =
   | 'current-override'
   | 'default-development'
   | 'default-production'
+  | 'legacy-app-root'
   | 'standard-installed-pure'
   | 'standard-installed-embedded'
 

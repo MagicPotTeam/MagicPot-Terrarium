@@ -10,6 +10,7 @@ import { BuildEnv, DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import * as buildEnv from '../config/buildEnv'
 import * as mcpRuntime from '../mcp/runtime'
 import * as userDataDirectory from '../config/userDataDirectory'
+import * as portablePaths from '../config/portablePaths'
 import * as llmProxyServer from '../llmProxy/server'
 import * as llmProxyAccessUsage from '../llmProxy/accessUsage'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
@@ -38,6 +39,14 @@ vi.mock(import('../config/userDataDirectory'), () => {
     getCurrentUserDataDirectoryState: vi.fn(),
     getDefaultUserDataDirectory: vi.fn(),
     prepareUserDataDirectoryChange: vi.fn()
+  }
+})
+
+vi.mock(import('../config/portablePaths'), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    getLegacyPortableUserDataDirectory: vi.fn()
   }
 })
 
@@ -270,6 +279,7 @@ describe('svcStateImpl', () => {
         }
       })
       vi.mocked(userDataDirectory.getDefaultUserDataDirectory).mockReturnValue(currentDataDir)
+      vi.mocked(portablePaths.getLegacyPortableUserDataDirectory).mockReturnValue(null)
 
       const svcStateImpl = new StateSvcImpl()
       const response = await svcStateImpl.getStorageLocations({})
@@ -298,6 +308,57 @@ describe('svcStateImpl', () => {
         process.env['LOCALAPPDATA'] = oldLocalAppData
       }
 
+      await fs.rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('should list legacy app-root user data when present', async () => {
+    const tempRoot = await createNodeTestArtifactDir('state-legacy-storage')
+    const currentDataDir = path.join(tempRoot, 'current-data')
+    const currentFileRoot = path.join(tempRoot, 'current-root')
+    const legacyRoot = path.join(tempRoot, 'Programs', 'magicpot-pure')
+    const legacyDataDir = path.join(legacyRoot, 'aiengineelectron')
+    const originalResourcesPath = process.resourcesPath
+    Object.defineProperty(process, 'resourcesPath', {
+      configurable: true,
+      value: path.join(legacyRoot, 'resources')
+    })
+    try {
+      await fs.mkdir(currentDataDir, { recursive: true })
+      await fs.mkdir(path.join(legacyDataDir, 'customSkills'), { recursive: true })
+      await fs.writeFile(path.join(legacyDataDir, 'config.json'), '{}', 'utf8')
+
+      mockConfig({})
+      mockBuildEnv({
+        env: {
+          build: 'prod'
+        },
+        pathMap: {
+          data: currentDataDir,
+          file: currentFileRoot
+        }
+      })
+      vi.mocked(userDataDirectory.getDefaultUserDataDirectory).mockReturnValue(currentDataDir)
+      vi.mocked(portablePaths.getLegacyPortableUserDataDirectory).mockReturnValue(legacyDataDir)
+
+      const svcStateImpl = new StateSvcImpl()
+      const response = await svcStateImpl.getStorageLocations({})
+
+      expect(response.locations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'legacy-app-root',
+            userDataDir: legacyDataDir,
+            configExists: true,
+            customSkillsExists: true
+          })
+        ])
+      )
+    } finally {
+      Object.defineProperty(process, 'resourcesPath', {
+        configurable: true,
+        value: originalResourcesPath
+      })
       await fs.rm(tempRoot, { recursive: true, force: true })
     }
   })
