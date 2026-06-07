@@ -6,8 +6,8 @@
  *
  * Priority:
  * 1. Configured download directory: <download_dir>/.chat_media/
- * 2. ComfyUI output folder (if exists): <appDir>/vendor/comfyui/ComfyUI/output/.chat_media/
- * 3. Fallback: <appDir>/.chat_media/
+ * 2. Automated test artifact directory
+ * 3. Fallback: <userData>/.chat_media/
  */
 
 import path from 'path'
@@ -65,19 +65,7 @@ export const resolveBaseChatMediaDir = (): string => {
   }
 
   if (!cachedBaseMediaDir) {
-    const appDir = app.isPackaged
-      ? path.dirname(app.getPath('exe'))
-      : path.resolve(app.getAppPath(), '..')
-    const comfyRuntimeRoots = app.isPackaged
-      ? ['ComfyUI_windows_portable']
-      : [path.join('vendor', 'comfyui'), 'ComfyUI_windows_portable']
-    const comfyOutputDir = comfyRuntimeRoots
-      .map((runtimeRoot) => path.join(appDir, runtimeRoot, 'ComfyUI', 'output'))
-      .find((candidate) => fs.existsSync(candidate))
-
-    cachedBaseMediaDir = comfyOutputDir
-      ? path.join(comfyOutputDir, CHAT_MEDIA_ROOT_DIR)
-      : path.join(appDir, CHAT_MEDIA_ROOT_DIR)
+    cachedBaseMediaDir = path.join(app.getPath('userData'), CHAT_MEDIA_ROOT_DIR)
   }
 
   if (!fs.existsSync(cachedBaseMediaDir)) {

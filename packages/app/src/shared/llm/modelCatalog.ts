@@ -45,6 +45,26 @@ const OLLAMA_VISION_MODEL_NAMES = [
   'internvl3:8b'
 ] as const
 
+const KLING_VIDEO_MODEL_NAMES = [
+  'kling-v3',
+  'kling-v2-6',
+  'kling-v2-5-turbo',
+  'kling-v2-1-master',
+  'kling-v2-1',
+  'kling-v2-master',
+  'kling-v1-6',
+  'kling-v1-5',
+  'kling-v1'
+] as const
+
+const VOLCENGINE_VIDEO_MODEL_NAMES = [
+  'doubao-seedance-2-0-260128',
+  'doubao-seedance-2-0-fast-260128',
+  'doubao-seedance-1-5-pro-251215',
+  'doubao-seedance-1-0-pro-250528',
+  'doubao-seedance-1-0-pro-fast-251015'
+] as const
+
 const normalizeCatalogValue = (value: string): string => value.trim()
 
 const toOption = (
@@ -124,6 +144,14 @@ export function getSuggestedModelCatalog(options: {
 
   if (options.provider === 'gemini') {
     return toOptions(GEMINI_MODEL_NAMES)
+  }
+
+  if (options.provider === 'kling') {
+    return options.modelUse === 'video' ? toOptions(KLING_VIDEO_MODEL_NAMES) : []
+  }
+
+  if (options.provider === 'volcengine') {
+    return options.modelUse === 'video' ? toOptions(VOLCENGINE_VIDEO_MODEL_NAMES) : []
   }
 
   if (options.provider === 'ollama') {

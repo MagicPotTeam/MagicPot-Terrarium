@@ -8,6 +8,7 @@ import QAppMenu, { QAppCategory } from './QAppMenu'
 const setCurrentQAppKeyMock = vi.fn()
 const navigateMock = vi.fn()
 const listQAppCfgsMock = vi.fn()
+const getQAppCfgMock = vi.fn()
 const deleteQAppMock = vi.fn(() => Promise.resolve({ success: true }))
 const { mockLayoutState } = vi.hoisted(() => ({
   mockLayoutState: {
@@ -111,7 +112,7 @@ vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
     svcQApp: {
       listQAppCfgs: listQAppCfgsMock,
-      getQAppCfg: vi.fn(),
+      getQAppCfg: getQAppCfgMock,
       saveQAppCfg: vi.fn(),
       deleteQApp: deleteQAppMock,
       renameQAppCfg: vi.fn()
@@ -127,7 +128,8 @@ vi.mock('react-i18next', () => ({
           'workspace.hunyuan_hint_title': 'Hunyuan3D lives in Quick Apps',
           'workspace.hunyuan_hint':
             'Select Hunyuan3D from the right-side Quick Apps list. Its Tencent Cloud credentials are configured in Settings > Quick App API.',
-          'qapp.names.hunyuan3d_quick_app': 'Hunyuan3D'
+          'qapp.names.hunyuan3d_quick_app': 'Hunyuan3D',
+          'qapp.names.ai_video_generation': 'AI Video Generation'
         }) as Record<string, string>
       )[key] ?? key
   })
@@ -208,6 +210,7 @@ beforeEach(() => {
   setCurrentQAppKeyMock.mockClear()
   navigateMock.mockClear()
   listQAppCfgsMock.mockReset()
+  getQAppCfgMock.mockReset()
   deleteQAppMock.mockReset()
   mockLayoutState.openTabs = []
   mockLayoutState.activeTabId = undefined
@@ -215,6 +218,7 @@ beforeEach(() => {
   listQAppCfgsMock.mockResolvedValue({
     qApps: defaultQApps
   })
+  getQAppCfgMock.mockResolvedValue({ cfg: {}, workflow: {} })
   deleteQAppMock.mockResolvedValue({ success: true })
 })
 
@@ -255,6 +259,32 @@ describe('QAppMenu', () => {
 
     expect(await screen.findByText('概念设计')).toBeTruthy()
     expect(await screen.findByText('格式转换')).toBeTruthy()
+  })
+
+  it('selects the protected built-in video-generation quick app without calling svcQApp.getQAppCfg', async () => {
+    renderMenu('video')
+
+    const videoButton = await screen.findByRole('button', { name: 'AI Video Generation' })
+    expect(videoButton).toBeTruthy()
+
+    fireEvent.click(videoButton)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(setCurrentQAppKeyMock).toHaveBeenCalledWith('~builtin/video-generation')
+    expect(getQAppCfgMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps the built-in video-generation quick app visible in project video category selections', async () => {
+    mockLayoutState.activeTabId = 'tab-project-video'
+    localStorage.setItem('qapp.selected.tab-project-video', JSON.stringify(['alpha']))
+
+    renderMenu('video')
+
+    expect(await screen.findByRole('button', { name: 'AI Video Generation' })).toBeTruthy()
+    expect(screen.queryByText('Wan2_2_T2V')).toBeNull()
   })
 
   it('uses explicit quick app categories instead of falling back to name heuristics', async () => {

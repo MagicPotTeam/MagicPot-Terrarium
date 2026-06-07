@@ -8,10 +8,13 @@ import { guessMimeTypeFromFileName } from '@renderer/utils/fileDisplay'
 import { BUILT_IN_TAGGING_SKILL_ID } from './builtInSkills'
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
+const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.m4v']
 const IMAGE_PROTOCOLS = new Set(['http:', 'https:', 'file:', 'local-media:'])
 const MARKDOWN_IMAGE_REGEX =
   /!\[.*?\]\(((?:https?:\/\/|file:\/\/|local-media:\/\/|data:image\/)[^)]+)\)/g
 const MARKDOWN_MODEL_REGEX = /\[(?:Generated 3D Model|3D Model|Model)\]\(([^)]+)\)/gi
+const MARKDOWN_VIDEO_REGEX =
+  /\[(?:Generated Video|Video)\]\(((?:https?:\/\/|file:\/\/|local-media:\/\/)[^)]+)\)/gi
 const MARKDOWN_FILE_REGEX = /\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|local-media:\/\/)[^)]+)\)/g
 const HUNYUAN_ARTIFACT_REGEX =
   /^\[Hunyuan3D\]\s+(model|video|image|file):\s+type=([A-Za-z_]+)\s+url=([^\s]+)\s*$/gim
@@ -56,6 +59,20 @@ const isGenericFileUrl = (url: string): boolean => {
   }
 }
 
+const isVideoUrl = (url: string): boolean => {
+  try {
+    const parsedUrl = new URL(url)
+    if (!['http:', 'https:', 'file:', 'local-media:'].includes(parsedUrl.protocol)) {
+      return false
+    }
+
+    const pathname = parsedUrl.pathname.toLowerCase()
+    return VIDEO_EXTENSIONS.some((extension) => pathname.includes(extension))
+  } catch {
+    return false
+  }
+}
+
 const hasExplicitFileExtension = (value: string): boolean => {
   const trimmed = value.trim()
   const lastDot = trimmed.lastIndexOf('.')
@@ -94,6 +111,40 @@ const collectModelAttachments = (response: string): ChatAttachment[] => {
       url: match[1],
       fileName: getDownloadFileNameFromUrl(match[1], 'model.glb')
     })
+  }
+
+  return attachments
+}
+
+const createVideoAttachment = (url: string): ChatAttachment => {
+  const fileName = getDownloadFileNameFromUrl(url, 'video.mp4')
+  return {
+    type: 'video',
+    url,
+    fileName,
+    mimeType: guessMimeTypeFromFileName(fileName, 'video/mp4')
+  }
+}
+
+const collectVideoAttachments = (response: string): ChatAttachment[] => {
+  const attachments: ChatAttachment[] = []
+  MARKDOWN_VIDEO_REGEX.lastIndex = 0
+  let match: RegExpExecArray | null = null
+
+  while ((match = MARKDOWN_VIDEO_REGEX.exec(response)) !== null) {
+    attachments.push(createVideoAttachment(match[1]))
+  }
+
+  MARKDOWN_FILE_REGEX.lastIndex = 0
+  while ((match = MARKDOWN_FILE_REGEX.exec(response)) !== null) {
+    const linkText = match[1]
+    const url = match[2]
+    if (
+      isVideoUrl(url) ||
+      VIDEO_EXTENSIONS.some((extension) => linkText.toLowerCase().endsWith(extension))
+    ) {
+      attachments.push(createVideoAttachment(url))
+    }
   }
 
   return attachments
@@ -179,8 +230,8 @@ const collectFileAttachments = (response: string): ChatAttachment[] => {
   while ((match = MARKDOWN_FILE_REGEX.exec(response)) !== null) {
     const linkText = match[1]
     const url = match[2]
-    // Skip if it is an image or 3D model (those are handled separately)
-    if (isImageUrl(url) || isModel3DUrl(url)) continue
+    // Skip if it is an image, video, or 3D model (those are handled separately)
+    if (isImageUrl(url) || isVideoUrl(url) || isModel3DUrl(url)) continue
     if (!isGenericFileUrl(url) && !hasArchiveExtension(linkText)) continue
 
     const urlFileName = getDownloadFileNameFromUrl(url, 'file')
@@ -200,6 +251,12 @@ const collectFileAttachments = (response: string): ChatAttachment[] => {
 const stripCollectedFileMarkdownLinks = (response: string): string => {
   MARKDOWN_FILE_REGEX.lastIndex = 0
   return response.replace(MARKDOWN_FILE_REGEX, (match, linkText, url) => {
+    if (
+      isVideoUrl(url) ||
+      VIDEO_EXTENSIONS.some((extension) => String(linkText).toLowerCase().endsWith(extension))
+    ) {
+      return ''
+    }
     if (isImageUrl(url) || isModel3DUrl(url)) return match
     if (!isGenericFileUrl(url) && !hasArchiveExtension(linkText)) return match
     return ''
@@ -364,11 +421,13 @@ export const buildAssistantMessageFromResponse = (
   const trimmedResponse = response.trim()
   const imageAttachments = collectImageAttachments(trimmedResponse)
   const modelAttachments = collectModelAttachments(trimmedResponse)
+  const videoAttachments = collectVideoAttachments(trimmedResponse)
   const inlineFileAttachments = collectFileAttachments(trimmedResponse)
   const hunyuanArtifactAttachments = collectHunyuanArtifactAttachments(trimmedResponse)
   const inlineAttachments = dedupeAttachments([
     ...imageAttachments,
     ...modelAttachments,
+    ...videoAttachments,
     ...inlineFileAttachments,
     ...hunyuanArtifactAttachments
   ])
@@ -376,6 +435,7 @@ export const buildAssistantMessageFromResponse = (
   if (inlineAttachments.length > 0) {
     MARKDOWN_IMAGE_REGEX.lastIndex = 0
     MARKDOWN_MODEL_REGEX.lastIndex = 0
+    MARKDOWN_VIDEO_REGEX.lastIndex = 0
     HUNYUAN_ARTIFACT_REGEX.lastIndex = 0
     return {
       role: 'assistant',
@@ -384,6 +444,7 @@ export const buildAssistantMessageFromResponse = (
           trimmedResponse
             .replace(MARKDOWN_IMAGE_REGEX, '')
             .replace(MARKDOWN_MODEL_REGEX, '')
+            .replace(MARKDOWN_VIDEO_REGEX, '')
             .replace(HUNYUAN_ARTIFACT_REGEX, '')
         )
       ),
@@ -403,6 +464,15 @@ export const buildAssistantMessageFromResponse = (
           mimeType: 'image/png'
         }
       ],
+      modelName
+    }
+  }
+
+  if (isVideoUrl(trimmedResponse)) {
+    return {
+      role: 'assistant',
+      content: '',
+      attachments: [createVideoAttachment(trimmedResponse)],
       modelName
     }
   }

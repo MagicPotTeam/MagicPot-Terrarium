@@ -575,6 +575,9 @@ export const cliFromProfile = (profile: LLMAPIProfile): LLMCli | undefined => {
       return new GeminiAPICli(profile.api_key, profile.base_url, profile.model_name)
     case 'claude':
       return new ClaudeAPICli(profile.api_key, profile.base_url, profile.model_name)
+    case 'kling':
+    case 'volcengine':
+      return new MainProcessQAppLLMProxyCli(profile.id)
     case 'openai':
     default:
       return new OpenAIAPICli(profile.api_key, profile.base_url, profile.model_name, {

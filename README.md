@@ -8,6 +8,7 @@ MagicPot 是一个基于 Electron 的 AI 工作台。它把 AI 对话、ComfyUI 
 
 - **AI Chat**：面向多模型/多技能的对话入口，支持流式响应、附件与工具调用链路。
 - **Quick App**：运行、设计和管理快应用，配合目标方案与自定义技能扩展工作流。
+- **AI Video Generation Quick App**：通过 Kling 或 Volcengine/BytePlus Seedance 配置提交异步视频生成任务；Provider 配置、参数、限制和排障见 [`docs/ai-video-generation.md`](docs/ai-video-generation.md)。
 - **Project Canvas**：参考画布，承载图片、视频、3D/图层等创作素材的导入、选择、拖拽、裁切与恢复能力。
 - **ComfyUI 集成**：管理 ComfyUI 启动、HTTP/WS 通信、队列、输出结果和文件访问。
 - **Model Browser**：在配置了 ComfyUI 目录后浏览模型和相关文件。

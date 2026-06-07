@@ -10,7 +10,7 @@ import {
   TaggerProviderOption,
   TaggerRuntimeCacheScopeOption
 } from '@shared/config/config'
-import type { OpenAIImageGenerationOptions } from '@shared/llm/types'
+import type { OpenAIImageGenerationOptions, VideoGenerationOptions } from '@shared/llm/types'
 import type { LLMReasoningEffort } from '@shared/llm/profileCapabilities'
 import type { ReportBundleRole } from '@shared/reportBundle'
 
@@ -124,6 +124,7 @@ export type LLMChatReq = {
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
   imageGenerationOptions?: OpenAIImageGenerationOptions
+  videoGenerationOptions?: VideoGenerationOptions
   skillRuntime?: LLMChatSkillRuntime
   route?: AgentRouteLike
   /** 指定使用的模型配置 ID，如果不指定则使用服务端默认配置 */

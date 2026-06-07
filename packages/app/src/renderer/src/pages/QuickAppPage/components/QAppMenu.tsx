@@ -80,6 +80,10 @@ import {
   createBuiltinDuplicateCheckQApp,
   isBuiltinDuplicateCheckQApp
 } from '../duplicateCheck/builtin'
+import {
+  createBuiltinVideoGenerationQApp,
+  isBuiltinVideoGenerationQApp
+} from '../videoGeneration/builtin'
 
 const QAppDesignPage = lazy(() => import('../QAppDesignPage'))
 
@@ -93,7 +97,9 @@ type QAppCategory = SharedQAppCategory
 
 const isBuiltinHunyuan3DQApp = (key: string): boolean => key === BUILTIN_HUNYUAN3D_QAPP_KEY
 const isBuiltinProtectedQApp = (key: string): boolean =>
-  isBuiltinHunyuan3DQApp(key) || isBuiltinDuplicateCheckQApp(key)
+  isBuiltinHunyuan3DQApp(key) ||
+  isBuiltinDuplicateCheckQApp(key) ||
+  isBuiltinVideoGenerationQApp(key)
 
 const createBuiltinHunyuan3DQApp = (): QAppMenuItem =>
   ({
@@ -379,7 +385,12 @@ const CascadingMenuItem = memo(
             setCurrentQAppKey(qAppItem.key)
           }}
           onContextMenu={(e) => {
-            if (!isDirectory && !isBuiltinHunyuan3DMenuKey(qAppItem.key)) {
+            if (
+              !isDirectory &&
+              !isBuiltinHunyuan3DMenuKey(qAppItem.key) &&
+              !isBuiltinDuplicateCheckQApp(qAppItem.key) &&
+              !isBuiltinVideoGenerationQApp(qAppItem.key)
+            ) {
               e.preventDefault()
               onMoreClick(e, qAppItem.key)
             }
@@ -460,40 +471,44 @@ const CascadingMenuItem = memo(
               </Box>
             </Box>
             {/* 非目录项：播放/停止按钮 */}
-            {!isDirectory && !isBuiltinHunyuan3DQApp(qAppItem.key) && onRunClick && isSelected && (
-              <IconButton
-                size="small"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onRunClick(qAppItem.key)
-                }}
-                sx={{
-                  p: 0.5,
-                  flexShrink: 0,
-                  ml: 0.5,
-                  color: canCancelRun ? '#fff' : '#7E73FD',
-                  bgcolor: canCancelRun ? '#d32f2f' : '#ffffff',
-                  borderRadius: 1,
-                  boxShadow: '0 2px 4px rgba(0,0,0,0.15)',
-                  transition:
-                    'background-color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease',
-                  '&:hover': {
-                    bgcolor: canCancelRun ? '#b71c1c' : '#f8f8f8',
-                    transform: 'scale(1.12)',
-                    boxShadow: '0 4px 8px rgba(0,0,0,0.2)'
-                  },
-                  '&:active': {
-                    transform: 'scale(0.95)'
-                  }
-                }}
-              >
-                {canCancelRun ? (
-                  <Box sx={{ width: 10, height: 10, bgcolor: '#fff', borderRadius: 0.5 }} />
-                ) : (
-                  <PlayArrowIcon sx={{ fontSize: 20 }} />
-                )}
-              </IconButton>
-            )}
+            {!isDirectory &&
+              !isBuiltinHunyuan3DQApp(qAppItem.key) &&
+              !isBuiltinVideoGenerationQApp(qAppItem.key) &&
+              onRunClick &&
+              isSelected && (
+                <IconButton
+                  size="small"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onRunClick(qAppItem.key)
+                  }}
+                  sx={{
+                    p: 0.5,
+                    flexShrink: 0,
+                    ml: 0.5,
+                    color: canCancelRun ? '#fff' : '#7E73FD',
+                    bgcolor: canCancelRun ? '#d32f2f' : '#ffffff',
+                    borderRadius: 1,
+                    boxShadow: '0 2px 4px rgba(0,0,0,0.15)',
+                    transition:
+                      'background-color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease',
+                    '&:hover': {
+                      bgcolor: canCancelRun ? '#b71c1c' : '#f8f8f8',
+                      transform: 'scale(1.12)',
+                      boxShadow: '0 4px 8px rgba(0,0,0,0.2)'
+                    },
+                    '&:active': {
+                      transform: 'scale(0.95)'
+                    }
+                  }}
+                >
+                  {canCancelRun ? (
+                    <Box sx={{ width: 10, height: 10, bgcolor: '#fff', borderRadius: 0.5 }} />
+                  ) : (
+                    <PlayArrowIcon sx={{ fontSize: 20 }} />
+                  )}
+                </IconButton>
+              )}
             {isDirectory && (
               <IconButton
                 size="small"
@@ -718,6 +733,9 @@ export default function QAppMenu({
       if (isBuiltinDuplicateCheckQApp(v) || v === '重复图检查') {
         return '重复图检查'
       }
+      if (isBuiltinVideoGenerationQApp(v) || v === 'ai_video_generation') {
+        return t('qapp.names.ai_video_generation')
+      }
       return t(`qapp.names.${v}`) !== `qapp.names.${v}` ? t(`qapp.names.${v}`) : v
     },
     [t]
@@ -914,6 +932,7 @@ export default function QAppMenu({
       const localItems = [
         createBuiltinHunyuan3DQApp(),
         createBuiltinDuplicateCheckQApp(),
+        createBuiltinVideoGenerationQApp(),
         ...res.qApps.filter((item) => !isBuiltinProtectedQApp(item.key))
       ]
 
@@ -1636,7 +1655,9 @@ export default function QAppMenu({
         {(() => {
           const isRemoteItem = menuKey?.startsWith('~remote')
           const isBuiltinItem = menuKey
-            ? isBuiltinHunyuan3DMenuKey(menuKey) || isBuiltinDuplicateCheckQApp(menuKey)
+            ? isBuiltinHunyuan3DMenuKey(menuKey) ||
+              isBuiltinDuplicateCheckQApp(menuKey) ||
+              isBuiltinVideoGenerationQApp(menuKey)
             : false
           const items: React.ReactNode[] = [
             <MenuItem

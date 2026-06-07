@@ -23,6 +23,7 @@ const notifySuccessMock = vi.fn()
 const notifyWarningMock = vi.fn()
 const getObjectInfoMock = vi.fn(async () => ({}))
 const watchQueueMock = vi.fn(async () => undefined)
+const getQAppCfgMock = vi.fn(async () => ({ cfg: {}, workflow: {} }))
 let comfyEventCallback: ((event: { type: string; data: Record<string, unknown> }) => void) | null =
   null
 const createConfig = (): Config => ({
@@ -102,6 +103,9 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     },
     svcState: {
       saveConfig: vi.fn()
+    },
+    svcQApp: {
+      getQAppCfg: getQAppCfgMock
     }
   })
 }))
@@ -153,15 +157,23 @@ vi.mock('../pages/QuickAppPage/components/QAppMenu', () => ({
   default: ({
     currentQAppKey,
     activeCategory,
+    setCurrentQAppKey,
     renderExpandedContent
   }: {
     currentQAppKey: string
     activeCategory: string
+    setCurrentQAppKey: (key: string) => void
     renderExpandedContent: (key: string) => React.ReactNode
   }) => (
     <div>
       <div>{`Active Category: ${activeCategory}`}</div>
-      {currentQAppKey.startsWith('~builtin/hunyuan3d/')
+      {activeCategory === 'video' ? (
+        <button type="button" onClick={() => setCurrentQAppKey('~builtin/video-generation')}>
+          AI Video Generation
+        </button>
+      ) : null}
+      {currentQAppKey.startsWith('~builtin/hunyuan3d/') ||
+      currentQAppKey === '~builtin/video-generation'
         ? renderExpandedContent(currentQAppKey)
         : null}
     </div>
@@ -174,6 +186,25 @@ vi.mock('../pages/QuickAppPage/QAppExecutePanel/QAppInputPanel', () => ({
 
 vi.mock('../pages/FileBrowserPage/ModelPage', () => ({
   default: () => <div>Explorer</div>
+}))
+
+vi.mock('../pages/QuickAppPage/videoGeneration/VideoGenerationWorkspace', () => ({
+  default: ({
+    projectId,
+    inline,
+    resultPromptId
+  }: {
+    projectId?: string
+    inline?: boolean
+    resultPromptId?: string
+  }) => (
+    <div>
+      <div>Video Generation Workspace</div>
+      <div>{`Video Project: ${projectId || '(empty)'}`}</div>
+      <div>{`Video Inline: ${inline ? 'yes' : 'no'}`}</div>
+      <div>{`Video Result Prompt: ${resultPromptId || '(empty)'}`}</div>
+    </div>
+  )
 }))
 
 vi.mock('../pages/ChatPage/Hunyuan3DPanel', () => ({
@@ -258,6 +289,7 @@ describe('SidePanel', () => {
     requestChatCompletionMock.mockReset()
     getObjectInfoMock.mockClear()
     watchQueueMock.mockClear()
+    getQAppCfgMock.mockClear()
     comfyEventCallback = null
     currentConfig = createConfig()
     requestChatCompletionMock.mockResolvedValue({
@@ -279,6 +311,30 @@ describe('SidePanel', () => {
 
     expect(await screen.findByText('Hunyuan3D Panel')).toBeTruthy()
     expect(await screen.findByRole('button', { name: /API/ })).toBeTruthy()
+  })
+
+  it('renders the built-in video app directly in inline mode when selected from the SidePanel', async () => {
+    render(<SidePanel projectId="tab-project-video" />)
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('qapp:switch', {
+          detail: { qAppKey: '~builtin/video-generation' }
+        })
+      )
+    })
+
+    expect(await screen.findByText('Active Category: video')).toBeTruthy()
+    expect(screen.queryByText('Video Generation Workspace')).toBeNull()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'AI Video Generation' }))
+
+    expect(await screen.findByText('Video Generation Workspace')).toBeTruthy()
+    expect(screen.getByText('Video Project: tab-project-video')).toBeTruthy()
+    expect(screen.getByText('Video Inline: yes')).toBeTruthy()
+    expect(screen.getByText('Video Result Prompt: builtin-video-generation-inline')).toBeTruthy()
+    expect(screen.queryByText('Quick App Panel')).toBeNull()
+    expect(getQAppCfgMock).not.toHaveBeenCalled()
   })
 
   it('moves overflow quick app categories into a more menu when the side panel is narrow', async () => {

@@ -1,4 +1,4 @@
-﻿/* eslint-disable react-refresh/only-export-components */
+/* eslint-disable react-refresh/only-export-components */
 import React from 'react'
 import { Alert, Box, Button, IconButton, Stack, TextField, Typography } from '@mui/material'
 import { Add as AddIcon, Delete } from '@mui/icons-material'
@@ -16,14 +16,12 @@ import SettingSection from './components/SettingSection'
 import type { PanelProps } from './PanelProps'
 import { isHunyuan3DCompatibleProfile } from '@shared/config/apiProfileSelectors'
 import {
-  getSuggestedModelCatalog,
   isOllamaUrl,
   isLocalBaseUrl,
   resolveProfileCallType,
   resolveProfileDeployment,
   resolveProfileModelUse,
-  resolveProfileProvider,
-  type ModelCatalogOption
+  resolveProfileProvider
 } from '@shared/llm'
 import type {
   Config,
@@ -47,6 +45,8 @@ const DEFAULT_PROVIDER_OPTION = 'default' as const
 const DEFAULT_MODEL_USE_OPTION = 'default' as const
 const OFFICIAL_OPENAI_BASE_URL = 'https://api.openai.com/v1'
 const HUNYUAN_AI3D_BASE_URL = 'https://api.ai3d.cloud.tencent.com'
+const KLING_BASE_URL = 'https://api-beijing.klingai.com'
+const VOLCENGINE_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
 const DEFAULT_HY3D_COS_PREFIX = 'magicpot/hunyuan3d'
 const DEFAULT_HY3D_API_REGION = 'ap-guangzhou'
 const LOCAL_DUPLICATE_CHECK_MODEL_ID_PREFIX = 'agent-local:'
@@ -135,6 +135,10 @@ const getSuggestedBaseUrl = (provider: LLMProvider, deployment: LLMDeployment): 
       return 'https://generativelanguage.googleapis.com/v1beta'
     case 'claude':
       return 'https://api.anthropic.com/v1'
+    case 'kling':
+      return KLING_BASE_URL
+    case 'volcengine':
+      return VOLCENGINE_BASE_URL
     case 'openai':
     default:
       return OFFICIAL_OPENAI_BASE_URL
@@ -142,7 +146,7 @@ const getSuggestedBaseUrl = (provider: LLMProvider, deployment: LLMDeployment): 
 }
 
 const applyModelUseToProfile = (profile: LLMAPIProfile, modelUse: LLMModelUse): LLMAPIProfile => ({
-  ...profile,
+  ...(modelUse === 'video' ? profile : stripVideoSecretProfile(profile)),
   model_use: modelUse,
   is_vision_model:
     modelUse === 'agent' ||
@@ -173,6 +177,56 @@ const stripExternalAuthProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
   return nextProfile
 }
 
+const stripVideoSecretProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
+  const { api_secret: _apiSecret, ...nextProfile } = profile
+  return nextProfile
+}
+
+const isKlingVideoModelName = (modelName: string | null | undefined): boolean =>
+  String(modelName || '')
+    .trim()
+    .toLowerCase()
+    .startsWith('kling-')
+
+const isVolcengineVideoModelName = (modelName: string | null | undefined): boolean => {
+  const normalized = String(modelName || '')
+    .trim()
+    .toLowerCase()
+  return normalized.startsWith('doubao-seedance-')
+}
+
+const getDefaultVideoModelName = (provider: 'kling' | 'volcengine'): string =>
+  provider === 'kling' ? 'kling-v3' : 'doubao-seedance-1-0-pro-250528'
+
+const getVideoProviderModelName = (
+  profile: LLMAPIProfile,
+  provider: 'kling' | 'volcengine'
+): string => {
+  const modelName = profile.model_name?.trim() || ''
+  const isCompatibleModelName =
+    provider === 'kling' ? isKlingVideoModelName(modelName) : isVolcengineVideoModelName(modelName)
+  return isCompatibleModelName ? modelName : getDefaultVideoModelName(provider)
+}
+
+const applyVideoProviderToProfile = (
+  profile: LLMAPIProfile,
+  provider: 'kling' | 'volcengine'
+): LLMAPIProfile => ({
+  ...stripLocalModelProfile(stripExternalAuthProfile(profile)),
+  call_type: undefined,
+  provider,
+  deployment: 'cloud',
+  model_use: 'video',
+  model_name: getVideoProviderModelName(profile, provider),
+  base_url: provider === 'kling' ? KLING_BASE_URL : VOLCENGINE_BASE_URL,
+  api_key: profile.api_key || '',
+  api_secret: provider === 'kling' ? profile.api_secret || '' : undefined,
+  backup_api_keys: undefined,
+  is_ollama: false,
+  is_vision_model: false,
+  is_ocr_model: false
+})
+
 const stripHunyuan3DProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
   const {
     tencent_secret_id: _tencentSecretId,
@@ -188,7 +242,7 @@ const stripHunyuan3DProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
 }
 
 const applyHunyuan3DPresetToProfile = (profile: LLMAPIProfile): LLMAPIProfile => ({
-  ...stripLocalModelProfile(stripExternalAuthProfile(profile)),
+  ...stripVideoSecretProfile(stripLocalModelProfile(stripExternalAuthProfile(profile))),
   call_type: undefined,
   model_name: isHunyuan3DCompatibleProfile(profile)
     ? profile.model_name?.trim() || 'Hunyuan3D Pro'
@@ -221,7 +275,7 @@ const applyCallTypeToProfile = (
     case 'local': {
       const isCurrentLocalProfile = resolveProfileCallType(profile) === 'local'
       return {
-        ...stripHunyuan3DProfile(stripExternalAuthProfile(profile)),
+        ...stripVideoSecretProfile(stripHunyuan3DProfile(stripExternalAuthProfile(profile))),
         call_type: 'local',
         model_name: isCurrentLocalProfile ? profile.model_name : '',
         base_url: '',
@@ -240,8 +294,8 @@ const applyCallTypeToProfile = (
       return applyHunyuan3DPresetToProfile(profile)
     case 'api':
     default: {
-      const apiProfile = stripHunyuan3DProfile(
-        stripLocalModelProfile(stripExternalAuthProfile(profile))
+      const apiProfile = stripVideoSecretProfile(
+        stripHunyuan3DProfile(stripLocalModelProfile(stripExternalAuthProfile(profile)))
       )
       const shouldResetApiProfile =
         isHunyuan3DCompatibleProfile(profile) || resolveProfileCallType(profile) === 'local'
@@ -361,7 +415,9 @@ const useApiProfiles = (
       {
         ...stripExternalAuthProfile(profile),
         id: crypto.randomUUID(),
-        api_key: ''
+        api_key: '',
+        api_secret: undefined,
+        backup_api_keys: undefined
       }
     ])
   }
@@ -460,10 +516,13 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   const modelUseSelectValue =
     profile.model_use === DEFAULT_MODEL_USE_OPTION ? DEFAULT_MODEL_USE_OPTION : effectiveModelUse
   const isLocalCallType = profileCallType === 'local'
+  const isVideoProvider = effectiveProvider === 'kling' || effectiveProvider === 'volcengine'
   const showApiKeyInput = !isLocalCallType && effectiveProvider !== 'ollama'
+  const showKlingSecretInput = !isLocalCallType && effectiveProvider === 'kling'
   const showBackupKeys =
     !isLocalCallType &&
     !isHunyuan3DCallType &&
+    !isVideoProvider &&
     effectiveDeployment === 'cloud' &&
     effectiveProvider !== 'ollama'
   const showBaseUrlInput = !isLocalCallType
@@ -472,24 +531,32 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     : getSuggestedBaseUrl(effectiveProvider, effectiveDeployment)
   const apiKeyPlaceholder = isHunyuan3DCallType
     ? quickAppText('hunyuan_api_key_placeholder', 'Optional Hunyuan3D API Key')
-    : effectiveProvider === 'ollama'
-      ? copy('Ollama 本地服务无需密钥', 'No API key needed for Ollama')
-      : effectiveDeployment === 'local'
-        ? copy('本地服务如无鉴权可留空', 'Optional for local servers without auth')
-        : isChineseUi
-          ? '请输入 API 密钥'
-          : t('llm.api_key_placeholder')
+    : effectiveProvider === 'kling'
+      ? 'AccessKey ID'
+      : effectiveProvider === 'volcengine'
+        ? 'Bearer API Key'
+        : effectiveProvider === 'ollama'
+          ? copy('Ollama 本地服务无需密钥', 'No API key needed for Ollama')
+          : effectiveDeployment === 'local'
+            ? copy('本地服务如无鉴权可留空', 'Optional for local servers without auth')
+            : isChineseUi
+              ? '请输入 API 密钥'
+              : t('llm.api_key_placeholder')
   const modelNamePlaceholder = isLocalCallType
     ? copy('例如：本地 CLIP 模型', 'e.g. Local CLIP Model')
     : effectiveProvider === 'ollama'
       ? usesVisualCapabilities
         ? 'qwen2.5vl:7b'
         : 'llama3.2'
-      : usesVisualCapabilities
-        ? copy('例如：qwen2.5-vl-7b-instruct', 'e.g. qwen2.5-vl-7b-instruct')
-        : effectiveModelUse === 'image'
-          ? copy('例如：gpt-5.4', 'e.g. gpt-5.4')
-          : t('llm.model_name_placeholder')
+      : effectiveModelUse === 'video' && effectiveProvider === 'kling'
+        ? 'kling-v3'
+        : effectiveModelUse === 'video' && effectiveProvider === 'volcengine'
+          ? 'doubao-seedance-1-0-pro-250528'
+          : usesVisualCapabilities
+            ? copy('例如：qwen2.5-vl-7b-instruct', 'e.g. qwen2.5-vl-7b-instruct')
+            : effectiveModelUse === 'image'
+              ? copy('例如：gpt-5.4', 'e.g. gpt-5.4')
+              : t('llm.model_name_placeholder')
 
   const modelUseOptions = [
     { label: copy('默认', 'Default'), value: DEFAULT_MODEL_USE_OPTION },
@@ -498,12 +565,20 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     { label: copy('多模态', 'Multimodal'), value: 'multimodal' },
     { label: copy('视觉', 'Vision'), value: 'vision' },
     { label: 'OCR', value: 'ocr' },
-    { label: copy('图像生成', 'Image Generation'), value: 'image' }
+    { label: copy('图像生成', 'Image Generation'), value: 'image' },
+    { label: quickAppText('model_use_video', 'Video Generation'), value: 'video' }
   ]
   const callTypeOptions = [
     { label: copy('API模型', 'API Model'), value: 'api' },
     { label: 'Hunyuan3D', value: 'hunyuan3d' },
     { label: copy('本地模型', 'Local Model'), value: 'local' }
+  ]
+  const videoProviderOptions = [
+    { label: 'Kling', value: 'kling' },
+    {
+      label: quickAppText('video_provider_volcengine_seedance', 'Volcengine / BytePlus Seedance'),
+      value: 'volcengine'
+    }
   ]
   const localModelPath = normalizeLocalModelPath(profile.local_model_path)
   const localModelPathErrorText =
@@ -526,45 +601,57 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   )
   const [isClearingHy3dCosPrefix, setIsClearingHy3dCosPrefix] = React.useState(false)
 
-  const updateProfile = (nextProfile: LLMAPIProfile) => {
-    const nextCallType = resolveProfileCallType(nextProfile)
-    if (nextCallType === 'local') {
+  const updateProfile = React.useCallback(
+    (nextProfile: LLMAPIProfile) => {
+      const nextCallType = resolveProfileCallType(nextProfile)
+      if (nextCallType === 'local') {
+        onUpdate(profile.id, {
+          ...stripVideoSecretProfile(stripHunyuan3DProfile(stripExternalAuthProfile(nextProfile))),
+          call_type: 'local',
+          base_url: '',
+          api_key: '',
+          backup_api_keys: undefined,
+          provider: DEFAULT_PROVIDER_OPTION,
+          deployment: undefined,
+          is_ollama: false,
+          local_model_path: normalizeLocalModelPath(nextProfile.local_model_path)
+        })
+        return
+      }
+
+      const preserveLegacyOllamaOverride =
+        profile.provider === 'ollama' || nextProfile.provider === 'ollama'
+      const nextBaseUrl = nextProfile.base_url || ''
+      const inferredLocal = isOllamaUrl(nextBaseUrl) || isLocalBaseUrl(nextBaseUrl)
+      const normalizedNextProfile: LLMAPIProfile = {
+        ...stripLocalModelProfile(nextProfile),
+        call_type: undefined
+      }
+      const normalizedProfile = stripExternalAuthProfile(normalizedNextProfile)
+      const shouldKeepVideoProvider =
+        normalizedNextProfile.model_use === 'video' &&
+        (normalizedNextProfile.provider === 'kling' ||
+          normalizedNextProfile.provider === 'volcengine')
+      const outputProfile = shouldKeepVideoProvider
+        ? normalizedProfile
+        : stripVideoSecretProfile(normalizedProfile)
+
       onUpdate(profile.id, {
-        ...stripHunyuan3DProfile(stripExternalAuthProfile(nextProfile)),
-        call_type: 'local',
-        base_url: '',
-        api_key: '',
-        backup_api_keys: undefined,
-        provider: DEFAULT_PROVIDER_OPTION,
-        deployment: undefined,
-        is_ollama: false,
-        local_model_path: normalizeLocalModelPath(nextProfile.local_model_path)
+        ...outputProfile,
+        call_type: normalizedNextProfile.call_type,
+        provider: shouldKeepVideoProvider
+          ? normalizedNextProfile.provider
+          : DEFAULT_PROVIDER_OPTION,
+        deployment: shouldKeepVideoProvider ? 'cloud' : undefined,
+        is_ollama:
+          inferredLocal &&
+          (isOllamaUrl(nextBaseUrl) ||
+            Boolean(normalizedProfile.is_ollama) ||
+            preserveLegacyOllamaOverride)
       })
-      return
-    }
-
-    const preserveLegacyOllamaOverride =
-      profile.provider === 'ollama' || nextProfile.provider === 'ollama'
-    const nextBaseUrl = nextProfile.base_url || ''
-    const inferredLocal = isOllamaUrl(nextBaseUrl) || isLocalBaseUrl(nextBaseUrl)
-    const normalizedNextProfile: LLMAPIProfile = {
-      ...stripLocalModelProfile(nextProfile),
-      call_type: undefined
-    }
-    const normalizedProfile = stripExternalAuthProfile(normalizedNextProfile)
-
-    onUpdate(profile.id, {
-      ...normalizedProfile,
-      call_type: normalizedNextProfile.call_type,
-      provider: DEFAULT_PROVIDER_OPTION,
-      deployment: undefined,
-      is_ollama:
-        inferredLocal &&
-        (isOllamaUrl(nextBaseUrl) ||
-          Boolean(normalizedProfile.is_ollama) ||
-          preserveLegacyOllamaOverride)
-    })
-  }
+    },
+    [onUpdate, profile.id, profile.provider]
+  )
 
   const handleCallTypeChange = (callType: ProfileCallTypeSelectValue) => {
     onUpdate(profile.id, applyCallTypeToProfile(profile, callType))
@@ -573,15 +660,26 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   const applyModelUseOptionToProfile = (
     nextProfile: LLMAPIProfile,
     modelUse: LLMModelUseOption
-  ): LLMAPIProfile =>
-    modelUse === DEFAULT_MODEL_USE_OPTION
-      ? {
-          ...nextProfile,
-          model_use: DEFAULT_MODEL_USE_OPTION,
-          is_vision_model: false,
-          is_ocr_model: false
-        }
-      : applyModelUseToProfile(nextProfile, modelUse)
+  ): LLMAPIProfile => {
+    if (modelUse === DEFAULT_MODEL_USE_OPTION) {
+      return {
+        ...stripVideoSecretProfile(nextProfile),
+        model_use: DEFAULT_MODEL_USE_OPTION,
+        is_vision_model: false,
+        is_ocr_model: false
+      }
+    }
+
+    const nextModelProfile = applyModelUseToProfile(nextProfile, modelUse)
+    if (modelUse !== 'video') {
+      return nextModelProfile
+    }
+
+    return applyVideoProviderToProfile(
+      nextModelProfile,
+      effectiveProvider === 'volcengine' ? 'volcengine' : 'kling'
+    )
+  }
 
   const commitModelName = React.useCallback(
     (nextModelName: string) => {
@@ -712,6 +810,17 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           items={modelUseOptions}
         />
 
+        {effectiveModelUse === 'video' && !isLocalCallType && !isHunyuan3DCallType && (
+          <InputSelect
+            label={quickAppText('video_provider', 'Video Provider')}
+            value={effectiveProvider === 'volcengine' ? 'volcengine' : 'kling'}
+            onChange={(value) =>
+              updateProfile(applyVideoProviderToProfile(profile, value as 'kling' | 'volcengine'))
+            }
+            items={videoProviderOptions}
+          />
+        )}
+
         <InputText
           label={copy('模型名称', t('llm.model_name'))}
           value={profile.model_name}
@@ -762,9 +871,13 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
             label={
               isHunyuan3DCallType
                 ? quickAppText('hunyuan_api_key_optional', 'Hunyuan3D API Key (Optional)')
-                : effectiveDeployment === 'local'
-                  ? copy('API 密钥（可选）', 'API Key (Optional)')
-                  : copy('API 密钥', t('llm.api_key'))
+                : effectiveProvider === 'kling'
+                  ? 'Kling AccessKey'
+                  : effectiveProvider === 'volcengine'
+                    ? quickAppText('volcengine_api_key', 'Volcengine API Key')
+                    : effectiveDeployment === 'local'
+                      ? copy('API 密钥（可选）', 'API Key (Optional)')
+                      : copy('API 密钥', t('llm.api_key'))
             }
             value={profile.api_key}
             onChange={(value) =>
@@ -776,6 +889,39 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
             placeholder={apiKeyPlaceholder}
             shrinkLabel
           />
+        )}
+
+        {showKlingSecretInput && (
+          <InputText
+            label="Kling SecretKey"
+            value={profile.api_secret || ''}
+            onChange={(value) =>
+              updateProfile({
+                ...profile,
+                api_secret: value,
+                backup_api_keys: undefined
+              })
+            }
+            placeholder="AccessKey Secret"
+            shrinkLabel
+            updateMode="change"
+          />
+        )}
+
+        {isVideoProvider && (
+          <Alert severity="info">
+            <Typography variant="body2">
+              {effectiveProvider === 'kling'
+                ? quickAppText(
+                    'kling_video_info',
+                    'Kling uses AccessKey + SecretKey to sign a JWT and submit text-to-video or image-to-video tasks.'
+                  )
+                : quickAppText(
+                    'seedance_video_info',
+                    'Volcengine / BytePlus Seedance uses a Bearer API key to submit async video generation tasks.'
+                  )}
+            </Typography>
+          </Alert>
         )}
 
         {isHunyuan3DCallType && (

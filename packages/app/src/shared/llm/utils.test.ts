@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ClaudeAPICli, GeminiAPICli, OllamaAPICli, OpenAIAPICli } from './clients'
+import { KlingVideoAPICli, VolcengineSeedanceAPICli } from './videoClients'
 import {
   cliFromProfile,
   isOllamaProfile,
@@ -14,6 +15,8 @@ describe('shared llm ollama compatibility', () => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
+
+  const stableFetch = (() => Promise.reject(new Error('not used'))) as typeof fetch
 
   it('detects the default Ollama host and allows profiles without API keys', () => {
     const profile = {
@@ -225,5 +228,88 @@ describe('shared llm ollama compatibility', () => {
     }
 
     expect(resolveProfileModelUse(profile)).toBe('agent')
+  })
+
+  it('routes configured Kling video profiles to the Kling client only when both access key and secret are present', () => {
+    const incompleteProfile = {
+      model_name: 'kling-v3',
+      base_url: 'https://api-beijing.klingai.com',
+      api_key: 'access-id',
+      provider: 'kling' as const,
+      model_use: 'video' as const
+    }
+    const profile = {
+      ...incompleteProfile,
+      api_secret: 'secret-key'
+    }
+
+    expect(resolveProfileModelUse(profile)).toBe('video')
+    expect(isRunnableProfile(incompleteProfile)).toBe(false)
+    expect(cliFromProfile(incompleteProfile)).toBeUndefined()
+    expect(isRunnableProfile(profile)).toBe(true)
+    expect(cliFromProfile(profile, { fetchImpl: stableFetch })).toBeInstanceOf(KlingVideoAPICli)
+  })
+
+  it('routes Volcengine Seedance video profiles without falling through to OpenAI', () => {
+    const profile = {
+      model_name: 'doubao-seedance-1-0-pro-250528',
+      base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+      api_key: 'ark-key',
+      provider: 'volcengine' as const,
+      model_use: 'video' as const
+    }
+
+    expect(resolveProfileModelUse(profile)).toBe('video')
+    expect(isRunnableProfile(profile)).toBe(true)
+    expect(cliFromProfile(profile, { fetchImpl: stableFetch })).toBeInstanceOf(
+      VolcengineSeedanceAPICli
+    )
+  })
+
+  it('infers Volcengine Seedance routing from the default Ark base URL only for video profiles', () => {
+    const profile = {
+      model_name: 'doubao-seedance-1-0-pro-250528',
+      base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+      api_key: 'ark-key',
+      model_use: 'video' as const
+    }
+    const chatProfile = {
+      model_name: 'doubao-seed-1-6-250615',
+      base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+      api_key: 'ark-key'
+    }
+
+    expect(cliFromProfile(profile, { fetchImpl: stableFetch })).toBeInstanceOf(
+      VolcengineSeedanceAPICli
+    )
+    expect(resolveProfileModelUse(chatProfile)).toBe('chat')
+    expect(cliFromProfile(chatProfile, { fetchImpl: stableFetch })).toBeInstanceOf(OpenAIAPICli)
+  })
+
+  it('does not route explicit non-video Ark profiles through the Volcengine video client', () => {
+    const profile = {
+      model_name: 'doubao-seed-1-6-250615',
+      base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+      api_key: 'ark-key',
+      provider: 'volcengine' as const,
+      model_use: 'chat' as const
+    }
+
+    expect(resolveProfileModelUse(profile)).toBe('chat')
+    expect(cliFromProfile(profile, { fetchImpl: stableFetch })).toBeInstanceOf(OpenAIAPICli)
+  })
+
+  it('does not re-infer Kling video routing after a profile is switched to non-video use', () => {
+    const profile = {
+      model_name: 'kling-v3',
+      base_url: 'https://api-beijing.klingai.com',
+      api_key: 'access-id',
+      api_secret: 'stale-secret',
+      provider: 'default' as const,
+      model_use: 'default' as const
+    }
+
+    expect(resolveProfileModelUse(profile)).toBe('chat')
+    expect(cliFromProfile(profile, { fetchImpl: stableFetch })).toBeInstanceOf(OpenAIAPICli)
   })
 })

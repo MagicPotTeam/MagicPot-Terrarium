@@ -49,6 +49,35 @@ describe('QuickApp renderer LLM compatibility', () => {
     expect(client).toBeInstanceOf(ClaudeAPICli)
   })
 
+  it('routes video generation profiles through the main-process Quick App proxy', async () => {
+    const client = cliFromProfile({
+      id: 'quick-video',
+      model_name: 'kling-v3',
+      base_url: 'https://api-beijing.klingai.com',
+      api_key: 'access-id',
+      api_secret: 'secret-key',
+      provider: 'kling',
+      model_use: 'video'
+    })
+
+    expect(client).toBeInstanceOf(MainProcessQAppLLMProxyCli)
+    llmProxyChatMock.mockResolvedValueOnce({
+      content: '',
+      attachments: [{ type: 'video', url: 'https://cdn.example/video.mp4' }]
+    })
+
+    await expect(client?.generatePrompt({ prompt: 'make a video' })).resolves.toBe(
+      'https://cdn.example/video.mp4'
+    )
+    expect(llmProxyChatMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileId: 'quick-video',
+        profileScope: 'qapp',
+        messages: [expect.objectContaining({ role: 'user', content: 'make a video' })]
+      })
+    )
+  })
+
   it('selects a configured Ollama quick app profile without an API key', () => {
     const config = {
       ...DEFAULT_CONFIG,

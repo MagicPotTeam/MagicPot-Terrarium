@@ -697,6 +697,23 @@ const getScopedApiProfiles = (
 const getScopedApiProfileSettingsLabel = (profileScope?: LLMChatReq['profileScope']): string =>
   profileScope === 'qapp' ? 'Quick App API' : 'Agent API'
 
+const isGenericQAppTextProfile = (profile: LLMAPIProfile): boolean =>
+  !profile.is_vision_model && resolveProfileModelUse(profile) !== 'video'
+
+const getDefaultScopedApiProfile = (
+  profiles: LLMAPIProfile[],
+  profileScope?: LLMChatReq['profileScope']
+): LLMAPIProfile | undefined => {
+  if (profileScope !== 'qapp') {
+    return profiles[0]
+  }
+
+  return (
+    profiles.find(isGenericQAppTextProfile) ||
+    profiles.find((profile) => resolveProfileModelUse(profile) !== 'video')
+  )
+}
+
 const isCanvasTargetSelectionSnapshotAttachment = (attachment: ChatAttachment): boolean => {
   const fileName = attachment.fileName?.trim().toLowerCase()
   return fileName === 'canvas-target-selection.png' || fileName === 'canvas-check-selection.png'
@@ -1408,7 +1425,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     const validProfiles = getScopedApiProfiles(config, req.profileScope).filter(isRunnableProfile)
     const profileForTaggerRoute = requestedProfileId
       ? validProfiles.find((p) => p.id === requestedProfileId)
-      : validProfiles[0]
+      : getDefaultScopedApiProfile(validProfiles, req.profileScope)
     const taggerRuntime = profileForTaggerRoute
       ? resolveTaggerRuntimeDescriptor(profileForTaggerRoute, req.skillRuntime)
       : null
@@ -1448,7 +1465,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         )
       }
     } else {
-      profile = validProfiles[0]
+      profile = getDefaultScopedApiProfile(validProfiles, req.profileScope)
+    }
+
+    if (!profile) {
+      throw new Error(
+        `No suitable LLM profile available. Add one in Settings -> ${getScopedApiProfileSettingsLabel(req.profileScope)}.`
+      )
     }
 
     let selectedApiKey = profile?.api_key || ''
@@ -1571,6 +1594,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         systemPrompt: toolAwareSystemPrompt,
         reasoningEffort: req.reasoningEffort,
         imageGenerationOptions: req.imageGenerationOptions,
+        videoGenerationOptions: req.videoGenerationOptions,
         signal: options?.signal,
         sessionUrl: req.sessionUrl,
         conversationId: req.conversationId,
@@ -1698,8 +1722,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         signal: abortContext.signal,
         onDelta: emitEvent
       })
-      const fallbackContent = result.content || result.imageUrl || ''
-      const finalFullContent = result.content || streamedText || result.imageUrl || undefined
+      const firstAttachmentUrl = result.attachments?.[0]?.url || ''
+      const fallbackContent = result.content || result.imageUrl || firstAttachmentUrl || ''
+      const finalFullContent =
+        result.content || streamedText || result.imageUrl || firstAttachmentUrl || undefined
 
       if (!streamedText && fallbackContent) {
         streamedText = fallbackContent
@@ -1709,7 +1735,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           done: false,
           fullContent: fallbackContent,
           content: result.content,
-          ...(result.imageUrl ? { imageUrl: result.imageUrl } : {})
+          ...(result.imageUrl ? { imageUrl: result.imageUrl } : {}),
+          ...(result.attachments ? { attachments: result.attachments } : {})
         })
       }
 

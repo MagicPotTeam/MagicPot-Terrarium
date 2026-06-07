@@ -119,7 +119,8 @@ vi.mock('@renderer/hooks/useMessage', () => ({
 vi.mock('./PanelLLM', () => ({
   ApiProfilesSection: ({
     title,
-    profiles
+    profiles,
+    onClone
   }: {
     title: string
     profiles?: Array<{
@@ -127,6 +128,9 @@ vi.mock('./PanelLLM', () => ({
       model_name?: string
       base_url?: string
       api_key?: string
+      api_secret?: string
+      provider?: string
+      model_use?: string
       tencent_secret_id?: string
       tencent_secret_key?: string
       api_region?: string
@@ -134,10 +138,12 @@ vi.mock('./PanelLLM', () => ({
       cos_region?: string
       cos_key_prefix?: string
     }>
+    onClone?: (profile: NonNullable<typeof profiles>[number]) => void
   }) => (
     <div
       data-testid="api-profiles-section"
       data-first-profile-api-key={profiles?.[0]?.api_key ?? ''}
+      data-first-profile-api-secret={profiles?.[0]?.api_secret ?? ''}
       data-first-profile-auth-mode={profiles?.[0]?.auth_mode ?? ''}
       data-first-profile-base-url={profiles?.[0]?.base_url ?? ''}
       data-first-profile-cos-bucket={profiles?.[0]?.cos_bucket ?? ''}
@@ -145,11 +151,18 @@ vi.mock('./PanelLLM', () => ({
       data-first-profile-cos-region={profiles?.[0]?.cos_region ?? ''}
       data-first-profile-api-region={profiles?.[0]?.api_region ?? ''}
       data-first-profile-model={profiles?.[0]?.model_name ?? ''}
+      data-first-profile-model-use={profiles?.[0]?.model_use ?? ''}
+      data-first-profile-provider={profiles?.[0]?.provider ?? ''}
       data-first-profile-secret-id={profiles?.[0]?.tencent_secret_id ?? ''}
       data-first-profile-secret-key={profiles?.[0]?.tencent_secret_key ?? ''}
       data-profile-count={profiles?.length ?? 0}
     >
       {title}
+      {profiles?.[0] && onClone ? (
+        <button type="button" onClick={() => onClone(profiles[0])}>
+          Clone first profile
+        </button>
+      ) : null}
     </div>
   ),
   createEmptyProfile: () => ({
@@ -225,6 +238,70 @@ describe('PanelPlugin', () => {
         }
       })
     })
+  })
+
+  it('passes Quick App video API profile fields through and clears secrets when cloning', () => {
+    const saveSettings = vi.fn()
+    const randomUUIDSpy = vi
+      .spyOn(crypto, 'randomUUID')
+      .mockReturnValue('00000000-0000-4000-8000-000000000001')
+
+    try {
+      render(
+        <PanelPlugin
+          settingsValue={{
+            ...DEFAULT_CONFIG,
+            plugin_config: {
+              ...DEFAULT_CONFIG.plugin_config!,
+              api_profiles: [
+                {
+                  id: 'quick-kling',
+                  model_name: 'kling-v3',
+                  base_url: 'https://api-beijing.klingai.com',
+                  api_key: 'access-id',
+                  api_secret: 'secret-key',
+                  backup_api_keys: ['backup-secret'],
+                  provider: 'kling',
+                  model_use: 'video'
+                }
+              ]
+            }
+          }}
+          saveSettings={saveSettings}
+        />
+      )
+
+      const section = screen.getByTestId('api-profiles-section')
+      expect(section).toHaveAttribute('data-first-profile-model', 'kling-v3')
+      expect(section).toHaveAttribute('data-first-profile-provider', 'kling')
+      expect(section).toHaveAttribute('data-first-profile-model-use', 'video')
+      expect(section).toHaveAttribute('data-first-profile-api-secret', 'secret-key')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Clone first profile' }))
+
+      expect(saveSettings).toHaveBeenLastCalledWith({
+        plugin_config: {
+          api_profiles: [
+            expect.objectContaining({
+              id: 'quick-kling',
+              api_key: 'access-id',
+              api_secret: 'secret-key'
+            }),
+            expect.objectContaining({
+              id: '00000000-0000-4000-8000-000000000001',
+              model_name: 'kling-v3',
+              provider: 'kling',
+              model_use: 'video',
+              api_key: '',
+              api_secret: undefined,
+              backup_api_keys: undefined
+            })
+          ]
+        }
+      })
+    } finally {
+      randomUUIDSpy.mockRestore()
+    }
   })
 
   it('saves quick app prompt translation system and user prompts separately', () => {

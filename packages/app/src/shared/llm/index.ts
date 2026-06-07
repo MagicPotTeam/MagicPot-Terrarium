@@ -45,6 +45,8 @@ export type { FetchImpl } from './clients'
 export {
   isGeminiUrl,
   isClaudeUrl,
+  isKlingUrl,
+  isVolcengineUrl,
   isOllamaUrl,
   isLocalBaseUrl,
   isOllamaProfile,
@@ -62,6 +64,13 @@ export {
   createOpenAIFileSearchSession
 } from './openaiFileSearch'
 export { normalizeOpenAIImageGenerationSize } from './openaiResponses'
+export {
+  KlingVideoAPICli,
+  VolcengineSeedanceAPICli,
+  createKlingJwt,
+  normalizeKlingBaseUrl,
+  normalizeVolcengineBaseUrl
+} from './videoClients'
 export { getSuggestedModelCatalog, type ModelCatalogOption } from './modelCatalog'
 export {
   listTaggerProviders,

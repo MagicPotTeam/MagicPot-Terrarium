@@ -220,6 +220,185 @@ describe('LLMProxySvcImpl', () => {
     expect(resp.content).toBe('quick response')
   })
 
+  it('skips video-only Quick App profiles for default qapp text routing', async () => {
+    const quickChat = vi.fn().mockResolvedValue('quick response')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: quickChat } as never)
+
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-video',
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'access-id',
+            api_secret: 'secret-key',
+            provider: 'kling',
+            model_use: 'video'
+          },
+          {
+            id: 'quick-text',
+            model_name: 'Quick Text Model',
+            base_url: 'https://quick.example/v1',
+            api_key: 'quick-key'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const resp = await svc.chat({
+      profileScope: 'qapp',
+      messages: [{ role: 'user', content: 'hello' }]
+    })
+
+    expect(cliFromProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'quick-text',
+        model_name: 'Quick Text Model'
+      }),
+      expect.objectContaining({
+        fetchImpl: expect.any(Function)
+      })
+    )
+    expect(resp.content).toBe('quick response')
+  })
+
+  it('rejects default qapp text routing when only video Quick App profiles are configured', async () => {
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-video',
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'access-id',
+            api_secret: 'secret-key',
+            provider: 'kling',
+            model_use: 'video'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    await expect(
+      svc.chat({
+        profileScope: 'qapp',
+        messages: [{ role: 'user', content: 'hello' }]
+      })
+    ).rejects.toThrow('No suitable LLM profile available')
+  })
+
+  it('preserves video attachments from API profile clients', async () => {
+    const videoChat = vi.fn().mockResolvedValue({
+      content: '',
+      attachments: [
+        {
+          type: 'video',
+          url: 'https://cdn.example/video.mp4',
+          mimeType: 'video/mp4',
+          fileName: 'video.mp4'
+        }
+      ]
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: videoChat } as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'video-profile',
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'access-id',
+            api_secret: 'secret-key',
+            provider: 'kling',
+            model_use: 'video'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const resp = await svc.chat({
+      profileId: 'video-profile',
+      messages: [{ role: 'user', content: 'make a video' }]
+    })
+
+    expect(resp.content).toBe('')
+    expect(resp.attachments).toEqual([
+      {
+        type: 'video',
+        url: 'https://cdn.example/video.mp4',
+        mimeType: 'video/mp4',
+        fileName: 'video.mp4'
+      }
+    ])
+  })
+
+  it('forwards videoGenerationOptions exactly to the selected video client', async () => {
+    const videoChat = vi.fn().mockResolvedValue({
+      content: '',
+      attachments: [
+        {
+          type: 'video',
+          url: 'https://cdn.example/video.mp4',
+          mimeType: 'video/mp4',
+          fileName: 'video.mp4'
+        }
+      ]
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: videoChat } as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'video-profile',
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'access-id',
+            api_secret: 'secret-key',
+            provider: 'kling',
+            model_use: 'video'
+          }
+        ]
+      }
+    })
+
+    const videoGenerationOptions = {
+      duration: 5,
+      callbackUrl: 'https://webhook.example/kling',
+      externalTaskId: 'external-123',
+      cameraSimpleControls: { horizontal: 3 },
+      advancedJson: {
+        shot_type: 'multi',
+        multi_shot: true
+      },
+      requestOverride: {
+        mode: 'pro'
+      }
+    }
+
+    const svc = new LLMProxySvcImpl()
+    await svc.chat({
+      profileId: 'video-profile',
+      messages: [{ role: 'user', content: 'make a video' }],
+      videoGenerationOptions
+    })
+
+    expect(videoChat).toHaveBeenCalledWith({
+      messages: [{ role: 'user', content: 'make a video' }],
+      systemPrompt: undefined,
+      videoGenerationOptions
+    })
+  })
+
   it('passes AbortSignal through to the selected LLM client', async () => {
     const agentChat = vi.fn().mockResolvedValue('agent response')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)

@@ -17,9 +17,11 @@ import type {
 import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 import { LLMCli } from './types'
 import { OpenAIAPICli, GeminiAPICli, ClaudeAPICli, OllamaAPICli, type FetchImpl } from './clients'
+import { KlingVideoAPICli, VolcengineSeedanceAPICli } from './videoClients'
 
 type ProfileLike = {
   api_key?: string
+  api_secret?: string
   call_type?: LLMProfileCallType
   auth_mode?: string
   base_url?: string
@@ -65,6 +67,18 @@ const looksLikeGlmOcrModel = (modelName?: string): boolean =>
     .toLowerCase()
     .includes('glm-ocr')
 
+const looksLikeKlingVideoModel = (modelName?: string): boolean =>
+  String(modelName || '')
+    .trim()
+    .toLowerCase()
+    .startsWith('kling-')
+
+const looksLikeVolcengineVideoModel = (modelName?: string): boolean =>
+  String(modelName || '')
+    .trim()
+    .toLowerCase()
+    .startsWith('doubao-seedance-')
+
 const normalizeProvider = (provider?: string): LLMProvider | undefined => {
   switch (provider) {
     case 'default':
@@ -73,6 +87,8 @@ const normalizeProvider = (provider?: string): LLMProvider | undefined => {
     case 'gemini':
     case 'claude':
     case 'ollama':
+    case 'kling':
+    case 'volcengine':
       return provider
     default:
       return undefined
@@ -99,6 +115,7 @@ const normalizeModelUse = (modelUse?: string): LLMModelUse | undefined => {
     case 'vision':
     case 'ocr':
     case 'image':
+    case 'video':
       return modelUse
     default:
       return undefined
@@ -111,6 +128,25 @@ export const isGeminiUrl = (url: string): boolean => {
 
 export const isClaudeUrl = (url: string): boolean => {
   return url.includes('anthropic.com') || url.includes('claude')
+}
+
+export const isKlingUrl = (url: string): boolean => {
+  const normalized = url.trim().toLowerCase()
+  return normalized.includes('klingai.com') || normalized.includes('klingapi.com')
+}
+
+export const isVolcengineUrl = (url: string): boolean => {
+  const normalized = url.trim().toLowerCase()
+  return normalized.includes('/contents/generations/tasks')
+}
+
+const isVolcengineVideoBaseUrl = (url: string): boolean => {
+  const normalized = url.trim().toLowerCase()
+  return (
+    normalized.includes('ark.cn-beijing.volces.com') ||
+    normalized.includes('volcengineapi.com') ||
+    normalized.includes('byteplusapi.com')
+  )
 }
 
 export const isOllamaUrl = (url: string): boolean => {
@@ -175,13 +211,42 @@ export const resolveProfileProvider = (profile: ProfileLike): LLMProvider | unde
     }
   }
 
+  const explicitModelUse = normalizeModelUse(profile.model_use)
+  const hasExplicitModelUse =
+    typeof profile.model_use === 'string' && profile.model_use.trim().length > 0
+  const isExplicitNonVideoProfile = hasExplicitModelUse && explicitModelUse !== 'video'
+  const isVideoProfile = explicitModelUse === 'video'
+
   const explicitProvider = normalizeProvider(profile.provider)
   if (explicitProvider) {
-    return explicitProvider
+    if (
+      !isExplicitNonVideoProfile ||
+      (explicitProvider !== 'kling' && explicitProvider !== 'volcengine')
+    ) {
+      return explicitProvider
+    }
   }
 
   if (profile.is_ollama || isOllamaUrl(profile.base_url || '')) {
     return 'ollama'
+  }
+
+  if (
+    !isExplicitNonVideoProfile &&
+    (isVideoProfile || looksLikeKlingVideoModel(profile.model_name)) &&
+    isKlingUrl(profile.base_url || '')
+  ) {
+    return 'kling'
+  }
+
+  if (
+    !isExplicitNonVideoProfile &&
+    (isVolcengineUrl(profile.base_url || '') ||
+      (isVideoProfile &&
+        (looksLikeVolcengineVideoModel(profile.model_name) ||
+          isVolcengineVideoBaseUrl(profile.base_url || ''))))
+  ) {
+    return 'volcengine'
   }
 
   if (isGeminiUrl(profile.base_url || '')) {
@@ -240,6 +305,11 @@ export const resolveProfileModelUse = (profile: ProfileLike): LLMModelUse => {
     return explicitModelUse
   }
 
+  const provider = resolveProfileProvider(profile)
+  if (provider === 'kling' || provider === 'volcengine') {
+    return 'video'
+  }
+
   if (profile.is_ocr_model || looksLikeGlmOcrModel(profile.model_name)) {
     return 'ocr'
   }
@@ -274,14 +344,20 @@ export const isRunnableProfile = (profile: ProfileLike): boolean => {
     return false
   }
 
-  if (resolveProfileProvider(profile) === 'ollama') {
+  const provider = resolveProfileProvider(profile)
+  if (provider === 'ollama') {
     return true
   }
 
-  if (
-    resolveProfileProvider(profile) === 'openai' &&
-    resolveProfileDeployment(profile) === 'local'
-  ) {
+  if (provider === 'kling') {
+    return Boolean(profile.api_key?.trim() && profile.api_secret?.trim())
+  }
+
+  if (provider === 'volcengine') {
+    return Boolean(profile.api_key?.trim())
+  }
+
+  if (provider === 'openai' && resolveProfileDeployment(profile) === 'local') {
     return true
   }
 
@@ -295,6 +371,7 @@ export const isRunnableProfile = (profile: ProfileLike): boolean => {
 export const cliFromProfile = (
   profile: {
     api_key: string
+    api_secret?: string
     auth_mode?: string
     base_url: string
     codex_fast_mode?: boolean
@@ -338,11 +415,27 @@ export const cliFromProfile = (
         profile.model_name,
         options?.fetchImpl
       )
+    case 'kling':
+      return new KlingVideoAPICli(
+        profile.api_key,
+        profile.api_secret || '',
+        profile.base_url,
+        profile.model_name,
+        options?.fetchImpl
+      )
+    case 'volcengine':
+      return new VolcengineSeedanceAPICli(
+        profile.api_key,
+        profile.base_url,
+        profile.model_name,
+        options?.fetchImpl
+      )
     case 'openai':
-    default:
       return new OpenAIAPICli(profile.api_key, profile.base_url, profile.model_name, {
         modelUse: resolveProfileModelUse(profile),
         fetchImpl: options?.fetchImpl
       })
+    default:
+      return undefined
   }
 }

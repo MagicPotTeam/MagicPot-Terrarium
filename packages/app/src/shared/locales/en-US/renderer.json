@@ -235,7 +235,13 @@
     "clear_cos_empty": "No objects were found under the current prefix.",
     "clear_cos_success": "Cleared {{deletedCount}} objects.",
     "clear_cos_partial": "Deleted {{deletedCount}} objects, but {{errorCount}} objects failed to delete.",
-    "clear_cos_failed": "Failed to clear the Hunyuan3D COS cache."
+    "clear_cos_failed": "Failed to clear the Hunyuan3D COS cache.",
+    "model_use_video": "Video Generation",
+    "video_provider": "Video Provider",
+    "video_provider_volcengine_seedance": "Volcengine / BytePlus Seedance",
+    "volcengine_api_key": "Volcengine API Key",
+    "kling_video_info": "Kling uses AccessKey + SecretKey to sign a JWT and submit text-to-video or image-to-video tasks.",
+    "seedance_video_info": "Volcengine / BytePlus Seedance uses a Bearer API key to submit async video generation tasks."
   },
   "mcp": {
     "overview_title": "MCP Integration",
@@ -511,6 +517,7 @@
       "内置快应用": "Builtin QApps",
       "hunyuan3d": "Hunyuan3D",
       "hunyuan3d_quick_app": "Hunyuan3D",
+      "ai_video_generation": "AI Video Generation",
       "文生图（SDXL）": "Text-to-Image (SDXL)",
       "图生图": "Image-to-Image",
       "示例": "Example",
@@ -664,6 +671,46 @@
         "image_interrogation_failed": "Prompt interrogation failed: {{error}}",
         "translation_failed": "Prompt translation failed: {{error}}",
         "max_length": "Prompt length must not exceed {{maxLength}} characters."
+      }
+    },
+    "video_generation": {
+      "title": "AI Video Generation",
+      "description": "Submit Kling or Volcengine/Seedance async video-generation tasks and show the generated video here.",
+      "profile_label": "Video model",
+      "scope_qapp": "Quick App API",
+      "scope_agent": "Agent Threads",
+      "prompt_label": "Video prompt",
+      "prompt_placeholder": "Example: cinematic shot of a red panda walking through a misty bamboo forest, soft morning light, 4K",
+      "reference_title": "Reference image (optional)",
+      "reference_description": "Choose a PNG/JPEG image to run image-to-video. The local file is converted to a data URL.",
+      "choose_reference": "Choose reference image",
+      "clear_reference": "Clear reference",
+      "no_reference": "No image selected",
+      "generate": "Generate video",
+      "generating": "Generating...",
+      "latest_result": "Latest result",
+      "download": "Download video",
+      "open_preview": "Open preview",
+      "hint": {
+        "kling": "Kling supports text-to-video and image-to-video. A selected PNG/JPEG reference image is sent as data:image base64.",
+        "seedance": "Volcengine/Seedance supports text-to-video and image-to-video. Requests use duration=5 and watermark=false by default.",
+        "missing_profile": "Add a Video Generation profile in Settings -> Quick App API or Settings -> Agent Threads first."
+      },
+      "errors": {
+        "image_required": "Please choose an image file.",
+        "image_read_failed": "Failed to read image: {{error}}",
+        "missing_profile": "Configure a Kling or Volcengine/Seedance video model in Settings first.",
+        "prompt_or_image_required": "Enter a video prompt or choose a reference image.",
+        "no_video_url": "The video task completed without a video URL."
+      },
+      "status": {
+        "submitting": "Submitting the async video task and polling the result.",
+        "complete": "Video generation completed.",
+        "failed": "Generation failed: {{error}}"
+      },
+      "toast": {
+        "complete": "Video generation completed.",
+        "failed": "Generation failed: {{error}}"
       }
     }
   },

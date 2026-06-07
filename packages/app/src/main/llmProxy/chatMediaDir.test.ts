@@ -46,6 +46,9 @@ describe('chatMediaDir', () => {
       if (name === 'exe') {
         return path.join(tempRoot, 'MagicPot.exe')
       }
+      if (name === 'userData') {
+        return path.join(tempRoot, 'userData')
+      }
       throw new Error(`Unexpected app.getPath(${name})`)
     })
     delete process.env['MAGICPOT_TEST_AUTOMATED_RUN']
@@ -91,6 +94,16 @@ describe('chatMediaDir', () => {
         'alice-team'
       )
     )
+    await expect(fs.access(mediaDir)).resolves.toBeUndefined()
+  })
+
+  it('falls back to userData instead of the app directory', async () => {
+    currentConfig = {}
+
+    const module = await loadModule()
+    const mediaDir = module.getChatMediaDir('Alice Team')
+
+    expect(mediaDir).toBe(path.join(tempRoot, 'userData', '.chat_media', 'alice-team'))
     await expect(fs.access(mediaDir)).resolves.toBeUndefined()
   })
 })
