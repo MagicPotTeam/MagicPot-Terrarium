@@ -3,9 +3,11 @@ import { ClaudeAPICli, GeminiAPICli, OllamaAPICli, OpenAIAPICli } from './client
 import { KlingVideoAPICli, VolcengineSeedanceAPICli } from './videoClients'
 import {
   cliFromProfile,
+  isKlingUrl,
   isOllamaProfile,
   isOllamaUrl,
   isRunnableProfile,
+  isVolcengineUrl,
   resolveProfileCallType,
   resolveProfileModelUse
 } from './utils'
@@ -230,6 +232,17 @@ describe('shared llm ollama compatibility', () => {
     expect(resolveProfileModelUse(profile)).toBe('agent')
   })
 
+  it('matches video provider URLs by hostname instead of unsafe substrings', () => {
+    expect(isKlingUrl('https://api-beijing.klingai.com/v1/videos/text2video')).toBe(true)
+    expect(isKlingUrl('https://klingai.com.evil.example/v1/videos/text2video')).toBe(false)
+    expect(isKlingUrl('https://evil.example/relay?klingai.com')).toBe(false)
+
+    expect(
+      isVolcengineUrl('https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks')
+    ).toBe(true)
+    expect(isVolcengineUrl('https://evil.example/api/v3/contents/generations/tasks')).toBe(true)
+  })
+
   it('routes configured Kling video profiles to the Kling client only when both access key and secret are present', () => {
     const incompleteProfile = {
       model_name: 'kling-v3',
@@ -311,5 +324,26 @@ describe('shared llm ollama compatibility', () => {
 
     expect(resolveProfileModelUse(profile)).toBe('chat')
     expect(cliFromProfile(profile, { fetchImpl: stableFetch })).toBeInstanceOf(OpenAIAPICli)
+
+    const spoofedKlingProfile = {
+      model_name: 'kling-v3',
+      base_url: 'https://klingai.com.evil.example',
+      api_key: 'access-id',
+      api_secret: 'secret-key',
+      model_use: 'video' as const
+    }
+    const spoofedVolcengineProfile = {
+      model_name: 'video-compatible-model',
+      base_url: 'https://volcengineapi.com.evil.example/api/v3',
+      api_key: 'ark-key',
+      model_use: 'video' as const
+    }
+
+    expect(cliFromProfile(spoofedKlingProfile, { fetchImpl: stableFetch })).toBeInstanceOf(
+      OpenAIAPICli
+    )
+    expect(cliFromProfile(spoofedVolcengineProfile, { fetchImpl: stableFetch })).toBeInstanceOf(
+      OpenAIAPICli
+    )
   })
 })

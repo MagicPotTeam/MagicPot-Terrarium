@@ -122,6 +122,33 @@ const normalizeModelUse = (modelUse?: string): LLMModelUse | undefined => {
   }
 }
 
+const parseHttpUrl = (url: string): URL | undefined => {
+  const normalized = url.trim()
+  if (!normalized) {
+    return undefined
+  }
+
+  try {
+    const parsed = new URL(normalized)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const hostnameMatchesDomain = (hostname: string, domain: string): boolean =>
+  hostname === domain || hostname.endsWith(`.${domain}`)
+
+const urlHostnameMatchesDomain = (url: string, domains: readonly string[]): boolean => {
+  const parsed = parseHttpUrl(url)
+  if (!parsed) {
+    return false
+  }
+
+  const hostname = parsed.hostname.toLowerCase()
+  return domains.some((domain) => hostnameMatchesDomain(hostname, domain))
+}
+
 export const isGeminiUrl = (url: string): boolean => {
   return url.includes('generativelanguage.googleapis.com') || url.includes('googleapis.com')
 }
@@ -130,24 +157,24 @@ export const isClaudeUrl = (url: string): boolean => {
   return url.includes('anthropic.com') || url.includes('claude')
 }
 
-export const isKlingUrl = (url: string): boolean => {
-  const normalized = url.trim().toLowerCase()
-  return normalized.includes('klingai.com') || normalized.includes('klingapi.com')
-}
+export const isKlingUrl = (url: string): boolean =>
+  urlHostnameMatchesDomain(url, ['klingai.com', 'klingapi.com'])
 
 export const isVolcengineUrl = (url: string): boolean => {
-  const normalized = url.trim().toLowerCase()
-  return normalized.includes('/contents/generations/tasks')
+  const parsed = parseHttpUrl(url)
+  if (parsed) {
+    return parsed.pathname.toLowerCase().includes('/contents/generations/tasks')
+  }
+
+  return url.trim().toLowerCase().includes('/contents/generations/tasks')
 }
 
-const isVolcengineVideoBaseUrl = (url: string): boolean => {
-  const normalized = url.trim().toLowerCase()
-  return (
-    normalized.includes('ark.cn-beijing.volces.com') ||
-    normalized.includes('volcengineapi.com') ||
-    normalized.includes('byteplusapi.com')
-  )
-}
+const isVolcengineVideoBaseUrl = (url: string): boolean =>
+  urlHostnameMatchesDomain(url, [
+    'ark.cn-beijing.volces.com',
+    'volcengineapi.com',
+    'byteplusapi.com'
+  ])
 
 export const isOllamaUrl = (url: string): boolean => {
   const normalized = url.trim().toLowerCase()

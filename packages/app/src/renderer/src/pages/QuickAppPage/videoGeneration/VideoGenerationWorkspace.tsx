@@ -582,6 +582,46 @@ const hasExplicitNonVideoUse = (profile: LLMAPIProfile): boolean => {
   return Boolean(modelUse && modelUse !== 'default' && modelUse !== 'video')
 }
 
+const KLING_VIDEO_PROVIDER_DOMAINS = ['klingai.com', 'klingapi.com'] as const
+const VOLCENGINE_VIDEO_PROVIDER_DOMAINS = [
+  'ark.cn-beijing.volces.com',
+  'volcengineapi.com',
+  'byteplusapi.com'
+] as const
+
+const parseHttpUrl = (url: string): URL | undefined => {
+  const normalized = url.trim()
+  if (!normalized) {
+    return undefined
+  }
+
+  try {
+    const parsed = new URL(normalized)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const hostnameMatchesDomain = (hostname: string, domain: string): boolean =>
+  hostname === domain || hostname.endsWith(`.${domain}`)
+
+const matchesVideoProviderHost = (url: string, domains: readonly string[]): boolean => {
+  const parsed = parseHttpUrl(url)
+  if (!parsed) {
+    return false
+  }
+
+  const hostname = parsed.hostname.toLowerCase()
+  return domains.some((domain) => hostnameMatchesDomain(hostname, domain))
+}
+
+const isSeedanceTaskEndpointUrl = (url: string): boolean => {
+  const parsed = parseHttpUrl(url)
+  const normalized = parsed?.pathname || url.trim().toLowerCase()
+  return normalized.toLowerCase().includes('/contents/generations/tasks')
+}
+
 const resolveVideoProfileProvider = (profile: LLMAPIProfile): VideoProvider | undefined => {
   if (hasExplicitNonVideoUse(profile)) {
     return undefined
@@ -593,20 +633,21 @@ const resolveVideoProfileProvider = (profile: LLMAPIProfile): VideoProvider | un
   }
 
   const modelName = profile.model_name.trim().toLowerCase()
-  const baseUrl = profile.base_url.trim().toLowerCase()
+  const baseUrl = profile.base_url.trim()
   const isExplicitVideo = profile.model_use === 'video'
 
-  if ((isExplicitVideo || modelName.startsWith('kling-')) && /kling(?:ai|api)\.com/.test(baseUrl)) {
+  if (
+    (isExplicitVideo || modelName.startsWith('kling-')) &&
+    matchesVideoProviderHost(baseUrl, KLING_VIDEO_PROVIDER_DOMAINS)
+  ) {
     return 'kling'
   }
 
   if (
-    baseUrl.includes('/contents/generations/tasks') ||
+    isSeedanceTaskEndpointUrl(baseUrl) ||
     (isExplicitVideo &&
       (modelName.startsWith('doubao-seedance-') ||
-        baseUrl.includes('ark.cn-beijing.volces.com') ||
-        baseUrl.includes('volcengineapi.com') ||
-        baseUrl.includes('byteplusapi.com')))
+        matchesVideoProviderHost(baseUrl, VOLCENGINE_VIDEO_PROVIDER_DOMAINS)))
   ) {
     return 'volcengine'
   }

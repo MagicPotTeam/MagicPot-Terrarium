@@ -16,6 +16,11 @@ type MockChatResponse = {
   attachments?: Array<Record<string, unknown>>
 }
 
+type MockToolResponse = {
+  content: string
+  metadata?: Record<string, unknown>
+}
+
 const chatMock = vi.fn(
   async (_req?: unknown, _options?: unknown): Promise<MockChatResponse> => ({
     content: 'chat ok'
@@ -24,10 +29,12 @@ const chatMock = vi.fn(
 
 let rawLocalMediaPath = 'file:///tmp/reference.png'
 
-const callToolMock = vi.fn(async (_route?: unknown, _toolName?: unknown, _args?: unknown) => ({
-  content: 'tool ok',
-  metadata: { ok: true }
-}))
+const callToolMock = vi.fn(
+  async (_route?: unknown, _toolName?: unknown, _args?: unknown): Promise<MockToolResponse> => ({
+    content: 'tool ok',
+    metadata: { ok: true }
+  })
+)
 
 vi.mock('electron', () => ({
   app: {
@@ -523,6 +530,52 @@ describe('LLM proxy server legacy compatibility', () => {
     ])
   })
 
+  it('strips stack-like fields from explicit tool execution responses', async () => {
+    callToolMock.mockResolvedValueOnce({
+      content: 'tool ok',
+      metadata: {
+        keep: 'shown',
+        stack: 'internal stack trace',
+        nested: {
+          keepNested: 'shown too',
+          stackTrace: 'nested internal stack trace',
+          stacktrace: 'nested alternate stack trace'
+        }
+      }
+    })
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/tools/call`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer proxy-secret',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        channel: 'generic',
+        scopeType: 'thread',
+        scopeId: 'chat-session-1',
+        threadId: 'chat-session-1',
+        toolName: 'session.status',
+        args: { verbose: true },
+        allowedToolNames: ['session.status']
+      })
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(body).toEqual({
+      result: {
+        content: 'tool ok',
+        metadata: {
+          keep: 'shown',
+          nested: {
+            keepNested: 'shown too'
+          }
+        }
+      }
+    })
+  })
+
   it('keeps MCP auth working through the local secret helper', async () => {
     const unauthorizedResponse = await fetch(`http://127.0.0.1:${port}/api/mcp`)
     const unauthorizedBody = await unauthorizedResponse.json()
@@ -554,7 +607,12 @@ describe('LLM proxy server legacy compatibility', () => {
   })
 
   it('rewrites raw local-media attachments in the final /api/chat response to scoped proxy URLs', async () => {
-    const scopedAssetPath = path.join(testArtifactDir, 'source-assets', 'reference.png')
+    const scopedAssetPath = path.join(
+      testArtifactDir,
+      '.chat_media',
+      'canvas-agent-2',
+      'reference.png'
+    )
     await fs.mkdir(path.dirname(scopedAssetPath), { recursive: true })
     await fs.writeFile(scopedAssetPath, 'png-bytes', 'utf8')
     rawLocalMediaPath = `file:///${scopedAssetPath.replace(/\\/g, '/')}`

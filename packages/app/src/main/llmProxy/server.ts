@@ -5,7 +5,7 @@ import http from 'http'
 import os from 'os'
 import fs from 'fs'
 import path from 'path'
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHmac, timingSafeEqual } from 'node:crypto'
 import { app } from 'electron'
 import { buildMagicPotAppCatalogSnapshot } from '@shared/app/catalog'
 import {
@@ -203,14 +203,132 @@ const getRequesterAddress = (req: http.IncomingMessage): string => {
   return candidate.replace(/^::ffff:/i, '')
 }
 
-const sanitizeProxyAssetFileStem = (value?: string | null): string => {
-  const normalized = String(value || '')
-    .trim()
-    .replace(/\.[^.]+$/, '')
-    .replace(/[^a-zA-Z0-9._-]+/g, '-')
-    .replace(/-{2,}/g, '-')
-    .replace(/^[-.]+|[-.]+$/g, '')
-  return normalized || 'asset'
+const PROXY_MEDIA_FILENAME_PATTERN = /^[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+$/
+
+const getSafeProxyMediaFilename = (sourcePath: string): string | undefined => {
+  const filename = path.basename(sourcePath)
+  return PROXY_MEDIA_FILENAME_PATTERN.test(filename) ? filename : undefined
+}
+
+const resolvePathInsideDirectory = (baseDir: string, filename: string): string | undefined => {
+  if (!PROXY_MEDIA_FILENAME_PATTERN.test(filename)) {
+    return undefined
+  }
+
+  const resolvedBaseDir = path.resolve(baseDir)
+  const resolvedPath = path.resolve(resolvedBaseDir, filename)
+  const relativePath = path.relative(resolvedBaseDir, resolvedPath)
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return undefined
+  }
+
+  return resolvedPath
+}
+
+const resolveExistingProxyMediaPath = (
+  filename: string,
+  resourceScope?: string
+): string | undefined => {
+  const candidateDirs = [getChatMediaDir(resourceScope), getLlmProxyTempDir(resourceScope)]
+  for (const candidateDir of candidateDirs) {
+    const candidatePath = resolvePathInsideDirectory(candidateDir, filename)
+    if (candidatePath && fs.existsSync(candidatePath)) {
+      return candidatePath
+    }
+  }
+
+  return undefined
+}
+
+const getProxyMediaContentType = (filename: string): string => {
+  const extension = path.extname(filename).toLowerCase()
+  switch (extension) {
+    case '.png':
+      return 'image/png'
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg'
+    case '.gif':
+      return 'image/gif'
+    case '.webp':
+      return 'image/webp'
+    case '.mp4':
+      return 'video/mp4'
+    case '.webm':
+      return 'video/webm'
+    default:
+      return 'application/octet-stream'
+  }
+}
+
+const TOOL_RESPONSE_MAX_DEPTH = 6
+const TOOL_RESPONSE_PRIVATE_FIELD_NAMES = new Set(['stack', 'stackTrace', 'stacktrace'])
+
+const sanitizeToolResponseValue = (
+  value: unknown,
+  depth = 0,
+  seen: WeakSet<object> = new WeakSet()
+): unknown => {
+  if (depth > TOOL_RESPONSE_MAX_DEPTH) {
+    return '[Truncated]'
+  }
+
+  if (typeof value === 'bigint') {
+    return value.toString()
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value
+  }
+
+  if (seen.has(value)) {
+    return '[Circular]'
+  }
+  seen.add(value)
+
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message
+    }
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeToolResponseValue(item, depth + 1, seen))
+  }
+
+  const sanitized: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (TOOL_RESPONSE_PRIVATE_FIELD_NAMES.has(key)) {
+      continue
+    }
+    sanitized[key] = sanitizeToolResponseValue(item, depth + 1, seen)
+  }
+  return sanitized
+}
+
+const buildSafeToolResponseResult = (result: unknown): { content: string; metadata?: unknown } => {
+  if (result instanceof Error) {
+    return { content: 'Tool execution failed.' }
+  }
+
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    const toolResult = result as { content?: unknown; metadata?: unknown }
+    const content =
+      typeof toolResult.content === 'string'
+        ? toolResult.content
+        : toolResult.content == null
+          ? ''
+          : String(toolResult.content)
+    return {
+      content,
+      ...(toolResult.metadata !== undefined
+        ? { metadata: sanitizeToolResponseValue(toolResult.metadata) }
+        : {})
+    }
+  }
+
+  return { content: result == null ? '' : String(result) }
 }
 
 const buildProxyMediaAccessSignature = (
@@ -282,34 +400,30 @@ const buildScopedProxyMediaUrl = (
   }
 
   const normalizedSourcePath = normalizeLocalFilePath(sourceUrl)
-  const fallbackFilename = path.basename(normalizedSourcePath)
-  let proxiedUrl = `${protocol}://${host}/${buildProxyImagePath(fallbackFilename, undefined, accessToken, requesterAddress).replace(/^\//, '')}`
-
-  try {
-    if (normalizedSourcePath && fs.existsSync(normalizedSourcePath)) {
-      const extension = path.extname(normalizedSourcePath)
-      const fileStem = sanitizeProxyAssetFileStem(path.basename(normalizedSourcePath, extension))
-      const stagedFilename = `${fileStem}-${randomUUID()}${extension}`
-      const targetDir = getChatMediaDir(resourceScope)
-      const targetPath = path.join(targetDir, stagedFilename)
-      const sourceStat = fs.statSync(normalizedSourcePath)
-
-      if (path.resolve(normalizedSourcePath) !== path.resolve(targetPath)) {
-        fs.copyFileSync(normalizedSourcePath, targetPath)
-      }
-
-      recordLlmProxyAccessUsage(accessToken, {
-        activity: 'media-generated',
-        requesterAddress,
-        generatedMediaBytes: sourceStat.size
-      })
-
-      proxiedUrl = `${protocol}://${host}/${buildProxyImagePath(stagedFilename, resourceScope, accessToken, requesterAddress).replace(/^\//, '')}`
-    }
-  } catch (error) {
-    console.warn('[LLMProxyServer] Failed to stage local media for remote access:', error)
+  const filename = getSafeProxyMediaFilename(normalizedSourcePath)
+  if (!filename) {
+    return sourceUrl
   }
 
+  const existingMediaPath = resolveExistingProxyMediaPath(filename, resourceScope)
+  if (!existingMediaPath) {
+    return sourceUrl
+  }
+
+  let generatedMediaBytes: number | undefined
+  try {
+    generatedMediaBytes = fs.statSync(existingMediaPath).size
+  } catch {
+    generatedMediaBytes = undefined
+  }
+
+  recordLlmProxyAccessUsage(accessToken, {
+    activity: 'media-generated',
+    requesterAddress,
+    ...(typeof generatedMediaBytes === 'number' ? { generatedMediaBytes } : {})
+  })
+
+  const proxiedUrl = `${protocol}://${host}/${buildProxyImagePath(filename, resourceScope, accessToken, requesterAddress).replace(/^\//, '')}`
   stagedUrlCache?.set(cacheKey, proxiedUrl)
   return proxiedUrl
 }
@@ -1107,7 +1221,7 @@ export function startLLMProxyServer(): void {
         if (
           mediaSegments.length === 0 ||
           mediaSegments.length > 2 ||
-          !/^[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+$/.test(filename) ||
+          !PROXY_MEDIA_FILENAME_PATTERN.test(filename) ||
           (resourceScope && !/^[a-z0-9_.-]+$/i.test(resourceScope))
         ) {
           res.writeHead(400)
@@ -1138,29 +1252,15 @@ export function startLLMProxyServer(): void {
         })
 
         // Prefer the persisted chat media directory, then fall back to temp for legacy data.
-        const mediaDir = getChatMediaDir(resourceScope)
-        const tempDir = getLlmProxyTempDir(resourceScope)
-
-        let filePath = path.join(mediaDir, filename)
-        if (!fs.existsSync(filePath)) {
-          filePath = path.join(tempDir, filename)
-        }
-
-        if (!fs.existsSync(filePath)) {
+        const filePath = resolveExistingProxyMediaPath(filename, resourceScope)
+        if (!filePath) {
           res.writeHead(404)
           res.end('Not Found')
           return
         }
 
         const stat = fs.statSync(filePath)
-        // Infer Content-Type.
-        let contentType = 'application/octet-stream'
-        if (filename.endsWith('.png')) contentType = 'image/png'
-        else if (filename.endsWith('.jpg') || filename.endsWith('.jpeg')) contentType = 'image/jpeg'
-        else if (filename.endsWith('.gif')) contentType = 'image/gif'
-        else if (filename.endsWith('.webp')) contentType = 'image/webp'
-        else if (filename.endsWith('.mp4')) contentType = 'video/mp4'
-        else if (filename.endsWith('.webm')) contentType = 'video/webm'
+        const contentType = getProxyMediaContentType(filename)
 
         res.writeHead(200, {
           'Content-Type': contentType,
@@ -1247,7 +1347,7 @@ export function startLLMProxyServer(): void {
         )
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ result }))
+        res.end(JSON.stringify({ result: buildSafeToolResponseResult(result) }))
         return
       }
 
@@ -1544,7 +1644,7 @@ export function startLLMProxyServer(): void {
       res.writeHead(500, { 'Content-Type': 'application/json' })
       res.end(
         JSON.stringify({
-          error: error instanceof Error ? error.message : String(error)
+          error: 'Internal Server Error'
         })
       )
     }
