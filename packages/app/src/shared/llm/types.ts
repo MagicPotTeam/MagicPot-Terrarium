@@ -14,6 +14,7 @@ export interface ChatAttachment {
   fileName?: string
   relativePath?: string
   hiddenFromChatView?: boolean
+  metadata?: Record<string, unknown>
   sizeBytes?: number
   sourceWidth?: number
   sourceHeight?: number

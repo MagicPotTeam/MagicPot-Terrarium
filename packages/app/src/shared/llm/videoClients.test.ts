@@ -273,6 +273,32 @@ describe('video generation clients', () => {
     ).rejects.toThrow('Kling callback_url must be a valid public http(s) URL.')
   })
 
+  it('rejects private or local Kling result URLs after polling succeeds', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ data: { task_id: 'private-result-task' } }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            task_status: 'succeed',
+            task_result: { videos: [{ url: 'http://localhost/kling.mp4' }] }
+          }
+        })
+      )
+    const client = new KlingVideoAPICli(
+      'access-id',
+      'secret-key',
+      'https://api-beijing.klingai.com',
+      'kling-v3',
+      fetchMock,
+      { intervalMs: 1, timeoutMs: 1000 }
+    )
+
+    await expect(
+      client.chat({ messages: [{ role: 'user', content: 'A cat plays piano' }] })
+    ).rejects.toThrow('Kling task private-result-task succeeded but did not return a video URL')
+  })
+
   it('surfaces Kling business code errors returned with HTTP 200', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(
       jsonResponse({
@@ -739,8 +765,8 @@ describe('video generation clients', () => {
                 type: 'file',
                 url: audioUrl,
                 mimeType: 'audio/mpeg',
-                referenceRole: 'reference_audio'
-              } as never
+                metadata: { videoGenerationRole: 'reference_audio' }
+              }
             ]
           }
         ],

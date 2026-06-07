@@ -1041,13 +1041,15 @@ const assertKlingBusinessSuccess = (
   )
 }
 
-const getKlingVideoUrl = (data: unknown): string | undefined =>
-  firstString(
+const getKlingVideoUrl = (data: unknown): string | undefined => {
+  const videoUrl = firstString(
     getStringAtPath(data, ['data', 'task_result', 'videos', 0, 'url']),
     getStringAtPath(data, ['task_result', 'videos', 0, 'url']),
     getStringAtPath(data, ['data', 'videos', 0, 'url']),
     findFirstStringByKey(data, ['video_url', 'videoUrl'], 0, { requireUrlValue: true })
   )
+  return videoUrl && isSupportedPublicHttpUrl(videoUrl) ? videoUrl : undefined
+}
 
 const isKlingTerminalSuccess = (status: string): boolean =>
   ['succeed', 'succeeded', 'success', 'completed', 'done'].includes(status)
@@ -1403,6 +1405,11 @@ const assertSupportedSeedanceMediaAttachment = (
 const getAttachmentUnknownOption = (attachment: ChatAttachment, key: string): unknown =>
   (attachment as unknown as Record<string, unknown>)[key]
 
+const getAttachmentMetadataOption = (attachment: ChatAttachment, key: string): unknown => {
+  const metadata = getAttachmentUnknownOption(attachment, 'metadata')
+  return isPlainObject(metadata) ? metadata[key] : undefined
+}
+
 const firstDefined = (...values: unknown[]): unknown => values.find((value) => value !== undefined)
 
 const getSeedanceReferenceRoleForAttachment = (
@@ -1417,6 +1424,7 @@ const getSeedanceReferenceRoleForAttachment = (
   const allRoles = getStringArrayOption(getUnknownOption(options, 'referenceRoles'))
   const role = firstDefined(
     getAttachmentUnknownOption(attachment, 'referenceRole'),
+    getAttachmentMetadataOption(attachment, 'videoGenerationRole'),
     kindRoles[mediaIndex],
     allRoles[attachmentIndex],
     kindRole,

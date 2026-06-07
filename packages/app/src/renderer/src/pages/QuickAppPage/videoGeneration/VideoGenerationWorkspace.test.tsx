@@ -358,6 +358,70 @@ describe('VideoGenerationWorkspace', () => {
     })
   })
 
+  it('validates and sends Seedance reference video/audio URL assets', async () => {
+    mocks.currentConfig.value = buildConfig({
+      qappProfiles: [buildSeedanceProfile('seedance-video')]
+    })
+    const videoFile = new File(['local-video'], 'local.mp4', { type: 'video/mp4' })
+    mocks.selectFileMock.mockResolvedValue(videoFile)
+    mocks.fileToDataUrlMock.mockResolvedValue('data:video/mp4;base64,LOCAL')
+
+    renderWorkspace()
+
+    await screen.findByRole('combobox', { name: /Video model/ })
+    fireEvent.click(screen.getByRole('button', { name: 'Choose Reference video' }))
+    expect(await screen.findByText('local.mp4')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Generate video' }))
+
+    await waitFor(() => {
+      expect(mocks.notifyErrorMock).toHaveBeenCalledWith(
+        expect.stringContaining('Reference video must use a public http(s) URL')
+      )
+    })
+    expect(mocks.chatMock).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText('Reference video URL'), {
+      target: { value: 'https://cdn.example/reference.mp4' }
+    })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Use URL' })[3])
+    fireEvent.change(screen.getByLabelText('Reference audio URL'), {
+      target: { value: 'asset://audio/reference' }
+    })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Use URL' })[4])
+    fireEvent.change(screen.getByLabelText('Video prompt'), {
+      target: { value: 'Blend media references' }
+    })
+    mocks.notifyErrorMock.mockClear()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate video' }))
+
+    await waitFor(() => {
+      expect(mocks.chatMock).toHaveBeenCalledTimes(1)
+    })
+    expect(mocks.chatMock.mock.calls[0][0].messages[0]).toEqual({
+      role: 'user',
+      content: 'Blend media references',
+      attachments: [
+        expect.objectContaining({
+          type: 'video',
+          url: 'https://cdn.example/reference.mp4',
+          mimeType: 'video/mp4',
+          metadata: expect.objectContaining({ videoGenerationRole: 'reference_video' })
+        }),
+        expect.objectContaining({
+          type: 'file',
+          url: 'asset://audio/reference',
+          mimeType: 'audio/mpeg',
+          metadata: expect.objectContaining({ videoGenerationRole: 'reference_audio' })
+        })
+      ]
+    })
+    const previewText = screen.getByTestId('video-generation-request-preview').textContent || ''
+    expect(previewText).toContain('"video_url"')
+    expect(previewText).toContain('"audio_url"')
+    expect(previewText).not.toContain('unsupportedByCurrentClient')
+  })
+
   it('shows inline mode with compact controls', async () => {
     mocks.currentConfig.value = buildConfig({
       qappProfiles: [buildKlingProfile('qapp-video')]

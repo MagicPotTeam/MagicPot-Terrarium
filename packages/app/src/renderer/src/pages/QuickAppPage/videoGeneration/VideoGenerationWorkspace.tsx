@@ -82,19 +82,7 @@ const ASSET_SLOT_KEYS = [
 const IMAGE_ASSET_SLOT_KEYS = ['firstFrame', 'lastFrame', 'referenceImage'] as const
 const NON_IMAGE_ASSET_SLOT_KEYS = ['referenceVideo', 'referenceAudio'] as const
 
-const ASSET_SLOT_ROLES: Record<
-  (typeof IMAGE_ASSET_SLOT_KEYS)[number],
-  VideoGenerationReferenceRole
-> = {
-  firstFrame: 'first_frame',
-  lastFrame: 'last_frame',
-  referenceImage: 'reference_image'
-}
-
-const ASSET_SLOT_REFERENCE_ROLES: Record<
-  (typeof ASSET_SLOT_KEYS)[number],
-  VideoGenerationReferenceRole
-> = {
+const ASSET_SLOT_ROLES: Record<AssetSlotKey, VideoGenerationReferenceRole> = {
   firstFrame: 'first_frame',
   lastFrame: 'last_frame',
   referenceImage: 'reference_image',
@@ -388,7 +376,7 @@ const redactAssetUrlForPreview = (slotKey: AssetSlotKey, asset: AssetSlotState):
 
 const createAssetAttachment = (slotKey: AssetSlotKey, asset: AssetSlotState): ChatAttachment => {
   const config = ASSET_SLOT_CONFIG[slotKey]
-  const role = ASSET_SLOT_REFERENCE_ROLES[slotKey]
+  const role = ASSET_SLOT_ROLES[slotKey]
   return {
     type: config.kind === 'image' ? 'image' : config.kind === 'video' ? 'video' : 'file',
     url: asset.dataUrl,
@@ -397,9 +385,8 @@ const createAssetAttachment = (slotKey: AssetSlotKey, asset: AssetSlotState): Ch
     metadata: {
       videoGenerationAssetSlot: slotKey,
       videoGenerationRole: role
-    },
-    referenceRole: role
-  } as ChatAttachment
+    }
+  }
 }
 
 const createPreviewAttachment = (attachment: ChatAttachment): Record<string, unknown> => ({
@@ -519,17 +506,15 @@ const buildProviderRequestPreview = ({
   if (hasSelectedAsset(assetSlots.referenceVideo)) {
     content.push({
       type: 'video_url',
-      role: 'reference_video',
-      video_url: { url: createProviderAssetPreview('referenceVideo', assetSlots) },
-      unsupportedByCurrentClient: true
+      role: ASSET_SLOT_ROLES.referenceVideo,
+      video_url: { url: createProviderAssetPreview('referenceVideo', assetSlots) }
     })
   }
   if (hasSelectedAsset(assetSlots.referenceAudio)) {
     content.push({
       type: 'audio_url',
-      role: 'reference_audio',
-      audio_url: { url: createProviderAssetPreview('referenceAudio', assetSlots) },
-      unsupportedByCurrentClient: true
+      role: ASSET_SLOT_ROLES.referenceAudio,
+      audio_url: { url: createProviderAssetPreview('referenceAudio', assetSlots) }
     })
   }
 
@@ -953,7 +938,7 @@ const VideoGenerationWorkspace: React.FC<VideoGenerationWorkspaceProps> = ({
       errors.push(
         txt(
           'errors.prompt_or_supported_asset_required',
-          'Enter a video prompt or choose a supported image asset.'
+          'Enter a video prompt or choose a supported asset.'
         )
       )
     }
@@ -1020,7 +1005,13 @@ const VideoGenerationWorkspace: React.FC<VideoGenerationWorkspaceProps> = ({
           errors.push(
             txt(
               'errors.seedance_reference_url_required',
-              'Seedance reference video/audio inputs must use public http(s) URLs or Volcengine asset:// URLs.'
+              '{{label}} must use a public http(s) URL or Volcengine asset:// URL for Seedance. Local files are only previewed in the UI and cannot be sent for this asset type.',
+              {
+                label:
+                  slotKey === 'referenceVideo'
+                    ? txt('asset.reference_video', 'Reference video')
+                    : txt('asset.reference_audio', 'Reference audio')
+              }
             )
           )
           break
@@ -1050,14 +1041,13 @@ const VideoGenerationWorkspace: React.FC<VideoGenerationWorkspaceProps> = ({
     assetSlots,
     callbackUrl,
     cfgScale,
-    externalTaskId,
     frames,
     klingCameraSimpleControlInputs,
     parsedAdvancedJson.error,
     prompt,
     seedanceReferenceRole,
     selectedImageAssetSlots,
-    selectedNonImageAssetSlots.length,
+    selectedNonImageAssetSlots,
     selectedProfile,
     selectedProvider,
     txt
@@ -1302,14 +1292,20 @@ const VideoGenerationWorkspace: React.FC<VideoGenerationWorkspaceProps> = ({
           : txt('asset.reference_image_seedance_help', 'Seedance reference_image role.')
       case 'referenceVideo':
         return selectedProvider === 'volcengine'
-          ? txt('asset.reference_video_seedance_help', 'Seedance reference_video URL attachment.')
+          ? txt(
+              'asset.reference_video_seedance_help',
+              'Seedance reference_video attachment. Use a public http(s) URL or Volcengine asset:// URL; local files are preview-only.'
+            )
           : txt(
               'asset.reference_video_help',
               'Reference video URL/file is sent only for Seedance profiles.'
             )
       case 'referenceAudio':
         return selectedProvider === 'volcengine'
-          ? txt('asset.reference_audio_seedance_help', 'Seedance reference_audio URL attachment.')
+          ? txt(
+              'asset.reference_audio_seedance_help',
+              'Seedance reference_audio attachment. Use a public http(s) URL or Volcengine asset:// URL; local files are preview-only.'
+            )
           : txt(
               'asset.reference_audio_help',
               'Reference audio URL/file is sent only for Seedance profiles.'
