@@ -52,13 +52,15 @@ describe('hunyuan3dCos', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-04T00:00:00.000Z'))
     randomUUIDMock.mockReturnValue('12345678-1234-1234-1234-123456789abc')
-    COSCtorMock.mockImplementation(() => ({
-      uploadFile: uploadFileMock,
-      putObject: putObjectMock,
-      getObjectUrl: getObjectUrlMock,
-      getBucket: getBucketMock,
-      deleteMultipleObject: deleteMultipleObjectMock
-    }))
+    COSCtorMock.mockImplementation(function MockCOS() {
+      return {
+        uploadFile: uploadFileMock,
+        putObject: putObjectMock,
+        getObjectUrl: getObjectUrlMock,
+        getBucket: getBucketMock,
+        deleteMultipleObject: deleteMultipleObjectMock
+      }
+    })
   })
 
   afterEach(() => {
