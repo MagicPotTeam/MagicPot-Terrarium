@@ -70,6 +70,7 @@ const InputLora: React.FC<InputLoraProps> = ({
   const [imageHeight, setImageHeight] = useState<number | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
   const [gridTemplateColumns, setGridTemplateColumns] = useState<string>('1fr')
+  const loraSelectionRequestRef = useRef(0)
 
   useEffect(() => {
     ;(async () => {
@@ -105,6 +106,8 @@ const InputLora: React.FC<InputLoraProps> = ({
       <Autocomplete
         value={currentLora.lora_name || null}
         onChange={(event, newValue) => {
+          const requestId = loraSelectionRequestRef.current + 1
+          loraSelectionRequestRef.current = requestId
           const nextLoraName = newValue || ''
           const nextTriggerWords = nextLoraName ? loraTriggerWordsByName[nextLoraName] || '' : ''
           handleUpdate(index, {
@@ -117,11 +120,14 @@ const InputLora: React.FC<InputLoraProps> = ({
           if (nextLoraName) {
             void Promise.resolve(onLoraSelected?.(nextLoraName, nextTriggerWords))
               .then((loadedTriggerWords) => {
-                if (!loadedTriggerWords) {
+                if (!loadedTriggerWords || loraSelectionRequestRef.current !== requestId) {
                   return
                 }
                 handleTriggerWordsChange(nextLoraName, loadedTriggerWords)
-                handleUpdate(index, { trigger_words: loadedTriggerWords })
+                handleUpdate(index, {
+                  lora_name: nextLoraName,
+                  trigger_words: loadedTriggerWords
+                })
               })
               .catch((error) => {
                 console.warn('[InputLoRAChain] failed to load LoRA trigger words:', error)
