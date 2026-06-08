@@ -325,11 +325,8 @@ describe('SidePanel', () => {
     })
 
     expect(await screen.findByText('Active Category: video')).toBeTruthy()
-    expect(screen.queryByText('Video Generation Workspace')).toBeNull()
-
-    fireEvent.click(await screen.findByRole('button', { name: 'AI Video Generation' }))
-
     expect(await screen.findByText('Video Generation Workspace')).toBeTruthy()
+    expect(await screen.findByRole('button', { name: 'AI Video Generation' })).toBeTruthy()
     expect(screen.getByText('Video Project: tab-project-video')).toBeTruthy()
     expect(screen.getByText('Video Inline: yes')).toBeTruthy()
     expect(screen.getByText('Video Result Prompt: builtin-video-generation-inline')).toBeTruthy()
