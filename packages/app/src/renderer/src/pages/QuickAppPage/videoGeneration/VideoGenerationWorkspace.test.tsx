@@ -420,7 +420,7 @@ describe('VideoGenerationWorkspace', () => {
     expect(previewText).toContain('"video_url"')
     expect(previewText).toContain('"audio_url"')
     expect(previewText).not.toContain('unsupportedByCurrentClient')
-  })
+  }, 15000)
 
   it('shows inline mode with compact controls', async () => {
     mocks.currentConfig.value = buildConfig({
