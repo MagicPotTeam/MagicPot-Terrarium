@@ -1,6 +1,6 @@
 {
   "name": "aiengineelectron",
-  "version": "1.0.106",
+  "version": "1.0.109",
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "example.com",
@@ -170,7 +170,7 @@
     "@vitest/coverage-v8": "^3.2.4",
     "cross-env": "^10.0.0",
     "electron": "^39.8.10",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "^26.8.1",
     "electron-devtools-installer": "^4.0.0",
     "electron-vite": "^4.0.0",
     "eslint": "^9.34.0",
@@ -188,7 +188,7 @@
     "rollup-plugin-obfuscator": "^1.1.0",
     "ts-json-schema-generator": "^2.4.0",
     "typescript": "^5.8.3",
-    "vite": "^7.0.5",
+    "vite": "^7.3.3",
     "vitest": "^3.2.4"
   },
   "optionalDependencies": {

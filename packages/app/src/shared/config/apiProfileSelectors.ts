@@ -15,6 +15,31 @@ export const isConfiguredApiProfile = (profile: LLMAPIProfile): boolean =>
 const hasConfiguredHunyuan3DSecretCredentials = (profile: LLMAPIProfile): boolean =>
   Boolean(profile.tencent_secret_id?.trim() && profile.tencent_secret_key?.trim())
 
+const getProfileBaseHostname = (value: string): string | null => {
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return null
+
+  const parseHostname = (candidate: string): string | null => {
+    try {
+      return new URL(candidate).hostname.toLowerCase()
+    } catch {
+      return null
+    }
+  }
+
+  return (
+    parseHostname(normalized) ||
+    (/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized) ? null : parseHostname(`https://${normalized}`))
+  )
+}
+
+const hostnameMatchesDomain = (hostname: string, domain: string): boolean =>
+  hostname === domain || hostname.endsWith(`.${domain}`)
+
+const isTencentHunyuan3DHostname = (hostname: string): boolean =>
+  hostnameMatchesDomain(hostname, 'ai3d.cloud.tencent.com') ||
+  hostnameMatchesDomain(hostname, 'hunyuan.cloud.tencent.com')
+
 export const isVisionCapableApiProfile = (profile: LLMAPIProfile): boolean => {
   const modelUse = resolveProfileModelUse(profile)
   return (
@@ -29,12 +54,14 @@ export const isVisionCapableApiProfile = (profile: LLMAPIProfile): boolean => {
 export const isHunyuan3DCompatibleProfile = (profile: LLMAPIProfile): boolean => {
   if (!profile.model_name || !profile.base_url) return false
   const modelName = profile.model_name.toLowerCase()
-  const baseUrl = profile.base_url.toLowerCase()
+  const baseHostname = getProfileBaseHostname(profile.base_url)
+  const isTencentHunyuan3DBaseUrl = Boolean(
+    baseHostname && isTencentHunyuan3DHostname(baseHostname)
+  )
   return (
     modelName.includes('hunyuan3d') ||
-    (modelName.includes('hunyuan') && baseUrl.includes('ai3d.cloud.tencent.com')) ||
-    baseUrl.includes('ai3d.cloud.tencent.com') ||
-    baseUrl.includes('hunyuan.cloud.tencent.com')
+    (modelName.includes('hunyuan') && isTencentHunyuan3DBaseUrl) ||
+    isTencentHunyuan3DBaseUrl
   )
 }
 

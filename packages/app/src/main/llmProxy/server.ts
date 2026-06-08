@@ -5,7 +5,7 @@ import http from 'http'
 import os from 'os'
 import fs from 'fs'
 import path from 'path'
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { app } from 'electron'
 import { buildMagicPotAppCatalogSnapshot } from '@shared/app/catalog'
 import {
@@ -203,12 +203,8 @@ const getRequesterAddress = (req: http.IncomingMessage): string => {
   return candidate.replace(/^::ffff:/i, '')
 }
 
-const PROXY_MEDIA_FILENAME_PATTERN = /^[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+$/
 
-const getSafeProxyMediaFilename = (sourcePath: string): string | undefined => {
-  const filename = path.basename(sourcePath)
-  return PROXY_MEDIA_FILENAME_PATTERN.test(filename) ? filename : undefined
-}
+const PROXY_MEDIA_FILENAME_PATTERN = /^[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+$/
 
 const resolvePathInsideDirectory = (baseDir: string, filename: string): string | undefined => {
   if (!PROXY_MEDIA_FILENAME_PATTERN.test(filename)) {
@@ -260,6 +256,75 @@ const getProxyMediaContentType = (filename: string): string => {
       return 'application/octet-stream'
   }
 }
+
+const isSafeProxyAssetNameChar = (char: string): boolean => {
+  const code = char.charCodeAt(0)
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    char === '.' ||
+    char === '_' ||
+    char === '-'
+  )
+}
+
+const trimProxyAssetNameEdges = (value: string): string => {
+  let start = 0
+  let end = value.length
+
+  while (start < end && (value[start] === '-' || value[start] === '.')) {
+    start += 1
+  }
+  while (end > start && (value[end - 1] === '-' || value[end - 1] === '.')) {
+    end -= 1
+  }
+
+  return value.slice(start, end)
+}
+
+const stripProxyAssetExtension = (value: string): string => {
+  const extensionIndex = value.lastIndexOf('.')
+  return extensionIndex > 0 ? value.slice(0, extensionIndex) : value
+}
+
+const sanitizeProxyAssetFileStem = (value?: string | null): string => {
+  const source = stripProxyAssetExtension(String(value || '').trim())
+  let normalized = ''
+  let lastWasDash = false
+
+  for (const char of source) {
+    if (isSafeProxyAssetNameChar(char)) {
+      normalized += char
+      lastWasDash = char === '-'
+      continue
+    }
+
+    if (!lastWasDash) {
+      normalized += '-'
+      lastWasDash = true
+    }
+  }
+
+  return trimProxyAssetNameEdges(normalized) || 'asset'
+}
+
+const sanitizeProxyAssetExtension = (value: string): string => {
+  const source = value.toLowerCase()
+  if (!source.startsWith('.') || source.length < 2 || source.length > 13) {
+    return ''
+  }
+
+  for (let i = 1; i < source.length; i += 1) {
+    const code = source.charCodeAt(i)
+    if (!((code >= 48 && code <= 57) || (code >= 97 && code <= 122))) {
+      return ''
+    }
+  }
+
+  return source
+}
+
 
 const TOOL_RESPONSE_MAX_DEPTH = 6
 const TOOL_RESPONSE_PRIVATE_FIELD_NAMES = new Set(['stack', 'stackTrace', 'stacktrace'])
@@ -380,6 +445,107 @@ const buildProxyImagePath = (
   return `${pathname}?${params.toString()}`
 }
 
+const getProxyMediaSourceRoots = (resourceScope?: string): string[] => {
+  const roots = [getChatMediaDir(resourceScope), getChatMediaDir()]
+
+  try {
+    const downloadDir = getConfig().download_dir
+    if (typeof downloadDir === 'string' && downloadDir.trim()) {
+      roots.push(downloadDir)
+    }
+  } catch {
+    // Config may be unavailable while the proxy is starting up.
+  }
+
+  return Array.from(new Set(roots.map((root) => path.resolve(root))))
+}
+
+const normalizeRealPathForComparison = (value: string): string => {
+  let normalized = ''
+  for (const char of value) {
+    normalized += char === '\\' ? '/' : char
+  }
+  while (normalized.length > 1 && normalized.endsWith('/')) {
+    normalized = normalized.slice(0, -1)
+  }
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+const stageAllowedProxyMediaSource = (
+  sourceUrl: string,
+  resourceScope?: string
+): { filename: string; size: number } | null => {
+  const sourcePath = path.resolve(normalizeLocalFilePath(sourceUrl))
+
+  for (const sourceRoot of getProxyMediaSourceRoots(resourceScope)) {
+    const resolvedSourceRoot = path.resolve(sourceRoot)
+    const sourceRelativePath = path.relative(resolvedSourceRoot, sourcePath)
+    let realSourceRoot: string
+    let safeSourcePath = sourceRelativePath
+    try {
+      realSourceRoot = fs.realpathSync(resolvedSourceRoot)
+      safeSourcePath = fs.realpathSync(path.resolve(realSourceRoot, safeSourcePath))
+    } catch {
+      continue
+    }
+
+    if (!safeSourcePath.startsWith(realSourceRoot)) {
+      continue
+    }
+    const comparableRoot = normalizeRealPathForComparison(realSourceRoot)
+    const comparableSourcePath = normalizeRealPathForComparison(safeSourcePath)
+    if (
+      comparableSourcePath !== comparableRoot &&
+      !comparableSourcePath.startsWith(`${comparableRoot}/`)
+    ) {
+      continue
+    }
+
+    const sourceStat = fs.statSync(safeSourcePath)
+    if (!sourceStat.isFile()) {
+      return null
+    }
+
+    const rawExtension = path.extname(safeSourcePath)
+    const extension = sanitizeProxyAssetExtension(rawExtension)
+    const fileStem = sanitizeProxyAssetFileStem(path.basename(safeSourcePath, rawExtension))
+    const stagedFilename = `${fileStem}-${randomUUID()}${extension}`
+    const targetDir = getChatMediaDir(resourceScope)
+    const targetPath = path.join(targetDir, stagedFilename)
+
+    if (path.resolve(safeSourcePath) !== path.resolve(targetPath)) {
+      fs.copyFileSync(safeSourcePath, targetPath)
+    }
+
+    return {
+      filename: stagedFilename,
+      size: sourceStat.size
+    }
+  }
+
+  return null
+}
+
+const trimLeadingSlash = (value: string): string => (value.startsWith('/') ? value.slice(1) : value)
+
+const normalizeOpenAiCompatibleImageUrl = (value?: string): string | null => {
+  const source = String(value || '').trim()
+  if (!source || source.includes('\n') || source.includes('\r')) {
+    return null
+  }
+
+  if (source.startsWith('data:image/') || isLocalFileSource(source)) {
+    return source
+  }
+
+  try {
+    const parsed = new URL(source)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.toString() : null
+  } catch {
+    return null
+  }
+}
+
 const buildScopedProxyMediaUrl = (
   sourceUrl: string,
   host: string,
@@ -399,31 +565,24 @@ const buildScopedProxyMediaUrl = (
     return cached
   }
 
-  const normalizedSourcePath = normalizeLocalFilePath(sourceUrl)
-  const filename = getSafeProxyMediaFilename(normalizedSourcePath)
-  if (!filename) {
-    return sourceUrl
-  }
+  const fallbackFilename = `${sanitizeProxyAssetFileStem(sourceUrl)}.png`
+  let proxiedUrl = `${protocol}://${host}/${trimLeadingSlash(buildProxyImagePath(fallbackFilename, undefined, accessToken, requesterAddress))}`
 
-  const existingMediaPath = resolveExistingProxyMediaPath(filename, resourceScope)
-  if (!existingMediaPath) {
-    return sourceUrl
-  }
-
-  let generatedMediaBytes: number | undefined
   try {
-    generatedMediaBytes = fs.statSync(existingMediaPath).size
-  } catch {
-    generatedMediaBytes = undefined
+    const stagedMedia = stageAllowedProxyMediaSource(sourceUrl, resourceScope)
+    if (stagedMedia) {
+      recordLlmProxyAccessUsage(accessToken, {
+        activity: 'media-generated',
+        requesterAddress,
+        generatedMediaBytes: stagedMedia.size
+      })
+
+      proxiedUrl = `${protocol}://${host}/${trimLeadingSlash(buildProxyImagePath(stagedMedia.filename, resourceScope, accessToken, requesterAddress))}`
+    }
+  } catch (error) {
+    console.warn('[LLMProxyServer] Failed to stage local media for remote access:', error)
   }
 
-  recordLlmProxyAccessUsage(accessToken, {
-    activity: 'media-generated',
-    requesterAddress,
-    ...(typeof generatedMediaBytes === 'number' ? { generatedMediaBytes } : {})
-  })
-
-  const proxiedUrl = `${protocol}://${host}/${buildProxyImagePath(filename, resourceScope, accessToken, requesterAddress).replace(/^\//, '')}`
   stagedUrlCache?.set(cacheKey, proxiedUrl)
   return proxiedUrl
 }
@@ -1436,9 +1595,13 @@ export function startLLMProxyServer(): void {
               if (part.type === 'text' && part.text) {
                 textContent += part.text
               } else if (part.type === 'image_url' && part.image_url?.url) {
+                const imageUrl = normalizeOpenAiCompatibleImageUrl(part.image_url.url)
+                if (!imageUrl) {
+                  continue
+                }
                 attachments.push({
                   type: 'image',
-                  url: part.image_url.url,
+                  url: imageUrl,
                   mimeType: 'image/jpeg'
                 })
               }
@@ -1644,7 +1807,7 @@ export function startLLMProxyServer(): void {
       res.writeHead(500, { 'Content-Type': 'application/json' })
       res.end(
         JSON.stringify({
-          error: 'Internal Server Error'
+          error: 'Internal server error.'
         })
       )
     }
