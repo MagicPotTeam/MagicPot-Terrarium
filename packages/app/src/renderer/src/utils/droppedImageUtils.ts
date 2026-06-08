@@ -809,12 +809,7 @@ export const getDroppedAttachmentFile = async (
 
 export const getDroppedTextContent = (dataTransfer: DragDataReader): string | null => {
   const internalPayload = parseInternalImageDragPayload(dataTransfer)
-  if (
-    internalPayload?.textContent?.trim() &&
-    internalPayload.itemTypes?.length === 1 &&
-    internalPayload.itemTypes[0] === 'text' &&
-    !internalPayload.attachments?.length
-  ) {
+  if (internalPayload?.textContent?.trim() && internalPayload.itemTypes?.includes('text')) {
     return internalPayload.textContent
   }
   if (internalPayload) {
