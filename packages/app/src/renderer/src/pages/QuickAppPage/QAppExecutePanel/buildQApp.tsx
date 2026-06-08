@@ -96,32 +96,44 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
       return buildComfyOrgExtraData(comfyOrgApiKey)
     }, [comfyOrgApiKey, requiresComfyOrgAuth])
 
+    const validateRef = useRef(validate)
+    const buildWorkflowRef = useRef(buildWorkflow)
+    const buildSubmitExtraDataRef = useRef(buildSubmitExtraData)
+    validateRef.current = validate
+    buildWorkflowRef.current = buildWorkflow
+    buildSubmitExtraDataRef.current = buildSubmitExtraData
+
+    const stableValidate = useCallback(() => validateRef.current(), [])
+    const stableBuildWorkflow = useCallback(() => buildWorkflowRef.current(), [])
+    const stableBuildSubmitExtraData = useCallback(() => buildSubmitExtraDataRef.current(), [])
+
     useEffect(() => {
-      setValidate(validate)
-      setBuildWorkflow(buildWorkflow)
-      setBuildSubmitExtraData(buildSubmitExtraData)
-      setSubmitClientId(clientId)
-      setSubmitSessionKey(submitSessionKey)
+      setValidate(stableValidate)
+      setBuildWorkflow(stableBuildWorkflow)
+      setBuildSubmitExtraData(stableBuildSubmitExtraData)
       return () => {
         setValidate(undefined)
         setBuildWorkflow(undefined)
         setBuildSubmitExtraData(undefined)
-        setSubmitClientId(undefined)
-        setSubmitSessionKey(undefined)
       }
     }, [
-      buildSubmitExtraData,
-      buildWorkflow,
-      clientId,
-      currentQAppKey,
       setBuildSubmitExtraData,
       setBuildWorkflow,
-      setSubmitClientId,
-      setSubmitSessionKey,
       setValidate,
-      submitSessionKey,
-      validate
+      stableBuildSubmitExtraData,
+      stableBuildWorkflow,
+      stableValidate
     ])
+
+    useEffect(() => {
+      setSubmitClientId(clientId)
+      return () => setSubmitClientId(undefined)
+    }, [clientId, setSubmitClientId])
+
+    useEffect(() => {
+      setSubmitSessionKey(submitSessionKey)
+      return () => setSubmitSessionKey(undefined)
+    }, [setSubmitSessionKey, submitSessionKey])
 
     return (
       <Stack

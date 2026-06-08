@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useEffect, useMemo } from 'react'
 import { PanelProps } from './PanelProps'
 import { useMessage } from '@renderer/hooks/useMessage'
 import buildQApp from './buildQApp'
-import { useComfyStatus } from '@renderer/store/hooks/comfyStatus'
+import { useAppSelector } from '@renderer/store'
+import { shallowEqual } from 'react-redux'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useQAppContext } from '../components/QAppContext'
 import { getQAppSessionKey } from '../utils/qAppSessionIdentity'
@@ -27,29 +28,33 @@ const QAppPanel: React.FC<QAppPanelProps> = ({ fallback, isDesignMode }) => {
     ? getQAppSessionKey({ qAppKey: currentQAppKey })
     : config.client_id
 
-  const [Panel, setPanel] = useState<React.FC<PanelProps> | null>(null)
-
-  // QuickApp 全局状态
-  const {
-    state: { isConnected, objectInfos }
-  } = useComfyStatus()
-
-  const buildQAppInputPanel = useCallback(() => {
+  const panelBuild = useMemo(() => {
     if (!qAppCfg || !workflow) {
-      return
+      return { Panel: null, error: '' }
     }
+
     try {
-      const NewPanel = buildQApp(qAppCfg, workflow)
-      setPanel(() => NewPanel)
+      return { Panel: buildQApp(qAppCfg, workflow), error: '' }
     } catch (error) {
-      notifyError(`构建 QApp 输入面板失败: ${error}`)
-      setPanel(null)
+      return { Panel: null, error: `构建 QApp 输入面板失败: ${error}` }
     }
-  }, [notifyError, qAppCfg, workflow])
+  }, [qAppCfg, workflow])
+  const Panel = panelBuild.Panel
 
   useEffect(() => {
-    buildQAppInputPanel()
-  }, [buildQAppInputPanel])
+    if (panelBuild.error) {
+      notifyError(panelBuild.error)
+    }
+  }, [notifyError, panelBuild.error])
+
+  // QuickApp 全局状态：只订阅输入面板实际需要的字段，避免结果/队列状态更新时重建输入区。
+  const { isConnected, objectInfos } = useAppSelector(
+    (state) => ({
+      isConnected: state.comfyStatus.isConnected,
+      objectInfos: state.comfyStatus.objectInfos
+    }),
+    shallowEqual
+  )
 
   const panelProps: PanelProps = {
     objectInfos,

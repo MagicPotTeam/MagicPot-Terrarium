@@ -28,10 +28,8 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
 
   // 同步外部 value 变化到 internalValue
   useEffect(() => {
-    if (value !== internalValue) {
-      setInternalValue(value)
-    }
-  }, [value, internalValue])
+    setInternalValue((prev) => (prev === value ? prev : value))
+  }, [value])
 
   const doUpload = async (file: File) => {
     setIsLoading(true)
@@ -59,12 +57,6 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
       setIsLoading(false)
     }
   }
-
-  const viewImage = useCallback(async () => {
-    const res = await api().svcComfy.getView(valueToFileItem(internalValue))
-    const image: Uint8Array = res.result
-    return image
-  }, [internalValue])
 
   const handleLoadFromPhotoshop = async () => {
     try {
@@ -117,20 +109,20 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
         return
       }
       try {
-        const bytes = await viewImage()
+        const res = await api().svcComfy.getView(valueToFileItem(internalValue))
         if (!active) return
-        const blob = new Blob([bytes as BlobPart], { type: 'image/*' })
+        const image: Uint8Array = res.result
+        const blob = new Blob([image as BlobPart], { type: 'image/*' })
         const url = URL.createObjectURL(blob)
         setPreviewUrl((prev) => {
           if (prev) URL.revokeObjectURL(prev)
           return url
         })
-      } catch {
-        // Image file doesn't exist anymore, clear the value
-        console.warn('[InputComfyImage] Failed to load image, clearing value:', internalValue)
+      } catch (error) {
+        // Preview failures should not erase the selected input value; the
+        // uploaded image may still be available once ComfyUI refreshes.
+        console.warn('[InputComfyImage] Failed to load image preview:', internalValue, error)
         if (active) {
-          setInternalValue('')
-          onChange('')
           setPreviewUrl((prev) => {
             if (prev) URL.revokeObjectURL(prev)
             return null
@@ -141,7 +133,7 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
     return () => {
       active = false
     }
-  }, [internalValue, viewImage, onChange])
+  }, [internalValue])
 
   return (
     <BaseInputComfyImage

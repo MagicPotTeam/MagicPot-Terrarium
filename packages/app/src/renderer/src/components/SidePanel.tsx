@@ -1,5 +1,6 @@
 // packages/app/src/renderer/src/components/SidePanel.tsx
 import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
+import { isEqual } from 'es-toolkit'
 import {
   Box,
   CircularProgress,
@@ -1102,7 +1103,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
       : 'ComfyUI is offline, click to reconnect'
   }
   const {
-    state: { isConnected },
+    state: { isConnected, objectInfos },
     setIsConnected,
     setObjectInfos
   } = useComfyStatus()
@@ -1124,6 +1125,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
   const reconnectAttemptsRef = useRef(0)
   const nextReconnectAllowedAtRef = useRef(0)
   const isConnectedRef = useRef(isConnected)
+  const objectInfosRef = useRef(objectInfos)
   const quickAppTitleRef = useRef<HTMLElement | null>(null)
   const quickAppQueueBadgeRef = useRef<HTMLDivElement | null>(null)
   const quickAppActionsRef = useRef<HTMLDivElement | null>(null)
@@ -1210,10 +1212,16 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
 
     try {
       const objectInfo = await api().svcComfy.getObjectInfo({})
-      const wasDisconnected = !isConnected
+      const wasDisconnected = !isConnectedRef.current
 
-      setIsConnected(true)
-      setObjectInfos(objectInfo)
+      if (!isConnectedRef.current) {
+        setIsConnected(true)
+      }
+      isConnectedRef.current = true
+      if (!isEqual(objectInfosRef.current, objectInfo)) {
+        objectInfosRef.current = objectInfo
+        setObjectInfos(objectInfo)
+      }
       reconnectAttemptsRef.current = 0
       nextReconnectAllowedAtRef.current = 0
 
@@ -1223,12 +1231,15 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
 
       return true
     } catch {
-      setIsConnected(false)
+      if (isConnectedRef.current) {
+        setIsConnected(false)
+      }
+      isConnectedRef.current = false
       const nextAttempt = reconnectAttemptsRef.current + 1
       nextReconnectAllowedAtRef.current = Date.now() + Math.min(30000, 5000 * nextAttempt)
       return false
     }
-  }, [isConnected, setIsConnected, setObjectInfos])
+  }, [setIsConnected, setObjectInfos])
 
   const _refreshStatusLegacy = useCallback(async () => {
     const ok = await silentRefresh()
@@ -1251,16 +1262,20 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
   }, [isConnected])
 
   useEffect(() => {
+    objectInfosRef.current = objectInfos
+  }, [objectInfos])
+
+  useEffect(() => {
     if (activeSidePanel !== 'quickapp') {
       reconnectAttemptsRef.current = 0
       return
     }
 
-    if (isConnected) {
+    if (isConnectedRef.current) {
       reconnectAttemptsRef.current = 0
     }
 
-    if (!isConnected && reconnectAttemptsRef.current < 3) {
+    if (!isConnectedRef.current && reconnectAttemptsRef.current < 3) {
       silentRefresh().then((ok) => {
         if (!ok) reconnectAttemptsRef.current += 1
       })
@@ -1271,7 +1286,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
     }, 5000)
 
     return () => clearInterval(timer)
-  }, [activeSidePanel, silentRefresh, isConnected])
+  }, [activeSidePanel, silentRefresh])
 
   useEffect(() => {
     if (activeSidePanel !== 'quickapp') return
@@ -1284,8 +1299,6 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
         const { newAbortHandler } = await import('@shared/api/apiUtils/abortHandler')
         const [abortSender, abortReceiver] = newAbortHandler()
         abortFn = () => abortSender.abort()
-        const { isEqual } = await import('es-toolkit')
-
         await api().svcComfy.watchQueue(
           {},
           {
