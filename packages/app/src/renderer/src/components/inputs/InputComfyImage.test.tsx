@@ -118,6 +118,28 @@ describe('InputComfyImage', () => {
     expect(notifyErrorMock.mock.calls[0][0]).toBe(UNSUPPORTED_INTERNAL_FILE_DROP_MESSAGE)
   })
 
+
+  it('preserves the selected value when preview loading fails', async () => {
+    apiMocks.getView.mockRejectedValue(new Error('preview offline'))
+    const onChange = vi.fn()
+
+    render(
+      <InputComfyImage
+        label="Quick App Image"
+        value="demo.png"
+        onChange={onChange}
+        placeholder="Drop an image"
+      />
+    )
+
+    await waitFor(() => {
+      expect(apiMocks.getView).toHaveBeenCalledTimes(1)
+    })
+
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.getByText('Drop an image')).toBeInTheDocument()
+  })
+
   it('clears a selected image from the preview delete button', async () => {
     const createObjectURLMock = vi.fn(() => 'blob:preview')
     const revokeObjectURLMock = vi.fn()
