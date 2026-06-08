@@ -443,9 +443,29 @@ describe('useCanvasAssetIntake', () => {
 
       const [items, result] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem[]]
       const imageItems = items.filter((item): item is CanvasImageItem => item.type === 'image')
+      const loadedSourceUrls = loadedSources.filter((source) =>
+        source.startsWith('local-media:///C:/real-board/lazy-tail-')
+      )
+      const loadedSourceIndexes = loadedSourceUrls
+        .map((source) => /lazy-tail-(\d+)\.png/.exec(source)?.[1])
+        .filter((value): value is string => Boolean(value))
+        .map(Number)
+
       expect(result).toHaveLength(sources.length)
       expect(imageItems).toHaveLength(sources.length)
-      expect(loadedSources).toHaveLength(PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT)
+      expect(new Set(loadedSourceIndexes)).toEqual(
+        new Set(
+          Array.from(
+            { length: PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT },
+            (_, index) => index
+          )
+        )
+      )
+      expect(
+        loadedSourceIndexes.every(
+          (index) => index < PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT
+        )
+      ).toBe(true)
       expect(hangingManifestRead).not.toHaveBeenCalled()
       expect(imageItems[PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT].image).toBeInstanceOf(
         HTMLCanvasElement
