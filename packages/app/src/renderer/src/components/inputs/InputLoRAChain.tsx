@@ -224,25 +224,22 @@ const InputLora: React.FC<InputLoraProps> = ({
             overflow: 'auto'
           }
         }}
-        renderOption={(props, option) => {
-          const { key, ...optionProps } = props
-          return (
-            <li
-              key={key}
-              {...optionProps}
-              style={{ whiteSpace: 'normal', wordBreak: 'break-word', padding: '8px 16px' }}
-            >
-              <Box sx={{ minWidth: 0 }}>
-                <Typography variant="body2">{option}</Typography>
-                {loraTriggerWordsByName[option] && (
-                  <Typography variant="caption" color="text.secondary">
-                    {loraTriggerWordsByName[option]}
-                  </Typography>
-                )}
-              </Box>
-            </li>
-          )
-        }}
+        renderOption={(props, option) => (
+          <li
+            {...props}
+            key={option}
+            style={{ whiteSpace: 'normal', wordBreak: 'break-word', padding: '8px 16px' }}
+          >
+            <Box sx={{ minWidth: 0 }}>
+              <Typography variant="body2">{option}</Typography>
+              {loraTriggerWordsByName[option] && (
+                <Typography variant="caption" color="text.secondary">
+                  {loraTriggerWordsByName[option]}
+                </Typography>
+              )}
+            </Box>
+          </li>
+        )}
         sx={{
           '& .MuiOutlinedInput-root': {
             backgroundColor: 'background.paper'

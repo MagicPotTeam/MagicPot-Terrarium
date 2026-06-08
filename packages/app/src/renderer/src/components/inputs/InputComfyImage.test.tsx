@@ -118,7 +118,6 @@ describe('InputComfyImage', () => {
     expect(notifyErrorMock.mock.calls[0][0]).toBe(UNSUPPORTED_INTERNAL_FILE_DROP_MESSAGE)
   })
 
-
   it('preserves the selected value when preview loading fails', async () => {
     apiMocks.getView.mockRejectedValue(new Error('preview offline'))
     const onChange = vi.fn()

@@ -69,7 +69,10 @@ const renderControlled = ({
   onLoraSelected
 }: {
   initialValue: LoRAConfig[]
-  onLoraSelected?: (loraName: string, triggerWords?: string) => string | void | Promise<string | void>
+  onLoraSelected?: (
+    loraName: string,
+    triggerWords?: string
+  ) => string | void | Promise<string | void>
 }) => {
   const latest = { value: initialValue }
   const onChange = vi.fn((nextValue: LoRAConfig[]) => {
