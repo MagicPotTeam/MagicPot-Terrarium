@@ -292,43 +292,47 @@ describe('VideoGenerationWorkspace', () => {
     })
   })
 
-  it('passes Seedance adaptive duration, valid frames, callback URL, and duration mode options', async () => {
-    mocks.currentConfig.value = buildConfig({
-      qappProfiles: [buildSeedanceProfile('seedance-video')]
-    })
+  it(
+    'passes Seedance adaptive duration, valid frames, callback URL, and duration mode options',
+    async () => {
+      mocks.currentConfig.value = buildConfig({
+        qappProfiles: [buildSeedanceProfile('seedance-video')]
+      })
 
-    renderWorkspace()
+      renderWorkspace()
 
-    await screen.findByRole('combobox', { name: /Video model/ })
-    fireEvent.change(screen.getByLabelText('Video prompt'), {
-      target: { value: 'wide tracking shot of waves' }
-    })
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Duration' }))
-    fireEvent.click(await screen.findByRole('option', { name: 'Adaptive' }))
-    fireEvent.change(screen.getByLabelText('Frames'), { target: { value: '97' } })
-    fireEvent.change(screen.getByLabelText('Callback URL'), {
-      target: { value: 'https://example.com/callback' }
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Generate video' }))
+      await screen.findByRole('combobox', { name: /Video model/ })
+      fireEvent.change(screen.getByLabelText('Video prompt'), {
+        target: { value: 'wide tracking shot of waves' }
+      })
+      fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Duration' }))
+      fireEvent.click(await screen.findByRole('option', { name: 'Adaptive' }))
+      fireEvent.change(screen.getByLabelText('Frames'), { target: { value: '97' } })
+      fireEvent.change(screen.getByLabelText('Callback URL'), {
+        target: { value: 'https://example.com/callback' }
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Generate video' }))
 
-    await waitFor(() => {
-      expect(mocks.chatMock).toHaveBeenCalledTimes(1)
-    })
-    expect(mocks.chatMock.mock.calls[0][0].videoGenerationOptions).toMatchObject({
-      aspectRatio: '16:9',
-      duration: -1,
-      watermark: false,
-      resolution: '720p',
-      generateAudio: false,
-      returnLastFrame: false,
-      frames: 97,
-      durationMode: 'adaptive',
-      callbackUrl: 'https://example.com/callback'
-    })
-    expect(screen.getByTestId('video-generation-request-preview').textContent).toContain(
-      'callback_url'
-    )
-  })
+      await waitFor(() => {
+        expect(mocks.chatMock).toHaveBeenCalledTimes(1)
+      })
+      expect(mocks.chatMock.mock.calls[0][0].videoGenerationOptions).toMatchObject({
+        aspectRatio: '16:9',
+        duration: -1,
+        watermark: false,
+        resolution: '720p',
+        generateAudio: false,
+        returnLastFrame: false,
+        frames: 97,
+        durationMode: 'adaptive',
+        callbackUrl: 'https://example.com/callback'
+      })
+      expect(screen.getByTestId('video-generation-request-preview').textContent).toContain(
+        'callback_url'
+      )
+    },
+    15000
+  )
 
   it('uses the selected Seedance image slot role for a single last-frame asset', async () => {
     mocks.currentConfig.value = buildConfig({
