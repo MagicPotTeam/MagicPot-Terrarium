@@ -37,8 +37,9 @@ export type LoRAConfig = {
 
 type InputLoraProps = {
   index: number
+  rowId: string
   currentLora: LoRAConfig
-  handleUpdate: (index: number, newValue: Partial<LoRAConfig>) => void
+  handleUpdateByRowId: (rowId: string, newValue: Partial<LoRAConfig>) => void
   loraOptions: string[]
   loraName2ImageName: Record<string, string>
   loraTriggerWordsByName: LoraTriggerWordsMap
@@ -56,8 +57,9 @@ type InputLoraProps = {
 
 const InputLora: React.FC<InputLoraProps> = ({
   index,
+  rowId,
   currentLora,
-  handleUpdate,
+  handleUpdateByRowId,
   loraOptions,
   loraName2ImageName,
   loraTriggerWordsByName,
@@ -71,24 +73,90 @@ const InputLora: React.FC<InputLoraProps> = ({
   const boxRef = useRef<HTMLDivElement>(null)
   const [gridTemplateColumns, setGridTemplateColumns] = useState<string>('1fr')
   const loraSelectionRequestRef = useRef(0)
+  const loraPreviewRequestRef = useRef(0)
+  const handleUpdateByRowIdRef = useRef(handleUpdateByRowId)
+  const currentLoraNameRef = useRef(currentLora.lora_name)
+  const imageObjUrlRef = useRef<string | null>(null)
 
   useEffect(() => {
+    handleUpdateByRowIdRef.current = handleUpdateByRowId
+  }, [handleUpdateByRowId])
+
+  useEffect(() => {
+    currentLoraNameRef.current = currentLora.lora_name
+  }, [currentLora.lora_name])
+
+  const updateImageObjUrl = useCallback((nextUrl: string | null) => {
+    setImageObjUrl((prev) => {
+      if (prev && prev !== nextUrl) {
+        URL.revokeObjectURL(prev)
+      }
+      imageObjUrlRef.current = nextUrl
+      return nextUrl
+    })
+  }, [])
+
+  useEffect(
+    () => () => {
+      loraSelectionRequestRef.current += 1
+      loraPreviewRequestRef.current += 1
+      if (imageObjUrlRef.current) {
+        URL.revokeObjectURL(imageObjUrlRef.current)
+        imageObjUrlRef.current = null
+      }
+    },
+    []
+  )
+
+  useEffect(() => {
+    const requestId = loraPreviewRequestRef.current + 1
+    loraPreviewRequestRef.current = requestId
+    let createdUrl: string | null = null
+
+    updateImageObjUrl(null)
+    setGridTemplateColumns(`1fr`)
+
+    const imageName = loraName2ImageName[currentLora.lora_name]
+    if (!imageName) {
+      return () => {
+        if (loraPreviewRequestRef.current === requestId) {
+          loraPreviewRequestRef.current += 1
+        }
+      }
+    }
+
     ;(async () => {
       try {
-        const imageName = loraName2ImageName[currentLora.lora_name]
-        if (imageName) {
-          const res = await comfyUtilsRef.current.viewImage({ name: imageName })
-          setImageObjUrl(bytesToObjectUrl(res.image, 'image/png'))
-          setGridTemplateColumns(`1fr 3fr`)
+        const res = await comfyUtilsRef.current.viewImage({ name: imageName })
+        createdUrl = bytesToObjectUrl(res.image, 'image/png')
+        if (loraPreviewRequestRef.current !== requestId) {
+          URL.revokeObjectURL(createdUrl)
+          createdUrl = null
           return
         }
+        updateImageObjUrl(createdUrl)
+        createdUrl = null
+        setGridTemplateColumns(`1fr 3fr`)
       } catch (error) {
+        if (loraPreviewRequestRef.current !== requestId) {
+          return
+        }
         console.info('failed to view image', currentLora.lora_name, error)
+        updateImageObjUrl(null)
+        setGridTemplateColumns(`1fr`)
       }
-      setImageObjUrl(null)
-      setGridTemplateColumns(`1fr`)
     })()
-  }, [currentLora.lora_name, loraName2ImageName, comfyUtilsRef])
+
+    return () => {
+      if (loraPreviewRequestRef.current === requestId) {
+        loraPreviewRequestRef.current += 1
+      }
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl)
+        createdUrl = null
+      }
+    }
+  }, [currentLora.lora_name, loraName2ImageName, comfyUtilsRef, updateImageObjUrl])
 
   useLayoutEffect(() => {
     if (boxRef.current) {
@@ -110,7 +178,7 @@ const InputLora: React.FC<InputLoraProps> = ({
           loraSelectionRequestRef.current = requestId
           const nextLoraName = newValue || ''
           const nextTriggerWords = nextLoraName ? loraTriggerWordsByName[nextLoraName] || '' : ''
-          handleUpdate(index, {
+          handleUpdateByRowIdRef.current(rowId, {
             lora_name: nextLoraName,
             trigger_words: nextTriggerWords
           })
@@ -120,11 +188,15 @@ const InputLora: React.FC<InputLoraProps> = ({
           if (nextLoraName) {
             void Promise.resolve(onLoraSelected?.(nextLoraName, nextTriggerWords))
               .then((loadedTriggerWords) => {
-                if (!loadedTriggerWords || loraSelectionRequestRef.current !== requestId) {
+                if (
+                  !loadedTriggerWords ||
+                  loraSelectionRequestRef.current !== requestId ||
+                  currentLoraNameRef.current !== nextLoraName
+                ) {
                   return
                 }
                 handleTriggerWordsChange(nextLoraName, loadedTriggerWords)
-                handleUpdate(index, {
+                handleUpdateByRowIdRef.current(rowId, {
                   lora_name: nextLoraName,
                   trigger_words: loadedTriggerWords
                 })
@@ -155,6 +227,7 @@ const InputLora: React.FC<InputLoraProps> = ({
         renderOption={(props, option) => (
           <li
             {...props}
+            key={option}
             style={{ whiteSpace: 'normal', wordBreak: 'break-word', padding: '8px 16px' }}
           >
             <Box sx={{ minWidth: 0 }}>
@@ -192,7 +265,7 @@ const InputLora: React.FC<InputLoraProps> = ({
             value={currentLora.strength_model}
             label={`Lora ${index} 模型强度`}
             onChange={(v) =>
-              handleUpdate(index, {
+              handleUpdateByRowIdRef.current(rowId, {
                 strength_model: v
               })
             }
@@ -205,7 +278,7 @@ const InputLora: React.FC<InputLoraProps> = ({
             value={currentLora.strength_clip}
             label={`Lora ${index} CLIP强度`}
             onChange={(v) =>
-              handleUpdate(index, {
+              handleUpdateByRowIdRef.current(rowId, {
                 strength_clip: v
               })
             }
@@ -223,7 +296,7 @@ const InputLora: React.FC<InputLoraProps> = ({
                 return
               }
               const nextTriggerWords = event.target.value
-              handleUpdate(index, { trigger_words: nextTriggerWords })
+              handleUpdateByRowIdRef.current(rowId, { trigger_words: nextTriggerWords })
               handleTriggerWordsChange(currentLora.lora_name, nextTriggerWords)
             }}
             onBlur={() => {
@@ -269,18 +342,49 @@ const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
   const [loraTriggerWordsByName, setLoraTriggerWordsByName] = useState<LoraTriggerWordsMap>(() =>
     readLoraTriggerWordsMap()
   )
+  const rowIdsRef = useRef<string[]>([])
+  const nextRowIdRef = useRef(0)
+  const valueRef = useRef(value)
+  valueRef.current = value
 
-  const handleChange = (newValue: LoRAConfig[]) => {
-    onChange(newValue)
+  const createRowId = () => `lora-row-${nextRowIdRef.current++}`
+  while (rowIdsRef.current.length < value.length) {
+    rowIdsRef.current.push(createRowId())
   }
-  const handleUpdate = (index: number, newValue: Partial<LoRAConfig>) => {
-    handleChange(value.map((lora, i) => (i === index ? { ...lora, ...newValue } : lora)))
+  if (rowIdsRef.current.length > value.length) {
+    rowIdsRef.current = rowIdsRef.current.slice(0, value.length)
   }
+
+  const handleChange = useCallback(
+    (newValue: LoRAConfig[]) => {
+      valueRef.current = newValue
+      onChange(newValue)
+    },
+    [onChange]
+  )
+  const handleUpdateByRowId = useCallback(
+    (rowId: string, newValue: Partial<LoRAConfig>) => {
+      const rowIndex = rowIdsRef.current.indexOf(rowId)
+      if (rowIndex === -1) {
+        return
+      }
+      const currentValue = valueRef.current
+      if (!currentValue[rowIndex]) {
+        return
+      }
+      handleChange(
+        currentValue.map((lora, i) => (i === rowIndex ? { ...lora, ...newValue } : lora))
+      )
+    },
+    [handleChange]
+  )
   const handleDelete = (index: number) => {
-    handleChange(value.filter((lora, i) => i !== index))
+    rowIdsRef.current.splice(index, 1)
+    handleChange(valueRef.current.filter((lora, i) => i !== index))
   }
   const handleAdd = () => {
-    handleChange([...value, { ...defaultLoraConfig }])
+    rowIdsRef.current.push(createRowId())
+    handleChange([...valueRef.current, { ...defaultLoraConfig }])
   }
   const handleTriggerWordsChange = useCallback((loraName: string, triggerWords: string) => {
     setLoraTriggerWordsByName((prev) => {
@@ -319,12 +423,13 @@ const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
       <Stack sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
         {value &&
           value.map((currentLora, index) => (
-            <Card key={index}>
+            <Card key={rowIdsRef.current[index] ?? index}>
               <CardContent>
                 <InputLora
                   index={index}
+                  rowId={rowIdsRef.current[index] ?? `${index}`}
                   currentLora={currentLora}
-                  handleUpdate={handleUpdate}
+                  handleUpdateByRowId={handleUpdateByRowId}
                   loraOptions={lora_options}
                   loraName2ImageName={loraName2ImageName}
                   loraTriggerWordsByName={loraTriggerWordsByName}

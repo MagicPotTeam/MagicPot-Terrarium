@@ -56,10 +56,8 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
 
   // 同步外部 value 变化到 internalValue
   useEffect(() => {
-    if (value !== internalValue) {
-      setInternalValue(value)
-    }
-  }, [value, internalValue])
+    setInternalValue((prev) => (prev === value ? prev : value))
+  }, [value])
 
   const { notifyError } = useMessage()
   const { t } = useTranslation()
@@ -88,12 +86,6 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
     }
   }
 
-  const viewImage = useCallback(async () => {
-    const res = await api().svcComfy.getView(valueToFileItem(internalValue))
-    const image: Uint8Array = res.result
-    return image
-  }, [internalValue])
-
   const handleClear = useCallback(() => {
     setModalOpen(false)
     setInternalValue('')
@@ -115,22 +107,29 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
         return
       }
       try {
-        const bytes = await viewImage()
+        const res = await api().svcComfy.getView(valueToFileItem(internalValue))
         if (!active) return
-        const blob = new Blob([bytes as BlobPart], { type: 'image/*' })
+        const image: Uint8Array = res.result
+        const blob = new Blob([image as BlobPart], { type: 'image/*' })
         const url = URL.createObjectURL(blob)
         setPreviewUrl((prev) => {
           if (prev) URL.revokeObjectURL(prev)
           return url
         })
-      } catch {
-        // ignore preview errors
+      } catch (error) {
+        console.warn('[InputComfyImageMask] Failed to load image preview:', internalValue, error)
+        if (active) {
+          setPreviewUrl((prev) => {
+            if (prev) URL.revokeObjectURL(prev)
+            return null
+          })
+        }
       }
     })()
     return () => {
       active = false
     }
-  }, [internalValue, viewImage])
+  }, [internalValue])
 
   const doUploadMask = async (maskCanvas: HTMLCanvasElement) => {
     console.log('doUploadMask', maskCanvas)

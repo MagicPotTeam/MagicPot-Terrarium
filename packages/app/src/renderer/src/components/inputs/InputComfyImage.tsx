@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { InputProps } from './InputProps'
 import { Box, IconButton, Typography, Button } from '@mui/material'
 import { UploadOutlined, PhotoLibraryOutlined } from '@mui/icons-material'
@@ -23,15 +23,34 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
   const [internalValue, setInternalValue] = useState(value)
   const [isLoading, setIsLoading] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const previewUrlRef = useRef<string | null>(null)
   const { notifySuccess, notifyError } = useMessage()
   const { t } = useTranslation()
 
+  const updatePreviewUrl = useCallback((nextUrl: string | null) => {
+    setPreviewUrl((prev) => {
+      if (prev && prev !== nextUrl) {
+        URL.revokeObjectURL(prev)
+      }
+      previewUrlRef.current = nextUrl
+      return nextUrl
+    })
+  }, [])
+
+  useEffect(
+    () => () => {
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current)
+        previewUrlRef.current = null
+      }
+    },
+    []
+  )
+
   // 同步外部 value 变化到 internalValue
   useEffect(() => {
-    if (value !== internalValue) {
-      setInternalValue(value)
-    }
-  }, [value, internalValue])
+    setInternalValue((prev) => (prev === value ? prev : value))
+  }, [value])
 
   const doUpload = async (file: File) => {
     setIsLoading(true)
@@ -59,12 +78,6 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
       setIsLoading(false)
     }
   }
-
-  const viewImage = useCallback(async () => {
-    const res = await api().svcComfy.getView(valueToFileItem(internalValue))
-    const image: Uint8Array = res.result
-    return image
-  }, [internalValue])
 
   const handleLoadFromPhotoshop = async () => {
     try {
@@ -100,48 +113,36 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
   const handleClear = useCallback(() => {
     setInternalValue('')
     onChange('')
-    setPreviewUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev)
-      return null
-    })
-  }, [onChange])
+    updatePreviewUrl(null)
+  }, [onChange, updatePreviewUrl])
 
   useEffect(() => {
     let active = true
     ;(async () => {
       if (!internalValue) {
-        setPreviewUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev)
-          return null
-        })
+        updatePreviewUrl(null)
         return
       }
       try {
-        const bytes = await viewImage()
+        const res = await api().svcComfy.getView(valueToFileItem(internalValue))
         if (!active) return
-        const blob = new Blob([bytes as BlobPart], { type: 'image/*' })
+        const image: Uint8Array = res.result
+        const blob = new Blob([image as BlobPart], { type: 'image/*' })
         const url = URL.createObjectURL(blob)
-        setPreviewUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev)
-          return url
-        })
-      } catch {
-        // Image file doesn't exist anymore, clear the value
-        console.warn('[InputComfyImage] Failed to load image, clearing value:', internalValue)
+        updatePreviewUrl(url)
+      } catch (error) {
+        // Preview failures should not erase the selected input value; the
+        // uploaded image may still be available once ComfyUI refreshes.
+        console.warn('[InputComfyImage] Failed to load image preview:', internalValue, error)
         if (active) {
-          setInternalValue('')
-          onChange('')
-          setPreviewUrl((prev) => {
-            if (prev) URL.revokeObjectURL(prev)
-            return null
-          })
+          updatePreviewUrl(null)
         }
       }
     })()
     return () => {
       active = false
     }
-  }, [internalValue, viewImage, onChange])
+  }, [internalValue, updatePreviewUrl])
 
   return (
     <BaseInputComfyImage

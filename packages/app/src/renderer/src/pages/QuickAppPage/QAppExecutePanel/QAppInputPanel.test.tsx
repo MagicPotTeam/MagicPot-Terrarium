@@ -17,13 +17,14 @@ vi.mock('@renderer/hooks/useMessage', () => ({
   })
 }))
 
-vi.mock('@renderer/store/hooks/comfyStatus', () => ({
-  useComfyStatus: () => ({
-    state: {
-      isConnected: true,
-      objectInfos: {}
-    }
-  })
+vi.mock('@renderer/store', () => ({
+  useAppSelector: (selector: (state: unknown) => unknown) =>
+    selector({
+      comfyStatus: {
+        isConnected: true,
+        objectInfos: {}
+      }
+    })
 }))
 
 vi.mock('@renderer/hooks/useConfig', () => ({
