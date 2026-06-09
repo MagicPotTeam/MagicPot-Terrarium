@@ -1,4 +1,4 @@
-﻿import React from 'react'
+import React from 'react'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
@@ -16,7 +16,7 @@ vi.mock('react-i18next', () => ({
 
 type HarnessProps = {
   initialSettings?: Config
-  saveSpy?: ReturnType<typeof vi.fn>
+  saveSpy?: (patch: DeepPartial<Config>) => void
 }
 
 const PanelMcpHarness: React.FC<HarnessProps> = ({ initialSettings = DEFAULT_CONFIG, saveSpy }) => {

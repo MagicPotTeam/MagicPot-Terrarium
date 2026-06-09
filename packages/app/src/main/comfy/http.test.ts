@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { webSocketCtor, testConfig, testBuildEnv } = vi.hoisted(() => ({
-  webSocketCtor: vi.fn(() => ({
-    onopen: null,
-    onmessage: null,
-    onclose: null,
-    onerror: null
-  })),
+  webSocketCtor: vi.fn(function MockWebSocket() {
+    return {
+      onopen: null,
+      onmessage: null,
+      onclose: null,
+      onerror: null
+    }
+  }),
   testConfig: {
     client_id: 'legacy-client',
     use_remote_comfyui: false,

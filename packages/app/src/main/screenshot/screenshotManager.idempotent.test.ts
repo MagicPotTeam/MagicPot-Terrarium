@@ -154,7 +154,9 @@ describe('screenshotManager init idempotency', () => {
     ipcHandleHandlers.clear()
     desktopCapturerGetSourcesMock.mockReset()
     browserWindowCtorMock.mockReset()
-    browserWindowCtorMock.mockImplementation(() => createAuxiliaryWindowStub())
+    browserWindowCtorMock.mockImplementation(function MockBrowserWindow() {
+      return createAuxiliaryWindowStub()
+    })
     existsSyncMock.mockClear()
     existsSyncMock.mockReturnValue(true)
     mkdirSyncMock.mockClear()

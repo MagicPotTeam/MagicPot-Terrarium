@@ -129,21 +129,23 @@ describe('Hunyuan3DClient', () => {
     vi.useFakeTimers()
     vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockReset()
-    sdkClientCtorMock.mockImplementation(() => ({
-      SubmitHunyuanTo3DRapidJob: submitRapidJobMock,
-      QueryHunyuanTo3DRapidJob: queryRapidJobMock,
-      SubmitTextureTo3DJob: submitTextureJobMock,
-      DescribeTextureTo3DJob: describeTextureJobMock,
-      SubmitReduceFaceJob: submitReduceFaceJobMock,
-      DescribeReduceFaceJob: describeReduceFaceJobMock,
-      SubmitHunyuanTo3DUVJob: submitUvJobMock,
-      DescribeHunyuanTo3DUVJob: describeUvJobMock,
-      SubmitHunyuan3DPartJob: submitPartJobMock,
-      QueryHunyuan3DPartJob: queryPartJobMock,
-      SubmitProfileTo3DJob: submitProfileJobMock,
-      DescribeProfileTo3DJob: describeProfileJobMock,
-      Convert3DFormat: convert3DFormatMock
-    }))
+    sdkClientCtorMock.mockImplementation(function MockAi3dClient() {
+      return {
+        SubmitHunyuanTo3DRapidJob: submitRapidJobMock,
+        QueryHunyuanTo3DRapidJob: queryRapidJobMock,
+        SubmitTextureTo3DJob: submitTextureJobMock,
+        DescribeTextureTo3DJob: describeTextureJobMock,
+        SubmitReduceFaceJob: submitReduceFaceJobMock,
+        DescribeReduceFaceJob: describeReduceFaceJobMock,
+        SubmitHunyuanTo3DUVJob: submitUvJobMock,
+        DescribeHunyuanTo3DUVJob: describeUvJobMock,
+        SubmitHunyuan3DPartJob: submitPartJobMock,
+        QueryHunyuan3DPartJob: queryPartJobMock,
+        SubmitProfileTo3DJob: submitProfileJobMock,
+        DescribeProfileTo3DJob: describeProfileJobMock,
+        Convert3DFormat: convert3DFormatMock
+      }
+    })
   })
 
   afterEach(() => {
