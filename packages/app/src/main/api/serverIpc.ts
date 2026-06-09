@@ -20,6 +20,7 @@ import { DccBridgeSvcImpl } from './svcDccBridgeImpl'
 import { DuplicateCheckSvcImpl } from './svcDuplicateCheckImpl'
 import { registerIpcServer } from '@shared/api/createServer/registerIpcServer'
 import { createApiExtensionServices } from './extensionServices'
+import { AppUpdateSvcImpl } from './svcAppUpdateImpl'
 
 export const createServer = (): Api => {
   const baseApi: BaseApi = {
@@ -41,7 +42,8 @@ export const createServer = (): Api => {
     svcLog: new LogSvcImpl(),
     svcFs: new FsSvcImpl(),
     svcDccBridge: new DccBridgeSvcImpl(),
-    svcDuplicateCheck: new DuplicateCheckSvcImpl()
+    svcDuplicateCheck: new DuplicateCheckSvcImpl(),
+    svcAppUpdate: new AppUpdateSvcImpl()
   }
 
   return {

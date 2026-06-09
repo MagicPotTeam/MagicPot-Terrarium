@@ -52,8 +52,8 @@ export type StorageLocationKind =
   | 'current-override'
   | 'default-development'
   | 'default-production'
-  | 'standard-installed-pure'
-  | 'standard-installed-embedded'
+  | 'legacy-app-root'
+  | 'standard-installed'
 
 export type StorageLocationSnapshot = {
   id: string

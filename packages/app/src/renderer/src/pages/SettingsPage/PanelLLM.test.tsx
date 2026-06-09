@@ -419,6 +419,256 @@ describe('PanelLLM Agent API settings', () => {
     })
   })
 
+  it('stores video-generation capability without enabling vision or OCR flags', () => {
+    const saveSettings = vi.fn()
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({})}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    const capabilitySelect = screen.getByLabelText('Capability')
+    fireEvent.mouseDown(capabilitySelect)
+    fireEvent.click(screen.getByRole('option', { name: 'Video Generation' }))
+
+    expect(saveSettings).toHaveBeenCalledWith({
+      llm_config: {
+        api_profiles: [
+          {
+            id: 'profile-1',
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'sk-test',
+            api_secret: '',
+            backup_api_keys: undefined,
+            model_use: 'video',
+            provider: 'kling',
+            deployment: 'cloud',
+            is_ollama: false,
+            is_vision_model: false,
+            is_ocr_model: false
+          }
+        ]
+      }
+    })
+  })
+
+  it('preserves Kling video provider settings and stores SecretKey edits', () => {
+    const saveSettings = vi.fn()
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'kling-v3',
+          base_url: 'https://api-beijing.klingai.com',
+          api_key: 'access-id',
+          api_secret: '',
+          provider: 'kling',
+          deployment: 'cloud',
+          model_use: 'video'
+        })}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    expect(screen.getByLabelText('Video Provider')).toHaveTextContent('Kling')
+    expect(screen.getByLabelText('Kling AccessKey')).toBeInTheDocument()
+    expect(screen.getByLabelText('Kling SecretKey')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Add Backup Key' })).toBeNull()
+
+    fireEvent.change(screen.getByLabelText('Kling SecretKey'), {
+      target: { value: 'secret-key' }
+    })
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'profile-1',
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'access-id',
+            api_secret: 'secret-key',
+            provider: 'kling',
+            deployment: 'cloud',
+            model_use: 'video'
+          })
+        ]
+      }
+    })
+  })
+
+  it.each([
+    ['Default', 'default'],
+    ['Chat', 'chat'],
+    ['Image Generation', 'image']
+  ])(
+    'clears Kling SecretKey when switching a video profile back to %s capability',
+    (optionName, expectedModelUse) => {
+      const saveSettings = vi.fn()
+
+      render(
+        <PanelLLM
+          settingsValue={buildSettingsWithProfile({
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'access-id',
+            api_secret: 'secret-key',
+            provider: 'kling',
+            deployment: 'cloud',
+            model_use: 'video'
+          })}
+          saveSettings={saveSettings}
+          onSelectTab={vi.fn()}
+        />
+      )
+
+      const capabilitySelect = screen.getByLabelText('Capability')
+      fireEvent.mouseDown(capabilitySelect)
+      fireEvent.click(screen.getByRole('option', { name: optionName }))
+
+      const savedProfile = saveSettings.mock.lastCall?.[0]?.llm_config?.api_profiles?.[0]
+      expect(savedProfile).toMatchObject({
+        id: 'profile-1',
+        model_use: expectedModelUse,
+        provider: 'default'
+      })
+      expect(savedProfile?.deployment).toBeUndefined()
+      expect(savedProfile?.api_secret).toBeUndefined()
+    }
+  )
+
+  it('switches video profiles to Volcengine presets without keeping Kling secrets', () => {
+    const saveSettings = vi.fn()
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'kling-v3',
+          base_url: 'https://api-beijing.klingai.com',
+          api_key: 'access-id',
+          api_secret: 'secret-key',
+          backup_api_keys: ['backup-secret'],
+          provider: 'kling',
+          deployment: 'cloud',
+          model_use: 'video'
+        })}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    const providerSelect = screen.getByLabelText('Video Provider')
+    fireEvent.mouseDown(providerSelect)
+    fireEvent.click(screen.getByRole('option', { name: 'Volcengine / BytePlus Seedance' }))
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'profile-1',
+            provider: 'volcengine',
+            deployment: 'cloud',
+            model_use: 'video',
+            model_name: 'doubao-seedance-1-0-pro-250528',
+            base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+            api_secret: undefined,
+            is_vision_model: false,
+            is_ocr_model: false
+          })
+        ]
+      }
+    })
+  })
+
+  it('clears Kling AccessKey and SecretKey when cloning a video profile', () => {
+    const saveSettings = vi.fn()
+    const randomUUIDSpy = vi
+      .spyOn(crypto, 'randomUUID')
+      .mockReturnValue('00000000-0000-4000-8000-000000000000')
+
+    try {
+      render(
+        <PanelLLM
+          settingsValue={buildSettingsWithProfile({
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'access-id',
+            api_secret: 'secret-key',
+            provider: 'kling',
+            deployment: 'cloud',
+            model_use: 'video'
+          })}
+          saveSettings={saveSettings}
+          onSelectTab={vi.fn()}
+        />
+      )
+
+      fireEvent.click(screen.getByRole('button', { name: 'Clone' }))
+
+      expect(saveSettings).toHaveBeenLastCalledWith({
+        llm_config: {
+          api_profiles: [
+            expect.objectContaining({
+              id: 'profile-1',
+              api_key: 'access-id',
+              api_secret: 'secret-key'
+            }),
+            expect.objectContaining({
+              id: '00000000-0000-4000-8000-000000000000',
+              model_name: 'kling-v3',
+              provider: 'kling',
+              model_use: 'video',
+              api_key: '',
+              api_secret: undefined,
+              backup_api_keys: undefined
+            })
+          ]
+        }
+      })
+    } finally {
+      randomUUIDSpy.mockRestore()
+    }
+  })
+
+  it('clears Kling SecretKey when switching a video profile to local call type', () => {
+    const saveSettings = vi.fn()
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'kling-v3',
+          base_url: 'https://api-beijing.klingai.com',
+          api_key: 'access-id',
+          api_secret: 'secret-key',
+          provider: 'kling',
+          deployment: 'cloud',
+          model_use: 'video'
+        })}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    const callTypeSelect = screen.getByLabelText('Call Type')
+    fireEvent.mouseDown(callTypeSelect)
+    fireEvent.click(screen.getByRole('option', { name: 'Local Model' }))
+
+    const savedProfile = saveSettings.mock.lastCall?.[0]?.llm_config?.api_profiles?.[0]
+    expect(savedProfile).toMatchObject({
+      id: 'profile-1',
+      call_type: 'local',
+      api_key: '',
+      provider: 'default'
+    })
+    expect(savedProfile?.deployment).toBeUndefined()
+    expect(savedProfile?.api_secret).toBeUndefined()
+  })
+
   it('syncs local ONNX model profiles into the duplicate-check visual model list', () => {
     const saveSettings = vi.fn()
 

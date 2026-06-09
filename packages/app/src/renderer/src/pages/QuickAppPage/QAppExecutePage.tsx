@@ -10,6 +10,8 @@ import QAppMenu from './components/QAppMenu'
 import { QAppContextProvider } from './components/QAppContext'
 import DuplicateCheckWorkspace from './duplicateCheck/DuplicateCheckWorkspace'
 import { isBuiltinDuplicateCheckQApp } from './duplicateCheck/builtin'
+import VideoGenerationWorkspace from './videoGeneration/VideoGenerationWorkspace'
+import { isBuiltinVideoGenerationQApp } from './videoGeneration/builtin'
 
 const STORAGE_KEY = 'qapp.currentQAppKey'
 
@@ -65,6 +67,7 @@ const QAppExecutePage: React.FC = () => {
   const { t } = useTranslation()
   const [currentQAppKey, setCurrentQAppKey] = useState<string>(readStoredQAppKey)
   const isDuplicateCheckPage = isBuiltinDuplicateCheckQApp(currentQAppKey)
+  const isVideoGenerationPage = isBuiltinVideoGenerationQApp(currentQAppKey)
 
   useEffect(() => {
     persistQAppKey(currentQAppKey)
@@ -95,6 +98,8 @@ const QAppExecutePage: React.FC = () => {
           <Container sx={{ flex: 1, overflowY: 'overlay', overflowX: 'hidden', py: 2 }}>
             <DuplicateCheckWorkspace />
           </Container>
+        ) : isVideoGenerationPage ? (
+          <VideoGenerationWorkspace />
         ) : (
           <QAppContextProvider key={currentQAppKey} qAppKey={currentQAppKey}>
             <Box

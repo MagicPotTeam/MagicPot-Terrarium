@@ -6,9 +6,9 @@ import {
   type DuplicateCheckSettings
 } from '@shared/duplicateCheck/types'
 
-export type LLMProvider = 'openai' | 'gemini' | 'claude' | 'ollama'
+export type LLMProvider = 'openai' | 'gemini' | 'claude' | 'ollama' | 'kling' | 'volcengine'
 export type LLMDeployment = 'cloud' | 'local'
-export type LLMModelUse = 'chat' | 'agent' | 'multimodal' | 'vision' | 'ocr' | 'image'
+export type LLMModelUse = 'chat' | 'agent' | 'multimodal' | 'vision' | 'ocr' | 'image' | 'video'
 export type LLMProviderOption = LLMProvider | 'default'
 export type LLMModelUseOption = LLMModelUse | 'default'
 export type LLMProfileAuthMode = string
@@ -30,6 +30,7 @@ export type LLMAPIProfile = {
   model_name: string
   base_url: string
   api_key: string
+  api_secret?: string
   call_type?: LLMProfileCallType
   local_model_path?: string
   auth_mode?: LLMProfileAuthMode

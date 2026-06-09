@@ -611,6 +611,9 @@ const UserMessageEditForm: React.FC<{
   onSubmit: (content: string) => void
   isLight: boolean
 }> = ({ message, editingContent, onSetEditingContent, onCancel, onSubmit, isLight }) => {
+  const userBubbleBg = isLight ? '#eee7ff' : '#6f5bd6'
+  const userBubbleText = isLight ? '#2f235f' : '#ffffff'
+
   return (
     <Box sx={{ px: 2, mb: 2, display: 'flex', justifyContent: 'flex-end' }}>
       <Box sx={{ maxWidth: '85%', width: '100%' }}>
@@ -627,10 +630,10 @@ const UserMessageEditForm: React.FC<{
           sx={{
             '& .MuiOutlinedInput-root': {
               borderRadius: '18px',
-              bgcolor: isLight ? '#e8eaed' : '#303134'
+              bgcolor: userBubbleBg
             },
             '& .MuiInputBase-input': {
-              color: isLight ? '#202124' : '#e8eaed'
+              color: userBubbleText
             }
           }}
         />
@@ -688,6 +691,8 @@ const UserMessageBubble: React.FC<{
   theme
 }) => {
   const visibleAttachments = sortReportBundleAttachmentsForDisplay(message.attachments)
+  const userBubbleBg = isLight ? '#eee7ff' : '#6f5bd6'
+  const userBubbleText = isLight ? '#2f235f' : '#ffffff'
 
   return (
     <Box
@@ -758,7 +763,7 @@ const UserMessageBubble: React.FC<{
         sx={{
           position: 'relative',
           maxWidth: '85%',
-          bgcolor: isLight ? '#e8eaed' : '#303134',
+          bgcolor: userBubbleBg,
           borderRadius: '18px',
           px: 3,
           py: 2,
@@ -835,7 +840,7 @@ const UserMessageBubble: React.FC<{
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',
               overflowWrap: 'break-word',
-              color: isLight ? '#202124' : '#e8eaed',
+              color: userBubbleText,
               lineHeight: 1.6
             }}
           >

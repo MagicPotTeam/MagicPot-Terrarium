@@ -113,12 +113,21 @@ describe('getQAppApiProfiles', () => {
     ).toBe('quick-vision')
   })
 
-  it('prefers a non-vision quick app profile for generic quick app execution', () => {
+  it('prefers a non-video text quick app profile for generic quick app execution', () => {
     const config = {
       ...DEFAULT_CONFIG,
       plugin_config: {
         ...DEFAULT_CONFIG.plugin_config!,
         api_profiles: [
+          {
+            id: 'quick-video',
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'kling-access-key',
+            api_secret: 'kling-secret-key',
+            provider: 'kling' as const,
+            model_use: 'video' as const
+          },
           {
             id: 'quick-vision',
             model_name: 'quick-vision-model',
@@ -137,6 +146,50 @@ describe('getQAppApiProfiles', () => {
     }
 
     expect(findQAppApiProfile(config)?.id).toBe('quick-text')
+  })
+
+  it('does not use video-only quick app profiles for generic text execution', () => {
+    const config = {
+      ...DEFAULT_CONFIG,
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-video',
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'kling-access-key',
+            api_secret: 'kling-secret-key',
+            provider: 'kling' as const,
+            model_use: 'video' as const
+          }
+        ]
+      }
+    }
+
+    expect(findQAppApiProfile(config)).toBeUndefined()
+  })
+
+  it('still selects video quick app profiles when explicitly requested by id', () => {
+    const config = {
+      ...DEFAULT_CONFIG,
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-video',
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'kling-access-key',
+            api_secret: 'kling-secret-key',
+            provider: 'kling' as const,
+            model_use: 'video' as const
+          }
+        ]
+      }
+    }
+
+    expect(findQAppApiProfile(config, { profileId: 'quick-video' })?.id).toBe('quick-video')
   })
 
   it('treats Ollama quick app profiles without API keys as configured', () => {

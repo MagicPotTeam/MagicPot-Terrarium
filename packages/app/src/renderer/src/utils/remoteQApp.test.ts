@@ -54,7 +54,10 @@ describe('remoteQApp', () => {
       'http://127.0.0.1:3721/api/qapps/list',
       expect.objectContaining({
         headers: {
-          Authorization: 'Bearer proxy-secret'
+          Authorization: 'Bearer proxy-secret',
+          'X-MagicPot-Proxy-Token': 'proxy-secret',
+          'X-MagicPot-Bot-Secret': 'proxy-secret',
+          'X-Bot-Secret': 'proxy-secret'
         }
       })
     )

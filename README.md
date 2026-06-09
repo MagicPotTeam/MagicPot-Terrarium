@@ -8,6 +8,7 @@ MagicPot 是一个基于 Electron 的 AI 工作台。它把 AI 对话、ComfyUI 
 
 - **AI Chat**：面向多模型/多技能的对话入口，支持流式响应、附件与工具调用链路。
 - **Quick App**：运行、设计和管理快应用，配合目标方案与自定义技能扩展工作流。
+- **AI Video Generation Quick App**：通过 Kling 或 Volcengine/BytePlus Seedance 配置提交异步视频生成任务；Provider 配置、参数、限制和排障见 [`docs/ai-video-generation.md`](docs/ai-video-generation.md)。
 - **Project Canvas**：参考画布，承载图片、视频、3D/图层等创作素材的导入、选择、拖拽、裁切与恢复能力。
 - **ComfyUI 集成**：管理 ComfyUI 启动、HTTP/WS 通信、队列、输出结果和文件访问。
 - **Model Browser**：在配置了 ComfyUI 目录后浏览模型和相关文件。
@@ -120,6 +121,23 @@ npm run release:embedded:win
 
 GitHub release workflows are maintainer-only automation. They expect repository secrets and variables for signing, upload, Aliyun OSS publishing, and Discord notifications. Forks or public source checkouts can still build locally, but should not expect release workflows to publish without maintainer-provided credentials.
 
+## Release assets and update policy
+
+MagicPot uses a dual-package release model on GitHub Releases:
+
+| Asset                                   | Purpose                                                    | Updated by the in-app updater |
+| --------------------------------------- | ---------------------------------------------------------- | ----------------------------- |
+| `magicpot-<version>-win.7z`             | First-time full package with the bundled Windows runtime.  | No                            |
+| `magicpot-<version>-setup.exe`          | App-body installer used by `electron-updater`.             | Yes                           |
+| `magicpot-<version>-setup.exe.blockmap` | Differential download metadata for the app-body installer. | Yes                           |
+| `latest.yml`                            | Update feed read by packaged builds.                       | Yes                           |
+
+Users who need the bundled runtime start from the embedded `.7z`. Later app-body updates are delivered through the app-body updater and read only `latest.yml`. The updater is disabled in development builds, so unsupported environments show an unavailable state instead of attempting an update. On Windows, the updater pins the NSIS `/D=` target to the current executable directory, allowing extracted embedded builds to apply the app-body installer back into the embedded folder while preserving the bundled runtime.
+
+The app-body updater does not update, delete, or overwrite the embedded runtime directory such as `ComfyUI_windows_portable`. Runtime resources, local ComfyUI nodes, models, generated outputs, Python caches, and other user data remain outside the app-body update target. The Windows package uses a unified executable filename (`magicpot.exe`) so app-body updates replace the user's existing launcher entry when applied inside an extracted embedded folder. If the embedded runtime itself must be refreshed, publish a new embedded `.7z` and ask users to replace or reinstall that runtime explicitly; this project intentionally does not implement embedded `.7z` self-overwrite updates.
+
+Default user data is stored outside the app installation directory under the OS app-data location, with `MAGICPOT_USER_DATA_DIR` available for explicit overrides. This avoids placing settings, chat records, cache, QApps, skills, and target schemes in paths that NSIS may remove during pure app updates.
+
 ## 运行模式
 
 MagicPot 有两种构建模式。模式由构建参数决定，应用打包完成后用户不能在运行时切换。
@@ -146,7 +164,7 @@ embedded 包会使用 `.staging/embedded` 作为打包暂存目录。
 npm run prepare:embedded-staging
 ```
 
-This command clones clean ComfyUI source from `vendor/comfyui/ComfyUI` and copies custom nodes from `vendor/comfyui/comfyui_data/custom_nodes` into `.staging/embedded/ComfyUI/custom_nodes`. Model files are not included in embedded packages.
+This command clones clean ComfyUI source from `vendor/comfyui/ComfyUI` and copies custom nodes from `vendor/comfyui/comfyui_data/custom_nodes` into `.staging/embedded/ComfyUI/custom_nodes`. Model checkpoints, custom-node `ckpts`/`checkpoints` folders, and HuggingFace caches are not included in embedded packages; QApp-required node models remain runtime downloads.
 
 准备 Windows embedded Python：
 
@@ -317,11 +335,11 @@ MagicPot/
 
 ### embedded 包会包含模型文件吗？
 
-默认不会。`prepare:embedded-staging` 会保留 `ComfyUI/models`、`input`、`output` 等目录结构，但不会把 `.safetensors`、`.ckpt`、`.pt`、`.pth`、`.gguf`、`.onnx`、`.bin` 等模型文件打进安装包。
+默认不会。`prepare:embedded-staging` 会保留 `ComfyUI/models`、`input`、`output` 等目录结构，但不会把模型检查点、自定义节点的 `ckpts`/`checkpoints` 目录或 HuggingFace 缓存打进安装包。少量节点自带的小型 `.pt`/`.pth` 数据文件可能保留；QApp 需要的大模型仍按配置在运行时下载。
 
-### Windows embedded 为什么输出 `dir` 和 `zip`？
+### Windows embedded 为什么输出 `dir` 和 `7z`？
 
-embedded 包包含大量 Python 文件，NSIS 对大体积和大量文件的安装包不友好。当前配置中 Windows embedded 使用 `dir` 和 `zip` 作为主要输出。
+embedded 包包含大量 Python 文件，NSIS 对大体积和大量文件的安装包不友好。当前配置中 Windows embedded 使用 `dir` 和 `7z` 作为主要输出。
 
 ### 如何新增一个 IPC API？
 

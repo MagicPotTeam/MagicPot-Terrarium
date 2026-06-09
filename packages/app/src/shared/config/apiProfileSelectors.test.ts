@@ -3,6 +3,7 @@ import { DEFAULT_CONFIG } from './config'
 import {
   findHunyuan3DQAppProfile,
   getQAppApiProfiles,
+  isConfiguredApiProfile,
   isConfiguredHunyuan3DProfile,
   isHunyuan3DCompatibleProfile,
   isVisionCapableApiProfile
@@ -237,5 +238,20 @@ describe('apiProfileSelectors', () => {
         model_use: 'vision'
       })
     ).toBe(true)
+  })
+
+  it('treats configured video profiles as runnable without marking them as vision-capable', () => {
+    const profile = {
+      id: 'kling-video',
+      model_name: 'kling-v3',
+      base_url: 'https://api-beijing.klingai.com',
+      api_key: 'access-id',
+      api_secret: 'secret-key',
+      provider: 'kling' as const,
+      model_use: 'video' as const
+    }
+
+    expect(isConfiguredApiProfile(profile)).toBe(true)
+    expect(isVisionCapableApiProfile(profile)).toBe(false)
   })
 })

@@ -68,6 +68,46 @@ type UseCanvasViewportPersistenceOptions = {
   suspendAutoSave?: boolean
 }
 
+type CanvasPersistenceSnapshot = {
+  canvasId: string
+  items: CanvasItem[]
+  groups: CanvasGroup[]
+  groupBranches: CanvasGroupBranch[]
+  figmaBinding: CanvasFigmaBinding | null
+}
+
+const pendingCanvasSaveById = new Map<string, Promise<void>>()
+
+function rememberPendingCanvasSave(canvasId: string, promise: Promise<void>) {
+  pendingCanvasSaveById.set(canvasId, promise)
+  void promise
+    .finally(() => {
+      if (pendingCanvasSaveById.get(canvasId) === promise) {
+        pendingCanvasSaveById.delete(canvasId)
+      }
+    })
+    .catch(() => {
+      // waitForPendingCanvasSave handles the original promise; this only consumes finally().
+    })
+}
+
+async function waitForPendingCanvasSave(canvasId: string): Promise<void> {
+  const pendingSave = pendingCanvasSaveById.get(canvasId)
+  if (!pendingSave) return
+
+  try {
+    await pendingSave
+  } catch {
+    // saveCanvasItems normalizes failures internally; keep restore best-effort if that changes.
+  }
+}
+
+function areArrayItemsSame<T>(left: readonly T[], right: readonly T[]): boolean {
+  return (
+    left.length === right.length && left.every((value, index) => Object.is(value, right[index]))
+  )
+}
+
 function buildCanvasPersistenceStructuralSignature(
   items: CanvasItem[],
   groups: CanvasGroup[],
@@ -126,12 +166,8 @@ export function useCanvasViewportPersistence({
   addVideoToCanvas,
   suspendAutoSave = false
 }: UseCanvasViewportPersistenceOptions) {
-  const latestPersistedCanvasStateRef = useRef<{
-    items: CanvasItem[]
-    groups: CanvasGroup[]
-    groupBranches: CanvasGroupBranch[]
-    figmaBinding: CanvasFigmaBinding | null
-  }>({
+  const latestPersistedCanvasStateRef = useRef<CanvasPersistenceSnapshot>({
+    canvasId,
     items: [],
     groups: [],
     groupBranches: [],
@@ -139,17 +175,37 @@ export function useCanvasViewportPersistence({
   })
   const pendingCanvasSaveTimerRef = useRef<number | null>(null)
   const hasPendingCanvasChangesRef = useRef(false)
-  const canvasSaveInFlightRef = useRef<Promise<void> | null>(null)
+  const canvasSaveInFlightRef = useRef<{ canvasId: string; promise: Promise<void> } | null>(null)
   const saveAgainAfterInFlightRef = useRef(false)
   const lastStructuralCanvasSignatureRef = useRef<string | null>(null)
   const isRestoringRef = useRef(false)
+  const activeCanvasIdRef = useRef(canvasId)
+  const restoreGenerationRef = useRef(0)
+  const shouldClearCanvasBeforeRestoreRef = useRef(false)
   const suspendAutoSaveRef = useRef(suspendAutoSave)
+  const latestHydrateCanvasImageItemForCanvasRef = useRef(hydrateCanvasImageItemForCanvas)
+  const latestNextZIndexRefRef = useRef(nextZIndexRef)
   const [fitTrigger, setFitTrigger] = useState(0)
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false)
+
+  if (activeCanvasIdRef.current !== canvasId) {
+    activeCanvasIdRef.current = canvasId
+    restoreGenerationRef.current += 1
+    isRestoringRef.current = true
+    shouldClearCanvasBeforeRestoreRef.current = true
+    hasPendingCanvasChangesRef.current = false
+    saveAgainAfterInFlightRef.current = false
+    lastStructuralCanvasSignatureRef.current = null
+  }
 
   useEffect(() => {
     suspendAutoSaveRef.current = suspendAutoSave
   }, [suspendAutoSave])
+
+  useEffect(() => {
+    latestHydrateCanvasImageItemForCanvasRef.current = hydrateCanvasImageItemForCanvas
+    latestNextZIndexRefRef.current = nextZIndexRef
+  }, [hydrateCanvasImageItemForCanvas, nextZIndexRef])
 
   const setStageScaleAroundViewportCenter = useCallback(
     (nextScale: number) => {
@@ -275,6 +331,7 @@ export function useCanvasViewportPersistence({
 
   useEffect(() => {
     latestPersistedCanvasStateRef.current = {
+      canvasId,
       items,
       groups,
       groupBranches,
@@ -284,7 +341,7 @@ export function useCanvasViewportPersistence({
     if (!isRestoringRef.current) {
       hasPendingCanvasChangesRef.current = true
     }
-  }, [figmaBinding, groupBranches, groups, items])
+  }, [canvasId, figmaBinding, groupBranches, groups, items])
 
   const clearPendingCanvasSave = useCallback(() => {
     if (pendingCanvasSaveTimerRef.current !== null) {
@@ -298,49 +355,77 @@ export function useCanvasViewportPersistence({
 
     clearPendingCanvasSave()
 
-    if (canvasSaveInFlightRef.current) {
+    const saveInFlight = canvasSaveInFlightRef.current
+    if (saveInFlight?.canvasId === canvasId) {
       saveAgainAfterInFlightRef.current = true
       hasPendingCanvasChangesRef.current = false
-      return canvasSaveInFlightRef.current
+      return saveInFlight.promise
     }
 
+    const saveCanvasId = canvasId
+    let savePromise: Promise<void> | null = null
     const drainCanvasSaves = async () => {
       try {
         do {
           saveAgainAfterInFlightRef.current = false
           hasPendingCanvasChangesRef.current = false
           const snapshot = latestPersistedCanvasStateRef.current
+          if (snapshot.canvasId !== saveCanvasId) {
+            break
+          }
           await saveCanvasItems(
             snapshot.items,
-            canvasId,
+            saveCanvasId,
             snapshot.groups,
             snapshot.groupBranches,
             snapshot.figmaBinding
           )
         } while (saveAgainAfterInFlightRef.current || hasPendingCanvasChangesRef.current)
       } finally {
-        canvasSaveInFlightRef.current = null
+        if (savePromise && canvasSaveInFlightRef.current?.promise === savePromise) {
+          canvasSaveInFlightRef.current = null
+        }
       }
     }
 
-    canvasSaveInFlightRef.current = drainCanvasSaves()
-    return canvasSaveInFlightRef.current
+    savePromise = drainCanvasSaves()
+    canvasSaveInFlightRef.current = { canvasId: saveCanvasId, promise: savePromise }
+    rememberPendingCanvasSave(saveCanvasId, savePromise)
+    return savePromise
   }, [canvasId, clearPendingCanvasSave])
 
   useEffect(() => {
     let cancelled = false
+    const restoreGeneration = restoreGenerationRef.current
 
     const restore = async () => {
       isRestoringRef.current = true
       try {
+        clearPendingCanvasSave()
+        hasPendingCanvasChangesRef.current = false
+        saveAgainAfterInFlightRef.current = false
+        lastStructuralCanvasSignatureRef.current = null
+        if (shouldClearCanvasBeforeRestoreRef.current) {
+          shouldClearCanvasBeforeRestoreRef.current = false
+          setItems((currentItems) => (currentItems.length === 0 ? currentItems : []))
+          setGroups((currentGroups) => (currentGroups.length === 0 ? currentGroups : []))
+          setGroupBranches((currentBranches) =>
+            currentBranches.length === 0 ? currentBranches : []
+          )
+          setSelectedIds((currentSelectedIds) =>
+            currentSelectedIds.size === 0 ? currentSelectedIds : new Set()
+          )
+          setFigmaBinding((currentBinding) => (currentBinding === null ? currentBinding : null))
+          latestNextZIndexRefRef.current.current = 1
+        }
+
+        await waitForPendingCanvasSave(canvasId)
+        if (cancelled || restoreGenerationRef.current !== restoreGeneration) {
+          return
+        }
+
         const saved = await loadCanvasItems(canvasId)
-        if (cancelled || saved.items.length === 0) {
-          if (!cancelled) {
-            setGroups(saved.groups)
-            setGroupBranches(saved.groupBranches || [])
-            setFigmaBinding(saved.figmaBinding)
-          }
-          isRestoringRef.current = false
+        if (cancelled || restoreGenerationRef.current !== restoreGeneration) {
           return
         }
 
@@ -351,19 +436,30 @@ export function useCanvasViewportPersistence({
           restored.push(item)
         }
 
-        if (!cancelled) {
-          setItems(restored)
-          setGroups(saved.groups)
-          setGroupBranches(saved.groupBranches || [])
-          setFigmaBinding(saved.figmaBinding)
-          nextZIndexRef.current = maxZ + 1
-          if (restored.length > 0) {
-            window.setTimeout(() => {
-              if (!cancelled) {
-                setFitTrigger(Date.now())
-              }
-            }, 300)
-          }
+        setItems((currentItems) =>
+          areArrayItemsSame(currentItems, restored) ? currentItems : restored
+        )
+        setGroups((currentGroups) =>
+          areArrayItemsSame(currentGroups, saved.groups) ? currentGroups : saved.groups
+        )
+        setGroupBranches((currentBranches) => {
+          const savedBranches = saved.groupBranches || []
+          return areArrayItemsSame(currentBranches, savedBranches) ? currentBranches : savedBranches
+        })
+        setFigmaBinding((currentBinding) =>
+          Object.is(currentBinding, saved.figmaBinding) ? currentBinding : saved.figmaBinding
+        )
+        latestNextZIndexRefRef.current.current = maxZ + 1
+        if (restored.length > 0) {
+          window.setTimeout(() => {
+            if (!cancelled) {
+              setFitTrigger(Date.now())
+            }
+          }, 300)
+        }
+
+        if (restored.length === 0) {
+          return
         }
 
         const imageHydrationEntries = await Promise.all(
@@ -372,7 +468,7 @@ export function useCanvasViewportPersistence({
               return null
             }
 
-            const hydratedItem = await hydrateCanvasImageItemForCanvas(item)
+            const hydratedItem = await latestHydrateCanvasImageItemForCanvasRef.current(item)
             if (!hydratedItem) {
               console.warn('[Canvas] Skipped restoring an image item because hydration failed.')
               return null
@@ -382,7 +478,7 @@ export function useCanvasViewportPersistence({
           })
         )
 
-        if (!cancelled) {
+        if (!cancelled && restoreGenerationRef.current === restoreGeneration) {
           const hydratedImageItems = new Map(
             imageHydrationEntries.filter(
               (entry): entry is readonly [string, CanvasImageItem] => entry !== null
@@ -390,15 +486,26 @@ export function useCanvasViewportPersistence({
           )
 
           if (hydratedImageItems.size > 0) {
-            setItems((currentItems) =>
-              currentItems.map((item) => hydratedImageItems.get(item.id) ?? item)
-            )
+            setItems((currentItems) => {
+              let changed = false
+              const nextItems = currentItems.map((item) => {
+                const hydratedItem = hydratedImageItems.get(item.id)
+                if (!hydratedItem || hydratedItem === item) {
+                  return item
+                }
+                changed = true
+                return hydratedItem
+              })
+              return changed ? nextItems : currentItems
+            })
           }
         }
       } catch (error) {
         console.error('[Canvas] Failed to restore canvas state.', error)
       } finally {
-        isRestoringRef.current = false
+        if (restoreGenerationRef.current === restoreGeneration) {
+          isRestoringRef.current = false
+        }
       }
     }
 
@@ -406,15 +513,16 @@ export function useCanvasViewportPersistence({
 
     return () => {
       cancelled = true
+      restoreGenerationRef.current += 1
     }
   }, [
     canvasId,
-    hydrateCanvasImageItemForCanvas,
-    nextZIndexRef,
+    clearPendingCanvasSave,
     setFigmaBinding,
     setGroupBranches,
     setGroups,
-    setItems
+    setItems,
+    setSelectedIds
   ])
 
   useEffect(() => {

@@ -14,6 +14,7 @@ export interface ChatAttachment {
   fileName?: string
   relativePath?: string
   hiddenFromChatView?: boolean
+  metadata?: Record<string, unknown>
   sizeBytes?: number
   sourceWidth?: number
   sourceHeight?: number
@@ -84,11 +85,90 @@ export interface OpenAIImageGenerationOptions {
   size?: string
 }
 
+export type VideoGenerationJsonPrimitive = string | number | boolean | null
+export type VideoGenerationJsonValue =
+  | VideoGenerationJsonPrimitive
+  | VideoGenerationJsonValue[]
+  | { [key: string]: VideoGenerationJsonValue }
+export type VideoGenerationJsonObject = { [key: string]: VideoGenerationJsonValue }
+
+export type VideoGenerationMode = 'std' | 'pro' | '4k'
+export type VideoGenerationSound = 'on' | 'off'
+export type VideoGenerationDurationMode = 'fixed' | 'adaptive'
+export type VideoGenerationCameraPreset =
+  | 'none'
+  | 'down_back'
+  | 'forward_up'
+  | 'right_turn_forward'
+  | 'left_turn_forward'
+export type VideoGenerationCameraControlType = 'simple' | VideoGenerationCameraPreset
+export interface VideoGenerationCameraSimpleControls {
+  horizontal?: number
+  vertical?: number
+  pan?: number
+  tilt?: number
+  roll?: number
+  zoom?: number
+}
+export interface VideoGenerationCameraControl {
+  type: VideoGenerationCameraControlType
+  config?: VideoGenerationCameraSimpleControls
+}
+export type VideoGenerationImageReferenceRole = 'first_frame' | 'last_frame' | 'reference_image'
+export type VideoGenerationVideoReferenceRole =
+  | 'video'
+  | 'source_video'
+  | 'reference_video'
+  | 'video_reference'
+export type VideoGenerationAudioReferenceRole =
+  | 'audio'
+  | 'source_audio'
+  | 'reference_audio'
+  | 'audio_reference'
+  | 'voiceover'
+  | 'music'
+export type VideoGenerationReferenceRole =
+  | VideoGenerationImageReferenceRole
+  | VideoGenerationVideoReferenceRole
+  | VideoGenerationAudioReferenceRole
+export interface VideoGenerationReferenceRoles {
+  image?: VideoGenerationImageReferenceRole | VideoGenerationImageReferenceRole[]
+  video?: VideoGenerationVideoReferenceRole | VideoGenerationVideoReferenceRole[]
+  audio?: VideoGenerationAudioReferenceRole | VideoGenerationAudioReferenceRole[]
+}
+
+export interface VideoGenerationOptions {
+  aspectRatio?: string
+  duration?: number
+  durationMode?: VideoGenerationDurationMode
+  negativePrompt?: string
+  cfgScale?: number
+  mode?: VideoGenerationMode
+  sound?: VideoGenerationSound
+  watermark?: boolean
+  callbackUrl?: string
+  externalTaskId?: string
+  advancedJson?: string | VideoGenerationJsonObject
+  requestOverride?: VideoGenerationJsonObject
+  cameraPreset?: VideoGenerationCameraPreset
+  cameraControl?: VideoGenerationCameraControl
+  cameraSimpleControls?: VideoGenerationCameraSimpleControls
+  resolution?: string
+  frames?: number
+  generateAudio?: boolean
+  returnLastFrame?: boolean
+  referenceRole?: VideoGenerationReferenceRole
+  referenceRoles?: VideoGenerationReferenceRoles
+  videoReferenceRole?: VideoGenerationVideoReferenceRole
+  audioReferenceRole?: VideoGenerationAudioReferenceRole
+}
+
 export interface LLMChatParams {
   messages: ChatMessage[]
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
   imageGenerationOptions?: OpenAIImageGenerationOptions
+  videoGenerationOptions?: VideoGenerationOptions
   signal?: AbortSignal
   sessionUrl?: string
   conversationId?: string

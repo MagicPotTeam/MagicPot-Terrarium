@@ -4,6 +4,7 @@ import {
   isConfiguredApiProfile,
   isVisionCapableApiProfile
 } from '@shared/config/apiProfileSelectors'
+import { resolveProfileModelUse } from '@shared/llm'
 
 export const getQAppApiProfiles = (config: Config): LLMAPIProfile[] =>
   getSharedQAppApiProfiles(config)
@@ -39,5 +40,9 @@ export const findQAppApiProfile = (
     return configuredProfiles.find(matchesNeedVision)
   }
 
-  return configuredProfiles.find((profile) => !profile.is_vision_model) || configuredProfiles[0]
+  return (
+    configuredProfiles.find(
+      (profile) => !profile.is_vision_model && resolveProfileModelUse(profile) !== 'video'
+    ) || configuredProfiles.find((profile) => resolveProfileModelUse(profile) !== 'video')
+  )
 }

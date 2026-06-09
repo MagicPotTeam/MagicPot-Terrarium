@@ -17,9 +17,11 @@ import type {
 import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 import { LLMCli } from './types'
 import { OpenAIAPICli, GeminiAPICli, ClaudeAPICli, OllamaAPICli, type FetchImpl } from './clients'
+import { KlingVideoAPICli, VolcengineSeedanceAPICli } from './videoClients'
 
 type ProfileLike = {
   api_key?: string
+  api_secret?: string
   call_type?: LLMProfileCallType
   auth_mode?: string
   base_url?: string
@@ -65,6 +67,18 @@ const looksLikeGlmOcrModel = (modelName?: string): boolean =>
     .toLowerCase()
     .includes('glm-ocr')
 
+const looksLikeKlingVideoModel = (modelName?: string): boolean =>
+  String(modelName || '')
+    .trim()
+    .toLowerCase()
+    .startsWith('kling-')
+
+const looksLikeVolcengineVideoModel = (modelName?: string): boolean =>
+  String(modelName || '')
+    .trim()
+    .toLowerCase()
+    .startsWith('doubao-seedance-')
+
 const normalizeProvider = (provider?: string): LLMProvider | undefined => {
   switch (provider) {
     case 'default':
@@ -73,6 +87,8 @@ const normalizeProvider = (provider?: string): LLMProvider | undefined => {
     case 'gemini':
     case 'claude':
     case 'ollama':
+    case 'kling':
+    case 'volcengine':
       return provider
     default:
       return undefined
@@ -99,9 +115,24 @@ const normalizeModelUse = (modelUse?: string): LLMModelUse | undefined => {
     case 'vision':
     case 'ocr':
     case 'image':
+    case 'video':
       return modelUse
     default:
       return undefined
+  }
+}
+
+const parseHttpUrl = (url: string): URL | undefined => {
+  const normalized = url.trim()
+  if (!normalized) {
+    return undefined
+  }
+
+  try {
+    const parsed = new URL(normalized)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -126,6 +157,16 @@ const getBaseUrlHostname = (value: string): string | null => {
 const hostnameMatchesDomain = (hostname: string, domain: string): boolean =>
   hostname === domain || hostname.endsWith(`.${domain}`)
 
+const urlHostnameMatchesDomain = (url: string, domains: readonly string[]): boolean => {
+  const parsed = parseHttpUrl(url)
+  if (!parsed) {
+    return false
+  }
+
+  const hostname = parsed.hostname.toLowerCase()
+  return domains.some((domain) => hostnameMatchesDomain(hostname, domain))
+}
+
 export const isGeminiUrl = (url: string): boolean => {
   const hostname = getBaseUrlHostname(url)
   return Boolean(
@@ -143,6 +184,25 @@ export const isClaudeUrl = (url: string): boolean => {
       hostnameMatchesDomain(hostname, 'claude.ai'))
   )
 }
+
+export const isKlingUrl = (url: string): boolean =>
+  urlHostnameMatchesDomain(url, ['klingai.com', 'klingapi.com'])
+
+export const isVolcengineUrl = (url: string): boolean => {
+  const parsed = parseHttpUrl(url)
+  if (parsed) {
+    return parsed.pathname.toLowerCase().includes('/contents/generations/tasks')
+  }
+
+  return url.trim().toLowerCase().includes('/contents/generations/tasks')
+}
+
+const isVolcengineVideoBaseUrl = (url: string): boolean =>
+  urlHostnameMatchesDomain(url, [
+    'ark.cn-beijing.volces.com',
+    'volcengineapi.com',
+    'byteplusapi.com'
+  ])
 
 export const isOllamaUrl = (url: string): boolean => {
   const normalized = url.trim().toLowerCase()
@@ -206,13 +266,42 @@ export const resolveProfileProvider = (profile: ProfileLike): LLMProvider | unde
     }
   }
 
+  const explicitModelUse = normalizeModelUse(profile.model_use)
+  const hasExplicitModelUse =
+    typeof profile.model_use === 'string' && profile.model_use.trim().length > 0
+  const isExplicitNonVideoProfile = hasExplicitModelUse && explicitModelUse !== 'video'
+  const isVideoProfile = explicitModelUse === 'video'
+
   const explicitProvider = normalizeProvider(profile.provider)
   if (explicitProvider) {
-    return explicitProvider
+    if (
+      !isExplicitNonVideoProfile ||
+      (explicitProvider !== 'kling' && explicitProvider !== 'volcengine')
+    ) {
+      return explicitProvider
+    }
   }
 
   if (profile.is_ollama || isOllamaUrl(profile.base_url || '')) {
     return 'ollama'
+  }
+
+  if (
+    !isExplicitNonVideoProfile &&
+    (isVideoProfile || looksLikeKlingVideoModel(profile.model_name)) &&
+    isKlingUrl(profile.base_url || '')
+  ) {
+    return 'kling'
+  }
+
+  if (
+    !isExplicitNonVideoProfile &&
+    (isVolcengineUrl(profile.base_url || '') ||
+      (isVideoProfile &&
+        (looksLikeVolcengineVideoModel(profile.model_name) ||
+          isVolcengineVideoBaseUrl(profile.base_url || ''))))
+  ) {
+    return 'volcengine'
   }
 
   if (isGeminiUrl(profile.base_url || '')) {
@@ -271,6 +360,11 @@ export const resolveProfileModelUse = (profile: ProfileLike): LLMModelUse => {
     return explicitModelUse
   }
 
+  const provider = resolveProfileProvider(profile)
+  if (provider === 'kling' || provider === 'volcengine') {
+    return 'video'
+  }
+
   if (profile.is_ocr_model || looksLikeGlmOcrModel(profile.model_name)) {
     return 'ocr'
   }
@@ -305,14 +399,20 @@ export const isRunnableProfile = (profile: ProfileLike): boolean => {
     return false
   }
 
-  if (resolveProfileProvider(profile) === 'ollama') {
+  const provider = resolveProfileProvider(profile)
+  if (provider === 'ollama') {
     return true
   }
 
-  if (
-    resolveProfileProvider(profile) === 'openai' &&
-    resolveProfileDeployment(profile) === 'local'
-  ) {
+  if (provider === 'kling') {
+    return Boolean(profile.api_key?.trim() && profile.api_secret?.trim())
+  }
+
+  if (provider === 'volcengine') {
+    return Boolean(profile.api_key?.trim())
+  }
+
+  if (provider === 'openai' && resolveProfileDeployment(profile) === 'local') {
     return true
   }
 
@@ -326,6 +426,7 @@ export const isRunnableProfile = (profile: ProfileLike): boolean => {
 export const cliFromProfile = (
   profile: {
     api_key: string
+    api_secret?: string
     auth_mode?: string
     base_url: string
     codex_fast_mode?: boolean
@@ -369,11 +470,27 @@ export const cliFromProfile = (
         profile.model_name,
         options?.fetchImpl
       )
+    case 'kling':
+      return new KlingVideoAPICli(
+        profile.api_key,
+        profile.api_secret || '',
+        profile.base_url,
+        profile.model_name,
+        options?.fetchImpl
+      )
+    case 'volcengine':
+      return new VolcengineSeedanceAPICli(
+        profile.api_key,
+        profile.base_url,
+        profile.model_name,
+        options?.fetchImpl
+      )
     case 'openai':
-    default:
       return new OpenAIAPICli(profile.api_key, profile.base_url, profile.model_name, {
         modelUse: resolveProfileModelUse(profile),
         fetchImpl: options?.fetchImpl
       })
+    default:
+      return undefined
   }
 }

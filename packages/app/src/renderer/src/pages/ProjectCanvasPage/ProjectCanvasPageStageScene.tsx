@@ -2018,7 +2018,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
                 fileName: flattenedCropSource.fileName,
                 sizeBytes: flattenedCropSource.sizeBytes,
                 sourceWidth: flattenedCropSource.sourceWidth,
-                sourceHeight: flattenedCropSource.sourceHeight
+                sourceHeight: flattenedCropSource.sourceHeight,
+                width: flattenedCropSource.sourceWidth,
+                height: flattenedCropSource.sourceHeight
               }
             }
 

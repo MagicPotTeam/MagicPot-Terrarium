@@ -4,6 +4,9 @@
 
 // default to pure mode
 const packageMode = process.env.PACKAGE_MODE || 'pure'
+const updateOwner = process.env.MAGICPOT_UPDATE_OWNER || 'MagicPotTeam'
+const updateRepo = process.env.MAGICPOT_UPDATE_REPO || 'magicpot-open'
+const updateChannel = process.env.MAGICPOT_UPDATE_CHANNEL || 'latest'
 const runtimeAssetsDir = 'packages/runtime-assets'
 const buildResourcesDir = `${runtimeAssetsDir}/build`
 const appResourcesDir = `${runtimeAssetsDir}/resources`
@@ -28,7 +31,9 @@ const comfySourceFile = (relativePath) => ({
 
 const modeMap = {
   embedded: {
-    productName: 'magicpot-embedded',
+    appId: 'com.magicpot.app',
+    productName: 'magicpot',
+    executableName: 'magicpot',
     distDir: 'dist/embedded',
     winExtraFiles: [
       embeddedComfyUIStageFiles,
@@ -51,7 +56,7 @@ const modeMap = {
       artifactName: '${productName}-${version}-setup.${ext}',
       shortcutName: '${productName}',
       uninstallDisplayName: '${productName}',
-      include: `${buildResourcesDir}/uninstaller.nsh`
+      include: `${buildResourcesDir}/magicpot-uninstall-cleanup.nsh`
     },
     afterPack: `${buildResourcesDir}/afterPack.js`,
     macExtraFiles: [
@@ -62,7 +67,9 @@ const modeMap = {
     linuxExtraFiles: [embeddedComfyUIStageFiles]
   },
   pure: {
-    productName: 'magicpot-pure',
+    appId: 'com.magicpot.app',
+    productName: 'magicpot',
+    executableName: 'magicpot',
     distDir: 'dist/pure',
     winExtraFiles: [],
     winTarget: ['dir', 'zip', 'nsis'],
@@ -80,7 +87,16 @@ const modeMap = {
       shortcutName: '${productName}',
       uninstallDisplayName: '${productName}',
       include: `${buildResourcesDir}/pure-installer.nsh` // pure installer options plus uninstall cleanup
-    }
+    },
+    publish: [
+      {
+        provider: 'github',
+        owner: updateOwner,
+        repo: updateRepo,
+        channel: updateChannel,
+        releaseType: 'release'
+      }
+    ]
   }
 }
 
@@ -102,7 +118,7 @@ const bundledContentExtraFiles = [
 ]
 
 const config = {
-  appId: 'com.magicpot.app',
+  appId: modeConfig.appId,
   productName: modeConfig.productName,
   directories: {
     buildResources: buildResourcesDir,
@@ -126,6 +142,7 @@ const config = {
   win: {
     icon: `${buildResourcesDir}/icon.png`,
     defaultArch: 'x64',
+    executableName: modeConfig.executableName,
     extraFiles: modeConfig.winExtraFiles,
     target: modeConfig.winTarget,
     signtoolOptions: {
@@ -161,6 +178,7 @@ const config = {
   electronDownload: {
     mirror: 'https://npmmirror.com/mirrors/electron/'
   },
+  publish: modeConfig.publish,
   afterPack: modeConfig.afterPack || undefined
 }
 

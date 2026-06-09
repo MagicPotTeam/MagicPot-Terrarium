@@ -723,6 +723,14 @@ describe('ProjectCanvasPage OCR agent drag/drop integration', () => {
       </ThemeProvider>
     )
 
+    await waitFor(() => {
+      expect(mockLoadCanvasItems).toHaveBeenCalled()
+      expect(screen.getByTestId('project-canvas-stage-root')).toHaveAttribute(
+        'data-project-canvas-total-item-count',
+        '0'
+      )
+    })
+
     await act(async () => {
       window.dispatchEvent(
         new CustomEvent('canvas:add-model3d', {
@@ -730,6 +738,7 @@ describe('ProjectCanvasPage OCR agent drag/drop integration', () => {
             src: 'https://example.com/generated-model.glb',
             fileName: 'generated-model.glb',
             projectId: 'canvas-ocr-test',
+            select: true,
             hy3dQuickAppKey: '~builtin/hunyuan3d/texture',
             hy3dParams: {
               apiAction: 'SubmitTextureTo3DJob',

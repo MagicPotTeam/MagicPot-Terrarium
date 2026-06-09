@@ -8,7 +8,11 @@ import path from 'path'
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { app } from 'electron'
 import { buildMagicPotAppCatalogSnapshot } from '@shared/app/catalog'
-import { type LLMProxyAccessTokenEntry } from '@shared/config/config'
+import {
+  type Config,
+  type LLMAPIProfile,
+  type LLMProxyAccessTokenEntry
+} from '@shared/config/config'
 import { getConfig } from '../config/config'
 import { LLMProxySvcImpl } from '../api/svcLLMProxyImpl'
 import { ChatMessage, LLMChatSkillRuntime, type LLMProfileScope } from '@shared/api/svcLLMProxy'
@@ -18,6 +22,12 @@ import {
   normalizeAssistantRoute,
   type AssistantRoute
 } from '../assistantRuntime/types'
+import {
+  isRunnableProfile,
+  resolveProfileDeployment,
+  resolveProfileModelUse,
+  resolveProfileProvider
+} from '@shared/llm'
 import { buildAgentRoute } from '@shared/agent'
 import {
   getConfiguredMcpLegacySseMessagePath,
@@ -38,6 +48,95 @@ const testUiPolicy = resolveTestUiPolicy(readTestUiEnv())
 const CANVAS_SYNC_REMOVED_ERROR =
   'Canvas mirroring has been removed. Remote agents can only access content explicitly attached to the current request.'
 const LEGACY_CHAT_ENDPOINTS = new Set(['/api/bot/message', '/api/bot/chat', '/api/message'])
+
+const getAllConfiguredLlmProfiles = (config: Config): LLMAPIProfile[] => [
+  ...(config.llm_config?.api_profiles || []),
+  ...(config.plugin_config?.api_profiles || [])
+]
+
+const buildProfileCompatibilityAlias = (profile: LLMAPIProfile) => {
+  const modelUse = resolveProfileModelUse(profile)
+  return {
+    id: profile.id,
+    profileId: profile.id,
+    profile_id: profile.id,
+    name: profile.model_name,
+    label: profile.model_name,
+    model: profile.model_name,
+    model_name: profile.model_name,
+    modelName: profile.model_name,
+    base_url: '',
+    api_key: '',
+    provider: resolveProfileProvider(profile),
+    deployment: resolveProfileDeployment(profile),
+    model_use: modelUse,
+    is_vision_model:
+      modelUse === 'agent' ||
+      modelUse === 'multimodal' ||
+      modelUse === 'vision' ||
+      modelUse === 'ocr' ||
+      Boolean(profile.is_vision_model),
+    is_ocr_model: modelUse === 'ocr' || Boolean(profile.is_ocr_model),
+    ...(profile.tagger_provider ? { tagger_provider: profile.tagger_provider } : {}),
+    ...(profile.tagger_endpoint?.trim() ? { tagger_endpoint: profile.tagger_endpoint.trim() } : {}),
+    ...(profile.tagger_runtime_cache_scope
+      ? { tagger_runtime_cache_scope: profile.tagger_runtime_cache_scope }
+      : {})
+  }
+}
+
+const buildProxyProfilesCompatibilityPayload = (
+  profilesResp: Awaited<ReturnType<LLMProxySvcImpl['listProfiles']>>
+) => {
+  const aliasProfiles = profilesResp.profiles.map((profile) => ({
+    ...profile,
+    profileId: profile.id,
+    profile_id: profile.id,
+    modelName: profile.model_name,
+    name: profile.model_name,
+    label: profile.model_name,
+    base_url: '',
+    api_key: ''
+  }))
+  return {
+    ...profilesResp,
+    profiles: aliasProfiles,
+    availableProfiles: aliasProfiles,
+    models: aliasProfiles,
+    data: aliasProfiles
+  }
+}
+
+const buildProxyStatusCompatibilityPayload = (
+  status: Awaited<ReturnType<LLMProxySvcImpl['serverStatus']>>,
+  config: Config,
+  legacyEndpoint?: string
+) => {
+  const runnableProfiles = getAllConfiguredLlmProfiles(config).filter(isRunnableProfile)
+  const aliases = runnableProfiles.map(buildProfileCompatibilityAlias)
+  return {
+    ...status,
+    ok: status.online,
+    status: status.online ? 'online' : 'offline',
+    availableProfiles: status.availableProfiles ?? aliases.length,
+    profileCount: status.availableProfiles ?? aliases.length,
+    profiles: aliases,
+    models: aliases,
+    compatibility: {
+      endpoint: '/api/status',
+      ...(legacyEndpoint ? { legacyEndpoint } : {}),
+      chatEndpoint: '/api/chat',
+      legacyChatEndpoints: Array.from(LEGACY_CHAT_ENDPOINTS),
+      profileEndpoint: '/api/profiles',
+      authHeaders: [
+        'Authorization',
+        'X-MagicPot-Proxy-Token',
+        'X-MagicPot-Bot-Secret',
+        'X-Bot-Secret'
+      ]
+    }
+  }
+}
 
 function getLlmProxyTempDir(scope?: string): string {
   const baseTempDir = resolveTestArtifactPath({
@@ -102,6 +201,60 @@ const getRequesterAddress = (req: http.IncomingMessage): string => {
     return 'unknown'
   }
   return candidate.replace(/^::ffff:/i, '')
+}
+
+
+const PROXY_MEDIA_FILENAME_PATTERN = /^[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+$/
+
+const resolvePathInsideDirectory = (baseDir: string, filename: string): string | undefined => {
+  if (!PROXY_MEDIA_FILENAME_PATTERN.test(filename)) {
+    return undefined
+  }
+
+  const resolvedBaseDir = path.resolve(baseDir)
+  const resolvedPath = path.resolve(resolvedBaseDir, filename)
+  const relativePath = path.relative(resolvedBaseDir, resolvedPath)
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return undefined
+  }
+
+  return resolvedPath
+}
+
+const resolveExistingProxyMediaPath = (
+  filename: string,
+  resourceScope?: string
+): string | undefined => {
+  const candidateDirs = [getChatMediaDir(resourceScope), getLlmProxyTempDir(resourceScope)]
+  for (const candidateDir of candidateDirs) {
+    const candidatePath = resolvePathInsideDirectory(candidateDir, filename)
+    if (candidatePath && fs.existsSync(candidatePath)) {
+      return candidatePath
+    }
+  }
+
+  return undefined
+}
+
+const getProxyMediaContentType = (filename: string): string => {
+  const extension = path.extname(filename).toLowerCase()
+  switch (extension) {
+    case '.png':
+      return 'image/png'
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg'
+    case '.gif':
+      return 'image/gif'
+    case '.webp':
+      return 'image/webp'
+    case '.mp4':
+      return 'video/mp4'
+    case '.webm':
+      return 'video/webm'
+    default:
+      return 'application/octet-stream'
+  }
 }
 
 const isSafeProxyAssetNameChar = (char: string): boolean => {
@@ -170,6 +323,77 @@ const sanitizeProxyAssetExtension = (value: string): string => {
   }
 
   return source
+}
+
+
+const TOOL_RESPONSE_MAX_DEPTH = 6
+const TOOL_RESPONSE_PRIVATE_FIELD_NAMES = new Set(['stack', 'stackTrace', 'stacktrace'])
+
+const sanitizeToolResponseValue = (
+  value: unknown,
+  depth = 0,
+  seen: WeakSet<object> = new WeakSet()
+): unknown => {
+  if (depth > TOOL_RESPONSE_MAX_DEPTH) {
+    return '[Truncated]'
+  }
+
+  if (typeof value === 'bigint') {
+    return value.toString()
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value
+  }
+
+  if (seen.has(value)) {
+    return '[Circular]'
+  }
+  seen.add(value)
+
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message
+    }
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeToolResponseValue(item, depth + 1, seen))
+  }
+
+  const sanitized: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (TOOL_RESPONSE_PRIVATE_FIELD_NAMES.has(key)) {
+      continue
+    }
+    sanitized[key] = sanitizeToolResponseValue(item, depth + 1, seen)
+  }
+  return sanitized
+}
+
+const buildSafeToolResponseResult = (result: unknown): { content: string; metadata?: unknown } => {
+  if (result instanceof Error) {
+    return { content: 'Tool execution failed.' }
+  }
+
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    const toolResult = result as { content?: unknown; metadata?: unknown }
+    const content =
+      typeof toolResult.content === 'string'
+        ? toolResult.content
+        : toolResult.content == null
+          ? ''
+          : String(toolResult.content)
+    return {
+      content,
+      ...(toolResult.metadata !== undefined
+        ? { metadata: sanitizeToolResponseValue(toolResult.metadata) }
+        : {})
+    }
+  }
+
+  return { content: result == null ? '' : String(result) }
 }
 
 const buildProxyMediaAccessSignature = (
@@ -1045,17 +1269,11 @@ export function startLLMProxyServer(): void {
           requesterAddress: getRequesterAddress(req)
         })
         const status = await getLLMProxySvc().serverStatus({})
-        const responseBody =
-          pathname === '/api/bot/status'
-            ? {
-                ...status,
-                compatibility: {
-                  endpoint: '/api/status',
-                  legacyEndpoint: '/api/bot/status',
-                  chatEndpoint: '/api/chat'
-                }
-              }
-            : status
+        const responseBody = buildProxyStatusCompatibilityPayload(
+          status,
+          getConfig(),
+          pathname === '/api/bot/status' ? '/api/bot/status' : undefined
+        )
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(responseBody))
         return
@@ -1074,7 +1292,7 @@ export function startLLMProxyServer(): void {
         })
         const profiles = await getLLMProxySvc().listProfiles({})
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(profiles))
+        res.end(JSON.stringify(buildProxyProfilesCompatibilityPayload(profiles)))
         return
       }
 
@@ -1162,7 +1380,7 @@ export function startLLMProxyServer(): void {
         if (
           mediaSegments.length === 0 ||
           mediaSegments.length > 2 ||
-          !/^[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+$/.test(filename) ||
+          !PROXY_MEDIA_FILENAME_PATTERN.test(filename) ||
           (resourceScope && !/^[a-z0-9_.-]+$/i.test(resourceScope))
         ) {
           res.writeHead(400)
@@ -1193,29 +1411,15 @@ export function startLLMProxyServer(): void {
         })
 
         // Prefer the persisted chat media directory, then fall back to temp for legacy data.
-        const mediaDir = getChatMediaDir(resourceScope)
-        const tempDir = getLlmProxyTempDir(resourceScope)
-
-        let filePath = path.join(mediaDir, filename)
-        if (!fs.existsSync(filePath)) {
-          filePath = path.join(tempDir, filename)
-        }
-
-        if (!fs.existsSync(filePath)) {
+        const filePath = resolveExistingProxyMediaPath(filename, resourceScope)
+        if (!filePath) {
           res.writeHead(404)
           res.end('Not Found')
           return
         }
 
         const stat = fs.statSync(filePath)
-        // Infer Content-Type.
-        let contentType = 'application/octet-stream'
-        if (filename.endsWith('.png')) contentType = 'image/png'
-        else if (filename.endsWith('.jpg') || filename.endsWith('.jpeg')) contentType = 'image/jpeg'
-        else if (filename.endsWith('.gif')) contentType = 'image/gif'
-        else if (filename.endsWith('.webp')) contentType = 'image/webp'
-        else if (filename.endsWith('.mp4')) contentType = 'video/mp4'
-        else if (filename.endsWith('.webm')) contentType = 'video/webm'
+        const contentType = getProxyMediaContentType(filename)
 
         res.writeHead(200, {
           'Content-Type': contentType,
@@ -1302,7 +1506,7 @@ export function startLLMProxyServer(): void {
         )
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ result }))
+        res.end(JSON.stringify({ result: buildSafeToolResponseResult(result) }))
         return
       }
 

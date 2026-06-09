@@ -186,12 +186,56 @@ describe('buildAssistantMessageFromResponse', () => {
     })
   })
 
-  it('keeps generated video markdown intact so the assistant renderer can render signed MP4 links', () => {
-    const response = '[Generated Video](https://example.com/download?id=clip-1)'
+  it('extracts generated video markdown links as video attachments', () => {
+    const response = 'Done: [Generated Video](https://example.com/download?id=clip-1)'
 
     expect(buildAssistantMessageFromResponse(response)).toEqual({
       role: 'assistant',
-      content: response
+      content: 'Done:',
+      attachments: [
+        {
+          type: 'video',
+          url: 'https://example.com/download?id=clip-1',
+          fileName: 'download',
+          mimeType: 'video/mp4'
+        }
+      ]
+    })
+  })
+
+  it('treats generic markdown links to video files as video attachments', () => {
+    const message = buildAssistantMessageFromResponse(
+      'Done: [clip.mp4](https://example.com/download?id=clip-1)'
+    )
+
+    expect(message).toEqual({
+      role: 'assistant',
+      content: 'Done:',
+      attachments: [
+        {
+          type: 'video',
+          url: 'https://example.com/download?id=clip-1',
+          fileName: 'download',
+          mimeType: 'video/mp4'
+        }
+      ]
+    })
+  })
+
+  it('treats a direct video URL as an attachment-only response', () => {
+    const message = buildAssistantMessageFromResponse('https://example.com/render.mp4')
+
+    expect(message).toEqual({
+      role: 'assistant',
+      content: '',
+      attachments: [
+        {
+          type: 'video',
+          url: 'https://example.com/render.mp4',
+          fileName: 'render.mp4',
+          mimeType: 'video/mp4'
+        }
+      ]
     })
   })
 

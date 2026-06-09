@@ -3,6 +3,10 @@ import { getJsonPath, setJsonPath } from '@shared/utils/jsonPath'
 import { ExeAutoBuilder, ExeAutoProps } from './types'
 import { valueIsJsonDict } from '@shared/utils/utilTypes'
 import { Config, LLMAPIProfile } from '@shared/config/config'
+import {
+  getRemoteLlmServerAccessToken,
+  getRemoteLlmServerOrigin
+} from '@renderer/utils/llmProfileUtils'
 import { isVisionCapableApiProfile } from '@shared/config/apiProfileSelectors'
 import { Alert, Button } from '@mui/material'
 import { useNavigate } from 'react-router-dom'
@@ -15,12 +19,14 @@ import {
 const llmProfile = (config: Config, needVisionModel?: boolean) => {
   const profiles = getQAppApiProfiles(config)
   if (config.use_remote_llm) {
-    const serverOrigin = config.remote_llm_server_config?.server_origin || 'http://localhost:3721'
+    const serverOrigin = getRemoteLlmServerOrigin(config).replace(/\/+$/, '')
     return {
       id: 'remote',
-      model_name: 'gpt-4o', // 使用一个通用的模型名，代理端可能不仅支持 Gemini
+      model_name: 'remote',
       base_url: `${serverOrigin}/v1`,
-      api_key: 'sk-remote',
+      api_key: getRemoteLlmServerAccessToken(config),
+      provider: 'openai',
+      deployment: 'cloud',
       is_ollama: false,
       is_vision_model: true // 假设远程服务端支持视觉
     } as LLMAPIProfile

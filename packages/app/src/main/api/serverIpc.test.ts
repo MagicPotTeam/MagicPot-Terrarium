@@ -36,6 +36,7 @@ vi.mock('./svcLogImpl', () => ({ LogSvcImpl: createServiceClass() }))
 vi.mock('./svcFsImpl', () => ({ FsSvcImpl: createServiceClass() }))
 vi.mock('./svcDccBridgeImpl', () => ({ DccBridgeSvcImpl: createServiceClass() }))
 vi.mock('./svcDuplicateCheckImpl', () => ({ DuplicateCheckSvcImpl: createServiceClass() }))
+vi.mock('./svcAppUpdateImpl', () => ({ AppUpdateSvcImpl: createServiceClass() }))
 
 describe('serverIpc createServer', () => {
   it('creates the remaining service registry', () => {
@@ -43,5 +44,7 @@ describe('serverIpc createServer', () => {
 
     expect(api.svcTargetScheme).toBeDefined()
     expect(apiDef.svcTargetScheme).toBeDefined()
+    expect(api.svcAppUpdate).toBeDefined()
+    expect(apiDef.svcAppUpdate).toBeDefined()
   })
 })

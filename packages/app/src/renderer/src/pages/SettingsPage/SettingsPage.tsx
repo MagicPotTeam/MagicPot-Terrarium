@@ -12,7 +12,7 @@ import { useTheme } from '@mui/material/styles'
 import { useLocation } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { Config, DEFAULT_CONFIG } from '@shared/config/config'
-import { BUILD_MODE, PACKAGE_VERSION } from '@shared/config/viteEnv'
+import { PACKAGE_VERSION } from '@shared/config/viteEnv'
 import type { DeepPartial } from '@shared/utils/utilTypes'
 import { lazyWithRetry } from '@renderer/utils/lazyWithRetry'
 import { useConfig } from '@renderer/hooks/useConfig'
@@ -160,7 +160,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
 
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <Typography sx={{ fontSize: 12, fontWeight: 500, color: settingsMetaColor }}>
-              Magic Pot {BUILD_MODE} {PACKAGE_VERSION}
+              Magic Pot {PACKAGE_VERSION}
             </Typography>
             {onClose && (
               <Tooltip title={t('general.close')} arrow>

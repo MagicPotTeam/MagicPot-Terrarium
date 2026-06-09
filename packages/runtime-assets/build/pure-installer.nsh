@@ -1,7 +1,8 @@
 !include "LogicLib.nsh"
-!include "nsDialogs.nsh"
-!include "uninstaller.nsh"
+!include "${BUILD_RESOURCES_DIR}\magicpot-uninstall-cleanup.nsh"
 
+!ifndef BUILD_UNINSTALLER
+!include "nsDialogs.nsh"
 !define MAGICPOT_VC_REDIST_DOWNLOAD_URL "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
 Var MagicPotVcRedistCheckbox
@@ -45,3 +46,4 @@ FunctionEnd
     ${EndIf}
   ${EndIf}
 !macroend
+!endif

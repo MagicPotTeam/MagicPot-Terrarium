@@ -1,9 +1,11 @@
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 import { app } from 'electron'
 
 export const USER_DATA_OVERRIDE_ENV = 'MAGICPOT_USER_DATA_DIR'
 export const USER_DATA_DIRNAME = 'aiengineelectron'
+export const USER_DATA_PARENT_DIRNAME = 'MagicPot'
 export const DEV_USER_DATA_DIRNAME = '.aiengineelectron-dev'
 export const USER_DATA_BOOTSTRAP_FILENAME = 'user-data-bootstrap.json'
 
@@ -43,29 +45,87 @@ function cleanPath(value: unknown): string | null {
   return trimmed ? path.resolve(trimmed) : null
 }
 
+function normalizePathKey(targetPath: string): string {
+  const normalized = path.resolve(targetPath)
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+function dedupePaths(paths: Array<string | null>): string[] {
+  const seen = new Set<string>()
+  const deduped: string[] = []
+  for (const targetPath of paths) {
+    if (!targetPath) {
+      continue
+    }
+    const key = normalizePathKey(targetPath)
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    deduped.push(targetPath)
+  }
+  return deduped
+}
+
 export function getDefaultPortableUserDataDirectory(): string {
   if (!app.isPackaged) {
     return path.join(process.cwd(), DEV_USER_DATA_DIRNAME)
   }
-  return path.join(process.resourcesPath, '..', USER_DATA_DIRNAME)
+
+  let appDataRoot: string
+  try {
+    appDataRoot = app.getPath('appData')
+  } catch {
+    appDataRoot =
+      process.platform === 'win32'
+        ? path.join(os.homedir(), 'AppData', 'Roaming')
+        : path.join(os.homedir(), '.config')
+  }
+
+  return path.join(appDataRoot, USER_DATA_PARENT_DIRNAME, USER_DATA_DIRNAME)
+}
+
+export function getLegacyPortableUserDataDirectory(): string | null {
+  if (!app.isPackaged || !process.resourcesPath) {
+    return null
+  }
+
+  const legacyDir = path.join(process.resourcesPath, '..', USER_DATA_DIRNAME)
+  const defaultDir = getDefaultPortableUserDataDirectory()
+  return normalizePathKey(legacyDir) === normalizePathKey(defaultDir) ? null : legacyDir
 }
 
 export function getPortableUserDataBootstrapPath(): string {
   return path.join(getDefaultPortableUserDataDirectory(), USER_DATA_BOOTSTRAP_FILENAME)
 }
 
+export function getLegacyPortableUserDataBootstrapPath(): string | null {
+  const legacyDir = getLegacyPortableUserDataDirectory()
+  return legacyDir ? path.join(legacyDir, USER_DATA_BOOTSTRAP_FILENAME) : null
+}
+
+export function getPortableUserDataBootstrapPaths(): string[] {
+  return dedupePaths([getPortableUserDataBootstrapPath(), getLegacyPortableUserDataBootstrapPath()])
+}
+
 export function readPortableBootstrapCustomUserDataDirSync(): string | null {
-  const bootstrapPath = getPortableUserDataBootstrapPath()
-  if (!fs.existsSync(bootstrapPath)) {
-    return null
+  for (const bootstrapPath of getPortableUserDataBootstrapPaths()) {
+    if (!fs.existsSync(bootstrapPath)) {
+      continue
+    }
+
+    try {
+      const raw = JSON.parse(sanitizeText(fs.readFileSync(bootstrapPath, 'utf8'))) as BootstrapLike
+      const customUserDataDir = cleanPath(raw.customUserDataDir)
+      if (customUserDataDir) {
+        return customUserDataDir
+      }
+    } catch {
+      // Keep scanning fallbacks so an unreadable legacy bootstrap does not block startup.
+    }
   }
 
-  try {
-    const raw = JSON.parse(sanitizeText(fs.readFileSync(bootstrapPath, 'utf8'))) as BootstrapLike
-    return cleanPath(raw.customUserDataDir)
-  } catch {
-    return null
-  }
+  return null
 }
 
 export function resolveEarlyPortableUserDataDirectory(): string {

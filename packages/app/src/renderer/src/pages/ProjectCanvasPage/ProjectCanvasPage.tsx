@@ -455,15 +455,13 @@ function summarizeProjectTraceCanvasItemTypes(items: CanvasItem[]): string {
     .join(', ')
 }
 
-const ProjectCanvasPage: React.FC = () => {
+const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) => {
   const theme = useTheme()
   const { t, i18n } = useTranslation()
   const { config } = useConfig()
   const isChineseUi = isChineseUiLanguage(i18n.resolvedLanguage || i18n.language)
-  const location = useLocation()
   const navigate = useNavigate()
   const dispatch = useDispatch()
-  const canvasId = new URLSearchParams(location.search).get('id') || 'default'
   const canvasAgentSessionKey = useMemo(
     () => resolveActiveCanvasAgentSessionKey(canvasId),
     [canvasId]
@@ -2225,6 +2223,13 @@ const ProjectCanvasPage: React.FC = () => {
       registerViewportInteractionCallback={registerViewportInteractionCallback}
     />
   )
+}
+
+const ProjectCanvasPage: React.FC = () => {
+  const location = useLocation()
+  const canvasId = new URLSearchParams(location.search).get('id') || 'default'
+
+  return <ProjectCanvasPageContent key={canvasId} canvasId={canvasId} />
 }
 
 export default ProjectCanvasPage

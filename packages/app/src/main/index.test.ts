@@ -19,7 +19,9 @@ const {
   stopQAppWatcherMock,
   initScreenshotManagerMock,
   cleanupScreenshotManagerMock,
-  resolveStartupUserDataDirectoryMock
+  resolveStartupUserDataDirectoryMock,
+  initializeAppUpdateManagerMock,
+  isAppUpdateInstallInProgressMock
 } = vi.hoisted(() => {
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
   const appMock = {
@@ -55,7 +57,9 @@ const {
     resolveStartupUserDataDirectoryMock: vi.fn(() => ({
       path: '/test-user-data',
       source: 'default' as const
-    }))
+    })),
+    initializeAppUpdateManagerMock: vi.fn(() => Promise.resolve()),
+    isAppUpdateInstallInProgressMock: vi.fn(() => false)
   }
 })
 
@@ -93,6 +97,11 @@ vi.mock('./screenshot/screenshotManager', () => ({
   cleanupScreenshotManager: cleanupScreenshotManagerMock
 }))
 
+vi.mock('./appUpdate/updateManager', () => ({
+  initializeAppUpdateManager: initializeAppUpdateManagerMock,
+  isAppUpdateInstallInProgress: isAppUpdateInstallInProgressMock
+}))
+
 vi.mock('./utils/loggingOverride', () => ({}))
 
 async function loadModule() {
@@ -118,6 +127,8 @@ describe('main process startup window opening', () => {
     stopQAppWatcherMock.mockClear()
     initScreenshotManagerMock.mockClear()
     cleanupScreenshotManagerMock.mockClear()
+    initializeAppUpdateManagerMock.mockClear()
+    isAppUpdateInstallInProgressMock.mockReset().mockReturnValue(false)
     appMock.setPath.mockClear()
     appMock.whenReady.mockClear()
     appMock.on.mockClear()
@@ -155,6 +166,7 @@ describe('main process startup window opening', () => {
     expect(createMainWindowMock).toHaveBeenCalledTimes(1)
     expect(initScreenshotManagerMock).toHaveBeenCalledTimes(1)
     expect(startQAppWatcherMock).toHaveBeenCalledTimes(1)
+    expect(initializeAppUpdateManagerMock).toHaveBeenCalledTimes(1)
     expect(initScreenshotManagerMock).toHaveBeenCalledWith(fallbackWindow)
     expect(startQAppWatcherMock).toHaveBeenCalledWith(fallbackWindow)
   })
@@ -228,5 +240,23 @@ describe('main process startup window opening', () => {
     expect(createMainWindowMock).toHaveBeenCalledTimes(1)
     expect(initScreenshotManagerMock).toHaveBeenCalledWith(automatedWindow)
     expect(startQAppWatcherMock).toHaveBeenCalledWith(automatedWindow)
+  })
+
+  it('does not intercept quit when an update install is in progress', async () => {
+    isAppUpdateInstallInProgressMock.mockReturnValue(true)
+    await loadModule()
+
+    const beforeQuitHandler = appMock.on.mock.calls.find(
+      ([event]) => event === 'before-quit'
+    )?.[1] as ((event: { preventDefault: () => void }) => Promise<void>) | undefined
+    const event = { preventDefault: vi.fn() }
+
+    expect(beforeQuitHandler).toBeTypeOf('function')
+    await beforeQuitHandler?.(event)
+
+    expect(event.preventDefault).not.toHaveBeenCalled()
+    expect(beforeQuitMock).not.toHaveBeenCalled()
+    expect(cleanupScreenshotManagerMock).toHaveBeenCalled()
+    expect(stopQAppWatcherMock).toHaveBeenCalled()
   })
 })

@@ -199,7 +199,31 @@
     "warranty_label": "担保",
     "warranty_text": "本程序按“原样”提供，不附带任何形式的担保。",
     "developer_name": "MagicPotTeam",
-    "license_name": "AGPL-3.0"
+    "license_name": "AGPL-3.0",
+    "update": {
+      "title": "GitHub 更新",
+      "version_unknown": "未知",
+      "detail_idle": "打包版可以检查 GitHub Release。",
+      "detail_available": "发现新版本 {{version}}。",
+      "detail_downloaded": "新版本 {{version}} 已准备安装。",
+      "detail_downloading": "正在下载 {{percent}}%。",
+      "detail_not_available": "当前已是最新版本。",
+      "detail_unsupported": "自动更新仅在打包版可用。",
+      "action_check": "检查更新",
+      "action_download": "下载更新",
+      "action_install": "重启并安装",
+      "state": {
+        "idle": "就绪",
+        "unsupported": "不可用",
+        "checking": "检查中",
+        "available": "可更新",
+        "not_available": "已最新",
+        "downloading": "\u4e0b\u8f7d\u4e2d",
+        "downloaded": "已下载",
+        "installing": "安装中",
+        "error": "错误"
+      }
+    }
   },
   "terminal": {
     "title_ready": "终端就绪，输入命令开始...",
@@ -408,7 +432,8 @@
       "Qwen_风格转绘_草图细化": "Qwen_风格转绘_草图细化",
       "Kontext扩图": "Kontext扩图",
       "hunyuan3d": "Hunyuan3D",
-      "hunyuan3d_quick_app": "Hunyuan3D"
+      "hunyuan3d_quick_app": "Hunyuan3D",
+      "ai_video_generation": "AI 视频生成"
     },
     "design": {
       "load_workflow": "加载工作流",
@@ -543,6 +568,46 @@
         "image_interrogation_failed": "提示词反推失败：{{error}}",
         "translation_failed": "提示词翻译失败：{{error}}",
         "max_length": "提示词最大长度为 {{maxLength}}。"
+      }
+    },
+    "video_generation": {
+      "title": "AI 视频生成",
+      "description": "提交 Kling 或火山方舟 Seedance 异步视频生成任务，并在这里展示生成结果。",
+      "profile_label": "视频模型",
+      "scope_qapp": "快应用 API",
+      "scope_agent": "Agent 线程",
+      "prompt_label": "视频提示词",
+      "prompt_placeholder": "示例：电影镜头，一只小熊猫穿过有薄雾的竹林，柔和晨光，4K",
+      "reference_title": "参考图（可选）",
+      "reference_description": "选择 PNG/JPEG 图片来执行图生视频。本地文件会转换为 data URL。",
+      "choose_reference": "选择参考图",
+      "clear_reference": "清除参考图",
+      "no_reference": "未选择图片",
+      "generate": "生成视频",
+      "generating": "生成中...",
+      "latest_result": "最新结果",
+      "download": "下载视频",
+      "open_preview": "打开预览",
+      "hint": {
+        "kling": "Kling 支持文生视频和图生视频。选择的 PNG/JPEG 参考图会以 data:image base64 发送。",
+        "seedance": "火山方舟 Seedance 支持文生视频和图生视频。默认使用 duration=5、watermark=false。",
+        "missing_profile": "请先在设置 -> 快应用 API 或设置 -> Agent 线程中添加视频生成配置。"
+      },
+      "errors": {
+        "image_required": "请选择图片文件。",
+        "image_read_failed": "读取图片失败：{{error}}",
+        "missing_profile": "请先在设置中配置 Kling 或火山方舟 Seedance 视频模型。",
+        "prompt_or_image_required": "请输入视频提示词或选择参考图。",
+        "no_video_url": "视频任务已完成，但未返回视频 URL。"
+      },
+      "status": {
+        "submitting": "正在提交异步视频任务并轮询结果。",
+        "complete": "视频生成完成。",
+        "failed": "生成失败：{{error}}"
+      },
+      "toast": {
+        "complete": "视频生成完成。",
+        "failed": "生成失败：{{error}}"
       }
     }
   },
@@ -826,6 +891,12 @@
     "clear_cos_success": "已清理 {{deletedCount}} 个对象。",
     "clear_cos_partial": "已删除 {{deletedCount}} 个对象，另有 {{errorCount}} 个对象删除失败。",
     "clear_cos_failed": "清理 Hunyuan3D COS 缓存失败。",
+    "model_use_video": "视频生成",
+    "video_provider": "视频供应商",
+    "video_provider_volcengine_seedance": "火山方舟 / BytePlus Seedance",
+    "volcengine_api_key": "火山方舟 API Key",
+    "kling_video_info": "Kling 会使用 AccessKey + SecretKey 生成 JWT，并提交文生视频或图生视频任务。",
+    "seedance_video_info": "火山方舟 / BytePlus Seedance 使用 Bearer API Key 提交异步视频生成任务。",
     "prompt_translation_system_prompt": "系统提示词",
     "prompt_translation_user_prompt": "用户提示词",
     "image_interrogation_system_prompt": "系统提示词",

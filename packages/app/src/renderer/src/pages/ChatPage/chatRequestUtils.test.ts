@@ -432,7 +432,10 @@ describe('requestChatCompletion', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: 'Bearer proxy-secret'
+        Authorization: 'Bearer proxy-secret',
+        'X-MagicPot-Proxy-Token': 'proxy-secret',
+        'X-MagicPot-Bot-Secret': 'proxy-secret',
+        'X-Bot-Secret': 'proxy-secret'
       },
       signal: expect.any(AbortSignal),
       body: JSON.stringify({
@@ -444,6 +447,60 @@ describe('requestChatCompletion', () => {
         isEdit: undefined
       })
     })
+  })
+
+  it('falls back to legacy remote chat endpoints and response aliases', async () => {
+    const config = createConfig()
+    config.use_remote_llm = true
+    config.remote_llm_server_config.server_origin = 'http://example.com:3721/'
+    config.remote_llm_server_config.access_token = 'proxy-secret'
+
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === 'http://example.com:3721/api/chat') {
+        return {
+          ok: false,
+          status: 404,
+          statusText: 'Not Found',
+          text: async () => '{"error":"missing"}'
+        }
+      }
+      if (url === 'http://example.com:3721/api/bot/chat') {
+        return {
+          ok: false,
+          status: 410,
+          statusText: 'Gone',
+          text: async () => '{"error":"gone"}'
+        }
+      }
+      if (url === 'http://example.com:3721/api/bot/message') {
+        return {
+          ok: true,
+          json: async () => ({ reply: 'legacy reply', sessionUrl: 'legacy-session' })
+        }
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(requestChatCompletion({ config, messages, profileId: 'bar' })).resolves.toEqual({
+      content: 'legacy reply',
+      sessionUrl: 'legacy-session'
+    })
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'http://example.com:3721/api/chat',
+      expect.objectContaining({ method: 'POST' })
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'http://example.com:3721/api/bot/chat',
+      expect.objectContaining({ method: 'POST' })
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      'http://example.com:3721/api/bot/message',
+      expect.objectContaining({ method: 'POST' })
+    )
   })
 
   it('does not derive remote canvas access from storageScope and only sends explicit attachments', async () => {

@@ -90,10 +90,15 @@ import {
   BUILTIN_DUPLICATE_CHECK_QAPP_KEY,
   isBuiltinDuplicateCheckQApp
 } from '../pages/QuickAppPage/duplicateCheck/builtin'
+import { isBuiltinVideoGenerationQApp } from '../pages/QuickAppPage/videoGeneration/builtin'
 
 const QAppMenu = lazy(() => import('../pages/QuickAppPage/components/QAppMenu'))
 const QAppPanel = lazy(() => import('../pages/QuickAppPage/QAppExecutePanel/QAppInputPanel'))
+const VideoGenerationWorkspace = lazy(
+  () => import('../pages/QuickAppPage/videoGeneration/VideoGenerationWorkspace')
+)
 const ModelPage = lazy(() => import('../pages/FileBrowserPage/ModelPage'))
+const VIDEO_GENERATION_INLINE_RESULT_PROMPT_ID = 'builtin-video-generation-inline'
 
 /*
 type QuickAppCategory = 'image' | 'model3d' | 'video' | 'inspection'
@@ -127,6 +132,19 @@ const QUICK_APP_CATEGORY_DISPLAY_ICONS: Record<QuickAppCategory, React.ReactNode
 
 type QuickAppCategory = 'image' | 'model3d' | 'video' | 'inspection'
 const QUICK_APP_CATEGORIES: QuickAppCategory[] = ['image', 'model3d', 'video', 'inspection']
+
+const getBuiltinQuickAppCategoryForKey = (qAppKey: string): QuickAppCategory | null => {
+  if (isBuiltinHunyuan3DMenuKey(qAppKey)) {
+    return 'model3d'
+  }
+  if (isBuiltinVideoGenerationQApp(qAppKey)) {
+    return 'video'
+  }
+  if (isBuiltinDuplicateCheckQApp(qAppKey)) {
+    return 'inspection'
+  }
+  return null
+}
 
 const QUICK_APP_CATEGORY_LABELS: Record<QuickAppCategory, string> = {
   image: '\u56fe\u50cf',
@@ -946,6 +964,14 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
         </Box>
       ) : isBuiltinDuplicateCheckQApp(key) ? (
         <DuplicateCheckWorkspace projectId={projectId} inline onRunReady={handleRunReady} />
+      ) : isBuiltinVideoGenerationQApp(key) ? (
+        <Suspense fallback={<LoadingFallback />}>
+          <VideoGenerationWorkspace
+            projectId={projectId}
+            inline
+            resultPromptId={VIDEO_GENERATION_INLINE_RESULT_PROMPT_ID}
+          />
+        </Suspense>
       ) : (
         <QAppContextProvider key={key} qAppKey={key}>
           <PromptTagProvider>
@@ -1115,8 +1141,8 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
   })
   const [animationStates, setAnimationStates] = useState<QueueAnimationStates>({})
   const [queueExpanded, setQueueExpanded] = useState(false)
-  const [quickAppCategory, setQuickAppCategory] = useState<QuickAppCategory>(() =>
-    isBuiltinHunyuan3DMenuKey(readCurrentQAppKey(projectId)) ? 'model3d' : 'image'
+  const [quickAppCategory, setQuickAppCategory] = useState<QuickAppCategory>(
+    () => getBuiltinQuickAppCategoryForKey(readCurrentQAppKey(projectId)) ?? 'image'
   )
   const [quickAppCategoryAvailableWidth, setQuickAppCategoryAvailableWidth] = useState(() =>
     Math.max(0, width - 120)
@@ -1149,9 +1175,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
   }, [])
 
   useEffect(() => {
-    setQuickAppCategory(
-      isBuiltinHunyuan3DMenuKey(readCurrentQAppKey(projectId)) ? 'model3d' : 'image'
-    )
+    setQuickAppCategory(getBuiltinQuickAppCategoryForKey(readCurrentQAppKey(projectId)) ?? 'image')
     setQuickAppOverflowAnchorEl(null)
   }, [projectId])
 
@@ -1193,8 +1217,9 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
   useEffect(() => {
     const handleSwitchQApp = (event: Event) => {
       const detail = (event as CustomEvent<SwitchQAppDetail>).detail
-      if (isBuiltinHunyuan3DMenuKey(detail.qAppKey)) {
-        setQuickAppCategory('model3d')
+      const builtinCategory = getBuiltinQuickAppCategoryForKey(detail.qAppKey)
+      if (builtinCategory) {
+        setQuickAppCategory(builtinCategory)
       }
     }
 

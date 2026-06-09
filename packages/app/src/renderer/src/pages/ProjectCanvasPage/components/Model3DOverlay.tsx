@@ -129,15 +129,6 @@ const Model3DOverlay: React.FC<{
     }
   }, [item.textures, revokeOwnedTextureObjectUrl])
 
-  React.useEffect(
-    () => () => {
-      for (const url of Array.from(ownedTextureObjectUrlsRef.current)) {
-        revokeOwnedTextureObjectUrl(url)
-      }
-    },
-    [revokeOwnedTextureObjectUrl]
-  )
-
   return (
     <Box
       data-canvas-item-id={item.id}

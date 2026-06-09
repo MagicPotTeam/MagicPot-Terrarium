@@ -697,7 +697,9 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
         prepareClonedQuickAppProfile(profile, {
           ...stripExternalAuthProfile(profile),
           id: crypto.randomUUID(),
-          api_key: ''
+          api_key: '',
+          api_secret: undefined,
+          backup_api_keys: undefined
         })
       ])
     },
