@@ -105,7 +105,7 @@ describe('ConfigUtils qApp paths', () => {
 })
 
 describe('ConfigUtils ComfyUI paths', () => {
-  it('resolves bundled relative ComfyUI model dirs against the app root', () => {
+  it('resolves development embedded default model dirs against comfyui_data', () => {
     const config = createConfig()
     const configUtils = new ConfigUtils(config, createBuildEnv(), path)
 
@@ -114,7 +114,7 @@ describe('ConfigUtils ComfyUI paths', () => {
       true
     ])
     expect(configUtils.getCheckpointsDir()).toBe(
-      path.join('/app-root', 'vendor/comfyui/ComfyUI', 'models/checkpoints')
+      path.join('/app-root', 'vendor/comfyui/comfyui_data', 'models/checkpoints')
     )
     expect(config.local_comfyui_config.comfyui_dir).toBe('')
   })

@@ -1,4 +1,16 @@
-import { Config } from './config'
+import {
+  DEFAULT_CHECKPOINTS_DIR,
+  DEFAULT_CLIP_DIR,
+  DEFAULT_CONTROLNET_DIR,
+  DEFAULT_DIFFUSION_MODELS_DIR,
+  DEFAULT_LORA_DIR,
+  DEFAULT_OUTPUT_DIR,
+  DEFAULT_UNET_DIR,
+  DEFAULT_UPSCALE_MODELS_DIR,
+  DEFAULT_VAE_DIR,
+  DEFAULT_WORKFLOW_DIR
+} from './config'
+import type { Config } from './config'
 import { BuildEnv } from './buildEnv'
 import { BuiltInPath } from '@shared/utils/utilWindow'
 import { parsePortFromOrigin } from '@shared/utils/utilFuncs'
@@ -25,6 +37,31 @@ export class ConfigUtils {
       return this.path.join(this.getAppRootDir(), ...developmentSegments)
     }
     return this.path.join(this.getAppRootDir(), packagedDirName)
+  }
+
+  private isUsingDevelopmentEmbeddedComfyDataDir(): boolean {
+    return (
+      this.buildEnv.env.build === 'development' &&
+      !this.config.use_remote_comfyui &&
+      !this.config.local_comfyui_config.comfyui_dir.trim() &&
+      Boolean(this.buildEnv.embeddedDefaults.comfyuiDir)
+    )
+  }
+
+  private comfyDataSubDir(subDir: string): string {
+    const [comfyUIDir, available] = this.getComfyUIDir()
+    if (!available) {
+      return ''
+    }
+    return this.path.join(comfyUIDir, '..', 'comfyui_data', subDir)
+  }
+
+  private resolveDefaultDevelopmentEmbeddedSubDir(value: string, defaultSubDir: string): string {
+    const normalizedValue = value.trim()
+    if (normalizedValue === defaultSubDir && this.isUsingDevelopmentEmbeddedComfyDataDir()) {
+      return this.comfyDataSubDir(defaultSubDir)
+    }
+    return this.comfySubDir(normalizedValue)
   }
 
   private resolveLocalDirectoryPath(value: string): string {
@@ -142,43 +179,58 @@ export class ConfigUtils {
   }
 
   getLoraDir(): string {
-    return this.comfySubDir(this.config.lora_dir)
+    return this.resolveDefaultDevelopmentEmbeddedSubDir(this.config.lora_dir, DEFAULT_LORA_DIR)
   }
 
   getClipDir(): string {
-    return this.comfySubDir(this.config.clip_dir)
+    return this.resolveDefaultDevelopmentEmbeddedSubDir(this.config.clip_dir, DEFAULT_CLIP_DIR)
   }
 
   getVAEDir(): string {
-    return this.comfySubDir(this.config.vae_dir)
+    return this.resolveDefaultDevelopmentEmbeddedSubDir(this.config.vae_dir, DEFAULT_VAE_DIR)
   }
 
   getControlnetDir(): string {
-    return this.comfySubDir(this.config.controlnet_dir)
+    return this.resolveDefaultDevelopmentEmbeddedSubDir(
+      this.config.controlnet_dir,
+      DEFAULT_CONTROLNET_DIR
+    )
   }
 
   getDiffusionModelsDir(): string {
-    return this.comfySubDir(this.config.diffusion_models_dir)
+    return this.resolveDefaultDevelopmentEmbeddedSubDir(
+      this.config.diffusion_models_dir,
+      DEFAULT_DIFFUSION_MODELS_DIR
+    )
   }
 
   getUNetDir(): string {
-    return this.comfySubDir(this.config.unet_dir)
+    return this.resolveDefaultDevelopmentEmbeddedSubDir(this.config.unet_dir, DEFAULT_UNET_DIR)
   }
 
   getUpscaleModelsDir(): string {
-    return this.comfySubDir(this.config.upscale_models_dir)
+    return this.resolveDefaultDevelopmentEmbeddedSubDir(
+      this.config.upscale_models_dir,
+      DEFAULT_UPSCALE_MODELS_DIR
+    )
   }
 
   getOutputDir(): string {
-    return this.comfySubDir(this.config.output_dir)
+    return this.resolveDefaultDevelopmentEmbeddedSubDir(this.config.output_dir, DEFAULT_OUTPUT_DIR)
   }
 
   getCheckpointsDir(): string {
-    return this.comfySubDir(this.config.checkpoints_dir)
+    return this.resolveDefaultDevelopmentEmbeddedSubDir(
+      this.config.checkpoints_dir,
+      DEFAULT_CHECKPOINTS_DIR
+    )
   }
 
   getWorkflowDir(): string {
-    return this.comfySubDir(this.config.workflow_dir)
+    return this.resolveDefaultDevelopmentEmbeddedSubDir(
+      this.config.workflow_dir,
+      DEFAULT_WORKFLOW_DIR
+    )
   }
 
   /**
