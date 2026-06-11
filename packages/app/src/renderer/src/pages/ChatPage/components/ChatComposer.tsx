@@ -102,6 +102,7 @@ const renderFileAttachmentIcon = (attachment: ChatAttachment) => {
  * Minimum textarea height in px.
  */
 const MIN_TEXTAREA_HEIGHT = 24
+const TEXTAREA_BOTTOM_VISIBILITY_PADDING = 28
 const COMPOSER_VERTICAL_OVERHEAD = 140
 const MIN_ATTACHMENT_PREVIEW_HEIGHT = 88
 const MAX_ATTACHMENT_PREVIEW_HEIGHT = 240
@@ -113,6 +114,15 @@ const parseCssPixelValue = (value: unknown): number | null => {
 
   const parsed = Number.parseFloat(value)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+const scrollTextareaToBottom = (textarea: HTMLTextAreaElement) => {
+  textarea.scrollTop = textarea.scrollHeight
+  window.requestAnimationFrame(() => {
+    if (textarea.isConnected) {
+      textarea.scrollTop = textarea.scrollHeight
+    }
+  })
 }
 
 const StableNativeTextarea = React.forwardRef<HTMLTextAreaElement, InputBaseComponentProps>(
@@ -136,6 +146,9 @@ const StableNativeTextarea = React.forwardRef<HTMLTextAreaElement, InputBaseComp
           ? Math.max(minHeight, textarea.scrollHeight)
           : Math.max(minHeight, Math.min(textarea.scrollHeight, maxHeight))
       textarea.style.height = `${nextHeight}px`
+      if (document.activeElement === textarea) {
+        scrollTextareaToBottom(textarea)
+      }
     }, [style])
 
     useLayoutEffect(() => {
@@ -890,8 +903,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   wordBreak: 'break-word',
                   overflowWrap: 'break-word',
                   alignItems: 'flex-start',
-                  maxHeight: resolvedTextareaMaxHeight,
-                  overflow: 'hidden'
+                  overflow: 'visible'
                 }
               }}
               inputProps={{
@@ -914,14 +926,17 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   overflowX: 'hidden',
                   resize: 'none',
                   lineHeight: '1.6',
+                  boxSizing: 'border-box',
+                  paddingTop: '4px',
+                  paddingBottom: `${TEXTAREA_BOTTOM_VISIBILITY_PADDING}px`,
+                  scrollPaddingBottom: `${TEXTAREA_BOTTOM_VISIBILITY_PADDING}px`,
                   scrollbarGutter: 'stable'
                 }
               }}
               sx={{
                 '& .MuiInputBase-root': {
                   alignItems: 'flex-start',
-                  maxHeight: resolvedTextareaMaxHeight,
-                  overflow: 'hidden',
+                  overflow: 'visible',
                   display: 'flex',
                   flexWrap: 'wrap',
                   '&:focus': {
@@ -934,7 +949,9 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   }
                 },
                 '& .MuiInputBase-input': {
-                  py: 0.5,
+                  pt: 0.5,
+                  pb: `${TEXTAREA_BOTTOM_VISIBILITY_PADDING}px`,
+                  boxSizing: 'border-box',
                   wordBreak: 'break-word',
                   overflowWrap: 'break-word',
                   minHeight: `${MIN_TEXTAREA_HEIGHT}px`,
