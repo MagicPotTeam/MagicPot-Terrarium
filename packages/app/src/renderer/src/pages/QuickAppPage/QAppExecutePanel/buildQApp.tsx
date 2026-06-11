@@ -96,10 +96,26 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
       return buildComfyOrgExtraData(comfyOrgApiKey)
     }, [comfyOrgApiKey, requiresComfyOrgAuth])
 
+    // Register stable functions in QAppContext. The implementations above can
+    // legitimately change when input values, i18n, or notification callbacks
+    // change; pushing those changing function identities into parent state can
+    // create a render/effect/update loop. Stable wrappers keep the parent state
+    // steady while still invoking the latest implementation.
+    const validateRef = useRef(validate)
+    const buildWorkflowRef = useRef(buildWorkflow)
+    const buildSubmitExtraDataRef = useRef(buildSubmitExtraData)
+    validateRef.current = validate
+    buildWorkflowRef.current = buildWorkflow
+    buildSubmitExtraDataRef.current = buildSubmitExtraData
+
+    const registeredValidate = useCallback((): boolean => validateRef.current(), [])
+    const registeredBuildWorkflow = useCallback((): Workflow => buildWorkflowRef.current(), [])
+    const registeredBuildSubmitExtraData = useCallback(() => buildSubmitExtraDataRef.current(), [])
+
     useEffect(() => {
-      setValidate(validate)
-      setBuildWorkflow(buildWorkflow)
-      setBuildSubmitExtraData(buildSubmitExtraData)
+      setValidate(registeredValidate)
+      setBuildWorkflow(registeredBuildWorkflow)
+      setBuildSubmitExtraData(registeredBuildSubmitExtraData)
       setSubmitClientId(clientId)
       setSubmitSessionKey(submitSessionKey)
       return () => {
@@ -110,17 +126,16 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
         setSubmitSessionKey(undefined)
       }
     }, [
-      buildSubmitExtraData,
-      buildWorkflow,
       clientId,
-      currentQAppKey,
+      registeredBuildSubmitExtraData,
+      registeredBuildWorkflow,
+      registeredValidate,
       setBuildSubmitExtraData,
       setBuildWorkflow,
       setSubmitClientId,
       setSubmitSessionKey,
       setValidate,
-      submitSessionKey,
-      validate
+      submitSessionKey
     ])
 
     return (

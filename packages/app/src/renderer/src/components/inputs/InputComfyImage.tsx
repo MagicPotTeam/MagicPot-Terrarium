@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { InputProps } from './InputProps'
-import { Box, IconButton, Typography, Button } from '@mui/material'
-import { UploadOutlined, PhotoLibraryOutlined } from '@mui/icons-material'
+import { Button } from '@mui/material'
+import { PhotoLibraryOutlined } from '@mui/icons-material'
 import { api } from '@renderer/utils/windowUtils'
 import { FileItem } from '@shared/comfy/types'
 import BaseInputComfyImage from './BaseInputComfyImage'
@@ -23,42 +23,60 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
   const [internalValue, setInternalValue] = useState(value)
   const [isLoading, setIsLoading] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const previewRequestIdRef = useRef(0)
+  const latestValueRef = useRef(value)
+  const latestOnChangeRef = useRef(onChange)
   const { notifySuccess, notifyError } = useMessage()
   const { t } = useTranslation()
 
-  // 同步外部 value 变化到 internalValue
   useEffect(() => {
-    if (value !== internalValue) {
-      setInternalValue(value)
-    }
-  }, [value, internalValue])
+    latestValueRef.current = value
+  }, [value])
 
-  const doUpload = async (file: File) => {
-    setIsLoading(true)
-    try {
-      const arrayBuffer = await file.arrayBuffer()
-      const uint8 = new Uint8Array(arrayBuffer)
-      const res: FileItem = await api().svcComfy.uploadImage({
-        fileItem: { filename: file.name, type: 'input' },
-        image: uint8
-      })
-      if (!res.filename) {
-        throw new Error('failed to upload image, response did not contain filename')
-      }
-      const uploadedName = fileItemToValue(res)
-      setInternalValue(uploadedName)
-      onChange(uploadedName)
-    } catch (error) {
-      console.error('[InputComfyImage] Upload failed:', error)
-      notifyError(
-        t('input.image.load_failed', {
-          error: error instanceof Error ? error.message : t('input.image.check_comfy_connection')
-        })
-      )
-    } finally {
-      setIsLoading(false)
+  useEffect(() => {
+    latestOnChangeRef.current = onChange
+  }, [onChange])
+
+  // 同步外部 value 变化到 internalValue。只依赖外部 value，避免内部预览刷新触发父级重渲染时形成循环。
+  useEffect(() => {
+    setInternalValue((current) => (value !== current ? value : current))
+  }, [value])
+
+  const commitValue = useCallback((nextValue: string) => {
+    setInternalValue((current) => (current === nextValue ? current : nextValue))
+    if (latestValueRef.current !== nextValue) {
+      latestValueRef.current = nextValue
+      latestOnChangeRef.current(nextValue)
     }
-  }
+  }, [])
+
+  const doUpload = useCallback(
+    async (file: File) => {
+      setIsLoading(true)
+      try {
+        const arrayBuffer = await file.arrayBuffer()
+        const uint8 = new Uint8Array(arrayBuffer)
+        const res: FileItem = await api().svcComfy.uploadImage({
+          fileItem: { filename: file.name, type: 'input' },
+          image: uint8
+        })
+        if (!res.filename) {
+          throw new Error('failed to upload image, response did not contain filename')
+        }
+        commitValue(fileItemToValue(res))
+      } catch (error) {
+        console.error('[InputComfyImage] Upload failed:', error)
+        notifyError(
+          t('input.image.load_failed', {
+            error: error instanceof Error ? error.message : t('input.image.check_comfy_connection')
+          })
+        )
+      } finally {
+        setIsLoading(false)
+      }
+    },
+    [commitValue, notifyError, t]
+  )
 
   const viewImage = useCallback(async () => {
     const res = await api().svcComfy.getView(valueToFileItem(internalValue))
@@ -66,7 +84,7 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
     return image
   }, [internalValue])
 
-  const handleLoadFromPhotoshop = async () => {
+  const handleLoadFromPhotoshop = useCallback(async () => {
     try {
       setIsLoading(true)
       const res = await api().svcPhotoshop.loadImageFromPhotoshop({})
@@ -81,9 +99,7 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
         throw new Error(t('input.image.upload_missing_filename'))
       }
 
-      const uploadedName = fileItemToValue(fileItem)
-      setInternalValue(uploadedName)
-      onChange(uploadedName)
+      commitValue(fileItemToValue(fileItem))
       notifySuccess(t('input.image.photoshop_loaded'))
     } catch (error) {
       console.error(t('input.image.photoshop_load_failed_log'), error)
@@ -95,42 +111,47 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [commitValue, notifyError, notifySuccess, t])
 
   const handleClear = useCallback(() => {
-    setInternalValue('')
-    onChange('')
+    commitValue('')
+    previewRequestIdRef.current += 1
     setPreviewUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev)
       return null
     })
-  }, [onChange])
+  }, [commitValue])
 
   useEffect(() => {
-    let active = true
+    const requestId = ++previewRequestIdRef.current
+    let urlToRevoke: string | null = null
+
+    if (!internalValue) {
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev)
+        return null
+      })
+      return
+    }
+
     ;(async () => {
-      if (!internalValue) {
-        setPreviewUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev)
-          return null
-        })
-        return
-      }
       try {
         const bytes = await viewImage()
-        if (!active) return
+        if (previewRequestIdRef.current !== requestId) return
         const blob = new Blob([bytes as BlobPart], { type: 'image/*' })
         const url = URL.createObjectURL(blob)
+        urlToRevoke = url
         setPreviewUrl((prev) => {
+          if (prev === url) return prev
           if (prev) URL.revokeObjectURL(prev)
+          urlToRevoke = null
           return url
         })
       } catch {
-        // Image file doesn't exist anymore, clear the value
+        // Image file doesn't exist anymore, clear the value once.
         console.warn('[InputComfyImage] Failed to load image, clearing value:', internalValue)
-        if (active) {
-          setInternalValue('')
-          onChange('')
+        if (previewRequestIdRef.current === requestId) {
+          commitValue('')
           setPreviewUrl((prev) => {
             if (prev) URL.revokeObjectURL(prev)
             return null
@@ -138,10 +159,16 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
         }
       }
     })()
+
     return () => {
-      active = false
+      if (previewRequestIdRef.current === requestId) {
+        previewRequestIdRef.current += 1
+      }
+      if (urlToRevoke) {
+        URL.revokeObjectURL(urlToRevoke)
+      }
     }
-  }, [internalValue, viewImage, onChange])
+  }, [internalValue, viewImage, commitValue])
 
   return (
     <BaseInputComfyImage

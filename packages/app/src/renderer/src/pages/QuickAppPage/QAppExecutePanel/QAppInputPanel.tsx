@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useEffect, useMemo } from 'react'
 import { PanelProps } from './PanelProps'
 import { useMessage } from '@renderer/hooks/useMessage'
 import buildQApp from './buildQApp'
@@ -27,29 +27,28 @@ const QAppPanel: React.FC<QAppPanelProps> = ({ fallback, isDesignMode }) => {
     ? getQAppSessionKey({ qAppKey: currentQAppKey })
     : config.client_id
 
-  const [Panel, setPanel] = useState<React.FC<PanelProps> | null>(null)
+  const { panel, buildError } = useMemo(() => {
+    if (!qAppCfg || !workflow) {
+      return { panel: null, buildError: null }
+    }
+
+    try {
+      return { panel: buildQApp(qAppCfg, workflow), buildError: null }
+    } catch (error) {
+      return { panel: null, buildError: `构建 QApp 输入面板失败: ${error}` }
+    }
+  }, [qAppCfg, workflow])
+
+  useEffect(() => {
+    if (buildError) {
+      notifyError(buildError)
+    }
+  }, [buildError, notifyError])
 
   // QuickApp 全局状态
   const {
     state: { isConnected, objectInfos }
   } = useComfyStatus()
-
-  const buildQAppInputPanel = useCallback(() => {
-    if (!qAppCfg || !workflow) {
-      return
-    }
-    try {
-      const NewPanel = buildQApp(qAppCfg, workflow)
-      setPanel(() => NewPanel)
-    } catch (error) {
-      notifyError(`构建 QApp 输入面板失败: ${error}`)
-      setPanel(null)
-    }
-  }, [notifyError, qAppCfg, workflow])
-
-  useEffect(() => {
-    buildQAppInputPanel()
-  }, [buildQAppInputPanel])
 
   const panelProps: PanelProps = {
     objectInfos,
@@ -66,10 +65,11 @@ const QAppPanel: React.FC<QAppPanelProps> = ({ fallback, isDesignMode }) => {
   }
 
   // 如果加载完成但没有 Panel（例如 config 为空或构建失败），显示空内容
-  if (!Panel) {
+  if (!panel) {
     return null
   }
 
+  const Panel = panel
   return <Panel {...panelProps} />
 }
 
