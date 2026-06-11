@@ -27,6 +27,7 @@ export type Canvas3DStageModelItemRenderState = {
   stageScale: number
   isFullModelActivated: boolean
   shouldMountFullModel: boolean
+  isPerformanceThrottled?: boolean
   sessionKey?: string
 }
 
@@ -40,4 +41,5 @@ export const areCanvas3DStageModelItemRenderStatesEqual = (
   previousState.stageScale === nextState.stageScale &&
   previousState.isFullModelActivated === nextState.isFullModelActivated &&
   previousState.shouldMountFullModel === nextState.shouldMountFullModel &&
+  previousState.isPerformanceThrottled === nextState.isPerformanceThrottled &&
   previousState.sessionKey === nextState.sessionKey

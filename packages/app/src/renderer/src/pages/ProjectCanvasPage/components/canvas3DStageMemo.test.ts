@@ -148,6 +148,27 @@ describe('canvas3DStageMemo', () => {
         }
       )
     ).toBe(false)
+
+    expect(
+      areCanvas3DStagePropsEqual(
+        {
+          items: [firstItem],
+          selectedIds: new Set<string>(),
+          stagePos: { x: 0, y: 0 },
+          stageScale: 1,
+          stageSize: { width: 1280, height: 720 },
+          isPerformanceThrottled: false
+        },
+        {
+          items: [firstItem],
+          selectedIds: new Set<string>(),
+          stagePos: { x: 0, y: 0 },
+          stageScale: 1,
+          stageSize: { width: 1280, height: 720 },
+          isPerformanceThrottled: true
+        }
+      )
+    ).toBe(false)
   })
 
   it('only restarts the render pump when the load version or pump frames change', () => {

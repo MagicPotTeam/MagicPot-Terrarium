@@ -176,5 +176,28 @@ describe('canvas3DStageModelItemMemo', () => {
         }
       )
     ).toBe(false)
+
+    expect(
+      areCanvas3DStageModelItemRenderStatesEqual(
+        {
+          item,
+          preview: null,
+          isSelected: false,
+          stageScale: 1,
+          isFullModelActivated: true,
+          shouldMountFullModel: true,
+          isPerformanceThrottled: false
+        },
+        {
+          item,
+          preview: null,
+          isSelected: false,
+          stageScale: 1,
+          isFullModelActivated: true,
+          shouldMountFullModel: true,
+          isPerformanceThrottled: true
+        }
+      )
+    ).toBe(false)
   })
 })

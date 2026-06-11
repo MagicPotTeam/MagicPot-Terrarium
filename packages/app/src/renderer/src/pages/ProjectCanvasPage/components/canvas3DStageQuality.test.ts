@@ -145,4 +145,44 @@ describe('canvas3DStageQuality', () => {
       })
     ).toBe(true)
   })
+
+  it('drops 3D quality to the minimum while canvas performance is throttled', () => {
+    expect(
+      resolveCanvas3DStageDpr({
+        itemCount: 1,
+        activatedItemCount: 1,
+        isViewportMoving: false,
+        isPerformanceThrottled: true
+      })
+    ).toEqual([1, 1])
+
+    expect(
+      resolveCanvas3DStageRenderPumpFrames({
+        isViewportMoving: false,
+        pendingActivationCount: 4,
+        mountedItemCount: 8,
+        isPerformanceThrottled: true
+      })
+    ).toBe(1)
+
+    expect(
+      shouldCanvas3DStageRenderLighting({
+        mountedItemCount: 2,
+        isPerformanceThrottled: true
+      })
+    ).toBe(false)
+  })
+
+  it('limits mounted full 3D models to the first prioritized activated item while throttled', () => {
+    expect(
+      Array.from(
+        resolveCanvas3DStageMountedIds({
+          activatedIds: new Set(['item-a', 'item-b', 'item-c']),
+          prioritizedLoadIds: ['item-c', 'item-missing', 'item-a', 'item-b'],
+          isViewportMoving: false,
+          isPerformanceThrottled: true
+        })
+      )
+    ).toEqual(['item-c'])
+  })
 })

@@ -322,6 +322,7 @@ type Canvas3DStageProps = {
   stageSize: { width: number; height: number }
   sessionKey?: string
   isViewportInteracting?: boolean
+  isPerformanceThrottled?: boolean
   onViewportSyncReady?: (sync: Canvas3DStageViewportSync | null) => void
 }
 
@@ -1013,6 +1014,7 @@ const ModelItem3D: React.FC<{
   stageScale: number
   isFullModelActivated: boolean
   shouldMountFullModel: boolean
+  isPerformanceThrottled?: boolean
   sessionKey?: string
 }> = ({
   item,
@@ -1021,6 +1023,7 @@ const ModelItem3D: React.FC<{
   stageScale,
   isFullModelActivated,
   shouldMountFullModel,
+  isPerformanceThrottled = false,
   sessionKey
 }) => {
   const renderItem = useMemo(() => resolveCanvas3DStagePreviewItem(item, preview), [item, preview])
@@ -1046,7 +1049,10 @@ const ModelItem3D: React.FC<{
   const shouldRenderPlaceholderOnly =
     displayWidth < MIN_MODEL_RENDER_SIZE_PX || displayHeight < MIN_MODEL_RENDER_SIZE_PX
   const shouldUsePreviewTexture =
-    shouldRenderPlaceholderOnly || !isFullModelActivated || !shouldMountFullModel
+    shouldRenderPlaceholderOnly ||
+    !isFullModelActivated ||
+    !shouldMountFullModel ||
+    isPerformanceThrottled
   const previewFootprint = useMemo(
     () =>
       shouldUsePreviewTexture
@@ -1069,15 +1075,18 @@ const ModelItem3D: React.FC<{
     [instanceCacheKey, modelBounds, renderItem.fileName]
   )
   const shouldRequestPreviewTexture = Boolean(
-    previewTextureKey && modelBounds && (isFullModelActivated || shouldUsePreviewTexture)
+    previewTextureKey &&
+    modelBounds &&
+    !isPerformanceThrottled &&
+    (isFullModelActivated || shouldUsePreviewTexture)
   )
   const [previewTexture, setPreviewTexture] = useState<THREE.Texture | null>(() =>
     readCanvas3DStagePreviewTexture(previewTextureKey)
   )
   const visualMode = resolveCanvas3DStageModelVisualMode({
     shouldRenderPlaceholderOnly,
-    isFullModelActivated,
-    shouldMountFullModel,
+    isFullModelActivated: isPerformanceThrottled ? false : isFullModelActivated,
+    shouldMountFullModel: isPerformanceThrottled ? false : shouldMountFullModel,
     hasPreviewTexture: Boolean(previewTexture)
   })
   const fitScale = useMemo(
@@ -1103,7 +1112,7 @@ const ModelItem3D: React.FC<{
     })
   }, [instanceCacheKey])
   useEffect(() => {
-    if (!previewTextureKey || !shouldRequestPreviewTexture) {
+    if (!previewTextureKey) {
       setPreviewTexture(null)
       return
     }
@@ -1113,6 +1122,11 @@ const ModelItem3D: React.FC<{
       setPreviewTexture((previousTexture) =>
         previousTexture === cachedTexture ? previousTexture : cachedTexture
       )
+      return
+    }
+
+    if (!shouldRequestPreviewTexture) {
+      setPreviewTexture(null)
       return
     }
 
@@ -1145,7 +1159,7 @@ const ModelItem3D: React.FC<{
     },
     [instanceCacheKey]
   )
-  const showBackdrop = shouldMountFullModel || isSelected
+  const showBackdrop = (shouldMountFullModel && !isPerformanceThrottled) || isSelected
 
   return (
     <group
@@ -1227,6 +1241,7 @@ const Canvas3DStage: React.FC<Canvas3DStageProps> = ({
   stageSize,
   sessionKey,
   isViewportInteracting = false,
+  isPerformanceThrottled = false,
   onViewportSyncReady
 }) => {
   const [previewById, setPreviewById] = useState<Record<string, CanvasSyncDetail | null>>({})
@@ -1446,18 +1461,20 @@ const Canvas3DStage: React.FC<Canvas3DStageProps> = ({
       resolveCanvas3DStageDpr({
         itemCount: viewportVisibleItems.length,
         activatedItemCount: activatedItemIds.size,
-        isViewportMoving: liveViewportMoving
+        isViewportMoving: liveViewportMoving,
+        isPerformanceThrottled
       }),
-    [activatedItemIds.size, liveViewportMoving, viewportVisibleItems.length]
+    [activatedItemIds.size, isPerformanceThrottled, liveViewportMoving, viewportVisibleItems.length]
   )
   const mountedItemIds = useMemo(
     () =>
       resolveCanvas3DStageMountedIds({
         activatedIds: activatedItemIds,
         prioritizedLoadIds,
-        isViewportMoving: liveViewportMoving
+        isViewportMoving: liveViewportMoving,
+        isPerformanceThrottled
       }),
-    [activatedItemIds, liveViewportMoving, prioritizedLoadIds]
+    [activatedItemIds, isPerformanceThrottled, liveViewportMoving, prioritizedLoadIds]
   )
   const pendingActivationCount = useMemo(
     () => prioritizedLoadIds.filter((itemId) => !activatedItemIds.has(itemId)).length,
@@ -1468,9 +1485,10 @@ const Canvas3DStage: React.FC<Canvas3DStageProps> = ({
       resolveCanvas3DStageRenderPumpFrames({
         isViewportMoving: liveViewportMoving,
         pendingActivationCount,
-        mountedItemCount: mountedItemIds.size
+        mountedItemCount: mountedItemIds.size,
+        isPerformanceThrottled
       }),
-    [liveViewportMoving, mountedItemIds.size, pendingActivationCount]
+    [isPerformanceThrottled, liveViewportMoving, mountedItemIds.size, pendingActivationCount]
   )
   const stageFrameloop = useMemo(
     () =>
@@ -1489,9 +1507,10 @@ const Canvas3DStage: React.FC<Canvas3DStageProps> = ({
   const shouldRenderLighting = useMemo(
     () =>
       shouldCanvas3DStageRenderLighting({
-        mountedItemCount: mountedItemIds.size
+        mountedItemCount: mountedItemIds.size,
+        isPerformanceThrottled
       }),
-    [mountedItemIds.size]
+    [isPerformanceThrottled, mountedItemIds.size]
   )
   const captureFreezeFrameSnapshot = useCallback((nextViewport: Canvas3DStageViewportState) => {
     const sourceCanvas = stageCanvasRef.current
@@ -1630,6 +1649,7 @@ const Canvas3DStage: React.FC<Canvas3DStageProps> = ({
       data-project-canvas-3d-full-model-count={fullModelMountedCount}
       data-project-canvas-3d-placeholder-count={placeholderOnlyCount}
       data-project-canvas-3d-queue-depth={pendingActivationCount}
+      data-project-canvas-3d-performance-throttled={String(isPerformanceThrottled)}
       style={{
         position: 'absolute',
         inset: 0,
@@ -1704,7 +1724,8 @@ const Canvas3DStage: React.FC<Canvas3DStageProps> = ({
             isSelected={selectedIds.has(item.id)}
             stageScale={stageScale}
             isFullModelActivated={activatedItemIds.has(item.id)}
-            shouldMountFullModel={mountedItemIds.has(item.id)}
+            shouldMountFullModel={mountedItemIds.has(item.id) && !isPerformanceThrottled}
+            isPerformanceThrottled={isPerformanceThrottled}
             sessionKey={resolvedSessionKey}
           />
         ))}

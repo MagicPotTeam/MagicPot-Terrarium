@@ -45,6 +45,7 @@ type ProjectCanvasWebGLImageLayerProps = {
   stageScale: number
   stageSize?: { width: number; height: number }
   isViewportInteracting?: boolean
+  isPerformanceThrottled?: boolean
   onReadyChange?: (ready: boolean) => void
   onResidentIdsChange?: (residentIds: Set<string>) => void
   onResolvedIdsChange?: (resolvedIds: Set<string>) => void
@@ -89,6 +90,11 @@ export const PROJECT_CANVAS_WEBGL_SELECTED_RESIDENT_LIMIT = 64
 export const PROJECT_CANVAS_WEBGL_SELECTED_PROTECTED_LIMIT = 32
 const PROJECT_CANVAS_WEBGL_IMAGE_VISIBLE_OVERSCAN_PX = 320
 const VIEWPORT_RECONCILE_DEBOUNCE_MS = 48
+const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_RENDER_INTERVAL_MS = 180
+const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_VIEWPORT_RECONCILE_MS = 240
+const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_IMAGE_VERSION_MAX_DEFER_MS = 750
+const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_INITIAL_IMAGE_LOAD_CONCURRENCY = 2
+const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_SPRITE_RECONCILE_BATCH_SIZE = 4
 const PROJECT_CANVAS_WEBGL_METRICS_THROTTLE_MS = 250
 export const PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_MAX_SIDE = 4096
 const PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_CONCURRENCY = 2
@@ -148,14 +154,28 @@ function canUploadProjectCanvasTexture(textureByteSize: number) {
   )
 }
 
-function getProjectCanvasSpriteReconcileBatchSize(stageScale: number) {
+function getProjectCanvasSpriteReconcileBatchSize(
+  stageScale: number,
+  isPerformanceThrottled = false
+) {
+  if (isPerformanceThrottled) {
+    return PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_SPRITE_RECONCILE_BATCH_SIZE
+  }
+
   const safeScale = Math.max(Math.abs(stageScale), PROJECT_CANVAS_MIN_STAGE_SCALE)
   return safeScale <= PROJECT_CANVAS_WEBGL_OVERVIEW_BATCH_MAX_SCALE
     ? PROJECT_CANVAS_WEBGL_OVERVIEW_SPRITE_RECONCILE_BATCH_SIZE
     : PROJECT_CANVAS_WEBGL_SPRITE_RECONCILE_BATCH_SIZE
 }
 
-function shouldSuppressIntermediateOverviewRender(stageScale: number) {
+function shouldSuppressIntermediateOverviewRender(
+  stageScale: number,
+  isPerformanceThrottled = false
+) {
+  if (isPerformanceThrottled) {
+    return true
+  }
+
   const safeScale = Math.max(Math.abs(stageScale), PROJECT_CANVAS_MIN_STAGE_SCALE)
   return safeScale <= PROJECT_CANVAS_WEBGL_OVERVIEW_BATCH_MAX_SCALE
 }
@@ -700,6 +720,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     stageScale,
     stageSize,
     isViewportInteracting = false,
+    isPerformanceThrottled = false,
     onReadyChange,
     onResidentIdsChange,
     onResolvedIdsChange,
@@ -740,6 +761,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const currentItemIdsRef = useRef(new Set(items.map((item) => item.id)))
   const spriteUsageCounterRef = useRef(0)
   const rafRef = useRef<number | null>(null)
+  const renderThrottleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastRenderAtRef = useRef(0)
   const activeItemCountRef = useRef(0)
   const stagePosRef = useRef(stagePos)
   const stageScaleRef = useRef(stageScale)
@@ -752,6 +775,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const sourceUpgradeIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sourceUpgradeAllowedAtRef = useRef(0)
   const isViewportInteractingRef = useRef(isViewportInteracting)
+  const isPerformanceThrottledRef = useRef(isPerformanceThrottled)
   const metricsReportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hasDeferredMetricsReportRef = useRef(false)
   const imageVersionDeferredTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -790,6 +814,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const [imageVersion, setImageVersion] = useState(0)
   const [viewportVersion, setViewportVersion] = useState(0)
   selectedIdsRef.current = selectedIds
+  isPerformanceThrottledRef.current = isPerformanceThrottled
   const itemSpatialIndex = useMemo(
     () => buildCanvasSpatialIndex(items, getCanvasItemBounds),
     [items]
@@ -807,9 +832,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   }, [])
 
   const scheduleImageVersionUpdate = useCallback(() => {
-    if (isViewportInteractingRef.current) {
+    const shouldDeferImageVersion =
+      isViewportInteractingRef.current || isPerformanceThrottledRef.current
+    if (shouldDeferImageVersion) {
       hasDeferredImageVersionUpdateRef.current = true
       if (imageVersionDeferredTimerRef.current === null) {
+        const deferMs = isPerformanceThrottledRef.current
+          ? PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_IMAGE_VERSION_MAX_DEFER_MS
+          : PROJECT_CANVAS_WEBGL_IMAGE_VERSION_INTERACTION_MAX_DEFER_MS
         imageVersionDeferredTimerRef.current = setTimeout(() => {
           imageVersionDeferredTimerRef.current = null
           if (!hasDeferredImageVersionUpdateRef.current) {
@@ -818,7 +848,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
           hasDeferredImageVersionUpdateRef.current = false
           queueImageVersionFrame()
-        }, PROJECT_CANVAS_WEBGL_IMAGE_VERSION_INTERACTION_MAX_DEFER_MS)
+        }, deferMs)
       }
       return
     }
@@ -838,7 +868,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         metricsReportTimerRef.current = null
       }
 
-      if (isViewportInteractingRef.current && !options.force) {
+      if (
+        (isViewportInteractingRef.current || isPerformanceThrottledRef.current) &&
+        !options.force
+      ) {
         hasDeferredMetricsReportRef.current = true
         return
       }
@@ -871,7 +904,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       metricsReportTimerRef.current = setTimeout(() => {
         metricsReportTimerRef.current = null
-        if (isViewportInteractingRef.current) {
+        if (isViewportInteractingRef.current || isPerformanceThrottledRef.current) {
           hasDeferredMetricsReportRef.current = true
           return
         }
@@ -1105,7 +1138,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       runtimeFailureHandlerRef.current?.(error)
       return
     }
-    const lastRenderDurationMs = Math.max(0, window.performance.now() - startedAt)
+    lastRenderAtRef.current = window.performance.now()
+    const lastRenderDurationMs = Math.max(0, lastRenderAtRef.current - startedAt)
     if (isViewportInteractingRef.current) {
       metricsRef.current.renderCount += 1
       metricsRef.current.lastRenderDurationMs = lastRenderDurationMs
@@ -1129,13 +1163,16 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
+      const reconcileDelayMs = isPerformanceThrottledRef.current
+        ? PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_VIEWPORT_RECONCILE_MS
+        : VIEWPORT_RECONCILE_DEBOUNCE_MS
       viewportReconcileTimerRef.current = setTimeout(() => {
         viewportReconcileTimerRef.current = null
         if (isViewportInteractingRef.current && !allowDuringInteraction) {
           return
         }
         setViewportVersion((version) => version + 1)
-      }, VIEWPORT_RECONCILE_DEBOUNCE_MS)
+      }, reconcileDelayMs)
     },
     []
   )
@@ -1152,6 +1189,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     if (sourceUpgradeIdleTimerRef.current !== null) {
       clearTimeout(sourceUpgradeIdleTimerRef.current)
       sourceUpgradeIdleTimerRef.current = null
+    }
+
+    if (isPerformanceThrottledRef.current) {
+      sourceUpgradeAllowedAtRef.current = Number.POSITIVE_INFINITY
+      return
     }
 
     sourceUpgradeAllowedAtRef.current =
@@ -1188,6 +1230,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
+      if (isPerformanceThrottledRef.current) {
+        sourceUpgradeAllowedAtRef.current = Number.POSITIVE_INFINITY
+        return
+      }
+
       if (hasDeferredMetricsReportRef.current) {
         flushMetricsReport({ force: true })
       }
@@ -1210,10 +1257,47 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   }, [isViewportInteracting, setViewportInteractingState])
 
   useLayoutEffect(() => {
+    isPerformanceThrottledRef.current = isPerformanceThrottled
+    if (isPerformanceThrottled) {
+      if (sourceUpgradeIdleTimerRef.current != null) {
+        clearTimeout(sourceUpgradeIdleTimerRef.current)
+        sourceUpgradeIdleTimerRef.current = null
+      }
+      sourceUpgradeAllowedAtRef.current = Number.POSITIVE_INFINITY
+      thumbnailLoadQueueRef.current = []
+      pendingThumbnailLoadSrcByIdRef.current.clear()
+      hasDeferredMetricsReportRef.current = true
+      return
+    }
+
+    sourceUpgradeAllowedAtRef.current = 0
+    if (!isViewportInteractingRef.current) {
+      if (hasDeferredMetricsReportRef.current) {
+        flushMetricsReport({ force: true })
+      }
+      if (hasDeferredImageVersionUpdateRef.current) {
+        scheduleImageVersionUpdate()
+      }
+      scheduleSourceUpgradeIdleReconcile()
+      forceViewportReconcile()
+    }
+  }, [
+    flushMetricsReport,
+    forceViewportReconcile,
+    isPerformanceThrottled,
+    scheduleImageVersionUpdate,
+    scheduleSourceUpgradeIdleReconcile
+  ])
+
+  useLayoutEffect(() => {
     return () => {
       if (viewportReconcileTimerRef.current != null) {
         clearTimeout(viewportReconcileTimerRef.current)
         viewportReconcileTimerRef.current = null
+      }
+      if (renderThrottleTimerRef.current != null) {
+        clearTimeout(renderThrottleTimerRef.current)
+        renderThrottleTimerRef.current = null
       }
       if (sourceUpgradeIdleTimerRef.current != null) {
         clearTimeout(sourceUpgradeIdleTimerRef.current)
@@ -1231,24 +1315,58 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   }, [])
 
   const scheduleRender = useCallback(() => {
-    if (!appRef.current || rafRef.current !== null) {
+    if (!appRef.current || rafRef.current !== null || renderThrottleTimerRef.current !== null) {
       return
     }
 
-    rafRef.current = window.requestAnimationFrame(() => {
-      rafRef.current = null
-      renderApp()
-    })
+    const requestRenderFrame = () => {
+      rafRef.current = window.requestAnimationFrame(() => {
+        rafRef.current = null
+        renderApp()
+      })
+    }
+
+    if (isPerformanceThrottledRef.current) {
+      const elapsedMs = window.performance.now() - lastRenderAtRef.current
+      const delayMs = Math.max(
+        0,
+        PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_RENDER_INTERVAL_MS - elapsedMs
+      )
+      if (delayMs > 0) {
+        renderThrottleTimerRef.current = setTimeout(() => {
+          renderThrottleTimerRef.current = null
+          if (!appRef.current || rafRef.current !== null) {
+            return
+          }
+          requestRenderFrame()
+        }, delayMs)
+        return
+      }
+    }
+
+    requestRenderFrame()
   }, [renderApp])
 
   const cancelScheduledRender = useCallback(() => {
-    if (rafRef.current === null) {
+    if (rafRef.current !== null) {
+      window.cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
+    if (renderThrottleTimerRef.current !== null) {
+      clearTimeout(renderThrottleTimerRef.current)
+      renderThrottleTimerRef.current = null
+    }
+  }, [])
+
+  const renderImmediateOrSchedule = useCallback(() => {
+    if (isPerformanceThrottledRef.current) {
+      scheduleRender()
       return
     }
 
-    window.cancelAnimationFrame(rafRef.current)
-    rafRef.current = null
-  }, [])
+    cancelScheduledRender()
+    renderApp()
+  }, [cancelScheduledRender, renderApp, scheduleRender])
 
   const resizeRendererToStage = useCallback(
     (preferredSize?: { width: number; height: number }) => {
@@ -1293,9 +1411,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       world.position.set(pos.x, pos.y)
       world.scale.set(scale)
-      renderApp()
+      renderImmediateOrSchedule()
     },
-    [isInitialized, renderApp]
+    [isInitialized, renderImmediateOrSchedule]
   )
 
   const markSpriteRecordUsed = useCallback((record: SpriteRecord) => {
@@ -1393,6 +1511,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       if (metricsReportTimerRef.current !== null) {
         clearTimeout(metricsReportTimerRef.current)
         metricsReportTimerRef.current = null
+      }
+      if (renderThrottleTimerRef.current !== null) {
+        clearTimeout(renderThrottleTimerRef.current)
+        renderThrottleTimerRef.current = null
       }
       if (imageVersionDeferredTimerRef.current !== null) {
         clearTimeout(imageVersionDeferredTimerRef.current)
@@ -1589,8 +1711,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             record.transformKey = getProjectCanvasRenderTransformKey(renderItem)
           }
           markSpriteRecordUsed(record)
-          cancelScheduledRender()
-          renderApp()
+          renderImmediateOrSchedule()
           return
         }
 
@@ -1603,15 +1724,13 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         )
         record.transformKey = getProjectCanvasRenderTransformKey(preview)
         markSpriteRecordUsed(record)
-        cancelScheduledRender()
-        renderApp()
+        renderImmediateOrSchedule()
       }
     }),
     [
       applyViewportTransform,
-      cancelScheduledRender,
       markSpriteRecordUsed,
-      renderApp,
+      renderImmediateOrSchedule,
       scheduleViewportReconcile,
       setViewportInteractingState
     ]
@@ -1927,8 +2046,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
 
     function pumpInitialImageLoadQueue() {
+      const initialImageLoadConcurrency = isPerformanceThrottledRef.current
+        ? PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_INITIAL_IMAGE_LOAD_CONCURRENCY
+        : PROJECT_CANVAS_WEBGL_INITIAL_IMAGE_LOAD_CONCURRENCY
       while (
-        activeInitialLoadCountRef.current < PROJECT_CANVAS_WEBGL_INITIAL_IMAGE_LOAD_CONCURRENCY &&
+        activeInitialLoadCountRef.current < initialImageLoadConcurrency &&
         initialLoadQueueRef.current.length > 0
       ) {
         initialLoadQueueRef.current.sort((left, right) => right.priority - left.priority)
@@ -2041,7 +2163,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
 
     function pumpThumbnailLoadQueue() {
-      if (isViewportInteractingRef.current) {
+      if (isViewportInteractingRef.current || isPerformanceThrottledRef.current) {
         return
       }
 
@@ -2099,7 +2221,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
 
     const queueThumbnailLoad = (item: CanvasImageItem, src: string, priority: number) => {
-      if (isViewportInteractingRef.current) {
+      if (isViewportInteractingRef.current || isPerformanceThrottledRef.current) {
         return false
       }
 
@@ -2240,7 +2362,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         failedLoadSrcByIdRef.current.delete(item.id)
         return fallbackImage
       }
-      if (fallbackImage && isViewportInteractingRef.current) {
+      if (
+        fallbackImage &&
+        (isViewportInteractingRef.current || isPerformanceThrottledRef.current)
+      ) {
         failedLoadSrcByIdRef.current.delete(item.id)
         return fallbackImage
       }
@@ -2261,7 +2386,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       if (failedSrc) {
         failedLoadSrcByIdRef.current.delete(item.id)
       }
-      if (isViewportInteractingRef.current) {
+      if (isViewportInteractingRef.current || isPerformanceThrottledRef.current) {
         return null
       }
 
@@ -2487,7 +2612,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     const residentCandidateImageCount = residentCandidateIds.size
     residentCandidateImageCountForThumbnailLod = residentCandidateImageCount
     const viewportCulledImageCount = Math.max(0, items.length - residentCandidateImageCount)
-    const spriteReconcileBatchSize = getProjectCanvasSpriteReconcileBatchSize(safeScale)
+    const spriteReconcileBatchSize = getProjectCanvasSpriteReconcileBatchSize(
+      safeScale,
+      isPerformanceThrottledRef.current
+    )
     const shouldBatchNewSpriteCreation = residentCandidateImageCount >= spriteReconcileBatchSize * 2
     let newSpriteCreationBudget = shouldBatchNewSpriteCreation
       ? spriteReconcileFrameRef.current === null
@@ -2536,7 +2664,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       let image = ensureImage(item, getSourceUpgradePriority(item))
       if (!image) {
-        if (!item.image && shouldSuppressIntermediateOverviewRender(safeScale)) {
+        if (
+          !item.image &&
+          shouldSuppressIntermediateOverviewRender(safeScale, isPerformanceThrottledRef.current)
+        ) {
           destroySpriteRecord(item.id, { retainPreview: false })
           renderItemsRef.current.delete(item.id)
         }
@@ -2745,7 +2876,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     const imageHealthCounts = collectImageHealthCounts(residentCandidateIds)
     const isSpriteReconcileDeferred = deferredNewSpriteCount > 0
     const shouldHideIntermediateOverviewRender =
-      isSpriteReconcileDeferred && shouldSuppressIntermediateOverviewRender(safeScale)
+      isSpriteReconcileDeferred &&
+      shouldSuppressIntermediateOverviewRender(safeScale, isPerformanceThrottledRef.current)
     emitItemLoadMetricsSnapshot(
       {
         imageCount: items.length,
@@ -2818,6 +2950,10 @@ function areProjectCanvasWebGLImageLayerPropsEqual(
   }
 
   if (previousProps.isViewportInteracting !== nextProps.isViewportInteracting) {
+    return false
+  }
+
+  if (previousProps.isPerformanceThrottled !== nextProps.isPerformanceThrottled) {
     return false
   }
 

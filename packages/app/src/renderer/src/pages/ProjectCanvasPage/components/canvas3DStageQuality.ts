@@ -6,12 +6,15 @@ export type Canvas3DStageFrameloop = 'always' | 'demand'
 export const resolveCanvas3DStageDpr = ({
   itemCount,
   activatedItemCount,
-  isViewportMoving
+  isViewportMoving,
+  isPerformanceThrottled = false
 }: {
   itemCount: number
   activatedItemCount: number
   isViewportMoving: boolean
+  isPerformanceThrottled?: boolean
 }): [number, number] => {
+  if (isPerformanceThrottled) return [1, 1]
   if (isViewportMoving) return [1, 1]
   if (activatedItemCount >= 10 || itemCount >= 14) return [1, 1.1]
   if (activatedItemCount >= 6 || itemCount >= 8) return [1, 1.25]
@@ -21,12 +24,15 @@ export const resolveCanvas3DStageDpr = ({
 export const resolveCanvas3DStageRenderPumpFrames = ({
   isViewportMoving,
   pendingActivationCount,
-  mountedItemCount
+  mountedItemCount,
+  isPerformanceThrottled = false
 }: {
   isViewportMoving: boolean
   pendingActivationCount: number
   mountedItemCount: number
+  isPerformanceThrottled?: boolean
 }) => {
+  if (isPerformanceThrottled) return 1
   if (isViewportMoving) return 2
   if (pendingActivationCount > 0) {
     if (mountedItemCount === 0) return 2
@@ -49,12 +55,26 @@ export const resolveCanvas3DStageFrameloop = ({
 
 export const resolveCanvas3DStageMountedIds = ({
   activatedIds,
-  isViewportMoving
+  prioritizedLoadIds,
+  isViewportMoving,
+  isPerformanceThrottled = false
 }: {
   activatedIds: ReadonlySet<string>
   prioritizedLoadIds: readonly string[]
   isViewportMoving: boolean
+  isPerformanceThrottled?: boolean
 }) => {
+  if (isPerformanceThrottled) {
+    const mountedIds = new Set<string>()
+    for (const itemId of prioritizedLoadIds) {
+      if (activatedIds.has(itemId)) {
+        mountedIds.add(itemId)
+        break
+      }
+    }
+    return mountedIds
+  }
+
   if (isViewportMoving) {
     return new Set(activatedIds)
   }
@@ -71,7 +91,9 @@ export const resolveCanvas3DStageLightingPreset = ({
 }
 
 export const shouldCanvas3DStageRenderLighting = ({
-  mountedItemCount
+  mountedItemCount,
+  isPerformanceThrottled = false
 }: {
   mountedItemCount: number
-}) => mountedItemCount > 0
+  isPerformanceThrottled?: boolean
+}) => mountedItemCount > 0 && !isPerformanceThrottled
