@@ -1212,16 +1212,18 @@ export default function QAppMenu({
       // 3. 没有匹配到，直接在当前快应用上填充参数（可能会部分失败）
       const targetQAppKey = currentQAppKey.trim()
       if (!targetQAppKey) {
-        console.warn('[handleDrop] 未匹配到快应用，且当前没有可填充的快应用')
-        notifyError('未找到匹配的快应用，请先选择一个快应用')
+        console.warn(
+          '[handleDrop] no matching quick app found and no current quick app is selected'
+        )
+        notifyError(t('qapp.menu.no_matching_quick_app_select_first'))
         return false
       }
 
-      console.warn('[handleDrop] 未匹配到快应用，使用当前快应用填充')
+      console.warn('[handleDrop] no matching quick app found, filling current quick app')
       dispatchQAppFillParams({ qAppKey: targetQAppKey, workflow })
       return false
     },
-    [setCurrentQAppKey, compareWorkflows, currentQAppKey, notifyError]
+    [setCurrentQAppKey, compareWorkflows, currentQAppKey, notifyError, t]
   )
 
   // 导入 .mpqapp 文件（必须定义在 handleDrop 之前，避免 TDZ）

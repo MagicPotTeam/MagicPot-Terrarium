@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { api } from '@renderer/utils/windowUtils'
 import { extractWorkflowFromImage } from '@renderer/utils/fileUtils'
 import { compareWorkflows } from '@renderer/utils/qappUtils'
@@ -37,6 +38,7 @@ export function useQAppDragAndDrop({
 }: UseQAppDragAndDropProps) {
   const [isDraggingOver, setIsDraggingOver] = useState(false)
   const { currentQAppKey, setQAppCfg } = useQAppContext()
+  const { t } = useTranslation()
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -100,7 +102,7 @@ export function useQAppDragAndDrop({
         console.warn(
           '[handleDrop] no matching quick app found and no current quick app is selected'
         )
-        notifyError('未找到匹配的快应用，请先选择一个快应用')
+        notifyError(t('qapp.menu.no_matching_quick_app_select_first'))
         return false
       }
 
@@ -109,7 +111,7 @@ export function useQAppDragAndDrop({
       notifySuccess('未找到匹配的快应用，已在当前快应用中加载可用参数')
       return false
     },
-    [currentQAppKey, notifyError, notifySuccess, setCurrentQAppKey]
+    [currentQAppKey, notifyError, notifySuccess, setCurrentQAppKey, t]
   )
 
   const importQAppFile = useCallback(

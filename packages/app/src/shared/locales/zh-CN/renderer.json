@@ -408,7 +408,8 @@
       "rename": "重命名",
       "export": "导出 (.mpqapp)",
       "remove_from_project": "从项目移除",
-      "delete": "删除"
+      "delete": "删除",
+      "no_matching_quick_app_select_first": "未找到匹配的快应用，请先选择一个快应用"
     },
     "names": {
       "内置快应用": "内置快应用",
