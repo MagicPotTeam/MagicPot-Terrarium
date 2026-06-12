@@ -19,10 +19,12 @@ vi.mock('@renderer/utils/windowUtils', () => ({
 }))
 
 vi.mock('@renderer/utils/comfyUtils', () => ({
-  ComfyUtils: vi.fn().mockImplementation(() => ({
-    listImages: comfyMocks.listImages,
-    viewImage: comfyMocks.viewImage
-  }))
+  ComfyUtils: vi.fn().mockImplementation(function MockComfyUtils() {
+    return {
+      listImages: comfyMocks.listImages,
+      viewImage: comfyMocks.viewImage
+    }
+  })
 }))
 
 vi.mock('@renderer/utils/fileUtils', () => ({
