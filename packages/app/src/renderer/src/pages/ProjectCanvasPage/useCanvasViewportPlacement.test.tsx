@@ -43,18 +43,21 @@ describe('useCanvasViewportPlacement', () => {
 
   it('uses the live stage transform refs when resolving drop points at tiny zoom', () => {
     const canvasContainer = document.createElement('div')
-    canvasContainer.getBoundingClientRect = () =>
-      ({
-        left: 40,
-        top: 80,
-        right: 840,
-        bottom: 680,
-        width: 800,
-        height: 600,
-        x: 40,
-        y: 80,
-        toJSON: () => ({})
-      }) as DOMRect
+    Object.defineProperty(canvasContainer, 'getBoundingClientRect', {
+      configurable: true,
+      value: () =>
+        ({
+          left: 40,
+          top: 80,
+          right: 840,
+          bottom: 680,
+          width: 800,
+          height: 600,
+          x: 40,
+          y: 80,
+          toJSON: () => ({})
+        }) as DOMRect
+    })
 
     const { result } = renderHook(() =>
       useCanvasViewportPlacement({

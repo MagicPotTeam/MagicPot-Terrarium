@@ -46,16 +46,16 @@ vi.mock(import('@shared/llm'), async (importOriginal) => {
 vi.mock(import('../llmProxy/hunyuan3dClient'), async (importOriginal) => {
   const actual = await importOriginal<typeof import('../llmProxy/hunyuan3dClient')>()
   return {
-    Hunyuan3DClient: Hunyuan3DClientMock.mockImplementation(
-      (...args: ConstructorParameters<typeof actual.Hunyuan3DClient>) => {
-        if (useActualHunyuan3DClient.current) {
-          return new actual.Hunyuan3DClient(...args)
-        }
-        return {
-          generateFromMessages: generateFromMessagesMock
-        }
+    Hunyuan3DClient: Hunyuan3DClientMock.mockImplementation(function MockHunyuan3DClient(
+      ...args: ConstructorParameters<typeof actual.Hunyuan3DClient>
+    ) {
+      if (useActualHunyuan3DClient.current) {
+        return new actual.Hunyuan3DClient(...args)
       }
-    )
+      return {
+        generateFromMessages: generateFromMessagesMock
+      }
+    })
   }
 })
 

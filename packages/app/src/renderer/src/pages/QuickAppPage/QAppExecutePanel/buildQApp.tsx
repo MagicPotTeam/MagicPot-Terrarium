@@ -108,35 +108,37 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
     buildWorkflowRef.current = buildWorkflow
     buildSubmitExtraDataRef.current = buildSubmitExtraData
 
-    const registeredValidate = useCallback((): boolean => validateRef.current(), [])
-    const registeredBuildWorkflow = useCallback((): Workflow => buildWorkflowRef.current(), [])
-    const registeredBuildSubmitExtraData = useCallback(() => buildSubmitExtraDataRef.current(), [])
+    const stableValidate = useCallback((): boolean => validateRef.current(), [])
+    const stableBuildWorkflow = useCallback((): Workflow => buildWorkflowRef.current(), [])
+    const stableBuildSubmitExtraData = useCallback(() => buildSubmitExtraDataRef.current(), [])
 
     useEffect(() => {
-      setValidate(registeredValidate)
-      setBuildWorkflow(registeredBuildWorkflow)
-      setBuildSubmitExtraData(registeredBuildSubmitExtraData)
-      setSubmitClientId(clientId)
-      setSubmitSessionKey(submitSessionKey)
+      setValidate(stableValidate)
+      setBuildWorkflow(stableBuildWorkflow)
+      setBuildSubmitExtraData(stableBuildSubmitExtraData)
       return () => {
         setValidate(undefined)
         setBuildWorkflow(undefined)
         setBuildSubmitExtraData(undefined)
-        setSubmitClientId(undefined)
-        setSubmitSessionKey(undefined)
       }
     }, [
-      clientId,
-      registeredBuildSubmitExtraData,
-      registeredBuildWorkflow,
-      registeredValidate,
       setBuildSubmitExtraData,
       setBuildWorkflow,
-      setSubmitClientId,
-      setSubmitSessionKey,
       setValidate,
-      submitSessionKey
+      stableBuildSubmitExtraData,
+      stableBuildWorkflow,
+      stableValidate
     ])
+
+    useEffect(() => {
+      setSubmitClientId(clientId)
+      return () => setSubmitClientId(undefined)
+    }, [clientId, setSubmitClientId])
+
+    useEffect(() => {
+      setSubmitSessionKey(submitSessionKey)
+      return () => setSubmitSessionKey(undefined)
+    }, [setSubmitSessionKey, submitSessionKey])
 
     return (
       <Stack

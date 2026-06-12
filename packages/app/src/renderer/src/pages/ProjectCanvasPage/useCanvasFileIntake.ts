@@ -12,6 +12,7 @@ import {
   getDroppedAttachmentFile,
   parseInternalImageDragPayload
 } from '@renderer/utils/droppedImageUtils'
+import { stripHtmlToText } from '@renderer/utils/htmlText'
 import type { ChatAttachment, OCRResult } from '@shared/api/svcLLMProxy'
 import type { FileItem } from '@shared/comfy/types'
 import { getProjectCanvasLocation, isCanvasFile } from './canvasStorage'
@@ -951,7 +952,7 @@ export function useCanvasFileIntake({
             dropDataTransfer.getData('Text') ||
             dropDataTransfer.getData('text/html')
           if (text) {
-            text = text.replace(/<[^>]*>?/gm, '')
+            text = stripHtmlToText(text)
           }
         }
 

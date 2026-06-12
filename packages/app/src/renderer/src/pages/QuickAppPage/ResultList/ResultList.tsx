@@ -185,7 +185,7 @@ export default function ResultList({}: ResultListProps) {
                   typeof result.type
                 >
                 return (
-                  <Box key={index} sx={{ width: '100%', minWidth: 0 }}>
+                  <Box key={result.id} sx={{ width: '100%', minWidth: 0 }}>
                     <ResultCard
                       result={result}
                       index={index}
@@ -209,7 +209,7 @@ export default function ResultList({}: ResultListProps) {
                 >
                 return (
                   <ResultCard
-                    key={index}
+                    key={result.id}
                     result={result}
                     index={index}
                     config={config}

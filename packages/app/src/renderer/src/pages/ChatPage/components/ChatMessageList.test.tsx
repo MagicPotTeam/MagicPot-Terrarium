@@ -24,6 +24,15 @@ vi.mock('@renderer/hooks/useMessage', () => ({
   })
 }))
 
+type OnSendEditedMessage = (
+  content: string,
+  attachments: ChatAttachment[] | undefined,
+  hiddenContext: string | undefined,
+  baseMessages: ChatMessage[]
+) => void
+
+type OnDownloadAttachment = (attachment: ChatAttachment) => void
+
 const buildChatMessageList = (
   currentSession: ChatSession,
   options?: {
@@ -31,8 +40,8 @@ const buildChatMessageList = (
     isLoading?: boolean
     editingMessageIndex?: number | null
     editingContent?: string
-    onSendEditedMessage?: ReturnType<typeof vi.fn>
-    onDownloadAttachment?: ReturnType<typeof vi.fn>
+    onSendEditedMessage?: OnSendEditedMessage
+    onDownloadAttachment?: OnDownloadAttachment
   }
 ) => (
   <ThemeProvider theme={createTheme()}>
@@ -44,10 +53,10 @@ const buildChatMessageList = (
       editingContent={options?.editingContent ?? ''}
       onSetEditingIndex={vi.fn()}
       onSetEditingContent={vi.fn()}
-      onSendEditedMessage={options?.onSendEditedMessage ?? vi.fn()}
+      onSendEditedMessage={options?.onSendEditedMessage ?? vi.fn<OnSendEditedMessage>()}
       onPreviewImage={vi.fn()}
       onImageContextMenu={vi.fn()}
-      onDownloadAttachment={options?.onDownloadAttachment ?? vi.fn()}
+      onDownloadAttachment={options?.onDownloadAttachment ?? vi.fn<OnDownloadAttachment>()}
       onSendModelToDcc={vi.fn()}
       chatContainerRef={React.createRef<HTMLDivElement>()}
       messagesEndRef={React.createRef<HTMLDivElement>()}
@@ -62,8 +71,8 @@ const renderChatMessageList = (
     isLoading?: boolean
     editingMessageIndex?: number | null
     editingContent?: string
-    onSendEditedMessage?: ReturnType<typeof vi.fn>
-    onDownloadAttachment?: ReturnType<typeof vi.fn>
+    onSendEditedMessage?: OnSendEditedMessage
+    onDownloadAttachment?: OnDownloadAttachment
   }
 ) => render(buildChatMessageList(currentSession, options))
 

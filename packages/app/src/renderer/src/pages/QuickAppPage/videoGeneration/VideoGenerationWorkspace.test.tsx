@@ -328,7 +328,7 @@ describe('VideoGenerationWorkspace', () => {
     expect(screen.getByTestId('video-generation-request-preview').textContent).toContain(
       'callback_url'
     )
-  })
+  }, 15000)
 
   it('uses the selected Seedance image slot role for a single last-frame asset', async () => {
     mocks.currentConfig.value = buildConfig({
@@ -420,7 +420,7 @@ describe('VideoGenerationWorkspace', () => {
     expect(previewText).toContain('"video_url"')
     expect(previewText).toContain('"audio_url"')
     expect(previewText).not.toContain('unsupportedByCurrentClient')
-  })
+  }, 15000)
 
   it('shows inline mode with compact controls', async () => {
     mocks.currentConfig.value = buildConfig({

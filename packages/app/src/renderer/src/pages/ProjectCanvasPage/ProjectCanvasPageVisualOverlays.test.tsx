@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { type DragEvent as ReactDragEvent } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 
@@ -249,9 +249,9 @@ function renderVisualOverlays(options?: {
   isViewportInteracting?: boolean
   forceRenderAllItemsForExport?: boolean
   tool?: 'select' | 'hand' | 'annotate'
-  onDragOver?: ReturnType<typeof vi.fn>
-  onDrop?: ReturnType<typeof vi.fn>
-  registerViewportLayer?: ReturnType<typeof vi.fn>
+  onDragOver?: (event: ReactDragEvent<Element>) => void
+  onDrop?: (event: ReactDragEvent<Element>) => void
+  registerViewportLayer?: (element: HTMLElement | null) => void
   registerViewportCallback?: (
     fn: (pos: { x: number; y: number }, scale: number) => void
   ) => () => void
@@ -297,8 +297,8 @@ function renderVisualOverlays(options?: {
       isViewportInteracting={options?.isViewportInteracting ?? false}
       forceRenderAllItemsForExport={options?.forceRenderAllItemsForExport ?? false}
       onSelectItem={vi.fn()}
-      onDragOver={options?.onDragOver ?? vi.fn()}
-      onDrop={options?.onDrop ?? vi.fn()}
+      onDragOver={options?.onDragOver ?? vi.fn<(event: ReactDragEvent<Element>) => void>()}
+      onDrop={options?.onDrop ?? vi.fn<(event: ReactDragEvent<Element>) => void>()}
       onDragVideoEnd={vi.fn()}
       onUpdateVideoItem={vi.fn()}
       onUpdateHtmlItem={vi.fn()}
@@ -453,7 +453,7 @@ describe('ProjectCanvasPageVisualOverlays selection chrome routing', () => {
   })
 
   it('registers the DOM overlay viewport layer with the shared viewport driver', () => {
-    const registerViewportLayer = vi.fn()
+    const registerViewportLayer = vi.fn<(element: HTMLElement | null) => void>()
 
     renderVisualOverlays({
       annotationItems: [createAnnotationItem('annotation-1')],
@@ -748,10 +748,10 @@ describe('ProjectCanvasPageVisualOverlays selection chrome routing', () => {
 
   it('captures external drag events from portal overlays so drops stay allowed over existing items', () => {
     const videoItem = createVideoItem('video-drop-capture')
-    const onDragOver = vi.fn((event: Event) => {
+    const onDragOver = vi.fn<(event: ReactDragEvent<Element>) => void>((event) => {
       event.preventDefault()
     })
-    const onDrop = vi.fn()
+    const onDrop = vi.fn<(event: ReactDragEvent<Element>) => void>()
 
     renderVisualOverlays({
       videoItems: [videoItem],

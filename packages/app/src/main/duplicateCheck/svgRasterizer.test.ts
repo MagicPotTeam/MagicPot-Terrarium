@@ -19,14 +19,16 @@ const {
     appMock: {
       whenReady: vi.fn(() => Promise.resolve())
     },
-    browserWindowCtorMock: vi.fn(() => ({
-      loadURL: loadURLMock,
-      destroy: destroyMock,
-      isDestroyed: isDestroyedMock,
-      webContents: {
-        executeJavaScript: executeJavaScriptMock
+    browserWindowCtorMock: vi.fn(function MockBrowserWindow() {
+      return {
+        loadURL: loadURLMock,
+        destroy: destroyMock,
+        isDestroyed: isDestroyedMock,
+        webContents: {
+          executeJavaScript: executeJavaScriptMock
+        }
       }
-    })),
+    }),
     loadURLMock,
     executeJavaScriptMock,
     destroyMock,

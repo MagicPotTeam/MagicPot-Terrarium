@@ -92,23 +92,38 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
   const [isLoading, setIsLoading] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const previewRequestIdRef = useRef(0)
+  const previewUrlRef = useRef<string | null>(null)
   const latestValueRef = useRef(value)
   const latestOnChangeRef = useRef(onChange)
   const { notifySuccess, notifyError } = useMessage()
   const { t } = useTranslation()
 
+  const updatePreviewUrl = useCallback((nextUrl: string | null) => {
+    setPreviewUrl((prev) => {
+      if (prev !== nextUrl) {
+        revokePreviewUrl(prev)
+      }
+      previewUrlRef.current = nextUrl
+      return nextUrl
+    })
+  }, [])
+
+  useEffect(
+    () => () => {
+      revokePreviewUrl(previewUrlRef.current)
+      previewUrlRef.current = null
+    },
+    []
+  )
+
   useEffect(() => {
     latestValueRef.current = value
+    setInternalValue((current) => (value !== current ? value : current))
   }, [value])
 
   useEffect(() => {
     latestOnChangeRef.current = onChange
   }, [onChange])
-
-  // 同步外部 value 变化到 internalValue。只依赖外部 value，避免内部预览刷新触发父级重渲染时形成循环。
-  useEffect(() => {
-    setInternalValue((current) => (value !== current ? value : current))
-  }, [value])
 
   const commitValue = useCallback((nextValue: string) => {
     setInternalValue((current) => (current === nextValue ? current : nextValue))
@@ -137,12 +152,6 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
     [commitValue, notifyError, t]
   )
 
-  const viewImage = useCallback(async () => {
-    const res = await api().svcComfy.getView(valueToFileItem(internalValue))
-    const image: Uint8Array = res.result
-    return image
-  }, [internalValue])
-
   const handleLoadFromPhotoshop = useCallback(async () => {
     try {
       setIsLoading(true)
@@ -168,55 +177,40 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
   const handleClear = useCallback(() => {
     commitValue('')
     previewRequestIdRef.current += 1
-    setPreviewUrl((prev) => {
-      revokePreviewUrl(prev)
-      return null
-    })
-  }, [commitValue])
+    updatePreviewUrl(null)
+  }, [commitValue, updatePreviewUrl])
 
   useEffect(() => {
     const requestId = ++previewRequestIdRef.current
     let urlToRevoke: string | null = null
 
     if (!internalValue) {
-      setPreviewUrl((prev) => {
-        revokePreviewUrl(prev)
-        return null
-      })
+      updatePreviewUrl(null)
       return
     }
 
     const deferredValue = parseDeferredComfyImageInputValue(internalValue)
     if (deferredValue) {
-      setPreviewUrl((prev) => {
-        revokePreviewUrl(prev)
-        return deferredValue.dataUrl
-      })
+      updatePreviewUrl(deferredValue.dataUrl)
       return
     }
 
     ;(async () => {
       try {
-        const bytes = await viewImage()
+        const res = await api().svcComfy.getView(valueToFileItem(internalValue))
         if (previewRequestIdRef.current !== requestId) return
-        const blob = new Blob([bytes as BlobPart], { type: 'image/*' })
+        const image: Uint8Array = res.result
+        const blob = new Blob([image as BlobPart], { type: 'image/*' })
         const url = URL.createObjectURL(blob)
         urlToRevoke = url
-        setPreviewUrl((prev) => {
-          if (prev === url) return prev
-          revokePreviewUrl(prev)
-          urlToRevoke = null
-          return url
-        })
+        updatePreviewUrl(url)
+        urlToRevoke = null
       } catch (error) {
         // ComfyUI may be stopped while the form still contains a previously uploaded image name.
         // Keep the value intact; only hide the preview until ComfyUI can serve it again.
-        console.warn('[InputComfyImage] Failed to load image preview:', error)
+        console.warn('[InputComfyImage] Failed to load image preview:', internalValue, error)
         if (previewRequestIdRef.current === requestId) {
-          setPreviewUrl((prev) => {
-            revokePreviewUrl(prev)
-            return null
-          })
+          updatePreviewUrl(null)
         }
       }
     })()
@@ -227,7 +221,7 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
       }
       revokePreviewUrl(urlToRevoke)
     }
-  }, [internalValue, viewImage])
+  }, [internalValue, updatePreviewUrl])
 
   return (
     <BaseInputComfyImage

@@ -1385,6 +1385,14 @@ describe('ProjectCanvasPage generation-first entry', () => {
       </ThemeProvider>
     )
 
+    await waitFor(() => {
+      expect(mockLoadCanvasItems).toHaveBeenCalled()
+      expect(screen.getByTestId('project-canvas-stage-root')).toHaveAttribute(
+        'data-project-canvas-total-item-count',
+        '0'
+      )
+    })
+
     act(() => {
       window.dispatchEvent(
         new CustomEvent('canvas:add-model3d', {
@@ -1762,18 +1770,17 @@ describe('ProjectCanvasPage generation-first entry', () => {
         id: 'image-1',
         x: 92,
         y: 48,
-        width: 128,
-        height: 136,
+        width: 300,
+        height: 224,
         scaleX: 1.15,
         scaleY: 1.1,
-        crop: expect.objectContaining({
-          x: 10,
-          y: 6,
-          width: 300,
-          height: 224
-        })
+        src: 'data:image/png;base64,mock-canvas',
+        fileName: 'crop-target.png',
+        sourceWidth: 300,
+        sourceHeight: 224
       })
     )
+    expect(savedTargetImage).not.toHaveProperty('crop')
     expect(savedPeerImage).toEqual(
       expect.objectContaining({
         id: 'image-2',

@@ -376,6 +376,7 @@ vi.mock('./components/ChatComposer', () => ({
     onUploadFile,
     pendingAttachments,
     selectedSkillName,
+    modelSelectorSlot,
     inputSyncKey,
     onCompressContext,
     onClearContext,
@@ -388,6 +389,7 @@ vi.mock('./components/ChatComposer', () => ({
     onUploadFile: () => void
     pendingAttachments: ChatAttachment[]
     selectedSkillName?: string
+    modelSelectorSlot?: React.ReactNode
     inputSyncKey?: string
     onCompressContext?: () => void
     onClearContext?: () => void
@@ -437,6 +439,7 @@ vi.mock('./components/ChatComposer', () => ({
         <div data-testid="chat-composer-attachment-names">
           {pendingAttachments.map((attachment) => attachment.fileName || attachment.url).join('|')}
         </div>
+        {modelSelectorSlot}
       </div>
     )
   }

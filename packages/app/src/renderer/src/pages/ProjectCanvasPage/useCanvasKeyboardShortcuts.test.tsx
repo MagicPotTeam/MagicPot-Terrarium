@@ -63,7 +63,7 @@ function createSvgImageItem(): CanvasItem {
   }
 }
 
-function KeyboardShortcutHarness({ handleUndo }: { handleUndo: ReturnType<typeof vi.fn> }) {
+function KeyboardShortcutHarness({ handleUndo }: { handleUndo: () => void }) {
   const canvasActiveRef = useRef(true)
   const [items, setItems] = useState<CanvasItem[]>([createFileItem(40)])
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set(['file-1']))

@@ -8,6 +8,15 @@ import {
   resetQuickAppImagePasteTargetsForTest
 } from '@renderer/utils/quickAppPasteTarget'
 import { useCanvasFileIntake } from './useCanvasFileIntake'
+
+type TestAddImageToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addImageToCanvas']
+type TestAddImagesToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addImagesToCanvas']
+type TestAddFileToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addFileToCanvas']
+type TestAddTextToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addTextToCanvas']
+type TestNotifyWarning = NonNullable<Parameters<typeof useCanvasFileIntake>[0]['notifyWarning']>
+type TestImageBatchImportProgress = NonNullable<
+  Parameters<typeof useCanvasFileIntake>[0]['onImageBatchImportProgress']
+>
 import { buildCanvasImageSourceIdentity } from './canvasThumbnailCache'
 
 vi.mock('react-konva', () => ({
@@ -137,21 +146,21 @@ function buildTypelessDragEvent(): DragEvent {
 
 function FileIntakeHarness({
   addTextToCanvas,
-  addImageToCanvas = vi.fn().mockResolvedValue(undefined),
-  addImagesToCanvas = vi.fn().mockResolvedValue(undefined),
-  addFileToCanvas = vi.fn().mockResolvedValue(undefined),
-  notifyWarning = vi.fn(),
-  onImageBatchImportProgress = vi.fn(),
+  addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined),
+  addImagesToCanvas = vi.fn<TestAddImagesToCanvas>().mockResolvedValue(undefined),
+  addFileToCanvas = vi.fn<TestAddFileToCanvas>().mockResolvedValue(undefined),
+  notifyWarning = vi.fn<TestNotifyWarning>(),
+  onImageBatchImportProgress = vi.fn<TestImageBatchImportProgress>(),
   quickAppTargetActive = false,
   withExternalInput = false,
   initialCanvasActive = true
 }: {
-  addTextToCanvas: ReturnType<typeof vi.fn>
-  addImageToCanvas?: ReturnType<typeof vi.fn>
-  addImagesToCanvas?: ReturnType<typeof vi.fn>
-  addFileToCanvas?: ReturnType<typeof vi.fn>
-  notifyWarning?: ReturnType<typeof vi.fn>
-  onImageBatchImportProgress?: ReturnType<typeof vi.fn>
+  addTextToCanvas: TestAddTextToCanvas
+  addImageToCanvas?: TestAddImageToCanvas
+  addImagesToCanvas?: TestAddImagesToCanvas
+  addFileToCanvas?: TestAddFileToCanvas
+  notifyWarning?: TestNotifyWarning
+  onImageBatchImportProgress?: TestImageBatchImportProgress
   quickAppTargetActive?: boolean
   withExternalInput?: boolean
   initialCanvasActive?: boolean
@@ -453,7 +462,7 @@ describe('useCanvasFileIntake', () => {
 
   it('accepts pasted clipboard files for canvas-supported office/text formats', async () => {
     const addTextToCanvas = vi.fn()
-    const addFileToCanvas = vi.fn().mockResolvedValue(undefined)
+    const addFileToCanvas = vi.fn<TestAddFileToCanvas>().mockResolvedValue(undefined)
 
     render(
       <FileIntakeHarness addTextToCanvas={addTextToCanvas} addFileToCanvas={addFileToCanvas} />
@@ -482,9 +491,9 @@ describe('useCanvasFileIntake', () => {
 
   it('explicitly rejects unsupported .pur drops', async () => {
     const addTextToCanvas = vi.fn()
-    const addImageToCanvas = vi.fn().mockResolvedValue(undefined)
-    const addFileToCanvas = vi.fn().mockResolvedValue(undefined)
-    const notifyWarning = vi.fn()
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
+    const addFileToCanvas = vi.fn<TestAddFileToCanvas>().mockResolvedValue(undefined)
+    const notifyWarning = vi.fn<TestNotifyWarning>()
     const purFile = new File(['pur'], '1(1).pur', { type: 'application/octet-stream' })
 
     render(
@@ -576,7 +585,7 @@ describe('useCanvasFileIntake', () => {
 
   it('does not claim external file drags over the agent workspace', async () => {
     const addTextToCanvas = vi.fn()
-    const addImageToCanvas = vi.fn().mockResolvedValue(undefined)
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
     const agentDragOverListener = vi.fn()
     const agentDropListener = vi.fn()
     const imageFile = new File(['png'], 'agent-reference.png', { type: 'image/png' })
@@ -616,7 +625,7 @@ describe('useCanvasFileIntake', () => {
 
   it('does not claim external file drops when pointer hit-testing is over the agent workspace', async () => {
     const addTextToCanvas = vi.fn()
-    const addImageToCanvas = vi.fn().mockResolvedValue(undefined)
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
     const imageFile = new File(['png'], 'agent-reference.png', { type: 'image/png' })
     const agentRoot = document.createElement('div')
     const originalElementsFromPoint = document.elementsFromPoint
@@ -650,7 +659,7 @@ describe('useCanvasFileIntake', () => {
 
   it('uses local-media URLs for Electron local image batches instead of reading every file as data URLs', async () => {
     const addTextToCanvas = vi.fn()
-    const addImagesToCanvas = vi.fn().mockResolvedValue(undefined)
+    const addImagesToCanvas = vi.fn<TestAddImagesToCanvas>().mockResolvedValue(undefined)
     const firstImage = new File(['png'], 'first.png', { type: 'image/png' })
     const secondImage = new File(['png'], 'second.png', { type: 'image/png' })
     Object.defineProperty(firstImage, 'path', {
@@ -696,8 +705,8 @@ describe('useCanvasFileIntake', () => {
 
   it('reports progress while preparing large local image batches', async () => {
     const addTextToCanvas = vi.fn()
-    const addImagesToCanvas = vi.fn().mockResolvedValue(undefined)
-    const onImageBatchImportProgress = vi.fn()
+    const addImagesToCanvas = vi.fn<TestAddImagesToCanvas>().mockResolvedValue(undefined)
+    const onImageBatchImportProgress = vi.fn<TestImageBatchImportProgress>()
     const imageFiles = Array.from({ length: 50 }, (_, index) => {
       const file = new File(['png'], `batch-${index + 1}.png`, { type: 'image/png' })
       Object.defineProperty(file, 'path', {
@@ -752,7 +761,7 @@ describe('useCanvasFileIntake', () => {
 
   it('passes PNG header dimensions to the canvas image intake without decoding the file', async () => {
     const addTextToCanvas = vi.fn()
-    const addImageToCanvas = vi.fn().mockResolvedValue(undefined)
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
     const imageFile = new File([buildPngHeader(19717, 12079, 6)], 'huge.png', {
       type: 'image/png'
     })
@@ -792,7 +801,7 @@ describe('useCanvasFileIntake', () => {
 
   it('adds local source identity metadata when the thumbnail service resolves file metadata', async () => {
     const addTextToCanvas = vi.fn()
-    const addImageToCanvas = vi.fn().mockResolvedValue(undefined)
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
     const imageFile = new File([buildPngHeader(640, 320, 6)], 'identity.png', {
       type: 'image/png'
     })
@@ -846,7 +855,7 @@ describe('useCanvasFileIntake', () => {
 
   it('passes the original source file for non-PNG image intake', async () => {
     const addTextToCanvas = vi.fn()
-    const addImageToCanvas = vi.fn().mockResolvedValue(undefined)
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
     const bitmapClose = vi.fn()
     Object.defineProperty(globalThis, 'createImageBitmap', {
       configurable: true,
@@ -896,7 +905,7 @@ describe('useCanvasFileIntake', () => {
 
   it('uses the Electron file bridge when File.path is unavailable', async () => {
     const addTextToCanvas = vi.fn()
-    const addImagesToCanvas = vi.fn().mockResolvedValue(undefined)
+    const addImagesToCanvas = vi.fn<TestAddImagesToCanvas>().mockResolvedValue(undefined)
     const firstImage = new File(['png'], 'first.png', { type: 'image/png' })
     const secondImage = new File(['png'], 'second.png', { type: 'image/png' })
     const getPathForFile = vi.fn((file: File) =>
@@ -943,7 +952,7 @@ describe('useCanvasFileIntake', () => {
 
   it('falls back to blob URLs for image batches without a local filesystem path', async () => {
     const addTextToCanvas = vi.fn()
-    const addImagesToCanvas = vi.fn().mockResolvedValue(undefined)
+    const addImagesToCanvas = vi.fn<TestAddImagesToCanvas>().mockResolvedValue(undefined)
     const firstImage = new File(['png'], 'first.png', { type: 'image/png' })
     const secondImage = new File(['png'], 'second.png', { type: 'image/png' })
     const createObjectURL = vi.fn((file: Blob) => `blob:${(file as File).name}`)

@@ -224,9 +224,9 @@ describe('ResultCardImage', () => {
       expect(notifySuccessMock).not.toHaveBeenCalled()
     })
 
-    const qappSwitchEvent = dispatchSpy.mock.calls.find(
-      ([event]) => event instanceof CustomEvent && event.type === 'qapp:switch'
-    )?.[0] as CustomEvent | undefined
+    const qappSwitchEvent = dispatchSpy.mock.calls
+      .filter(([event]) => event instanceof CustomEvent && event.type === 'qapp:switch')
+      .at(-1)?.[0] as CustomEvent | undefined
     expect(qappSwitchEvent?.detail).toEqual({
       qAppKey: 'image-workflow-app',
       workflow: importedWorkflow
@@ -291,9 +291,9 @@ describe('ResultCardImage', () => {
       expect(notifySuccessMock).not.toHaveBeenCalled()
     })
 
-    const qappSwitchEvent = dispatchSpy.mock.calls.find(
-      ([event]) => event instanceof CustomEvent && event.type === 'qapp:switch'
-    )?.[0] as CustomEvent | undefined
+    const qappSwitchEvent = dispatchSpy.mock.calls
+      .filter(([event]) => event instanceof CustomEvent && event.type === 'qapp:switch')
+      .at(-1)?.[0] as CustomEvent | undefined
     expect(qappSwitchEvent?.detail).toEqual({
       qAppKey: 'matched-qapp',
       workflow: importedWorkflow
