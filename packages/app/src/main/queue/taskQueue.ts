@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { ComfyHistory, Workflow } from '@shared/comfy/types'
+import { ComfyHistory, Workflow, WorkflowInputValue } from '@shared/comfy/types'
 import { QueueManager, QueueSource } from '../utils/queueManager'
 import { COMFY_PROCESS_TRANSPORT_CLIENT_ID, ComfyHttpCli } from '../comfy/http'
 import { waitPromptId } from '../comfy/logic'
@@ -9,6 +9,8 @@ import { deepCopy, JsonDict, JsonValue } from '@shared/utils/utilTypes'
 import { isComfyPostError } from '../comfy/error'
 import { isTaskResultError, TaskResultError } from './taskError'
 import { isPromptError } from '@shared/comfy/error'
+import { parseDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
+import { fileItemToValue } from '@shared/comfy/funcs'
 import { readTestUiEnv, resolveTestArtifactPath, resolveTestUiPolicy } from '../testUiPolicy'
 
 export type Task = {
@@ -64,6 +66,68 @@ const resolveComfyFailureArchiveDir = (runId: string): string =>
     policy: testUiPolicy,
     segments: ['comfyui', 'failures', sanitizeComfyFailureId(runId)]
   })
+
+const dataUrlToUint8Array = (dataUrl: string): Uint8Array => {
+  const commaIndex = dataUrl.indexOf(',')
+  if (commaIndex < 0) {
+    throw new Error('invalid deferred Comfy image data')
+  }
+
+  const metadata = dataUrl.slice(0, commaIndex)
+  const payload = dataUrl.slice(commaIndex + 1)
+  return metadata.includes(';base64')
+    ? new Uint8Array(Buffer.from(payload, 'base64'))
+    : new Uint8Array(Buffer.from(decodeURIComponent(payload), 'utf8'))
+}
+
+const uploadDeferredComfyImagesInWorkflow = async (
+  workflow: Workflow,
+  cli: ComfyHttpCli
+): Promise<Workflow> => {
+  const uploadedValueByDeferredValue = new Map<string, string>()
+  let hasDeferredImages = false
+
+  for (const node of Object.values(workflow)) {
+    for (const value of Object.values(node.inputs)) {
+      if (parseDeferredComfyImageInputValue(value)) {
+        hasDeferredImages = true
+        break
+      }
+    }
+    if (hasDeferredImages) break
+  }
+
+  if (!hasDeferredImages) {
+    return workflow
+  }
+
+  const nextWorkflow = deepCopy(workflow as JsonValue) as Workflow
+  for (const node of Object.values(nextWorkflow)) {
+    for (const [inputName, inputValue] of Object.entries(node.inputs)) {
+      if (typeof inputValue !== 'string') {
+        continue
+      }
+
+      const deferredImage = parseDeferredComfyImageInputValue(inputValue)
+      if (!deferredImage) {
+        continue
+      }
+
+      let uploadedValue = uploadedValueByDeferredValue.get(inputValue)
+      if (!uploadedValue) {
+        const uploadedFile = await cli.uploadImage(
+          { filename: deferredImage.fileName, type: 'input' },
+          dataUrlToUint8Array(deferredImage.dataUrl)
+        )
+        uploadedValue = fileItemToValue(uploadedFile)
+        uploadedValueByDeferredValue.set(inputValue, uploadedValue)
+      }
+      node.inputs[inputName] = uploadedValue as WorkflowInputValue
+    }
+  }
+
+  return nextWorkflow
+}
 
 const serializeErrorForArchive = (error: unknown) => {
   if (error instanceof Error) {
@@ -356,8 +420,10 @@ async function executeTask(task: Task): Promise<Task> {
   try {
     console.log(`[TaskQueue] ${task.id} processing task:`, summarizeTaskForLog(task))
     const cli = new ComfyHttpCli()
+    const promptPayload = await uploadDeferredComfyImagesInWorkflow(task.payload, cli)
+    task.payload = promptPayload
     const res = await cli.prompt({
-      prompt: task.payload,
+      prompt: promptPayload,
       // Keep a single ComfyUI transport client so the shared main-process
       // WebSocket listener continues to receive task progress events.
       client_id: COMFY_PROCESS_TRANSPORT_CLIENT_ID,

@@ -25,6 +25,7 @@ vi.mock('@renderer/utils/windowUtils', () => ({
 }))
 
 import InputComfyImage from './InputComfyImage'
+import { parseDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
 
 const notifyErrorMock = vi.fn()
 const notifySuccessMock = vi.fn()
@@ -87,6 +88,46 @@ describe('InputComfyImage', () => {
     expect(notifyErrorMock.mock.calls[0][0]).toContain('图片输入')
     expect(notifyErrorMock.mock.calls[0][0]).toContain('.docx')
     expect(notifyErrorMock.mock.calls[0][0]).toContain('.txt')
+  })
+
+  it('accepts local images without uploading to ComfyUI and shows a local preview', async () => {
+    const onChange = vi.fn()
+
+    render(
+      <InputComfyImage
+        label="Quick App Image"
+        value=""
+        onChange={onChange}
+        placeholder="Drop an image"
+      />
+    )
+
+    const dropZone = screen.getByText('Drop an image').closest('[tabindex="0"]')
+    expect(dropZone).toBeTruthy()
+
+    const file = new File(['local-image-bytes'], 'folder-photo.png', { type: 'image/png' })
+    fireEvent.drop(dropZone as Element, {
+      dataTransfer: createDataTransfer({}, [file])
+    })
+
+    await waitFor(() => {
+      expect(onChange).toHaveBeenCalledTimes(1)
+    })
+
+    const nextValue = onChange.mock.calls[0][0] as string
+    const deferredImage = parseDeferredComfyImageInputValue(nextValue)
+    expect(deferredImage).toMatchObject({
+      fileName: 'folder-photo.png',
+      mimeType: 'image/png',
+      sizeBytes: file.size
+    })
+    expect(deferredImage?.dataUrl).toMatch(/^data:image\/png;base64,/)
+    expect(apiMocks.uploadImage).not.toHaveBeenCalled()
+    expect(apiMocks.getView).not.toHaveBeenCalled()
+    expect(notifyErrorMock).not.toHaveBeenCalled()
+
+    const preview = await screen.findByRole('img', { name: 'folder-photo.png' })
+    expect(preview).toHaveAttribute('src', deferredImage?.dataUrl)
   })
 
   it('rejects unsupported internal canvas nodes with a clear error from the Quick App image-input path', async () => {

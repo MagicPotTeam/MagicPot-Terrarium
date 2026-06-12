@@ -83,10 +83,19 @@ const IMAGE_EXTENSIONS_TO_MIME: Record<string, string> = {
   '.svg': 'image/svg+xml'
 }
 
+const getImageMimeTypeFromFileName = (fileName: string): string | null => {
+  const lowerName = fileName.trim().toLowerCase()
+  const extension = Object.keys(IMAGE_EXTENSIONS_TO_MIME).find((ext) => lowerName.endsWith(ext))
+  return extension ? IMAGE_EXTENSIONS_TO_MIME[extension] : null
+}
+
 const isSupportedImageDropFile = (
   file: Pick<File, 'name' | 'type'>,
   options?: ImageDropOptions
-): boolean => file.type.startsWith('image/') && (options?.allowSvg || file.type !== 'image/svg+xml')
+): boolean => {
+  const mimeType = file.type || getImageMimeTypeFromFileName(file.name) || ''
+  return mimeType.startsWith('image/') && (options?.allowSvg || mimeType !== 'image/svg+xml')
+}
 
 const describeDroppedImageFile = (file: Pick<File, 'name' | 'type'>): string => {
   const trimmedName = file.name.trim()
@@ -481,11 +490,8 @@ const decodeLocalImagePath = (url: string): string | null => {
   return null
 }
 
-const inferMimeTypeFromFileName = (fileName: string): string => {
-  const lowerName = fileName.toLowerCase()
-  const extension = Object.keys(IMAGE_EXTENSIONS_TO_MIME).find((ext) => lowerName.endsWith(ext))
-  return (extension && IMAGE_EXTENSIONS_TO_MIME[extension]) || 'image/png'
-}
+const inferMimeTypeFromFileName = (fileName: string): string =>
+  getImageMimeTypeFromFileName(fileName) || 'image/png'
 
 const inferFileNameFromUrl = (url: string, fallback: string): string => {
   if (url.startsWith('data:')) {
