@@ -80,15 +80,38 @@ const dataUrlToUint8Array = (dataUrl: string): Uint8Array => {
     : new Uint8Array(Buffer.from(decodeURIComponent(payload), 'utf8'))
 }
 
+type DeferredComfyImageUploadResult = {
+  /** Workflow submitted to ComfyUI. Deferred image values are replaced by uploaded file names. */
+  promptWorkflow: Workflow
+  /** Workflow kept in MagicPot history. Deferred values preserve the original dropped/loaded images. */
+  historyWorkflow: Workflow
+}
+
+const getWorkflowNodeInputs = (node: unknown): Record<string, WorkflowInputValue> | null => {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) {
+    return null
+  }
+
+  const inputs = (node as { inputs?: unknown }).inputs
+  if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) {
+    return null
+  }
+
+  return inputs as Record<string, WorkflowInputValue>
+}
+
 const uploadDeferredComfyImagesInWorkflow = async (
   workflow: Workflow,
   cli: ComfyHttpCli
-): Promise<Workflow> => {
+): Promise<DeferredComfyImageUploadResult> => {
   const uploadedValueByDeferredValue = new Map<string, string>()
   let hasDeferredImages = false
 
   for (const node of Object.values(workflow)) {
-    for (const value of Object.values(node.inputs)) {
+    const inputs = getWorkflowNodeInputs(node)
+    if (!inputs) continue
+
+    for (const value of Object.values(inputs)) {
       if (parseDeferredComfyImageInputValue(value)) {
         hasDeferredImages = true
         break
@@ -98,12 +121,18 @@ const uploadDeferredComfyImagesInWorkflow = async (
   }
 
   if (!hasDeferredImages) {
-    return workflow
+    return {
+      promptWorkflow: workflow,
+      historyWorkflow: workflow
+    }
   }
 
   const nextWorkflow = deepCopy(workflow as JsonValue) as Workflow
   for (const node of Object.values(nextWorkflow)) {
-    for (const [inputName, inputValue] of Object.entries(node.inputs)) {
+    const inputs = getWorkflowNodeInputs(node)
+    if (!inputs) continue
+
+    for (const [inputName, inputValue] of Object.entries(inputs)) {
       if (typeof inputValue !== 'string') {
         continue
       }
@@ -122,11 +151,14 @@ const uploadDeferredComfyImagesInWorkflow = async (
         uploadedValue = fileItemToValue(uploadedFile)
         uploadedValueByDeferredValue.set(inputValue, uploadedValue)
       }
-      node.inputs[inputName] = uploadedValue as WorkflowInputValue
+      inputs[inputName] = uploadedValue as WorkflowInputValue
     }
   }
 
-  return nextWorkflow
+  return {
+    promptWorkflow: nextWorkflow,
+    historyWorkflow: deepCopy(workflow as JsonValue) as Workflow
+  }
 }
 
 const serializeErrorForArchive = (error: unknown) => {
@@ -197,13 +229,17 @@ class TaskCancelledError extends Error {
 const isTaskCancelledError = (error: unknown): boolean =>
   error instanceof Error && (error.name === 'AbortError' || /cancelled/i.test(error.message))
 
-function rewriteTaskResultPromptMeta(task: Task, result: ComfyHistory): ComfyHistory {
+function rewriteTaskResultPromptMeta(
+  task: Task,
+  result: ComfyHistory,
+  historyWorkflow: Workflow = result.prompt[2]
+): ComfyHistory {
   return {
     ...result,
     prompt: [
       result.prompt[0],
       result.prompt[1],
-      result.prompt[2],
+      historyWorkflow,
       {
         ...(result.prompt[3] || {}),
         client_id: task.client_id,
@@ -420,10 +456,13 @@ async function executeTask(task: Task): Promise<Task> {
   try {
     console.log(`[TaskQueue] ${task.id} processing task:`, summarizeTaskForLog(task))
     const cli = new ComfyHttpCli()
-    const promptPayload = await uploadDeferredComfyImagesInWorkflow(task.payload, cli)
-    task.payload = promptPayload
+    const { promptWorkflow, historyWorkflow } = await uploadDeferredComfyImagesInWorkflow(
+      task.payload,
+      cli
+    )
+    task.payload = promptWorkflow
     const res = await cli.prompt({
-      prompt: promptPayload,
+      prompt: promptWorkflow,
       // Keep a single ComfyUI transport client so the shared main-process
       // WebSocket listener continues to receive task progress events.
       client_id: COMFY_PROCESS_TRANSPORT_CLIENT_ID,
@@ -447,7 +486,7 @@ async function executeTask(task: Task): Promise<Task> {
       throw new TaskCancelledError(`Task ${task.id} was cancelled during execution`)
     }
 
-    const normalizedResult = rewriteTaskResultPromptMeta(task, result)
+    const normalizedResult = rewriteTaskResultPromptMeta(task, result, historyWorkflow)
 
     console.log(`[TaskQueue] ${task.id} result:`, summarizeTaskResultForLog(normalizedResult))
     if (isTaskResultError(normalizedResult)) {

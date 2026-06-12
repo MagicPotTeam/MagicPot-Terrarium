@@ -6,6 +6,7 @@ import { QAppCfg, QAppCfgInput } from '@shared/qApp/cfgTypes'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { getJsonPath } from '@shared/utils/jsonPath'
 import { valueToFileItem, fileItemToValue } from '@shared/comfy/funcs'
+import { parseDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
 import { JsonDict } from '@shared/utils/utilTypes'
 import {
   clearPendingQAppTaskPack,
@@ -365,53 +366,56 @@ export const QAppContextProvider = ({
                   typeof value
                 )
 
-                // 如果值是字符串（文件名），尝试从ComfyUI获取图片并重新上传
+                // 如果值是字符串（文件名或延迟图片），设置到表单中。
+                // 延迟图片值包含原始图像数据，可直接恢复拖拽/加载时的图像；普通文件名再尝试从 ComfyUI 取回并重新上传。
                 if (typeof value === 'string' && value.trim()) {
-                  // 先设置原值，确保图片能立即显示
+                  const deferredImage = parseDeferredComfyImageInputValue(value)
                   console.log(`[fillParamsFromWorkflow] 设置图片原值 ${inputCfg.slot}:`, value)
                   setFormStateValue(inputCfg.slot, value)
 
-                  // 然后异步尝试重新上传图片
-                  ;(async () => {
-                    try {
-                      const fileItem = valueToFileItem(value)
-                      console.log(`[fillParamsFromWorkflow] 尝试从ComfyUI获取图片:`, fileItem)
+                  if (!deferredImage) {
+                    // 然后异步尝试重新上传图片
+                    ;(async () => {
+                      try {
+                        const fileItem = valueToFileItem(value)
+                        console.log(`[fillParamsFromWorkflow] 尝试从ComfyUI获取图片:`, fileItem)
 
-                      // 从ComfyUI获取图片数据
-                      const viewRes = await api().svcComfy.getView(fileItem)
-                      const imageBytes = viewRes.result
+                        // 从ComfyUI获取图片数据
+                        const viewRes = await api().svcComfy.getView(fileItem)
+                        const imageBytes = viewRes.result
 
-                      // 将图片数据转换为File对象
-                      const blob = new Blob([imageBytes as BlobPart], { type: 'image/png' })
-                      const file = new File([blob], fileItem.filename || 'image.png', {
-                        type: 'image/png'
-                      })
+                        // 将图片数据转换为File对象
+                        const blob = new Blob([imageBytes as BlobPart], { type: 'image/png' })
+                        const file = new File([blob], fileItem.filename || 'image.png', {
+                          type: 'image/png'
+                        })
 
-                      // 上传图片到ComfyUI
-                      const arrayBuffer = await file.arrayBuffer()
-                      const uint8 = new Uint8Array(arrayBuffer)
-                      const uploadRes = await api().svcComfy.uploadImage({
-                        fileItem: { filename: file.name, type: 'input' },
-                        image: uint8
-                      })
+                        // 上传图片到ComfyUI
+                        const arrayBuffer = await file.arrayBuffer()
+                        const uint8 = new Uint8Array(arrayBuffer)
+                        const uploadRes = await api().svcComfy.uploadImage({
+                          fileItem: { filename: file.name, type: 'input' },
+                          image: uint8
+                        })
 
-                      if (uploadRes.filename) {
-                        // 使用新上传的图片值
-                        const newValue = fileItemToValue(uploadRes)
-                        console.log(
-                          `[fillParamsFromWorkflow] 图片上传成功，更新值 ${inputCfg.slot}:`,
-                          newValue
+                        if (uploadRes.filename) {
+                          // 使用新上传的图片值
+                          const newValue = fileItemToValue(uploadRes)
+                          console.log(
+                            `[fillParamsFromWorkflow] 图片上传成功，更新值 ${inputCfg.slot}:`,
+                            newValue
+                          )
+                          setFormStateValue(inputCfg.slot, newValue)
+                        }
+                      } catch (error) {
+                        // 如果获取或上传失败，保持原值不变（已经在上面设置了）
+                        console.warn(
+                          `[fillParamsFromWorkflow] 无法重新上传图片 ${inputCfg.slot}:`,
+                          error
                         )
-                        setFormStateValue(inputCfg.slot, newValue)
                       }
-                    } catch (error) {
-                      // 如果获取或上传失败，保持原值不变（已经在上面设置了）
-                      console.warn(
-                        `[fillParamsFromWorkflow] 无法重新上传图片 ${inputCfg.slot}:`,
-                        error
-                      )
-                    }
-                  })()
+                    })()
+                  }
                 } else if (Array.isArray(value) && value.length === 2) {
                   // 如果值是数组（节点输出），直接使用原值
                   console.log(

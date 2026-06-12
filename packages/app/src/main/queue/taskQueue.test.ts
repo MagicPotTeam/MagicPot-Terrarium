@@ -160,6 +160,7 @@ describe('taskQueue transport client', () => {
       const [status, task] = taskQueue.getTask(taskId)
       expect(status).toBe('completed')
       expect(task?.payload['1'].inputs.image).toBe('uploaded-input.png')
+      expect(task?.result?.prompt[2]['1'].inputs.image).toBe(deferredImageValue)
     } finally {
       await taskQueue.stopTaskQueue()
     }
