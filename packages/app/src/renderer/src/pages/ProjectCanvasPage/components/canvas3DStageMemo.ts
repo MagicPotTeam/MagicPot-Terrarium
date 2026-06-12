@@ -8,6 +8,7 @@ type Canvas3DStageLikeProps = {
   stageSize: { width: number; height: number }
   sessionKey?: string
   isViewportInteracting?: boolean
+  isPerformanceThrottled?: boolean
   onViewportSyncReady?: unknown
 }
 
@@ -63,6 +64,7 @@ export const areCanvas3DStagePropsEqual = (
   previousProps.stageSize.height === nextProps.stageSize.height &&
   previousProps.sessionKey === nextProps.sessionKey &&
   previousProps.isViewportInteracting === nextProps.isViewportInteracting &&
+  previousProps.isPerformanceThrottled === nextProps.isPerformanceThrottled &&
   previousProps.onViewportSyncReady === nextProps.onViewportSyncReady
 
 export const areCanvas3DStageRenderKickPropsEqual = (

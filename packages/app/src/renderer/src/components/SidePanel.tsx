@@ -46,7 +46,11 @@ import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import { useAppDispatch, useAppSelector } from '../store'
 import { closeSidePanel, openTab, setActiveTab } from '../store/slices/layoutSlice'
 import { PromptTagProvider } from './inputs/PromptTagContext'
-import { QAppContextProvider, useQAppContext } from '../pages/QuickAppPage/components/QAppContext'
+import {
+  QAppContextProvider,
+  dispatchQAppFillParams,
+  useQAppContext
+} from '../pages/QuickAppPage/components/QAppContext'
 import { useQAppRunner as useSharedQAppRunner } from '../pages/QuickAppPage/hooks/useQAppRunner'
 import { ResultItem } from '@shared/qApp/resultTypes'
 import { transformResults } from '../pages/QuickAppPage/ResultList/resultTransformers'
@@ -412,8 +416,8 @@ const getLocalizedFallbackText = (
   return isChineseUi && value === key ? fallback : value
 }
 
-const emitWorkflowFill = (workflow: Workflow): void => {
-  window.dispatchEvent(new CustomEvent('qapp:fillParams', { detail: { workflow } }))
+const emitWorkflowFill = (qAppKey: string, workflow: Workflow): void => {
+  dispatchQAppFillParams({ qAppKey, workflow })
 }
 
 const LoadingFallback: React.FC = () => (
@@ -845,7 +849,7 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
       setCurrentQAppKey(detail.qAppKey)
 
       if (detail.workflow) {
-        emitWorkflowFill(detail.workflow)
+        emitWorkflowFill(detail.qAppKey, detail.workflow)
       }
     }
 

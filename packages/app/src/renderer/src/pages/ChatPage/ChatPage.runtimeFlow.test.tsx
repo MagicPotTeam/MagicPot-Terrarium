@@ -62,7 +62,8 @@ const hoisted = vi.hoisted(() => ({
   chatMessageListMock: vi.fn(),
   notifySuccessMock: vi.fn(),
   notifyErrorMock: vi.fn(),
-  notifyWarningMock: vi.fn()
+  notifyWarningMock: vi.fn(),
+  notifyInfoMock: vi.fn()
 }))
 
 const cloneValue = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -139,7 +140,8 @@ vi.mock('@renderer/hooks/useMessage', () => ({
   useMessage: () => ({
     notifySuccess: hoisted.notifySuccessMock,
     notifyError: hoisted.notifyErrorMock,
-    notifyWarning: hoisted.notifyWarningMock
+    notifyWarning: hoisted.notifyWarningMock,
+    notifyInfo: hoisted.notifyInfoMock
   })
 }))
 
@@ -375,7 +377,11 @@ vi.mock('./components/ChatComposer', () => ({
     pendingAttachments,
     selectedSkillName,
     modelSelectorSlot,
-    inputSyncKey
+    inputSyncKey,
+    onCompressContext,
+    onClearContext,
+    disableCompressContext,
+    disableClearContext
   }: {
     inputValue: string
     onInputChange: (value: string) => void
@@ -385,6 +391,10 @@ vi.mock('./components/ChatComposer', () => ({
     selectedSkillName?: string
     modelSelectorSlot?: React.ReactNode
     inputSyncKey?: string
+    onCompressContext?: () => void
+    onClearContext?: () => void
+    disableCompressContext?: boolean
+    disableClearContext?: boolean
   }) {
     const [draftValue, setDraftValue] = React.useState(inputValue)
 
@@ -405,6 +415,22 @@ vi.mock('./components/ChatComposer', () => ({
         />
         <button type="button" data-testid="chat-composer-upload-mock" onClick={onUploadFile}>
           upload
+        </button>
+        <button
+          type="button"
+          data-testid="chat-composer-compress-context-mock"
+          onClick={onCompressContext}
+          disabled={disableCompressContext}
+        >
+          compress-context
+        </button>
+        <button
+          type="button"
+          data-testid="chat-composer-clear-context-mock"
+          onClick={onClearContext}
+          disabled={disableClearContext}
+        >
+          clear-context
         </button>
         <button type="button" data-testid="chat-composer-send-mock" onClick={onSend}>
           send
@@ -607,6 +633,7 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.notifySuccessMock.mockReset()
     hoisted.notifyErrorMock.mockReset()
     hoisted.notifyWarningMock.mockReset()
+    hoisted.notifyInfoMock.mockReset()
     hoisted.resolveAttachmentBatchCapabilityMock.mockReset()
     hoisted.resolveAttachmentBatchCapabilityMock.mockResolvedValue(1)
     hoisted.requestChatCompletionMock.mockReset()
@@ -687,6 +714,105 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => {
       expect(hoisted.chatMessageListMock).toHaveBeenCalled()
     })
+  })
+
+  it('renders model and reasoning controls above the message list', async () => {
+    renderChatPage()
+
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    const topControls = screen.getByTestId('chat-top-context-controls')
+    const composer = screen.getByTestId('chat-composer-mock')
+
+    expect(within(topControls).getByTestId('chat-primary-selection-mock')).toBeInTheDocument()
+    expect(within(composer).queryByTestId('chat-primary-selection-mock')).toBeNull()
+  })
+
+  it('compresses and clears the current chat context from composer controls', async () => {
+    const longSession: ChatSession = {
+      id: 'long-session',
+      title: 'Long session',
+      messages: Array.from({ length: 12 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `message ${index + 1}`
+      }))
+    }
+    hoisted.storedSessions.value = [longSession]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      longSession.id
+    )
+
+    renderChatPage()
+
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(longSession.id))
+    const compressButton = screen.getByTestId('chat-composer-compress-context-mock')
+    expect(compressButton).not.toBeDisabled()
+
+    fireEvent.click(compressButton)
+
+    await waitFor(() => {
+      const currentSession = readCurrentSessionState()
+      expect(currentSession?.messages).toHaveLength(8)
+      expect(currentSession?.messages[0]?.content).toBe('message 5')
+      expect(currentSession?.contextCompression?.summary).toContain('message 1')
+      expect(currentSession?.contextCompression?.manual).toBe(true)
+    })
+    expect(hoisted.notifySuccessMock).toHaveBeenCalledWith('Context compressed.')
+
+    const clearButton = screen.getByTestId('chat-composer-clear-context-mock')
+    fireEvent.click(clearButton)
+
+    await waitFor(() => {
+      const currentSession = readCurrentSessionState()
+      expect(currentSession?.messages).toEqual([])
+      expect(currentSession?.contextCompression).toBeUndefined()
+    })
+    expect(hoisted.notifySuccessMock).toHaveBeenCalledWith('Context cleared.')
+  })
+
+  it('sends manual compressed context with the next request', async () => {
+    const compressedSession: ChatSession = {
+      id: 'compressed-session',
+      title: 'Compressed session',
+      messages: [
+        { role: 'user', content: 'recent question' },
+        { role: 'assistant', content: 'recent answer' }
+      ],
+      contextCompression: {
+        summary: 'manual summary context',
+        coveredMessageCount: 4,
+        sourceHash: 'manual-hash',
+        estimatedSourceTokens: 120,
+        estimatedSummaryTokens: 8,
+        updatedAt: Date.now(),
+        manual: true
+      }
+    }
+    hoisted.storedSessions.value = [compressedSession]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      compressedSession.id
+    )
+
+    renderChatPage()
+
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(compressedSession.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'continue with compressed context' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const messages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]?.messages as
+      | Array<{ role?: string; content?: string; hiddenContext?: string }>
+      | undefined
+    expect(messages?.[messages.length - 1]).toEqual(
+      expect.objectContaining({
+        role: 'user',
+        content: 'continue with compressed context',
+        hiddenContext: expect.stringContaining('manual summary context')
+      })
+    )
   })
 
   it('sends the latest composer ref before the delayed input state commit', async () => {

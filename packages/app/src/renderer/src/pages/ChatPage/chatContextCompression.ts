@@ -9,6 +9,7 @@ export type ChatContextCompressionSummary = {
   estimatedSourceTokens: number
   estimatedSummaryTokens: number
   updatedAt: number
+  manual?: boolean
 }
 
 export type ChatContextCompressionPlan = {

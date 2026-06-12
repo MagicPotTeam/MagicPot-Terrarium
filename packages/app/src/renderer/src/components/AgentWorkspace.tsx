@@ -73,6 +73,7 @@ const PREVIEW_REFRESH_EVENTS = [
 ] as const
 
 const DEFAULT_PANES: AgentPane[] = [{ id: 'agent-1', enabled: true }]
+const CHAT_PAGE_DEFER_MOUNT_DELAY_MS = 16
 
 const buildWorkspaceStorageKey = (projectId: string): string => `agent.workspace.${projectId}`
 const buildActivePaneStorageKey = (projectId: string): string =>
@@ -329,6 +330,27 @@ const PaneStatusIndicator: React.FC<{ status?: PanePreviewStatus }> = ({ status 
   )
 }
 
+const AgentPaneLoadingFallback: React.FC<{ label: string }> = ({ label }) => (
+  <Box
+    data-testid="agent-workspace-pane-loading"
+    sx={{
+      height: '100%',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flexDirection: 'column',
+      gap: 1.2,
+      color: 'text.secondary',
+      backgroundColor: 'background.default'
+    }}
+  >
+    <CircularProgress size={22} thickness={4} />
+    <Typography variant="caption" sx={{ fontWeight: 600 }}>
+      {label}
+    </Typography>
+  </Box>
+)
+
 type PaneListItemProps = {
   index: number
   pane: AgentPane
@@ -522,6 +544,35 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   const previewRefreshSequenceRef = useRef(0)
   const openPanes = useMemo(() => getOpenPanes(panes), [panes])
   const workspaceStrings = useMemo(() => createAgentWorkspaceStrings(t), [t])
+  const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? openPanes[0] ?? null
+  const activePaneScope = activePane ? buildAgentPaneScope(projectId, activePane.id) : null
+  const [mountedPaneScopes, setMountedPaneScopes] = useState<Set<string>>(() => new Set())
+
+  useEffect(() => {
+    if (!activePaneScope || mountedPaneScopes.has(activePaneScope)) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      setMountedPaneScopes((prev) => {
+        if (prev.has(activePaneScope)) return prev
+        return new Set([...prev, activePaneScope])
+      })
+    }, CHAT_PAGE_DEFER_MOUNT_DELAY_MS)
+
+    return () => window.clearTimeout(timer)
+  }, [activePaneScope, mountedPaneScopes])
+
+  useEffect(() => {
+    setMountedPaneScopes((prev) => {
+      const openPaneScopes = new Set(
+        openPanes.map((pane) => buildAgentPaneScope(projectId, pane.id))
+      )
+      const next = new Set(Array.from(prev).filter((scope) => openPaneScopes.has(scope)))
+      if (next.size === prev.size && Array.from(next).every((scope) => prev.has(scope))) return prev
+      return next
+    })
+  }, [openPanes, projectId])
 
   useEffect(() => {
     const nextPanes = readStoredPanes(storageKey)
@@ -701,8 +752,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
       }
     }
   }, [openPanes, projectId, workspaceStrings])
-
-  const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? openPanes[0] ?? null
 
   const handleRemovePane = (paneId: string) => {
     const remainingOpenPanes = openPanes.filter((pane) => pane.id !== paneId)
@@ -976,9 +1025,16 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
           activePane ? buildAgentPaneScope(projectId, activePane.id) : undefined
         }
       >
+        {activePane && activePaneScope && !mountedPaneScopes.has(activePaneScope) ? (
+          <AgentPaneLoadingFallback
+            label={t('agent_workspace.loading_chat', { defaultValue: 'Loading chat...' })}
+          />
+        ) : null}
         {openPanes.map((pane) => {
           const scope = buildAgentPaneScope(projectId, pane.id)
           const isActivePane = activePane?.id === pane.id
+          const shouldMountPane = mountedPaneScopes.has(scope)
+          if (!shouldMountPane) return null
 
           return (
             <Box

@@ -187,6 +187,11 @@ import { useCanvasImageExtract } from './useCanvasImageExtract'
 import { useMessage } from '../../hooks/useMessage'
 import { useConfig } from '../../hooks/useConfig'
 import { api } from '../../utils/windowUtils'
+import {
+  COMFY_EXECUTION_ACTIVITY_CHANGE_EVENT,
+  getComfyExecutionActivitySnapshot,
+  type ComfyExecutionActivitySnapshot
+} from '../../utils/comfyExecutionActivity'
 import { useDispatch, useSelector } from 'react-redux'
 import { openRightPanel, openSidePanel } from '../../store/slices/layoutSlice'
 import { useTranslation } from 'react-i18next'
@@ -505,6 +510,29 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     const tab = state.layout.openTabs.find((t: any) => t.id === canvasId)
     return tab?.label || 'Project'
   })
+  const [comfyExecutionActivity, setComfyExecutionActivity] =
+    useState<ComfyExecutionActivitySnapshot>(() => getComfyExecutionActivitySnapshot())
+  const isCanvasPerformanceThrottled = comfyExecutionActivity.active
+
+  useEffect(() => {
+    const handleComfyExecutionActivityChange = (event: Event) => {
+      const detail = (event as CustomEvent<ComfyExecutionActivitySnapshot>).detail
+      setComfyExecutionActivity(detail ?? getComfyExecutionActivitySnapshot())
+    }
+
+    window.addEventListener(
+      COMFY_EXECUTION_ACTIVITY_CHANGE_EVENT,
+      handleComfyExecutionActivityChange
+    )
+    setComfyExecutionActivity(getComfyExecutionActivitySnapshot())
+
+    return () => {
+      window.removeEventListener(
+        COMFY_EXECUTION_ACTIVITY_CHANGE_EVENT,
+        handleComfyExecutionActivityChange
+      )
+    }
+  }, [])
 
   const {
     activeOcrHover,
@@ -2013,6 +2041,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     isLightCanvasTheme,
     isMiddleMouseRef,
     isViewportInteracting,
+    isCanvasPerformanceThrottled,
     suppressSelectionChromeAfterMarquee,
     itemIdSet,
     items,

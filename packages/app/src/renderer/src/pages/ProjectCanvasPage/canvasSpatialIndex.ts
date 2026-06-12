@@ -1,4 +1,9 @@
 import type { CanvasItem } from './types'
+import {
+  createCanvasSpatialIndexAccelerator,
+  shouldAttemptCanvasSpatialIndexAcceleration,
+  type CanvasSpatialIndexAccelerator
+} from './canvasSpatialIndexAccelerator'
 
 export type CanvasSpatialBounds = {
   minX: number
@@ -17,11 +22,13 @@ export type CanvasSpatialIndex<T> = {
   entries: Array<CanvasSpatialIndexEntry<T>>
   cells: Map<string, number[]>
   overflowEntryIndexes: number[]
+  accelerator?: CanvasSpatialIndexAccelerator | null
 }
 
 export const CANVAS_SPATIAL_INDEX_CELL_SIZE = 512
 export const CANVAS_SPATIAL_INDEX_MAX_INDEXED_CELLS_PER_ENTRY = 4096
 export const CANVAS_SPATIAL_INDEX_MAX_QUERY_CELLS = 16384
+const CANVAS_SPATIAL_INDEX_BOUNDS_STRIDE = 4
 
 type CanvasSpatialCellRange = {
   minCellX: number
@@ -158,11 +165,59 @@ export function buildCanvasSpatialIndex<T>(
     })
   })
 
+  let accelerator: CanvasSpatialIndexAccelerator | null = null
+  if (shouldAttemptCanvasSpatialIndexAcceleration(entries.length)) {
+    const flattenedBounds = new Float64Array(entries.length * CANVAS_SPATIAL_INDEX_BOUNDS_STRIDE)
+    entries.forEach((entry, entryIndex) => {
+      const offset = entryIndex * CANVAS_SPATIAL_INDEX_BOUNDS_STRIDE
+      flattenedBounds[offset] = entry.bounds.minX
+      flattenedBounds[offset + 1] = entry.bounds.minY
+      flattenedBounds[offset + 2] = entry.bounds.maxX
+      flattenedBounds[offset + 3] = entry.bounds.maxY
+    })
+    accelerator = createCanvasSpatialIndexAccelerator(flattenedBounds, {
+      cellSize,
+      maxIndexedCellsPerEntry: CANVAS_SPATIAL_INDEX_MAX_INDEXED_CELLS_PER_ENTRY,
+      maxQueryCells: CANVAS_SPATIAL_INDEX_MAX_QUERY_CELLS
+    })
+  }
+
   return {
     cellSize,
     entries,
     cells,
-    overflowEntryIndexes
+    overflowEntryIndexes,
+    accelerator
+  }
+}
+
+function queryCanvasSpatialIndexAccelerator<T>(
+  index: CanvasSpatialIndex<T>,
+  normalizedQueryBounds: CanvasSpatialBounds
+): T[] | null {
+  if (!index.accelerator) {
+    return null
+  }
+
+  try {
+    const candidateIndexes = index.accelerator.queryIndexes(normalizedQueryBounds)
+    if (!candidateIndexes) {
+      return null
+    }
+
+    const matches: T[] = []
+    for (const entryIndex of candidateIndexes) {
+      const entry = index.entries[entryIndex]
+      if (!entry) {
+        return null
+      }
+      if (doCanvasSpatialBoundsIntersect(entry.bounds, normalizedQueryBounds)) {
+        matches.push(entry.item)
+      }
+    }
+    return matches
+  } catch {
+    return null
   }
 }
 
@@ -173,6 +228,11 @@ export function queryCanvasSpatialIndex<T>(
   const normalizedQueryBounds = normalizeCanvasSpatialBounds(queryBounds)
   if (!normalizedQueryBounds) {
     return []
+  }
+
+  const acceleratorMatches = queryCanvasSpatialIndexAccelerator(index, normalizedQueryBounds)
+  if (acceleratorMatches) {
+    return acceleratorMatches
   }
 
   const range = getCanvasSpatialCellRange(normalizedQueryBounds, index.cellSize)

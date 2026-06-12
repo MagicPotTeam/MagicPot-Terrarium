@@ -816,6 +816,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     isFillableAnnotationShape: isFillableAnnotationShapeProp,
     isMiddleMouseRef,
     isViewportInteracting = false,
+    isCanvasPerformanceThrottled = false,
     lastClickedIdRef,
     dragContextRef,
     onLiveMultiSelectionBoundsChange,
@@ -967,7 +968,11 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const [webglMetrics, setWebglMetrics] =
     React.useState<ProjectCanvasWebGLImageLayerMetrics | null>(null)
   const webglImageLayerRef = React.useRef<ProjectCanvasWebGLImageLayerHandle | null>(null)
+  const isCanvasPerformanceThrottledRef = React.useRef(isCanvasPerformanceThrottled)
   const isViewportInteractionActiveRef = React.useRef(isViewportInteracting)
+  const isWebglRuntimeStateDeferredRef = React.useRef(
+    isViewportInteracting || isCanvasPerformanceThrottled
+  )
   const pendingWebglRuntimeStateRef = React.useRef(
     createProjectCanvasWebGLPendingRuntimeState<ProjectCanvasWebGLImageLayerMetrics>()
   )
@@ -1020,7 +1025,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
   }, [commitWebglFailedIds, commitWebglMetrics, commitWebglResidentIds, commitWebglResolvedIds])
   const handleWebglResidentIdsChange = React.useCallback(
     (residentIds: Set<string>) => {
-      if (isViewportInteractionActiveRef.current) {
+      if (isWebglRuntimeStateDeferredRef.current) {
         pendingWebglRuntimeStateRef.current = queueProjectCanvasWebGLPendingRuntimeIds(
           pendingWebglRuntimeStateRef.current,
           'residentIds',
@@ -1035,7 +1040,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
   )
   const handleWebglResolvedIdsChange = React.useCallback(
     (resolvedIds: Set<string>) => {
-      if (isViewportInteractionActiveRef.current) {
+      if (isWebglRuntimeStateDeferredRef.current) {
         pendingWebglRuntimeStateRef.current = queueProjectCanvasWebGLPendingRuntimeIds(
           pendingWebglRuntimeStateRef.current,
           'resolvedIds',
@@ -1050,7 +1055,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
   )
   const handleWebglFailedIdsChange = React.useCallback(
     (failedIds: Set<string>) => {
-      if (isViewportInteractionActiveRef.current) {
+      if (isWebglRuntimeStateDeferredRef.current) {
         pendingWebglRuntimeStateRef.current = queueProjectCanvasWebGLPendingRuntimeIds(
           pendingWebglRuntimeStateRef.current,
           'failedIds',
@@ -1065,7 +1070,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
   )
   const handleWebglMetricsChange = React.useCallback(
     (metrics: ProjectCanvasWebGLImageLayerMetrics) => {
-      if (isViewportInteractionActiveRef.current) {
+      if (isWebglRuntimeStateDeferredRef.current) {
         pendingWebglRuntimeStateRef.current = queueProjectCanvasWebGLPendingRuntimeMetrics(
           pendingWebglRuntimeStateRef.current,
           metrics
@@ -1078,11 +1083,14 @@ export default function ProjectCanvasPageStageScene(props: any) {
     [commitWebglMetrics]
   )
   React.useEffect(() => {
+    isCanvasPerformanceThrottledRef.current = isCanvasPerformanceThrottled
     isViewportInteractionActiveRef.current = isViewportInteracting
-    if (!isViewportInteracting) {
+    const shouldDeferRuntimeState = isViewportInteracting || isCanvasPerformanceThrottled
+    isWebglRuntimeStateDeferredRef.current = shouldDeferRuntimeState
+    if (!shouldDeferRuntimeState) {
       flushPendingWebglRuntimeState()
     }
-  }, [flushPendingWebglRuntimeState, isViewportInteracting])
+  }, [flushPendingWebglRuntimeState, isCanvasPerformanceThrottled, isViewportInteracting])
   React.useEffect(() => {
     if (!registerViewportCallback) {
       return
@@ -1102,11 +1110,12 @@ export default function ProjectCanvasPageStageScene(props: any) {
 
     return registerViewportInteractionCallback((active) => {
       isViewportInteractionActiveRef.current = active
+      isWebglRuntimeStateDeferredRef.current = active || isCanvasPerformanceThrottledRef.current
       const webglImageLayer = webglImageLayerRef.current
       if (typeof webglImageLayer?.setViewportInteracting === 'function') {
         webglImageLayer.setViewportInteracting(active)
       }
-      if (!active) {
+      if (!active && !isCanvasPerformanceThrottledRef.current) {
         flushPendingWebglRuntimeState()
       }
     })
@@ -1191,7 +1200,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     return count
   }, [imageRuntimeRouteById])
   const highResolutionDomImagePreviewItems = React.useMemo(() => {
-    if (isViewportInteracting) {
+    if (isViewportInteracting || isCanvasPerformanceThrottled) {
       return []
     }
 
@@ -1292,6 +1301,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     return budgetedItems
   }, [
     imageRuntimeRouteById,
+    isCanvasPerformanceThrottled,
     isViewportInteracting,
     selectedIds,
     stagePos,
@@ -3020,6 +3030,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
       }
       data-project-canvas-webgl-resident-budget-state={webglResidentBudgetState}
       data-project-canvas-webgl-render-count={webglMetrics?.renderCount ?? 0}
+      data-project-canvas-performance-throttled={String(isCanvasPerformanceThrottled)}
       data-project-canvas-webgl-last-render-duration-ms={
         webglMetrics?.lastRenderDurationMs != null ? String(webglMetrics.lastRenderDurationMs) : ''
       }
@@ -3105,6 +3116,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
             stageScale={stageScale}
             stageSize={stageSize}
             isViewportInteracting={isViewportInteracting}
+            isPerformanceThrottled={isCanvasPerformanceThrottled}
             onReadyChange={setWebglImageLayerReady}
             onResidentIdsChange={handleWebglResidentIdsChange}
             onResolvedIdsChange={handleWebglResolvedIdsChange}

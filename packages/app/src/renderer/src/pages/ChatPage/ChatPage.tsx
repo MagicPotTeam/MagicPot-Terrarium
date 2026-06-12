@@ -61,6 +61,10 @@ import {
 } from './chatPageShared'
 import {
   buildChatContextCompressionPlan,
+  buildExtractiveContextSummary,
+  createContextCompressionSourceHash,
+  estimateChatMessagesTokenCount,
+  estimateTextTokenCount,
   type ChatContextCompressionSummary
 } from './chatContextCompression'
 import type { ChatLoadingStatus } from './chatLoadingStatus'
@@ -667,7 +671,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const isChineseUi = (i18n?.resolvedLanguage || i18n?.language || '').startsWith('zh')
   const theme = useTheme()
   const { config, buildEnv, isReady } = useConfig()
-  const { notifySuccess, notifyError, notifyWarning } = useMessage()
+  const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useMessage()
   const emitPreviewRefresh = useCallback(() => {
     window.dispatchEvent(
       new CustomEvent('chat:preview-refresh', {
@@ -2002,6 +2006,87 @@ const ChatPage: React.FC<ChatPageProps> = ({
       selectedCapabilityProfile
     ]
   )
+  const canCompressCurrentContext = Boolean(currentSession && currentSession.messages.length >= 10)
+  const canClearCurrentContext = Boolean(currentSession && currentSession.messages.length > 0)
+
+  const handleCompressCurrentContext = useCallback(() => {
+    if (!currentSession || currentSession.messages.length < 10) {
+      notifyInfo(
+        t('chat.context_compress_not_enough', {
+          defaultValue: 'There is not enough chat history to compress yet.'
+        })
+      )
+      return
+    }
+
+    const retainRecentMessageCount = 8
+    const messagesToCompress = currentSession.messages.slice(0, -retainRecentMessageCount)
+    const retainedMessages = currentSession.messages.slice(-retainRecentMessageCount)
+    const summary: ChatContextCompressionSummary = {
+      summary: buildExtractiveContextSummary(messagesToCompress),
+      coveredMessageCount: messagesToCompress.length,
+      sourceHash: createContextCompressionSourceHash(messagesToCompress),
+      estimatedSourceTokens: estimateChatMessagesTokenCount(messagesToCompress),
+      estimatedSummaryTokens: 0,
+      updatedAt: Date.now(),
+      manual: true
+    }
+    summary.estimatedSummaryTokens = estimateTextTokenCount(summary.summary)
+
+    const updatedSession: ChatSession = {
+      ...currentSession,
+      messages: retainedMessages,
+      contextCompression: summary,
+      sessionUrl: undefined
+    }
+
+    setSessions((prev) =>
+      prev.map((session) => (session.id === currentSession.id ? updatedSession : session))
+    )
+    skipSaveRef.current = true
+    saveSessionToDB(updatedSession, storageScope).catch((error) => {
+      console.warn('[ChatPage] Failed to save compressed context:', error)
+    })
+    emitPreviewRefresh()
+    notifySuccess(
+      t('chat.context_compressed', {
+        defaultValue: 'Context compressed.'
+      })
+    )
+  }, [currentSession, emitPreviewRefresh, notifyInfo, notifySuccess, setSessions, storageScope, t])
+
+  const handleClearCurrentContext = useCallback(() => {
+    if (!currentSession || currentSession.messages.length === 0) {
+      notifyInfo(
+        t('chat.context_clear_empty', {
+          defaultValue: 'There is no context to clear.'
+        })
+      )
+      return
+    }
+
+    const updatedSession: ChatSession = {
+      ...currentSession,
+      messages: [],
+      contextCompression: undefined,
+      sessionUrl: undefined
+    }
+
+    setSessions((prev) =>
+      prev.map((session) => (session.id === currentSession.id ? updatedSession : session))
+    )
+    skipSaveRef.current = true
+    saveSessionToDB(updatedSession, storageScope).catch((error) => {
+      console.warn('[ChatPage] Failed to clear context:', error)
+    })
+    emitPreviewRefresh()
+    notifySuccess(
+      t('chat.context_cleared', {
+        defaultValue: 'Context cleared.'
+      })
+    )
+  }, [currentSession, emitPreviewRefresh, notifyInfo, notifySuccess, setSessions, storageScope, t])
+
   const contextCompressionStatusSlot = useMemo(() => {
     if (!isAutoContextCompressionAvailable) {
       return undefined
@@ -2154,6 +2239,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     isAutoContextCompressionAvailable,
     t
   ])
+
   const aiImageList = useMemo(() => collectAssistantImageUrls(currentSession), [currentSession])
 
   const imagePreview = useImagePreview(aiImageList, active)
@@ -3456,6 +3542,71 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [reasoningEffortByProfileId, selectedReasoningProfileKey]
   )
 
+  const chatTopControlSlot = useMemo(
+    () => (
+      <Box
+        data-testid="chat-top-context-controls"
+        sx={{
+          flexShrink: 0,
+          display: 'flex',
+          justifyContent: 'flex-end',
+          alignItems: 'center',
+          gap: 0.75,
+          width: '100%',
+          maxWidth: '900px',
+          mx: 'auto',
+          px: 2,
+          pt: 1,
+          pb: 0.5
+        }}
+      >
+        {contextCompressionStatusSlot ? (
+          <Box data-testid="chat-top-context-status" sx={{ display: 'flex', alignItems: 'center' }}>
+            {contextCompressionStatusSlot}
+          </Box>
+        ) : null}
+        {!isAgentSkillSelected && isImageGenerationSelected ? (
+          <ChatImageGenerationSettings
+            active={active}
+            value={imageGenerationOptions}
+            onChange={setImageGenerationOptions}
+            referenceImageSize={imageGenerationReferenceSize}
+            variant="activeChip"
+          />
+        ) : null}
+        <ChatPrimarySelection
+          active={active}
+          compact={true}
+          isAgentSkillSelected={isAgentSkillSelected}
+          selectedProfileId={selectedProfileId}
+          availableProfiles={availableProfiles}
+          selectedReasoningEffort={selectedReasoningEffort}
+          availableReasoningEfforts={selectedProfileCapabilities.reasoningEfforts}
+          selectedSkillLabel={
+            selectedCustomSkill ? getCustomSkillName(selectedCustomSkill) : t('chat.skill_none')
+          }
+          onSelectProfile={selectProfile}
+          onSelectReasoningEffort={selectReasoningEffort}
+        />
+      </Box>
+    ),
+    [
+      active,
+      availableProfiles,
+      contextCompressionStatusSlot,
+      imageGenerationOptions,
+      imageGenerationReferenceSize,
+      isAgentSkillSelected,
+      isImageGenerationSelected,
+      selectedCustomSkill,
+      selectedProfileId,
+      selectedProfileCapabilities.reasoningEfforts,
+      selectedReasoningEffort,
+      selectProfile,
+      selectReasoningEffort,
+      t
+    ]
+  )
   // ==================== 发送消息 ====================
   const prepareOutgoingUserMessage = useCallback(
     async (content: string, attachments?: ChatAttachment[]): Promise<ChatMessage> => {
@@ -3765,6 +3916,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const buildRequestExecutionState = (requestMessage: ChatMessage) => {
         const requestMessageWithRuntimeContext =
           buildRequestMessageWithRuntimeContext(requestMessage)
+        const existingManualCompressionSummary = latestContextCompressionSummary?.manual
+          ? latestContextCompressionSummary
+          : undefined
         const compressionPlan = buildChatContextCompressionPlan({
           historyMessages,
           requestMessage: requestMessageWithRuntimeContext,
@@ -3773,7 +3927,28 @@ const ChatPage: React.FC<ChatPageProps> = ({
           cachedSummary: latestContextCompressionSummary
         })
 
-        if (isAutoContextCompressionAvailable) {
+        if (isAutoContextCompressionAvailable && compressionPlan.compressionSummary) {
+          latestContextCompressionSummary = existingManualCompressionSummary
+            ? {
+                ...compressionPlan.compressionSummary,
+                summary: mergeHiddenContext(
+                  existingManualCompressionSummary.summary,
+                  compressionPlan.compressionSummary.summary
+                ),
+                coveredMessageCount:
+                  existingManualCompressionSummary.coveredMessageCount +
+                  compressionPlan.compressionSummary.coveredMessageCount,
+                sourceHash: `${existingManualCompressionSummary.sourceHash}:${compressionPlan.compressionSummary.sourceHash}`,
+                estimatedSourceTokens:
+                  existingManualCompressionSummary.estimatedSourceTokens +
+                  compressionPlan.compressionSummary.estimatedSourceTokens,
+                manual: true
+              }
+            : compressionPlan.compressionSummary
+          latestContextCompressionSummary.estimatedSummaryTokens = estimateTextTokenCount(
+            latestContextCompressionSummary.summary
+          )
+        } else if (!existingManualCompressionSummary && isAutoContextCompressionAvailable) {
           latestContextCompressionSummary = compressionPlan.compressionSummary
         }
 
@@ -3796,16 +3971,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
           2
         )
 
-        const requestMessageWithCompressedContext =
-          compressionPlan.shouldCompress && compressionPlan.compressionSummary
-            ? {
-                ...requestMessageWithRuntimeContext,
-                hiddenContext: mergeHiddenContext(
-                  compressionPlan.compressionSummary.summary,
-                  requestMessageWithRuntimeContext.hiddenContext || ''
-                )
-              }
-            : requestMessageWithRuntimeContext
+        const compressionSummaryText = mergeHiddenContext(
+          existingManualCompressionSummary?.summary || '',
+          compressionPlan.shouldCompress ? compressionPlan.compressionSummary?.summary || '' : ''
+        )
+        const requestMessageWithCompressedContext = compressionSummaryText
+          ? {
+              ...requestMessageWithRuntimeContext,
+              hiddenContext: mergeHiddenContext(
+                compressionSummaryText,
+                requestMessageWithRuntimeContext.hiddenContext || ''
+              )
+            }
+          : requestMessageWithRuntimeContext
 
         return {
           compressionPlan,
@@ -4892,6 +5070,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           {/* 消息列表 */}
           {!isSkillPickerOpen ? (
             <>
+              {chatTopControlSlot}
               <ChatMessageList
                 active={active}
                 currentSession={currentSession}
@@ -4947,36 +5126,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 }
                 toolHelpItems={selectedSkillToolHelpItems}
                 onClearSkill={() => handleSelectSkill(null)}
-                statusSlot={contextCompressionStatusSlot}
-                modelSelectorSlot={
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
-                    {!isAgentSkillSelected && isImageGenerationSelected ? (
-                      <ChatImageGenerationSettings
-                        active={active}
-                        value={imageGenerationOptions}
-                        onChange={setImageGenerationOptions}
-                        referenceImageSize={imageGenerationReferenceSize}
-                        variant="activeChip"
-                      />
-                    ) : null}
-                    <ChatPrimarySelection
-                      active={active}
-                      compact={true}
-                      isAgentSkillSelected={isAgentSkillSelected}
-                      selectedProfileId={selectedProfileId}
-                      availableProfiles={availableProfiles}
-                      selectedReasoningEffort={selectedReasoningEffort}
-                      availableReasoningEfforts={selectedProfileCapabilities.reasoningEfforts}
-                      selectedSkillLabel={
-                        selectedCustomSkill
-                          ? getCustomSkillName(selectedCustomSkill)
-                          : t('chat.skill_none')
-                      }
-                      onSelectProfile={selectProfile}
-                      onSelectReasoningEffort={selectReasoningEffort}
-                    />
-                  </Box>
-                }
+                onCompressContext={handleCompressCurrentContext}
+                onClearContext={handleClearCurrentContext}
+                disableCompressContext={!canCompressCurrentContext}
+                disableClearContext={!canClearCurrentContext}
               />
             </>
           ) : (

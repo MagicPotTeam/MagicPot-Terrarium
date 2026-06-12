@@ -830,6 +830,14 @@ describe('droppedImageUtils', () => {
     ).toBeNull()
   })
 
+  it('accepts OS file drops whose image file has an empty MIME type', async () => {
+    const file = new File(['image-bytes'], 'folder-photo.JPG', { type: '' })
+    const dataTransfer = createDataTransfer({}, [file])
+
+    expect(getDroppedImageDropError(dataTransfer)).toBeNull()
+    await expect(getDroppedImageFile(dataTransfer)).resolves.toBe(file)
+  })
+
   it('rejects unsupported files for image-only drops with a specific message', () => {
     const message = getDroppedImageDropError(
       createDataTransfer({}, [

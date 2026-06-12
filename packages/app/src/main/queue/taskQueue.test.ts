@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComfyHistory, Workflow } from '@shared/comfy/types'
+import { encodeDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
 
-const { promptMock, waitPromptIdMock } = vi.hoisted(() => ({
+const { promptMock, uploadImageMock, waitPromptIdMock } = vi.hoisted(() => ({
   promptMock: vi.fn(async (_req: unknown) => ({ prompt_id: 'comfy-prompt-1' })),
+  uploadImageMock: vi.fn(async (_fileItem: unknown, _image: unknown) => ({
+    filename: 'uploaded-input.png',
+    type: 'input'
+  })),
   waitPromptIdMock: vi.fn(
     async (
       _cli: unknown,
@@ -29,6 +34,10 @@ vi.mock('../comfy/http', () => ({
   ComfyHttpCli: class MockComfyHttpCli {
     async prompt(req: unknown) {
       return promptMock(req)
+    }
+
+    async uploadImage(fileItem: unknown, image: unknown) {
+      return uploadImageMock(fileItem, image)
     }
 
     async interrupt() {
@@ -90,6 +99,68 @@ describe('taskQueue transport client', () => {
           created_at: createdAt
         })
       )
+    } finally {
+      await taskQueue.stopTaskQueue()
+    }
+  })
+
+  it('uploads deferred Comfy image inputs before submitting the prompt', async () => {
+    vi.resetModules()
+    const taskQueue = await import('./taskQueue')
+    const deferredImageValue = encodeDeferredComfyImageInputValue({
+      fileName: 'folder-photo.png',
+      mimeType: 'image/png',
+      sizeBytes: 2,
+      dataUrl: 'data:image/png;base64,SGk='
+    })
+    const workflow: Workflow = {
+      '1': {
+        class_type: 'LoadImage',
+        inputs: {
+          image: deferredImageValue,
+          mask: deferredImageValue
+        }
+      }
+    }
+
+    const taskId = taskQueue.addTask({
+      id: '',
+      type: 'comfy_prompt',
+      client_id: 'logical-client',
+      created_at: 1710000000000,
+      prompt_id: null,
+      payload: workflow,
+      result: null
+    })
+
+    try {
+      await taskQueue.initTaskQueue()
+      await vi.advanceTimersByTimeAsync(1000)
+
+      expect(uploadImageMock).toHaveBeenCalledTimes(1)
+      expect(uploadImageMock.mock.calls[0][0]).toEqual({
+        filename: 'folder-photo.png',
+        type: 'input'
+      })
+      expect(Array.from(uploadImageMock.mock.calls[0][1] as Uint8Array)).toEqual([72, 105])
+      expect(promptMock).toHaveBeenCalledWith({
+        prompt: {
+          '1': {
+            class_type: 'LoadImage',
+            inputs: {
+              image: 'uploaded-input.png',
+              mask: 'uploaded-input.png'
+            }
+          }
+        },
+        client_id: 'magicpot-main-test',
+        extra_data: undefined
+      })
+
+      const [status, task] = taskQueue.getTask(taskId)
+      expect(status).toBe('completed')
+      expect(task?.payload['1'].inputs.image).toBe('uploaded-input.png')
+      expect(task?.result?.prompt[2]['1'].inputs.image).toBe(deferredImageValue)
     } finally {
       await taskQueue.stopTaskQueue()
     }

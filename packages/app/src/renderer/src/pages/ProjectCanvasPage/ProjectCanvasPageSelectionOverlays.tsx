@@ -133,6 +133,7 @@ const GROUP_CHIP_MAX_WIDTH = 220
 const GROUP_CHIP_MAX_SCALE = 1.08
 const GROUP_CHIP_MIN_GAP = 6
 const GROUP_CHIP_MIN_SCALE = 0.58
+const GROUP_CHIP_Z_INDEX = 90
 
 function clampGroupChipValue(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
@@ -187,6 +188,18 @@ function resolveDefaultGroupChipLayout(options: {
     x,
     y
   }
+}
+
+function doGroupChipRectsOverlap(
+  left: Pick<GroupChipLayout, 'height' | 'width' | 'x' | 'y'>,
+  right: Pick<GroupChipLayout, 'height' | 'width' | 'x' | 'y'>
+): boolean {
+  return (
+    left.x < right.x + right.width &&
+    left.x + left.width > right.x &&
+    left.y < right.y + right.height &&
+    left.y + left.height > right.y
+  )
 }
 
 function resolveAdaptiveExactGroupChipLayout(options: {
@@ -1010,10 +1023,25 @@ export default function ProjectCanvasPageSelectionOverlays({
         ? SELECTION_TOOLBAR_SIZE_ESTIMATES[currentMultiSelectionLayout.toolbarKind]
         : null
 
-      return exactSelectedLiveGroup?.id === group.id &&
+      const toolbarLayout =
+        currentMultiSelectionLayout && toolbarMetrics
+          ? {
+              height: toolbarMetrics.height,
+              width: toolbarMetrics.width,
+              x:
+                currentMultiSelectionLayout.selectionActionStackPosition.left -
+                toolbarMetrics.width / 2,
+              y: currentMultiSelectionLayout.selectionActionStackPosition.top
+            }
+          : null
+      const shouldAvoidToolbar =
+        exactSelectedLiveGroup?.id === group.id &&
         currentMultiSelectionLayout &&
         toolbarMetrics &&
-        defaultLayout.y <= GROUP_CHIP_MARGIN + 0.5
+        (defaultLayout.y <= GROUP_CHIP_MARGIN + 0.5 ||
+          (toolbarLayout ? doGroupChipRectsOverlap(defaultLayout, toolbarLayout) : false))
+
+      return shouldAvoidToolbar
         ? resolveAdaptiveExactGroupChipLayout({
             defaultLayout,
             toolbarHeight: toolbarMetrics.height,
@@ -1211,7 +1239,7 @@ export default function ProjectCanvasPageSelectionOverlays({
             alignItems: 'center',
             gap: 0.75,
             pointerEvents: 'auto',
-            zIndex: 140
+            zIndex: GROUP_CHIP_Z_INDEX
           }}
           onPointerDownCapture={stopCanvasToolbarPointerPropagation}
           onMouseDownCapture={stopCanvasToolbarPointerPropagation}

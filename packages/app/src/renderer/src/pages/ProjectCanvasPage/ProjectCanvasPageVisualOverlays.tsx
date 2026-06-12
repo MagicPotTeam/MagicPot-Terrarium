@@ -107,6 +107,7 @@ type ProjectCanvasPageVisualOverlaysProps = {
   stageSize: { width: number; height: number }
   itemsLength: number
   isViewportInteracting?: boolean
+  isCanvasPerformanceThrottled?: boolean
   forceRenderAllItemsForExport?: boolean
   onSelectItem: (itemId: string) => void
   onDragOver: (event: ReactDragEvent) => void
@@ -293,6 +294,7 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
   stageSize,
   itemsLength,
   isViewportInteracting = false,
+  isCanvasPerformanceThrottled = false,
   forceRenderAllItemsForExport = false,
   onSelectItem,
   onDragOver,
@@ -414,9 +416,11 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
       renderableVideoCanvasItems.map((renderableItem) => ({
         item: renderableItem.item,
         isVisible: renderableItem.isVisible,
-        mode: renderableItem.videoBudgetMode ?? 'visible-paused'
+        mode: isCanvasPerformanceThrottled
+          ? 'poster-frame'
+          : (renderableItem.videoBudgetMode ?? 'visible-paused')
       })),
-    [renderableVideoCanvasItems]
+    [isCanvasPerformanceThrottled, renderableVideoCanvasItems]
   )
   const videoBudgetSummary = React.useMemo(
     () => summarizeProjectCanvasVideoBudget(budgetedVideoItems),
@@ -643,6 +647,7 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
         data-project-canvas-video-visible-paused-count={videoBudgetSummary.visiblePausedCount}
         data-project-canvas-video-poster-frame-count={videoBudgetSummary.posterFrameCount}
         data-project-canvas-video-unmounted-count={videoBudgetSummary.unmountedCount}
+        data-project-canvas-overlay-performance-throttled={String(isCanvasPerformanceThrottled)}
         style={{
           position: 'absolute',
           left: 0,
@@ -664,6 +669,7 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
           stageSize={stageSize}
           sessionKey={sessionKey}
           isViewportInteracting={isViewportInteracting}
+          isPerformanceThrottled={isCanvasPerformanceThrottled}
           onViewportSyncReady={handleCanvas3DViewportSyncReady}
         />
         <div ref={registerViewportLayer} style={STAGE_VIEWPORT_LAYER_BASE_STYLE}>

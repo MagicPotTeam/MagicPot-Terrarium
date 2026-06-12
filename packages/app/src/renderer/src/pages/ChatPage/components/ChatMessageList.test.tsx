@@ -185,7 +185,7 @@ describe('ChatMessageList text selection and reply actions', () => {
     expect(screen.getByText('This reply has a model label.')).toBeInTheDocument()
   })
 
-  it('copies the assistant reply from the action bar', () => {
+  it('copies the assistant reply from the action bar and shows copied feedback', () => {
     renderChatMessageList({
       id: 'session-copy-reply',
       title: 'Reply copy',
@@ -199,10 +199,12 @@ describe('ChatMessageList text selection and reply actions', () => {
 
     const writeTextMock = vi.mocked(navigator.clipboard.writeText)
 
-    fireEvent.click(screen.getByLabelText('\u590d\u5236\u56de\u7b54'))
+    fireEvent.click(screen.getByLabelText('Copy reply'))
 
     expect(writeTextMock).toHaveBeenCalledWith('Copy this reply.')
-    expect(notifySuccessMock).toHaveBeenCalledWith('\u56de\u7b54\u5df2\u590d\u5236')
+    expect(notifySuccessMock).toHaveBeenCalledWith('Reply copied')
+    expect(screen.getByLabelText('Reply copied')).toBeInTheDocument()
+    expect(screen.getByTestId('copy-done-icon')).toBeInTheDocument()
   })
 
   it('allows resubmitting an edited user message without changing its text', () => {

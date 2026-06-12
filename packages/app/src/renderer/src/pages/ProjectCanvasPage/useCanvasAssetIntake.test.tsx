@@ -455,16 +455,11 @@ describe('useCanvasAssetIntake', () => {
       expect(imageItems).toHaveLength(sources.length)
       expect(new Set(loadedSourceIndexes)).toEqual(
         new Set(
-          Array.from(
-            { length: PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT },
-            (_, index) => index
-          )
+          Array.from({ length: PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT }, (_, index) => index)
         )
       )
       expect(
-        loadedSourceIndexes.every(
-          (index) => index < PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT
-        )
+        loadedSourceIndexes.every((index) => index < PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT)
       ).toBe(true)
       expect(hangingManifestRead).not.toHaveBeenCalled()
       expect(imageItems[PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT].image).toBeInstanceOf(

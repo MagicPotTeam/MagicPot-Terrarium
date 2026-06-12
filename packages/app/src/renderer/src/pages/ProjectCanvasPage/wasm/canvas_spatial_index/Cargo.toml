@@ -1,0 +1,18 @@
+[package]
+name = "magicpot_canvas_spatial_index"
+version = "0.1.0"
+edition = "2021"
+description = "WASM broadphase spatial index accelerator for MagicPot project canvas"
+license = "AGPL-3.0-only"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

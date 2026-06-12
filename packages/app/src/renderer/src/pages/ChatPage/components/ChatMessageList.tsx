@@ -26,7 +26,10 @@ import {
   InsertDriveFile as FileIcon,
   SlideshowOutlined as PowerPointFileIcon
 } from '@mui/icons-material'
-import { ContentCopy as ContentCopyIcon } from '@mui/icons-material'
+import {
+  CheckCircleOutline as CopyDoneIcon,
+  ContentCopy as ContentCopyIcon
+} from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -61,6 +64,7 @@ import {
 } from '@renderer/utils/fileDisplay'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { DccBridgeTarget, isSupportedDccBridgeModelSourceFormat } from '@shared/api/svcDccBridge'
+import type { SxProps, Theme } from '@mui/material/styles'
 
 interface ChatMessageListProps {
   active?: boolean
@@ -92,6 +96,71 @@ export type ChatPendingConfirmation = {
   prompt: string
   confirmLabel: string
   cancelLabel: string
+}
+
+const COPIED_FEEDBACK_DURATION_MS = 1800
+
+const CopiableIconButton: React.FC<{
+  copyLabel: string
+  copiedLabel: string
+  iconSize?: number | string
+  buttonSx?: SxProps<Theme>
+  onCopy: () => void
+}> = ({ copyLabel, copiedLabel, iconSize = 14, buttonSx, onCopy }) => {
+  const [copied, setCopied] = React.useState(false)
+  const [tooltipOpen, setTooltipOpen] = React.useState(false)
+  const timerRef = React.useRef<number | null>(null)
+
+  React.useEffect(
+    () => () => {
+      if (timerRef.current) {
+        window.clearTimeout(timerRef.current)
+      }
+    },
+    []
+  )
+
+  const handleClick = React.useCallback(() => {
+    onCopy()
+    setCopied(true)
+    setTooltipOpen(true)
+    if (timerRef.current) {
+      window.clearTimeout(timerRef.current)
+    }
+    timerRef.current = window.setTimeout(() => {
+      setCopied(false)
+      setTooltipOpen(false)
+      timerRef.current = null
+    }, COPIED_FEEDBACK_DURATION_MS)
+  }, [onCopy])
+
+  return (
+    <Tooltip
+      title={copied ? copiedLabel : copyLabel}
+      placement="top"
+      open={tooltipOpen}
+      onOpen={() => setTooltipOpen(true)}
+      onClose={() => {
+        if (!copied) {
+          setTooltipOpen(false)
+        }
+      }}
+    >
+      <IconButton
+        size="small"
+        aria-label={copied ? copiedLabel : copyLabel}
+        onClick={handleClick}
+        color={copied ? 'success' : 'default'}
+        sx={buttonSx}
+      >
+        {copied ? (
+          <CopyDoneIcon data-testid="copy-done-icon" sx={{ fontSize: iconSize }} />
+        ) : (
+          <ContentCopyIcon data-testid="copy-icon" sx={{ fontSize: iconSize }} />
+        )}
+      </IconButton>
+    </Tooltip>
+  )
 }
 
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
@@ -719,25 +788,25 @@ const UserMessageBubble: React.FC<{
           transition: 'opacity 0.15s ease'
         }}
       >
-        <Tooltip title={t('chat.copy_prompt')} placement="top">
-          <IconButton
-            size="small"
-            onClick={() => {
-              if (message.content) {
-                navigator.clipboard.writeText(message.content)
-                notifySuccess(t('chat.prompt_copied'))
-              }
-            }}
-            sx={{
-              color: 'text.disabled',
-              width: 28,
-              height: 28,
-              '&:hover': { color: 'text.secondary' }
-            }}
-          >
-            <ContentCopyIcon sx={{ fontSize: 14 }} />
-          </IconButton>
-        </Tooltip>
+        <CopiableIconButton
+          copyLabel={t('chat.copy_prompt')}
+          copiedLabel={t('chat.prompt_copied')}
+          onCopy={() => {
+            if (message.content) {
+              navigator.clipboard.writeText(message.content)
+              notifySuccess(t('chat.prompt_copied'))
+            }
+          }}
+          buttonSx={{
+            color: 'text.disabled',
+            width: 28,
+            height: 28,
+            '&:hover': { color: 'text.secondary' },
+            '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
+              color: 'success.main'
+            }
+          }}
+        />
         <Tooltip title={t('chat.edit_message')} placement="top">
           <IconButton
             size="small"
@@ -1460,16 +1529,22 @@ const AssistantMarkdownContent: React.FC<{
                     }}
                   >
                     <span>{codeMatch[1]}</span>
-                    <IconButton
-                      size="small"
-                      onClick={() => {
+                    <CopiableIconButton
+                      copyLabel={t('chat.copy_code', { defaultValue: 'Copy code' })}
+                      copiedLabel={t('chat.code_copied')}
+                      iconSize="14px"
+                      onCopy={() => {
                         navigator.clipboard.writeText(String(children).replace(/\n$/, ''))
                         notifySuccess(t('chat.code_copied'))
                       }}
-                      sx={{ color: 'inherit', padding: '2px' }}
-                    >
-                      <ContentCopyIcon sx={{ fontSize: '14px' }} />
-                    </IconButton>
+                      buttonSx={{
+                        color: 'inherit',
+                        padding: '2px',
+                        '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
+                          color: 'success.main'
+                        }
+                      }}
+                    />
                   </div>
                   <Prism
                     style={isLight ? prism : vscDarkPlus}
@@ -1567,29 +1642,23 @@ const AssistantMarkdownContent: React.FC<{
           }}
         >
           {hasTextContent ? (
-            <Tooltip
-              title={t('chat.copy_reply', { defaultValue: '\u590d\u5236\u56de\u7b54' })}
-              placement="top"
-            >
-              <IconButton
-                size="small"
-                aria-label={t('chat.copy_reply', { defaultValue: '\u590d\u5236\u56de\u7b54' })}
-                onClick={() => {
-                  navigator.clipboard.writeText(textContent)
-                  notifySuccess(
-                    t('chat.reply_copied', { defaultValue: '\u56de\u7b54\u5df2\u590d\u5236' })
-                  )
-                }}
-                sx={{
-                  color: 'text.disabled',
-                  width: 28,
-                  height: 28,
-                  '&:hover': { color: 'text.secondary' }
-                }}
-              >
-                <ContentCopyIcon sx={{ fontSize: 14 }} />
-              </IconButton>
-            </Tooltip>
+            <CopiableIconButton
+              copyLabel={t('chat.copy_reply', { defaultValue: 'Copy reply' })}
+              copiedLabel={t('chat.reply_copied', { defaultValue: 'Reply copied' })}
+              onCopy={() => {
+                navigator.clipboard.writeText(textContent)
+                notifySuccess(t('chat.reply_copied', { defaultValue: 'Reply copied' }))
+              }}
+              buttonSx={{
+                color: 'text.disabled',
+                width: 28,
+                height: 28,
+                '&:hover': { color: 'text.secondary' },
+                '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
+                  color: 'success.main'
+                }
+              }}
+            />
           ) : null}
           <Tooltip title={downloadButtonLabel} placement="top">
             <IconButton

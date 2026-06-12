@@ -1,16 +1,84 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { InputProps } from './InputProps'
-import { Box, IconButton, Typography, Button } from '@mui/material'
-import { UploadOutlined, PhotoLibraryOutlined } from '@mui/icons-material'
+import { Button } from '@mui/material'
+import { PhotoLibraryOutlined } from '@mui/icons-material'
 import { api } from '@renderer/utils/windowUtils'
-import { FileItem } from '@shared/comfy/types'
 import BaseInputComfyImage from './BaseInputComfyImage'
-import { fileItemToValue, valueToFileItem } from '@shared/comfy/funcs'
+import { valueToFileItem } from '@shared/comfy/funcs'
+import {
+  encodeDeferredComfyImageInputValue,
+  getDeferredComfyImageDisplayName,
+  parseDeferredComfyImageInputValue
+} from '@shared/comfy/deferredImages'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { useTranslation } from 'react-i18next'
 
 type InputComfyImageProps = InputProps<string> & {
   placeholder: string
+}
+
+const IMAGE_EXTENSIONS_TO_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.bmp': 'image/bmp'
+}
+
+const inferImageMimeTypeFromFile = (file: File): string => {
+  if (file.type.startsWith('image/')) return file.type
+  const lowerName = file.name.trim().toLowerCase()
+  const extension = Object.keys(IMAGE_EXTENSIONS_TO_MIME).find((ext) => lowerName.endsWith(ext))
+  return (extension && IMAGE_EXTENSIONS_TO_MIME[extension]) || 'image/png'
+}
+
+const readBlobArrayBuffer = async (blob: Blob): Promise<ArrayBuffer> => {
+  const maybeArrayBuffer = (blob as Blob & { arrayBuffer?: () => Promise<ArrayBuffer> }).arrayBuffer
+  if (typeof maybeArrayBuffer === 'function') {
+    return maybeArrayBuffer.call(blob)
+  }
+
+  return await new Promise<ArrayBuffer>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error || new Error('failed to read image file'))
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) {
+        resolve(reader.result)
+        return
+      }
+      reject(new Error('failed to read image file'))
+    }
+    reader.readAsArrayBuffer(blob)
+  })
+}
+
+const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, offset + chunkSize)
+    binary += String.fromCharCode(...chunk)
+  }
+  return btoa(binary)
+}
+
+const buildDeferredComfyImageValue = async (file: File): Promise<string> => {
+  const mimeType = inferImageMimeTypeFromFile(file)
+  const buffer = await readBlobArrayBuffer(file)
+  return encodeDeferredComfyImageInputValue({
+    fileName: file.name || `image-${Date.now()}.png`,
+    mimeType,
+    sizeBytes: file.size,
+    dataUrl: `data:${mimeType};base64,${arrayBufferToBase64(buffer)}`
+  })
+}
+
+const revokePreviewUrl = (url: string | null) => {
+  if (url?.startsWith('blob:')) {
+    URL.revokeObjectURL(url)
+  }
 }
 
 const InputComfyImage: React.FC<InputComfyImageProps> = ({
@@ -23,14 +91,17 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
   const [internalValue, setInternalValue] = useState(value)
   const [isLoading, setIsLoading] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const previewRequestIdRef = useRef(0)
   const previewUrlRef = useRef<string | null>(null)
+  const latestValueRef = useRef(value)
+  const latestOnChangeRef = useRef(onChange)
   const { notifySuccess, notifyError } = useMessage()
   const { t } = useTranslation()
 
   const updatePreviewUrl = useCallback((nextUrl: string | null) => {
     setPreviewUrl((prev) => {
-      if (prev && prev !== nextUrl) {
-        URL.revokeObjectURL(prev)
+      if (prev !== nextUrl) {
+        revokePreviewUrl(prev)
       }
       previewUrlRef.current = nextUrl
       return nextUrl
@@ -39,64 +110,57 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
 
   useEffect(
     () => () => {
-      if (previewUrlRef.current) {
-        URL.revokeObjectURL(previewUrlRef.current)
-        previewUrlRef.current = null
-      }
+      revokePreviewUrl(previewUrlRef.current)
+      previewUrlRef.current = null
     },
     []
   )
 
-  // 同步外部 value 变化到 internalValue
   useEffect(() => {
-    setInternalValue((prev) => (prev === value ? prev : value))
+    latestValueRef.current = value
+    setInternalValue((current) => (value !== current ? value : current))
   }, [value])
 
-  const doUpload = async (file: File) => {
-    setIsLoading(true)
-    try {
-      const arrayBuffer = await file.arrayBuffer()
-      const uint8 = new Uint8Array(arrayBuffer)
-      const res: FileItem = await api().svcComfy.uploadImage({
-        fileItem: { filename: file.name, type: 'input' },
-        image: uint8
-      })
-      if (!res.filename) {
-        throw new Error('failed to upload image, response did not contain filename')
-      }
-      const uploadedName = fileItemToValue(res)
-      setInternalValue(uploadedName)
-      onChange(uploadedName)
-    } catch (error) {
-      console.error('[InputComfyImage] Upload failed:', error)
-      notifyError(
-        t('input.image.load_failed', {
-          error: error instanceof Error ? error.message : t('input.image.check_comfy_connection')
-        })
-      )
-    } finally {
-      setIsLoading(false)
-    }
-  }
+  useEffect(() => {
+    latestOnChangeRef.current = onChange
+  }, [onChange])
 
-  const handleLoadFromPhotoshop = async () => {
+  const commitValue = useCallback((nextValue: string) => {
+    setInternalValue((current) => (current === nextValue ? current : nextValue))
+    if (latestValueRef.current !== nextValue) {
+      latestValueRef.current = nextValue
+      latestOnChangeRef.current(nextValue)
+    }
+  }, [])
+
+  const doUpload = useCallback(
+    async (file: File) => {
+      setIsLoading(true)
+      try {
+        commitValue(await buildDeferredComfyImageValue(file))
+      } catch (error) {
+        console.error('[InputComfyImage] Failed to read image:', error)
+        notifyError(
+          t('input.image.load_failed', {
+            error: error instanceof Error ? error.message : String(error)
+          })
+        )
+      } finally {
+        setIsLoading(false)
+      }
+    },
+    [commitValue, notifyError, t]
+  )
+
+  const handleLoadFromPhotoshop = useCallback(async () => {
     try {
       setIsLoading(true)
       const res = await api().svcPhotoshop.loadImageFromPhotoshop({})
-
-      // 将图片上传到 ComfyUI
-      const fileItem: FileItem = await api().svcComfy.uploadImage({
-        fileItem: { filename: res.fileName, type: 'input' },
-        image: res.image
+      const blob = new Blob([res.image as BlobPart], { type: 'image/png' })
+      const file = new File([blob], res.fileName || `photoshop-${Date.now()}.png`, {
+        type: 'image/png'
       })
-
-      if (!fileItem.filename) {
-        throw new Error(t('input.image.upload_missing_filename'))
-      }
-
-      const uploadedName = fileItemToValue(fileItem)
-      setInternalValue(uploadedName)
-      onChange(uploadedName)
+      commitValue(await buildDeferredComfyImageValue(file))
       notifySuccess(t('input.image.photoshop_loaded'))
     } catch (error) {
       console.error(t('input.image.photoshop_load_failed_log'), error)
@@ -108,39 +172,54 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [commitValue, notifyError, notifySuccess, t])
 
   const handleClear = useCallback(() => {
-    setInternalValue('')
-    onChange('')
+    commitValue('')
+    previewRequestIdRef.current += 1
     updatePreviewUrl(null)
-  }, [onChange, updatePreviewUrl])
+  }, [commitValue, updatePreviewUrl])
 
   useEffect(() => {
-    let active = true
+    const requestId = ++previewRequestIdRef.current
+    let urlToRevoke: string | null = null
+
+    if (!internalValue) {
+      updatePreviewUrl(null)
+      return
+    }
+
+    const deferredValue = parseDeferredComfyImageInputValue(internalValue)
+    if (deferredValue) {
+      updatePreviewUrl(deferredValue.dataUrl)
+      return
+    }
+
     ;(async () => {
-      if (!internalValue) {
-        updatePreviewUrl(null)
-        return
-      }
       try {
         const res = await api().svcComfy.getView(valueToFileItem(internalValue))
-        if (!active) return
+        if (previewRequestIdRef.current !== requestId) return
         const image: Uint8Array = res.result
         const blob = new Blob([image as BlobPart], { type: 'image/*' })
         const url = URL.createObjectURL(blob)
+        urlToRevoke = url
         updatePreviewUrl(url)
+        urlToRevoke = null
       } catch (error) {
-        // Preview failures should not erase the selected input value; the
-        // uploaded image may still be available once ComfyUI refreshes.
+        // ComfyUI may be stopped while the form still contains a previously uploaded image name.
+        // Keep the value intact; only hide the preview until ComfyUI can serve it again.
         console.warn('[InputComfyImage] Failed to load image preview:', internalValue, error)
-        if (active) {
+        if (previewRequestIdRef.current === requestId) {
           updatePreviewUrl(null)
         }
       }
     })()
+
     return () => {
-      active = false
+      if (previewRequestIdRef.current === requestId) {
+        previewRequestIdRef.current += 1
+      }
+      revokePreviewUrl(urlToRevoke)
     }
   }, [internalValue, updatePreviewUrl])
 
@@ -149,7 +228,7 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
       label={label}
       Icon={Icon}
       placeholder={placeholder}
-      internalValue={internalValue}
+      internalValue={getDeferredComfyImageDisplayName(internalValue)}
       isLoading={isLoading}
       previewUrl={previewUrl}
       doUpload={doUpload}

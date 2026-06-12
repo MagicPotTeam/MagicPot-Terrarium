@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { api } from '@renderer/utils/windowUtils'
 import { extractWorkflowFromImage } from '@renderer/utils/fileUtils'
 import { compareWorkflows } from '@renderer/utils/qappUtils'
@@ -9,7 +10,11 @@ import {
   parseInternalImageDragPayload
 } from '@renderer/utils/droppedImageUtils'
 import { getBuiltinHunyuan3DQuickAppKeyForAction } from '@renderer/pages/ChatPage/hy3d/types'
-import { clearCachedQAppState, useQAppContext } from '../components/QAppContext'
+import {
+  clearCachedQAppState,
+  dispatchQAppFillParams,
+  useQAppContext
+} from '../components/QAppContext'
 import {
   QUICK_APP_IMPORT_PROMPT,
   QUICK_APP_WORKFLOW_EXTRACT_ERROR,
@@ -32,7 +37,8 @@ export function useQAppDragAndDrop({
   refreshTabs
 }: UseQAppDragAndDropProps) {
   const [isDraggingOver, setIsDraggingOver] = useState(false)
-  const { setQAppCfg } = useQAppContext()
+  const { currentQAppKey, setQAppCfg } = useQAppContext()
+  const { t } = useTranslation()
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -48,14 +54,12 @@ export function useQAppDragAndDrop({
 
   const matchAndFillQApp = useCallback(
     async (workflow: Record<string, unknown>) => {
-      const embeddedQAppKey = (workflow as Record<string, unknown>).__qAppKey__ as
-        | string
-        | undefined
+      const embeddedQAppKey = String((workflow as Record<string, unknown>).__qAppKey__ || '').trim()
       if (embeddedQAppKey) {
         console.log(`[handleDrop] using embedded qAppKey: ${embeddedQAppKey}`)
         setCurrentQAppKey(embeddedQAppKey)
         setTimeout(() => {
-          window.dispatchEvent(new CustomEvent('qapp:fillParams', { detail: { workflow } }))
+          dispatchQAppFillParams({ qAppKey: embeddedQAppKey, workflow })
         }, 300)
         notifySuccess(`已切换到快应用「${embeddedQAppKey}」并加载参数`)
         return true
@@ -80,7 +84,7 @@ export function useQAppDragAndDrop({
               console.log(`[handleDrop] matched qApp: ${key}`)
               setCurrentQAppKey(key)
               setTimeout(() => {
-                window.dispatchEvent(new CustomEvent('qapp:fillParams', { detail: { workflow } }))
+                dispatchQAppFillParams({ qAppKey: key, workflow })
               }, 300)
               notifySuccess(`已匹配快应用「${key}」并加载参数`)
               return true
@@ -93,12 +97,21 @@ export function useQAppDragAndDrop({
         console.error('[handleDrop] failed to match quick app', error)
       }
 
+      const targetQAppKey = String(currentQAppKey || '').trim()
+      if (!targetQAppKey) {
+        console.warn(
+          '[handleDrop] no matching quick app found and no current quick app is selected'
+        )
+        notifyError(t('qapp.menu.no_matching_quick_app_select_first'))
+        return false
+      }
+
       console.warn('[handleDrop] no matching quick app found, filling current quick app')
-      window.dispatchEvent(new CustomEvent('qapp:fillParams', { detail: { workflow } }))
+      dispatchQAppFillParams({ qAppKey: targetQAppKey, workflow })
       notifySuccess('未找到匹配的快应用，已在当前快应用中加载可用参数')
       return false
     },
-    [notifySuccess, setCurrentQAppKey]
+    [currentQAppKey, notifyError, notifySuccess, setCurrentQAppKey, t]
   )
 
   const importQAppFile = useCallback(

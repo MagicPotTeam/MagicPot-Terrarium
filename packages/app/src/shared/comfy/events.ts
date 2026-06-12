@@ -160,9 +160,12 @@ export type ComfyEvent = Unionize<{
     | 'progress'
     | 'executing'
     | 'executed'
+    | 'status'
     | 'execution_start'
     | 'execution_success'
-    | 'execution_error']: ApiMessage<Key>
+    | 'execution_error'
+    | 'execution_interrupted'
+    | 'execution_cached']: ApiMessage<Key>
 }>
 
 /**

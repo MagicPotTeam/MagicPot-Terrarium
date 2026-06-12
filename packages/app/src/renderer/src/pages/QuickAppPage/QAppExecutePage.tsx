@@ -7,7 +7,7 @@ import StatusBar from './components/StatusBar'
 import ResultSection from './ResultList/ResultSection'
 import QAppPanel from './QAppExecutePanel/QAppInputPanel'
 import QAppMenu from './components/QAppMenu'
-import { QAppContextProvider } from './components/QAppContext'
+import { QAppContextProvider, dispatchQAppFillParams } from './components/QAppContext'
 import DuplicateCheckWorkspace from './duplicateCheck/DuplicateCheckWorkspace'
 import { isBuiltinDuplicateCheckQApp } from './duplicateCheck/builtin'
 import VideoGenerationWorkspace from './videoGeneration/VideoGenerationWorkspace'
@@ -40,8 +40,8 @@ const persistQAppKey = (qAppKey: string): void => {
   }
 }
 
-const emitWorkflowFill = (workflow: Workflow): void => {
-  window.dispatchEvent(new CustomEvent('qapp:fillParams', { detail: { workflow } }))
+const emitWorkflowFill = (qAppKey: string, workflow: Workflow): void => {
+  dispatchQAppFillParams({ qAppKey, workflow })
 }
 
 const EmptyState: React.FC<{ message: string }> = ({ message }) => (
@@ -79,7 +79,7 @@ const QAppExecutePage: React.FC = () => {
       setCurrentQAppKey(detail.qAppKey)
 
       if (detail.workflow) {
-        emitWorkflowFill(detail.workflow)
+        emitWorkflowFill(detail.qAppKey, detail.workflow)
       }
     }
 

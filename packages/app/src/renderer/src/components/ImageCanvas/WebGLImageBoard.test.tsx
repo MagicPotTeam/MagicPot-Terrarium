@@ -169,6 +169,49 @@ describe('WebGLImageBoard', () => {
     vi.stubGlobal('ResizeObserver', MockResizeObserver)
   })
 
+  it('fits oversized images inside the visible board area', async () => {
+    const getBoundingClientRectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockReturnValue({
+        width: 800,
+        height: 600,
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        bottom: 600,
+        right: 800,
+        toJSON: () => ({})
+      } as DOMRect)
+
+    try {
+      const { default: WebGLImageBoard } = await import('./WebGLImageBoard')
+      const image = createImage(2500, 2500)
+
+      render(
+        <div style={{ width: 800, height: 600 }}>
+          <WebGLImageBoard image={image} />
+        </div>
+      )
+
+      await waitFor(
+        () => {
+          expect(createdSprites).toHaveLength(1)
+        },
+        { timeout: 15000 }
+      )
+
+      const world = createdSprites[0].parent
+      expect(world).not.toBeNull()
+      expect(world?.scale.x).toBeCloseTo(0.2208, 4)
+      expect(world?.scale.y).toBeCloseTo(0.2208, 4)
+      expect(world?.position.x).toBeCloseTo(124, 2)
+      expect(world?.position.y).toBeCloseTo(24, 2)
+    } finally {
+      getBoundingClientRectSpy.mockRestore()
+    }
+  }, 15000)
+
   it('initializes Pixi once and incrementally syncs sprite state across rerenders', async () => {
     const { default: WebGLImageBoard } = await import('./WebGLImageBoard')
     const baseItem = {

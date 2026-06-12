@@ -2,14 +2,18 @@ import { QueueItem as ComfyQueueItem } from '@shared/comfy/types'
 import { ComfyEvent } from '@shared/comfy/events'
 import { getTaskByPromptId, Task, TaskQueueState, TaskStatus } from './taskQueue'
 
-function isOnePromptIdField(event: ComfyEvent): boolean {
+type ComfyEventWithPromptId = Extract<ComfyEvent, { data: { prompt_id: string } }>
+
+function isOnePromptIdField(event: ComfyEvent): event is ComfyEventWithPromptId {
   return (
     event.type === 'progress' ||
     event.type === 'executing' ||
     event.type === 'executed' ||
     event.type === 'execution_start' ||
     event.type === 'execution_success' ||
-    event.type === 'execution_error'
+    event.type === 'execution_error' ||
+    event.type === 'execution_interrupted' ||
+    event.type === 'execution_cached'
   )
 }
 

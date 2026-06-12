@@ -96,6 +96,11 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
       return buildComfyOrgExtraData(comfyOrgApiKey)
     }, [comfyOrgApiKey, requiresComfyOrgAuth])
 
+    // Register stable functions in QAppContext. The implementations above can
+    // legitimately change when input values, i18n, or notification callbacks
+    // change; pushing those changing function identities into parent state can
+    // create a render/effect/update loop. Stable wrappers keep the parent state
+    // steady while still invoking the latest implementation.
     const validateRef = useRef(validate)
     const buildWorkflowRef = useRef(buildWorkflow)
     const buildSubmitExtraDataRef = useRef(buildSubmitExtraData)
@@ -103,8 +108,8 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
     buildWorkflowRef.current = buildWorkflow
     buildSubmitExtraDataRef.current = buildSubmitExtraData
 
-    const stableValidate = useCallback(() => validateRef.current(), [])
-    const stableBuildWorkflow = useCallback(() => buildWorkflowRef.current(), [])
+    const stableValidate = useCallback((): boolean => validateRef.current(), [])
+    const stableBuildWorkflow = useCallback((): Workflow => buildWorkflowRef.current(), [])
     const stableBuildSubmitExtraData = useCallback(() => buildSubmitExtraDataRef.current(), [])
 
     useEffect(() => {

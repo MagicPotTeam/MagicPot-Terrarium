@@ -34,7 +34,9 @@ import {
   Videocam as VideoIcon,
   ViewInAr as Model3DIcon,
   InsertDriveFile as FileIcon,
-  SlideshowOutlined as PowerPointFileIcon
+  SlideshowOutlined as PowerPointFileIcon,
+  CompressOutlined as CompressContextIcon,
+  CleaningServicesOutlined as ClearContextIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
 import { ChatAttachment } from '../../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
@@ -74,6 +76,10 @@ interface ChatComposerProps {
   modelSelectorSlot?: React.ReactNode
   toolbarSlot?: React.ReactNode
   statusSlot?: React.ReactNode
+  onCompressContext?: () => void
+  onClearContext?: () => void
+  disableCompressContext?: boolean
+  disableClearContext?: boolean
   toolHelpItems?: MagicPotAppToolDescriptor[]
   active?: boolean
 }
@@ -102,6 +108,7 @@ const renderFileAttachmentIcon = (attachment: ChatAttachment) => {
  * Minimum textarea height in px.
  */
 const MIN_TEXTAREA_HEIGHT = 24
+const TEXTAREA_BOTTOM_VISIBILITY_PADDING = 28
 const COMPOSER_VERTICAL_OVERHEAD = 140
 const MIN_ATTACHMENT_PREVIEW_HEIGHT = 88
 const MAX_ATTACHMENT_PREVIEW_HEIGHT = 240
@@ -113,6 +120,15 @@ const parseCssPixelValue = (value: unknown): number | null => {
 
   const parsed = Number.parseFloat(value)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+const scrollTextareaToBottom = (textarea: HTMLTextAreaElement) => {
+  textarea.scrollTop = textarea.scrollHeight
+  window.requestAnimationFrame(() => {
+    if (textarea.isConnected) {
+      textarea.scrollTop = textarea.scrollHeight
+    }
+  })
 }
 
 const StableNativeTextarea = React.forwardRef<HTMLTextAreaElement, InputBaseComponentProps>(
@@ -136,6 +152,9 @@ const StableNativeTextarea = React.forwardRef<HTMLTextAreaElement, InputBaseComp
           ? Math.max(minHeight, textarea.scrollHeight)
           : Math.max(minHeight, Math.min(textarea.scrollHeight, maxHeight))
       textarea.style.height = `${nextHeight}px`
+      if (document.activeElement === textarea) {
+        scrollTextareaToBottom(textarea)
+      }
     }, [style])
 
     useLayoutEffect(() => {
@@ -309,6 +328,10 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   modelSelectorSlot,
   toolbarSlot,
   statusSlot,
+  onCompressContext,
+  onClearContext,
+  disableCompressContext = false,
+  disableClearContext = false,
   toolHelpItems = [],
   active = true
 }) => {
@@ -359,34 +382,52 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     // The composer sits at the bottom of a flex column. When content grows, the
     // message list above can shrink, so the textarea should be capped by the
     // panel height instead of the composer's current rendered height.
-    const maxHeight = Math.max(MIN_TEXTAREA_HEIGHT, parentRect.height - COMPOSER_VERTICAL_OVERHEAD)
-    const nextAttachmentPreviewMaxHeight = Math.min(
-      MAX_ATTACHMENT_PREVIEW_HEIGHT,
-      Math.max(
-        MIN_ATTACHMENT_PREVIEW_HEIGHT,
-        Math.floor(parentRect.height * ATTACHMENT_PREVIEW_HEIGHT_RATIO)
+    const maxHeight = Math.round(
+      Math.max(MIN_TEXTAREA_HEIGHT, parentRect.height - COMPOSER_VERTICAL_OVERHEAD)
+    )
+    const nextAttachmentPreviewMaxHeight = Math.round(
+      Math.min(
+        MAX_ATTACHMENT_PREVIEW_HEIGHT,
+        Math.max(
+          MIN_ATTACHMENT_PREVIEW_HEIGHT,
+          Math.floor(parentRect.height * ATTACHMENT_PREVIEW_HEIGHT_RATIO)
+        )
       )
     )
 
-    setTextareaMaxHeight(maxHeight)
-    setAttachmentPreviewMaxHeight(nextAttachmentPreviewMaxHeight)
+    setTextareaMaxHeight((prev) => (Object.is(prev, maxHeight) ? prev : maxHeight))
+    setAttachmentPreviewMaxHeight((prev) =>
+      Object.is(prev, nextAttachmentPreviewMaxHeight) ? prev : nextAttachmentPreviewMaxHeight
+    )
   }, [])
 
   useLayoutEffect(() => {
+    let resizeFrameId: number | null = null
+    const scheduleRecalcMaxHeight = () => {
+      if (resizeFrameId != null) return
+      resizeFrameId = window.requestAnimationFrame(() => {
+        resizeFrameId = null
+        recalcMaxHeight()
+      })
+    }
+
     recalcMaxHeight()
 
-    window.addEventListener('resize', recalcMaxHeight)
+    window.addEventListener('resize', scheduleRecalcMaxHeight)
 
     let observer: ResizeObserver | undefined
     const root = composerRootRef.current
     const observed = root?.parentElement
     if (observed && typeof ResizeObserver !== 'undefined') {
-      observer = new ResizeObserver(recalcMaxHeight)
+      observer = new ResizeObserver(scheduleRecalcMaxHeight)
       observer.observe(observed)
     }
 
     return () => {
-      window.removeEventListener('resize', recalcMaxHeight)
+      window.removeEventListener('resize', scheduleRecalcMaxHeight)
+      if (resizeFrameId != null) {
+        window.cancelAnimationFrame(resizeFrameId)
+      }
       observer?.disconnect()
     }
   }, [recalcMaxHeight])
@@ -890,8 +931,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   wordBreak: 'break-word',
                   overflowWrap: 'break-word',
                   alignItems: 'flex-start',
-                  maxHeight: resolvedTextareaMaxHeight,
-                  overflow: 'hidden'
+                  overflow: 'visible'
                 }
               }}
               inputProps={{
@@ -914,14 +954,17 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   overflowX: 'hidden',
                   resize: 'none',
                   lineHeight: '1.6',
+                  boxSizing: 'border-box',
+                  paddingTop: '4px',
+                  paddingBottom: `${TEXTAREA_BOTTOM_VISIBILITY_PADDING}px`,
+                  scrollPaddingBottom: `${TEXTAREA_BOTTOM_VISIBILITY_PADDING}px`,
                   scrollbarGutter: 'stable'
                 }
               }}
               sx={{
                 '& .MuiInputBase-root': {
                   alignItems: 'flex-start',
-                  maxHeight: resolvedTextareaMaxHeight,
-                  overflow: 'hidden',
+                  overflow: 'visible',
                   display: 'flex',
                   flexWrap: 'wrap',
                   '&:focus': {
@@ -934,7 +977,9 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   }
                 },
                 '& .MuiInputBase-input': {
-                  py: 0.5,
+                  pt: 0.5,
+                  pb: `${TEXTAREA_BOTTOM_VISIBILITY_PADDING}px`,
+                  boxSizing: 'border-box',
                   wordBreak: 'break-word',
                   overflowWrap: 'break-word',
                   minHeight: `${MIN_TEXTAREA_HEIGHT}px`,
@@ -1138,6 +1183,42 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                 >
                   {statusSlot}
                 </Box>
+              ) : null}
+
+              {onCompressContext ? (
+                <IconButton
+                  data-testid="chat-composer-compress-context"
+                  onClick={onCompressContext}
+                  disabled={disabled || isLoading || disableCompressContext}
+                  sx={{
+                    color: 'text.secondary',
+                    width: 30,
+                    height: 30,
+                    '&:hover': { bgcolor: 'action.hover', color: 'text.primary' }
+                  }}
+                  title={t('chat.compress_context', { defaultValue: 'Compress context' })}
+                  aria-label={t('chat.compress_context', { defaultValue: 'Compress context' })}
+                >
+                  <CompressContextIcon sx={{ fontSize: 17 }} />
+                </IconButton>
+              ) : null}
+
+              {onClearContext ? (
+                <IconButton
+                  data-testid="chat-composer-clear-context"
+                  onClick={onClearContext}
+                  disabled={disabled || isLoading || disableClearContext}
+                  sx={{
+                    color: 'text.secondary',
+                    width: 30,
+                    height: 30,
+                    '&:hover': { bgcolor: 'action.hover', color: 'text.primary' }
+                  }}
+                  title={t('chat.clear_context', { defaultValue: 'Clear context' })}
+                  aria-label={t('chat.clear_context', { defaultValue: 'Clear context' })}
+                >
+                  <ClearContextIcon sx={{ fontSize: 17 }} />
+                </IconButton>
               ) : null}
 
               {/* 发送/停止按钮 */}

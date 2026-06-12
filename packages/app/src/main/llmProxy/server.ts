@@ -203,8 +203,12 @@ const getRequesterAddress = (req: http.IncomingMessage): string => {
   return candidate.replace(/^::ffff:/i, '')
 }
 
-
 const PROXY_MEDIA_FILENAME_PATTERN = /^[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+$/
+
+const getSafeProxyMediaFilename = (sourcePath: string): string | undefined => {
+  const filename = path.basename(sourcePath)
+  return PROXY_MEDIA_FILENAME_PATTERN.test(filename) ? filename : undefined
+}
 
 const resolvePathInsideDirectory = (baseDir: string, filename: string): string | undefined => {
   if (!PROXY_MEDIA_FILENAME_PATTERN.test(filename)) {
@@ -324,7 +328,6 @@ const sanitizeProxyAssetExtension = (value: string): string => {
 
   return source
 }
-
 
 const TOOL_RESPONSE_MAX_DEPTH = 6
 const TOOL_RESPONSE_PRIVATE_FIELD_NAMES = new Set(['stack', 'stackTrace', 'stacktrace'])
@@ -563,6 +566,30 @@ const buildScopedProxyMediaUrl = (
   const cached = stagedUrlCache?.get(cacheKey)
   if (cached) {
     return cached
+  }
+
+  const normalizedSourcePath = normalizeLocalFilePath(sourceUrl)
+  const filename = getSafeProxyMediaFilename(normalizedSourcePath)
+  if (filename) {
+    const existingMediaPath = resolveExistingProxyMediaPath(filename, resourceScope)
+    if (existingMediaPath) {
+      let generatedMediaBytes: number | undefined
+      try {
+        generatedMediaBytes = fs.statSync(existingMediaPath).size
+      } catch {
+        generatedMediaBytes = undefined
+      }
+
+      recordLlmProxyAccessUsage(accessToken, {
+        activity: 'media-generated',
+        requesterAddress,
+        ...(typeof generatedMediaBytes === 'number' ? { generatedMediaBytes } : {})
+      })
+
+      const proxiedUrl = `${protocol}://${host}/${trimLeadingSlash(buildProxyImagePath(filename, resourceScope, accessToken, requesterAddress))}`
+      stagedUrlCache?.set(cacheKey, proxiedUrl)
+      return proxiedUrl
+    }
   }
 
   const fallbackFilename = `${sanitizeProxyAssetFileStem(sourceUrl)}.png`

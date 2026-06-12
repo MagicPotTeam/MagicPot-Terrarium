@@ -10,6 +10,8 @@ import { DndProvider } from 'react-dnd'
 import { getAppDndManager } from './utils/dndManager'
 import ComfyLogBridge from './components/ComfyLogBridge'
 import ManagedComfyProcessBridge from './components/ManagedComfyProcessBridge'
+import { useComfyEventCallback } from './hooks/useComfyEvent'
+import { handleComfyExecutionActivityEvent } from './utils/comfyExecutionActivity'
 let hasHandledInitialComfyAutoStart = false
 let hasStartedInitialComfyAutoStart = false
 const appDndManager = getAppDndManager()
@@ -112,10 +114,16 @@ function AutoStartLocalComfyUI(): null {
   return null
 }
 
+function ComfyExecutionActivityBridge(): null {
+  useComfyEventCallback(handleComfyExecutionActivityEvent, [])
+  return null
+}
+
 function App(): React.JSX.Element {
   return (
     <DndProvider manager={appDndManager}>
       <HashRouter>
+        <ComfyExecutionActivityBridge />
         <ComfyLogBridge />
         <ManagedComfyProcessBridge />
         <AutoStartLocalComfyUI />
