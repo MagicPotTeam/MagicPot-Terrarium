@@ -1,6 +1,7 @@
 out
 dist
 src/renderer/public/three
+packages/app/src/renderer/public/wasm
 pnpm-lock.yaml
 LICENSE.md
 tsconfig.json
