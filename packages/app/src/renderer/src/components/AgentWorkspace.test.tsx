@@ -99,6 +99,7 @@ const renderWorkspace = () =>
 
 describe('AgentWorkspace', () => {
   beforeEach(() => {
+    vi.useRealTimers()
     localStorage.clear()
     clearScopedExternalLoadingSessionIds()
     chatPageMock.mockClear()
@@ -116,6 +117,17 @@ describe('AgentWorkspace', () => {
         ]
       }
     ])
+  })
+
+  it('defers mounting ChatPage so the workspace shell can render first', async () => {
+    renderWorkspace()
+
+    expect(chatPageMock).not.toHaveBeenCalled()
+    expect(screen.getByTestId('agent-workspace-pane-loading')).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(chatPageMock).toHaveBeenCalled()
+    })
   })
 
   it('shows the running spinner when an external loading session is active', async () => {
