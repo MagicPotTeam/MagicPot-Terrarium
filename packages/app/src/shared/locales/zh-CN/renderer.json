@@ -218,7 +218,7 @@
         "checking": "检查中",
         "available": "可更新",
         "not_available": "已最新",
-        "downloading": "\u4e0b\u8f7d\u4e2d",
+        "downloading": "下载中",
         "downloaded": "已下载",
         "installing": "安装中",
         "error": "错误"
@@ -491,7 +491,7 @@
       "missing_models_subtitle": "Missing Model Files",
       "put_to": "放到: {{dir}}",
       "download": "下载",
-      "downloading": "\u4e0b\u8f7d\u4e2d",
+      "downloading": "下载中",
       "open_directory": "打开目录",
       "open_link": "打开链接",
       "model_exists": "模型文件已存在",
@@ -568,7 +568,9 @@
         "image_interrogation_failed": "提示词反推失败：{{error}}",
         "translation_failed": "提示词翻译失败：{{error}}",
         "max_length": "提示词最大长度为 {{maxLength}}。"
-      }
+      },
+      "image_interrogation_output_language_zh": "请用中文输出反推提示词。只返回提示词本身。",
+      "image_interrogation_output_language_en": "Please output the interrogated prompt in English. Return only the prompt itself."
     },
     "video_generation": {
       "title": "AI 视频生成",
@@ -670,7 +672,13 @@
     "reply_model": "模型：{{model}}",
     "copy_reply": "复制回复",
     "reply_copied": "已复制回复",
-    "drag_reply_to_canvas": "拖拽回复到画布"
+    "drag_reply_to_canvas": "拖拽回复到画布",
+    "compress_context": "压缩上下文",
+    "clear_context": "清理上下文",
+    "context_compress_not_enough": "当前对话内容太少，暂时不需要压缩上下文",
+    "context_clear_empty": "当前没有可清理的上下文",
+    "context_compressed": "已压缩当前上下文",
+    "context_cleared": "已清理当前上下文"
   },
   "agent_workspace": {
     "title": "Agent 线程",
@@ -709,7 +717,7 @@
       "photoshop_load_failed_log": "从 Photoshop 加载图像失败：",
       "load_failed_short": "加载失败：{{error}}",
       "load_from_photoshop": "从 Photoshop 加载",
-      "clear": "\u5220\u9664\u56fe\u50cf"
+      "clear": "删除图像"
     }
   },
   "project": {

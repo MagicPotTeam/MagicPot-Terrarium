@@ -671,7 +671,9 @@
         "image_interrogation_failed": "Prompt interrogation failed: {{error}}",
         "translation_failed": "Prompt translation failed: {{error}}",
         "max_length": "Prompt length must not exceed {{maxLength}} characters."
-      }
+      },
+      "image_interrogation_output_language_zh": "Please output the interrogated prompt in Chinese. Return only the prompt itself.",
+      "image_interrogation_output_language_en": "Please output the interrogated prompt in English. Return only the prompt itself."
     },
     "video_generation": {
       "title": "AI Video Generation",
@@ -773,7 +775,13 @@
     "unknown_error": "Unknown error",
     "preview_controls": "{{scale}}% | Scroll to switch | Ctrl+wheel to zoom | Drag to pan | Double-click or Esc to close",
     "preview_alt": "Preview",
-    "preview_alt_index": "Preview {{index}}"
+    "preview_alt_index": "Preview {{index}}",
+    "compress_context": "Compress context",
+    "clear_context": "Clear context",
+    "context_compress_not_enough": "There is not enough chat history to compress yet.",
+    "context_clear_empty": "There is no context to clear.",
+    "context_compressed": "Context compressed.",
+    "context_cleared": "Context cleared."
   },
   "agent_workspace": {
     "title": "Agent Threads",

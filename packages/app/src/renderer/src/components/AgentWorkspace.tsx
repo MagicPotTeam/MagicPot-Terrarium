@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box,
   Button,
@@ -19,6 +19,7 @@ import {
   StopCircleOutlined as StopIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
+import ChatPage from '@renderer/pages/ChatPage/ChatPage'
 import { loadAllSessions, type ChatSession } from '@renderer/pages/ChatPage/chatStorage'
 import { getLocalizedConversationTitle } from '@renderer/pages/ChatPage/chatLocaleUtils'
 import { readScopedLoadingSessionIds } from '@renderer/pages/ChatPage/chatPageShared'
@@ -37,8 +38,6 @@ import {
   type ProjectTraceCaptureStateEvent
 } from '@renderer/features/projectTrace/projectTraceRuntime'
 import type { ChatAttachment, ChatMessage } from '@shared/api/svcLLMProxy'
-
-const ChatPage = lazy(() => import('@renderer/pages/ChatPage/ChatPage'))
 
 type AgentPane = {
   id: string
@@ -1052,21 +1051,13 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
                 pointerEvents: isActivePane ? 'auto' : 'none'
               }}
             >
-              <Suspense
-                fallback={
-                  <AgentPaneLoadingFallback
-                    label={t('agent_workspace.loading_chat', { defaultValue: 'Loading chat...' })}
-                  />
-                }
-              >
-                <ChatPage
-                  compact
-                  storageScope={scope}
-                  route={buildCanvasAgentRoute(projectId, pane.id)}
-                  acceptExternalInput={isActivePane}
-                  active={isActivePane}
-                />
-              </Suspense>
+              <ChatPage
+                compact
+                storageScope={scope}
+                route={buildCanvasAgentRoute(projectId, pane.id)}
+                acceptExternalInput={isActivePane}
+                active={isActivePane}
+              />
             </Box>
           )
         })}

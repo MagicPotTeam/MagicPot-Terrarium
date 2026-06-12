@@ -14,6 +14,7 @@ const getDroppedImageDropErrorMock = vi.fn()
 const getDroppedImageFileMock = vi.fn()
 
 let mockInputState: string | undefined = 'source prompt'
+let mockResolvedLanguage = 'en-US'
 let mockPromptSettings = {
   usePromptTranslation: true,
   promptTranslationSystemPrompt: 'Translate the following prompt to English.',
@@ -63,8 +64,15 @@ vi.mock('react-i18next', () => ({
         return `Prompt interrogation failed: ${params?.error ?? ''}`
       }
       if (key === 'qapp.prompt.default_description') return 'generate an image'
+      if (key === 'qapp.prompt.image_interrogation_output_language_zh') {
+        return '请用中文输出反推提示词。只返回提示词本身。'
+      }
+      if (key === 'qapp.prompt.image_interrogation_output_language_en') {
+        return 'Please output the interrogated prompt in English. Return only the prompt itself.'
+      }
       return key
-    }
+    },
+    i18n: { language: mockResolvedLanguage, resolvedLanguage: mockResolvedLanguage }
   })
 }))
 
@@ -138,6 +146,7 @@ const createDataTransfer = (files: File[] = []) =>
 describe('buildExeInputPrompt', () => {
   beforeEach(() => {
     mockInputState = 'source prompt'
+    mockResolvedLanguage = 'en-US'
     mockPromptSettings = {
       usePromptTranslation: true,
       promptTranslationSystemPrompt: 'Translate the following prompt to English.',
@@ -401,11 +410,64 @@ describe('buildExeInputPrompt', () => {
     await waitFor(() => {
       expect(generatePromptMock).toHaveBeenCalledWith({
         prompt: 'Focus on generate an image only.',
-        systemPrompt: 'Describe generate an image in detail.',
+        systemPrompt:
+          'Describe generate an image in detail.\n\nPlease output the interrogated prompt in English. Return only the prompt itself.',
         imageObjUrl: 'data:image/png;base64,drop'
       })
     })
     expect(setValueMock).toHaveBeenCalledWith('interrogated prompt')
+  })
+
+  it('asks image interrogation to return Chinese prompts when the UI language is Chinese', async () => {
+    mockResolvedLanguage = 'zh-CN'
+    mockPromptSettings = {
+      ...mockPromptSettings,
+      usePromptTranslation: false,
+      useImageInterrogation: true,
+      imageInterrogationSystemPrompt: 'Describe {{description}} in detail.',
+      imageInterrogationUserPrompt: 'Focus on {{description}} only.'
+    }
+    const selectedFile = new File(['image'], 'select.png', { type: 'image/png' })
+    selectFileMock.mockResolvedValue(selectedFile)
+    fileToDataUrlMock.mockResolvedValue('data:image/png;base64,select')
+
+    const workflow = {
+      1: {
+        class_type: 'CLIPTextEncode',
+        inputs: {
+          text: 'default prompt'
+        }
+      }
+    } as any
+
+    const Component = buildExeInputPrompt(
+      {
+        label: 'Prompt',
+        component: 'InputPrompt',
+        slot: '$.1.inputs.text'
+      },
+      workflow
+    )
+
+    const { getByRole } = render(
+      <Component
+        ref={createRef<ExeInputRef>()}
+        objectInfos={{} as any}
+        config={{} as any}
+        buildEnv={{} as any}
+      />
+    )
+
+    fireEvent.click(getByRole('button', { name: 'Interrogate' }))
+
+    await waitFor(() => {
+      expect(generatePromptMock).toHaveBeenCalledWith({
+        prompt: 'Focus on generate an image only.',
+        systemPrompt:
+          'Describe generate an image in detail.\n\n请用中文输出反推提示词。只返回提示词本身。',
+        imageObjUrl: 'data:image/png;base64,select'
+      })
+    })
   })
 
   it('shows a drop validation warning instead of interrogating unsupported drags', async () => {

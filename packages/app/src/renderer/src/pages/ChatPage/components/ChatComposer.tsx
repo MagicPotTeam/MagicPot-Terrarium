@@ -34,7 +34,9 @@ import {
   Videocam as VideoIcon,
   ViewInAr as Model3DIcon,
   InsertDriveFile as FileIcon,
-  SlideshowOutlined as PowerPointFileIcon
+  SlideshowOutlined as PowerPointFileIcon,
+  CompressOutlined as CompressContextIcon,
+  CleaningServicesOutlined as ClearContextIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
 import { ChatAttachment } from '../../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
@@ -74,6 +76,10 @@ interface ChatComposerProps {
   modelSelectorSlot?: React.ReactNode
   toolbarSlot?: React.ReactNode
   statusSlot?: React.ReactNode
+  onCompressContext?: () => void
+  onClearContext?: () => void
+  disableCompressContext?: boolean
+  disableClearContext?: boolean
   toolHelpItems?: MagicPotAppToolDescriptor[]
   active?: boolean
 }
@@ -322,6 +328,10 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   modelSelectorSlot,
   toolbarSlot,
   statusSlot,
+  onCompressContext,
+  onClearContext,
+  disableCompressContext = false,
+  disableClearContext = false,
   toolHelpItems = [],
   active = true
 }) => {
@@ -1155,6 +1165,42 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                 >
                   {statusSlot}
                 </Box>
+              ) : null}
+
+              {onCompressContext ? (
+                <IconButton
+                  data-testid="chat-composer-compress-context"
+                  onClick={onCompressContext}
+                  disabled={disabled || isLoading || disableCompressContext}
+                  sx={{
+                    color: 'text.secondary',
+                    width: 30,
+                    height: 30,
+                    '&:hover': { bgcolor: 'action.hover', color: 'text.primary' }
+                  }}
+                  title={t('chat.compress_context', { defaultValue: 'Compress context' })}
+                  aria-label={t('chat.compress_context', { defaultValue: 'Compress context' })}
+                >
+                  <CompressContextIcon sx={{ fontSize: 17 }} />
+                </IconButton>
+              ) : null}
+
+              {onClearContext ? (
+                <IconButton
+                  data-testid="chat-composer-clear-context"
+                  onClick={onClearContext}
+                  disabled={disabled || isLoading || disableClearContext}
+                  sx={{
+                    color: 'text.secondary',
+                    width: 30,
+                    height: 30,
+                    '&:hover': { bgcolor: 'action.hover', color: 'text.primary' }
+                  }}
+                  title={t('chat.clear_context', { defaultValue: 'Clear context' })}
+                  aria-label={t('chat.clear_context', { defaultValue: 'Clear context' })}
+                >
+                  <ClearContextIcon sx={{ fontSize: 17 }} />
+                </IconButton>
               ) : null}
 
               {/* 发送/停止按钮 */}

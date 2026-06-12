@@ -59,12 +59,19 @@ const buildTranslationRequest = (
 const resolveTemplate = (template: string, placeholder: string, value: string) =>
   template.trim().split(placeholder).join(value)
 
+const appendInstruction = (prompt: string, instruction: string): string =>
+  [prompt.trim(), instruction.trim()].filter(Boolean).join('\n\n')
+
 const buildImageInterrogationRequest = (
   systemPromptTemplate: string,
   userPromptTemplate: string,
-  promptDescription: string
+  promptDescription: string,
+  outputLanguageInstruction: string
 ) => {
-  const systemPrompt = resolveTemplate(systemPromptTemplate, REPLACE_DESCRIPTION, promptDescription)
+  const systemPrompt = appendInstruction(
+    resolveTemplate(systemPromptTemplate, REPLACE_DESCRIPTION, promptDescription),
+    outputLanguageInstruction
+  )
   const prompt = resolveTemplate(userPromptTemplate, REPLACE_DESCRIPTION, promptDescription)
 
   return {
@@ -89,7 +96,7 @@ const buildExeInputPrompt: ExeInputBuilder<'InputPrompt'> = (
     const [value, setValue] = useQAppInputState<string>(slot, defaultInputValue)
     const { config } = useConfig()
     const { notifyWarning } = useMessage()
-    const { t } = useTranslation()
+    const { t, i18n } = useTranslation()
     const qAppPromptSettings = getQAppPromptSettings(config)
 
     const resolveError = (error: unknown) =>
@@ -97,6 +104,15 @@ const buildExeInputPrompt: ExeInputBuilder<'InputPrompt'> = (
 
     const resolvedPromptDescription =
       promptDescription || (t('qapp.prompt.default_description') as string)
+    const imageInterrogationOutputLanguageInstruction = (
+      (i18n?.resolvedLanguage || i18n?.language || '').toLowerCase().startsWith('zh')
+        ? t('qapp.prompt.image_interrogation_output_language_zh', {
+            defaultValue: 'Output the interrogated prompt in Chinese. Return only the prompt.'
+          })
+        : t('qapp.prompt.image_interrogation_output_language_en', {
+            defaultValue: 'Output the interrogated prompt in English. Return only the prompt.'
+          })
+    ) as string
 
     useImperativeHandle(
       ref,
@@ -154,7 +170,8 @@ const buildExeInputPrompt: ExeInputBuilder<'InputPrompt'> = (
           ...buildImageInterrogationRequest(
             qAppPromptSettings.imageInterrogationSystemPrompt,
             qAppPromptSettings.imageInterrogationUserPrompt,
-            resolvedPromptDescription
+            resolvedPromptDescription,
+            imageInterrogationOutputLanguageInstruction
           ),
           imageObjUrl: imageDataUrl
         })
