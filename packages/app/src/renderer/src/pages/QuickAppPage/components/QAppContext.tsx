@@ -71,6 +71,93 @@ type QAppCacheEntry = {
 }
 
 const qAppCache = new Map<string, QAppCacheEntry>()
+const QAPP_FORM_STATE_STORAGE_PREFIX = 'qapp.formState.v1.'
+const MAX_PERSISTED_QAPP_FORM_VALUE_CHARS = 250_000
+
+const getPersistedQAppFormStateStorageKey = (qAppKey: string): string =>
+  `${QAPP_FORM_STATE_STORAGE_PREFIX}${encodeURIComponent(qAppKey)}`
+
+const buildPersistableQAppFormStateRecord = (
+  formState: Map<string, unknown>
+): Record<string, unknown> => {
+  const record: Record<string, unknown> = {}
+
+  for (const [key, value] of formState.entries()) {
+    try {
+      const serializedValue = JSON.stringify(value)
+      if (!serializedValue || serializedValue.length > MAX_PERSISTED_QAPP_FORM_VALUE_CHARS) {
+        continue
+      }
+      record[key] = JSON.parse(serializedValue)
+    } catch {
+      /* skip values that cannot safely round-trip through localStorage */
+    }
+  }
+
+  return record
+}
+
+const readPersistedQAppFormState = (qAppKey?: string): Map<string, unknown> => {
+  if (!qAppKey || typeof window === 'undefined') return new Map()
+
+  try {
+    const raw = window.localStorage.getItem(getPersistedQAppFormStateStorageKey(qAppKey))
+    if (!raw) return new Map()
+    const parsed = JSON.parse(raw)
+    if (!isPlainQAppValueRecord(parsed)) return new Map()
+    return new Map(Object.entries(parsed))
+  } catch {
+    return new Map()
+  }
+}
+
+const writePersistedQAppFormState = (
+  qAppKey: string | undefined,
+  formState: Map<string, unknown>
+) => {
+  if (!qAppKey || typeof window === 'undefined') return
+
+  try {
+    const storageKey = getPersistedQAppFormStateStorageKey(qAppKey)
+    const persistedRecord = buildPersistableQAppFormStateRecord(formState)
+    if (Object.keys(persistedRecord).length === 0) {
+      window.localStorage.removeItem(storageKey)
+      return
+    }
+    window.localStorage.setItem(storageKey, JSON.stringify(persistedRecord))
+  } catch (error) {
+    console.warn('[QAppContext] failed to persist QApp form state:', error)
+  }
+}
+
+const clearPersistedQAppFormState = (qAppKey?: string) => {
+  if (typeof window === 'undefined') return
+
+  try {
+    if (qAppKey !== undefined) {
+      window.localStorage.removeItem(getPersistedQAppFormStateStorageKey(qAppKey))
+      return
+    }
+
+    const keysToRemove: string[] = []
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index)
+      if (key?.startsWith(QAPP_FORM_STATE_STORAGE_PREFIX)) {
+        keysToRemove.push(key)
+      }
+    }
+    keysToRemove.forEach((key) => window.localStorage.removeItem(key))
+  } catch {
+    /* ignore storage cleanup failures */
+  }
+}
+
+const getCachedOrPersistedQAppFormState = (qAppKey?: string): Map<string, unknown> => {
+  if (!qAppKey) return new Map()
+  const cached = qAppCache.get(qAppKey)?.formState
+  if (cached && cached.size > 0) return new Map(cached)
+  return readPersistedQAppFormState(qAppKey)
+}
 
 const cloneQAppCacheEntry = (entry: QAppCacheEntry): QAppCacheEntry => ({
   cfg: entry.cfg,
@@ -147,11 +234,9 @@ export const QAppContextProvider = ({
   const [submitClientId, setSubmitClientIdInternal] = useState<string | undefined>(undefined)
   const [submitSessionKey, setSubmitSessionKeyInternal] = useState<string | undefined>(undefined)
   const { notifyError } = useMessage()
-  const [formState, setFormState] = useState<Map<string, unknown>>(() => {
-    if (!qAppKey) return new Map()
-    const cached = qAppCache.get(qAppKey)
-    return cached?.formState ? new Map(cached.formState) : new Map()
-  })
+  const [formState, setFormState] = useState<Map<string, unknown>>(() =>
+    getCachedOrPersistedQAppFormState(qAppKey)
+  )
   const pendingWorkflowRef = useRef<Workflow | null>(null)
   const pendingTaskPackRef = useRef<QAppApplyTaskPackDetail | null>(null)
   const fillParamsFromWorkflowRef = useRef<
@@ -536,8 +621,9 @@ export const QAppContextProvider = ({
     const hasCachedSnapshot = Boolean(cached?.cfg && cached?.workflow)
 
     setIsLoading(!hasCachedSnapshot)
-    if (cached?.formState) {
-      setFormState(new Map(cached.formState))
+    const restoredFormState = getCachedOrPersistedQAppFormState(qAppKey)
+    if (restoredFormState.size > 0) {
+      setFormState(restoredFormState)
     }
     if (cached?.cfg) {
       setQAppCfg(cached.cfg)
@@ -579,9 +665,9 @@ export const QAppContextProvider = ({
 
         setQAppCfg(resCfg)
         setWorkflow(resWorkflow)
-        const cachedAfter = qAppCache.get(qAppKey)
-        if (cachedAfter?.formState) {
-          setFormState(new Map(cachedAfter.formState))
+        const restoredFormStateAfterFetch = getCachedOrPersistedQAppFormState(qAppKey)
+        if (restoredFormStateAfterFetch.size > 0) {
+          setFormState(restoredFormStateAfterFetch)
         }
         applyPendingWorkflow(resCfg)
       } catch (error) {
@@ -596,9 +682,9 @@ export const QAppContextProvider = ({
         if (!cached?.workflow) {
           setWorkflow(null)
         }
-        const cachedAfter = qAppCache.get(qAppKey)
-        if (cachedAfter?.formState) {
-          setFormState(new Map(cachedAfter.formState))
+        const restoredFormStateAfterError = getCachedOrPersistedQAppFormState(qAppKey)
+        if (restoredFormStateAfterError.size > 0) {
+          setFormState(restoredFormStateAfterError)
         }
       } finally {
         if (!cancelled) {
@@ -634,6 +720,7 @@ export const QAppContextProvider = ({
       workflow: workflow ?? prev?.workflow ?? null,
       formState: new Map(formState)
     })
+    writePersistedQAppFormState(qAppKey, formState)
   }, [qAppKey, qAppCfg, workflow, formState])
 
   const setValidateFn = useCallback((next: (() => boolean) | undefined) => {
@@ -839,21 +926,25 @@ export const restoreGlobalQAppCache = (cacheObj: Record<string, unknown>) => {
   if (!cacheObj) return
   Object.keys(cacheObj).forEach((key) => {
     const val = cacheObj[key] as any
+    const formState = new Map<string, unknown>(Object.entries(val.formState || {}))
     qAppCache.set(key, {
       cfg: val.cfg,
       workflow: val.workflow,
-      formState: new Map(Object.entries(val.formState || {}))
+      formState
     })
+    writePersistedQAppFormState(key, formState)
   })
 }
 
 export const clearCachedQAppState = (qAppKey?: string) => {
   if (qAppKey === undefined) {
     qAppCache.clear()
+    clearPersistedQAppFormState()
     return
   }
 
   qAppCache.delete(qAppKey)
+  clearPersistedQAppFormState(qAppKey)
   // Notify any mounted QAppContextProvider that watches this key to force re-fetch
   window.dispatchEvent(new CustomEvent('qapp:cache-invalidated', { detail: { key: qAppKey } }))
 }
@@ -864,11 +955,18 @@ export const renameCachedQAppState = (fromKey: string, toKey: string) => {
   }
 
   const cached = qAppCache.get(fromKey)
+  const persistedFormState = readPersistedQAppFormState(fromKey)
   if (cached) {
     qAppCache.set(toKey, cloneQAppCacheEntry(cached))
+    writePersistedQAppFormState(toKey, cached.formState)
+  } else if (persistedFormState.size > 0) {
+    qAppCache.delete(toKey)
+    writePersistedQAppFormState(toKey, persistedFormState)
   } else {
     qAppCache.delete(toKey)
+    clearPersistedQAppFormState(toKey)
   }
 
   qAppCache.delete(fromKey)
+  clearPersistedQAppFormState(fromKey)
 }

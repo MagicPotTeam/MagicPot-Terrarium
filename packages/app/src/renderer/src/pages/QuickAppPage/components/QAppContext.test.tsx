@@ -217,6 +217,43 @@ describe('useQAppInputState', () => {
     expect(screen.getByTestId('probe-value').textContent).toBe('manual override')
   })
 
+  it('restores persisted quick app input values after the in-memory cache is empty', () => {
+    localStorage.setItem(
+      'qapp.formState.v1.demo',
+      JSON.stringify({ prompt: 'persisted prompt', size: { width: 768, height: 1024 } })
+    )
+
+    const { rerender } = render(
+      <QAppContextProvider qAppKey="demo" skipServerFetch={true}>
+        <InputStateProbe formKey="prompt" defaultValue="default prompt" />
+      </QAppContextProvider>
+    )
+
+    expect(screen.getByTestId('probe-value').textContent).toBe('persisted prompt')
+
+    rerender(
+      <QAppContextProvider qAppKey="demo" skipServerFetch={true}>
+        <ObjectInputStateProbe width={512} height={512} />
+      </QAppContextProvider>
+    )
+
+    expect(screen.getByTestId('object-probe-value').textContent).toBe('768x1024')
+  })
+
+  it('writes user-entered quick app input values to persistent storage', () => {
+    render(
+      <QAppContextProvider qAppKey="demo" skipServerFetch={true}>
+        <InputStateProbe formKey="prompt" defaultValue="old prompt" />
+      </QAppContextProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'set manual override' }))
+
+    expect(JSON.parse(localStorage.getItem('qapp.formState.v1.demo') || '{}')).toMatchObject({
+      prompt: 'manual override'
+    })
+  })
+
   it('does not persist equivalent object defaults on rerender', () => {
     const { rerender } = render(
       <QAppContextProvider qAppKey="demo" skipServerFetch={true}>
