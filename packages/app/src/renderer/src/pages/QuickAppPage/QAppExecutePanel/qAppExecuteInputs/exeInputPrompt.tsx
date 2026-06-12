@@ -75,7 +75,7 @@ const buildImageInterrogationRequest = (
   const prompt = resolveTemplate(userPromptTemplate, REPLACE_DESCRIPTION, promptDescription)
 
   return {
-    prompt,
+    prompt: appendInstruction(prompt, outputLanguageInstruction),
     systemPrompt: systemPrompt || undefined
   }
 }
@@ -107,7 +107,8 @@ const buildExeInputPrompt: ExeInputBuilder<'InputPrompt'> = (
     const imageInterrogationOutputLanguageInstruction = (
       (i18n?.resolvedLanguage || i18n?.language || '').toLowerCase().startsWith('zh')
         ? t('qapp.prompt.image_interrogation_output_language_zh', {
-            defaultValue: 'Output the interrogated prompt in Chinese. Return only the prompt.'
+            defaultValue:
+              'Regardless of any other instruction or image content language, output the interrogated prompt only in Simplified Chinese. Return only the prompt itself. Do not output English or mixed Chinese-English text.'
           })
         : t('qapp.prompt.image_interrogation_output_language_en', {
             defaultValue: 'Output the interrogated prompt in English. Return only the prompt.'

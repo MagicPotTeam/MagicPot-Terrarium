@@ -382,34 +382,52 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     // The composer sits at the bottom of a flex column. When content grows, the
     // message list above can shrink, so the textarea should be capped by the
     // panel height instead of the composer's current rendered height.
-    const maxHeight = Math.max(MIN_TEXTAREA_HEIGHT, parentRect.height - COMPOSER_VERTICAL_OVERHEAD)
-    const nextAttachmentPreviewMaxHeight = Math.min(
-      MAX_ATTACHMENT_PREVIEW_HEIGHT,
-      Math.max(
-        MIN_ATTACHMENT_PREVIEW_HEIGHT,
-        Math.floor(parentRect.height * ATTACHMENT_PREVIEW_HEIGHT_RATIO)
+    const maxHeight = Math.round(
+      Math.max(MIN_TEXTAREA_HEIGHT, parentRect.height - COMPOSER_VERTICAL_OVERHEAD)
+    )
+    const nextAttachmentPreviewMaxHeight = Math.round(
+      Math.min(
+        MAX_ATTACHMENT_PREVIEW_HEIGHT,
+        Math.max(
+          MIN_ATTACHMENT_PREVIEW_HEIGHT,
+          Math.floor(parentRect.height * ATTACHMENT_PREVIEW_HEIGHT_RATIO)
+        )
       )
     )
 
-    setTextareaMaxHeight(maxHeight)
-    setAttachmentPreviewMaxHeight(nextAttachmentPreviewMaxHeight)
+    setTextareaMaxHeight((prev) => (Object.is(prev, maxHeight) ? prev : maxHeight))
+    setAttachmentPreviewMaxHeight((prev) =>
+      Object.is(prev, nextAttachmentPreviewMaxHeight) ? prev : nextAttachmentPreviewMaxHeight
+    )
   }, [])
 
   useLayoutEffect(() => {
+    let resizeFrameId: number | null = null
+    const scheduleRecalcMaxHeight = () => {
+      if (resizeFrameId != null) return
+      resizeFrameId = window.requestAnimationFrame(() => {
+        resizeFrameId = null
+        recalcMaxHeight()
+      })
+    }
+
     recalcMaxHeight()
 
-    window.addEventListener('resize', recalcMaxHeight)
+    window.addEventListener('resize', scheduleRecalcMaxHeight)
 
     let observer: ResizeObserver | undefined
     const root = composerRootRef.current
     const observed = root?.parentElement
     if (observed && typeof ResizeObserver !== 'undefined') {
-      observer = new ResizeObserver(recalcMaxHeight)
+      observer = new ResizeObserver(scheduleRecalcMaxHeight)
       observer.observe(observed)
     }
 
     return () => {
-      window.removeEventListener('resize', recalcMaxHeight)
+      window.removeEventListener('resize', scheduleRecalcMaxHeight)
+      if (resizeFrameId != null) {
+        window.cancelAnimationFrame(resizeFrameId)
+      }
       observer?.disconnect()
     }
   }, [recalcMaxHeight])

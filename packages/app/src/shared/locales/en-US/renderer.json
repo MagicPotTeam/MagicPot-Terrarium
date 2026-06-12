@@ -672,7 +672,7 @@
         "translation_failed": "Prompt translation failed: {{error}}",
         "max_length": "Prompt length must not exceed {{maxLength}} characters."
       },
-      "image_interrogation_output_language_zh": "Please output the interrogated prompt in Chinese. Return only the prompt itself.",
+      "image_interrogation_output_language_zh": "Regardless of any other instruction or image content language, output the interrogated prompt only in Simplified Chinese. Return only the prompt itself. Do not output English or mixed Chinese-English text.",
       "image_interrogation_output_language_en": "Please output the interrogated prompt in English. Return only the prompt itself."
     },
     "video_generation": {

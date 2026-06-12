@@ -569,7 +569,7 @@
         "translation_failed": "提示词翻译失败：{{error}}",
         "max_length": "提示词最大长度为 {{maxLength}}。"
       },
-      "image_interrogation_output_language_zh": "请用中文输出反推提示词。只返回提示词本身。",
+      "image_interrogation_output_language_zh": "无论其他指令或图片内容使用什么语言，都必须只用简体中文输出反推提示词。只返回提示词本身，不要输出英文或中英混排。",
       "image_interrogation_output_language_en": "Please output the interrogated prompt in English. Return only the prompt itself."
     },
     "video_generation": {

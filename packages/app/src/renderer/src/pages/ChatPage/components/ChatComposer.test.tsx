@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ThemeProvider } from '@mui/material'
 import { theme } from '@renderer/theme'
@@ -701,7 +701,7 @@ describe('ChatComposer', () => {
     expect(parentDrop).toHaveBeenCalledTimes(1)
   })
 
-  it('uses the full chat panel height budget for long input', () => {
+  it('uses the full chat panel height budget for long input', async () => {
     render(
       <ThemeProvider theme={theme}>
         <ChatComposer
@@ -734,15 +734,17 @@ describe('ChatComposer', () => {
 
     const textarea = screen.getByTestId('chat-composer-input')
 
-    expect(textarea).toHaveStyle({
-      maxHeight: '460px'
+    await waitFor(() => {
+      expect(textarea).toHaveStyle({
+        maxHeight: '460px'
+      })
     })
 
     restoreComposerRect.mockRestore()
     restoreParentRect.mockRestore()
   })
 
-  it('keeps large attachment batches in a scrollable preview tray', () => {
+  it('keeps large attachment batches in a scrollable preview tray', async () => {
     render(
       <ThemeProvider theme={theme}>
         <ChatComposer
@@ -776,10 +778,12 @@ describe('ChatComposer', () => {
 
     const attachmentTray = screen.getByTestId('chat-composer-attachments')
 
-    expect(attachmentTray).toHaveStyle({
-      maxHeight: '192px',
-      overflowY: 'auto',
-      overflowX: 'hidden'
+    await waitFor(() => {
+      expect(attachmentTray).toHaveStyle({
+        maxHeight: '192px',
+        overflowY: 'auto',
+        overflowX: 'hidden'
+      })
     })
 
     restoreParentRect.mockRestore()
@@ -845,5 +849,41 @@ describe('ChatComposer', () => {
 
     expect(container.querySelectorAll('img')).toHaveLength(0)
     expect(screen.getByTitle('chat.send_message')).not.toBeDisabled()
+  })
+
+  it('coalesces ResizeObserver layout recalculations without a synchronous update loop', async () => {
+    const originalResizeObserver = globalThis.ResizeObserver
+    const callbacks: ResizeObserverCallback[] = []
+    class MockResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        callbacks.push(callback)
+      }
+      observe = vi.fn()
+      disconnect = vi.fn()
+      unobserve = vi.fn()
+    }
+    globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const { container } = render(<ControlledChatComposer initialValue="hello" />)
+      const root = container.querySelector('[data-testid="chat-composer-root"]')
+      const parent = root?.parentElement
+      expect(parent).toBeTruthy()
+      vi.spyOn(parent as HTMLElement, 'getBoundingClientRect').mockReturnValue(createRect(0, 640))
+
+      for (let index = 0; index < 20; index += 1) {
+        callbacks.forEach((callback) => callback([], {} as ResizeObserver))
+      }
+
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+
+      expect(consoleErrorSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('Maximum update depth exceeded')
+      )
+    } finally {
+      consoleErrorSpy.mockRestore()
+      globalThis.ResizeObserver = originalResizeObserver
+    }
   })
 })
