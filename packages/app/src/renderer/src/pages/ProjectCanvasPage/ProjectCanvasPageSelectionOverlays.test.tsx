@@ -2105,7 +2105,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
     canvasContainer.remove()
   })
 
-  it('keeps the exact-group chip anchored to the selection top-left instead of drifting around the toolbar', async () => {
+  it('moves the exact-group chip beside the toolbar when its default anchor would overlap controls', async () => {
     const canvasContainer = document.createElement('div')
     Object.defineProperty(canvasContainer, 'clientWidth', {
       configurable: true,
@@ -2199,9 +2199,9 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
 
     expect(groupChip).toBeTruthy()
     expect(toolbar).toBeTruthy()
-    expect((groupChip as HTMLElement).dataset.canvasGroupChipPlacement).toBe('default')
-    expect(parseFloat(getComputedStyle(groupChip as HTMLElement).left)).toBeCloseTo(240, 0)
-    expect(parseFloat(getComputedStyle(groupChip as HTMLElement).top)).toBeGreaterThan(70)
+    expect((groupChip as HTMLElement).dataset.canvasGroupChipPlacement).toBe('left-of-toolbar')
+    expect(parseFloat(getComputedStyle(groupChip as HTMLElement).left)).toBeLessThan(200)
+    expect(parseFloat(getComputedStyle(groupChip as HTMLElement).top)).toBeGreaterThan(60)
     expect(parseFloat(getComputedStyle(groupChip as HTMLElement).top)).toBeLessThan(80)
 
     canvasContainer.remove()
@@ -2329,7 +2329,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
     canvasContainer.remove()
   })
 
-  it('anchors the exact-group chip to the current selected item bounds when the stored group bounds are stale', async () => {
+  it('positions the exact-group chip beside the live selected item toolbar when stored group bounds are stale', async () => {
     const canvasContainer = document.createElement('div')
     Object.defineProperty(canvasContainer, 'clientWidth', {
       configurable: true,
@@ -2426,14 +2426,15 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
       return element as HTMLElement
     })
 
-    expect(parseFloat(getComputedStyle(groupChip).left)).toBeCloseTo(420, 0)
-    expect(parseFloat(getComputedStyle(groupChip).top)).toBeGreaterThan(270)
-    expect(parseFloat(getComputedStyle(groupChip).top)).toBeLessThan(295)
+    expect(groupChip.dataset.canvasGroupChipPlacement).toBe('left-of-toolbar')
+    expect(parseFloat(getComputedStyle(groupChip).left)).toBeCloseTo(256, 0)
+    expect(parseFloat(getComputedStyle(groupChip).top)).toBeGreaterThan(260)
+    expect(parseFloat(getComputedStyle(groupChip).top)).toBeLessThan(285)
 
     canvasContainer.remove()
   })
 
-  it('anchors the matching group chip to the current selected bounds even before exactSelectedGroup catches up', async () => {
+  it('positions the matching group chip beside the current selected toolbar before exactSelectedGroup catches up', async () => {
     const canvasContainer = document.createElement('div')
     Object.defineProperty(canvasContainer, 'clientWidth', {
       configurable: true,
@@ -2530,9 +2531,10 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
       return element as HTMLElement
     })
 
-    expect(parseFloat(getComputedStyle(groupChip).left)).toBeCloseTo(420, 0)
-    expect(parseFloat(getComputedStyle(groupChip).top)).toBeGreaterThan(270)
-    expect(parseFloat(getComputedStyle(groupChip).top)).toBeLessThan(295)
+    expect(groupChip.dataset.canvasGroupChipPlacement).toBe('left-of-toolbar')
+    expect(parseFloat(getComputedStyle(groupChip).left)).toBeCloseTo(256, 0)
+    expect(parseFloat(getComputedStyle(groupChip).top)).toBeGreaterThan(260)
+    expect(parseFloat(getComputedStyle(groupChip).top)).toBeLessThan(285)
 
     canvasContainer.remove()
   })
@@ -2808,7 +2810,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
     expect(nextChipWidth).toBeLessThan(initialChipWidth)
     expect(nextToolbarLeft).toBeLessThan(initialToolbarLeft - 60)
     expect(Math.abs(nextToolbarTop - initialToolbarTop)).toBeGreaterThan(5)
-    expect(parseFloat(getComputedStyle(groupChip).zIndex)).toBeGreaterThan(
+    expect(parseFloat(getComputedStyle(groupChip).zIndex)).toBeLessThan(
       parseFloat(getComputedStyle(toolbar).zIndex)
     )
 
