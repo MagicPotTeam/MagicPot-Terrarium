@@ -3,6 +3,44 @@ import { describe, expect, it } from 'vitest'
 import { useCanvasViewportPlacement } from './useCanvasViewportPlacement'
 
 describe('useCanvasViewportPlacement', () => {
+  it('fits oversized generated images inside the visible viewport without cropping', () => {
+    const canvasContainer = document.createElement('div')
+
+    const { result } = renderHook(() =>
+      useCanvasViewportPlacement({
+        stagePos: { x: 0, y: 0 },
+        stageSize: { width: 1280, height: 720 },
+        stageScale: 1,
+        stageRef: { current: null },
+        canvasContainerRef: { current: canvasContainer }
+      })
+    )
+
+    expect(result.current.fitSizeToCanvas(2500, 2500)).toEqual({
+      width: 612,
+      height: 612
+    })
+  })
+
+  it('does not upscale small generated images while fitting them to the viewport', () => {
+    const canvasContainer = document.createElement('div')
+
+    const { result } = renderHook(() =>
+      useCanvasViewportPlacement({
+        stagePos: { x: 0, y: 0 },
+        stageSize: { width: 1280, height: 720 },
+        stageScale: 1,
+        stageRef: { current: null },
+        canvasContainerRef: { current: canvasContainer }
+      })
+    )
+
+    expect(result.current.fitSizeToCanvas(320, 180)).toEqual({
+      width: 320,
+      height: 180
+    })
+  })
+
   it('uses the live stage transform refs when resolving drop points at tiny zoom', () => {
     const canvasContainer = document.createElement('div')
     canvasContainer.getBoundingClientRect = () =>

@@ -64,6 +64,13 @@ type QAppContextProviderProps = {
   children: React.ReactNode
 }
 
+type QAppFillParamsWorkflow = Workflow | Record<string, unknown>
+
+export type QAppFillParamsDetail = {
+  qAppKey?: string
+  workflow: QAppFillParamsWorkflow
+}
+
 // 将缓存提升到模块级别，这样即使组件卸载和重新挂载，缓存也不会丢失
 type QAppCacheEntry = {
   cfg: QAppCfg | null
@@ -72,8 +79,49 @@ type QAppCacheEntry = {
 }
 
 const qAppCache = new Map<string, QAppCacheEntry>()
+const pendingQAppFillParams = new Map<string, QAppFillParamsWorkflow>()
 const QAPP_FORM_STATE_STORAGE_PREFIX = 'qapp.formState.v1.'
 const MAX_PERSISTED_QAPP_FORM_VALUE_CHARS = 250_000
+
+const normalizeQAppKey = (qAppKey?: string): string => String(qAppKey || '').trim()
+
+const readPendingQAppFillParams = (qAppKey?: string): QAppFillParamsWorkflow | null => {
+  const normalizedQAppKey = normalizeQAppKey(qAppKey)
+  if (!normalizedQAppKey) return null
+  return pendingQAppFillParams.get(normalizedQAppKey) ?? null
+}
+
+const clearPendingQAppFillParams = (qAppKey?: string, workflow?: QAppFillParamsWorkflow): void => {
+  const normalizedQAppKey = normalizeQAppKey(qAppKey)
+  if (!normalizedQAppKey) return
+
+  const pendingWorkflow = pendingQAppFillParams.get(normalizedQAppKey)
+  if (workflow && pendingWorkflow && pendingWorkflow !== workflow) {
+    return
+  }
+
+  pendingQAppFillParams.delete(normalizedQAppKey)
+}
+
+export const dispatchQAppFillParams = (detail: QAppFillParamsDetail): void => {
+  if (!detail.workflow || typeof window === 'undefined') return
+
+  const hasExplicitQAppKey = Object.prototype.hasOwnProperty.call(detail, 'qAppKey')
+  const normalizedQAppKey = normalizeQAppKey(detail.qAppKey)
+  if (hasExplicitQAppKey && !normalizedQAppKey) {
+    return
+  }
+
+  const nextDetail: QAppFillParamsDetail = hasExplicitQAppKey
+    ? { qAppKey: normalizedQAppKey, workflow: detail.workflow }
+    : { workflow: detail.workflow }
+
+  if (hasExplicitQAppKey) {
+    pendingQAppFillParams.set(normalizedQAppKey, detail.workflow)
+  }
+
+  window.dispatchEvent(new CustomEvent('qapp:fillParams', { detail: nextDetail }))
+}
 
 const getPersistedQAppFormStateStorageKey = (qAppKey: string): string =>
   `${QAPP_FORM_STATE_STORAGE_PREFIX}${encodeURIComponent(qAppKey)}`
@@ -209,6 +257,23 @@ const qAppInputValueEquals = (left: unknown, right: unknown): boolean => {
   return false
 }
 
+const qAppFormStateEquals = (left: Map<string, unknown>, right: Map<string, unknown>): boolean => {
+  if (left === right) {
+    return true
+  }
+  if (left.size !== right.size) {
+    return false
+  }
+
+  for (const [key, value] of left.entries()) {
+    if (!right.has(key) || !qAppInputValueEquals(value, right.get(key))) {
+      return false
+    }
+  }
+
+  return true
+}
+
 export const QAppContextProvider = ({
   qAppKey,
   skipServerFetch,
@@ -235,15 +300,40 @@ export const QAppContextProvider = ({
   const [submitClientId, setSubmitClientIdInternal] = useState<string | undefined>(undefined)
   const [submitSessionKey, setSubmitSessionKeyInternal] = useState<string | undefined>(undefined)
   const { notifyError } = useMessage()
+  const notifyErrorRef = useRef(notifyError)
   const [formState, setFormState] = useState<Map<string, unknown>>(() =>
     getCachedOrPersistedQAppFormState(qAppKey)
   )
-  const pendingWorkflowRef = useRef<Workflow | null>(null)
+  const replaceFormStateIfChanged = useCallback((nextFormState: Map<string, unknown>) => {
+    setFormState((prev) => (qAppFormStateEquals(prev, nextFormState) ? prev : nextFormState))
+  }, [])
+  const [loadedQAppKey, setLoadedQAppKey] = useState(qAppKey)
+  const qAppKeyChangedDuringRender = loadedQAppKey !== qAppKey
+  const pendingWorkflowRef = useRef<QAppFillParamsWorkflow | null>(null)
+  const pendingWorkflowApplyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const scheduledPendingWorkflowRef = useRef<QAppFillParamsWorkflow | null>(null)
+  const scheduledPendingCfgRef = useRef<QAppCfg | null>(null)
   const pendingTaskPackRef = useRef<QAppApplyTaskPackDetail | null>(null)
   const fillParamsFromWorkflowRef = useRef<
     ((sourceWorkflow: Workflow, cfg: QAppCfg | null) => void) | null
   >(null)
   const [isLoading, setIsLoading] = useState(false)
+
+  useEffect(() => {
+    notifyErrorRef.current = notifyError
+  }, [notifyError])
+
+  useEffect(() => {
+    return () => {
+      if (pendingWorkflowApplyTimerRef.current !== null) {
+        clearTimeout(pendingWorkflowApplyTimerRef.current)
+        pendingWorkflowApplyTimerRef.current = null
+      }
+      scheduledPendingWorkflowRef.current = null
+      scheduledPendingCfgRef.current = null
+      pendingWorkflowRef.current = null
+    }
+  }, [qAppKey])
 
   // Block cache writeback while an invalidation→refetch cycle is in progress
   // to prevent stale state from being written back into the cache.
@@ -264,13 +354,13 @@ export const QAppContextProvider = ({
         // Reset local state so the fetch effect re-runs with fresh data
         setQAppCfg(null)
         setWorkflow(null)
-        setFormState(new Map())
+        replaceFormStateIfChanged(new Map())
         setCacheInvalidationTick((prev) => prev + 1)
       }
     }
     window.addEventListener('qapp:cache-invalidated', handler)
     return () => window.removeEventListener('qapp:cache-invalidated', handler)
-  }, [qAppKey])
+  }, [qAppKey, replaceFormStateIfChanged])
 
   // 先定义 setFormStateValue，因为 fillParamsFromWorkflow 需要使用它
   const setFormStateValue = useCallback((key: string, value: unknown) => {
@@ -594,30 +684,52 @@ export const QAppContextProvider = ({
     fillParamsFromWorkflowRef.current = fillParamsFromWorkflow
   }, [fillParamsFromWorkflow])
 
-  useEffect(() => {
-    let cancelled = false
-
-    const applyPendingWorkflow = (cfg: QAppCfg | null) => {
-      if (!pendingWorkflowRef.current || !fillParamsFromWorkflowRef.current || !cfg) {
+  const schedulePendingWorkflowApply = useCallback(
+    (cfg: QAppCfg | null) => {
+      const pendingWorkflow = pendingWorkflowRef.current ?? readPendingQAppFillParams(qAppKey)
+      if (!pendingWorkflow || !fillParamsFromWorkflowRef.current || !cfg) {
         return
       }
 
-      const pendingWorkflow = pendingWorkflowRef.current
-      setTimeout(() => {
-        if (cancelled) {
+      pendingWorkflowRef.current = pendingWorkflow
+
+      if (pendingWorkflowApplyTimerRef.current !== null) {
+        clearTimeout(pendingWorkflowApplyTimerRef.current)
+      }
+
+      scheduledPendingWorkflowRef.current = pendingWorkflow
+      scheduledPendingCfgRef.current = cfg
+      pendingWorkflowApplyTimerRef.current = setTimeout(() => {
+        pendingWorkflowApplyTimerRef.current = null
+        const workflowToApply = scheduledPendingWorkflowRef.current
+        const cfgToApply = scheduledPendingCfgRef.current
+        scheduledPendingWorkflowRef.current = null
+        scheduledPendingCfgRef.current = null
+
+        if (!workflowToApply || !cfgToApply) {
           return
         }
-        fillParamsFromWorkflowRef.current?.(pendingWorkflow, cfg)
-        if (pendingWorkflowRef.current === pendingWorkflow) {
+
+        fillParamsFromWorkflowRef.current?.(workflowToApply as Workflow, cfgToApply)
+        if (pendingWorkflowRef.current === workflowToApply) {
           pendingWorkflowRef.current = null
         }
+        clearPendingQAppFillParams(qAppKey, workflowToApply)
       }, 100)
-    }
+    },
+    [qAppKey]
+  )
+
+  useEffect(() => {
+    let cancelled = false
 
     if (!qAppKey) {
+      pendingWorkflowRef.current = null
       setQAppCfg(null)
       setWorkflow(null)
-      setFormState(new Map())
+      replaceFormStateIfChanged(new Map())
+      setLoadedQAppKey(qAppKey)
+      cacheWriteBlockedRef.current = false
       return
     }
 
@@ -626,19 +738,15 @@ export const QAppContextProvider = ({
 
     setIsLoading(!hasCachedSnapshot)
     const restoredFormState = getCachedOrPersistedQAppFormState(qAppKey)
-    if (restoredFormState.size > 0) {
-      setFormState(restoredFormState)
-    }
-    if (cached?.cfg) {
-      setQAppCfg(cached.cfg)
-    }
-    if (cached?.workflow) {
-      setWorkflow(cached.workflow)
-    }
-    applyPendingWorkflow(cached?.cfg ?? null)
+    replaceFormStateIfChanged(restoredFormState)
+    setQAppCfg(cached?.cfg ?? null)
+    setWorkflow(cached?.workflow ?? null)
+    setLoadedQAppKey(qAppKey)
+    schedulePendingWorkflowApply(cached?.cfg ?? null)
 
     if (skipServerFetch) {
       setIsLoading(false)
+      cacheWriteBlockedRef.current = false
       return
     }
 
@@ -671,15 +779,15 @@ export const QAppContextProvider = ({
         setWorkflow(resWorkflow)
         const restoredFormStateAfterFetch = getCachedOrPersistedQAppFormState(qAppKey)
         if (restoredFormStateAfterFetch.size > 0) {
-          setFormState(restoredFormStateAfterFetch)
+          replaceFormStateIfChanged(restoredFormStateAfterFetch)
         }
-        applyPendingWorkflow(resCfg)
+        schedulePendingWorkflowApply(resCfg)
       } catch (error) {
         if (cancelled) {
           return
         }
         console.error('fetchQAppCfg', error)
-        notifyError('获取 QApp 配置失败')
+        notifyErrorRef.current('获取 QApp 配置失败')
         if (!cached?.cfg) {
           setQAppCfg(null)
         }
@@ -688,7 +796,7 @@ export const QAppContextProvider = ({
         }
         const restoredFormStateAfterError = getCachedOrPersistedQAppFormState(qAppKey)
         if (restoredFormStateAfterError.size > 0) {
-          setFormState(restoredFormStateAfterError)
+          replaceFormStateIfChanged(restoredFormStateAfterError)
         }
       } finally {
         if (!cancelled) {
@@ -705,10 +813,23 @@ export const QAppContextProvider = ({
     return () => {
       cancelled = true
     }
-  }, [qAppKey, skipServerFetch, notifyError, cacheInvalidationTick])
+  }, [
+    qAppKey,
+    skipServerFetch,
+    cacheInvalidationTick,
+    replaceFormStateIfChanged,
+    schedulePendingWorkflowApply
+  ])
 
   useEffect(() => {
-    if (!qAppKey) {
+    if (qAppKeyChangedDuringRender) {
+      return
+    }
+    schedulePendingWorkflowApply(qAppCfg)
+  }, [qAppCfg, qAppKeyChangedDuringRender, schedulePendingWorkflowApply])
+
+  useEffect(() => {
+    if (!qAppKey || qAppKeyChangedDuringRender) {
       return
     }
     // Skip cache writeback while an invalidation→refetch cycle is in progress.
@@ -725,7 +846,7 @@ export const QAppContextProvider = ({
       formState: new Map(formState)
     })
     writePersistedQAppFormState(qAppKey, formState)
-  }, [qAppKey, qAppCfg, workflow, formState])
+  }, [qAppKey, qAppKeyChangedDuringRender, qAppCfg, workflow, formState])
 
   const setValidateFn = useCallback((next: (() => boolean) | undefined) => {
     setValidateInternal(() => next)
@@ -752,23 +873,41 @@ export const QAppContextProvider = ({
 
   // 监听填充参数事件
   useEffect(() => {
-    const handleFillParams = (event: CustomEvent<{ workflow: Workflow }>) => {
-      if (qAppCfg && fillParamsFromWorkflowRef.current) {
-        // 如果qAppCfg已经加载，直接填充
-        setTimeout(() => {
-          fillParamsFromWorkflowRef.current?.(event.detail.workflow, qAppCfg)
-        }, 100)
-      } else {
-        // 如果qAppCfg还没加载，保存工作流等待加载完成
-        pendingWorkflowRef.current = event.detail.workflow
+    const handleFillParams = (event: Event) => {
+      const detail = (event as CustomEvent<QAppFillParamsDetail>).detail
+      if (!detail?.workflow) {
+        return
       }
+
+      const hasExplicitQAppKey = Object.prototype.hasOwnProperty.call(detail, 'qAppKey')
+      const targetQAppKey = normalizeQAppKey(detail.qAppKey)
+      const currentQAppKey = normalizeQAppKey(qAppKey)
+      if (hasExplicitQAppKey && (!targetQAppKey || targetQAppKey !== currentQAppKey)) {
+        return
+      }
+
+      pendingWorkflowRef.current = detail.workflow
+      schedulePendingWorkflowApply(qAppCfg)
     }
 
     window.addEventListener('qapp:fillParams', handleFillParams as EventListener)
     return () => {
       window.removeEventListener('qapp:fillParams', handleFillParams as EventListener)
     }
-  }, [qAppCfg])
+  }, [qAppCfg, qAppKey, schedulePendingWorkflowApply])
+
+  const exposedFormState = useMemo(
+    () => (qAppKeyChangedDuringRender ? new Map<string, unknown>() : formState),
+    [qAppKeyChangedDuringRender, formState]
+  )
+  const exposedQAppCfg = qAppKeyChangedDuringRender ? null : qAppCfg
+  const exposedWorkflow = qAppKeyChangedDuringRender ? null : workflow
+  const exposedValidate = qAppKeyChangedDuringRender ? undefined : validate
+  const exposedBuildWorkflow = qAppKeyChangedDuringRender ? undefined : buildWorkflow
+  const exposedBuildSubmitExtraData = qAppKeyChangedDuringRender ? undefined : buildSubmitExtraData
+  const exposedSubmitClientId = qAppKeyChangedDuringRender ? undefined : submitClientId
+  const exposedSubmitSessionKey = qAppKeyChangedDuringRender ? undefined : submitSessionKey
+  const exposedIsLoading = qAppKeyChangedDuringRender ? true : isLoading
 
   useEffect(() => {
     const handleApplyTaskPack = (event: Event) => {
@@ -807,24 +946,24 @@ export const QAppContextProvider = ({
   return (
     <QAppContext.Provider
       value={{
-        qAppCfg,
-        workflow,
+        qAppCfg: exposedQAppCfg,
+        workflow: exposedWorkflow,
         setQAppCfg,
         setWorkflow,
-        submitClientId,
-        submitSessionKey,
-        validate,
-        buildWorkflow,
-        buildSubmitExtraData,
+        submitClientId: exposedSubmitClientId,
+        submitSessionKey: exposedSubmitSessionKey,
+        validate: exposedValidate,
+        buildWorkflow: exposedBuildWorkflow,
+        buildSubmitExtraData: exposedBuildSubmitExtraData,
         setSubmitClientId: setSubmitClientIdFn,
         setSubmitSessionKey: setSubmitSessionKeyFn,
         setValidate: setValidateFn,
         setBuildWorkflow: setBuildWorkflowFn,
         setBuildSubmitExtraData: setBuildSubmitExtraDataFn,
-        formState,
+        formState: exposedFormState,
         setFormStateValue,
         currentQAppKey: qAppKey,
-        isLoading
+        isLoading: exposedIsLoading
       }}
     >
       {children}
@@ -943,11 +1082,13 @@ export const restoreGlobalQAppCache = (cacheObj: Record<string, unknown>) => {
 export const clearCachedQAppState = (qAppKey?: string) => {
   if (qAppKey === undefined) {
     qAppCache.clear()
+    pendingQAppFillParams.clear()
     clearPersistedQAppFormState()
     return
   }
 
   qAppCache.delete(qAppKey)
+  pendingQAppFillParams.delete(normalizeQAppKey(qAppKey))
   clearPersistedQAppFormState(qAppKey)
   // Notify any mounted QAppContextProvider that watches this key to force re-fetch
   window.dispatchEvent(new CustomEvent('qapp:cache-invalidated', { detail: { key: qAppKey } }))

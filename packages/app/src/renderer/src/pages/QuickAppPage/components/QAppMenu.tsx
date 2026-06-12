@@ -54,7 +54,7 @@ import {
   hasRestorableHy3dQuickAppPayload,
   parseInternalImageDragPayload
 } from '@renderer/utils/droppedImageUtils'
-import { clearCachedQAppState, renameCachedQAppState } from './QAppContext'
+import { clearCachedQAppState, dispatchQAppFillParams, renameCachedQAppState } from './QAppContext'
 import {
   QUICK_APP_IMPORT_PROMPT,
   getUnsupportedQuickAppDropMessage,
@@ -1166,15 +1166,13 @@ export default function QAppMenu({
   const matchAndFillQApp = useCallback(
     async (workflow: Record<string, unknown>) => {
       // 1. 检查工作流中是否嵌入了 qAppKey
-      const embeddedQAppKey = (workflow as Record<string, unknown>).__qAppKey__ as
-        | string
-        | undefined
+      const embeddedQAppKey = String((workflow as Record<string, unknown>).__qAppKey__ || '').trim()
       if (embeddedQAppKey) {
         console.log(`[handleDrop] 使用嵌入的 qAppKey: ${embeddedQAppKey}`)
         setCurrentQAppKey(embeddedQAppKey)
-        // 等待快应用切换完成后再填充参数
+        // 等待快应用切换完成后再填充参数；同时按 qAppKey 缓存，避免切换竞态丢失事件。
         setTimeout(() => {
-          window.dispatchEvent(new CustomEvent('qapp:fillParams', { detail: { workflow } }))
+          dispatchQAppFillParams({ qAppKey: embeddedQAppKey, workflow })
         }, 300)
         return true
       }
@@ -1199,7 +1197,7 @@ export default function QAppMenu({
               console.log(`[handleDrop] 匹配到快应用: ${key}`)
               setCurrentQAppKey(key)
               setTimeout(() => {
-                window.dispatchEvent(new CustomEvent('qapp:fillParams', { detail: { workflow } }))
+                dispatchQAppFillParams({ qAppKey: key, workflow })
               }, 300)
               return true
             }
@@ -1212,11 +1210,18 @@ export default function QAppMenu({
       }
 
       // 3. 没有匹配到，直接在当前快应用上填充参数（可能会部分失败）
+      const targetQAppKey = currentQAppKey.trim()
+      if (!targetQAppKey) {
+        console.warn('[handleDrop] 未匹配到快应用，且当前没有可填充的快应用')
+        notifyError('未找到匹配的快应用，请先选择一个快应用')
+        return false
+      }
+
       console.warn('[handleDrop] 未匹配到快应用，使用当前快应用填充')
-      window.dispatchEvent(new CustomEvent('qapp:fillParams', { detail: { workflow } }))
+      dispatchQAppFillParams({ qAppKey: targetQAppKey, workflow })
       return false
     },
-    [setCurrentQAppKey, compareWorkflows]
+    [setCurrentQAppKey, compareWorkflows, currentQAppKey, notifyError]
   )
 
   // 导入 .mpqapp 文件（必须定义在 handleDrop 之前，避免 TDZ）

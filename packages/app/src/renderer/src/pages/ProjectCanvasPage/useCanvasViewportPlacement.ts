@@ -26,6 +26,8 @@ type ResolveCanvasPlacementOptions = {
   mode?: 'center' | 'auto'
 }
 
+const CANVAS_VIEWPORT_IMAGE_FIT_RATIO = 0.85
+
 export function useCanvasViewportPlacement({
   stagePos,
   stagePosRef,
@@ -52,12 +54,28 @@ export function useCanvasViewportPlacement({
     return getCanvasViewportBounds(pos, stageSize, scale)
   }, [getLiveStageTransform, stageSize])
 
-  const fitSizeToCanvas = useCallback((width: number, height: number) => {
-    return {
-      width: Math.max(1, Math.round(width)),
-      height: Math.max(1, Math.round(height))
-    }
-  }, [])
+  const fitSizeToCanvas = useCallback(
+    (width: number, height: number) => {
+      const safeWidth = Math.max(1, Math.round(width))
+      const safeHeight = Math.max(1, Math.round(height))
+      const viewport = getViewportBounds()
+      const maxWidth = Math.max(
+        1,
+        Math.round(Math.abs(viewport.width) * CANVAS_VIEWPORT_IMAGE_FIT_RATIO)
+      )
+      const maxHeight = Math.max(
+        1,
+        Math.round(Math.abs(viewport.height) * CANVAS_VIEWPORT_IMAGE_FIT_RATIO)
+      )
+      const scale = Math.min(1, maxWidth / safeWidth, maxHeight / safeHeight)
+
+      return {
+        width: Math.max(1, Math.round(safeWidth * scale)),
+        height: Math.max(1, Math.round(safeHeight * scale))
+      }
+    },
+    [getViewportBounds]
+  )
 
   const getCenterPosition = useCallback(
     (width: number, height: number) =>

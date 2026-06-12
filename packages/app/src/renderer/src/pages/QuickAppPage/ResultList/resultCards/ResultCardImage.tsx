@@ -22,6 +22,9 @@ import { resolveProjectResourceDir } from '@renderer/utils/projectResourcePaths'
 // 记录已经自动保存过的图片，防止组件重新挂载时重复保存
 const autoSavedImageTracker = new Set<string>()
 
+const getPositiveImageDimension = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+
 const ResultCardImage: ResultCardComponent<'image'> = ({
   result,
   index,
@@ -39,6 +42,12 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
   } | null>(null)
   const { setWorkflow, setQAppCfg, setFormStateValue, qAppCfg } = useQAppContext()
   const isDraggableResult = Boolean(result.objectUrl && result.objectUrl.trim())
+  const resultSourceWidth = getPositiveImageDimension(result.sourceWidth)
+  const resultSourceHeight = getPositiveImageDimension(result.sourceHeight)
+  const resultAspectRatio =
+    resultSourceWidth && resultSourceHeight
+      ? `${resultSourceWidth} / ${resultSourceHeight}`
+      : undefined
 
   useEffect(() => {
     // 自动保存逻辑
@@ -331,8 +340,10 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
             return
           }
           // 携带图片URL和promptId，供拖放目标提取工作流
-          const sourceWidth = e.currentTarget.naturalWidth || undefined
-          const sourceHeight = e.currentTarget.naturalHeight || undefined
+          const sourceWidth =
+            resultSourceWidth ?? getPositiveImageDimension(e.currentTarget.naturalWidth)
+          const sourceHeight =
+            resultSourceHeight ?? getPositiveImageDimension(e.currentTarget.naturalHeight)
           const payload = JSON.stringify({
             objectUrl: result.objectUrl,
             promptId: result.promptId,
@@ -345,12 +356,15 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
           e.dataTransfer.setData('text/uri-list', result.objectUrl)
           e.dataTransfer.effectAllowed = 'copy'
         }}
+        width={resultSourceWidth}
+        height={resultSourceHeight}
         style={{
           width: '100%',
           height: 'auto',
           minHeight: '100px',
           display: 'block',
-          cursor: 'default'
+          cursor: 'default',
+          ...(resultAspectRatio ? { aspectRatio: resultAspectRatio } : {})
         }}
         onContextMenu={handleContextMenu}
       />

@@ -350,4 +350,61 @@ describe('ResultCardImage', () => {
       sourceHeight: 864
     })
   })
+
+  it('uses stored source dimensions for image layout and drag payload before decode completes', async () => {
+    const setData = vi.fn()
+    const dataTransfer = {
+      setData,
+      effectAllowed: ''
+    } as unknown as DataTransfer
+
+    render(
+      <ResultCardImage
+        result={
+          {
+            type: 'image',
+            id: 'image-4',
+            promptId: 'prompt-4',
+            objectUrl: 'blob:image-result-4',
+            sourceWidth: 3136,
+            sourceHeight: 2624,
+            fileItem: {
+              filename: 'image-4.png',
+              subfolder: 'outputs',
+              type: 'output'
+            }
+          } as any
+        }
+        index={3}
+        config={{ download_dir: 'C:/downloads' } as any}
+        buildEnv={{} as any}
+      />
+    )
+
+    const image = screen.getByRole('img') as HTMLImageElement
+    Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 0 })
+    Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 0 })
+
+    expect(image.getAttribute('width')).toBe('3136')
+    expect(image.getAttribute('height')).toBe('2624')
+    expect(image.style.aspectRatio).toBe('3136 / 2624')
+
+    fireEvent.dragStart(image, { dataTransfer })
+
+    const rawPayload = setData.mock.calls.find(
+      ([key]) => key === 'application/x-qapp-image'
+    )?.[1] as string | undefined
+    expect(rawPayload).toBeTruthy()
+    expect(JSON.parse(rawPayload!)).toEqual({
+      objectUrl: 'blob:image-result-4',
+      promptId: 'prompt-4',
+      fileItem: {
+        filename: 'image-4.png',
+        subfolder: 'outputs',
+        type: 'output'
+      },
+      sourceWidth: 3136,
+      sourceHeight: 2624
+    })
+  })
 })
