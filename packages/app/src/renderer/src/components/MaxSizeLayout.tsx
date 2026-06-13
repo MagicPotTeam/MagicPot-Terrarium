@@ -65,10 +65,6 @@ export default function MaxSizeLayout({ children, onResize }: MaxSizeLayoutProps
 
   useLayoutEffect(() => {
     scheduleUpdateSize()
-  })
-
-  useLayoutEffect(() => {
-    scheduleUpdateSize()
 
     const handleResize = () => {
       scheduleUpdateSize()
