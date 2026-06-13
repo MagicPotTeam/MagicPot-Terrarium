@@ -1359,7 +1359,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   }, [])
 
   const renderImmediateOrSchedule = useCallback(() => {
-    if (isPerformanceThrottledRef.current) {
+    if (isPerformanceThrottledRef.current || isViewportInteractingRef.current) {
       scheduleRender()
       return
     }
@@ -1681,7 +1681,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     () => ({
       syncViewport(pos, scale) {
         applyViewportTransform(pos, scale)
-        scheduleViewportReconcile({ allowDuringInteraction: true })
+        scheduleViewportReconcile()
       },
       setViewportInteracting(active) {
         setViewportInteractingState(active)

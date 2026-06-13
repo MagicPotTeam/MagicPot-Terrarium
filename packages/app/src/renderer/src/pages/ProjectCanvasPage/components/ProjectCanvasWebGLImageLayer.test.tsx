@@ -1304,7 +1304,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(getLiveSpriteByLabel('image-far')).not.toBeNull()
   }, 30000)
 
-  it('admits preview sprites during viewport interaction without waiting for idle', async () => {
+  it('defers viewport resident reconciliation during interaction until the viewport settles', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
     const residentIdsCalls: Set<string>[] = []
@@ -1344,14 +1344,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       await new Promise((resolve) => setTimeout(resolve, 120))
     })
 
-    await waitFor(
-      () => {
-        expect(residentIdsCalls.at(-1)).toEqual(new Set(['image-far-interacting']))
-      },
-      { timeout: 15000 }
-    )
-    expect(getLiveSpriteByLabel('image-visible-interacting')).toBeNull()
-    expect(getLiveSpriteByLabel('image-far-interacting')).not.toBeNull()
+    expect(residentIdsCalls.at(-1)).toEqual(new Set(['image-visible-interacting']))
+    expect(getLiveSpriteByLabel('image-visible-interacting')).not.toBeNull()
+    expect(getLiveSpriteByLabel('image-far-interacting')).toBeNull()
 
     rerender(
       <ProjectCanvasWebGLImageLayer
@@ -1371,6 +1366,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       },
       { timeout: 15000 }
     )
+    expect(getLiveSpriteByLabel('image-visible-interacting')).toBeNull()
+    expect(getLiveSpriteByLabel('image-far-interacting')).not.toBeNull()
   }, 30000)
 
   it('defers metrics reports while viewport interaction is active', async () => {
