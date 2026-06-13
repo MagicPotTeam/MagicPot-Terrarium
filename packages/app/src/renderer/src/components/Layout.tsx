@@ -24,6 +24,10 @@ import {
   isProjectCanvasRoutePath,
   normalizeProjectCanvasRoutePath
 } from '../pages/ProjectCanvasPage/projectCanvasRouting'
+import {
+  emitCanvasLayoutResizeInteraction,
+  type CanvasLayoutResizeInteractionSource
+} from '../pages/ProjectCanvasPage/canvasLayoutResizeInteraction'
 
 const SidePanel = lazyWithRetry(() => import('./SidePanel'))
 const BottomPanel = lazyWithRetry(() => import('./BottomPanel'))
@@ -38,6 +42,7 @@ const RIGHT_PANEL_MIN_WIDTH = 360
 const RIGHT_PANEL_MAX_WIDTH = 1024
 const BOTTOM_PANEL_DEFAULT_HEIGHT = 220
 const ROUTE_TAB_SYNC_DELAY_MS = 50
+const LAYOUT_RESIZE_REMEASURE_SETTLE_DELAY_MS = 120
 export const STARTUP_HOME_PAINT_DELAY_MS = 160
 
 export const clampSidePanelWidth = (currentWidth: number, delta: number): number =>
@@ -45,6 +50,17 @@ export const clampSidePanelWidth = (currentWidth: number, delta: number): number
 
 export const clampRightPanelWidth = (currentWidth: number, delta: number): number =>
   Math.max(RIGHT_PANEL_MIN_WIDTH, Math.min(RIGHT_PANEL_MAX_WIDTH, currentWidth + delta))
+
+export const clampBottomPanelHeight = (
+  currentHeight: number,
+  delta: number,
+  windowHeight: number
+): number =>
+  Math.max(BOTTOM_PANEL_DEFAULT_HEIGHT, Math.min(windowHeight - 34, currentHeight + delta))
+
+export function dispatchMaxSizeLayoutRemeasure() {
+  window.dispatchEvent(new Event(MAX_SIZE_LAYOUT_REMEASURE_EVENT))
+}
 
 const SYSTEM_ROUTE_TAB_IDS: Record<string, string> = {
   '/': 'tab-home',
@@ -157,7 +173,7 @@ export const scheduleStartupRestoreAfterHomePaint = (callback: () => void): (() 
   }
 }
 
-type ResizeDirection = 'side' | 'bottom' | 'right' | null
+type ResizeDirection = CanvasLayoutResizeInteractionSource | null
 
 interface ResizeHandleProps {
   direction: 'horizontal' | 'vertical'
@@ -398,11 +414,72 @@ const Layout: React.FC = () => {
   const resizingRef = useRef<ResizeDirection>(null)
   const startPosRef = useRef(0)
   const startSizeRef = useRef(0)
+  const pendingResizeSizeRef = useRef<number | null>(null)
+  const resizeFrameRef = useRef<number | null>(null)
+
+  const applyPendingResizeSize = useCallback(() => {
+    resizeFrameRef.current = null
+    const dir = resizingRef.current
+    const nextSize = pendingResizeSizeRef.current
+    pendingResizeSizeRef.current = null
+    if (!dir || nextSize === null) {
+      return
+    }
+
+    if (dir === 'side') {
+      setSidePanelWidth((previousWidth) => (previousWidth === nextSize ? previousWidth : nextSize))
+    } else if (dir === 'right') {
+      setRightPanelWidth((previousWidth) => (previousWidth === nextSize ? previousWidth : nextSize))
+    } else if (dir === 'bottom') {
+      setBottomPanelHeight((previousHeight) =>
+        previousHeight === nextSize ? previousHeight : nextSize
+      )
+    }
+  }, [])
+
+  const scheduleResizeSizeUpdate = useCallback(
+    (nextSize: number) => {
+      if (pendingResizeSizeRef.current === nextSize && resizeFrameRef.current !== null) {
+        return
+      }
+
+      pendingResizeSizeRef.current = nextSize
+      if (resizeFrameRef.current !== null) {
+        return
+      }
+
+      resizeFrameRef.current = window.requestAnimationFrame(applyPendingResizeSize)
+    },
+    [applyPendingResizeSize]
+  )
+
+  const finishResizeInteraction = useCallback(() => {
+    const dir = resizingRef.current
+    if (!dir) {
+      return
+    }
+
+    if (resizeFrameRef.current !== null) {
+      window.cancelAnimationFrame(resizeFrameRef.current)
+      resizeFrameRef.current = null
+    }
+    applyPendingResizeSize()
+    resizingRef.current = null
+    pendingResizeSizeRef.current = null
+    emitCanvasLayoutResizeInteraction(false, dir)
+    dispatchMaxSizeLayoutRemeasure()
+    window.setTimeout(dispatchMaxSizeLayoutRemeasure, LAYOUT_RESIZE_REMEASURE_SETTLE_DELAY_MS)
+  }, [applyPendingResizeSize])
 
   const handleMouseDown = useCallback(
     (dir: ResizeDirection) => (e: React.MouseEvent) => {
+      if (!dir) {
+        return
+      }
+
       e.preventDefault()
       resizingRef.current = dir
+      emitCanvasLayoutResizeInteraction(true, dir)
       if (dir === 'side' || dir === 'right') {
         startPosRef.current = e.clientX
         startSizeRef.current = dir === 'side' ? sidePanelWidth : rightPanelWidth
@@ -421,32 +498,26 @@ const Layout: React.FC = () => {
 
       if (dir === 'side') {
         const delta = e.clientX - startPosRef.current
-        setSidePanelWidth(clampSidePanelWidth(startSizeRef.current, delta))
+        scheduleResizeSizeUpdate(clampSidePanelWidth(startSizeRef.current, delta))
       } else if (dir === 'right') {
         const delta = startPosRef.current - e.clientX
-        setRightPanelWidth(clampRightPanelWidth(startSizeRef.current, delta))
+        scheduleResizeSizeUpdate(clampRightPanelWidth(startSizeRef.current, delta))
       } else if (dir === 'bottom') {
         const delta = startPosRef.current - e.clientY
-        setBottomPanelHeight(
-          Math.max(
-            BOTTOM_PANEL_DEFAULT_HEIGHT,
-            Math.min(window.innerHeight - 34, startSizeRef.current + delta)
-          )
+        scheduleResizeSizeUpdate(
+          clampBottomPanelHeight(startSizeRef.current, delta, window.innerHeight)
         )
       }
     }
 
-    const handleMouseUp = () => {
-      resizingRef.current = null
-    }
-
     window.addEventListener('mousemove', handleMouseMove)
-    window.addEventListener('mouseup', handleMouseUp)
+    window.addEventListener('mouseup', finishResizeInteraction)
     return () => {
       window.removeEventListener('mousemove', handleMouseMove)
-      window.removeEventListener('mouseup', handleMouseUp)
+      window.removeEventListener('mouseup', finishResizeInteraction)
+      finishResizeInteraction()
     }
-  }, [])
+  }, [finishResizeInteraction, scheduleResizeSizeUpdate])
 
   const isProjectTab = activeTabId?.startsWith('tab-project-')
   const isProjectRoute = isProjectCanvasRoutePath(location.pathname)

@@ -8,6 +8,9 @@ type MaxSizeLayoutProps = {
 
 export const MAX_SIZE_LAYOUT_REMEASURE_EVENT = 'magicpot:max-size-layout-remeasure'
 
+const normalizeMeasuredSize = (value: number) =>
+  Number.isFinite(value) && value > 0 ? Math.round(value) : 0
+
 /**
  * Measures the rendered size of the container and reports changes upstream.
  */
@@ -15,16 +18,18 @@ export default function MaxSizeLayout({ children, onResize }: MaxSizeLayoutProps
   const containerRef = useRef<HTMLDivElement>(null)
   const onResizeRef = useRef(onResize)
   const lastMeasuredSizeRef = useRef<{ width: number; height: number } | null>(null)
+  const measureFrameRef = useRef<number | null>(null)
 
   const updateSize = useCallback(() => {
+    measureFrameRef.current = null
     if (!containerRef.current) {
       return
     }
 
     const rect = containerRef.current.getBoundingClientRect()
     const nextSize = {
-      width: rect.width,
-      height: rect.height
+      width: normalizeMeasuredSize(rect.width),
+      height: normalizeMeasuredSize(rect.height)
     }
 
     if (
@@ -38,25 +43,35 @@ export default function MaxSizeLayout({ children, onResize }: MaxSizeLayoutProps
     onResizeRef.current(nextSize.width, nextSize.height)
   }, [])
 
+  const scheduleUpdateSize = useCallback(() => {
+    if (measureFrameRef.current !== null) {
+      return
+    }
+
+    measureFrameRef.current = -1
+    let didRunSynchronously = false
+    const animationFrameId = window.requestAnimationFrame(() => {
+      didRunSynchronously = true
+      updateSize()
+    })
+    if (!didRunSynchronously) {
+      measureFrameRef.current = animationFrameId
+    }
+  }, [updateSize])
+
   useLayoutEffect(() => {
     onResizeRef.current = onResize
   }, [onResize])
 
   useLayoutEffect(() => {
-    const animationFrameId = window.requestAnimationFrame(() => {
-      updateSize()
-    })
-
-    return () => {
-      window.cancelAnimationFrame(animationFrameId)
-    }
+    scheduleUpdateSize()
   })
 
   useLayoutEffect(() => {
-    updateSize()
+    scheduleUpdateSize()
 
     const handleResize = () => {
-      updateSize()
+      scheduleUpdateSize()
     }
 
     window.addEventListener('resize', handleResize)
@@ -64,7 +79,7 @@ export default function MaxSizeLayout({ children, onResize }: MaxSizeLayoutProps
 
     let resizeObserver: ResizeObserver | null = null
     if (containerRef.current && window.ResizeObserver) {
-      resizeObserver = new ResizeObserver(updateSize)
+      resizeObserver = new ResizeObserver(scheduleUpdateSize)
       resizeObserver.observe(containerRef.current)
     }
 
@@ -74,8 +89,12 @@ export default function MaxSizeLayout({ children, onResize }: MaxSizeLayoutProps
       if (resizeObserver) {
         resizeObserver.disconnect()
       }
+      if (measureFrameRef.current !== null && measureFrameRef.current > 0) {
+        window.cancelAnimationFrame(measureFrameRef.current)
+      }
+      measureFrameRef.current = null
     }
-  }, [updateSize])
+  }, [scheduleUpdateSize])
 
   return (
     <Box ref={containerRef} sx={{ width: '100%', height: '100%' }}>

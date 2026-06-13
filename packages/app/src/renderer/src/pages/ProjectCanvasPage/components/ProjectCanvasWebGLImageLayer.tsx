@@ -1394,9 +1394,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       canvas.style.width = '100%'
       canvas.style.height = '100%'
       ;(app as ResizablePixiApplication).renderer?.resize?.(width, height)
-      scheduleRender()
+      renderImmediateOrSchedule()
     },
-    [scheduleRender]
+    [renderImmediateOrSchedule]
   )
 
   const applyViewportTransform = useCallback(
