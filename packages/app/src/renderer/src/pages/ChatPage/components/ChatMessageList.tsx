@@ -1618,12 +1618,11 @@ const AssistantMarkdownContent: React.FC<{
               }
             }}
             onClick={() => {
-              const a = document.createElement('a')
-              a.href = normalizeLocalMediaUrl(url)
-              a.download = getDownloadFileNameFromUrl(url, 'video.mp4')
-              document.body.appendChild(a)
-              a.click()
-              document.body.removeChild(a)
+              onDownloadAttachment({
+                type: 'video',
+                url,
+                fileName: getDownloadFileNameFromUrl(url, 'video.mp4')
+              })
             }}
             title="Download or reveal the file"
           >

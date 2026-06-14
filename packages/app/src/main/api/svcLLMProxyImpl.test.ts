@@ -4,6 +4,7 @@ import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { cliFromProfile } from '@shared/llm'
 import * as configModule from '../config/config'
 import type { AssistantRuntime } from '../assistantRuntime/runtime'
+import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
 import { LLMProxySvcImpl } from './svcLLMProxyImpl'
 
 const {
@@ -96,7 +97,93 @@ const mockConfig = (overrides: Partial<Config>): void => {
 }
 
 describe('LLMProxySvcImpl', () => {
+  it('allows main-process LLM extensions to normalize requests and provide clients', async () => {
+    const extensionChat = vi.fn().mockResolvedValue({ content: 'extension response' })
+    const createCli = vi.fn().mockReturnValue({ chat: extensionChat })
+    const normalizeRequestedProfileId = vi.fn((profileId: string | undefined) =>
+      profileId === 'alias-profile' ? 'agent-profile' : undefined
+    )
+
+    mainHostExtensionApiV1.llmProxy.push({
+      id: 'test-extension',
+      createCli,
+      normalizeRequestedProfileId
+    })
+    vi.mocked(cliFromProfile).mockReturnValue(undefined as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'agent-profile',
+            model_name: 'Agent Model',
+            base_url: 'https://agent.example/v1',
+            api_key: 'agent-key'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const resp = await svc.chat({
+      profileId: 'alias-profile',
+      messages: [{ role: 'user', content: 'hello' }]
+    })
+
+    expect(normalizeRequestedProfileId).toHaveBeenCalledWith('alias-profile')
+    expect(createCli).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'agent-profile',
+        model_name: 'Agent Model'
+      }),
+      expect.objectContaining({
+        config: expect.any(Object),
+        fetchImpl: expect.any(Function),
+        rawProfileId: 'alias-profile',
+        requestedProfileId: 'agent-profile'
+      })
+    )
+    expect(cliFromProfile).not.toHaveBeenCalled()
+    expect(extensionChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [{ role: 'user', content: 'hello' }]
+      })
+    )
+    expect(resp).toEqual({ content: 'extension response' })
+  })
+
+  it('allows main-process LLM extensions to short-circuit chat requests', async () => {
+    const handleChatRequest = vi.fn().mockReturnValue({ content: 'handled by extension' })
+    mainHostExtensionApiV1.llmProxy.push({
+      id: 'test-handler',
+      handleChatRequest
+    })
+
+    mockConfig({})
+
+    const svc = new LLMProxySvcImpl()
+    const resp = await svc.chat({
+      profileId: 'agent-profile',
+      messages: [{ role: 'user', content: 'hello' }]
+    })
+
+    expect(handleChatRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ profileId: 'agent-profile' }),
+      expect.objectContaining({
+        config: expect.any(Object),
+        fetchImpl: expect.any(Function),
+        rawProfileId: 'agent-profile',
+        requestedProfileId: 'agent-profile'
+      })
+    )
+    expect(cliFromProfile).not.toHaveBeenCalled()
+    expect(resp).toEqual({ content: 'handled by extension' })
+  })
+
   afterEach(() => {
+    mainHostExtensionApiV1.apiServices.splice(0)
+    mainHostExtensionApiV1.llmProxy.splice(0)
     useActualHunyuan3DClient.current = false
     fetchMock.mockReset()
     listToolsMock.mockReset()

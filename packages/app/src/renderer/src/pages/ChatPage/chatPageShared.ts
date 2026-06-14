@@ -297,6 +297,79 @@ export const normalizeLocalMediaUrl = (url: string): string => {
   return url
 }
 
+const decodeLocalMediaPathPart = (value: string): string => {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+const normalizeLocalMediaPathPart = (value: string): string => {
+  const decoded = decodeLocalMediaPathPart(value).replace(/\\/g, '/')
+  if (/^\/[a-zA-Z]:($|\/)/.test(decoded)) {
+    return decoded.slice(1)
+  }
+
+  return decoded.replace(/^\/+/, '')
+}
+
+export const resolveLocalMediaPathFromUrl = (url: string): string | null => {
+  const normalized = normalizeLocalMediaUrl(url || '').trim()
+  if (!normalized) return null
+
+  try {
+    const parsed = new URL(normalized)
+    if (parsed.protocol !== 'local-media:' && parsed.protocol !== 'file:') {
+      return null
+    }
+
+    if (parsed.hostname) {
+      const hostname = decodeLocalMediaPathPart(parsed.hostname)
+      const pathname = normalizeLocalMediaPathPart(parsed.pathname)
+      if (/^[a-zA-Z]$/.test(hostname)) {
+        return `${hostname}:/${pathname}`
+      }
+
+      return `//${hostname}${parsed.pathname ? `/${pathname}` : ''}`
+    }
+
+    return normalizeLocalMediaPathPart(parsed.pathname)
+  } catch {
+    // Fall through to prefix handling for partially escaped legacy URLs.
+  }
+
+  if (normalized.startsWith('local-media:///')) {
+    return normalizeLocalMediaPathPart(normalized.slice('local-media:///'.length))
+  }
+
+  if (normalized.startsWith('local-media://')) {
+    const rest = normalizeLocalMediaPathPart(normalized.slice('local-media://'.length))
+    const driveMatch = rest.match(/^([a-zA-Z])\/(.+)$/)
+    if (driveMatch) {
+      return `${driveMatch[1]}:/${driveMatch[2]}`
+    }
+
+    return rest
+  }
+
+  if (normalized.startsWith('file:///')) {
+    return normalizeLocalMediaPathPart(normalized.slice('file:///'.length))
+  }
+
+  if (normalized.startsWith('file://')) {
+    const rest = normalizeLocalMediaPathPart(normalized.slice('file://'.length))
+    const driveMatch = rest.match(/^([a-zA-Z])\/(.+)$/)
+    if (driveMatch) {
+      return `${driveMatch[1]}:/${driveMatch[2]}`
+    }
+
+    return rest
+  }
+
+  return null
+}
+
 export const getDownloadFileNameFromUrl = (url: string, fallback: string): string => {
   try {
     const normalized = normalizeLocalMediaUrl(url)

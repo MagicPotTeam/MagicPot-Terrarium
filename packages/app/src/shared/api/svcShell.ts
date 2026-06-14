@@ -5,6 +5,7 @@
 
 import { ServiceDefSheet } from './apiUtils/serviceDefSheet'
 import { ServerStreaming } from './apiUtils/streaming'
+import { ServiceValidationError } from './apiUtils/serviceValidation'
 
 export type DownloadFileReq = {
   url: string
@@ -49,6 +50,58 @@ export type InstallGitRepositoryResp = {
   alreadyExists: boolean
 }
 
+type NonEmptyStringKey<T extends string> = T
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const requireNonEmptyString = <T extends string>(
+  value: unknown,
+  field: NonEmptyStringKey<T>
+): string => {
+  if (typeof value === 'string' && value.trim()) {
+    return value
+  }
+  throw new ServiceValidationError(`svcShell ${field}`, [
+    {
+      path: [field],
+      message: 'Expected a non-empty string',
+      code: 'invalid_type'
+    }
+  ])
+}
+
+const validateEnsureDirectoryReq = (value: unknown): EnsureDirectoryReq => {
+  if (!isRecord(value)) {
+    throw new ServiceValidationError('svcShell.ensureDirectory request')
+  }
+  return {
+    path: requireNonEmptyString(value.path, 'path')
+  }
+}
+
+const validateDownloadFileReq = (value: unknown): DownloadFileReq => {
+  if (!isRecord(value)) {
+    throw new ServiceValidationError('svcShell.downloadFile request')
+  }
+  return {
+    url: requireNonEmptyString(value.url, 'url'),
+    outputDir: requireNonEmptyString(value.outputDir, 'outputDir'),
+    filename: requireNonEmptyString(value.filename, 'filename')
+  }
+}
+
+const validateInstallGitRepositoryReq = (value: unknown): InstallGitRepositoryReq => {
+  if (!isRecord(value)) {
+    throw new ServiceValidationError('svcShell.installGitRepository request')
+  }
+  return {
+    url: requireNonEmptyString(value.url, 'url'),
+    outputDir: requireNonEmptyString(value.outputDir, 'outputDir'),
+    directoryName: requireNonEmptyString(value.directoryName, 'directoryName')
+  }
+}
+
 export type ShellSvc = {
   openPath(path: string): Promise<string>
   showItemInFolder(path: string): Promise<void>
@@ -85,15 +138,19 @@ export const shellSvcDef: ServiceDefSheet<ShellSvc> = {
     type: 'unary'
   },
   ensureDirectory: {
-    type: 'unary'
+    type: 'unary',
+    request: validateEnsureDirectoryReq
   },
   downloadFile: {
-    type: 'unary'
+    type: 'unary',
+    request: validateDownloadFileReq
   },
   downloadFileWithProgress: {
-    type: 'serverStreaming'
+    type: 'serverStreaming',
+    request: validateDownloadFileReq
   },
   installGitRepository: {
-    type: 'unary'
+    type: 'unary',
+    request: validateInstallGitRepositoryReq
   }
 }

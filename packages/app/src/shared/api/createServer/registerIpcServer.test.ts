@@ -147,6 +147,7 @@ describe('registerIpcServer', () => {
     expect(port.postMessage).toHaveBeenCalledWith({
       error: {
         message: 'stream failed',
+        code: 'E_STREAM',
         payload: { message: 'stream failed', code: 'E_STREAM' }
       }
     })
@@ -174,7 +175,8 @@ describe('registerIpcServer', () => {
 
     expect(port.postMessage).toHaveBeenCalledWith({
       error: {
-        message: 'plain stream failure'
+        message: 'plain stream failure',
+        code: 'INTERNAL_ERROR'
       }
     })
   })
@@ -200,7 +202,8 @@ describe('registerIpcServer', () => {
 
     expect(port.postMessage).toHaveBeenCalledWith({
       error: {
-        message: 'Unknown error'
+        message: 'Unknown error',
+        code: 'INTERNAL_ERROR'
       }
     })
   })

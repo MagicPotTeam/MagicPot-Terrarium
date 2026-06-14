@@ -1993,7 +1993,15 @@ export function useCanvasAssetIntake({
   )
 
   const addVideoToCanvas = useCallback(
-    (file: File) => {
+    (
+      file: File,
+      options: {
+        clientX?: number
+        clientY?: number
+        promptId?: string
+        fileItem?: FileItem
+      } = {}
+    ) => {
       const probeObjectUrl = URL.createObjectURL(file)
       const persistentSrc = getCanvasLocalMediaSourceUrl(file) || probeObjectUrl
       const releaseProbeObjectUrl = () => {
@@ -2003,7 +2011,12 @@ export function useCanvasAssetIntake({
       }
 
       const createVideoItem = (width: number, height: number) => {
-        const pos = getCenterPosition(width, height)
+        const pos = resolvePlacement({
+          width,
+          height,
+          clientX: options.clientX,
+          clientY: options.clientY
+        })
         const newItem = createCanvasVideoItemDraft({
           id: createCanvasItemId('video'),
           src: persistentSrc,
@@ -2020,7 +2033,9 @@ export function useCanvasAssetIntake({
           locked: false,
           playing: false,
           muted: true,
-          volume: 0.5
+          volume: 0.5,
+          promptId: options.promptId,
+          fileItem: options.fileItem
         })
         setItemsWithHistory((prev) => [...prev, newItem])
         setSelectedIds(new Set([newItem.id]))
@@ -2049,7 +2064,7 @@ export function useCanvasAssetIntake({
       video.src = probeObjectUrl
       return undefined
     },
-    [getCenterPosition, nextZIndexRef, setItemsWithHistory, setSelectedIds, setTool]
+    [nextZIndexRef, resolvePlacement, setItemsWithHistory, setSelectedIds, setTool]
   )
 
   const addTextToCanvas = useCallback(

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { Box, Typography, CircularProgress, Alert, Tooltip, useTheme, Button } from '@mui/material'
@@ -18,7 +17,6 @@ import {
   type ChatCapabilityProfile,
   type LLMReasoningEffort,
   type OpenAIImageGenerationOptions,
-  normalizeOpenAIImageGenerationSize,
   normalizeReasoningEffort,
   resolveChatProfileCapabilities
 } from '@shared/llm'
@@ -49,9 +47,10 @@ import {
   getBaseProfileId,
   getDownloadFileNameFromUrl,
   hasAutoSavedChatImageKey,
+  normalizeLocalMediaUrl,
+  resolveLocalMediaPathFromUrl,
   HUNYUAN_3D_PROFILE_ID,
   normalizeChatProfileIdForStorage,
-  normalizeLocalMediaUrl,
   readScopedExternalLoadingSessionIds,
   recordAutoSavedChatImageKey,
   scopedStorageKey,
@@ -164,6 +163,33 @@ import {
   resolveAssistantImageAutoSaveDir,
   resolveChatReasoningPreferenceKey
 } from './chatPageExtensions'
+import {
+  getChatAttachmentMaxSizeMB,
+  getChatAttachmentTypeForFile,
+  getLocalFilePath,
+  summarizeChatAttachmentsForLog
+} from '@renderer/features/chat/chatAttachmentUtils'
+import {
+  areChatSessionDraftsEqual,
+  cloneChatAttachment,
+  cloneChatSessionDraft,
+  normalizeChatSessionDraft,
+  resolvePreferredSessionDraft as resolvePreferredSessionDraftFromFeature,
+  stripSessionDraft
+} from '@renderer/features/chat/chatDraftUtils'
+import {
+  buildChatFailureArchivePayload,
+  formatChatFailureMessage,
+  readChatFailureArchiveRootDir,
+  resolveChatFailureArchiveDir as resolveChatFailureArchiveDirFromFeature
+} from '@renderer/features/chat/chatFailureArchive'
+import { formatCompactTokenCount } from '@renderer/features/chat/chatFormatUtils'
+import {
+  normalizeReasoningPreferenceMap,
+  readStoredImageGenerationOptions as readStoredImageGenerationOptionsFromFeature,
+  readStoredReasoningEffortMap as readStoredReasoningEffortMapFromFeature,
+  resolveImageGenerationOptionsForAttachments
+} from '@renderer/features/chat/chatPreferences'
 
 // Hooks
 import { useImagePreview } from './hooks/useImagePreview'
@@ -218,7 +244,6 @@ type ExternalConfirmationRequest = ChatPendingConfirmation & {
 const HY3D_SIGNED_URL_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const CHAT_INPUT_STATE_COMMIT_DELAY_MS = 80
 const CHAT_DRAFT_PERSIST_DELAY_MS = 200
-const CHAT_MODEL3D_EXTENSIONS = ['.glb', '.gltf', '.obj', '.fbx', '.dae', '.3ds', '.ply', '.stl']
 const STORAGE_KEY_REASONING_EFFORT = 'chat.reasoningEffort'
 const STORAGE_KEY_IMAGE_GENERATION_OPTIONS = 'chat.imageGenerationOptions'
 const CHAT_REASONING_EFFORT_SYNC_EVENT = 'chat:reasoning-effort-sync'
@@ -248,95 +273,6 @@ const getFriendlyHy3dRuntimeError = (error: unknown): string => {
     return '当前运行中的主进程还是旧版本，Hy3D 本地上传能力尚未加载。请完全退出应用后重新启动一次。'
   }
   return message || 'Hy3D 模型链接处理失败'
-}
-
-const getChatAttachmentTypeForFile = (
-  file: Pick<File, 'name' | 'type'>
-): ChatAttachment['type'] => {
-  if (file.type.startsWith('image/')) return 'image'
-  if (file.type.startsWith('video/')) return 'video'
-
-  const extensionIndex = file.name.lastIndexOf('.')
-  const extension = extensionIndex >= 0 ? file.name.toLowerCase().slice(extensionIndex) : ''
-  if (CHAT_MODEL3D_EXTENSIONS.includes(extension)) return 'model3d'
-
-  return 'file'
-}
-
-const getChatAttachmentMaxSizeMB = (type: ChatAttachment['type']): number => {
-  if (type === 'video') return 500
-  if (type === 'model3d') return 200
-  return 50
-}
-
-const getLocalFilePath = (file: File): string =>
-  typeof (file as any).path === 'string' ? (file as any).path.replace(/\\/g, '/') : ''
-
-const cloneChatAttachment = (attachment: ChatAttachment): ChatAttachment => ({ ...attachment })
-
-const cloneChatSessionDraft = (draft?: ChatSessionDraft | null): ChatSessionDraft | undefined =>
-  draft
-    ? {
-        ...draft,
-        pendingAttachments: draft.pendingAttachments.map(cloneChatAttachment)
-      }
-    : undefined
-
-const normalizeChatSessionDraft = (
-  draft?: Partial<ChatSessionDraft> | null
-): ChatSessionDraft | undefined => {
-  if (!draft) {
-    return undefined
-  }
-
-  const inputValue = typeof draft.inputValue === 'string' ? draft.inputValue : ''
-  const pendingHiddenContext =
-    typeof draft.pendingHiddenContext === 'string' ? draft.pendingHiddenContext : ''
-  const pendingAttachments = Array.isArray(draft.pendingAttachments)
-    ? draft.pendingAttachments.map(cloneChatAttachment)
-    : []
-  const updatedAt =
-    typeof draft.updatedAt === 'number' && Number.isFinite(draft.updatedAt)
-      ? draft.updatedAt
-      : Date.now()
-
-  if (!inputValue && !pendingHiddenContext && pendingAttachments.length === 0) {
-    return undefined
-  }
-
-  return {
-    inputValue,
-    pendingHiddenContext,
-    pendingAttachments,
-    updatedAt
-  }
-}
-
-const buildChatDraftComparableValue = (
-  draft?: ChatSessionDraft
-): {
-  inputValue: string
-  pendingHiddenContext: string
-  pendingAttachments: ChatAttachment[]
-} | null =>
-  draft
-    ? {
-        inputValue: draft.inputValue,
-        pendingHiddenContext: draft.pendingHiddenContext,
-        pendingAttachments: draft.pendingAttachments
-      }
-    : null
-
-const areChatSessionDraftsEqual = (
-  left?: ChatSessionDraft | null,
-  right?: ChatSessionDraft | null
-): boolean =>
-  JSON.stringify(buildChatDraftComparableValue(left || undefined)) ===
-  JSON.stringify(buildChatDraftComparableValue(right || undefined))
-
-const stripSessionDraft = (session: ChatSession): ChatSession => {
-  const { draft, ...rest } = session
-  return rest
 }
 
 const serializeDraftAttachment = async (
@@ -377,25 +313,13 @@ const resolvePreferredSessionDraft = (
   sessionId: string | null,
   sessionDraft: ChatSessionDraft | undefined,
   storageScope: string
-): ChatSessionDraft | undefined => {
-  const normalizedSessionDraft = cloneChatSessionDraft(normalizeChatSessionDraft(sessionDraft))
-  if (!sessionId) {
-    return normalizedSessionDraft
-  }
-
-  const backupRecord = readSessionDraftBackup(sessionId, storageScope)
-  if (!backupRecord) {
-    return normalizedSessionDraft
-  }
-
-  const normalizedBackupDraft = cloneChatSessionDraft(normalizeChatSessionDraft(backupRecord.draft))
-  const sessionUpdatedAt = normalizedSessionDraft?.updatedAt ?? 0
-  if (backupRecord.updatedAt >= sessionUpdatedAt) {
-    return normalizedBackupDraft
-  }
-
-  return normalizedSessionDraft
-}
+): ChatSessionDraft | undefined =>
+  resolvePreferredSessionDraftFromFeature({
+    sessionId,
+    sessionDraft,
+    storageScope,
+    readSessionDraftBackup
+  })
 
 const createDraftRecoverySession = (options: {
   sessionId: string
@@ -409,65 +333,23 @@ const createDraftRecoverySession = (options: {
   ...(options.draft ? { draft: cloneChatSessionDraft(options.draft) } : {})
 })
 
-const formatChatFailureMessage = (message: string, runId?: string | null): string => {
-  const normalized = message.trim()
-  if (!runId || !normalized) return message
-  return `${normalized} (Run: ${runId})`
-}
-
 const resolveChatFailureArchiveRootDir = (options: {
   configDownloadDir?: string | null
   buildDataDir?: string | null
-}): string | null => {
-  const downloadDirKey = 'qapp.downloadDir'
-  const localOverride = (() => {
-    try {
-      return localStorage.getItem(downloadDirKey)
-    } catch {
-      return null
-    }
-  })()
-  const baseDir = (localOverride || options.configDownloadDir || options.buildDataDir || '').trim()
-  return baseDir || null
-}
+}): string | null =>
+  readChatFailureArchiveRootDir({
+    configDownloadDir: options.configDownloadDir,
+    buildDataDir: options.buildDataDir
+  })
 
-const resolveChatFailureArchiveDir = (baseDir: string, runId: string): string => {
-  if (window.path?.join) {
-    return window.path.join(baseDir, 'chat-failures', runId)
-  }
-  return `${baseDir.replace(/[\\/]+$/g, '')}/chat-failures/${runId}`
-}
-
-const formatCompactTokenCount = (value?: number | null): string => {
-  if (!value || !Number.isFinite(value)) {
-    return '0'
-  }
-
-  if (value >= 1_000_000) {
-    const millions = value / 1_000_000
-    return `${millions >= 10 ? Math.round(millions) : millions.toFixed(1)}M`
-  }
-
-  if (value >= 1_000) {
-    return `${Math.round(value / 1_000)}K`
-  }
-
-  return `${Math.round(value)}`
-}
+const resolveChatFailureArchiveDir = (baseDir: string, runId: string): string =>
+  resolveChatFailureArchiveDirFromFeature({
+    baseDir,
+    runId,
+    pathJoin: window.path?.join
+  })
 
 const CHAT_LOADING_TOTAL_STEPS = 4
-
-const normalizeReasoningPreferenceMap = (
-  value: Record<string, string | LLMReasoningEffort>
-): Record<string, LLMReasoningEffort> =>
-  Object.fromEntries(
-    Object.entries(value)
-      .map(([profileKey, effort]) => [profileKey, normalizeReasoningEffort(effort)] as const)
-      .filter(
-        (entry): entry is readonly [string, LLMReasoningEffort] =>
-          Boolean(entry[0]?.trim()) && Boolean(entry[1])
-      )
-  )
 
 const dispatchReasoningEffortSync = (map: Record<string, LLMReasoningEffort>) => {
   window.dispatchEvent(
@@ -477,121 +359,11 @@ const dispatchReasoningEffortSync = (map: Record<string, LLMReasoningEffort>) =>
   )
 }
 
-const readStoredReasoningEffortMap = (storageKey: string): Record<string, LLMReasoningEffort> => {
-  try {
-    const raw = localStorage.getItem(storageKey)
-    if (!raw) {
-      return {}
-    }
+const readStoredReasoningEffortMap = (storageKey: string): Record<string, LLMReasoningEffort> =>
+  readStoredReasoningEffortMapFromFeature(storageKey)
 
-    const parsed = JSON.parse(raw) as Record<string, string>
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {}
-    }
-
-    return normalizeReasoningPreferenceMap(parsed)
-  } catch {
-    return {}
-  }
-}
-
-const readStoredImageGenerationOptions = (storageKey: string): OpenAIImageGenerationOptions => {
-  try {
-    const raw = localStorage.getItem(storageKey)
-    if (!raw) {
-      return { ...DEFAULT_CHAT_IMAGE_GENERATION_OPTIONS }
-    }
-
-    const parsed = JSON.parse(raw) as OpenAIImageGenerationOptions
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return { ...DEFAULT_CHAT_IMAGE_GENERATION_OPTIONS }
-    }
-
-    return {
-      ...DEFAULT_CHAT_IMAGE_GENERATION_OPTIONS,
-      ...parsed
-    }
-  } catch {
-    return { ...DEFAULT_CHAT_IMAGE_GENERATION_OPTIONS }
-  }
-}
-
-const resolveReferenceImageGenerationSizeFromAttachments = (
-  attachments: ChatAttachment[] | undefined
-): string | undefined => {
-  const referenceImage = attachments?.find((attachment) => {
-    if (attachment.type !== 'image') return false
-    const width = Number(attachment.sourceWidth)
-    const height = Number(attachment.sourceHeight)
-    return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
-  })
-
-  if (!referenceImage) {
-    return undefined
-  }
-
-  return normalizeOpenAIImageGenerationSize(
-    `${Math.round(Number(referenceImage.sourceWidth))}x${Math.round(Number(referenceImage.sourceHeight))}`
-  )
-}
-
-const resolveImageGenerationOptionsForAttachments = (
-  options: OpenAIImageGenerationOptions,
-  attachments: ChatAttachment[] | undefined
-): OpenAIImageGenerationOptions => {
-  const requestedSize = normalizeOpenAIImageGenerationSize(options.size)
-  if (requestedSize && requestedSize !== 'auto') {
-    return {
-      ...options,
-      size: requestedSize
-    }
-  }
-
-  const referenceSize = resolveReferenceImageGenerationSizeFromAttachments(attachments)
-  if (!referenceSize) {
-    return requestedSize
-      ? {
-          ...options,
-          size: requestedSize
-        }
-      : options
-  }
-
-  return {
-    ...options,
-    size: referenceSize
-  }
-}
-
-const buildChatFailureArchivePayload = (options: {
-  sessionId?: string | null
-  profileId?: string | null
-  skillId?: string | null
-  error: string
-  userMessage?: ChatMessage
-  timestamp?: number
-}) => ({
-  runId: options.sessionId || null,
-  profileId: options.profileId || null,
-  skillId: options.skillId || null,
-  error: options.error,
-  createdAt: new Date(options.timestamp ?? Date.now()).toISOString(),
-  userMessage: options.userMessage
-    ? {
-        role: options.userMessage.role,
-        content: options.userMessage.content,
-        attachments: options.userMessage.attachments?.map((attachment) => ({
-          type: attachment.type,
-          url: attachment.url,
-          fileName: attachment.fileName,
-          mimeType: attachment.mimeType,
-          sizeBytes: attachment.sizeBytes,
-          sourceWidth: attachment.sourceWidth,
-          sourceHeight: attachment.sourceHeight
-        }))
-      }
-    : null
-})
+const readStoredImageGenerationOptions = (storageKey: string): OpenAIImageGenerationOptions =>
+  readStoredImageGenerationOptionsFromFeature(storageKey, DEFAULT_CHAT_IMAGE_GENERATION_OPTIONS)
 
 const persistChatFailureArchive = async (options: {
   baseDir?: string | null
@@ -694,23 +466,6 @@ const buildChatAttachmentFromDroppedFile = async (
     sizeBytes: file.size
   }
 }
-
-const summarizeChatAttachmentsForLog = (attachments: ChatAttachment[] | undefined) =>
-  attachments?.map((attachment) => ({
-    type: attachment.type,
-    fileName: attachment.fileName,
-    relativePath: attachment.relativePath,
-    mimeType: attachment.mimeType,
-    sizeBytes: attachment.sizeBytes,
-    sourceWidth: attachment.sourceWidth,
-    sourceHeight: attachment.sourceHeight,
-    url:
-      typeof attachment.url === 'string'
-        ? attachment.url.startsWith('data:')
-          ? `[data-url length=${attachment.url.length}]`
-          : attachment.url
-        : attachment.url
-  }))
 
 const ChatPage: React.FC<ChatPageProps> = ({
   compact = false,
@@ -4940,24 +4695,60 @@ const ChatPage: React.FC<ChatPageProps> = ({
     ]
   )
 
-  const downloadAttachment = useCallback((attachment: ChatAttachment) => {
-    const fallbackFileName =
-      attachment.type === 'image'
-        ? 'image.png'
-        : attachment.type === 'video'
-          ? 'video.mp4'
-          : attachment.type === 'file'
-            ? 'download'
-            : 'model.glb'
-    const resolvedFileName =
-      attachment.fileName || getDownloadFileNameFromUrl(attachment.url, fallbackFileName)
-    const link = document.createElement('a')
-    link.href = normalizeLocalMediaUrl(attachment.url)
-    link.download = resolvedFileName
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-  }, [])
+  const downloadAttachment = useCallback(
+    async (attachment: ChatAttachment) => {
+      const fallbackFileName =
+        attachment.type === 'image'
+          ? 'image.png'
+          : attachment.type === 'video'
+            ? 'video.mp4'
+            : attachment.type === 'file'
+              ? 'download'
+              : 'model.glb'
+      const normalizedUrl = normalizeLocalMediaUrl(attachment.url)
+      const resolvedFileName =
+        attachment.fileName || getDownloadFileNameFromUrl(normalizedUrl, fallbackFileName)
+      const downloadDir = (() => {
+        try {
+          return localStorage.getItem('qapp.downloadDir') || config.download_dir
+        } catch {
+          return config.download_dir
+        }
+      })()
+
+      try {
+        const localPath = resolveLocalMediaPathFromUrl(normalizedUrl)
+        let data: Uint8Array
+        if (localPath && api().svcFs?.readFileFromPath) {
+          const response = await api().svcFs.readFileFromPath({ fullPath: localPath })
+          data =
+            response.data instanceof Uint8Array
+              ? response.data
+              : new Uint8Array(response.data as ArrayLike<number>)
+        } else {
+          const response = await fetch(normalizedUrl)
+          if (!response.ok && response.status !== 0) {
+            throw new Error(`Failed to download attachment (${response.status})`)
+          }
+          data = new Uint8Array(await (await response.blob()).arrayBuffer())
+        }
+
+        await api().svcHyper.saveImageToDir({
+          data,
+          fileName: resolvedFileName,
+          dir: downloadDir || undefined
+        })
+      } catch (error) {
+        console.error('[ChatPage] Failed to download attachment:', error)
+        notifyError(
+          error instanceof Error
+            ? error.message
+            : t('chat.attachment_download_failed', { defaultValue: 'Download failed' })
+        )
+      }
+    },
+    [config.download_dir, notifyError, t]
+  )
 
   const handleStopGenerating = () => {
     if (currentSessionId) {

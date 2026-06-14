@@ -2,6 +2,7 @@ import type { BaseApi } from '@shared/api'
 import type { LLMChatReq, LLMChatResp } from '@shared/api/svcLLMProxy'
 import type { Config, LLMAPIProfile } from '@shared/config/config'
 import type { ApiExtensionServices } from '@shared/api/extensionServices'
+import type { LLMCli } from '@shared/llm'
 import type { FetchImpl } from '@shared/llm/clients'
 
 export type MainApiExtensionContextV1 = {
@@ -16,27 +17,42 @@ export type MainLlmProxyExtensionContextV1 = {
   signal?: AbortSignal
 }
 
-export type MainLlmProxyExtensionV1 = {
+export type MainLlmProxyExtensionV1 = Readonly<{
   id: string
   createCli?: (
     profile: LLMAPIProfile,
     options: MainLlmProxyExtensionContextV1
-  ) => import('@shared/llm').LLMCli | undefined
+  ) => LLMCli | undefined
   handleChatRequest?: (
     req: LLMChatReq,
     options: MainLlmProxyExtensionContextV1
-  ) => Promise<LLMChatResp | undefined>
+  ) => Promise<LLMChatResp | undefined> | LLMChatResp | undefined
   normalizeRequestedProfileId?: (profileId: string | undefined) => string | undefined
-}
+}>
 
-export type MainHostExtensionApiV1 = {
+export type MainApiExtensionServicesFactoryV1 = (
+  context: MainApiExtensionContextV1
+) => Partial<ApiExtensionServices> | undefined
+
+export type MainHostExtensionApiV1 = Readonly<{
+  apiServices: MainApiExtensionServicesFactoryV1[]
   llmProxy: MainLlmProxyExtensionV1[]
-}
+}>
 
 export const mainHostExtensionApiV1: MainHostExtensionApiV1 = {
+  apiServices: [],
   llmProxy: []
 }
 
 export const createApiExtensionServices = (
-  _context: MainApiExtensionContextV1
-): ApiExtensionServices => ({})
+  context: MainApiExtensionContextV1
+): ApiExtensionServices => {
+  const services = mainHostExtensionApiV1.apiServices.reduce<Partial<ApiExtensionServices>>(
+    (currentServices, createServices) => ({
+      ...currentServices,
+      ...createServices(context)
+    }),
+    {}
+  )
+  return services as ApiExtensionServices
+}
