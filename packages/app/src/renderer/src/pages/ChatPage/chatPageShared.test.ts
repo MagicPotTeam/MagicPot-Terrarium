@@ -11,7 +11,9 @@ import {
   hasAutoSavedChatImageKey,
   isModel3DUrl,
   normalizeChatProfileIdForStorage,
+  normalizeLocalMediaUrl,
   readScopedExternalLoadingSessionIds,
+  resolveLocalMediaPathFromUrl,
   readScopedLoadingSessionIds,
   recordAutoSavedChatImageKey,
   scopedStorageKey,
@@ -78,6 +80,32 @@ describe('buildHy3dProfileId', () => {
   it('normalizes stored composite profile ids to their base profile', () => {
     expect(normalizeChatProfileIdForStorage(buildHy3dProfileId(DEFAULT_PARAMS))).toBe(
       'hunyuan3d-pro'
+    )
+  })
+})
+
+describe('local media file path helpers', () => {
+  it('preserves file URL hosts as UNC-style local-media URLs', () => {
+    expect(normalizeLocalMediaUrl('file://server/share/folder/render%201.png')).toBe(
+      'local-media://server/share/folder/render%201.png'
+    )
+    expect(resolveLocalMediaPathFromUrl('file://server/share/folder/render%201.png')).toBe(
+      '//server/share/folder/render 1.png'
+    )
+    expect(resolveLocalMediaPathFromUrl('local-media://server/share/folder/render%201.png')).toBe(
+      '//server/share/folder/render 1.png'
+    )
+  })
+
+  it('resolves canonical local-media and file URLs without dropping absolute path roots', () => {
+    expect(resolveLocalMediaPathFromUrl('local-media:///C:/MagicPot/render%201.png')).toBe(
+      'C:/MagicPot/render 1.png'
+    )
+    expect(resolveLocalMediaPathFromUrl('local-media://c/Users/me/render%201.png')).toBe(
+      'c:/Users/me/render 1.png'
+    )
+    expect(resolveLocalMediaPathFromUrl('file:///tmp/magicpot/render%201.png')).toBe(
+      '/tmp/magicpot/render 1.png'
     )
   })
 })

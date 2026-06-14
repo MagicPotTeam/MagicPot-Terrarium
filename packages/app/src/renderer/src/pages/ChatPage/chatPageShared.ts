@@ -288,11 +288,24 @@ export const buildHy3dProfileId = (params: Hy3dParams): string => {
 export const normalizeLocalMediaUrl = (url: string): string => {
   if (!url) return url
   if (url.startsWith('local-media://')) return url
-  if (url.startsWith('file:///')) {
-    return `local-media:///${url.slice('file:///'.length)}`
-  }
   if (url.startsWith('file://')) {
-    return `local-media:///${url.slice('file://'.length).replace(/^\/+/, '')}`
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'file:') {
+        if (parsed.hostname) {
+          return `local-media://${parsed.hostname}${parsed.pathname}`
+        }
+        return `local-media://${parsed.pathname}`
+      }
+    } catch {
+      // Fall through to legacy string normalization for partially escaped file URLs.
+    }
+
+    const rest = url.slice('file://'.length)
+    if (/^[a-zA-Z]:($|[\\/])/.test(rest)) {
+      return `local-media:///${rest}`
+    }
+    return `local-media://${rest.replace(/^\/+/, '')}`
   }
   return url
 }
@@ -310,8 +323,11 @@ const normalizeLocalMediaPathPart = (value: string): string => {
   if (/^\/[a-zA-Z]:($|\/)/.test(decoded)) {
     return decoded.slice(1)
   }
+  if (/^\/{2,}[^/]/.test(decoded)) {
+    return `//${decoded.replace(/^\/+/, '')}`
+  }
 
-  return decoded.replace(/^\/+/, '')
+  return decoded
 }
 
 export const resolveLocalMediaPathFromUrl = (url: string): string | null => {
@@ -328,10 +344,11 @@ export const resolveLocalMediaPathFromUrl = (url: string): string | null => {
       const hostname = decodeLocalMediaPathPart(parsed.hostname)
       const pathname = normalizeLocalMediaPathPart(parsed.pathname)
       if (/^[a-zA-Z]$/.test(hostname)) {
-        return `${hostname}:/${pathname}`
+        return `${hostname}:/${pathname.replace(/^\/+/, '')}`
       }
 
-      return `//${hostname}${parsed.pathname ? `/${pathname}` : ''}`
+      const hostPath = pathname ? (pathname.startsWith('/') ? pathname : `/${pathname}`) : ''
+      return `//${hostname}${hostPath}`
     }
 
     return normalizeLocalMediaPathPart(parsed.pathname)
@@ -345,7 +362,8 @@ export const resolveLocalMediaPathFromUrl = (url: string): string | null => {
 
   if (normalized.startsWith('local-media://')) {
     const rest = normalizeLocalMediaPathPart(normalized.slice('local-media://'.length))
-    const driveMatch = rest.match(/^([a-zA-Z])\/(.+)$/)
+    const driveCandidate = rest.replace(/^\/+/, '')
+    const driveMatch = driveCandidate.match(/^([a-zA-Z])\/(.+)$/)
     if (driveMatch) {
       return `${driveMatch[1]}:/${driveMatch[2]}`
     }
@@ -359,7 +377,8 @@ export const resolveLocalMediaPathFromUrl = (url: string): string | null => {
 
   if (normalized.startsWith('file://')) {
     const rest = normalizeLocalMediaPathPart(normalized.slice('file://'.length))
-    const driveMatch = rest.match(/^([a-zA-Z])\/(.+)$/)
+    const driveCandidate = rest.replace(/^\/+/, '')
+    const driveMatch = driveCandidate.match(/^([a-zA-Z])\/(.+)$/)
     if (driveMatch) {
       return `${driveMatch[1]}:/${driveMatch[2]}`
     }

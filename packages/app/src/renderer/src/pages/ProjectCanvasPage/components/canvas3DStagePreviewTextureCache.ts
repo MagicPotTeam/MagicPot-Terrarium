@@ -73,10 +73,14 @@ const touchCanvas3DStagePreviewTextureCacheEntry = (
 }
 
 const evictCanvas3DStagePreviewTextureCache = () => {
-  while (
-    Array.from(canvas3DStagePreviewTextureCache.values()).filter((entry) => entry.texture).length >
-    CANVAS_3D_STAGE_PREVIEW_TEXTURE_CACHE_LIMIT
-  ) {
+  let texturedEntryCount = 0
+  for (const entry of canvas3DStagePreviewTextureCache.values()) {
+    if (entry.texture) {
+      texturedEntryCount += 1
+    }
+  }
+
+  while (texturedEntryCount > CANVAS_3D_STAGE_PREVIEW_TEXTURE_CACHE_LIMIT) {
     let oldestEntryKey: string | null = null
     let oldestEntryTimestamp = Number.POSITIVE_INFINITY
 
@@ -93,7 +97,10 @@ const evictCanvas3DStagePreviewTextureCache = () => {
     }
 
     const oldestEntry = canvas3DStagePreviewTextureCache.get(oldestEntryKey)
-    oldestEntry?.texture?.dispose()
+    if (oldestEntry?.texture) {
+      oldestEntry.texture.dispose()
+      texturedEntryCount -= 1
+    }
     canvas3DStagePreviewTextureCache.delete(oldestEntryKey)
   }
 }

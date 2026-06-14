@@ -31,7 +31,16 @@ const BENCHMARK_INTERACTION_SAMPLE_COUNT = Math.max(
 const isFatalPageError = (message) => !/fetch failed|Pysssss is not installed/i.test(message)
 
 const getWorkflowImagePath = () =>
-  path.join(process.cwd(), 'src', 'renderer', 'src', 'assets', 'workflowImage.png')
+  path.join(
+    process.cwd(),
+    'packages',
+    'app',
+    'src',
+    'renderer',
+    'src',
+    'assets',
+    'workflowImage.png'
+  )
 
 async function writeSmokeConfig(userDataDir) {
   const config = {

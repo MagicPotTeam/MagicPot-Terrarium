@@ -27,6 +27,41 @@ describe('useProjectCanvasPageRuntimeState model split undo flow', () => {
     vi.useRealTimers()
   })
 
+  it('skips selectedIds updates only when a new Set preserves identical members and order', () => {
+    let renderCount = 0
+    const { result } = renderHook(() => {
+      renderCount += 1
+      return useProjectCanvasPageRuntimeState()
+    })
+
+    expect(renderCount).toBe(1)
+
+    act(() => {
+      result.current.setSelectedIds(new Set(['image-a', 'image-b']))
+    })
+
+    expect(renderCount).toBe(2)
+    const selectedIds = result.current.selectedIds
+    const selectedIdsRefCurrent = result.current.selectedIdsRef.current
+
+    act(() => {
+      result.current.setSelectedIds(new Set(['image-a', 'image-b']))
+    })
+
+    expect(renderCount).toBe(2)
+    expect(result.current.selectedIds).toBe(selectedIds)
+    expect(result.current.selectedIdsRef.current).toBe(selectedIdsRefCurrent)
+
+    act(() => {
+      result.current.setSelectedIds(new Set(['image-b', 'image-a']))
+    })
+
+    expect(renderCount).toBe(3)
+    expect(result.current.selectedIds).not.toBe(selectedIds)
+    expect(result.current.selectedIdsRef.current).not.toBe(selectedIdsRefCurrent)
+    expect([...result.current.selectedIds]).toEqual(['image-b', 'image-a'])
+  })
+
   it('stores canonical local-media URLs for imported local files, videos, and models', async () => {
     const nextZIndexRef = { current: 1 }
     const setGroups = vi.fn()

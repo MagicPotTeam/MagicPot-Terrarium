@@ -24,6 +24,8 @@ const BENCHMARK_VIDEO_COUNT = Math.max(
 )
 const PROJECT_CANVAS_VIDEO_FIXTURE_PATH = path.join(
   process.cwd(),
+  'packages',
+  'app',
   'src',
   'main',
   'testSupport',
@@ -32,6 +34,7 @@ const PROJECT_CANVAS_VIDEO_FIXTURE_PATH = path.join(
   'projectCanvasSampleVideo.webm'
 )
 const PROJECT_CANVAS_VIDEO_FIXTURE_URL = pathToFileURL(PROJECT_CANVAS_VIDEO_FIXTURE_PATH).href
+const VIDEO_BENCHMARK_WINDOW_POINTER_EVENTS = ['pointermove', 'pointerup', 'pointercancel']
 
 const isFatalPageError = (message) => !/fetch failed|Pysssss is not installed/i.test(message)
 
@@ -161,6 +164,49 @@ async function navigateToHash(page, hash) {
     throw new Error(`Expected hash ${hash} but got ${appliedHash}`)
   }
   await page.waitForTimeout(200)
+}
+
+async function installWindowPointerListenerProbe(page) {
+  await page.evaluate((trackedEvents) => {
+    const previousProbe = window.__magicpotVideoBenchmarkPointerListenerProbe
+    if (previousProbe?.restore) {
+      previousProbe.restore()
+    }
+
+    const trackedEventSet = new Set(trackedEvents)
+    const listenerCounts = new Map(trackedEvents.map((eventName) => [eventName, 0]))
+    const originalAddEventListener = window.addEventListener.bind(window)
+    const originalRemoveEventListener = window.removeEventListener.bind(window)
+
+    window.addEventListener = function addEventListenerWithProbe(type, listener, options) {
+      if (trackedEventSet.has(String(type))) {
+        listenerCounts.set(String(type), (listenerCounts.get(String(type)) || 0) + 1)
+      }
+      return originalAddEventListener(type, listener, options)
+    }
+
+    window.removeEventListener = function removeEventListenerWithProbe(type, listener, options) {
+      if (trackedEventSet.has(String(type))) {
+        listenerCounts.set(String(type), Math.max(0, (listenerCounts.get(String(type)) || 0) - 1))
+      }
+      return originalRemoveEventListener(type, listener, options)
+    }
+
+    window.__magicpotVideoBenchmarkPointerListenerProbe = {
+      getCounts: () => Object.fromEntries(listenerCounts),
+      restore: () => {
+        window.addEventListener = originalAddEventListener
+        window.removeEventListener = originalRemoveEventListener
+      }
+    }
+  }, VIDEO_BENCHMARK_WINDOW_POINTER_EVENTS)
+}
+
+async function readWindowPointerListenerProbe(page) {
+  return page.evaluate((trackedEvents) => {
+    const counts = window.__magicpotVideoBenchmarkPointerListenerProbe?.getCounts?.() || {}
+    return Object.fromEntries(trackedEvents.map((eventName) => [eventName, counts[eventName] || 0]))
+  }, VIDEO_BENCHMARK_WINDOW_POINTER_EVENTS)
 }
 
 async function assertVideoFixtureExists() {
@@ -550,6 +596,7 @@ try {
 
   appHandle = await launchApp(userDataDir)
   const { page, fatalErrors } = appHandle
+  await installWindowPointerListenerProbe(page)
   const canvasId = `video-benchmark-${Date.now().toString(36)}`
   const { items, budgetExpectations, seededLayout } = createVideoBenchmarkItems(
     BENCHMARK_VIDEO_COUNT,
@@ -561,11 +608,13 @@ try {
   await waitForHealthyPage(page, fatalErrors)
 
   const initialVideoMetrics = await waitForVideoMetrics(page, budgetExpectations)
+  const idleWindowPointerListeners = await readWindowPointerListenerProbe(page)
   const zoomedVideo = await zoomUntilVideoBudgetConverges(
     page,
     budgetExpectations,
     initialVideoMetrics.mountedVideoOverlayCount
   )
+  const zoomedWindowPointerListeners = await readWindowPointerListenerProbe(page)
   const windowPlacement = await readWindowPlacement(appHandle.app)
   assertNonIntrusiveWindowPlacement(windowPlacement, 'Video benchmark')
   const payload = {
@@ -574,6 +623,8 @@ try {
     budgetExpectations,
     seededLayout,
     windowPlacement,
+    idleWindowPointerListeners,
+    zoomedWindowPointerListeners,
     initialVideoMetrics,
     zoomedVideoMetrics: zoomedVideo.metrics,
     zoomStepsApplied: zoomedVideo.zoomSteps

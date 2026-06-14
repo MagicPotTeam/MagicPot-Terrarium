@@ -75,9 +75,7 @@ export const resolveCanvas3DStageMountedIds = ({
     return mountedIds
   }
 
-  if (isViewportMoving) {
-    return new Set(activatedIds)
-  }
+  void isViewportMoving
   return new Set(activatedIds)
 }
 
