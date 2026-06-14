@@ -6,6 +6,7 @@ export type LLMReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' 
 export type ChatCapabilityProfile = {
   model_name?: string
   auth_mode?: string
+  call_type?: string
   provider?: LLMProviderOption | string
   deployment?: LLMDeployment | string
   base_url?: string
@@ -37,20 +38,20 @@ const normalizeModelName = (value?: string): string =>
     .trim()
     .toLowerCase()
 
-const isOpenAICompatibleProfile = (profile?: ChatCapabilityProfile | null): boolean => {
+const isCodexReasoningProfile = (profile?: ChatCapabilityProfile | null): boolean => {
   if (!profile) {
     return false
   }
 
-  const provider = String(profile.provider || '')
-    .trim()
-    .toLowerCase()
-  if (provider === 'openai') {
+  if (profile.auth_mode === 'codex_oauth') {
     return true
   }
 
-  const modelName = normalizeModelName(profile.model_name)
-  return modelName.startsWith('gpt-5')
+  return (
+    String(profile.call_type || '')
+      .trim()
+      .toLowerCase() === 'codex'
+  )
 }
 
 const dedupeReasoningEfforts = (efforts: readonly LLMReasoningEffort[]): LLMReasoningEffort[] => {
@@ -100,7 +101,7 @@ export const resolveChatProfileCapabilities = (
     return nextCapabilities
   }
 
-  if (!isOpenAICompatibleProfile(profile)) {
+  if (!isCodexReasoningProfile(profile)) {
     return applyExtensions({
       reasoningEfforts: [],
       supportsAutoContextCompression: false
@@ -195,9 +196,9 @@ export const normalizeReasoningEffort = (
     return undefined
   }
 
-  if (!supportedEfforts?.length) {
-    return candidate
+  if (supportedEfforts) {
+    return supportedEfforts.includes(candidate) ? candidate : undefined
   }
 
-  return supportedEfforts.includes(candidate) ? candidate : undefined
+  return candidate
 }
