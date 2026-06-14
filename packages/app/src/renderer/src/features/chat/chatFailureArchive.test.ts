@@ -4,7 +4,8 @@ import {
   formatChatFailureMessage,
   readChatFailureArchiveRootDir,
   resolveChatFailureArchiveDir,
-  resolveChatFailureArchiveRootDir
+  resolveChatFailureArchiveRootDir,
+  sanitizeChatFailureArchiveRunId
 } from './chatFailureArchive'
 
 describe('chatFailureArchive', () => {
@@ -12,6 +13,12 @@ describe('chatFailureArchive', () => {
     expect(formatChatFailureMessage(' Failed ', 'run-1')).toBe('Failed (Run: run-1)')
     expect(formatChatFailureMessage('   ', 'run-1')).toBe('   ')
     expect(formatChatFailureMessage('Failed', null)).toBe('Failed')
+    expect(formatChatFailureMessage('Failed', '../run/1')).toBe('Failed (Run: run-1)')
+  })
+
+  it('sanitizes archive run ids for filesystem path segments', () => {
+    expect(sanitizeChatFailureArchiveRunId('../run/1:*?')).toBe('run-1')
+    expect(sanitizeChatFailureArchiveRunId('   ')).toBe('unknown-run')
   })
 
   it('resolves archive roots with local override precedence', () => {
@@ -57,7 +64,7 @@ describe('chatFailureArchive', () => {
     expect(
       resolveChatFailureArchiveDir({
         baseDir: 'C:/Downloads',
-        runId: 'run-1',
+        runId: '../run-1:*?',
         pathJoin: (...parts) => parts.join('\\')
       })
     ).toBe('C:/Downloads\\chat-failures\\run-1')
@@ -101,7 +108,7 @@ describe('chatFailureArchive', () => {
         attachments: [
           {
             type: 'image',
-            url: 'file:///image.png',
+            url: '[redacted:local-file-url]',
             fileName: 'image.png',
             mimeType: 'image/png',
             sizeBytes: 123,

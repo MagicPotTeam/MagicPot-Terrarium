@@ -220,8 +220,6 @@ type DroppedModelReference = {
   fileName: string
 }
 
-type ElectronFile = File & { path?: string }
-
 type ModelDragReader = Pick<DataTransfer, 'getData'>
 
 const parseUriList = (value: string): string[] =>
@@ -244,26 +242,6 @@ const createDroppedModelReference = (
     fileName:
       String(fileName || '').trim() || getDownloadFileNameFromUrl(normalizedUrl, 'model.glb')
   }
-}
-
-const decodeLocalModelPath = (url: string): string | null => {
-  if (url.startsWith('local-media:///')) {
-    return decodeURIComponent(url.slice('local-media:///'.length))
-  }
-
-  if (url.startsWith('local-media://')) {
-    return decodeURIComponent(url.slice('local-media://'.length).replace(/^\/+/, ''))
-  }
-
-  if (url.startsWith('file:///')) {
-    return decodeURIComponent(url.slice('file:///'.length))
-  }
-
-  if (url.startsWith('file://')) {
-    return decodeURIComponent(url.slice('file://'.length).replace(/^\/+/, ''))
-  }
-
-  return null
 }
 
 const parseHy3dSignedUrlExpiresAt = (
@@ -631,7 +609,7 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
 
   const uploadResolvedModel = React.useCallback(
     async (file: File, fallbackPath?: string) => {
-      const resolvedPath = fallbackPath || (file as ElectronFile).path
+      const resolvedPath = fallbackPath
       const selectedFileName = file.name || getFileNameFromPath(resolvedPath || '')
       const ext = `.${inferExt(selectedFileName)}`
       if (!acceptExtensions.includes(ext)) {
@@ -721,15 +699,11 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
       }
 
       if (localUploadEnabled) {
-        const localPath = decodeLocalModelPath(normalizedUrl)
-        if (localPath) {
-          return await uploadResolvedModel(
-            new File([], reference.fileName, { type: 'application/octet-stream' }),
-            localPath
-          )
-        }
-
-        if (normalizedUrl.startsWith('blob:') || normalizedUrl.startsWith('data:')) {
+        if (
+          normalizedUrl.startsWith('local-media:') ||
+          normalizedUrl.startsWith('blob:') ||
+          normalizedUrl.startsWith('data:')
+        ) {
           const response = await fetch(normalizedUrl)
           if (!response.ok) {
             throw new Error(`Failed to load dropped model (${response.status})`)

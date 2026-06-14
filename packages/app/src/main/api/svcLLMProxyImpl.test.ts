@@ -5,6 +5,10 @@ import { cliFromProfile } from '@shared/llm'
 import * as configModule from '../config/config'
 import type { AssistantRuntime } from '../assistantRuntime/runtime'
 import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
+import {
+  clearTrustedLocalFileSelectionsForTest,
+  rememberTrustedLocalFileSelections
+} from './trustedFileSelection'
 import { LLMProxySvcImpl } from './svcLLMProxyImpl'
 
 const {
@@ -184,6 +188,7 @@ describe('LLMProxySvcImpl', () => {
   afterEach(() => {
     mainHostExtensionApiV1.apiServices.splice(0)
     mainHostExtensionApiV1.llmProxy.splice(0)
+    clearTrustedLocalFileSelectionsForTest()
     useActualHunyuan3DClient.current = false
     fetchMock.mockReset()
     listToolsMock.mockReset()
@@ -2501,6 +2506,8 @@ describe('LLMProxySvcImpl', () => {
       }
     })
 
+    rememberTrustedLocalFileSelections(['C:/models/model.glb'])
+
     const svc = new LLMProxySvcImpl()
     const resp = await svc.uploadHy3DModel({ filePath: 'C:/models/model.glb' })
 
@@ -2511,6 +2518,25 @@ describe('LLMProxySvcImpl', () => {
     )
     expect(resp.key).toBe('magicpot/hunyuan3d/2026/04/04/model.glb')
     expect(resp.fileName).toBe('model.glb')
+  })
+
+  it('rejects renderer-supplied local model paths that were not selected through the trusted dialog', async () => {
+    mockConfig({
+      aigc3d_config: {
+        ...DEFAULT_CONFIG.aigc3d_config!,
+        tencent_secret_id: 'secret-id',
+        tencent_secret_key: 'secret-key',
+        cos_bucket: 'magicpot-1314265479',
+        cos_region: 'ap-guangzhou',
+        cos_key_prefix: 'magicpot/hunyuan3d'
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    await expect(svc.uploadHy3DModel({ filePath: 'C:/models/secret.glb' })).rejects.toThrow(
+      'trusted dialog'
+    )
+    expect(uploadLocalHy3dModelMock).not.toHaveBeenCalled()
   })
 
   it('uploads a buffered model via uploadHy3DModel', async () => {

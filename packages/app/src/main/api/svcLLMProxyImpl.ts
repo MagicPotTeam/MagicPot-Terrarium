@@ -1,4 +1,4 @@
-﻿// Main-process LLM proxy service used by chat, OCR, skill routing, and local model integrations.
+// Main-process LLM proxy service used by chat, OCR, skill routing, and local model integrations.
 // This file centralizes provider selection and media-aware request handling.
 
 import { net } from 'electron'
@@ -68,6 +68,11 @@ import { validateStructuredSkillOutput } from './skillRuntimeStructuredOutput'
 import { syncMcpClientManager } from '../mcp/runtime'
 import fs from 'node:fs/promises'
 import { isLocalFileSource } from '../utils/localFileUrl'
+import {
+  MAX_REMOTE_FETCH_RESPONSE_BYTES,
+  parseAndValidateRemoteFetchRequest
+} from './remoteFetchPolicy'
+import { consumeTrustedLocalFileSelection } from './trustedFileSelection'
 import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
 // Browser automation snapshots may arrive through file URLs; normalize them before downstream handling.
 
@@ -1855,7 +1860,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
 
     try {
       if (req.filePath) {
-        return await uploadLocalHy3dModel(credentials, cosConfig, req.filePath)
+        const trustedPath = consumeTrustedLocalFileSelection(req.filePath)
+        return await uploadLocalHy3dModel(credentials, cosConfig, trustedPath)
       }
 
       if (req.fileName && req.fileDataBase64) {
@@ -1926,8 +1932,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     const https = await import('https')
     const http = await import('http')
 
-    const timeoutMs = req.timeoutMs || 5 * 60 * 1000
-    const parsedUrl = new URL(req.url)
+    const { parsedUrl, headers, timeoutMs, resolvedAddress } =
+      await parseAndValidateRemoteFetchRequest(req, getConfig())
     const isHttps = parsedUrl.protocol === 'https:'
     const transport = isHttps ? https : http
     const maxRetries = 3
@@ -1941,14 +1947,24 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           port: parsedUrl.port || (isHttps ? 443 : 80),
           path: parsedUrl.pathname + parsedUrl.search,
           method: req.method,
-          headers: req.headers || {},
+          headers,
           timeout: timeoutMs,
-          rejectUnauthorized: false
+          lookup: (_hostname, _options, callback) => {
+            callback(null, resolvedAddress.address, resolvedAddress.family)
+          }
         }
 
         const request = transport.request(options, (res) => {
           const chunks: Buffer[] = []
-          res.on('data', (chunk: Buffer) => chunks.push(chunk))
+          let receivedBytes = 0
+          res.on('data', (chunk: Buffer) => {
+            receivedBytes += chunk.length
+            if (receivedBytes > MAX_REMOTE_FETCH_RESPONSE_BYTES) {
+              request.destroy(new Error('Remote response is too large.'))
+              return
+            }
+            chunks.push(chunk)
+          })
           res.on('end', () => {
             abortContext.signal?.removeEventListener('abort', handleAbort)
             const body = Buffer.concat(chunks).toString('utf-8')
