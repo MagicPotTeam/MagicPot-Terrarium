@@ -1844,13 +1844,21 @@ describe('ChatPage runtime workflow integration', () => {
     await dispatchNewSession({
       profileId: 'vision-model',
       initialMessage: 'Use both references together.',
-      initialAttachments: [createImageAttachment('role.png'), createImageAttachment('ghost.png')]
+      initialAttachments: [
+        { ...createImageAttachment('role.png'), sourceWidth: 610, sourceHeight: 610 },
+        createImageAttachment('ghost.png')
+      ]
     })
 
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
     expect(hoisted.resolveAttachmentBatchCapabilityMock).not.toHaveBeenCalled()
 
     const firstCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
+    expect(firstCall.imageGenerationOptions).toMatchObject({
+      enabled: true,
+      action: 'edit',
+      size: '1024x1024'
+    })
     const lastRequestMessage = firstCall.messages[firstCall.messages.length - 1]
     expect(lastRequestMessage.attachments).toEqual([
       expect.objectContaining({

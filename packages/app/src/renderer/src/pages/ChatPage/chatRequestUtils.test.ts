@@ -922,6 +922,12 @@ describe('requestChatCompletion', () => {
         profileId: 'ignored-profile',
         systemPrompt: 'Caller-supplied prompt should be ignored.',
         conversationId: 'conversation-2',
+        imageGenerationOptions: {
+          enabled: true,
+          action: 'edit',
+          size: '1024x1024',
+          outputFormat: 'png'
+        },
         externalAgentSkill: {
           id: 'skill-1',
           category: 'Ops',
@@ -948,6 +954,12 @@ describe('requestChatCompletion', () => {
         messages: [{ role: 'user', content: 'hello', attachments: undefined }],
         profileId: undefined,
         systemPrompt: 'Follow the workflow prompt.',
+        imageGenerationOptions: {
+          enabled: true,
+          action: 'edit',
+          size: '1024x1024',
+          outputFormat: 'png'
+        },
         sessionUrl: undefined,
         conversationId: 'conversation-2',
         isEdit: undefined

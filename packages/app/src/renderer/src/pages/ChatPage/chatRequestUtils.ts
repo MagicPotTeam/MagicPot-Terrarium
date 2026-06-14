@@ -383,7 +383,7 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
     ...(input.reasoningEffort && input.externalAgentSkill?.type !== 'agent'
       ? { reasoningEffort: input.reasoningEffort }
       : {}),
-    ...(requestImageGenerationOptions && input.externalAgentSkill?.type !== 'agent'
+    ...(requestImageGenerationOptions
       ? { imageGenerationOptions: requestImageGenerationOptions }
       : {}),
     ...(input.skillRuntime ? { skillRuntime: input.skillRuntime } : {}),

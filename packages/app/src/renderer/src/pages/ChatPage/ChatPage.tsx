@@ -18,6 +18,7 @@ import {
   type ChatCapabilityProfile,
   type LLMReasoningEffort,
   type OpenAIImageGenerationOptions,
+  normalizeOpenAIImageGenerationSize,
   normalizeReasoningEffort,
   resolveChatProfileCapabilities
 } from '@shared/llm'
@@ -515,6 +516,53 @@ const readStoredImageGenerationOptions = (storageKey: string): OpenAIImageGenera
   }
 }
 
+const resolveReferenceImageGenerationSizeFromAttachments = (
+  attachments: ChatAttachment[] | undefined
+): string | undefined => {
+  const referenceImage = attachments?.find((attachment) => {
+    if (attachment.type !== 'image') return false
+    const width = Number(attachment.sourceWidth)
+    const height = Number(attachment.sourceHeight)
+    return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+  })
+
+  if (!referenceImage) {
+    return undefined
+  }
+
+  return normalizeOpenAIImageGenerationSize(
+    `${Math.round(Number(referenceImage.sourceWidth))}x${Math.round(Number(referenceImage.sourceHeight))}`
+  )
+}
+
+const resolveImageGenerationOptionsForAttachments = (
+  options: OpenAIImageGenerationOptions,
+  attachments: ChatAttachment[] | undefined
+): OpenAIImageGenerationOptions => {
+  const requestedSize = normalizeOpenAIImageGenerationSize(options.size)
+  if (requestedSize && requestedSize !== 'auto') {
+    return {
+      ...options,
+      size: requestedSize
+    }
+  }
+
+  const referenceSize = resolveReferenceImageGenerationSizeFromAttachments(attachments)
+  if (!referenceSize) {
+    return requestedSize
+      ? {
+          ...options,
+          size: requestedSize
+        }
+      : options
+  }
+
+  return {
+    ...options,
+    size: referenceSize
+  }
+}
+
 const buildChatFailureArchivePayload = (options: {
   sessionId?: string | null
   profileId?: string | null
@@ -537,7 +585,9 @@ const buildChatFailureArchivePayload = (options: {
           url: attachment.url,
           fileName: attachment.fileName,
           mimeType: attachment.mimeType,
-          sizeBytes: attachment.sizeBytes
+          sizeBytes: attachment.sizeBytes,
+          sourceWidth: attachment.sourceWidth,
+          sourceHeight: attachment.sourceHeight
         }))
       }
     : null
@@ -652,6 +702,8 @@ const summarizeChatAttachmentsForLog = (attachments: ChatAttachment[] | undefine
     relativePath: attachment.relativePath,
     mimeType: attachment.mimeType,
     sizeBytes: attachment.sizeBytes,
+    sourceWidth: attachment.sourceWidth,
+    sourceHeight: attachment.sourceHeight,
     url:
       typeof attachment.url === 'string'
         ? attachment.url.startsWith('data:')
@@ -3794,6 +3846,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const historyMessages = executionContext.historyMessages
       const currentSessionUrl = executionContext.sessionUrl
       const shouldPreserveMultiAttachmentRequest = isImageGenerationSelected
+      const requestImageGenerationOptions = resolveImageGenerationOptionsForAttachments(
+        imageGenerationOptions,
+        rawAttachments
+      )
       const useAttachmentBatching =
         shouldBatchAttachments(rawAttachments) && !shouldPreserveMultiAttachmentRequest
       let latestContextCompressionSummary = cs.contextCompression
@@ -4036,7 +4092,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           profileId,
           systemPrompt: activeSystemPrompt,
           reasoningEffort: selectedReasoningEffort,
-          imageGenerationOptions,
+          imageGenerationOptions: requestImageGenerationOptions,
           skillRuntime: serializedSkillRuntime,
           externalAgentSkill: activeExternalAgentSkill,
           sessionUrl,
@@ -4101,7 +4157,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           profileId,
           systemPrompt: activeSystemPrompt,
           reasoningEffort: selectedReasoningEffort,
-          imageGenerationOptions,
+          imageGenerationOptions: requestImageGenerationOptions,
           skillRuntime: serializedSkillRuntime,
           externalAgentSkill: activeExternalAgentSkill,
           sessionUrl,
