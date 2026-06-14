@@ -9,7 +9,7 @@
 | `packages/app/src/renderer` | `shared`, browser/React libraries, renderer extension contracts.      | Main service implementations, Node-only modules, private wrapper code.                | Owns UI and client-side interaction.                                              |
 | `packages/app/src/shared`   | Type-only platform contracts, pure utilities, shared models.          | Main/renderer runtime modules.                                                        | Owns IPC contracts and cross-process types.                                       |
 | `scripts`                   | Repository config, Node.js tooling, packaging inputs.                 | Runtime feature assumptions that bypass app contracts.                                | Owns automation, QA, benchmarks, release prep.                                    |
-| `vendor` and runtime assets | External project/runtime data.                                        | Application source code importing private/local-only paths as mandatory dependencies. | Optional for public `pure` builds; required only for prepared embedded packaging. |
+| `vendor` and runtime assets | External project/runtime data.                                        | Application source code importing local-only or non-public paths as mandatory dependencies. | Optional for public `pure` builds; required only for prepared embedded packaging. |
 
 ## Dependency direction
 
