@@ -83,12 +83,6 @@ type ResizablePixiApplication = Application & {
   }
 }
 
-type ProjectCanvasViewportTransform = {
-  x: number
-  y: number
-  scale: number
-}
-
 export const PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT = 512
 export const PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES = 768 * 1024 * 1024
 export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES = 128 * 1024 * 1024
@@ -773,12 +767,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const stagePosRef = useRef(stagePos)
   const stageScaleRef = useRef(stageScale)
   const stageSizeRef = useRef(stageSize)
-  const lastRenderedViewportRef = useRef<ProjectCanvasViewportTransform>({
-    x: stagePos.x,
-    y: stagePos.y,
-    scale: stageScale
-  })
-  const hasViewportCompensationTransformRef = useRef(false)
   const selectedIdsRef = useRef(selectedIds)
   const residentCandidateIdsRef = useRef<ReadonlySet<string> | null>(null)
   const rendererSizeRef = useRef<{ width: number; height: number } | null>(null)
@@ -938,56 +926,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     })
     return residentTextureBytes
   }, [])
-
-  const clearViewportCompensationTransform = useCallback(() => {
-    const canvas = appRef.current?.canvas as HTMLCanvasElement | undefined
-    if (!canvas || (!hasViewportCompensationTransformRef.current && !canvas.style.transform)) {
-      return
-    }
-
-    canvas.style.transform = ''
-    canvas.style.removeProperty('will-change')
-    hasViewportCompensationTransformRef.current = false
-  }, [])
-
-  const applyViewportCompensationTransform = useCallback(
-    (pos: { x: number; y: number }, scale: number) => {
-      const canvas = appRef.current?.canvas as HTMLCanvasElement | undefined
-      const renderedViewport = lastRenderedViewportRef.current
-      const renderedScale = renderedViewport.scale
-      if (
-        !canvas ||
-        !Number.isFinite(pos.x) ||
-        !Number.isFinite(pos.y) ||
-        !Number.isFinite(scale) ||
-        !Number.isFinite(renderedViewport.x) ||
-        !Number.isFinite(renderedViewport.y) ||
-        !Number.isFinite(renderedScale) ||
-        Math.abs(renderedScale) < 0.0001
-      ) {
-        clearViewportCompensationTransform()
-        return
-      }
-
-      const scaleRatio = scale / renderedScale
-      const translateX = pos.x - renderedViewport.x * scaleRatio
-      const translateY = pos.y - renderedViewport.y * scaleRatio
-      if (
-        Math.abs(translateX) < 0.01 &&
-        Math.abs(translateY) < 0.01 &&
-        Math.abs(scaleRatio - 1) < 0.0001
-      ) {
-        clearViewportCompensationTransform()
-        return
-      }
-
-      canvas.style.transformOrigin = '0 0'
-      canvas.style.willChange = 'transform'
-      canvas.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${scaleRatio})`
-      hasViewportCompensationTransformRef.current = true
-    },
-    [clearViewportCompensationTransform]
-  )
 
   const collectImageHealthCounts = useCallback(
     (candidateIds?: ReadonlySet<string>) => {
@@ -1194,7 +1132,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
 
     const startedAt = window.performance.now()
-    clearViewportCompensationTransform()
     try {
       appRef.current.render()
     } catch (error) {
@@ -1202,11 +1139,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       return
     }
     lastRenderAtRef.current = window.performance.now()
-    lastRenderedViewportRef.current = {
-      x: stagePosRef.current.x,
-      y: stagePosRef.current.y,
-      scale: stageScaleRef.current
-    }
     const lastRenderDurationMs = Math.max(0, lastRenderAtRef.current - startedAt)
     if (isViewportInteractingRef.current) {
       metricsRef.current.renderCount += 1
@@ -1219,7 +1151,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       renderCount: metricsRef.current.renderCount + 1,
       lastRenderDurationMs
     })
-  }, [clearViewportCompensationTransform, reportMetrics])
+  }, [reportMetrics])
 
   const scheduleViewportReconcile = useCallback(
     (options: { allowDuringInteraction?: boolean } = {}) => {
@@ -1300,7 +1232,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       if (isPerformanceThrottledRef.current) {
         sourceUpgradeAllowedAtRef.current = Number.POSITIVE_INFINITY
-        forceViewportReconcile()
         return
       }
 
@@ -1480,14 +1411,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       world.position.set(pos.x, pos.y)
       world.scale.set(scale)
-      if (isPerformanceThrottledRef.current && isViewportInteractingRef.current) {
-        applyViewportCompensationTransform(pos, scale)
-        return
-      }
-
       renderImmediateOrSchedule()
     },
-    [applyViewportCompensationTransform, isInitialized, renderImmediateOrSchedule]
+    [isInitialized, renderImmediateOrSchedule]
   )
 
   const markSpriteRecordUsed = useCallback((record: SpriteRecord) => {
