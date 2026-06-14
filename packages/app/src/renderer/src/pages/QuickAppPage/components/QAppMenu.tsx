@@ -1500,7 +1500,9 @@ export default function QAppMenu({
           pt: 0,
           pb: 1,
           overflowX: 'hidden',
-          overflowY: 'overlay', // Using overlay to not take up space if possible, or auto
+          overflowY: 'auto',
+          overscrollBehavior: 'contain',
+          scrollbarGutter: 'stable',
           display: 'flex',
           flexDirection: 'column',
           background: 'transparent',
