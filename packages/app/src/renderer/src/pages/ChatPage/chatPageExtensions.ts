@@ -4,45 +4,36 @@ import {
   resolveProjectIdFromStorageScope,
   resolveProjectResourceDir
 } from '@renderer/utils/projectResourcePaths'
-import { rendererHostExtensionApiV1 } from '@renderer/extensions/generatedRegistry'
+import {
+  resolveRendererAssistantImageAutoSaveDir,
+  resolveRendererChatReasoningPreferenceKey
+} from '@renderer/extensions/rendererHostExtensionHelpers'
 import { getBaseProfileId } from './chatPageShared'
 
 export const resolveChatReasoningPreferenceKey = (
   profileId: string | null | undefined,
   profile?: ChatCapabilityProfile | null
-): string | null => {
-  const extensionValue = rendererHostExtensionApiV1.chat?.resolveReasoningPreferenceKey?.(
-    profileId,
-    profile
-  )
-  if (extensionValue !== undefined) {
-    return extensionValue
-  }
+): string | null =>
+  resolveRendererChatReasoningPreferenceKey(profileId, profile, () => {
+    const baseProfileId = getBaseProfileId(profileId)
+    if (baseProfileId) {
+      return baseProfileId
+    }
 
-  const baseProfileId = getBaseProfileId(profileId)
-  if (baseProfileId) {
-    return baseProfileId
-  }
-
-  const modelName = String(profile?.model_name || '')
-    .trim()
-    .toLowerCase()
-  return modelName || null
-}
+    const modelName = String(profile?.model_name || '')
+      .trim()
+      .toLowerCase()
+    return modelName || null
+  })
 
 export const resolveAssistantImageAutoSaveDir = (options: {
   config: Pick<Config, 'download_dir'>
   storageScope?: string
-}): string | undefined => {
-  const extensionValue =
-    rendererHostExtensionApiV1.chat?.resolveAssistantImageAutoSaveDir?.(options)
-  if (extensionValue !== undefined) {
-    return extensionValue
-  }
-
-  return resolveProjectResourceDir({
-    config: { download_dir: options.config.download_dir },
-    projectId: resolveProjectIdFromStorageScope(options.storageScope),
-    segments: ['.AutoSave', 'Agent']
-  })
-}
+}): string | undefined =>
+  resolveRendererAssistantImageAutoSaveDir(options, () =>
+    resolveProjectResourceDir({
+      config: { download_dir: options.config.download_dir },
+      projectId: resolveProjectIdFromStorageScope(options.storageScope),
+      segments: ['.AutoSave', 'Agent']
+    })
+  )
