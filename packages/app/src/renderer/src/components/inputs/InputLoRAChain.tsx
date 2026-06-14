@@ -16,6 +16,7 @@ import { ComfyUtils } from '@renderer/utils/comfyUtils'
 import { api } from '@renderer/utils/windowUtils'
 import { bytesToObjectUrl } from '@renderer/utils/fileUtils'
 import { InputProps } from './InputProps'
+import { isEqual } from 'es-toolkit'
 import {
   readLoraTriggerWordsMap,
   updateLoraTriggerWordsMap,
@@ -397,10 +398,24 @@ const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
   const comfyUtilsRef = useRef(new ComfyUtils(api().svcComfy, api().svcPysssss))
   const [loraName2ImageName, setLoraName2ImageName] = useState<Record<string, string>>({})
   useEffect(() => {
+    let cancelled = false
     ;(async () => {
-      const loraName2ImageName = await comfyUtilsRef.current.listImages({ type: 'loras' })
-      setLoraName2ImageName(loraName2ImageName)
+      try {
+        const nextLoraName2ImageName = await comfyUtilsRef.current.listImages({ type: 'loras' })
+        if (cancelled) return
+        setLoraName2ImageName((prev) =>
+          isEqual(prev, nextLoraName2ImageName) ? prev : nextLoraName2ImageName
+        )
+      } catch (error) {
+        if (cancelled) return
+        console.warn('[InputLoRAChain] failed to list LoRA preview images:', error)
+        setLoraName2ImageName((prev) => (Object.keys(prev).length === 0 ? prev : {}))
+      }
     })()
+
+    return () => {
+      cancelled = true
+    }
   }, [comfyUtilsRef])
 
   const defaultLoraConfig: LoRAConfig = {

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { InputProps } from './InputProps'
 import { isEqual } from 'es-toolkit'
 import { Box, Button, IconButton, Typography } from '@mui/material'
@@ -43,17 +43,23 @@ type InputTextListProps = InputProps<string[]>
 
 const InputTextList: React.FC<InputTextListProps> = ({ value, label, onChange, Icon }) => {
   const [internalValue, setInternalValue] = useState<string[]>(value)
-
-  const [prevValue, setPrevValue] = useState<string[]>(value)
-  if (!isEqual(prevValue, value)) {
-    setPrevValue(value)
-    setInternalValue((prev) => (isEqual(prev, value) ? prev : value))
-  }
+  const lastCommittedValueRef = useRef(value)
 
   useEffect(() => {
+    setInternalValue((prev) => {
+      if (isEqual(prev, value)) return prev
+      lastCommittedValueRef.current = value
+      return value
+    })
+  }, [value])
+
+  useEffect(() => {
+    if (isEqual(lastCommittedValueRef.current, internalValue)) {
+      return
+    }
+    lastCommittedValueRef.current = internalValue
     onChange(internalValue)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [internalValue])
+  }, [internalValue, onChange])
 
   const addItem = useCallback(() => {
     setInternalValue((prev) => [...prev, ''])
