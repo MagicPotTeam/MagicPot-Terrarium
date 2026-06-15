@@ -3,7 +3,7 @@ import { QAppCfgInputComfySelect } from '@shared/qApp/cfgTypes'
 import { ExeInputBuilder, ExeInputProps } from './types'
 import { getJsonPath, setJsonPath } from '@shared/utils/jsonPath'
 import { Workflow } from '@shared/comfy/types'
-import { useImperativeHandle } from 'react'
+import { useImperativeHandle, useMemo } from 'react'
 import { Autocomplete, TextField } from '@mui/material'
 import { clsAndFieldByJsonPath, findFieldOptions } from '@shared/comfy/funcs'
 import { useQAppInputState } from '../../components/QAppContext'
@@ -42,7 +42,10 @@ const buildExeInputComfySelect: ExeInputBuilder<'InputComfySelect'> = (
   const id = `QAppInputComfySelect-${label}`
 
   const QAppInputComfySelect: React.FC<ExeInputProps> = ({ objectInfos, ref }) => {
-    const options = findFieldOptions(objectInfos, cls, field)
+    const options = useMemo(
+      () => findFieldOptions(objectInfos, cls, field),
+      [objectInfos, cls, field]
+    )
     const [value, setValue] = useQAppInputState<string>(slot, defaultValue)
 
     // Check if current value is valid (exists in options)

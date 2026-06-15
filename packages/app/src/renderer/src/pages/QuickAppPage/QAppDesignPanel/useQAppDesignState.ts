@@ -12,6 +12,7 @@ import {
 } from '@shared/qApp/cfgTypes'
 import { Workflow } from '@shared/comfy/types'
 import { DesignItem } from './QAppDesignPopUpPanel'
+import { isEqual } from 'es-toolkit'
 
 type InputCompValue = QAppCfgAllComponentTypeMap[QAppCfgInputType | 'Section' | 'Description']
 type AutoCompValue = QAppCfgAutoTypeMap[QAppCfgAutoType]
@@ -41,13 +42,31 @@ export const useQAppDesignState = (
 
   // --- handlers ---
   const handleSetAutoItemValue = useCallback((id: string, value: AutoCompValue) => {
-    setAutoItems((prev) => prev.map((item) => (item.id === id ? { ...item, value } : item)))
+    setAutoItems((prev) => {
+      let changed = false
+      const next = prev.map((item) => {
+        if (item.id !== id) return item
+        if (isEqual(item.value, value)) return item
+        changed = true
+        return { ...item, value }
+      })
+      return changed ? next : prev
+    })
   }, [])
   const handleDeleteAutoItem = useCallback((id: string) => {
     setAutoItems((prev) => prev.filter((item) => item.id !== id))
   }, [])
   const handleSetInputItemValue = useCallback((id: string, value: InputCompValue) => {
-    setInputItems((prev) => prev.map((item) => (item.id === id ? { ...item, value } : item)))
+    setInputItems((prev) => {
+      let changed = false
+      const next = prev.map((item) => {
+        if (item.id !== id) return item
+        if (isEqual(item.value, value)) return item
+        changed = true
+        return { ...item, value }
+      })
+      return changed ? next : prev
+    })
   }, [])
   const handleDeleteInputItem = useCallback((id: string) => {
     setInputItems((prev) => prev.filter((item) => item.id !== id))

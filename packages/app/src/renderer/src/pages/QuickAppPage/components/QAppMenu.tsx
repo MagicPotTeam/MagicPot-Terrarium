@@ -1042,9 +1042,15 @@ export default function QAppMenu({
     const ancestors = path.slice(0, -1)
     if (ancestors.length)
       setExpandedKeys((p) => {
+        let changed = false
         const n = new Set(p)
-        ancestors.forEach((k) => n.add(k))
-        return n
+        ancestors.forEach((k) => {
+          if (!n.has(k)) {
+            changed = true
+            n.add(k)
+          }
+        })
+        return changed ? n : p
       })
   }, [currentQAppKey, qAppItems])
 

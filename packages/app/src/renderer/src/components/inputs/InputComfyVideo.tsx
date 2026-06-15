@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Box, IconButton, Typography } from '@mui/material'
 import { MovieCreationOutlined, UploadOutlined } from '@mui/icons-material'
 import { InputProps } from './InputProps'
@@ -25,13 +25,33 @@ const InputComfyVideo: React.FC<InputComfyVideoProps> = ({
   const [isDragging, setIsDragging] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const fileInputRef = React.useRef<HTMLInputElement | null>(null)
+  const previewRequestIdRef = useRef(0)
+  const previewUrlRef = useRef<string | null>(null)
   const { notifyError } = useMessage()
 
+  const updatePreviewUrl = useCallback((nextUrl: string | null) => {
+    setPreviewUrl((prev) => {
+      if (prev && prev !== nextUrl) {
+        URL.revokeObjectURL(prev)
+      }
+      previewUrlRef.current = nextUrl
+      return nextUrl
+    })
+  }, [])
+
+  useEffect(
+    () => () => {
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current)
+        previewUrlRef.current = null
+      }
+    },
+    []
+  )
+
   useEffect(() => {
-    if (value !== internalValue) {
-      setInternalValue(value)
-    }
-  }, [value, internalValue])
+    setInternalValue((prev) => (prev === value ? prev : value))
+  }, [value])
 
   const doUpload = useCallback(
     async (file: File) => {
@@ -66,57 +86,47 @@ const InputComfyVideo: React.FC<InputComfyVideoProps> = ({
     [notifyError, onChange]
   )
 
-  const viewVideo = useCallback(async () => {
-    const res = await api().svcComfy.getView(valueToFileItem(internalValue))
-    return res.result
-  }, [internalValue])
-
   useEffect(() => {
-    let active = true
-    ;(async () => {
-      if (!internalValue) {
-        setPreviewUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev)
-          return null
-        })
-        return
-      }
+    const requestId = ++previewRequestIdRef.current
+    let createdUrl: string | null = null
 
+    if (!internalValue) {
+      updatePreviewUrl(null)
+      return
+    }
+
+    ;(async () => {
       try {
-        const bytes = await viewVideo()
-        if (!active) return
+        const res = await api().svcComfy.getView(valueToFileItem(internalValue))
+        if (previewRequestIdRef.current !== requestId) return
+        const bytes = res.result
         const blob = new Blob([bytes as BlobPart], {
           type: guessMimeTypeFromFileName(internalValue, 'video/mp4')
         })
-        const url = URL.createObjectURL(blob)
-        setPreviewUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev)
-          return url
-        })
-      } catch {
-        if (!active) return
-        console.warn('[InputComfyVideo] Failed to load video, clearing value:', internalValue)
-        setInternalValue('')
-        onChange('')
-        setPreviewUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev)
-          return null
-        })
+        createdUrl = URL.createObjectURL(blob)
+        updatePreviewUrl(createdUrl)
+        createdUrl = null
+      } catch (error) {
+        if (previewRequestIdRef.current !== requestId) return
+        // Preview failures should not erase the selected video value. During
+        // ComfyUI startup or heavy execution the file may be temporarily
+        // unavailable; clearing it here would write back into QApp form state
+        // from an effect and can amplify render/update loops.
+        console.warn('[InputComfyVideo] Failed to load video preview:', internalValue, error)
+        updatePreviewUrl(null)
       }
     })()
 
     return () => {
-      active = false
-    }
-  }, [internalValue, onChange, viewVideo])
-
-  useEffect(() => {
-    return () => {
-      if (previewUrl) {
-        URL.revokeObjectURL(previewUrl)
+      if (previewRequestIdRef.current === requestId) {
+        previewRequestIdRef.current += 1
+      }
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl)
+        createdUrl = null
       }
     }
-  }, [previewUrl])
+  }, [internalValue, updatePreviewUrl])
 
   return (
     <Box data-panel="quick-app">
