@@ -24,10 +24,6 @@ import {
   isProjectCanvasRoutePath,
   normalizeProjectCanvasRoutePath
 } from '../pages/ProjectCanvasPage/projectCanvasRouting'
-import {
-  emitCanvasLayoutResizeInteraction,
-  type CanvasLayoutResizeInteractionSource
-} from '../pages/ProjectCanvasPage/canvasLayoutResizeInteraction'
 
 const SidePanel = lazyWithRetry(() => import('./SidePanel'))
 const BottomPanel = lazyWithRetry(() => import('./BottomPanel'))
@@ -42,7 +38,6 @@ const RIGHT_PANEL_MIN_WIDTH = 360
 const RIGHT_PANEL_MAX_WIDTH = 1024
 const BOTTOM_PANEL_DEFAULT_HEIGHT = 220
 const ROUTE_TAB_SYNC_DELAY_MS = 50
-const LAYOUT_RESIZE_REMEASURE_SETTLE_DELAY_MS = 120
 export const STARTUP_HOME_PAINT_DELAY_MS = 160
 
 export const clampSidePanelWidth = (currentWidth: number, delta: number): number =>
@@ -173,7 +168,7 @@ export const scheduleStartupRestoreAfterHomePaint = (callback: () => void): (() 
   }
 }
 
-type ResizeDirection = CanvasLayoutResizeInteractionSource | null
+type ResizeDirection = 'side' | 'right' | 'bottom' | null
 
 interface ResizeHandleProps {
   direction: 'horizontal' | 'vertical'
@@ -466,9 +461,6 @@ const Layout: React.FC = () => {
     applyPendingResizeSize()
     resizingRef.current = null
     pendingResizeSizeRef.current = null
-    emitCanvasLayoutResizeInteraction(false, dir)
-    dispatchMaxSizeLayoutRemeasure()
-    window.setTimeout(dispatchMaxSizeLayoutRemeasure, LAYOUT_RESIZE_REMEASURE_SETTLE_DELAY_MS)
   }, [applyPendingResizeSize])
 
   const handleMouseDown = useCallback(
@@ -479,7 +471,6 @@ const Layout: React.FC = () => {
 
       e.preventDefault()
       resizingRef.current = dir
-      emitCanvasLayoutResizeInteraction(true, dir)
       if (dir === 'side' || dir === 'right') {
         startPosRef.current = e.clientX
         startSizeRef.current = dir === 'side' ? sidePanelWidth : rightPanelWidth
@@ -554,33 +545,6 @@ const Layout: React.FC = () => {
   const effectSidePanel = isProjectTab && isProjectRoute ? activeSidePanel : null
   const effectRightPanelVisible = isProjectTab && isProjectRoute ? rightPanelVisible : false
 
-  useEffect(() => {
-    const emitRemeasure = () => {
-      window.dispatchEvent(new Event(MAX_SIZE_LAYOUT_REMEASURE_EVENT))
-    }
-
-    const firstFrameId = window.requestAnimationFrame(emitRemeasure)
-    const secondFrameId = window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(emitRemeasure)
-    })
-    const settledTimerId = window.setTimeout(emitRemeasure, 180)
-
-    return () => {
-      window.cancelAnimationFrame(firstFrameId)
-      window.cancelAnimationFrame(secondFrameId)
-      window.clearTimeout(settledTimerId)
-    }
-  }, [
-    activeTabId,
-    bottomPanelHeight,
-    bottomPanelMaximized,
-    bottomPanelVisible,
-    effectRightPanelVisible,
-    effectSidePanel,
-    rightPanelWidth,
-    sidePanelWidth
-  ])
-
   return (
     <Box
       sx={{
@@ -593,102 +557,121 @@ const Layout: React.FC = () => {
     >
       <TitleBar />
 
-      <Box sx={{ display: 'flex', flexDirection: 'row', flex: 1, overflow: 'hidden' }}>
+      <Box
+        sx={{ display: 'flex', flexDirection: 'row', flex: 1, overflow: 'hidden', minHeight: 0 }}
+      >
         <ActivityBar />
 
-        {effectSidePanel && (
-          <Suspense fallback={<Box sx={{ width: sidePanelWidth, minWidth: sidePanelWidth }} />}>
-            <>
-              <SidePanel key={activeTabId} width={sidePanelWidth} projectId={activeTabId} />
-              <ResizeHandle direction="horizontal" onMouseDown={handleMouseDown('side')} />
-            </>
-          </Suspense>
-        )}
-
-        <Box
-          sx={{
-            flex: 1,
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-            minWidth: 0,
-            minHeight: 0
-          }}
-        >
+        <Box sx={{ position: 'relative', flex: 1, overflow: 'hidden', minWidth: 0, minHeight: 0 }}>
           <Box
-            sx={{
-              flex: 1,
-              display: bottomPanelMaximized ? 'none' : 'flex',
-              flexDirection: 'column',
-              overflow: 'hidden',
-              minWidth: 0,
-              minHeight: 0
-            }}
+            sx={{ position: 'absolute', inset: 0, overflow: 'hidden', minWidth: 0, minHeight: 0 }}
           >
             <MainArea />
           </Box>
 
+          {effectSidePanel && (
+            <Box
+              data-canvas-document-drop-bypass="side-panel"
+              sx={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                bottom: 0,
+                zIndex: 30,
+                display: 'flex',
+                pointerEvents: 'auto'
+              }}
+            >
+              <Suspense
+                fallback={
+                  <Box sx={{ width: sidePanelWidth, minWidth: sidePanelWidth, height: '100%' }} />
+                }
+              >
+                <SidePanel key={activeTabId} width={sidePanelWidth} projectId={activeTabId} />
+                <ResizeHandle direction="horizontal" onMouseDown={handleMouseDown('side')} />
+              </Suspense>
+            </Box>
+          )}
+
           {bottomPanelVisible && (
-            <>
+            <Box
+              data-canvas-document-drop-bypass="bottom-panel"
+              sx={{
+                position: 'absolute',
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: bottomPanelMaximized ? '100%' : bottomPanelHeight + 4,
+                zIndex: 50,
+                display: 'flex',
+                flexDirection: 'column',
+                pointerEvents: 'auto'
+              }}
+            >
               {!bottomPanelMaximized && (
                 <ResizeHandle direction="vertical" onMouseDown={handleMouseDown('bottom')} />
               )}
               <Suspense
                 fallback={
-                  <Box sx={{ height: bottomPanelMaximized ? '100%' : bottomPanelHeight }} />
+                  <Box
+                    sx={{ flex: 1, height: bottomPanelMaximized ? '100%' : bottomPanelHeight }}
+                  />
                 }
               >
                 <BottomPanel height={bottomPanelMaximized ? '100%' : bottomPanelHeight} />
               </Suspense>
-            </>
+            </Box>
           )}
-        </Box>
 
-        {effectRightPanelVisible && (
-          <Box
-            data-canvas-document-drop-bypass="right-panel"
-            sx={(theme) => ({
-              width: rightPanelWidth,
-              minWidth: rightPanelWidth,
-              height: '100%',
-              position: 'relative',
-              display: 'flex',
-              flexDirection: 'column',
-              boxSizing: 'border-box',
-              backgroundColor: theme.palette.mode === 'dark' ? '#1b1b1d' : '#eaecf5',
-              borderLeft: `1px solid ${theme.palette.divider}`,
-              flexShrink: 0,
-              overflow: 'hidden'
-            })}
-          >
+          {effectRightPanelVisible && (
             <Box
-              data-canvas-document-drop-bypass="right-panel-resize"
-              onMouseDown={handleMouseDown('right')}
+              data-canvas-document-drop-bypass="right-panel"
               sx={(theme) => ({
+                width: rightPanelWidth,
+                minWidth: rightPanelWidth,
                 position: 'absolute',
                 top: 0,
-                left: 0,
+                right: 0,
                 bottom: 0,
-                width: 10,
-                cursor: 'col-resize',
-                zIndex: 20,
-                backgroundColor: 'transparent',
-                transition: 'background-color 0.15s ease',
-                '&:hover': {
-                  backgroundColor:
-                    theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)'
-                }
+                zIndex: 40,
+                display: 'flex',
+                flexDirection: 'column',
+                boxSizing: 'border-box',
+                backgroundColor: theme.palette.mode === 'dark' ? '#1b1b1d' : '#eaecf5',
+                borderLeft: `1px solid ${theme.palette.divider}`,
+                overflow: 'hidden',
+                pointerEvents: 'auto'
               })}
-            />
-            <Suspense fallback={<Box sx={{ flex: 1 }} />}>
-              <AgentWorkspace
-                key={activeTabId}
-                projectId={activeTabId}
-                projectName={openTabs.find((tab) => tab.id === activeTabId)?.label}
+            >
+              <Box
+                data-canvas-document-drop-bypass="right-panel-resize"
+                onMouseDown={handleMouseDown('right')}
+                sx={(theme) => ({
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  bottom: 0,
+                  width: 10,
+                  cursor: 'col-resize',
+                  zIndex: 20,
+                  backgroundColor: 'transparent',
+                  transition: 'background-color 0.15s ease',
+                  '&:hover': {
+                    backgroundColor:
+                      theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)'
+                  }
+                })}
               />
-            </Suspense>
-          </Box>
-        )}
+              <Suspense fallback={<Box sx={{ flex: 1 }} />}>
+                <AgentWorkspace
+                  key={activeTabId}
+                  projectId={activeTabId}
+                  projectName={openTabs.find((tab) => tab.id === activeTabId)?.label}
+                />
+              </Suspense>
+            </Box>
+          )}
+        </Box>
       </Box>
     </Box>
   )

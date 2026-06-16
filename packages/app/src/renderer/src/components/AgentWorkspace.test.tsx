@@ -119,14 +119,19 @@ describe('AgentWorkspace', () => {
     ])
   })
 
-  it('defers mounting ChatPage so the workspace shell can render first', async () => {
+  it('mounts ChatPage immediately with the workspace shell', async () => {
     renderWorkspace()
 
-    expect(chatPageMock).not.toHaveBeenCalled()
-    expect(screen.getByTestId('agent-workspace-pane-loading')).toBeInTheDocument()
+    expect(chatPageMock).toHaveBeenCalled()
+    expect(screen.queryByTestId('agent-workspace-pane-loading')).not.toBeInTheDocument()
+    expect(screen.getByTestId('mock-chat-page')).toHaveAttribute(
+      'data-storage-scope',
+      'project-1.agent-1'
+    )
 
     await waitFor(() => {
-      expect(chatPageMock).toHaveBeenCalled()
+      expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-1')
+      expect(screen.getByText('画布执行已开始。')).toBeInTheDocument()
     })
   })
 

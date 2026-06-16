@@ -512,7 +512,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
   })
   const [comfyExecutionActivity, setComfyExecutionActivity] =
     useState<ComfyExecutionActivitySnapshot>(() => getComfyExecutionActivitySnapshot())
-  const isCanvasPerformanceThrottled = comfyExecutionActivity.active
+  const isCanvasPerformanceThrottled = !config.use_remote_comfyui && comfyExecutionActivity.active
 
   useEffect(() => {
     const handleComfyExecutionActivityChange = (event: Event) => {
