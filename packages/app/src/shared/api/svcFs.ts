@@ -68,6 +68,18 @@ export type ReadFileFromPathResp = {
   filename: string
 }
 
+export type ReadFileSliceReq = {
+  fullPath: string
+  offset?: number
+  length: number
+}
+
+export type ReadFileSliceResp = {
+  data: Uint8Array
+  filename: string
+  fileSizeBytes: number
+}
+
 export type WriteTextFileReq = {
   outputPath: string
   filename: string
@@ -86,6 +98,7 @@ export type FsSvc = {
   readImageFromPath(req: ReadImageFromPathReq): Promise<ReadImageFromPathResp>
   readTextFile(req: ReadTextFileReq): Promise<ReadTextFileResp>
   readFileFromPath(req: ReadFileFromPathReq): Promise<ReadFileFromPathResp>
+  readFileSlice(req: ReadFileSliceReq): Promise<ReadFileSliceResp>
   writeTextFile(req: WriteTextFileReq): Promise<WriteTextFileResp>
 }
 
@@ -106,6 +119,9 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
     type: 'unary'
   },
   readFileFromPath: {
+    type: 'unary'
+  },
+  readFileSlice: {
     type: 'unary'
   },
   writeTextFile: {

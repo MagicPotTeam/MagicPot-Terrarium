@@ -15,7 +15,7 @@ import {
 } from '@renderer/components/inputs/loraTriggerWords'
 import {
   listLoraModelOptions,
-  readLoraTriggerWordsSidecar
+  readLoraTriggerWordsAuto
 } from '@renderer/components/inputs/loraTriggerWordFiles'
 
 const keyLoraLoader = 'LoraLoader'
@@ -71,7 +71,7 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
           preferredTriggerWords || readLoraTriggerWordsMap()[loraName] || ''
         )
         if (!triggerWords) {
-          triggerWords = await readLoraTriggerWordsSidecar(loraName, configUtils)
+          triggerWords = await readLoraTriggerWordsAuto(loraName, configUtils)
         }
         if (!triggerWords) {
           return
@@ -96,14 +96,32 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
           }
         }
 
-        const nextPrompt = appendPromptTriggerWords(currentPrompt, triggerWords)
+        const storedTriggerWordsByLoraName = readLoraTriggerWordsMap()
+        const promptTriggerWordParts = loraInputs
+          .filter((lora) => lora.lora_name && lora.lora_name.trim())
+          .map((lora) => {
+            const selectedLoraName = lora.lora_name.trim()
+            if (selectedLoraName === loraName) {
+              return triggerWords
+            }
+            return normalizeTriggerWords(
+              lora.trigger_words || storedTriggerWordsByLoraName[selectedLoraName] || ''
+            )
+          })
+          .filter(Boolean)
+        if (!promptTriggerWordParts.includes(triggerWords)) {
+          promptTriggerWordParts.unshift(triggerWords)
+        }
+        const triggerWordsForPrompt = normalizeTriggerWords(promptTriggerWordParts.join('\n'))
+
+        const nextPrompt = appendPromptTriggerWords(currentPrompt, triggerWordsForPrompt)
         if (nextPrompt !== currentPrompt) {
           setFormStateValue(primaryPromptSlot, nextPrompt)
         }
 
         return triggerWords
       },
-      [configUtils, formState, primaryPromptSlot, setFormStateValue]
+      [configUtils, formState, loraInputs, primaryPromptSlot, setFormStateValue]
     )
 
     useImperativeHandle(

@@ -93,21 +93,94 @@ const splitPromptTags = (value: string): string[] =>
     .map((tag) => tag.trim())
     .filter(Boolean)
 
+const stripBalancedPromptWrappers = (tag: string): string => {
+  let value = tag.trim()
+  let changed = true
+
+  while (changed && value.length >= 2) {
+    changed = false
+    const pairs: Array<[string, string]> = [
+      ['(', ')'],
+      ['[', ']'],
+      ['{', '}']
+    ]
+    for (const [open, close] of pairs) {
+      if (value.startsWith(open) && value.endsWith(close)) {
+        value = value.slice(1, -1).trim()
+        changed = true
+        break
+      }
+    }
+  }
+
+  return value
+}
+
+const explicitWeightSuffixPattern = /\s*:\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*$/
+
+const promptTagIdentity = (tag: string): string =>
+  stripBalancedPromptWrappers(tag)
+    .replace(explicitWeightSuffixPattern, '')
+    .trim()
+    .toLocaleLowerCase()
+
+const hasExplicitPromptWeight = (tag: string): boolean => {
+  const value = tag.trim()
+  const wrappedAsWeight =
+    (value.startsWith('(') && value.endsWith(')')) ||
+    (value.startsWith('[') && value.endsWith(']')) ||
+    (value.startsWith('{') && value.endsWith('}'))
+  return wrappedAsWeight || explicitWeightSuffixPattern.test(stripBalancedPromptWrappers(value))
+}
+
 export const appendPromptTriggerWords = (prompt: string, triggerWords: string): string => {
   const normalizedTriggerWords = normalizeTriggerWords(triggerWords)
   if (!normalizedTriggerWords) {
     return prompt
   }
 
-  const promptTags = splitPromptTags(prompt)
-  const existingTags = new Set(promptTags.map((tag) => tag.toLocaleLowerCase()))
-  const missingTriggerTags = splitPromptTags(normalizedTriggerWords).filter(
-    (tag) => !existingTags.has(tag.toLocaleLowerCase())
-  )
-
-  if (missingTriggerTags.length === 0) {
+  const triggerEntries = splitPromptTags(normalizedTriggerWords)
+    .map((tag) => ({ tag, identity: promptTagIdentity(tag) }))
+    .filter(({ identity }) => identity)
+  if (triggerEntries.length === 0) {
     return prompt
   }
 
-  return [...promptTags, ...missingTriggerTags].join(', ')
+  const dedupedTriggerEntries = triggerEntries.filter(
+    ({ identity }, index) =>
+      triggerEntries.findIndex((item) => item.identity === identity) === index
+  )
+  const triggerIdentities = new Set(dedupedTriggerEntries.map(({ identity }) => identity))
+  const promptTags = splitPromptTags(prompt)
+  const existingTriggerTags = new Map<string, string>()
+  const nonTriggerTags: string[] = []
+
+  for (const tag of promptTags) {
+    const identity = promptTagIdentity(tag)
+    if (triggerIdentities.has(identity)) {
+      const current = existingTriggerTags.get(identity)
+      if (!current || (!hasExplicitPromptWeight(current) && hasExplicitPromptWeight(tag))) {
+        existingTriggerTags.set(identity, tag)
+      }
+      continue
+    }
+
+    nonTriggerTags.push(tag)
+  }
+
+  const leadingTriggerTags = dedupedTriggerEntries.map(({ tag, identity }) => {
+    const existingTag = existingTriggerTags.get(identity)
+    if (!existingTag) {
+      return tag
+    }
+    if (hasExplicitPromptWeight(existingTag)) {
+      return existingTag
+    }
+    if (hasExplicitPromptWeight(tag)) {
+      return tag
+    }
+    return existingTag
+  })
+
+  return [...leadingTriggerTags, ...nonTriggerTags].join(', ')
 }

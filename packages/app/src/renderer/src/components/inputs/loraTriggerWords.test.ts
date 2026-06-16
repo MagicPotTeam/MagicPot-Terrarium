@@ -40,10 +40,28 @@ describe('loraTriggerWords', () => {
     expect(next).toEqual({})
   })
 
-  it('appends only missing trigger tags to prompts', () => {
+  it('prepends trigger tags before regular prompt tags', () => {
     expect(appendPromptTriggerWords('masterpiece, style tag', 'style tag, hero pose')).toBe(
-      'masterpiece, style tag, hero pose'
+      'style tag, hero pose, masterpiece'
     )
     expect(appendPromptTriggerWords('', 'style tag, hero pose')).toBe('style tag, hero pose')
+  })
+
+  it('keeps existing trigger weights when moving trigger tags to the front', () => {
+    expect(
+      appendPromptTriggerWords(
+        'masterpiece, (style tag:1.25), cinematic light, hero pose',
+        'style tag, hero pose'
+      )
+    ).toBe('(style tag:1.25), hero pose, masterpiece, cinematic light')
+    expect(appendPromptTriggerWords('masterpiece, [style tag]', 'style tag')).toBe(
+      '[style tag], masterpiece'
+    )
+  })
+
+  it('keeps weighted trigger words from trigger-word input when prompt has unweighted duplicate', () => {
+    expect(appendPromptTriggerWords('masterpiece, style tag', '(style tag:1.2)')).toBe(
+      '(style tag:1.2), masterpiece'
+    )
   })
 })

@@ -10,6 +10,8 @@ import {
   ReadImageFromPathResp,
   ReadFileFromPathReq,
   ReadFileFromPathResp,
+  ReadFileSliceReq,
+  ReadFileSliceResp,
   ReadTextFileReq,
   ReadTextFileResp,
   WriteTextFileReq,
@@ -157,6 +159,43 @@ export class FsSvcImpl implements FsSvc {
     return {
       data: new Uint8Array(buffer),
       filename: path.basename(fullPath)
+    }
+  }
+
+  readFileSlice = async (req: ReadFileSliceReq): Promise<ReadFileSliceResp> => {
+    const { fullPath, length } = req
+    const offset = Math.max(0, Math.floor(req.offset || 0))
+    const safeLength = Math.max(0, Math.floor(length))
+
+    if (!fs.existsSync(fullPath)) {
+      throw new Error(`File not found: ${fullPath}`)
+    }
+
+    const stats = fs.statSync(fullPath)
+    if (!stats.isFile()) {
+      throw new Error(`Path is not a file: ${fullPath}`)
+    }
+
+    if (safeLength === 0 || offset >= stats.size) {
+      return {
+        data: new Uint8Array(),
+        filename: path.basename(fullPath),
+        fileSizeBytes: stats.size
+      }
+    }
+
+    const bytesToRead = Math.min(safeLength, stats.size - offset)
+    const fd = fs.openSync(fullPath, 'r')
+    try {
+      const buffer = Buffer.alloc(bytesToRead)
+      const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, offset)
+      return {
+        data: new Uint8Array(buffer.subarray(0, bytesRead)),
+        filename: path.basename(fullPath),
+        fileSizeBytes: stats.size
+      }
+    } finally {
+      fs.closeSync(fd)
     }
   }
 
