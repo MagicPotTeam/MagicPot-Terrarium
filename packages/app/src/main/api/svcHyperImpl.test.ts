@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { getBuildEnvMock, getConfigMock } = vi.hoisted(() => ({
   getBuildEnvMock: vi.fn(),
@@ -59,6 +59,14 @@ const baseConfig = {
     mapping_comfyui_dir: ''
   }
 }
+
+const getTestRoot = (): string =>
+  path.join(
+    process.cwd(),
+    '.magicpot-trash',
+    'svc-hyper-impl',
+    `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2)}`
+  )
 
 const windowsBuildEnv = {
   env: {
@@ -119,12 +127,20 @@ describe('HyperSvcImpl.comfyPortDetect', () => {
 })
 
 describe('HyperSvcImpl.saveImageToDir', () => {
+  let testRoot: string
+
   beforeEach(() => {
     vi.clearAllMocks()
-    fs.rmSync('C:\\downloads', { recursive: true, force: true })
-    fs.rmSync('C:\\startup', { recursive: true, force: true })
+    testRoot = getTestRoot()
+    fs.mkdirSync(testRoot, { recursive: true })
     getConfigMock.mockReturnValue(baseConfig)
     getBuildEnvMock.mockReturnValue(windowsBuildEnv)
+  })
+
+  afterEach(() => {
+    if (testRoot) {
+      fs.rmSync(testRoot, { recursive: true, force: true })
+    }
   })
 
   it('sanitizes simple filenames and rejects path traversal', () => {
@@ -138,7 +154,7 @@ describe('HyperSvcImpl.saveImageToDir', () => {
 
   it('does not write outside the requested directory when saving an attachment', async () => {
     const svc = new HyperSvcImpl()
-    const targetDir = path.join('C:\\downloads')
+    const targetDir = path.join(testRoot, 'downloads')
 
     await expect(
       svc.saveImageToDir({
@@ -148,12 +164,12 @@ describe('HyperSvcImpl.saveImageToDir', () => {
       })
     ).rejects.toThrow(/path separators|traversal/i)
 
-    expect(fs.existsSync(path.join('C:\\startup', 'payload.js'))).toBe(false)
+    expect(fs.existsSync(path.join(testRoot, 'startup', 'payload.js'))).toBe(false)
   })
 
   it('uses exclusive writes and suffixes conflicting filenames', async () => {
     const svc = new HyperSvcImpl()
-    const targetDir = path.join('C:\\downloads')
+    const targetDir = path.join(testRoot, 'downloads')
     fs.mkdirSync(targetDir, { recursive: true })
     fs.writeFileSync(path.join(targetDir, 'image.png'), Buffer.from([9]))
 
@@ -163,7 +179,7 @@ describe('HyperSvcImpl.saveImageToDir', () => {
       dir: targetDir
     })
 
-    expect(response.savedPath).toBe(path.join(targetDir, 'image_1.png'))
+    expect(response.savedPath).toBe(path.resolve(targetDir, 'image_1.png'))
     expect(fs.readFileSync(path.join(targetDir, 'image.png'))).toEqual(Buffer.from([9]))
     expect(fs.readFileSync(response.savedPath)).toEqual(Buffer.from([1, 2, 3]))
   })
