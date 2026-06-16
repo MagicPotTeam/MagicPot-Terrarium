@@ -21,6 +21,7 @@ export type Task = {
   prompt_id: string | null
   payload: Workflow
   extra_data?: JsonDict
+  cleanupAfterRun?: boolean
   result: ComfyHistory | null
 }
 
@@ -37,7 +38,8 @@ const summarizeTaskForLog = (task: Task) => ({
   payloadNodeCount: task.payload ? Object.keys(task.payload).length : 0,
   hasExtraData: !!task.extra_data,
   resultStatus: task.result?.status?.status_str ?? null,
-  resultOutputCount: task.result ? Object.keys(task.result.outputs || {}).length : 0
+  resultOutputCount: task.result ? Object.keys(task.result.outputs || {}).length : 0,
+  cleanupAfterRun: task.cleanupAfterRun === true
 })
 
 const summarizePromptResultForLog = (result: { prompt_id?: string | null }) => ({
@@ -452,10 +454,23 @@ class TaskMemorySource implements QueueSource<Task> {
   }
 }
 
+async function cleanupComfyMemoryAfterRun(task: Task, cli: ComfyHttpCli): Promise<void> {
+  if (!task.cleanupAfterRun) {
+    return
+  }
+
+  try {
+    await cli.freeMemory()
+    console.log(`[TaskQueue] ${task.id} requested ComfyUI memory cleanup`)
+  } catch (error) {
+    console.warn(`[TaskQueue] ${task.id} failed to request ComfyUI memory cleanup:`, error)
+  }
+}
+
 async function executeTask(task: Task): Promise<Task> {
+  const cli = new ComfyHttpCli()
   try {
     console.log(`[TaskQueue] ${task.id} processing task:`, summarizeTaskForLog(task))
-    const cli = new ComfyHttpCli()
     const { promptWorkflow, historyWorkflow } = await uploadDeferredComfyImagesInWorkflow(
       task.payload,
       cli
@@ -531,6 +546,8 @@ async function executeTask(task: Task): Promise<Task> {
 
     console.error(`[TaskQueue] ${task.id} unknown error:`, error)
     throw error
+  } finally {
+    await cleanupComfyMemoryAfterRun(task, cli)
   }
 }
 

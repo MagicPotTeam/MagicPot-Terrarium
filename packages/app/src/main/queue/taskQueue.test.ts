@@ -2,12 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComfyHistory, Workflow } from '@shared/comfy/types'
 import { encodeDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
 
-const { promptMock, uploadImageMock, waitPromptIdMock } = vi.hoisted(() => ({
+const { promptMock, uploadImageMock, freeMemoryMock, waitPromptIdMock } = vi.hoisted(() => ({
   promptMock: vi.fn(async (_req: unknown) => ({ prompt_id: 'comfy-prompt-1' })),
   uploadImageMock: vi.fn(async (_fileItem: unknown, _image: unknown) => ({
     filename: 'uploaded-input.png',
     type: 'input'
   })),
+  freeMemoryMock: vi.fn(async (_req?: unknown) => undefined),
   waitPromptIdMock: vi.fn(
     async (
       _cli: unknown,
@@ -46,6 +47,10 @@ vi.mock('../comfy/http', () => ({
 
     async cancel() {
       return undefined
+    }
+
+    async freeMemory(req?: unknown) {
+      return freeMemoryMock(req)
     }
   }
 }))
@@ -161,6 +166,34 @@ describe('taskQueue transport client', () => {
       expect(status).toBe('completed')
       expect(task?.payload['1'].inputs.image).toBe('uploaded-input.png')
       expect(task?.result?.prompt[2]['1'].inputs.image).toBe(deferredImageValue)
+    } finally {
+      await taskQueue.stopTaskQueue()
+    }
+  })
+
+  it('requests ComfyUI memory cleanup after tasks that opt in', async () => {
+    vi.resetModules()
+    const taskQueue = await import('./taskQueue')
+    const workflow = {} as Workflow
+
+    const taskId = taskQueue.addTask({
+      id: '',
+      type: 'comfy_prompt',
+      client_id: 'logical-client',
+      created_at: 1710000000000,
+      prompt_id: null,
+      payload: workflow,
+      cleanupAfterRun: true,
+      result: null
+    })
+
+    try {
+      await taskQueue.initTaskQueue()
+      await vi.advanceTimersByTimeAsync(1000)
+
+      expect(freeMemoryMock).toHaveBeenCalledTimes(1)
+      const [status] = taskQueue.getTask(taskId)
+      expect(status).toBe('completed')
     } finally {
       await taskQueue.stopTaskQueue()
     }
