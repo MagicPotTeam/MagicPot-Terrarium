@@ -2,33 +2,35 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComfyHistory, Workflow } from '@shared/comfy/types'
 import { encodeDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
 
-const { promptMock, uploadImageMock, freeMemoryMock, waitPromptIdMock } = vi.hoisted(() => ({
-  promptMock: vi.fn(async (_req: unknown) => ({ prompt_id: 'comfy-prompt-1' })),
-  uploadImageMock: vi.fn(async (_fileItem: unknown, _image: unknown) => ({
-    filename: 'uploaded-input.png',
-    type: 'input'
-  })),
-  freeMemoryMock: vi.fn(async (_req?: unknown) => undefined),
-  waitPromptIdMock: vi.fn(
-    async (
-      _cli: unknown,
-      promptId: string,
-      _timeout?: number,
-      _poll?: number,
-      _shouldCancel?: () => boolean
-    ) => {
-      return {
-        prompt: [0, promptId, {} as Workflow, { client_id: 'transport-client' }, []],
-        outputs: {},
-        status: {
-          status_str: 'success',
-          completed: true,
-          messages: []
-        }
-      } as ComfyHistory
-    }
-  )
-}))
+const { promptMock, uploadImageMock, freeMemoryMock, isRemoteComfyUIMock, waitPromptIdMock } =
+  vi.hoisted(() => ({
+    promptMock: vi.fn(async (_req: unknown) => ({ prompt_id: 'comfy-prompt-1' })),
+    uploadImageMock: vi.fn(async (_fileItem: unknown, _image: unknown) => ({
+      filename: 'uploaded-input.png',
+      type: 'input'
+    })),
+    freeMemoryMock: vi.fn(async (_req?: unknown) => undefined),
+    isRemoteComfyUIMock: vi.fn(() => false),
+    waitPromptIdMock: vi.fn(
+      async (
+        _cli: unknown,
+        promptId: string,
+        _timeout?: number,
+        _poll?: number,
+        _shouldCancel?: () => boolean
+      ) => {
+        return {
+          prompt: [0, promptId, {} as Workflow, { client_id: 'transport-client' }, []],
+          outputs: {},
+          status: {
+            status_str: 'success',
+            completed: true,
+            messages: []
+          }
+        } as ComfyHistory
+      }
+    )
+  }))
 
 vi.mock('../comfy/http', () => ({
   COMFY_PROCESS_TRANSPORT_CLIENT_ID: 'magicpot-main-test',
@@ -52,6 +54,10 @@ vi.mock('../comfy/http', () => ({
     async freeMemory(req?: unknown) {
       return freeMemoryMock(req)
     }
+
+    isRemoteComfyUI() {
+      return isRemoteComfyUIMock()
+    }
   }
 }))
 
@@ -62,6 +68,7 @@ vi.mock('../comfy/logic', () => ({
 describe('taskQueue transport client', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    isRemoteComfyUIMock.mockReturnValue(false)
     vi.useFakeTimers()
   })
 
@@ -192,6 +199,35 @@ describe('taskQueue transport client', () => {
       await vi.advanceTimersByTimeAsync(1000)
 
       expect(freeMemoryMock).toHaveBeenCalledTimes(1)
+      const [status] = taskQueue.getTask(taskId)
+      expect(status).toBe('completed')
+    } finally {
+      await taskQueue.stopTaskQueue()
+    }
+  })
+
+  it('skips automatic ComfyUI memory cleanup for remote ComfyUI', async () => {
+    vi.resetModules()
+    isRemoteComfyUIMock.mockReturnValue(true)
+    const taskQueue = await import('./taskQueue')
+    const workflow = {} as Workflow
+
+    const taskId = taskQueue.addTask({
+      id: '',
+      type: 'comfy_prompt',
+      client_id: 'logical-client',
+      created_at: 1710000000000,
+      prompt_id: null,
+      payload: workflow,
+      cleanupAfterRun: true,
+      result: null
+    })
+
+    try {
+      await taskQueue.initTaskQueue()
+      await vi.advanceTimersByTimeAsync(1000)
+
+      expect(freeMemoryMock).not.toHaveBeenCalled()
       const [status] = taskQueue.getTask(taskId)
       expect(status).toBe('completed')
     } finally {

@@ -40,6 +40,10 @@ export class ComfyHttpCli {
     return this.configUtils.getComfyUIOrigin()
   }
 
+  isRemoteComfyUI(): boolean {
+    return this.config.use_remote_comfyui === true
+  }
+
   private async get<RESP>(path: string): Promise<RESP> {
     const url = new URL(path, this.host()).href
     const response = await fetch(url)

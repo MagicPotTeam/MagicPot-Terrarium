@@ -458,6 +458,10 @@ async function cleanupComfyMemoryAfterRun(task: Task, cli: ComfyHttpCli): Promis
   if (!task.cleanupAfterRun) {
     return
   }
+  if (cli.isRemoteComfyUI()) {
+    console.log(`[TaskQueue] ${task.id} skipped ComfyUI memory cleanup for remote ComfyUI`)
+    return
+  }
 
   try {
     await cli.freeMemory()
