@@ -1,4 +1,5 @@
 import { ServiceDefSheet } from './apiUtils/serviceDefSheet'
+import { ServiceValidationError } from './apiUtils/serviceValidation'
 
 /**
  * 文件系统相关 API
@@ -91,6 +92,71 @@ export type WriteTextFileResp = {
   fullPath: string
 }
 
+export const MAX_READ_FILE_SLICE_BYTES = 16 * 1024 * 1024
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const requireNonEmptyString = (value: unknown, field: string): string => {
+  if (typeof value === 'string' && value.trim()) {
+    return value
+  }
+  throw new ServiceValidationError(`svcFs.readFileSlice ${field}`, [
+    {
+      path: [field],
+      message: 'Expected a non-empty string',
+      code: 'invalid_type'
+    }
+  ])
+}
+
+const requireBoundedInteger = ({
+  value,
+  field,
+  min,
+  max
+}: {
+  value: unknown
+  field: string
+  min: number
+  max: number
+}): number => {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max) {
+    return value
+  }
+  throw new ServiceValidationError(`svcFs.readFileSlice ${field}`, [
+    {
+      path: [field],
+      message: `Expected an integer between ${min} and ${max}`,
+      code: 'invalid_type'
+    }
+  ])
+}
+
+const validateReadFileSliceReq = (value: unknown): ReadFileSliceReq => {
+  if (!isRecord(value)) {
+    throw new ServiceValidationError('svcFs.readFileSlice request')
+  }
+  return {
+    fullPath: requireNonEmptyString(value.fullPath, 'fullPath'),
+    offset:
+      value.offset === undefined
+        ? 0
+        : requireBoundedInteger({
+            value: value.offset,
+            field: 'offset',
+            min: 0,
+            max: Number.MAX_SAFE_INTEGER
+          }),
+    length: requireBoundedInteger({
+      value: value.length,
+      field: 'length',
+      min: 1,
+      max: MAX_READ_FILE_SLICE_BYTES
+    })
+  }
+}
+
 export type FsSvc = {
   listImagesInFolder(req: ListImagesInFolderReq): Promise<ListImagesInFolderResp>
   listFilesInFolder(req: ListFilesInFolderReq): Promise<ListFilesInFolderResp>
@@ -122,7 +188,8 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
     type: 'unary'
   },
   readFileSlice: {
-    type: 'unary'
+    type: 'unary',
+    request: validateReadFileSliceReq
   },
   writeTextFile: {
     type: 'unary'

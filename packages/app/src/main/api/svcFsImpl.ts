@@ -1,5 +1,6 @@
 import {
   FsSvc,
+  MAX_READ_FILE_SLICE_BYTES,
   ListFilesInFolderReq,
   ListFilesInFolderResp,
   ListImagesInFolderReq,
@@ -164,8 +165,14 @@ export class FsSvcImpl implements FsSvc {
 
   readFileSlice = async (req: ReadFileSliceReq): Promise<ReadFileSliceResp> => {
     const { fullPath, length } = req
-    const offset = Math.max(0, Math.floor(req.offset || 0))
-    const safeLength = Math.max(0, Math.floor(length))
+    const offset = req.offset ?? 0
+
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new Error('Invalid file slice offset')
+    }
+    if (!Number.isSafeInteger(length) || length <= 0 || length > MAX_READ_FILE_SLICE_BYTES) {
+      throw new Error(`Invalid file slice length: expected 1-${MAX_READ_FILE_SLICE_BYTES}`)
+    }
 
     if (!fs.existsSync(fullPath)) {
       throw new Error(`File not found: ${fullPath}`)
@@ -176,7 +183,7 @@ export class FsSvcImpl implements FsSvc {
       throw new Error(`Path is not a file: ${fullPath}`)
     }
 
-    if (safeLength === 0 || offset >= stats.size) {
+    if (offset >= stats.size) {
       return {
         data: new Uint8Array(),
         filename: path.basename(fullPath),
@@ -184,7 +191,7 @@ export class FsSvcImpl implements FsSvc {
       }
     }
 
-    const bytesToRead = Math.min(safeLength, stats.size - offset)
+    const bytesToRead = Math.min(length, stats.size - offset)
     const fd = fs.openSync(fullPath, 'r')
     try {
       const buffer = Buffer.alloc(bytesToRead)

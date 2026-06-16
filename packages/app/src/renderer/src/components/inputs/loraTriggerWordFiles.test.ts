@@ -2,6 +2,9 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   collectSelectedLoraTriggerWords,
+  extractTriggerWordsFromMetadataObject,
+  extractTriggerWordsFromSafetensorsMetadata,
+  readSafetensorsHeaderLength,
   resolveLoraTriggerWordsFile,
   toLoraOptionName
 } from './loraTriggerWordFiles'
@@ -71,5 +74,43 @@ describe('loraTriggerWordFiles', () => {
       { loraName: 'style.safetensors', triggerWords: 'style tag, cinematic' },
       { loraName: 'legacy.safetensors', triggerWords: 'legacy tag' }
     ])
+  })
+
+  it('extracts trigger words from civitai/json style metadata payloads', () => {
+    expect(
+      extractTriggerWordsFromMetadataObject({
+        trainedWords: ['hero_style', 'cinematic'],
+        modelVersions: [{ trainedWords: ['nested_token'] }]
+      })
+    ).toBe('hero_style, cinematic, nested_token')
+    expect(
+      extractTriggerWordsFromMetadataObject(
+        JSON.stringify({ modelVersion: { triggerWords: 'alpha, beta' } })
+      )
+    ).toBe('alpha, beta')
+  })
+
+  it('extracts trigger words from safetensors metadata and dataset dirs fallback', () => {
+    expect(
+      extractTriggerWordsFromSafetensorsMetadata({
+        __metadata__: {
+          trigger_words: 'main_style\nsecondary_style'
+        }
+      })
+    ).toBe('main_style, secondary_style')
+    expect(
+      extractTriggerWordsFromSafetensorsMetadata({
+        __metadata__: {
+          ss_dataset_dirs: JSON.stringify({ '12_char_style': { n_repeats: 12 } })
+        }
+      })
+    ).toBe('char_style')
+  })
+
+  it('reads and bounds safetensors header lengths', () => {
+    expect(readSafetensorsHeaderLength(new Uint8Array([5, 0, 0, 0, 0, 0, 0, 0]))).toBe(5)
+    expect(readSafetensorsHeaderLength(new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0]))).toBeNull()
+    expect(readSafetensorsHeaderLength(new Uint8Array([1]))).toBeNull()
+    expect(readSafetensorsHeaderLength(new Uint8Array([1, 0, 0, 1, 0, 0, 0, 0]))).toBeNull()
   })
 })

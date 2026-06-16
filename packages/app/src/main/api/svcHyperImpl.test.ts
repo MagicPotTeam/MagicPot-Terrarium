@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { getBuildEnvMock, getConfigMock } = vi.hoisted(() => ({
@@ -42,7 +44,7 @@ vi.mock('../config/fastSettingTemplates', () => ({
   listFastSettingTemplates: vi.fn()
 }))
 
-import { HyperSvcImpl } from './svcHyperImpl'
+import { HyperSvcImpl, sanitizeSaveImageFileName } from './svcHyperImpl'
 
 const baseConfig = {
   use_remote_comfyui: false,
@@ -113,5 +115,56 @@ describe('HyperSvcImpl.comfyPortDetect', () => {
     })
 
     await expect(svc.comfyPortDetect({})).resolves.toEqual({ pid: 60004 })
+  })
+})
+
+describe('HyperSvcImpl.saveImageToDir', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    fs.rmSync('C:\\downloads', { recursive: true, force: true })
+    fs.rmSync('C:\\startup', { recursive: true, force: true })
+    getConfigMock.mockReturnValue(baseConfig)
+    getBuildEnvMock.mockReturnValue(windowsBuildEnv)
+  })
+
+  it('sanitizes simple filenames and rejects path traversal', () => {
+    expect(sanitizeSaveImageFileName(' image.png ')).toBe('image.png')
+    expect(() => sanitizeSaveImageFileName('../payload.js')).toThrow(/path separators|traversal/i)
+    expect(() => sanitizeSaveImageFileName('folder/payload.js')).toThrow(
+      /path separators|traversal/i
+    )
+    expect(() => sanitizeSaveImageFileName('CON')).toThrow(/reserved/i)
+  })
+
+  it('does not write outside the requested directory when saving an attachment', async () => {
+    const svc = new HyperSvcImpl()
+    const targetDir = path.join('C:\\downloads')
+
+    await expect(
+      svc.saveImageToDir({
+        data: new Uint8Array([1, 2, 3]),
+        fileName: '..\\startup\\payload.js',
+        dir: targetDir
+      })
+    ).rejects.toThrow(/path separators|traversal/i)
+
+    expect(fs.existsSync(path.join('C:\\startup', 'payload.js'))).toBe(false)
+  })
+
+  it('uses exclusive writes and suffixes conflicting filenames', async () => {
+    const svc = new HyperSvcImpl()
+    const targetDir = path.join('C:\\downloads')
+    fs.mkdirSync(targetDir, { recursive: true })
+    fs.writeFileSync(path.join(targetDir, 'image.png'), Buffer.from([9]))
+
+    const response = await svc.saveImageToDir({
+      data: new Uint8Array([1, 2, 3]),
+      fileName: 'image.png',
+      dir: targetDir
+    })
+
+    expect(response.savedPath).toBe(path.join(targetDir, 'image_1.png'))
+    expect(fs.readFileSync(path.join(targetDir, 'image.png'))).toEqual(Buffer.from([9]))
+    expect(fs.readFileSync(response.savedPath)).toEqual(Buffer.from([1, 2, 3]))
   })
 })
