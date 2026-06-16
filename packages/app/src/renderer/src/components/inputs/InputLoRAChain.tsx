@@ -17,12 +17,6 @@ import { api } from '@renderer/utils/windowUtils'
 import { bytesToObjectUrl } from '@renderer/utils/fileUtils'
 import { InputProps } from './InputProps'
 import { isEqual } from 'es-toolkit'
-import {
-  readLoraTriggerWordsMap,
-  updateLoraTriggerWordsMap,
-  writeLoraTriggerWordsMap
-} from './loraTriggerWords'
-import type { LoraTriggerWordsMap } from './loraTriggerWords'
 
 const TRIGGER_WORDS_LABEL = '\u89e6\u53d1\u8bcd\u5907\u6ce8'
 const TRIGGER_WORDS_PLACEHOLDER = '\u586b\u5199\u8be5 LoRA \u7684\u89e6\u53d1\u8bcd'
@@ -40,14 +34,13 @@ type InputLoraProps = {
   index: number
   rowId: string
   currentLora: LoRAConfig
-  handleUpdateByRowId: (rowId: string, newValue: Partial<LoRAConfig>) => void
+  handleUpdateByRowId: (rowId: string, newValue: Partial<LoRAConfig>) => LoRAConfig[] | undefined
   loraOptions: string[]
   loraName2ImageName: Record<string, string>
-  loraTriggerWordsByName: LoraTriggerWordsMap
-  handleTriggerWordsChange: (loraName: string, triggerWords: string) => void
   onLoraSelected?: (
     loraName: string,
-    triggerWords?: string
+    triggerWords?: string,
+    nextLoras?: LoRAConfig[]
   ) => string | void | Promise<string | void>
   onLoraTriggerWordsConfirmed?: (
     loraName: string,
@@ -63,8 +56,6 @@ const InputLora: React.FC<InputLoraProps> = ({
   handleUpdateByRowId,
   loraOptions,
   loraName2ImageName,
-  loraTriggerWordsByName,
-  handleTriggerWordsChange,
   onLoraSelected,
   onLoraTriggerWordsConfirmed,
   comfyUtilsRef
@@ -166,9 +157,7 @@ const InputLora: React.FC<InputLoraProps> = ({
     }
   }, [boxRef])
 
-  const currentTriggerWords = currentLora.lora_name
-    ? currentLora.trigger_words || loraTriggerWordsByName[currentLora.lora_name] || ''
-    : ''
+  const currentTriggerWords = currentLora.lora_name ? currentLora.trigger_words || '' : ''
 
   return (
     <>
@@ -178,16 +167,12 @@ const InputLora: React.FC<InputLoraProps> = ({
           const requestId = loraSelectionRequestRef.current + 1
           loraSelectionRequestRef.current = requestId
           const nextLoraName = newValue || ''
-          const nextTriggerWords = nextLoraName ? loraTriggerWordsByName[nextLoraName] || '' : ''
-          handleUpdateByRowIdRef.current(rowId, {
+          const nextLoras = handleUpdateByRowIdRef.current(rowId, {
             lora_name: nextLoraName,
-            trigger_words: nextTriggerWords
+            trigger_words: ''
           })
-          if (nextLoraName && nextTriggerWords) {
-            handleTriggerWordsChange(nextLoraName, nextTriggerWords)
-          }
           if (nextLoraName) {
-            void Promise.resolve(onLoraSelected?.(nextLoraName, nextTriggerWords))
+            void Promise.resolve(onLoraSelected?.(nextLoraName, '', nextLoras))
               .then((loadedTriggerWords) => {
                 if (
                   !loadedTriggerWords ||
@@ -196,7 +181,6 @@ const InputLora: React.FC<InputLoraProps> = ({
                 ) {
                   return
                 }
-                handleTriggerWordsChange(nextLoraName, loadedTriggerWords)
                 handleUpdateByRowIdRef.current(rowId, {
                   lora_name: nextLoraName,
                   trigger_words: loadedTriggerWords
@@ -233,11 +217,6 @@ const InputLora: React.FC<InputLoraProps> = ({
           >
             <Box sx={{ minWidth: 0 }}>
               <Typography variant="body2">{option}</Typography>
-              {loraTriggerWordsByName[option] && (
-                <Typography variant="caption" color="text.secondary">
-                  {loraTriggerWordsByName[option]}
-                </Typography>
-              )}
             </Box>
           </li>
         )}
@@ -298,7 +277,6 @@ const InputLora: React.FC<InputLoraProps> = ({
               }
               const nextTriggerWords = event.target.value
               handleUpdateByRowIdRef.current(rowId, { trigger_words: nextTriggerWords })
-              handleTriggerWordsChange(currentLora.lora_name, nextTriggerWords)
             }}
             onBlur={() => {
               if (currentLora.lora_name && currentTriggerWords.trim()) {
@@ -327,7 +305,8 @@ type InputLoRAChainProps = InputProps<LoRAConfig[]> & {
   lora_options: string[]
   onLoraSelected?: (
     loraName: string,
-    triggerWords?: string
+    triggerWords?: string,
+    nextLoras?: LoRAConfig[]
   ) => string | void | Promise<string | void>
 }
 
@@ -340,9 +319,6 @@ const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
   lora_options,
   onLoraSelected
 }) => {
-  const [loraTriggerWordsByName, setLoraTriggerWordsByName] = useState<LoraTriggerWordsMap>(() =>
-    readLoraTriggerWordsMap()
-  )
   const rowIdsRef = useRef<string[]>([])
   const nextRowIdRef = useRef(0)
   const valueRef = useRef(value)
@@ -367,15 +343,17 @@ const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
     (rowId: string, newValue: Partial<LoRAConfig>) => {
       const rowIndex = rowIdsRef.current.indexOf(rowId)
       if (rowIndex === -1) {
-        return
+        return undefined
       }
       const currentValue = valueRef.current
       if (!currentValue[rowIndex]) {
-        return
+        return undefined
       }
-      handleChange(
-        currentValue.map((lora, i) => (i === rowIndex ? { ...lora, ...newValue } : lora))
+      const nextValue = currentValue.map((lora, i) =>
+        i === rowIndex ? { ...lora, ...newValue } : lora
       )
+      handleChange(nextValue)
+      return nextValue
     },
     [handleChange]
   )
@@ -387,14 +365,6 @@ const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
     rowIdsRef.current.push(createRowId())
     handleChange([...valueRef.current, { ...defaultLoraConfig }])
   }
-  const handleTriggerWordsChange = useCallback((loraName: string, triggerWords: string) => {
-    setLoraTriggerWordsByName((prev) => {
-      const next = updateLoraTriggerWordsMap(prev, loraName, triggerWords)
-      writeLoraTriggerWordsMap(next)
-      return next
-    })
-  }, [])
-
   const comfyUtilsRef = useRef(new ComfyUtils(api().svcComfy, api().svcPysssss))
   const [loraName2ImageName, setLoraName2ImageName] = useState<Record<string, string>>({})
   useEffect(() => {
@@ -447,8 +417,6 @@ const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
                   handleUpdateByRowId={handleUpdateByRowId}
                   loraOptions={lora_options}
                   loraName2ImageName={loraName2ImageName}
-                  loraTriggerWordsByName={loraTriggerWordsByName}
-                  handleTriggerWordsChange={handleTriggerWordsChange}
                   onLoraSelected={onLoraSelected}
                   onLoraTriggerWordsConfirmed={onLoraSelected}
                   comfyUtilsRef={comfyUtilsRef}

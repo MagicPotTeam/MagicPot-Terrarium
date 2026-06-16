@@ -1,39 +1,35 @@
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  collectSelectedLoraTriggerWords,
   extractTriggerWordsFromMetadataObject,
   extractTriggerWordsFromSafetensorsMetadata,
-  readSafetensorsHeaderLength,
-  resolveLoraTriggerWordsFile,
+  readLoraTriggerWordsAuto,
+  readLoraTriggerWordsComfyUIMetadata,
+  resolveLoraModelFile,
   toLoraOptionName
 } from './loraTriggerWordFiles'
 
 describe('loraTriggerWordFiles', () => {
-  it('resolves a trigger-word sidecar beside the selected LoRA file', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('resolves a selected LoRA model inside the LoRA directory', () => {
     expect(
-      resolveLoraTriggerWordsFile(
-        'C:\\ComfyUI\\models\\loras',
-        'anime\\style.safetensors',
-        path.win32
-      )
+      resolveLoraModelFile('C:\\ComfyUI\\models\\loras', 'anime\\style.safetensors', path.win32)
     ).toEqual({
       outputPath: 'C:\\ComfyUI\\models\\loras\\anime',
-      filename: 'style.txt',
-      fullPath: 'C:\\ComfyUI\\models\\loras\\anime\\style.txt'
+      filename: 'style.safetensors',
+      fullPath: 'C:\\ComfyUI\\models\\loras\\anime\\style.safetensors'
     })
   })
 
-  it('rejects LoRA names outside the LoRA directory', () => {
+  it('rejects LoRA model names outside the LoRA directory', () => {
     expect(
-      resolveLoraTriggerWordsFile('C:\\ComfyUI\\models\\loras', '..\\style.safetensors', path.win32)
+      resolveLoraModelFile('C:\\ComfyUI\\models\\loras', '..\\style.safetensors', path.win32)
     ).toBeNull()
     expect(
-      resolveLoraTriggerWordsFile(
-        'C:\\ComfyUI\\models\\loras',
-        'C:\\other\\style.safetensors',
-        path.win32
-      )
+      resolveLoraModelFile('C:\\ComfyUI\\models\\loras', 'C:\\other\\style.safetensors', path.win32)
     ).toBeNull()
   })
 
@@ -54,29 +50,7 @@ describe('loraTriggerWordFiles', () => {
     ).toBeNull()
   })
 
-  it('collects trigger words from selected LoRA rows', () => {
-    const formState = new Map<string, unknown>([
-      [
-        'loras',
-        [
-          { lora_name: 'style.safetensors', trigger_words: ' style tag\ncinematic ' },
-          { lora_name: 'empty.safetensors', trigger_words: ' ' },
-          { lora_name: 'legacy.safetensors' }
-        ]
-      ]
-    ])
-
-    expect(
-      collectSelectedLoraTriggerWords(formState, {
-        'legacy.safetensors': 'legacy tag'
-      })
-    ).toEqual([
-      { loraName: 'style.safetensors', triggerWords: 'style tag, cinematic' },
-      { loraName: 'legacy.safetensors', triggerWords: 'legacy tag' }
-    ])
-  })
-
-  it('extracts trigger words from civitai/json style metadata payloads', () => {
+  it('extracts trigger words from explicit metadata payloads', () => {
     expect(
       extractTriggerWordsFromMetadataObject({
         trainedWords: ['hero_style', 'cinematic'],
@@ -90,7 +64,7 @@ describe('loraTriggerWordFiles', () => {
     ).toBe('alpha, beta')
   })
 
-  it('extracts trigger words from safetensors metadata and dataset dirs fallback', () => {
+  it('extracts trigger words from safetensors metadata explicit fields only', () => {
     expect(
       extractTriggerWordsFromSafetensorsMetadata({
         __metadata__: {
@@ -101,16 +75,54 @@ describe('loraTriggerWordFiles', () => {
     expect(
       extractTriggerWordsFromSafetensorsMetadata({
         __metadata__: {
-          ss_dataset_dirs: JSON.stringify({ '12_char_style': { n_repeats: 12 } })
+          ss_dataset_dirs: JSON.stringify({ '12_char_style': { n_repeats: 12 } }),
+          ss_tag_frequency: JSON.stringify({ char_style: 20 })
         }
       })
-    ).toBe('char_style')
+    ).toBe('')
+    expect(
+      extractTriggerWordsFromSafetensorsMetadata({
+        __metadata__: {
+          ss_dataset_dirs: JSON.stringify({ '1_complete_split41': { n_repeats: 1 } })
+        }
+      })
+    ).toBe('')
   })
 
-  it('reads and bounds safetensors header lengths', () => {
-    expect(readSafetensorsHeaderLength(new Uint8Array([5, 0, 0, 0, 0, 0, 0, 0]))).toBe(5)
-    expect(readSafetensorsHeaderLength(new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0]))).toBeNull()
-    expect(readSafetensorsHeaderLength(new Uint8Array([1]))).toBeNull()
-    expect(readSafetensorsHeaderLength(new Uint8Array([1, 0, 0, 1, 0, 0, 0, 0]))).toBeNull()
+  it('reads trigger words only from ComfyUI /view_metadata/loras', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ trigger_words: 'remote style, remote token' })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const configUtils = {
+      getComfyUIOrigin: () => 'http://remote-comfyui:8188'
+    }
+
+    await expect(
+      readLoraTriggerWordsComfyUIMetadata('anime/style.safetensors', configUtils as never)
+    ).resolves.toBe('remote style, remote token')
+    await expect(
+      readLoraTriggerWordsAuto('anime/style.safetensors', configUtils as never)
+    ).resolves.toBe('remote style, remote token')
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://remote-comfyui:8188/view_metadata/loras?filename=anime%2Fstyle.safetensors'
+    )
+  })
+
+  it('skips non-safetensors files for ComfyUI metadata detection', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      readLoraTriggerWordsAuto('anime/style.ckpt', {
+        getComfyUIOrigin: () => 'http://remote-comfyui:8188'
+      } as never)
+    ).resolves.toBe('')
+
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

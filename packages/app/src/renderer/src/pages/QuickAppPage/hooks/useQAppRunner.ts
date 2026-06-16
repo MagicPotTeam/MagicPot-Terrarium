@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import { writeSelectedLoraTriggerWordFiles } from '@renderer/components/inputs/loraTriggerWordFiles'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { useComfyStatus } from '@renderer/store/hooks/comfyStatus'
@@ -183,12 +182,6 @@ export const useQAppRunner = (projectId?: string) => {
         const scopedResultItems = scopeResultItemsToProject(resultItems, projectId)
         appendResults(scopedResultItems)
 
-        try {
-          await writeSelectedLoraTriggerWordFiles({ formState, configUtils })
-        } catch (error) {
-          console.warn('[LoRA trigger words] failed to write sidecar files:', error)
-        }
-
         const generationSessionId = readPendingQAppGenerationSessionId(qAppKey)
         const canvasDispatchCounts = dispatchQAppResultsToCanvas(
           scopedResultItems,
@@ -221,7 +214,6 @@ export const useQAppRunner = (projectId?: string) => {
     },
     [
       appendResults,
-      configUtils,
       currentQAppKey,
       formState,
       notifyError,

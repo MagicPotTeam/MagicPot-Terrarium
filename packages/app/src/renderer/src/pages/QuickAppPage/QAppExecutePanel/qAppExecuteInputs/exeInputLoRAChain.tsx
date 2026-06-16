@@ -2,16 +2,14 @@ import React, { useCallback, useEffect, useImperativeHandle, useMemo, useState }
 import { setJsonPath, getJsonPath } from '@shared/utils/jsonPath'
 import { ExeInputBuilder, ExeInputProps } from './types'
 import InputLoRAChain, { LoRAConfig } from '@renderer/components/inputs/InputLoRAChain'
+import { isEqual } from 'es-toolkit'
 import { findFieldOptions } from '@shared/comfy/funcs'
 import { useQAppContext, useQAppInputState } from '../../components/QAppContext'
 import { WorkflowInputRef, Workflow } from '@shared/comfy/types'
 import { ConfigUtils } from '@shared/config/configUtils'
 import {
   appendPromptTriggerWords,
-  normalizeTriggerWords,
-  readLoraTriggerWordsMap,
-  updateLoraTriggerWordsMap,
-  writeLoraTriggerWordsMap
+  normalizeTriggerWords
 } from '@renderer/components/inputs/loraTriggerWords'
 import {
   listLoraModelOptions,
@@ -49,7 +47,7 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
       let cancelled = false
       void listLoraModelOptions(configUtils).then((modelOptions) => {
         if (!cancelled) {
-          setFallbackOptions(modelOptions)
+          setFallbackOptions((prev) => (isEqual(prev, modelOptions) ? prev : modelOptions))
         }
       })
 
@@ -66,20 +64,18 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
     }, [qAppCfg])
 
     const appendLoraTriggerWordsToPrompt = useCallback(
-      async (loraName: string, preferredTriggerWords?: string) => {
-        let triggerWords = normalizeTriggerWords(
-          preferredTriggerWords || readLoraTriggerWordsMap()[loraName] || ''
-        )
+      async (
+        loraName: string,
+        preferredTriggerWords?: string,
+        nextLoraInputs: LoRAConfig[] = loraInputs
+      ) => {
+        let triggerWords = normalizeTriggerWords(preferredTriggerWords || '')
         if (!triggerWords) {
           triggerWords = await readLoraTriggerWordsAuto(loraName, configUtils)
         }
         if (!triggerWords) {
           return
         }
-
-        writeLoraTriggerWordsMap(
-          updateLoraTriggerWordsMap(readLoraTriggerWordsMap(), loraName, triggerWords)
-        )
 
         if (!primaryPromptSlot) {
           return triggerWords
@@ -96,17 +92,14 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
           }
         }
 
-        const storedTriggerWordsByLoraName = readLoraTriggerWordsMap()
-        const promptTriggerWordParts = loraInputs
+        const promptTriggerWordParts = nextLoraInputs
           .filter((lora) => lora.lora_name && lora.lora_name.trim())
           .map((lora) => {
             const selectedLoraName = lora.lora_name.trim()
             if (selectedLoraName === loraName) {
               return triggerWords
             }
-            return normalizeTriggerWords(
-              lora.trigger_words || storedTriggerWordsByLoraName[selectedLoraName] || ''
-            )
+            return normalizeTriggerWords(lora.trigger_words || '')
           })
           .filter(Boolean)
         if (!promptTriggerWordParts.includes(triggerWords)) {
