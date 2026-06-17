@@ -35,22 +35,22 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.49.inputs.unet_name",
+      "slot": "$.39.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.26.inputs.clip_name1",
+      "slot": "$.23.inputs.clip_name1",
       "component": "InputComfySelect"
     },
     {
       "label": "T5XXL加载器",
-      "slot": "$.26.inputs.clip_name2",
+      "slot": "$.23.inputs.clip_name2",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.28.inputs.vae_name",
+      "slot": "$.25.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
@@ -63,20 +63,21 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.21.inputs.model",
-        "$.39.inputs.model"
+        "$.19.inputs.model",
+        "$.33.inputs.model",
+        "$.43.inputs.model"
       ],
       "outputClipSlots": [
-        "$.31.inputs.clip",
-        "$.34.inputs.clip",
-        "$.35.inputs.clip"
+        "$.28.inputs.clip",
+        "$.53.inputs.clip",
+        "$.54.inputs.clip"
       ],
       "inputModel": [
-        "49",
+        "39",
         0
       ],
       "inputClip": [
-        "26",
+        "23",
         0
       ]
     },
@@ -90,18 +91,18 @@
       "label": "图片尺寸",
       "component": "InputImageSize",
       "seperateSlots": true,
-      "widthSlot": "$.37.inputs.value",
-      "heightSlot": "$.38.inputs.value"
+      "widthSlot": "$.31.inputs.value",
+      "heightSlot": "$.32.inputs.value"
     },
     {
       "label": "提示词",
-      "slot": "$.36.inputs.value",
+      "slot": "$.30.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.40.inputs.value",
+      "slot": "$.34.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -113,6 +114,6 @@
     "https://github.com/Fannovel16/comfyui_controlnet_aux"
   ],
   "outputNodeIds": [
-    "45"
+    "38"
   ]
 }

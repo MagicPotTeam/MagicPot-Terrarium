@@ -1,13 +1,13 @@
 {
-  "1": {
+  "172": {
     "inputs": {
       "preprocessor": "AnyLineArtPreprocessor_aux",
       "resolution": [
-        "15",
+        "184",
         0
       ],
       "image": [
-        "34",
+        "217",
         0
       ]
     },
@@ -16,7 +16,54 @@
       "title": "AIO Aux Preprocessor"
     }
   },
-  "10": {
+  "173": {
+    "inputs": {
+      "preprocessor": "DepthAnythingV2Preprocessor",
+      "resolution": [
+        "181",
+        0
+      ],
+      "image": [
+        "213",
+        0
+      ]
+    },
+    "class_type": "AIO_Preprocessor",
+    "_meta": {
+      "title": "AIO Aux Preprocessor"
+    }
+  },
+  "174": {
+    "inputs": {
+      "resize_mode": "Just Resize",
+      "image": [
+        "213",
+        0
+      ]
+    },
+    "class_type": "easy imagePixelPerfect",
+    "_meta": {
+      "title": "图像完美像素"
+    }
+  },
+  "175": {
+    "inputs": {
+      "preprocessor": "AnyLineArtPreprocessor_aux",
+      "resolution": [
+        "174",
+        0
+      ],
+      "image": [
+        "213",
+        0
+      ]
+    },
+    "class_type": "AIO_Preprocessor",
+    "_meta": {
+      "title": "AIO Aux Preprocessor"
+    }
+  },
+  "180": {
     "inputs": {
       "control_net_name": "FLUX.1-dev-ControlNet-Union-Pro-2.0.safetensors"
     },
@@ -25,15 +72,28 @@
       "title": "加载ControlNet模型"
     }
   },
-  "13": {
+  "181": {
+    "inputs": {
+      "resize_mode": "Just Resize",
+      "image": [
+        "213",
+        0
+      ]
+    },
+    "class_type": "easy imagePixelPerfect",
+    "_meta": {
+      "title": "图像完美像素"
+    }
+  },
+  "182": {
     "inputs": {
       "preprocessor": "DepthAnythingV2Preprocessor",
       "resolution": [
-        "14",
+        "183",
         0
       ],
       "image": [
-        "34",
+        "217",
         0
       ]
     },
@@ -42,11 +102,11 @@
       "title": "AIO Aux Preprocessor"
     }
   },
-  "14": {
+  "183": {
     "inputs": {
       "resize_mode": "Just Resize",
       "image": [
-        "34",
+        "217",
         0
       ]
     },
@@ -55,11 +115,11 @@
       "title": "图像完美像素"
     }
   },
-  "15": {
+  "184": {
     "inputs": {
       "resize_mode": "Just Resize",
       "image": [
-        "34",
+        "217",
         0
       ]
     },
@@ -68,10 +128,10 @@
       "title": "图像完美像素"
     }
   },
-  "16": {
+  "185": {
     "inputs": {
       "image": [
-        "34",
+        "217",
         0
       ]
     },
@@ -80,32 +140,32 @@
       "title": "获取图像尺寸"
     }
   },
-  "19": {
+  "188": {
     "inputs": {
       "strength": 0.3,
       "start_percent": 0,
       "end_percent": [
-        "42",
+        "205",
         0
       ],
       "positive": [
-        "35",
+        "202",
         0
       ],
       "negative": [
-        "35",
+        "202",
         1
       ],
       "control_net": [
-        "25",
+        "193",
         0
       ],
       "vae": [
-        "27",
+        "195",
         0
       ],
       "image": [
-        "1",
+        "172",
         0
       ]
     },
@@ -114,20 +174,54 @@
       "title": "应用ControlNet"
     }
   },
-  "21": {
+  "189": {
+    "inputs": {
+      "strength": 0.3,
+      "start_percent": 0,
+      "end_percent": [
+        "205",
+        0
+      ],
+      "positive": [
+        "219",
+        0
+      ],
+      "negative": [
+        "220",
+        0
+      ],
+      "control_net": [
+        "180",
+        0
+      ],
+      "vae": [
+        "195",
+        0
+      ],
+      "image": [
+        "173",
+        0
+      ]
+    },
+    "class_type": "ControlNetApplySD3",
+    "_meta": {
+      "title": "应用ControlNet"
+    }
+  },
+  "190": {
     "inputs": {
       "max_shift": 1.15,
       "base_shift": 0.5000000000000001,
       "width": [
-        "16",
+        "185",
         0
       ],
       "height": [
-        "16",
+        "185",
         1
       ],
       "model": [
-        "47",
+        "224",
         0
       ]
     },
@@ -136,10 +230,10 @@
       "title": "采样算法（Flux）"
     }
   },
-  "22": {
+  "191": {
     "inputs": {
       "seed": [
-        "38",
+        "225",
         0
       ],
       "steps": 36,
@@ -147,23 +241,23 @@
       "sampler_name": "dpmpp_2m",
       "scheduler": "sgm_uniform",
       "denoise": [
-        "41",
+        "204",
         0
       ],
       "model": [
-        "21",
+        "190",
         0
       ],
       "positive": [
-        "19",
+        "188",
         0
       ],
       "negative": [
-        "19",
+        "188",
         1
       ],
       "latent_image": [
-        "46",
+        "211",
         0
       ]
     },
@@ -172,23 +266,7 @@
       "title": "K采样器"
     }
   },
-  "23": {
-    "inputs": {
-      "samples": [
-        "22",
-        0
-      ],
-      "vae": [
-        "27",
-        0
-      ]
-    },
-    "class_type": "VAEDecode",
-    "_meta": {
-      "title": "VAE解码"
-    }
-  },
-  "25": {
+  "193": {
     "inputs": {
       "control_net_name": "FLUX.1-dev-ControlNet-Union-Pro-2.0.safetensors"
     },
@@ -197,7 +275,7 @@
       "title": "加载ControlNet模型"
     }
   },
-  "26": {
+  "194": {
     "inputs": {
       "clip_name1": "clip_l.safetensors",
       "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
@@ -209,7 +287,7 @@
       "title": "双CLIP加载器"
     }
   },
-  "27": {
+  "195": {
     "inputs": {
       "vae_name": "ae.safetensors"
     },
@@ -218,45 +296,32 @@
       "title": "加载VAE"
     }
   },
-  "34": {
-    "inputs": {
-      "index": 1,
-      "value1": [
-        "48",
-        0
-      ]
-    },
-    "class_type": "easy anythingIndexSwitch",
-    "_meta": {
-      "title": "编号切换"
-    }
-  },
-  "35": {
+  "202": {
     "inputs": {
       "strength": 0.3,
       "start_percent": 0,
       "end_percent": [
-        "42",
+        "205",
         0
       ],
       "positive": [
-        "36",
+        "219",
         0
       ],
       "negative": [
-        "37",
+        "220",
         0
       ],
       "control_net": [
-        "10",
+        "180",
         0
       ],
       "vae": [
-        "27",
+        "195",
         0
       ],
       "image": [
-        "13",
+        "182",
         0
       ]
     },
@@ -265,54 +330,16 @@
       "title": "应用ControlNet"
     }
   },
-  "36": {
+  "203": {
     "inputs": {
-      "text": [
-        "39",
-        0
-      ],
-      "clip": [
-        "26",
-        0
-      ]
+      "value": 0.55
     },
-    "class_type": "CLIPTextEncode",
+    "class_type": "easy float",
     "_meta": {
-      "title": "CLIP文本编码"
+      "title": "浮点数"
     }
   },
-  "37": {
-    "inputs": {
-      "text": "",
-      "clip": [
-        "26",
-        0
-      ]
-    },
-    "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "CLIP文本编码"
-    }
-  },
-  "38": {
-    "inputs": {
-      "value": 0
-    },
-    "class_type": "PrimitiveInt",
-    "_meta": {
-      "title": "整数"
-    }
-  },
-  "39": {
-    "inputs": {
-      "value": ""
-    },
-    "class_type": "PrimitiveStringMultiline",
-    "_meta": {
-      "title": "字符串（多行）"
-    }
-  },
-  "41": {
+  "204": {
     "inputs": {
       "value": 0.8
     },
@@ -321,7 +348,7 @@
       "title": "浮点数"
     }
   },
-  "42": {
+  "205": {
     "inputs": {
       "value": 0.8
     },
@@ -330,48 +357,7 @@
       "title": "浮点数"
     }
   },
-  "44": {
-    "inputs": {
-      "filename_prefix": "ComfyUI",
-      "images": [
-        "23",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "保存图像"
-    }
-  },
-  "45": {
-    "inputs": {
-      "images": [
-        "34",
-        0
-      ]
-    },
-    "class_type": "PreviewImage",
-    "_meta": {
-      "title": "预览图像"
-    }
-  },
-  "46": {
-    "inputs": {
-      "pixels": [
-        "34",
-        0
-      ],
-      "vae": [
-        "27",
-        0
-      ]
-    },
-    "class_type": "VAEEncode",
-    "_meta": {
-      "title": "VAE编码"
-    }
-  },
-  "47": {
+  "206": {
     "inputs": {
       "unet_name": "flux1-dev-fp8-e4m3fn.safetensors",
       "weight_dtype": "default"
@@ -381,13 +367,360 @@
       "title": "UNet加载器"
     }
   },
-  "48": {
+  "207": {
     "inputs": {
-      "image": ""
+      "pixels": [
+        "212",
+        0
+      ],
+      "vae": [
+        "195",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE编码"
+    }
+  },
+  "208": {
+    "inputs": {
+      "samples": [
+        "216",
+        0
+      ],
+      "vae": [
+        "195",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "209": {
+    "inputs": {
+      "max_shift": 1.15,
+      "base_shift": 0.5000000000000001,
+      "width": [
+        "214",
+        0
+      ],
+      "height": [
+        "214",
+        1
+      ],
+      "model": [
+        "224",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingFlux",
+    "_meta": {
+      "title": "采样算法（Flux）"
+    }
+  },
+  "210": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": [
+        "217",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJ",
+    "_meta": {
+      "title": "Resize Image (deprecated)"
+    }
+  },
+  "211": {
+    "inputs": {
+      "pixels": [
+        "210",
+        0
+      ],
+      "vae": [
+        "195",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE编码"
+    }
+  },
+  "212": {
+    "inputs": {
+      "width": 1536,
+      "height": 1536,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": [
+        "213",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJ",
+    "_meta": {
+      "title": "Resize Image (deprecated)"
+    }
+  },
+  "213": {
+    "inputs": {
+      "samples": [
+        "191",
+        0
+      ],
+      "vae": [
+        "195",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "214": {
+    "inputs": {
+      "image": [
+        "212",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "获取图像尺寸"
+    }
+  },
+  "215": {
+    "inputs": {
+      "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))",
+      "a": [
+        "204",
+        0
+      ],
+      "b": [
+        "203",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "Math Expression 🐍"
+    }
+  },
+  "216": {
+    "inputs": {
+      "seed": [
+        "225",
+        0
+      ],
+      "steps": 24,
+      "cfg": 1,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "sgm_uniform",
+      "denoise": [
+        "215",
+        1
+      ],
+      "model": [
+        "209",
+        0
+      ],
+      "positive": [
+        "221",
+        0
+      ],
+      "negative": [
+        "221",
+        1
+      ],
+      "latent_image": [
+        "207",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "217": {
+    "inputs": {
+      "index": 1,
+      "value1": [
+        "222",
+        0
+      ]
+    },
+    "class_type": "easy anythingIndexSwitch",
+    "_meta": {
+      "title": "编号切换"
+    }
+  },
+  "218": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": [
+        "208",
+        0
+      ],
+      "get_image_size": [
+        "217",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJ",
+    "_meta": {
+      "title": "Resize Image (deprecated)"
+    }
+  },
+  "219": {
+    "inputs": {
+      "text": [
+        "223",
+        0
+      ],
+      "clip": [
+        "224",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "220": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "224",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "221": {
+    "inputs": {
+      "strength": 0.3,
+      "start_percent": 0,
+      "end_percent": [
+        "205",
+        0
+      ],
+      "positive": [
+        "189",
+        0
+      ],
+      "negative": [
+        "189",
+        1
+      ],
+      "control_net": [
+        "193",
+        0
+      ],
+      "vae": [
+        "195",
+        0
+      ],
+      "image": [
+        "175",
+        0
+      ]
+    },
+    "class_type": "ControlNetApplySD3",
+    "_meta": {
+      "title": "应用ControlNet"
+    }
+  },
+  "222": {
+    "inputs": {
+      "image": "20260608-145521_01.png"
     },
     "class_type": "LoadImage",
     "_meta": {
       "title": "加载图像"
+    }
+  },
+  "223": {
+    "inputs": {
+      "value": "hhct_complete_split41_style, \n\nNighttime Nepalese-style alpine lodge and restaurant in snowy mountains, isometric top-down view, cartoon game scene illustration, warm lighting contrasting with the cool snowy night, mixed wood and stone architecture, roof covered with dark tiles, colorful Tibetan decorative borders, terrace and balconies filled with warm yellow string lights, upper-level scenic lounge area with wooden tables and chairs, sofas, a telescope, and small round tables, lower-level open restaurant and kitchen showing copper pots, teapots, cutlery, spice jars, bowls, plates, and Nepalese-style rugs, walls decorated with portraits of snow-capped mountains, climbers, and local people, signs reading “Everest Lodge” and “Nepal Lodge Bistro”, mountaineering gear shop area on the right with ice axes, ropes, oxygen tanks, climbing tools, and maps hanging, cliffside stone steps on the left leading up the mountain, surrounded by snow-covered pine trees, rock walls, shrubs, ferns, and stone paths, deep blue starry sky background, layered mist and glass reflections, partially obscured by soft-focus foreground leaves, highly detailed scene, warm and cozy adventure lodge atmosphere, high-definition banner composition, exquisite hand-drawn style, soft shadows, saturated colors, casual puzzle game background art style, no main human subject, no realistic photography feel."
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "字符串（多行）"
+    }
+  },
+  "224": {
+    "inputs": {
+      "lora_name": "",
+      "strength_model": 0.8000000000000002,
+      "strength_clip": 0.8000000000000002,
+      "model": [
+        "206",
+        0
+      ],
+      "clip": [
+        "194",
+        0
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA"
+    }
+  },
+  "225": {
+    "inputs": {
+      "value": 715822939891100
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "整数"
+    }
+  },
+  "227": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "218",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "228": {
+    "inputs": {
+      "images": [
+        "217",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
     }
   }
 }

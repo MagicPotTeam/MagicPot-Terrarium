@@ -9,32 +9,32 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.90.inputs.unet_name",
+      "slot": "$.148.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.74.inputs.clip_name1",
+      "slot": "$.136.inputs.clip_name1",
       "component": "InputComfySelect"
     },
     {
       "label": "T5XXL加载器",
-      "slot": "$.74.inputs.clip_name2",
+      "slot": "$.136.inputs.clip_name2",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.75.inputs.vae_name",
+      "slot": "$.137.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Anyline-Controlnet-Flux",
-      "slot": "$.73.inputs.control_net_name",
+      "slot": "$.135.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Depth-Controlnet-Flux",
-      "slot": "$.58.inputs.control_net_name",
+      "slot": "$.123.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
@@ -47,18 +47,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.69.inputs.model"
+        "$.132.inputs.model",
+        "$.156.inputs.model"
       ],
       "outputClipSlots": [
-        "$.65.inputs.clip",
-        "$.84.inputs.clip"
+        "$.167.inputs.clip",
+        "$.168.inputs.clip"
       ],
       "inputModel": [
-        "90",
+        "148",
         0
       ],
       "inputClip": [
-        "74",
+        "136",
         0
       ]
     },
@@ -70,18 +71,18 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.91.inputs.image",
+      "slot": "$.149.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "提示词",
-      "slot": "$.83.inputs.value",
+      "slot": "$.145.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.85.inputs.value",
+      "slot": "$.146.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -93,7 +94,7 @@
     "https://github.com/kijai/ComfyUI-KJNodes"
   ],
   "outputNodeIds": [
-    "86"
+    "147"
   ],
   "requiredModels": [
     {

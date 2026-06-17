@@ -9,27 +9,27 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.33.inputs.unet_name",
+      "slot": "$.86.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.35.inputs.clip_name",
+      "slot": "$.88.inputs.clip_name",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.36.inputs.vae_name",
+      "slot": "$.89.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Anyline-Controlnet",
-      "slot": "$.37.inputs.control_net_name",
+      "slot": "$.90.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Depth-Controlnet",
-      "slot": "$.38.inputs.control_net_name",
+      "slot": "$.91.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
@@ -42,18 +42,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.42.inputs.model"
+        "$.95.inputs.model",
+        "$.107.inputs.model"
       ],
       "outputClipSlots": [
-        "$.13.inputs.clip",
-        "$.31.inputs.clip"
+        "$.68.inputs.clip",
+        "$.84.inputs.clip"
       ],
       "inputModel": [
-        "34",
+        "87",
         0
       ],
       "inputClip": [
-        "35",
+        "88",
         0
       ]
     },
@@ -65,24 +66,24 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.51.inputs.image",
+      "slot": "$.99.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "正面提示词",
-      "slot": "$.40.inputs.value",
+      "slot": "$.93.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.41.inputs.value",
+      "slot": "$.94.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.32.inputs.value",
+      "slot": "$.85.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -94,7 +95,7 @@
     "https://github.com/kijai/ComfyUI-KJNodes"
   ],
   "outputNodeIds": [
-    "43"
+    "111"
   ],
   "requiredModels": [
     {

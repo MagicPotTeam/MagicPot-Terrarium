@@ -9,32 +9,32 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.47.inputs.unet_name",
+      "slot": "$.206.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.26.inputs.clip_name1",
+      "slot": "$.194.inputs.clip_name1",
       "component": "InputComfySelect"
     },
     {
       "label": "T5XXL加载器",
-      "slot": "$.26.inputs.clip_name2",
+      "slot": "$.194.inputs.clip_name2",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.27.inputs.vae_name",
+      "slot": "$.195.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Anyline-Controlnet-Flux",
-      "slot": "$.25.inputs.control_net_name",
+      "slot": "$.193.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Depth-Controlnet-Flux",
-      "slot": "$.10.inputs.control_net_name",
+      "slot": "$.180.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
@@ -47,18 +47,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.21.inputs.model"
+        "$.190.inputs.model",
+        "$.209.inputs.model"
       ],
       "outputClipSlots": [
-        "$.36.inputs.clip",
-        "$.37.inputs.clip"
+        "$.219.inputs.clip",
+        "$.220.inputs.clip"
       ],
       "inputModel": [
-        "47",
+        "206",
         0
       ],
       "inputClip": [
-        "26",
+        "194",
         0
       ]
     },
@@ -70,7 +71,7 @@
     },
     {
       "label": "Controlnet",
-      "slot": "$.42.inputs.value",
+      "slot": "$.205.inputs.value",
       "min": 0,
       "max": 1,
       "step": 0.01,
@@ -78,7 +79,7 @@
     },
     {
       "label": "重绘幅度",
-      "slot": "$.41.inputs.value",
+      "slot": "$.204.inputs.value",
       "min": 0,
       "max": 1,
       "step": 0.01,
@@ -86,18 +87,18 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.48.inputs.image",
+      "slot": "$.222.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "提示词",
-      "slot": "$.39.inputs.value",
+      "slot": "$.223.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.38.inputs.value",
+      "slot": "$.225.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -109,7 +110,7 @@
     "https://github.com/kijai/ComfyUI-KJNodes"
   ],
   "outputNodeIds": [
-    "44"
+    "227"
   ],
   "isHidden": false,
   "requiredModels": [

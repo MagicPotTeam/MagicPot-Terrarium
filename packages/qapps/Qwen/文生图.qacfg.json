@@ -9,17 +9,17 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.240.inputs.unet_name",
+      "slot": "$.39.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.235.inputs.clip_name",
+      "slot": "$.34.inputs.clip_name",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.239.inputs.vae_name",
+      "slot": "$.38.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
@@ -32,18 +32,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.241.inputs.model"
+        "$.40.inputs.model",
+        "$.54.inputs.model"
       ],
       "outputClipSlots": [
-        "$.225.inputs.clip",
-        "$.226.inputs.clip"
+        "$.25.inputs.clip",
+        "$.26.inputs.clip"
       ],
       "inputModel": [
-        "236",
+        "35",
         0
       ],
       "inputClip": [
-        "235",
+        "34",
         0
       ]
     },
@@ -57,24 +58,24 @@
       "label": "图片尺寸",
       "component": "InputImageSize",
       "seperateSlots": true,
-      "widthSlot": "$.227.inputs.value",
-      "heightSlot": "$.228.inputs.value"
+      "widthSlot": "$.27.inputs.value",
+      "heightSlot": "$.28.inputs.value"
     },
     {
       "label": "正面提示词",
-      "slot": "$.243.inputs.value",
+      "slot": "$.42.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.237.inputs.value",
+      "slot": "$.36.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.230.inputs.value",
+      "slot": "$.30.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -86,7 +87,7 @@
     "https://github.com/Fannovel16/comfyui_controlnet_aux"
   ],
   "outputNodeIds": [
-    "244"
+    "43"
   ],
   "requiredModels": [
     {
