@@ -40,6 +40,33 @@ export const useQAppDesignState = (
   const [isRequiredModelsEnabled, setIsRequiredModelsEnabled] = useState(false)
   const [requiredModels, setRequiredModels] = useState<QAppRequiredModel[]>([])
 
+  const handleSetCustomNodeUrls = useCallback(
+    (value: string[] | ((prev: string[]) => string[])) => {
+      setCustomNodeUrls((prev) => {
+        const next = typeof value === 'function' ? value(prev) : value
+        return isEqual(prev, next) ? prev : next
+      })
+    },
+    []
+  )
+
+  const handleSetRequiredModels = useCallback(
+    (value: QAppRequiredModel[] | ((prev: QAppRequiredModel[]) => QAppRequiredModel[])) => {
+      setRequiredModels((prev) => {
+        const next = typeof value === 'function' ? value(prev) : value
+        return isEqual(prev, next) ? prev : next
+      })
+    },
+    []
+  )
+
+  const handleSetOutputNodeIds = useCallback((value: string[] | ((prev: string[]) => string[])) => {
+    setOutputNodeIds((prev) => {
+      const next = typeof value === 'function' ? value(prev) : value
+      return isEqual(prev, next) ? prev : next
+    })
+  }, [])
+
   // --- handlers ---
   const handleSetAutoItemValue = useCallback((id: string, value: AutoCompValue) => {
     setAutoItems((prev) => {
@@ -218,12 +245,12 @@ export const useQAppDesignState = (
     setIcon,
     // custom node urls
     customNodeUrls,
-    setCustomNodeUrls,
+    setCustomNodeUrls: handleSetCustomNodeUrls,
     isCustomNodeUrlsEnabled,
     setIsCustomNodeUrlsEnabled,
     // required models
     requiredModels,
-    setRequiredModels,
+    setRequiredModels: handleSetRequiredModels,
     isRequiredModelsEnabled,
     setIsRequiredModelsEnabled,
     // auto items
@@ -238,7 +265,7 @@ export const useQAppDesignState = (
     handleDeleteInputItem,
     // output
     outputNodeIds,
-    setOutputNodeIds,
+    setOutputNodeIds: handleSetOutputNodeIds,
     isSpecifyOutput,
     setIsSpecifyOutput,
     // actions
