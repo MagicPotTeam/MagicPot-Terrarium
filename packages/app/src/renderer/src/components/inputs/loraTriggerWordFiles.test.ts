@@ -6,6 +6,7 @@ import {
   readLoraTriggerWordsAuto,
   readLoraTriggerWordsComfyUIMetadata,
   resolveLoraModelFile,
+  resolveLoraTriggerWordsFile,
   toLoraOptionName
 } from './loraTriggerWordFiles'
 
@@ -30,6 +31,23 @@ describe('loraTriggerWordFiles', () => {
     ).toBeNull()
     expect(
       resolveLoraModelFile('C:\\ComfyUI\\models\\loras', 'C:\\other\\style.safetensors', path.win32)
+    ).toBeNull()
+  })
+
+  it('resolves a same-name trigger words txt file next to the LoRA model', () => {
+    expect(
+      resolveLoraTriggerWordsFile(
+        'C:\\ComfyUI\\models\\loras',
+        'anime\\style.safetensors',
+        path.win32
+      )
+    ).toEqual({
+      outputPath: 'C:\\ComfyUI\\models\\loras\\anime',
+      filename: 'style.txt',
+      fullPath: 'C:\\ComfyUI\\models\\loras\\anime\\style.txt'
+    })
+    expect(
+      resolveLoraTriggerWordsFile('C:\\ComfyUI\\models\\loras', '..\\style.safetensors', path.win32)
     ).toBeNull()
   })
 
@@ -89,15 +107,18 @@ describe('loraTriggerWordFiles', () => {
     ).toBe('')
   })
 
-  it('reads trigger words only from ComfyUI /view_metadata/loras', async () => {
+  it('reads trigger words from ComfyUI /view_metadata/loras before local txt sidecars', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ trigger_words: 'remote style, remote token' })
     })
+    const readTextFileMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('api', () => ({ svcFs: { readTextFile: readTextFileMock } }))
 
     const configUtils = {
-      getComfyUIOrigin: () => 'http://remote-comfyui:8188'
+      getComfyUIOrigin: () => 'http://remote-comfyui:8188',
+      getLoraDir: () => 'C:\\ComfyUI\\models\\loras'
     }
 
     await expect(
@@ -107,22 +128,59 @@ describe('loraTriggerWordFiles', () => {
       readLoraTriggerWordsAuto('anime/style.safetensors', configUtils as never)
     ).resolves.toBe('remote style, remote token')
 
+    expect(readTextFileMock).not.toHaveBeenCalled()
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(fetchMock).toHaveBeenCalledWith(
       'http://remote-comfyui:8188/view_metadata/loras?filename=anime%2Fstyle.safetensors'
     )
   })
 
-  it('skips non-safetensors files for ComfyUI metadata detection', async () => {
-    const fetchMock = vi.fn()
+  it('falls back to a same-name local txt sidecar when ComfyUI metadata has no triggers', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ss_dataset_dirs: '{"12_style": {"n_repeats": 12}}' })
+    })
+    const readTextFileMock = vi.fn().mockResolvedValue({ content: 'sidecar style\nsidecar token' })
     vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('path', path.win32)
+    window.path = path.win32 as typeof window.path
+    window.api = { svcFs: { readTextFile: readTextFileMock } } as unknown as typeof window.api
 
     await expect(
-      readLoraTriggerWordsAuto('anime/style.ckpt', {
+      readLoraTriggerWordsAuto('anime/style.safetensors', {
+        getComfyUIOrigin: () => 'http://remote-comfyui:8188',
+        getLoraDir: () => 'C:\\ComfyUI\\models\\loras'
+      } as never)
+    ).resolves.toBe('sidecar style, sidecar token')
+
+    expect(readTextFileMock).toHaveBeenCalledWith({
+      fullPath: 'C:\\ComfyUI\\models\\loras\\anime\\style.txt'
+    })
+  })
+
+  it('skips ComfyUI metadata for non-safetensors files but can still read txt sidecars', async () => {
+    const fetchMock = vi.fn()
+    const readTextFileMock = vi.fn().mockResolvedValue({ content: 'ckpt sidecar token' })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('path', path.win32)
+    window.path = path.win32 as typeof window.path
+    window.api = { svcFs: { readTextFile: readTextFileMock } } as unknown as typeof window.api
+
+    await expect(
+      readLoraTriggerWordsComfyUIMetadata('anime/style.ckpt', {
         getComfyUIOrigin: () => 'http://remote-comfyui:8188'
       } as never)
     ).resolves.toBe('')
+    await expect(
+      readLoraTriggerWordsAuto('anime/style.ckpt', {
+        getComfyUIOrigin: () => 'http://remote-comfyui:8188',
+        getLoraDir: () => 'C:\\ComfyUI\\models\\loras'
+      } as never)
+    ).resolves.toBe('ckpt sidecar token')
 
     expect(fetchMock).not.toHaveBeenCalled()
+    expect(readTextFileMock).toHaveBeenCalledWith({
+      fullPath: 'C:\\ComfyUI\\models\\loras\\anime\\style.txt'
+    })
   })
 })

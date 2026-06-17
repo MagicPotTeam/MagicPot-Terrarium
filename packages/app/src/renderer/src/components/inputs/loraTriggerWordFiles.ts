@@ -9,6 +9,12 @@ export type LoraModelFileRef = {
   fullPath: string
 }
 
+export type LoraTriggerWordsFileRef = {
+  outputPath: string
+  filename: string
+  fullPath: string
+}
+
 const LORA_MODEL_FILE_EXTENSIONS = ['.safetensors', '.ckpt', '.pt', '.pth', '.bin']
 const SAFETENSORS_EXTENSION = '.safetensors'
 const MAX_TRIGGER_WORD_SEARCH_DEPTH = 6
@@ -95,6 +101,25 @@ export const resolveLoraModelFile = (
     outputPath: pathApi.dirname(fullPath) || baseDir,
     filename: pathApi.basename(fullPath),
     fullPath
+  }
+}
+
+export const resolveLoraTriggerWordsFile = (
+  loraDir: string,
+  loraName: string,
+  pathApi: BuiltInPath = window.path
+): LoraTriggerWordsFileRef | null => {
+  const modelFileRef = resolveLoraModelFile(loraDir, loraName, pathApi)
+  if (!modelFileRef) {
+    return null
+  }
+
+  const parsedName = pathApi.parse(modelFileRef.filename)
+  const filename = `${parsedName.name}.txt`
+  return {
+    outputPath: modelFileRef.outputPath,
+    filename,
+    fullPath: pathApi.join(modelFileRef.outputPath, filename)
   }
 }
 
@@ -251,6 +276,23 @@ export const extractTriggerWordsFromMetadataObject = (metadataObject: unknown): 
 export const extractTriggerWordsFromSafetensorsMetadata = (headerObject: unknown): string =>
   extractTriggerWordsFromMetadataObject(headerObject)
 
+export const readLoraTriggerWordsSidecar = async (
+  loraName: string,
+  configUtils: ConfigUtils
+): Promise<string> => {
+  const fileRef = resolveLoraTriggerWordsFile(configUtils.getLoraDir(), loraName)
+  if (!fileRef) {
+    return ''
+  }
+
+  try {
+    const response = await api().svcFs.readTextFile({ fullPath: fileRef.fullPath })
+    return normalizeTriggerWords(response.content)
+  } catch {
+    return ''
+  }
+}
+
 export const readLoraTriggerWordsComfyUIMetadata = async (
   loraName: string,
   configUtils: ConfigUtils
@@ -284,5 +326,10 @@ export const readLoraTriggerWordsAuto = async (
   loraName: string,
   configUtils: ConfigUtils
 ): Promise<string> => {
-  return readLoraTriggerWordsComfyUIMetadata(loraName, configUtils)
+  const triggerWordsFromMetadata = await readLoraTriggerWordsComfyUIMetadata(loraName, configUtils)
+  if (triggerWordsFromMetadata) {
+    return triggerWordsFromMetadata
+  }
+
+  return readLoraTriggerWordsSidecar(loraName, configUtils)
 }

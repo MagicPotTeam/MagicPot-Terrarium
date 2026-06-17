@@ -4,7 +4,9 @@ import {
   LORA_TRIGGER_WORDS_STORAGE_KEY,
   normalizeTriggerWords,
   readLoraTriggerWordsMap,
+  resolveLoraTriggerWordsWithCache,
   updateLoraTriggerWordsMap,
+  weightTriggerWordsForPrompt,
   writeLoraTriggerWordsMap
 } from './loraTriggerWords'
 
@@ -40,6 +42,43 @@ describe('loraTriggerWords', () => {
     expect(next).toEqual({})
   })
 
+  it('uses cached trigger words before reading model metadata', async () => {
+    writeLoraTriggerWordsMap({ 'style.safetensors': 'cached style\nbest quality' })
+    const readMetadataTriggerWords = vi.fn(async () => 'metadata style')
+
+    await expect(
+      resolveLoraTriggerWordsWithCache({
+        loraName: 'style.safetensors',
+        readMetadataTriggerWords
+      })
+    ).resolves.toEqual({
+      triggerWords: 'cached style, best quality',
+      triggerWordsByLoraName: {
+        'style.safetensors': 'cached style, best quality'
+      }
+    })
+    expect(readMetadataTriggerWords).not.toHaveBeenCalled()
+  })
+
+  it('stores metadata trigger words for later selections', async () => {
+    const readMetadataTriggerWords = vi.fn(async () => 'metadata style\nhero pose')
+
+    await expect(
+      resolveLoraTriggerWordsWithCache({
+        loraName: 'style.safetensors',
+        readMetadataTriggerWords
+      })
+    ).resolves.toEqual({
+      triggerWords: 'metadata style, hero pose',
+      triggerWordsByLoraName: {
+        'style.safetensors': 'metadata style, hero pose'
+      }
+    })
+    expect(readLoraTriggerWordsMap()).toEqual({
+      'style.safetensors': 'metadata style, hero pose'
+    })
+  })
+
   it('prepends trigger tags before regular prompt tags', () => {
     expect(appendPromptTriggerWords('masterpiece, style tag', 'style tag, hero pose')).toBe(
       'style tag, hero pose, masterpiece'
@@ -59,9 +98,21 @@ describe('loraTriggerWords', () => {
     )
   })
 
-  it('keeps weighted trigger words from trigger-word input when prompt has unweighted duplicate', () => {
+  it('uses weighted trigger words from the explicit append action when prompt has duplicates', () => {
     expect(appendPromptTriggerWords('masterpiece, style tag', '(style tag:1.2)')).toBe(
       '(style tag:1.2), masterpiece'
+    )
+    expect(appendPromptTriggerWords('masterpiece, (style tag:0.8)', '(style tag:1.2)')).toBe(
+      '(style tag:1.2), masterpiece'
+    )
+  })
+
+  it('weights trigger words using LoRA model strength for prompt insertion', () => {
+    expect(weightTriggerWordsForPrompt('style tag\nhero pose', 0.8)).toBe(
+      '(style tag:0.8), (hero pose:0.8)'
+    )
+    expect(weightTriggerWordsForPrompt('(style tag:1.2), hero pose', 1.05)).toBe(
+      '(style tag:1.05), (hero pose:1.05)'
     )
   })
 })

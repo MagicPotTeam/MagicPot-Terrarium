@@ -3,6 +3,7 @@ import InputSlider from './InputSlider'
 import {
   Autocomplete,
   Box,
+  Button,
   Card,
   CardActions,
   CardContent,
@@ -11,7 +12,7 @@ import {
   TextField,
   Typography
 } from '@mui/material'
-import { Add, Delete } from '@mui/icons-material'
+import { Add, Delete, PlaylistAdd } from '@mui/icons-material'
 import { ComfyUtils } from '@renderer/utils/comfyUtils'
 import { api } from '@renderer/utils/windowUtils'
 import { bytesToObjectUrl } from '@renderer/utils/fileUtils'
@@ -20,8 +21,8 @@ import { isEqual } from 'es-toolkit'
 
 const TRIGGER_WORDS_LABEL = '\u89e6\u53d1\u8bcd\u5907\u6ce8'
 const TRIGGER_WORDS_PLACEHOLDER = '\u586b\u5199\u8be5 LoRA \u7684\u89e6\u53d1\u8bcd'
-const TRIGGER_WORDS_HELPER =
-  '\u9009\u62e9\u8be5 LoRA \u65f6\u4f1a\u81ea\u52a8\u8ffd\u52a0\u5230\u63d0\u793a\u8bcd'
+const TRIGGER_WORDS_HELPER = '选择 LoRA 后自动读取；点击“追加”才会加入提示词'
+const APPEND_TRIGGER_WORDS_LABEL = '追加触发词'
 
 export type LoRAConfig = {
   lora_name: string
@@ -46,6 +47,7 @@ type InputLoraProps = {
     loraName: string,
     triggerWords: string
   ) => string | void | Promise<string | void>
+  onAppendLoraTriggerWords?: (lora: LoRAConfig) => string | void | Promise<string | void>
   comfyUtilsRef: RefObject<ComfyUtils>
 }
 
@@ -58,6 +60,7 @@ const InputLora: React.FC<InputLoraProps> = ({
   loraName2ImageName,
   onLoraSelected,
   onLoraTriggerWordsConfirmed,
+  onAppendLoraTriggerWords,
   comfyUtilsRef
 }) => {
   const [imageObjUrl, setImageObjUrl] = useState<string | null>(null)
@@ -267,33 +270,66 @@ const InputLora: React.FC<InputLoraProps> = ({
             step={0.01}
             defaultValue={1}
           />
-          <TextField
-            value={currentTriggerWords}
-            label={`Lora ${index} ${TRIGGER_WORDS_LABEL}`}
-            placeholder={TRIGGER_WORDS_PLACEHOLDER}
-            onChange={(event) => {
-              if (!currentLora.lora_name) {
-                return
-              }
-              const nextTriggerWords = event.target.value
-              handleUpdateByRowIdRef.current(rowId, { trigger_words: nextTriggerWords })
-            }}
-            onBlur={() => {
-              if (currentLora.lora_name && currentTriggerWords.trim()) {
-                void Promise.resolve(
-                  onLoraTriggerWordsConfirmed?.(currentLora.lora_name, currentTriggerWords)
-                ).catch((error) => {
-                  console.warn('[InputLoRAChain] failed to confirm LoRA trigger words:', error)
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
+            <TextField
+              value={currentTriggerWords}
+              label={`Lora ${index} ${TRIGGER_WORDS_LABEL}`}
+              placeholder={TRIGGER_WORDS_PLACEHOLDER}
+              onChange={(event) => {
+                if (!currentLora.lora_name) {
+                  return
+                }
+                const nextTriggerWords = event.target.value
+                handleUpdateByRowIdRef.current(rowId, { trigger_words: nextTriggerWords })
+              }}
+              onBlur={() => {
+                if (currentLora.lora_name && currentTriggerWords.trim()) {
+                  void Promise.resolve(
+                    onLoraTriggerWordsConfirmed?.(currentLora.lora_name, currentTriggerWords)
+                  ).catch((error) => {
+                    console.warn('[InputLoRAChain] failed to confirm LoRA trigger words:', error)
+                  })
+                }
+              }}
+              size="small"
+              disabled={!currentLora.lora_name}
+              multiline
+              minRows={1}
+              maxRows={3}
+              helperText={TRIGGER_WORDS_HELPER}
+              sx={{
+                flex: 1,
+                minWidth: 0,
+                '& .MuiFormHelperText-root': {
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis'
+                }
+              }}
+            />
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<PlaylistAdd />}
+              disabled={!currentLora.lora_name || !currentTriggerWords.trim()}
+              onClick={() => {
+                if (!currentLora.lora_name || !currentTriggerWords.trim()) {
+                  return
+                }
+                void Promise.resolve(onAppendLoraTriggerWords?.(currentLora)).catch((error) => {
+                  console.warn('[InputLoRAChain] failed to append LoRA trigger words:', error)
                 })
-              }
-            }}
-            size="small"
-            disabled={!currentLora.lora_name}
-            multiline
-            minRows={1}
-            maxRows={3}
-            helperText={TRIGGER_WORDS_HELPER}
-          />
+              }}
+              sx={{
+                height: 40,
+                minHeight: 40,
+                whiteSpace: 'nowrap',
+                flexShrink: 0
+              }}
+            >
+              {APPEND_TRIGGER_WORDS_LABEL}
+            </Button>
+          </Box>
         </Box>
       </Box>
     </>
@@ -308,6 +344,7 @@ type InputLoRAChainProps = InputProps<LoRAConfig[]> & {
     triggerWords?: string,
     nextLoras?: LoRAConfig[]
   ) => string | void | Promise<string | void>
+  onAppendLoraTriggerWords?: (lora: LoRAConfig) => string | void | Promise<string | void>
 }
 
 const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
@@ -317,7 +354,8 @@ const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
   Icon,
   placeholder,
   lora_options,
-  onLoraSelected
+  onLoraSelected,
+  onAppendLoraTriggerWords
 }) => {
   const rowIdsRef = useRef<string[]>([])
   const nextRowIdRef = useRef(0)
@@ -419,6 +457,7 @@ const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
                   loraName2ImageName={loraName2ImageName}
                   onLoraSelected={onLoraSelected}
                   onLoraTriggerWordsConfirmed={onLoraSelected}
+                  onAppendLoraTriggerWords={onAppendLoraTriggerWords}
                   comfyUtilsRef={comfyUtilsRef}
                 />
               </CardContent>

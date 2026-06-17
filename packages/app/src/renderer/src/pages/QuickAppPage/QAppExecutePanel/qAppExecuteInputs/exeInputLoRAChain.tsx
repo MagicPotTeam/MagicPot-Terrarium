@@ -9,7 +9,8 @@ import { WorkflowInputRef, Workflow } from '@shared/comfy/types'
 import { ConfigUtils } from '@shared/config/configUtils'
 import {
   appendPromptTriggerWords,
-  normalizeTriggerWords
+  resolveLoraTriggerWordsWithCache,
+  weightTriggerWordsForPrompt
 } from '@renderer/components/inputs/loraTriggerWords'
 import {
   listLoraModelOptions,
@@ -63,22 +64,42 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
       return primaryPromptInput?.slot
     }, [qAppCfg])
 
+    const loadLoraTriggerWords = useCallback(
+      async (loraName: string, preferredTriggerWords?: string) => {
+        const resolvedTriggerWords = await resolveLoraTriggerWordsWithCache({
+          loraName,
+          preferredTriggerWords,
+          readMetadataTriggerWords: (selectedLoraName) =>
+            readLoraTriggerWordsAuto(selectedLoraName, configUtils)
+        })
+        return resolvedTriggerWords?.triggerWords
+      },
+      [configUtils]
+    )
+
     const appendLoraTriggerWordsToPrompt = useCallback(
-      async (
-        loraName: string,
-        preferredTriggerWords?: string,
-        nextLoraInputs: LoRAConfig[] = loraInputs
-      ) => {
-        let triggerWords = normalizeTriggerWords(preferredTriggerWords || '')
-        if (!triggerWords) {
-          triggerWords = await readLoraTriggerWordsAuto(loraName, configUtils)
-        }
-        if (!triggerWords) {
+      async (lora: LoRAConfig) => {
+        const loraName = lora.lora_name.trim()
+        if (!loraName || !primaryPromptSlot) {
           return
         }
 
-        if (!primaryPromptSlot) {
-          return triggerWords
+        const resolvedTriggerWords = await resolveLoraTriggerWordsWithCache({
+          loraName,
+          preferredTriggerWords: lora.trigger_words,
+          readMetadataTriggerWords: (selectedLoraName) =>
+            readLoraTriggerWordsAuto(selectedLoraName, configUtils)
+        })
+        if (!resolvedTriggerWords) {
+          return
+        }
+
+        const triggerWordsForPrompt = weightTriggerWordsForPrompt(
+          resolvedTriggerWords.triggerWords,
+          lora.strength_model
+        )
+        if (!triggerWordsForPrompt) {
+          return resolvedTriggerWords.triggerWords
         }
 
         const storedPrompt = formState.get(primaryPromptSlot)
@@ -92,29 +113,14 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
           }
         }
 
-        const promptTriggerWordParts = nextLoraInputs
-          .filter((lora) => lora.lora_name && lora.lora_name.trim())
-          .map((lora) => {
-            const selectedLoraName = lora.lora_name.trim()
-            if (selectedLoraName === loraName) {
-              return triggerWords
-            }
-            return normalizeTriggerWords(lora.trigger_words || '')
-          })
-          .filter(Boolean)
-        if (!promptTriggerWordParts.includes(triggerWords)) {
-          promptTriggerWordParts.unshift(triggerWords)
-        }
-        const triggerWordsForPrompt = normalizeTriggerWords(promptTriggerWordParts.join('\n'))
-
         const nextPrompt = appendPromptTriggerWords(currentPrompt, triggerWordsForPrompt)
         if (nextPrompt !== currentPrompt) {
           setFormStateValue(primaryPromptSlot, nextPrompt)
         }
 
-        return triggerWords
+        return resolvedTriggerWords.triggerWords
       },
-      [configUtils, formState, loraInputs, primaryPromptSlot, setFormStateValue]
+      [configUtils, formState, primaryPromptSlot, setFormStateValue]
     )
 
     useImperativeHandle(
@@ -307,7 +313,8 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
         value={loraInputs}
         onChange={(v) => setLoraInputs(v)}
         lora_options={options}
-        onLoraSelected={appendLoraTriggerWordsToPrompt}
+        onLoraSelected={loadLoraTriggerWords}
+        onAppendLoraTriggerWords={appendLoraTriggerWordsToPrompt}
       />
     )
   }

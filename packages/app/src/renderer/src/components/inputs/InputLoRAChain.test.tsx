@@ -68,13 +68,15 @@ const deferred = <T,>() => {
 
 const renderControlled = ({
   initialValue,
-  onLoraSelected
+  onLoraSelected,
+  onAppendLoraTriggerWords
 }: {
   initialValue: LoRAConfig[]
   onLoraSelected?: (
     loraName: string,
     triggerWords?: string
   ) => string | void | Promise<string | void>
+  onAppendLoraTriggerWords?: (lora: LoRAConfig) => string | void | Promise<string | void>
 }) => {
   const latest = { value: initialValue }
   const onChange = vi.fn((nextValue: LoRAConfig[]) => {
@@ -93,6 +95,7 @@ const renderControlled = ({
         }}
         lora_options={['alpha.safetensors', 'beta.safetensors']}
         onLoraSelected={onLoraSelected}
+        onAppendLoraTriggerWords={onAppendLoraTriggerWords}
       />
     )
   }
@@ -201,7 +204,7 @@ describe('InputLoRAChain', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'beta.safetensors' }))
 
     await waitFor(() => {
-      expect(onLoraSelected).toHaveBeenCalledWith('beta.safetensors', '')
+      expect(onLoraSelected).toHaveBeenCalledWith('beta.safetensors', '', expect.any(Array))
       expect(latest.value[1].lora_name).toBe('beta.safetensors')
     })
 
@@ -225,6 +228,40 @@ describe('InputLoRAChain', () => {
     })
   })
 
+  it('loads trigger words on selection but appends them only after clicking append', async () => {
+    comfyMocks.listImages.mockResolvedValue({})
+    const onLoraSelected = vi.fn(async () => 'beta trigger')
+    const onAppendLoraTriggerWords = vi.fn()
+    const { latest } = renderControlled({
+      initialValue: [createLora('')],
+      onLoraSelected,
+      onAppendLoraTriggerWords
+    })
+
+    const combo = await screen.findByLabelText('Lora 0')
+    fireEvent.mouseDown(combo)
+    fireEvent.change(combo, { target: { value: 'beta.safetensors' } })
+    fireEvent.click(await screen.findByRole('option', { name: 'beta.safetensors' }))
+
+    await waitFor(() => {
+      expect(latest.value[0]).toMatchObject({
+        lora_name: 'beta.safetensors',
+        trigger_words: 'beta trigger'
+      })
+    })
+    expect(onAppendLoraTriggerWords).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: /追加触发词/ }))
+
+    expect(onAppendLoraTriggerWords).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lora_name: 'beta.safetensors',
+        strength_model: 1,
+        trigger_words: 'beta trigger'
+      })
+    )
+  })
+
   it('applies delayed trigger words to the same row after deleting a row before it', async () => {
     comfyMocks.listImages.mockResolvedValue({})
     const triggerWords = deferred<string>()
@@ -240,7 +277,7 @@ describe('InputLoRAChain', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'beta.safetensors' }))
 
     await waitFor(() => {
-      expect(onLoraSelected).toHaveBeenCalledWith('beta.safetensors', '')
+      expect(onLoraSelected).toHaveBeenCalledWith('beta.safetensors', '', expect.any(Array))
       expect(latest.value[1].lora_name).toBe('beta.safetensors')
     })
 

@@ -87,6 +87,36 @@ export const updateLoraTriggerWordsMap = (
   return next
 }
 
+export async function resolveLoraTriggerWordsWithCache({
+  loraName,
+  preferredTriggerWords,
+  readMetadataTriggerWords
+}: {
+  loraName: string
+  preferredTriggerWords?: string
+  readMetadataTriggerWords: (loraName: string) => Promise<string>
+}): Promise<{ triggerWords: string; triggerWordsByLoraName: LoraTriggerWordsMap } | null> {
+  const cachedTriggerWordsByLoraName = readLoraTriggerWordsMap()
+  let triggerWords = normalizeTriggerWords(
+    preferredTriggerWords || cachedTriggerWordsByLoraName[loraName] || ''
+  )
+  if (!triggerWords) {
+    triggerWords = normalizeTriggerWords(await readMetadataTriggerWords(loraName))
+  }
+  if (!triggerWords) {
+    return null
+  }
+
+  const triggerWordsByLoraName = updateLoraTriggerWordsMap(
+    cachedTriggerWordsByLoraName,
+    loraName,
+    triggerWords
+  )
+  writeLoraTriggerWordsMap(triggerWordsByLoraName)
+
+  return { triggerWords, triggerWordsByLoraName }
+}
+
 const splitPromptTags = (value: string): string[] =>
   value
     .split(',')
@@ -118,11 +148,10 @@ const stripBalancedPromptWrappers = (tag: string): string => {
 
 const explicitWeightSuffixPattern = /\s*:\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*$/
 
-const promptTagIdentity = (tag: string): string =>
-  stripBalancedPromptWrappers(tag)
-    .replace(explicitWeightSuffixPattern, '')
-    .trim()
-    .toLocaleLowerCase()
+const stripPromptWeight = (tag: string): string =>
+  stripBalancedPromptWrappers(tag).replace(explicitWeightSuffixPattern, '').trim()
+
+const promptTagIdentity = (tag: string): string => stripPromptWeight(tag).toLocaleLowerCase()
 
 const hasExplicitPromptWeight = (tag: string): boolean => {
   const value = tag.trim()
@@ -131,6 +160,31 @@ const hasExplicitPromptWeight = (tag: string): boolean => {
     (value.startsWith('[') && value.endsWith(']')) ||
     (value.startsWith('{') && value.endsWith('}'))
   return wrappedAsWeight || explicitWeightSuffixPattern.test(stripBalancedPromptWrappers(value))
+}
+
+const formatPromptWeight = (weight: number): string =>
+  Number.isFinite(weight) ? Number(weight.toFixed(2)).toString() : '1'
+
+export const weightTriggerWordsForPrompt = (
+  triggerWords: string,
+  strengthModel: number
+): string => {
+  const normalizedTriggerWords = normalizeTriggerWords(triggerWords)
+  if (!normalizedTriggerWords) {
+    return ''
+  }
+
+  const normalizedWeight = formatPromptWeight(strengthModel)
+  return splitPromptTags(normalizedTriggerWords)
+    .map((tag) => {
+      const strippedTag = stripPromptWeight(tag)
+      if (!strippedTag) {
+        return ''
+      }
+      return `(${strippedTag}:${normalizedWeight})`
+    })
+    .filter(Boolean)
+    .join(', ')
 }
 
 export const appendPromptTriggerWords = (prompt: string, triggerWords: string): string => {
@@ -173,11 +227,11 @@ export const appendPromptTriggerWords = (prompt: string, triggerWords: string): 
     if (!existingTag) {
       return tag
     }
-    if (hasExplicitPromptWeight(existingTag)) {
-      return existingTag
-    }
     if (hasExplicitPromptWeight(tag)) {
       return tag
+    }
+    if (hasExplicitPromptWeight(existingTag)) {
+      return existingTag
     }
     return existingTag
   })
