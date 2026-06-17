@@ -211,9 +211,78 @@ function isExternalFileDragType(type: string): boolean {
   )
 }
 
+type SnapshotDataTransferItem = DataTransferItem & {
+  webkitGetAsEntry?: () => unknown
+}
+
+function snapshotDataTransferItem(item: DataTransferItem): DataTransferItem {
+  let file: File | null = null
+  let entry: unknown = null
+
+  if (item.kind === 'file') {
+    try {
+      file = item.getAsFile()
+    } catch {
+      file = null
+    }
+
+    try {
+      entry = (item as SnapshotDataTransferItem).webkitGetAsEntry?.() ?? null
+    } catch {
+      entry = null
+    }
+  }
+
+  const snapshot: SnapshotDataTransferItem = {
+    kind: item.kind,
+    type: item.type,
+    getAsFile: () => file,
+    getAsString: (callback: ((data: string) => void) | null) => {
+      if (!callback) {
+        return
+      }
+
+      try {
+        item.getAsString(callback)
+      } catch {
+        callback('')
+      }
+    }
+  } as SnapshotDataTransferItem
+
+  if (entry) {
+    snapshot.webkitGetAsEntry = () => entry
+  }
+
+  return snapshot as DataTransferItem
+}
+
+function getSnapshotDataTransferItemFiles(items: DataTransferItem[]): File[] {
+  const files: File[] = []
+  for (const item of items) {
+    if (item.kind !== 'file') {
+      continue
+    }
+
+    try {
+      const file = item.getAsFile()
+      if (file) {
+        files.push(file)
+      }
+    } catch {
+      // Ignore inaccessible items and keep any other files that were snapshotted.
+    }
+  }
+  return files
+}
+
 function snapshotDropDataTransfer(dataTransfer: DataTransfer): DropDataTransferSnapshot {
-  const files = arrayFromTransferList<File>(dataTransfer.files)
-  const items = arrayFromTransferList<DataTransferItem>(dataTransfer.items)
+  const directFiles = arrayFromTransferList<File>(dataTransfer.files)
+  const items = arrayFromTransferList<DataTransferItem>(dataTransfer.items).map(
+    snapshotDataTransferItem
+  )
+  const itemFiles = getSnapshotDataTransferItemFiles(items)
+  const files = directFiles.length > 0 ? directFiles : itemFiles
   const textData = new Map<string, string>()
 
   for (const type of DROP_TEXT_TYPES_TO_SNAPSHOT) {
@@ -1091,7 +1160,10 @@ export function useCanvasFileIntake({
       }
 
       const droppedFiles = Array.from(dropDataTransfer.files)
-      const files = hasDirectoryStructure ? droppedEntries.map((entry) => entry.file) : droppedFiles
+      const files =
+        hasDirectoryStructure || droppedFiles.length === 0
+          ? droppedEntries.map((entry) => entry.file)
+          : droppedFiles
 
       if (files.length === 0) {
         let text = dropDataTransfer.getData('text/plain')

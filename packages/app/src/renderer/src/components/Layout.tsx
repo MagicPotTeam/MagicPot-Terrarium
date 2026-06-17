@@ -38,6 +38,7 @@ const RIGHT_PANEL_MIN_WIDTH = 360
 const RIGHT_PANEL_MAX_WIDTH = 1024
 const BOTTOM_PANEL_DEFAULT_HEIGHT = 220
 const ROUTE_TAB_SYNC_DELAY_MS = 50
+const LAYOUT_RESIZE_REMEASURE_SETTLE_DELAY_MS = 120
 export const STARTUP_HOME_PAINT_DELAY_MS = 160
 
 export const clampSidePanelWidth = (currentWidth: number, delta: number): number =>
@@ -545,6 +546,32 @@ const Layout: React.FC = () => {
   const effectSidePanel = isProjectTab && isProjectRoute ? activeSidePanel : null
   const effectRightPanelVisible = isProjectTab && isProjectRoute ? rightPanelVisible : false
 
+  useEffect(() => {
+    const firstFrameId = window.requestAnimationFrame(dispatchMaxSizeLayoutRemeasure)
+    const secondFrameId = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(dispatchMaxSizeLayoutRemeasure)
+    })
+    const settledTimerId = window.setTimeout(
+      dispatchMaxSizeLayoutRemeasure,
+      LAYOUT_RESIZE_REMEASURE_SETTLE_DELAY_MS
+    )
+
+    return () => {
+      window.cancelAnimationFrame(firstFrameId)
+      window.cancelAnimationFrame(secondFrameId)
+      window.clearTimeout(settledTimerId)
+    }
+  }, [
+    activeTabId,
+    bottomPanelHeight,
+    bottomPanelMaximized,
+    bottomPanelVisible,
+    effectRightPanelVisible,
+    effectSidePanel,
+    rightPanelWidth,
+    sidePanelWidth
+  ])
+
   return (
     <Box
       sx={{
@@ -564,7 +591,15 @@ const Layout: React.FC = () => {
 
         <Box sx={{ position: 'relative', flex: 1, overflow: 'hidden', minWidth: 0, minHeight: 0 }}>
           <Box
-            sx={{ position: 'absolute', inset: 0, overflow: 'hidden', minWidth: 0, minHeight: 0 }}
+            sx={{
+              position: 'absolute',
+              inset: 0,
+              display: bottomPanelMaximized ? 'none' : 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+              minWidth: 0,
+              minHeight: 0
+            }}
           >
             <MainArea />
           </Box>

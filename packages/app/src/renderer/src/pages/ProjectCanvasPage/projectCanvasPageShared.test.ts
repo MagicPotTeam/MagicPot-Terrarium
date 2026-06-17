@@ -1,11 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   EXPORT_IMAGE_MAX_AREA,
   EXPORT_IMAGE_MAX_SIDE,
   resolveCanvasExportRasterConfig
 } from './canvasExportRasterUtils'
-import { getCanvasItemBounds } from './projectCanvasPageShared'
+import { getCanvasItemBounds, resolveDroppedAgentImageDataUrl } from './projectCanvasPageShared'
 
 describe('resolveCanvasExportRasterConfig', () => {
   it('keeps regular exports at the requested raster size', () => {
@@ -86,5 +86,46 @@ describe('getCanvasItemBounds', () => {
     expect(bounds.maxX).toBeCloseTo(120, 5)
     expect(bounds.minY).toBeCloseTo(160, 5)
     expect(bounds.maxY).toBeCloseTo(240, 5)
+  })
+})
+
+describe('resolveDroppedAgentImageDataUrl', () => {
+  it('prefers the internal quick-app image payload over placeholder files', async () => {
+    const placeholderFile = new File(['x'], 'placeholder.png', { type: 'image/png' })
+    const createObjectURL = vi.fn(() => 'blob:placeholder-file')
+    const originalCreateObjectURL = URL.createObjectURL
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL
+    })
+
+    try {
+      const dataTransfer = {
+        files: [placeholderFile],
+        getData: (type: string) =>
+          type === 'application/x-qapp-image'
+            ? JSON.stringify({
+                objectUrl: 'blob:real-generated-image',
+                fileItem: { filename: 'generated.png' },
+                sourceWidth: 1024,
+                sourceHeight: 768
+              })
+            : ''
+      } as unknown as Pick<DataTransfer, 'getData' | 'files'>
+
+      await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
+        src: 'blob:real-generated-image',
+        fileName: 'generated.png',
+        sizeBytes: undefined,
+        sourceWidthHint: 1024,
+        sourceHeightHint: 768
+      })
+      expect(createObjectURL).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        value: originalCreateObjectURL
+      })
+    }
   })
 })

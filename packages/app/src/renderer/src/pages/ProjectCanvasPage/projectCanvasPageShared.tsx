@@ -397,6 +397,19 @@ export async function resolveDroppedAgentImageDataUrl(
   const quickAppImagePayload = dataTransfer.getData(QAPP_IMAGE_DRAG_MIME).trim()
   if (!agentImageUrl && !quickAppImagePayload) return null
 
+  const normalizedAgentUrl = normalizeLocalMediaUrl(agentImageUrl)
+  if (normalizedAgentUrl) {
+    return {
+      src: normalizedAgentUrl,
+      fileName: getDownloadFileNameFromUrl(normalizedAgentUrl, 'dropped-image.png')
+    }
+  }
+
+  const quickAppImageData = resolveQuickAppImageDragData(quickAppImagePayload)
+  if (quickAppImageData) {
+    return quickAppImageData
+  }
+
   const droppedImageFile = resolveDroppedImageFile(dataTransfer)
   if (droppedImageFile && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
     return {
@@ -410,15 +423,7 @@ export async function resolveDroppedAgentImageDataUrl(
     }
   }
 
-  const normalizedAgentUrl = normalizeLocalMediaUrl(agentImageUrl)
-  if (normalizedAgentUrl) {
-    return {
-      src: normalizedAgentUrl,
-      fileName: getDownloadFileNameFromUrl(normalizedAgentUrl, 'dropped-image.png')
-    }
-  }
-
-  return resolveQuickAppImageDragData(quickAppImagePayload)
+  return null
 }
 
 export const VIDEO_FRAME_CAPTURE_EPSILON_SECONDS = 0.05
