@@ -19,7 +19,6 @@ import { DragDropContext, Draggable, Droppable, DropResult } from '@hello-pangea
 import { useTranslation } from 'react-i18next'
 import { CalloutNodeNotInstalled } from '../components/CalloutNodeNotInstalled'
 import { CalloutComfyAPINotAvailable } from '../components/CalloutComfyAPINotAvailable'
-import DsnIcon from './qAppDesignInputs/DsnIcon'
 import DsnCustomNodeUrls from './qAppDesignInputs/DsnCustomNodeUrls'
 import DsnRequiredModels from './qAppDesignInputs/DsnRequiredModels'
 import { ButtonAddAutoItem } from './ButtonAddAutoItem'
@@ -99,8 +98,6 @@ export const QAppDesignPopUpPanel = ({
   initialName,
   selectedCategory,
   onSelectedCategoryChange,
-  icon,
-  setIcon,
   customNodeUrls,
   setCustomNodeUrls,
   isCustomNodeUrlsEnabled,
@@ -136,7 +133,6 @@ export const QAppDesignPopUpPanel = ({
   // 生成当前状态的快照字符串
   const getCurrentSnapshot = (): string => {
     return JSON.stringify({
-      icon,
       customNodeUrls,
       isCustomNodeUrlsEnabled,
       requiredModels,
@@ -265,11 +261,6 @@ export const QAppDesignPopUpPanel = ({
               <Stack spacing={3}>
                 <CalloutNodeNotInstalled workflow={workflow} objectInfos={objectInfos} />
                 <CalloutComfyAPINotAvailable isDesignMode={true} objectInfos={objectInfos} />
-
-                <Typography variant="h6">
-                  {t('qapp.design.set_app_icon') || '设置应用图标'}
-                </Typography>
-                <DsnIcon value={icon} setValue={setIcon} />
 
                 <Typography variant="h6">{t('qapp.design.set_custom_node_urls')}</Typography>
                 <DsnCustomNodeUrls
