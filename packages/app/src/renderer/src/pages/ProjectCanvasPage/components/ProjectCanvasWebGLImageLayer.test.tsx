@@ -388,6 +388,31 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     installPixiMock()
   })
 
+  it('initializes Pixi with explicit canvas clearing to avoid transparent-frame trails', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+
+    render(
+      <ProjectCanvasWebGLImageLayer
+        items={[createItem()]}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 640, height: 480 }}
+      />
+    )
+
+    await waitFor(
+      () => {
+        expect(createdApplications).toHaveLength(1)
+      },
+      { timeout: 15000 }
+    )
+
+    expect(createdApplications[0].initOptions).toMatchObject({
+      backgroundAlpha: 0,
+      clearBeforeRender: true
+    })
+  })
+
   it('resizes the Pixi renderer when the stage size changes', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
 

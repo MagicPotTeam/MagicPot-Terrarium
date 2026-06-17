@@ -1611,6 +1611,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         await app.init({
           resizeTo: host,
           backgroundAlpha: 0,
+          clearBeforeRender: true,
           antialias: true,
           autoDensity: true,
           resolution: getProjectCanvasRenderDeviceScale(),

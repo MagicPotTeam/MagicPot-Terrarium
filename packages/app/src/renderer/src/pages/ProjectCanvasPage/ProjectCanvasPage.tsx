@@ -1464,6 +1464,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     () =>
       items.some(
         (item) =>
+          item.type === 'image' ||
           item.type === 'video' ||
           item.type === 'model3d' ||
           item.type === 'html' ||
