@@ -1,13 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ClaudeAPICli, GeminiAPICli, OllamaAPICli, OpenAIAPICli } from './clients'
+import {
+  ClaudeAPICli,
+  GeminiAPICli,
+  OllamaAPICli,
+  OpencodeZenAPICli,
+  OpenAIAPICli
+} from './clients'
+import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 import { KlingVideoAPICli, VolcengineSeedanceAPICli } from './videoClients'
 import {
   cliFromProfile,
   isClaudeUrl,
+  isCodexFastModeEnabled,
   isGeminiUrl,
   isKlingUrl,
   isOllamaProfile,
   isOllamaUrl,
+  isOpencodeZenUrl,
   isRunnableProfile,
   isVolcengineUrl,
   resolveProfileCallType,
@@ -16,11 +25,48 @@ import {
 
 describe('shared llm ollama compatibility', () => {
   afterEach(() => {
+    sharedHostExtensionApiV1.llmProfiles = []
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
 
   const stableFetch = (() => Promise.reject(new Error('not used'))) as typeof fetch
+
+  it('enables Codex fast mode by default unless explicitly disabled', () => {
+    expect(isCodexFastModeEnabled({})).toBe(false)
+    expect(isCodexFastModeEnabled({ auth_mode: 'codex_oauth' })).toBe(true)
+    expect(isCodexFastModeEnabled({ call_type: 'codex' as never })).toBe(true)
+    expect(isCodexFastModeEnabled({ auth_mode: 'codex_oauth', codex_fast_mode: true })).toBe(true)
+    expect(isCodexFastModeEnabled({ auth_mode: 'codex_oauth', codex_fast_mode: false })).toBe(false)
+  })
+
+  it('passes default-enabled Codex fast mode to LLM extensions', () => {
+    const createCli = vi.fn(() => undefined)
+    sharedHostExtensionApiV1.llmProfiles = [{ id: 'codex-test', createCli }]
+
+    cliFromProfile({
+      model_name: 'gpt-5.5',
+      base_url: 'https://codex.local/v1',
+      api_key: 'codex-token',
+      auth_mode: 'codex_oauth'
+    })
+    expect(createCli).toHaveBeenLastCalledWith(
+      expect.objectContaining({ codex_fast_mode: true }),
+      undefined
+    )
+
+    cliFromProfile({
+      model_name: 'gpt-5.5',
+      base_url: 'https://codex.local/v1',
+      api_key: 'codex-token',
+      auth_mode: 'codex_oauth',
+      codex_fast_mode: false
+    })
+    expect(createCli).toHaveBeenLastCalledWith(
+      expect.objectContaining({ codex_fast_mode: false }),
+      undefined
+    )
+  })
 
   it('detects the default Ollama host and allows profiles without API keys', () => {
     const profile = {
@@ -170,6 +216,25 @@ describe('shared llm ollama compatibility', () => {
     expect(isGeminiUrl('https://evil.example/generativelanguage.googleapis.com/v1beta')).toBe(false)
     expect(isClaudeUrl('https://api.anthropic.com/v1/messages')).toBe(true)
     expect(isClaudeUrl('https://gateway.example/claude/v1/messages')).toBe(false)
+  })
+
+  it('recognizes OpenCode Zen base URLs without matching spoofed hosts', () => {
+    expect(isOpencodeZenUrl('https://opencode.ai/zen/v1')).toBe(true)
+    expect(isOpencodeZenUrl('opencode.ai/zen/v1')).toBe(true)
+    expect(isOpencodeZenUrl('https://opencode.ai/zen/v1/messages')).toBe(true)
+    expect(isOpencodeZenUrl('https://opencode.ai.evil.example/zen/v1')).toBe(false)
+  })
+
+  it('routes OpenCode Zen profiles through the Zen multi-endpoint client', () => {
+    const profile = {
+      model_name: 'opencode/claude-opus-4-8',
+      base_url: 'https://opencode.ai/zen/v1',
+      api_key: 'zen-key',
+      provider: 'default' as const
+    }
+
+    expect(isRunnableProfile(profile)).toBe(true)
+    expect(cliFromProfile(profile, { fetchImpl: stableFetch })).toBeInstanceOf(OpencodeZenAPICli)
   })
 
   it('allows local OpenAI-compatible gateways without API keys', () => {
