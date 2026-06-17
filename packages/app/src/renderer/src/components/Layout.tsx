@@ -37,6 +37,7 @@ const SIDE_PANEL_MAX_WIDTH = 840
 const RIGHT_PANEL_MIN_WIDTH = 360
 const RIGHT_PANEL_MAX_WIDTH = 1024
 const BOTTOM_PANEL_DEFAULT_HEIGHT = 220
+const LAYOUT_RESIZE_HANDLE_SIZE = 4
 const ROUTE_TAB_SYNC_DELAY_MS = 50
 const LAYOUT_RESIZE_REMEASURE_SETTLE_DELAY_MS = 120
 export const STARTUP_HOME_PAINT_DELAY_MS = 160
@@ -171,6 +172,36 @@ export const scheduleStartupRestoreAfterHomePaint = (callback: () => void): (() 
 
 type ResizeDirection = 'side' | 'right' | 'bottom' | null
 
+type MainAreaOverlayInsetsOptions = {
+  sidePanelVisible: boolean
+  sidePanelWidth: number
+  rightPanelVisible: boolean
+  rightPanelWidth: number
+  bottomPanelVisible: boolean
+  bottomPanelMaximized: boolean
+  bottomPanelHeight: number
+}
+
+export function resolveMainAreaOverlayInsets({
+  sidePanelVisible,
+  sidePanelWidth,
+  rightPanelVisible,
+  rightPanelWidth,
+  bottomPanelVisible,
+  bottomPanelMaximized,
+  bottomPanelHeight
+}: MainAreaOverlayInsetsOptions) {
+  return {
+    top: 0,
+    left: sidePanelVisible ? sidePanelWidth + LAYOUT_RESIZE_HANDLE_SIZE : 0,
+    right: rightPanelVisible ? rightPanelWidth : 0,
+    bottom:
+      bottomPanelVisible && !bottomPanelMaximized
+        ? bottomPanelHeight + LAYOUT_RESIZE_HANDLE_SIZE
+        : 0
+  }
+}
+
 interface ResizeHandleProps {
   direction: 'horizontal' | 'vertical'
   onMouseDown: (e: React.MouseEvent) => void
@@ -182,8 +213,8 @@ const ResizeHandle: React.FC<ResizeHandleProps> = ({ direction, onMouseDown }) =
     <Box
       onMouseDown={onMouseDown}
       sx={(theme) => ({
-        [isH ? 'width' : 'height']: 4,
-        [isH ? 'minWidth' : 'minHeight']: 4,
+        [isH ? 'width' : 'height']: LAYOUT_RESIZE_HANDLE_SIZE,
+        [isH ? 'minWidth' : 'minHeight']: LAYOUT_RESIZE_HANDLE_SIZE,
         cursor: isH ? 'col-resize' : 'row-resize',
         backgroundColor:
           theme.palette.mode === 'dark'
@@ -545,6 +576,15 @@ const Layout: React.FC = () => {
 
   const effectSidePanel = isProjectTab && isProjectRoute ? activeSidePanel : null
   const effectRightPanelVisible = isProjectTab && isProjectRoute ? rightPanelVisible : false
+  const mainAreaInsets = resolveMainAreaOverlayInsets({
+    sidePanelVisible: Boolean(effectSidePanel),
+    sidePanelWidth,
+    rightPanelVisible: effectRightPanelVisible,
+    rightPanelWidth,
+    bottomPanelVisible,
+    bottomPanelMaximized,
+    bottomPanelHeight
+  })
 
   useEffect(() => {
     const firstFrameId = window.requestAnimationFrame(dispatchMaxSizeLayoutRemeasure)
@@ -593,7 +633,7 @@ const Layout: React.FC = () => {
           <Box
             sx={{
               position: 'absolute',
-              inset: 0,
+              ...mainAreaInsets,
               display: bottomPanelMaximized ? 'none' : 'flex',
               flexDirection: 'column',
               overflow: 'hidden',
