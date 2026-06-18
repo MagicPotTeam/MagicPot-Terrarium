@@ -102,8 +102,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
         Panel: PanelPlugin,
         description: tabText(
           'settings.tab_descs.plugin',
-          '快应用 API 配置',
-          'Quick App API settings'
+          '配置快应用运行、提示词辅助与扩展功能所需的 API 档案',
+          'Configure API profiles for Quick App runtime, prompt helpers, and extensions'
         )
       },
       {
@@ -111,7 +111,11 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
         value: 'llm',
         icon: <Code sx={{ fontSize: 18 }} />,
         Panel: PanelLLM,
-        description: tabText('settings.tab_descs.llm', 'Agent线程配置', 'Agent thread settings')
+        description: tabText(
+          'settings.tab_descs.llm',
+          '配置 Agent 线程使用的模型与 API 档案',
+          'Configure models and API profiles used by Agent threads'
+        )
       },
       {
         label: localizedText('settings.tabs.mcp', 'MCP'),
