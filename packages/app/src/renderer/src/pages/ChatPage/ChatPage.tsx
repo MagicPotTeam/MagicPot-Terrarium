@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
+import { useNavigate } from 'react-router-dom'
 import { Box, Typography, CircularProgress, Alert, Tooltip, useTheme, Button } from '@mui/material'
 import { useTranslation } from 'react-i18next'
 import { useConfig } from '@renderer/hooks/useConfig'
@@ -477,6 +478,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const { t, i18n } = useTranslation()
   const isChineseUi = (i18n?.resolvedLanguage || i18n?.language || '').startsWith('zh')
   const theme = useTheme()
+  const navigate = useNavigate()
   const { config, buildEnv, isReady } = useConfig()
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useMessage()
   const emitPreviewRefresh = useCallback(() => {
@@ -486,6 +488,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       })
     )
   }, [storageScope])
+  const handleGoToApiThreadSettings = useCallback(() => {
+    navigate('/settings', { state: { tab: 'llm' } })
+  }, [navigate])
   const buildSkillAttachmentUnsupportedMessage = useCallback(
     (params: {
       skillName?: string | null
@@ -4818,11 +4823,63 @@ const ChatPage: React.FC<ChatPageProps> = ({
             bgcolor: isLight ? 'transparent' : theme.palette.background.default
           }}
         >
-          <Alert severity="warning" sx={{ maxWidth: 500 }}>
-            <Typography variant="h6" gutterBottom>
+          <Alert
+            severity="warning"
+            action={
+              <Button
+                color="inherit"
+                size="small"
+                onClick={handleGoToApiThreadSettings}
+                sx={{
+                  minWidth: 'auto',
+                  px: 1,
+                  color: '#ffd38c',
+                  fontSize: 13,
+                  fontWeight: 800,
+                  textTransform: 'none',
+                  '&:hover': {
+                    bgcolor: 'rgba(255, 211, 140, 0.1)'
+                  }
+                }}
+              >
+                {t('quickapp.snackbar.go')}
+              </Button>
+            }
+            sx={(theme) => ({
+              width: compact ? 'calc(100% - 48px)' : '100%',
+              maxWidth: 500,
+              px: 2,
+              py: 1.75,
+              borderRadius: 2,
+              bgcolor: theme.palette.mode === 'dark' ? '#1b1000' : '#fff7ed',
+              color: theme.palette.mode === 'dark' ? '#fff3d8' : '#5c3b00',
+              alignItems: 'flex-start',
+              '& .MuiAlert-icon': {
+                color: '#f6b73c',
+                pt: 0.25,
+                mr: 1.25
+              },
+              '& .MuiAlert-message': {
+                flex: 1,
+                minWidth: 0,
+                py: 0
+              },
+              '& .MuiAlert-action': {
+                alignSelf: 'stretch',
+                alignItems: 'flex-end',
+                pt: 0,
+                pl: 2,
+                pr: 0,
+                mr: 0
+              }
+            })}
+          >
+            <Typography sx={{ fontSize: 16, fontWeight: 800, lineHeight: 1.35, mb: 0.75 }}>
               {t('chat.no_llm_config')}
             </Typography>
-            <Typography variant="body2">{t('chat.go_to_settings')}</Typography>
+            <Typography sx={{ fontSize: 14, lineHeight: 1.5, color: 'inherit' }}>
+              {t('chat.go_to_settings')}
+            </Typography>
           </Alert>
         </Box>
         {compactSkillPortal}
