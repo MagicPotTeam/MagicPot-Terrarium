@@ -182,6 +182,15 @@ type MainAreaOverlayInsetsOptions = {
   bottomPanelHeight: number
 }
 
+type BottomPanelOverlayBoundsOptions = {
+  sidePanelVisible: boolean
+  sidePanelWidth: number
+  rightPanelVisible: boolean
+  rightPanelWidth: number
+  bottomPanelMaximized: boolean
+  bottomPanelHeight: number
+}
+
 export function resolveMainAreaOverlayInsets({
   sidePanelVisible,
   sidePanelWidth,
@@ -199,6 +208,21 @@ export function resolveMainAreaOverlayInsets({
       bottomPanelVisible && !bottomPanelMaximized
         ? bottomPanelHeight + LAYOUT_RESIZE_HANDLE_SIZE
         : 0
+  }
+}
+
+export function resolveBottomPanelOverlayBounds({
+  sidePanelVisible,
+  sidePanelWidth,
+  rightPanelVisible,
+  rightPanelWidth,
+  bottomPanelMaximized,
+  bottomPanelHeight
+}: BottomPanelOverlayBoundsOptions) {
+  return {
+    left: sidePanelVisible ? sidePanelWidth + LAYOUT_RESIZE_HANDLE_SIZE : 0,
+    right: rightPanelVisible ? rightPanelWidth : 0,
+    height: bottomPanelMaximized ? '100%' : bottomPanelHeight + LAYOUT_RESIZE_HANDLE_SIZE
   }
 }
 
@@ -576,12 +600,21 @@ const Layout: React.FC = () => {
 
   const effectSidePanel = isProjectTab && isProjectRoute ? activeSidePanel : null
   const effectRightPanelVisible = isProjectTab && isProjectRoute ? rightPanelVisible : false
+  const sidePanelVisible = Boolean(effectSidePanel)
   const mainAreaInsets = resolveMainAreaOverlayInsets({
-    sidePanelVisible: Boolean(effectSidePanel),
+    sidePanelVisible,
     sidePanelWidth,
     rightPanelVisible: effectRightPanelVisible,
     rightPanelWidth,
     bottomPanelVisible,
+    bottomPanelMaximized,
+    bottomPanelHeight
+  })
+  const bottomPanelBounds = resolveBottomPanelOverlayBounds({
+    sidePanelVisible,
+    sidePanelWidth,
+    rightPanelVisible: effectRightPanelVisible,
+    rightPanelWidth,
     bottomPanelMaximized,
     bottomPanelHeight
   })
@@ -673,10 +706,10 @@ const Layout: React.FC = () => {
               data-canvas-document-drop-bypass="bottom-panel"
               sx={{
                 position: 'absolute',
-                left: 0,
-                right: 0,
+                left: bottomPanelBounds.left,
+                right: bottomPanelBounds.right,
                 bottom: 0,
-                height: bottomPanelMaximized ? '100%' : bottomPanelHeight + 4,
+                height: bottomPanelBounds.height,
                 zIndex: 50,
                 display: 'flex',
                 flexDirection: 'column',

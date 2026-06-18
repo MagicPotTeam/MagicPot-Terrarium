@@ -6,6 +6,7 @@ import {
   resolveStartupFallbackRoutePath,
   resolveStartupRouteTarget,
   resolveHashRoutePath,
+  resolveBottomPanelOverlayBounds,
   resolveMainAreaOverlayInsets,
   SIDE_PANEL_DEFAULT_WIDTH,
   shouldPersistCurrentRoute,
@@ -58,6 +59,32 @@ describe('Layout overlay insets', () => {
         bottomPanelHeight: 220
       })
     ).toEqual({ top: 0, left: 0, right: 0, bottom: 0 })
+  })
+
+  it('keeps the bottom panel between the left quick-app panel and the right agent panel', () => {
+    expect(
+      resolveBottomPanelOverlayBounds({
+        sidePanelVisible: true,
+        sidePanelWidth: 460,
+        rightPanelVisible: true,
+        rightPanelWidth: 420,
+        bottomPanelMaximized: false,
+        bottomPanelHeight: 220
+      })
+    ).toEqual({ left: 464, right: 420, height: 224 })
+  })
+
+  it('lets the maximized bottom panel cover only the center workspace, not the side panels', () => {
+    expect(
+      resolveBottomPanelOverlayBounds({
+        sidePanelVisible: true,
+        sidePanelWidth: 460,
+        rightPanelVisible: true,
+        rightPanelWidth: 420,
+        bottomPanelMaximized: true,
+        bottomPanelHeight: 220
+      })
+    ).toEqual({ left: 464, right: 420, height: '100%' })
   })
 })
 
