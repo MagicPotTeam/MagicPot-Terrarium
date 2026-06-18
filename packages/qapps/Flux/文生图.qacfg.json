@@ -35,22 +35,22 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.39.inputs.unet_name",
+      "slot": "$.325.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.23.inputs.clip_name1",
+      "slot": "$.323.inputs.clip_name1",
       "component": "InputComfySelect"
     },
     {
       "label": "T5XXL加载器",
-      "slot": "$.23.inputs.clip_name2",
+      "slot": "$.323.inputs.clip_name2",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.25.inputs.vae_name",
+      "slot": "$.326.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
@@ -63,21 +63,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.19.inputs.model",
-        "$.33.inputs.model",
-        "$.43.inputs.model"
+        "$.317.inputs.model",
+        "$.1444.inputs.model"
       ],
       "outputClipSlots": [
-        "$.28.inputs.clip",
-        "$.53.inputs.clip",
-        "$.54.inputs.clip"
+        "$.342.inputs.clip",
+        "$.343.inputs.clip"
       ],
       "inputModel": [
-        "39",
+        "325",
         0
       ],
       "inputClip": [
-        "23",
+        "323",
         0
       ]
     },
@@ -91,29 +89,28 @@
       "label": "图片尺寸",
       "component": "InputImageSize",
       "seperateSlots": true,
-      "widthSlot": "$.31.inputs.value",
-      "heightSlot": "$.32.inputs.value"
+      "widthSlot": "$.371.inputs.value",
+      "heightSlot": "$.372.inputs.value"
     },
     {
       "label": "提示词",
-      "slot": "$.30.inputs.value",
+      "slot": "$.345.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.34.inputs.value",
+      "slot": "$.382.inputs.value",
       "component": "InputSeed"
     }
   ],
   "autoInputs": [],
   "customNodeUrls": [
-    "https://github.com/kijai/ComfyUI-KJNodes",
-    "https://github.com/yolain/ComfyUI-Easy-Use",
     "https://github.com/pythongosssss/ComfyUI-Custom-Scripts",
-    "https://github.com/Fannovel16/comfyui_controlnet_aux"
+    "https://github.com/yolain/ComfyUI-Easy-Use",
+    "https://github.com/kijai/ComfyUI-KJNodes"
   ],
   "outputNodeIds": [
-    "38"
+    "377"
   ]
 }

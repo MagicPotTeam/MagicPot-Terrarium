@@ -9,27 +9,27 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.86.inputs.unet_name",
+      "slot": "$.1210.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.88.inputs.clip_name",
+      "slot": "$.1213.inputs.clip_name",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.89.inputs.vae_name",
+      "slot": "$.1214.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Anyline-Controlnet",
-      "slot": "$.90.inputs.control_net_name",
+      "slot": "$.1215.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Depth-Controlnet",
-      "slot": "$.91.inputs.control_net_name",
+      "slot": "$.1216.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
@@ -42,19 +42,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.95.inputs.model",
-        "$.107.inputs.model"
+        "$.1228.inputs.model",
+        "$.1417.inputs.model"
       ],
       "outputClipSlots": [
-        "$.68.inputs.clip",
-        "$.84.inputs.clip"
+        "$.1123.inputs.clip",
+        "$.1181.inputs.clip"
       ],
       "inputModel": [
-        "87",
+        "1212",
         0
       ],
       "inputClip": [
-        "88",
+        "1213",
         0
       ]
     },
@@ -66,36 +66,35 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.99.inputs.image",
+      "slot": "$.1202.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "正面提示词",
-      "slot": "$.93.inputs.value",
+      "slot": "$.1218.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.94.inputs.value",
+      "slot": "$.1220.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.85.inputs.value",
+      "slot": "$.1188.inputs.value",
       "component": "InputSeed"
     }
   ],
   "autoInputs": [],
   "customNodeUrls": [
     "https://github.com/Fannovel16/comfyui_controlnet_aux",
-    "https://github.com/pythongosssss/ComfyUI-Custom-Scripts",
     "https://github.com/yolain/ComfyUI-Easy-Use",
     "https://github.com/kijai/ComfyUI-KJNodes"
   ],
   "outputNodeIds": [
-    "111"
+    "1126"
   ],
   "requiredModels": [
     {

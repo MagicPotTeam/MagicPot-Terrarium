@@ -9,7 +9,7 @@
     },
     {
       "label": "Checkpoint加载器",
-      "slot": "$.57.inputs.ckpt_name",
+      "slot": "$.363.inputs.ckpt_name",
       "component": "InputComfySelect"
     },
     {
@@ -22,19 +22,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.32.inputs.*"
+        "$.174.inputs.model",
+        "$.175.inputs.model"
       ],
       "outputClipSlots": [
-        "$.28.inputs.clip",
-        "$.35.inputs.clip",
-        "$.44.inputs.clip"
+        "$.165.inputs.clip",
+        "$.350.inputs.clip"
       ],
       "inputModel": [
-        "57",
+        "162",
         0
       ],
       "inputClip": [
-        "57",
+        "363",
         1
       ]
     },
@@ -48,45 +48,36 @@
       "label": "图片尺寸",
       "component": "InputImageSize",
       "seperateSlots": true,
-      "widthSlot": "$.48.inputs.value",
-      "heightSlot": "$.49.inputs.value"
+      "widthSlot": "$.373.inputs.value",
+      "heightSlot": "$.374.inputs.value"
     },
     {
       "label": "正面提示词",
-      "slot": "$.46.inputs.value",
+      "slot": "$.369.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.47.inputs.value",
+      "slot": "$.370.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.45.inputs.value",
+      "slot": "$.361.inputs.value",
       "component": "InputSeed"
     }
   ],
   "autoInputs": [],
   "customNodeUrls": [
-    "https://github.com/Fannovel16/comfyui_controlnet_aux",
     "https://github.com/pythongosssss/ComfyUI-Custom-Scripts",
     "https://github.com/yolain/ComfyUI-Easy-Use",
     "https://github.com/kijai/ComfyUI-KJNodes",
-    "https://github.com/shiimizu/ComfyUI_smZNodes",
-    "https://github.com/chinoll/ComfyUI-Advanced-ControlNet"
+    "https://github.com/shiimizu/ComfyUI_smZNodes"
   ],
   "outputNodeIds": [
-    "37"
+    "172"
   ],
-  "requiredModels": [
-    {
-      "name": "Chenkin-UniControl-XL.safetensors",
-      "size": "2.5 GB",
-      "dir": "models/controlnet",
-      "url": "https://modelscope.cn/models/ChenkinNoob/Chenkin-UniControl-XL/resolve/master/Chenkin-UniControl-XL.safetensors"
-    }
-  ]
+  "requiredModels": []
 }

@@ -1,528 +1,519 @@
 {
-  "14": {
+  "309": {
+    "class_type": "GetImageSize",
     "inputs": {
       "image": [
-        "57",
+        "340",
         0
       ]
     },
-    "class_type": "GetImageSize",
     "_meta": {
-      "title": "获取图像尺寸"
+      "title": "GetImageSize"
     }
   },
-  "19": {
+  "317": {
+    "class_type": "ModelSamplingFlux",
     "inputs": {
-      "max_shift": 1.15,
-      "base_shift": 0.5000000000000001,
+      "model": [
+        "336",
+        0
+      ],
       "width": [
-        "14",
+        "309",
         0
       ],
       "height": [
-        "14",
+        "309",
         1
       ],
-      "model": [
-        "52",
-        0
-      ]
+      "max_shift": 1.15,
+      "base_shift": 0.5000000000000001
     },
-    "class_type": "ModelSamplingFlux",
     "_meta": {
-      "title": "采样算法（Flux）"
+      "title": "ModelSamplingFlux"
     }
   },
-  "20": {
+  "318": {
+    "class_type": "KSampler",
     "inputs": {
+      "model": [
+        "317",
+        0
+      ],
+      "positive": [
+        "343",
+        0
+      ],
+      "negative": [
+        "342",
+        0
+      ],
+      "latent_image": [
+        "1447",
+        0
+      ],
       "seed": [
-        "34",
+        "382",
+        0
+      ],
+      "denoise": [
+        "390",
         0
       ],
       "steps": 36,
       "cfg": 1,
       "sampler_name": "dpmpp_2m",
-      "scheduler": "sgm_uniform",
-      "denoise": [
-        "35",
+      "scheduler": "sgm_uniform"
+    },
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "319": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "318",
         0
       ],
-      "model": [
-        "19",
-        0
-      ],
-      "positive": [
-        "53",
-        0
-      ],
-      "negative": [
-        "54",
-        0
-      ],
-      "latent_image": [
-        "45",
+      "vae": [
+        "326",
         0
       ]
     },
-    "class_type": "KSampler",
     "_meta": {
-      "title": "K采样器"
+      "title": "VAEDecode"
     }
   },
-  "23": {
+  "323": {
+    "class_type": "DualCLIPLoader",
     "inputs": {
       "clip_name1": "clip_l.safetensors",
       "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
       "type": "flux",
       "device": "default"
     },
-    "class_type": "DualCLIPLoader",
     "_meta": {
-      "title": "双CLIP加载器"
+      "title": "DualCLIPLoader"
     }
   },
-  "25": {
+  "325": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "flux1-dev-fp8-e4m3fn.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "UNETLoader"
+    }
+  },
+  "326": {
+    "class_type": "VAELoader",
     "inputs": {
       "vae_name": "ae.safetensors"
     },
-    "class_type": "VAELoader",
     "_meta": {
-      "title": "加载VAE"
+      "title": "VAELoader"
     }
   },
-  "26": {
+  "327": {
+    "class_type": "VAEDecode",
     "inputs": {
       "samples": [
-        "33",
+        "381",
         0
       ],
       "vae": [
-        "25",
+        "326",
         0
       ]
     },
-    "class_type": "VAEDecode",
     "_meta": {
-      "title": "VAE解码"
+      "title": "VAEDecode"
     }
   },
-  "27": {
+  "328": {
+    "class_type": "EmptyLatentImage",
     "inputs": {
       "width": [
-        "31",
+        "371",
         0
       ],
       "height": [
-        "32",
+        "372",
         0
       ],
       "batch_size": 1
     },
-    "class_type": "EmptyLatentImage",
     "_meta": {
-      "title": "空Latent图像"
+      "title": "EmptyLatentImage"
     }
   },
-  "28": {
+  "329": {
+    "class_type": "CLIPTextEncode",
     "inputs": {
-      "text": "",
       "clip": [
-        "23",
+        "323",
+        0
+      ],
+      "text": ""
+    },
+    "_meta": {
+      "title": "CLIPTextEncode"
+    }
+  },
+  "336": {
+    "class_type": "LoraLoader",
+    "inputs": {
+      "model": [
+        "325",
+        0
+      ],
+      "clip": [
+        "323",
+        0
+      ],
+      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "strength_model": 0.8000000000000002,
+      "strength_clip": 0.8000000000000002
+    },
+    "_meta": {
+      "title": "LoraLoader"
+    }
+  },
+  "340": {
+    "class_type": "easy anythingIndexSwitch",
+    "inputs": {
+      "value0": [
+        "327",
+        0
+      ],
+      "index": 0
+    },
+    "_meta": {
+      "title": "easy anythingIndexSwitch"
+    }
+  },
+  "342": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "336",
+        1
+      ],
+      "text": ""
+    },
+    "_meta": {
+      "title": "CLIPTextEncode"
+    }
+  },
+  "343": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "336",
+        1
+      ],
+      "text": [
+        "345",
         0
       ]
     },
-    "class_type": "CLIPTextEncode",
     "_meta": {
-      "title": "CLIP文本编码"
+      "title": "CLIPTextEncode"
     }
   },
-  "30": {
+  "345": {
+    "class_type": "PrimitiveStringMultiline",
     "inputs": {
       "value": ""
     },
-    "class_type": "PrimitiveStringMultiline",
     "_meta": {
-      "title": "字符串（多行）"
+      "title": "PrimitiveStringMultiline"
     }
   },
-  "31": {
+  "371": {
+    "class_type": "PrimitiveInt",
     "inputs": {
       "value": 1024
     },
-    "class_type": "PrimitiveInt",
     "_meta": {
-      "title": "整数"
+      "title": "PrimitiveInt"
     }
   },
-  "32": {
+  "372": {
+    "class_type": "PrimitiveInt",
     "inputs": {
       "value": 1024
     },
-    "class_type": "PrimitiveInt",
     "_meta": {
-      "title": "整数"
+      "title": "PrimitiveInt"
     }
   },
-  "33": {
+  "377": {
+    "class_type": "SaveImage",
     "inputs": {
+      "images": [
+        "1440",
+        0
+      ],
+      "filename_prefix": "ComfyUI"
+    },
+    "_meta": {
+      "title": "SaveImage"
+    }
+  },
+  "381": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "325",
+        0
+      ],
+      "positive": [
+        "329",
+        0
+      ],
+      "negative": [
+        "329",
+        0
+      ],
+      "latent_image": [
+        "328",
+        0
+      ],
       "seed": [
-        "34",
+        "382",
         0
       ],
       "steps": 1,
       "cfg": 1,
       "sampler_name": "euler",
       "scheduler": "normal",
-      "denoise": 1,
-      "model": [
-        "39",
-        0
-      ],
-      "positive": [
-        "28",
-        0
-      ],
-      "negative": [
-        "28",
-        0
-      ],
-      "latent_image": [
-        "27",
-        0
-      ]
+      "denoise": 1
     },
-    "class_type": "KSampler",
     "_meta": {
-      "title": "K采样器"
+      "title": "KSampler"
     }
   },
-  "34": {
+  "382": {
+    "class_type": "PrimitiveInt",
     "inputs": {
       "value": 0
     },
-    "class_type": "PrimitiveInt",
     "_meta": {
-      "title": "整数"
+      "title": "PrimitiveInt"
     }
   },
-  "35": {
+  "390": {
+    "class_type": "easy float",
     "inputs": {
       "value": 1
     },
-    "class_type": "easy float",
     "_meta": {
-      "title": "浮点数"
+      "title": "easy float"
     }
   },
-  "36": {
+  "391": {
+    "class_type": "MathExpression|pysssss",
+    "inputs": {
+      "a": [
+        "390",
+        0
+      ],
+      "b": [
+        "392",
+        0
+      ],
+      "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))"
+    },
+    "_meta": {
+      "title": "MathExpression|pysssss"
+    }
+  },
+  "392": {
+    "class_type": "easy float",
     "inputs": {
       "value": 0.55
     },
-    "class_type": "easy float",
     "_meta": {
-      "title": "浮点数"
+      "title": "easy float"
     }
   },
-  "38": {
+  "1439": {
+    "class_type": "ImageResizeKJ",
     "inputs": {
-      "filename_prefix": "ComfyUI",
-      "images": [
-        "51",
+      "image": [
+        "319",
         0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "保存图像"
-    }
-  },
-  "39": {
-    "inputs": {
-      "unet_name": "flux1-dev-fp8-e4m3fn.safetensors",
-      "weight_dtype": "default"
-    },
-    "class_type": "UNETLoader",
-    "_meta": {
-      "title": "UNet加载器"
-    }
-  },
-  "40": {
-    "inputs": {
+      ],
       "width": 1536,
       "height": 1536,
       "upscale_method": "lanczos",
       "keep_proportion": true,
       "divisible_by": 2,
-      "crop": "disabled",
-      "image": [
-        "47",
-        0
-      ]
+      "crop": "disabled"
     },
+    "_meta": {
+      "title": "ImageResizeKJ"
+    }
+  },
+  "1440": {
     "class_type": "ImageResizeKJ",
-    "_meta": {
-      "title": "Resize Image (deprecated)"
-    }
-  },
-  "41": {
-    "inputs": {
-      "pixels": [
-        "40",
-        0
-      ],
-      "vae": [
-        "25",
-        0
-      ]
-    },
-    "class_type": "VAEEncode",
-    "_meta": {
-      "title": "VAE编码"
-    }
-  },
-  "42": {
-    "inputs": {
-      "samples": [
-        "49",
-        0
-      ],
-      "vae": [
-        "25",
-        0
-      ]
-    },
-    "class_type": "VAEDecode",
-    "_meta": {
-      "title": "VAE解码"
-    }
-  },
-  "43": {
-    "inputs": {
-      "max_shift": 1.15,
-      "base_shift": 0.5000000000000001,
-      "width": [
-        "48",
-        0
-      ],
-      "height": [
-        "48",
-        1
-      ],
-      "model": [
-        "52",
-        0
-      ]
-    },
-    "class_type": "ModelSamplingFlux",
-    "_meta": {
-      "title": "采样算法（Flux）"
-    }
-  },
-  "44": {
-    "inputs": {
-      "width": 1024,
-      "height": 1024,
-      "upscale_method": "lanczos",
-      "keep_proportion": true,
-      "divisible_by": 2,
-      "crop": "disabled",
-      "image": [
-        "57",
-        0
-      ]
-    },
-    "class_type": "ImageResizeKJ",
-    "_meta": {
-      "title": "Resize Image (deprecated)"
-    }
-  },
-  "45": {
-    "inputs": {
-      "pixels": [
-        "44",
-        0
-      ],
-      "vae": [
-        "25",
-        0
-      ]
-    },
-    "class_type": "VAEEncode",
-    "_meta": {
-      "title": "VAE编码"
-    }
-  },
-  "46": {
-    "inputs": {
-      "images": [
-        "57",
-        0
-      ]
-    },
-    "class_type": "PreviewImage",
-    "_meta": {
-      "title": "预览图像"
-    }
-  },
-  "47": {
-    "inputs": {
-      "samples": [
-        "20",
-        0
-      ],
-      "vae": [
-        "25",
-        0
-      ]
-    },
-    "class_type": "VAEDecode",
-    "_meta": {
-      "title": "VAE解码"
-    }
-  },
-  "48": {
     "inputs": {
       "image": [
-        "40",
-        0
-      ]
-    },
-    "class_type": "GetImageSize",
-    "_meta": {
-      "title": "获取图像尺寸"
-    }
-  },
-  "49": {
-    "inputs": {
-      "seed": 278921953093575,
-      "steps": 24,
-      "cfg": 1,
-      "sampler_name": "dpmpp_2m",
-      "scheduler": "sgm_uniform",
-      "denoise": [
-        "50",
-        1
-      ],
-      "model": [
-        "43",
-        0
-      ],
-      "positive": [
-        "53",
-        0
-      ],
-      "negative": [
-        "54",
-        0
-      ],
-      "latent_image": [
-        "41",
-        0
-      ]
-    },
-    "class_type": "KSampler",
-    "_meta": {
-      "title": "K采样器"
-    }
-  },
-  "50": {
-    "inputs": {
-      "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))",
-      "a": [
-        "35",
-        0
-      ],
-      "b": [
-        "36",
-        0
-      ]
-    },
-    "class_type": "MathExpression|pysssss",
-    "_meta": {
-      "title": "Math Expression 🐍"
-    }
-  },
-  "51": {
-    "inputs": {
-      "width": 1024,
-      "height": 1024,
-      "upscale_method": "lanczos",
-      "keep_proportion": true,
-      "divisible_by": 2,
-      "crop": "disabled",
-      "image": [
-        "42",
+        "1443",
         0
       ],
       "get_image_size": [
-        "57",
+        "340",
+        0
+      ],
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled"
+    },
+    "_meta": {
+      "title": "ImageResizeKJ"
+    }
+  },
+  "1441": {
+    "class_type": "GetImageSize",
+    "inputs": {
+      "image": [
+        "1439",
         0
       ]
     },
-    "class_type": "ImageResizeKJ",
     "_meta": {
-      "title": "Resize Image (deprecated)"
+      "title": "GetImageSize"
     }
   },
-  "52": {
+  "1442": {
+    "class_type": "VAEEncode",
     "inputs": {
-      "lora_name": "",
-      "strength_model": 0.8000000000000002,
-      "strength_clip": 0.8000000000000002,
+      "pixels": [
+        "1439",
+        0
+      ],
+      "vae": [
+        "326",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "VAEEncode"
+    }
+  },
+  "1443": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "1445",
+        0
+      ],
+      "vae": [
+        "326",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "VAEDecode"
+    }
+  },
+  "1444": {
+    "class_type": "ModelSamplingFlux",
+    "inputs": {
       "model": [
-        "39",
+        "336",
         0
       ],
-      "clip": [
-        "23",
-        0
-      ]
-    },
-    "class_type": "LoraLoader",
-    "_meta": {
-      "title": "加载LoRA"
-    }
-  },
-  "53": {
-    "inputs": {
-      "text": [
-        "30",
+      "width": [
+        "1441",
         0
       ],
-      "clip": [
-        "52",
+      "height": [
+        "1441",
         1
-      ]
+      ],
+      "max_shift": 1.15,
+      "base_shift": 0.5000000000000001
     },
-    "class_type": "CLIPTextEncode",
     "_meta": {
-      "title": "CLIP文本编码"
+      "title": "ModelSamplingFlux"
     }
   },
-  "54": {
+  "1445": {
+    "class_type": "KSampler",
     "inputs": {
-      "text": "",
-      "clip": [
-        "52",
+      "model": [
+        "1444",
+        0
+      ],
+      "positive": [
+        "343",
+        0
+      ],
+      "negative": [
+        "342",
+        0
+      ],
+      "latent_image": [
+        "1442",
+        0
+      ],
+      "seed": [
+        "382",
+        0
+      ],
+      "denoise": [
+        "391",
         1
-      ]
+      ],
+      "steps": 24,
+      "cfg": 1,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "sgm_uniform"
     },
-    "class_type": "CLIPTextEncode",
     "_meta": {
-      "title": "CLIP文本编码"
+      "title": "KSampler"
     }
   },
-  "57": {
+  "1446": {
+    "class_type": "ImageResizeKJ",
     "inputs": {
-      "index": 0,
-      "value0": [
-        "26",
+      "image": [
+        "340",
+        0
+      ],
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled"
+    },
+    "_meta": {
+      "title": "ImageResizeKJ"
+    }
+  },
+  "1447": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": [
+        "1446",
+        0
+      ],
+      "vae": [
+        "326",
         0
       ]
     },
-    "class_type": "easy anythingIndexSwitch",
     "_meta": {
-      "title": "编号切换"
+      "title": "VAEEncode"
     }
   }
 }
