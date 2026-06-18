@@ -40,6 +40,7 @@ type ChatRequestPayload = {
   profileId?: string
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
+  maxOutputTokens?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
   skillRuntime?: LLMChatSkillRuntime
   sessionUrl?: string
@@ -55,6 +56,7 @@ type RequestChatCompletionInput = {
   profileId?: string | null
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
+  maxOutputTokens?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
   skillRuntime?: LLMChatSkillRuntime
   externalAgentSkill?: CustomSkill | null
@@ -64,11 +66,19 @@ type RequestChatCompletionInput = {
   signal?: AbortSignal
 }
 
+export type RequestChatTokenUsage = {
+  promptTokens?: number
+  completionTokens?: number
+  totalTokens?: number
+}
+
 type RequestChatCompletionResult = {
   content: string
   sessionUrl?: string
   attachments?: ChatAttachment[]
   ocrResult?: OCRResult
+  metadata?: Record<string, unknown>
+  usage?: RequestChatTokenUsage
 }
 
 export type RequestChatCompletionStreamEvent =
@@ -383,6 +393,7 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
     ...(input.reasoningEffort && input.externalAgentSkill?.type !== 'agent'
       ? { reasoningEffort: input.reasoningEffort }
       : {}),
+    ...(input.maxOutputTokens ? { maxOutputTokens: input.maxOutputTokens } : {}),
     ...(requestImageGenerationOptions
       ? { imageGenerationOptions: requestImageGenerationOptions }
       : {}),
@@ -591,6 +602,32 @@ const prepareMessagesForRequest = async (
   return prepared
 }
 
+const normalizeTokenCount = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined
+
+const normalizeChatTokenUsage = (
+  usage?: Record<string, unknown>,
+  metadata?: Record<string, unknown>
+): RequestChatTokenUsage | undefined => {
+  const rawUsage =
+    usage ||
+    (metadata?.usage && typeof metadata.usage === 'object'
+      ? (metadata.usage as Record<string, unknown>)
+      : metadata)
+  const promptTokens = normalizeTokenCount(rawUsage?.promptTokens ?? rawUsage?.prompt_tokens)
+  const completionTokens = normalizeTokenCount(
+    rawUsage?.completionTokens ?? rawUsage?.completion_tokens
+  )
+  const totalTokens = normalizeTokenCount(rawUsage?.totalTokens ?? rawUsage?.total_tokens)
+  return promptTokens !== undefined || completionTokens !== undefined || totalTokens !== undefined
+    ? {
+        ...(promptTokens !== undefined ? { promptTokens } : {}),
+        ...(completionTokens !== undefined ? { completionTokens } : {}),
+        ...(totalTokens !== undefined ? { totalTokens } : {})
+      }
+    : undefined
+}
+
 const normalizeResponse = (response: {
   content?: string
   reply?: string
@@ -600,6 +637,8 @@ const normalizeResponse = (response: {
   sessionUrl?: string
   attachments?: ChatAttachment[]
   ocrResult?: OCRResult
+  metadata?: Record<string, unknown>
+  usage?: Record<string, unknown>
 }): RequestChatCompletionResult => {
   const normalizedAttachments = normalizeAttachmentOcrResults(
     response.attachments,
@@ -619,10 +658,13 @@ const normalizeResponse = (response: {
       : undefined
   const normalizedContent =
     response.content ?? response.reply ?? response.message ?? response.text ?? ''
+  const usage = normalizeChatTokenUsage(response.usage, response.metadata)
   const normalized: RequestChatCompletionResult = {
     content: normalizedContent,
     sessionUrl: response.sessionUrl,
-    attachments
+    attachments,
+    ...(response.metadata ? { metadata: response.metadata } : {}),
+    ...(usage ? { usage } : {})
   }
 
   if (response.ocrResult) {
@@ -640,6 +682,7 @@ const parseExternalAgentSkillResponse = (
   sessionUrl?: string
   attachments?: ChatAttachment[]
   ocrResult?: OCRResult
+  metadata?: Record<string, unknown>
 } => {
   try {
     return JSON.parse(body) as {
@@ -648,6 +691,7 @@ const parseExternalAgentSkillResponse = (
       sessionUrl?: string
       attachments?: ChatAttachment[]
       ocrResult?: OCRResult
+      metadata?: Record<string, unknown>
     }
   } catch {
     return { content: body }
@@ -858,6 +902,8 @@ const toRequestChatCompletionStreamResult = (
     sessionUrl?: string
     attachments?: ChatAttachment[]
     ocrResult?: OCRResult
+    metadata?: Record<string, unknown>
+    usage?: Record<string, unknown>
   }
 ): RequestChatCompletionStreamResult => {
   const normalized = normalizeResponse({
@@ -865,7 +911,9 @@ const toRequestChatCompletionStreamResult = (
     imageUrl: response.imageUrl,
     sessionUrl: response.sessionUrl,
     attachments: response.attachments,
-    ocrResult: response.ocrResult
+    ocrResult: response.ocrResult,
+    metadata: response.metadata,
+    usage: response.usage
   })
 
   return {
@@ -940,7 +988,10 @@ const requestLocalChatCompletionStream = async (
             ...chunk,
             attachments: chunk.attachments ?? streamedResponse.result.attachments,
             sessionUrl: chunk.sessionUrl ?? streamedResponse.result.sessionUrl,
-            ocrResult: chunk.ocrResult ?? streamedResponse.result.ocrResult
+            ocrResult: chunk.ocrResult ?? streamedResponse.result.ocrResult,
+            metadata: chunk.metadata ?? streamedResponse.result.metadata,
+            usage:
+              (chunk as { usage?: Record<string, unknown> }).usage ?? streamedResponse.result.usage
           })
           input.onEvent({ type: 'done' })
           if (chunk.error) {

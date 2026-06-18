@@ -76,6 +76,50 @@ const renderChatMessageList = (
   }
 ) => render(buildChatMessageList(currentSession, options))
 
+describe('ChatMessageList context compression summary', () => {
+  it('renders compressed context as a collapsed expandable row', () => {
+    renderChatMessageList({
+      id: 'compressed-session',
+      title: 'Compressed session',
+      messages: [],
+      contextCompression: {
+        summary: '### Current Goal\nKeep the user goal and key facts available.',
+        coveredMessageCount: 6,
+        sourceHash: 'source-hash',
+        estimatedSourceTokens: 1200,
+        estimatedSummaryTokens: 64,
+        updatedAt: 1_700_000,
+        manual: false
+      }
+    })
+
+    expect(screen.getByTestId('chat-context-summary-card')).toBeInTheDocument()
+    expect(screen.getByTestId('chat-context-summary-toggle')).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+    expect(screen.queryByTestId('chat-context-summary-content')).toBeNull()
+    expect(screen.queryByText('chat.welcome_message')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('chat-context-summary-toggle'))
+
+    expect(screen.getByTestId('chat-context-summary-toggle')).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+    expect(screen.getByTestId('chat-context-summary-content')).toBeInTheDocument()
+    expect(screen.getByText('Keep the user goal and key facts available.')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('chat-context-summary-toggle'))
+
+    expect(screen.getByTestId('chat-context-summary-toggle')).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+    expect(screen.queryByTestId('chat-context-summary-content')).toBeNull()
+  })
+})
+
 describe('ChatMessageList 3D export gating', () => {
   it('keeps Unity/Unreal actions enabled for supported model formats', () => {
     const attachment: ChatAttachment = {

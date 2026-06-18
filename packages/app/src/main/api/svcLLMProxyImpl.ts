@@ -177,6 +177,7 @@ const toLLMChatResp = (value: string | LLMChatResult): LLMChatResp => {
     ...(normalized.attachments || [])
   ])
   const metadata = mergeChatMetadata(structuredContent?.metadata, normalized.metadata)
+  const usage = structuredContent?.usage || normalized.usage
 
   return {
     content: structuredContent ? structuredContent.content : normalized.content,
@@ -193,7 +194,8 @@ const toLLMChatResp = (value: string | LLMChatResult): LLMChatResp => {
     ...(normalized.finishReason || structuredContent?.finishReason
       ? { finishReason: normalized.finishReason || structuredContent?.finishReason }
       : {}),
-    ...(metadata ? { metadata } : {})
+    ...(metadata ? { metadata } : {}),
+    ...(usage ? { usage } : {})
   }
 }
 
@@ -1598,6 +1600,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         messages: conversationMessages,
         systemPrompt: toolAwareSystemPrompt,
         reasoningEffort: req.reasoningEffort,
+        maxOutputTokens: req.maxOutputTokens,
         imageGenerationOptions: req.imageGenerationOptions,
         videoGenerationOptions: req.videoGenerationOptions,
         signal: options?.signal,
@@ -1741,7 +1744,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           fullContent: fallbackContent,
           content: result.content,
           ...(result.imageUrl ? { imageUrl: result.imageUrl } : {}),
-          ...(result.attachments ? { attachments: result.attachments } : {})
+          ...(result.attachments ? { attachments: result.attachments } : {}),
+          ...(result.usage ? { usage: result.usage } : {})
         })
       }
 
@@ -1781,7 +1785,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         ...(result.sessionUrl ? { sessionUrl: result.sessionUrl } : {}),
         ...(result.ocrResult ? { ocrResult: result.ocrResult } : {}),
         ...(result.finishReason ? { finishReason: result.finishReason } : { finishReason: 'stop' }),
-        ...(result.metadata ? { metadata: result.metadata } : {})
+        ...(result.metadata ? { metadata: result.metadata } : {}),
+        ...(result.usage ? { usage: result.usage } : {})
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -1835,6 +1840,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           ...(p.tagger_endpoint?.trim() ? { tagger_endpoint: p.tagger_endpoint.trim() } : {}),
           ...(p.tagger_runtime_cache_scope
             ? { tagger_runtime_cache_scope: p.tagger_runtime_cache_scope }
+            : {}),
+          ...(typeof p.context_window_tokens === 'number'
+            ? { context_window_tokens: p.context_window_tokens }
+            : {}),
+          ...(typeof p.context_budget_tokens === 'number'
+            ? { context_budget_tokens: p.context_budget_tokens }
             : {}),
           ...(taggerDescriptor ? { tagger_runtime_key: taggerDescriptor.cacheKey } : {})
         }

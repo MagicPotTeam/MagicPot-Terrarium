@@ -72,6 +72,9 @@ export const MODEL3D_FILE_EXTENSIONS = [
 export const scopedStorageKey = (baseKey: string, scope: string): string =>
   scope === 'default' ? baseKey : `${baseKey}.${scope}`
 
+export const buildChatWorkspaceControlsPortalId = (scope: string): string =>
+  `agent-workspace-chat-controls-${encodeURIComponent(scope || 'default')}`
+
 export const AUTO_SAVED_CHAT_IMAGE_TRACKER_LIMIT = 512
 
 export interface AutoSavedChatImageKeyParts {

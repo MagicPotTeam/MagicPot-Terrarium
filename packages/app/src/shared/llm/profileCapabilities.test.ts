@@ -40,4 +40,35 @@ describe('resolveChatProfileCapabilities', () => {
     expect(capabilities.contextBudgetTokens).toBeUndefined()
     expect(capabilities.supportsAutoContextCompression).toBe(false)
   })
+
+  it('uses explicit context metadata for non-Codex profiles without exposing reasoning efforts', () => {
+    const capabilities = resolveChatProfileCapabilities({
+      model_name: 'compact-chat',
+      provider: 'openai',
+      auth_mode: 'api_key',
+      context_window_tokens: 128_000,
+      context_budget_tokens: 64_000
+    })
+
+    expect(capabilities.defaultReasoningEffort).toBeUndefined()
+    expect(capabilities.reasoningEfforts).toEqual([])
+    expect(capabilities.contextWindowTokens).toBe(128_000)
+    expect(capabilities.contextBudgetTokens).toBe(64_000)
+    expect(capabilities.supportsAutoContextCompression).toBe(true)
+  })
+
+  it('ignores non-positive or non-finite context metadata for non-Codex profiles', () => {
+    const capabilities = resolveChatProfileCapabilities({
+      model_name: 'compact-chat',
+      provider: 'openai',
+      auth_mode: 'api_key',
+      context_window_tokens: Number.POSITIVE_INFINITY,
+      context_budget_tokens: 0
+    })
+
+    expect(capabilities.reasoningEfforts).toEqual([])
+    expect(capabilities.contextWindowTokens).toBeUndefined()
+    expect(capabilities.contextBudgetTokens).toBeUndefined()
+    expect(capabilities.supportsAutoContextCompression).toBe(false)
+  })
 })

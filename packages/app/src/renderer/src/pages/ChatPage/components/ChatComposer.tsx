@@ -18,11 +18,9 @@ import {
   ListItemIcon,
   ListItemText,
   Menu,
-  MenuItem,
-  SvgIcon
+  MenuItem
 } from '@mui/material'
 import type { InputBaseComponentProps } from '@mui/material/InputBase'
-import type { SvgIconProps } from '@mui/material/SvgIcon'
 import {
   Send as SendIcon,
   Add as AddIcon,
@@ -77,9 +75,7 @@ interface ChatComposerProps {
   toolbarSlot?: React.ReactNode
   statusSlot?: React.ReactNode
   onCompressContext?: () => void
-  onClearContext?: () => void
   disableCompressContext?: boolean
-  disableClearContext?: boolean
   toolHelpItems?: MagicPotAppToolDescriptor[]
   active?: boolean
 }
@@ -113,39 +109,6 @@ const COMPOSER_VERTICAL_OVERHEAD = 140
 const MIN_ATTACHMENT_PREVIEW_HEIGHT = 88
 const MAX_ATTACHMENT_PREVIEW_HEIGHT = 240
 const ATTACHMENT_PREVIEW_HEIGHT_RATIO = 0.32
-
-const CompressContextIcon: React.FC<SvgIconProps> = ({ sx, ...props }) => (
-  <SvgIcon
-    {...props}
-    sx={[{ fill: 'none' }, ...(Array.isArray(sx) ? sx : sx ? [sx] : [])]}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={2}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <rect width="20" height="5" x="2" y="3" rx="1" />
-    <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
-    <path d="M10 12h4" />
-  </SvgIcon>
-)
-
-const ClearContextIcon: React.FC<SvgIconProps> = ({ sx, ...props }) => (
-  <SvgIcon
-    {...props}
-    sx={[{ fill: 'none' }, ...(Array.isArray(sx) ? sx : sx ? [sx] : [])]}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={2}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M21 21H8a2 2 0 0 1-1.42-.587l-3.994-3.999a2 2 0 0 1 0-2.828l10-10a2 2 0 0 1 2.829 0l5.999 6a2 2 0 0 1 0 2.828L12.834 21" />
-    <path d="m5.082 11.09 8.828 8.828" />
-  </SvgIcon>
-)
 
 const parseCssPixelValue = (value: unknown): number | null => {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null
@@ -362,16 +325,14 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   toolbarSlot,
   statusSlot,
   onCompressContext,
-  onClearContext,
   disableCompressContext = false,
-  disableClearContext = false,
   toolHelpItems = [],
   active = true
 }) => {
   const { t } = useTranslation()
   const visiblePendingAttachmentEntries = getVisibleChatAttachmentEntries(pendingAttachments)
   const theme = useTheme()
-  const resolvedToolbarSlot = modelSelectorSlot ?? toolbarSlot
+  const hasModelSelectorSlot = modelSelectorSlot != null
 
   const composerRootRef = useRef<HTMLDivElement | null>(null)
   const committedInputValueRef = useRef(inputValue)
@@ -1165,7 +1126,10 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
             }}
             data-testid="chat-composer-action-bar"
           >
-            <Box>
+            <Box
+              data-testid="chat-composer-left-controls"
+              sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}
+            >
               <IconButton
                 onClick={(event) => setAddMenuAnchorEl(event.currentTarget)}
                 disabled={disabled}
@@ -1211,18 +1175,31 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   </>
                 ) : null}
               </Menu>
+              {toolbarSlot ? (
+                <Box
+                  data-testid="chat-composer-toolbar-slot"
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    minWidth: 0,
+                    transform: 'translateY(-3px)'
+                  }}
+                >
+                  {toolbarSlot}
+                </Box>
+              ) : null}
             </Box>
 
             <Box
               data-testid="chat-composer-send-group"
               sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}
             >
-              {resolvedToolbarSlot ? (
+              {hasModelSelectorSlot ? (
                 <Box
-                  data-testid="chat-composer-toolbar-slot"
+                  data-testid="chat-composer-model-selector-slot"
                   sx={{ display: 'flex', alignItems: 'center', transform: 'translateY(-3px)' }}
                 >
-                  {resolvedToolbarSlot}
+                  {modelSelectorSlot}
                 </Box>
               ) : null}
 
@@ -1265,42 +1242,6 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                     statusSlot
                   )}
                 </Box>
-              ) : null}
-
-              {onCompressContext && !statusSlot ? (
-                <IconButton
-                  data-testid="chat-composer-compress-context"
-                  onClick={onCompressContext}
-                  disabled={disabled || isLoading || disableCompressContext}
-                  sx={{
-                    color: 'text.secondary',
-                    width: 30,
-                    height: 30,
-                    '&:hover': { bgcolor: 'action.hover', color: 'text.primary' }
-                  }}
-                  title={t('chat.compress_context', { defaultValue: 'Compress context' })}
-                  aria-label={t('chat.compress_context', { defaultValue: 'Compress context' })}
-                >
-                  <CompressContextIcon sx={{ fontSize: 17 }} />
-                </IconButton>
-              ) : null}
-
-              {onClearContext ? (
-                <IconButton
-                  data-testid="chat-composer-clear-context"
-                  onClick={onClearContext}
-                  disabled={disabled || isLoading || disableClearContext}
-                  sx={{
-                    color: 'text.secondary',
-                    width: 30,
-                    height: 30,
-                    '&:hover': { bgcolor: 'action.hover', color: 'text.primary' }
-                  }}
-                  title={t('chat.clear_context', { defaultValue: 'Clear context' })}
-                  aria-label={t('chat.clear_context', { defaultValue: 'Clear context' })}
-                >
-                  <ClearContextIcon sx={{ fontSize: 17 }} />
-                </IconButton>
               ) : null}
 
               {/* 发送/停止按钮 */}

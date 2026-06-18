@@ -44,6 +44,7 @@ import {
 } from './chatStorage'
 import {
   buildAutoSavedChatImageKey,
+  buildChatWorkspaceControlsPortalId,
   buildHy3dProfileId,
   getBaseProfileId,
   getDownloadFileNameFromUrl,
@@ -61,11 +62,14 @@ import {
   updateScopedExternalLoadingSessionId
 } from './chatPageShared'
 import {
+  buildChatContextCompactPromptMessages,
   buildChatContextCompressionPlan,
-  buildExtractiveContextSummary,
   createContextCompressionSourceHash,
   estimateChatMessagesTokenCount,
   estimateTextTokenCount,
+  resolveChatContextCompactSummaryMaxTokens,
+  resolveChatContextCompactWindow,
+  wrapChatContextCompactSummary,
   type ChatContextCompressionSummary
 } from './chatContextCompression'
 import type { ChatLoadingStatus } from './chatLoadingStatus'
@@ -89,7 +93,8 @@ import {
   requestChatCompletion,
   requestChatCompletionStream,
   resolveAttachmentBatchCapability,
-  supportsStreamingChatCompletion
+  supportsStreamingChatCompletion,
+  type RequestChatTokenUsage
 } from './chatRequestUtils'
 import {
   NO_SKILL_VALUE,
@@ -242,6 +247,33 @@ type ExternalConfirmationRequest = ChatPendingConfirmation & {
   cancelledUserContent: string
 }
 
+type ChatContextCompactJobOptions = {
+  sessionId: string
+  manual?: boolean
+  force?: boolean
+  profileId?: string | null
+  reasoningEffort?: LLMReasoningEffort
+}
+
+type ChatContextCompactActivityType =
+  | 'compact_start'
+  | 'compact_decision'
+  | 'compact_skipped'
+  | 'compact_complete'
+  | 'compact_failed'
+  | 'compact_cancelled'
+  | 'compact_stale'
+  | 'send_progress'
+
+type ChatContextCompactSkipReason =
+  | 'no_session'
+  | 'too_short'
+  | 'busy'
+  | 'cooldown'
+  | 'stale'
+  | 'aborted'
+  | 'failed'
+
 const HY3D_SIGNED_URL_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const CHAT_INPUT_STATE_COMMIT_DELAY_MS = 80
 const CHAT_DRAFT_PERSIST_DELAY_MS = 200
@@ -249,6 +281,7 @@ const STORAGE_KEY_REASONING_EFFORT = 'chat.reasoningEffort'
 const STORAGE_KEY_IMAGE_GENERATION_OPTIONS = 'chat.imageGenerationOptions'
 const CHAT_REASONING_EFFORT_SYNC_EVENT = 'chat:reasoning-effort-sync'
 const AUTO_CONTEXT_COMPRESSION_TRIGGER_PERCENT = 80
+const CHAT_CONTEXT_COMPACT_COOLDOWN_MS = 30_000
 const HY3D_POST_PROCESS_ACTIONS = new Set([
   'SubmitHunyuan3DPartJob',
   'SubmitReduceFaceJob',
@@ -488,6 +521,21 @@ const ChatPage: React.FC<ChatPageProps> = ({
       })
     )
   }, [storageScope])
+  const emitChatActivity = useCallback(
+    (type: ChatContextCompactActivityType, detail: Record<string, unknown> = {}) => {
+      window.dispatchEvent(
+        new CustomEvent('chat:activity', {
+          detail: {
+            scope: storageScope,
+            type,
+            timestamp: Date.now(),
+            ...detail
+          }
+        })
+      )
+    },
+    [storageScope]
+  )
   const handleGoToApiThreadSettings = useCallback(() => {
     navigate('/settings', { state: { tab: 'llm' } })
   }, [navigate])
@@ -551,18 +599,39 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const hasScopedSelectedProfileStorage = selectedProfileStorageKey !== STORAGE_KEY_SELECTED_PROFILE
 
   // ==================== Portal State ====================
-  const [portalElement, setPortalElement] = useState<HTMLElement | null>(null)
+  const [skillPortalElement, setSkillPortalElement] = useState<HTMLElement | null>(null)
+  const [workspaceControlsPortalElement, setWorkspaceControlsPortalElement] =
+    useState<HTMLElement | null>(null)
   useEffect(() => {
-    if (compact) {
-      setPortalElement(document.getElementById('agent-workspace-skill-portal'))
+    if (!compact || !active) {
+      setSkillPortalElement(null)
+      setWorkspaceControlsPortalElement(null)
+      return
     }
-  }, [compact])
+
+    const workspaceControlsPortalId = buildChatWorkspaceControlsPortalId(storageScope)
+    const resolvePortalElements = () => {
+      setSkillPortalElement(document.getElementById('agent-workspace-skill-portal'))
+      setWorkspaceControlsPortalElement(document.getElementById(workspaceControlsPortalId))
+    }
+
+    resolvePortalElements()
+
+    const observer =
+      typeof MutationObserver !== 'undefined' ? new MutationObserver(resolvePortalElements) : null
+    observer?.observe(document.body, { childList: true, subtree: true })
+
+    return () => observer?.disconnect()
+  }, [active, compact, storageScope])
 
   // ==================== Sessions 状态 ====================
   const [sessions, setSessionsState] = useState<ChatSession[]>([])
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
   const skipSaveRef = useRef(false)
   const sessionsRef = useRef<ChatSession[]>([])
+  const compactingSessionIdsRef = useRef<Set<string>>(new Set())
+  const contextCompactAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
+  const contextCompactLastAttemptAtBySessionIdRef = useRef<Map<string, number>>(new Map())
   const autoSaveScanInitializedRef = useRef(false)
   const autoSaveScanCursorBySessionIdRef = useRef<Map<string, number>>(new Map())
   const setSessions = useCallback<React.Dispatch<React.SetStateAction<ChatSession[]>>>((value) => {
@@ -652,6 +721,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
   useEffect(
     () => () => {
       isMountedRef.current = false
+      contextCompactAbortControllersRef.current.forEach((controller) => {
+        controller.abort('Chat page unmounted.')
+      })
+      contextCompactAbortControllersRef.current.clear()
+      compactingSessionIdsRef.current.clear()
     },
     []
   )
@@ -811,6 +885,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
       cancelledSessionsRef.current.add(sessionId)
       sessionAbortControllersRef.current.get(sessionId)?.abort('Chat session cancelled.')
       sessionAbortControllersRef.current.delete(sessionId)
+      contextCompactAbortControllersRef.current
+        .get(sessionId)
+        ?.abort('Chat context compression cancelled.')
+      contextCompactAbortControllersRef.current.delete(sessionId)
+      compactingSessionIdsRef.current.delete(sessionId)
       clearLoadingSessionTracking(sessionId)
       setSessions((prev) => removeTrailingEmptyAssistantMessage(prev, sessionId))
       window.dispatchEvent(
@@ -1818,11 +1897,417 @@ const ChatPage: React.FC<ChatPageProps> = ({
       selectedCapabilityProfile
     ]
   )
-  const canCompressCurrentContext = Boolean(currentSession && currentSession.messages.length >= 10)
-  const canClearCurrentContext = Boolean(currentSession && currentSession.messages.length > 0)
+  const canCompressCurrentContext = Boolean(currentSession && currentSession.messages.length > 0)
+  const emitCompactSkipped = useCallback(
+    (
+      sessionId: string | undefined,
+      reason: ChatContextCompactSkipReason,
+      metadata: Record<string, unknown> = {}
+    ) => {
+      emitChatActivity('compact_skipped', {
+        sessionId,
+        reason,
+        ...metadata
+      })
+    },
+    [emitChatActivity]
+  )
+  const resolveCompactProfileSelection = useCallback(
+    (requestedProfileId?: string | null) => {
+      const findAvailableProfile = (profileId?: string | null): ChatCapabilityProfile | null => {
+        const normalizedProfileId = normalizeChatProfileIdForStorage(profileId)
+        const baseProfileId = getBaseProfileId(normalizedProfileId)
+        return (
+          availableProfiles.find((profile) => profile.id === normalizedProfileId) ||
+          availableProfiles.find((profile) => profile.id === baseProfileId) ||
+          null
+        )
+      }
+      const requestedProfile = findAvailableProfile(requestedProfileId)
+      const fallbackChatProfile = availableProfiles.find(
+        (profile) =>
+          !profile.model_use || profile.model_use === 'chat' || profile.model_use === 'agent'
+      )
+      const fallbackCompressionProfile = availableProfiles.find(
+        (profile) => resolveChatProfileCapabilities(profile).supportsAutoContextCompression
+      )
+      const profile = requestedProfile || fallbackChatProfile || fallbackCompressionProfile || null
+      const profileId = (profile as { id?: string } | null)?.id || requestedProfileId || null
+
+      return {
+        profile,
+        profileId,
+        reasoningEffort: undefined
+      }
+    },
+    [availableProfiles]
+  )
+  const startContextCompactJob = useCallback(
+    (options: ChatContextCompactJobOptions): boolean => {
+      const session = sessionsRef.current.find((candidate) => candidate.id === options.sessionId)
+      if (!session) {
+        emitCompactSkipped(options.sessionId, 'no_session', { manual: Boolean(options.manual) })
+        if (options.manual) {
+          notifyInfo(
+            t('chat.context_compress_not_enough', {
+              defaultValue: 'There is not enough chat history to compress yet.'
+            })
+          )
+        }
+        return false
+      }
+      if (session.messages.length === 0) {
+        emitCompactSkipped(options.sessionId, 'too_short', { manual: Boolean(options.manual) })
+        if (options.manual) {
+          notifyInfo(
+            t('chat.context_compress_not_enough', {
+              defaultValue: 'There is not enough chat history to compress yet.'
+            })
+          )
+        }
+        return false
+      }
+
+      if (compactingSessionIdsRef.current.has(options.sessionId)) {
+        emitChatActivity('compact_decision', {
+          sessionId: options.sessionId,
+          reason: 'busy',
+          skipped: true,
+          manual: Boolean(options.manual)
+        })
+        emitCompactSkipped(options.sessionId, 'busy', { manual: Boolean(options.manual) })
+        if (options.manual) {
+          notifyInfo(
+            t('chat.context_compress_already_running', {
+              defaultValue: 'Context compression is already running.'
+            })
+          )
+        }
+        return false
+      }
+
+      const now = Date.now()
+      const lastAttemptAt =
+        contextCompactLastAttemptAtBySessionIdRef.current.get(options.sessionId) ||
+        session.contextCompression?.lastCompactAttemptAt ||
+        0
+      if (
+        !options.force &&
+        lastAttemptAt > 0 &&
+        now - lastAttemptAt < CHAT_CONTEXT_COMPACT_COOLDOWN_MS
+      ) {
+        emitChatActivity('compact_decision', {
+          sessionId: options.sessionId,
+          reason: 'cooldown',
+          skipped: true,
+          manual: Boolean(options.manual),
+          cooldownMs: CHAT_CONTEXT_COMPACT_COOLDOWN_MS,
+          lastAttemptAt
+        })
+        emitCompactSkipped(options.sessionId, 'cooldown', {
+          manual: Boolean(options.manual),
+          lastAttemptAt
+        })
+        return false
+      }
+
+      const compactWindow = resolveChatContextCompactWindow(session.messages, {
+        minCompactableMessages: options.manual || options.force ? 2 : undefined
+      })
+      if (compactWindow.compactCount === 0) {
+        emitChatActivity('compact_decision', {
+          sessionId: options.sessionId,
+          reason: 'too_short',
+          skipped: true,
+          manual: Boolean(options.manual),
+          messageCount: session.messages.length
+        })
+        emitCompactSkipped(options.sessionId, 'too_short', {
+          manual: Boolean(options.manual),
+          messageCount: session.messages.length
+        })
+        if (options.manual) {
+          notifyInfo(
+            t('chat.context_compress_not_enough', {
+              defaultValue: 'There is not enough chat history to compress yet.'
+            })
+          )
+        }
+        return false
+      }
+
+      const messagesToCompress = compactWindow.compactMessages
+      const previousSummary = session.contextCompression
+      const previousSourceHash = previousSummary?.sourceHash || ''
+      const compactSourceHash = createContextCompressionSourceHash(messagesToCompress)
+      const compactRound = (previousSummary?.compactRound || 0) + 1
+      const summarySourceHash = previousSourceHash
+        ? `${previousSourceHash}:${compactSourceHash}`
+        : compactSourceHash
+      const estimatedSourceTokens =
+        (previousSummary?.estimatedSourceTokens || 0) +
+        estimateChatMessagesTokenCount(messagesToCompress)
+      const promptMessages = buildChatContextCompactPromptMessages({
+        messages: messagesToCompress,
+        previousSummary: previousSummary?.summary
+      })
+      const compactProfileSelection = resolveCompactProfileSelection(options.profileId)
+      const compactReasoningEffort =
+        options.reasoningEffort ?? compactProfileSelection.reasoningEffort
+      const compactSummaryMaxTokens = resolveChatContextCompactSummaryMaxTokens(
+        compactProfileSelection.profile
+      )
+      const abortController = new AbortController()
+
+      compactingSessionIdsRef.current.add(options.sessionId)
+      contextCompactAbortControllersRef.current.set(options.sessionId, abortController)
+      contextCompactLastAttemptAtBySessionIdRef.current.set(options.sessionId, now)
+      emitChatActivity('compact_start', {
+        sessionId: options.sessionId,
+        round: compactRound,
+        manual: Boolean(options.manual),
+        profileId: compactProfileSelection.profileId,
+        messagesCompacted: messagesToCompress.length,
+        tokensBefore: estimatedSourceTokens,
+        maxOutputTokens: compactSummaryMaxTokens
+      })
+      emitChatActivity('compact_decision', {
+        sessionId: options.sessionId,
+        round: compactRound,
+        reason: options.manual ? 'manual' : 'threshold',
+        skipped: false,
+        manual: Boolean(options.manual)
+      })
+
+      if (options.manual) {
+        notifyInfo(
+          t('chat.context_compress_started', {
+            defaultValue: 'Compressing context in the background…'
+          })
+        )
+      }
+
+      void (async () => {
+        try {
+          const result = await requestChatCompletion({
+            config,
+            messages: promptMessages,
+            storageScope,
+            route,
+            profileId: compactProfileSelection.profileId,
+            reasoningEffort: compactReasoningEffort,
+            maxOutputTokens: compactSummaryMaxTokens,
+            conversationId: `${options.sessionId}:compact:${now}`,
+            signal: abortController.signal
+          })
+          if (abortController.signal.aborted) {
+            const abortError = new Error('Context compression was cancelled.')
+            abortError.name = 'AbortError'
+            throw abortError
+          }
+          const rawSummary = (result.content || '')
+            .replace(/file:\/\/\//g, 'local-media:///')
+            .trim()
+          if (!rawSummary) {
+            throw new Error('Context compact summary is empty.')
+          }
+          if (!isMountedRef.current) {
+            return
+          }
+
+          const summaryText = wrapChatContextCompactSummary(rawSummary, compactRound)
+          const summary: ChatContextCompressionSummary = {
+            summary: summaryText,
+            coveredMessageCount:
+              (previousSummary?.coveredMessageCount || 0) + messagesToCompress.length,
+            sourceHash: summarySourceHash,
+            estimatedSourceTokens,
+            estimatedSummaryTokens: estimateTextTokenCount(summaryText),
+            updatedAt: Date.now(),
+            lastCompactAttemptAt: now,
+            lastCompactSuccessAt: Date.now(),
+            ...(result.usage?.promptTokens !== undefined
+              ? { lastPromptTokens: result.usage.promptTokens }
+              : {}),
+            ...(result.usage?.totalTokens !== undefined
+              ? { lastTotalTokens: result.usage.totalTokens }
+              : {}),
+            ...(options.manual ? { manual: true } : {}),
+            metadata: {
+              ...(previousSummary?.metadata || {}),
+              previousSourceHash,
+              compactSourceHash,
+              generatedBy: 'llm',
+              profileId: compactProfileSelection.profileId,
+              maxOutputTokens: compactSummaryMaxTokens
+            },
+            compactRound
+          }
+          const compactCompleteActivity = {
+            sessionId: options.sessionId,
+            round: compactRound,
+            manual: Boolean(options.manual),
+            messagesCompacted: messagesToCompress.length,
+            tokensBefore: estimatedSourceTokens,
+            tokensAfter:
+              summary.estimatedSummaryTokens +
+              estimateChatMessagesTokenCount(compactWindow.liveMessages),
+            summaryPreview: summary.summary.slice(0, 400)
+          }
+
+          let updatedSessionToPersist: ChatSession | null = null
+          let skippedAsStale = false
+          setSessions((prev) => {
+            let changed = false
+            const next = prev.map((candidate) => {
+              if (candidate.id !== options.sessionId) {
+                return candidate
+              }
+
+              const currentPreviousSourceHash = candidate.contextCompression?.sourceHash || ''
+              const currentCompactSlice = candidate.messages.slice(0, messagesToCompress.length)
+              const currentCompactSourceHash =
+                createContextCompressionSourceHash(currentCompactSlice)
+              if (
+                currentPreviousSourceHash !== previousSourceHash ||
+                currentCompactSlice.length !== messagesToCompress.length ||
+                currentCompactSourceHash !== compactSourceHash
+              ) {
+                skippedAsStale = true
+                emitChatActivity('compact_stale', {
+                  sessionId: options.sessionId,
+                  round: compactRound,
+                  reason: 'stale',
+                  manual: Boolean(options.manual)
+                })
+                return candidate
+              }
+
+              const updatedSession: ChatSession = {
+                ...candidate,
+                messages: candidate.messages.slice(messagesToCompress.length),
+                contextCompression: summary,
+                sessionUrl: undefined
+              }
+              updatedSessionToPersist = updatedSession
+              changed = true
+              return updatedSession
+            })
+
+            return changed ? next : prev
+          })
+
+          if (updatedSessionToPersist) {
+            skipSaveRef.current = true
+            await saveSessionToDB(updatedSessionToPersist, storageScope)
+            emitPreviewRefresh()
+            emitChatActivity('compact_complete', compactCompleteActivity)
+            if (!options.manual) {
+              notifyInfo(
+                t('chat.context_auto_compressed', {
+                  defaultValue: '较早上下文已自动压缩，可展开摘要查看。'
+                })
+              )
+            }
+            if (options.manual) {
+              notifySuccess(
+                t('chat.context_compressed', {
+                  defaultValue: '上下文已压缩。'
+                })
+              )
+            }
+          } else if (options.manual || skippedAsStale) {
+            if (skippedAsStale) {
+              emitCompactSkipped(options.sessionId, 'stale', {
+                manual: Boolean(options.manual),
+                round: compactRound
+              })
+            }
+            notifyInfo(
+              t('chat.context_compress_stale', {
+                defaultValue:
+                  'Context changed before compression finished; kept the existing history.'
+              })
+            )
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          const aborted =
+            abortController.signal.aborted ||
+            (error instanceof Error && error.name === 'AbortError')
+          if (aborted) {
+            emitChatActivity('compact_cancelled', {
+              sessionId: options.sessionId,
+              round: compactRound,
+              reason: 'aborted',
+              manual: Boolean(options.manual)
+            })
+            emitCompactSkipped(options.sessionId, 'aborted', {
+              manual: Boolean(options.manual),
+              round: compactRound
+            })
+            return
+          }
+          emitChatActivity('compact_failed', {
+            sessionId: options.sessionId,
+            round: compactRound,
+            reason: 'failed',
+            manual: Boolean(options.manual),
+            error: message
+          })
+          emitCompactSkipped(options.sessionId, 'failed', {
+            manual: Boolean(options.manual),
+            round: compactRound,
+            error: message
+          })
+          console.warn('[ChatPage] Context compact failed:', error)
+          if (options.manual) {
+            notifyError(
+              t('chat.context_compress_failed', {
+                error: message,
+                defaultValue: 'Context compression failed: {{error}}'
+              })
+            )
+          } else {
+            notifyWarning(
+              t('chat.context_auto_compress_failed', {
+                error: message,
+                defaultValue:
+                  'Background context compression failed; original context was kept. {{error}}'
+              })
+            )
+          }
+        } finally {
+          compactingSessionIdsRef.current.delete(options.sessionId)
+          if (
+            contextCompactAbortControllersRef.current.get(options.sessionId) === abortController
+          ) {
+            contextCompactAbortControllersRef.current.delete(options.sessionId)
+          }
+        }
+      })()
+
+      return true
+    },
+    [
+      config,
+      emitChatActivity,
+      emitCompactSkipped,
+      emitPreviewRefresh,
+      notifyError,
+      notifyInfo,
+      notifySuccess,
+      notifyWarning,
+      resolveCompactProfileSelection,
+      route,
+      setSessions,
+      storageScope,
+      t
+    ]
+  )
 
   const handleCompressCurrentContext = useCallback(() => {
-    if (!currentSession || currentSession.messages.length < 10) {
+    if (!currentSession) {
       notifyInfo(
         t('chat.context_compress_not_enough', {
           defaultValue: 'There is not enough chat history to compress yet.'
@@ -1831,73 +2316,21 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return
     }
 
-    const retainRecentMessageCount = 8
-    const messagesToCompress = currentSession.messages.slice(0, -retainRecentMessageCount)
-    const retainedMessages = currentSession.messages.slice(-retainRecentMessageCount)
-    const summary: ChatContextCompressionSummary = {
-      summary: buildExtractiveContextSummary(messagesToCompress),
-      coveredMessageCount: messagesToCompress.length,
-      sourceHash: createContextCompressionSourceHash(messagesToCompress),
-      estimatedSourceTokens: estimateChatMessagesTokenCount(messagesToCompress),
-      estimatedSummaryTokens: 0,
-      updatedAt: Date.now(),
-      manual: true
-    }
-    summary.estimatedSummaryTokens = estimateTextTokenCount(summary.summary)
-
-    const updatedSession: ChatSession = {
-      ...currentSession,
-      messages: retainedMessages,
-      contextCompression: summary,
-      sessionUrl: undefined
-    }
-
-    setSessions((prev) =>
-      prev.map((session) => (session.id === currentSession.id ? updatedSession : session))
-    )
-    skipSaveRef.current = true
-    saveSessionToDB(updatedSession, storageScope).catch((error) => {
-      console.warn('[ChatPage] Failed to save compressed context:', error)
+    startContextCompactJob({
+      sessionId: currentSession.id,
+      manual: true,
+      force: true,
+      profileId: currentSession.profileId || selectedProfileId,
+      reasoningEffort: selectedReasoningEffort
     })
-    emitPreviewRefresh()
-    notifySuccess(
-      t('chat.context_compressed', {
-        defaultValue: 'Context compressed.'
-      })
-    )
-  }, [currentSession, emitPreviewRefresh, notifyInfo, notifySuccess, setSessions, storageScope, t])
-
-  const handleClearCurrentContext = useCallback(() => {
-    if (!currentSession || currentSession.messages.length === 0) {
-      notifyInfo(
-        t('chat.context_clear_empty', {
-          defaultValue: 'There is no context to clear.'
-        })
-      )
-      return
-    }
-
-    const updatedSession: ChatSession = {
-      ...currentSession,
-      messages: [],
-      contextCompression: undefined,
-      sessionUrl: undefined
-    }
-
-    setSessions((prev) =>
-      prev.map((session) => (session.id === currentSession.id ? updatedSession : session))
-    )
-    skipSaveRef.current = true
-    saveSessionToDB(updatedSession, storageScope).catch((error) => {
-      console.warn('[ChatPage] Failed to clear context:', error)
-    })
-    emitPreviewRefresh()
-    notifySuccess(
-      t('chat.context_cleared', {
-        defaultValue: 'Context cleared.'
-      })
-    )
-  }, [currentSession, emitPreviewRefresh, notifyInfo, notifySuccess, setSessions, storageScope, t])
+  }, [
+    currentSession,
+    notifyInfo,
+    selectedProfileId,
+    selectedReasoningEffort,
+    startContextCompactJob,
+    t
+  ])
 
   const contextCompressionStatusSlot = useMemo(() => {
     if (!isAutoContextCompressionAvailable) {
@@ -3372,20 +3805,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
           pb: 0.5
         }}
       >
-        {contextCompressionStatusSlot ? (
-          <Box data-testid="chat-top-context-status" sx={{ display: 'flex', alignItems: 'center' }}>
-            {contextCompressionStatusSlot}
-          </Box>
-        ) : null}
-        {!isAgentSkillSelected && isImageGenerationSelected ? (
-          <ChatImageGenerationSettings
-            active={active}
-            value={imageGenerationOptions}
-            onChange={setImageGenerationOptions}
-            referenceImageSize={imageGenerationReferenceSize}
-            variant="activeChip"
-          />
-        ) : null}
         <ChatPrimarySelection
           active={active}
           compact={true}
@@ -3405,11 +3824,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [
       active,
       availableProfiles,
-      contextCompressionStatusSlot,
-      imageGenerationOptions,
-      imageGenerationReferenceSize,
       isAgentSkillSelected,
-      isImageGenerationSelected,
       selectedCustomSkill,
       selectedProfileId,
       selectedProfileCapabilities.reasoningEfforts,
@@ -3417,6 +3832,77 @@ const ChatPage: React.FC<ChatPageProps> = ({
       selectProfile,
       selectReasoningEffort,
       t
+    ]
+  )
+
+  const chatWorkspaceControlsSlot = useMemo(
+    () => (
+      <Box
+        data-testid="chat-workspace-controls"
+        sx={{
+          flexShrink: 0,
+          display: 'flex',
+          justifyContent: 'flex-start',
+          alignItems: 'center',
+          gap: 0.5,
+          width: '100%',
+          maxWidth: '100%',
+          mx: 0,
+          px: 0,
+          pt: 0,
+          pb: 0,
+          minWidth: 0,
+          overflow: 'hidden',
+          flexWrap: 'nowrap'
+        }}
+      >
+        <ChatPrimarySelection
+          active={active}
+          compact={true}
+          isAgentSkillSelected={isAgentSkillSelected}
+          selectedProfileId={selectedProfileId}
+          availableProfiles={availableProfiles}
+          selectedReasoningEffort={selectedReasoningEffort}
+          availableReasoningEfforts={selectedProfileCapabilities.reasoningEfforts}
+          selectedSkillLabel={
+            selectedCustomSkill ? getCustomSkillName(selectedCustomSkill) : t('chat.skill_none')
+          }
+          onSelectProfile={selectProfile}
+          onSelectReasoningEffort={selectReasoningEffort}
+        />
+      </Box>
+    ),
+    [
+      active,
+      availableProfiles,
+      isAgentSkillSelected,
+      selectedCustomSkill,
+      selectedProfileId,
+      selectedProfileCapabilities.reasoningEfforts,
+      selectedReasoningEffort,
+      selectProfile,
+      selectReasoningEffort,
+      t
+    ]
+  )
+
+  const chatImageGenerationToolbarSlot = useMemo(
+    () =>
+      !isAgentSkillSelected && isImageGenerationSelected ? (
+        <ChatImageGenerationSettings
+          active={active}
+          value={imageGenerationOptions}
+          onChange={setImageGenerationOptions}
+          referenceImageSize={imageGenerationReferenceSize}
+          variant="activeChip"
+        />
+      ) : null,
+    [
+      active,
+      imageGenerationOptions,
+      imageGenerationReferenceSize,
+      isAgentSkillSelected,
+      isImageGenerationSelected
     ]
   )
   // ==================== 发送消息 ====================
@@ -3612,25 +4098,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
       )
       const useAttachmentBatching =
         shouldBatchAttachments(rawAttachments) && !shouldPreserveMultiAttachmentRequest
-      let latestContextCompressionSummary = cs.contextCompression
+      const latestContextCompressionSummary = cs.contextCompression
+      let shouldDiscardSessionUrlForContextCompact = false
       const sessionAbortController = new AbortController()
       sessionAbortControllersRef.current.set(targetSessionId, sessionAbortController)
 
-      const applyContextCompressionSummaryToSessions = (prev: ChatSession[]) =>
-        prev.map((session) =>
-          session.id === targetSessionId
-            ? {
-                ...session,
-                contextCompression: latestContextCompressionSummary
-              }
-            : session
-        )
-
       const withLatestContextCompression = (
         updater: (prev: ChatSession[]) => ChatSession[]
-      ): ((prev: ChatSession[]) => ChatSession[]) => {
-        return (prev) => applyContextCompressionSummaryToSessions(updater(prev))
-      }
+      ): ((prev: ChatSession[]) => ChatSession[]) => updater
       const updateLoadingStatus = (
         label: string,
         detail: string,
@@ -3729,12 +4204,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
           : requestMessage
 
-      const buildRequestExecutionState = (requestMessage: ChatMessage) => {
+      const buildRequestExecutionState = (requestMessage: ChatMessage, sessionUrl?: string) => {
         const requestMessageWithRuntimeContext =
           buildRequestMessageWithRuntimeContext(requestMessage)
-        const existingManualCompressionSummary = latestContextCompressionSummary?.manual
-          ? latestContextCompressionSummary
-          : undefined
         const compressionPlan = buildChatContextCompressionPlan({
           historyMessages,
           requestMessage: requestMessageWithRuntimeContext,
@@ -3743,29 +4215,24 @@ const ChatPage: React.FC<ChatPageProps> = ({
           cachedSummary: latestContextCompressionSummary
         })
 
-        if (isAutoContextCompressionAvailable && compressionPlan.compressionSummary) {
-          latestContextCompressionSummary = existingManualCompressionSummary
-            ? {
-                ...compressionPlan.compressionSummary,
-                summary: mergeHiddenContext(
-                  existingManualCompressionSummary.summary,
-                  compressionPlan.compressionSummary.summary
-                ),
-                coveredMessageCount:
-                  existingManualCompressionSummary.coveredMessageCount +
-                  compressionPlan.compressionSummary.coveredMessageCount,
-                sourceHash: `${existingManualCompressionSummary.sourceHash}:${compressionPlan.compressionSummary.sourceHash}`,
-                estimatedSourceTokens:
-                  existingManualCompressionSummary.estimatedSourceTokens +
-                  compressionPlan.compressionSummary.estimatedSourceTokens,
-                manual: true
-              }
-            : compressionPlan.compressionSummary
-          latestContextCompressionSummary.estimatedSummaryTokens = estimateTextTokenCount(
-            latestContextCompressionSummary.summary
-          )
-        } else if (!existingManualCompressionSummary && isAutoContextCompressionAvailable) {
-          latestContextCompressionSummary = compressionPlan.compressionSummary
+        const shouldDropSessionUrlForCompressedRequest = Boolean(
+          compressionPlan.shouldCompress && isAutoContextCompressionAvailable
+        )
+        if (shouldDropSessionUrlForCompressedRequest) {
+          shouldDiscardSessionUrlForContextCompact = true
+        }
+
+        if (
+          targetSessionId &&
+          shouldDropSessionUrlForCompressedRequest &&
+          !activeExternalAgentSkill &&
+          !overrides?.baseMessages
+        ) {
+          startContextCompactJob({
+            sessionId: targetSessionId,
+            profileId,
+            reasoningEffort: selectedReasoningEffort
+          })
         }
 
         updateLoadingStatus(
@@ -3787,10 +4254,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
           2
         )
 
-        const compressionSummaryText = mergeHiddenContext(
-          existingManualCompressionSummary?.summary || '',
-          compressionPlan.shouldCompress ? compressionPlan.compressionSummary?.summary || '' : ''
-        )
+        const compressionSummaryText = compressionPlan.shouldCompress
+          ? compressionPlan.compressionSummary?.summary ||
+            latestContextCompressionSummary?.summary ||
+            ''
+          : latestContextCompressionSummary?.summary || ''
         const requestMessageWithCompressedContext = compressionSummaryText
           ? {
               ...requestMessageWithRuntimeContext,
@@ -3806,8 +4274,55 @@ const ChatPage: React.FC<ChatPageProps> = ({
           requestMessages: [
             ...compressionPlan.requestHistoryMessages,
             requestMessageWithCompressedContext
-          ]
+          ],
+          sessionUrl: shouldDropSessionUrlForCompressedRequest ? undefined : sessionUrl
         }
+      }
+
+      const resolvePersistedSessionUrl = (sessionUrl?: string): string | null | undefined =>
+        shouldDiscardSessionUrlForContextCompact || !executionContext.shouldPersistSessionUrl
+          ? null
+          : sessionUrl
+
+      const maybeStartContextCompactFromUsage = (usage?: RequestChatTokenUsage): void => {
+        const observedInputTokens = usage?.promptTokens ?? usage?.totalTokens
+        const contextWindowTokens =
+          selectedProfileCapabilities.contextWindowTokens ||
+          selectedProfileCapabilities.contextBudgetTokens
+        const triggerTokens =
+          selectedProfileCapabilities.contextBudgetTokens ||
+          (contextWindowTokens
+            ? Math.floor((contextWindowTokens * AUTO_CONTEXT_COMPRESSION_TRIGGER_PERCENT) / 100)
+            : undefined)
+
+        if (observedInputTokens !== undefined) {
+          emitChatActivity('send_progress', {
+            sessionId: targetSessionId,
+            promptTokens: usage?.promptTokens,
+            completionTokens: usage?.completionTokens,
+            totalTokens: usage?.totalTokens,
+            triggerTokens,
+            contextWindowTokens
+          })
+        }
+
+        if (
+          !targetSessionId ||
+          !isAutoContextCompressionAvailable ||
+          activeExternalAgentSkill ||
+          overrides?.baseMessages ||
+          !observedInputTokens ||
+          !triggerTokens ||
+          observedInputTokens < triggerTokens
+        ) {
+          return
+        }
+
+        startContextCompactJob({
+          sessionId: targetSessionId,
+          profileId,
+          reasoningEffort: selectedReasoningEffort
+        })
       }
 
       const shouldStreamStandardResponse = supportsStreamingChatCompletion({
@@ -3834,7 +4349,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         requestMessage: ChatMessage,
         sessionUrl?: string
       ) => {
-        const requestState = buildRequestExecutionState(requestMessage)
+        const requestState = buildRequestExecutionState(requestMessage, sessionUrl)
         updateLoadingStatus(
           t('chat.loading_wait_response', {
             defaultValue: '等待模型响应'
@@ -3855,11 +4370,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
           imageGenerationOptions: requestImageGenerationOptions,
           skillRuntime: serializedSkillRuntime,
           externalAgentSkill: activeExternalAgentSkill,
-          sessionUrl,
+          sessionUrl: requestState.sessionUrl,
           conversationId: targetSessionId ?? undefined,
           isEdit: !!overrides?.baseMessages,
           signal: sessionAbortController.signal
         })
+        maybeStartContextCompactFromUsage(result.usage)
         let response = result.content
         const hasStructuredResponse =
           Boolean(response?.trim()) ||
@@ -3898,7 +4414,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         streamedOcrResult = undefined
         seenStreamAttachmentKeys.clear()
 
-        const requestState = buildRequestExecutionState(requestMessage)
+        const requestState = buildRequestExecutionState(requestMessage, sessionUrl)
         updateLoadingStatus(
           t('chat.loading_wait_response', {
             defaultValue: '等待模型响应'
@@ -3920,7 +4436,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           imageGenerationOptions: requestImageGenerationOptions,
           skillRuntime: serializedSkillRuntime,
           externalAgentSkill: activeExternalAgentSkill,
-          sessionUrl,
+          sessionUrl: requestState.sessionUrl,
           conversationId: targetSessionId ?? undefined,
           isEdit: !!overrides?.baseMessages,
           signal: sessionAbortController.signal,
@@ -3972,6 +4488,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         })
 
+        maybeStartContextCompactFromUsage(streamedResult.result.usage)
         const response = streamedResult.response.replace(/file:\/\/\//g, 'local-media:///')
         streamedResponse = response
         streamedSessionUrl = streamedResult.result.sessionUrl || streamedSessionUrl
@@ -4201,7 +4718,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             replaceLastMessageWithMessagesInSession(prev, {
               sessionId: targetSessionId,
               messages: completedAssistantMessages,
-              sessionUrl: executionContext.shouldPersistSessionUrl ? returnedSessionUrl : null
+              sessionUrl: resolvePersistedSessionUrl(returnedSessionUrl)
             })
           )
 
@@ -4232,7 +4749,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   skillId: activeSkillRuntime.skill?.id
                 }
               ),
-              sessionUrl: executionContext.shouldPersistSessionUrl ? result.sessionUrl : null
+              sessionUrl: resolvePersistedSessionUrl(result.sessionUrl)
             })
           )
 
@@ -4263,7 +4780,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               return replaceLastMessageWithMessagesInSession(prev, {
                 sessionId: targetSessionId,
                 messages: completedAssistantMessages,
-                sessionUrl: executionContext.shouldPersistSessionUrl ? streamedSessionUrl : null
+                sessionUrl: resolvePersistedSessionUrl(streamedSessionUrl)
               })
             }
 
@@ -4277,7 +4794,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   ...(streamedOcrResult ? { ocrResult: streamedOcrResult } : {}),
                   ...(responseModelName ? { modelName: responseModelName } : {})
                 },
-                sessionUrl: executionContext.shouldPersistSessionUrl ? streamedSessionUrl : null
+                sessionUrl: resolvePersistedSessionUrl(streamedSessionUrl)
               })
             }
 
@@ -4380,6 +4897,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       clearLoadingSessionTracking,
       config,
       customSkills,
+      emitChatActivity,
       emitPreviewRefresh,
       loadingIdsStorageKey,
       mergeHiddenContext,
@@ -4403,7 +4921,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       notifyWarning,
       isAutoContextCompressionAvailable,
       selectedCapabilityProfile,
-      selectedReasoningEffort
+      selectedProfileCapabilities,
+      selectedReasoningEffort,
+      startContextCompactJob
     ]
   )
 
@@ -4761,8 +5281,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   }
 
+  const chatWorkspaceControlsPortal =
+    compact && active && workspaceControlsPortalElement
+      ? createPortal(chatWorkspaceControlsSlot, workspaceControlsPortalElement)
+      : null
+
   const compactSkillPortal =
-    compact && active && portalElement && hasCustomSkills
+    compact && active && skillPortalElement && hasCustomSkills
       ? createPortal(
           <Button
             size="small"
@@ -4780,7 +5305,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           >
             {t('chat.skill', { defaultValue: '技能' })}
           </Button>,
-          portalElement
+          skillPortalElement
         )
       : null
   const deprecatedSkillPortalDisabled = false
@@ -4974,7 +5499,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           {/* 消息列表 */}
           {!isSkillPickerOpen ? (
             <>
-              {chatTopControlSlot}
+              {!compact ? chatTopControlSlot : null}
               <ChatMessageList
                 active={active}
                 currentSession={currentSession}
@@ -5031,9 +5556,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 toolHelpItems={selectedSkillToolHelpItems}
                 onClearSkill={() => handleSelectSkill(null)}
                 onCompressContext={handleCompressCurrentContext}
-                onClearContext={handleClearCurrentContext}
                 disableCompressContext={!canCompressCurrentContext}
-                disableClearContext={!canClearCurrentContext}
+                toolbarSlot={chatImageGenerationToolbarSlot}
+                statusSlot={contextCompressionStatusSlot}
               />
             </>
           ) : (
@@ -5079,7 +5604,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         )}
 
         {/* React Portal to inject Skill Selectors into the AgentWorkspace header */}
-        {deprecatedSkillPortalDisabled && portalElement
+        {deprecatedSkillPortalDisabled && skillPortalElement
           ? createPortal(
               <Button
                 size="small"
@@ -5097,10 +5622,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
               >
                 {t('chat.skill', { defaultValue: '技能' })}
               </Button>,
-              portalElement!
+              skillPortalElement!
             )
           : null}
       </Box>
+      {chatWorkspaceControlsPortal}
       {compactSkillPortal}
     </>
   )

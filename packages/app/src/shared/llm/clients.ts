@@ -70,6 +70,47 @@ const normalizeErrorText = (value: unknown): string =>
     .trim()
     .replace(/\s+/g, ' ')
 
+const normalizeTokenCount = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined
+
+const normalizeProviderTokenUsage = (payload: unknown): LLMChatResult['usage'] | undefined => {
+  const record =
+    payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : undefined
+  const rawUsage =
+    record?.usage && typeof record.usage === 'object'
+      ? (record.usage as Record<string, unknown>)
+      : record?.usageMetadata && typeof record.usageMetadata === 'object'
+        ? (record.usageMetadata as Record<string, unknown>)
+        : record
+  const promptTokens = normalizeTokenCount(
+    rawUsage?.promptTokens ??
+      rawUsage?.prompt_tokens ??
+      rawUsage?.inputTokens ??
+      rawUsage?.input_tokens ??
+      rawUsage?.promptTokenCount ??
+      rawUsage?.prompt_eval_count
+  )
+  const completionTokens = normalizeTokenCount(
+    rawUsage?.completionTokens ??
+      rawUsage?.completion_tokens ??
+      rawUsage?.outputTokens ??
+      rawUsage?.output_tokens ??
+      rawUsage?.candidatesTokenCount ??
+      rawUsage?.eval_count
+  )
+  const totalTokens = normalizeTokenCount(
+    rawUsage?.totalTokens ?? rawUsage?.total_tokens ?? rawUsage?.totalTokenCount
+  )
+
+  return promptTokens !== undefined || completionTokens !== undefined || totalTokens !== undefined
+    ? {
+        ...(promptTokens !== undefined ? { promptTokens } : {}),
+        ...(completionTokens !== undefined ? { completionTokens } : {}),
+        ...(totalTokens !== undefined ? { totalTokens } : {})
+      }
+    : undefined
+}
+
 const collectFetchFailureFragments = (error: unknown, fragments: Set<string>, depth = 0): void => {
   if (!error || depth > 6) {
     return
@@ -254,6 +295,9 @@ export class OpenAIAPICli implements LLMCli {
       instructions: params.systemPrompt?.trim() || 'You are a helpful assistant.',
       store: false
     }
+    if (params.maxOutputTokens) {
+      requestBody.max_output_tokens = params.maxOutputTokens
+    }
     const reasoningEffort = normalizeReasoningEffort(
       params.reasoningEffort,
       resolveChatProfileCapabilities({ model_name: this.modelName }).reasoningEfforts
@@ -333,7 +377,12 @@ export class OpenAIAPICli implements LLMCli {
         )
       }
 
-      return normalizeLLMChatResult(serialized)
+      const result = normalizeLLMChatResult(serialized)
+      const usage = normalizeProviderTokenUsage(data)
+      return {
+        ...result,
+        ...(usage ? { usage } : {})
+      }
     } catch (error) {
       throw buildFetchFailureError('OpenAI API', `${base}/responses`, error)
     } finally {
@@ -391,6 +440,9 @@ export class OpenAIAPICli implements LLMCli {
       temperature: 0.7,
       stream: false
     }
+    if (params.maxOutputTokens) {
+      requestBody.max_tokens = params.maxOutputTokens
+    }
     if (this.options?.serviceTier && isOfficialOpenAIBaseUrl(base)) {
       requestBody.service_tier = this.options.serviceTier
     }
@@ -434,7 +486,11 @@ export class OpenAIAPICli implements LLMCli {
         const imageUrl = firstItem.url || firstItem.image_url?.url
         if (imageUrl && typeof imageUrl === 'string') {
           console.log('[OpenAIAPICli] Detected image generation response, returning image URL')
-          return normalizeLLMChatResult(imageUrl)
+          const usage = normalizeProviderTokenUsage(data)
+          return {
+            ...normalizeLLMChatResult(imageUrl),
+            ...(usage ? { usage } : {})
+          }
         }
       }
     }
@@ -444,7 +500,11 @@ export class OpenAIAPICli implements LLMCli {
         `OpenAI API returned empty or invalid content. Response: ${JSON.stringify(data)}`
       )
     }
-    return normalizeLLMChatResult(content.trim())
+    const usage = normalizeProviderTokenUsage(data)
+    return normalizeLLMChatResult({
+      content: content.trim(),
+      ...(usage ? { usage } : {})
+    })
   }
 }
 
@@ -537,6 +597,12 @@ export class GeminiAPICli implements LLMCli {
     const requestBody: Record<string, any> = {
       contents
     }
+    if (params.maxOutputTokens) {
+      requestBody.generationConfig = {
+        ...(requestBody.generationConfig || {}),
+        maxOutputTokens: params.maxOutputTokens
+      }
+    }
 
     if (systemPrompt) {
       requestBody.systemInstruction = {
@@ -589,7 +655,11 @@ export class GeminiAPICli implements LLMCli {
         `Gemini API returned empty or invalid content. Response: ${JSON.stringify(data)}`
       )
     }
-    return normalizeLLMChatResult(content.trim())
+    const usage = normalizeProviderTokenUsage(data)
+    return normalizeLLMChatResult({
+      content: content.trim(),
+      ...(usage ? { usage } : {})
+    })
   }
 }
 
@@ -705,7 +775,7 @@ export class ClaudeAPICli implements LLMCli {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const requestBody: Record<string, any> = {
       model: this.modelName,
-      max_tokens: this.options.maxTokens || 4096,
+      max_tokens: params.maxOutputTokens || this.options.maxTokens || 4096,
       messages: claudeMessages
     }
 
@@ -756,7 +826,11 @@ export class ClaudeAPICli implements LLMCli {
         `Claude API returned empty or invalid content. Response: ${JSON.stringify(data)}`
       )
     }
-    return normalizeLLMChatResult(contentText.trim())
+    const usage = normalizeProviderTokenUsage(data)
+    return normalizeLLMChatResult({
+      content: contentText.trim(),
+      ...(usage ? { usage } : {})
+    })
   }
 }
 
@@ -884,7 +958,8 @@ export class OllamaAPICli implements LLMCli {
     const requestBody = {
       model: this.modelName,
       messages: ollamaMessages,
-      stream: false
+      stream: false,
+      ...(params.maxOutputTokens ? { options: { num_predict: params.maxOutputTokens } } : {})
     }
 
     let resp: Response
@@ -914,6 +989,10 @@ export class OllamaAPICli implements LLMCli {
         `Ollama API returned empty or invalid content. Response: ${JSON.stringify(data)}`
       )
     }
-    return normalizeLLMChatResult(content.trim())
+    const usage = normalizeProviderTokenUsage(data)
+    return normalizeLLMChatResult({
+      content: content.trim(),
+      ...(usage ? { usage } : {})
+    })
   }
 }

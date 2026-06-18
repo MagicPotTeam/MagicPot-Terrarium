@@ -37,6 +37,8 @@ export type LLMAPIProfile = {
   auth_account_email?: string
   auth_connected_at?: string
   codex_fast_mode?: boolean
+  context_window_tokens?: number
+  context_budget_tokens?: number
   provider?: LLMProviderOption
   deployment?: LLMDeployment
   model_use?: LLMModelUseOption
