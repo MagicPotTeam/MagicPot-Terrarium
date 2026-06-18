@@ -38,6 +38,12 @@ function nodeIdAndFieldFallback(slot: JsonPath, workflow: Workflow): [string, st
   return [nodeId, field]
 }
 
+type FieldConditionContext = {
+  nodeId: string
+  field: string
+  node: WorkflowNode
+}
+
 type InputNodeSelectProps = {
   label: string
   value: JsonPath | null
@@ -46,7 +52,11 @@ type InputNodeSelectProps = {
   objectInfos: ObjectInfoMap
   mode: 'node' | 'field'
   allowNodeCondition?: (objInfoNode: ObjectInfo) => boolean
-  allowFieldCondition?: (objInfoNode: ObjectInfo, objInfoField: ObjectInfoInputField) => boolean
+  allowFieldCondition?: (
+    objInfoNode: ObjectInfo,
+    objInfoField: ObjectInfoInputField,
+    context: FieldConditionContext
+  ) => boolean
 }
 
 const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
@@ -93,14 +103,14 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
         }
         return allowNodeCondition(objInfoNode)
       })
-      .filter(({ objInfoNode, objInfoField }) => {
+      .filter(({ nodeId, field, node, objInfoNode, objInfoField }) => {
         if (!allowFieldCondition) {
           return true
         }
-        if (!objInfoNode || !objInfoField) {
+        if (!node || !objInfoNode || !objInfoField) {
           return true // 保留未能解析的节点，以便用户手动选择
         }
-        return allowFieldCondition(objInfoNode, objInfoField)
+        return allowFieldCondition(objInfoNode, objInfoField, { nodeId, field, node })
       })
 
     return filtered.map(({ nodeId, field }) => ({ nodeId, field }))
