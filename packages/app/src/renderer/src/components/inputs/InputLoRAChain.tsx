@@ -21,7 +21,7 @@ import { isEqual } from 'es-toolkit'
 
 const TRIGGER_WORDS_LABEL = '\u89e6\u53d1\u8bcd\u5907\u6ce8'
 const TRIGGER_WORDS_PLACEHOLDER = '\u586b\u5199\u8be5 LoRA \u7684\u89e6\u53d1\u8bcd'
-const TRIGGER_WORDS_HELPER = '选择 LoRA 后自动读取；点击“追加”才会加入提示词'
+const TRIGGER_WORDS_HELPER = '选择 LoRA 后会自动读取触发词；点击“追加触发词”才会加入提示词'
 const APPEND_TRIGGER_WORDS_LABEL = '追加触发词'
 
 export type LoRAConfig = {
@@ -163,7 +163,7 @@ const InputLora: React.FC<InputLoraProps> = ({
   const currentTriggerWords = currentLora.lora_name ? currentLora.trigger_words || '' : ''
 
   return (
-    <>
+    <Box sx={{ containerType: 'inline-size' }}>
       <Autocomplete
         value={currentLora.lora_name || null}
         onChange={(event, newValue) => {
@@ -229,7 +229,17 @@ const InputLora: React.FC<InputLoraProps> = ({
           }
         }}
       />
-      <Box sx={{ display: 'grid', gridTemplateColumns: gridTemplateColumns, gap: 1, mt: 2 }}>
+      <Box
+        sx={{
+          display: 'grid',
+          gridTemplateColumns: gridTemplateColumns,
+          gap: 1,
+          mt: 1.5,
+          '@container (max-width: 360px)': {
+            mt: 1
+          }
+        }}
+      >
         {imageObjUrl && imageHeight && (
           <Box
             sx={{ display: 'flex', flexDirection: 'column', gap: 1, width: '100%' }}
@@ -270,7 +280,14 @@ const InputLora: React.FC<InputLoraProps> = ({
             step={0.01}
             defaultValue={1}
           />
-          <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
+          <Box
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0, 1fr)',
+              gap: 1,
+              alignItems: 'flex-start'
+            }}
+          >
             <TextField
               value={currentTriggerWords}
               label={`Lora ${index} ${TRIGGER_WORDS_LABEL}`}
@@ -298,12 +315,22 @@ const InputLora: React.FC<InputLoraProps> = ({
               maxRows={3}
               helperText={TRIGGER_WORDS_HELPER}
               sx={{
-                flex: 1,
                 minWidth: 0,
+                '& .MuiInputBase-root': {
+                  alignItems: 'flex-start'
+                },
                 '& .MuiFormHelperText-root': {
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis'
+                },
+                '@container (max-width: 360px)': {
+                  '& .MuiFormHelperText-root': {
+                    whiteSpace: 'normal',
+                    display: '-webkit-box',
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: 'vertical'
+                  }
                 }
               }}
             />
@@ -324,7 +351,7 @@ const InputLora: React.FC<InputLoraProps> = ({
                 height: 40,
                 minHeight: 40,
                 whiteSpace: 'nowrap',
-                flexShrink: 0
+                justifySelf: 'stretch'
               }}
             >
               {APPEND_TRIGGER_WORDS_LABEL}
@@ -332,7 +359,7 @@ const InputLora: React.FC<InputLoraProps> = ({
           </Box>
         </Box>
       </Box>
-    </>
+    </Box>
   )
 }
 
