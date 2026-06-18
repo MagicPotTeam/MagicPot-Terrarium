@@ -18,9 +18,11 @@ import {
   ListItemIcon,
   ListItemText,
   Menu,
-  MenuItem
+  MenuItem,
+  SvgIcon
 } from '@mui/material'
 import type { InputBaseComponentProps } from '@mui/material/InputBase'
+import type { SvgIconProps } from '@mui/material/SvgIcon'
 import {
   Send as SendIcon,
   Add as AddIcon,
@@ -34,9 +36,7 @@ import {
   Videocam as VideoIcon,
   ViewInAr as Model3DIcon,
   InsertDriveFile as FileIcon,
-  SlideshowOutlined as PowerPointFileIcon,
-  CompressOutlined as CompressContextIcon,
-  CleaningServicesOutlined as ClearContextIcon
+  SlideshowOutlined as PowerPointFileIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
 import { ChatAttachment } from '../../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
@@ -113,6 +113,39 @@ const COMPOSER_VERTICAL_OVERHEAD = 140
 const MIN_ATTACHMENT_PREVIEW_HEIGHT = 88
 const MAX_ATTACHMENT_PREVIEW_HEIGHT = 240
 const ATTACHMENT_PREVIEW_HEIGHT_RATIO = 0.32
+
+const CompressContextIcon: React.FC<SvgIconProps> = ({ sx, ...props }) => (
+  <SvgIcon
+    {...props}
+    sx={[{ fill: 'none' }, ...(Array.isArray(sx) ? sx : sx ? [sx] : [])]}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <rect width="20" height="5" x="2" y="3" rx="1" />
+    <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+    <path d="M10 12h4" />
+  </SvgIcon>
+)
+
+const ClearContextIcon: React.FC<SvgIconProps> = ({ sx, ...props }) => (
+  <SvgIcon
+    {...props}
+    sx={[{ fill: 'none' }, ...(Array.isArray(sx) ? sx : sx ? [sx] : [])]}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M21 21H8a2 2 0 0 1-1.42-.587l-3.994-3.999a2 2 0 0 1 0-2.828l10-10a2 2 0 0 1 2.829 0l5.999 6a2 2 0 0 1 0 2.828L12.834 21" />
+    <path d="m5.082 11.09 8.828 8.828" />
+  </SvgIcon>
+)
 
 const parseCssPixelValue = (value: unknown): number | null => {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null
@@ -610,6 +643,23 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   const handleUploadFileFromMenu = () => {
     closeAddMenu()
     onUploadFile()
+  }
+
+  const canCompressFromStatusSlot = Boolean(
+    onCompressContext && !disabled && !isLoading && !disableCompressContext
+  )
+
+  const handleStatusSlotCompressClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!canCompressFromStatusSlot || !onCompressContext) return
+    event.preventDefault()
+    onCompressContext()
+  }
+
+  const handleStatusSlotCompressKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    if (!canCompressFromStatusSlot || !onCompressContext) return
+    event.preventDefault()
+    onCompressContext()
   }
 
   const resolvedTextareaMaxHeight = textareaMaxHeight != null ? `${textareaMaxHeight}px` : '40vh'
@@ -1181,11 +1231,43 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   data-testid="chat-composer-status-slot"
                   sx={{ display: 'flex', alignItems: 'center' }}
                 >
-                  {statusSlot}
+                  {onCompressContext ? (
+                    <Box
+                      data-testid="chat-composer-context-status-compress"
+                      role="button"
+                      aria-label={t('chat.compress_context', { defaultValue: 'Compress context' })}
+                      aria-disabled={!canCompressFromStatusSlot}
+                      tabIndex={canCompressFromStatusSlot ? 0 : -1}
+                      onClick={handleStatusSlotCompressClick}
+                      onKeyDown={handleStatusSlotCompressKeyDown}
+                      sx={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: 30,
+                        height: 30,
+                        borderRadius: '50%',
+                        color: 'text.secondary',
+                        cursor: canCompressFromStatusSlot ? 'pointer' : 'default',
+                        opacity: disabled || isLoading ? 0.5 : 1,
+                        outline: 'none',
+                        '&:focus-visible': {
+                          boxShadow: (theme) => `0 0 0 2px ${theme.palette.primary.main}`
+                        },
+                        '& [data-testid="chat-context-compression-indicator"]': {
+                          cursor: canCompressFromStatusSlot ? 'pointer' : 'default'
+                        }
+                      }}
+                    >
+                      {statusSlot}
+                    </Box>
+                  ) : (
+                    statusSlot
+                  )}
                 </Box>
               ) : null}
 
-              {onCompressContext ? (
+              {onCompressContext && !statusSlot ? (
                 <IconButton
                   data-testid="chat-composer-compress-context"
                   onClick={onCompressContext}
