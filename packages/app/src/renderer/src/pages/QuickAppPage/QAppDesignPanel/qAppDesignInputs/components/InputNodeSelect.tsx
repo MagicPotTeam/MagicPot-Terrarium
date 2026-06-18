@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ObjectInfo,
   ObjectInfoInputField,
@@ -7,7 +7,7 @@ import {
   WorkflowNode
 } from '@shared/comfy/types'
 import { JsonPath } from '@shared/utils/jsonPath'
-import { Box, Typography } from '@mui/material'
+import { Autocomplete, Box, TextField, Typography } from '@mui/material'
 import {
   fieldByJsonPath,
   nodeIdAndClsByJsonPath,
@@ -16,6 +16,16 @@ import {
 import InputSelect from '@renderer/components/inputs/InputSelect'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { useTranslation } from 'react-i18next'
+
+type NodeOption = { label: string; value: string }
+
+function buildNodeSelectLabel(nodeId: string, workflow: Workflow): string {
+  const node = workflow[nodeId]
+  if (!node) {
+    return `${nodeId} (node not found)`
+  }
+  return node._meta?.title ? `${node._meta.title} (#${nodeId})` : `${node.class_type} (#${nodeId})`
+}
 
 function nodeIdAndFieldFallback(slot: JsonPath, workflow: Workflow): [string, string] {
   let nodeId = ''
@@ -159,22 +169,11 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
     return Array.from(new Set(allNodeAndObjInfo.map(({ nodeId }) => nodeId)))
   }, [workflow, objectInfos, allowNodeCondition])
 
-  const nodeOptions: { label: string; value: string }[] = useMemo(() => {
-    return allAllowedNodeIds.map((nodeId) => {
-      const node = workflow[nodeId]
-      if (!node) {
-        return {
-          label: `${nodeId} (未找到节点)`,
-          value: nodeId
-        }
-      }
-      return {
-        label: node._meta?.title
-          ? `${node._meta?.title} (#${nodeId})`
-          : `${node.class_type} (#${nodeId})`,
-        value: nodeId
-      }
-    })
+  const nodeOptions: NodeOption[] = useMemo(() => {
+    return allAllowedNodeIds.map((nodeId) => ({
+      label: buildNodeSelectLabel(nodeId, workflow),
+      value: nodeId
+    }))
   }, [workflow, allAllowedNodeIds])
 
   const [nodeId, setNodeId] = useState<string>(() => {
@@ -230,6 +229,59 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
     return ''
   })
 
+  const selectedNodeOption = useMemo<NodeOption | null>(() => {
+    if (!nodeId) {
+      return null
+    }
+    return nodeOptions.find(({ value }) => value === nodeId) ?? null
+  }, [nodeId, nodeOptions])
+
+  const normalizeNodeIdInput = useCallback((inputValue: string) => {
+    return inputValue.trim().replace(/^#/, '')
+  }, [])
+
+  const [nodeInputValue, setNodeInputValue] = useState<string>(
+    () => selectedNodeOption?.label ?? ''
+  )
+  const [isNodeInputFocused, setIsNodeInputFocused] = useState(false)
+
+  const getNodeOptionByInput = useCallback(
+    (inputValue: string): NodeOption | null => {
+      const nextNodeId = normalizeNodeIdInput(inputValue)
+      if (!nextNodeId) {
+        return null
+      }
+      return nodeOptions.find(({ value }) => value === nextNodeId) ?? null
+    },
+    [nodeOptions, normalizeNodeIdInput]
+  )
+
+  const hasLongerNodeIdPrefix = useCallback(
+    (nodeId: string): boolean => {
+      return nodeOptions.some(({ value }) => value !== nodeId && value.startsWith(nodeId))
+    },
+    [nodeOptions]
+  )
+
+  const selectNodeByInput = useCallback(
+    (inputValue: string): boolean => {
+      const nodeOption = getNodeOptionByInput(inputValue)
+      if (!nodeOption) {
+        return false
+      }
+      setNodeId(nodeOption.value)
+      setNodeInputValue(nodeOption.label)
+      return true
+    },
+    [getNodeOptionByInput]
+  )
+
+  useEffect(() => {
+    if (!isNodeInputFocused) {
+      setNodeInputValue(selectedNodeOption?.label ?? '')
+    }
+  }, [isNodeInputFocused, selectedNodeOption])
+
   /**
    * nodeId 更新时触发更新 field 与 value 的形式不同，是因为：
    * 1. field 是内部状态，更新时依赖到 fieldOptions ，不希望在组件加载时将默认值更新掉
@@ -282,12 +334,76 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
           gap: 1
         }}
       >
-        <InputSelect
-          label={t('qapp.design.node')}
-          value={nodeId}
-          onChange={(v) => setNodeId(v)}
-          items={nodeOptions}
-          error={!nodeId}
+        <Autocomplete<NodeOption, false, false, true>
+          fullWidth
+          freeSolo
+          autoHighlight
+          selectOnFocus
+          value={selectedNodeOption}
+          inputValue={nodeInputValue}
+          options={nodeOptions}
+          getOptionLabel={(option) => (typeof option === 'string' ? option : option.label)}
+          isOptionEqualToValue={(option, value) => option.value === value.value}
+          filterOptions={(options, { inputValue }) => {
+            const keyword = normalizeNodeIdInput(inputValue).toLowerCase()
+            if (!keyword) {
+              return options
+            }
+            return options
+              .filter(({ label, value }) => {
+                return (
+                  value.toLowerCase().includes(keyword) || label.toLowerCase().includes(keyword)
+                )
+              })
+              .sort((left, right) => {
+                if (left.value === keyword) return -1
+                if (right.value === keyword) return 1
+                if (left.value.startsWith(keyword) && !right.value.startsWith(keyword)) return -1
+                if (!left.value.startsWith(keyword) && right.value.startsWith(keyword)) return 1
+                return 0
+              })
+          }}
+          onInputChange={(_, inputValue, reason) => {
+            if (reason !== 'input' && reason !== 'clear') {
+              return
+            }
+            setNodeInputValue(inputValue)
+            const nextNodeId = normalizeNodeIdInput(inputValue)
+            const nodeOption = getNodeOptionByInput(inputValue)
+            if (nodeOption && !hasLongerNodeIdPrefix(nextNodeId)) {
+              setNodeId(nodeOption.value)
+              setNodeInputValue(nodeOption.label)
+            }
+          }}
+          onChange={(_, selectedValue) => {
+            if (typeof selectedValue === 'string') {
+              selectNodeByInput(selectedValue)
+              return
+            }
+            setNodeId(selectedValue?.value ?? '')
+            setNodeInputValue(selectedValue?.label ?? '')
+            setIsNodeInputFocused(false)
+          }}
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              label={t('qapp.design.node')}
+              error={!nodeId}
+              onFocus={() => setIsNodeInputFocused(true)}
+              onBlur={() => {
+                setIsNodeInputFocused(false)
+                if (!selectNodeByInput(nodeInputValue)) {
+                  setNodeInputValue(selectedNodeOption?.label ?? '')
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && selectNodeByInput(nodeInputValue)) {
+                  event.preventDefault()
+                  setIsNodeInputFocused(false)
+                }
+              }}
+            />
+          )}
         />
         {mode === 'field' && (
           <InputSelect
