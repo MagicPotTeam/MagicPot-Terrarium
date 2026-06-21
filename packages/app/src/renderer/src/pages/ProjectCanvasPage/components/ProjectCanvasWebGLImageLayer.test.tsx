@@ -3641,6 +3641,96 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     }
   }, 30000)
 
+  it('releases pending local-media object URLs when the WebGL layer unmounts before image load settles', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const originalApi = window.api
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const attemptedSrcs: string[] = []
+    const readImageFromPath = vi.fn(async () => ({
+      image: new Uint8Array([1, 2, 3, 4]),
+      filename: 'pending-source.png'
+    }))
+    const createObjectURLMock = vi.fn((_blob: Blob) => 'blob:webgl-pending-local-image')
+    const revokeObjectURLMock = vi.fn()
+
+    class MockImage {
+      onload: null | (() => void) = null
+      onerror: null | (() => void) = null
+      crossOrigin: string | null = null
+      naturalWidth = 640
+      naturalHeight = 360
+      width = 640
+      height = 360
+      private _src = ''
+
+      set src(value: string) {
+        this._src = value
+        attemptedSrcs.push(value)
+      }
+
+      get src() {
+        return this._src
+      }
+    }
+
+    URL.createObjectURL = createObjectURLMock as unknown as typeof URL.createObjectURL
+    URL.revokeObjectURL = revokeObjectURLMock as unknown as typeof URL.revokeObjectURL
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcFs: {
+          readImageFromPath
+        }
+      }
+    })
+    vi.stubGlobal('Image', MockImage as unknown as typeof Image)
+
+    try {
+      const { unmount } = render(
+        <ProjectCanvasWebGLImageLayer
+          items={[
+            createItem({
+              id: 'image-local-source-pending',
+              src: 'local-media:///C:/real-board/pending-source.png',
+              fileName: 'pending-source.png',
+              image: undefined as unknown as HTMLImageElement
+            })
+          ]}
+          stagePos={{ x: 0, y: 0 }}
+          stageScale={1}
+          stageSize={{ width: 1280, height: 720 }}
+        />
+      )
+
+      await waitFor(
+        () => {
+          expect(readImageFromPath).toHaveBeenCalledWith({
+            fullPath: 'C:/real-board/pending-source.png'
+          })
+          expect(attemptedSrcs).toEqual(['blob:webgl-pending-local-image'])
+        },
+        { timeout: 15000 }
+      )
+
+      expect(revokeObjectURLMock).not.toHaveBeenCalled()
+      unmount()
+
+      expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:webgl-pending-local-image')
+      expect(revokeObjectURLMock).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+      URL.createObjectURL = originalCreateObjectURL
+      URL.revokeObjectURL = originalRevokeObjectURL
+      Object.defineProperty(window, 'api', {
+        configurable: true,
+        writable: true,
+        value: originalApi
+      })
+    }
+  }, 30000)
+
   it('falls back to an image element when bounded source fetch fails', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []

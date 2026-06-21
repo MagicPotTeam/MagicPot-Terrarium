@@ -1825,6 +1825,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       skippedSourceUpgradeSrcByIdRef.current.clear()
       clearCachedImageRecords(imageCacheRef.current, 'component-unmount')
       clearCachedImageRecords(thumbnailCacheRef.current, 'component-unmount')
+      releaseManagerRef.current.releaseAll('component-unmount')
       spriteRecords.forEach((record) => {
         destroyProjectCanvasSpriteRecord(record)
       })
