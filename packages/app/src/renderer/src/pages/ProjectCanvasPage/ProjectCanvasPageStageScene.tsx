@@ -23,10 +23,7 @@ import {
 } from './canvasLiveOverlayBounds'
 import { CANVAS_NEW_RESULT_HINT_EVENT, type CanvasNewResultHintDetail } from './canvasNewResultHint'
 import { measureCanvasAnnotationTextHeight, measureCanvasTextBoxHeight } from './canvasTextLayout'
-import {
-  ProjectCanvasPageSceneGrid,
-  ProjectCanvasPageSceneOverlay
-} from './ProjectCanvasPageSceneDecorations'
+import { ProjectCanvasPageSceneOverlay } from './ProjectCanvasPageSceneDecorations'
 import ProjectCanvasWebGLImageLayer, {
   PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT,
   PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_MAX_SIDE,
@@ -803,7 +800,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
     cursorStyle,
     drawingState,
     exactSelectedGroup,
-    gridColor,
     handleDragEnd,
     handleDragOver,
     handleDrop,
@@ -841,7 +837,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
     setLabelDialogText,
     setSelectedIds,
     setTool,
-    showGrid,
     shouldForceShapeCreationCrosshair,
     stagePos,
     stagePosRef,
@@ -3159,14 +3154,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
     >
       <MaxSizeLayout onResize={handleResize}>
         <Box sx={{ position: 'relative', width: '100%', height: '100%' }}>
-          <ProjectCanvasPageSceneGrid
-            showGrid={showGrid}
-            stagePos={stagePos}
-            stageScale={stageScale}
-            stageSize={stageSize}
-            gridColor={gridColor}
-            registerViewportCallback={registerViewportCallback}
-          />
           <ProjectCanvasWebGLImageLayer
             ref={webglImageLayerRef}
             items={webglImageItems}
