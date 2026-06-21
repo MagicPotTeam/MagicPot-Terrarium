@@ -125,6 +125,7 @@ let createdSprites: MockSpriteInstance[] = []
 let createdApplications: MockApplicationInstance[] = []
 let textureFromThrowForNaturalWidth: number | null = null
 let textureFromWidths: number[] = []
+let textureFromAlphaModes: unknown[] = []
 let textureScaleModeReadCount = 0
 let textureScaleModeWriteCount = 0
 const originalDevicePixelRatio = window.devicePixelRatio
@@ -190,9 +191,12 @@ function installPixiMock() {
         this.destroySourceCalled = Boolean(destroySource)
       }
 
-      static from(image: HTMLImageElement) {
+      static from(input: HTMLImageElement | { resource?: HTMLImageElement; alphaMode?: unknown }) {
+        const options = input as { resource?: HTMLImageElement; alphaMode?: unknown }
+        const image = options.resource ?? (input as HTMLImageElement)
         const textureWidth = image.naturalWidth || image.width || 1
         textureFromWidths.push(textureWidth)
+        textureFromAlphaModes.push(options.alphaMode)
         if (textureFromThrowForNaturalWidth === textureWidth) {
           throw new Error(`Texture creation failed for ${textureWidth}px image`)
         }
@@ -202,6 +206,7 @@ function installPixiMock() {
           destroyed: false,
           unload: vi.fn(),
           image,
+          alphaMode: options.alphaMode,
           get scaleMode() {
             textureScaleModeReadCount += 1
             return scaleMode
@@ -382,6 +387,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     createdApplications = []
     textureFromThrowForNaturalWidth = null
     textureFromWidths = []
+    textureFromAlphaModes = []
     textureScaleModeReadCount = 0
     textureScaleModeWriteCount = 0
     setWindowDevicePixelRatio(originalDevicePixelRatio)
@@ -455,6 +461,28 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
     expect(app.canvas.width).toBe(1180)
     expect(app.canvas.height).toBe(720)
+  }, 30000)
+
+  it('creates Pixi textures with straight-alpha blending so transparent pixels stay transparent', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+
+    render(
+      <ProjectCanvasWebGLImageLayer
+        items={[createItem()]}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 640, height: 480 }}
+      />
+    )
+
+    await waitFor(
+      () => {
+        expect(createdSprites.filter((sprite) => !sprite.destroyed)).toHaveLength(1)
+      },
+      { timeout: 15000 }
+    )
+
+    expect(textureFromAlphaModes).toEqual(['no-premultiply-alpha'])
   }, 30000)
 
   it('does not rescan resident texture sampling on every viewport sync', async () => {
@@ -3512,7 +3540,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           expect(createImageBitmapMock).toHaveBeenCalledWith(expect.any(Blob), {
             resizeWidth: 4096,
             resizeHeight: 2509,
-            resizeQuality: 'high'
+            resizeQuality: 'high',
+            premultiplyAlpha: 'none'
           })
           expect(getLiveSpriteByLabel('image-bounded-hires')?.texture.width).toBe(4096)
         },
@@ -3684,7 +3713,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           expect(createImageBitmapMock).toHaveBeenCalledWith(imageInstances[0], {
             resizeWidth: 4096,
             resizeHeight: 2276,
-            resizeQuality: 'high'
+            resizeQuality: 'high',
+            premultiplyAlpha: 'none'
           })
           expect(getLiveSpriteByLabel('image-bounded-fallback-hires')?.texture.width).toBe(4096)
         },

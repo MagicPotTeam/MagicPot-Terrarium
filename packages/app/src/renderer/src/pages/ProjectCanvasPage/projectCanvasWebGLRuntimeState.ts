@@ -22,6 +22,15 @@ export type ProjectCanvasWebGLRuntimeMetrics = {
   sourceUpgradePendingImageCount: number
   sourceUpgradeFailedImageCount: number
   missingImageCount: number
+  activeObjectUrlCount: number
+  revokedObjectUrlCount: number
+  activeImageBitmapCount: number
+  closedImageBitmapCount: number
+  releaseErrorCount: number
+  decodedInFlightBytes: number
+  activeSourceUpgradeCount: number
+  residentTextureBudgetPressureCount: number
+  textureBudgetEvictionCount: number
   renderCount: number
   lastRenderDurationMs: number | null
   lastUpdateReason: 'initialize' | 'items' | 'preview' | 'cleanup'
@@ -52,6 +61,7 @@ export type ProjectCanvasMetricsSnapshot = {
 
 export type ProjectCanvasThumbnailCacheMetrics = CanvasThumbnailRuntimeMetrics & {
   cacheGeneratedCount: number
+  cacheSidecarGeneratedCount: number
   cacheNativeGeneratedCount: number
   cacheStaleCount: number
   cacheFailedCount: number
@@ -61,10 +71,12 @@ const fallbackThumbnailCacheMetrics: ProjectCanvasThumbnailCacheMetrics = {
   thumbnailCount: 0,
   cacheHitCount: 0,
   generatedCount: 0,
+  sidecarGeneratedCount: 0,
   nativeGeneratedCount: 0,
   staleCount: 0,
   failedCount: 0,
   cacheGeneratedCount: 0,
+  cacheSidecarGeneratedCount: 0,
   cacheNativeGeneratedCount: 0,
   cacheStaleCount: 0,
   cacheFailedCount: 0
@@ -92,6 +104,15 @@ const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   sourceUpgradePendingImageCount: 0,
   sourceUpgradeFailedImageCount: 0,
   missingImageCount: 0,
+  activeObjectUrlCount: 0,
+  revokedObjectUrlCount: 0,
+  activeImageBitmapCount: 0,
+  closedImageBitmapCount: 0,
+  releaseErrorCount: 0,
+  decodedInFlightBytes: 0,
+  activeSourceUpgradeCount: 0,
+  residentTextureBudgetPressureCount: 0,
+  textureBudgetEvictionCount: 0,
   renderCount: 0,
   lastRenderDurationMs: null,
   lastUpdateReason: 'cleanup'
@@ -119,6 +140,15 @@ const PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS = [
   'sourceUpgradePendingImageCount',
   'sourceUpgradeFailedImageCount',
   'missingImageCount',
+  'activeObjectUrlCount',
+  'revokedObjectUrlCount',
+  'activeImageBitmapCount',
+  'closedImageBitmapCount',
+  'releaseErrorCount',
+  'decodedInFlightBytes',
+  'activeSourceUpgradeCount',
+  'residentTextureBudgetPressureCount',
+  'textureBudgetEvictionCount',
   'renderCount',
   'lastRenderDurationMs',
   'lastUpdateReason'
@@ -218,6 +248,7 @@ export function buildProjectCanvasMetricsSnapshot({
     ? {
         ...thumbnailCacheMetrics,
         cacheGeneratedCount: thumbnailCacheMetrics.generatedCount,
+        cacheSidecarGeneratedCount: thumbnailCacheMetrics.sidecarGeneratedCount,
         cacheNativeGeneratedCount: thumbnailCacheMetrics.nativeGeneratedCount,
         cacheStaleCount: thumbnailCacheMetrics.staleCount,
         cacheFailedCount: thumbnailCacheMetrics.failedCount
