@@ -1561,6 +1561,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   ])
 
   useLayoutEffect(() => {
+    const imageElementLoadTimeouts = imageElementLoadTimeoutsRef.current
+
     return () => {
       if (viewportReconcileTimerRef.current != null) {
         clearTimeout(viewportReconcileTimerRef.current)
@@ -1578,10 +1580,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         clearTimeout(imageVersionDeferredTimerRef.current)
         imageVersionDeferredTimerRef.current = null
       }
-      imageElementLoadTimeoutsRef.current.forEach((timeoutId) => {
+      imageElementLoadTimeouts.forEach((timeoutId) => {
         window.clearTimeout(timeoutId)
       })
-      imageElementLoadTimeoutsRef.current.clear()
+      imageElementLoadTimeouts.clear()
     }
   }, [])
 
@@ -3262,6 +3264,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       })
     }
   }, [
+    beginDecodeBudgetReservation,
     destroySpriteRecord,
     collectImageHealthCounts,
     deleteCachedImageRecord,
