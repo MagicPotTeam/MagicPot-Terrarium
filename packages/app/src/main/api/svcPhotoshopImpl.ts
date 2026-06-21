@@ -48,6 +48,67 @@ const buildPhotoshopJavaScriptAppleScript = (jsxScript: string): string =>
 const runAppleScript = (appleScript: string, timeout = 10000) =>
   execFileAsync('osascript', ['-e', appleScript], { timeout })
 
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const PNG_IEND_CHUNK = Buffer.from([
+  0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
+])
+
+const hasCompletePngSignatureAndIend = async (filePath: string): Promise<boolean> => {
+  let handle: fs.FileHandle | null = null
+  try {
+    handle = await fs.open(filePath, 'r')
+    const stats = await handle.stat()
+    if (stats.size < PNG_SIGNATURE.length + PNG_IEND_CHUNK.length) {
+      return false
+    }
+
+    const signature = Buffer.alloc(PNG_SIGNATURE.length)
+    const signatureRead = await handle.read(signature, 0, signature.length, 0)
+    if (signatureRead.bytesRead !== signature.length || !signature.equals(PNG_SIGNATURE)) {
+      return false
+    }
+
+    const iend = Buffer.alloc(PNG_IEND_CHUNK.length)
+    const iendRead = await handle.read(iend, 0, iend.length, stats.size - iend.length)
+    return iendRead.bytesRead === iend.length && iend.equals(PNG_IEND_CHUNK)
+  } catch {
+    return false
+  } finally {
+    if (handle) {
+      await handle.close().catch(() => {})
+    }
+  }
+}
+
+const waitForCompletePhotoshopPngExport = async (
+  outputPath: string,
+  timeoutMs = 10000
+): Promise<void> => {
+  let waitTime = 10
+  const startTime = Date.now()
+
+  while (Date.now() - startTime < timeoutMs) {
+    if (await hasCompletePngSignatureAndIend(outputPath)) {
+      return
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, waitTime))
+    waitTime = Math.min(waitTime * 1.5, 200)
+  }
+
+  let sizeDetails = ''
+  try {
+    const stats = await fs.stat(outputPath)
+    sizeDetails = ` Last observed size: ${stats.size} bytes.`
+  } catch {
+    sizeDetails = ' The file does not exist.'
+  }
+
+  throw new Error(
+    `Photoshop export failed: complete PNG was not created at ${outputPath}.${sizeDetails}`
+  )
+}
+
 const getPhotoshopTempDir = async (): Promise<string> => {
   const tempDir = resolveTestArtifactPath({
     desktopPath: app.getPath('desktop'),
@@ -347,34 +408,9 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
         throw new Error('Direct Photoshop reads are only supported on Windows and macOS.')
       }
 
-      // Wait for the exported file to appear using a short adaptive polling strategy.
-      // Start aggressively, then back off while the file is still being written.
-      let fileExists = false
-      let waitTime = 10 // Initial wait interval in milliseconds.
-      const maxWaitTime = 5000 // Maximum total wait time in milliseconds.
-      const startTime = Date.now()
-
-      while (Date.now() - startTime < maxWaitTime) {
-        try {
-          // stat lets us check both existence and file size in one call.
-          const stats = await fs.stat(outputPath)
-          // A non-empty file is enough to treat the export as ready.
-          if (stats.size > 0) {
-            fileExists = true
-            break
-          }
-        } catch {
-          // The file is not ready yet; keep polling.
-        }
-
-        // Back off gradually while capping the polling interval.
-        await new Promise((resolve) => setTimeout(resolve, waitTime))
-        waitTime = Math.min(waitTime * 1.5, 200) // Cap the interval at 200ms.
-      }
-
-      if (!fileExists) {
-        throw new Error(`Photoshop export failed: file was not created at ${outputPath}`)
-      }
+      // Wait for Photoshop to finish writing the PNG before the renderer builds a preview.
+      // A non-empty file can still be incomplete on slow restarts or large documents.
+      await waitForCompletePhotoshopPngExport(outputPath)
 
       // Read the exported image file.
       const imageData = await fs.readFile(outputPath)
