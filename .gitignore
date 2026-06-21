@@ -104,3 +104,6 @@ record.json
 /perf/baseline/
 /perf/verification/
 /perf/performance-phase-1-report.md
+
+# Locally built native sidecar binaries
+/packages/runtime-assets/resources/bin/image-worker/

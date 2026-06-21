@@ -69,7 +69,7 @@ The build script runs `cargo build --release --manifest-path packages/canvas-thu
 packages/runtime-assets/resources/bin/image-worker/${process.platform}-${process.arch}/magicpot-image-worker(.exe)
 ```
 
-This only stages the sidecar for packaging; runtime IPC/resolver wiring is intentionally not included here.
+This creates a local packaging artifact; generated binaries are ignored by git and should be produced by the target-platform packaging job before `electron-builder` runs. Runtime IPC/resolver wiring is intentionally not included here.
 
 ## Test
 
