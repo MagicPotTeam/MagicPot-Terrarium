@@ -109,7 +109,7 @@ Quick App packages and custom skill definitions are not trusted code just becaus
 - enforce compatible app version constraints;
 - treat custom node URLs and model URLs as remote inputs requiring user awareness;
 - do not execute scripts from packages without a separate reviewed extension boundary;
-- keep private/package-only runtime paths out of portable package metadata.
+- keep host-specific runtime paths out of portable package metadata.
 
 ## LLM and prompt-injection considerations
 

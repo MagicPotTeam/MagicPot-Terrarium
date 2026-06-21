@@ -148,7 +148,7 @@ Package compatibility follows these rules:
 - Preserve backward parsers for older package versions where practical.
 - Add new `QAppCfg` components as additive schema changes.
 - Use `compatibleAppVersions` when a package requires a feature only available in newer app versions.
-- Do not rely on private/bundled runtime paths in package metadata; packages should describe requirements, not local machine state.
+- Do not rely on host-specific bundled runtime paths in package metadata; packages should describe requirements, not local machine state.
 
 ## Security and trust boundaries
 

@@ -88,9 +88,9 @@ export type MagicAgentRunRequest = {
   timeoutMs?: number
   allowedToolNames?: string[] | null
   /**
-   * Internal/test-only escape hatch. Platform v1 must keep model-driven tool
-   * execution disabled by default so route-scoped AssistantRuntime/AgentKernel
-   * policy remains the execution boundary.
+   * Test-only escape hatch. Platform v1 must keep model-driven tool execution
+   * disabled by default so route-scoped AssistantRuntime/AgentKernel policy
+   * remains the execution boundary.
    */
   enableToolExecution?: boolean
   signal?: AbortSignal
