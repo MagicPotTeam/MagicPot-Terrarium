@@ -12,11 +12,19 @@ import {
   type MainHostExtensionApiV1,
   type MainLlmProxyExtensionV1
 } from './generatedRegistry'
+import { tripoMainLlmProxyExtension } from './tripoMainExtension'
 
 describe('main extension registry', () => {
+  it('registers the Tripo LLM proxy extension by default', () => {
+    expect(mainHostExtensionApiV1.llmProxy).toContain(tripoMainLlmProxyExtension)
+  })
   afterEach(() => {
     mainHostExtensionApiV1.apiServices.splice(0)
-    mainHostExtensionApiV1.llmProxy.splice(0)
+    mainHostExtensionApiV1.llmProxy.splice(
+      0,
+      mainHostExtensionApiV1.llmProxy.length,
+      tripoMainLlmProxyExtension
+    )
   })
 
   it('creates API extension services from registered factories with base API context', () => {

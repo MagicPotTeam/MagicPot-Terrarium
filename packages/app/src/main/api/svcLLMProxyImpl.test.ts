@@ -5,6 +5,7 @@ import { cliFromProfile } from '@shared/llm'
 import * as configModule from '../config/config'
 import type { AssistantRuntime } from '../assistantRuntime/runtime'
 import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
+import { tripoMainLlmProxyExtension } from '../extensions/tripoMainExtension'
 import {
   clearTrustedLocalFileSelectionsForTest,
   rememberTrustedLocalFileSelections
@@ -187,7 +188,11 @@ describe('LLMProxySvcImpl', () => {
 
   afterEach(() => {
     mainHostExtensionApiV1.apiServices.splice(0)
-    mainHostExtensionApiV1.llmProxy.splice(0)
+    mainHostExtensionApiV1.llmProxy.splice(
+      0,
+      mainHostExtensionApiV1.llmProxy.length,
+      tripoMainLlmProxyExtension
+    )
     clearTrustedLocalFileSelectionsForTest()
     useActualHunyuan3DClient.current = false
     fetchMock.mockReset()
@@ -2099,7 +2104,7 @@ describe('LLMProxySvcImpl', () => {
     )
   })
 
-  it('passes the encoded model source file name hint into Hunyuan3D post-process requests', async () => {
+  it('passes legacy encoded model source file name hints into Hunyuan3D post-process requests', async () => {
     generateFromMessagesMock.mockResolvedValue(
       '[Generated OBJ Package.zip](https://example.com/cup.zip)'
     )
@@ -2118,6 +2123,39 @@ describe('LLMProxySvcImpl', () => {
     await svc.chat({
       profileId:
         'hunyuan3d-pro::SubmitTextureTo3DJob::3.1::Normal::500000::DEFAULT::triangle::triangle::0::DEFAULT::Generated%20OBJ%20Package.zip',
+      messages: [
+        { role: 'user', content: 'https://example.com/download?id=obj-1\nadd bronze texture' }
+      ]
+    })
+
+    expect(generateFromMessagesMock).toHaveBeenCalledWith(
+      [{ role: 'user', content: 'https://example.com/download?id=obj-1\nadd bronze texture' }],
+      'SubmitTextureTo3DJob',
+      expect.objectContaining({
+        SourceFileName: 'Generated OBJ Package.zip'
+      })
+    )
+  })
+
+  it('parses keyed model source file name hints for Hunyuan3D fallback requests', async () => {
+    generateFromMessagesMock.mockResolvedValue(
+      '[Generated OBJ Package.zip](https://example.com/cup.zip)'
+    )
+
+    mockConfig({
+      aigc3d_config: {
+        ...DEFAULT_CONFIG.aigc3d_config!,
+        tencent_secret_id: 'secret-id',
+        tencent_secret_key: 'secret-key',
+        api_region: 'ap-shanghai',
+        cos_region: 'ap-guangzhou'
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    await svc.chat({
+      profileId:
+        'hunyuan3d-pro::SubmitTextureTo3DJob::3.1::Normal::500000::DEFAULT::triangle::triangle::0::DEFAULT::source=Generated%20OBJ%20Package.zip::task=tripo-task-1',
       messages: [
         { role: 'user', content: 'https://example.com/download?id=obj-1\nadd bronze texture' }
       ]

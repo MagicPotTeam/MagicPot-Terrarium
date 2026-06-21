@@ -86,6 +86,38 @@ const decodeHy3dProfileSegment = (value?: string): string => {
   }
 }
 
+type Hy3dProfileExtras = {
+  sourceFileName?: string
+}
+
+const parseHy3dProfileExtras = (segments: string[]): Hy3dProfileExtras => {
+  const extras: Hy3dProfileExtras = {}
+  let legacySourceFileNameConsumed = false
+
+  for (const segment of segments) {
+    if (!segment) continue
+
+    const equalsIndex = segment.indexOf('=')
+    if (equalsIndex <= 0) {
+      if (!legacySourceFileNameConsumed) {
+        extras.sourceFileName = decodeHy3dProfileSegment(segment) || undefined
+        legacySourceFileNameConsumed = true
+      }
+      continue
+    }
+
+    const key = segment.slice(0, equalsIndex)
+    const value = decodeHy3dProfileSegment(segment.slice(equalsIndex + 1))
+    if (!value) continue
+
+    if (key === 'source') {
+      extras.sourceFileName = value
+    }
+  }
+
+  return extras
+}
+
 const isMockFetchFunction = (value: unknown): value is FetchImpl =>
   typeof value === 'function' && 'mock' in (value as unknown as { mock?: unknown })
 
@@ -1363,7 +1395,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       polygonType,
       enablePBR,
       profileTemplate,
-      sourceFileName
+      ...hy3dProfileExtraSegments
     ] = (requestedProfileId || '').split('::')
 
     if (baseProfileId === 'hunyuan3d-pro') {
@@ -1398,7 +1430,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         apiRegion
       )
       let content: string
-      const decodedSourceFileName = decodeHy3dProfileSegment(sourceFileName) || undefined
+      const decodedSourceFileName = parseHy3dProfileExtras(hy3dProfileExtraSegments).sourceFileName
       try {
         const resolvedTargetFormat =
           targetFormat && targetFormat !== 'DEFAULT' ? targetFormat : undefined

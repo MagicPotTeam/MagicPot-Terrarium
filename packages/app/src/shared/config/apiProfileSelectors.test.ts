@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_CONFIG } from './config'
 import {
   findHunyuan3DQAppProfile,
+  findTripo3DQAppProfile,
   getQAppApiProfiles,
   isConfiguredApiProfile,
   isConfiguredHunyuan3DProfile,
   isHunyuan3DCompatibleProfile,
+  isTripo3DCompatibleProfile,
   isVisionCapableApiProfile
 } from './apiProfileSelectors'
 
@@ -207,6 +209,49 @@ describe('apiProfileSelectors', () => {
 
     expect(isConfiguredHunyuan3DProfile(profile)).toBe(true)
     expect(findHunyuan3DQAppProfile(config)?.id).toBe('plugin-hunyuan-sdk')
+  })
+
+  it('detects Tripo profiles for the 3D quick app', () => {
+    const config = {
+      ...DEFAULT_CONFIG,
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'plugin-tripo',
+            model_name: 'Tripo v3.1',
+            base_url: 'https://api.tripo3d.ai/v2/openapi',
+            api_key: 'tripo-key'
+          }
+        ]
+      }
+    }
+
+    expect(findTripo3DQAppProfile(config)?.id).toBe('plugin-tripo')
+    expect(
+      isTripo3DCompatibleProfile({
+        id: 'proxy-tripo',
+        model_name: '3D Model',
+        base_url: 'https://api.302.ai/tripo3d/v2/openapi',
+        api_key: 'proxy-key'
+      })
+    ).toBe(true)
+    expect(
+      isTripo3DCompatibleProfile({
+        id: 'mainland-tripo',
+        model_name: 'Tripo China',
+        base_url: 'https://api.tripo3d.com/v2/openapi',
+        api_key: 'tripo-cn-key'
+      })
+    ).toBe(true)
+    expect(
+      isTripo3DCompatibleProfile({
+        id: 'not-tripo',
+        model_name: 'Generic 3D',
+        base_url: 'https://example.com/v1',
+        api_key: 'key'
+      })
+    ).toBe(false)
   })
 
   it('matches Hunyuan3D Tencent endpoints by hostname only', () => {

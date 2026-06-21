@@ -69,5 +69,22 @@ export const isConfiguredHunyuan3DProfile = (profile: LLMAPIProfile): boolean =>
   isHunyuan3DCompatibleProfile(profile) &&
   (isConfiguredApiProfile(profile) || hasConfiguredHunyuan3DSecretCredentials(profile))
 
+export const isTripo3DCompatibleProfile = (profile: LLMAPIProfile): boolean => {
+  if (!profile.model_name || !profile.base_url) return false
+  const modelName = profile.model_name.toLowerCase()
+  const baseUrl = profile.base_url.toLowerCase()
+  return (
+    modelName.includes('tripo') ||
+    baseUrl.includes('tripo3d.ai') ||
+    baseUrl.includes('tripo3d.com') ||
+    /\/tripo3d\/v\d+\/openapi/i.test(baseUrl)
+  )
+}
+
 export const findHunyuan3DQAppProfile = (config: Config): LLMAPIProfile | undefined =>
   getQAppApiProfiles(config).find(isConfiguredHunyuan3DProfile)
+
+export const findTripo3DQAppProfile = (config: Config): LLMAPIProfile | undefined =>
+  getQAppApiProfiles(config).find(
+    (profile) => isConfiguredApiProfile(profile) && isTripo3DCompatibleProfile(profile)
+  )
