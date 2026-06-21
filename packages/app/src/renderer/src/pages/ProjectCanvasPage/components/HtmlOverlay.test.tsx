@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import HtmlOverlay from './HtmlOverlay'
+import { sanitizeHtmlOverlayContent } from './htmlOverlaySanitizer'
 import {
   buildOcrResultHtml,
   CANVAS_OCR_HOVER_EVENT,
@@ -45,6 +46,17 @@ const createHtmlItem = (): CanvasHtmlItem => ({
 describe('HtmlOverlay', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('sanitizes executable markup before rendering HTML overlays', () => {
+    const sanitized = sanitizeHtmlOverlayContent(
+      '<div onclick="alert(1)"><script>alert(1)</script><a href="javascript:alert(1)">x</a><img src="https://example.com/image.png"></div>'
+    )
+
+    expect(sanitized).not.toContain('onclick')
+    expect(sanitized).not.toContain('<script')
+    expect(sanitized).not.toContain('javascript:')
+    expect(sanitized).toContain('src="https://example.com/image.png"')
   })
 
   it('dispatches OCR hover events when hovering OCR table cells', () => {
