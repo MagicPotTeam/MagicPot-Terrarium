@@ -1,4 +1,7 @@
-import type { CanvasThumbnailManifest } from '@shared/api/svcCanvasThumbnail'
+import type {
+  CanvasThumbnailGenerateSetResp,
+  CanvasThumbnailManifest
+} from '@shared/api/svcCanvasThumbnail'
 
 export const CANVAS_THUMBNAIL_LEVELS = [128, 256, 512, 1024, 2048] as const
 export type CanvasThumbnailLevelSize = (typeof CANVAS_THUMBNAIL_LEVELS)[number]
@@ -40,6 +43,7 @@ export type CanvasThumbnailEnsureStatus =
   | 'cache-miss'
   | 'cache-stale'
   | 'generated'
+  | 'sidecar-generated'
   | 'native-generated'
   | 'failed'
 
@@ -52,6 +56,7 @@ export type CanvasThumbnailRuntimeMetrics = {
   thumbnailCount: number
   cacheHitCount: number
   generatedCount: number
+  sidecarGeneratedCount: number
   nativeGeneratedCount: number
   staleCount: number
   failedCount: number
@@ -104,6 +109,12 @@ export type CanvasThumbnailIpcBridge = {
     manifest: CanvasThumbnailManifestLike
     files: CanvasThumbnailCacheWriteFile[]
   }) => Promise<CanvasThumbnailWriteSetResponse>
+  generateThumbnailSet?: (input: {
+    fullPath: string
+    cacheRootDir?: string
+    levels?: number[]
+    format?: 'image/png' | 'image/webp'
+  }) => Promise<CanvasThumbnailGenerateSetResp | null>
   createNativeThumbnail?: (input: {
     fullPath: string
     maxSide: CanvasThumbnailLevelSize

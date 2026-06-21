@@ -102,10 +102,59 @@ describe('canvasThumbnailWorkerClient', () => {
       expect.objectContaining({
         thumbnailCount: 1,
         cacheHitCount: 1,
-        generatedCount: 0
+        generatedCount: 0,
+        sidecarGeneratedCount: 0
       })
     )
     expect(bridge.readThumbnailManifest).toHaveBeenCalledWith({ cacheKey: identity.cacheKey })
+  })
+
+  it('uses main-process sidecar generated manifests before renderer decode fallback', async () => {
+    const identity = createIdentity()
+    const thumbnailSet = createCanvasThumbnailSet({
+      identity,
+      levels: createCompleteLevels()
+    })
+    const manifest = canvasThumbnailManifestFromSet(thumbnailSet)
+    const createImageBitmap = vi.fn()
+    Object.defineProperty(globalThis, 'createImageBitmap', {
+      configurable: true,
+      writable: true,
+      value: createImageBitmap
+    })
+    const bridge: CanvasThumbnailIpcBridge = {
+      readThumbnailManifest: vi.fn(async () => ({ manifest: null })),
+      generateThumbnailSet: vi.fn(async () => ({
+        manifest,
+        status: 'generated' as const,
+        sidecar: { used: true, fallback: false }
+      })),
+      writeThumbnailSet: vi.fn(async ({ manifest }) => ({ manifest }))
+    }
+
+    const result = await ensureCanvasThumbnailSet({
+      source: new Blob(['source'], { type: 'image/png' }),
+      identity,
+      bridge
+    })
+
+    expect(result.status).toBe('sidecar-generated')
+    expect(result.thumbnailSet).toEqual(thumbnailSet)
+    expect(bridge.generateThumbnailSet).toHaveBeenCalledWith({
+      fullPath: identity.canonicalPath,
+      levels: [128, 256, 512, 1024, 2048],
+      format: 'image/webp'
+    })
+    expect(bridge.writeThumbnailSet).not.toHaveBeenCalled()
+    expect(createImageBitmap).not.toHaveBeenCalled()
+    expect(getCanvasThumbnailRuntimeMetrics()).toEqual(
+      expect.objectContaining({
+        thumbnailCount: 1,
+        sidecarGeneratedCount: 1,
+        generatedCount: 0,
+        nativeGeneratedCount: 0
+      })
+    )
   })
 
   it('generates persistent thumbnail levels as WebP in renderer fallback', async () => {
@@ -154,7 +203,8 @@ describe('canvasThumbnailWorkerClient', () => {
       expect.objectContaining({
         thumbnailCount: 1,
         cacheHitCount: 0,
-        generatedCount: 1
+        generatedCount: 1,
+        sidecarGeneratedCount: 0
       })
     )
   })
