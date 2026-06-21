@@ -12905,6 +12905,12 @@
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
       "kind": "string",
+      "value": "国际站 api.tripo3d.ai",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
+      "kind": "string",
       "value": "技能类型",
       "count": 1
     },
@@ -12989,6 +12995,12 @@
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
       "kind": "string",
+      "value": "请输入 Tripo API Key",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
+      "kind": "string",
       "value": "视觉",
       "count": 1
     },
@@ -13061,6 +13073,12 @@
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
       "kind": "string",
+      "value": "中国大陆站 api.tripo3d.com",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
+      "kind": "string",
       "value": "自定义技能",
       "count": 1
     },
@@ -13104,6 +13122,12 @@
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
       "kind": "string",
       "value": "Ollama 本地服务无需密钥",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
+      "kind": "string",
+      "value": "Tripo 站点",
       "count": 1
     },
     {

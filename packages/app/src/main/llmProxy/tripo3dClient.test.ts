@@ -248,6 +248,52 @@ describe('Tripo3DClient', () => {
     expect(content).toContain('[Generated 3D Model](https://cdn.example.com/textured.glb)')
   })
 
+  it('extracts broad Tripo task id formats for post-process tasks', async () => {
+    for (const [content, expectedTaskId] of [
+      ['[Tripo3D] Task ID: task-hyphen_1', 'task-hyphen_1'],
+      ['task_id=task_underscore-2', 'task_underscore-2'],
+      ['tripo task id: RETARGET_3-abc', 'RETARGET_3-abc']
+    ] as const) {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          jsonResponse({ code: 0, data: { task_id: `texture-${expectedTaskId}` } })
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            code: 0,
+            data: {
+              task_id: `texture-${expectedTaskId}`,
+              type: 'texture_model',
+              status: 'success',
+              progress: 100,
+              output: {
+                pbr_model: `https://cdn.example.com/${expectedTaskId}.glb`
+              }
+            }
+          })
+        )
+      const client = new Tripo3DClient('tripo-key', 'https://api.tripo3d.ai/v2/openapi', {
+        fetchImpl: fetchMock as unknown as typeof fetch,
+        pollIntervalMs: 0
+      })
+
+      await client.generateFromMessages(
+        [{ role: 'user', content: `${content}\nweathered bronze` }],
+        'SubmitTextureTo3DJob',
+        { Model: '3.0' }
+      )
+
+      const submitBody = JSON.parse(fetchMock.mock.calls[0][1].body)
+      expect(submitBody).toEqual(
+        expect.objectContaining({
+          type: 'texture_model',
+          original_model_task_id: expectedTaskId
+        })
+      )
+    }
+  })
+
   it('submits advanced image generation tasks and formats image results', async () => {
     const fetchMock = vi
       .fn()

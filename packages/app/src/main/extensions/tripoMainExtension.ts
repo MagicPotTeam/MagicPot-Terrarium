@@ -1,5 +1,12 @@
 import type { LLMChatReq, LLMChatResp } from '@shared/api/svcLLMProxy'
-import { findTripo3DQAppProfile } from '@shared/config/apiProfileSelectors'
+import type { LLMAPIProfile } from '@shared/config/config'
+import {
+  findTripo3DQAppProfile,
+  getQAppApiProfiles,
+  isConfiguredHunyuan3DProfile,
+  isTripo3DCompatibleProfile
+} from '@shared/config/apiProfileSelectors'
+import { isRunnableProfile } from '@shared/llm'
 import type { MainLlmProxyExtensionV1 } from './generatedRegistry'
 import { Tripo3DClient } from '../llmProxy/tripo3dClient'
 
@@ -22,6 +29,20 @@ const decodeHy3dProfileSegment = (value?: string): string => {
   } catch {
     return value
   }
+}
+
+const shouldUseTripo3DProfile = (
+  config: Parameters<NonNullable<MainLlmProxyExtensionV1['handleChatRequest']>>[1]['config'],
+  tripoProfile: LLMAPIProfile | undefined
+): boolean => {
+  if (!tripoProfile) return false
+
+  const firstConfigured3DProfile = getQAppApiProfiles(config).find(
+    (profile) =>
+      (isRunnableProfile(profile) && isTripo3DCompatibleProfile(profile)) ||
+      isConfiguredHunyuan3DProfile(profile)
+  )
+  return !firstConfigured3DProfile || firstConfigured3DProfile.id === tripoProfile.id
 }
 
 const parseHy3dProfileExtras = (segments: string[]): Hy3dProfileExtras => {
@@ -96,11 +117,14 @@ const handleTripoChatRequest = async (
     ...hy3dProfileExtraSegments
   ] = (options.requestedProfileId || req.profileId || '').split('::')
 
-  if (baseProfileId !== 'tripo3d-pro') {
+  if (baseProfileId !== 'tripo3d-pro' && baseProfileId !== 'hunyuan3d-pro') {
     return undefined
   }
 
   const tripoProfile = findTripo3DQAppProfile(config)
+  if (baseProfileId === 'hunyuan3d-pro' && !shouldUseTripo3DProfile(config, tripoProfile)) {
+    return undefined
+  }
   if (!tripoProfile?.api_key || !tripoProfile.base_url) {
     throw new Error(
       'No valid Tripo 3D configuration found. Configure the Tripo API Key/Base URL in Settings -> Quick App API.'

@@ -836,6 +836,183 @@ describe('PanelLLM Agent API settings', () => {
     expect(within(container).queryByLabelText('Model Path')).toBeNull()
   })
 
+  it('switches an API profile to the Tripo API preset', () => {
+    const saveSettings = vi.fn()
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'Demo Model',
+          base_url: 'https://example.com/v1',
+          api_key: 'sk-test',
+          model_use: 'vision',
+          is_vision_model: true,
+          is_ocr_model: true
+        })}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    fireEvent.mouseDown(screen.getByLabelText('Call Type'))
+    fireEvent.click(screen.getByRole('option', { name: 'Tripo API' }))
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'profile-1',
+            call_type: 'api',
+            model_name: 'Tripo3D',
+            base_url: 'https://api.tripo3d.ai/v2/openapi',
+            api_key: '',
+            provider: 'default',
+            model_use: 'default',
+            is_ollama: false,
+            is_vision_model: false,
+            is_ocr_model: false
+          })
+        ]
+      }
+    })
+  })
+
+  it('lets Tripo API profiles switch between international and mainland endpoints', () => {
+    const saveSettings = vi.fn()
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'Tripo3D',
+          base_url: 'https://api.tripo3d.ai/v2/openapi',
+          api_key: 'tripo-token',
+          call_type: 'api'
+        })}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    expect(screen.getByLabelText('Call Type')).toHaveTextContent('Tripo API')
+
+    fireEvent.mouseDown(screen.getByLabelText('Tripo Endpoint'))
+    fireEvent.click(screen.getByRole('option', { name: 'Mainland China api.tripo3d.com' }))
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'profile-1',
+            call_type: 'api',
+            model_name: 'Tripo3D',
+            base_url: 'https://api.tripo3d.com/v2/openapi',
+            api_key: 'tripo-token',
+            provider: 'default',
+            model_use: 'default',
+            is_ollama: false
+          })
+        ]
+      }
+    })
+  })
+
+  it('switches a Tripo API preset back to a generic API model', () => {
+    const saveSettings = vi.fn()
+    const { container, rerender } = render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'Tripo3D',
+          base_url: 'https://api.tripo3d.ai/v2/openapi',
+          api_key: 'tripo-token',
+          call_type: 'api'
+        })}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    expect(screen.getByLabelText('Call Type')).toHaveTextContent('Tripo API')
+
+    fireEvent.mouseDown(screen.getByLabelText('Call Type'))
+    fireEvent.click(screen.getByRole('option', { name: 'API Model' }))
+
+    const savedProfile = saveSettings.mock.lastCall?.[0].llm_config.api_profiles[0]
+    expect(savedProfile).toEqual(
+      expect.objectContaining({
+        id: 'profile-1',
+        model_name: '',
+        base_url: 'https://api.openai.com/v1',
+        api_key: '',
+        provider: 'default',
+        model_use: 'default',
+        is_ollama: false,
+        is_vision_model: false,
+        is_ocr_model: false
+      })
+    )
+    expect(savedProfile.call_type).toBeUndefined()
+
+    rerender(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile(savedProfile)}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+    expect(within(container).getByLabelText('Call Type')).toHaveTextContent('API Model')
+    expect(within(container).getByLabelText('Model Name')).toHaveValue('')
+    expect(within(container).queryByText('Tripo3D')).toBeNull()
+  })
+
+  it('switches a Tripo API preset to a local model without keeping Tripo text', () => {
+    const saveSettings = vi.fn()
+    const { container, rerender } = render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'Tripo3D',
+          base_url: 'https://api.tripo3d.ai/v2/openapi',
+          api_key: 'tripo-token',
+          call_type: 'api'
+        })}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    expect(screen.getByLabelText('Call Type')).toHaveTextContent('Tripo API')
+
+    fireEvent.mouseDown(screen.getByLabelText('Call Type'))
+    fireEvent.click(screen.getByRole('option', { name: 'Local Model' }))
+
+    const savedProfile = saveSettings.mock.lastCall?.[0].llm_config.api_profiles[0]
+    expect(savedProfile).toEqual(
+      expect.objectContaining({
+        id: 'profile-1',
+        call_type: 'local',
+        model_name: '',
+        base_url: '',
+        api_key: '',
+        provider: 'default',
+        model_use: 'default',
+        is_ollama: false,
+        is_vision_model: false,
+        is_ocr_model: false,
+        local_model_path: ''
+      })
+    )
+
+    rerender(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile(savedProfile)}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+    expect(within(container).getByLabelText('Call Type')).toHaveTextContent('Local Model')
+    expect(within(container).getByLabelText('Model Name')).toHaveValue('')
+    expect(within(container).queryByText('Tripo3D')).toBeNull()
+  })
+
   it('switches an API profile to the Hunyuan3D preset', () => {
     const saveSettings = vi.fn()
 

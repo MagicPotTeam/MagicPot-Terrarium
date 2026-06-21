@@ -14,7 +14,10 @@ import { api } from '@renderer/utils/windowUtils'
 import { useMessage } from '@renderer/hooks/useMessage'
 import SettingSection from './components/SettingSection'
 import type { PanelProps } from './PanelProps'
-import { isHunyuan3DCompatibleProfile } from '@shared/config/apiProfileSelectors'
+import {
+  isHunyuan3DCompatibleProfile,
+  isTripo3DCompatibleProfile
+} from '@shared/config/apiProfileSelectors'
 import {
   isOllamaUrl,
   isLocalBaseUrl,
@@ -44,13 +47,16 @@ export type SaveSettings = (value: DeepPartial<Config>) => void
 const DEFAULT_PROVIDER_OPTION = 'default' as const
 const DEFAULT_MODEL_USE_OPTION = 'default' as const
 const OFFICIAL_OPENAI_BASE_URL = 'https://api.openai.com/v1'
+const TRIPO_INTERNATIONAL_BASE_URL = 'https://api.tripo3d.ai/v2/openapi'
+const TRIPO_MAINLAND_BASE_URL = 'https://api.tripo3d.com/v2/openapi'
 const HUNYUAN_AI3D_BASE_URL = 'https://api.ai3d.cloud.tencent.com'
 const KLING_BASE_URL = 'https://api-beijing.klingai.com'
 const VOLCENGINE_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
 const DEFAULT_HY3D_COS_PREFIX = 'magicpot/hunyuan3d'
 const DEFAULT_HY3D_API_REGION = 'ap-guangzhou'
 const LOCAL_DUPLICATE_CHECK_MODEL_ID_PREFIX = 'agent-local:'
-type ProfileCallTypeSelectValue = LLMProfileCallType | 'hunyuan3d'
+type TripoApiEndpointPreset = 'international' | 'mainland'
+type ProfileCallTypeSelectValue = LLMProfileCallType | 'tripo' | 'hunyuan3d'
 
 export const createEmptyProfile = (): LLMAPIProfile => ({
   id: crypto.randomUUID(),
@@ -241,6 +247,35 @@ const stripHunyuan3DProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
   return nextProfile
 }
 
+const getTripoApiEndpointPreset = (baseUrl: string): TripoApiEndpointPreset =>
+  baseUrl.toLowerCase().includes('tripo3d.com') ? 'mainland' : 'international'
+
+const getTripoApiBaseUrl = (preset: TripoApiEndpointPreset): string =>
+  preset === 'mainland' ? TRIPO_MAINLAND_BASE_URL : TRIPO_INTERNATIONAL_BASE_URL
+
+const applyTripoApiPresetToProfile = (
+  profile: LLMAPIProfile,
+  endpoint: TripoApiEndpointPreset = 'international'
+): LLMAPIProfile => {
+  const isExistingTripoProfile = isTripo3DCompatibleProfile(profile)
+  return {
+    ...stripVideoSecretProfile(
+      stripHunyuan3DProfile(stripLocalModelProfile(stripExternalAuthProfile(profile)))
+    ),
+    call_type: 'api',
+    model_name: isExistingTripoProfile ? profile.model_name : 'Tripo3D',
+    base_url: getTripoApiBaseUrl(endpoint),
+    api_key: isExistingTripoProfile ? profile.api_key : '',
+    provider: DEFAULT_PROVIDER_OPTION,
+    deployment: undefined,
+    model_use: DEFAULT_MODEL_USE_OPTION,
+    backup_api_keys: undefined,
+    is_ollama: false,
+    is_vision_model: false,
+    is_ocr_model: false
+  }
+}
+
 const applyHunyuan3DPresetToProfile = (profile: LLMAPIProfile): LLMAPIProfile => ({
   ...stripVideoSecretProfile(stripLocalModelProfile(stripExternalAuthProfile(profile))),
   call_type: undefined,
@@ -290,6 +325,8 @@ const applyCallTypeToProfile = (
         local_model_path: normalizeLocalModelPath(profile.local_model_path)
       }
     }
+    case 'tripo':
+      return applyTripoApiPresetToProfile(profile)
     case 'hunyuan3d':
       return applyHunyuan3DPresetToProfile(profile)
     case 'api':
@@ -298,7 +335,9 @@ const applyCallTypeToProfile = (
         stripHunyuan3DProfile(stripLocalModelProfile(stripExternalAuthProfile(profile)))
       )
       const shouldResetApiProfile =
-        isHunyuan3DCompatibleProfile(profile) || resolveProfileCallType(profile) === 'local'
+        isTripo3DCompatibleProfile(profile) ||
+        isHunyuan3DCompatibleProfile(profile) ||
+        resolveProfileCallType(profile) === 'local'
       return {
         ...apiProfile,
         call_type: undefined,
@@ -510,11 +549,17 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     [t]
   )
   const resolvedProfileCallType = resolveProfileCallType(profile)
+  const isTripo3DCallType =
+    resolvedProfileCallType !== 'local' && isTripo3DCompatibleProfile(profile)
   const isHunyuan3DCallType =
-    resolvedProfileCallType !== 'local' && isHunyuan3DCompatibleProfile(profile)
-  const profileCallType: ProfileCallTypeSelectValue = isHunyuan3DCallType
-    ? 'hunyuan3d'
-    : resolvedProfileCallType
+    !isTripo3DCallType &&
+    resolvedProfileCallType !== 'local' &&
+    isHunyuan3DCompatibleProfile(profile)
+  const profileCallType: ProfileCallTypeSelectValue = isTripo3DCallType
+    ? 'tripo'
+    : isHunyuan3DCallType
+      ? 'hunyuan3d'
+      : resolvedProfileCallType
   const effectiveDeployment = resolveProfileDeployment(profile)
   const effectiveProvider =
     resolveProfileProvider(profile) || getDefaultProviderForDeployment(effectiveDeployment)
@@ -532,42 +577,49 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   const showKlingSecretInput = !isLocalCallType && effectiveProvider === 'kling'
   const showBackupKeys =
     !isLocalCallType &&
+    !isTripo3DCallType &&
     !isHunyuan3DCallType &&
     !isVideoProvider &&
     effectiveDeployment === 'cloud' &&
     effectiveProvider !== 'ollama'
   const showBaseUrlInput = !isLocalCallType
-  const baseUrlPlaceholder = isHunyuan3DCallType
-    ? HUNYUAN_AI3D_BASE_URL
-    : getSuggestedBaseUrl(effectiveProvider, effectiveDeployment)
-  const apiKeyPlaceholder = isHunyuan3DCallType
-    ? quickAppText('hunyuan_api_key_placeholder', 'Optional Hunyuan3D API Key')
-    : effectiveProvider === 'kling'
-      ? 'AccessKey ID'
-      : effectiveProvider === 'volcengine'
-        ? 'Bearer API Key'
-        : effectiveProvider === 'ollama'
-          ? copy('Ollama 本地服务无需密钥', 'No API key needed for Ollama')
-          : effectiveDeployment === 'local'
-            ? copy('本地服务如无鉴权可留空', 'Optional for local servers without auth')
-            : isChineseUi
-              ? '请输入 API 密钥'
-              : t('llm.api_key_placeholder')
-  const modelNamePlaceholder = isLocalCallType
-    ? copy('例如：本地 CLIP 模型', 'e.g. Local CLIP Model')
-    : effectiveProvider === 'ollama'
-      ? usesVisualCapabilities
-        ? 'qwen2.5vl:7b'
-        : 'llama3.2'
-      : effectiveModelUse === 'video' && effectiveProvider === 'kling'
-        ? 'kling-v3'
-        : effectiveModelUse === 'video' && effectiveProvider === 'volcengine'
-          ? 'doubao-seedance-1-0-pro-250528'
-          : usesVisualCapabilities
-            ? copy('例如：qwen2.5-vl-7b-instruct', 'e.g. qwen2.5-vl-7b-instruct')
-            : effectiveModelUse === 'image'
-              ? copy('例如：gpt-5.4', 'e.g. gpt-5.4')
-              : t('llm.model_name_placeholder')
+  const baseUrlPlaceholder = isTripo3DCallType
+    ? TRIPO_INTERNATIONAL_BASE_URL
+    : isHunyuan3DCallType
+      ? HUNYUAN_AI3D_BASE_URL
+      : getSuggestedBaseUrl(effectiveProvider, effectiveDeployment)
+  const apiKeyPlaceholder = isTripo3DCallType
+    ? copy('请输入 Tripo API Key', 'Enter Tripo API key')
+    : isHunyuan3DCallType
+      ? quickAppText('hunyuan_api_key_placeholder', 'Optional Hunyuan3D API Key')
+      : effectiveProvider === 'kling'
+        ? 'AccessKey ID'
+        : effectiveProvider === 'volcengine'
+          ? 'Bearer API Key'
+          : effectiveProvider === 'ollama'
+            ? copy('Ollama 本地服务无需密钥', 'No API key needed for Ollama')
+            : effectiveDeployment === 'local'
+              ? copy('本地服务如无鉴权可留空', 'Optional for local servers without auth')
+              : isChineseUi
+                ? '请输入 API 密钥'
+                : t('llm.api_key_placeholder')
+  const modelNamePlaceholder = isTripo3DCallType
+    ? 'Tripo3D'
+    : isLocalCallType
+      ? copy('例如：本地 CLIP 模型', 'e.g. Local CLIP Model')
+      : effectiveProvider === 'ollama'
+        ? usesVisualCapabilities
+          ? 'qwen2.5vl:7b'
+          : 'llama3.2'
+        : effectiveModelUse === 'video' && effectiveProvider === 'kling'
+          ? 'kling-v3'
+          : effectiveModelUse === 'video' && effectiveProvider === 'volcengine'
+            ? 'doubao-seedance-1-0-pro-250528'
+            : usesVisualCapabilities
+              ? copy('例如：qwen2.5-vl-7b-instruct', 'e.g. qwen2.5-vl-7b-instruct')
+              : effectiveModelUse === 'image'
+                ? copy('例如：gpt-5.4', 'e.g. gpt-5.4')
+                : t('llm.model_name_placeholder')
 
   const modelUseOptions = [
     { label: copy('默认', 'Default'), value: DEFAULT_MODEL_USE_OPTION },
@@ -581,6 +633,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   ]
   const callTypeOptions = [
     { label: copy('API模型', 'API Model'), value: 'api' },
+    { label: 'Tripo API', value: 'tripo' },
     { label: 'Hunyuan3D', value: 'hunyuan3d' },
     { label: copy('本地模型', 'Local Model'), value: 'local' }
   ]
@@ -589,6 +642,17 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     {
       label: quickAppText('video_provider_volcengine_seedance', 'Volcengine / BytePlus Seedance'),
       value: 'volcengine'
+    }
+  ]
+  const tripoEndpointPreset = getTripoApiEndpointPreset(profile.base_url)
+  const tripoEndpointOptions = [
+    {
+      label: copy('国际站 api.tripo3d.ai', 'International api.tripo3d.ai'),
+      value: 'international'
+    },
+    {
+      label: copy('中国大陆站 api.tripo3d.com', 'Mainland China api.tripo3d.com'),
+      value: 'mainland'
     }
   ]
   const localModelPath = normalizeLocalModelPath(profile.local_model_path)
@@ -636,7 +700,10 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
       const inferredLocal = isOllamaUrl(nextBaseUrl) || isLocalBaseUrl(nextBaseUrl)
       const normalizedNextProfile: LLMAPIProfile = {
         ...stripLocalModelProfile(nextProfile),
-        call_type: undefined
+        call_type:
+          nextProfile.call_type === 'api' && isTripo3DCompatibleProfile(nextProfile)
+            ? 'api'
+            : undefined
       }
       const normalizedProfile = stripExternalAuthProfile(normalizedNextProfile)
       const shouldKeepVideoProvider =
@@ -812,6 +879,17 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           items={callTypeOptions}
         />
 
+        {isTripo3DCallType && (
+          <InputSelect
+            label={copy('Tripo 站点', 'Tripo Endpoint')}
+            value={tripoEndpointPreset}
+            onChange={(value) =>
+              updateProfile(applyTripoApiPresetToProfile(profile, value as TripoApiEndpointPreset))
+            }
+            items={tripoEndpointOptions}
+          />
+        )}
+
         <InputSelect
           label={copy('应用场景', 'Capability')}
           value={modelUseSelectValue}
@@ -821,16 +899,19 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           items={modelUseOptions}
         />
 
-        {effectiveModelUse === 'video' && !isLocalCallType && !isHunyuan3DCallType && (
-          <InputSelect
-            label={quickAppText('video_provider', 'Video Provider')}
-            value={effectiveProvider === 'volcengine' ? 'volcengine' : 'kling'}
-            onChange={(value) =>
-              updateProfile(applyVideoProviderToProfile(profile, value as 'kling' | 'volcengine'))
-            }
-            items={videoProviderOptions}
-          />
-        )}
+        {effectiveModelUse === 'video' &&
+          !isLocalCallType &&
+          !isTripo3DCallType &&
+          !isHunyuan3DCallType && (
+            <InputSelect
+              label={quickAppText('video_provider', 'Video Provider')}
+              value={effectiveProvider === 'volcengine' ? 'volcengine' : 'kling'}
+              onChange={(value) =>
+                updateProfile(applyVideoProviderToProfile(profile, value as 'kling' | 'volcengine'))
+              }
+              items={videoProviderOptions}
+            />
+          )}
 
         <InputText
           label={copy('模型名称', t('llm.model_name'))}
@@ -880,15 +961,17 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
         {showApiKeyInput && (
           <InputText
             label={
-              isHunyuan3DCallType
-                ? quickAppText('hunyuan_api_key_optional', 'Hunyuan3D API Key (Optional)')
-                : effectiveProvider === 'kling'
-                  ? 'Kling AccessKey'
-                  : effectiveProvider === 'volcengine'
-                    ? quickAppText('volcengine_api_key', 'Volcengine API Key')
-                    : effectiveDeployment === 'local'
-                      ? copy('API 密钥（可选）', 'API Key (Optional)')
-                      : copy('API 密钥', t('llm.api_key'))
+              isTripo3DCallType
+                ? 'Tripo API Key'
+                : isHunyuan3DCallType
+                  ? quickAppText('hunyuan_api_key_optional', 'Hunyuan3D API Key (Optional)')
+                  : effectiveProvider === 'kling'
+                    ? 'Kling AccessKey'
+                    : effectiveProvider === 'volcengine'
+                      ? quickAppText('volcengine_api_key', 'Volcengine API Key')
+                      : effectiveDeployment === 'local'
+                        ? copy('API 密钥（可选）', 'API Key (Optional)')
+                        : copy('API 密钥', t('llm.api_key'))
             }
             value={profile.api_key}
             onChange={(value) =>
