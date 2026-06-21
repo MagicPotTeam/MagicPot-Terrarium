@@ -384,6 +384,18 @@ function normalizeGeneratedFormat(format: CanvasThumbnailGenerateSetReq['format'
   return format === 'image/png' ? 'png' : 'webp'
 }
 
+function hasRequiredThumbnailLevels(
+  manifest: CanvasThumbnailManifest,
+  requiredLevels: readonly number[]
+): boolean {
+  const manifestLevels = new Set(
+    manifest.levels
+      .map((level) => Math.floor(Number(level.maxSide)))
+      .filter((level) => Number.isFinite(level) && level > 0)
+  )
+  return requiredLevels.every((level) => manifestLevels.has(level))
+}
+
 function getSidecarResultMessage(
   result: CanvasThumbnailSidecarResult<CanvasThumbnailSidecarBatchThumbnailResponse>
 ): string {
@@ -616,6 +628,14 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
           manifest: null,
           status: 'failed',
           error: 'Canvas thumbnail sidecar output failed manifest validation.',
+          sidecar: { used: true, fallback: false }
+        }
+      }
+      if (!hasRequiredThumbnailLevels(read.manifest, levels)) {
+        return {
+          manifest: null,
+          status: 'failed',
+          error: 'Canvas thumbnail sidecar output did not include all requested levels.',
           sidecar: { used: true, fallback: false }
         }
       }

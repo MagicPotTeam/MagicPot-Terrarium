@@ -306,6 +306,19 @@ describe('CanvasThumbnailSvcImpl', () => {
     expect(fs.existsSync(path.join(cacheRoot, manifest.cacheKey, 'manifest.json'))).toBe(true)
   })
 
+  it('rejects cache entries that resolve outside the authorized cache root through symlinks', async () => {
+    const sourcePath = await createSourceFile()
+    const manifest = createManifest({ sourcePath })
+    const cacheRoot = path.join(getDesktopTrashRoot(), 'thumbnail-cache-symlink-root')
+    const escapedEntryRoot = path.join(getDesktopTrashRoot(), 'thumbnail-cache-symlink-escaped')
+    await fsp.mkdir(cacheRoot, { recursive: true })
+    await fsp.mkdir(escapedEntryRoot, { recursive: true })
+    fs.symlinkSync(escapedEntryRoot, path.join(cacheRoot, manifest.cacheKey), 'dir')
+
+    await expect(writeManifestSet(manifest, cacheRoot)).rejects.toThrow(/cache path escaped root/)
+    expect(fs.existsSync(path.join(escapedEntryRoot, 'manifest.json'))).toBe(false)
+  })
+
   it('rejects unsafe cache keys, cache filenames, and unreferenced thumbnail writes', async () => {
     const sourcePath = await createSourceFile()
     const manifest = createManifest({ sourcePath })
@@ -499,6 +512,63 @@ describe('CanvasThumbnailSvcImpl', () => {
       true
     )
     expect(response.manifest?.levels.some((level) => level.src.includes('sidecar-src'))).toBe(false)
+  })
+
+  it('rejects sidecar-generated manifests that omit requested thumbnail levels', async () => {
+    const sourcePath = await createSourceFile('sidecar-missing-level.png')
+    const manifest = createManifest({ sourcePath })
+    const cacheRoot = path.join(getDesktopTrashRoot(), 'sidecar-missing-level-cache')
+    const manifestMissingRequestedLevel: CanvasThumbnailManifest = {
+      ...manifest,
+      levels: manifest.levels.filter((level) => level.maxSide !== 256)
+    }
+    const serviceWithSidecar = createServiceWithSidecar(async (request) => {
+      const entryDir = path.join(request.cacheRoot, manifest.cacheKey)
+      await fsp.mkdir(entryDir, { recursive: true })
+      for (const level of manifestMissingRequestedLevel.levels) {
+        await fsp.writeFile(path.join(entryDir, level.filename), Buffer.from([1, 2, 3, 4]))
+      }
+      await fsp.writeFile(
+        path.join(entryDir, 'manifest.json'),
+        JSON.stringify(
+          createSidecarManifest(manifestMissingRequestedLevel, request.cacheRoot),
+          null,
+          2
+        ),
+        'utf8'
+      )
+      return {
+        ok: true,
+        response: {
+          ok: true,
+          cacheRoot: fs.realpathSync.native(request.cacheRoot),
+          results: [
+            {
+              id: manifest.cacheKey,
+              ok: true,
+              manifest: createSidecarManifest(manifestMissingRequestedLevel, request.cacheRoot)
+            }
+          ]
+        },
+        binaryPath: 'sidecar.exe',
+        args: [],
+        stderr: '',
+        stderrTruncated: false
+      }
+    })
+
+    const response = await serviceWithSidecar.generateThumbnailSet({
+      fullPath: sourcePath,
+      cacheRootDir: cacheRoot,
+      levels: [128, 256]
+    })
+
+    expect(response).toMatchObject({
+      manifest: null,
+      status: 'failed',
+      error: 'Canvas thumbnail sidecar output did not include all requested levels.',
+      sidecar: { used: true, fallback: false }
+    })
   })
 
   it('returns a safe fallback when the sidecar is disabled or unavailable', async () => {
