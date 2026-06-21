@@ -3,6 +3,8 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import BottomPanel from './BottomPanel'
+import { joinBoundedLogLines } from './comfyLogRendering'
+import { MAX_COMFY_OUTPUT_LINES } from '@renderer/store/slices/comfyProcess'
 
 const dispatchMock = vi.fn()
 const clearOutputMock = vi.fn()
@@ -62,6 +64,20 @@ function expectRowValue(label: string, value: string): void {
   expect(rows.length).toBeGreaterThan(0)
   expect(rows.some((row) => within(row).queryByText(value))).toBe(true)
 }
+
+describe('BottomPanel log rendering', () => {
+  it('joins only the bounded ComfyUI log window for rendering', () => {
+    const output = joinBoundedLogLines(
+      Array.from({ length: 20_000 }, (_, index) => `line-${index}`),
+      MAX_COMFY_OUTPUT_LINES
+    )
+
+    expect(output.startsWith(`line-${20_000 - MAX_COMFY_OUTPUT_LINES}\n`)).toBe(true)
+    expect(output.endsWith('line-19999')).toBe(true)
+    expect(output).not.toContain('line-8999\n')
+    expect(output.split('\n')).toHaveLength(MAX_COMFY_OUTPUT_LINES)
+  })
+})
 
 describe('BottomPanel element info', () => {
   beforeEach(() => {
