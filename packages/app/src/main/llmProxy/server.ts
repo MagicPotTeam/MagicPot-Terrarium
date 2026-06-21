@@ -783,10 +783,11 @@ const getLegacyBotSecretToken = (
 
 const isLocalSecretRequestAuthorized = (
   headers: Record<string, string | string[] | undefined>,
-  secret?: string | null
+  secret?: string | null,
+  options: { allowMissingSecret?: boolean } = {}
 ): boolean => {
   const normalizedSecret = cleanString(secret)
-  if (!normalizedSecret) return true
+  if (!normalizedSecret) return options.allowMissingSecret === true
 
   const authorizationToken = getBearerToken(headers.authorization)
   if (authorizationToken === normalizedSecret) {
@@ -1370,6 +1371,15 @@ export function startLLMProxyServer(): void {
       }
 
       if (pathname === '/api/apps/catalog' && req.method === 'GET') {
+        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
+        if (!accessIdentity) {
+          writeUnauthorizedLlmProxyResponse(res)
+          return
+        }
+        recordLlmProxyAccessUsage(accessIdentity, {
+          activity: 'profiles',
+          requesterAddress: getRequesterAddress(req)
+        })
         const config = getConfig()
         let runtimeStatus: Awaited<ReturnType<typeof getMcpRuntimeStatus>> | null = null
         try {
@@ -1873,11 +1883,18 @@ export function stopLLMProxyServer(): void {
  * Get the current server status.
  */
 export function getLLMProxyServerStatus(): { running: boolean; port?: number } {
+  if (server) {
+    const address = server.address()
+    const listeningPort = address && typeof address === 'object' ? address.port : undefined
+    return {
+      running: true,
+      port: listeningPort
+    }
+  }
+
   const config = getConfig()
-  const address = server?.address()
-  const listeningPort = address && typeof address === 'object' ? address.port : undefined
   return {
-    running: server !== null,
-    port: listeningPort ?? config.local_llm_server_config?.port
+    running: false,
+    port: config.local_llm_server_config?.port
   }
 }

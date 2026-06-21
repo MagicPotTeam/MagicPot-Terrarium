@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises'
+import net from 'node:net'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
@@ -149,8 +150,48 @@ vi.mock('../mcp/platform/httpBridge', () => ({
 
 import { getLLMProxyServerStatus, startLLMProxyServer, stopLLMProxyServer } from './server'
 
+const TEST_SERVER_STARTUP_TIMEOUT_MS = 30_000
+const TEST_SERVER_HOOK_TIMEOUT_MS = TEST_SERVER_STARTUP_TIMEOUT_MS + 5_000
+const TEST_SERVER_POLL_INTERVAL_MS = 50
+const FETCH_FORBIDDEN_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87,
+  95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143,
+  161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556,
+  563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190,
+  5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080
+])
+
+const isFetchSafePort = (port: number): boolean => port > 0 && !FETCH_FORBIDDEN_PORTS.has(port)
+
+const getAvailableFetchSafePort = async (): Promise<number> => {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const port = await new Promise<number>((resolve, reject) => {
+      const candidate = net.createServer()
+      candidate.once('error', reject)
+      candidate.listen(0, '0.0.0.0', () => {
+        const address = candidate.address()
+        const selectedPort = address && typeof address === 'object' ? address.port : 0
+        candidate.close((error) => {
+          if (error) {
+            reject(error)
+            return
+          }
+          resolve(selectedPort)
+        })
+      })
+    })
+
+    if (isFetchSafePort(port)) {
+      return port
+    }
+  }
+
+  throw new Error('Failed to allocate a fetch-safe test server port')
+}
+
 const waitForServer = async (port: number): Promise<void> => {
-  const deadline = Date.now() + 5000
+  const deadline = Date.now() + TEST_SERVER_STARTUP_TIMEOUT_MS
+  let lastError = ''
   while (Date.now() < deadline) {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/status`, {
@@ -161,22 +202,26 @@ const waitForServer = async (port: number): Promise<void> => {
       if (response.ok) {
         return
       }
-    } catch {
+      lastError = `last response status ${response.status}`
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
       // retry until the server is up
     }
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await new Promise((resolve) => setTimeout(resolve, TEST_SERVER_POLL_INTERVAL_MS))
   }
-  throw new Error(`Timed out waiting for test server on port ${port}`)
+  throw new Error(
+    `Timed out waiting for test server on port ${port}${lastError ? ` (${lastError})` : ''}`
+  )
 }
 
 const waitForListeningPort = async (): Promise<number> => {
-  const deadline = Date.now() + 5000
+  const deadline = Date.now() + TEST_SERVER_STARTUP_TIMEOUT_MS
   while (Date.now() < deadline) {
     const status = getLLMProxyServerStatus()
     if (status.running && typeof status.port === 'number' && status.port > 0) {
       return status.port
     }
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await new Promise((resolve) => setTimeout(resolve, TEST_SERVER_POLL_INTERVAL_MS))
   }
   throw new Error('Timed out waiting for test server to bind a port')
 }
@@ -185,7 +230,7 @@ describe('LLM proxy server legacy compatibility', () => {
   let port = 0
 
   beforeEach(async () => {
-    port = 0
+    port = await getAvailableFetchSafePort()
     testArtifactDir = await createNodeTestArtifactDir('llm-proxy-server')
     currentConfig = {
       ...DEFAULT_CONFIG,
@@ -240,13 +285,13 @@ describe('LLM proxy server legacy compatibility', () => {
     startLLMProxyServer()
     port = await waitForListeningPort()
     await waitForServer(port)
-  })
+  }, TEST_SERVER_HOOK_TIMEOUT_MS)
 
   afterEach(async () => {
     stopLLMProxyServer()
     await fs.rm(testArtifactDir, { recursive: true, force: true })
     testArtifactDir = ''
-  })
+  }, TEST_SERVER_HOOK_TIMEOUT_MS)
 
   it('maps legacy /api/bot/status to the current status endpoint', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/bot/status`, {
@@ -525,6 +570,38 @@ describe('LLM proxy server legacy compatibility', () => {
         allowedToolNames: ['session.status']
       }
     ])
+  })
+
+  it('rejects MCP requests when MCP is enabled without a configured auth token', async () => {
+    currentConfig = {
+      ...currentConfig,
+      chat_config: {
+        ...currentConfig.chat_config,
+        webhook_secret: ''
+      },
+      mcp_config: {
+        ...currentConfig.mcp_config,
+        server: {
+          ...currentConfig.mcp_config.server,
+          enabled: true,
+          auth_token: ''
+        }
+      }
+    }
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/mcp`)
+    const body = await response.json()
+
+    expect(response.status).toBe(401)
+    expect(body).toEqual({
+      jsonrpc: '2.0',
+      id: null,
+      error: {
+        code: -32001,
+        message: 'Unauthorized MCP request.'
+      }
+    })
+    expect(mcpBridgeRequestCapture).toBeNull()
   })
 
   it('keeps MCP auth working through the local secret helper', async () => {
