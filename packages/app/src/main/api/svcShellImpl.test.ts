@@ -1,7 +1,17 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { describe, expect, it, vi, afterEach } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const { shellOpenExternalMock } = vi.hoisted(() => ({
+  shellOpenExternalMock: vi.fn<(url: string) => Promise<void>>(() => Promise.resolve())
+}))
+
+vi.mock('electron', () => ({
+  shell: {
+    openExternal: shellOpenExternalMock
+  }
+}))
 
 import { DownloadFileProgressEvent } from '@shared/api/svcShell'
 import { ShellSvcImpl } from './svcShellImpl'
@@ -20,9 +30,14 @@ function makeStats({
 }
 
 describe('ShellSvcImpl', () => {
+  beforeEach(() => {
+    shellOpenExternalMock.mockResolvedValue(undefined)
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
+    shellOpenExternalMock.mockReset()
   })
 
   it('treats regular files as available', async () => {
@@ -68,6 +83,24 @@ describe('ShellSvcImpl', () => {
     const svc = new ShellSvcImpl()
 
     await expect(svc.getHomeDir()).resolves.toBe('C:/Users/demo')
+  })
+
+  it('normalizes safe external URLs before handing them to Electron shell', async () => {
+    const svc = new ShellSvcImpl()
+
+    await expect(svc.openExternal(' https://example.com/path ')).resolves.toBeUndefined()
+
+    expect(shellOpenExternalMock).toHaveBeenCalledWith('https://example.com/path')
+  })
+
+  it('rejects unsafe external URL protocols before calling Electron shell', async () => {
+    const svc = new ShellSvcImpl()
+
+    await expect(svc.openExternal('javascript:alert(1)')).rejects.toThrow(
+      /Unsupported external URL protocol/
+    )
+
+    expect(shellOpenExternalMock).not.toHaveBeenCalled()
   })
 
   const makeTempDir = async (name: string) => {

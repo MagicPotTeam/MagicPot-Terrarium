@@ -16,6 +16,7 @@ import os from 'os'
 import path from 'path'
 import { Readable, Transform } from 'stream'
 import { pipeline } from 'stream/promises'
+import { normalizeAllowedExternalUrl } from '../utils/externalUrl'
 
 function isLocallyAvailable(filePath: string): boolean {
   try {
@@ -95,7 +96,7 @@ export class ShellSvcImpl implements ShellSvc {
     return shell.showItemInFolder(targetPath)
   }
   openExternal = async (url: string): Promise<void> => {
-    return shell.openExternal(url)
+    return shell.openExternal(normalizeAllowedExternalUrl(url))
   }
   getHomeDir = async (): Promise<string> => {
     return os.homedir()
