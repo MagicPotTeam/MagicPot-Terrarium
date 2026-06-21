@@ -3558,12 +3558,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const originalApi = window.api
     const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
     const attemptedSrcs: string[] = []
     const readImageFromPath = vi.fn(async () => ({
       image: new Uint8Array([1, 2, 3, 4]),
       filename: 'source-only.png'
     }))
     const createObjectURLMock = vi.fn((_blob: Blob) => 'blob:webgl-local-image')
+    const revokeObjectURLMock = vi.fn()
 
     class MockImage {
       onload: null | (() => void) = null
@@ -3587,6 +3589,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     }
 
     URL.createObjectURL = createObjectURLMock as unknown as typeof URL.createObjectURL
+    URL.revokeObjectURL = revokeObjectURLMock as unknown as typeof URL.revokeObjectURL
     Object.defineProperty(window, 'api', {
       configurable: true,
       writable: true,
@@ -3621,6 +3624,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
             fullPath: 'C:/real-board/source-only.png'
           })
           expect(attemptedSrcs).toEqual(['blob:webgl-local-image'])
+          expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:webgl-local-image')
           expect(getLiveSpriteByLabel('image-local-source-only')?.texture.width).toBe(640)
         },
         { timeout: 15000 }
@@ -3628,6 +3632,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     } finally {
       vi.unstubAllGlobals()
       URL.createObjectURL = originalCreateObjectURL
+      URL.revokeObjectURL = originalRevokeObjectURL
       Object.defineProperty(window, 'api', {
         configurable: true,
         writable: true,
