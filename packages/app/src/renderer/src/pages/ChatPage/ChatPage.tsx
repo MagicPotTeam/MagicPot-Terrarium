@@ -1163,12 +1163,42 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const applyExternalSendToAgentInput = useCallback(
     ({ image, text, hiddenText, attachment, attachments, autoSend }: ExternalSendToAgentDetail) => {
       if (autoSend && sendMessageRef.current) {
-        const sendAttachments = attachments && attachments.length > 0 ? attachments : undefined
-        void sendMessageRef.current({
-          content: text || '',
-          attachments: sendAttachments,
-          hiddenContext: hiddenText
-        })
+        const sendAttachments = [...(attachments || [])]
+        if (attachment?.url && !sendAttachments.some((item) => item.url === attachment.url)) {
+          sendAttachments.push(attachment)
+        }
+
+        const sendExternalMessage = (resolvedAttachments: ChatAttachment[]) => {
+          void sendMessageRef.current?.({
+            content: text || '',
+            attachments: resolvedAttachments.length > 0 ? resolvedAttachments : undefined,
+            hiddenContext: hiddenText
+          })
+        }
+
+        if (image) {
+          fetch(image)
+            .then((res) => res.blob())
+            .then(async (blob) => {
+              const nextAttachment = await buildImageChatAttachmentFromFile(
+                new File([blob], getDownloadFileNameFromUrl(image, 'image.png'), {
+                  type: blob.type || 'image/png'
+                }),
+                image
+              )
+              if (!sendAttachments.some((item) => item.url === nextAttachment.url)) {
+                sendAttachments.push(nextAttachment)
+              }
+              sendExternalMessage(sendAttachments)
+            })
+            .catch((err) => {
+              console.error('[ChatPage] Failed to parse canvas image:', err)
+              sendExternalMessage(sendAttachments)
+            })
+          return
+        }
+
+        sendExternalMessage(sendAttachments)
         return
       }
 
@@ -2205,14 +2235,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
             if (!options.manual) {
               notifyInfo(
                 t('chat.context_auto_compressed', {
-                  defaultValue: '较早上下文已自动压缩，可展开摘要查看。'
+                  defaultValue:
+                    'Older context was compressed automatically. Expand the summary to review it.'
                 })
               )
             }
             if (options.manual) {
               notifySuccess(
                 t('chat.context_compressed', {
-                  defaultValue: '上下文已压缩。'
+                  defaultValue: 'Context compressed.'
                 })
               )
             }

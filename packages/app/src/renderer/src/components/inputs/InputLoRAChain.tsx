@@ -18,11 +18,13 @@ import { api } from '@renderer/utils/windowUtils'
 import { bytesToObjectUrl } from '@renderer/utils/fileUtils'
 import { InputProps } from './InputProps'
 import { isEqual } from 'es-toolkit'
+import { useTranslation } from 'react-i18next'
 
-const TRIGGER_WORDS_LABEL = '\u89e6\u53d1\u8bcd\u5907\u6ce8'
-const TRIGGER_WORDS_PLACEHOLDER = '\u586b\u5199\u8be5 LoRA \u7684\u89e6\u53d1\u8bcd'
-const TRIGGER_WORDS_HELPER = '选择 LoRA 后会自动读取触发词；点击“追加触发词”才会加入提示词'
-const APPEND_TRIGGER_WORDS_LABEL = '追加触发词'
+const TRIGGER_WORDS_LABEL_FALLBACK = 'Trigger words note'
+const TRIGGER_WORDS_PLACEHOLDER_FALLBACK = 'Enter trigger words for this LoRA'
+const TRIGGER_WORDS_HELPER_FALLBACK =
+  'Trigger words are read after selecting a LoRA; click "Append trigger words" to add them to the prompt'
+const APPEND_TRIGGER_WORDS_LABEL_FALLBACK = 'Append trigger words'
 
 export type LoRAConfig = {
   lora_name: string
@@ -63,6 +65,19 @@ const InputLora: React.FC<InputLoraProps> = ({
   onAppendLoraTriggerWords,
   comfyUtilsRef
 }) => {
+  const { t } = useTranslation()
+  const triggerWordsLabel = t('input.lora.trigger_words_label', {
+    defaultValue: TRIGGER_WORDS_LABEL_FALLBACK
+  })
+  const triggerWordsPlaceholder = t('input.lora.trigger_words_placeholder', {
+    defaultValue: TRIGGER_WORDS_PLACEHOLDER_FALLBACK
+  })
+  const triggerWordsHelper = t('input.lora.trigger_words_helper', {
+    defaultValue: TRIGGER_WORDS_HELPER_FALLBACK
+  })
+  const appendTriggerWordsLabel = t('input.lora.append_trigger_words', {
+    defaultValue: APPEND_TRIGGER_WORDS_LABEL_FALLBACK
+  })
   const [imageObjUrl, setImageObjUrl] = useState<string | null>(null)
   const [imageHeight, setImageHeight] = useState<number | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
@@ -290,8 +305,8 @@ const InputLora: React.FC<InputLoraProps> = ({
           >
             <TextField
               value={currentTriggerWords}
-              label={`Lora ${index} ${TRIGGER_WORDS_LABEL}`}
-              placeholder={TRIGGER_WORDS_PLACEHOLDER}
+              label={`Lora ${index} ${triggerWordsLabel}`}
+              placeholder={triggerWordsPlaceholder}
               onChange={(event) => {
                 if (!currentLora.lora_name) {
                   return
@@ -313,7 +328,7 @@ const InputLora: React.FC<InputLoraProps> = ({
               multiline
               minRows={1}
               maxRows={3}
-              helperText={TRIGGER_WORDS_HELPER}
+              helperText={triggerWordsHelper}
               sx={{
                 minWidth: 0,
                 '& .MuiInputBase-root': {
@@ -354,7 +369,7 @@ const InputLora: React.FC<InputLoraProps> = ({
                 justifySelf: 'stretch'
               }}
             >
-              {APPEND_TRIGGER_WORDS_LABEL}
+              {appendTriggerWordsLabel}
             </Button>
           </Box>
         </Box>

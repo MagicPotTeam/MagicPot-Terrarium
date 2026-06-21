@@ -343,15 +343,15 @@ const ContextCompressionSummaryCard: React.FC<{
     ? new Date(updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : ''
   const triggerLabel = manual
-    ? t('chat.context_summary_manual', { defaultValue: '手动' })
-    : t('chat.context_summary_auto', { defaultValue: '自动' })
-  const title = t('chat.context_summary_title', { defaultValue: '上下文已压缩' })
+    ? t('chat.context_summary_manual', { defaultValue: 'Manual' })
+    : t('chat.context_summary_auto', { defaultValue: 'Automatic' })
+  const title = t('chat.context_summary_title', { defaultValue: 'Context compressed' })
   const messageCountLabel = t('chat.context_summary_message_count', {
-    defaultValue: '{{count}} 条消息',
+    defaultValue: '{{count}} messages',
     count: coveredMessageCount
   })
   const summaryLabel = t('chat.context_summary_expand_label', {
-    defaultValue: '压缩后的上下文'
+    defaultValue: 'Compressed context'
   })
 
   return (

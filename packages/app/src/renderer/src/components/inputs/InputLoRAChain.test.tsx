@@ -251,7 +251,7 @@ describe('InputLoRAChain', () => {
     })
     expect(onAppendLoraTriggerWords).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: /追加触发词/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Append trigger words/ }))
 
     expect(onAppendLoraTriggerWords).toHaveBeenCalledWith(
       expect.objectContaining({
