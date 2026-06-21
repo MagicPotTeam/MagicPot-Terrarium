@@ -11,6 +11,16 @@ export type Hy3dApiAction =
   | 'SubmitHunyuanTo3DUVJob'
   | 'SubmitTextureTo3DJob'
   | 'Convert3DFormat'
+  | 'TripoStylized3DFlow'
+  | 'TripoTextToImage'
+  | 'TripoGenerateImage'
+  | 'TripoGenerateMultiviewImage'
+  | 'TripoEditMultiviewImage'
+  | 'TripoImportModel'
+  | 'TripoMeshCompletion'
+  | 'TripoPreRigCheck'
+  | 'TripoRig'
+  | 'TripoRetarget'
 
 export type Hy3dProfileTemplate =
   | 'DEFAULT'
@@ -39,7 +49,15 @@ export type Hy3dGenerateType = 'Normal' | 'LowPoly' | 'Geometry' | 'Sketch'
 
 export type Hy3dGenerateTargetFormat = 'DEFAULT' | 'OBJ' | 'GLB' | 'STL' | 'USDZ' | 'FBX' | 'MP4'
 
-export type Hy3dConvertTargetFormat = 'STL' | 'USDZ' | 'FBX' | 'MP4' | 'GIF'
+export type Hy3dConvertTargetFormat =
+  | 'STL'
+  | 'USDZ'
+  | 'FBX'
+  | 'MP4'
+  | 'GIF'
+  | 'GLTF'
+  | 'OBJ'
+  | '3MF'
 
 export type Hy3dFaceLevel = 'low' | 'medium' | 'high'
 
@@ -57,6 +75,7 @@ export interface Hy3dParams {
   prompt: string
   enablePBR: boolean
   modelUrl: string
+  modelTaskId: string
   modelSourceFileName: string
   modelStorageKey: string
   modelStorageBucket: string
@@ -66,6 +85,12 @@ export interface Hy3dParams {
   textureEnablePBR: boolean
   topoFaceLevel: Hy3dFaceLevel
   profileTemplate: Hy3dProfileTemplate
+  tripoImageModelVersion: string
+  tripoImageTemplate: string
+  tripoEditView: 'front' | 'left' | 'back' | 'right'
+  tripoAnimationPreset: string
+  tripoRigType: string
+  tripoRigSpec: string
 }
 
 export interface Hy3dImageAttachment {
@@ -95,6 +120,8 @@ const HY3D_MEDIA_STORAGE_KEY = 'hy3d.media'
 
 export const BUILTIN_HUNYUAN3D_QAPP_KEY = '~builtin/hunyuan3d'
 export const BUILTIN_HUNYUAN3D_STEP_KEY_PREFIX = `${BUILTIN_HUNYUAN3D_QAPP_KEY}/`
+export const BUILTIN_TRIPO3D_QAPP_KEY = '~builtin/tripo3d'
+export const BUILTIN_TRIPO3D_STEP_KEY_PREFIX = `${BUILTIN_TRIPO3D_QAPP_KEY}/`
 
 export const DEFAULT_PARAMS: Hy3dParams = {
   mode: 'text2_3d',
@@ -108,6 +135,7 @@ export const DEFAULT_PARAMS: Hy3dParams = {
   prompt: '',
   enablePBR: false,
   modelUrl: '',
+  modelTaskId: '',
   modelSourceFileName: '',
   modelStorageKey: '',
   modelStorageBucket: '',
@@ -116,7 +144,13 @@ export const DEFAULT_PARAMS: Hy3dParams = {
   texturePrompt: '',
   textureEnablePBR: false,
   topoFaceLevel: 'low',
-  profileTemplate: 'DEFAULT'
+  profileTemplate: 'DEFAULT',
+  tripoImageModelVersion: 'flux.1_kontext_pro',
+  tripoImageTemplate: '',
+  tripoEditView: 'front',
+  tripoAnimationPreset: 'preset:walk',
+  tripoRigType: 'biped',
+  tripoRigSpec: 'tripo'
 }
 
 export const DEFAULT_MEDIA_STATE: Hy3dMediaState = {
@@ -204,6 +238,11 @@ export const buildHy3dGenerateAttachments = (
       return params.mode === 'img2_3d'
         ? sortHy3dConceptImages(mediaState.conceptImages).map(stripAttachmentSlot)
         : []
+    case 'TripoStylized3DFlow':
+    case 'TripoGenerateImage':
+      return sortHy3dConceptImages(mediaState.conceptImages).map(stripAttachmentSlot)
+    case 'TripoGenerateMultiviewImage':
+      return sortHy3dConceptImages(mediaState.conceptImages).slice(0, 1).map(stripAttachmentSlot)
     case 'SubmitTextureTo3DJob':
       return sortHy3dConceptImages(mediaState.textureRefImages).map(stripAttachmentSlot)
     case 'SubmitProfileTo3DJob':
@@ -214,16 +253,41 @@ export const buildHy3dGenerateAttachments = (
 }
 
 export const buildHy3dSubmissionContent = (
-  params: Pick<Hy3dParams, 'apiAction' | 'mode' | 'modelUrl' | 'prompt' | 'texturePrompt'>
+  params: Pick<
+    Hy3dParams,
+    'apiAction' | 'mode' | 'modelUrl' | 'modelTaskId' | 'prompt' | 'texturePrompt'
+  >,
+  options: { provider?: 'hunyuan' | 'tripo' } = {}
 ): string => {
+  const isTripoProvider = options.provider === 'tripo'
+  const hunyuanModelReference = params.modelUrl.trim()
+  const tripoModelReference = (params.modelTaskId || params.modelUrl).trim()
+  const modelReference = isTripoProvider ? tripoModelReference : hunyuanModelReference
+
   switch (params.apiAction) {
     case 'SubmitHunyuan3DPartJob':
     case 'SubmitReduceFaceJob':
-    case 'SubmitHunyuanTo3DUVJob':
     case 'Convert3DFormat':
-      return params.modelUrl.trim()
+      return modelReference
+    case 'SubmitHunyuanTo3DUVJob':
+      return hunyuanModelReference
     case 'SubmitTextureTo3DJob':
-      return [params.modelUrl, params.texturePrompt].filter(Boolean).join('\n').trim()
+      return [modelReference, params.texturePrompt].filter(Boolean).join('\n').trim()
+    case 'TripoImportModel':
+      return params.modelUrl.trim()
+    case 'TripoPreRigCheck':
+    case 'TripoRig':
+    case 'TripoRetarget':
+      return tripoModelReference
+    case 'TripoMeshCompletion':
+      return [tripoModelReference, params.texturePrompt].filter(Boolean).join('\n').trim()
+    case 'TripoTextToImage':
+    case 'TripoStylized3DFlow':
+    case 'TripoGenerateImage':
+    case 'TripoEditMultiviewImage':
+      return params.prompt.trim()
+    case 'TripoGenerateMultiviewImage':
+      return ''
     case 'SubmitHunyuanTo3DProJob':
     case 'SubmitHunyuanTo3DRapidJob':
       return params.mode === 'text2_3d' ? params.prompt.trim() : ''
@@ -257,7 +321,22 @@ export const getHy3dMissingInputMessage = (params: Pick<Hy3dParams, 'apiAction'>
     case 'SubmitProfileTo3DJob':
       return '请先上传人物参考图，再开始生成人物模型。'
     case 'SubmitTextureTo3DJob':
-      return '请先上传待处理模型，并填写纹理描述或参考图。'
+      return '请先选择模型任务 ID 或上传待处理模型，并填写纹理描述或参考图。'
+    case 'TripoTextToImage':
+    case 'TripoGenerateImage':
+    case 'TripoEditMultiviewImage':
+      return '请先填写 Tripo 任务提示词。'
+    case 'TripoStylized3DFlow':
+      return '请先上传源图并填写风格化提示词，再生成 Tripo 3D。'
+    case 'TripoGenerateMultiviewImage':
+      return '请先上传一张参考图，再生成 Tripo 多视图。'
+    case 'TripoImportModel':
+      return '请先填写 Tripo STS file token/object 或公开模型 URL。'
+    case 'TripoMeshCompletion':
+    case 'TripoPreRigCheck':
+    case 'TripoRig':
+    case 'TripoRetarget':
+      return '请先选择 Tripo 模型任务 ID 或已生成的模型，再执行该流程。'
     case 'SubmitHunyuan3DPartJob':
     case 'SubmitReduceFaceJob':
     case 'SubmitHunyuanTo3DUVJob':
@@ -536,6 +615,56 @@ export const CONVERT_TARGET_FORMATS = [
   { value: 'GIF', label: 'GIF 预览动图' }
 ] as const
 
+export const TRIPO_CONVERT_TARGET_FORMATS = [
+  { value: 'GLTF', label: 'GLTF' },
+  { value: 'USDZ', label: 'USDZ' },
+  { value: 'FBX', label: 'FBX' },
+  { value: 'OBJ', label: 'OBJ' },
+  { value: 'STL', label: 'STL' },
+  { value: '3MF', label: '3MF' }
+] as const
+
+export const TRIPO_IMAGE_MODEL_VERSION_OPTIONS = [
+  { value: 'flux.1_kontext_pro', label: 'Flux Kontext Pro' },
+  { value: 'flux.1_dev', label: 'Flux Dev' },
+  { value: 'gpt_4o', label: 'GPT-4o' },
+  { value: 'gpt_image_1.5', label: 'GPT Image 1.5' },
+  { value: 'midjourney', label: 'Midjourney' },
+  { value: 'gemini_2.5_flash_image_preview', label: 'Gemini 2.5 Flash' },
+  { value: 'gemini_3_pro_image_preview', label: 'Gemini 3 Pro' },
+  { value: 'gemini_3.1_flash_image_preview', label: 'Gemini 3.1 Flash' }
+] as const
+
+export const TRIPO_TEMPLATE_OPTIONS = [
+  { value: '', label: '默认' },
+  { value: 't_pose', label: 'T-Pose' },
+  { value: 'sketch_to_render', label: '草图渲染' }
+] as const
+
+export const TRIPO_ANIMATION_PRESETS = [
+  { value: 'preset:idle', label: 'Idle' },
+  { value: 'preset:walk', label: 'Walk' },
+  { value: 'preset:run', label: 'Run' },
+  { value: 'preset:jump', label: 'Jump' },
+  { value: 'preset:turn', label: 'Turn' },
+  { value: 'preset:slash', label: 'Slash' },
+  { value: 'preset:shoot', label: 'Shoot' },
+  { value: 'preset:hurt', label: 'Hurt' },
+  { value: 'preset:fall', label: 'Fall' },
+  { value: 'preset:dive', label: 'Dive' },
+  { value: 'preset:climb', label: 'Climb' }
+] as const
+
+export const TRIPO_RIG_TYPE_OPTIONS = [
+  { value: 'biped', label: 'Biped' },
+  { value: 'quadruped', label: 'Quadruped' }
+] as const
+
+export const TRIPO_RIG_SPEC_OPTIONS = [
+  { value: 'tripo', label: 'Tripo' },
+  { value: 'mixamo', label: 'Mixamo' }
+] as const
+
 export const FACE_LEVEL_OPTIONS = [
   { value: 'low', label: '低', desc: '约 3,000 面' },
   { value: 'medium', label: '中', desc: '约 15,000 面' },
@@ -603,6 +732,44 @@ export const WORKFLOW_STEPS: WorkflowStep[] = [
     label: '格式转换',
     icon: 'convert',
     apiAction: 'Convert3DFormat',
+    enabled: true
+  }
+]
+
+export const TRIPO_WORKFLOW_STEPS: WorkflowStep[] = [
+  {
+    id: 'stylized-3d',
+    label: '风格化 3D',
+    icon: 'texture',
+    apiAction: 'TripoStylized3DFlow',
+    enabled: true
+  },
+  {
+    id: 'concept',
+    label: '模型生成',
+    icon: 'concept',
+    apiAction: 'SubmitHunyuanTo3DProJob',
+    enabled: true
+  },
+  {
+    id: 'image-pipeline',
+    label: '图片 / 多视图',
+    icon: 'concept',
+    apiAction: 'TripoGenerateImage',
+    enabled: true
+  },
+  {
+    id: 'model-refine',
+    label: '模型精修',
+    icon: 'texture',
+    apiAction: 'TripoImportModel',
+    enabled: true
+  },
+  {
+    id: 'rig-animation',
+    label: '绑定动画',
+    icon: 'profile',
+    apiAction: 'TripoPreRigCheck',
     enabled: true
   }
 ]
@@ -811,18 +978,65 @@ export const HY3D_PROFILE_TEMPLATE_PREVIEW_META: Record<
 
 export const getWorkflowStepIdForAction = (action: Hy3dApiAction): string => {
   switch (action) {
+    case 'TripoStylized3DFlow':
+      return 'stylized-3d'
+    case 'TripoTextToImage':
+      return 'text-image'
+    case 'TripoGenerateImage':
+      return 'image-edit'
+    case 'TripoGenerateMultiviewImage':
+      return 'multiview-image'
+    case 'TripoEditMultiviewImage':
+      return 'edit-multiview'
+    case 'TripoImportModel':
+      return 'import'
     case 'SubmitProfileTo3DJob':
       return 'profile'
     case 'SubmitHunyuan3DPartJob':
       return 'split'
+    case 'TripoMeshCompletion':
+      return 'completion'
     case 'SubmitReduceFaceJob':
       return 'topology'
     case 'SubmitHunyuanTo3DUVJob':
       return 'uv'
     case 'SubmitTextureTo3DJob':
       return 'texture'
+    case 'TripoPreRigCheck':
+      return 'rig-check'
+    case 'TripoRig':
+      return 'rig'
+    case 'TripoRetarget':
+      return 'retarget'
     case 'Convert3DFormat':
       return 'convert'
+    case 'SubmitHunyuanTo3DProJob':
+    case 'SubmitHunyuanTo3DRapidJob':
+    default:
+      return 'concept'
+  }
+}
+
+export const getTripoWorkflowStepIdForAction = (action: Hy3dApiAction): string => {
+  switch (action) {
+    case 'TripoStylized3DFlow':
+      return 'stylized-3d'
+    case 'TripoTextToImage':
+    case 'TripoGenerateImage':
+    case 'TripoGenerateMultiviewImage':
+    case 'TripoEditMultiviewImage':
+      return 'image-pipeline'
+    case 'TripoImportModel':
+    case 'SubmitTextureTo3DJob':
+    case 'SubmitHunyuan3DPartJob':
+    case 'TripoMeshCompletion':
+    case 'SubmitReduceFaceJob':
+    case 'Convert3DFormat':
+      return 'model-refine'
+    case 'TripoPreRigCheck':
+    case 'TripoRig':
+    case 'TripoRetarget':
+      return 'rig-animation'
     case 'SubmitHunyuanTo3DProJob':
     case 'SubmitHunyuanTo3DRapidJob':
     default:
@@ -836,11 +1050,35 @@ export const isBuiltinHunyuan3DWorkflowKey = (key: string): boolean =>
 export const isBuiltinHunyuan3DMenuKey = (key: string): boolean =>
   key === BUILTIN_HUNYUAN3D_QAPP_KEY || isBuiltinHunyuan3DWorkflowKey(key)
 
+export const isBuiltinTripo3DWorkflowKey = (key: string): boolean =>
+  key.startsWith(BUILTIN_TRIPO3D_STEP_KEY_PREFIX)
+
+export const isBuiltinTripo3DMenuKey = (key: string): boolean =>
+  key === BUILTIN_TRIPO3D_QAPP_KEY || isBuiltinTripo3DWorkflowKey(key)
+
+export const isBuiltin3DWorkflowKey = (key: string): boolean =>
+  isBuiltinHunyuan3DWorkflowKey(key) || isBuiltinTripo3DWorkflowKey(key)
+
+export const isBuiltin3DMenuKey = (key: string): boolean =>
+  isBuiltinHunyuan3DMenuKey(key) || isBuiltinTripo3DMenuKey(key)
+
 export const getBuiltinHunyuan3DStepKey = (stepId: string): string =>
   `${BUILTIN_HUNYUAN3D_STEP_KEY_PREFIX}${stepId}`
+
+export const getBuiltinTripo3DStepKey = (stepId: string): string =>
+  `${BUILTIN_TRIPO3D_STEP_KEY_PREFIX}${stepId}`
 
 export const getBuiltinHunyuan3DStepId = (key: string): string =>
   isBuiltinHunyuan3DWorkflowKey(key) ? key.slice(BUILTIN_HUNYUAN3D_STEP_KEY_PREFIX.length) : ''
 
+export const getBuiltinTripo3DStepId = (key: string): string =>
+  isBuiltinTripo3DWorkflowKey(key) ? key.slice(BUILTIN_TRIPO3D_STEP_KEY_PREFIX.length) : ''
+
+export const getBuiltin3DStepId = (key: string): string =>
+  isBuiltinHunyuan3DWorkflowKey(key) ? getBuiltinHunyuan3DStepId(key) : getBuiltinTripo3DStepId(key)
+
 export const getBuiltinHunyuan3DQuickAppKeyForAction = (action: Hy3dApiAction): string =>
   getBuiltinHunyuan3DStepKey(getWorkflowStepIdForAction(action))
+
+export const getBuiltinTripo3DQuickAppKeyForAction = (action: Hy3dApiAction): string =>
+  getBuiltinTripo3DStepKey(getTripoWorkflowStepIdForAction(action))

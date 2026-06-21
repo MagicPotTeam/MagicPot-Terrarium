@@ -4,8 +4,9 @@ import { describe, expect, it, vi } from 'vitest'
 
 import ConvertPanel from './ConvertPanel'
 import TopologyPanel from './TopologyPanel'
+import TripoTaskPanel from './TripoTaskPanel'
 import UVPanel from './UVPanel'
-import { DEFAULT_PARAMS } from './types'
+import { DEFAULT_MEDIA_STATE, DEFAULT_PARAMS } from './types'
 
 vi.mock('./ModelDropZone', () => ({
   default: () => <div>ModelDropZone</div>
@@ -77,5 +78,41 @@ describe('Hunyuan3D post-process panels', () => {
 
     expect(screen.getByText(/30000 faces/i)).toBeTruthy()
     expect(screen.getByText(/GLB[\s\S]*FBX/i)).toBeTruthy()
+  })
+
+  it('does not show a Tripo task-id field for first-step generation tasks', () => {
+    render(
+      <TripoTaskPanel
+        params={{
+          ...DEFAULT_PARAMS,
+          apiAction: 'TripoTextToImage'
+        }}
+        mediaState={DEFAULT_MEDIA_STATE}
+        onParamsChange={vi.fn()}
+        onMediaStateChange={vi.fn()}
+      />
+    )
+
+    expect(screen.queryByText('上一轮 Tripo 任务 ID')).toBeNull()
+    expect(screen.queryByText('模型 file token / URL')).toBeNull()
+  })
+
+  it('labels Tripo post-process task ids as prior task references', () => {
+    render(
+      <TripoTaskPanel
+        params={{
+          ...DEFAULT_PARAMS,
+          apiAction: 'TripoPreRigCheck'
+        }}
+        mediaState={DEFAULT_MEDIA_STATE}
+        onParamsChange={vi.fn()}
+        onMediaStateChange={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText('上一轮 Tripo 任务 ID')).toBeTruthy()
+    expect(screen.getByText(/不是 API Key/)).toBeTruthy()
+    expect(screen.queryByText('模型 URL / 备注')).toBeNull()
+    expect(screen.getByRole('button', { name: '开始预检' })).toBeDisabled()
   })
 })

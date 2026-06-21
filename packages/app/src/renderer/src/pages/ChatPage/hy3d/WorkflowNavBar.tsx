@@ -14,10 +14,11 @@ import { Box, Collapse, IconButton, Tooltip } from '@mui/material'
 import { useTheme } from '@mui/material/styles'
 
 import { hyColors, scrollbarSx } from './theme'
-import { WORKFLOW_STEPS } from './types'
+import { WORKFLOW_STEPS, type WorkflowStep } from './types'
 
 interface WorkflowNavBarProps {
   activeStep: string
+  steps?: WorkflowStep[]
   onStepClick: (stepId: string) => void
   onRunStep?: (stepId: string) => void
   getStepActionMeta?: (stepId: string) => { label: string; disabled?: boolean }
@@ -55,6 +56,7 @@ const getStepIcon = (icon: string): React.ReactNode => {
 
 const WorkflowNavBar: React.FC<WorkflowNavBarProps> = ({
   activeStep,
+  steps = WORKFLOW_STEPS,
   onStepClick,
   onRunStep,
   getStepActionMeta,
@@ -92,7 +94,7 @@ const WorkflowNavBar: React.FC<WorkflowNavBarProps> = ({
             theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.015)' : 'rgba(255,255,255,0.7)'
         }}
       >
-        {WORKFLOW_STEPS.map((step, index) => {
+        {steps.map((step, index) => {
           const isActive = step.id === activeStep
           const stepActionMeta = getStepActionMeta?.(step.id)
           const rowBg = isActive ? selectedRowColor : 'transparent'
@@ -101,8 +103,7 @@ const WorkflowNavBar: React.FC<WorkflowNavBarProps> = ({
             <Box
               key={step.id}
               sx={{
-                borderBottom:
-                  index === WORKFLOW_STEPS.length - 1 ? 'none' : `1px solid ${hyColors.border}`
+                borderBottom: index === steps.length - 1 ? 'none' : `1px solid ${hyColors.border}`
               }}
             >
               <Box

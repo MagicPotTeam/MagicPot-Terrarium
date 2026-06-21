@@ -64,10 +64,13 @@ import {
 import { ProjectSelectorDialog } from './ProjectSelectorDialog'
 import {
   BUILTIN_HUNYUAN3D_QAPP_KEY,
+  BUILTIN_TRIPO3D_QAPP_KEY,
+  TRIPO_WORKFLOW_STEPS,
   WORKFLOW_STEPS,
   getBuiltinHunyuan3DQuickAppKeyForAction,
   getBuiltinHunyuan3DStepKey,
-  isBuiltinHunyuan3DMenuKey
+  getBuiltinTripo3DStepKey,
+  isBuiltin3DMenuKey
 } from '@renderer/pages/ChatPage/hy3d/types'
 import {
   buildDefaultQAppManifest,
@@ -96,10 +99,11 @@ const QAPP_MENU_CACHE_KEY = 'qapp.menu.cachedItems.v1'
 type QAppCategory = SharedQAppCategory
 
 const isBuiltinHunyuan3DQApp = (key: string): boolean => key === BUILTIN_HUNYUAN3D_QAPP_KEY
+const isBuiltinTripo3DQApp = (key: string): boolean => key === BUILTIN_TRIPO3D_QAPP_KEY
+const isBuiltinModel3DQApp = (key: string): boolean =>
+  isBuiltinHunyuan3DQApp(key) || isBuiltinTripo3DQApp(key)
 const isBuiltinProtectedQApp = (key: string): boolean =>
-  isBuiltinHunyuan3DQApp(key) ||
-  isBuiltinDuplicateCheckQApp(key) ||
-  isBuiltinVideoGenerationQApp(key)
+  isBuiltin3DMenuKey(key) || isBuiltinDuplicateCheckQApp(key) || isBuiltinVideoGenerationQApp(key)
 
 const createBuiltinHunyuan3DQApp = (): QAppMenuItem =>
   ({
@@ -118,6 +122,31 @@ const createBuiltinHunyuan3DQApp = (): QAppMenuItem =>
     )
   }) as QAppMenuItem
 
+const createBuiltinTripo3DQApp = (): QAppMenuItem =>
+  ({
+    key: BUILTIN_TRIPO3D_QAPP_KEY,
+    name: 'tripo3d',
+    isBuiltin: true,
+    isDirectory: true,
+    children: TRIPO_WORKFLOW_STEPS.map(
+      (step) =>
+        ({
+          key: getBuiltinTripo3DStepKey(step.id),
+          name: step.label,
+          isBuiltin: true,
+          isDirectory: false
+        }) as QAppMenuItem
+    )
+  }) as QAppMenuItem
+
+const mergeBuiltinQAppItems = (items: QAppMenuItem[]): QAppMenuItem[] => [
+  createBuiltinHunyuan3DQApp(),
+  createBuiltinTripo3DQApp(),
+  createBuiltinDuplicateCheckQApp(),
+  createBuiltinVideoGenerationQApp(),
+  ...items.filter((item) => !isBuiltinProtectedQApp(item.key))
+]
+
 const readCachedQAppItems = (): QAppMenuItem[] => {
   try {
     const raw = window.localStorage.getItem(QAPP_MENU_CACHE_KEY)
@@ -126,7 +155,7 @@ const readCachedQAppItems = (): QAppMenuItem[] => {
     }
 
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? (parsed as QAppMenuItem[]) : []
+    return Array.isArray(parsed) ? mergeBuiltinQAppItems(parsed as QAppMenuItem[]) : []
   } catch {
     return []
   }
@@ -162,7 +191,7 @@ export { QAPP_CATEGORY_LABELS }
 export type { QAppCategory }
 
 const getQAppCategory = (item: QAppMenuItem): QAppCategory => {
-  if (isBuiltinHunyuan3DQApp(item.key)) {
+  if (isBuiltin3DMenuKey(item.key)) {
     return 'model3d'
   }
   return inferQAppCategory({
@@ -375,6 +404,12 @@ const CascadingMenuItem = memo(
             e.stopPropagation()
             if (isDirectory) {
               onToggleExpand(qAppItem.key)
+              if (renderExpandedContent && isBuiltinModel3DQApp(qAppItem.key)) {
+                const childKeys = collectSelectableQAppKeys(qAppItem.children ?? [])
+                if (childKeys.length > 0 && !childKeys.includes(currentQAppKey)) {
+                  setCurrentQAppKey(childKeys[0])
+                }
+              }
               return
             }
             // 侧边面板模式：点击切换选中/取消
@@ -387,7 +422,7 @@ const CascadingMenuItem = memo(
           onContextMenu={(e) => {
             if (
               !isDirectory &&
-              !isBuiltinHunyuan3DMenuKey(qAppItem.key) &&
+              !isBuiltin3DMenuKey(qAppItem.key) &&
               !isBuiltinDuplicateCheckQApp(qAppItem.key) &&
               !isBuiltinVideoGenerationQApp(qAppItem.key)
             ) {
@@ -472,7 +507,7 @@ const CascadingMenuItem = memo(
             </Box>
             {/* 非目录项：播放/停止按钮 */}
             {!isDirectory &&
-              !isBuiltinHunyuan3DQApp(qAppItem.key) &&
+              !isBuiltinModel3DQApp(qAppItem.key) &&
               !isBuiltinVideoGenerationQApp(qAppItem.key) &&
               onRunClick &&
               isSelected && (
@@ -730,6 +765,10 @@ export default function QAppMenu({
       if (v === BUILTIN_HUNYUAN3D_QAPP_KEY || v === 'hunyuan3d') {
         return t('qapp.names.hunyuan3d_quick_app')
       }
+      if (v === BUILTIN_TRIPO3D_QAPP_KEY || v === 'tripo3d') {
+        const tripoLabel = t('qapp.names.tripo3d_quick_app')
+        return tripoLabel === 'qapp.names.tripo3d_quick_app' ? 'Tripo3D' : tripoLabel
+      }
       if (isBuiltinDuplicateCheckQApp(v) || v === '重复图检查') {
         return '重复图检查'
       }
@@ -756,7 +795,7 @@ export default function QAppMenu({
           continue
         }
 
-        if (isBuiltinHunyuan3DQApp(item.key) && activeCategory !== 'model3d') {
+        if (isBuiltinModel3DQApp(item.key) && activeCategory !== 'model3d') {
           continue
         }
 
@@ -793,6 +832,7 @@ export default function QAppMenu({
         const ap = pinnedKeys.has(a.key)
         const bp = pinnedKeys.has(b.key)
         if (ap !== bp) return ap ? -1 : 1
+        if (isBuiltin3DMenuKey(a.key) && isBuiltin3DMenuKey(b.key)) return 0
         return (a.name || a.key).localeCompare(b.name || b.key)
       })
     },
@@ -929,12 +969,7 @@ export default function QAppMenu({
       if (requestId !== refreshRequestIdRef.current) {
         return
       }
-      const localItems = [
-        createBuiltinHunyuan3DQApp(),
-        createBuiltinDuplicateCheckQApp(),
-        createBuiltinVideoGenerationQApp(),
-        ...res.qApps.filter((item) => !isBuiltinProtectedQApp(item.key))
-      ]
+      const localItems = mergeBuiltinQAppItems(res.qApps)
 
       // 先显示本地项，加快加载速度
       writeCachedQAppItems(localItems)
@@ -1670,7 +1705,7 @@ export default function QAppMenu({
         {(() => {
           const isRemoteItem = menuKey?.startsWith('~remote')
           const isBuiltinItem = menuKey
-            ? isBuiltinHunyuan3DMenuKey(menuKey) ||
+            ? isBuiltin3DMenuKey(menuKey) ||
               isBuiltinDuplicateCheckQApp(menuKey) ||
               isBuiltinVideoGenerationQApp(menuKey)
             : false

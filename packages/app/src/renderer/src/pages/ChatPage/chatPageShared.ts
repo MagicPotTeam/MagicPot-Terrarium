@@ -58,6 +58,7 @@ export const STORAGE_KEY_SELECTED_PROFILE = 'chat.selectedProfileId'
 export const STORAGE_KEY_LOADING_IDS = 'chat.loadingSessionIds'
 export const STORAGE_KEY_EXTERNAL_LOADING_IDS = 'chat.externalLoadingSessionIds'
 export const HUNYUAN_3D_PROFILE_ID = 'hunyuan3d-pro'
+export const TRIPO_3D_PROFILE_ID = 'tripo3d-pro'
 export const MODEL3D_FILE_EXTENSIONS = [
   '.glb',
   '.gltf',
@@ -263,12 +264,15 @@ export const normalizeChatProfileIdForStorage = (
   return getBaseProfileId(normalizedProfileId) ?? undefined
 }
 
-export const buildHy3dProfileId = (params: Hy3dParams): string => {
+export const buildHy3dProfileId = (
+  params: Hy3dParams,
+  provider: 'hunyuan' | 'tripo' = 'hunyuan'
+): string => {
   const hy3dEnablePBR =
     params.apiAction === 'SubmitTextureTo3DJob' ? params.textureEnablePBR : params.enablePBR
 
   const profileSegments = [
-    HUNYUAN_3D_PROFILE_ID,
+    provider === 'tripo' ? TRIPO_3D_PROFILE_ID : HUNYUAN_3D_PROFILE_ID,
     params.apiAction,
     params.modelVersion,
     params.generateType,
@@ -280,10 +284,32 @@ export const buildHy3dProfileId = (params: Hy3dParams): string => {
     params.profileTemplate || 'DEFAULT'
   ]
 
-  const encodedModelSourceFileName = encodeURIComponent(params.modelSourceFileName || '')
-  if (encodedModelSourceFileName) {
-    profileSegments.push(encodedModelSourceFileName)
+  const appendProfileExtra = (key: string, value: string | undefined): void => {
+    const encodedValue = encodeURIComponent(value || '')
+    if (encodedValue) {
+      profileSegments.push(`${key}=${encodedValue}`)
+    }
   }
+
+  appendProfileExtra('source', params.modelSourceFileName)
+  appendProfileExtra('task', params.modelTaskId)
+  appendProfileExtra(
+    'imageModel',
+    params.tripoImageModelVersion !== 'flux.1_kontext_pro'
+      ? params.tripoImageModelVersion
+      : undefined
+  )
+  appendProfileExtra('template', params.tripoImageTemplate)
+  appendProfileExtra(
+    'editView',
+    params.tripoEditView !== 'front' ? params.tripoEditView : undefined
+  )
+  appendProfileExtra(
+    'animation',
+    params.tripoAnimationPreset !== 'preset:walk' ? params.tripoAnimationPreset : undefined
+  )
+  appendProfileExtra('rigType', params.tripoRigType !== 'biped' ? params.tripoRigType : undefined)
+  appendProfileExtra('rigSpec', params.tripoRigSpec !== 'tripo' ? params.tripoRigSpec : undefined)
 
   return profileSegments.join('::')
 }

@@ -41,7 +41,10 @@ import { useComfyEventCallback } from '@renderer/hooks/useComfyEvent'
 import { useComfyStatus } from '@renderer/store/hooks/comfyStatus'
 import { api } from '@renderer/utils/windowUtils'
 import { Config } from '@shared/config/config'
-import { findHunyuan3DQAppProfile } from '@shared/config/apiProfileSelectors'
+import {
+  findHunyuan3DQAppProfile,
+  findTripo3DQAppProfile
+} from '@shared/config/apiProfileSelectors'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import { useAppDispatch, useAppSelector } from '../store'
 import { closeSidePanel, openTab, setActiveTab } from '../store/slices/layoutSlice'
@@ -74,19 +77,26 @@ import {
 import {
   cloneHy3dMediaState,
   DEFAULT_MEDIA_STATE,
+  getBuiltin3DStepId,
   getBuiltinHunyuan3DQuickAppKeyForAction,
-  getBuiltinHunyuan3DStepId,
+  getBuiltinTripo3DQuickAppKeyForAction,
   buildHy3dSubmissionContent as buildSharedHy3dSubmissionContent,
   buildHy3dGenerateAttachments,
   getHy3dMissingInputMessage as getSharedHy3dMissingInputMessage,
   getHy3dSubmissionConflictMessage,
+  getTripoWorkflowStepIdForAction,
   getHy3dMediaState,
   getHy3dParams,
-  isBuiltinHunyuan3DMenuKey,
-  isBuiltinHunyuan3DWorkflowKey,
+  isBuiltin3DMenuKey,
+  isBuiltin3DWorkflowKey,
+  isBuiltinTripo3DMenuKey,
+  isBuiltinTripo3DWorkflowKey,
   saveHy3dMediaState,
   saveHy3dParams,
+  TRIPO_WORKFLOW_STEPS,
   WORKFLOW_STEPS,
+  type Hy3dImageAttachment,
+  type Hy3dMediaState,
   type Hy3dParams
 } from '../pages/ChatPage/hy3d/types'
 import DuplicateCheckWorkspace from '../pages/QuickAppPage/duplicateCheck/DuplicateCheckWorkspace'
@@ -138,7 +148,7 @@ type QuickAppCategory = 'image' | 'model3d' | 'video' | 'inspection'
 const QUICK_APP_CATEGORIES: QuickAppCategory[] = ['image', 'model3d', 'video', 'inspection']
 
 const getBuiltinQuickAppCategoryForKey = (qAppKey: string): QuickAppCategory | null => {
-  if (isBuiltinHunyuan3DMenuKey(qAppKey)) {
+  if (isBuiltin3DMenuKey(qAppKey)) {
     return 'model3d'
   }
   if (isBuiltinVideoGenerationQApp(qAppKey)) {
@@ -235,8 +245,10 @@ const hasRapidHunyuanConfig = (config: Config): boolean => {
   )
 }
 
-const isHunyuanConfigured = (config: Config): boolean =>
+const isHunyuan3DConfigured = (config: Config): boolean =>
   hasRapidHunyuanConfig(config) || Boolean(findHunyuan3DQAppProfile(config))
+
+const isTripo3DConfigured = (config: Config): boolean => Boolean(findTripo3DQAppProfile(config))
 
 let hy3dDraftMediaStateCache: import('../pages/ChatPage/hy3d/types').Hy3dMediaState = {
   ...DEFAULT_MEDIA_STATE,
@@ -260,9 +272,20 @@ const HY3D_POST_PROCESS_ACTIONS = new Set([
   'SubmitReduceFaceJob',
   'SubmitHunyuanTo3DUVJob',
   'SubmitTextureTo3DJob',
-  'Convert3DFormat'
+  'Convert3DFormat',
+  'TripoImportModel',
+  'TripoMeshCompletion',
+  'TripoPreRigCheck',
+  'TripoRig',
+  'TripoRetarget'
 ])
 const HY3D_CONCEPT_ACTIONS = new Set(['SubmitHunyuanTo3DProJob', 'SubmitHunyuanTo3DRapidJob'])
+const TRIPO_IMAGE_RESULT_ACTIONS = new Set([
+  'TripoTextToImage',
+  'TripoGenerateImage',
+  'TripoGenerateMultiviewImage',
+  'TripoEditMultiviewImage'
+])
 const HY3D_SIGNED_URL_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const HY3D_PART_RESULT_CANVAS_MODEL_SIZE = 240
 const HY3D_PART_RESULT_CANVAS_GAP = 40
@@ -330,9 +353,35 @@ const getFriendlyHy3dRuntimeError = (error: unknown): string => {
 }
 
 type Model3DAttachment = ChatAttachment & { type: 'model3d' }
+type ImageAttachment = ChatAttachment & { type: 'image' }
 
 const isModel3DAttachment = (attachment: ChatAttachment): attachment is Model3DAttachment =>
   attachment.type === 'model3d'
+
+const isImageAttachment = (attachment: ChatAttachment): attachment is ImageAttachment =>
+  attachment.type === 'image'
+
+const pickPrimaryImageAttachment = (attachments: ImageAttachment[]): ImageAttachment =>
+  attachments[0]
+
+const buildTripoGeneratedImageReference = (attachment: ImageAttachment): Hy3dImageAttachment => ({
+  type: 'image',
+  url: attachment.url,
+  mimeType: attachment.mimeType,
+  fileName: attachment.fileName || 'tripo-stylized.png',
+  slot: 'single'
+})
+
+const extractTripoTaskId = (content: string): string => {
+  const text = String(content || '')
+  const match =
+    text.match(/\[Tripo3D\]\s*Task ID:\s*([A-Za-z0-9_-]+)/i) ||
+    text.match(/(?:tripo[-_\s]?task(?:\s*id)?|task_id)\s*[:=]\s*([A-Za-z0-9_-]+)/i)
+  return match?.[1]?.trim() || ''
+}
+
+const getHy3dProviderName = (qAppKey: string): string =>
+  isBuiltinTripo3DWorkflowKey(qAppKey) ? 'Tripo3D' : 'Hunyuan3D'
 
 const getModelAttachmentPriority = (attachment: Model3DAttachment): number => {
   const hint = `${attachment.fileName || ''}\n${attachment.url || ''}`.toLowerCase()
@@ -712,26 +761,194 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
     []
   )
 
+  const handleTripoStylized3DFlow = useCallback(async () => {
+    const imageParams: Hy3dParams = {
+      ...hy3dParams,
+      apiAction: 'TripoGenerateImage'
+    }
+    const imageAttachments = buildHy3dGenerateAttachments(imageParams, hy3dMediaState)
+    const imageContent = buildSharedHy3dSubmissionContent(imageParams)
+
+    if (!imageContent || imageAttachments.length === 0) {
+      notifyWarning(getSharedHy3dMissingInputMessage({ apiAction: 'TripoStylized3DFlow' }))
+      return
+    }
+
+    const progressMessageKey = notifyInfo('Tripo3D 正在生成风格化图片和 3D 模型，请稍候...', null)
+    console.log('[SidePanel] Tripo stylized 3D flow started', {
+      projectId,
+      sourceImageCount: imageAttachments.length
+    })
+
+    try {
+      const imageResult = await requestChatCompletion({
+        config,
+        messages: [
+          {
+            role: 'user',
+            content: imageContent,
+            attachments: imageAttachments
+          }
+        ],
+        profileId: buildHy3dProfileId(imageParams, 'tripo')
+      })
+      const rawImageResultContent = (imageResult.content || '').replace(
+        /file:\/\/\//g,
+        'local-media:///'
+      )
+      const imageAssistantMessage = buildAssistantMessageFromResult({
+        content: rawImageResultContent,
+        attachments: imageResult.attachments,
+        ocrResult: imageResult.ocrResult
+      })
+      const generatedImages = (imageAssistantMessage.attachments || []).filter(isImageAttachment)
+      const imageTaskId = extractTripoTaskId(
+        rawImageResultContent || imageAssistantMessage.content || ''
+      )
+
+      if (generatedImages.length === 0) {
+        throw new Error(imageAssistantMessage.content || 'Tripo3D 未返回可用于 3D 生成的风格化图片')
+      }
+
+      const primaryImage = pickPrimaryImageAttachment(generatedImages)
+      window.dispatchEvent(
+        new CustomEvent('canvas:add-image', {
+          detail: {
+            src: primaryImage.url,
+            fileName: primaryImage.fileName,
+            projectId,
+            select: false
+          }
+        })
+      )
+
+      const modelParams: Hy3dParams = {
+        ...hy3dParams,
+        apiAction: 'SubmitHunyuanTo3DProJob',
+        mode: 'img2_3d',
+        modelTaskId: ''
+      }
+      const modelMediaState: Hy3dMediaState = {
+        ...cloneHy3dMediaState(hy3dMediaState),
+        conceptImages: [buildTripoGeneratedImageReference(primaryImage)]
+      }
+      const modelAttachments = buildHy3dGenerateAttachments(modelParams, modelMediaState)
+      const modelResult = await requestChatCompletion({
+        config,
+        messages: [
+          {
+            role: 'user',
+            content: buildSharedHy3dSubmissionContent(modelParams),
+            attachments: modelAttachments
+          }
+        ],
+        profileId: buildHy3dProfileId(modelParams, 'tripo')
+      })
+      const rawModelResultContent = (modelResult.content || '').replace(
+        /file:\/\/\//g,
+        'local-media:///'
+      )
+      const modelAssistantMessage = buildAssistantMessageFromResult({
+        content: rawModelResultContent,
+        attachments: modelResult.attachments,
+        ocrResult: modelResult.ocrResult
+      })
+      const modelResultAttachments = (modelAssistantMessage.attachments || []).filter(
+        isModel3DAttachment
+      )
+      const modelTaskId = extractTripoTaskId(
+        rawModelResultContent || modelAssistantMessage.content || ''
+      )
+
+      if (modelResultAttachments.length === 0) {
+        throw new Error(modelAssistantMessage.content || 'Tripo3D 未返回可用的 3D 模型')
+      }
+
+      const primaryModel = pickPrimaryModelAttachment(modelResultAttachments)
+      const hy3dSourceParams = {
+        ...hy3dParams,
+        modelUrl: primaryModel.url,
+        modelTaskId,
+        modelSourceFileName: primaryModel.fileName || hy3dParams.modelSourceFileName || ''
+      }
+      const hy3dSourceMediaState = cloneHy3dMediaState(hy3dMediaState)
+
+      handleHy3dParamsChange({
+        modelUrl: primaryModel.url,
+        modelTaskId,
+        modelSourceFileName: primaryModel.fileName || '',
+        modelStorageKey: '',
+        modelStorageBucket: '',
+        modelStorageRegion: '',
+        modelSignedUrlExpiresAt: ''
+      })
+
+      window.dispatchEvent(
+        new CustomEvent('canvas:add-model3d', {
+          detail: {
+            src: primaryModel.url,
+            fileName: primaryModel.fileName,
+            projectId,
+            select: true,
+            hy3dQuickAppKey: getBuiltinTripo3DQuickAppKeyForAction(hy3dParams.apiAction),
+            hy3dParams: hy3dSourceParams,
+            hy3dMediaState: hy3dSourceMediaState
+          }
+        })
+      )
+
+      console.log('[SidePanel] Tripo stylized 3D flow completed', {
+        imageTaskId,
+        modelTaskId,
+        modelUrl: primaryModel.url
+      })
+      notifySuccess(projectId ? 'Tripo3D 风格化模型已添加到画布。' : 'Tripo3D 风格化模型已生成。')
+    } catch (error) {
+      console.error('[SidePanel] Tripo stylized 3D flow failed:', error)
+      notifyError(getFriendlyHy3dRuntimeError(error))
+    } finally {
+      closeMessage(progressMessageKey)
+    }
+  }, [
+    closeMessage,
+    config,
+    handleHy3dParamsChange,
+    hy3dMediaState,
+    hy3dParams,
+    notifyError,
+    notifyInfo,
+    notifySuccess,
+    notifyWarning,
+    projectId
+  ])
+
   const handleHy3dGenerate = useCallback(async () => {
+    if (hy3dParams.apiAction === 'TripoStylized3DFlow') {
+      await handleTripoStylized3DFlow()
+      return
+    }
+
     const attachments = buildHy3dGenerateAttachments(hy3dParams, hy3dMediaState)
-    const content = buildSharedHy3dSubmissionContent(hy3dParams)
+    const isTripoWorkflow = isBuiltinTripo3DWorkflowKey(currentQAppKey)
+    const content = buildSharedHy3dSubmissionContent(hy3dParams, {
+      provider: isTripoWorkflow ? 'tripo' : 'hunyuan'
+    })
 
     if (!content && attachments.length === 0) {
       notifyWarning(getSharedHy3dMissingInputMessage(hy3dParams))
       return
     }
 
-    const submissionConflictMessage = getHy3dSubmissionConflictMessage(
-      hy3dParams,
-      content,
-      attachments.length
-    )
+    const providerName = getHy3dProviderName(currentQAppKey)
+    const submissionConflictMessage = isBuiltinTripo3DWorkflowKey(currentQAppKey)
+      ? null
+      : getHy3dSubmissionConflictMessage(hy3dParams, content, attachments.length)
     if (submissionConflictMessage) {
       notifyWarning(submissionConflictMessage)
       return
     }
 
-    const progressMessageKey = notifyInfo('Hunyuan3D 正在生成，请稍候…', null)
+    const progressMessageKey = notifyInfo(`${providerName} 正在处理，请稍候...`, null)
     console.log('[SidePanel] Hy3D generation started', {
       apiAction: hy3dParams.apiAction,
       projectId,
@@ -749,14 +966,19 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
             attachments
           }
         ],
-        profileId: buildHy3dProfileId(nextParams)
+        profileId: buildHy3dProfileId(nextParams, isTripoWorkflow ? 'tripo' : 'hunyuan')
       })
+      const rawResultContent = (result.content || '').replace(/file:\/\/\//g, 'local-media:///')
       const assistantMessage = buildAssistantMessageFromResult({
-        content: (result.content || '').replace(/file:\/\/\//g, 'local-media:///'),
+        content: rawResultContent,
         attachments: result.attachments,
         ocrResult: result.ocrResult
       })
       const modelAttachments = (assistantMessage.attachments || []).filter(isModel3DAttachment)
+      const imageAttachments = (assistantMessage.attachments || []).filter(isImageAttachment)
+      const tripoTaskId = isTripoWorkflow
+        ? extractTripoTaskId(rawResultContent || assistantMessage.content || '')
+        : ''
       const isPartSplitAction = nextParams.apiAction === 'SubmitHunyuan3DPartJob'
 
       if (isPartSplitAction) {
@@ -769,7 +991,43 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
       }
 
       if (modelAttachments.length === 0) {
-        throw new Error(assistantMessage.content || 'Hunyuan3D 未返回可用的 3D 模型')
+        if (isTripoWorkflow) {
+          if (tripoTaskId) {
+            handleHy3dParamsChange({ modelTaskId: tripoTaskId })
+          }
+
+          if (TRIPO_IMAGE_RESULT_ACTIONS.has(nextParams.apiAction) && imageAttachments.length > 0) {
+            imageAttachments.forEach((imageAttachment, index) => {
+              window.dispatchEvent(
+                new CustomEvent('canvas:add-image', {
+                  detail: {
+                    src: imageAttachment.url,
+                    fileName: imageAttachment.fileName,
+                    projectId,
+                    select: index === imageAttachments.length - 1
+                  }
+                })
+              )
+            })
+            notifySuccess(projectId ? 'Tripo3D 图片已添加到画布。' : 'Tripo3D 图片已生成。')
+            return
+          }
+
+          if (assistantMessage.content) {
+            window.dispatchEvent(
+              new CustomEvent('canvas:add-text', {
+                detail: {
+                  text: assistantMessage.content,
+                  projectId
+                }
+              })
+            )
+            notifySuccess('Tripo3D 任务已完成。')
+            return
+          }
+        }
+
+        throw new Error(assistantMessage.content || `${providerName} 未返回可用的 3D 模型`)
       }
 
       const primaryModel = pickPrimaryModelAttachment(modelAttachments)
@@ -778,6 +1036,7 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
       if (!isPartSplitAction) {
         handleHy3dParamsChange({
           modelUrl: primaryModel.url,
+          modelTaskId: tripoTaskId || nextParams.modelTaskId,
           modelSourceFileName: primaryModel.fileName || '',
           modelStorageKey: '',
           modelStorageBucket: '',
@@ -786,8 +1045,15 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
         })
       }
 
-      const hy3dQuickAppKey = getBuiltinHunyuan3DQuickAppKeyForAction(nextParams.apiAction)
-      const hy3dSourceParams = { ...nextParams }
+      const hy3dQuickAppKey = isBuiltinTripo3DWorkflowKey(currentQAppKey)
+        ? getBuiltinTripo3DQuickAppKeyForAction(nextParams.apiAction)
+        : getBuiltinHunyuan3DQuickAppKeyForAction(nextParams.apiAction)
+      const hy3dSourceParams = {
+        ...nextParams,
+        modelUrl: primaryModel.url,
+        modelTaskId: tripoTaskId || nextParams.modelTaskId,
+        modelSourceFileName: primaryModel.fileName || nextParams.modelSourceFileName || ''
+      }
       const hy3dSourceMediaState = cloneHy3dMediaState(hy3dMediaState)
 
       canvasModels.forEach((modelAttachment, index) => {
@@ -823,7 +1089,9 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
       if (assistantMessage.content) {
         console.info('[SidePanel] Hy3D response note:', assistantMessage.content)
       }
-      notifySuccess(projectId ? '3D 模型已添加到画布。' : '3D 模型已生成。')
+      notifySuccess(
+        projectId ? `${providerName} 模型已添加到画布。` : `${providerName} 模型已生成。`
+      )
     } catch (error) {
       console.error('[SidePanel] Hy3D generation failed:', error)
       notifyError(getFriendlyHy3dRuntimeError(error))
@@ -833,7 +1101,9 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
   }, [
     closeMessage,
     config,
+    currentQAppKey,
     handleHy3dParamsChange,
+    handleTripoStylized3DFlow,
     hy3dMediaState,
     hy3dParams,
     notifyError,
@@ -907,11 +1177,11 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
   }, [hy3dParams.apiAction])
 
   useEffect(() => {
-    if (!isBuiltinHunyuan3DWorkflowKey(currentQAppKey)) {
+    if (!isBuiltin3DWorkflowKey(currentQAppKey)) {
       return
     }
 
-    const stepId = getBuiltinHunyuan3DStepId(currentQAppKey)
+    const stepId = getBuiltin3DStepId(currentQAppKey)
     if (stepId === 'concept') {
       if (isHy3dConceptAction(hy3dParams.apiAction)) {
         return
@@ -923,7 +1193,17 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
       return
     }
 
-    const step = WORKFLOW_STEPS.find((item) => item.id === stepId)
+    const workflowSteps = isBuiltinTripo3DWorkflowKey(currentQAppKey)
+      ? TRIPO_WORKFLOW_STEPS
+      : WORKFLOW_STEPS
+    const step = workflowSteps.find((item) => item.id === stepId)
+    if (
+      isBuiltinTripo3DWorkflowKey(currentQAppKey) &&
+      getTripoWorkflowStepIdForAction(hy3dParams.apiAction) === stepId
+    ) {
+      return
+    }
+
     if (!step?.apiAction || hy3dParams.apiAction === step.apiAction) {
       return
     }
@@ -935,7 +1215,7 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
 
   const renderExpandedContent = useCallback(
     (key: string) =>
-      isBuiltinHunyuan3DWorkflowKey(key) ? (
+      isBuiltin3DWorkflowKey(key) ? (
         <Box
           sx={{
             '& .hy3d-panel-shell': {
@@ -962,7 +1242,8 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
               onMediaStateChange={handleHy3dMediaStateChange}
               onGenerate={handleHy3dGenerate}
               inline
-              stepId={getBuiltinHunyuan3DStepId(key)}
+              stepId={getBuiltin3DStepId(key)}
+              provider={isBuiltinTripo3DWorkflowKey(key) ? 'tripo' : 'hunyuan'}
             />
           </Suspense>
         </Box>
@@ -1006,7 +1287,7 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
         return
       }
 
-      if (isBuiltinHunyuan3DWorkflowKey(key)) {
+      if (isBuiltin3DWorkflowKey(key)) {
         if (key !== currentQAppKey) {
           setCurrentQAppKey(key)
           return
@@ -1026,15 +1307,31 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
     [currentQAppKey, handleHy3dGenerate]
   )
 
-  const showHunyuanHint =
+  const isChineseUi = i18n.language?.toLowerCase().startsWith('zh')
+  const isSelectedTripo3DMenu = isBuiltinTripo3DMenuKey(currentQAppKey)
+  const selectedModel3DProviderName = isSelectedTripo3DMenu ? 'Tripo3D' : 'Hunyuan3D'
+  const model3DHintTitle = isChineseUi
+    ? `${selectedModel3DProviderName} API 未配置`
+    : `${selectedModel3DProviderName} API is not configured`
+  const model3DHintBody = isSelectedTripo3DMenu
+    ? isChineseUi
+      ? '请在“快应用 API”里配置 Tripo API Key，然后回到 Tripo3D 快应用继续生成。'
+      : 'Configure a Tripo API key in Quick App API, then return to the Tripo3D quick app to generate.'
+    : isChineseUi
+      ? '请在“快应用 API”里配置 Hunyuan3D/Tencent Cloud 凭证，然后回到 Hunyuan3D 快应用继续生成。'
+      : 'Configure Hunyuan3D/Tencent Cloud credentials in Quick App API, then return to the Hunyuan3D quick app to generate.'
+  const isSelectedModel3DConfigured = isSelectedTripo3DMenu
+    ? isTripo3DConfigured(config)
+    : isHunyuan3DConfigured(config)
+  const showModel3DHint =
     activeCategory === 'model3d' &&
-    isBuiltinHunyuan3DMenuKey(currentQAppKey) &&
-    !isHunyuanConfigured(config)
+    isBuiltin3DMenuKey(currentQAppKey) &&
+    !isSelectedModel3DConfigured
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       <Box sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0, minWidth: 0 }}>
-        <Collapse in={showHunyuanHint} timeout={120} unmountOnExit>
+        <Collapse in={showModel3DHint} timeout={120} unmountOnExit>
           <Box sx={{ px: 1.5, pt: 1.5 }}>
             <Alert
               severity="info"
@@ -1046,14 +1343,9 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
               }
             >
               <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {qt('quickapp.workspace.hunyuan_hint_title', 'Hunyuan3D 位于快应用')}
+                {model3DHintTitle}
               </Typography>
-              <Typography variant="body2">
-                {qt(
-                  'quickapp.workspace.hunyuan_hint',
-                  '请在左侧快应用列表中切换到 3D 分类后选择 Hunyuan3D。相关 API 凭证在“快应用 API”里配置。'
-                )}
-              </Typography>
+              <Typography variant="body2">{model3DHintBody}</Typography>
             </Alert>
           </Box>
         </Collapse>

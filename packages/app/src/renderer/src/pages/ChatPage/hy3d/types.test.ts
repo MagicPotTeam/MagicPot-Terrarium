@@ -114,6 +114,35 @@ describe('buildHy3dGenerateAttachments', () => {
     ])
   })
 
+  it('uses source images and prompt for the Tripo stylized 3D flow', () => {
+    expect(
+      buildHy3dGenerateAttachments(
+        { apiAction: 'TripoStylized3DFlow', mode: 'img2_3d' },
+        mediaState
+      )
+    ).toEqual([
+      {
+        type: 'image',
+        url: 'https://example.com/concept-front.png',
+        fileName: 'concept-front.png'
+      },
+      {
+        type: 'image',
+        url: 'https://example.com/concept-back.png',
+        fileName: 'concept-back.png'
+      }
+    ])
+
+    expect(
+      buildHy3dSubmissionContent({
+        ...DEFAULT_PARAMS,
+        apiAction: 'TripoStylized3DFlow',
+        prompt: 'turn it into a clay toy'
+      })
+    ).toBe('turn it into a clay toy')
+    expect(getHy3dMissingInputMessage({ apiAction: 'TripoStylized3DFlow' })).toContain('源图')
+  })
+
   it('keeps texture primary and multiview images for texture generation in stable slot order', () => {
     expect(
       buildHy3dGenerateAttachments(
