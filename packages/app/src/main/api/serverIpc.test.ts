@@ -1,18 +1,50 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { apiDef } from '@shared/api'
-import { createServer } from './serverIpc'
+import { createServer, initServerIpc } from './serverIpc'
 
-const { createServiceClass } = vi.hoisted(() => ({
-  createServiceClass: () => class {}
-}))
+const CANVAS_THUMBNAIL_METHODS = [
+  'getSourceFileMetadata',
+  'getThumbnailCacheRoot',
+  'readThumbnailManifest',
+  'writeThumbnailSet',
+  'generateThumbnailSet',
+  'createNativeThumbnail'
+] as const
+
+const { createServiceClass, handleMock, onMock } = vi.hoisted(() => {
+  const createServiceClass = () =>
+    class {
+      [methodName: string]: unknown
+
+      constructor() {
+        return new Proxy(this, {
+          get(target, property, receiver) {
+            if (typeof property !== 'string') {
+              return Reflect.get(target, property, receiver)
+            }
+            if (!(property in target)) {
+              target[property] = async () => undefined
+            }
+            return Reflect.get(target, property, receiver)
+          }
+        })
+      }
+    }
+
+  return {
+    createServiceClass,
+    handleMock: vi.fn(),
+    onMock: vi.fn()
+  }
+})
 
 vi.mock('electron', () => ({
   app: {
     getVersion: vi.fn(() => '1.0.0')
   },
   ipcMain: {
-    handle: vi.fn(),
-    on: vi.fn()
+    handle: handleMock,
+    on: onMock
   },
   MessagePortMain: class {}
 }))
@@ -37,8 +69,14 @@ vi.mock('./svcFsImpl', () => ({ FsSvcImpl: createServiceClass() }))
 vi.mock('./svcDccBridgeImpl', () => ({ DccBridgeSvcImpl: createServiceClass() }))
 vi.mock('./svcDuplicateCheckImpl', () => ({ DuplicateCheckSvcImpl: createServiceClass() }))
 vi.mock('./svcAppUpdateImpl', () => ({ AppUpdateSvcImpl: createServiceClass() }))
+vi.mock('./svcMagicAgentPlatformImpl', () => ({ MagicAgentPlatformSvcImpl: createServiceClass() }))
 
 describe('serverIpc createServer', () => {
+  beforeEach(() => {
+    handleMock.mockClear()
+    onMock.mockClear()
+  })
+
   it('creates the remaining service registry', () => {
     const api = createServer()
 
@@ -46,5 +84,19 @@ describe('serverIpc createServer', () => {
     expect(apiDef.svcTargetScheme).toBeDefined()
     expect(api.svcAppUpdate).toBeDefined()
     expect(apiDef.svcAppUpdate).toBeDefined()
+    expect(api.svcMagicAgentPlatform).toBeDefined()
+    expect(apiDef.svcMagicAgentPlatform).toBeDefined()
+  })
+
+  it('registers svcCanvasThumbnail unary methods on ipcMain', () => {
+    initServerIpc()
+
+    for (const methodName of CANVAS_THUMBNAIL_METHODS) {
+      expect(apiDef.svcCanvasThumbnail[methodName].type).toBe('unary')
+      expect(handleMock).toHaveBeenCalledWith(
+        `svcCanvasThumbnail.${methodName}`,
+        expect.any(Function)
+      )
+    }
   })
 })
