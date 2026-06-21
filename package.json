@@ -91,6 +91,7 @@
     "benchmark:project-canvas:real-board:import-1800": "npm run build:pure && npm run benchmark:project-canvas:real-board:import-1800:raw",
     "benchmark:project-canvas:real-board:mixed-3000": "npm run build:pure && npm run benchmark:project-canvas:real-board:mixed-3000:raw",
     "build:canvas-spatial-index-wasm": "node scripts/build-canvas-spatial-index-wasm.mjs",
+    "build:image-worker": "node scripts/build-image-worker.mjs",
     "probe:project-canvas:dev-watch": "cross-env NODE_OPTIONS=--max-old-space-size=6144 node scripts/projectCanvas/devWatcherProbe.mjs",
     "qa:security-posture": "node scripts/qa-security-posture.mjs",
     "test:project-canvas:3d": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/pages/ProjectCanvasPage/components/canvas3DConvergenceStress.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/canvas3DStageLoadQueue.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/canvas3DStageQuality.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/Canvas3DStage.cameraSync.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/Model3DViewerDialog.test.tsx packages/app/src/renderer/src/pages/ProjectCanvasPage/components/modelLoaders/sceneInstanceCloneCache.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/modelLoaders/sceneInstanceCloneCacheKey.test.ts --pool=forks --maxWorkers=1",
