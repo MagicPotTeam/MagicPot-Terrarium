@@ -1,4 +1,4 @@
-import fs from 'fs'
+import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
@@ -152,12 +152,21 @@ const normalizePrepareImageErrorMessage = (
   return `处理图片“${imageName}”时失败：${rawMessage || '未知错误'}`
 }
 
-const listFolderFiles = (
+const pathExists = async (targetPath: string): Promise<boolean> => {
+  try {
+    await fs.access(targetPath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const listFolderFiles = async (
   folderPath: string,
   recursive: boolean,
   imageExtensions: string[]
-): DuplicateCheckComparableImage[] => {
-  if (!folderPath || !fs.existsSync(folderPath)) {
+): Promise<DuplicateCheckComparableImage[]> => {
+  if (!folderPath || !(await pathExists(folderPath))) {
     return []
   }
 
@@ -177,7 +186,13 @@ const listFolderFiles = (
       continue
     }
 
-    const entries = fs.readdirSync(currentDir, { withFileTypes: true })
+    let entries
+    try {
+      entries = await fs.readdir(currentDir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
     for (const entry of entries) {
       const fullPath = path.join(currentDir, entry.name)
       if (entry.isDirectory()) {
@@ -300,8 +315,8 @@ const resolveWorkerScriptPath = (): string => {
   return path.join(buildEnv.pathMap.resources, 'duplicateCheckWorker.py')
 }
 
-const ensureDir = (dirPath: string): void => {
-  fs.mkdirSync(dirPath, { recursive: true })
+const ensureDir = async (dirPath: string): Promise<void> => {
+  await fs.mkdir(dirPath, { recursive: true })
 }
 
 const buildVisualAnalysisGroupKey = (image: DuplicateCheckVisualAnalysisImage): string =>
@@ -380,8 +395,8 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
     }
 
     const duplicateCheckTempRoot = resolveDuplicateCheckTempRoot()
-    fs.mkdirSync(duplicateCheckTempRoot, { recursive: true })
-    const tempDir = fs.mkdtempSync(path.join(duplicateCheckTempRoot, 'magicpot-visual-analysis-'))
+    await fs.mkdir(duplicateCheckTempRoot, { recursive: true })
+    const tempDir = await fs.mkdtemp(path.join(duplicateCheckTempRoot, 'magicpot-visual-analysis-'))
     let currentPythonWorker: ChildProcessWithoutNullStreams | null = null
 
     try {
@@ -400,7 +415,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
       }
 
       const workerScriptPath = resolveWorkerScriptPath()
-      if (!fs.existsSync(workerScriptPath)) {
+      if (!(await pathExists(workerScriptPath))) {
         throw new Error(`Visual analysis worker script is missing: ${workerScriptPath}`)
       }
 
@@ -443,7 +458,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
             })
           )
           if (image.descriptor.sourcePath) {
-            const stats = fs.statSync(image.descriptor.sourcePath)
+            const stats = await fs.stat(image.descriptor.sourcePath)
             cache.upsertFile(image.descriptor.sourcePath, stats.size, stats.mtimeMs, image.sha256)
           }
         }
@@ -536,7 +551,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
       }
     } finally {
       try {
-        fs.rmSync(tempDir, { recursive: true, force: true })
+        await fs.rm(tempDir, { recursive: true, force: true })
       } catch {
         // ignore cleanup failures
       }
@@ -563,7 +578,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
     let shouldKeepRasterizedBuffer = false
 
     if (hasPath && normalizedDescriptor.sourcePath) {
-      const stats = fs.statSync(normalizedDescriptor.sourcePath)
+      const stats = await fs.stat(normalizedDescriptor.sourcePath)
       size = stats.size
       mtimeMs = stats.mtimeMs
       cached = context.cache?.getFile(normalizedDescriptor.sourcePath, size, mtimeMs) || null
@@ -576,7 +591,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
       const sourceBuffer = image.data
         ? Buffer.from(image.data)
         : image.sourcePath
-          ? fs.readFileSync(image.sourcePath)
+          ? await fs.readFile(image.sourcePath)
           : undefined
 
       if (!sourceBuffer) {
@@ -681,12 +696,12 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
       throw new Error(`Missing in-memory payload for ${image.descriptor.name}`)
     }
 
-    ensureDir(tempDir)
+    await ensureDir(tempDir)
     const tempFilePath = path.join(
       tempDir,
       `${image.descriptor.id.replace(/[^a-zA-Z0-9_-]/g, '_')}${inferPreparedImageExtension(image)}`
     )
-    fs.writeFileSync(tempFilePath, image.buffer)
+    await fs.writeFile(tempFilePath, image.buffer)
     image.tempPath = tempFilePath
     return tempFilePath
   }
@@ -703,7 +718,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
     tempDir: string,
     setActiveWorker: (worker: ChildProcessWithoutNullStreams | null) => void
   ): Promise<PythonWorkerOutput> {
-    ensureDir(tempDir)
+    await ensureDir(tempDir)
 
     const inputPath = path.join(tempDir, `${model.id}.input.json`)
     const outputPath = path.join(tempDir, `${model.id}.output.json`)
@@ -722,7 +737,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
       enableRobustness
     }
 
-    fs.writeFileSync(inputPath, JSON.stringify(payload), 'utf8')
+    await fs.writeFile(inputPath, JSON.stringify(payload), 'utf8')
 
     await new Promise<void>((resolve, reject) => {
       const child = spawn(
@@ -757,11 +772,11 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
       })
     })
 
-    if (!fs.existsSync(outputPath)) {
+    if (!(await pathExists(outputPath))) {
       throw new Error(`Visual model worker did not produce output for ${model.name}`)
     }
 
-    return JSON.parse(fs.readFileSync(outputPath, 'utf8')) as PythonWorkerOutput
+    return JSON.parse(await fs.readFile(outputPath, 'utf8')) as PythonWorkerOutput
   }
 
   private scoreMatch(
@@ -956,8 +971,8 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
     }
 
     const duplicateCheckTempRoot = resolveDuplicateCheckTempRoot()
-    fs.mkdirSync(duplicateCheckTempRoot, { recursive: true })
-    const tempDir = fs.mkdtempSync(path.join(duplicateCheckTempRoot, 'magicpot-duplicate-check-'))
+    await fs.mkdir(duplicateCheckTempRoot, { recursive: true })
+    const tempDir = await fs.mkdtemp(path.join(duplicateCheckTempRoot, 'magicpot-duplicate-check-'))
     const providerByModel: Record<string, string> = {}
     const warnings: string[] = []
     const skippedScopeImages: DuplicateCheckSkippedImage[] = []
@@ -978,7 +993,11 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
 
       const scopeImages =
         req.scope.type === 'folder'
-          ? listFolderFiles(req.scope.folderPath, req.scope.recursive, req.scope.imageExtensions)
+          ? await listFolderFiles(
+              req.scope.folderPath,
+              req.scope.recursive,
+              req.scope.imageExtensions
+            )
           : req.scope.images
 
       resp.onData({
@@ -1059,7 +1078,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
         }
 
         const workerScriptPath = resolveWorkerScriptPath()
-        if (!fs.existsSync(workerScriptPath)) {
+        if (!(await pathExists(workerScriptPath))) {
           throw new Error(`找不到视觉检查 Worker：${workerScriptPath}`)
         }
 
@@ -1129,7 +1148,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
                 mergeBlobCacheEntry(cache.getBlob(image.sha256), image, providerByModel)
               )
               if (image.descriptor.sourcePath) {
-                const stats = fs.statSync(image.descriptor.sourcePath)
+                const stats = await fs.stat(image.descriptor.sourcePath)
                 cache.upsertFile(
                   image.descriptor.sourcePath,
                   stats.size,
@@ -1239,7 +1258,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
       })
     } finally {
       try {
-        fs.rmSync(tempDir, { recursive: true, force: true })
+        await fs.rm(tempDir, { recursive: true, force: true })
       } catch {
         // ignore cleanup failures
       }
