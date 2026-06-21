@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
+import { convertGuiWorkflowToPrompt, isGuiWorkflow } from '@shared/comfy/guiWorkflowToPrompt'
+import { isWorkflow } from '@shared/comfy/typeGuards'
+import type { Workflow } from '@shared/comfy/types'
+
 const promptSuffix = '.prompt.json'
 const cfgSuffix = '.qacfg.json'
 
@@ -15,6 +19,20 @@ function parseJson(text: string): unknown {
 
 function getBundledQAppKey(path: string, suffix: string): string {
   return path.replace(/^.*\/(?:packages\/)?qapps\//, '').slice(0, -suffix.length)
+}
+
+function parseBundledWorkflow(text: string): Workflow {
+  const raw = parseJson(text)
+  if (isWorkflow(raw)) {
+    return raw
+  }
+  if (isGuiWorkflow(raw)) {
+    const workflow = convertGuiWorkflowToPrompt(raw)
+    if (workflow) {
+      return workflow
+    }
+  }
+  throw new Error('Bundled qApp prompt is not a valid API or GUI workflow')
 }
 
 function getControlNetModelName(node: {
@@ -94,7 +112,10 @@ describe('bundled qApp fixtures', () => {
       const cfg = cfgByKey.get(key)
       if (!cfg) continue
 
-      const workflow = parseJson(text) as Record<string, { class_type?: string; inputs?: unknown }>
+      const workflow = parseBundledWorkflow(text) as Record<
+        string,
+        { class_type?: string; inputs?: unknown }
+      >
       const controlNetNames = new Set(
         Object.values(workflow)
           .map(getControlNetModelName)
@@ -125,7 +146,10 @@ describe('bundled qApp fixtures', () => {
       const cfg = cfgByKey.get(key)
       if (!cfg) continue
 
-      const workflow = parseJson(text) as Record<string, { class_type?: string; inputs?: unknown }>
+      const workflow = parseBundledWorkflow(text) as Record<
+        string,
+        { class_type?: string; inputs?: unknown }
+      >
       const runtimeModelNames = new Set(
         Object.values(workflow).flatMap(getRuntimeDownloadedModelNames)
       )

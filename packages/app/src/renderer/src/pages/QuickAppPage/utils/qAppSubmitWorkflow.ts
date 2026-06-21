@@ -8,7 +8,7 @@ type BuildQAppSubmitWorkflowRequestOptions = {
   qAppKey?: string
   clientId?: string | null
   sessionKey?: string | null
-  /** Defaults to true for quick-app submissions to release ComfyUI VRAM after completion. */
+  /** Defaults to false so consecutive quick-app generations keep local ComfyUI models warm. */
   cleanupAfterRun?: boolean
   extraData?: JsonDict
 }
@@ -25,6 +25,6 @@ export const buildQAppSubmitWorkflowRequest = (
   ...(cleanString(options.qAppKey) ? { qAppKey: cleanString(options.qAppKey) } : {}),
   ...(cleanString(options.clientId) ? { clientId: cleanString(options.clientId) } : {}),
   ...(cleanString(options.sessionKey) ? { sessionKey: cleanString(options.sessionKey) } : {}),
-  cleanupAfterRun: options.cleanupAfterRun ?? true,
+  cleanupAfterRun: options.cleanupAfterRun ?? false,
   ...(options.extraData ? { extra_data: options.extraData } : {})
 })
