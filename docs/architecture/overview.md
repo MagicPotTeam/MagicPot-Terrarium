@@ -74,4 +74,5 @@ The renderer owns presentation and interaction. The main process owns privileged
 - [Build modes](build-modes.md)
 - [Module boundaries](module-boundaries.md)
 - [Security model](security-model.md)
+- [Project Canvas Asset Resource Engine](project-canvas-asset-resource-engine.md)
 - [ADR index](adr/0001-public-private-extension-boundary.md)
