@@ -100,3 +100,7 @@ canvas-target-failures/
 # Local-only files (not for version control)
 read_only .md
 record.json
+# Local performance verification artifacts
+/perf/baseline/
+/perf/verification/
+/perf/performance-phase-1-report.md

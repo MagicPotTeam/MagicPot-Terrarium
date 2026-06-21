@@ -18,6 +18,7 @@
 [submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-KJNodes"]
 	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-KJNodes
 	url = https://github.com/kijai/ComfyUI-KJNodes.git
+	ignore = dirty
 [submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager"]
 	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager
 	url = https://github.com/Comfy-Org/ComfyUI-Manager.git
