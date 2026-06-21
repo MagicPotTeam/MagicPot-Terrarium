@@ -589,10 +589,10 @@ export const DEFAULT_CONFIG: Config = {
       servers: []
     },
     server: {
-      enabled: true,
+      enabled: false,
       path: '/api/mcp',
       auth_token: '',
-      expose_resources: true
+      expose_resources: false
     }
   },
   seedLocked: false

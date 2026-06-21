@@ -47,13 +47,17 @@ describe('config', () => {
     vi.clearAllMocks()
   })
 
-  it('creates new configs with the local LLM proxy server disabled', async () => {
+  it('creates new configs with the local LLM proxy and MCP server disabled', async () => {
     const configModule = await loadConfigModule()
     await configModule.initConfig()
 
     expect(configModule.getConfig().local_llm_server_config.enable_server).toBe(false)
+    expect(configModule.getConfig().mcp_config.server.enabled).toBe(false)
+    expect(configModule.getConfig().mcp_config.server.expose_resources).toBe(false)
     const savedConfig = JSON.parse(await fs.readFile(path.join(tempDir, 'config.json'), 'utf8'))
     expect(savedConfig.local_llm_server_config.enable_server).toBe(false)
+    expect(savedConfig.mcp_config.server.enabled).toBe(false)
+    expect(savedConfig.mcp_config.server.expose_resources).toBe(false)
   })
 
   it('persists custom skills and reloads them from disk', async () => {
@@ -474,6 +478,64 @@ describe('config', () => {
 
     expect(loadedConfig.plugin_config!.api_profiles).toEqual([])
     expect(savedConfig.plugin_config.api_profiles).toEqual([])
+  })
+
+  it('preserves existing quick app plugin settings during legacy LLM migration', async () => {
+    const legacyConfigPath = path.join(tempDir, 'config.json')
+    await fs.writeFile(
+      legacyConfigPath,
+      JSON.stringify(
+        {
+          use_remote_llm: true,
+          llm_config: {
+            api_profiles: []
+          },
+          plugin_config: {
+            api_profiles: [],
+            promptTranslationSystemPrompt: 'custom translation system',
+            promptTranslationUserPrompt: 'custom translation user',
+            imageInterrogationSystemPrompt: 'custom image system',
+            imageInterrogationUserPrompt: 'custom image user',
+            duplicateCheck: {
+              ...DEFAULT_CONFIG.plugin_config!.duplicateCheck!,
+              enabled: false,
+              defaultPreset: 'strict'
+            }
+          }
+        },
+        null,
+        2
+      ),
+      'utf8'
+    )
+
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+    const loadedConfig = configModule.getConfig()
+    const savedConfig = JSON.parse(await fs.readFile(legacyConfigPath, 'utf8'))
+
+    expect(loadedConfig.plugin_config?.promptTranslationSystemPrompt).toBe(
+      'custom translation system'
+    )
+    expect(loadedConfig.plugin_config?.promptTranslationUserPrompt).toBe('custom translation user')
+    expect(loadedConfig.plugin_config?.imageInterrogationSystemPrompt).toBe('custom image system')
+    expect(loadedConfig.plugin_config?.imageInterrogationUserPrompt).toBe('custom image user')
+    expect(loadedConfig.plugin_config?.duplicateCheck).toEqual({
+      ...DEFAULT_CONFIG.plugin_config!.duplicateCheck!,
+      enabled: false,
+      defaultPreset: 'strict'
+    })
+    expect(savedConfig.plugin_config.promptTranslationSystemPrompt).toBe(
+      'custom translation system'
+    )
+    expect(savedConfig.plugin_config.promptTranslationUserPrompt).toBe('custom translation user')
+    expect(savedConfig.plugin_config.imageInterrogationSystemPrompt).toBe('custom image system')
+    expect(savedConfig.plugin_config.imageInterrogationUserPrompt).toBe('custom image user')
+    expect(savedConfig.plugin_config.duplicateCheck).toEqual({
+      ...DEFAULT_CONFIG.plugin_config!.duplicateCheck!,
+      enabled: false,
+      defaultPreset: 'strict'
+    })
   })
 
   it('persists migrated quick app image interrogation system and user prompts', async () => {
