@@ -1,13 +1,21 @@
 import type { CanvasGroup, CanvasItem } from './types'
-
-export const PSD_IMPORT_EXTENSIONS = ['.psd', '.psb']
-export const PSD_IMPORT_ACCEPT = PSD_IMPORT_EXTENSIONS.join(',')
+import { PSD_IMPORT_EXTENSIONS } from './psdImportDetection'
+export { PSD_IMPORT_ACCEPT, PSD_IMPORT_EXTENSIONS, isPsdImportFile } from './psdImportDetection'
 
 export type PsdImportSourceApp = 'psd' | 'psb'
+
+export type PsdImportLimitKind = 'fileSize' | 'layerCount' | 'pixelCount'
+
+export type PsdImportSafetyLimits = {
+  maxFileBytes: number
+  maxLayerCount: number
+  maxPixelCount: number
+}
 
 type PsdImportOptions = {
   importedAt?: string
   startZIndex?: number
+  limits?: Partial<PsdImportSafetyLimits>
 }
 
 type PsdImportResult = {
@@ -41,6 +49,26 @@ type PsdRasterSurface = {
   convertToBlob: (options?: { type?: string }) => Promise<Blob>
 }
 
+export const PSD_IMPORT_DEFAULT_LIMITS: PsdImportSafetyLimits = {
+  maxFileBytes: 512 * 1024 * 1024,
+  maxLayerCount: 4096,
+  maxPixelCount: 64 * 1024 * 1024
+}
+
+export class PsdImportLimitExceededError extends Error {
+  limitKind: PsdImportLimitKind
+  limit: number
+  actual: number
+
+  constructor(limitKind: PsdImportLimitKind, limit: number, actual: number) {
+    super(`PSD import ${limitKind} exceeds safety limit (${actual} > ${limit})`)
+    this.name = 'PsdImportLimitExceededError'
+    this.limitKind = limitKind
+    this.limit = limit
+    this.actual = actual
+  }
+}
+
 const MAX_IMPORT_WARNINGS = 50
 const DEFAULT_TEXT_FONT_FAMILY = 'Arial'
 const DEFAULT_TEXT_FILL = '#111827'
@@ -65,6 +93,24 @@ function toFiniteNumber(value: unknown, fallback = 0): number {
 
 function createImportedAt(options?: PsdImportOptions): string {
   return options?.importedAt ?? new Date().toISOString()
+}
+
+function resolvePsdImportLimits(limits?: Partial<PsdImportSafetyLimits>): PsdImportSafetyLimits {
+  return {
+    maxFileBytes: limits?.maxFileBytes ?? PSD_IMPORT_DEFAULT_LIMITS.maxFileBytes,
+    maxLayerCount: limits?.maxLayerCount ?? PSD_IMPORT_DEFAULT_LIMITS.maxLayerCount,
+    maxPixelCount: limits?.maxPixelCount ?? PSD_IMPORT_DEFAULT_LIMITS.maxPixelCount
+  }
+}
+
+function assertPsdImportLimit(limitKind: PsdImportLimitKind, actual: number, limit: number): void {
+  if (actual > limit) {
+    throw new PsdImportLimitExceededError(limitKind, limit, actual)
+  }
+}
+
+function getPsdNodePixelCount(width: number, height: number): number {
+  return Math.max(0, width) * Math.max(0, height)
 }
 
 function createProvenance(
@@ -94,13 +140,11 @@ function pushWarning(warnings: string[], message: string): void {
   }
 }
 
-async function blobToDataUri(blob: Blob): Promise<string> {
-  return await new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result))
-    reader.onerror = () => reject(new Error('Failed to convert PSD layer to a data URI.'))
-    reader.readAsDataURL(blob)
-  })
+function createPsdObjectUrl(blob: Blob): string {
+  if (typeof URL.createObjectURL !== 'function') {
+    throw new Error('Object URL support is required for PSD import.')
+  }
+  return URL.createObjectURL(blob)
 }
 
 function createCanvasSurface(width: number, height: number) {
@@ -118,11 +162,11 @@ function createCanvasSurface(width: number, height: number) {
   throw new Error('A raster surface is required for PSD import.')
 }
 
-async function rgbaToDataUri(
+async function rgbaToObjectUrl(
   pixels: Uint8ClampedArray,
   width: number,
   height: number
-): Promise<string> {
+): Promise<{ src: string; sizeBytes: number }> {
   const surface = createCanvasSurface(width, height)
   const context = surface.getContext('2d')
 
@@ -133,17 +177,12 @@ async function rgbaToDataUri(
   const imagePixels = new Uint8ClampedArray(pixels)
   context.putImageData(new ImageData(imagePixels, width, height), 0, 0)
   const blob = await surface.convertToBlob({ type: 'image/png' })
-  return await blobToDataUri(blob)
+  return { src: createPsdObjectUrl(blob), sizeBytes: blob.size }
 }
 
 function nextId(prefix: string, state: { nextId: number }): string {
   state.nextId += 1
   return `${prefix}-${state.nextId}`
-}
-
-export function isPsdImportFile(file: Pick<File, 'name' | 'type'>): boolean {
-  const normalizedName = file.name.trim().toLowerCase()
-  return PSD_IMPORT_EXTENSIONS.some((extension) => normalizedName.endsWith(extension))
 }
 
 export async function materializePsdFile(
@@ -153,11 +192,17 @@ export async function materializePsdFile(
   const { default: Psd } = await import('@webtoon/psd')
   const sourceApp = getSourceApp(file.name)
   const importedAt = createImportedAt(options)
+  const limits = resolvePsdImportLimits(options?.limits)
   const warnings: string[] = []
   const items: CanvasItem[] = []
   const groups: CanvasGroup[] = []
   const idState = { nextId: 0 }
   const zIndexState = { nextZIndex: options?.startZIndex ?? 0 }
+  const fileWithSize = file as unknown as Pick<File, 'size'>
+  if (typeof fileWithSize.size === 'number' && Number.isFinite(fileWithSize.size)) {
+    assertPsdImportLimit('fileSize', fileWithSize.size, limits.maxFileBytes)
+  }
+
   const psd = Psd.parse(await file.arrayBuffer())
 
   const appendRasterLayer = async (
@@ -177,6 +222,7 @@ export async function materializePsdFile(
 
     const width = Math.max(1, rawWidth)
     const height = Math.max(1, rawHeight)
+    assertPsdImportLimit('pixelCount', getPsdNodePixelCount(width, height), limits.maxPixelCount)
 
     const pixels = await node.composite()
     if (!(pixels instanceof Uint8ClampedArray) || pixels.length === 0) {
@@ -187,13 +233,14 @@ export async function materializePsdFile(
       return []
     }
 
-    const src = await rgbaToDataUri(pixels, width, height)
+    const { src, sizeBytes } = await rgbaToObjectUrl(pixels, width, height)
     const itemId = nextId('psd-image', idState)
     items.push({
       id: itemId,
       type: 'image',
       src,
       fileName: `${node.name || itemId}.png`,
+      sizeBytes,
       x: toFiniteNumber(node.left, 0),
       y: toFiniteNumber(node.top, 0),
       width,
@@ -219,6 +266,7 @@ export async function materializePsdFile(
       Math.round(toFiniteNumber(node.width, Math.max(120, text.length * 12)))
     )
     const height = Math.max(1, Math.round(toFiniteNumber(node.height, 32)))
+    assertPsdImportLimit('pixelCount', getPsdNodePixelCount(width, height), limits.maxPixelCount)
 
     items.push({
       id: itemId,
@@ -241,6 +289,8 @@ export async function materializePsdFile(
 
     return [itemId]
   }
+
+  let visitedLayerCount = 0
 
   const walk = async (node: ParsedPsdNode, path: string[]): Promise<string[]> => {
     const nodeName = node.name?.trim() || node.type
@@ -275,6 +325,9 @@ export async function materializePsdFile(
       return descendantItemIds
     }
 
+    visitedLayerCount += 1
+    assertPsdImportLimit('layerCount', visitedLayerCount, limits.maxLayerCount)
+
     if (node.isHidden) {
       return []
     }
@@ -287,6 +340,10 @@ export async function materializePsdFile(
     try {
       return await appendRasterLayer(node, sourceNodeId)
     } catch (error) {
+      if (error instanceof PsdImportLimitExceededError) {
+        throw error
+      }
+
       pushWarning(
         warnings,
         `Skipped PSD layer "${nodeName}" because it could not be rasterized: ${
@@ -303,14 +360,23 @@ export async function materializePsdFile(
 
   if (items.length === 0) {
     try {
+      const rawWidth = Math.round(toFiniteNumber(psd.width, 0))
+      const rawHeight = Math.round(toFiniteNumber(psd.height, 0))
+      assertPsdImportLimit(
+        'pixelCount',
+        getPsdNodePixelCount(rawWidth, rawHeight),
+        limits.maxPixelCount
+      )
       const composite = await psd.composite()
       if (composite.length > 0) {
+        const flattenedPreview = await rgbaToObjectUrl(composite, psd.width, psd.height)
         const itemId = nextId('psd-image', idState)
         items.push({
           id: itemId,
           type: 'image',
-          src: await rgbaToDataUri(composite, psd.width, psd.height),
+          src: flattenedPreview.src,
           fileName: `${stripExtension(file.name) || itemId}.png`,
+          sizeBytes: flattenedPreview.sizeBytes,
           x: 0,
           y: 0,
           width: psd.width,
@@ -334,6 +400,10 @@ export async function materializePsdFile(
         )
       }
     } catch (error) {
+      if (error instanceof PsdImportLimitExceededError) {
+        throw error
+      }
+
       pushWarning(
         warnings,
         `Failed to decode a flattened PSD preview: ${

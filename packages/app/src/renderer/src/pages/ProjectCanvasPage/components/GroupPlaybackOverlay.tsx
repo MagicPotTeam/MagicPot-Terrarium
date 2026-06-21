@@ -10,7 +10,7 @@ import {
   Videocam as VideoIcon,
   GifBox as GifIcon
 } from '@mui/icons-material'
-import Canvas3DStage from './Canvas3DStage'
+import LazyCanvas3DStage from './LazyCanvas3DStage'
 import { getCanvasImageAssetSize } from '../canvasImageAssetUtils'
 import type { CanvasImageItem, CanvasModel3DItem, CanvasVideoItem } from '../types'
 
@@ -371,7 +371,7 @@ const GroupPlaybackOverlay: React.FC<{
             <PlaybackVideoFrame item={item} paused={paused} onEnded={onVideoEnded} />
           )}
           {item.type === 'model3d' && previewItem && (
-            <Canvas3DStage
+            <LazyCanvas3DStage
               items={[previewItem]}
               selectedIds={EMPTY_GROUP_PLAYBACK_SELECTED_IDS}
               stagePos={{ x: 0, y: 0 }}

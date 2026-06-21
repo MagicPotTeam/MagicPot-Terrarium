@@ -28,7 +28,7 @@ vi.mock('konva', () => ({
   default: {}
 }))
 
-vi.mock('./Canvas3DStage', () => ({
+vi.mock('./LazyCanvas3DStage', () => ({
   default: (props: Record<string, unknown>) => {
     latestCanvas3DStageProps = props
     const items = (props.items as Array<{ id: string }>) ?? []

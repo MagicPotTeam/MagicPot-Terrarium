@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Model3DOverlay from './Model3DOverlay'
 import type { CanvasModel3DItem } from '../types'
 
-vi.mock('./Canvas3DStage', async () => {
+vi.mock('./LazyCanvas3DStage', async () => {
   const React = await import('react')
 
   return {

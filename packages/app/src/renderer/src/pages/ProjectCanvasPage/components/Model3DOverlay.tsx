@@ -1,7 +1,7 @@
 import React from 'react'
 import { Box, Badge, IconButton, Tooltip, Typography } from '@mui/material'
 import { AddPhotoAlternate as TextureIcon, ViewInAr as Model3DIcon } from '@mui/icons-material'
-import Canvas3DStage from './Canvas3DStage'
+import LazyCanvas3DStage from './LazyCanvas3DStage'
 import { PROJECT_CANVAS_MIN_STAGE_SCALE } from '../projectCanvasViewportScale'
 import type { CanvasModel3DItem } from '../types'
 
@@ -177,7 +177,7 @@ const Model3DOverlay: React.FC<{
           />
         </Box>
       ) : (
-        <Canvas3DStage
+        <LazyCanvas3DStage
           items={[previewItem]}
           selectedIds={selectedIds}
           stagePos={{ x: 0, y: 0 }}

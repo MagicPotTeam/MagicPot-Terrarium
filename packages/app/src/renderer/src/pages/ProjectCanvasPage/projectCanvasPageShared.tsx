@@ -5,7 +5,7 @@ import type { SvgIconProps } from '@mui/material/SvgIcon'
 import type { AdobeBridgeTarget } from '@shared/api/svcAdobeBridge'
 import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
 import { AGENT_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
-import { resolveOfficeFileNodeData } from './officePreviewUtils'
+import type { OfficeFileNodeData } from './officePreviewUtils'
 export {
   EXPORT_IMAGE_MAX_AREA,
   EXPORT_IMAGE_MAX_SIDE,
@@ -23,9 +23,7 @@ import type {
   CanvasVideoItem
 } from './types'
 
-export const normalizeOfficeFileNodeDataForCanvas = (
-  fileNodeData: Awaited<ReturnType<typeof resolveOfficeFileNodeData>>
-) => ({
+export const normalizeOfficeFileNodeDataForCanvas = (fileNodeData: OfficeFileNodeData) => ({
   ...fileNodeData,
   previewText: fileNodeData.previewText ?? undefined,
   previewImages: fileNodeData.previewImages.length > 0 ? fileNodeData.previewImages : undefined,
@@ -397,21 +395,19 @@ export async function resolveDroppedAgentImageDataUrl(
   const quickAppImagePayload = dataTransfer.getData(QAPP_IMAGE_DRAG_MIME).trim()
   if (!agentImageUrl && !quickAppImagePayload) return null
 
-  const normalizedAgentUrl = normalizeLocalMediaUrl(agentImageUrl)
-  if (normalizedAgentUrl) {
-    return {
-      src: normalizedAgentUrl,
-      fileName: getDownloadFileNameFromUrl(normalizedAgentUrl, 'dropped-image.png')
-    }
-  }
-
-  const quickAppImageData = resolveQuickAppImageDragData(quickAppImagePayload)
-  if (quickAppImageData) {
-    return quickAppImageData
-  }
-
   const droppedImageFile = resolveDroppedImageFile(dataTransfer)
+  const quickAppImageData = resolveQuickAppImageDragData(quickAppImagePayload)
   if (droppedImageFile && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    const droppedFileName = droppedImageFile.name?.trim()
+    if (
+      quickAppImageData &&
+      (!droppedFileName ||
+        !quickAppImageData.fileName ||
+        quickAppImageData.fileName.trim() !== droppedFileName)
+    ) {
+      return quickAppImageData
+    }
+
     return {
       src: URL.createObjectURL(droppedImageFile),
       fileName: droppedImageFile.name || undefined,
@@ -421,6 +417,18 @@ export async function resolveDroppedAgentImageDataUrl(
           : undefined,
       sourceFile: droppedImageFile
     }
+  }
+
+  const normalizedAgentUrl = normalizeLocalMediaUrl(agentImageUrl)
+  if (normalizedAgentUrl) {
+    return {
+      src: normalizedAgentUrl,
+      fileName: getDownloadFileNameFromUrl(normalizedAgentUrl, 'dropped-image.png')
+    }
+  }
+
+  if (quickAppImageData) {
+    return quickAppImageData
   }
 
   return null

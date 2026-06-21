@@ -4,6 +4,8 @@ import {
   extractModelArchive,
   extractModelPackageFiles,
   listContainedModelExtensions,
+  ModelArchiveLimitExceededError,
+  ModelArchiveMalformedError,
   ModelPackageUnsupportedFormatError
 } from './modelArchive'
 
@@ -23,6 +25,7 @@ describe('extractModelArchive', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
 
@@ -56,6 +59,135 @@ describe('extractModelArchive', () => {
 
     expect(extracted?.file.name).toBe('character.fbx')
     expect(extracted?.linkedAssets).toEqual({})
+  })
+
+  it('extracts only the selected model and linked assets from archive entries', async () => {
+    const modelAsync = vi.fn(async () => new Blob(['fbx-binary']))
+    const assetAsync = vi.fn(async () => new Blob(['png-binary']))
+    const unrelatedAsync = vi.fn(async () => new Blob(['unused-binary']))
+    const fakeZip = {
+      files: {
+        'hero.fbx': {
+          name: 'hero.fbx',
+          dir: false,
+          async: modelAsync,
+          _data: { uncompressedSize: 'fbx-binary'.length }
+        },
+        'hero.fbm/diffuse.png': {
+          name: 'hero.fbm/diffuse.png',
+          dir: false,
+          async: assetAsync,
+          _data: { uncompressedSize: 'png-binary'.length }
+        },
+        'extras/readme.txt': {
+          name: 'extras/readme.txt',
+          dir: false,
+          async: unrelatedAsync,
+          _data: { uncompressedSize: 'unused-binary'.length }
+        }
+      }
+    } as unknown as JSZip
+    vi.spyOn(JSZip, 'loadAsync').mockResolvedValue(fakeZip)
+    const archive = new File(['zip-bytes'], 'hero.zip', { type: 'application/zip' })
+
+    const extracted = await extractModelArchive(archive)
+
+    expect(extracted?.file.name).toBe('hero.fbx')
+    expect(extracted?.linkedAssets).toEqual({ 'hero.fbm/diffuse.png': 'blob:mock-0' })
+    expect(modelAsync).toHaveBeenCalledOnce()
+    expect(assetAsync).toHaveBeenCalledOnce()
+    expect(unrelatedAsync).not.toHaveBeenCalled()
+  })
+
+  it('rejects archives above the compressed file size safety limit', async () => {
+    const zip = new JSZip()
+    zip.file('hero.glb', 'glb-binary')
+    const blob = await zip.generateAsync({ type: 'blob' })
+    const archive = new File([blob], 'hero.zip', { type: 'application/zip' })
+
+    await expect(
+      extractModelArchive(archive, ['.glb'], { maxArchiveBytes: archive.size - 1 })
+    ).rejects.toMatchObject({
+      name: 'ModelArchiveLimitExceededError',
+      limitKind: 'archiveSize'
+    } satisfies Partial<ModelArchiveLimitExceededError>)
+  })
+
+  it('rejects archives above the entry count safety limit', async () => {
+    const zip = new JSZip()
+    zip.file('hero.glb', 'glb-binary')
+    zip.file('texture.png', 'png-binary')
+    const blob = await zip.generateAsync({ type: 'blob' })
+    const archive = new File([blob], 'hero.zip', { type: 'application/zip' })
+
+    await expect(extractModelArchive(archive, ['.glb'], { maxEntries: 1 })).rejects.toMatchObject({
+      name: 'ModelArchiveLimitExceededError',
+      limitKind: 'entryCount'
+    } satisfies Partial<ModelArchiveLimitExceededError>)
+  })
+
+  it('rejects archives above the total extracted size safety limit before extraction', async () => {
+    const zip = new JSZip()
+    zip.file('hero.glb', 'glb-binary')
+    zip.file('texture.png', 'png-binary')
+    const blob = await zip.generateAsync({ type: 'blob' })
+    const archive = new File([blob], 'hero.zip', { type: 'application/zip' })
+
+    await expect(
+      extractModelArchive(archive, ['.glb'], { maxTotalExtractedBytes: 'glb-binary'.length })
+    ).rejects.toMatchObject({
+      name: 'ModelArchiveLimitExceededError',
+      limitKind: 'totalExtractedSize'
+    } satisfies Partial<ModelArchiveLimitExceededError>)
+    expect(createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('rejects a streaming zip entry as soon as it expands beyond its declared size', async () => {
+    let dataCallback: ((chunk: Uint8Array) => void) | undefined
+    let endCallback: (() => void) | undefined
+    const pause = vi.fn()
+    const asyncFallback = vi.fn()
+    const stream = {
+      on: vi.fn((event: 'data' | 'end' | 'error', callback: unknown) => {
+        if (event === 'data') dataCallback = callback as (chunk: Uint8Array) => void
+        if (event === 'end') endCallback = callback as () => void
+        return stream
+      }),
+      pause,
+      resume: vi.fn(() => {
+        dataCallback?.(new Uint8Array([1, 2, 3, 4]))
+        endCallback?.()
+        return stream
+      })
+    } as unknown as JSZip.JSZipStreamHelper<Uint8Array>
+    const fakeZip = {
+      files: {
+        'hero.glb': {
+          name: 'hero.glb',
+          dir: false,
+          async: asyncFallback,
+          internalStream: vi.fn(() => stream),
+          _data: { uncompressedSize: 2 }
+        }
+      }
+    } as unknown as JSZip
+    vi.spyOn(JSZip, 'loadAsync').mockResolvedValue(fakeZip)
+    const archive = new File(['zip-bytes'], 'hero.zip', { type: 'application/zip' })
+
+    await expect(extractModelArchive(archive, ['.glb'])).rejects.toMatchObject({
+      name: 'ModelArchiveMalformedError'
+    } satisfies Partial<ModelArchiveMalformedError>)
+    expect(pause).toHaveBeenCalledOnce()
+    expect(asyncFallback).not.toHaveBeenCalled()
+    expect(createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('throws a dedicated malformed error for unreadable model archives', async () => {
+    const archive = new File(['not a zip'], 'broken.zip', { type: 'application/zip' })
+
+    await expect(extractModelArchive(archive)).rejects.toMatchObject({
+      name: 'ModelArchiveMalformedError'
+    } satisfies Partial<ModelArchiveMalformedError>)
   })
 
   it('supports folder-style entries with a shared root directory', () => {

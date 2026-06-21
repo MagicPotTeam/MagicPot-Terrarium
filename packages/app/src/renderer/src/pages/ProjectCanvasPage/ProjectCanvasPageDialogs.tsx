@@ -1,7 +1,7 @@
-import React from 'react'
+import React, { Suspense, lazy } from 'react'
 import { ListItemText, Menu, MenuItem } from '@mui/material'
 import { useTranslation } from 'react-i18next'
-import Model3DViewerDialog from './components/Model3DViewerDialog'
+import type { Model3DViewerDialogProps } from './components/Model3DViewerDialog'
 import { LabelEditorDialog } from './Dialogs/LabelEditorDialog'
 import { ClearConfirmDialog } from './Dialogs/ClearConfirmDialog'
 import { TextureImportDialog } from './Dialogs/TextureImportDialog'
@@ -16,6 +16,8 @@ type MouseMenuPosition = {
   mouseY: number
 }
 
+const Model3DViewerDialog = lazy(() => import('./components/Model3DViewerDialog'))
+
 type ProjectCanvasPageDialogsProps = {
   dccExportMenuAnchor: HTMLElement | null
   dccExportMenuItemId: string | null
@@ -29,7 +31,7 @@ type ProjectCanvasPageDialogsProps = {
   generationTraceHistoryDialogProps: React.ComponentProps<typeof GenerationTraceHistoryDialog>
   filePreviewDialogProps: React.ComponentProps<typeof CanvasFilePreviewDialog>
   clearConfirmDialogProps: React.ComponentProps<typeof ClearConfirmDialog>
-  model3DViewerDialogProps: React.ComponentProps<typeof Model3DViewerDialog>
+  model3DViewerDialogProps: Model3DViewerDialogProps
   textureImportDialogProps: React.ComponentProps<typeof TextureImportDialog>
   textureInputRef: React.RefObject<HTMLInputElement | null>
   onTextureFilesSelected: React.ChangeEventHandler<HTMLInputElement>
@@ -161,7 +163,11 @@ export default function ProjectCanvasPageDialogs({
       <GenerationTraceHistoryDialog {...generationTraceHistoryDialogProps} />
       <CanvasFilePreviewDialog {...filePreviewDialogProps} />
       <ClearConfirmDialog {...clearConfirmDialogProps} />
-      <Model3DViewerDialog {...model3DViewerDialogProps} />
+      {model3DViewerDialogProps.open ? (
+        <Suspense fallback={null}>
+          <Model3DViewerDialog {...model3DViewerDialogProps} />
+        </Suspense>
+      ) : null}
       <TextureImportDialog {...textureImportDialogProps} />
       <input
         ref={textureInputRef}

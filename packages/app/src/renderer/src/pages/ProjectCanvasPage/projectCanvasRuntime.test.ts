@@ -184,6 +184,36 @@ describe('projectCanvasRuntime', () => {
     ).toEqual(['overscan', 'visible'])
   })
 
+  it('keeps 3000-item boards spatially indexed while viewport queries stay local', () => {
+    const runtime = createProjectCanvasRuntime()
+    const items = Array.from({ length: 3000 }, (_, index) => {
+      const col = index % 60
+      const row = Math.floor(index / 60)
+      return createCanvasItem({
+        id: `item-${index}`,
+        x: col * 256,
+        y: row * 256,
+        width: 64,
+        height: 64
+      })
+    })
+
+    runtime.setViewport({ x: 0, y: 0, scale: 1 })
+    runtime.setItems(items)
+
+    const visibleIds = runtime
+      .getVisibleItems({ stageSize: { width: 512, height: 512 } })
+      .map((item) => item.id)
+
+    expect(runtime.getMetrics()).toMatchObject({
+      itemCount: 3000,
+      visibleItemCount: 3000,
+      indexedItemCount: 3000
+    })
+    expect(visibleIds).toHaveLength(4)
+    expect(new Set(visibleIds)).toEqual(new Set(['item-0', 'item-1', 'item-60', 'item-61']))
+  })
+
   it('creates a snapshot with viewport visibility and export bounds', () => {
     const runtime = createProjectCanvasRuntime()
     runtime.setItems([

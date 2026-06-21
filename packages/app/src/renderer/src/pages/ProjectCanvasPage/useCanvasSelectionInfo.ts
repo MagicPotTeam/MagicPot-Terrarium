@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { useSelector } from 'react-redux'
 import type { CanvasTargetAssetMetadata } from '@shared/canvasTarget'
-import { CANVAS_MODEL3D_METADATA_UPDATED_EVENT } from './components/modelLoaders/modelInspectionMetadata'
+import { CANVAS_MODEL3D_METADATA_UPDATED_EVENT } from './components/modelLoaders/modelInspectionMetadataCache'
 import { buildDesignInspectionContextPack } from './designInspectionWorkflow'
 import type { CanvasGroup, CanvasItem } from './types'
 import type { CanvasExportBounds } from './groupPlaybackUtils'

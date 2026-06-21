@@ -116,7 +116,7 @@ describe('resolveModel3DViewerStageBackgroundSx', () => {
 })
 
 describe('Model3DViewerDialog', () => {
-  it('uses the shared viewer surface with the lighter viewer render settings', () => {
+  it('uses the shared viewer surface with the lighter viewer render settings', async () => {
     const sessionKey = 'canvas:thread:project-1:thread:agent-1'
     renderDialog(baseItem, sessionKey)
     const expectedInstanceCacheKey = getSceneInstanceCloneCacheKey({
@@ -126,22 +126,22 @@ describe('Model3DViewerDialog', () => {
       itemId: baseItem.id
     })
 
-    expect(screen.getByTestId('canvas3d-viewer-surface')).toHaveAttribute(
+    expect(await screen.findByTestId('canvas3d-viewer-surface')).toHaveAttribute(
       'data-dpr',
       JSON.stringify([1, 1.45])
     )
-    expect(screen.getByTestId('canvas3d-viewer-surface')).toHaveAttribute(
+    expect(await screen.findByTestId('canvas3d-viewer-surface')).toHaveAttribute(
       'data-render-key',
       expectedInstanceCacheKey
     )
     expect(screen.getAllByText('sample.glb').length).toBeGreaterThan(0)
   })
 
-  it('derives the model clone cache key from the canonical session key', () => {
+  it('derives the model clone cache key from the canonical session key', async () => {
     const sessionKey = 'canvas:thread:project-9:thread:agent-7'
     renderDialog(baseItem, sessionKey)
 
-    expect(screen.getByTestId('canvas3d-viewer-surface')).toHaveAttribute(
+    expect(await screen.findByTestId('canvas3d-viewer-surface')).toHaveAttribute(
       'data-instance-cache-key',
       getSceneInstanceCloneCacheKey({
         sessionKey,
@@ -152,10 +152,10 @@ describe('Model3DViewerDialog', () => {
     )
   })
 
-  it('falls back to the shared default session key when sessionKey is omitted', () => {
+  it('falls back to the shared default session key when sessionKey is omitted', async () => {
     renderDialog(baseItem, undefined)
 
-    expect(screen.getByTestId('canvas3d-viewer-surface')).toHaveAttribute(
+    expect(await screen.findByTestId('canvas3d-viewer-surface')).toHaveAttribute(
       'data-instance-cache-key',
       getSceneInstanceCloneCacheKey({
         sessionKey: DEFAULT_CANVAS_MODEL3D_SESSION_KEY,
@@ -166,7 +166,7 @@ describe('Model3DViewerDialog', () => {
     )
   })
 
-  it('can transition from an empty viewer state to a real model without changing hook order', () => {
+  it('can transition from an empty viewer state to a real model without changing hook order', async () => {
     const { rerender } = render(
       <Model3DViewerDialog
         open
@@ -187,7 +187,7 @@ describe('Model3DViewerDialog', () => {
       />
     )
 
-    expect(screen.getByTestId('canvas3d-viewer-surface')).toHaveAttribute(
+    expect(await screen.findByTestId('canvas3d-viewer-surface')).toHaveAttribute(
       'data-instance-cache-key',
       getSceneInstanceCloneCacheKey({
         sessionKey: DEFAULT_CANVAS_MODEL3D_SESSION_KEY,
@@ -198,12 +198,12 @@ describe('Model3DViewerDialog', () => {
     )
   })
 
-  it('changes the viewer render identity when the canonical session key changes', () => {
+  it('changes the viewer render identity when the canonical session key changes', async () => {
     const firstSessionKey = 'canvas:thread:project-1:thread:agent-1'
     const secondSessionKey = 'canvas:thread:project-1:thread:agent-2'
     const { rerender } = renderDialog(baseItem, firstSessionKey)
 
-    expect(screen.getByTestId('canvas3d-viewer-surface')).toHaveAttribute(
+    expect(await screen.findByTestId('canvas3d-viewer-surface')).toHaveAttribute(
       'data-render-key',
       getSceneInstanceCloneCacheKey({
         sessionKey: firstSessionKey,
@@ -224,7 +224,7 @@ describe('Model3DViewerDialog', () => {
       />
     )
 
-    expect(screen.getByTestId('canvas3d-viewer-surface')).toHaveAttribute(
+    expect(await screen.findByTestId('canvas3d-viewer-surface')).toHaveAttribute(
       'data-render-key',
       getSceneInstanceCloneCacheKey({
         sessionKey: secondSessionKey,
@@ -233,7 +233,7 @@ describe('Model3DViewerDialog', () => {
         itemId: baseItem.id
       })
     )
-    expect(screen.getByTestId('canvas3d-viewer-surface')).toHaveAttribute(
+    expect(await screen.findByTestId('canvas3d-viewer-surface')).toHaveAttribute(
       'data-instance-cache-key',
       getSceneInstanceCloneCacheKey({
         sessionKey: secondSessionKey,
@@ -244,11 +244,11 @@ describe('Model3DViewerDialog', () => {
     )
   })
 
-  it('changes the viewer render identity when the canonical asset source changes', () => {
+  it('changes the viewer render identity when the canonical asset source changes', async () => {
     const sessionKey = 'canvas:thread:project-1:thread:agent-1'
     const { rerender } = renderDialog(baseItem, sessionKey)
 
-    expect(screen.getByTestId('canvas3d-viewer-surface')).toHaveAttribute(
+    expect(await screen.findByTestId('canvas3d-viewer-surface')).toHaveAttribute(
       'data-render-key',
       getSceneInstanceCloneCacheKey({
         sessionKey,
@@ -275,7 +275,7 @@ describe('Model3DViewerDialog', () => {
       />
     )
 
-    expect(screen.getByTestId('canvas3d-viewer-surface')).toHaveAttribute(
+    expect(await screen.findByTestId('canvas3d-viewer-surface')).toHaveAttribute(
       'data-render-key',
       getSceneInstanceCloneCacheKey({
         sessionKey,
@@ -284,7 +284,7 @@ describe('Model3DViewerDialog', () => {
         itemId: swappedSourceItem.id
       })
     )
-    expect(screen.getByTestId('canvas3d-viewer-surface')).toHaveAttribute(
+    expect(await screen.findByTestId('canvas3d-viewer-surface')).toHaveAttribute(
       'data-instance-cache-key',
       getSceneInstanceCloneCacheKey({
         sessionKey,

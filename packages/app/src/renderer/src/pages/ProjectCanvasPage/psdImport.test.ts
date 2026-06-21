@@ -1,7 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { isPsdImportFile, materializePsdFile, PSD_IMPORT_ACCEPT } from './psdImport'
+import {
+  isPsdImportFile,
+  materializePsdFile,
+  PSD_IMPORT_ACCEPT,
+  PsdImportLimitExceededError
+} from './psdImport'
 
 const { mockParsedPsd } = vi.hoisted(() => ({
   mockParsedPsd: {
@@ -42,10 +47,12 @@ class MockOffscreenCanvas {
 
 const originalOffscreenCanvas = globalThis.OffscreenCanvas
 const originalImageData = globalThis.ImageData
+const originalCreateObjectUrl = URL.createObjectURL
 
 beforeEach(() => {
   globalThis.OffscreenCanvas = MockOffscreenCanvas as any
   globalThis.ImageData = MockImageData as any
+  URL.createObjectURL = vi.fn((blob: Blob) => `blob:mock-psd-${blob.size}`)
 })
 
 afterEach(() => {
@@ -54,6 +61,7 @@ afterEach(() => {
 
   globalThis.OffscreenCanvas = originalOffscreenCanvas
   globalThis.ImageData = originalImageData
+  URL.createObjectURL = originalCreateObjectUrl
 })
 
 describe('psdImport', () => {
@@ -138,6 +146,10 @@ describe('psdImport', () => {
         importedAt: '2026-04-04T00:00:00.000Z'
       }
     })
+    expect(imageItem.type === 'image' ? imageItem.src : '').toMatch(/^blob:mock-psd-/)
+    expect(imageItem.type === 'image' ? imageItem.src : '').not.toContain('data:image')
+    expect(imageItem.type === 'image' ? imageItem.sizeBytes : 0).toBeGreaterThan(0)
+
     expect(textItem).toMatchObject({
       type: 'text',
       text: 'Hello PSD',
@@ -157,6 +169,140 @@ describe('psdImport', () => {
       name: 'Artboard 1',
       itemIds: [imageItem.id, textItem.id]
     })
+  })
+
+  it('rejects PSD files above the explicit file-size guard before parsing', async () => {
+    const arrayBuffer = vi.fn(async () => new ArrayBuffer(8))
+
+    await expect(
+      materializePsdFile(
+        {
+          name: 'huge.psd',
+          size: 11,
+          arrayBuffer
+        } as any,
+        {
+          limits: { maxFileBytes: 10 }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'PsdImportLimitExceededError',
+      limitKind: 'fileSize',
+      actual: 11,
+      limit: 10
+    } satisfies Partial<PsdImportLimitExceededError>)
+    expect(arrayBuffer).not.toHaveBeenCalled()
+  })
+
+  it('rejects PSD documents above the explicit layer-count guard', async () => {
+    mockParsedPsd.current = {
+      type: 'Psd',
+      name: 'ROOT',
+      width: 10,
+      height: 10,
+      children: [
+        {
+          type: 'Layer',
+          name: 'Layer 1',
+          width: 1,
+          height: 1,
+          composite: vi.fn(async () => new Uint8ClampedArray([255, 255, 255, 255]))
+        },
+        {
+          type: 'Layer',
+          name: 'Layer 2',
+          width: 1,
+          height: 1,
+          composite: vi.fn(async () => new Uint8ClampedArray([255, 255, 255, 255]))
+        }
+      ],
+      composite: vi.fn(async () => new Uint8ClampedArray())
+    }
+
+    await expect(
+      materializePsdFile(
+        {
+          name: 'too-many-layers.psd',
+          arrayBuffer: vi.fn(async () => new ArrayBuffer(8))
+        },
+        {
+          limits: { maxLayerCount: 1 }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'PsdImportLimitExceededError',
+      limitKind: 'layerCount',
+      actual: 2,
+      limit: 1
+    } satisfies Partial<PsdImportLimitExceededError>)
+  })
+
+  it('rejects PSD layers above the explicit pixel-count guard without rasterizing them', async () => {
+    const composite = vi.fn(async () => new Uint8ClampedArray(100 * 100 * 4))
+    mockParsedPsd.current = {
+      type: 'Psd',
+      name: 'ROOT',
+      width: 100,
+      height: 100,
+      children: [
+        {
+          type: 'Layer',
+          name: 'Oversized',
+          width: 100,
+          height: 100,
+          composite
+        }
+      ],
+      composite: vi.fn(async () => new Uint8ClampedArray())
+    }
+
+    await expect(
+      materializePsdFile(
+        {
+          name: 'oversized.psd',
+          arrayBuffer: vi.fn(async () => new ArrayBuffer(8))
+        },
+        {
+          limits: { maxPixelCount: 99 }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'PsdImportLimitExceededError',
+      limitKind: 'pixelCount',
+      actual: 10000,
+      limit: 99
+    } satisfies Partial<PsdImportLimitExceededError>)
+    expect(composite).not.toHaveBeenCalled()
+  })
+
+  it('rejects flattened PSD previews above the explicit pixel-count guard', async () => {
+    const composite = vi.fn(async () => new Uint8ClampedArray(100 * 100 * 4))
+    mockParsedPsd.current = {
+      type: 'Psd',
+      name: 'ROOT',
+      width: 100,
+      height: 100,
+      children: [],
+      composite
+    }
+
+    await expect(
+      materializePsdFile(
+        {
+          name: 'oversized-flat.psd',
+          arrayBuffer: vi.fn(async () => new ArrayBuffer(8))
+        },
+        {
+          limits: { maxPixelCount: 99 }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'PsdImportLimitExceededError',
+      limitKind: 'pixelCount',
+      actual: 10000,
+      limit: 99
+    } satisfies Partial<PsdImportLimitExceededError>)
+    expect(composite).not.toHaveBeenCalled()
   })
 
   it('falls back to a flattened preview when no visible child layers can be imported', async () => {
@@ -198,6 +344,7 @@ describe('psdImport', () => {
       type: 'image',
       width: 8,
       height: 4,
+      src: 'blob:mock-psd-8',
       provenance: {
         kind: 'psb',
         sourceFileName: 'poster.psb'

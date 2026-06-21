@@ -30,7 +30,7 @@ vi.mock('react-i18next', () => ({
   })
 }))
 
-vi.mock('./components/Canvas3DStage', () => ({
+vi.mock('./components/LazyCanvas3DStage', () => ({
   default: function MockCanvas3DStage(props: Record<string, unknown>) {
     React.useEffect(() => {
       const onViewportSyncReady = props.onViewportSyncReady as

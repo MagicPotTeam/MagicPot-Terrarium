@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import {
   Box,
   Button,
@@ -16,7 +16,6 @@ import {
   ViewInAr as Model3DIcon
 } from '@mui/icons-material'
 import type { CanvasModel3DItem } from '../types'
-import { Canvas3DViewerSurface } from './Canvas3DStage'
 import {
   DEFAULT_CANVAS_MODEL3D_SESSION_KEY,
   getSceneInstanceCloneCacheKey,
@@ -24,7 +23,28 @@ import {
 } from './modelLoaders/sceneInstanceCloneCacheKey'
 import { resolveModel3DViewerQualityPreset } from './model3DViewerQualityPreset'
 
-type Model3DViewerDialogProps = {
+const Canvas3DViewerSurface = lazy(() =>
+  import('./Canvas3DStage').then((module) => ({ default: module.Canvas3DViewerSurface }))
+)
+
+const Model3DViewerSurfaceFallback: React.FC = () => (
+  <Box
+    data-testid="canvas3d-viewer-surface-fallback"
+    sx={{
+      position: 'absolute',
+      inset: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: 'rgba(248,250,252,0.72)',
+      background: 'rgba(2,6,23,0.18)'
+    }}
+  >
+    <Typography variant="body2">Loading 3D preview…</Typography>
+  </Box>
+)
+
+export type Model3DViewerDialogProps = {
   open: boolean
   item: CanvasModel3DItem | null
   onClose: () => void
@@ -197,16 +217,18 @@ const Model3DViewerDialog: React.FC<Model3DViewerDialogProps> = ({
               ) : null}
             </Box>
           ) : (
-            <Canvas3DViewerSurface
-              item={item}
-              qualityPreset={qualityPreset}
-              renderKey={renderKey}
-              instanceCacheKey={instanceCacheKey ?? undefined}
-              onError={(message) => {
-                setHasError(true)
-                setErrorMsg(message)
-              }}
-            />
+            <Suspense fallback={<Model3DViewerSurfaceFallback />}>
+              <Canvas3DViewerSurface
+                item={item}
+                qualityPreset={qualityPreset}
+                renderKey={renderKey}
+                instanceCacheKey={instanceCacheKey ?? undefined}
+                onError={(message) => {
+                  setHasError(true)
+                  setErrorMsg(message)
+                }}
+              />
+            </Suspense>
           )}
 
           {!hasError ? (

@@ -1,32 +1,16 @@
 import * as THREE from 'three'
+import {
+  cloneModelInspectionMetadata,
+  type ModelInspectionMetadata
+} from './modelInspectionMetadataCache'
 
-export const CANVAS_MODEL3D_METADATA_UPDATED_EVENT = 'canvas:model3d-metadata-updated'
-
-export type ModelInspectionMetadata = {
-  vertexCount: number
-  faceCount: number
-  materialCount: number
-  animationCount: number
-  boneCount: number
-  uvSetCount: number
-  normalData: boolean
-  tangentData: boolean
-}
+export {
+  CANVAS_MODEL3D_METADATA_UPDATED_EVENT,
+  writeCanvasModel3DInspectionMetadataCache
+} from './modelInspectionMetadataCache'
+export type { ModelInspectionMetadata } from './modelInspectionMetadataCache'
 
 const MODEL_INSPECTION_METADATA_USER_DATA_KEY = '__magicpotModelInspectionMetadata'
-
-const cloneModelInspectionMetadata = (
-  metadata: ModelInspectionMetadata
-): ModelInspectionMetadata => ({
-  vertexCount: metadata.vertexCount,
-  faceCount: metadata.faceCount,
-  materialCount: metadata.materialCount,
-  animationCount: metadata.animationCount,
-  boneCount: metadata.boneCount,
-  uvSetCount: metadata.uvSetCount,
-  normalData: metadata.normalData,
-  tangentData: metadata.tangentData
-})
 
 const normalizeModelInspectionCount = (value: unknown) =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : null

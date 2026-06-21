@@ -4,7 +4,7 @@ import { Box, Typography } from '@mui/material'
 import type { DragEvent as ReactDragEvent } from 'react'
 import { PhotoLibrary as PhotoIcon } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
-import Canvas3DStage, { type Canvas3DStageViewportSync } from './components/Canvas3DStage'
+import LazyCanvas3DStage, { type Canvas3DStageViewportSync } from './components/LazyCanvas3DStage'
 import type { CanvasSyncDetail } from './components/canvasSync'
 import VideoOverlay from './components/VideoOverlay'
 import HtmlOverlay from './components/HtmlOverlay'
@@ -661,7 +661,7 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
         onDragOverCapture={onDragOver}
         onDropCapture={onDrop}
       >
-        <Canvas3DStage
+        <LazyCanvas3DStage
           items={canvas3DStageItems}
           selectedIds={canvas3DStageSelectedIds}
           stagePos={stagePos}

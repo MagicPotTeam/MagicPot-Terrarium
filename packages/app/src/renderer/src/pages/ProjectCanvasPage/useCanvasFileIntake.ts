@@ -23,8 +23,7 @@ import {
 } from '../ChatPage/chatPageShared'
 import { getProjectCanvasLocation, isCanvasFile } from './canvasStorage'
 import { collectDroppedDirectoryFiles } from './dropDirectory'
-import { extractModelPackageFiles } from './modelArchive'
-import { isPsdImportFile } from './psdImport'
+import { isPsdImportFile } from './psdImportDetection'
 import { resolveDroppedAgentImageDataUrl } from './projectCanvasPageShared'
 import { detectFileType, isModelArchiveFile } from './types'
 import { CANVAS_IMPORT_ACCEPT } from './canvasImportAccept'
@@ -212,12 +211,12 @@ function isExternalFileDragType(type: string): boolean {
 }
 
 type SnapshotDataTransferItem = DataTransferItem & {
-  webkitGetAsEntry?: () => unknown
+  webkitGetAsEntry?: () => FileSystemEntry | null
 }
 
 function snapshotDataTransferItem(item: DataTransferItem): DataTransferItem {
   let file: File | null = null
-  let entry: unknown = null
+  let entry: FileSystemEntry | null = null
 
   if (item.kind === 'file') {
     try {
@@ -1149,6 +1148,7 @@ export function useCanvasFileIntake({
 
       if (hasDirectoryStructure) {
         const packageName = droppedEntries[0]?.path.split('/')[0] || 'package'
+        const { extractModelPackageFiles } = await import('./modelArchive')
         const extractedPackage = extractModelPackageFiles(droppedEntries, packageName)
         if (extractedPackage) {
           await addModel3DToCanvas(extractedPackage.file, {

@@ -76,14 +76,8 @@ import type {
   CanvasAnnotationItem,
   AnnotationShape
 } from './types'
-import {
-  detectFileType,
-  isModelArchiveFile,
-  MODEL_IMPORT_EXTENSIONS,
-  VIDEO_EXTENSIONS
-} from './types'
+import { detectFileType, MODEL_IMPORT_EXTENSIONS, VIDEO_EXTENSIONS } from './types'
 import { importCanvasFile, isCanvasFile } from './canvasStorage'
-import { extractModelArchive } from './modelArchive'
 import { detectImageHasAlpha, estimateDataUrlByteSize } from './canvasImageMetadata'
 import {
   buildCanvasAgentAttachments,
@@ -141,8 +135,6 @@ import {
   shouldKeepOriginalCanvasImage
 } from './canvasPageLocalStateUtils'
 import { PROJECT_CANVAS_MAX_STAGE_SCALE } from './projectCanvasViewportScale'
-import { resolveOfficeFileNodeData } from './officePreviewUtils'
-import { isPsdImportFile, materializePsdFile } from './psdImport'
 import {
   GROUP_CHIP_SEND_ACTION_ENABLED,
   isLegacySelectionToolbarEnabled

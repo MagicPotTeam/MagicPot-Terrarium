@@ -1,4 +1,3 @@
-import JSZip from 'jszip'
 import { sanitizeFilePart } from './canvasExportNamingUtils'
 import type { CanvasFileItem } from './types'
 import { getFileExtension } from './types'
@@ -51,7 +50,8 @@ function buildWordDocumentParagraphs(text: string): string {
 }
 
 async function buildWordDocumentBlob(text: string): Promise<Blob> {
-  const zip = new JSZip()
+  const { default: JSZipCtor } = await import('jszip')
+  const zip = new JSZipCtor()
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document ${WORD_DOCUMENT_XML_NAMESPACES}>
   <w:body>
