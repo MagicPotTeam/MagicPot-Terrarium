@@ -780,7 +780,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(currentSession?.contextCompression?.summary).toContain('default reply')
       expect(currentSession?.contextCompression?.manual).toBe(true)
     })
-    expect(hoisted.notifySuccessMock).toHaveBeenCalledWith('上下文已压缩。')
+    expect(hoisted.notifySuccessMock).toHaveBeenCalledWith('Context compressed.')
   })
 
   it('sends manual compressed context with the next request', async () => {
@@ -1265,6 +1265,43 @@ describe('ChatPage runtime workflow integration', () => {
         'active-only.png'
       )
     })
+  })
+
+  it('auto-sends singular send-to-agent attachments instead of dropping them', async () => {
+    renderChatPage()
+
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            text: 'auto send with one attachment',
+            hiddenText: 'auto hidden context',
+            attachment: createImageAttachment('auto-single.png'),
+            autoSend: true
+          }
+        })
+      )
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const call = hoisted.requestChatCompletionMock.mock.calls[0]?.[0] as
+      | {
+          messages?: Array<{
+            content?: string
+            hiddenContext?: string
+            attachments?: ChatAttachment[]
+          }>
+        }
+      | undefined
+    expect(call?.messages?.[call.messages.length - 1]).toEqual(
+      expect.objectContaining({
+        content: 'auto send with one attachment',
+        hiddenContext: 'auto hidden context',
+        attachments: [expect.objectContaining({ fileName: 'auto-single.png' })]
+      })
+    )
   })
 
   it('allows scoped send-to-agent input to mutate an explicit inactive target scope', async () => {
