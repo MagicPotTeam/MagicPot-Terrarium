@@ -9,27 +9,27 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.1210.inputs.unet_name",
+      "slot": "$.29.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.1213.inputs.clip_name",
+      "slot": "$.31.inputs.clip_name",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.1214.inputs.vae_name",
+      "slot": "$.32.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Anyline-Controlnet",
-      "slot": "$.1215.inputs.control_net_name",
+      "slot": "$.33.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Depth-Controlnet",
-      "slot": "$.1216.inputs.control_net_name",
+      "slot": "$.34.inputs.control_net_name",
       "component": "InputComfySelect"
     },
     {
@@ -42,19 +42,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.1228.inputs.model",
-        "$.1417.inputs.model"
+        "$.38.inputs.model",
+        "$.48.inputs.model"
       ],
       "outputClipSlots": [
-        "$.1123.inputs.clip",
-        "$.1181.inputs.clip"
+        "$.12.inputs.clip",
+        "$.28.inputs.clip"
       ],
       "inputModel": [
-        "1212",
+        "30",
         0
       ],
       "inputClip": [
-        "1213",
+        "31",
         0
       ]
     },
@@ -66,24 +66,24 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.1202.inputs.image",
+      "slot": "$.42.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "正面提示词",
-      "slot": "$.1218.inputs.value",
+      "slot": "$.36.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.1220.inputs.value",
+      "slot": "$.37.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.1188.inputs.value",
+      "slot": "$.54.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -94,7 +94,7 @@
     "https://github.com/kijai/ComfyUI-KJNodes"
   ],
   "outputNodeIds": [
-    "1126"
+    "52"
   ],
   "requiredModels": [
     {

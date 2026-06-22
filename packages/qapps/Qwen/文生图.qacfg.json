@@ -9,17 +9,17 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.1209.inputs.unet_name",
+      "slot": "$.38.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.1204.inputs.clip_name",
+      "slot": "$.33.inputs.clip_name",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.1208.inputs.vae_name",
+      "slot": "$.37.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
@@ -32,19 +32,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.1226.inputs.model",
-        "$.1424.inputs.model"
+        "$.39.inputs.model",
+        "$.53.inputs.model"
       ],
       "outputClipSlots": [
-        "$.1177.inputs.clip",
-        "$.1178.inputs.clip"
+        "$.25.inputs.clip",
+        "$.26.inputs.clip"
       ],
       "inputModel": [
-        "1205",
+        "34",
         0
       ],
       "inputClip": [
-        "1204",
+        "33",
         0
       ]
     },
@@ -58,24 +58,24 @@
       "label": "图片尺寸",
       "component": "InputImageSize",
       "seperateSlots": true,
-      "widthSlot": "$.1183.inputs.value",
-      "heightSlot": "$.1184.inputs.value"
+      "widthSlot": "$.27.inputs.value",
+      "heightSlot": "$.28.inputs.value"
     },
     {
       "label": "正面提示词",
-      "slot": "$.1244.inputs.value",
+      "slot": "$.41.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.1206.inputs.value",
+      "slot": "$.35.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.1187.inputs.value",
+      "slot": "$.56.inputs.value",
       "component": "InputSeed"
     }
   ],
@@ -86,7 +86,7 @@
     "https://github.com/kijai/ComfyUI-KJNodes"
   ],
   "outputNodeIds": [
-    "1185"
+    "42"
   ],
   "requiredModels": [
     {

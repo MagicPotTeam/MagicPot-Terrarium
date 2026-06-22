@@ -3,7 +3,7 @@
   "inputs": [
     {
       "label": "加载图像",
-      "slot": "$.12.inputs.image",
+      "slot": "$.1.inputs.image",
       "component": "InputComfyImage"
     }
   ],
@@ -21,6 +21,6 @@
     }
   ],
   "outputNodeIds": [
-    "10"
+    "3"
   ]
 }

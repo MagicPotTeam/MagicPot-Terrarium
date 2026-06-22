@@ -1,21 +1,5 @@
 {
-  "1381": {
-    "class_type": "SeedVR2LoadDiTModel",
-    "inputs": {
-      "model": "seedvr2_ema_7b_fp16.safetensors",
-      "device": "cuda:0",
-      "blocks_to_swap": 36,
-      "swap_io_components": false,
-      "offload_device": "cpu",
-      "cache_model": false,
-      "attention_mode": "sdpa"
-    },
-    "_meta": {
-      "title": "SeedVR2LoadDiTModel"
-    }
-  },
-  "1382": {
-    "class_type": "SeedVR2LoadVAEModel",
+  "1": {
     "inputs": {
       "model": "ema_vae_fp16.safetensors",
       "device": "cuda:0",
@@ -29,25 +13,37 @@
       "offload_device": "cpu",
       "cache_model": false
     },
+    "class_type": "SeedVR2LoadVAEModel",
     "_meta": {
-      "title": "SeedVR2LoadVAEModel"
+      "title": "SeedVR2 (Down)Load VAE Model"
     }
   },
-  "1383": {
-    "class_type": "SeedVR2VideoUpscaler",
+  "2": {
     "inputs": {
-      "image": [
-        "1385",
-        0
-      ],
-      "dit": [
-        "1381",
-        0
-      ],
-      "vae": [
-        "1382",
-        0
-      ],
+      "image": "1 (1).png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "3": {
+    "inputs": {
+      "model": "seedvr2_ema_7b_fp16.safetensors",
+      "device": "cuda:0",
+      "blocks_to_swap": 36,
+      "swap_io_components": false,
+      "offload_device": "cpu",
+      "cache_model": false,
+      "attention_mode": "sdpa"
+    },
+    "class_type": "SeedVR2LoadDiTModel",
+    "_meta": {
+      "title": "SeedVR2 (Down)Load DiT Model"
+    }
+  },
+  "4": {
+    "inputs": {
       "seed": 42,
       "resolution": 4096,
       "max_resolution": 4096,
@@ -59,32 +55,36 @@
       "input_noise_scale": 0,
       "latent_noise_scale": 0,
       "offload_device": "cpu",
-      "enable_debug": false
-    },
-    "_meta": {
-      "title": "SeedVR2VideoUpscaler"
-    }
-  },
-  "1384": {
-    "class_type": "SaveImage",
-    "inputs": {
-      "images": [
-        "1383",
+      "enable_debug": false,
+      "image": [
+        "2",
         0
       ],
-      "filename_prefix": "ComfyUI"
+      "dit": [
+        "3",
+        0
+      ],
+      "vae": [
+        "1",
+        0
+      ]
     },
+    "class_type": "SeedVR2VideoUpscaler",
     "_meta": {
-      "title": "SaveImage"
+      "title": "SeedVR2 Video Upscaler (v2.5.24)"
     }
   },
-  "1385": {
-    "class_type": "LoadImage",
+  "5": {
     "inputs": {
-      "image": ""
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "4",
+        0
+      ]
     },
+    "class_type": "SaveImage",
     "_meta": {
-      "title": "LoadImage"
+      "title": "保存图像"
     }
   }
 }

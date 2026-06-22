@@ -1,37 +1,37 @@
 {
-  "8": {
-    "class_type": "InspyrenetRembg",
+  "1": {
     "inputs": {
-      "image": [
-        "12",
-        0
-      ],
-      "torchscript_jit": "default"
+      "image": "example.png"
     },
-    "_meta": {
-      "title": "InspyrenetRembg"
-    }
-  },
-  "10": {
-    "class_type": "SaveImage",
-    "inputs": {
-      "images": [
-        "8",
-        0
-      ],
-      "filename_prefix": "ComfyUI"
-    },
-    "_meta": {
-      "title": "SaveImage"
-    }
-  },
-  "12": {
     "class_type": "LoadImage",
-    "inputs": {
-      "image": ""
-    },
     "_meta": {
-      "title": "LoadImage"
+      "title": "加载图像"
+    }
+  },
+  "2": {
+    "inputs": {
+      "torchscript_jit": "default",
+      "image": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "InspyrenetRembg",
+    "_meta": {
+      "title": "Inspyrenet Rembg"
+    }
+  },
+  "3": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
     }
   }
 }
