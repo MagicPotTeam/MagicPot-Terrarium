@@ -32,13 +32,9 @@ const getUrlProtocol = (value: string): string | null => {
 
 export const sanitizeHtmlOverlayContent = (html: string): string => {
   if (typeof document === 'undefined') {
-    return html
-      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-      .replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-      .replace(
-        /\s(?:href|src|xlink:href|action|formaction|poster)\s*=\s*("\s*(?:javascript|data|vbscript):[^"]*"|'\s*(?:javascript|data|vbscript):[^']*'|\s*(?:javascript|data|vbscript):[^\s>]+)/gi,
-        ''
-      )
+    // HTML overlays are renderer-only. Without the DOM parser, fail closed instead
+    // of relying on regex-based sanitization that can be bypassed by malformed HTML.
+    return ''
   }
 
   const template = document.createElement('template')
