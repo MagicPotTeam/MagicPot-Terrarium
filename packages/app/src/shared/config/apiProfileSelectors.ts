@@ -15,7 +15,7 @@ export const isConfiguredApiProfile = (profile: LLMAPIProfile): boolean =>
 const hasConfiguredHunyuan3DSecretCredentials = (profile: LLMAPIProfile): boolean =>
   Boolean(profile.tencent_secret_id?.trim() && profile.tencent_secret_key?.trim())
 
-const getProfileBaseHostname = (value: string): string | null => {
+export const getProfileBaseHostname = (value: string): string | null => {
   const normalized = value.trim().toLowerCase()
   if (!normalized) return null
 
@@ -33,12 +33,15 @@ const getProfileBaseHostname = (value: string): string | null => {
   )
 }
 
-const hostnameMatchesDomain = (hostname: string, domain: string): boolean =>
+export const hostnameMatchesDomain = (hostname: string, domain: string): boolean =>
   hostname === domain || hostname.endsWith(`.${domain}`)
 
 const isTencentHunyuan3DHostname = (hostname: string): boolean =>
   hostnameMatchesDomain(hostname, 'ai3d.cloud.tencent.com') ||
   hostnameMatchesDomain(hostname, 'hunyuan.cloud.tencent.com')
+
+const isOfficialTripo3DHostname = (hostname: string): boolean =>
+  hostnameMatchesDomain(hostname, 'tripo3d.ai') || hostnameMatchesDomain(hostname, 'tripo3d.com')
 
 export const isVisionCapableApiProfile = (profile: LLMAPIProfile): boolean => {
   const modelUse = resolveProfileModelUse(profile)
@@ -73,10 +76,11 @@ export const isTripo3DCompatibleProfile = (profile: LLMAPIProfile): boolean => {
   if (!profile.model_name || !profile.base_url) return false
   const modelName = profile.model_name.toLowerCase()
   const baseUrl = profile.base_url.toLowerCase()
+  const baseHostname = getProfileBaseHostname(profile.base_url)
+  const isOfficialTripo3DBaseUrl = Boolean(baseHostname && isOfficialTripo3DHostname(baseHostname))
   return (
     modelName.includes('tripo') ||
-    baseUrl.includes('tripo3d.ai') ||
-    baseUrl.includes('tripo3d.com') ||
+    isOfficialTripo3DBaseUrl ||
     /\/tripo3d\/v\d+\/openapi/i.test(baseUrl)
   )
 }

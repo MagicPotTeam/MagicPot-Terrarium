@@ -15,6 +15,8 @@ import { useMessage } from '@renderer/hooks/useMessage'
 import SettingSection from './components/SettingSection'
 import type { PanelProps } from './PanelProps'
 import {
+  getProfileBaseHostname,
+  hostnameMatchesDomain,
   isHunyuan3DCompatibleProfile,
   isTripo3DCompatibleProfile
 } from '@shared/config/apiProfileSelectors'
@@ -247,8 +249,10 @@ const stripHunyuan3DProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
   return nextProfile
 }
 
-const getTripoApiEndpointPreset = (baseUrl: string): TripoApiEndpointPreset =>
-  baseUrl.toLowerCase().includes('tripo3d.com') ? 'mainland' : 'international'
+const getTripoApiEndpointPreset = (baseUrl: string): TripoApiEndpointPreset => {
+  const hostname = getProfileBaseHostname(baseUrl)
+  return hostname && hostnameMatchesDomain(hostname, 'tripo3d.com') ? 'mainland' : 'international'
+}
 
 const getTripoApiBaseUrl = (preset: TripoApiEndpointPreset): string =>
   preset === 'mainland' ? TRIPO_MAINLAND_BASE_URL : TRIPO_INTERNATIONAL_BASE_URL

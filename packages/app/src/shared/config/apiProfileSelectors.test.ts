@@ -252,6 +252,22 @@ describe('apiProfileSelectors', () => {
         api_key: 'key'
       })
     ).toBe(false)
+    expect(
+      isTripo3DCompatibleProfile({
+        id: 'spoofed-tripo-host',
+        model_name: 'Generic 3D',
+        base_url: 'https://tripo3d.com.example.com/v2/openapi',
+        api_key: 'key'
+      })
+    ).toBe(false)
+    expect(
+      isTripo3DCompatibleProfile({
+        id: 'spoofed-tripo-path',
+        model_name: 'Generic 3D',
+        base_url: 'https://gateway.example/v2/openapi?redirect=tripo3d.com',
+        api_key: 'key'
+      })
+    ).toBe(false)
   })
 
   it('matches Hunyuan3D Tencent endpoints by hostname only', () => {
