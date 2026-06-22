@@ -647,6 +647,139 @@ describe('useCanvasAssetIntake', () => {
     }
   })
 
+  it('uses warm thumbnail cache first for small local single-image imports with source hints', async () => {
+    const originalImageCtor = window.Image
+    const originalApi = window.api
+    const loadedSources: string[] = []
+    const sourceIdentity = buildCanvasImageSourceIdentity({
+      canonicalPath: 'C:/real-board/small-warm-cache.png',
+      sizeBytes: 512 * 1024,
+      lastModifiedMs: 1712345678000
+    })
+    expect(sourceIdentity).not.toBeNull()
+    const thumbnailSet = createCanvasThumbnailSet({
+      identity: sourceIdentity!,
+      levels: [
+        {
+          maxSide: 128,
+          src: 'local-media:///cache/small-warm-cache/128.webp',
+          filename: '128.webp',
+          mimeType: 'image/webp',
+          width: 128,
+          height: 64,
+          sizeBytes: 128
+        },
+        {
+          maxSide: 256,
+          src: 'local-media:///cache/small-warm-cache/256.webp',
+          filename: '256.webp',
+          mimeType: 'image/webp',
+          width: 256,
+          height: 128,
+          sizeBytes: 256
+        },
+        {
+          maxSide: 512,
+          src: 'local-media:///cache/small-warm-cache/512.webp',
+          filename: '512.webp',
+          mimeType: 'image/webp',
+          width: 512,
+          height: 256,
+          sizeBytes: 512
+        },
+        {
+          maxSide: 1024,
+          src: 'local-media:///cache/small-warm-cache/1024.webp',
+          filename: '1024.webp',
+          mimeType: 'image/webp',
+          width: 1024,
+          height: 512,
+          sizeBytes: 1024
+        },
+        {
+          maxSide: 2048,
+          src: 'local-media:///cache/small-warm-cache/2048.webp',
+          filename: '2048.webp',
+          mimeType: 'image/webp',
+          width: 2048,
+          height: 1024,
+          sizeBytes: 2048
+        }
+      ],
+      now: new Date('2026-05-02T00:00:00.000Z')
+    })
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: {
+        svcCanvasThumbnail: {
+          readThumbnailManifest: vi.fn(async () => ({
+            manifest: canvasThumbnailManifestFromSet(thumbnailSet)
+          }))
+        }
+      }
+    })
+
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 2048 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 1024 })
+      Object.defineProperty(image, 'width', { configurable: true, value: 2048 })
+      Object.defineProperty(image, 'height', { configurable: true, value: 1024 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        get: () => '',
+        set: (value: string) => {
+          loadedSources.push(value)
+          window.setTimeout(() => image.onload?.(new Event('load')), 0)
+        }
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const onComplete = vi.fn()
+
+      render(
+        <SingleImageHarness
+          src="local-media:///C:/real-board/small-warm-cache.png"
+          onComplete={onComplete}
+          options={{
+            fileName: 'small-warm-cache.png',
+            sizeBytes: 512 * 1024,
+            sourceWidthHint: 640,
+            sourceHeightHint: 320,
+            sourceIdentity: sourceIdentity!
+          }}
+        />
+      )
+
+      await waitFor(() => {
+        expect(onComplete).toHaveBeenCalledTimes(1)
+      })
+
+      const [items, result] = onComplete.mock.calls[0] as [
+        CanvasItem[],
+        CanvasImageItem | null | undefined
+      ]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+
+      expect(result).toBeTruthy()
+      expect(imageItem?.thumbnailSet).toEqual(thumbnailSet)
+      expect(imageItem?.sourceWidth).toBe(640)
+      expect(imageItem?.sourceHeight).toBe(320)
+      expect(imageItem?.width).toBe(640)
+      expect(imageItem?.height).toBe(320)
+      expect(loadedSources).toEqual(['local-media:///cache/small-warm-cache/2048.webp'])
+    } finally {
+      window.Image = originalImageCtor
+      Object.defineProperty(window, 'api', {
+        configurable: true,
+        value: originalApi
+      })
+    }
+  })
+
   it('creates resized preview thumbnails for oversized image sources without eager image decoding', async () => {
     const originalImageCtor = window.Image
     const originalCreateImageBitmap = globalThis.createImageBitmap
@@ -707,7 +840,8 @@ describe('useCanvasAssetIntake', () => {
       expect(createImageBitmapMock).toHaveBeenCalledWith(hugeSource.sourceFile, {
         resizeWidth: 2048,
         resizeHeight: 1255,
-        resizeQuality: 'high'
+        resizeQuality: 'high',
+        premultiplyAlpha: 'none'
       })
       expect(imageItems[0].image).toBe(previewBitmap)
       expect(imageItems[0].sourceWidth).toBe(19_717)
@@ -797,7 +931,8 @@ describe('useCanvasAssetIntake', () => {
       expect(createImageBitmapMock).toHaveBeenCalledWith(previewBlob, {
         resizeWidth: 2048,
         resizeHeight: 1255,
-        resizeQuality: 'high'
+        resizeQuality: 'high',
+        premultiplyAlpha: 'none'
       })
       expect(imageItems[0].image).toBe(previewBitmap)
     } finally {
@@ -886,7 +1021,8 @@ describe('useCanvasAssetIntake', () => {
       expect(createImageBitmapMock).toHaveBeenCalledWith(expect.any(Blob), {
         resizeWidth: 2048,
         resizeHeight: 1255,
-        resizeQuality: 'high'
+        resizeQuality: 'high',
+        premultiplyAlpha: 'none'
       })
       expect(imageItems[0].image).toBe(previewBitmap)
     } finally {

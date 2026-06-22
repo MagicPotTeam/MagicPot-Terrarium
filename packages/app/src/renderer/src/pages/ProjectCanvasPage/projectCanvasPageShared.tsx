@@ -4,8 +4,8 @@ import SvgIcon from '@mui/material/SvgIcon'
 import type { SvgIconProps } from '@mui/material/SvgIcon'
 import type { AdobeBridgeTarget } from '@shared/api/svcAdobeBridge'
 import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
-import { AGENT_IMAGE_DRAG_MIME, getDroppedImageFile } from '@renderer/utils/droppedImageUtils'
-import { resolveOfficeFileNodeData } from './officePreviewUtils'
+import { AGENT_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
+import type { OfficeFileNodeData } from './officePreviewUtils'
 export {
   EXPORT_IMAGE_MAX_AREA,
   EXPORT_IMAGE_MAX_SIDE,
@@ -23,9 +23,7 @@ import type {
   CanvasVideoItem
 } from './types'
 
-export const normalizeOfficeFileNodeDataForCanvas = (
-  fileNodeData: Awaited<ReturnType<typeof resolveOfficeFileNodeData>>
-) => ({
+export const normalizeOfficeFileNodeDataForCanvas = (fileNodeData: OfficeFileNodeData) => ({
   ...fileNodeData,
   previewText: fileNodeData.previewText ?? undefined,
   previewImages: fileNodeData.previewImages.length > 0 ? fileNodeData.previewImages : undefined,
@@ -113,6 +111,9 @@ export type ResolvedDroppedAgentImageData = {
   src: string
   fileName?: string
   sizeBytes?: number
+  sourceFile?: Blob
+  sourceWidthHint?: number
+  sourceHeightHint?: number
 }
 
 export function isCanvasExportableItem(item: CanvasItem): item is CanvasExportableItem {
@@ -298,37 +299,139 @@ export function applySelectedTextSizeChange(
   }) as CanvasItem[]
 }
 
-export async function resolveDroppedAgentImageDataUrl(
-  dataTransfer: Pick<DataTransfer, 'getData' | 'files'>,
-  readFileAsDataURL: (file: File) => Promise<string>
-): Promise<ResolvedDroppedAgentImageData | null> {
-  const agentImageUrl = dataTransfer.getData(AGENT_IMAGE_DRAG_MIME).trim()
-  const quickAppImagePayload = dataTransfer.getData('application/x-qapp-image').trim()
-  if (!agentImageUrl && !quickAppImagePayload) return null
+const QAPP_IMAGE_DRAG_MIME = 'application/x-qapp-image'
+
+const IMAGE_DROP_FILE_NAME_PATTERN = /\.(png|jpe?g|webp|gif|bmp|svg)$/i
+
+type QuickAppImageDragPayload = {
+  objectUrl?: unknown
+  itemTypes?: unknown[]
+  fileItem?: {
+    filename?: unknown
+  }
+  attachments?: unknown[]
+  sourceWidth?: unknown
+  sourceHeight?: unknown
+}
+
+const getPositiveFiniteImageHint = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+
+const resolveDroppedImageFile = (dataTransfer: Pick<DataTransfer, 'files'>): File | undefined =>
+  Array.from(dataTransfer.files ?? []).find((file) => {
+    const type = (file.type || '').toLowerCase()
+    return type.startsWith('image/') || IMAGE_DROP_FILE_NAME_PATTERN.test(file.name || '')
+  })
+
+const resolveQuickAppImageDragData = (rawPayload: string): ResolvedDroppedAgentImageData | null => {
+  if (!rawPayload.trim()) return null
 
   try {
-    const droppedImageFile = await getDroppedImageFile(dataTransfer)
-    if (droppedImageFile) {
-      return {
-        src: await readFileAsDataURL(droppedImageFile),
-        fileName: droppedImageFile.name || undefined,
-        sizeBytes:
-          Number.isFinite(droppedImageFile.size) && droppedImageFile.size >= 0
-            ? droppedImageFile.size
-            : undefined
-      }
+    const payload = JSON.parse(rawPayload) as QuickAppImageDragPayload
+    if (!payload || typeof payload !== 'object') return null
+    if (
+      Array.isArray(payload.itemTypes) &&
+      payload.itemTypes.length > 0 &&
+      !payload.itemTypes.includes('image')
+    ) {
+      return null
     }
-  } catch (error) {
-    console.warn('[Canvas] Failed to normalize dropped Agent image; falling back to URL:', error)
+
+    const imageAttachment = Array.isArray(payload.attachments)
+      ? payload.attachments.find(
+          (
+            attachment
+          ): attachment is {
+            type?: unknown
+            url?: unknown
+            fileName?: unknown
+            sourceWidth?: unknown
+            sourceHeight?: unknown
+            sizeBytes?: unknown
+          } =>
+            !!attachment &&
+            typeof attachment === 'object' &&
+            (attachment as { type?: unknown }).type === 'image' &&
+            typeof (attachment as { url?: unknown }).url === 'string' &&
+            Boolean((attachment as { url?: string }).url?.trim())
+        )
+      : undefined
+
+    const rawSrc =
+      (typeof imageAttachment?.url === 'string' && imageAttachment.url.trim()) ||
+      (typeof payload.objectUrl === 'string' && payload.objectUrl.trim()) ||
+      ''
+    const normalizedSrc = normalizeLocalMediaUrl(rawSrc)
+    if (!normalizedSrc) return null
+
+    const fileName =
+      (typeof imageAttachment?.fileName === 'string' && imageAttachment.fileName.trim()) ||
+      (typeof payload.fileItem?.filename === 'string' && payload.fileItem.filename.trim()) ||
+      getDownloadFileNameFromUrl(normalizedSrc, 'dropped-image.png')
+
+    return {
+      src: normalizedSrc,
+      fileName,
+      sizeBytes:
+        typeof imageAttachment?.sizeBytes === 'number' && Number.isFinite(imageAttachment.sizeBytes)
+          ? imageAttachment.sizeBytes
+          : undefined,
+      sourceWidthHint:
+        getPositiveFiniteImageHint(imageAttachment?.sourceWidth) ??
+        getPositiveFiniteImageHint(payload.sourceWidth),
+      sourceHeightHint:
+        getPositiveFiniteImageHint(imageAttachment?.sourceHeight) ??
+        getPositiveFiniteImageHint(payload.sourceHeight)
+    }
+  } catch {
+    return null
+  }
+}
+
+export async function resolveDroppedAgentImageDataUrl(
+  dataTransfer: Pick<DataTransfer, 'getData' | 'files'>
+): Promise<ResolvedDroppedAgentImageData | null> {
+  const agentImageUrl = dataTransfer.getData(AGENT_IMAGE_DRAG_MIME).trim()
+  const quickAppImagePayload = dataTransfer.getData(QAPP_IMAGE_DRAG_MIME).trim()
+  if (!agentImageUrl && !quickAppImagePayload) return null
+
+  const droppedImageFile = resolveDroppedImageFile(dataTransfer)
+  const quickAppImageData = resolveQuickAppImageDragData(quickAppImagePayload)
+  if (droppedImageFile && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    const droppedFileName = droppedImageFile.name?.trim()
+    if (
+      quickAppImageData &&
+      (!droppedFileName ||
+        !quickAppImageData.fileName ||
+        quickAppImageData.fileName.trim() !== droppedFileName)
+    ) {
+      return quickAppImageData
+    }
+
+    return {
+      src: URL.createObjectURL(droppedImageFile),
+      fileName: droppedImageFile.name || undefined,
+      sizeBytes:
+        Number.isFinite(droppedImageFile.size) && droppedImageFile.size >= 0
+          ? droppedImageFile.size
+          : undefined,
+      sourceFile: droppedImageFile
+    }
   }
 
-  if (!agentImageUrl) return null
-
-  const normalizedUrl = normalizeLocalMediaUrl(agentImageUrl)
-  return {
-    src: normalizedUrl,
-    fileName: getDownloadFileNameFromUrl(normalizedUrl, 'dropped-image.png')
+  const normalizedAgentUrl = normalizeLocalMediaUrl(agentImageUrl)
+  if (normalizedAgentUrl) {
+    return {
+      src: normalizedAgentUrl,
+      fileName: getDownloadFileNameFromUrl(normalizedAgentUrl, 'dropped-image.png')
+    }
   }
+
+  if (quickAppImageData) {
+    return quickAppImageData
+  }
+
+  return null
 }
 
 export const VIDEO_FRAME_CAPTURE_EPSILON_SECONDS = 0.05

@@ -2,7 +2,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import React from 'react'
 import { fireEvent, render } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import VideoOverlay from './VideoOverlay'
 import type { CanvasVideoItem } from '../types'
 
@@ -65,6 +65,13 @@ function createCanvasContainerRef(): React.RefObject<HTMLDivElement | null> {
   return { current: element }
 }
 
+function countPointerListenerCalls(spy: MockInstance<typeof window.addEventListener>): number {
+  return spy.mock.calls.filter(
+    ([eventName]) =>
+      eventName === 'pointermove' || eventName === 'pointerup' || eventName === 'pointercancel'
+  ).length
+}
+
 describe('VideoOverlay', () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -109,6 +116,8 @@ describe('VideoOverlay', () => {
   it('commits a direct drag for an unselected video overlay', () => {
     const onSelect = vi.fn()
     const onDragEnd = vi.fn()
+    const addEventListenerSpy = vi.spyOn(window, 'addEventListener')
+    const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener')
 
     const { container } = render(
       <VideoOverlay
@@ -126,13 +135,47 @@ describe('VideoOverlay', () => {
 
     const overlay = container.querySelector('[data-canvas-overlay="video"]') as HTMLElement | null
     expect(overlay).not.toBeNull()
+    expect(countPointerListenerCalls(addEventListenerSpy)).toBe(0)
 
     fireEvent.pointerDown(overlay!, { pointerId: 7, button: 0, clientX: 120, clientY: 90 })
+    expect(countPointerListenerCalls(addEventListenerSpy)).toBe(3)
+
     fireEvent.pointerMove(window, { pointerId: 7, clientX: 170, clientY: 140 })
     fireEvent.pointerUp(window, { pointerId: 7, clientX: 170, clientY: 140 })
 
     expect(onDragEnd).toHaveBeenCalledWith('video-1', 130, 114, expect.any(PointerEvent))
     expect(onSelect).toHaveBeenCalledTimes(1)
+    expect(countPointerListenerCalls(removeEventListenerSpy)).toBe(3)
+  })
+
+  it('removes active drag listeners when a drag is canceled', () => {
+    const onDragEnd = vi.fn()
+    const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener')
+
+    const { container } = render(
+      <VideoOverlay
+        canvasContainerRef={createCanvasContainerRef()}
+        item={createVideoItem()}
+        budgetMode="visible-paused"
+        isSelected={false}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        onSelect={vi.fn()}
+        onDragEnd={onDragEnd}
+        onUpdateItem={vi.fn()}
+      />
+    )
+
+    const overlay = container.querySelector('[data-canvas-overlay="video"]') as HTMLElement | null
+    expect(overlay).not.toBeNull()
+
+    fireEvent.pointerDown(overlay!, { pointerId: 7, button: 0, clientX: 120, clientY: 90 })
+    fireEvent.pointerMove(window, { pointerId: 7, clientX: 170, clientY: 140 })
+    fireEvent.pointerCancel(window, { pointerId: 7, clientX: 170, clientY: 140 })
+
+    expect(onDragEnd).not.toHaveBeenCalled()
+    expect(countPointerListenerCalls(removeEventListenerSpy)).toBe(3)
+    expect(overlay).toHaveStyle({ transform: 'translate3d(80px, 64px, 0)' })
   })
 
   it('does not mount a video element for poster-frame budget mode', () => {

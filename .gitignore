@@ -1,6 +1,7 @@
 node_modules
 dist
 out
+target
 .DS_Store
 .eslintcache
 *.log*
@@ -99,3 +100,10 @@ canvas-target-failures/
 # Local-only files (not for version control)
 read_only .md
 record.json
+# Local performance verification artifacts
+/perf/baseline/
+/perf/verification/
+/perf/performance-phase-1-report.md
+
+# Locally built native sidecar binaries
+/packages/runtime-assets/resources/bin/image-worker/

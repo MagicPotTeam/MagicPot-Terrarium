@@ -19,6 +19,7 @@ import { QAppSvc, qAppSvcDef } from './svcQApp'
 import { ShellSvc, shellSvcDef } from './svcShell'
 import { StateSvc, stateSvcDef } from './svcState'
 import { AppUpdateSvc, appUpdateSvcDef } from './svcAppUpdate'
+import { MagicAgentPlatformSvc, magicAgentPlatformSvcDef } from './svcMagicAgentPlatform'
 import { apiExtensionDef, type ApiExtensionServices } from './extensionServices'
 
 export type BaseApi = {
@@ -42,6 +43,7 @@ export type BaseApi = {
   svcDccBridge: DccBridgeSvc
   svcDuplicateCheck: DuplicateCheckSvc
   svcAppUpdate: AppUpdateSvc
+  svcMagicAgentPlatform: MagicAgentPlatformSvc
 }
 
 export type Api = BaseApi & ApiExtensionServices
@@ -67,5 +69,6 @@ export const apiDef: ApiDefSheet<Api> = {
   svcDccBridge: dccBridgeSvcDef,
   svcDuplicateCheck: duplicateCheckSvcDef,
   svcAppUpdate: appUpdateSvcDef,
+  svcMagicAgentPlatform: magicAgentPlatformSvcDef,
   ...apiExtensionDef
 }

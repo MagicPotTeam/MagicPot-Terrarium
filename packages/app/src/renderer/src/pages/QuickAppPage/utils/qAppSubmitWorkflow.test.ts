@@ -17,6 +17,7 @@ describe('buildQAppSubmitWorkflowRequest', () => {
       qAppKey: 'demo.app',
       clientId: 'renderer-quickapp',
       sessionKey: 'session-1',
+      cleanupAfterRun: false,
       extra_data: { trace: true }
     })
   })
@@ -30,7 +31,20 @@ describe('buildQAppSubmitWorkflowRequest', () => {
     })
 
     expect(request).toEqual({
-      prompt: {} as never
+      prompt: {} as never,
+      cleanupAfterRun: false
+    })
+  })
+
+  it('allows callers to opt in to automatic ComfyUI memory cleanup', () => {
+    const request = buildQAppSubmitWorkflowRequest({
+      prompt: {} as never,
+      cleanupAfterRun: true
+    })
+
+    expect(request).toEqual({
+      prompt: {} as never,
+      cleanupAfterRun: true
     })
   })
 

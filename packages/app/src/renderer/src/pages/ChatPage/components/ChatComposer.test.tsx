@@ -130,6 +130,42 @@ describe('ChatComposer', () => {
     expect(within(actionBar).getByTestId('skill-slot-content')).toBeInTheDocument()
   })
 
+  it('uses the status slot as the compress context action when both are provided', () => {
+    const onCompressContext = vi.fn()
+
+    render(
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          inputValue=""
+          onInputChange={vi.fn()}
+          onSend={vi.fn()}
+          onUploadFile={vi.fn()}
+          pendingAttachments={[]}
+          uploadProgress={{}}
+          onRemoveAttachment={vi.fn()}
+          isLoading={false}
+          onStopGenerating={vi.fn()}
+          disabled={false}
+          composerInputRef={{ current: null }}
+          onPreviewImage={vi.fn()}
+          statusSlot={<div data-testid="context-indicator">ctx</div>}
+          onCompressContext={onCompressContext}
+        />
+      </ThemeProvider>
+    )
+
+    const actionBar = screen.getByTestId('chat-composer-action-bar')
+    const statusAction = within(actionBar).getByTestId('chat-composer-context-status-compress')
+
+    expect(within(statusAction).getByTestId('context-indicator')).toBeInTheDocument()
+    expect(within(actionBar).queryByTestId('chat-composer-compress-context')).toBeNull()
+
+    fireEvent.click(statusAction)
+    fireEvent.keyDown(statusAction, { key: 'Enter' })
+
+    expect(onCompressContext).toHaveBeenCalledTimes(2)
+  })
+
   it('shows bound tool guidance and expands details in /tool mode', () => {
     const onInputChange = vi.fn()
     render(

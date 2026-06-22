@@ -30,6 +30,19 @@ describe('chatDragData', () => {
 
     expect(normalized).toBe('local-media:///C:/demo/image.png')
     expect(data.get(AGENT_IMAGE_DRAG_MIME)).toBe('local-media:///C:/demo/image.png')
+    expect(data.get(QAPP_IMAGE_DRAG_MIME)).toBe(
+      JSON.stringify({
+        objectUrl: 'local-media:///C:/demo/image.png',
+        itemTypes: ['image'],
+        attachments: [
+          {
+            type: 'image',
+            url: 'local-media:///C:/demo/image.png',
+            fileName: 'image.png'
+          }
+        ]
+      })
+    )
     expect(data.get('text/uri-list')).toBe('local-media:///C:/demo/image.png')
     expect(data.get('text/plain')).toBe('local-media:///C:/demo/image.png')
     expect(target.effectAllowed).toBe('copy')

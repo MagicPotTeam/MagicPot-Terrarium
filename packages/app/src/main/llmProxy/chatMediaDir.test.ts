@@ -75,7 +75,7 @@ describe('chatMediaDir', () => {
     await expect(fs.access(mediaDir)).resolves.toBeUndefined()
   })
 
-  it('routes automated runs into desktop .Codex-Junk/MagicPot/<run-id>/llm-proxy/chat-media', async () => {
+  it('routes automated runs into desktop .magicpot-trash/MagicPot/<run-id>/llm-proxy/chat-media', async () => {
     process.env['MAGICPOT_TEST_AUTOMATED_RUN'] = '1'
     process.env['MAGICPOT_TEST_RUN_ID'] = 'run-789'
 
@@ -86,7 +86,7 @@ describe('chatMediaDir', () => {
       path.join(
         tempRoot,
         'Desktop',
-        '.Codex-Junk',
+        '.magicpot-trash',
         'MagicPot',
         'run-789',
         'llm-proxy',

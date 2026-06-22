@@ -3,6 +3,7 @@ import { AbortReceiver } from './abortHandler'
 
 export type ServerStreamingError = {
   message: string
+  code?: string
   payload?: JsonDict
 }
 

@@ -23,10 +23,7 @@ import {
 } from './canvasLiveOverlayBounds'
 import { CANVAS_NEW_RESULT_HINT_EVENT, type CanvasNewResultHintDetail } from './canvasNewResultHint'
 import { measureCanvasAnnotationTextHeight, measureCanvasTextBoxHeight } from './canvasTextLayout'
-import {
-  ProjectCanvasPageSceneGrid,
-  ProjectCanvasPageSceneOverlay
-} from './ProjectCanvasPageSceneDecorations'
+import { ProjectCanvasPageSceneOverlay } from './ProjectCanvasPageSceneDecorations'
 import ProjectCanvasWebGLImageLayer, {
   PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT,
   PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_MAX_SIDE,
@@ -34,6 +31,11 @@ import ProjectCanvasWebGLImageLayer, {
   type ProjectCanvasWebGLImageLayerHandle,
   type ProjectCanvasWebGLImageLayerMetrics
 } from './components/ProjectCanvasWebGLImageLayer'
+import {
+  CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT,
+  useCanvasLayoutResizeInteractionActive,
+  type CanvasLayoutResizeInteractionDetail
+} from './canvasLayoutResizeInteraction'
 import {
   buildProjectCanvasRenderableItems,
   resolveProjectCanvasImageInteractionMode,
@@ -798,7 +800,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
     cursorStyle,
     drawingState,
     exactSelectedGroup,
-    gridColor,
     handleDragEnd,
     handleDragOver,
     handleDrop,
@@ -836,7 +837,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
     setLabelDialogText,
     setSelectedIds,
     setTool,
-    showGrid,
     shouldForceShapeCreationCrosshair,
     stagePos,
     stagePosRef,
@@ -968,10 +968,12 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const [webglMetrics, setWebglMetrics] =
     React.useState<ProjectCanvasWebGLImageLayerMetrics | null>(null)
   const webglImageLayerRef = React.useRef<ProjectCanvasWebGLImageLayerHandle | null>(null)
+  const isCanvasLayoutResizeInteracting = useCanvasLayoutResizeInteractionActive()
   const isCanvasPerformanceThrottledRef = React.useRef(isCanvasPerformanceThrottled)
+  const isCanvasLayoutResizeInteractionActiveRef = React.useRef(isCanvasLayoutResizeInteracting)
   const isViewportInteractionActiveRef = React.useRef(isViewportInteracting)
   const isWebglRuntimeStateDeferredRef = React.useRef(
-    isViewportInteracting || isCanvasPerformanceThrottled
+    isViewportInteracting || isCanvasPerformanceThrottled || isCanvasLayoutResizeInteracting
   )
   const pendingWebglRuntimeStateRef = React.useRef(
     createProjectCanvasWebGLPendingRuntimeState<ProjectCanvasWebGLImageLayerMetrics>()
@@ -1084,13 +1086,55 @@ export default function ProjectCanvasPageStageScene(props: any) {
   )
   React.useEffect(() => {
     isCanvasPerformanceThrottledRef.current = isCanvasPerformanceThrottled
+    isCanvasLayoutResizeInteractionActiveRef.current = isCanvasLayoutResizeInteracting
     isViewportInteractionActiveRef.current = isViewportInteracting
-    const shouldDeferRuntimeState = isViewportInteracting || isCanvasPerformanceThrottled
+    const shouldDeferRuntimeState =
+      isViewportInteracting || isCanvasPerformanceThrottled || isCanvasLayoutResizeInteracting
     isWebglRuntimeStateDeferredRef.current = shouldDeferRuntimeState
     if (!shouldDeferRuntimeState) {
       flushPendingWebglRuntimeState()
     }
-  }, [flushPendingWebglRuntimeState, isCanvasPerformanceThrottled, isViewportInteracting])
+  }, [
+    flushPendingWebglRuntimeState,
+    isCanvasLayoutResizeInteracting,
+    isCanvasPerformanceThrottled,
+    isViewportInteracting
+  ])
+  React.useEffect(() => {
+    const handleCanvasLayoutResizeInteraction = (event: Event) => {
+      const detail = (event as CustomEvent<CanvasLayoutResizeInteractionDetail>).detail
+      const active = Boolean(detail?.active)
+      isCanvasLayoutResizeInteractionActiveRef.current = active
+      isWebglRuntimeStateDeferredRef.current =
+        active || isViewportInteractionActiveRef.current || isCanvasPerformanceThrottledRef.current
+      if (
+        webglImageLayerReady &&
+        typeof webglImageLayerRef.current?.setViewportInteracting === 'function'
+      ) {
+        webglImageLayerRef.current.setViewportInteracting(
+          active || isViewportInteractionActiveRef.current
+        )
+      }
+      if (
+        !active &&
+        !isViewportInteractionActiveRef.current &&
+        !isCanvasPerformanceThrottledRef.current
+      ) {
+        flushPendingWebglRuntimeState()
+      }
+    }
+
+    window.addEventListener(
+      CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT,
+      handleCanvasLayoutResizeInteraction
+    )
+    return () => {
+      window.removeEventListener(
+        CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT,
+        handleCanvasLayoutResizeInteraction
+      )
+    }
+  }, [flushPendingWebglRuntimeState, webglImageLayerReady])
   React.useEffect(() => {
     if (!registerViewportCallback) {
       return
@@ -1110,12 +1154,21 @@ export default function ProjectCanvasPageStageScene(props: any) {
 
     return registerViewportInteractionCallback((active) => {
       isViewportInteractionActiveRef.current = active
-      isWebglRuntimeStateDeferredRef.current = active || isCanvasPerformanceThrottledRef.current
+      isWebglRuntimeStateDeferredRef.current =
+        active ||
+        isCanvasPerformanceThrottledRef.current ||
+        isCanvasLayoutResizeInteractionActiveRef.current
       const webglImageLayer = webglImageLayerRef.current
       if (typeof webglImageLayer?.setViewportInteracting === 'function') {
-        webglImageLayer.setViewportInteracting(active)
+        webglImageLayer.setViewportInteracting(
+          active || isCanvasLayoutResizeInteractionActiveRef.current
+        )
       }
-      if (!active && !isCanvasPerformanceThrottledRef.current) {
+      if (
+        !active &&
+        !isCanvasPerformanceThrottledRef.current &&
+        !isCanvasLayoutResizeInteractionActiveRef.current
+      ) {
         flushPendingWebglRuntimeState()
       }
     })
@@ -1200,7 +1253,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     return count
   }, [imageRuntimeRouteById])
   const highResolutionDomImagePreviewItems = React.useMemo(() => {
-    if (isViewportInteracting || isCanvasPerformanceThrottled) {
+    if (isViewportInteracting || isCanvasPerformanceThrottled || isCanvasLayoutResizeInteracting) {
       return []
     }
 
@@ -1301,6 +1354,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     return budgetedItems
   }, [
     imageRuntimeRouteById,
+    isCanvasLayoutResizeInteracting,
     isCanvasPerformanceThrottled,
     isViewportInteracting,
     selectedIds,
@@ -3100,14 +3154,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
     >
       <MaxSizeLayout onResize={handleResize}>
         <Box sx={{ position: 'relative', width: '100%', height: '100%' }}>
-          <ProjectCanvasPageSceneGrid
-            showGrid={showGrid}
-            stagePos={stagePos}
-            stageScale={stageScale}
-            stageSize={stageSize}
-            gridColor={gridColor}
-            registerViewportCallback={registerViewportCallback}
-          />
           <ProjectCanvasWebGLImageLayer
             ref={webglImageLayerRef}
             items={webglImageItems}
@@ -3115,7 +3161,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
             stagePos={stagePos}
             stageScale={stageScale}
             stageSize={stageSize}
-            isViewportInteracting={isViewportInteracting}
+            isViewportInteracting={isViewportInteracting || isCanvasLayoutResizeInteracting}
             isPerformanceThrottled={isCanvasPerformanceThrottled}
             onReadyChange={setWebglImageLayerReady}
             onResidentIdsChange={handleWebglResidentIdsChange}

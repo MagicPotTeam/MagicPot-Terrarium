@@ -1,24 +1,86 @@
 import {
   FsSvc,
+  MAX_READ_FILE_SLICE_BYTES,
   ListFilesInFolderReq,
   ListFilesInFolderResp,
   ListImagesInFolderReq,
   ListImagesInFolderResp,
   SaveImageToPathReq,
   SaveImageToPathResp,
+  SaveQAppInputImageReq,
+  SaveQAppInputImageResp,
   ReadImageFromPathReq,
   ReadImageFromPathResp,
   ReadFileFromPathReq,
   ReadFileFromPathResp,
+  ReadFileSliceReq,
+  ReadFileSliceResp,
   ReadTextFileReq,
   ReadTextFileResp,
   WriteTextFileReq,
   WriteTextFileResp
 } from '@shared/api/svcFs'
-import * as fs from 'fs'
+import fs from 'fs/promises'
 import * as path from 'path'
+import { app } from 'electron'
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tif', '.tiff']
+const MAX_CONCURRENT_FS_OPS = 16
+const QAPP_INPUT_IMAGE_DIR = 'qapp-input-images'
+
+let activeFsOps = 0
+const pendingFsOps: (() => void)[] = []
+
+const acquireFsOpSlot = async (): Promise<void> =>
+  new Promise((resolve) => {
+    const acquire = (): void => {
+      activeFsOps += 1
+      resolve()
+    }
+
+    if (activeFsOps < MAX_CONCURRENT_FS_OPS) {
+      acquire()
+      return
+    }
+
+    pendingFsOps.push(acquire)
+  })
+
+const releaseFsOpSlot = (): void => {
+  activeFsOps -= 1
+  const next = pendingFsOps.shift()
+  if (next && activeFsOps < MAX_CONCURRENT_FS_OPS) {
+    next()
+  }
+}
+
+const runBoundedFsOp = async <T>(operation: () => Promise<T>): Promise<T> => {
+  await acquireFsOpSlot()
+  try {
+    return await operation()
+  } finally {
+    releaseFsOpSlot()
+  }
+}
+
+const pathExists = async (targetPath: string): Promise<boolean> => {
+  try {
+    await runBoundedFsOp(() => fs.access(targetPath))
+    return true
+  } catch {
+    return false
+  }
+}
+
+const sanitizeFileName = (value: string): string => {
+  const normalized = path.basename(String(value || '').trim())
+  const withoutReservedChars = normalized.replace(/[<>:"/\\|?*]+/g, '_')
+  const withoutControlChars = Array.from(withoutReservedChars)
+    .map((char) => (char.charCodeAt(0) < 32 ? '_' : char))
+    .join('')
+    .trim()
+  return withoutControlChars || 'qapp-input-image.png'
+}
 
 function normalizeExtension(value: string): string {
   const normalized = value.trim().toLowerCase()
@@ -29,11 +91,11 @@ export class FsSvcImpl implements FsSvc {
   listImagesInFolder = async (req: ListImagesInFolderReq): Promise<ListImagesInFolderResp> => {
     const { folderPath } = req
 
-    if (!fs.existsSync(folderPath)) {
+    if (!(await pathExists(folderPath))) {
       return { images: [] }
     }
 
-    const files = fs.readdirSync(folderPath)
+    const files = await runBoundedFsOp(() => fs.readdir(folderPath))
     const images = files
       .filter((file) => {
         const ext = path.extname(file).toLowerCase()
@@ -50,7 +112,7 @@ export class FsSvcImpl implements FsSvc {
   listFilesInFolder = async (req: ListFilesInFolderReq): Promise<ListFilesInFolderResp> => {
     const { folderPath, extensions, recursive = false } = req
 
-    if (!fs.existsSync(folderPath)) {
+    if (!(await pathExists(folderPath))) {
       return { files: [] }
     }
 
@@ -69,7 +131,7 @@ export class FsSvcImpl implements FsSvc {
         continue
       }
 
-      const entries = fs.readdirSync(currentDir, { withFileTypes: true })
+      const entries = await runBoundedFsOp(() => fs.readdir(currentDir, { withFileTypes: true }))
       for (const entry of entries) {
         const fullPath = path.join(currentDir, entry.name)
 
@@ -91,7 +153,7 @@ export class FsSvcImpl implements FsSvc {
           continue
         }
 
-        const stats = fs.statSync(fullPath)
+        const stats = await runBoundedFsOp(() => fs.stat(fullPath))
         files.push({
           filename: entry.name,
           fullPath,
@@ -107,24 +169,38 @@ export class FsSvcImpl implements FsSvc {
     const { image, outputPath, filename } = req
 
     // Ensure output directory exists
-    if (!fs.existsSync(outputPath)) {
-      fs.mkdirSync(outputPath, { recursive: true })
+    if (!(await pathExists(outputPath))) {
+      await runBoundedFsOp(() => fs.mkdir(outputPath, { recursive: true }))
     }
 
     const fullPath = path.join(outputPath, filename)
-    fs.writeFileSync(fullPath, Buffer.from(image))
+    await runBoundedFsOp(() => fs.writeFile(fullPath, Buffer.from(image)))
 
     return { success: true, fullPath }
+  }
+
+  saveQAppInputImage = async (req: SaveQAppInputImageReq): Promise<SaveQAppInputImageResp> => {
+    const outputPath = path.join(app.getPath('userData'), QAPP_INPUT_IMAGE_DIR)
+    await runBoundedFsOp(() => fs.mkdir(outputPath, { recursive: true }))
+
+    const safeName = sanitizeFileName(req.filename)
+    const extension = path.extname(safeName)
+    const baseName = extension ? safeName.slice(0, -extension.length) : safeName
+    const filename = `${baseName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${extension || '.png'}`
+    const fullPath = path.join(outputPath, filename)
+    await runBoundedFsOp(() => fs.writeFile(fullPath, Buffer.from(req.image)))
+
+    return { success: true, fullPath, filename }
   }
 
   readImageFromPath = async (req: ReadImageFromPathReq): Promise<ReadImageFromPathResp> => {
     const { fullPath } = req
 
-    if (!fs.existsSync(fullPath)) {
+    if (!(await pathExists(fullPath))) {
       throw new Error(`File not found: ${fullPath}`)
     }
 
-    const buffer = fs.readFileSync(fullPath)
+    const buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
     const filename = path.basename(fullPath)
 
     return {
@@ -136,12 +212,12 @@ export class FsSvcImpl implements FsSvc {
   readTextFile = async (req: ReadTextFileReq): Promise<ReadTextFileResp> => {
     const { fullPath } = req
 
-    if (!fs.existsSync(fullPath)) {
+    if (!(await pathExists(fullPath))) {
       throw new Error(`File not found: ${fullPath}`)
     }
 
     return {
-      content: fs.readFileSync(fullPath, 'utf8'),
+      content: await runBoundedFsOp(() => fs.readFile(fullPath, 'utf8')),
       filename: path.basename(fullPath)
     }
   }
@@ -149,26 +225,73 @@ export class FsSvcImpl implements FsSvc {
   readFileFromPath = async (req: ReadFileFromPathReq): Promise<ReadFileFromPathResp> => {
     const { fullPath } = req
 
-    if (!fs.existsSync(fullPath)) {
+    if (!(await pathExists(fullPath))) {
       throw new Error(`File not found: ${fullPath}`)
     }
 
-    const buffer = fs.readFileSync(fullPath)
+    const buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
     return {
       data: new Uint8Array(buffer),
       filename: path.basename(fullPath)
     }
   }
 
+  readFileSlice = async (req: ReadFileSliceReq): Promise<ReadFileSliceResp> => {
+    const { fullPath, length } = req
+    const offset = req.offset ?? 0
+
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new Error('Invalid file slice offset')
+    }
+    if (!Number.isSafeInteger(length) || length <= 0 || length > MAX_READ_FILE_SLICE_BYTES) {
+      throw new Error(`Invalid file slice length: expected 1-${MAX_READ_FILE_SLICE_BYTES}`)
+    }
+
+    if (!(await pathExists(fullPath))) {
+      throw new Error(`File not found: ${fullPath}`)
+    }
+
+    const stats = await runBoundedFsOp(() => fs.stat(fullPath))
+    if (!stats.isFile()) {
+      throw new Error(`Path is not a file: ${fullPath}`)
+    }
+
+    if (offset >= stats.size) {
+      return {
+        data: new Uint8Array(),
+        filename: path.basename(fullPath),
+        fileSizeBytes: stats.size
+      }
+    }
+
+    const bytesToRead = Math.min(length, stats.size - offset)
+    const { buffer, bytesRead } = await runBoundedFsOp(async () => {
+      const fd = await fs.open(fullPath, 'r')
+      try {
+        const buffer = Buffer.alloc(bytesToRead)
+        const { bytesRead } = await fd.read(buffer, 0, bytesToRead, offset)
+        return { buffer, bytesRead }
+      } finally {
+        await fd.close()
+      }
+    })
+
+    return {
+      data: new Uint8Array(buffer.subarray(0, bytesRead)),
+      filename: path.basename(fullPath),
+      fileSizeBytes: stats.size
+    }
+  }
+
   writeTextFile = async (req: WriteTextFileReq): Promise<WriteTextFileResp> => {
     const { outputPath, filename, content } = req
 
-    if (!fs.existsSync(outputPath)) {
-      fs.mkdirSync(outputPath, { recursive: true })
+    if (!(await pathExists(outputPath))) {
+      await runBoundedFsOp(() => fs.mkdir(outputPath, { recursive: true }))
     }
 
     const fullPath = path.join(outputPath, filename)
-    fs.writeFileSync(fullPath, content, 'utf8')
+    await runBoundedFsOp(() => fs.writeFile(fullPath, content, 'utf8'))
 
     return {
       success: true,

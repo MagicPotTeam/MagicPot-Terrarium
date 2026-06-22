@@ -9,10 +9,11 @@ import {
   readCachedSceneInstanceClone,
   writeCachedSceneInstanceClone
 } from './sceneInstanceCloneCache'
+import { resolveModelInspectionMetadata } from './modelInspectionMetadata'
 import {
   CANVAS_MODEL3D_METADATA_UPDATED_EVENT,
-  resolveModelInspectionMetadata
-} from './modelInspectionMetadata'
+  writeCanvasModel3DInspectionMetadataCache
+} from './modelInspectionMetadataCache'
 
 type ModelSceneEventMap = {
   'model-centered': {
@@ -655,6 +656,8 @@ export const BaseScene: React.FC<{
     if (!instanceCacheKey || typeof window === 'undefined') {
       return
     }
+
+    writeCanvasModel3DInspectionMetadataCache(instanceCacheKey, modelInspectionMetadata)
 
     window.dispatchEvent(
       new CustomEvent(CANVAS_MODEL3D_METADATA_UPDATED_EVENT, {

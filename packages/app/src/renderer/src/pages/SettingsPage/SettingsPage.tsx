@@ -25,6 +25,29 @@ import type { PanelProps, SettingsTab } from './PanelProps'
 
 const PanelPlugin = lazyWithRetry(() => import('./PanelPlugin'))
 
+const SETTINGS_TABS: readonly SettingsTab[] = [
+  'general',
+  'environment',
+  'plugin',
+  'llm',
+  'mcp',
+  'about'
+]
+
+const getInitialSettingsTab = (location: ReturnType<typeof useLocation>): SettingsTab => {
+  const stateTab = (location.state as { tab?: unknown } | null | undefined)?.tab
+  if (typeof stateTab === 'string' && SETTINGS_TABS.includes(stateTab as SettingsTab)) {
+    return stateTab as SettingsTab
+  }
+
+  const queryTab = new URLSearchParams(location.search).get('tab')
+  if (queryTab && SETTINGS_TABS.includes(queryTab as SettingsTab)) {
+    return queryTab as SettingsTab
+  }
+
+  return 'general'
+}
+
 interface SettingsPageProps {
   onClose?: () => void
 }
@@ -35,8 +58,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
   const { t, i18n } = useTranslation()
   const isChineseUi = i18n.language?.toLowerCase().startsWith('zh')
   const location = useLocation()
-  const defaultTab = location.state?.tab as SettingsTab | undefined
-  const [currentTab, setCurrentTab] = useState<SettingsTab>(defaultTab || 'general')
+  const [currentTab, setCurrentTab] = useState<SettingsTab>(() => getInitialSettingsTab(location))
   const { config, isReady, updateConfig } = useConfig()
 
   const settingsValue: Config = isReady ? config : DEFAULT_CONFIG
@@ -96,22 +118,24 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
         description: t('settings.tab_descs.environment')
       },
       {
-        label: tabText('settings.tabs.plugin', '快应用 API', 'Quick App API'),
+        label: localizedText('settings.tabs.plugin', 'Quick App API'),
         value: 'plugin',
         icon: <ExtensionIcon sx={{ fontSize: 18 }} />,
         Panel: PanelPlugin,
-        description: tabText(
+        description: localizedText(
           'settings.tab_descs.plugin',
-          '快应用 API 配置',
-          'Quick App API settings'
+          'Configure API profiles for Quick App runtime, prompt helpers, and extensions'
         )
       },
       {
-        label: tabText('settings.tabs.llm', 'Agent线程配置', 'Agent Threads'),
+        label: localizedText('settings.tabs.llm', 'Agent Threads'),
         value: 'llm',
         icon: <Code sx={{ fontSize: 18 }} />,
         Panel: PanelLLM,
-        description: tabText('settings.tab_descs.llm', 'Agent线程配置', 'Agent thread settings')
+        description: localizedText(
+          'settings.tab_descs.llm',
+          'Configure models and API profiles used by Agent threads'
+        )
       },
       {
         label: localizedText('settings.tabs.mcp', 'MCP'),
@@ -133,7 +157,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
         description: t('settings.tab_descs.about')
       }
     ],
-    [isChineseUi, localizedText, t, tabText]
+    [isChineseUi, localizedText, t]
   )
 
   const activeTab = tabs.find((tab) => tab.value === currentTab) || tabs[0]

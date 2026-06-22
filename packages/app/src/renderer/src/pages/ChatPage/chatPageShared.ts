@@ -58,6 +58,7 @@ export const STORAGE_KEY_SELECTED_PROFILE = 'chat.selectedProfileId'
 export const STORAGE_KEY_LOADING_IDS = 'chat.loadingSessionIds'
 export const STORAGE_KEY_EXTERNAL_LOADING_IDS = 'chat.externalLoadingSessionIds'
 export const HUNYUAN_3D_PROFILE_ID = 'hunyuan3d-pro'
+export const TRIPO_3D_PROFILE_ID = 'tripo3d-pro'
 export const MODEL3D_FILE_EXTENSIONS = [
   '.glb',
   '.gltf',
@@ -71,6 +72,9 @@ export const MODEL3D_FILE_EXTENSIONS = [
 
 export const scopedStorageKey = (baseKey: string, scope: string): string =>
   scope === 'default' ? baseKey : `${baseKey}.${scope}`
+
+export const buildChatWorkspaceControlsPortalId = (scope: string): string =>
+  `agent-workspace-chat-controls-${encodeURIComponent(scope || 'default')}`
 
 export const AUTO_SAVED_CHAT_IMAGE_TRACKER_LIMIT = 512
 
@@ -260,12 +264,15 @@ export const normalizeChatProfileIdForStorage = (
   return getBaseProfileId(normalizedProfileId) ?? undefined
 }
 
-export const buildHy3dProfileId = (params: Hy3dParams): string => {
+export const buildHy3dProfileId = (
+  params: Hy3dParams,
+  provider: 'hunyuan' | 'tripo' = 'hunyuan'
+): string => {
   const hy3dEnablePBR =
     params.apiAction === 'SubmitTextureTo3DJob' ? params.textureEnablePBR : params.enablePBR
 
   const profileSegments = [
-    HUNYUAN_3D_PROFILE_ID,
+    provider === 'tripo' ? TRIPO_3D_PROFILE_ID : HUNYUAN_3D_PROFILE_ID,
     params.apiAction,
     params.modelVersion,
     params.generateType,
@@ -277,10 +284,32 @@ export const buildHy3dProfileId = (params: Hy3dParams): string => {
     params.profileTemplate || 'DEFAULT'
   ]
 
-  const encodedModelSourceFileName = encodeURIComponent(params.modelSourceFileName || '')
-  if (encodedModelSourceFileName) {
-    profileSegments.push(encodedModelSourceFileName)
+  const appendProfileExtra = (key: string, value: string | undefined): void => {
+    const encodedValue = encodeURIComponent(value || '')
+    if (encodedValue) {
+      profileSegments.push(`${key}=${encodedValue}`)
+    }
   }
+
+  appendProfileExtra('source', params.modelSourceFileName)
+  appendProfileExtra('task', params.modelTaskId)
+  appendProfileExtra(
+    'imageModel',
+    params.tripoImageModelVersion !== 'flux.1_kontext_pro'
+      ? params.tripoImageModelVersion
+      : undefined
+  )
+  appendProfileExtra('template', params.tripoImageTemplate)
+  appendProfileExtra(
+    'editView',
+    params.tripoEditView !== 'front' ? params.tripoEditView : undefined
+  )
+  appendProfileExtra(
+    'animation',
+    params.tripoAnimationPreset !== 'preset:walk' ? params.tripoAnimationPreset : undefined
+  )
+  appendProfileExtra('rigType', params.tripoRigType !== 'biped' ? params.tripoRigType : undefined)
+  appendProfileExtra('rigSpec', params.tripoRigSpec !== 'tripo' ? params.tripoRigSpec : undefined)
 
   return profileSegments.join('::')
 }
@@ -288,13 +317,105 @@ export const buildHy3dProfileId = (params: Hy3dParams): string => {
 export const normalizeLocalMediaUrl = (url: string): string => {
   if (!url) return url
   if (url.startsWith('local-media://')) return url
-  if (url.startsWith('file:///')) {
-    return `local-media:///${url.slice('file:///'.length)}`
-  }
   if (url.startsWith('file://')) {
-    return `local-media:///${url.slice('file://'.length).replace(/^\/+/, '')}`
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'file:') {
+        if (parsed.hostname) {
+          return `local-media://${parsed.hostname}${parsed.pathname}`
+        }
+        return `local-media://${parsed.pathname}`
+      }
+    } catch {
+      // Fall through to legacy string normalization for partially escaped file URLs.
+    }
+
+    const rest = url.slice('file://'.length)
+    if (/^[a-zA-Z]:($|[\\/])/.test(rest)) {
+      return `local-media:///${rest}`
+    }
+    return `local-media://${rest.replace(/^\/+/, '')}`
   }
   return url
+}
+
+const decodeLocalMediaPathPart = (value: string): string => {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+const normalizeLocalMediaPathPart = (value: string): string => {
+  const decoded = decodeLocalMediaPathPart(value).replace(/\\/g, '/')
+  if (/^\/[a-zA-Z]:($|\/)/.test(decoded)) {
+    return decoded.slice(1)
+  }
+  if (/^\/{2,}[^/]/.test(decoded)) {
+    return `//${decoded.replace(/^\/+/, '')}`
+  }
+
+  return decoded
+}
+
+export const resolveLocalMediaPathFromUrl = (url: string): string | null => {
+  const normalized = normalizeLocalMediaUrl(url || '').trim()
+  if (!normalized) return null
+
+  try {
+    const parsed = new URL(normalized)
+    if (parsed.protocol !== 'local-media:' && parsed.protocol !== 'file:') {
+      return null
+    }
+
+    if (parsed.hostname) {
+      const hostname = decodeLocalMediaPathPart(parsed.hostname)
+      const pathname = normalizeLocalMediaPathPart(parsed.pathname)
+      if (/^[a-zA-Z]$/.test(hostname)) {
+        return `${hostname}:/${pathname.replace(/^\/+/, '')}`
+      }
+
+      const hostPath = pathname ? (pathname.startsWith('/') ? pathname : `/${pathname}`) : ''
+      return `//${hostname}${hostPath}`
+    }
+
+    return normalizeLocalMediaPathPart(parsed.pathname)
+  } catch {
+    // Fall through to prefix handling for partially escaped legacy URLs.
+  }
+
+  if (normalized.startsWith('local-media:///')) {
+    return normalizeLocalMediaPathPart(normalized.slice('local-media:///'.length))
+  }
+
+  if (normalized.startsWith('local-media://')) {
+    const rest = normalizeLocalMediaPathPart(normalized.slice('local-media://'.length))
+    const driveCandidate = rest.replace(/^\/+/, '')
+    const driveMatch = driveCandidate.match(/^([a-zA-Z])\/(.+)$/)
+    if (driveMatch) {
+      return `${driveMatch[1]}:/${driveMatch[2]}`
+    }
+
+    return rest
+  }
+
+  if (normalized.startsWith('file:///')) {
+    return normalizeLocalMediaPathPart(normalized.slice('file:///'.length))
+  }
+
+  if (normalized.startsWith('file://')) {
+    const rest = normalizeLocalMediaPathPart(normalized.slice('file://'.length))
+    const driveCandidate = rest.replace(/^\/+/, '')
+    const driveMatch = driveCandidate.match(/^([a-zA-Z])\/(.+)$/)
+    if (driveMatch) {
+      return `${driveMatch[1]}:/${driveMatch[2]}`
+    }
+
+    return rest
+  }
+
+  return null
 }
 
 export const getDownloadFileNameFromUrl = (url: string, fallback: string): string => {

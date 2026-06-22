@@ -18,6 +18,7 @@ export const CANVAS_IMAGE_PROXY_MEDIUM_BATCH_MAX_SIDE = 384
 export const CANVAS_IMAGE_PROXY_LARGE_BATCH_MAX_SIDE = 256
 export const CANVAS_IMAGE_PROXY_HUGE_BATCH_MAX_SIDE = 192
 export const CANVAS_IMAGE_RGBA_BYTES_PER_PIXEL = 4
+const CANVAS_IMAGE_BITMAP_PREMULTIPLY_ALPHA = 'none' as const
 
 export type LoadedCanvasImage = {
   img: HTMLImageElement
@@ -98,7 +99,8 @@ async function buildCanvasImagePreview(
         return await createImageBitmap(image, {
           resizeWidth: width,
           resizeHeight: height,
-          resizeQuality: 'high'
+          resizeQuality: 'high',
+          premultiplyAlpha: CANVAS_IMAGE_BITMAP_PREMULTIPLY_ALPHA
         })
       } catch {
         // Fall back to canvas when ImageBitmap resize is unavailable for this source.
@@ -445,7 +447,8 @@ export async function buildCanvasImagePreviewFromBlob({
     return await createImageBitmap(blob, {
       resizeWidth: previewWidth,
       resizeHeight: previewHeight,
-      resizeQuality: 'high'
+      resizeQuality: 'high',
+      premultiplyAlpha: CANVAS_IMAGE_BITMAP_PREMULTIPLY_ALPHA
     })
   } catch {
     return null

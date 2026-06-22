@@ -1,6 +1,16 @@
-import { FieldType, ObjectInfo, ObjectInfoInputField } from '@shared/comfy/types'
+import { FieldType, ObjectInfo, ObjectInfoInputField, WorkflowNode } from '@shared/comfy/types'
 
-type FieldCondition = (objectInfos: ObjectInfo, objInfoField: ObjectInfoInputField) => boolean
+export type FieldConditionContext = {
+  nodeId?: string
+  field?: string
+  node?: WorkflowNode
+}
+
+type FieldCondition = (
+  objectInfos: ObjectInfo,
+  objInfoField: ObjectInfoInputField,
+  context?: FieldConditionContext
+) => boolean
 
 /**
  * @description 判断字段类型是否符合条件
@@ -112,8 +122,29 @@ export const conditionFieldComfySelect = (
  * @param objInfoField
  * @returns
  */
-export const conditionFieldSeed = (objectInfos: ObjectInfo, objInfoField: ObjectInfoInputField) => {
-  return objInfoField[0] === 'INT' && objInfoField[1]?.['control_after_generate'] === true
+export const conditionFieldSeed = (
+  objectInfos: ObjectInfo,
+  objInfoField: ObjectInfoInputField,
+  context?: FieldConditionContext
+) => {
+  if (objInfoField[0] !== 'INT') {
+    return false
+  }
+
+  if (objInfoField[1]?.['control_after_generate'] === true) {
+    return true
+  }
+
+  const fieldName = context?.field?.toLowerCase()
+  const nodeClassType = context?.node?.class_type
+  const fieldValue = context?.field ? context.node?.inputs?.[context.field] : undefined
+
+  return (
+    nodeClassType === 'PrimitiveInt' &&
+    fieldName === 'value' &&
+    typeof fieldValue === 'number' &&
+    Number.isInteger(fieldValue)
+  )
 }
 
 type NodeCondition = (objInfoNode: ObjectInfo) => boolean

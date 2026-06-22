@@ -67,8 +67,33 @@ const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
 const buildDeferredComfyImageValue = async (file: File): Promise<string> => {
   const mimeType = inferImageMimeTypeFromFile(file)
   const buffer = await readBlobArrayBuffer(file)
+  const fileName = file.name || `image-${Date.now()}.png`
+  const imageBytes = new Uint8Array(buffer)
+
+  try {
+    const saved = await api().svcFs.saveQAppInputImage({
+      filename: fileName,
+      image: imageBytes
+    })
+    if (saved.fullPath) {
+      return encodeDeferredComfyImageInputValue({
+        fileName,
+        mimeType,
+        sizeBytes: file.size,
+        filePath: saved.fullPath
+      })
+    }
+  } catch (error) {
+    // Keep drag/drop usable even if the durable cache is unavailable.
+    // The inline payload path is also used for older saved form state.
+    console.warn(
+      '[InputComfyImage] Failed to persist image input, falling back to inline data:',
+      error
+    )
+  }
+
   return encodeDeferredComfyImageInputValue({
-    fileName: file.name || `image-${Date.now()}.png`,
+    fileName,
     mimeType,
     sizeBytes: file.size,
     dataUrl: `data:${mimeType};base64,${arrayBufferToBase64(buffer)}`
@@ -190,17 +215,22 @@ const InputComfyImage: React.FC<InputComfyImageProps> = ({
     }
 
     const deferredValue = parseDeferredComfyImageInputValue(internalValue)
-    if (deferredValue) {
+    if (deferredValue?.dataUrl) {
       updatePreviewUrl(deferredValue.dataUrl)
       return
     }
 
     ;(async () => {
       try {
-        const res = await api().svcComfy.getView(valueToFileItem(internalValue))
+        const image: Uint8Array = deferredValue?.filePath
+          ? (
+              await api().svcFs.readImageFromPath({
+                fullPath: deferredValue.filePath
+              })
+            ).image
+          : (await api().svcComfy.getView(valueToFileItem(internalValue))).result
         if (previewRequestIdRef.current !== requestId) return
-        const image: Uint8Array = res.result
-        const blob = new Blob([image as BlobPart], { type: 'image/*' })
+        const blob = new Blob([image as BlobPart], { type: deferredValue?.mimeType || 'image/*' })
         const url = URL.createObjectURL(blob)
         urlToRevoke = url
         updatePreviewUrl(url)

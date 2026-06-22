@@ -6,9 +6,14 @@ export type LLMReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' 
 export type ChatCapabilityProfile = {
   model_name?: string
   auth_mode?: string
+  call_type?: string
   provider?: LLMProviderOption | string
   deployment?: LLMDeployment | string
   base_url?: string
+  context_window_tokens?: number
+  context_budget_tokens?: number
+  contextWindowTokens?: number
+  contextBudgetTokens?: number
 }
 
 export type ChatProfileCapabilities = {
@@ -37,20 +42,66 @@ const normalizeModelName = (value?: string): string =>
     .trim()
     .toLowerCase()
 
-const isOpenAICompatibleProfile = (profile?: ChatCapabilityProfile | null): boolean => {
+const normalizePositiveFiniteTokenCount = (value?: number): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined
+
+const deriveContextBudgetTokens = (
+  contextWindowTokens: number | undefined,
+  explicitBudgetTokens?: number
+): number | undefined => {
+  if (explicitBudgetTokens) {
+    return contextWindowTokens
+      ? Math.min(explicitBudgetTokens, contextWindowTokens)
+      : explicitBudgetTokens
+  }
+
+  if (!contextWindowTokens) {
+    return undefined
+  }
+
+  return Math.max(
+    64_000,
+    Math.min(
+      Math.floor(contextWindowTokens * CONTEXT_BUDGET_RATIO),
+      Math.max(1, contextWindowTokens - RESERVED_OUTPUT_AND_BUFFER_TOKENS)
+    )
+  )
+}
+
+const resolveExplicitContextTokens = (
+  profile?: ChatCapabilityProfile | null
+): Pick<ChatProfileCapabilities, 'contextWindowTokens' | 'contextBudgetTokens'> => {
+  const contextWindowTokens = normalizePositiveFiniteTokenCount(
+    profile?.context_window_tokens ?? profile?.contextWindowTokens
+  )
+  const explicitContextBudgetTokens = normalizePositiveFiniteTokenCount(
+    profile?.context_budget_tokens ?? profile?.contextBudgetTokens
+  )
+  const contextBudgetTokens = deriveContextBudgetTokens(
+    contextWindowTokens,
+    explicitContextBudgetTokens
+  )
+
+  return {
+    ...(contextWindowTokens ? { contextWindowTokens } : {}),
+    ...(contextBudgetTokens ? { contextBudgetTokens } : {})
+  }
+}
+
+const isCodexReasoningProfile = (profile?: ChatCapabilityProfile | null): boolean => {
   if (!profile) {
     return false
   }
 
-  const provider = String(profile.provider || '')
-    .trim()
-    .toLowerCase()
-  if (provider === 'openai') {
+  if (profile.auth_mode === 'codex_oauth') {
     return true
   }
 
-  const modelName = normalizeModelName(profile.model_name)
-  return modelName.startsWith('gpt-5')
+  return (
+    String(profile.call_type || '')
+      .trim()
+      .toLowerCase() === 'codex'
+  )
 }
 
 const dedupeReasoningEfforts = (efforts: readonly LLMReasoningEffort[]): LLMReasoningEffort[] => {
@@ -100,10 +151,13 @@ export const resolveChatProfileCapabilities = (
     return nextCapabilities
   }
 
-  if (!isOpenAICompatibleProfile(profile)) {
+  if (!isCodexReasoningProfile(profile)) {
+    const explicitContextTokens = resolveExplicitContextTokens(profile)
+
     return applyExtensions({
       reasoningEfforts: [],
-      supportsAutoContextCompression: false
+      ...explicitContextTokens,
+      supportsAutoContextCompression: Boolean(explicitContextTokens.contextBudgetTokens)
     })
   }
 
@@ -153,22 +207,20 @@ export const resolveChatProfileCapabilities = (
   const normalizedDefaultReasoningEffort =
     normalizeReasoningEffort(defaultReasoningEffort, normalizedEfforts) ||
     normalizedEfforts[normalizedEfforts.length - 1]
-  const contextBudgetTokens = contextWindowTokens
-    ? Math.max(
-        64_000,
-        Math.min(
-          Math.floor(contextWindowTokens * CONTEXT_BUDGET_RATIO),
-          contextWindowTokens - RESERVED_OUTPUT_AND_BUFFER_TOKENS
-        )
-      )
-    : undefined
+  const explicitContextTokens = resolveExplicitContextTokens(profile)
+  const resolvedContextWindowTokens =
+    explicitContextTokens.contextWindowTokens || contextWindowTokens
+  const contextBudgetTokens = deriveContextBudgetTokens(
+    resolvedContextWindowTokens,
+    explicitContextTokens.contextBudgetTokens
+  )
 
   return applyExtensions({
     reasoningEfforts: normalizedEfforts,
     ...(normalizedDefaultReasoningEffort
       ? { defaultReasoningEffort: normalizedDefaultReasoningEffort }
       : {}),
-    ...(contextWindowTokens ? { contextWindowTokens } : {}),
+    ...(resolvedContextWindowTokens ? { contextWindowTokens: resolvedContextWindowTokens } : {}),
     ...(contextBudgetTokens ? { contextBudgetTokens } : {}),
     supportsAutoContextCompression: Boolean(contextBudgetTokens)
   })
@@ -195,9 +247,9 @@ export const normalizeReasoningEffort = (
     return undefined
   }
 
-  if (!supportedEfforts?.length) {
-    return candidate
+  if (supportedEfforts) {
+    return supportedEfforts.includes(candidate) ? candidate : undefined
   }
 
-  return supportedEfforts.includes(candidate) ? candidate : undefined
+  return candidate
 }

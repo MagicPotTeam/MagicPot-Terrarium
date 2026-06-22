@@ -24,7 +24,9 @@ import {
   PictureAsPdfOutlined as PdfFileIcon,
   ViewInAr as Model3DIcon,
   InsertDriveFile as FileIcon,
-  SlideshowOutlined as PowerPointFileIcon
+  SlideshowOutlined as PowerPointFileIcon,
+  KeyboardArrowDown as CollapseIcon,
+  KeyboardArrowRight as ExpandIcon
 } from '@mui/icons-material'
 import {
   CheckCircleOutline as CopyDoneIcon,
@@ -187,6 +189,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   const isLight = theme.palette.mode === 'light'
   const { notifySuccess } = useMessage()
   const messages = React.useMemo(() => currentSession?.messages ?? [], [currentSession?.messages])
+  const contextCompressionSummary = currentSession?.contextCompression
   const sidecarExportEntries = React.useMemo(
     () => resolveAssistantSidecarExportEntries(messages, currentSession?.skillId),
     [messages, currentSession?.skillId]
@@ -211,7 +214,17 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         width: '100%'
       }}
     >
-      {messages.length === 0 && (
+      {contextCompressionSummary ? (
+        <ContextCompressionSummaryCard
+          summary={contextCompressionSummary.summary}
+          coveredMessageCount={contextCompressionSummary.coveredMessageCount}
+          updatedAt={contextCompressionSummary.updatedAt}
+          manual={contextCompressionSummary.manual}
+          t={t}
+          theme={theme}
+        />
+      ) : null}
+      {messages.length === 0 && !contextCompressionSummary && (
         <Box
           sx={{
             flex: 1,
@@ -313,6 +326,160 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         />
       ) : null}
       <div ref={messagesEndRef} />
+    </Box>
+  )
+}
+
+const ContextCompressionSummaryCard: React.FC<{
+  summary: string
+  coveredMessageCount: number
+  updatedAt?: number
+  manual?: boolean
+  t: (key: string, options?: any) => string
+  theme: any
+}> = ({ summary, coveredMessageCount, updatedAt, manual, t, theme }) => {
+  const [expanded, setExpanded] = React.useState(false)
+  const timeLabel = updatedAt
+    ? new Date(updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : ''
+  const triggerLabel = manual
+    ? t('chat.context_summary_manual', { defaultValue: 'Manual' })
+    : t('chat.context_summary_auto', { defaultValue: 'Automatic' })
+  const title = t('chat.context_summary_title', { defaultValue: 'Context compressed' })
+  const messageCountLabel = t('chat.context_summary_message_count', {
+    defaultValue: '{{count}} messages',
+    count: coveredMessageCount
+  })
+  const summaryLabel = t('chat.context_summary_expand_label', {
+    defaultValue: 'Compressed context'
+  })
+
+  return (
+    <Box sx={{ px: 2, mb: 1.5, display: 'flex', justifyContent: 'flex-start' }}>
+      <Box
+        data-testid="chat-context-summary-card"
+        sx={{
+          maxWidth: '85%',
+          minWidth: expanded ? 'min(680px, 100%)' : 'min(420px, 100%)',
+          borderRadius: '9px',
+          border: '1px solid',
+          borderColor:
+            theme.palette.mode === 'light' ? 'rgba(124, 58, 237, 0.18)' : 'rgba(255,255,255,0.08)',
+          bgcolor:
+            theme.palette.mode === 'light' ? 'rgba(247, 244, 255, 0.92)' : 'rgba(48, 40, 53, 0.92)',
+          boxShadow:
+            theme.palette.mode === 'light'
+              ? '0 8px 20px rgba(88, 28, 135, 0.08)'
+              : '0 10px 24px rgba(0,0,0,0.18)',
+          overflow: 'hidden'
+        }}
+      >
+        <Box
+          component="button"
+          type="button"
+          data-testid="chat-context-summary-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+          sx={{
+            width: '100%',
+            border: 0,
+            bgcolor: 'transparent',
+            color: 'text.primary',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.75,
+            px: 1,
+            py: 0.65,
+            font: 'inherit',
+            textAlign: 'left',
+            '&:hover': {
+              bgcolor:
+                theme.palette.mode === 'light'
+                  ? 'rgba(124, 58, 237, 0.06)'
+                  : 'rgba(255,255,255,0.04)'
+            }
+          }}
+        >
+          <Typography component="span" sx={{ color: '#f59e0b', fontSize: 12, lineHeight: 1 }}>
+            ◉
+          </Typography>
+          <Typography
+            component="span"
+            sx={{
+              fontWeight: 800,
+              fontSize: 12.5,
+              color: theme.palette.mode === 'light' ? '#5b21b6' : '#f5d0fe',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {title}
+          </Typography>
+          <Typography
+            component="span"
+            sx={{
+              minWidth: 0,
+              flex: 1,
+              color: 'text.secondary',
+              fontSize: 11.5,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {triggerLabel} · {messageCountLabel}
+            {timeLabel ? ` · ${timeLabel}` : ''}
+          </Typography>
+          {expanded ? (
+            <CollapseIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
+          ) : (
+            <ExpandIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
+          )}
+        </Box>
+        {expanded ? (
+          <Box
+            data-testid="chat-context-summary-content"
+            sx={{
+              px: 1.1,
+              pb: 1,
+              pt: 0.35,
+              borderTop: '1px solid',
+              borderColor:
+                theme.palette.mode === 'light'
+                  ? 'rgba(124, 58, 237, 0.14)'
+                  : 'rgba(255,255,255,0.08)'
+            }}
+          >
+            <Typography
+              variant="caption"
+              sx={{ display: 'block', mb: 0.65, color: 'text.secondary', fontWeight: 600 }}
+            >
+              ✓ {summaryLabel}
+            </Typography>
+            <Box
+              sx={{
+                maxHeight: 320,
+                overflow: 'auto',
+                borderRadius: '8px',
+                bgcolor:
+                  theme.palette.mode === 'light' ? 'rgba(255,255,255,0.76)' : 'rgba(0,0,0,0.18)',
+                px: 1,
+                py: 0.85,
+                fontSize: 13,
+                '& p': { my: 0.4 },
+                '& ul, & ol': { my: 0.5, pl: 2.2 },
+                '& h1, & h2, & h3': { mt: 1, mb: 0.55, fontSize: '0.92rem' },
+                '& code': {
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                  fontSize: '0.84em'
+                }
+              }}
+            >
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{summary}</ReactMarkdown>
+            </Box>
+          </Box>
+        ) : null}
+      </Box>
     </Box>
   )
 }
@@ -1618,12 +1785,11 @@ const AssistantMarkdownContent: React.FC<{
               }
             }}
             onClick={() => {
-              const a = document.createElement('a')
-              a.href = normalizeLocalMediaUrl(url)
-              a.download = getDownloadFileNameFromUrl(url, 'video.mp4')
-              document.body.appendChild(a)
-              a.click()
-              document.body.removeChild(a)
+              onDownloadAttachment({
+                type: 'video',
+                url,
+                fileName: getDownloadFileNameFromUrl(url, 'video.mp4')
+              })
             }}
             title="Download or reveal the file"
           >

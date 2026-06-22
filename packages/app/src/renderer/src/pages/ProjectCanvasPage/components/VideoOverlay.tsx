@@ -27,6 +27,22 @@ type VideoDragSession = {
   moved: boolean
 }
 
+type VideoDragHandlerState = {
+  canvasContainerRef: React.RefObject<HTMLDivElement | null>
+  stagePos: { x: number; y: number }
+  stageScale: number
+  itemId: string
+  scaleX: number
+  scaleY: number
+  rotation: number
+  applyVideoLayout: (
+    detail: Pick<CanvasVideoItem, 'x' | 'y' | 'scaleX' | 'scaleY' | 'rotation'>
+  ) => void
+  resetVideoLayout: () => void
+  onDragEnd: (id: string, x: number, y: number, event?: PointerEvent) => void
+  onSelect: () => void
+}
+
 function formatTime(seconds: number): string {
   const minutes = Math.floor(seconds / 60)
   const remainderSeconds = Math.floor(seconds % 60)
@@ -87,6 +103,8 @@ const VideoOverlay: React.FC<VideoOverlayProps> = ({
   const boxRef = useRef<HTMLElement>(null)
   const syncFrameRef = useRef<number | null>(null)
   const dragSessionRef = useRef<VideoDragSession | null>(null)
+  const removeDragListenersRef = useRef<(() => void) | null>(null)
+  const dragHandlerStateRef = useRef<VideoDragHandlerState | null>(null)
   const suppressNextClickRef = useRef(false)
   const lastAudibleVolumeRef = useRef(item.volume > 0 ? item.volume : 0.5)
   const [currentTime, setCurrentTime] = useState(0)
@@ -269,16 +287,93 @@ const VideoOverlay: React.FC<VideoOverlayProps> = ({
   }, [applyVideoLayout, item.id])
 
   useEffect(() => {
+    dragHandlerStateRef.current = {
+      canvasContainerRef,
+      stagePos,
+      stageScale,
+      itemId: item.id,
+      scaleX: item.scaleX,
+      scaleY: item.scaleY,
+      rotation: item.rotation,
+      applyVideoLayout,
+      resetVideoLayout,
+      onDragEnd,
+      onSelect
+    }
+  }, [
+    applyVideoLayout,
+    canvasContainerRef,
+    item.id,
+    item.rotation,
+    item.scaleX,
+    item.scaleY,
+    onDragEnd,
+    onSelect,
+    resetVideoLayout,
+    stagePos,
+    stageScale
+  ])
+
+  const removeDragListeners = useCallback(() => {
+    removeDragListenersRef.current?.()
+    removeDragListenersRef.current = null
+  }, [])
+
+  const finishDragSession = useCallback(
+    (event: PointerEvent, cancel = false) => {
+      const currentSession = dragSessionRef.current
+      if (!currentSession || event.pointerId !== currentSession.pointerId) {
+        return
+      }
+
+      dragSessionRef.current = null
+      removeDragListeners()
+
+      const state = dragHandlerStateRef.current
+      if (!state) {
+        return
+      }
+
+      if (cancel) {
+        state.resetVideoLayout()
+        return
+      }
+
+      if (!currentSession.moved) {
+        state.resetVideoLayout()
+        return
+      }
+
+      suppressNextClickRef.current = true
+      window.setTimeout(() => {
+        suppressNextClickRef.current = false
+      }, 0)
+      state.onDragEnd(state.itemId, currentSession.latestX, currentSession.latestY, event)
+      state.onSelect()
+    },
+    [removeDragListeners]
+  )
+
+  const addDragListeners = useCallback(() => {
+    if (removeDragListenersRef.current) {
+      return
+    }
+
     const handlePointerMove = (event: PointerEvent) => {
       const currentSession = dragSessionRef.current
       if (!currentSession || event.pointerId !== currentSession.pointerId) {
         return
       }
 
+      const state = dragHandlerStateRef.current
+      if (!state) {
+        return
+      }
+
       const point = getCanvasPointFromClient(
-        canvasContainerRef.current,
-        stagePos,
-        stageScale,
+        state.canvasContainerRef.current,
+        state.stagePos,
+        state.stageScale,
         event.clientX,
         event.clientY
       )
@@ -302,39 +397,17 @@ const VideoOverlay: React.FC<VideoOverlayProps> = ({
         moved
       }
 
-      applyVideoLayout({
+      state.applyVideoLayout({
         x: nextX,
         y: nextY,
-        scaleX: item.scaleX,
-        scaleY: item.scaleY,
-        rotation: item.rotation
+        scaleX: state.scaleX,
+        scaleY: state.scaleY,
+        rotation: state.rotation
       })
     }
 
-    const finishDragSession = (event: PointerEvent, cancel = false) => {
-      const currentSession = dragSessionRef.current
-      if (!currentSession || event.pointerId !== currentSession.pointerId) {
-        return
-      }
-
-      dragSessionRef.current = null
-
-      if (cancel) {
-        resetVideoLayout()
-        return
-      }
-
-      if (!currentSession.moved) {
-        resetVideoLayout()
-        return
-      }
-
-      suppressNextClickRef.current = true
-      window.setTimeout(() => {
-        suppressNextClickRef.current = false
-      }, 0)
-      onDragEnd(item.id, currentSession.latestX, currentSession.latestY, event)
-      onSelect()
+    const handlePointerUp = (event: PointerEvent) => {
+      finishDragSession(event)
     }
 
     const handlePointerCancel = (event: PointerEvent) => {
@@ -342,27 +415,22 @@ const VideoOverlay: React.FC<VideoOverlayProps> = ({
     }
 
     window.addEventListener('pointermove', handlePointerMove, true)
-    window.addEventListener('pointerup', finishDragSession, true)
+    window.addEventListener('pointerup', handlePointerUp, true)
     window.addEventListener('pointercancel', handlePointerCancel, true)
 
-    return () => {
+    removeDragListenersRef.current = () => {
       window.removeEventListener('pointermove', handlePointerMove, true)
-      window.removeEventListener('pointerup', finishDragSession, true)
+      window.removeEventListener('pointerup', handlePointerUp, true)
       window.removeEventListener('pointercancel', handlePointerCancel, true)
     }
-  }, [
-    applyVideoLayout,
-    canvasContainerRef,
-    item.id,
-    item.rotation,
-    item.scaleX,
-    item.scaleY,
-    onDragEnd,
-    onSelect,
-    resetVideoLayout,
-    stagePos,
-    stageScale
-  ])
+  }, [finishDragSession])
+
+  useEffect(() => {
+    return () => {
+      dragSessionRef.current = null
+      removeDragListeners()
+    }
+  }, [removeDragListeners])
 
   const handleRootPointerDown = useCallback(
     (event: React.PointerEvent<HTMLElement>) => {
@@ -392,8 +460,18 @@ const VideoOverlay: React.FC<VideoOverlayProps> = ({
         latestY: item.y,
         moved: false
       }
+      addDragListeners()
     },
-    [allowPointerPassthrough, canvasContainerRef, item.locked, item.x, item.y, stagePos, stageScale]
+    [
+      addDragListeners,
+      allowPointerPassthrough,
+      canvasContainerRef,
+      item.locked,
+      item.x,
+      item.y,
+      stagePos,
+      stageScale
+    ]
   )
 
   const handleRootClick = useCallback(() => {

@@ -1,4 +1,4 @@
-import JSZip from 'jszip'
+import type JSZip from 'jszip'
 import { MODEL_3D_EXTENSIONS, getFileExtension, isModelArchiveFile } from './types'
 
 export type ExtractedModelArchive = {
@@ -10,6 +10,44 @@ export type ExtractedModelArchive = {
 export type ModelPackageFileEntry = {
   path: string
   file: File
+}
+
+export type ModelArchiveLimitKind = 'archiveSize' | 'entryCount' | 'totalExtractedSize'
+
+export type ModelArchiveLimits = {
+  maxArchiveBytes: number
+  maxEntries: number
+  maxTotalExtractedBytes: number
+}
+
+export const MODEL_ARCHIVE_DEFAULT_LIMITS: ModelArchiveLimits = {
+  maxArchiveBytes: 512 * 1024 * 1024,
+  maxEntries: 4096,
+  maxTotalExtractedBytes: 1024 * 1024 * 1024
+}
+
+export class ModelArchiveLimitExceededError extends Error {
+  limitKind: ModelArchiveLimitKind
+  limit: number
+  actual: number
+
+  constructor(limitKind: ModelArchiveLimitKind, limit: number, actual: number) {
+    super(`Model archive ${limitKind} exceeds safety limit (${actual} > ${limit})`)
+    this.name = 'ModelArchiveLimitExceededError'
+    this.limitKind = limitKind
+    this.limit = limit
+    this.actual = actual
+  }
+}
+
+export class ModelArchiveMalformedError extends Error {
+  cause?: unknown
+
+  constructor(message = 'Model archive is malformed or could not be read', cause?: unknown) {
+    super(message)
+    this.name = 'ModelArchiveMalformedError'
+    this.cause = cause
+  }
 }
 
 export class ModelPackageUnsupportedFormatError extends Error {
@@ -55,6 +93,33 @@ const MODEL_EXTENSION_ORDER = new Map(
   MODEL_3D_EXTENSIONS.map((extension, index) => [extension, index])
 )
 
+type ModelPackagePathEntry = {
+  path: string
+}
+
+type SelectedModelPackageEntries<T extends ModelPackagePathEntry> = {
+  selectedModelEntry: T
+  linkedAssetEntries: T[]
+}
+
+type ZipEntrySizeData = {
+  uncompressedSize?: number
+}
+
+type JSZipObjectWithSize = JSZip.JSZipObject & {
+  _data?: ZipEntrySizeData
+}
+
+type JSZipObjectWithInternalStream = JSZip.JSZipObject & {
+  internalStream?: (type: 'uint8array') => JSZip.JSZipStreamHelper<Uint8Array>
+}
+
+type ModelArchiveZipEntry = {
+  path: string
+  entry: JSZip.JSZipObject
+  uncompressedSize: number
+}
+
 const normalizeArchivePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+/, '')
 
 const getBaseName = (value: string) => {
@@ -75,8 +140,10 @@ const getStem = (value: string) => {
   return extension ? baseName.slice(0, -extension.length) : baseName
 }
 
-const stripCommonLeadingDirectories = (entries: ModelPackageFileEntry[]) => {
-  if (entries.length === 0) return entries
+const stripCommonLeadingDirectories = <T extends ModelPackagePathEntry>(
+  entries: readonly T[]
+): T[] => {
+  if (entries.length === 0) return []
 
   const segmentedPaths = entries.map((entry) =>
     normalizeArchivePath(entry.path).split('/').filter(Boolean)
@@ -144,7 +211,42 @@ const shouldIncludeAssetEntry = (
   return entryDir === modelDir || normalizedEntryPath.startsWith(siblingFbmDir)
 }
 
-export const listContainedModelExtensions = (entries: ModelPackageFileEntry[]): string[] => {
+const selectModelPackageEntries = <T extends ModelPackagePathEntry>(
+  entries: readonly T[],
+  packageName = 'package',
+  allowedExtensions: readonly string[] = MODEL_3D_EXTENSIONS
+): SelectedModelPackageEntries<T> | null => {
+  const normalizedEntries = stripCommonLeadingDirectories(entries).filter((entry) => entry.path)
+  const modelEntries = normalizedEntries.filter((entry) =>
+    allowedExtensions.includes(getFileExtension(entry.path))
+  )
+
+  if (modelEntries.length === 0) {
+    return null
+  }
+
+  const packageStem = getStem(packageName).replace(/\.fbm$/i, '')
+  const modelPaths = modelEntries.map((entry) => entry.path)
+  const selectedModelEntry = [...modelEntries].sort(
+    (left, right) =>
+      scoreModelEntry(right.path, packageStem) - scoreModelEntry(left.path, packageStem)
+  )[0]
+  const includeAllFiles = modelEntries.length === 1
+  const linkedAssetEntries = normalizedEntries.filter((entry) =>
+    shouldIncludeAssetEntry(entry.path, selectedModelEntry.path, modelPaths, includeAllFiles)
+  )
+
+  return {
+    selectedModelEntry,
+    linkedAssetEntries
+  }
+}
+
+type ModelPackageExtensionEntry = ModelPackagePathEntry | ModelPackageFileEntry
+
+export const listContainedModelExtensions = (
+  entries: readonly ModelPackageExtensionEntry[]
+): string[] => {
   const extensions = new Set<string>()
 
   for (const entry of stripCommonLeadingDirectories(entries)) {
@@ -166,73 +268,193 @@ export function extractModelPackageFiles(
   packageName = 'package',
   allowedExtensions: readonly string[] = MODEL_3D_EXTENSIONS
 ): ExtractedModelArchive | null {
-  const normalizedEntries = stripCommonLeadingDirectories(entries).filter(
-    (entry) => entry.path && entry.file
-  )
-  const modelEntries = normalizedEntries.filter((entry) =>
-    allowedExtensions.includes(getFileExtension(entry.path))
+  const selectedEntries = selectModelPackageEntries(
+    entries.filter((entry) => entry.path && entry.file),
+    packageName,
+    allowedExtensions
   )
 
-  if (modelEntries.length === 0) {
+  if (!selectedEntries) {
     return null
   }
 
-  const packageStem = getStem(packageName).replace(/\.fbm$/i, '')
-  const modelPaths = modelEntries.map((entry) => entry.path)
-  const selectedModelEntry = [...modelEntries].sort(
-    (left, right) =>
-      scoreModelEntry(right.path, packageStem) - scoreModelEntry(left.path, packageStem)
-  )[0]
-
-  const includeAllFiles = modelEntries.length === 1
   const linkedAssets: Record<string, string> = {}
 
-  for (const entry of normalizedEntries) {
-    if (
-      !shouldIncludeAssetEntry(entry.path, selectedModelEntry.path, modelPaths, includeAllFiles)
-    ) {
-      continue
-    }
-
+  for (const entry of selectedEntries.linkedAssetEntries) {
     linkedAssets[entry.path] = URL.createObjectURL(entry.file)
   }
 
   return {
-    file: selectedModelEntry.file,
+    file: selectedEntries.selectedModelEntry.file,
     linkedAssets,
-    sourcePath: selectedModelEntry.path
+    sourcePath: selectedEntries.selectedModelEntry.path
   }
+}
+
+const resolveModelArchiveLimits = (limits?: Partial<ModelArchiveLimits>): ModelArchiveLimits => ({
+  maxArchiveBytes: limits?.maxArchiveBytes ?? MODEL_ARCHIVE_DEFAULT_LIMITS.maxArchiveBytes,
+  maxEntries: limits?.maxEntries ?? MODEL_ARCHIVE_DEFAULT_LIMITS.maxEntries,
+  maxTotalExtractedBytes:
+    limits?.maxTotalExtractedBytes ?? MODEL_ARCHIVE_DEFAULT_LIMITS.maxTotalExtractedBytes
+})
+
+const assertModelArchiveLimit = (
+  limitKind: ModelArchiveLimitKind,
+  actual: number,
+  limit: number
+) => {
+  if (actual > limit) {
+    throw new ModelArchiveLimitExceededError(limitKind, limit, actual)
+  }
+}
+
+const getZipEntryUncompressedSize = (entry: JSZip.JSZipObject) => {
+  const uncompressedSize = (entry as JSZipObjectWithSize)._data?.uncompressedSize
+
+  if (
+    typeof uncompressedSize !== 'number' ||
+    !Number.isFinite(uncompressedSize) ||
+    uncompressedSize < 0
+  ) {
+    throw new ModelArchiveMalformedError(
+      `Model archive entry "${entry.name}" is missing valid size metadata`
+    )
+  }
+
+  return uncompressedSize
+}
+
+const readModelArchiveZip = async (file: File) => {
+  try {
+    const { default: JSZipCtor } = await import('jszip')
+    return await JSZipCtor.loadAsync(file)
+  } catch (error) {
+    throw new ModelArchiveMalformedError('Model archive is malformed or could not be read', error)
+  }
+}
+
+const getModelArchiveZipEntries = (
+  zip: JSZip,
+  limits: ModelArchiveLimits
+): ModelArchiveZipEntry[] => {
+  const allEntries = Object.values(zip.files)
+  assertModelArchiveLimit('entryCount', allEntries.length, limits.maxEntries)
+
+  const archiveEntries: ModelArchiveZipEntry[] = []
+  let totalExtractedSize = 0
+
+  for (const entry of allEntries) {
+    if (entry.dir) continue
+
+    const uncompressedSize = getZipEntryUncompressedSize(entry)
+    totalExtractedSize += uncompressedSize
+    assertModelArchiveLimit('totalExtractedSize', totalExtractedSize, limits.maxTotalExtractedBytes)
+    archiveEntries.push({
+      path: normalizeArchivePath(entry.name),
+      entry,
+      uncompressedSize
+    })
+  }
+
+  return archiveEntries
+}
+
+const extractZipEntryFile = async (archiveEntry: ModelArchiveZipEntry) => {
+  const chunks: Uint8Array[] = []
+  let extractedSize = 0
+
+  try {
+    const entryWithInternalStream = archiveEntry.entry as JSZipObjectWithInternalStream
+    const stream = entryWithInternalStream.internalStream?.('uint8array')
+
+    if (!stream) {
+      const blob = await archiveEntry.entry.async('blob')
+      if (blob.size > archiveEntry.uncompressedSize) {
+        throw new ModelArchiveMalformedError(
+          `Model archive entry "${archiveEntry.path}" expanded beyond its declared size`
+        )
+      }
+      return new File([blob], getBaseName(archiveEntry.path), {
+        type: blob.type || 'application/octet-stream'
+      })
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      stream
+        .on('data', (chunk) => {
+          extractedSize += chunk.byteLength
+          if (extractedSize > archiveEntry.uncompressedSize) {
+            stream.pause()
+            reject(
+              new ModelArchiveMalformedError(
+                `Model archive entry "${archiveEntry.path}" expanded beyond its declared size`
+              )
+            )
+            return
+          }
+          chunks.push(chunk)
+        })
+        .on('error', reject)
+        .on('end', resolve)
+        .resume()
+    })
+  } catch (error) {
+    if (error instanceof ModelArchiveMalformedError) {
+      throw error
+    }
+    throw new ModelArchiveMalformedError(
+      `Model archive entry "${archiveEntry.path}" could not be extracted`,
+      error
+    )
+  }
+
+  const fileParts: BlobPart[] = chunks.map((chunk) => {
+    const copy = new Uint8Array(chunk.byteLength)
+    copy.set(chunk)
+    return copy as Uint8Array<ArrayBuffer>
+  })
+
+  return new File(fileParts, getBaseName(archiveEntry.path), {
+    type: 'application/octet-stream'
+  })
 }
 
 export async function extractModelArchive(
   file: File,
-  allowedExtensions: readonly string[] = MODEL_3D_EXTENSIONS
+  allowedExtensions: readonly string[] = MODEL_3D_EXTENSIONS,
+  limits?: Partial<ModelArchiveLimits>
 ): Promise<ExtractedModelArchive | null> {
   if (!isModelArchiveFile(file.name)) return null
 
-  const zip = await JSZip.loadAsync(file)
-  const entries = Object.values(zip.files).filter((entry) => !entry.dir)
-  const packageEntries: ModelPackageFileEntry[] = []
+  const resolvedLimits = resolveModelArchiveLimits(limits)
+  assertModelArchiveLimit('archiveSize', file.size, resolvedLimits.maxArchiveBytes)
+
+  const zip = await readModelArchiveZip(file)
+  const archiveEntries = getModelArchiveZipEntries(zip, resolvedLimits)
+  const selectedEntries = selectModelPackageEntries(archiveEntries, file.name, allowedExtensions)
+
+  if (!selectedEntries) {
+    throw new ModelPackageUnsupportedFormatError(listContainedModelExtensions(archiveEntries))
+  }
+
   const createdUrls: string[] = []
 
   try {
-    for (const entry of entries) {
-      const blob = await entry.async('blob')
-      packageEntries.push({
-        path: normalizeArchivePath(entry.name),
-        file: new File([blob], getBaseName(entry.name), {
-          type: blob.type || 'application/octet-stream'
-        })
-      })
+    const selectedModelFile = await extractZipEntryFile(selectedEntries.selectedModelEntry)
+    const linkedAssets: Record<string, string> = {}
+
+    for (const entry of selectedEntries.linkedAssetEntries) {
+      const assetFile = await extractZipEntryFile(entry)
+      const url = URL.createObjectURL(assetFile)
+      createdUrls.push(url)
+      linkedAssets[entry.path] = url
     }
 
-    const extracted = extractModelPackageFiles(packageEntries, file.name, allowedExtensions)
-    if (!extracted) {
-      throw new ModelPackageUnsupportedFormatError(listContainedModelExtensions(packageEntries))
+    return {
+      file: selectedModelFile,
+      linkedAssets,
+      sourcePath: selectedEntries.selectedModelEntry.path
     }
-
-    Object.values(extracted.linkedAssets).forEach((url) => createdUrls.push(url))
-    return extracted
   } catch (error) {
     createdUrls.forEach((url) => URL.revokeObjectURL(url))
     throw error

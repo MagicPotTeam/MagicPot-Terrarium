@@ -16,7 +16,14 @@ import type {
 } from '@shared/config/config'
 import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 import { LLMCli } from './types'
-import { OpenAIAPICli, GeminiAPICli, ClaudeAPICli, OllamaAPICli, type FetchImpl } from './clients'
+import {
+  OpenAIAPICli,
+  GeminiAPICli,
+  ClaudeAPICli,
+  OpencodeZenAPICli,
+  OllamaAPICli,
+  type FetchImpl
+} from './clients'
 import { KlingVideoAPICli, VolcengineSeedanceAPICli } from './videoClients'
 
 type ProfileLike = {
@@ -25,6 +32,7 @@ type ProfileLike = {
   call_type?: LLMProfileCallType
   auth_mode?: string
   base_url?: string
+  codex_fast_mode?: boolean
   local_model_path?: string
   model_name?: string
   provider?: LLMProviderOption
@@ -34,6 +42,13 @@ type ProfileLike = {
   is_vision_model?: boolean
   is_ocr_model?: boolean
 }
+
+const isCodexProfile = (profile: Pick<ProfileLike, 'auth_mode' | 'call_type'>): boolean =>
+  profile.auth_mode === 'codex_oauth' || profile.call_type === 'codex'
+
+export const isCodexFastModeEnabled = (
+  profile: Pick<ProfileLike, 'auth_mode' | 'call_type' | 'codex_fast_mode'>
+): boolean => isCodexProfile(profile) && profile.codex_fast_mode !== false
 
 const normalizeCallType = (callType?: string): LLMProfileCallType | undefined => {
   switch (callType) {
@@ -177,6 +192,18 @@ export const isGeminiUrl = (url: string): boolean => {
 }
 
 export const isClaudeUrl = (url: string): boolean => {
+  const parsed = parseHttpUrl(url)
+  if (parsed) {
+    const hostname = parsed.hostname.toLowerCase()
+    const pathname = parsed.pathname.toLowerCase()
+    if (
+      (hostname === 'api.kimi.com' && pathname.includes('/coding')) ||
+      (hostname === 'open.bigmodel.cn' && pathname.includes('/api/anthropic'))
+    ) {
+      return true
+    }
+  }
+
   const hostname = getBaseUrlHostname(url)
   return Boolean(
     hostname &&
@@ -227,6 +254,27 @@ export const isOllamaUrl = (url: string): boolean => {
   } catch {
     return normalized.includes('11434') || normalized.includes('ollama')
   }
+}
+
+export const isOpencodeZenUrl = (url: string): boolean => {
+  const normalized = url.trim()
+  if (!normalized) {
+    return false
+  }
+
+  const parsed =
+    parseHttpUrl(normalized) ||
+    (/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)
+      ? undefined
+      : parseHttpUrl(`https://${normalized}`))
+  if (!parsed) {
+    return false
+  }
+
+  return (
+    parsed.hostname.toLowerCase() === 'opencode.ai' &&
+    /^\/zen(?:\/v\d+)?(?:\/|$)/i.test(parsed.pathname)
+  )
 }
 
 export const isLocalBaseUrl = (url: string): boolean => {
@@ -441,14 +489,30 @@ export const cliFromProfile = (
     return undefined
   }
 
+  const profileWithDefaults = isCodexProfile(profile)
+    ? {
+        ...profile,
+        codex_fast_mode: isCodexFastModeEnabled(profile)
+      }
+    : profile
+
   for (const extension of sharedHostExtensionApiV1.llmProfiles) {
-    const cli = extension.createCli?.(profile, options)
+    const cli = extension.createCli?.(profileWithDefaults, options)
     if (cli) {
       return cli
     }
   }
 
-  switch (resolveProfileProvider(profile)) {
+  if (isOpencodeZenUrl(profileWithDefaults.base_url || '')) {
+    return new OpencodeZenAPICli(
+      profileWithDefaults.api_key,
+      profileWithDefaults.base_url,
+      profileWithDefaults.model_name,
+      options
+    )
+  }
+
+  switch (resolveProfileProvider(profileWithDefaults)) {
     case 'ollama':
       return new OllamaAPICli(
         profile.api_key,

@@ -48,13 +48,15 @@ vi.mock('./components/ColorWheelSquarePicker', () => ({
 }))
 vi.mock('@renderer/utils/droppedImageUtils', () => ({
   AGENT_IMAGE_DRAG_MIME: 'application/x-ai-image',
-  getDroppedImageFile: vi.fn(),
+  getDroppedImageFile: vi.fn(
+    async (dataTransfer: Pick<DataTransfer, 'files'>) =>
+      Array.from(dataTransfer.files ?? []).find((file) => (file.type || '').startsWith('image/')) ??
+      null
+  ),
   parseInternalImageDragPayload: vi.fn(() => null)
 }))
 
 import { applySelectedTextSizeChange, resolveDroppedAgentImageDataUrl } from './ProjectCanvasPage'
-import { getDroppedImageFile } from '@renderer/utils/droppedImageUtils'
-
 const emptyFileList = {
   length: 0,
   item: () => null
@@ -179,40 +181,52 @@ describe('applySelectedTextSizeChange', () => {
   })
 })
 
+const createFileList = (file: File): FileList =>
+  ({
+    0: file,
+    length: 1,
+    item: (index: number) => (index === 0 ? file : null),
+    [Symbol.iterator]: function* () {
+      yield file
+    }
+  }) as unknown as FileList
+
 describe('resolveDroppedAgentImageDataUrl', () => {
-  it('normalizes an Agent image drag into a data URL when a file can be materialized', async () => {
+  it('uses an object URL for an Agent image file without base64 materialization', async () => {
+    const file = new File(['image-bytes'], 'image.png', { type: 'image/png' })
     const dataTransfer = {
       getData: (type: string) =>
         type === 'application/x-ai-image' ? 'local-media:///C:/demo/image.png' : '',
-      files: emptyFileList
+      files: createFileList(file)
     } as unknown as Pick<DataTransfer, 'getData' | 'files'>
-    const file = new File(['image-bytes'], 'image.png', { type: 'image/png' })
-    vi.mocked(getDroppedImageFile).mockResolvedValueOnce(file)
+    const createObjectURLSpy = vi
+      .spyOn(URL, 'createObjectURL')
+      .mockReturnValueOnce('blob:image-file')
 
-    await expect(
-      resolveDroppedAgentImageDataUrl(dataTransfer, async (inputFile) => `data:${inputFile.name}`)
-    ).resolves.toEqual({
-      src: 'data:image.png',
+    await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
+      src: 'blob:image-file',
       fileName: 'image.png',
-      sizeBytes: 11
+      sizeBytes: 11,
+      sourceFile: file
     })
+    expect(createObjectURLSpy).toHaveBeenCalledWith(file)
   })
 
-  it('falls back to the normalized Agent URL when file materialization fails', async () => {
+  it('uses the normalized Agent URL when no image file is present', async () => {
     const dataTransfer = {
       getData: (type: string) =>
         type === 'application/x-ai-image' ? 'file:///C:/demo/image.png' : '',
       files: emptyFileList
     } as unknown as Pick<DataTransfer, 'getData' | 'files'>
-    vi.mocked(getDroppedImageFile).mockRejectedValueOnce(new Error('boom'))
 
-    await expect(resolveDroppedAgentImageDataUrl(dataTransfer, async () => '')).resolves.toEqual({
+    await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
       src: 'local-media:///C:/demo/image.png',
       fileName: 'image.png'
     })
   })
 
-  it('also materializes quick app image drags so canvas drops do not race the blue progress bar', async () => {
+  it('uses an object URL for quick app image file drops without base64 materialization', async () => {
+    const file = new File(['qapp-image'], 'result.png', { type: 'image/png' })
     const dataTransfer = {
       getData: (type: string) =>
         type === 'application/x-qapp-image'
@@ -225,17 +239,18 @@ describe('resolveDroppedAgentImageDataUrl', () => {
               }
             })
           : '',
-      files: emptyFileList
+      files: createFileList(file)
     } as unknown as Pick<DataTransfer, 'getData' | 'files'>
-    const file = new File(['qapp-image'], 'result.png', { type: 'image/png' })
-    vi.mocked(getDroppedImageFile).mockResolvedValueOnce(file)
+    const createObjectURLSpy = vi
+      .spyOn(URL, 'createObjectURL')
+      .mockReturnValueOnce('blob:qapp-file')
 
-    await expect(
-      resolveDroppedAgentImageDataUrl(dataTransfer, async (inputFile) => `data:${inputFile.name}`)
-    ).resolves.toEqual({
-      src: 'data:result.png',
+    await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
+      src: 'blob:qapp-file',
       fileName: 'result.png',
-      sizeBytes: 10
+      sizeBytes: 10,
+      sourceFile: file
     })
+    expect(createObjectURLSpy).toHaveBeenCalledWith(file)
   })
 })

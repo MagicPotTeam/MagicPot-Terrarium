@@ -9,6 +9,11 @@ import {
   resolveProjectCanvasArtifactRoot,
   resolveProjectCanvasBenchmarkRunId
 } from './benchmarkPolicy.mjs'
+import {
+  attachProjectCanvasLargeImageResourceDiagnostics,
+  collectProjectCanvasLargeImageResourceMetricsFromDomSnapshot,
+  formatProjectCanvasLargeImageResourceMetrics
+} from './largeImageResourceMetrics.mjs'
 
 const ELECTRON_LAUNCH_TIMEOUT_MS = 90000
 const FIRST_WINDOW_TIMEOUT_MS = 90000
@@ -31,7 +36,16 @@ const BENCHMARK_INTERACTION_SAMPLE_COUNT = Math.max(
 const isFatalPageError = (message) => !/fetch failed|Pysssss is not installed/i.test(message)
 
 const getWorkflowImagePath = () =>
-  path.join(process.cwd(), 'src', 'renderer', 'src', 'assets', 'workflowImage.png')
+  path.join(
+    process.cwd(),
+    'packages',
+    'app',
+    'src',
+    'renderer',
+    'src',
+    'assets',
+    'workflowImage.png'
+  )
 
 async function writeSmokeConfig(userDataDir) {
   const config = {
@@ -237,7 +251,9 @@ async function waitForBenchmarkMetrics(page, expectedImageCount) {
           webglMetrics?.residentLimit ?? root.dataset.projectCanvasWebglResidentLimit ?? '0'
         )
         const residentBudgetState =
-          webglMetrics?.residentBudgetState || root.dataset.projectCanvasWebglResidentBudgetState || ''
+          webglMetrics?.residentBudgetState ||
+          root.dataset.projectCanvasWebglResidentBudgetState ||
+          ''
         const renderCount = Number(
           webglMetrics?.renderCount ?? root.dataset.projectCanvasWebglRenderCount ?? '0'
         )
@@ -292,8 +308,12 @@ async function waitForBenchmarkMetrics(page, expectedImageCount) {
 }
 
 export function readProjectCanvasBenchmarkMetricsFromDomSnapshot(snapshotInput) {
-  const { rootDataset, overlayDataset = {}, domNodeCount = 0, hasWebglContext = false } =
-    snapshotInput
+  const {
+    rootDataset,
+    overlayDataset = {},
+    domNodeCount = 0,
+    hasWebglContext = false
+  } = snapshotInput
   const snapshotText = rootDataset.projectCanvasMetricsSnapshot
   let snapshot = null
   try {
@@ -307,105 +327,115 @@ export function readProjectCanvasBenchmarkMetricsFromDomSnapshot(snapshotInput) 
   const webglMetrics = snapshot?.webgl || null
   const viewportMetrics = snapshot?.viewport || null
 
-  return {
-    summary,
-    overlayMetrics: {
-      overlayTotalCount: Number(overlayDataset.projectCanvasOverlayTotalCount || '0'),
-      domOverlayCount: Number(overlayDataset.projectCanvasDomOverlayCount || '0'),
-      canvas3DOverlayCount: Number(overlayDataset.projectCanvasCanvas3dOverlayCount || '0'),
-      mountedVideoOverlayCount: Number(
-        overlayDataset.projectCanvasMountedVideoOverlayCount || '0'
+  const largeImageResourceMetrics =
+    collectProjectCanvasLargeImageResourceMetricsFromDomSnapshot(snapshotInput)
+
+  return attachProjectCanvasLargeImageResourceDiagnostics(
+    {
+      summary,
+      overlayMetrics: {
+        overlayTotalCount: Number(overlayDataset.projectCanvasOverlayTotalCount || '0'),
+        domOverlayCount: Number(overlayDataset.projectCanvasDomOverlayCount || '0'),
+        canvas3DOverlayCount: Number(overlayDataset.projectCanvasCanvas3dOverlayCount || '0'),
+        mountedVideoOverlayCount: Number(
+          overlayDataset.projectCanvasMountedVideoOverlayCount || '0'
+        ),
+        htmlOverlayCount: Number(overlayDataset.projectCanvasHtmlOverlayCount || '0'),
+        fileOverlayCount: Number(overlayDataset.projectCanvasFileOverlayCount || '0'),
+        textOverlayCount: Number(overlayDataset.projectCanvasTextOverlayCount || '0'),
+        annotationOverlayCount: Number(overlayDataset.projectCanvasAnnotationOverlayCount || '0')
+      },
+      stageScale: Number(viewportMetrics?.scale ?? rootDataset.stageScale ?? '0'),
+      stagePosX: Number(viewportMetrics?.x ?? rootDataset.stagePosX ?? '0'),
+      stagePosY: Number(viewportMetrics?.y ?? rootDataset.stagePosY ?? '0'),
+      reactCommits: Number(
+        snapshot?.reactCommits ?? rootDataset.projectCanvasReactCommitCount ?? '0'
       ),
-      htmlOverlayCount: Number(overlayDataset.projectCanvasHtmlOverlayCount || '0'),
-      fileOverlayCount: Number(overlayDataset.projectCanvasFileOverlayCount || '0'),
-      textOverlayCount: Number(overlayDataset.projectCanvasTextOverlayCount || '0'),
-      annotationOverlayCount: Number(
-        overlayDataset.projectCanvasAnnotationOverlayCount || '0'
-      )
+      loadedImageCount: Number(
+        webglMetrics?.loadedImageCount ?? rootDataset.projectCanvasWebglLoadedImageCount ?? '0'
+      ),
+      pendingImageCount: Number(
+        webglMetrics?.pendingImageCount ?? rootDataset.projectCanvasWebglPendingImageCount ?? '0'
+      ),
+      failedImageCount: Number(
+        webglMetrics?.failedImageCount ?? rootDataset.projectCanvasWebglFailedImageCount ?? '0'
+      ),
+      spriteCount: Number(
+        webglMetrics?.spriteCount ?? rootDataset.projectCanvasWebglSpriteCount ?? '0'
+      ),
+      residentImageCount: Number(
+        webglMetrics?.residentImageCount ?? rootDataset.projectCanvasWebglResidentImageCount ?? '0'
+      ),
+      residentCandidateImageCount: Number(
+        webglMetrics?.residentCandidateImageCount ??
+          rootDataset.projectCanvasWebglResidentCandidateImageCount ??
+          '0'
+      ),
+      viewportCulledImageCount: Number(
+        webglMetrics?.viewportCulledImageCount ??
+          rootDataset.projectCanvasWebglViewportCulledImageCount ??
+          '0'
+      ),
+      residentLimit: Number(
+        webglMetrics?.residentLimit ?? rootDataset.projectCanvasWebglResidentLimit ?? '0'
+      ),
+      residentRemainingCapacity: Number(
+        webglMetrics?.residentRemainingCapacity ??
+          rootDataset.projectCanvasWebglResidentRemainingCapacity ??
+          '0'
+      ),
+      residentBudgetState:
+        webglMetrics?.residentBudgetState ||
+        rootDataset.projectCanvasWebglResidentBudgetState ||
+        '',
+      residentTextureBytes: Number(
+        webglMetrics?.residentTextureBytes ??
+          rootDataset.projectCanvasWebglResidentTextureBytes ??
+          '0'
+      ),
+      residentTextureBudgetBytes: Number(
+        webglMetrics?.residentTextureBudgetBytes ??
+          rootDataset.projectCanvasWebglResidentTextureBudgetBytes ??
+          '0'
+      ),
+      missingImageCount: Number(
+        webglMetrics?.missingImageCount ?? rootDataset.projectCanvasWebglMissingImageCount ?? '0'
+      ),
+      previewImageCount: Number(
+        webglMetrics?.usingPreviewImageCount ??
+          rootDataset.projectCanvasWebglUsingPreviewImageCount ??
+          '0'
+      ),
+      sourceImageCount: Number(
+        webglMetrics?.usingSourceImageCount ??
+          rootDataset.projectCanvasWebglUsingSourceImageCount ??
+          '0'
+      ),
+      sourceUpgradePendingImageCount: Number(
+        webglMetrics?.sourceUpgradePendingImageCount ??
+          rootDataset.projectCanvasWebglSourceUpgradePendingImageCount ??
+          '0'
+      ),
+      sourceUpgradeFailedImageCount: Number(
+        webglMetrics?.sourceUpgradeFailedImageCount ??
+          rootDataset.projectCanvasWebglSourceUpgradeFailedImageCount ??
+          '0'
+      ),
+      renderCount: Number(
+        webglMetrics?.renderCount ?? rootDataset.projectCanvasWebglRenderCount ?? '0'
+      ),
+      lastRenderDurationMs: Number(
+        webglMetrics?.lastRenderDurationMs ??
+          rootDataset.projectCanvasWebglLastRenderDurationMs ??
+          '0'
+      ),
+      lastUpdateReason:
+        webglMetrics?.lastUpdateReason || rootDataset.projectCanvasWebglLastUpdateReason || '',
+      domNodeCount,
+      hasWebglContext
     },
-    stageScale: Number(viewportMetrics?.scale ?? rootDataset.stageScale ?? '0'),
-    stagePosX: Number(viewportMetrics?.x ?? rootDataset.stagePosX ?? '0'),
-    stagePosY: Number(viewportMetrics?.y ?? rootDataset.stagePosY ?? '0'),
-    reactCommits: Number(snapshot?.reactCommits ?? rootDataset.projectCanvasReactCommitCount ?? '0'),
-    loadedImageCount: Number(
-      webglMetrics?.loadedImageCount ?? rootDataset.projectCanvasWebglLoadedImageCount ?? '0'
-    ),
-    pendingImageCount: Number(
-      webglMetrics?.pendingImageCount ?? rootDataset.projectCanvasWebglPendingImageCount ?? '0'
-    ),
-    failedImageCount: Number(
-      webglMetrics?.failedImageCount ?? rootDataset.projectCanvasWebglFailedImageCount ?? '0'
-    ),
-    spriteCount: Number(
-      webglMetrics?.spriteCount ?? rootDataset.projectCanvasWebglSpriteCount ?? '0'
-    ),
-    residentImageCount: Number(
-      webglMetrics?.residentImageCount ?? rootDataset.projectCanvasWebglResidentImageCount ?? '0'
-    ),
-    residentCandidateImageCount: Number(
-      webglMetrics?.residentCandidateImageCount ??
-        rootDataset.projectCanvasWebglResidentCandidateImageCount ??
-        '0'
-    ),
-    viewportCulledImageCount: Number(
-      webglMetrics?.viewportCulledImageCount ??
-        rootDataset.projectCanvasWebglViewportCulledImageCount ??
-        '0'
-    ),
-    residentLimit: Number(
-      webglMetrics?.residentLimit ?? rootDataset.projectCanvasWebglResidentLimit ?? '0'
-    ),
-    residentRemainingCapacity: Number(
-      webglMetrics?.residentRemainingCapacity ??
-        rootDataset.projectCanvasWebglResidentRemainingCapacity ??
-        '0'
-    ),
-    residentBudgetState:
-      webglMetrics?.residentBudgetState || rootDataset.projectCanvasWebglResidentBudgetState || '',
-    residentTextureBytes: Number(
-      webglMetrics?.residentTextureBytes ?? rootDataset.projectCanvasWebglResidentTextureBytes ?? '0'
-    ),
-    residentTextureBudgetBytes: Number(
-      webglMetrics?.residentTextureBudgetBytes ??
-        rootDataset.projectCanvasWebglResidentTextureBudgetBytes ??
-        '0'
-    ),
-    missingImageCount: Number(
-      webglMetrics?.missingImageCount ?? rootDataset.projectCanvasWebglMissingImageCount ?? '0'
-    ),
-    previewImageCount: Number(
-      webglMetrics?.usingPreviewImageCount ??
-        rootDataset.projectCanvasWebglUsingPreviewImageCount ??
-        '0'
-    ),
-    sourceImageCount: Number(
-      webglMetrics?.usingSourceImageCount ??
-        rootDataset.projectCanvasWebglUsingSourceImageCount ??
-        '0'
-    ),
-    sourceUpgradePendingImageCount: Number(
-      webglMetrics?.sourceUpgradePendingImageCount ??
-        rootDataset.projectCanvasWebglSourceUpgradePendingImageCount ??
-        '0'
-    ),
-    sourceUpgradeFailedImageCount: Number(
-      webglMetrics?.sourceUpgradeFailedImageCount ??
-        rootDataset.projectCanvasWebglSourceUpgradeFailedImageCount ??
-        '0'
-    ),
-    renderCount: Number(
-      webglMetrics?.renderCount ?? rootDataset.projectCanvasWebglRenderCount ?? '0'
-    ),
-    lastRenderDurationMs: Number(
-      webglMetrics?.lastRenderDurationMs ??
-        rootDataset.projectCanvasWebglLastRenderDurationMs ??
-        '0'
-    ),
-    lastUpdateReason:
-      webglMetrics?.lastUpdateReason || rootDataset.projectCanvasWebglLastUpdateReason || '',
-    domNodeCount,
-    hasWebglContext
-  }
+    largeImageResourceMetrics
+  )
 }
 
 async function readBenchmarkMetrics(page) {
@@ -694,105 +724,111 @@ async function runInteractionBenchmark(page, sampleCount) {
 }
 
 export async function runWebglBenchmark() {
-let appHandle = null
-let tempRoot = null
-let artifactRoot = null
+  let appHandle = null
+  let tempRoot = null
+  let artifactRoot = null
 
-try {
-  artifactRoot = resolveProjectCanvasArtifactRoot(BENCHMARK_RUN_ID)
-  await fs.mkdir(artifactRoot, { recursive: true })
-  tempRoot = await fs.mkdtemp(path.join(artifactRoot, 'magicpot-webgl-benchmark-'))
-  const userDataDir = path.join(tempRoot, 'user-data')
-  await writeSmokeConfig(userDataDir)
+  try {
+    artifactRoot = resolveProjectCanvasArtifactRoot(BENCHMARK_RUN_ID)
+    await fs.mkdir(artifactRoot, { recursive: true })
+    tempRoot = await fs.mkdtemp(path.join(artifactRoot, 'magicpot-webgl-benchmark-'))
+    const userDataDir = path.join(tempRoot, 'user-data')
+    await writeSmokeConfig(userDataDir)
 
-  appHandle = await launchApp(userDataDir)
-  const { page, fatalErrors } = appHandle
-  await navigateToHash(page, '#/canvas?id=webgl-benchmark')
-  await waitForHealthyPage(page, fatalErrors)
+    appHandle = await launchApp(userDataDir)
+    const { page, fatalErrors } = appHandle
+    await navigateToHash(page, '#/canvas?id=webgl-benchmark')
+    await waitForHealthyPage(page, fatalErrors)
 
-  const benchmarkImages = await writeBenchmarkImages(tempRoot, BENCHMARK_IMAGE_COUNT)
-  const importInput = await getCanvasImportInput(page)
-  await importInput.setInputFiles(benchmarkImages, { timeout: 30000 })
-  await page.waitForTimeout(2500)
+    const benchmarkImages = await writeBenchmarkImages(tempRoot, BENCHMARK_IMAGE_COUNT)
+    const importInput = await getCanvasImportInput(page)
+    await importInput.setInputFiles(benchmarkImages, { timeout: 30000 })
+    await page.waitForTimeout(2500)
 
-  const metrics = await waitForBenchmarkMetrics(page, benchmarkImages.length)
-  const cullingBenchmark = await zoomUntilViewportCull(page, benchmarkImages.length)
-  const interactionBenchmark = await runInteractionBenchmark(
-    page,
-    BENCHMARK_INTERACTION_SAMPLE_COUNT
-  )
-  const windowPlacement = await readWindowPlacement(appHandle.app)
-  assertNonIntrusiveWindowPlacement(windowPlacement, 'WebGL benchmark')
-  const payload = {
-    benchmarkImageCount: benchmarkImages.length,
-    windowPlacement,
-    ...metrics,
-    zoomedMetrics: cullingBenchmark.metrics,
-    zoomStepsApplied: cullingBenchmark.zoomStepsApplied,
-    initialLoadDerivedFps:
-      metrics.lastRenderDurationMs > 0
-        ? Number((1000 / metrics.lastRenderDurationMs).toFixed(2))
-        : 0,
-    interactionBenchmark
-  }
+    const metrics = await waitForBenchmarkMetrics(page, benchmarkImages.length)
+    const cullingBenchmark = await zoomUntilViewportCull(page, benchmarkImages.length)
+    const interactionBenchmark = await runInteractionBenchmark(
+      page,
+      BENCHMARK_INTERACTION_SAMPLE_COUNT
+    )
+    const windowPlacement = await readWindowPlacement(appHandle.app)
+    assertNonIntrusiveWindowPlacement(windowPlacement, 'WebGL benchmark')
+    const payload = {
+      benchmarkImageCount: benchmarkImages.length,
+      windowPlacement,
+      ...metrics,
+      zoomedMetrics: cullingBenchmark.metrics,
+      zoomStepsApplied: cullingBenchmark.zoomStepsApplied,
+      initialLoadDerivedFps:
+        metrics.lastRenderDurationMs > 0
+          ? Number((1000 / metrics.lastRenderDurationMs).toFixed(2))
+          : 0,
+      diagnosticSummary: {
+        largeImageResources: formatProjectCanvasLargeImageResourceMetrics(
+          metrics.largeImageResourceMetrics
+        )
+      },
+      interactionBenchmark
+    }
 
-  await fs.writeFile(
-    path.join(artifactRoot, 'webgl-benchmark-report.json'),
-    JSON.stringify(payload, null, 2),
-    'utf8'
-  )
-  console.log(JSON.stringify(payload, null, 2))
+    await fs.writeFile(
+      path.join(artifactRoot, 'webgl-benchmark-report.json'),
+      JSON.stringify(payload, null, 2),
+      'utf8'
+    )
+    console.log(JSON.stringify(payload, null, 2))
 
-  if (
-    !metrics.hasWebglContext ||
-    metrics.summary.webglImageItems <
-      Math.min(benchmarkImages.length, metrics.residentLimit || benchmarkImages.length) ||
-    Number(metrics.summary.budgetDowngradedImageItems || 0) + metrics.summary.fallbackImageItems !==
-      Math.max(0, benchmarkImages.length - (metrics.residentLimit || benchmarkImages.length)) ||
-    payload.zoomedMetrics.viewportCulledImageCount <= 0 ||
-    payload.zoomedMetrics.residentCandidateImageCount >=
-      getViewportCullUniverseCount(payload.zoomedMetrics) ||
-    payload.zoomedMetrics.residentCandidateImageCount +
-      payload.zoomedMetrics.viewportCulledImageCount !==
-      getViewportCullUniverseCount(payload.zoomedMetrics) ||
-    interactionBenchmark.steadyStateFps <= 60
-  ) {
+    if (
+      !metrics.hasWebglContext ||
+      metrics.summary.webglImageItems <
+        Math.min(benchmarkImages.length, metrics.residentLimit || benchmarkImages.length) ||
+      Number(metrics.summary.budgetDowngradedImageItems || 0) +
+        metrics.summary.fallbackImageItems !==
+        Math.max(0, benchmarkImages.length - (metrics.residentLimit || benchmarkImages.length)) ||
+      payload.zoomedMetrics.viewportCulledImageCount <= 0 ||
+      payload.zoomedMetrics.residentCandidateImageCount >=
+        getViewportCullUniverseCount(payload.zoomedMetrics) ||
+      payload.zoomedMetrics.residentCandidateImageCount +
+        payload.zoomedMetrics.viewportCulledImageCount !==
+        getViewportCullUniverseCount(payload.zoomedMetrics) ||
+      interactionBenchmark.steadyStateFps <= 60
+    ) {
+      process.exitCode = 1
+    }
+  } catch (error) {
+    if (artifactRoot) {
+      try {
+        await fs.writeFile(
+          path.join(artifactRoot, 'webgl-benchmark-error.txt'),
+          error instanceof Error ? error.stack || error.message : String(error),
+          'utf8'
+        )
+      } catch {
+        // Ignore artifact persistence failures.
+      }
+    }
+    console.error(
+      error instanceof Error
+        ? error.stack || error.message
+        : `Unknown benchmark error: ${String(error)}`
+    )
     process.exitCode = 1
-  }
-} catch (error) {
-  if (artifactRoot) {
-    try {
-      await fs.writeFile(
-        path.join(artifactRoot, 'webgl-benchmark-error.txt'),
-        error instanceof Error ? error.stack || error.message : String(error),
-        'utf8'
-      )
-    } catch {
-      // Ignore artifact persistence failures.
+  } finally {
+    if (appHandle?.app) {
+      try {
+        await appHandle.app.close()
+      } catch {
+        // Ignore cleanup failures.
+      }
+    }
+    if (tempRoot) {
+      try {
+        await fs.rm(tempRoot, { recursive: true, force: true })
+      } catch {
+        // Ignore cleanup failures.
+      }
     }
   }
-  console.error(
-    error instanceof Error
-      ? error.stack || error.message
-      : `Unknown benchmark error: ${String(error)}`
-  )
-  process.exitCode = 1
-} finally {
-  if (appHandle?.app) {
-    try {
-      await appHandle.app.close()
-    } catch {
-      // Ignore cleanup failures.
-    }
-  }
-  if (tempRoot) {
-    try {
-      await fs.rm(tempRoot, { recursive: true, force: true })
-    } catch {
-      // Ignore cleanup failures.
-    }
-  }
-}
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

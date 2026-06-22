@@ -34,9 +34,7 @@ import {
   Videocam as VideoIcon,
   ViewInAr as Model3DIcon,
   InsertDriveFile as FileIcon,
-  SlideshowOutlined as PowerPointFileIcon,
-  CompressOutlined as CompressContextIcon,
-  CleaningServicesOutlined as ClearContextIcon
+  SlideshowOutlined as PowerPointFileIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
 import { ChatAttachment } from '../../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
@@ -77,9 +75,7 @@ interface ChatComposerProps {
   toolbarSlot?: React.ReactNode
   statusSlot?: React.ReactNode
   onCompressContext?: () => void
-  onClearContext?: () => void
   disableCompressContext?: boolean
-  disableClearContext?: boolean
   toolHelpItems?: MagicPotAppToolDescriptor[]
   active?: boolean
 }
@@ -329,16 +325,14 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   toolbarSlot,
   statusSlot,
   onCompressContext,
-  onClearContext,
   disableCompressContext = false,
-  disableClearContext = false,
   toolHelpItems = [],
   active = true
 }) => {
   const { t } = useTranslation()
   const visiblePendingAttachmentEntries = getVisibleChatAttachmentEntries(pendingAttachments)
   const theme = useTheme()
-  const resolvedToolbarSlot = modelSelectorSlot ?? toolbarSlot
+  const hasModelSelectorSlot = modelSelectorSlot != null
 
   const composerRootRef = useRef<HTMLDivElement | null>(null)
   const committedInputValueRef = useRef(inputValue)
@@ -610,6 +604,23 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   const handleUploadFileFromMenu = () => {
     closeAddMenu()
     onUploadFile()
+  }
+
+  const canCompressFromStatusSlot = Boolean(
+    onCompressContext && !disabled && !isLoading && !disableCompressContext
+  )
+
+  const handleStatusSlotCompressClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!canCompressFromStatusSlot || !onCompressContext) return
+    event.preventDefault()
+    onCompressContext()
+  }
+
+  const handleStatusSlotCompressKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    if (!canCompressFromStatusSlot || !onCompressContext) return
+    event.preventDefault()
+    onCompressContext()
   }
 
   const resolvedTextareaMaxHeight = textareaMaxHeight != null ? `${textareaMaxHeight}px` : '40vh'
@@ -1115,7 +1126,10 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
             }}
             data-testid="chat-composer-action-bar"
           >
-            <Box>
+            <Box
+              data-testid="chat-composer-left-controls"
+              sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}
+            >
               <IconButton
                 onClick={(event) => setAddMenuAnchorEl(event.currentTarget)}
                 disabled={disabled}
@@ -1161,18 +1175,31 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   </>
                 ) : null}
               </Menu>
+              {toolbarSlot ? (
+                <Box
+                  data-testid="chat-composer-toolbar-slot"
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    minWidth: 0,
+                    transform: 'translateY(-3px)'
+                  }}
+                >
+                  {toolbarSlot}
+                </Box>
+              ) : null}
             </Box>
 
             <Box
               data-testid="chat-composer-send-group"
               sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}
             >
-              {resolvedToolbarSlot ? (
+              {hasModelSelectorSlot ? (
                 <Box
-                  data-testid="chat-composer-toolbar-slot"
+                  data-testid="chat-composer-model-selector-slot"
                   sx={{ display: 'flex', alignItems: 'center', transform: 'translateY(-3px)' }}
                 >
-                  {resolvedToolbarSlot}
+                  {modelSelectorSlot}
                 </Box>
               ) : null}
 
@@ -1181,44 +1208,40 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                   data-testid="chat-composer-status-slot"
                   sx={{ display: 'flex', alignItems: 'center' }}
                 >
-                  {statusSlot}
+                  {onCompressContext ? (
+                    <Box
+                      data-testid="chat-composer-context-status-compress"
+                      role="button"
+                      aria-label={t('chat.compress_context', { defaultValue: 'Compress context' })}
+                      aria-disabled={!canCompressFromStatusSlot}
+                      tabIndex={canCompressFromStatusSlot ? 0 : -1}
+                      onClick={handleStatusSlotCompressClick}
+                      onKeyDown={handleStatusSlotCompressKeyDown}
+                      sx={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: 30,
+                        height: 30,
+                        borderRadius: '50%',
+                        color: 'text.secondary',
+                        cursor: canCompressFromStatusSlot ? 'pointer' : 'default',
+                        opacity: disabled || isLoading ? 0.5 : 1,
+                        outline: 'none',
+                        '&:focus-visible': {
+                          boxShadow: (theme) => `0 0 0 2px ${theme.palette.primary.main}`
+                        },
+                        '& [data-testid="chat-context-compression-indicator"]': {
+                          cursor: canCompressFromStatusSlot ? 'pointer' : 'default'
+                        }
+                      }}
+                    >
+                      {statusSlot}
+                    </Box>
+                  ) : (
+                    statusSlot
+                  )}
                 </Box>
-              ) : null}
-
-              {onCompressContext ? (
-                <IconButton
-                  data-testid="chat-composer-compress-context"
-                  onClick={onCompressContext}
-                  disabled={disabled || isLoading || disableCompressContext}
-                  sx={{
-                    color: 'text.secondary',
-                    width: 30,
-                    height: 30,
-                    '&:hover': { bgcolor: 'action.hover', color: 'text.primary' }
-                  }}
-                  title={t('chat.compress_context', { defaultValue: 'Compress context' })}
-                  aria-label={t('chat.compress_context', { defaultValue: 'Compress context' })}
-                >
-                  <CompressContextIcon sx={{ fontSize: 17 }} />
-                </IconButton>
-              ) : null}
-
-              {onClearContext ? (
-                <IconButton
-                  data-testid="chat-composer-clear-context"
-                  onClick={onClearContext}
-                  disabled={disabled || isLoading || disableClearContext}
-                  sx={{
-                    color: 'text.secondary',
-                    width: 30,
-                    height: 30,
-                    '&:hover': { bgcolor: 'action.hover', color: 'text.primary' }
-                  }}
-                  title={t('chat.clear_context', { defaultValue: 'Clear context' })}
-                  aria-label={t('chat.clear_context', { defaultValue: 'Clear context' })}
-                >
-                  <ClearContextIcon sx={{ fontSize: 17 }} />
-                </IconButton>
               ) : null}
 
               {/* 发送/停止按钮 */}

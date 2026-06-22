@@ -265,6 +265,74 @@ describe('chatStorage', () => {
     expect(fakeIndexedDb.state.getAllCount).toBe(0)
   })
 
+  it('preserves context compression metadata and drops legacy compact activity logs when saving and loading sessions', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+
+    const storage = await import('./chatStorage')
+    const contextCompression = {
+      summary: '[Previous context summary]\n\n### Current Goal\nKeep working.',
+      coveredMessageCount: 8,
+      sourceHash: 'source-hash',
+      estimatedSourceTokens: 4096,
+      estimatedSummaryTokens: 256,
+      updatedAt: 1_700_000,
+      manual: true,
+      compactRound: 3,
+      lastCompactAttemptAt: 1_699_900,
+      lastCompactSuccessAt: 1_700_000,
+      lastCompactFailureAt: 1_699_000,
+      lastCompactSkipReason: 'cooldown',
+      lastPromptTokens: 16_000,
+      lastTotalTokens: 16_500,
+      metadata: {
+        generatedBy: 'llm',
+        profileId: 'compact-model',
+        maxOutputTokens: 2_000,
+        realUsage: {
+          promptTokens: 16_000,
+          totalTokens: 16_500
+        }
+      }
+    }
+    await storage.saveSessionToDB(
+      {
+        id: 'compressed-session',
+        title: 'Compressed session',
+        messages: [{ role: 'user', content: 'recent live message' }],
+        contextCompression,
+        contextCompressionActivity: [
+          {
+            type: 'compact_complete',
+            timestamp: 1_700_000,
+            summaryPreview: '[Previous context summary]'
+          }
+        ]
+      } as import('./chatStorage').ChatSession & {
+        contextCompressionActivity: Array<Record<string, unknown>>
+      },
+      'workspace-a'
+    )
+
+    const loadedSession = await storage.loadSessionFromDB('compressed-session', 'workspace-a')
+    expect(loadedSession).toMatchObject({
+      id: 'compressed-session',
+      storageScope: 'workspace-a',
+      contextCompression
+    })
+    expect(loadedSession).not.toHaveProperty('contextCompressionActivity')
+
+    const loadedSessions = await storage.loadAllSessions('workspace-a')
+    expect(loadedSessions).toEqual([
+      expect.objectContaining({
+        id: 'compressed-session',
+        contextCompression
+      })
+    ])
+    expect(loadedSessions[0]).not.toHaveProperty('contextCompressionActivity')
+  })
+
   it('resets corrupted IndexedDB storage after fatal read errors and accepts future saves', async () => {
     const fakeIndexedDb = createFakeIndexedDb()
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})

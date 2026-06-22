@@ -8,11 +8,14 @@ import ProfilePanel from './hy3d/ProfilePanel'
 import SplitPanel from './hy3d/SplitPanel'
 import TexturePanel from './hy3d/TexturePanel'
 import TopologyPanel from './hy3d/TopologyPanel'
+import TripoTaskPanel from './hy3d/TripoTaskPanel'
 import { getHy3dCssVars, hyColors } from './hy3d/theme'
 import type { Hy3dApiAction, Hy3dMediaState, Hy3dParams } from './hy3d/types'
 import {
+  TRIPO_WORKFLOW_STEPS,
   WORKFLOW_STEPS,
   getHy3dPostProcessModelCompatibility,
+  getTripoWorkflowStepIdForAction,
   getWorkflowStepIdForAction
 } from './hy3d/types'
 import UVPanel from './hy3d/UVPanel'
@@ -27,6 +30,7 @@ interface Hunyuan3DPanelProps {
   compact?: boolean
   inline?: boolean
   stepId?: string
+  provider?: 'hunyuan' | 'tripo'
 }
 
 const Hunyuan3DPanel: React.FC<Hunyuan3DPanelProps> = ({
@@ -36,11 +40,20 @@ const Hunyuan3DPanel: React.FC<Hunyuan3DPanelProps> = ({
   onMediaStateChange,
   onGenerate,
   inline,
-  stepId
+  stepId,
+  provider = 'hunyuan'
 }) => {
   const theme = useTheme()
+  const workflowSteps = provider === 'tripo' ? TRIPO_WORKFLOW_STEPS : WORKFLOW_STEPS
+  const resolveWorkflowStepId = React.useCallback(
+    (action: Hy3dApiAction) =>
+      provider === 'tripo'
+        ? getTripoWorkflowStepIdForAction(action)
+        : getWorkflowStepIdForAction(action),
+    [provider]
+  )
   const [activeWorkflowStep, setActiveWorkflowStep] = React.useState(() =>
-    getWorkflowStepIdForAction(params.apiAction)
+    resolveWorkflowStepId(params.apiAction)
   )
   const hy3dCssVars = React.useMemo(() => getHy3dCssVars(theme.palette.mode), [theme.palette.mode])
   const primaryTextureRefImage =
@@ -50,10 +63,10 @@ const Hunyuan3DPanel: React.FC<Hunyuan3DPanelProps> = ({
 
   React.useEffect(() => {
     setActiveWorkflowStep((current) => {
-      const next = getWorkflowStepIdForAction(params.apiAction)
+      const next = resolveWorkflowStepId(params.apiAction)
       return current === next ? current : next
     })
-  }, [params.apiAction])
+  }, [params.apiAction, resolveWorkflowStepId])
 
   const handleWorkflowStepClick = React.useCallback(
     (stepId: string) => {
@@ -63,18 +76,61 @@ const Hunyuan3DPanel: React.FC<Hunyuan3DPanelProps> = ({
       }
 
       setActiveWorkflowStep(stepId)
-      const step = WORKFLOW_STEPS.find((item) => item.id === stepId)
+      const step = workflowSteps.find((item) => item.id === stepId)
       if (step?.apiAction) {
         onParamsChange({
           apiAction: step.apiAction as Hy3dApiAction
         })
       }
     },
-    [activeWorkflowStep, onParamsChange]
+    [activeWorkflowStep, onParamsChange, workflowSteps]
   )
 
   const getStepActionMeta = React.useCallback(
     (stepId: string) => {
+      if (provider === 'tripo') {
+        const step = workflowSteps.find((item) => item.id === stepId)
+        const action =
+          resolveWorkflowStepId(params.apiAction) === stepId
+            ? params.apiAction
+            : step?.apiAction || params.apiAction
+        const hasTaskId = Boolean(params.modelTaskId.trim())
+
+        switch (action) {
+          case 'TripoStylized3DFlow':
+            return {
+              label: '执行',
+              disabled: !params.prompt.trim() || mediaState.conceptImages.length === 0
+            }
+          case 'TripoTextToImage':
+          case 'TripoGenerateImage':
+            return { label: '执行', disabled: !params.prompt.trim() }
+          case 'TripoEditMultiviewImage':
+            return { label: '执行', disabled: !params.prompt.trim() || !hasTaskId }
+          case 'TripoGenerateMultiviewImage':
+            return { label: '执行', disabled: mediaState.conceptImages.length === 0 }
+          case 'TripoImportModel':
+            return { label: '导入', disabled: !params.modelUrl.trim() }
+          case 'SubmitTextureTo3DJob':
+            return {
+              label: '执行',
+              disabled:
+                !hasTaskId ||
+                (!params.texturePrompt.trim() && mediaState.textureRefImages.length === 0)
+            }
+          case 'SubmitHunyuan3DPartJob':
+          case 'TripoMeshCompletion':
+          case 'SubmitReduceFaceJob':
+          case 'TripoPreRigCheck':
+          case 'TripoRig':
+          case 'TripoRetarget':
+          case 'Convert3DFormat':
+            return { label: '执行', disabled: !hasTaskId }
+          default:
+            return { label: '执行', disabled: false }
+        }
+      }
+
       switch (stepId) {
         case 'concept':
           return {
@@ -137,11 +193,27 @@ const Hunyuan3DPanel: React.FC<Hunyuan3DPanelProps> = ({
           }
       }
     },
-    [mediaState.profileRefImage, params, primaryTextureRefImage]
+    [mediaState, params, primaryTextureRefImage, provider, workflowSteps]
   )
 
   const renderPanelForStep = React.useCallback(
     (stepId: string) => {
+      if (
+        provider === 'tripo' &&
+        stepId !== 'concept' &&
+        TRIPO_WORKFLOW_STEPS.some((item) => item.id === stepId)
+      ) {
+        return (
+          <TripoTaskPanel
+            params={params}
+            mediaState={mediaState}
+            onParamsChange={onParamsChange}
+            onMediaStateChange={onMediaStateChange}
+            onGenerate={onGenerate}
+          />
+        )
+      }
+
       switch (stepId) {
         case 'concept':
           return (
@@ -195,7 +267,7 @@ const Hunyuan3DPanel: React.FC<Hunyuan3DPanelProps> = ({
           return null
       }
     },
-    [mediaState, onGenerate, onMediaStateChange, onParamsChange, params]
+    [mediaState, onGenerate, onMediaStateChange, onParamsChange, params, provider]
   )
 
   const handleRunStep = React.useCallback(
@@ -237,6 +309,7 @@ const Hunyuan3DPanel: React.FC<Hunyuan3DPanelProps> = ({
     >
       <WorkflowNavBar
         activeStep={activeWorkflowStep}
+        steps={workflowSteps}
         onStepClick={handleWorkflowStepClick}
         onRunStep={onGenerate ? handleRunStep : undefined}
         getStepActionMeta={getStepActionMeta}

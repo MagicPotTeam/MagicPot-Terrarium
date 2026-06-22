@@ -679,7 +679,13 @@
     "context_compress_not_enough": "当前对话内容太少，暂时不需要压缩上下文",
     "context_clear_empty": "当前没有可清理的上下文",
     "context_compressed": "已压缩当前上下文",
-    "context_cleared": "已清理当前上下文"
+    "context_cleared": "已清理当前上下文",
+    "context_auto_compressed": "较早上下文已自动压缩，可展开摘要查看。",
+    "context_summary_manual": "手动",
+    "context_summary_auto": "自动",
+    "context_summary_title": "上下文已压缩",
+    "context_summary_message_count": "{{count}} 条消息",
+    "context_summary_expand_label": "压缩后的上下文"
   },
   "agent_workspace": {
     "title": "Agent 线程",
@@ -719,6 +725,12 @@
       "load_failed_short": "加载失败：{{error}}",
       "load_from_photoshop": "从 Photoshop 加载",
       "clear": "删除图像"
+    },
+    "lora": {
+      "trigger_words_label": "触发词备注",
+      "trigger_words_placeholder": "填写该 LoRA 的触发词",
+      "trigger_words_helper": "选择 LoRA 后会自动读取触发词；点击“追加触发词”才会加入提示词",
+      "append_trigger_words": "追加触发词"
     }
   },
   "project": {

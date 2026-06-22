@@ -9,6 +9,9 @@ let translations: Record<string, string> = {
   'menu.settings': '\u8bbe\u7f6e',
   'settings.tabs.general': '\u4e00\u822c\u8bbe\u7f6e',
   'settings.tabs.environment': '\u73af\u5883\u90e8\u7f72',
+  'settings.tabs.plugin': '\u63d2\u4ef6 API',
+  'settings.tabs.llm': 'Agent\u7ebf\u7a0b\u914d\u7f6e',
+  'settings.tabs.mcp': 'MCP',
   'settings.tabs.about': '\u5173\u4e8e',
   'settings.tab_descs.general': '\u8bed\u8a00\u3001\u4e3b\u9898\u3001\u4fdd\u5b58\u8def\u5f84',
   'settings.tab_descs.environment': 'ComfyUI \u90e8\u7f72\u4e0e\u6a21\u578b\u76ee\u5f55',
@@ -88,6 +91,9 @@ beforeEach(() => {
     'menu.settings': '\u8bbe\u7f6e',
     'settings.tabs.general': '\u4e00\u822c\u8bbe\u7f6e',
     'settings.tabs.environment': '\u73af\u5883\u90e8\u7f72',
+    'settings.tabs.plugin': '\u63d2\u4ef6 API',
+    'settings.tabs.llm': 'Agent\u7ebf\u7a0b\u914d\u7f6e',
+    'settings.tabs.mcp': 'MCP',
     'settings.tabs.about': '\u5173\u4e8e',
     'settings.tab_descs.general': '\u8bed\u8a00\u3001\u4e3b\u9898\u3001\u4fdd\u5b58\u8def\u5f84',
     'settings.tab_descs.environment': 'ComfyUI \u90e8\u7f72\u4e0e\u6a21\u578b\u76ee\u5f55',
@@ -101,7 +107,7 @@ describe('SettingsPage', () => {
     render(<SettingsPage />)
 
     const agentTab = await screen.findByText('Agent线程配置')
-    const quickAppTab = screen.getByText('\u5feb\u5e94\u7528 API')
+    const quickAppTab = screen.getByText('\u63d2\u4ef6 API')
 
     expect(agentTab).toBeTruthy()
     expect(quickAppTab).toBeTruthy()

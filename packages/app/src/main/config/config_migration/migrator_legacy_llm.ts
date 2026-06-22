@@ -227,6 +227,7 @@ export const migratorLegacyLLM: Migrator<DeepPartial<Config>> = {
         )
       },
       plugin_config: {
+        ...(isRecord(nextConfig.plugin_config) ? nextConfig.plugin_config : {}),
         api_profiles: pluginApiProfiles,
         light_adjustment_prompt: toStringValue(
           nextConfig.plugin_config?.light_adjustment_prompt,

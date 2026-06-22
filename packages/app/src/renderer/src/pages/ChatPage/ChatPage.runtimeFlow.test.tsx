@@ -2,6 +2,7 @@ import React from 'react'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config, type SkillReferenceAttachment } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
@@ -13,6 +14,7 @@ import {
   BUILT_IN_PROMPT_TRANSLATION_SKILL_ID
 } from './builtInSkills'
 import {
+  buildChatWorkspaceControlsPortalId,
   scopedStorageKey,
   STORAGE_KEY_CURRENT_SESSION_ID,
   STORAGE_KEY_LOADING_IDS,
@@ -35,12 +37,15 @@ const hoisted = vi.hoisted(() => ({
     ] as Array<{
       id: string
       model_name: string
-      model_use?: 'chat' | 'vision' | 'ocr'
+      model_use?: 'chat' | 'agent' | 'multimodal' | 'vision' | 'ocr'
       is_vision_model?: boolean
       is_ocr_model?: boolean
       auth_mode?: string
+      call_type?: string
       provider?: string
       deployment?: string
+      context_window_tokens?: number
+      context_budget_tokens?: number
     }>
   },
   storedSessions: { value: [] as ChatSession[] },
@@ -528,6 +533,13 @@ const createSkillReferenceFileAttachment = (
   sizeBytes: 2048
 })
 
+const renderWithProviders = (ui: React.ReactElement) =>
+  render(
+    <MemoryRouter>
+      <ThemeProvider theme={theme}>{ui}</ThemeProvider>
+    </MemoryRouter>
+  )
+
 const renderChatPage = (
   storageScopeOrProps: string | { acceptExternalInput?: boolean; active?: boolean } = 'runtime-flow'
 ) => {
@@ -537,15 +549,13 @@ const renderChatPage = (
     typeof storageScopeOrProps === 'string' ? undefined : storageScopeOrProps.acceptExternalInput
   const active = typeof storageScopeOrProps === 'string' ? undefined : storageScopeOrProps.active
 
-  return render(
-    <ThemeProvider theme={theme}>
-      <ChatPage
-        compact
-        storageScope={storageScope}
-        acceptExternalInput={acceptExternalInput}
-        active={active}
-      />
-    </ThemeProvider>
+  return renderWithProviders(
+    <ChatPage
+      compact
+      storageScope={storageScope}
+      acceptExternalInput={acceptExternalInput}
+      active={active}
+    />
   )
 }
 
@@ -675,7 +685,12 @@ describe('ChatPage runtime workflow integration', () => {
 
     localStorage.clear()
     sessionStorage.clear()
-    document.body.innerHTML = '<div id="agent-workspace-skill-portal"></div>'
+    document.body.innerHTML = [
+      '<div id="agent-workspace-skill-portal"></div>',
+      `<div id="${buildChatWorkspaceControlsPortalId('runtime-flow')}"></div>`,
+      `<div id="${buildChatWorkspaceControlsPortalId('runtime-flow-a')}"></div>`,
+      `<div id="${buildChatWorkspaceControlsPortalId('runtime-flow-b')}"></div>`
+    ].join('')
 
     Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
@@ -716,18 +731,26 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
-  it('renders model and reasoning controls above the message list', async () => {
+  it('renders model and reasoning controls in the workspace controls portal', async () => {
     renderChatPage()
 
     await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
-    const topControls = screen.getByTestId('chat-top-context-controls')
+    const workspaceControlsPortal = document.getElementById(
+      buildChatWorkspaceControlsPortalId('runtime-flow')
+    )
+    expect(workspaceControlsPortal).not.toBeNull()
     const composer = screen.getByTestId('chat-composer-mock')
 
-    expect(within(topControls).getByTestId('chat-primary-selection-mock')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(
+        within(workspaceControlsPortal as HTMLElement).getByTestId('chat-primary-selection-mock')
+      ).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('chat-top-context-controls')).toBeNull()
     expect(within(composer).queryByTestId('chat-primary-selection-mock')).toBeNull()
   })
 
-  it('compresses and clears the current chat context from composer controls', async () => {
+  it('compresses the current chat context from composer controls', async () => {
     const longSession: ChatSession = {
       id: 'long-session',
       title: 'Long session',
@@ -752,22 +775,12 @@ describe('ChatPage runtime workflow integration', () => {
 
     await waitFor(() => {
       const currentSession = readCurrentSessionState()
-      expect(currentSession?.messages).toHaveLength(8)
-      expect(currentSession?.messages[0]?.content).toBe('message 5')
-      expect(currentSession?.contextCompression?.summary).toContain('message 1')
+      expect(currentSession?.messages).toHaveLength(6)
+      expect(currentSession?.messages[0]?.content).toBe('message 7')
+      expect(currentSession?.contextCompression?.summary).toContain('default reply')
       expect(currentSession?.contextCompression?.manual).toBe(true)
     })
     expect(hoisted.notifySuccessMock).toHaveBeenCalledWith('Context compressed.')
-
-    const clearButton = screen.getByTestId('chat-composer-clear-context-mock')
-    fireEvent.click(clearButton)
-
-    await waitFor(() => {
-      const currentSession = readCurrentSessionState()
-      expect(currentSession?.messages).toEqual([])
-      expect(currentSession?.contextCompression).toBeUndefined()
-    })
-    expect(hoisted.notifySuccessMock).toHaveBeenCalledWith('Context cleared.')
   })
 
   it('sends manual compressed context with the next request', async () => {
@@ -813,6 +826,241 @@ describe('ChatPage runtime workflow integration', () => {
         hiddenContext: expect.stringContaining('manual summary context')
       })
     )
+  })
+
+  it('uses the current chat profile for manual compaction and normal requests', async () => {
+    hoisted.availableProfiles.value = [
+      { id: 'base-model', model_name: 'GPT-4o', model_use: 'chat' as const },
+      { id: 'translation-model', model_name: 'Translation Model', model_use: 'chat' as const }
+    ]
+    const longSession: ChatSession = {
+      id: 'compact-profile-session',
+      title: 'Compact profile session',
+      profileId: 'base-model',
+      messages: Array.from({ length: 12 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `profile message ${index + 1}`
+      }))
+    }
+    hoisted.storedSessions.value = [longSession]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      longSession.id
+    )
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+      'base-model'
+    )
+
+    renderChatPage()
+
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(longSession.id))
+    fireEvent.click(screen.getByTestId('chat-composer-compress-context-mock'))
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(readCurrentSessionState()?.contextCompression?.summary).toContain('default reply')
+    )
+    const compactCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0] as
+      | { profileId?: string; conversationId?: string; maxOutputTokens?: number }
+      | undefined
+    expect(compactCall).toEqual(
+      expect.objectContaining({
+        profileId: 'base-model',
+        maxOutputTokens: 4_000
+      })
+    )
+    expect(compactCall?.conversationId).toContain(`${longSession.id}:compact:`)
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'normal request after compact' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    const normalCall = hoisted.requestChatCompletionMock.mock.calls[1]?.[0] as
+      | {
+          profileId?: string
+          messages?: Array<{ hiddenContext?: string; content?: string }>
+        }
+      | undefined
+    expect(normalCall?.profileId).toBe('base-model')
+    expect(normalCall?.messages?.[normalCall.messages.length - 1]).toEqual(
+      expect.objectContaining({
+        content: 'normal request after compact',
+        hiddenContext: expect.stringContaining('default reply')
+      })
+    )
+  })
+
+  it('starts background compact from real provider token usage', async () => {
+    hoisted.availableProfiles.value = [
+      {
+        id: 'base-model',
+        model_name: 'GPT-4o',
+        model_use: 'chat' as const,
+        context_window_tokens: 20_000,
+        context_budget_tokens: 15_000
+      }
+    ]
+    const activityEvents: Array<Record<string, unknown>> = []
+    const handleActivity = (event: Event) => {
+      activityEvents.push((event as CustomEvent<Record<string, unknown>>).detail)
+    }
+    window.addEventListener('chat:activity', handleActivity)
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockImplementation(
+      async ({ conversationId }: { conversationId?: string }) => {
+        if (String(conversationId || '').includes(':compact:')) {
+          return {
+            content: 'usage compact summary',
+            usage: { promptTokens: 320, totalTokens: 420 }
+          }
+        }
+        return {
+          content: 'main usage response',
+          usage: { promptTokens: 16_000, totalTokens: 16_500 }
+        }
+      }
+    )
+    const session: ChatSession = {
+      id: 'usage-trigger-session',
+      title: 'Usage trigger session',
+      profileId: 'base-model',
+      messages: Array.from({ length: 10 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `usage message ${index + 1}`
+      }))
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+      'base-model'
+    )
+
+    try {
+      renderChatPage()
+
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'trigger compact from real usage' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      const normalCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0] as
+        | { profileId?: string }
+        | undefined
+      const compactCall = hoisted.requestChatCompletionMock.mock.calls[1]?.[0] as
+        | { profileId?: string; maxOutputTokens?: number; conversationId?: string }
+        | undefined
+      expect(normalCall?.profileId).toBe('base-model')
+      expect(compactCall).toEqual(
+        expect.objectContaining({
+          profileId: 'base-model',
+          maxOutputTokens: 512
+        })
+      )
+      expect(compactCall?.conversationId).toContain(`${session.id}:compact:`)
+
+      await waitFor(() => {
+        const currentSession = readCurrentSessionState()
+        expect(currentSession?.contextCompression?.summary).toContain('usage compact summary')
+        expect(currentSession?.contextCompression?.lastPromptTokens).toBe(320)
+        expect(currentSession?.contextCompression?.lastTotalTokens).toBe(420)
+      })
+      await waitFor(() => {
+        expect(hoisted.storedSessions.value[0]?.contextCompression?.summary).toContain(
+          'usage compact summary'
+        )
+      })
+      await waitFor(() => {
+        expect(activityEvents.map((event) => event.type)).toEqual(
+          expect.arrayContaining(['send_progress', 'compact_start', 'compact_complete'])
+        )
+      })
+      expect(
+        activityEvents.some(
+          (event) =>
+            event.type === 'send_progress' &&
+            event.promptTokens === 16_000 &&
+            event.totalTokens === 16_500 &&
+            event.triggerTokens === 15_000
+        )
+      ).toBe(true)
+    } finally {
+      window.removeEventListener('chat:activity', handleActivity)
+    }
+  })
+
+  it('aborts in-flight compact without writing a summary or showing an error toast', async () => {
+    let observedSignal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockImplementation(
+      ({ signal }: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          observedSignal = signal
+          const abortWithError = () => {
+            const error = new Error('aborted compact')
+            error.name = 'AbortError'
+            reject(error)
+          }
+
+          if (!signal) {
+            reject(new Error('Expected compact abort signal'))
+            return
+          }
+
+          if (signal.aborted) {
+            abortWithError()
+            return
+          }
+
+          signal.addEventListener('abort', abortWithError, { once: true })
+        })
+    )
+    const longSession: ChatSession = {
+      id: 'abort-compact-session',
+      title: 'Abort compact session',
+      messages: Array.from({ length: 12 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `abort message ${index + 1}`
+      }))
+    }
+    hoisted.storedSessions.value = [longSession]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      longSession.id
+    )
+
+    renderChatPage()
+
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(longSession.id))
+    fireEvent.click(screen.getByTestId('chat-composer-compress-context-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:terminate-session', {
+          detail: {
+            scope: 'runtime-flow',
+            sessionId: longSession.id
+          }
+        })
+      )
+    })
+
+    await waitFor(() => expect(observedSignal?.aborted).toBe(true))
+    await waitFor(() => expect(hoisted.notifyErrorMock).not.toHaveBeenCalled())
+    const currentSession = readCurrentSessionState()
+    expect(currentSession?.id).toBe(longSession.id)
+    expect(currentSession?.messages).toHaveLength(12)
+    expect(currentSession?.contextCompression).toBeUndefined()
+    expect(hoisted.storedSessions.value[0]?.contextCompression).toBeUndefined()
   })
 
   it('sends the latest composer ref before the delayed input state commit', async () => {
@@ -882,7 +1130,7 @@ describe('ChatPage runtime workflow integration', () => {
 
     await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
 
-    await user.click(screen.getByTestId('select-vision-model'))
+    await user.click(await screen.findByTestId('select-vision-model'))
 
     await waitFor(() => {
       expect(screen.getByTestId('chat-primary-selection-value').textContent).toBe('vision-model')
@@ -922,15 +1170,15 @@ describe('ChatPage runtime workflow integration', () => {
   })
 
   it('applies external send-to-agent input only to the matching targetScope', async () => {
-    render(
-      <ThemeProvider theme={theme}>
+    renderWithProviders(
+      <>
         <div data-testid="agent-a">
           <ChatPage compact storageScope="runtime-flow-a" />
         </div>
         <div data-testid="agent-b">
           <ChatPage compact storageScope="runtime-flow-b" />
         </div>
-      </ThemeProvider>
+      </>
     )
 
     const agentA = screen.getByTestId('agent-a')
@@ -974,15 +1222,15 @@ describe('ChatPage runtime workflow integration', () => {
   })
 
   it('routes unscoped send-to-agent input only into the active mounted ChatPage', async () => {
-    render(
-      <ThemeProvider theme={theme}>
+    renderWithProviders(
+      <>
         <div data-testid="agent-a">
           <ChatPage compact storageScope="runtime-flow-a" active={false} />
         </div>
         <div data-testid="agent-b">
           <ChatPage compact storageScope="runtime-flow-b" active />
         </div>
-      </ThemeProvider>
+      </>
     )
 
     const agentA = screen.getByTestId('agent-a')
@@ -1019,16 +1267,53 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
+  it('auto-sends singular send-to-agent attachments instead of dropping them', async () => {
+    renderChatPage()
+
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            text: 'auto send with one attachment',
+            hiddenText: 'auto hidden context',
+            attachment: createImageAttachment('auto-single.png'),
+            autoSend: true
+          }
+        })
+      )
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const call = hoisted.requestChatCompletionMock.mock.calls[0]?.[0] as
+      | {
+          messages?: Array<{
+            content?: string
+            hiddenContext?: string
+            attachments?: ChatAttachment[]
+          }>
+        }
+      | undefined
+    expect(call?.messages?.[call.messages.length - 1]).toEqual(
+      expect.objectContaining({
+        content: 'auto send with one attachment',
+        hiddenContext: 'auto hidden context',
+        attachments: [expect.objectContaining({ fileName: 'auto-single.png' })]
+      })
+    )
+  })
+
   it('allows scoped send-to-agent input to mutate an explicit inactive target scope', async () => {
-    render(
-      <ThemeProvider theme={theme}>
+    renderWithProviders(
+      <>
         <div data-testid="agent-a">
           <ChatPage compact storageScope="runtime-flow-a" active />
         </div>
         <div data-testid="agent-b">
           <ChatPage compact storageScope="runtime-flow-b" active={false} />
         </div>
-      </ThemeProvider>
+      </>
     )
 
     const agentA = screen.getByTestId('agent-a')
@@ -1061,15 +1346,15 @@ describe('ChatPage runtime workflow integration', () => {
   })
 
   it('handles unscoped compact chat events only in the active mounted ChatPage', async () => {
-    render(
-      <ThemeProvider theme={theme}>
+    renderWithProviders(
+      <>
         <div data-testid="agent-a">
           <ChatPage compact storageScope="runtime-flow-a" active={false} />
         </div>
         <div data-testid="agent-b">
           <ChatPage compact storageScope="runtime-flow-b" active />
         </div>
-      </ThemeProvider>
+      </>
     )
 
     const agentA = screen.getByTestId('agent-a')
@@ -1267,15 +1552,15 @@ describe('ChatPage runtime workflow integration', () => {
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
     hoisted.fileToBlobUrlMock.mockReturnValue('data:image/png;base64,iVBORw0KGgo=')
 
-    render(
-      <ThemeProvider theme={theme}>
+    renderWithProviders(
+      <>
         <div data-testid="agent-a">
           <ChatPage compact storageScope="runtime-flow-a" active={false} />
         </div>
         <div data-testid="agent-b">
           <ChatPage compact storageScope="runtime-flow-b" active />
         </div>
-      </ThemeProvider>
+      </>
     )
 
     const agentA = screen.getByTestId('agent-a')
@@ -1578,7 +1863,7 @@ describe('ChatPage runtime workflow integration', () => {
 
     await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
 
-    await user.click(screen.getByTestId('select-vision-model'))
+    await user.click(await screen.findByTestId('select-vision-model'))
 
     await waitFor(() => {
       expect(localStorage.getItem(STORAGE_KEY_SELECTED_PROFILE)).toBe('vision-model')
@@ -1844,13 +2129,21 @@ describe('ChatPage runtime workflow integration', () => {
     await dispatchNewSession({
       profileId: 'vision-model',
       initialMessage: 'Use both references together.',
-      initialAttachments: [createImageAttachment('role.png'), createImageAttachment('ghost.png')]
+      initialAttachments: [
+        { ...createImageAttachment('role.png'), sourceWidth: 610, sourceHeight: 610 },
+        createImageAttachment('ghost.png')
+      ]
     })
 
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
     expect(hoisted.resolveAttachmentBatchCapabilityMock).not.toHaveBeenCalled()
 
     const firstCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
+    expect(firstCall.imageGenerationOptions).toMatchObject({
+      enabled: true,
+      action: 'edit',
+      size: '1024x1024'
+    })
     const lastRequestMessage = firstCall.messages[firstCall.messages.length - 1]
     expect(lastRequestMessage.attachments).toEqual([
       expect.objectContaining({

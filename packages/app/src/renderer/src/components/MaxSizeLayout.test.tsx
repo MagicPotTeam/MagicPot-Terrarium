@@ -1,5 +1,5 @@
 import React from 'react'
-import { render, waitFor } from '@testing-library/react'
+import { act, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import MaxSizeLayout, { MAX_SIZE_LAYOUT_REMEASURE_EVENT } from './MaxSizeLayout'
 
@@ -10,9 +10,11 @@ type MutableSize = {
 
 describe('MaxSizeLayout', () => {
   let currentSize: MutableSize
+  let resizeObserverCallback: ResizeObserverCallback | null
 
   beforeEach(() => {
     currentSize = { width: 800, height: 600 }
+    resizeObserverCallback = null
 
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation(
       (callback: FrameRequestCallback) => {
@@ -39,6 +41,10 @@ describe('MaxSizeLayout', () => {
     class ResizeObserverMock {
       observe = vi.fn()
       disconnect = vi.fn()
+
+      constructor(callback: ResizeObserverCallback) {
+        resizeObserverCallback = callback
+      }
     }
 
     vi.stubGlobal('ResizeObserver', ResizeObserverMock)
@@ -49,7 +55,7 @@ describe('MaxSizeLayout', () => {
     vi.restoreAllMocks()
   })
 
-  it('remeasures after rerender when the container size changes without a window resize', async () => {
+  it('remeasures after rerender when ResizeObserver reports a container size change', async () => {
     const onResize = vi.fn()
     const { rerender } = render(
       <MaxSizeLayout onResize={onResize}>
@@ -69,6 +75,9 @@ describe('MaxSizeLayout', () => {
         <div>second</div>
       </MaxSizeLayout>
     )
+    act(() => {
+      resizeObserverCallback?.([] as ResizeObserverEntry[], {} as ResizeObserver)
+    })
 
     await waitFor(() => {
       expect(onResize).toHaveBeenCalledWith(1280, 720)

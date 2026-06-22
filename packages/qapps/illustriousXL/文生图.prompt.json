@@ -532,19 +532,9 @@
       "title": "Math Expression 🐍"
     }
   },
-  "56": {
-    "inputs": {
-      "name": "Chenkin-UniControl-XL.safetensors",
-      "control_type": "fuse (chenkincontrol-only)"
-    },
-    "class_type": "ACN_ControlNet++LoaderSingle",
-    "_meta": {
-      "title": "Load ControlNet++ Model (Single) 🛂🅐🅒🅝"
-    }
-  },
   "57": {
     "inputs": {
-      "ckpt_name": ""
+      "ckpt_name": "马上用\\novaPixelsXL_v30.safetensors"
     },
     "class_type": "CheckpointLoaderSimple",
     "_meta": {
@@ -553,7 +543,7 @@
   },
   "58": {
     "inputs": {
-      "lora_name": "",
+      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
       "strength_model": 0,
       "strength_clip": 0,
       "model": [
@@ -568,16 +558,6 @@
     "class_type": "LoraLoader",
     "_meta": {
       "title": "加载LoRA"
-    }
-  },
-  "59": {
-    "inputs": {
-      "name": "Chenkin-UniControl-XL.safetensors",
-      "control_type": "fuse (chenkincontrol-only)"
-    },
-    "class_type": "ACN_ControlNet++LoaderSingle",
-    "_meta": {
-      "title": "Load ControlNet++ Model (Single) 🛂🅐🅒🅝"
     }
   }
 }

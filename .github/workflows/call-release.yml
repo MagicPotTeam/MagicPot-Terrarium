@@ -35,7 +35,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version-file: '.node-version'
           cache: 'npm'
 
       - name: Cache Electron
@@ -66,6 +66,7 @@ jobs:
 
           npm run build:embedded
           npm run prepare:embedded
+          npm run build:image-worker
           npx cross-env PACKAGE_MODE=embedded npm run package:win -- --publish never
 
       - name: Build pure package
@@ -74,6 +75,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
 
           npm run build:pure
+          npm run build:image-worker
           npx cross-env PACKAGE_MODE=pure npm run package:win -- --publish never
 
       - name: Prepare release assets

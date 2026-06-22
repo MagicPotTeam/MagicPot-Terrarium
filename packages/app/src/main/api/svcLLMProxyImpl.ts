@@ -1,4 +1,4 @@
-﻿// Main-process LLM proxy service used by chat, OCR, skill routing, and local model integrations.
+// Main-process LLM proxy service used by chat, OCR, skill routing, and local model integrations.
 // This file centralizes provider selection and media-aware request handling.
 
 import { net } from 'electron'
@@ -68,6 +68,11 @@ import { validateStructuredSkillOutput } from './skillRuntimeStructuredOutput'
 import { syncMcpClientManager } from '../mcp/runtime'
 import fs from 'node:fs/promises'
 import { isLocalFileSource } from '../utils/localFileUrl'
+import {
+  MAX_REMOTE_FETCH_RESPONSE_BYTES,
+  parseAndValidateRemoteFetchRequest
+} from './remoteFetchPolicy'
+import { consumeTrustedLocalFileSelection } from './trustedFileSelection'
 import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
 // Browser automation snapshots may arrive through file URLs; normalize them before downstream handling.
 
@@ -79,6 +84,38 @@ const decodeHy3dProfileSegment = (value?: string): string => {
   } catch {
     return value
   }
+}
+
+type Hy3dProfileExtras = {
+  sourceFileName?: string
+}
+
+const parseHy3dProfileExtras = (segments: string[]): Hy3dProfileExtras => {
+  const extras: Hy3dProfileExtras = {}
+  let legacySourceFileNameConsumed = false
+
+  for (const segment of segments) {
+    if (!segment) continue
+
+    const equalsIndex = segment.indexOf('=')
+    if (equalsIndex <= 0) {
+      if (!legacySourceFileNameConsumed) {
+        extras.sourceFileName = decodeHy3dProfileSegment(segment) || undefined
+        legacySourceFileNameConsumed = true
+      }
+      continue
+    }
+
+    const key = segment.slice(0, equalsIndex)
+    const value = decodeHy3dProfileSegment(segment.slice(equalsIndex + 1))
+    if (!value) continue
+
+    if (key === 'source') {
+      extras.sourceFileName = value
+    }
+  }
+
+  return extras
 }
 
 const isMockFetchFunction = (value: unknown): value is FetchImpl =>
@@ -172,6 +209,7 @@ const toLLMChatResp = (value: string | LLMChatResult): LLMChatResp => {
     ...(normalized.attachments || [])
   ])
   const metadata = mergeChatMetadata(structuredContent?.metadata, normalized.metadata)
+  const usage = structuredContent?.usage || normalized.usage
 
   return {
     content: structuredContent ? structuredContent.content : normalized.content,
@@ -188,7 +226,8 @@ const toLLMChatResp = (value: string | LLMChatResult): LLMChatResp => {
     ...(normalized.finishReason || structuredContent?.finishReason
       ? { finishReason: normalized.finishReason || structuredContent?.finishReason }
       : {}),
-    ...(metadata ? { metadata } : {})
+    ...(metadata ? { metadata } : {}),
+    ...(usage ? { usage } : {})
   }
 }
 
@@ -1356,7 +1395,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       polygonType,
       enablePBR,
       profileTemplate,
-      sourceFileName
+      ...hy3dProfileExtraSegments
     ] = (requestedProfileId || '').split('::')
 
     if (baseProfileId === 'hunyuan3d-pro') {
@@ -1391,7 +1430,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         apiRegion
       )
       let content: string
-      const decodedSourceFileName = decodeHy3dProfileSegment(sourceFileName) || undefined
+      const decodedSourceFileName = parseHy3dProfileExtras(hy3dProfileExtraSegments).sourceFileName
       try {
         const resolvedTargetFormat =
           targetFormat && targetFormat !== 'DEFAULT' ? targetFormat : undefined
@@ -1593,6 +1632,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         messages: conversationMessages,
         systemPrompt: toolAwareSystemPrompt,
         reasoningEffort: req.reasoningEffort,
+        maxOutputTokens: req.maxOutputTokens,
         imageGenerationOptions: req.imageGenerationOptions,
         videoGenerationOptions: req.videoGenerationOptions,
         signal: options?.signal,
@@ -1736,7 +1776,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           fullContent: fallbackContent,
           content: result.content,
           ...(result.imageUrl ? { imageUrl: result.imageUrl } : {}),
-          ...(result.attachments ? { attachments: result.attachments } : {})
+          ...(result.attachments ? { attachments: result.attachments } : {}),
+          ...(result.usage ? { usage: result.usage } : {})
         })
       }
 
@@ -1776,7 +1817,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         ...(result.sessionUrl ? { sessionUrl: result.sessionUrl } : {}),
         ...(result.ocrResult ? { ocrResult: result.ocrResult } : {}),
         ...(result.finishReason ? { finishReason: result.finishReason } : { finishReason: 'stop' }),
-        ...(result.metadata ? { metadata: result.metadata } : {})
+        ...(result.metadata ? { metadata: result.metadata } : {}),
+        ...(result.usage ? { usage: result.usage } : {})
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -1831,6 +1873,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           ...(p.tagger_runtime_cache_scope
             ? { tagger_runtime_cache_scope: p.tagger_runtime_cache_scope }
             : {}),
+          ...(typeof p.context_window_tokens === 'number'
+            ? { context_window_tokens: p.context_window_tokens }
+            : {}),
+          ...(typeof p.context_budget_tokens === 'number'
+            ? { context_budget_tokens: p.context_budget_tokens }
+            : {}),
           ...(taggerDescriptor ? { tagger_runtime_key: taggerDescriptor.cacheKey } : {})
         }
       })
@@ -1855,7 +1903,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
 
     try {
       if (req.filePath) {
-        return await uploadLocalHy3dModel(credentials, cosConfig, req.filePath)
+        const trustedPath = consumeTrustedLocalFileSelection(req.filePath)
+        return await uploadLocalHy3dModel(credentials, cosConfig, trustedPath)
       }
 
       if (req.fileName && req.fileDataBase64) {
@@ -1926,8 +1975,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     const https = await import('https')
     const http = await import('http')
 
-    const timeoutMs = req.timeoutMs || 5 * 60 * 1000
-    const parsedUrl = new URL(req.url)
+    const { parsedUrl, headers, timeoutMs, resolvedAddress } =
+      await parseAndValidateRemoteFetchRequest(req, getConfig())
     const isHttps = parsedUrl.protocol === 'https:'
     const transport = isHttps ? https : http
     const maxRetries = 3
@@ -1941,14 +1990,24 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           port: parsedUrl.port || (isHttps ? 443 : 80),
           path: parsedUrl.pathname + parsedUrl.search,
           method: req.method,
-          headers: req.headers || {},
+          headers,
           timeout: timeoutMs,
-          rejectUnauthorized: false
+          lookup: (_hostname, _options, callback) => {
+            callback(null, resolvedAddress.address, resolvedAddress.family)
+          }
         }
 
         const request = transport.request(options, (res) => {
           const chunks: Buffer[] = []
-          res.on('data', (chunk: Buffer) => chunks.push(chunk))
+          let receivedBytes = 0
+          res.on('data', (chunk: Buffer) => {
+            receivedBytes += chunk.length
+            if (receivedBytes > MAX_REMOTE_FETCH_RESPONSE_BYTES) {
+              request.destroy(new Error('Remote response is too large.'))
+              return
+            }
+            chunks.push(chunk)
+          })
           res.on('end', () => {
             abortContext.signal?.removeEventListener('abort', handleAbort)
             const body = Buffer.concat(chunks).toString('utf-8')

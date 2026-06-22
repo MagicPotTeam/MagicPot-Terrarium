@@ -1,4 +1,4 @@
-import JSZip from 'jszip'
+import type JSZip from 'jszip'
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
 import {
   type CanvasFilePreviewImage,
@@ -57,6 +57,91 @@ const PREVIEWABLE_IMAGE_MIME_TYPES: Record<string, string> = {
 }
 
 const MAX_OFFICE_PREVIEW_IMAGES = 12
+const MAX_OFFICE_PREVIEW_ARCHIVE_BYTES = 128 * 1024 * 1024
+const MAX_OFFICE_PREVIEW_ARCHIVE_ENTRIES = 4096
+const MAX_OFFICE_PREVIEW_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+const MAX_OFFICE_PREVIEW_MEDIA_BYTES = 16 * 1024 * 1024
+const MAX_OFFICE_PREVIEW_TOTAL_MEDIA_BYTES = 64 * 1024 * 1024
+
+type OfficePreviewLimitKind = 'archiveSize' | 'entryCount' | 'totalUncompressedSize'
+
+class OfficePreviewLimitExceededError extends Error {
+  limitKind: OfficePreviewLimitKind
+  limit: number
+  actual: number
+
+  constructor(limitKind: OfficePreviewLimitKind, limit: number, actual: number) {
+    super(`Office preview ${limitKind} exceeds safety limit (${actual} > ${limit})`)
+    this.name = 'OfficePreviewLimitExceededError'
+    this.limitKind = limitKind
+    this.limit = limit
+    this.actual = actual
+  }
+}
+
+function getZipEntryUncompressedSize(entry: JSZip.JSZipObject): number | null {
+  const size = (entry as JSZip.JSZipObject & { _data?: { uncompressedSize?: unknown } })._data
+    ?.uncompressedSize
+  return typeof size === 'number' && Number.isFinite(size) ? size : null
+}
+
+function assertOfficePreviewLimit(
+  limitKind: OfficePreviewLimitKind,
+  actual: number,
+  limit: number
+): void {
+  if (actual > limit) {
+    throw new OfficePreviewLimitExceededError(limitKind, limit, actual)
+  }
+}
+
+function assertOfficePreviewZipLimits(file: File, zip: JSZip): void {
+  assertOfficePreviewLimit('archiveSize', file.size, MAX_OFFICE_PREVIEW_ARCHIVE_BYTES)
+
+  const entries = Object.values(zip.files).filter((entry) => !entry.dir)
+  assertOfficePreviewLimit('entryCount', entries.length, MAX_OFFICE_PREVIEW_ARCHIVE_ENTRIES)
+
+  let totalUncompressedBytes = 0
+  for (const entry of entries) {
+    const uncompressedSize = getZipEntryUncompressedSize(entry)
+    if (uncompressedSize == null) {
+      continue
+    }
+    totalUncompressedBytes += uncompressedSize
+    assertOfficePreviewLimit(
+      'totalUncompressedSize',
+      totalUncompressedBytes,
+      MAX_OFFICE_PREVIEW_TOTAL_UNCOMPRESSED_BYTES
+    )
+  }
+}
+
+async function loadOfficePreviewZip(file: File): Promise<JSZip> {
+  assertOfficePreviewLimit('archiveSize', file.size, MAX_OFFICE_PREVIEW_ARCHIVE_BYTES)
+  const { default: JSZipCtor } = await import('jszip')
+  const zip = await JSZipCtor.loadAsync(file)
+  assertOfficePreviewZipLimits(file, zip)
+  return zip
+}
+
+function emptyOfficePreviewData(): {
+  previewText: string | null
+  previewImages: CanvasFilePreviewImage[]
+  previewSheets: CanvasFilePreviewSheet[]
+} {
+  return {
+    previewText: null,
+    previewImages: [],
+    previewSheets: []
+  }
+}
+
+function createOfficePreviewObjectUrl(blob: Blob): string {
+  if (typeof URL.createObjectURL !== 'function') {
+    throw new Error('Object URL support is required for Office preview images.')
+  }
+  return URL.createObjectURL(blob)
+}
 
 const normalizePlainTextPreview = (text: string): string | null => {
   const normalized = text.replace(/\r\n/g, '\n').trim()
@@ -81,20 +166,34 @@ const extractOfficePreviewImages = async (
   zip: JSZip,
   extension: string
 ): Promise<CanvasFilePreviewImage[]> => {
-  const mediaPaths = getSortedOfficeMediaPaths(zip, extension).slice(0, MAX_OFFICE_PREVIEW_IMAGES)
+  const mediaPaths = getSortedOfficeMediaPaths(zip, extension)
   if (mediaPaths.length === 0) return []
 
   const previewImages: CanvasFilePreviewImage[] = []
+  let totalMediaBytes = 0
 
-  for (const [index, mediaPath] of mediaPaths.entries()) {
+  for (const mediaPath of mediaPaths) {
+    if (previewImages.length >= MAX_OFFICE_PREVIEW_IMAGES) break
+
     const mimeType = getPreviewImageMimeType(mediaPath)
     const mediaFile = zip.file(mediaPath)
     if (!mimeType || !mediaFile) continue
 
-    const base64 = await mediaFile.async('base64')
+    const declaredSize = getZipEntryUncompressedSize(mediaFile)
+    if (declaredSize != null) {
+      if (declaredSize > MAX_OFFICE_PREVIEW_MEDIA_BYTES) continue
+      if (totalMediaBytes + declaredSize > MAX_OFFICE_PREVIEW_TOTAL_MEDIA_BYTES) break
+    }
+
+    const blob = await mediaFile.async('blob')
+    if (blob.size > MAX_OFFICE_PREVIEW_MEDIA_BYTES) continue
+    if (totalMediaBytes + blob.size > MAX_OFFICE_PREVIEW_TOTAL_MEDIA_BYTES) break
+    totalMediaBytes += blob.size
+
+    const index = previewImages.length
     previewImages.push({
       id: `office-preview-image-${index + 1}-${mediaPath}`,
-      src: `data:${mimeType};base64,${base64}`,
+      src: createOfficePreviewObjectUrl(blob),
       mimeType,
       fileName: mediaPath.split('/').pop() || `image-${index + 1}`
     })
@@ -920,7 +1019,15 @@ export const saveSpreadsheetPreviewSheetsToFile = async (
   originalSheets: CanvasFilePreviewSheet[],
   nextSheets: CanvasFilePreviewSheet[]
 ): Promise<File> => {
-  const zip = await JSZip.loadAsync(file)
+  let zip: JSZip
+  try {
+    zip = await loadOfficePreviewZip(file)
+  } catch (error) {
+    if (error instanceof OfficePreviewLimitExceededError) {
+      return file
+    }
+    throw error
+  }
   const extension = getFileExtension(file.name)
   if (extension !== '.xlsx') {
     return file
@@ -1184,7 +1291,15 @@ const extractOfficePreviewData = async (
     }
   }
 
-  const zip = await JSZip.loadAsync(file)
+  let zip: JSZip
+  try {
+    zip = await loadOfficePreviewZip(file)
+  } catch (error) {
+    if (error instanceof OfficePreviewLimitExceededError) {
+      return emptyOfficePreviewData()
+    }
+    throw error
+  }
   const previewImages = await extractOfficePreviewImages(zip, extension)
 
   if (extension === '.docx') {

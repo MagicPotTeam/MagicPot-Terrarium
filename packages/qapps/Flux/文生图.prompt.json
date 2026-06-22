@@ -1,8 +1,8 @@
 {
-  "16": {
+  "14": {
     "inputs": {
       "image": [
-        "33",
+        "56",
         0
       ]
     },
@@ -11,20 +11,20 @@
       "title": "获取图像尺寸"
     }
   },
-  "21": {
+  "19": {
     "inputs": {
       "max_shift": 1.15,
       "base_shift": 0.5000000000000001,
       "width": [
-        "16",
+        "14",
         0
       ],
       "height": [
-        "16",
+        "14",
         1
       ],
       "model": [
-        "48",
+        "51",
         0
       ]
     },
@@ -33,10 +33,10 @@
       "title": "采样算法（Flux）"
     }
   },
-  "22": {
+  "20": {
     "inputs": {
       "seed": [
-        "40",
+        "57",
         0
       ],
       "steps": 36,
@@ -44,23 +44,23 @@
       "sampler_name": "dpmpp_2m",
       "scheduler": "sgm_uniform",
       "denoise": [
-        "41",
-        0
-      ],
-      "model": [
-        "21",
-        0
-      ],
-      "positive": [
-        "35",
-        0
-      ],
-      "negative": [
         "34",
         0
       ],
+      "model": [
+        "19",
+        0
+      ],
+      "positive": [
+        "52",
+        0
+      ],
+      "negative": [
+        "53",
+        0
+      ],
       "latent_image": [
-        "47",
+        "44",
         0
       ]
     },
@@ -70,22 +70,6 @@
     }
   },
   "23": {
-    "inputs": {
-      "samples": [
-        "22",
-        0
-      ],
-      "vae": [
-        "28",
-        0
-      ]
-    },
-    "class_type": "VAEDecode",
-    "_meta": {
-      "title": "VAE解码"
-    }
-  },
-  "26": {
     "inputs": {
       "clip_name1": "clip_l.safetensors",
       "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
@@ -97,7 +81,7 @@
       "title": "双CLIP加载器"
     }
   },
-  "28": {
+  "25": {
     "inputs": {
       "vae_name": "ae.safetensors"
     },
@@ -106,14 +90,14 @@
       "title": "加载VAE"
     }
   },
-  "29": {
+  "26": {
     "inputs": {
       "samples": [
-        "39",
+        "33",
         0
       ],
       "vae": [
-        "28",
+        "25",
         0
       ]
     },
@@ -122,14 +106,14 @@
       "title": "VAE解码"
     }
   },
-  "30": {
+  "27": {
     "inputs": {
       "width": [
-        "37",
+        "31",
         0
       ],
       "height": [
-        "38",
+        "32",
         0
       ],
       "batch_size": 1
@@ -139,11 +123,11 @@
       "title": "空Latent图像"
     }
   },
-  "31": {
+  "28": {
     "inputs": {
       "text": "",
       "clip": [
-        "26",
+        "23",
         0
       ]
     },
@@ -152,49 +136,7 @@
       "title": "CLIP文本编码"
     }
   },
-  "33": {
-    "inputs": {
-      "index": 0,
-      "value0": [
-        "29",
-        0
-      ]
-    },
-    "class_type": "easy anythingIndexSwitch",
-    "_meta": {
-      "title": "编号切换"
-    }
-  },
-  "34": {
-    "inputs": {
-      "text": "",
-      "clip": [
-        "48",
-        1
-      ]
-    },
-    "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "CLIP文本编码"
-    }
-  },
-  "35": {
-    "inputs": {
-      "text": [
-        "36",
-        0
-      ],
-      "clip": [
-        "48",
-        1
-      ]
-    },
-    "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "CLIP文本编码"
-    }
-  },
-  "36": {
+  "30": {
     "inputs": {
       "value": ""
     },
@@ -203,7 +145,7 @@
       "title": "字符串（多行）"
     }
   },
-  "37": {
+  "31": {
     "inputs": {
       "value": 1024
     },
@@ -212,7 +154,7 @@
       "title": "整数"
     }
   },
-  "38": {
+  "32": {
     "inputs": {
       "value": 1024
     },
@@ -221,10 +163,10 @@
       "title": "整数"
     }
   },
-  "39": {
+  "33": {
     "inputs": {
       "seed": [
-        "40",
+        "57",
         0
       ],
       "steps": 1,
@@ -233,19 +175,19 @@
       "scheduler": "normal",
       "denoise": 1,
       "model": [
-        "49",
+        "38",
         0
       ],
       "positive": [
-        "31",
+        "28",
         0
       ],
       "negative": [
-        "31",
+        "28",
         0
       ],
       "latent_image": [
-        "30",
+        "27",
         0
       ]
     },
@@ -254,16 +196,7 @@
       "title": "K采样器"
     }
   },
-  "40": {
-    "inputs": {
-      "value": 0
-    },
-    "class_type": "PrimitiveInt",
-    "_meta": {
-      "title": "整数"
-    }
-  },
-  "41": {
+  "34": {
     "inputs": {
       "value": 1
     },
@@ -272,24 +205,7 @@
       "title": "浮点数"
     }
   },
-  "42": {
-    "inputs": {
-      "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))",
-      "a": [
-        "41",
-        0
-      ],
-      "b": [
-        "43",
-        0
-      ]
-    },
-    "class_type": "MathExpression|pysssss",
-    "_meta": {
-      "title": "Math Expression 🐍"
-    }
-  },
-  "43": {
+  "35": {
     "inputs": {
       "value": 0.55
     },
@@ -298,11 +214,11 @@
       "title": "浮点数"
     }
   },
-  "45": {
+  "37": {
     "inputs": {
       "filename_prefix": "ComfyUI",
       "images": [
-        "23",
+        "50",
         0
       ]
     },
@@ -311,26 +227,42 @@
       "title": "保存图像"
     }
   },
-  "46": {
+  "38": {
     "inputs": {
-      "images": [
-        "33",
+      "unet_name": "flux1-dev-fp8-e4m3fn.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "39": {
+    "inputs": {
+      "width": 1536,
+      "height": 1536,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": [
+        "46",
         0
       ]
     },
-    "class_type": "PreviewImage",
+    "class_type": "ImageResizeKJ",
     "_meta": {
-      "title": "预览图像"
+      "title": "Resize Image (deprecated)"
     }
   },
-  "47": {
+  "40": {
     "inputs": {
       "pixels": [
-        "33",
+        "39",
         0
       ],
       "vae": [
-        "28",
+        "25",
         0
       ]
     },
@@ -339,17 +271,204 @@
       "title": "VAE编码"
     }
   },
+  "41": {
+    "inputs": {
+      "samples": [
+        "48",
+        0
+      ],
+      "vae": [
+        "25",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "42": {
+    "inputs": {
+      "max_shift": 1.15,
+      "base_shift": 0.5000000000000001,
+      "width": [
+        "47",
+        0
+      ],
+      "height": [
+        "47",
+        1
+      ],
+      "model": [
+        "51",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingFlux",
+    "_meta": {
+      "title": "采样算法（Flux）"
+    }
+  },
+  "43": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": [
+        "56",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJ",
+    "_meta": {
+      "title": "Resize Image (deprecated)"
+    }
+  },
+  "44": {
+    "inputs": {
+      "pixels": [
+        "43",
+        0
+      ],
+      "vae": [
+        "25",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE编码"
+    }
+  },
+  "45": {
+    "inputs": {
+      "images": [
+        "56",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "46": {
+    "inputs": {
+      "samples": [
+        "20",
+        0
+      ],
+      "vae": [
+        "25",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "47": {
+    "inputs": {
+      "image": [
+        "39",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "获取图像尺寸"
+    }
+  },
   "48": {
     "inputs": {
-      "lora_name": "",
+      "seed": [
+        "57",
+        0
+      ],
+      "steps": 24,
+      "cfg": 1,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "sgm_uniform",
+      "denoise": [
+        "49",
+        1
+      ],
+      "model": [
+        "42",
+        0
+      ],
+      "positive": [
+        "52",
+        0
+      ],
+      "negative": [
+        "53",
+        0
+      ],
+      "latent_image": [
+        "40",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "49": {
+    "inputs": {
+      "expression": "0.3 + 0.25 * max(0, min(1, (a - 0.3) / 0.25))",
+      "a": [
+        "34",
+        0
+      ],
+      "b": [
+        "35",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "Math Expression 🐍"
+    }
+  },
+  "50": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "upscale_method": "lanczos",
+      "keep_proportion": true,
+      "divisible_by": 2,
+      "crop": "disabled",
+      "image": [
+        "41",
+        0
+      ],
+      "get_image_size": [
+        "56",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJ",
+    "_meta": {
+      "title": "Resize Image (deprecated)"
+    }
+  },
+  "51": {
+    "inputs": {
+      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
       "strength_model": 0.8000000000000002,
       "strength_clip": 0.8000000000000002,
       "model": [
-        "49",
+        "38",
         0
       ],
       "clip": [
-        "26",
+        "23",
         0
       ]
     },
@@ -358,14 +477,55 @@
       "title": "加载LoRA"
     }
   },
-  "49": {
+  "52": {
     "inputs": {
-      "unet_name": "flux1-dev-fp8-e4m3fn.safetensors",
-      "weight_dtype": "default"
+      "text": [
+        "30",
+        0
+      ],
+      "clip": [
+        "51",
+        1
+      ]
     },
-    "class_type": "UNETLoader",
+    "class_type": "CLIPTextEncode",
     "_meta": {
-      "title": "UNet加载器"
+      "title": "CLIP文本编码"
+    }
+  },
+  "53": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "51",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "56": {
+    "inputs": {
+      "index": 0,
+      "value0": [
+        "26",
+        0
+      ]
+    },
+    "class_type": "easy anythingIndexSwitch",
+    "_meta": {
+      "title": "编号切换"
+    }
+  },
+  "57": {
+    "inputs": {
+      "value": 0
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "整数"
     }
   }
 }

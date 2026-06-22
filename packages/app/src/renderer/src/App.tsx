@@ -1,5 +1,5 @@
 // packages/app/src/renderer/src/App.tsx
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { HashRouter } from 'react-router-dom'
 import Layout from './components/Layout'
 import { useConfig } from './hooks/useConfig'
@@ -15,6 +15,132 @@ import { handleComfyExecutionActivityEvent } from './utils/comfyExecutionActivit
 let hasHandledInitialComfyAutoStart = false
 let hasStartedInitialComfyAutoStart = false
 const appDndManager = getAppDndManager()
+
+type IdleDeadline = {
+  didTimeout: boolean
+  timeRemaining: () => number
+}
+
+type RequestIdleCallbackHandle = number
+
+type WindowWithIdleCallbacks = typeof window & {
+  requestIdleCallback?: RequestIdleCallback
+  cancelIdleCallback?: (handle: RequestIdleCallbackHandle) => void
+}
+type RequestIdleCallback = (
+  callback: (deadline: IdleDeadline) => void,
+  options?: { timeout?: number }
+) => RequestIdleCallbackHandle
+
+const POST_SHELL_IDLE_TIMEOUT_MS = 1500
+
+function requestPostShellIdleCallback(callback: () => void): () => void {
+  if (typeof window === 'undefined') {
+    let isPending = true
+    const timeoutId = setTimeout(() => {
+      if (!isPending) {
+        return
+      }
+
+      isPending = false
+      callback()
+    }, 0)
+    return () => {
+      if (!isPending) {
+        return
+      }
+
+      isPending = false
+      clearTimeout(timeoutId)
+    }
+  }
+
+  const { requestIdleCallback, cancelIdleCallback } = window as WindowWithIdleCallbacks
+
+  if (requestIdleCallback) {
+    let isPending = true
+    let timeoutId: number | null = null
+    const idleHandle = requestIdleCallback(
+      () => {
+        if (!isPending) {
+          return
+        }
+
+        isPending = false
+        if (timeoutId !== null) {
+          window.clearTimeout(timeoutId)
+        }
+        callback()
+      },
+      { timeout: POST_SHELL_IDLE_TIMEOUT_MS }
+    )
+    timeoutId = window.setTimeout(() => {
+      if (!isPending) {
+        return
+      }
+
+      isPending = false
+      cancelIdleCallback?.(idleHandle)
+      callback()
+    }, POST_SHELL_IDLE_TIMEOUT_MS)
+    return () => {
+      if (!isPending) {
+        return
+      }
+
+      isPending = false
+      cancelIdleCallback?.(idleHandle)
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId)
+      }
+    }
+  }
+
+  let isPending = true
+  const timeoutId = window.setTimeout(() => {
+    if (!isPending) {
+      return
+    }
+
+    isPending = false
+    callback()
+  }, 0)
+  return () => {
+    if (!isPending) {
+      return
+    }
+
+    isPending = false
+    window.clearTimeout(timeoutId)
+  }
+}
+
+function DeferredComfyStartupBridges(): React.JSX.Element | null {
+  const [shouldMountComfyStartupBridges, setShouldMountComfyStartupBridges] = useState(false)
+
+  useEffect(() => {
+    if (shouldMountComfyStartupBridges) {
+      return
+    }
+
+    return requestPostShellIdleCallback(() => {
+      setShouldMountComfyStartupBridges(true)
+    })
+  }, [shouldMountComfyStartupBridges])
+
+  if (!shouldMountComfyStartupBridges) {
+    return null
+  }
+
+  return (
+    <>
+      <ComfyExecutionActivityBridge />
+      <ComfyLogBridge />
+      <ManagedComfyProcessBridge />
+      <AutoStartLocalComfyUI />
+    </>
+  )
+}
 
 function shouldAutoStartLocalComfyUIInThisRuntime(): boolean {
   const configuredValue = import.meta.env.VITE_MAGICPOT_AUTO_START_COMFYUI
@@ -123,10 +249,7 @@ function App(): React.JSX.Element {
   return (
     <DndProvider manager={appDndManager}>
       <HashRouter>
-        <ComfyExecutionActivityBridge />
-        <ComfyLogBridge />
-        <ManagedComfyProcessBridge />
-        <AutoStartLocalComfyUI />
+        <DeferredComfyStartupBridges />
         <Layout />
       </HashRouter>
     </DndProvider>

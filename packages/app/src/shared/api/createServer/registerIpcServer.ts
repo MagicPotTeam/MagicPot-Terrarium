@@ -1,13 +1,12 @@
 import { ipcMain, MessagePortMain } from 'electron'
 import { Api } from '@shared/api'
-import {
-  isServerStreamingError,
-  ServerStreaming,
-  ServerStreamingError,
-  ServerStreamingTransport
-} from '@shared/api/apiUtils/streaming'
-import { isJsonDict } from '@shared/utils/utilTypes'
+import { ServerStreaming, ServerStreamingTransport } from '@shared/api/apiUtils/streaming'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
+import {
+  serializeServiceError,
+  withServerStreamingValidation,
+  withServiceValidation
+} from '@shared/api/apiUtils/serviceValidation'
 import { ApiType } from '../apiUtils/serviceDefSheet'
 import { ApiDefSheet } from '../apiUtils/serviceDefSheet'
 
@@ -23,19 +22,8 @@ function cleanupPort(port: MessagePortMain, handleResult: Promise<void>): Promis
   return handleResult
     .catch((error) => {
       console.error('cleanupPort error', error)
-      const transportError: ServerStreamingError = {
-        message:
-          error instanceof Error
-            ? error.message
-            : isServerStreamingError(error)
-              ? error.message
-              : error.toString() || 'Unknown error'
-      }
       const transport: ServerStreamingTransport<void> = {
-        error: transportError
-      }
-      if (isJsonDict(error) && !(error instanceof Error)) {
-        transport.error.payload = error
+        error: serializeServiceError(error)
       }
       port.postMessage(transport)
     })
@@ -96,10 +84,25 @@ export function registerIpcServer<T extends ApiType>(apiDef: ApiDefSheet<T>, api
       const methodApi = serviceApi[methodName].bind(serviceApi)
 
       if (methodDef.type === 'unary') {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        registerUnary(fullMethodName, methodApi as (req: any) => Promise<any>)
+        registerUnary(
+          fullMethodName,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          withServiceValidation(methodApi as (req: any) => Promise<any>, {
+            methodName: fullMethodName,
+            request: methodDef.request,
+            response: methodDef.response
+          })
+        )
       } else if (methodDef.type === 'serverStreaming') {
-        registerServerStreaming(fullMethodName, methodApi)
+        registerServerStreaming(
+          fullMethodName,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          withServerStreamingValidation(methodApi as any, {
+            methodName: fullMethodName,
+            request: methodDef.request,
+            data: methodDef.data
+          })
+        )
       }
     }
   }

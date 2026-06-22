@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto'
 const DEFAULT_SIGNED_URL_EXPIRES_SECONDS = 24 * 60 * 60
 const DEFAULT_KEY_PREFIX = 'magicpot/hunyuan3d'
 const MULTIPART_SLICE_SIZE = 8 * 1024 * 1024
+const ALLOWED_HY3D_UPLOAD_EXTENSIONS = new Set(['.glb', '.obj', '.fbx'])
 
 type Hy3dCosCredentials = {
   secretId: string
@@ -59,7 +60,17 @@ const sanitizeFileName = (fileName: string): string => {
   return `${safeBase || 'model'}${safeExt}`
 }
 
+const assertAllowedHy3dUploadFileName = (fileName: string): void => {
+  const ext = path.extname(fileName).toLowerCase()
+  if (!ALLOWED_HY3D_UPLOAD_EXTENSIONS.has(ext)) {
+    throw new Error(
+      '[Hunyuan3D] Unsupported model file type. Only GLB, OBJ, and FBX files can be uploaded.'
+    )
+  }
+}
+
 const buildObjectKey = (fileName: string, keyPrefix?: string): string => {
+  assertAllowedHy3dUploadFileName(fileName)
   const now = new Date()
   const y = String(now.getFullYear())
   const m = String(now.getMonth() + 1).padStart(2, '0')

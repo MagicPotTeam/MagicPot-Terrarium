@@ -1,6 +1,7 @@
 import { app, BrowserWindow, Menu, net, protocol, session } from 'electron'
 import { electronApp } from '@electron-toolkit/utils'
 import { getTestWindowPolicy } from './testWindowRuntime'
+import path from 'node:path'
 import { type TestUiPolicy } from './testUiPolicy'
 import { normalizeLocalFilePath, toFileUrl } from './utils/localFileUrl'
 
@@ -13,6 +14,8 @@ const silentErrorCodes = [
   'ECONNREFUSED'
 ]
 const blockedDomains = ['*://*.xgoi.cc/*', '*://xgoi.cc/*']
+const allowedLocalMediaMethods = new Set(['GET', 'HEAD', 'OPTIONS'])
+const windowsAbsolutePathPattern = /^[A-Za-z]:[\\/]/
 
 export function getAppStartupTestWindowPolicy(): TestUiPolicy {
   return getTestWindowPolicy()
@@ -97,16 +100,48 @@ function registerLocalMediaScheme(): void {
         secure: true,
         corsEnabled: true,
         supportFetchAPI: true,
-        stream: true,
-        bypassCSP: true
+        stream: true
       }
     }
   ])
 }
 
-export function withLocalMediaCorsHeaders(response: Response): Response {
+function resolveLocalMediaCorsOrigin(request?: Request): string | null {
+  const origin = request?.headers.get('Origin')
+  if (!origin) {
+    return null
+  }
+  if (origin === 'null') {
+    return origin
+  }
+
+  try {
+    const parsed = new URL(origin)
+    if (parsed.protocol === 'file:') {
+      return origin
+    }
+    if (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
+    ) {
+      return origin
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
+export function withLocalMediaCorsHeaders(response: Response, request?: Request): Response {
   const headers = new Headers(response.headers)
-  headers.set('Access-Control-Allow-Origin', '*')
+  const allowedOrigin = resolveLocalMediaCorsOrigin(request)
+  if (allowedOrigin) {
+    headers.set('Access-Control-Allow-Origin', allowedOrigin)
+    headers.set('Vary', 'Origin')
+  } else {
+    headers.delete('Access-Control-Allow-Origin')
+  }
   headers.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
   headers.set('Access-Control-Allow-Headers', 'Range, Content-Type')
   headers.set('Cross-Origin-Resource-Policy', 'cross-origin')
@@ -118,17 +153,33 @@ export function withLocalMediaCorsHeaders(response: Response): Response {
   })
 }
 
+function isAllowedLocalMediaPath(filePath: string): boolean {
+  const trimmed = filePath.trim()
+  if (!trimmed || trimmed.startsWith('\\\\') || trimmed.startsWith('//')) {
+    return false
+  }
+  return path.isAbsolute(trimmed) || windowsAbsolutePathPattern.test(trimmed)
+}
+
 async function handleLocalMediaRequest(request: Request): Promise<Response> {
   try {
+    if (!allowedLocalMediaMethods.has(request.method.toUpperCase())) {
+      return withLocalMediaCorsHeaders(new Response('Method not allowed', { status: 405 }), request)
+    }
     if (request.method === 'OPTIONS') {
-      return withLocalMediaCorsHeaders(new Response(null, { status: 204 }))
+      return withLocalMediaCorsHeaders(new Response(null, { status: 204 }), request)
     }
 
-    const fileUrl = toFileUrl(normalizeLocalFilePath(request.url))
-    return withLocalMediaCorsHeaders(await net.fetch(fileUrl))
+    const localPath = normalizeLocalFilePath(request.url)
+    if (!isAllowedLocalMediaPath(localPath)) {
+      return withLocalMediaCorsHeaders(new Response('Forbidden', { status: 403 }), request)
+    }
+
+    const fileUrl = toFileUrl(localPath)
+    return withLocalMediaCorsHeaders(await net.fetch(fileUrl), request)
   } catch (error) {
     console.error('[App] local-media: 处理失败:', error)
-    return withLocalMediaCorsHeaders(new Response('Internal error', { status: 500 }))
+    return withLocalMediaCorsHeaders(new Response('Internal error', { status: 500 }), request)
   }
 }
 

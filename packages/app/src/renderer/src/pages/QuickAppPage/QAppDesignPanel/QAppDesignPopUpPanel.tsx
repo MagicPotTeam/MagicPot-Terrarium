@@ -19,7 +19,6 @@ import { DragDropContext, Draggable, Droppable, DropResult } from '@hello-pangea
 import { useTranslation } from 'react-i18next'
 import { CalloutNodeNotInstalled } from '../components/CalloutNodeNotInstalled'
 import { CalloutComfyAPINotAvailable } from '../components/CalloutComfyAPINotAvailable'
-import DsnIcon from './qAppDesignInputs/DsnIcon'
 import DsnCustomNodeUrls from './qAppDesignInputs/DsnCustomNodeUrls'
 import DsnRequiredModels from './qAppDesignInputs/DsnRequiredModels'
 import { ButtonAddAutoItem } from './ButtonAddAutoItem'
@@ -39,6 +38,7 @@ import { Config } from '@shared/config/config'
 import { BuildEnv } from '@shared/config/buildEnv'
 import { ButtonQAppSave } from './ButtonQAppSave'
 import { useState, useRef, useEffect } from 'react'
+import { isEqual } from 'es-toolkit'
 import QAppPanel from '../QAppExecutePanel/QAppInputPanel'
 import ResultSection from '../ResultList/ResultSection'
 import { Visibility, VisibilityOff, Close } from '@mui/icons-material'
@@ -99,8 +99,6 @@ export const QAppDesignPopUpPanel = ({
   initialName,
   selectedCategory,
   onSelectedCategoryChange,
-  icon,
-  setIcon,
   customNodeUrls,
   setCustomNodeUrls,
   isCustomNodeUrlsEnabled,
@@ -130,46 +128,50 @@ export const QAppDesignPopUpPanel = ({
   const qAppGroupName = getQAppGroupName(initialKey)
   const title = qAppGroupName ? `${qAppGroupName} / ${qAppName}` : qAppName
 
-  // 记录打开时的初始状态快照，用于检测是否有未保存的更改
-  const initialSnapshot = useRef<string>('')
+  // 生成当前状态的快照。不要把渲染用的随机 id 放进快照：
+  // 设计器打开后，部分子组件会在初始化时把等价的 value 回写到父状态，
+  // 这会让 item 对象被重建但业务配置并没有变化。
+  const getCurrentSnapshot = () => ({
+    customNodeUrls: isCustomNodeUrlsEnabled ? customNodeUrls : undefined,
+    requiredModels: isRequiredModelsEnabled ? requiredModels : undefined,
+    autoItems: autoItems.map((i) => ({ component: i.component, value: i.value })),
+    inputItems: inputItems.map((i) => ({ component: i.component, value: i.value })),
+    outputNodeIds: isSpecifyOutput ? outputNodeIds : undefined,
+    selectedCategory
+  })
 
-  // 生成当前状态的快照字符串
-  const getCurrentSnapshot = (): string => {
-    return JSON.stringify({
-      icon,
-      customNodeUrls,
-      isCustomNodeUrlsEnabled,
-      requiredModels,
-      isRequiredModelsEnabled,
-      autoItems: autoItems.map((i) => ({ id: i.id, component: i.component, value: i.value })),
-      inputItems: inputItems.map((i) => ({ id: i.id, component: i.component, value: i.value })),
-      outputNodeIds,
-      isSpecifyOutput,
-      selectedCategory
-    })
+  // 记录打开时的初始状态快照，用于检测是否有未保存的更改。
+  // 打开弹窗后，部分子组件会自动回填等价状态；在用户真正交互前持续刷新快照，
+  // 避免把这些初始化同步误判成“用户修改”。
+  const initialSnapshot = useRef<ReturnType<typeof getCurrentSnapshot> | null>(null)
+  const snapshotReady = useRef(false)
+  const hasUserInteracted = useRef(false)
+
+  const markUserInteracted = () => {
+    hasUserInteracted.current = true
   }
 
-  // 当 dialog 打开时，延迟记录初始快照（等待所有状态完全就绪）
-  // 使用 useEffect 确保在 render 之后捕获，而非 render 期间
-  const snapshotReady = useRef(false)
   useEffect(() => {
-    if (open && !snapshotReady.current) {
-      // 使用 requestAnimationFrame 确保父组件的 useEffect 也执行完毕
-      const rafId = requestAnimationFrame(() => {
-        initialSnapshot.current = getCurrentSnapshot()
-        snapshotReady.current = true
-      })
-      return () => cancelAnimationFrame(rafId)
-    }
     if (!open) {
       snapshotReady.current = false
-      initialSnapshot.current = ''
+      hasUserInteracted.current = false
+      initialSnapshot.current = null
+      return undefined
     }
+
+    if (!hasUserInteracted.current) {
+      initialSnapshot.current = getCurrentSnapshot()
+      snapshotReady.current = true
+    }
+
     return undefined
   })
 
   const hasUnsavedChanges = (): boolean => {
-    return getCurrentSnapshot() !== initialSnapshot.current
+    if (!snapshotReady.current || !hasUserInteracted.current) {
+      return false
+    }
+    return !isEqual(getCurrentSnapshot(), initialSnapshot.current)
   }
 
   const handleAttemptClose = () => {
@@ -190,6 +192,7 @@ export const QAppDesignPopUpPanel = ({
     if (!destination) return
     if (destination.droppableId === source.droppableId && destination.index === source.index) return
 
+    markUserInteracted()
     if (source.droppableId === DROPPABLE_INPUT && destination.droppableId === DROPPABLE_INPUT) {
       setInputItems((prev) => reorderList(prev, source.index, destination.index))
       return
@@ -215,6 +218,8 @@ export const QAppDesignPopUpPanel = ({
         fullWidth
         scroll="paper"
         PaperProps={{
+          onInputCapture: markUserInteracted,
+          onChangeCapture: markUserInteracted,
           sx: {
             height: '90vh',
             maxHeight: '90vh',
@@ -265,11 +270,6 @@ export const QAppDesignPopUpPanel = ({
               <Stack spacing={3}>
                 <CalloutNodeNotInstalled workflow={workflow} objectInfos={objectInfos} />
                 <CalloutComfyAPINotAvailable isDesignMode={true} objectInfos={objectInfos} />
-
-                <Typography variant="h6">
-                  {t('qapp.design.set_app_icon') || '设置应用图标'}
-                </Typography>
-                <DsnIcon value={icon} setValue={setIcon} />
 
                 <Typography variant="h6">{t('qapp.design.set_custom_node_urls')}</Typography>
                 <DsnCustomNodeUrls
@@ -555,6 +555,7 @@ export const QAppDesignPopUpPanel = ({
                 showCategoryField={false}
                 onSaveSuccess={() => {
                   initialSnapshot.current = getCurrentSnapshot()
+                  snapshotReady.current = true
                   onClose()
                 }}
               />

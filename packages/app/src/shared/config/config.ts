@@ -37,6 +37,8 @@ export type LLMAPIProfile = {
   auth_account_email?: string
   auth_connected_at?: string
   codex_fast_mode?: boolean
+  context_window_tokens?: number
+  context_budget_tokens?: number
   provider?: LLMProviderOption
   deployment?: LLMDeployment
   model_use?: LLMModelUseOption
@@ -587,10 +589,10 @@ export const DEFAULT_CONFIG: Config = {
       servers: []
     },
     server: {
-      enabled: true,
+      enabled: false,
       path: '/api/mcp',
       auth_token: '',
-      expose_resources: true
+      expose_resources: false
     }
   },
   seedLocked: false

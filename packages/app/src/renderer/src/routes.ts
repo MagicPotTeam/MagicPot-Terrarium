@@ -8,7 +8,8 @@ import {
   FlashOn as FlashIcon,
   Architecture as ArchitectureIcon,
   Chat as ChatIcon,
-  Dvr as ComfyIcon
+  Dvr as ComfyIcon,
+  SmartToy as AgentStudioIcon
 } from '@mui/icons-material'
 import MainPage from './pages/MainPage/MainPage'
 import LegacyProjectWebglRedirectPage from './pages/ProjectCanvasPage/LegacyProjectWebglRedirectPage'
@@ -32,6 +33,7 @@ const CustomSkillManagerPage = lazyWithRetry(
 )
 const ChatPage = lazyWithRetry(() => import('./pages/ChatPage/ChatPage'))
 const AppLogPage = lazyWithRetry(() => import('./pages/AppLogPage'))
+const AgentStudioPage = lazyWithRetry(() => import('./pages/AgentStudioPage/AgentStudioPage'))
 
 export type PageType =
   | 'main'
@@ -48,6 +50,7 @@ export type PageType =
   | 'project_canvas'
   | 'project_webgl_legacy'
   | 'chat'
+  | 'agent_studio'
   | 'language'
 
 export interface RouteConfig {
@@ -153,6 +156,14 @@ export const routes: RouteConfig[] = [
     labelKey: 'menu.chat',
     Icon: ChatIcon,
     Page: ChatPage,
+    showInSidebar: true
+  },
+  {
+    id: 'agent_studio',
+    path: '/agent-studio',
+    label: 'Agent Studio',
+    Icon: AgentStudioIcon,
+    Page: AgentStudioPage,
     showInSidebar: true
   },
   {

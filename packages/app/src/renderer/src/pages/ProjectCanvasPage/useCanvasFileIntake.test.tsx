@@ -657,6 +657,122 @@ describe('useCanvasFileIntake', () => {
     }
   })
 
+  it('prefers the internal quick-app image payload over placeholder drop files', async () => {
+    const addTextToCanvas = vi.fn()
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
+    const placeholderFile = new File([buildPngHeader(1, 1, 6)], 'placeholder.png', {
+      type: 'image/png'
+    })
+
+    render(
+      <FileIntakeHarness addTextToCanvas={addTextToCanvas} addImageToCanvas={addImageToCanvas} />
+    )
+
+    const quickAppPayload = JSON.stringify({
+      objectUrl: 'blob:real-generated-image',
+      fileItem: { filename: 'generated.png' },
+      sourceWidth: 1024,
+      sourceHeight: 768
+    })
+    const dropEvent = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+    Object.defineProperty(dropEvent, 'clientX', { configurable: true, value: 320 })
+    Object.defineProperty(dropEvent, 'clientY', { configurable: true, value: 240 })
+    Object.defineProperty(dropEvent, 'dataTransfer', {
+      configurable: true,
+      value: {
+        files: [placeholderFile],
+        items: [],
+        getData: vi.fn((type: string) =>
+          type === 'application/x-qapp-image' ? quickAppPayload : ''
+        )
+      }
+    })
+    screen.getByTestId('canvas-paste-surface').dispatchEvent(dropEvent)
+
+    await waitFor(() => {
+      expect(addImageToCanvas).toHaveBeenCalledTimes(1)
+    })
+
+    expect(addImageToCanvas.mock.calls[0]?.[0]).toBe('blob:real-generated-image')
+    expect(addImageToCanvas.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        clientX: 320,
+        clientY: 240,
+        fileName: 'generated.png',
+        sourceWidthHint: 1024,
+        sourceHeightHint: 768
+      })
+    )
+    expect(addImageToCanvas.mock.calls[0]?.[1]).not.toEqual(
+      expect.objectContaining({
+        fileName: 'placeholder.png',
+        sourceWidthHint: 1,
+        sourceHeightHint: 1,
+        sourceFile: placeholderFile
+      })
+    )
+    expect(addTextToCanvas).not.toHaveBeenCalled()
+  })
+
+  it('imports dropped image files exposed only through DataTransfer items', async () => {
+    const addTextToCanvas = vi.fn()
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
+    const imageFile = new File([buildPngHeader(640, 320, 6)], 'items-only.png', {
+      type: 'image/png'
+    })
+    Object.defineProperty(imageFile, 'path', {
+      configurable: true,
+      value: 'C:\\assets\\items-only.png'
+    })
+
+    const getAsFile = vi.fn(() => (dropDataStoreOpen ? imageFile : null))
+    let dropDataStoreOpen = true
+
+    render(
+      <FileIntakeHarness addTextToCanvas={addTextToCanvas} addImageToCanvas={addImageToCanvas} />
+    )
+
+    const dropEvent = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+    Object.defineProperty(dropEvent, 'clientX', { configurable: true, value: 320 })
+    Object.defineProperty(dropEvent, 'clientY', { configurable: true, value: 240 })
+    Object.defineProperty(dropEvent, 'dataTransfer', {
+      configurable: true,
+      value: {
+        files: [],
+        items: [
+          {
+            kind: 'file',
+            type: 'image/png',
+            getAsFile
+          }
+        ],
+        getData: vi.fn(() => '')
+      }
+    })
+    screen.getByTestId('canvas-paste-surface').dispatchEvent(dropEvent)
+    dropDataStoreOpen = false
+
+    await waitFor(() => {
+      expect(addImageToCanvas).toHaveBeenCalledTimes(1)
+    })
+
+    expect(getAsFile).toHaveBeenCalledTimes(1)
+
+    expect(addImageToCanvas.mock.calls[0]?.[0]).toBe('local-media:///C:/assets/items-only.png')
+    expect(addImageToCanvas.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        clientX: 320,
+        clientY: 240,
+        fileName: 'items-only.png',
+        sizeBytes: imageFile.size,
+        sourceWidthHint: 640,
+        sourceHeightHint: 320,
+        sourceFile: imageFile
+      })
+    )
+    expect(addTextToCanvas).not.toHaveBeenCalled()
+  })
+
   it('uses local-media URLs for Electron local image batches instead of reading every file as data URLs', async () => {
     const addTextToCanvas = vi.fn()
     const addImagesToCanvas = vi.fn<TestAddImagesToCanvas>().mockResolvedValue(undefined)

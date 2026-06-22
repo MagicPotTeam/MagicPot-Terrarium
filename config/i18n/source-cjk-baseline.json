@@ -641,12 +641,6 @@
     {
       "file": "packages/app/src/renderer/src/components/inputs/InputLoRAChain.tsx",
       "kind": "string",
-      "value": "触发词备注",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/components/inputs/InputLoRAChain.tsx",
-      "kind": "string",
       "value": "请添加 Lora",
       "count": 1
     },
@@ -654,18 +648,6 @@
       "file": "packages/app/src/renderer/src/components/inputs/InputLoRAChain.tsx",
       "kind": "string",
       "value": "输入搜索或选择...",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/components/inputs/InputLoRAChain.tsx",
-      "kind": "string",
-      "value": "填写该 LoRA 的触发词",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/components/inputs/InputLoRAChain.tsx",
-      "kind": "string",
-      "value": "选择该 LoRA 时会自动追加到提示词",
       "count": 1
     },
     {
@@ -923,18 +905,6 @@
     {
       "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
       "kind": "string",
-      "value": "3D 模型已生成。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
-      "kind": "string",
-      "value": "3D 模型已添加到画布。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
-      "kind": "string",
       "value": "宸茶繛鎺ュ埌 ComfyUI",
       "count": 1
     },
@@ -1013,7 +983,13 @@
     {
       "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
       "kind": "string",
-      "value": "请在左侧快应用列表中切换到 3D 分类后选择 Hunyuan3D。相关 API 凭证在“快应用 API”里配置。",
+      "value": "请在“快应用 API”里配置 Hunyuan3D/Tencent Cloud 凭证，然后回到 Hunyuan3D 快应用继续生成。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
+      "kind": "string",
+      "value": "请在“快应用 API”里配置 Tripo API Key，然后回到 Tripo3D 快应用继续生成。",
       "count": 1
     },
     {
@@ -1097,25 +1073,55 @@
     {
       "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
       "kind": "string",
-      "value": "Hunyuan3D 未返回可用的 3D 模型",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
-      "kind": "string",
-      "value": "Hunyuan3D 位于快应用",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
-      "kind": "string",
-      "value": "Hunyuan3D 正在生成，请稍候…",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
-      "kind": "string",
       "value": "Hy3D 模型链接处理失败",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
+      "kind": "string",
+      "value": "Tripo3D 风格化模型已生成。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
+      "kind": "string",
+      "value": "Tripo3D 风格化模型已添加到画布。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
+      "kind": "string",
+      "value": "Tripo3D 任务已完成。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
+      "kind": "string",
+      "value": "Tripo3D 图片已生成。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
+      "kind": "string",
+      "value": "Tripo3D 图片已添加到画布。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
+      "kind": "string",
+      "value": "Tripo3D 未返回可用的 3D 模型",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
+      "kind": "string",
+      "value": "Tripo3D 未返回可用于 3D 生成的风格化图片",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/components/SidePanel.tsx",
+      "kind": "string",
+      "value": "Tripo3D 正在生成风格化图片和 3D 模型，请稍候...",
       "count": 1
     },
     {
@@ -1821,42 +1827,6 @@
       "count": 2
     },
     {
-      "file": "packages/app/src/renderer/src/pages/ChatPage/chatContextCompression.ts",
-      "kind": "string",
-      "value": "- 之前有较长历史，已压缩为背景信息。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/ChatPage/chatContextCompression.ts",
-      "kind": "string",
-      "value": "(空消息)",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/ChatPage/chatContextCompression.ts",
-      "kind": "string",
-      "value": "较早对话的压缩背景信息：",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/ChatPage/chatContextCompression.ts",
-      "kind": "string",
-      "value": "系统",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/ChatPage/chatContextCompression.ts",
-      "kind": "string",
-      "value": "用户",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/ChatPage/chatContextCompression.ts",
-      "kind": "string",
-      "value": "助手",
-      "count": 1
-    },
-    {
       "file": "packages/app/src/renderer/src/pages/ChatPage/chatLocaleUtils.ts",
       "kind": "string",
       "value": "新对话",
@@ -2213,18 +2183,6 @@
     {
       "file": "packages/app/src/renderer/src/pages/ChatPage/components/ChatMessageList.tsx",
       "kind": "string",
-      "value": "复制回答",
-      "count": 2
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/ChatPage/components/ChatMessageList.tsx",
-      "kind": "string",
-      "value": "回答已复制",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/ChatPage/components/ChatMessageList.tsx",
-      "kind": "string",
       "value": "拖拽回答到画板",
       "count": 1
     },
@@ -2339,6 +2297,12 @@
     {
       "file": "packages/app/src/renderer/src/pages/ChatPage/Hunyuan3DPanel.tsx",
       "kind": "string",
+      "value": "导入",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/Hunyuan3DPanel.tsx",
+      "kind": "string",
       "value": "开始 UV 展开",
       "count": 1
     },
@@ -2382,7 +2346,7 @@
       "file": "packages/app/src/renderer/src/pages/ChatPage/Hunyuan3DPanel.tsx",
       "kind": "string",
       "value": "执行",
-      "count": 1
+      "count": 8
     },
     {
       "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/ConceptPanel.tsx",
@@ -3027,10 +2991,670 @@
       "count": 1
     },
     {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "绑定规格",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "绑定类型",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "编辑视角",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "当前环节",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "动画预设",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "多边形类型",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "模板",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "模型 file token / URL",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "目标格式",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "目标面数等级",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "请补齐当前任务必需的输入后再执行。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "图像模型",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "选择图片",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "jsx-text",
+      "value": "PBR 材质",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "把上一轮模型导出为 GLTF / USDZ / FBX / OBJ / STL / 3MF。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "把上一轮模型转换成更低面数版本。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "把外部模型导入 Tripo，生成可继续处理的任务。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "把预设动画应用到已绑定模型。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "绑定",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "必须上传一张源图。Tripo 会先按提示词和模板生成风格化图片，再自动生成 3D 模型。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "编辑多视图",
+      "count": 2
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "编辑多视图需要 generate_multiview_image 返回的 Task ID。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "编辑提示词",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "补全",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "不是 API Key。它是上一步生成/导入模型后返回的任务 ID。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "参考图",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "从上一次输出的 [Tripo3D] Task ID 复制，通常会自动带入",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "导入",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "导入模型",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "低模",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "动画",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "对分割后的指定部件做补全。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "对上一轮模型做部件分割。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "多视图",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "多视图任务 ID",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "分割",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "风格化提示词",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "高级生图",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "格式",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "给上一轮模型生成骨骼。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "基于上一轮多视图 Task ID 修改指定视角。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "基于上一轮模型 Task ID 继续生成纹理。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "检查上一轮模型是否适合骨骼绑定。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "仅需要一张源图，Tripo 会生成 front / left / back / right 多视图。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "开始绑定",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "开始补全",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "开始分割",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "开始预检",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "开始转换",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "可填写 tripo-file-token:<token>、file_token:<token>、完整 file object JSON，或公开可访问的模型 URL。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "可选参考图。单图会作为 file，多图会作为 files 提交。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "例如 head, left_arm, backpack",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "例如 weathered bronze, hand-painted stylized stone",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "描述要生成或修改的内容",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "描述源图要套用的风格、材质或造型方向",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "上传参考图后会清空纹理文字描述。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "上一轮 Tripo 任务 ID",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "生成低模",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "生成动画",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "生成多视图",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "生成风格化 3D",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "生成图片",
+      "count": 2
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "生成纹理",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 animate_prerigcheck 任务，检查模型是否适合骨骼绑定。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 animate_retarget 任务，把预设动画应用到已绑定模型。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 animate_rig 任务，输出带骨骼的 GLB/FBX 资源。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 convert_model 任务，导出 GLTF / USDZ / FBX / OBJ / STL / 3MF。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 edit_multiview_image 任务，按视角修改已有多视图任务。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 generate_image 任务，可带参考图、模板和图像模型。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 generate_multiview_image 任务，由单张参考图生成四视图。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 highpoly_to_lowpoly 任务，输出更低面数的模型。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 import_model 任务，支持 Tripo STS file token/object 或公开模型 URL。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 mesh_completion 任务，可填写要补全的 part_names，多个名称用逗号分隔。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 mesh_segmentation 任务，为后续部件补全等流程准备分割结果。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 text_to_image 任务，生成一张概念参考图。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 texture_model 任务，基于 Tripo 模型任务继续生成纹理。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提交 Tripo 任务。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "提示词",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "文生图",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "纹理",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "纹理参考图",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "纹理描述 / part_names",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "先按模板生成风格化图片，再自动用该图片生成 3D 模型。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "移除图片",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "用提示词、参考图和模板生成风格化图片。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "由单张参考图生成 front / left / back / right 多视图。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "预检",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "源图",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "这些是当前流程里的连续环节。上一步返回的 Task ID 会自动留在这里，供下一步继续处理。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "执行",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "只用文字生成概念参考图。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "part_names（可选）",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 绑定预检",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 编辑多视图",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 补全",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 导入模型",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 低模",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 动画重定向",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 多视图图",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 分割",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 风格化 3D",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 高级生图",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 格式转换",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 骨骼绑定",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 任务",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 任务完成后会返回 Task ID。继续处理该结果时需要这个 ID，通常会从上一步自动带入。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 文生图",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "Tripo 纹理",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/TripoTaskPanel.tsx",
+      "kind": "string",
+      "value": "tripo-file-token:... 或 {\"type\":\"model\",\"file_token\":\"...\"}",
+      "count": 1
+    },
+    {
       "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
       "kind": "string",
       "value": "白模",
       "count": 3
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
+      "value": "绑定动画",
+      "count": 1
     },
     {
       "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
@@ -3067,6 +3691,12 @@
       "kind": "string",
       "value": "草图模式",
       "count": 2
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
+      "value": "草图渲染",
+      "count": 1
     },
     {
       "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
@@ -3126,6 +3756,12 @@
       "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
       "kind": "string",
       "value": "都市白领",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
+      "value": "风格化 3D",
       "count": 1
     },
     {
@@ -3383,8 +4019,20 @@
     {
       "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
       "kind": "string",
+      "value": "模型精修",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
+      "value": "模型生成",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
       "value": "默认",
-      "count": 2
+      "count": 3
     },
     {
       "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
@@ -3455,12 +4103,6 @@
     {
       "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
       "kind": "string",
-      "value": "请先上传待处理模型，并填写纹理描述或参考图。",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
-      "kind": "string",
       "value": "请先上传待处理模型，再执行当前流程。",
       "count": 1
     },
@@ -3473,7 +4115,43 @@
     {
       "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
       "kind": "string",
+      "value": "请先上传一张参考图，再生成 Tripo 多视图。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
+      "value": "请先上传源图并填写风格化提示词，再生成 Tripo 3D。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
+      "value": "请先填写 Tripo 任务提示词。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
+      "value": "请先填写 Tripo STS file token/object 或公开模型 URL。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
       "value": "请先填写提示词或上传参考图，再开始生成 3D。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
+      "value": "请先选择 Tripo 模型任务 ID 或已生成的模型，再执行该流程。",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
+      "value": "请先选择模型任务 ID 或上传待处理模型，并填写纹理描述或参考图。",
       "count": 1
     },
     {
@@ -3582,6 +4260,12 @@
       "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
       "kind": "string",
       "value": "童话",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/ChatPage/hy3d/types.ts",
+      "kind": "string",
+      "value": "图片 / 多视图",
       "count": 1
     },
     {
@@ -4302,12 +4986,6 @@
       "file": "packages/app/src/renderer/src/pages/ProjectCanvasPage/canvasStorage.ts",
       "kind": "string",
       "value": "[Canvas Storage] 清空失败:",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/ProjectCanvasPage/canvasStorage.ts",
-      "kind": "string",
-      "value": "[Canvas Storage] 无法获取 blob 数据:",
       "count": 1
     },
     {
@@ -9479,12 +10157,6 @@
     {
       "file": "packages/app/src/renderer/src/pages/QuickAppPage/components/QAppMenu.tsx",
       "kind": "string",
-      "value": "[handleDrop] 未匹配到快应用，使用当前快应用填充",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/components/QAppMenu.tsx",
-      "kind": "string",
       "value": "[QApp] 导出失败:",
       "count": 1
     },
@@ -9648,24 +10320,6 @@
       "file": "packages/app/src/renderer/src/pages/QuickAppPage/CustomSkillManagerPage.tsx",
       "kind": "string",
       "value": "分批输入",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/CustomSkillManagerPage.tsx",
-      "kind": "string",
-      "value": "附属文本",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/CustomSkillManagerPage.tsx",
-      "kind": "string",
-      "value": "结构化输出",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/CustomSkillManagerPage.tsx",
-      "kind": "string",
-      "value": "聊天文本",
       "count": 1
     },
     {
@@ -10979,12 +11633,6 @@
     {
       "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/QAppDesignPopUpPanel.tsx",
       "kind": "string",
-      "value": "设置应用图标",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/QuickAppPage/QAppDesignPanel/QAppDesignPopUpPanel.tsx",
-      "kind": "string",
       "value": "未保存的更改",
       "count": 1
     },
@@ -12257,6 +12905,12 @@
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
       "kind": "string",
+      "value": "国际站 api.tripo3d.ai",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
+      "kind": "string",
       "value": "技能类型",
       "count": 1
     },
@@ -12341,6 +12995,12 @@
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
       "kind": "string",
+      "value": "请输入 Tripo API Key",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
+      "kind": "string",
       "value": "视觉",
       "count": 1
     },
@@ -12413,6 +13073,12 @@
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
       "kind": "string",
+      "value": "中国大陆站 api.tripo3d.com",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
+      "kind": "string",
       "value": "自定义技能",
       "count": 1
     },
@@ -12456,6 +13122,12 @@
       "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
       "kind": "string",
       "value": "Ollama 本地服务无需密钥",
+      "count": 1
+    },
+    {
+      "file": "packages/app/src/renderer/src/pages/SettingsPage/PanelLLM.tsx",
+      "kind": "string",
+      "value": "Tripo 站点",
       "count": 1
     },
     {
@@ -12877,24 +13549,6 @@
       "kind": "string",
       "value": "Python 命令路径",
       "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/SettingsPage.tsx",
-      "kind": "string",
-      "value": "快应用 API",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/SettingsPage.tsx",
-      "kind": "string",
-      "value": "快应用 API 配置",
-      "count": 1
-    },
-    {
-      "file": "packages/app/src/renderer/src/pages/SettingsPage/SettingsPage.tsx",
-      "kind": "string",
-      "value": "Agent线程配置",
-      "count": 2
     },
     {
       "file": "packages/app/src/renderer/src/pages/SettingsPage/SettingsPage.tsx",

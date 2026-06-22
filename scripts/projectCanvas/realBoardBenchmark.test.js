@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest'
 import {
   buildAcceptance,
   buildAggregateScenarioResult,
+  buildRealBoardAggregateReport,
+  buildRealBoardBenchmarkProfileMetadata,
   buildRepeatWorkloadAssessment,
   resolveRealBoardCachePasses,
-  buildSourceTextureVisualFailures
+  buildSourceTextureVisualFailures,
+  readProjectCanvasRealBoardMetricsFromDomSnapshot
 } from './realBoardBenchmark.mjs'
 
 function buildFinalMetrics(overrides = {}) {
@@ -28,6 +31,46 @@ function buildInteractionBurst(overrides = {}) {
     postIdleReactCommits: 0,
     ...overrides
   }
+}
+
+function buildOfficialProfileMetadata(overrides = {}) {
+  return buildRealBoardBenchmarkProfileMetadata({
+    scenarioMode: 'mixed',
+    imageCount: 3000,
+    pressureDurationMs: 30000,
+    cachePasses: ['cold-cache', 'warm-cache'],
+    allowRepeat: false,
+    memoryWatchdogEnabled: true,
+    memorySoftLimitFraction: 0.75,
+    memoryHardLimitFraction: 0.8,
+    ...overrides
+  })
+}
+
+function buildPassingAggregateResult(overrides = {}) {
+  return {
+    corpusLabel: 'real-corpus',
+    scenarioMode: 'mixed',
+    cachePass: 'cold-cache',
+    benchmarkImageCount: 3000,
+    acceptance: { passed: true },
+    ...overrides
+  }
+}
+
+function buildAggregateWithProfile(overrides = {}) {
+  const currentResults = overrides.currentResults ?? [buildPassingAggregateResult()]
+  const profileMetadata =
+    overrides.profileMetadata ?? buildOfficialProfileMetadata(overrides.profileOverrides)
+
+  return buildRealBoardAggregateReport({
+    aggregateRoot: 'C:/repo/.magicpot-trash/run-1/real-board',
+    currentResults,
+    existingResults: [],
+    generatedAt: '2025-01-01T00:00:00.000Z',
+    memoryWatchdogReport: null,
+    profileMetadata
+  })
 }
 
 function buildVisualFailures(overrides = {}) {
@@ -80,6 +123,105 @@ function buildVisualFailures(overrides = {}) {
 }
 
 describe('realBoardBenchmark acceptance gates', () => {
+  it('marks the default official mixed-3000 profile as non-diagnostic', () => {
+    const profile = buildOfficialProfileMetadata()
+    const aggregate = buildAggregateWithProfile({ profileMetadata: profile })
+
+    expect(profile.officialProfile).toBe(true)
+    expect(profile.diagnosticReasons).toEqual([])
+    expect(aggregate.officialProfile).toBe(true)
+    expect(aggregate.acceptanceAllPassed).toBe(true)
+    expect(aggregate.officialAllPassed).toBe(true)
+    expect(aggregate.allPassed).toBe(true)
+  })
+
+  it('prevents allow-repeat runs from reporting official aggregate allPassed', () => {
+    const profile = buildOfficialProfileMetadata({ allowRepeat: true })
+    const aggregate = buildAggregateWithProfile({ profileMetadata: profile })
+
+    expect(profile.officialProfile).toBe(false)
+    expect(profile.diagnosticReasons.join(' ')).toContain('allowRepeat=true')
+    expect(aggregate.acceptanceAllPassed).toBe(true)
+    expect(aggregate.officialAllPassed).toBe(false)
+    expect(aggregate.allPassed).toBe(false)
+  })
+
+  it('prevents watchdog-disabled runs from reporting official aggregate allPassed', () => {
+    const profile = buildOfficialProfileMetadata({ memoryWatchdogEnabled: false })
+    const aggregate = buildAggregateWithProfile({ profileMetadata: profile })
+
+    expect(profile.officialProfile).toBe(false)
+    expect(profile.diagnosticReasons.join(' ')).toContain('memory watchdog disabled')
+    expect(aggregate.acceptanceAllPassed).toBe(true)
+    expect(aggregate.officialAllPassed).toBe(false)
+    expect(aggregate.allPassed).toBe(false)
+  })
+
+  it('prevents relaxed watchdog thresholds from reporting official aggregate allPassed', () => {
+    const profile = buildOfficialProfileMetadata({
+      memorySoftLimitFraction: 0.9,
+      memoryHardLimitFraction: 0.95
+    })
+    const aggregate = buildAggregateWithProfile({ profileMetadata: profile })
+
+    expect(profile.officialProfile).toBe(false)
+    expect(profile.diagnosticReasons.join(' ')).toContain('memory watchdog soft limit=0.9')
+    expect(profile.diagnosticReasons.join(' ')).toContain('memory watchdog hard limit=0.95')
+    expect(aggregate.acceptanceAllPassed).toBe(true)
+    expect(aggregate.officialAllPassed).toBe(false)
+    expect(aggregate.allPassed).toBe(false)
+  })
+
+  it('prevents lowered image count runs from reporting official aggregate allPassed', () => {
+    const profile = buildOfficialProfileMetadata({ imageCount: 300 })
+    const aggregate = buildAggregateWithProfile({
+      profileMetadata: profile,
+      currentResults: [buildPassingAggregateResult({ benchmarkImageCount: 300 })]
+    })
+
+    expect(profile.officialProfile).toBe(false)
+    expect(profile.diagnosticReasons.join(' ')).toContain('imageCount=300')
+    expect(aggregate.acceptanceAllPassed).toBe(true)
+    expect(aggregate.officialAllPassed).toBe(false)
+    expect(aggregate.allPassed).toBe(false)
+  })
+
+  it('prevents shortened pressure runs from reporting official aggregate allPassed', () => {
+    const profile = buildOfficialProfileMetadata({ pressureDurationMs: 15000 })
+    const aggregate = buildAggregateWithProfile({ profileMetadata: profile })
+
+    expect(profile.officialProfile).toBe(false)
+    expect(profile.diagnosticReasons.join(' ')).toContain('pressureDurationMs=15000')
+    expect(aggregate.acceptanceAllPassed).toBe(true)
+    expect(aggregate.officialAllPassed).toBe(false)
+    expect(aggregate.allPassed).toBe(false)
+  })
+
+  it('prevents disabled pressure runs from reporting official aggregate allPassed', () => {
+    const profile = buildOfficialProfileMetadata({ pressureDurationMs: 0 })
+    const aggregate = buildAggregateWithProfile({ profileMetadata: profile })
+
+    expect(profile.officialProfile).toBe(false)
+    expect(profile.diagnosticReasons.join(' ')).toContain('pressureDurationMs=0')
+    expect(aggregate.acceptanceAllPassed).toBe(true)
+    expect(aggregate.officialAllPassed).toBe(false)
+    expect(aggregate.allPassed).toBe(false)
+  })
+
+  it('prevents single cache pass runs from reporting official aggregate allPassed', () => {
+    const profile = buildOfficialProfileMetadata({ cachePasses: ['cold-cache'] })
+    const aggregate = buildAggregateWithProfile({
+      profileMetadata: profile,
+      currentResults: [buildPassingAggregateResult({ cachePass: 'cold-cache' })]
+    })
+
+    expect(profile.officialProfile).toBe(false)
+    expect(profile.diagnosticReasons.join(' ')).toContain('cachePasses=cold-cache')
+    expect(aggregate.acceptanceAllPassed).toBe(true)
+    expect(aggregate.officialAllPassed).toBe(false)
+    expect(aggregate.allPassed).toBe(false)
+  })
+
   it('promotes final overlay, React, heap, and texture metrics into aggregate results', () => {
     const aggregateResult = buildAggregateScenarioResult({
       corpusLabel: 'real-corpus',
@@ -137,6 +279,30 @@ describe('realBoardBenchmark acceptance gates', () => {
           cacheHitCount: 3000,
           cacheGeneratedCount: 0,
           cacheStaleCount: 0
+        },
+        largeImageResourceMetrics: {
+          schemaName: 'project-canvas-large-image-resource-diagnostics',
+          schemaVersion: 1,
+          diagnosticOnly: true,
+          officialAcceptanceImpact: false,
+          thresholdsChanged: false,
+          values: {
+            firstThumbnailMs: 19,
+            cacheHitCount: 3000,
+            nativeGeneratedCount: 0,
+            sidecarGeneratedCount: 0,
+            residentTextureBytes: 987654321,
+            sourceUpgradeCount: 384,
+            evictionCount: 2,
+            evictionReasons: { budget: 2 },
+            lastEvictionReason: 'budget',
+            objectUrlCount: 3
+          },
+          fields: {},
+          availability: {},
+          sources: {},
+          derivedFields: [],
+          schema: { fields: [] }
         }
       },
       tinyZoomAcceptance: {
@@ -149,6 +315,8 @@ describe('realBoardBenchmark acceptance gates', () => {
       acceptance: { passed: true }
     })
 
+    expect(aggregateResult.officialProfile).toBe(false)
+    expect(aggregateResult.diagnosticReasons.join(' ')).toContain('pressureDurationMs=0')
     expect(aggregateResult.metrics).toEqual({
       reactCommits: 12,
       domNodeCount: 345,
@@ -178,6 +346,19 @@ describe('realBoardBenchmark acceptance gates', () => {
       cacheGeneratedCount: 0,
       cacheStaleCount: 0
     })
+    expect(aggregateResult.largeImageResourceMetrics.diagnosticOnly).toBe(true)
+    expect(aggregateResult.largeImageResourceMetrics.officialAcceptanceImpact).toBe(false)
+    expect(aggregateResult.largeImageResourceMetrics.values).toMatchObject({
+      firstThumbnailMs: 19,
+      cacheHitCount: 3000,
+      residentTextureBytes: 987654321,
+      sourceUpgradeCount: 384,
+      evictionCount: 2,
+      objectUrlCount: 3
+    })
+    expect(aggregateResult.diagnosticSummary.largeImageResources).toContain(
+      'first-thumbnail-ms=19ms'
+    )
     expect(aggregateResult.tinyZoomAcceptance).toEqual({
       enabled: true,
       stageScale: 0.001,
@@ -185,6 +366,57 @@ describe('realBoardBenchmark acceptance gates', () => {
       passed: true
     })
     expect(aggregateResult.benchmarkImageCount).toBe(3000)
+  })
+
+  it('parses real-board optional large image resource diagnostics without acceptance gates', () => {
+    const metrics = readProjectCanvasRealBoardMetricsFromDomSnapshot({
+      rootDataset: {
+        projectCanvasRenderSurfaceSummary: JSON.stringify({
+          totalItems: 10,
+          imageItems: 10
+        }),
+        projectCanvasTotalImageItemCount: '10',
+        projectCanvasVisibleImageItemCount: '4',
+        projectCanvasWebglLoadedImageCount: '4',
+        projectCanvasWebglResidentTextureBytes: '8192',
+        projectCanvasMetricsSnapshot: JSON.stringify({
+          thumbnailCache: {
+            firstThumbnailLatencyMs: 27,
+            cacheHitCount: 5,
+            nativeGeneratedCount: 2,
+            sidecarGeneratedCount: 3
+          },
+          webgl: {
+            sourceUpgradeCompletedCount: 4,
+            evictionReasons: [{ reason: 'budget', count: 2 }]
+          }
+        }),
+        projectCanvasObjectUrlCount: '6'
+      },
+      domMetrics: {
+        domNodeCount: 25,
+        viewportWidth: 1024,
+        clientRect: { x: 0, y: 0, width: 800, height: 600, right: 800, bottom: 600 },
+        drawableRect: { x: 0, y: 0, width: 800, height: 600, right: 800, bottom: 600 },
+        hasWebglContext: true
+      }
+    })
+
+    expect(metrics.largeImageResourceMetrics.diagnosticOnly).toBe(true)
+    expect(metrics.largeImageResourceMetrics.thresholdsChanged).toBe(false)
+    expect(metrics.largeImageResourceMetrics.values).toMatchObject({
+      firstThumbnailMs: 27,
+      cacheHitCount: 5,
+      nativeGeneratedCount: 2,
+      sidecarGeneratedCount: 3,
+      residentTextureBytes: 8192,
+      sourceUpgradeCount: 4,
+      evictionCount: 2,
+      evictionReasons: { budget: 2 },
+      objectUrlCount: 6
+    })
+    expect(metrics.diagnosticMetrics.largeImageResources).toBe(metrics.largeImageResourceMetrics)
+    expect(metrics.webgl.hasWebglContext).toBe(true)
   })
 
   it('allows bounded deferred React commits for idle source texture upgrades', () => {

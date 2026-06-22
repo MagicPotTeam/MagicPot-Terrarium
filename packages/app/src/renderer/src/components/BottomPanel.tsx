@@ -20,6 +20,8 @@ import {
 import { useTranslation } from 'react-i18next'
 import { api } from '@renderer/utils/windowUtils'
 import { useComfyProcess } from '@renderer/store/hooks/comfyProcess'
+import { MAX_COMFY_OUTPUT_LINES } from '@renderer/store/slices/comfyProcess'
+import { joinBoundedLogLines } from './comfyLogRendering'
 import { isServerStreamingError } from '@shared/api/apiUtils/streaming'
 import type { CanvasTargetAssetMetadata } from '@shared/canvasTarget'
 import type {
@@ -924,6 +926,10 @@ const ComfyUIPanel: React.FC = () => {
   const theme = useTheme()
   const consolePalette = getConsolePalette(theme.palette.mode as 'light' | 'dark')
   const { state, setPid, setIsRunning, addOutput, clearOutput } = useComfyProcess()
+  const outputText = useMemo(
+    () => joinBoundedLogLines(state.output, MAX_COMFY_OUTPUT_LINES),
+    [state.output]
+  )
   const shouldAutoScroll = useRef(true)
   const outputRef = useRef<HTMLPreElement>(null)
 
@@ -935,7 +941,7 @@ const ComfyUIPanel: React.FC = () => {
 
   useEffect(() => {
     if (shouldAutoScroll.current) scrollToBottom()
-  }, [state.output, scrollToBottom])
+  }, [outputText, scrollToBottom])
 
   const handleStartServer = useCallback(async () => {
     if (state.isRunning) {
@@ -1079,7 +1085,7 @@ const ComfyUIPanel: React.FC = () => {
           wordBreak: 'break-all'
         }}
       >
-        {state.output.join('\n')}
+        {outputText}
       </pre>
     </Box>
   )
@@ -1328,5 +1334,4 @@ const BottomPanel: React.FC<BottomPanelProps> = ({ height = BOTTOM_PANEL_DEFAULT
   )
 }
 
-export { BOTTOM_PANEL_DEFAULT_HEIGHT }
 export default BottomPanel

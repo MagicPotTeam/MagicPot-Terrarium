@@ -95,7 +95,16 @@ const QAppExecutePage: React.FC = () => {
 
       <Paper sx={{ flex: 1, m: 2, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         {isDuplicateCheckPage ? (
-          <Container sx={{ flex: 1, overflowY: 'overlay', overflowX: 'hidden', py: 2 }}>
+          <Container
+            sx={{
+              flex: 1,
+              overflowY: 'auto',
+              overflowX: 'hidden',
+              py: 2,
+              overscrollBehavior: 'contain',
+              scrollbarGutter: 'stable'
+            }}
+          >
             <DuplicateCheckWorkspace />
           </Container>
         ) : isVideoGenerationPage ? (
@@ -126,9 +135,11 @@ const QAppExecutePage: React.FC = () => {
                 <Container
                   sx={{
                     flex: 1,
-                    overflowY: 'overlay',
+                    overflowY: 'auto',
                     overflowX: 'hidden',
-                    py: 2
+                    py: 2,
+                    overscrollBehavior: 'contain',
+                    scrollbarGutter: 'stable'
                   }}
                 >
                   {currentQAppKey ? (
@@ -152,9 +163,11 @@ const QAppExecutePage: React.FC = () => {
                 <Container
                   sx={{
                     flex: 1,
-                    overflowY: 'overlay',
+                    overflowY: 'auto',
                     overflowX: 'hidden',
-                    py: 0
+                    py: 0,
+                    overscrollBehavior: 'contain',
+                    scrollbarGutter: 'stable'
                   }}
                 >
                   <ResultSection />

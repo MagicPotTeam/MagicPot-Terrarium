@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { newApiIpc } from './apiIpc'
 
+const CANVAS_THUMBNAIL_METHODS = [
+  'getSourceFileMetadata',
+  'getThumbnailCacheRoot',
+  'readThumbnailManifest',
+  'writeThumbnailSet',
+  'generateThumbnailSet',
+  'createNativeThumbnail'
+] as const
+
 const { invokeMock, postMessageMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   postMessageMock: vi.fn()
@@ -29,5 +38,17 @@ describe('newApiIpc', () => {
     await api.svcState.getConfig({})
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, 'svcState.getConfig', {})
+  })
+
+  it('exposes svcCanvasThumbnail unary methods through the preload API client', async () => {
+    invokeMock.mockResolvedValue(undefined)
+
+    const api = newApiIpc()
+
+    for (const methodName of CANVAS_THUMBNAIL_METHODS) {
+      expect(typeof api.svcCanvasThumbnail[methodName]).toBe('function')
+      await api.svcCanvasThumbnail[methodName](undefined as never)
+      expect(invokeMock).toHaveBeenLastCalledWith(`svcCanvasThumbnail.${methodName}`, undefined)
+    }
   })
 })

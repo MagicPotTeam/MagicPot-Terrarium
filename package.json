@@ -13,6 +13,10 @@
     "url": "https://github.com/MagicPotTeam/magicpot-open/issues"
   },
   "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=22.12.0 <23",
+    "npm": ">=10.5.1"
+  },
   "scripts": {
     "check:text-encoding": "node scripts/check-text-encoding.mjs",
     "check:i18n": "node scripts/check-i18n.mjs --strict-source",
@@ -37,6 +41,7 @@
     "dev:embedded": "cross-env-shell VITE_BUILD_MODE=embedded VITE_PACKAGE_MODE=embedded VITE_BUILD_MODE_NAME=Embedded VITE_MAGICPOT_AUTO_START_COMFYUI=true \"chcp 65001 >nul && node scripts/run-electron-vite.mjs dev --mode embedded\"",
     "dev": "cross-env VITE_MAGICPOT_AUTO_START_COMFYUI=true npm run dev:pure",
     "build:pure": "npm run typecheck && cross-env VITE_BUILD_MODE=pure VITE_PACKAGE_MODE=pure VITE_BUILD_MODE_NAME=Pure electron-vite build --config config/electron/electron.vite.config.ts --mode pure",
+    "analyze:bundle": "npm run typecheck && cross-env ANALYZE_BUNDLE=true VITE_BUILD_MODE=pure VITE_PACKAGE_MODE=pure VITE_BUILD_MODE_NAME=Pure electron-vite build --config config/electron/electron.vite.config.ts --mode pure",
     "build:embedded": "npm run typecheck && cross-env VITE_BUILD_MODE=embedded VITE_PACKAGE_MODE=embedded VITE_BUILD_MODE_NAME=Embedded electron-vite build --config config/electron/electron.vite.config.ts --mode embedded",
     "prepare:embedded-sources": "node scripts/prepare-embedded-comfyui-sources.mjs",
     "prepare:embedded-sources:dry-run": "node scripts/prepare-embedded-comfyui-sources.mjs --dry-run",
@@ -50,9 +55,9 @@
     "package:linux": "electron-builder --config config/electron/electron-builder.config.js --linux",
     "package:all": "npm run package:win && npm run package:mac",
     "release:pure": "npm run build:pure && cross-env PACKAGE_MODE=pure npm run package:all",
-    "release:pure:win": "npm run build:pure && cross-env PACKAGE_MODE=pure npm run package:win -- --publish never",
+    "release:pure:win": "npm run build:pure && npm run build:image-worker && cross-env PACKAGE_MODE=pure npm run package:win -- --publish never",
     "release:embedded": "npm run release:embedded:win",
-    "release:embedded:win": "npm run build:embedded && npm run prepare:embedded && cross-env PACKAGE_MODE=embedded npm run package:win",
+    "release:embedded:win": "npm run build:embedded && npm run prepare:embedded && npm run build:image-worker && cross-env PACKAGE_MODE=embedded npm run package:win",
     "release:update-submodules": "node scripts/release/update-embedded-submodules.mjs",
     "test:node": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.node.config.mjs",
     "test:core:coverage": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.core.config.mjs",
@@ -86,6 +91,7 @@
     "benchmark:project-canvas:real-board:import-1800": "npm run build:pure && npm run benchmark:project-canvas:real-board:import-1800:raw",
     "benchmark:project-canvas:real-board:mixed-3000": "npm run build:pure && npm run benchmark:project-canvas:real-board:mixed-3000:raw",
     "build:canvas-spatial-index-wasm": "node scripts/build-canvas-spatial-index-wasm.mjs",
+    "build:image-worker": "node scripts/build-image-worker.mjs",
     "probe:project-canvas:dev-watch": "cross-env NODE_OPTIONS=--max-old-space-size=6144 node scripts/projectCanvas/devWatcherProbe.mjs",
     "qa:security-posture": "node scripts/qa-security-posture.mjs",
     "test:project-canvas:3d": "cross-env NODE_OPTIONS=--max-old-space-size=6144 vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/pages/ProjectCanvasPage/components/canvas3DConvergenceStress.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/canvas3DStageLoadQueue.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/canvas3DStageQuality.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/Canvas3DStage.cameraSync.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/Model3DViewerDialog.test.tsx packages/app/src/renderer/src/pages/ProjectCanvasPage/components/modelLoaders/sceneInstanceCloneCache.test.ts packages/app/src/renderer/src/pages/ProjectCanvasPage/components/modelLoaders/sceneInstanceCloneCacheKey.test.ts --pool=forks --maxWorkers=1",
@@ -130,7 +136,7 @@
     "gifenc": "^1.0.3",
     "i18next": "^25.5.3",
     "i18next-browser-languagedetector": "^8.2.0",
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^4.2.0",
     "jszip": "^3.10.1",
     "konva": "^9.3.22",
     "notistack": "^3.0.2",
@@ -151,7 +157,7 @@
     "tencentcloud-sdk-nodejs-ai3d": "^4.1.197",
     "three": "^0.182.0",
     "use-image": "^1.1.4",
-    "ws": "^8.18.3",
+    "ws": "^8.21.0",
     "yaml": "^2.8.4",
     "zod": "^3.25.76"
   },
@@ -197,7 +203,10 @@
   },
   "overrides": {
     "@xmldom/xmldom": "0.8.13",
-    "axios": "1.16.0",
+    "axios": {
+      ".": "1.16.0",
+      "form-data": "4.0.6"
+    },
     "basic-ftp": "5.3.1",
     "conf": {
       "ajv": "8.18.0",
@@ -205,7 +214,8 @@
     },
     "cos-request": {
       "qs": "6.15.2",
-      "uuid": "11.1.1"
+      "uuid": "11.1.1",
+      "form-data": "2.5.6"
     },
     "cosmiconfig": {
       "yaml": "1.10.3"
@@ -215,14 +225,15 @@
     },
     "fast-xml-parser": "5.7.3",
     "follow-redirects": "1.16.0",
-    "hono": "4.12.23",
+    "hono": "4.12.26",
     "ip-address": "10.2.0",
     "postcss": "8.5.14",
-    "protobufjs": "7.5.9",
+    "protobufjs": "7.6.4",
     "qs": "6.15.2",
     "react-router": "7.17.0",
     "tencentcloud-sdk-nodejs-common": {
-      "uuid": "11.1.1"
+      "uuid": "11.1.1",
+      "form-data": "3.0.5"
     }
   },
   "prettier": "./config/prettier/prettier.config.cjs"

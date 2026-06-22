@@ -30,9 +30,11 @@ const CanvasPage: React.FC = () => {
           <Container
             sx={{
               flex: 1,
-              overflowY: 'overlay',
+              overflowY: 'auto',
               overflowX: 'hidden',
-              py: 2
+              py: 2,
+              overscrollBehavior: 'contain',
+              scrollbarGutter: 'stable'
             }}
           >
             <ResultSection />

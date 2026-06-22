@@ -77,6 +77,28 @@ export type CanvasThumbnailNativeResp = {
   mimeType: 'image/png'
 }
 
+export type CanvasThumbnailGenerateSetReq = {
+  fullPath: string
+  cacheRootDir?: string
+  levels?: number[]
+  format?: 'image/png' | 'image/webp'
+  maxConcurrency?: number
+  maxDecodedPixels?: number
+  timeoutMs?: number
+}
+
+export type CanvasThumbnailGenerateSetResp = {
+  manifest: CanvasThumbnailManifest | null
+  status: 'generated' | 'fallback' | 'failed'
+  error?: string
+  sidecar?: {
+    used: boolean
+    fallback: boolean
+    reason?: string
+    message?: string
+  }
+}
+
 export type CanvasThumbnailSvc = {
   getSourceFileMetadata(
     req: CanvasThumbnailSourceFileMetadataReq
@@ -86,6 +108,7 @@ export type CanvasThumbnailSvc = {
     req: CanvasThumbnailReadManifestReq
   ): Promise<CanvasThumbnailReadManifestResp>
   writeThumbnailSet(req: CanvasThumbnailWriteSetReq): Promise<CanvasThumbnailWriteSetResp>
+  generateThumbnailSet(req: CanvasThumbnailGenerateSetReq): Promise<CanvasThumbnailGenerateSetResp>
   createNativeThumbnail(req: CanvasThumbnailNativeReq): Promise<CanvasThumbnailNativeResp>
 }
 
@@ -100,6 +123,9 @@ export const canvasThumbnailSvcDef: ServiceDefSheet<CanvasThumbnailSvc> = {
     type: 'unary'
   },
   writeThumbnailSet: {
+    type: 'unary'
+  },
+  generateThumbnailSet: {
     type: 'unary'
   },
   createNativeThumbnail: {

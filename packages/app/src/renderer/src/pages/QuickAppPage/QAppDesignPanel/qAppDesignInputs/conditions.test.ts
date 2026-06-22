@@ -92,6 +92,41 @@ describe('conditions llm api', () => {
   })
 })
 
+describe('conditions seed field', () => {
+  it('recognizes standard seed fields and PrimitiveInt value fields', () => {
+    expect(
+      conditionFieldSeed(
+        {} as ObjectInfo,
+        ['INT', { default: 0, control_after_generate: true }] as ObjectInfoInputField
+      )
+    ).toBe(true)
+
+    expect(
+      conditionFieldSeed({} as ObjectInfo, ['INT', { default: 0 }] as ObjectInfoInputField, {
+        field: 'value',
+        node: {
+          class_type: 'PrimitiveInt',
+          inputs: {
+            value: 715822939891100
+          }
+        }
+      })
+    ).toBe(true)
+
+    expect(
+      conditionFieldSeed({} as ObjectInfo, ['INT', { default: 0 }] as ObjectInfoInputField, {
+        field: 'value',
+        node: {
+          class_type: 'PrimitiveInt',
+          inputs: {
+            value: 1.5
+          }
+        }
+      })
+    ).toBe(false)
+  })
+})
+
 describe('conditions video upload', () => {
   it('recognizes the supported video upload metadata variants', () => {
     const videoFieldVariants: ObjectInfoInputField[] = [

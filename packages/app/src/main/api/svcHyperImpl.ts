@@ -65,6 +65,56 @@ const LEGACY_MANAGER_CHANNEL_URLS = new Set([
 const COMFY_HTTP_CHECK_TIMEOUT_MS = 2500
 const COMFY_HTTP_EXISTING_PROCESS_ATTEMPTS = 10
 const COMFY_HTTP_EXISTING_PROCESS_INTERVAL_MS = 500
+const WINDOWS_RESERVED_FILE_NAMES = new Set([
+  'con',
+  'prn',
+  'aux',
+  'nul',
+  ...Array.from({ length: 9 }, (_, index) => `com${index + 1}`),
+  ...Array.from({ length: 9 }, (_, index) => `lpt${index + 1}`)
+])
+const INVALID_FILENAME_CHARS = new Set(['<', '>', ':', '"', '/', '\\', '|', '?', '*'])
+const MAX_SAFE_DOWNLOAD_FILENAME_LENGTH = 240
+
+const replaceUnsafeFilenameChars = (value: string): string =>
+  Array.from(value, (char) => {
+    const code = char.charCodeAt(0)
+    return code <= 0x1f || INVALID_FILENAME_CHARS.has(char) ? '_' : char
+  }).join('')
+
+export const sanitizeSaveImageFileName = (fileName: string): string => {
+  const rawFileName = String(fileName || '').trim()
+  if (!rawFileName) {
+    throw new Error('Invalid file name: empty')
+  }
+
+  if (
+    path.isAbsolute(rawFileName) ||
+    path.win32.isAbsolute(rawFileName) ||
+    rawFileName.includes('/') ||
+    rawFileName.includes('\\') ||
+    rawFileName.split(/[\\/]+/).some((segment) => segment === '..')
+  ) {
+    throw new Error('Invalid file name: path separators and traversal are not allowed')
+  }
+
+  const baseName = path.basename(path.win32.basename(path.posix.basename(rawFileName))).trim()
+  const sanitized = replaceUnsafeFilenameChars(baseName)
+    .replace(/[. ]+$/g, '')
+    .trim()
+    .slice(0, MAX_SAFE_DOWNLOAD_FILENAME_LENGTH)
+
+  if (!sanitized || sanitized === '.' || sanitized === '..') {
+    throw new Error('Invalid file name: empty after sanitization')
+  }
+
+  const reservedStem = sanitized.split('.')[0]?.toLocaleLowerCase() || sanitized.toLocaleLowerCase()
+  if (WINDOWS_RESERVED_FILE_NAMES.has(reservedStem)) {
+    throw new Error(`Invalid file name: reserved name ${reservedStem}`)
+  }
+
+  return sanitized
+}
 
 const checkLocalComfyHttp = async (port: string): Promise<boolean> => {
   const normalizedPort = port.trim()
@@ -799,33 +849,39 @@ export class HyperSvcImpl implements HyperSvc {
     const pathModule = await import('path')
     const os = await import('os')
 
+    // 文件名必须在主进程边界做净化，防止附件名路径穿越。
+    const originalFileName = sanitizeSaveImageFileName(req.fileName)
+
     // 默认保存到桌面/魔壶图片保存
-    const targetDir = req.dir || pathModule.join(os.homedir(), 'Desktop', '魔壶图片保存')
+    const targetDir = pathModule.resolve(
+      req.dir || pathModule.join(os.homedir(), 'Desktop', '魔壶图片保存')
+    )
 
     // 确保目录存在
     await fsPromises.mkdir(targetDir, { recursive: true })
 
-    // 避免文件名冲突
-    let fileName = req.fileName
-    let filePath = pathModule.join(targetDir, fileName)
-    const ext = pathModule.extname(fileName)
-    const base = pathModule.basename(fileName, ext)
-    let counter = 1
+    const ext = pathModule.extname(originalFileName)
+    const base = pathModule.basename(originalFileName, ext)
+    const data = Buffer.from(req.data)
+    let counter = 0
     while (true) {
+      const fileName = counter === 0 ? originalFileName : `${base}_${counter}${ext}`
+      const filePath = pathModule.resolve(targetDir, fileName)
+      const relativePath = pathModule.relative(targetDir, filePath)
+      if (!relativePath || relativePath.startsWith('..') || pathModule.isAbsolute(relativePath)) {
+        throw new Error('Invalid file name: resolved path escapes target directory')
+      }
+
       try {
-        await fsPromises.access(filePath)
-        // 文件已存在，加序号
-        fileName = `${base}_${counter}${ext}`
-        filePath = pathModule.join(targetDir, fileName)
-        counter++
-      } catch {
-        // 文件不存在，可以使用
-        break
+        await fsPromises.writeFile(filePath, data, { flag: 'wx' })
+        return { savedPath: filePath }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') {
+          throw error
+        }
+        counter += 1
       }
     }
-
-    await fsPromises.writeFile(filePath, Buffer.from(req.data))
-    return { savedPath: filePath }
   }
 
   async writeImageToClipboard(req: WriteImageToClipboardReq): Promise<WriteImageToClipboardResp> {

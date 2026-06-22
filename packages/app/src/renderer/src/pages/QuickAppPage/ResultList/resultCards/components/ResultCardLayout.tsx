@@ -67,7 +67,14 @@ export default function ResultCardLayout({
   const newBr = [...infoButtons, ...(br || [])]
 
   return (
-    <Card sx={{ position: 'relative', minHeight: '100px' }}>
+    <Card
+      sx={{
+        position: 'relative',
+        minHeight: '100px',
+        contentVisibility: 'auto',
+        containIntrinsicSize: '100px 600px'
+      }}
+    >
       {children}
       {newTl.length > 0 && (
         <ResultIconBox sx={{ position: 'absolute', top: 8, left: 8 }}>{newTl}</ResultIconBox>

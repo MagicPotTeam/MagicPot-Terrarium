@@ -9,6 +9,7 @@ import {
   type MessageBoxReturnValue,
   dialog
 } from 'electron'
+import { rememberTrustedLocalFileSelections } from './trustedFileSelection'
 
 export class DialogSvcImpl implements DialogSvc {
   private getDialogParentWindow(): BrowserWindow | null {
@@ -16,7 +17,13 @@ export class DialogSvcImpl implements DialogSvc {
   }
 
   showOpenDialog = async (options: OpenDialogOptions): Promise<OpenDialogReturnValue> => {
-    return dialog.showOpenDialog(options)
+    const result = await dialog.showOpenDialog(options)
+    const properties = options.properties || []
+    const selectedFiles = properties.includes('openFile') && !properties.includes('openDirectory')
+    if (selectedFiles && !result.canceled && result.filePaths?.length) {
+      rememberTrustedLocalFileSelections(result.filePaths)
+    }
+    return result
   }
   showSaveDialog = async (options: SaveDialogOptions): Promise<SaveDialogReturnValue> => {
     return dialog.showSaveDialog(options)

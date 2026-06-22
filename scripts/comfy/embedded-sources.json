@@ -3,13 +3,13 @@
     {
       "name": "ComfyUI",
       "url": "https://github.com/Comfy-Org/ComfyUI.git",
-      "commit": "0d8b7510bdc5409f4a76c3191e122ddea50f4aa2",
+      "commit": "2cdaaf4a25fd5771da451e906a98e096397312a9",
       "relativePath": "vendor/comfyui/ComfyUI"
     },
     {
       "name": "ComfyUI-Advanced-ControlNet",
       "url": "https://github.com/chinoll/ComfyUI-Advanced-ControlNet.git",
-      "commit": "7ec6a004f0e09a68b8786d3aa5cb0c83f01edd3f",
+      "commit": "5d044af51bb34814cf23c2a293c80816c1042329",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Advanced-ControlNet"
     },
     {
@@ -21,7 +21,7 @@
     {
       "name": "ComfyUI-Easy-Use",
       "url": "https://github.com/yolain/ComfyUI-Easy-Use.git",
-      "commit": "54d080bf6a4f52da287e984f305243c10db097f5",
+      "commit": "625efbfa2fc20c31797dfffcbb41a26b6d91ab7b",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use"
     },
     {
@@ -40,13 +40,13 @@
     {
       "name": "ComfyUI-KJNodes",
       "url": "https://github.com/kijai/ComfyUI-KJNodes.git",
-      "commit": "7f43f2ce910a27971bdbbf3fb5a52081457f32e2",
+      "commit": "b73fcbc5629c3c2972621afc761105af38345798",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-KJNodes"
     },
     {
       "name": "ComfyUI-Manager",
       "url": "https://github.com/Comfy-Org/ComfyUI-Manager.git",
-      "commit": "b6db1ac854f1cd2558ea0c3a665c3c21b7a15db4",
+      "commit": "4a1c06b90a63ae71679dcaa0c95a5bf9ec860675",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager"
     },
     {
@@ -70,7 +70,7 @@
     {
       "name": "comfyui_LLM_party",
       "url": "https://github.com/heshengtao/comfyui_LLM_party.git",
-      "commit": "39bca5e48505d3cfc292392479c065aa58cc2a48",
+      "commit": "4d279969d7b08a24857f7455b362b745d6dcf2d0",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/comfyui_LLM_party"
     },
     {

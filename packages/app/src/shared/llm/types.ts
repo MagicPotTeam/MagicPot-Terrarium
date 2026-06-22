@@ -48,6 +48,12 @@ export type LLMChatFinishReason = 'stop' | 'length' | 'tool_call' | 'cancelled' 
 
 export type LLMChatMetadata = Record<string, unknown>
 
+export type LLMChatTokenUsage = {
+  promptTokens?: number
+  completionTokens?: number
+  totalTokens?: number
+}
+
 export interface LLMChatResult {
   content: string
   imageUrl?: string
@@ -56,6 +62,7 @@ export interface LLMChatResult {
   ocrResult?: OCRResult
   finishReason?: LLMChatFinishReason
   metadata?: LLMChatMetadata
+  usage?: LLMChatTokenUsage
 }
 
 export interface LLMDeltaEvent {
@@ -167,6 +174,7 @@ export interface LLMChatParams {
   messages: ChatMessage[]
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
+  maxOutputTokens?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
   videoGenerationOptions?: VideoGenerationOptions
   signal?: AbortSignal
@@ -244,7 +252,8 @@ export const parseStructuredLLMChatResult = (content: string): LLMChatResult | n
       LLM_CHAT_FINISH_REASONS.has(parsed.finishReason as LLMChatFinishReason)
         ? { finishReason: parsed.finishReason as LLMChatFinishReason }
         : {}),
-      ...(isPlainRecord(parsed.metadata) ? { metadata: parsed.metadata as LLMChatMetadata } : {})
+      ...(isPlainRecord(parsed.metadata) ? { metadata: parsed.metadata as LLMChatMetadata } : {}),
+      ...(isPlainRecord(parsed.usage) ? { usage: parsed.usage as LLMChatTokenUsage } : {})
     }
   } catch {
     return null
@@ -260,7 +269,8 @@ export const normalizeLLMChatResult = (value: string | LLMChatResult): LLMChatRe
       ...(Array.isArray(value.attachments) ? { attachments: value.attachments } : {}),
       ...(value.ocrResult ? { ocrResult: value.ocrResult } : {}),
       ...(value.finishReason ? { finishReason: value.finishReason } : {}),
-      ...(value.metadata ? { metadata: value.metadata } : {})
+      ...(value.metadata ? { metadata: value.metadata } : {}),
+      ...(value.usage ? { usage: value.usage } : {})
     }
   }
 

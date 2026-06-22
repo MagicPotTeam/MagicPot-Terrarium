@@ -10,8 +10,7 @@ import {
   DEFAULT_CANVAS_MODEL3D_SESSION_KEY,
   getSceneInstanceCloneCacheKey
 } from './components/modelLoaders/sceneInstanceCloneCacheKey'
-import { peekCachedSceneInstanceCloneTemplate } from './components/modelLoaders/sceneInstanceCloneCache'
-import { resolveModelInspectionMetadata } from './components/modelLoaders/modelInspectionMetadata'
+import { readCanvasModel3DInspectionMetadataCache } from './components/modelLoaders/modelInspectionMetadataCache'
 import {
   summarizeProjectCanvasRuntimeSurfaces,
   type ProjectCanvasRuntimeSurfaceSummary
@@ -197,12 +196,11 @@ export function useCanvasVisualMetrics({
           itemId: item.id,
           textures: item.textures
         })
-        const cachedSceneTemplate = peekCachedSceneInstanceCloneTemplate(instanceCacheKey)
-        if (!cachedSceneTemplate) {
+        const inspectionMetadata = readCanvasModel3DInspectionMetadataCache(instanceCacheKey)
+        if (!inspectionMetadata) {
           return undefined
         }
 
-        const inspectionMetadata = resolveModelInspectionMetadata(cachedSceneTemplate)
         return {
           vertexCount: inspectionMetadata.vertexCount,
           faceCount: inspectionMetadata.faceCount,

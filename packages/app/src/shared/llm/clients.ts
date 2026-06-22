@@ -26,8 +26,34 @@ import {
 } from './openaiResponses'
 import { buildOpenAIFileSearchTool, createOpenAIFileSearchSession } from './openaiFileSearch'
 import { normalizeReasoningEffort, resolveChatProfileCapabilities } from './profileCapabilities'
+import {
+  OPENCODE_ZEN_API_BASE_URL,
+  resolveOpencodeZenAlias,
+  resolveOpencodeZenModelApi
+} from './opencodeZenModels'
 
 type OpenAIServiceTier = 'auto' | 'default' | 'flex' | 'priority'
+type OpenAIClientApiMode = 'auto' | 'responses' | 'chat-completions'
+type OpenAIClientOptions = {
+  modelUse?: LLMModelUse
+  serviceTier?: OpenAIServiceTier
+  fetchImpl?: FetchImpl
+  apiMode?: OpenAIClientApiMode
+  enableHostedTools?: boolean
+  extraHeaders?: Record<string, string>
+}
+type GeminiAuthMode = 'query-key' | 'bearer' | 'x-goog-api-key'
+type GeminiClientOptions = {
+  fetchImpl?: FetchImpl
+  authMode?: GeminiAuthMode
+  extraHeaders?: Record<string, string>
+}
+type ClaudeClientOptions = {
+  fetchImpl?: FetchImpl
+  authAsBearer?: boolean
+  extraHeaders?: Record<string, string>
+  maxTokens?: number
+}
 
 export type FetchImpl = typeof fetch
 
@@ -43,6 +69,47 @@ const normalizeErrorText = (value: unknown): string =>
   String(value || '')
     .trim()
     .replace(/\s+/g, ' ')
+
+const normalizeTokenCount = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined
+
+const normalizeProviderTokenUsage = (payload: unknown): LLMChatResult['usage'] | undefined => {
+  const record =
+    payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : undefined
+  const rawUsage =
+    record?.usage && typeof record.usage === 'object'
+      ? (record.usage as Record<string, unknown>)
+      : record?.usageMetadata && typeof record.usageMetadata === 'object'
+        ? (record.usageMetadata as Record<string, unknown>)
+        : record
+  const promptTokens = normalizeTokenCount(
+    rawUsage?.promptTokens ??
+      rawUsage?.prompt_tokens ??
+      rawUsage?.inputTokens ??
+      rawUsage?.input_tokens ??
+      rawUsage?.promptTokenCount ??
+      rawUsage?.prompt_eval_count
+  )
+  const completionTokens = normalizeTokenCount(
+    rawUsage?.completionTokens ??
+      rawUsage?.completion_tokens ??
+      rawUsage?.outputTokens ??
+      rawUsage?.output_tokens ??
+      rawUsage?.candidatesTokenCount ??
+      rawUsage?.eval_count
+  )
+  const totalTokens = normalizeTokenCount(
+    rawUsage?.totalTokens ?? rawUsage?.total_tokens ?? rawUsage?.totalTokenCount
+  )
+
+  return promptTokens !== undefined || completionTokens !== undefined || totalTokens !== undefined
+    ? {
+        ...(promptTokens !== undefined ? { promptTokens } : {}),
+        ...(completionTokens !== undefined ? { completionTokens } : {}),
+        ...(totalTokens !== undefined ? { totalTokens } : {})
+      }
+    : undefined
+}
 
 const collectFetchFailureFragments = (error: unknown, fragments: Set<string>, depth = 0): void => {
   if (!error || depth > 6) {
@@ -160,6 +227,7 @@ export function normalizeOpenAIBaseUrl(baseUrl: string): string {
   return baseUrl
     .trim()
     .replace(/\/chat\/completions\/?$/i, '')
+    .replace(/\/responses\/?$/i, '')
     .replace(/\/$/, '')
 }
 
@@ -175,7 +243,8 @@ const isOfficialOpenAIBaseUrl = (baseUrl: string): boolean => {
 export function normalizeGeminiBaseUrl(baseUrl: string): string {
   return baseUrl
     .trim()
-    .replace(/\/models\/[^/?#:]+:generateContent\/?$/i, '')
+    .replace(/\/models\/[^/?#:]+(?::generateContent)?\/?$/i, '')
+    .replace(/\/openai\/?$/i, '')
     .replace(/\/$/, '')
 }
 
@@ -183,6 +252,7 @@ export function normalizeClaudeBaseUrl(baseUrl: string): string {
   return baseUrl
     .trim()
     .replace(/\/v1\/messages\/?$/i, '')
+    .replace(/\/v1\/?$/i, '')
     .replace(/\/$/, '')
 }
 
@@ -200,11 +270,7 @@ export class OpenAIAPICli implements LLMCli {
     protected readonly apiKey: string,
     protected readonly baseUrl: string,
     protected readonly modelName: string,
-    protected readonly options?: {
-      modelUse?: LLMModelUse
-      serviceTier?: OpenAIServiceTier
-      fetchImpl?: FetchImpl
-    }
+    protected readonly options?: OpenAIClientOptions
   ) {}
 
   private getFetchImpl(): FetchImpl {
@@ -213,7 +279,8 @@ export class OpenAIAPICli implements LLMCli {
 
   async chat(params: LLMChatParams): Promise<LLMChatResult> {
     const base = normalizeOpenAIBaseUrl(this.baseUrl)
-    if (isOfficialOpenAIBaseUrl(base)) {
+    const apiMode = this.options?.apiMode || 'auto'
+    if (apiMode === 'responses' || (apiMode === 'auto' && isOfficialOpenAIBaseUrl(base))) {
       return this.chatViaResponsesApi(params, base)
     }
 
@@ -227,6 +294,9 @@ export class OpenAIAPICli implements LLMCli {
       input: buildOpenAIResponsesInput(params.messages),
       instructions: params.systemPrompt?.trim() || 'You are a helpful assistant.',
       store: false
+    }
+    if (params.maxOutputTokens) {
+      requestBody.max_output_tokens = params.maxOutputTokens
     }
     const reasoningEffort = normalizeReasoningEffort(
       params.reasoningEffort,
@@ -249,7 +319,7 @@ export class OpenAIAPICli implements LLMCli {
       requestBody.tool_choice = {
         type: 'image_generation'
       }
-    } else {
+    } else if (this.options?.enableHostedTools ?? isOfficialOpenAIBaseUrl(base)) {
       fileSearchSession = await createOpenAIFileSearchSession({
         apiKey: this.apiKey,
         baseUrl: base,
@@ -279,9 +349,10 @@ export class OpenAIAPICli implements LLMCli {
     }
 
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      ...(this.options?.extraHeaders || {})
     }
-    if (this.apiKey.trim()) {
+    if (this.apiKey.trim() && !headers.Authorization) {
       headers.Authorization = `Bearer ${this.apiKey}`
     }
 
@@ -306,7 +377,12 @@ export class OpenAIAPICli implements LLMCli {
         )
       }
 
-      return normalizeLLMChatResult(serialized)
+      const result = normalizeLLMChatResult(serialized)
+      const usage = normalizeProviderTokenUsage(data)
+      return {
+        ...result,
+        ...(usage ? { usage } : {})
+      }
     } catch (error) {
       throw buildFetchFailureError('OpenAI API', `${base}/responses`, error)
     } finally {
@@ -364,14 +440,18 @@ export class OpenAIAPICli implements LLMCli {
       temperature: 0.7,
       stream: false
     }
+    if (params.maxOutputTokens) {
+      requestBody.max_tokens = params.maxOutputTokens
+    }
     if (this.options?.serviceTier && isOfficialOpenAIBaseUrl(base)) {
       requestBody.service_tier = this.options.serviceTier
     }
 
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      ...(this.options?.extraHeaders || {})
     }
-    if (this.apiKey.trim()) {
+    if (this.apiKey.trim() && !headers.Authorization) {
       headers.Authorization = `Bearer ${this.apiKey}`
     }
 
@@ -406,7 +486,11 @@ export class OpenAIAPICli implements LLMCli {
         const imageUrl = firstItem.url || firstItem.image_url?.url
         if (imageUrl && typeof imageUrl === 'string') {
           console.log('[OpenAIAPICli] Detected image generation response, returning image URL')
-          return normalizeLLMChatResult(imageUrl)
+          const usage = normalizeProviderTokenUsage(data)
+          return {
+            ...normalizeLLMChatResult(imageUrl),
+            ...(usage ? { usage } : {})
+          }
         }
       }
     }
@@ -416,29 +500,48 @@ export class OpenAIAPICli implements LLMCli {
         `OpenAI API returned empty or invalid content. Response: ${JSON.stringify(data)}`
       )
     }
-    return normalizeLLMChatResult(content.trim())
+    const usage = normalizeProviderTokenUsage(data)
+    return normalizeLLMChatResult({
+      content: content.trim(),
+      ...(usage ? { usage } : {})
+    })
   }
 }
 
 // ==================== Gemini API Client ====================
 
+const normalizeGeminiClientOptions = (
+  fetchImplOrOptions?: FetchImpl | GeminiClientOptions
+): GeminiClientOptions =>
+  typeof fetchImplOrOptions === 'function'
+    ? { fetchImpl: fetchImplOrOptions }
+    : fetchImplOrOptions || {}
+
 export class GeminiAPICli implements LLMCli {
+  protected readonly options: GeminiClientOptions
+
   constructor(
     protected readonly apiKey: string,
     protected readonly baseUrl: string,
     protected readonly modelName: string,
-    protected readonly fetchImpl: FetchImpl = getDefaultFetchImpl()
-  ) {}
+    fetchImplOrOptions?: FetchImpl | GeminiClientOptions
+  ) {
+    this.options = normalizeGeminiClientOptions(fetchImplOrOptions)
+  }
 
   protected getNormalizedModelName(): string {
     return normalizeGeminiModelName(this.modelName)
+  }
+
+  private getFetchImpl(): FetchImpl {
+    return this.options.fetchImpl ?? getDefaultFetchImpl()
   }
 
   async chat(params: LLMChatParams): Promise<LLMChatResult> {
     const { messages, systemPrompt, signal } = params
     let base = normalizeGeminiBaseUrl(this.baseUrl)
 
-    // Ensure base URL has API version
+    // Ensure base URL has API version. OpenCode Zen already includes /v1.
     if (!base.includes('/v1') && !base.includes('/v1beta')) {
       base = base.replace(/\/$/, '') + '/v1beta'
     }
@@ -459,7 +562,7 @@ export class GeminiAPICli implements LLMCli {
         const imageAttachments = msg.attachments.filter((a) => a.type === 'image')
         for (const attachment of imageAttachments) {
           try {
-            const base64 = await convertImageToBase64(attachment.url, signal, this.fetchImpl)
+            const base64 = await convertImageToBase64(attachment.url, signal, this.getFetchImpl())
             let mimeType = attachment.mimeType || 'image/jpeg'
             if (attachment.url.startsWith('data:')) {
               const mimeMatch = attachment.url.match(/data:([^;]+)/)
@@ -494,6 +597,12 @@ export class GeminiAPICli implements LLMCli {
     const requestBody: Record<string, any> = {
       contents
     }
+    if (params.maxOutputTokens) {
+      requestBody.generationConfig = {
+        ...(requestBody.generationConfig || {}),
+        maxOutputTokens: params.maxOutputTokens
+      }
+    }
 
     if (systemPrompt) {
       requestBody.systemInstruction = {
@@ -502,15 +611,28 @@ export class GeminiAPICli implements LLMCli {
     }
 
     const url = new URL(endpoint)
-    url.searchParams.set('key', this.apiKey)
+    const authMode = this.options.authMode || 'query-key'
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(this.options.extraHeaders || {})
+    }
+    if (authMode === 'bearer') {
+      if (this.apiKey.trim() && !headers.Authorization) {
+        headers.Authorization = `Bearer ${this.apiKey}`
+      }
+    } else if (authMode === 'x-goog-api-key') {
+      if (this.apiKey.trim() && !headers['x-goog-api-key']) {
+        headers['x-goog-api-key'] = this.apiKey
+      }
+    } else {
+      url.searchParams.set('key', this.apiKey)
+    }
 
     let resp: Response
     try {
-      resp = await this.fetchImpl(url.toString(), {
+      resp = await this.getFetchImpl()(url.toString(), {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers,
         body: JSON.stringify(requestBody),
         signal
       })
@@ -524,26 +646,61 @@ export class GeminiAPICli implements LLMCli {
     }
 
     const data = await resp.json()
-    const content = data?.candidates?.[0]?.content?.parts?.[0]?.text
+    const content = data?.candidates?.[0]?.content?.parts
+      ?.map((part: { text?: unknown }) => (typeof part?.text === 'string' ? part.text : ''))
+      .join('')
 
     if (typeof content !== 'string' || !content) {
       throw new Error(
         `Gemini API returned empty or invalid content. Response: ${JSON.stringify(data)}`
       )
     }
-    return normalizeLLMChatResult(content.trim())
+    const usage = normalizeProviderTokenUsage(data)
+    return normalizeLLMChatResult({
+      content: content.trim(),
+      ...(usage ? { usage } : {})
+    })
   }
 }
 
 // ==================== Claude API Client ====================
 
+const normalizeClaudeClientOptions = (
+  fetchImplOrOptions?: FetchImpl | ClaudeClientOptions
+): ClaudeClientOptions =>
+  typeof fetchImplOrOptions === 'function'
+    ? { fetchImpl: fetchImplOrOptions }
+    : fetchImplOrOptions || {}
+
+const isBearerClaudeEndpoint = (baseUrl: string): boolean => {
+  try {
+    const parsed = new URL(baseUrl.trim())
+    const hostname = parsed.hostname.toLowerCase()
+    const pathname = parsed.pathname.toLowerCase()
+    return (
+      (hostname === 'api.kimi.com' && pathname.includes('/coding')) ||
+      (hostname === 'open.bigmodel.cn' && pathname.includes('/api/anthropic'))
+    )
+  } catch {
+    return false
+  }
+}
+
 export class ClaudeAPICli implements LLMCli {
+  protected readonly options: ClaudeClientOptions
+
   constructor(
     protected readonly apiKey: string,
     protected readonly baseUrl: string,
     protected readonly modelName: string,
-    protected readonly fetchImpl: FetchImpl = getDefaultFetchImpl()
-  ) {}
+    fetchImplOrOptions?: FetchImpl | ClaudeClientOptions
+  ) {
+    this.options = normalizeClaudeClientOptions(fetchImplOrOptions)
+  }
+
+  private getFetchImpl(): FetchImpl {
+    return this.options.fetchImpl ?? getDefaultFetchImpl()
+  }
 
   async chat(params: LLMChatParams): Promise<LLMChatResult> {
     const { messages, systemPrompt, signal } = params
@@ -572,7 +729,7 @@ export class ClaudeAPICli implements LLMCli {
 
           for (const attachment of imageAttachments) {
             try {
-              const base64 = await convertImageToBase64(attachment.url, signal, this.fetchImpl)
+              const base64 = await convertImageToBase64(attachment.url, signal, this.getFetchImpl())
               let mediaType = attachment.mimeType || 'image/jpeg'
               if (attachment.url.startsWith('data:')) {
                 const mimeMatch = attachment.url.match(/data:([^;]+)/)
@@ -618,7 +775,7 @@ export class ClaudeAPICli implements LLMCli {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const requestBody: Record<string, any> = {
       model: this.modelName,
-      max_tokens: 4096,
+      max_tokens: params.maxOutputTokens || this.options.maxTokens || 4096,
       messages: claudeMessages
     }
 
@@ -626,15 +783,25 @@ export class ClaudeAPICli implements LLMCli {
       requestBody.system = systemPrompt
     }
 
+    const authAsBearer = this.options.authAsBearer ?? isBearerClaudeEndpoint(base)
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      ...(this.options.extraHeaders || {})
+    }
+    if (this.apiKey.trim()) {
+      if (authAsBearer) {
+        headers.Authorization = headers.Authorization || `Bearer ${this.apiKey}`
+      } else {
+        headers['x-api-key'] = headers['x-api-key'] || this.apiKey
+      }
+    }
+
     let resp: Response
     try {
-      resp = await this.fetchImpl(endpoint, {
+      resp = await this.getFetchImpl()(endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': this.apiKey,
-          'anthropic-version': '2023-06-01'
-        },
+        headers,
         body: JSON.stringify(requestBody),
         signal
       })
@@ -648,14 +815,94 @@ export class ClaudeAPICli implements LLMCli {
     }
 
     const data = await resp.json()
-    const content_text = data?.content?.[0]?.text
+    const contentText = Array.isArray(data?.content)
+      ? data.content
+          .map((block: { text?: unknown }) => (typeof block?.text === 'string' ? block.text : ''))
+          .join('')
+      : undefined
 
-    if (typeof content_text !== 'string' || !content_text) {
+    if (typeof contentText !== 'string' || !contentText) {
       throw new Error(
         `Claude API returned empty or invalid content. Response: ${JSON.stringify(data)}`
       )
     }
-    return normalizeLLMChatResult(content_text.trim())
+    const usage = normalizeProviderTokenUsage(data)
+    return normalizeLLMChatResult({
+      content: contentText.trim(),
+      ...(usage ? { usage } : {})
+    })
+  }
+}
+
+// ==================== OpenCode Zen API Client ====================
+
+export class OpencodeZenAPICli implements LLMCli {
+  constructor(
+    protected readonly apiKey: string,
+    protected readonly baseUrl: string,
+    protected readonly modelName: string,
+    protected readonly options?: { fetchImpl?: FetchImpl }
+  ) {}
+
+  private getBaseUrl(): string {
+    const trimmed = normalizeOpenAIBaseUrl(this.baseUrl || OPENCODE_ZEN_API_BASE_URL)
+      .replace(/\/messages\/?$/i, '')
+      .replace(/\/models\/[^/?#:]+(?::generateContent)?\/?$/i, '')
+      .replace(/\/$/, '')
+    const normalized = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+
+    try {
+      const parsed = new URL(normalized)
+      if (parsed.hostname.toLowerCase() !== 'opencode.ai') {
+        return normalized
+      }
+
+      const pathname = parsed.pathname.replace(/\/+$/g, '') || '/zen/v1'
+      if (pathname === '/zen') {
+        return `${parsed.origin}/zen/v1`
+      }
+      const versionMatch = pathname.match(
+        /^(\/zen\/v\d+)(?:\/(?:responses|messages|chat\/completions))?$/i
+      )
+      if (versionMatch) {
+        return `${parsed.origin}${versionMatch[1]}`
+      }
+    } catch {
+      // Fall back to the string normalization above.
+    }
+
+    return normalized
+  }
+
+  async chat(params: LLMChatParams): Promise<LLMChatResult> {
+    const modelName = resolveOpencodeZenAlias(this.modelName)
+    const baseUrl = this.getBaseUrl()
+    const modelApi = resolveOpencodeZenModelApi(modelName)
+
+    switch (modelApi) {
+      case 'openai-responses':
+        return new OpenAIAPICli(this.apiKey, baseUrl, modelName, {
+          apiMode: 'responses',
+          enableHostedTools: false,
+          fetchImpl: this.options?.fetchImpl
+        }).chat(params)
+      case 'anthropic-messages':
+        return new ClaudeAPICli(this.apiKey, baseUrl, modelName, {
+          authAsBearer: false,
+          fetchImpl: this.options?.fetchImpl
+        }).chat(params)
+      case 'google-generative-ai':
+        return new GeminiAPICli(this.apiKey, baseUrl, modelName, {
+          authMode: 'x-goog-api-key',
+          fetchImpl: this.options?.fetchImpl
+        }).chat(params)
+      case 'openai-completions':
+      default:
+        return new OpenAIAPICli(this.apiKey, baseUrl, modelName, {
+          apiMode: 'chat-completions',
+          fetchImpl: this.options?.fetchImpl
+        }).chat(params)
+    }
   }
 }
 
@@ -711,7 +958,8 @@ export class OllamaAPICli implements LLMCli {
     const requestBody = {
       model: this.modelName,
       messages: ollamaMessages,
-      stream: false
+      stream: false,
+      ...(params.maxOutputTokens ? { options: { num_predict: params.maxOutputTokens } } : {})
     }
 
     let resp: Response
@@ -741,6 +989,10 @@ export class OllamaAPICli implements LLMCli {
         `Ollama API returned empty or invalid content. Response: ${JSON.stringify(data)}`
       )
     }
-    return normalizeLLMChatResult(content.trim())
+    const usage = normalizeProviderTokenUsage(data)
+    return normalizeLLMChatResult({
+      content: content.trim(),
+      ...(usage ? { usage } : {})
+    })
   }
 }

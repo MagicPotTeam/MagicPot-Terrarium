@@ -9,17 +9,17 @@
     },
     {
       "label": "Checkpoint加载器",
-      "slot": "$.108.inputs.ckpt_name",
+      "slot": "$.49.inputs.ckpt_name",
       "component": "InputComfySelect"
     },
     {
       "label": "UniControl-XL（线稿）",
-      "slot": "$.101.inputs.name",
+      "slot": "$.42.inputs.name",
       "component": "InputComfySelect"
     },
     {
       "label": "UniControl-XL（深度）",
-      "slot": "$.102.inputs.name",
+      "slot": "$.43.inputs.name",
       "component": "InputComfySelect"
     },
     {
@@ -32,19 +32,19 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.97.inputs.model",
-        "$.98.inputs.model"
+        "$.38.inputs.model",
+        "$.39.inputs.model"
       ],
       "outputClipSlots": [
-        "$.94.inputs.clip",
-        "$.99.inputs.clip"
+        "$.35.inputs.clip",
+        "$.40.inputs.clip"
       ],
       "inputModel": [
-        "90",
+        "31",
         0
       ],
       "inputClip": [
-        "108",
+        "49",
         1
       ]
     },
@@ -56,38 +56,37 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.106.inputs.image",
+      "slot": "$.47.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "正面提示词",
-      "slot": "$.110.inputs.value",
+      "slot": "$.51.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "负面提示词",
-      "slot": "$.111.inputs.value",
+      "slot": "$.52.inputs.value",
       "component": "InputPrompt",
       "suffixPrompt": ""
     },
     {
       "label": "随机种",
-      "slot": "$.100.inputs.value",
+      "slot": "$.41.inputs.value",
       "component": "InputSeed"
     }
   ],
   "autoInputs": [],
   "customNodeUrls": [
     "https://github.com/Fannovel16/comfyui_controlnet_aux",
-    "https://github.com/pythongosssss/ComfyUI-Custom-Scripts",
     "https://github.com/yolain/ComfyUI-Easy-Use",
     "https://github.com/kijai/ComfyUI-KJNodes",
     "https://github.com/shiimizu/ComfyUI_smZNodes",
     "https://github.com/chinoll/ComfyUI-Advanced-ControlNet"
   ],
   "outputNodeIds": [
-    "96"
+    "37"
   ],
   "requiredModels": [
     {

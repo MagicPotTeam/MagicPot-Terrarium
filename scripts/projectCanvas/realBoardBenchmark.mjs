@@ -16,6 +16,10 @@ import {
   resolveProjectCanvasBenchmarkRunId,
   sanitizeProjectCanvasRunId
 } from './benchmarkPolicy.mjs'
+import {
+  collectProjectCanvasLargeImageResourceMetricsFromDomSnapshot,
+  formatProjectCanvasLargeImageResourceMetrics
+} from './largeImageResourceMetrics.mjs'
 
 function parseNonNegativeIntegerEnv(name, fallback) {
   const parsed = Number.parseInt(process.env[name] || '', 10)
@@ -54,6 +58,13 @@ const REAL_BOARD_IMPORT_BATCH_WAIT_METRICS = /^(1|true|yes)$/i.test(
 const REAL_BOARD_MODE = `${process.env.MAGICPOT_REAL_BOARD_MODE || 'mixed'}`.trim().toLowerCase()
 const SUPPORTED_REAL_BOARD_MODES = new Set(['import', 'seeded-hires', 'mixed'])
 const SUPPORTED_REAL_BOARD_CACHE_PASSES = new Set(['cold-cache', 'warm-cache'])
+const OFFICIAL_REAL_BOARD_PROFILE_NAME = 'official-mixed-3000'
+const OFFICIAL_REAL_BOARD_MODE = 'mixed'
+const OFFICIAL_REAL_BOARD_IMAGE_COUNT = 3000
+const OFFICIAL_REAL_BOARD_PRESSURE_DURATION_MS = 30000
+const OFFICIAL_REAL_BOARD_CACHE_PASSES = ['cold-cache', 'warm-cache']
+const OFFICIAL_BENCHMARK_MEMORY_SOFT_LIMIT_FRACTION = 0.75
+const OFFICIAL_BENCHMARK_MEMORY_HARD_LIMIT_FRACTION = 0.8
 const REAL_BOARD_IMAGE_DIRS = `${process.env.MAGICPOT_REAL_BOARD_IMAGE_DIRS || ''}`.trim()
 const REAL_BOARD_CORPUS_LABELS = `${process.env.MAGICPOT_REAL_BOARD_CORPUS_LABELS || ''}`.trim()
 const REAL_BOARD_CACHE_PASSES = resolveRealBoardCachePasses({
@@ -471,6 +482,114 @@ const BENCHMARK_MEMORY_WATCHDOG = new BenchmarkMemoryWatchdog({
   sampleIntervalMs: BENCHMARK_MEMORY_SAMPLE_INTERVAL_MS,
   sampleLimit: BENCHMARK_MEMORY_SAMPLE_LIMIT
 })
+
+function getOfficialRealBoardProfilePolicy() {
+  return {
+    name: OFFICIAL_REAL_BOARD_PROFILE_NAME,
+    mode: OFFICIAL_REAL_BOARD_MODE,
+    imageCount: OFFICIAL_REAL_BOARD_IMAGE_COUNT,
+    pressureDurationMs: OFFICIAL_REAL_BOARD_PRESSURE_DURATION_MS,
+    cachePasses: OFFICIAL_REAL_BOARD_CACHE_PASSES,
+    memoryWatchdog: {
+      enabled: true,
+      softLimitFraction: OFFICIAL_BENCHMARK_MEMORY_SOFT_LIMIT_FRACTION,
+      hardLimitFraction: OFFICIAL_BENCHMARK_MEMORY_HARD_LIMIT_FRACTION
+    },
+    allowRepeat: false
+  }
+}
+
+function hasExplicitTruthyEnvValue(name) {
+  return /^(1|true|yes)$/i.test(`${process.env[name] || ''}`.trim())
+}
+
+function hasExplicitEnvValue(name) {
+  return `${process.env[name] || ''}`.trim() !== ''
+}
+
+function fractionsEqual(left, right) {
+  return Math.abs(left - right) < 0.000001
+}
+
+function buildRealBoardBenchmarkProfileMetadata({
+  scenarioMode = REAL_BOARD_MODE,
+  imageCount = REAL_BOARD_IMAGE_COUNT,
+  pressureDurationMs = REAL_BOARD_PRESSURE_DURATION_MS,
+  cachePasses = REAL_BOARD_CACHE_PASSES,
+  allowRepeat = REAL_BOARD_ALLOW_REPEAT,
+  memoryWatchdogEnabled = BENCHMARK_MEMORY_WATCHDOG_ENABLED,
+  memorySoftLimitFraction = BENCHMARK_MEMORY_SOFT_LIMIT_FRACTION,
+  memoryHardLimitFraction = BENCHMARK_MEMORY_HARD_LIMIT_FRACTION
+} = {}) {
+  const policy = getOfficialRealBoardProfilePolicy()
+  const normalizedCachePasses = Array.isArray(cachePasses) ? cachePasses : []
+  const hasOfficialCachePasses =
+    normalizedCachePasses.length === policy.cachePasses.length &&
+    policy.cachePasses.every((cachePass, index) => normalizedCachePasses[index] === cachePass)
+  const allowRepeatDiagnostic =
+    Boolean(allowRepeat) || hasExplicitTruthyEnvValue('MAGICPOT_REAL_BOARD_ALLOW_REPEAT')
+  const diagnosticReasons = []
+
+  if (scenarioMode !== policy.mode) {
+    diagnosticReasons.push(
+      `mode=${scenarioMode || 'unknown'}; official ${policy.name} requires mode=${policy.mode}.`
+    )
+  }
+  if (imageCount !== policy.imageCount) {
+    diagnosticReasons.push(
+      `imageCount=${imageCount}; official ${policy.name} requires imageCount=${policy.imageCount}.`
+    )
+  }
+  if (pressureDurationMs !== policy.pressureDurationMs) {
+    diagnosticReasons.push(
+      `pressureDurationMs=${pressureDurationMs}; official ${policy.name} requires pressureDurationMs=${policy.pressureDurationMs}.`
+    )
+  }
+  if (!hasOfficialCachePasses) {
+    diagnosticReasons.push(
+      `cachePasses=${normalizedCachePasses.join(',') || 'none'}; official ${policy.name} requires ${policy.cachePasses.join('+')}.`
+    )
+  }
+  if (!memoryWatchdogEnabled) {
+    diagnosticReasons.push(`memory watchdog disabled; official ${policy.name} requires it enabled.`)
+  }
+  if (!fractionsEqual(memorySoftLimitFraction, policy.memoryWatchdog.softLimitFraction)) {
+    diagnosticReasons.push(
+      `memory watchdog soft limit=${memorySoftLimitFraction}; official ${policy.name} requires ${policy.memoryWatchdog.softLimitFraction}.`
+    )
+  }
+  if (!fractionsEqual(memoryHardLimitFraction, policy.memoryWatchdog.hardLimitFraction)) {
+    diagnosticReasons.push(
+      `memory watchdog hard limit=${memoryHardLimitFraction}; official ${policy.name} requires ${policy.memoryWatchdog.hardLimitFraction}.`
+    )
+  }
+  if (allowRepeatDiagnostic) {
+    diagnosticReasons.push(
+      `allowRepeat=${allowRepeat ? 'true' : 'explicit'}; official ${policy.name} requires MAGICPOT_REAL_BOARD_ALLOW_REPEAT unset or false.`
+    )
+  }
+
+  return {
+    name: policy.name,
+    officialProfile: diagnosticReasons.length === 0,
+    diagnosticProfile: diagnosticReasons.length > 0,
+    diagnosticReasons,
+    policy,
+    observed: {
+      mode: scenarioMode,
+      imageCount,
+      pressureDurationMs,
+      cachePasses: normalizedCachePasses,
+      memoryWatchdog: {
+        enabled: memoryWatchdogEnabled,
+        softLimitFraction: memorySoftLimitFraction,
+        hardLimitFraction: memoryHardLimitFraction
+      },
+      allowRepeat: Boolean(allowRepeat),
+      allowRepeatEnvConfigured: hasExplicitEnvValue('MAGICPOT_REAL_BOARD_ALLOW_REPEAT')
+    }
+  }
+}
 
 function getCrcTable() {
   if (crcTable) {
@@ -1395,84 +1514,210 @@ function buildSourceTextureVisualFailures(highZoomUpgrade, finalMetrics) {
   }
 }
 
+function readProjectCanvasRealBoardMetricsFromDomSnapshot(snapshotInput) {
+  const { rootDataset, overlayDataset = {}, domMetrics = {} } = snapshotInput
+  const snapshotText = rootDataset.projectCanvasMetricsSnapshot
+  let snapshot = null
+  try {
+    snapshot = snapshotText ? JSON.parse(snapshotText) : null
+  } catch {
+    snapshot = null
+  }
+  const snapshotWebgl = snapshot?.webgl || null
+  const snapshotThumbnailCache = snapshot?.thumbnailCache || snapshot?.thumbnails || null
+  const hasOwn = (object, key) =>
+    Boolean(object && Object.prototype.hasOwnProperty.call(object, key))
+  const readNumberCandidate = (value) => {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  const readFirstNumber = (candidates, fallback = 0) => {
+    for (const candidate of candidates) {
+      const parsed = readNumberCandidate(candidate)
+      if (parsed !== null) {
+        return parsed
+      }
+    }
+    return fallback
+  }
+  const hasPlaceholderCountMetric =
+    hasOwn(snapshotWebgl, 'placeholderCount') ||
+    hasOwn(snapshotWebgl, 'placeholderImageCount') ||
+    rootDataset.projectCanvasWebglPlaceholderImageCount !== undefined ||
+    rootDataset.projectCanvasPlaceholderImageCount !== undefined ||
+    rootDataset.projectCanvasPlaceholderCount !== undefined
+  const placeholderCount = hasPlaceholderCountMetric
+    ? readFirstNumber([
+        snapshotWebgl?.placeholderCount,
+        snapshotWebgl?.placeholderImageCount,
+        rootDataset.projectCanvasWebglPlaceholderImageCount,
+        rootDataset.projectCanvasPlaceholderImageCount,
+        rootDataset.projectCanvasPlaceholderCount
+      ])
+    : null
+  const thumbnailCacheMetricAvailable =
+    Boolean(snapshotThumbnailCache) ||
+    rootDataset.projectCanvasThumbnailCount !== undefined ||
+    rootDataset.projectCanvasThumbnailCacheHitCount !== undefined ||
+    rootDataset.projectCanvasThumbnailCacheGeneratedCount !== undefined ||
+    rootDataset.projectCanvasThumbnailCacheStaleCount !== undefined
+  const summaryText = rootDataset.projectCanvasRenderSurfaceSummary || '{}'
+  const visibleSummary = JSON.parse(summaryText)
+  const totalItemCount = Number(
+    rootDataset.projectCanvasTotalItemCount || visibleSummary.totalItems || '0'
+  )
+  const totalImageItemCount = Number(
+    rootDataset.projectCanvasTotalImageItemCount || visibleSummary.imageItems || '0'
+  )
+  const visibleItemCount = Number(
+    rootDataset.projectCanvasVisibleItemCount || visibleSummary.totalItems || '0'
+  )
+  const visibleImageItemCount = Number(
+    rootDataset.projectCanvasVisibleImageItemCount || visibleSummary.imageItems || '0'
+  )
+  const summary = {
+    ...visibleSummary,
+    totalItems: totalItemCount,
+    imageItems: totalImageItemCount,
+    visibleItems: visibleItemCount,
+    visibleImageItems: visibleImageItemCount
+  }
+  const clientRect = domMetrics.clientRect || {}
+  const drawableRect = domMetrics.drawableRect || clientRect
+  const viewportWidth = Number(domMetrics.viewportWidth || 0)
+  const clientRight = Number(clientRect.right || 0)
+  const rightOcclusionPx = Math.max(0, viewportWidth - clientRight)
+  const largeImageResourceMetrics =
+    collectProjectCanvasLargeImageResourceMetricsFromDomSnapshot(snapshotInput)
+
+  return {
+    summary,
+    itemCounts: {
+      totalItemCount,
+      totalImageItemCount,
+      visibleItemCount,
+      visibleImageItemCount
+    },
+    reactCommits: Number(rootDataset.projectCanvasReactCommitCount || '0'),
+    domNodeCount: Number(domMetrics.domNodeCount || 0),
+    jsHeapBytes: domMetrics.usedJSHeapSize ?? null,
+    overlayMetrics: {
+      overlayTotalCount: Number(overlayDataset.projectCanvasOverlayTotalCount || '0'),
+      domOverlayCount: Number(overlayDataset.projectCanvasDomOverlayCount || '0'),
+      mountedVideoOverlayCount: Number(overlayDataset.projectCanvasMountedVideoOverlayCount || '0')
+    },
+    webgl: {
+      loadedImageCount: Number(rootDataset.projectCanvasWebglLoadedImageCount || '0'),
+      failedImageCount: Number(rootDataset.projectCanvasWebglFailedImageCount || '0'),
+      pendingImageCount: Number(rootDataset.projectCanvasWebglPendingImageCount || '0'),
+      residentImageCount: Number(rootDataset.projectCanvasWebglResidentImageCount || '0'),
+      residentCandidateImageCount: Number(
+        rootDataset.projectCanvasWebglResidentCandidateImageCount || '0'
+      ),
+      viewportCulledImageCount: Number(
+        rootDataset.projectCanvasWebglViewportCulledImageCount || '0'
+      ),
+      residentTextureBytes: Number(rootDataset.projectCanvasWebglResidentTextureBytes || '0'),
+      residentTextureBudgetBytes: Number(
+        rootDataset.projectCanvasWebglResidentTextureBudgetBytes || '0'
+      ),
+      missingImageCount: Number(rootDataset.projectCanvasWebglMissingImageCount || '0'),
+      previewCount: Number(rootDataset.projectCanvasWebglUsingPreviewImageCount || '0'),
+      sourceCount: Number(rootDataset.projectCanvasWebglUsingSourceImageCount || '0'),
+      sourceUpgradeSuppressedImageCount: Number(
+        rootDataset.projectCanvasWebglSourceUpgradeSuppressedImageCount || '0'
+      ),
+      sourceUpgradeablePreviewCount: Number(
+        rootDataset.projectCanvasWebglSourceUpgradeablePreviewImageCount || '0'
+      ),
+      upgradePendingCount: Number(
+        rootDataset.projectCanvasWebglSourceUpgradePendingImageCount || '0'
+      ),
+      sourceUpgradeFailedImageCount: Number(
+        rootDataset.projectCanvasWebglSourceUpgradeFailedImageCount || '0'
+      ),
+      placeholderMetricAvailable: hasPlaceholderCountMetric,
+      placeholderCount,
+      renderCount: Number(rootDataset.projectCanvasWebglRenderCount || '0'),
+      lastRenderDurationMs: Number(rootDataset.projectCanvasWebglLastRenderDurationMs || '0'),
+      lastUpdateReason: rootDataset.projectCanvasWebglLastUpdateReason || '',
+      hasWebglContext: Boolean(domMetrics.hasWebglContext)
+    },
+    thumbnailCache: {
+      metricAvailable: thumbnailCacheMetricAvailable,
+      thumbnailCount: readFirstNumber([
+        snapshotThumbnailCache?.thumbnailCount,
+        snapshotThumbnailCache?.count,
+        rootDataset.projectCanvasThumbnailCount
+      ]),
+      cacheHitCount: readFirstNumber([
+        snapshotThumbnailCache?.cacheHitCount,
+        snapshotThumbnailCache?.hitCount,
+        snapshotThumbnailCache?.hits,
+        rootDataset.projectCanvasThumbnailCacheHitCount
+      ]),
+      cacheGeneratedCount: readFirstNumber([
+        snapshotThumbnailCache?.cacheGeneratedCount,
+        snapshotThumbnailCache?.generatedCount,
+        snapshotThumbnailCache?.generated,
+        rootDataset.projectCanvasThumbnailCacheGeneratedCount
+      ]),
+      cacheStaleCount: readFirstNumber([
+        snapshotThumbnailCache?.cacheStaleCount,
+        snapshotThumbnailCache?.staleCount,
+        snapshotThumbnailCache?.stale,
+        rootDataset.projectCanvasThumbnailCacheStaleCount
+      ])
+    },
+    largeImageResourceMetrics,
+    diagnosticMetrics: {
+      largeImageResources: largeImageResourceMetrics
+    },
+    viewport: {
+      stageScale: Number(rootDataset.stageScale || '0'),
+      stagePosX: Number(rootDataset.stagePosX || '0'),
+      stagePosY: Number(rootDataset.stagePosY || '0'),
+      clientRect: {
+        x: Number(Number(clientRect.x || 0).toFixed(2)),
+        y: Number(Number(clientRect.y || 0).toFixed(2)),
+        width: Number(Number(clientRect.width || 0).toFixed(2)),
+        height: Number(Number(clientRect.height || 0).toFixed(2)),
+        right: Number(Number(clientRect.right || 0).toFixed(2)),
+        bottom: Number(Number(clientRect.bottom || 0).toFixed(2))
+      },
+      drawableRect: {
+        x: Number(Number(drawableRect.x || 0).toFixed(2)),
+        y: Number(Number(drawableRect.y || 0).toFixed(2)),
+        width: Number(Number(drawableRect.width || 0).toFixed(2)),
+        height: Number(Number(drawableRect.height || 0).toFixed(2)),
+        right: Number(Number(drawableRect.right || 0).toFixed(2)),
+        bottom: Number(Number(drawableRect.bottom || 0).toFixed(2))
+      },
+      rightOcclusionPx: Number(rightOcclusionPx.toFixed(2))
+    }
+  }
+}
+
 async function readBenchmarkMetrics(page) {
-  return page.evaluate(() => {
+  const snapshotInput = await page.evaluate(() => {
     const root = document.querySelector('[data-testid="project-canvas-stage-root"]')
     if (!(root instanceof HTMLElement)) {
       throw new Error('ProjectCanvas stage root not found.')
     }
 
-    const snapshotText = root.dataset.projectCanvasMetricsSnapshot
-    let snapshot = null
-    try {
-      snapshot = snapshotText ? JSON.parse(snapshotText) : null
-    } catch {
-      snapshot = null
-    }
-    const snapshotWebgl = snapshot?.webgl || null
-    const snapshotThumbnailCache = snapshot?.thumbnailCache || snapshot?.thumbnails || null
-    const hasOwn = (object, key) =>
-      Boolean(object && Object.prototype.hasOwnProperty.call(object, key))
-    const readNumberCandidate = (value) => {
-      const parsed = Number(value)
-      return Number.isFinite(parsed) ? parsed : null
-    }
-    const readFirstNumber = (candidates, fallback = 0) => {
-      for (const candidate of candidates) {
-        const parsed = readNumberCandidate(candidate)
-        if (parsed !== null) {
-          return parsed
-        }
-      }
-      return fallback
-    }
-    const hasPlaceholderCountMetric =
-      hasOwn(snapshotWebgl, 'placeholderCount') ||
-      hasOwn(snapshotWebgl, 'placeholderImageCount') ||
-      root.dataset.projectCanvasWebglPlaceholderImageCount !== undefined ||
-      root.dataset.projectCanvasPlaceholderImageCount !== undefined ||
-      root.dataset.projectCanvasPlaceholderCount !== undefined
-    const placeholderCount = hasPlaceholderCountMetric
-      ? readFirstNumber([
-          snapshotWebgl?.placeholderCount,
-          snapshotWebgl?.placeholderImageCount,
-          root.dataset.projectCanvasWebglPlaceholderImageCount,
-          root.dataset.projectCanvasPlaceholderImageCount,
-          root.dataset.projectCanvasPlaceholderCount
-        ])
-      : null
-    const thumbnailCacheMetricAvailable =
-      Boolean(snapshotThumbnailCache) ||
-      root.dataset.projectCanvasThumbnailCount !== undefined ||
-      root.dataset.projectCanvasThumbnailCacheHitCount !== undefined ||
-      root.dataset.projectCanvasThumbnailCacheGeneratedCount !== undefined ||
-      root.dataset.projectCanvasThumbnailCacheStaleCount !== undefined
-    const summaryText = root.dataset.projectCanvasRenderSurfaceSummary || '{}'
-    const visibleSummary = JSON.parse(summaryText)
-    const totalItemCount = Number(
-      root.dataset.projectCanvasTotalItemCount || visibleSummary.totalItems || '0'
-    )
-    const totalImageItemCount = Number(
-      root.dataset.projectCanvasTotalImageItemCount || visibleSummary.imageItems || '0'
-    )
-    const visibleItemCount = Number(
-      root.dataset.projectCanvasVisibleItemCount || visibleSummary.totalItems || '0'
-    )
-    const visibleImageItemCount = Number(
-      root.dataset.projectCanvasVisibleImageItemCount || visibleSummary.imageItems || '0'
-    )
-    const summary = {
-      ...visibleSummary,
-      totalItems: totalItemCount,
-      imageItems: totalImageItemCount,
-      visibleItems: visibleItemCount,
-      visibleImageItems: visibleImageItemCount
-    }
     const webglCanvas = document.querySelector('.project-canvas-webgl-layer canvas')
     const overlayRoot = document.querySelector('[data-project-canvas-overlay-total-count]')
     const clientRect = root.getBoundingClientRect()
     const drawableRect =
       webglCanvas instanceof HTMLElement ? webglCanvas.getBoundingClientRect() : clientRect
+    const rectToPlainObject = (rect) => ({
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      right: rect.right,
+      bottom: rect.bottom
+    })
     const usedJSHeapSize =
       typeof performance !== 'undefined' &&
       performance &&
@@ -1480,117 +1725,25 @@ async function readBenchmarkMetrics(page) {
       typeof performance.memory?.usedJSHeapSize === 'number'
         ? performance.memory.usedJSHeapSize
         : null
-    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0
-    const rightOcclusionPx = Math.max(0, viewportWidth - clientRect.right)
 
     return {
-      summary,
-      itemCounts: {
-        totalItemCount,
-        totalImageItemCount,
-        visibleItemCount,
-        visibleImageItemCount
-      },
-      reactCommits: Number(root.dataset.projectCanvasReactCommitCount || '0'),
-      domNodeCount: document.getElementsByTagName('*').length,
-      jsHeapBytes: usedJSHeapSize,
-      overlayMetrics: {
-        overlayTotalCount: Number(overlayRoot?.dataset.projectCanvasOverlayTotalCount || '0'),
-        domOverlayCount: Number(overlayRoot?.dataset.projectCanvasDomOverlayCount || '0'),
-        mountedVideoOverlayCount: Number(
-          overlayRoot?.dataset.projectCanvasMountedVideoOverlayCount || '0'
-        )
-      },
-      webgl: {
-        loadedImageCount: Number(root.dataset.projectCanvasWebglLoadedImageCount || '0'),
-        failedImageCount: Number(root.dataset.projectCanvasWebglFailedImageCount || '0'),
-        pendingImageCount: Number(root.dataset.projectCanvasWebglPendingImageCount || '0'),
-        residentImageCount: Number(root.dataset.projectCanvasWebglResidentImageCount || '0'),
-        residentCandidateImageCount: Number(
-          root.dataset.projectCanvasWebglResidentCandidateImageCount || '0'
-        ),
-        viewportCulledImageCount: Number(
-          root.dataset.projectCanvasWebglViewportCulledImageCount || '0'
-        ),
-        residentTextureBytes: Number(root.dataset.projectCanvasWebglResidentTextureBytes || '0'),
-        residentTextureBudgetBytes: Number(
-          root.dataset.projectCanvasWebglResidentTextureBudgetBytes || '0'
-        ),
-        missingImageCount: Number(root.dataset.projectCanvasWebglMissingImageCount || '0'),
-        previewCount: Number(root.dataset.projectCanvasWebglUsingPreviewImageCount || '0'),
-        sourceCount: Number(root.dataset.projectCanvasWebglUsingSourceImageCount || '0'),
-        sourceUpgradeSuppressedImageCount: Number(
-          root.dataset.projectCanvasWebglSourceUpgradeSuppressedImageCount || '0'
-        ),
-        sourceUpgradeablePreviewCount: Number(
-          root.dataset.projectCanvasWebglSourceUpgradeablePreviewImageCount || '0'
-        ),
-        upgradePendingCount: Number(
-          root.dataset.projectCanvasWebglSourceUpgradePendingImageCount || '0'
-        ),
-        sourceUpgradeFailedImageCount: Number(
-          root.dataset.projectCanvasWebglSourceUpgradeFailedImageCount || '0'
-        ),
-        placeholderMetricAvailable: hasPlaceholderCountMetric,
-        placeholderCount,
-        renderCount: Number(root.dataset.projectCanvasWebglRenderCount || '0'),
-        lastRenderDurationMs: Number(root.dataset.projectCanvasWebglLastRenderDurationMs || '0'),
-        lastUpdateReason: root.dataset.projectCanvasWebglLastUpdateReason || '',
+      rootDataset: { ...root.dataset },
+      overlayDataset: overlayRoot instanceof HTMLElement ? { ...overlayRoot.dataset } : {},
+      domMetrics: {
+        domNodeCount: document.getElementsByTagName('*').length,
+        usedJSHeapSize,
+        viewportWidth: window.innerWidth || document.documentElement.clientWidth || 0,
+        clientRect: rectToPlainObject(clientRect),
+        drawableRect: rectToPlainObject(drawableRect),
         hasWebglContext: Boolean(
           webglCanvas instanceof HTMLCanvasElement &&
           (webglCanvas.getContext('webgl2') || webglCanvas.getContext('webgl'))
         )
-      },
-      thumbnailCache: {
-        metricAvailable: thumbnailCacheMetricAvailable,
-        thumbnailCount: readFirstNumber([
-          snapshotThumbnailCache?.thumbnailCount,
-          snapshotThumbnailCache?.count,
-          root.dataset.projectCanvasThumbnailCount
-        ]),
-        cacheHitCount: readFirstNumber([
-          snapshotThumbnailCache?.cacheHitCount,
-          snapshotThumbnailCache?.hitCount,
-          snapshotThumbnailCache?.hits,
-          root.dataset.projectCanvasThumbnailCacheHitCount
-        ]),
-        cacheGeneratedCount: readFirstNumber([
-          snapshotThumbnailCache?.cacheGeneratedCount,
-          snapshotThumbnailCache?.generatedCount,
-          snapshotThumbnailCache?.generated,
-          root.dataset.projectCanvasThumbnailCacheGeneratedCount
-        ]),
-        cacheStaleCount: readFirstNumber([
-          snapshotThumbnailCache?.cacheStaleCount,
-          snapshotThumbnailCache?.staleCount,
-          snapshotThumbnailCache?.stale,
-          root.dataset.projectCanvasThumbnailCacheStaleCount
-        ])
-      },
-      viewport: {
-        stageScale: Number(root.dataset.stageScale || '0'),
-        stagePosX: Number(root.dataset.stagePosX || '0'),
-        stagePosY: Number(root.dataset.stagePosY || '0'),
-        clientRect: {
-          x: Number(clientRect.x.toFixed(2)),
-          y: Number(clientRect.y.toFixed(2)),
-          width: Number(clientRect.width.toFixed(2)),
-          height: Number(clientRect.height.toFixed(2)),
-          right: Number(clientRect.right.toFixed(2)),
-          bottom: Number(clientRect.bottom.toFixed(2))
-        },
-        drawableRect: {
-          x: Number(drawableRect.x.toFixed(2)),
-          y: Number(drawableRect.y.toFixed(2)),
-          width: Number(drawableRect.width.toFixed(2)),
-          height: Number(drawableRect.height.toFixed(2)),
-          right: Number(drawableRect.right.toFixed(2)),
-          bottom: Number(drawableRect.bottom.toFixed(2))
-        },
-        rightOcclusionPx: Number(rightOcclusionPx.toFixed(2))
       }
     }
   })
+
+  return readProjectCanvasRealBoardMetricsFromDomSnapshot(snapshotInput)
 }
 
 async function runPressureSampling(page, durationMs, sampleIntervalMs) {
@@ -2431,6 +2584,46 @@ function buildAcceptance({ finalMetrics, visualFailures, interactionBurst }) {
   }
 }
 
+function buildRealBoardAggregateReport({
+  aggregateRoot,
+  currentResults,
+  existingResults = [],
+  generatedAt = new Date().toISOString(),
+  memoryWatchdogReport = BENCHMARK_MEMORY_WATCHDOG.getReport(),
+  profileMetadata = buildRealBoardBenchmarkProfileMetadata()
+}) {
+  const resultKey = (result) =>
+    `${result.corpusLabel || 'unknown'}:${result.scenarioMode || 'unknown'}:${result.cachePass || 'single'}:${result.benchmarkImageCount || REAL_BOARD_IMAGE_COUNT}`
+  const currentKeys = new Set(currentResults.map(resultKey))
+  const mergedResults = [
+    ...existingResults.filter((result) => !currentKeys.has(resultKey(result))),
+    ...currentResults
+  ].sort((left, right) => resultKey(left).localeCompare(resultKey(right)))
+  const passedResults = mergedResults.filter((result) => result.acceptance?.passed === true).length
+  const failedResults = mergedResults.length - passedResults
+  const acceptanceAllPassed = mergedResults.length > 0 && failedResults === 0
+  const officialProfile = profileMetadata.officialProfile === true
+  const officialAllPassed = acceptanceAllPassed && officialProfile
+
+  return {
+    runId: BENCHMARK_RUN_ID,
+    generatedAt,
+    artifactRoot: aggregateRoot,
+    profile: profileMetadata,
+    officialProfile,
+    diagnosticReasons: profileMetadata.diagnosticReasons ?? [],
+    cachePasses: REAL_BOARD_CACHE_PASSES,
+    resultCount: mergedResults.length,
+    passedResults,
+    failedResults,
+    acceptanceAllPassed,
+    officialAllPassed,
+    allPassed: officialAllPassed,
+    memoryWatchdog: buildAggregateMemoryWatchdogReport(memoryWatchdogReport),
+    results: mergedResults
+  }
+}
+
 async function writeAggregateReport(aggregateRoot, currentResults) {
   const aggregatePath = path.join(aggregateRoot, 'aggregate-report.json')
   let existingResults = []
@@ -2443,27 +2636,12 @@ async function writeAggregateReport(aggregateRoot, currentResults) {
     existingResults = []
   }
 
-  const resultKey = (result) =>
-    `${result.corpusLabel || 'unknown'}:${result.scenarioMode || 'unknown'}:${result.cachePass || 'single'}:${result.benchmarkImageCount || REAL_BOARD_IMAGE_COUNT}`
-  const currentKeys = new Set(currentResults.map(resultKey))
-  const mergedResults = [
-    ...existingResults.filter((result) => !currentKeys.has(resultKey(result))),
-    ...currentResults
-  ].sort((left, right) => resultKey(left).localeCompare(resultKey(right)))
-  const passedResults = mergedResults.filter((result) => result.acceptance?.passed === true).length
-  const failedResults = mergedResults.length - passedResults
-  const aggregate = {
-    runId: BENCHMARK_RUN_ID,
-    generatedAt: new Date().toISOString(),
-    artifactRoot: aggregateRoot,
-    cachePasses: REAL_BOARD_CACHE_PASSES,
-    resultCount: mergedResults.length,
-    passedResults,
-    failedResults,
-    allPassed: mergedResults.length > 0 && failedResults === 0,
-    memoryWatchdog: buildAggregateMemoryWatchdogReport(BENCHMARK_MEMORY_WATCHDOG.getReport()),
-    results: mergedResults
-  }
+  const aggregate = buildRealBoardAggregateReport({
+    aggregateRoot,
+    currentResults,
+    existingResults,
+    profileMetadata: buildRealBoardBenchmarkProfileMetadata()
+  })
 
   await fs.writeFile(aggregatePath, JSON.stringify(aggregate, null, 2), 'utf8')
   return aggregate
@@ -2489,6 +2667,24 @@ function buildAggregateScenarioResult(payload) {
   const finalMetrics = payload.finalMetrics ?? {}
   const webgl = finalMetrics.webgl ?? {}
   const overlayMetrics = finalMetrics.overlayMetrics ?? {}
+  const largeImageResourceMetrics =
+    finalMetrics.largeImageResourceMetrics ?? payload.largeImageResourceMetrics ?? null
+  const profile =
+    payload.profile ??
+    buildRealBoardBenchmarkProfileMetadata({
+      scenarioMode: payload.scenarioMode ?? REAL_BOARD_MODE,
+      imageCount: payload.benchmarkImageCount ?? REAL_BOARD_IMAGE_COUNT,
+      pressureDurationMs: pressure?.configuredDurationMs ?? REAL_BOARD_PRESSURE_DURATION_MS,
+      cachePasses: payload.cachePass ? [payload.cachePass] : REAL_BOARD_CACHE_PASSES,
+      allowRepeat: payload.allowRepeat ?? REAL_BOARD_ALLOW_REPEAT,
+      memoryWatchdogEnabled: payload.memoryWatchdog?.enabled ?? BENCHMARK_MEMORY_WATCHDOG_ENABLED,
+      memorySoftLimitFraction:
+        payload.memoryWatchdog?.thresholds?.softLimitFraction ??
+        BENCHMARK_MEMORY_SOFT_LIMIT_FRACTION,
+      memoryHardLimitFraction:
+        payload.memoryWatchdog?.thresholds?.hardLimitFraction ??
+        BENCHMARK_MEMORY_HARD_LIMIT_FRACTION
+    })
 
   return {
     corpusLabel: payload.corpusLabel,
@@ -2546,6 +2742,13 @@ function buildAggregateScenarioResult(payload) {
       sourceUpgradeFailedImageCount:
         webgl.sourceUpgradeFailedImageCount ?? payload.webgl?.sourceUpgradeFailedImageCount ?? null
     },
+    largeImageResourceMetrics,
+    diagnosticMetrics: {
+      largeImageResources: largeImageResourceMetrics
+    },
+    diagnosticSummary: {
+      largeImageResources: formatProjectCanvasLargeImageResourceMetrics(largeImageResourceMetrics)
+    },
     thumbnailCache: finalMetrics.thumbnailCache ?? payload.thumbnailCache ?? null,
     tinyZoomAcceptance: payload.tinyZoomAcceptance ?? null,
     ...(pressure
@@ -2562,6 +2765,9 @@ function buildAggregateScenarioResult(payload) {
         }
       : {}),
     memoryWatchdog: buildAggregateMemoryWatchdogReport(payload.memoryWatchdog),
+    profile,
+    officialProfile: profile.officialProfile,
+    diagnosticReasons: profile.diagnosticReasons,
     visualFailures: payload.visualFailures,
     acceptance: payload.acceptance
   }
@@ -2713,6 +2919,16 @@ async function runRealBoardScenarioPass({
       ...(pressure ? { pressure: buildPressureVisualFailures(pressure, fatalErrors) } : {})
     }
     const acceptance = buildAcceptance({ finalMetrics, visualFailures, interactionBurst })
+    const profile = buildRealBoardBenchmarkProfileMetadata({
+      scenarioMode: REAL_BOARD_MODE,
+      imageCount: staged.stagedImages.length,
+      pressureDurationMs: REAL_BOARD_PRESSURE_DURATION_MS,
+      cachePasses: REAL_BOARD_CACHE_PASSES,
+      allowRepeat: REAL_BOARD_ALLOW_REPEAT,
+      memoryWatchdogEnabled: BENCHMARK_MEMORY_WATCHDOG_ENABLED,
+      memorySoftLimitFraction: BENCHMARK_MEMORY_SOFT_LIMIT_FRACTION,
+      memoryHardLimitFraction: BENCHMARK_MEMORY_HARD_LIMIT_FRACTION
+    })
     const decodedImageCount =
       initialMetrics.itemCounts?.totalImageItemCount ?? initialMetrics.webgl.loadedImageCount
     const culledImageCount = Math.max(
@@ -2786,9 +3002,19 @@ async function runRealBoardScenarioPass({
         failedImageCount: finalMetrics.webgl.failedImageCount
       },
       thumbnailCache: finalMetrics.thumbnailCache,
+      largeImageResourceMetrics: finalMetrics.largeImageResourceMetrics,
+      diagnosticMetrics: finalMetrics.diagnosticMetrics,
+      diagnosticSummary: {
+        largeImageResources: formatProjectCanvasLargeImageResourceMetrics(
+          finalMetrics.largeImageResourceMetrics
+        )
+      },
       viewport: finalMetrics.viewport,
       visualFailures,
       acceptance,
+      profile,
+      officialProfile: profile.officialProfile,
+      diagnosticReasons: profile.diagnosticReasons,
       initialMetrics,
       finalMetrics,
       tinyZoomAcceptance,
@@ -2821,6 +3047,16 @@ async function runRealBoardScenarioPass({
       scenarioRoot,
       errorPath,
       memoryWatchdog: BENCHMARK_MEMORY_WATCHDOG.getReport(),
+      profile: buildRealBoardBenchmarkProfileMetadata({
+        scenarioMode: REAL_BOARD_MODE,
+        imageCount: REAL_BOARD_IMAGE_COUNT,
+        pressureDurationMs: REAL_BOARD_PRESSURE_DURATION_MS,
+        cachePasses: REAL_BOARD_CACHE_PASSES,
+        allowRepeat: REAL_BOARD_ALLOW_REPEAT,
+        memoryWatchdogEnabled: BENCHMARK_MEMORY_WATCHDOG_ENABLED,
+        memorySoftLimitFraction: BENCHMARK_MEMORY_SOFT_LIMIT_FRACTION,
+        memoryHardLimitFraction: BENCHMARK_MEMORY_HARD_LIMIT_FRACTION
+      }),
       acceptance: {
         passed: false,
         failures: [error instanceof Error ? error.message : String(error)],
@@ -2914,6 +3150,16 @@ async function runRealBoardScenario(corpusConfig, aggregateRoot) {
         scenarioRoot: scenarioBaseRoot,
         errorPath,
         memoryWatchdog: BENCHMARK_MEMORY_WATCHDOG.getReport(),
+        profile: buildRealBoardBenchmarkProfileMetadata({
+          scenarioMode: REAL_BOARD_MODE,
+          imageCount: REAL_BOARD_IMAGE_COUNT,
+          pressureDurationMs: REAL_BOARD_PRESSURE_DURATION_MS,
+          cachePasses: REAL_BOARD_CACHE_PASSES,
+          allowRepeat: REAL_BOARD_ALLOW_REPEAT,
+          memoryWatchdogEnabled: BENCHMARK_MEMORY_WATCHDOG_ENABLED,
+          memorySoftLimitFraction: BENCHMARK_MEMORY_SOFT_LIMIT_FRACTION,
+          memoryHardLimitFraction: BENCHMARK_MEMORY_HARD_LIMIT_FRACTION
+        }),
         acceptance: {
           passed: false,
           failures: [error instanceof Error ? error.message : String(error)],
@@ -2982,7 +3228,10 @@ export {
   buildAcceptance,
   buildAggregateScenarioResult,
   buildPressureVisualFailures,
+  buildRealBoardAggregateReport,
+  buildRealBoardBenchmarkProfileMetadata,
   buildRepeatWorkloadAssessment,
   buildSourceTextureVisualFailures,
+  readProjectCanvasRealBoardMetricsFromDomSnapshot,
   main
 }

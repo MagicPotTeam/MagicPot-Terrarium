@@ -4,6 +4,62 @@ import { Menu, MenuItem } from '@mui/material'
 import { useTranslation } from 'react-i18next'
 import { api } from '@renderer/utils/windowUtils'
 import { useMessage } from '@renderer/hooks/useMessage'
+import {
+  getDownloadFileNameFromUrl,
+  normalizeLocalMediaUrl,
+  resolveLocalMediaPathFromUrl
+} from '../chatPageShared'
+
+const CHAT_DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
+
+const bytesToBase64 = (data: Uint8Array): string => {
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let offset = 0; offset < data.length; offset += chunkSize) {
+    const chunk = data.subarray(offset, offset + chunkSize)
+    binary += String.fromCharCode(...chunk)
+  }
+  return btoa(binary)
+}
+
+const inferImageMimeType = (fileName: string): string => {
+  const normalized = fileName.toLowerCase()
+  if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) return 'image/jpeg'
+  if (normalized.endsWith('.webp')) return 'image/webp'
+  if (normalized.endsWith('.gif')) return 'image/gif'
+  if (normalized.endsWith('.bmp')) return 'image/bmp'
+  if (normalized.endsWith('.svg')) return 'image/svg+xml'
+  return 'image/png'
+}
+
+const resolveImageBytes = async (imageUrl: string, fallbackFileName = 'image.png') => {
+  const normalizedUrl = normalizeLocalMediaUrl(imageUrl || '').trim()
+  if (!normalizedUrl) {
+    throw new Error('Image URL is empty')
+  }
+
+  const localPath = resolveLocalMediaPathFromUrl(normalizedUrl)
+  const fileNameFromUrl = getDownloadFileNameFromUrl(normalizedUrl, fallbackFileName)
+  if (localPath && api().svcFs?.readFileFromPath) {
+    const { data, filename } = await api().svcFs.readFileFromPath({ fullPath: localPath })
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayLike<number>)
+    const fileName = filename || fileNameFromUrl || fallbackFileName
+    return { data: bytes, fileName, mimeType: inferImageMimeType(fileName) }
+  }
+
+  const response = await fetch(normalizedUrl)
+  if (response.ok === false && response.status !== 0) {
+    throw new Error(`Failed to load image (${response.status})`)
+  }
+
+  const blob = await response.blob()
+  const fileName = fileNameFromUrl || fallbackFileName
+  return {
+    data: new Uint8Array(await blob.arrayBuffer()),
+    fileName,
+    mimeType: blob.type || inferImageMimeType(fileName)
+  }
+}
 
 interface ImageContextMenuProps {
   imageContextMenu: {
@@ -25,10 +81,8 @@ const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
 
   const handleCopyImage = async (imageUrl: string) => {
     try {
-      const response = await fetch(imageUrl)
-      const blob = await response.blob()
-      const arrayBuffer = await blob.arrayBuffer()
-      const res = await api().svcHyper.writeImageToClipboard({ data: new Uint8Array(arrayBuffer) })
+      const { data } = await resolveImageBytes(imageUrl, 'image.png')
+      const res = await api().svcHyper.writeImageToClipboard({ data })
       if (res.success) {
         notifySuccess(t('chat.image_copied'))
       } else {
@@ -66,8 +120,7 @@ const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
         onClick={async () => {
           if (imageContextMenu) {
             try {
-              const DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
-              let downloadDir = localStorage.getItem(DOWNLOAD_DIR_KEY) || config.download_dir
+              let downloadDir = localStorage.getItem(CHAT_DOWNLOAD_DIR_KEY) || config.download_dir
 
               if (!downloadDir) {
                 const result = await api().svcDialog.showOpenDialog({
@@ -79,16 +132,13 @@ const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
                   return
                 }
                 downloadDir = result.filePaths[0]
-                localStorage.setItem(DOWNLOAD_DIR_KEY, downloadDir)
+                localStorage.setItem(CHAT_DOWNLOAD_DIR_KEY, downloadDir)
                 api().svcState.saveConfig({ config: { download_dir: downloadDir } })
               }
 
               const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
               const fileName = `image_${timestamp}.png`
-              const response = await fetch(imageContextMenu.imageUrl || '')
-              const blob = await response.blob()
-              const arrayBuffer = await blob.arrayBuffer()
-              const data = new Uint8Array(arrayBuffer)
+              const { data } = await resolveImageBytes(imageContextMenu.imageUrl || '', fileName)
               const res = await api().svcHyper.saveImageToDir({
                 data,
                 fileName,
@@ -114,14 +164,11 @@ const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
         onClick={async () => {
           if (imageContextMenu) {
             try {
-              const response = await fetch(imageContextMenu.imageUrl || '')
-              const blob = await response.blob()
-              const reader = new FileReader()
-              const dataUrl = await new Promise<string>((resolve, reject) => {
-                reader.onload = () => resolve(reader.result as string)
-                reader.onerror = reject
-                reader.readAsDataURL(blob)
-              })
+              const imageBytes = await resolveImageBytes(
+                imageContextMenu.imageUrl || '',
+                'image.png'
+              )
+              const dataUrl = `data:${imageBytes.mimeType};base64,${bytesToBase64(imageBytes.data)}`
 
               const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
               const res = await api().svcPhotoshop.sendImageToPhotoshop({

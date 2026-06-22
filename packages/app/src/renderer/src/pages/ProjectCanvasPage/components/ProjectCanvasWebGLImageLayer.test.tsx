@@ -125,6 +125,7 @@ let createdSprites: MockSpriteInstance[] = []
 let createdApplications: MockApplicationInstance[] = []
 let textureFromThrowForNaturalWidth: number | null = null
 let textureFromWidths: number[] = []
+let textureFromAlphaModes: unknown[] = []
 let textureScaleModeReadCount = 0
 let textureScaleModeWriteCount = 0
 const originalDevicePixelRatio = window.devicePixelRatio
@@ -190,9 +191,12 @@ function installPixiMock() {
         this.destroySourceCalled = Boolean(destroySource)
       }
 
-      static from(image: HTMLImageElement) {
+      static from(input: HTMLImageElement | { resource?: HTMLImageElement; alphaMode?: unknown }) {
+        const options = input as { resource?: HTMLImageElement; alphaMode?: unknown }
+        const image = options.resource ?? (input as HTMLImageElement)
         const textureWidth = image.naturalWidth || image.width || 1
         textureFromWidths.push(textureWidth)
+        textureFromAlphaModes.push(options.alphaMode)
         if (textureFromThrowForNaturalWidth === textureWidth) {
           throw new Error(`Texture creation failed for ${textureWidth}px image`)
         }
@@ -202,6 +206,7 @@ function installPixiMock() {
           destroyed: false,
           unload: vi.fn(),
           image,
+          alphaMode: options.alphaMode,
           get scaleMode() {
             textureScaleModeReadCount += 1
             return scaleMode
@@ -382,10 +387,36 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     createdApplications = []
     textureFromThrowForNaturalWidth = null
     textureFromWidths = []
+    textureFromAlphaModes = []
     textureScaleModeReadCount = 0
     textureScaleModeWriteCount = 0
     setWindowDevicePixelRatio(originalDevicePixelRatio)
     installPixiMock()
+  })
+
+  it('initializes Pixi with explicit canvas clearing to avoid transparent-frame trails', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+
+    render(
+      <ProjectCanvasWebGLImageLayer
+        items={[createItem()]}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 640, height: 480 }}
+      />
+    )
+
+    await waitFor(
+      () => {
+        expect(createdApplications).toHaveLength(1)
+      },
+      { timeout: 15000 }
+    )
+
+    expect(createdApplications[0].initOptions).toMatchObject({
+      backgroundAlpha: 0,
+      clearBeforeRender: true
+    })
   })
 
   it('resizes the Pixi renderer when the stage size changes', async () => {
@@ -430,6 +461,28 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
     expect(app.canvas.width).toBe(1180)
     expect(app.canvas.height).toBe(720)
+  }, 30000)
+
+  it('creates Pixi textures with straight-alpha blending so transparent pixels stay transparent', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+
+    render(
+      <ProjectCanvasWebGLImageLayer
+        items={[createItem()]}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 640, height: 480 }}
+      />
+    )
+
+    await waitFor(
+      () => {
+        expect(createdSprites.filter((sprite) => !sprite.destroyed)).toHaveLength(1)
+      },
+      { timeout: 15000 }
+    )
+
+    expect(textureFromAlphaModes).toEqual(['no-premultiply-alpha'])
   }, 30000)
 
   it('does not rescan resident texture sampling on every viewport sync', async () => {
@@ -1304,7 +1357,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(getLiveSpriteByLabel('image-far')).not.toBeNull()
   }, 30000)
 
-  it('admits preview sprites during viewport interaction without waiting for idle', async () => {
+  it('defers viewport resident reconciliation during interaction until the viewport settles', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
     const residentIdsCalls: Set<string>[] = []
@@ -1344,14 +1397,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       await new Promise((resolve) => setTimeout(resolve, 120))
     })
 
-    await waitFor(
-      () => {
-        expect(residentIdsCalls.at(-1)).toEqual(new Set(['image-far-interacting']))
-      },
-      { timeout: 15000 }
-    )
-    expect(getLiveSpriteByLabel('image-visible-interacting')).toBeNull()
-    expect(getLiveSpriteByLabel('image-far-interacting')).not.toBeNull()
+    expect(residentIdsCalls.at(-1)).toEqual(new Set(['image-visible-interacting']))
+    expect(getLiveSpriteByLabel('image-visible-interacting')).not.toBeNull()
+    expect(getLiveSpriteByLabel('image-far-interacting')).toBeNull()
 
     rerender(
       <ProjectCanvasWebGLImageLayer
@@ -1371,6 +1419,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       },
       { timeout: 15000 }
     )
+    expect(getLiveSpriteByLabel('image-visible-interacting')).toBeNull()
+    expect(getLiveSpriteByLabel('image-far-interacting')).not.toBeNull()
   }, 30000)
 
   it('defers metrics reports while viewport interaction is active', async () => {
@@ -3490,7 +3540,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           expect(createImageBitmapMock).toHaveBeenCalledWith(expect.any(Blob), {
             resizeWidth: 4096,
             resizeHeight: 2509,
-            resizeQuality: 'high'
+            resizeQuality: 'high',
+            premultiplyAlpha: 'none'
           })
           expect(getLiveSpriteByLabel('image-bounded-hires')?.texture.width).toBe(4096)
         },
@@ -3507,12 +3558,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const originalApi = window.api
     const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
     const attemptedSrcs: string[] = []
     const readImageFromPath = vi.fn(async () => ({
       image: new Uint8Array([1, 2, 3, 4]),
       filename: 'source-only.png'
     }))
     const createObjectURLMock = vi.fn((_blob: Blob) => 'blob:webgl-local-image')
+    const revokeObjectURLMock = vi.fn()
 
     class MockImage {
       onload: null | (() => void) = null
@@ -3536,6 +3589,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     }
 
     URL.createObjectURL = createObjectURLMock as unknown as typeof URL.createObjectURL
+    URL.revokeObjectURL = revokeObjectURLMock as unknown as typeof URL.revokeObjectURL
     Object.defineProperty(window, 'api', {
       configurable: true,
       writable: true,
@@ -3570,6 +3624,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
             fullPath: 'C:/real-board/source-only.png'
           })
           expect(attemptedSrcs).toEqual(['blob:webgl-local-image'])
+          expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:webgl-local-image')
           expect(getLiveSpriteByLabel('image-local-source-only')?.texture.width).toBe(640)
         },
         { timeout: 15000 }
@@ -3577,6 +3632,97 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     } finally {
       vi.unstubAllGlobals()
       URL.createObjectURL = originalCreateObjectURL
+      URL.revokeObjectURL = originalRevokeObjectURL
+      Object.defineProperty(window, 'api', {
+        configurable: true,
+        writable: true,
+        value: originalApi
+      })
+    }
+  }, 30000)
+
+  it('releases pending local-media object URLs when the WebGL layer unmounts before image load settles', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const originalApi = window.api
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const attemptedSrcs: string[] = []
+    const readImageFromPath = vi.fn(async () => ({
+      image: new Uint8Array([1, 2, 3, 4]),
+      filename: 'pending-source.png'
+    }))
+    const createObjectURLMock = vi.fn((_blob: Blob) => 'blob:webgl-pending-local-image')
+    const revokeObjectURLMock = vi.fn()
+
+    class MockImage {
+      onload: null | (() => void) = null
+      onerror: null | (() => void) = null
+      crossOrigin: string | null = null
+      naturalWidth = 640
+      naturalHeight = 360
+      width = 640
+      height = 360
+      private _src = ''
+
+      set src(value: string) {
+        this._src = value
+        attemptedSrcs.push(value)
+      }
+
+      get src() {
+        return this._src
+      }
+    }
+
+    URL.createObjectURL = createObjectURLMock as unknown as typeof URL.createObjectURL
+    URL.revokeObjectURL = revokeObjectURLMock as unknown as typeof URL.revokeObjectURL
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcFs: {
+          readImageFromPath
+        }
+      }
+    })
+    vi.stubGlobal('Image', MockImage as unknown as typeof Image)
+
+    try {
+      const { unmount } = render(
+        <ProjectCanvasWebGLImageLayer
+          items={[
+            createItem({
+              id: 'image-local-source-pending',
+              src: 'local-media:///C:/real-board/pending-source.png',
+              fileName: 'pending-source.png',
+              image: undefined as unknown as HTMLImageElement
+            })
+          ]}
+          stagePos={{ x: 0, y: 0 }}
+          stageScale={1}
+          stageSize={{ width: 1280, height: 720 }}
+        />
+      )
+
+      await waitFor(
+        () => {
+          expect(readImageFromPath).toHaveBeenCalledWith({
+            fullPath: 'C:/real-board/pending-source.png'
+          })
+          expect(attemptedSrcs).toEqual(['blob:webgl-pending-local-image'])
+        },
+        { timeout: 15000 }
+      )
+
+      expect(revokeObjectURLMock).not.toHaveBeenCalled()
+      unmount()
+
+      expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:webgl-pending-local-image')
+      expect(revokeObjectURLMock).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+      URL.createObjectURL = originalCreateObjectURL
+      URL.revokeObjectURL = originalRevokeObjectURL
       Object.defineProperty(window, 'api', {
         configurable: true,
         writable: true,
@@ -3662,7 +3808,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           expect(createImageBitmapMock).toHaveBeenCalledWith(imageInstances[0], {
             resizeWidth: 4096,
             resizeHeight: 2276,
-            resizeQuality: 'high'
+            resizeQuality: 'high',
+            premultiplyAlpha: 'none'
           })
           expect(getLiveSpriteByLabel('image-bounded-fallback-hires')?.texture.width).toBe(4096)
         },

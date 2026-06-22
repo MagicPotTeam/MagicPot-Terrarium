@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { ALL_ACCEPT, detectFileType, isModelArchiveFile } from './types'
 import { CANVAS_IMPORT_ACCEPT } from './canvasImportAccept'
 import { resolveOfficeFileNodeData } from './officePreviewUtils'
-import { PSD_IMPORT_ACCEPT, isPsdImportFile } from './psdImport'
+import { PSD_IMPORT_ACCEPT, isPsdImportFile } from './psdImportDetection'
 
 const buildIntakeFile = (name: string, type = 'application/octet-stream'): File =>
   new File(['payload'], name, { type })

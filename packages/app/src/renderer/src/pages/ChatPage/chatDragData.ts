@@ -24,8 +24,23 @@ const setAgentDragPayload = (
   return normalizedUrl
 }
 
-export const setAgentImageDragPayload = (dataTransfer: DragDataTarget, url: string): string =>
-  setAgentDragPayload(dataTransfer, AGENT_IMAGE_DRAG_MIME, url)
+export const setAgentImageDragPayload = (dataTransfer: DragDataTarget, url: string): string => {
+  const normalizedUrl = setAgentDragPayload(dataTransfer, AGENT_IMAGE_DRAG_MIME, url)
+  const payload = JSON.stringify({
+    objectUrl: normalizedUrl,
+    itemTypes: ['image'],
+    attachments: [
+      {
+        type: 'image',
+        url: normalizedUrl,
+        fileName: getDownloadFileNameFromUrl(normalizedUrl, 'image.png')
+      } satisfies ChatAttachment
+    ]
+  })
+
+  dataTransfer.setData(QAPP_IMAGE_DRAG_MIME, payload)
+  return normalizedUrl
+}
 
 export const setAgentVideoDragPayload = (
   dataTransfer: DragDataTarget,

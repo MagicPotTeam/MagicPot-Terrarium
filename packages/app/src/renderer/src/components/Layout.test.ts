@@ -6,6 +6,8 @@ import {
   resolveStartupFallbackRoutePath,
   resolveStartupRouteTarget,
   resolveHashRoutePath,
+  resolveBottomPanelOverlayBounds,
+  resolveMainAreaOverlayInsets,
   SIDE_PANEL_DEFAULT_WIDTH,
   shouldPersistCurrentRoute,
   shouldAutoCloseProjectSidePanel
@@ -27,6 +29,62 @@ describe('Layout resize clamps', () => {
     expect(clampRightPanelWidth(420, -80)).toBe(360)
     expect(clampRightPanelWidth(420, 300)).toBe(720)
     expect(clampRightPanelWidth(420, 900)).toBe(1024)
+  })
+})
+
+describe('Layout overlay insets', () => {
+  it('keeps the main canvas area out from under overlay side, right, and bottom panels', () => {
+    expect(
+      resolveMainAreaOverlayInsets({
+        sidePanelVisible: true,
+        sidePanelWidth: 460,
+        rightPanelVisible: true,
+        rightPanelWidth: 420,
+        bottomPanelVisible: true,
+        bottomPanelMaximized: false,
+        bottomPanelHeight: 220
+      })
+    ).toEqual({ top: 0, left: 464, right: 420, bottom: 224 })
+  })
+
+  it('does not reserve bottom space while the bottom panel is maximized', () => {
+    expect(
+      resolveMainAreaOverlayInsets({
+        sidePanelVisible: false,
+        sidePanelWidth: 460,
+        rightPanelVisible: false,
+        rightPanelWidth: 420,
+        bottomPanelVisible: true,
+        bottomPanelMaximized: true,
+        bottomPanelHeight: 220
+      })
+    ).toEqual({ top: 0, left: 0, right: 0, bottom: 0 })
+  })
+
+  it('keeps the bottom panel between the left quick-app panel and the right agent panel', () => {
+    expect(
+      resolveBottomPanelOverlayBounds({
+        sidePanelVisible: true,
+        sidePanelWidth: 460,
+        rightPanelVisible: true,
+        rightPanelWidth: 420,
+        bottomPanelMaximized: false,
+        bottomPanelHeight: 220
+      })
+    ).toEqual({ left: 464, right: 420, height: 224 })
+  })
+
+  it('lets the maximized bottom panel cover only the center workspace, not the side panels', () => {
+    expect(
+      resolveBottomPanelOverlayBounds({
+        sidePanelVisible: true,
+        sidePanelWidth: 460,
+        rightPanelVisible: true,
+        rightPanelWidth: 420,
+        bottomPanelMaximized: true,
+        bottomPanelHeight: 220
+      })
+    ).toEqual({ left: 464, right: 420, height: '100%' })
   })
 })
 

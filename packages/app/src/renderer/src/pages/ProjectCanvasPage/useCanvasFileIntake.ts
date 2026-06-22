@@ -12,13 +12,18 @@ import {
   getDroppedAttachmentFile,
   parseInternalImageDragPayload
 } from '@renderer/utils/droppedImageUtils'
+import { guessMimeTypeFromFileName } from '@renderer/utils/fileDisplay'
 import { stripHtmlToText } from '@renderer/utils/htmlText'
 import type { ChatAttachment, OCRResult } from '@shared/api/svcLLMProxy'
 import type { FileItem } from '@shared/comfy/types'
+import {
+  getDownloadFileNameFromUrl,
+  normalizeLocalMediaUrl,
+  resolveLocalMediaPathFromUrl
+} from '../ChatPage/chatPageShared'
 import { getProjectCanvasLocation, isCanvasFile } from './canvasStorage'
 import { collectDroppedDirectoryFiles } from './dropDirectory'
-import { extractModelPackageFiles } from './modelArchive'
-import { isPsdImportFile } from './psdImport'
+import { isPsdImportFile } from './psdImportDetection'
 import { resolveDroppedAgentImageDataUrl } from './projectCanvasPageShared'
 import { detectFileType, isModelArchiveFile } from './types'
 import { CANVAS_IMPORT_ACCEPT } from './canvasImportAccept'
@@ -86,7 +91,15 @@ type AddFileToCanvasFn = (
     reportBundleManifestUrl?: CanvasFileItem['reportBundleManifestUrl']
   }
 ) => Promise<unknown>
-type AddVideoToCanvasFn = (file: File) => Promise<unknown> | unknown
+type AddVideoToCanvasFn = (
+  file: File,
+  options?: {
+    clientX?: number
+    clientY?: number
+    promptId?: string
+    fileItem?: FileItem
+  }
+) => Promise<unknown> | unknown
 type AddTextToCanvasFn = (text: string, clientX?: number, clientY?: number) => void
 
 type AddOcrResultToCanvasFn = (options: {
@@ -97,6 +110,11 @@ type AddOcrResultToCanvasFn = (options: {
   clientY?: number
 }) => Promise<unknown>
 
+type AgentVideoDragPayload = {
+  url: string
+  fileName?: string
+}
+
 type ImportCanvasSceneFileFn = (file: File) => Promise<unknown>
 type ImportPsdFileFn = (file: File) => Promise<unknown>
 
@@ -105,6 +123,7 @@ type DropDataTransferSnapshot = Pick<DataTransfer, 'files' | 'items' | 'getData'
 const DROP_TEXT_TYPES_TO_SNAPSHOT = [
   'application/x-qapp-image',
   'application/x-ai-image',
+  'application/x-ai-video',
   'application/x-ai-model3d',
   'text/plain',
   'text',
@@ -191,9 +210,78 @@ function isExternalFileDragType(type: string): boolean {
   )
 }
 
+type SnapshotDataTransferItem = DataTransferItem & {
+  webkitGetAsEntry?: () => FileSystemEntry | null
+}
+
+function snapshotDataTransferItem(item: DataTransferItem): DataTransferItem {
+  let file: File | null = null
+  let entry: FileSystemEntry | null = null
+
+  if (item.kind === 'file') {
+    try {
+      file = item.getAsFile()
+    } catch {
+      file = null
+    }
+
+    try {
+      entry = (item as SnapshotDataTransferItem).webkitGetAsEntry?.() ?? null
+    } catch {
+      entry = null
+    }
+  }
+
+  const snapshot: SnapshotDataTransferItem = {
+    kind: item.kind,
+    type: item.type,
+    getAsFile: () => file,
+    getAsString: (callback: ((data: string) => void) | null) => {
+      if (!callback) {
+        return
+      }
+
+      try {
+        item.getAsString(callback)
+      } catch {
+        callback('')
+      }
+    }
+  } as SnapshotDataTransferItem
+
+  if (entry) {
+    snapshot.webkitGetAsEntry = () => entry
+  }
+
+  return snapshot as DataTransferItem
+}
+
+function getSnapshotDataTransferItemFiles(items: DataTransferItem[]): File[] {
+  const files: File[] = []
+  for (const item of items) {
+    if (item.kind !== 'file') {
+      continue
+    }
+
+    try {
+      const file = item.getAsFile()
+      if (file) {
+        files.push(file)
+      }
+    } catch {
+      // Ignore inaccessible items and keep any other files that were snapshotted.
+    }
+  }
+  return files
+}
+
 function snapshotDropDataTransfer(dataTransfer: DataTransfer): DropDataTransferSnapshot {
-  const files = arrayFromTransferList<File>(dataTransfer.files)
-  const items = arrayFromTransferList<DataTransferItem>(dataTransfer.items)
+  const directFiles = arrayFromTransferList<File>(dataTransfer.files)
+  const items = arrayFromTransferList<DataTransferItem>(dataTransfer.items).map(
+    snapshotDataTransferItem
+  )
+  const itemFiles = getSnapshotDataTransferItemFiles(items)
+  const files = directFiles.length > 0 ? directFiles : itemFiles
   const textData = new Map<string, string>()
 
   for (const type of DROP_TEXT_TYPES_TO_SNAPSHOT) {
@@ -451,6 +539,118 @@ function normalizeClipboardFile(file: File, clipboardType?: string, index = 1): 
     type: file.type || normalizedMimeType || undefined,
     lastModified: file.lastModified
   })
+}
+
+function parseAgentVideoDragPayload(raw: string): AgentVideoDragPayload | null {
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+
+  try {
+    const parsed = JSON.parse(trimmed) as Partial<AgentVideoDragPayload>
+    if (typeof parsed.url === 'string' && parsed.url.trim()) {
+      return {
+        url: parsed.url.trim(),
+        fileName:
+          typeof parsed.fileName === 'string' && parsed.fileName.trim()
+            ? parsed.fileName
+            : undefined
+      }
+    }
+  } catch {
+    // Legacy payloads may be a plain URL.
+  }
+
+  return { url: trimmed }
+}
+
+async function readUrlAsFile(url: string, fallbackFileName: string): Promise<File> {
+  const response = await fetch(url)
+  if (!response.ok && response.status !== 0) {
+    throw new Error(`Failed to load dropped URL (${response.status})`)
+  }
+
+  const blob = await response.blob()
+  const fileName = fallbackFileName.trim() || 'download'
+  return new File([blob], fileName, {
+    type: blob.type || guessMimeTypeFromFileName(fileName)
+  })
+}
+
+function normalizeLocalUrlFileName(url: string, fallbackFileName: string): string {
+  return getDownloadFileNameFromUrl(normalizeLocalMediaUrl(url), fallbackFileName)
+}
+
+function normalizeLocalUrlFile(url: string, fallbackFileName: string, mimeFallback?: string): File {
+  const normalizedUrl = normalizeLocalMediaUrl(url)
+  const fileName = normalizeLocalUrlFileName(normalizedUrl, fallbackFileName)
+  const localPath = resolveLocalMediaPathFromUrl(normalizedUrl) || normalizedUrl
+  const file = new File([], fileName, {
+    type: guessMimeTypeFromFileName(fileName, mimeFallback || 'application/octet-stream')
+  })
+  Object.defineProperty(file, 'path', {
+    configurable: true,
+    value: localPath
+  })
+  return file
+}
+
+function isLocalMediaLikeUrl(url: string): boolean {
+  const normalized = url.trim().toLowerCase()
+  return normalized.startsWith('local-media://') || normalized.startsWith('file://')
+}
+
+async function resolveAgentVideoDropFile(
+  dropDataTransfer: DropDataTransferSnapshot,
+  internalImagePayload: ReturnType<typeof parseInternalImageDragPayload>
+): Promise<File | null> {
+  const droppedVideoFile = Array.from(dropDataTransfer.files).find((file) => {
+    const type = (file.type || '').toLowerCase()
+    return type.startsWith('video/') || detectFileType(file.name) === 'video'
+  })
+  if (droppedVideoFile) {
+    return droppedVideoFile
+  }
+
+  const internalVideoAttachment = internalImagePayload?.attachments?.find(
+    (attachment) => attachment.type === 'video'
+  )
+  const agentVideoPayload = parseAgentVideoDragPayload(
+    dropDataTransfer.getData('application/x-ai-video')
+  )
+  const videoUrl = (
+    internalVideoAttachment?.url ||
+    agentVideoPayload?.url ||
+    (internalImagePayload?.itemTypes?.includes('video') ? internalImagePayload.objectUrl : '') ||
+    ''
+  ).trim()
+  const fileName =
+    internalVideoAttachment?.fileName ||
+    agentVideoPayload?.fileName ||
+    internalImagePayload?.fileItem?.filename ||
+    normalizeLocalUrlFileName(videoUrl, 'dropped-video.mp4')
+
+  if (internalImagePayload?.fileItem?.filename) {
+    try {
+      const response = await api().svcComfy.getView(internalImagePayload.fileItem)
+      return new File([response.result as BlobPart], internalImagePayload.fileItem.filename, {
+        type: guessMimeTypeFromFileName(internalImagePayload.fileItem.filename, 'video/mp4')
+      })
+    } catch (error) {
+      if (!videoUrl) {
+        throw error
+      }
+    }
+  }
+
+  if (!videoUrl) {
+    return null
+  }
+
+  if (isLocalMediaLikeUrl(videoUrl)) {
+    return normalizeLocalUrlFile(videoUrl, fileName, 'video/mp4')
+  }
+
+  return readUrlAsFile(videoUrl, fileName)
 }
 
 function normalizeClipboardHtmlText(html: string): string {
@@ -858,10 +1058,7 @@ export function useCanvasFileIntake({
       }
 
       const droppedOcrResult = internalFileAttachment?.ocrResult || internalImagePayload?.ocrResult
-      const droppedAgentImage = await resolveDroppedAgentImageDataUrl(
-        dropDataTransfer,
-        readFileAsDataURL
-      )
+      const droppedAgentImage = await resolveDroppedAgentImageDataUrl(dropDataTransfer)
       if (droppedAgentImage) {
         await addImageToCanvas(droppedAgentImage.src, {
           clientX,
@@ -873,8 +1070,15 @@ export function useCanvasFileIntake({
           sizeBytes: droppedAgentImage.sizeBytes ?? internalImageAttachment?.sizeBytes,
           promptId: internalImagePayload?.promptId,
           fileItem: internalImagePayload?.fileItem,
-          sourceWidthHint: internalImagePayload?.sourceWidth,
-          sourceHeightHint: internalImagePayload?.sourceHeight,
+          sourceWidthHint:
+            droppedAgentImage.sourceWidthHint ??
+            internalImageAttachment?.sourceWidth ??
+            internalImagePayload?.sourceWidth,
+          sourceHeightHint:
+            droppedAgentImage.sourceHeightHint ??
+            internalImageAttachment?.sourceHeight ??
+            internalImagePayload?.sourceHeight,
+          sourceFile: droppedAgentImage.sourceFile,
           reportBundleId: internalImageAttachment?.reportBundleId,
           reportBundleRole: internalImageAttachment?.reportBundleRole,
           reportBundleRefName: internalImageAttachment?.reportBundleRefName,
@@ -889,6 +1093,23 @@ export function useCanvasFileIntake({
           clientX,
           clientY,
           select: true
+        })
+        return
+      }
+
+      const droppedAgentVideoFile = await resolveAgentVideoDropFile(
+        dropDataTransfer,
+        internalImagePayload
+      ).catch((error) => {
+        console.warn('[Canvas] Failed to materialize dropped Agent video:', error)
+        return null
+      })
+      if (droppedAgentVideoFile) {
+        await addVideoToCanvas(droppedAgentVideoFile, {
+          clientX,
+          clientY,
+          promptId: internalImagePayload?.promptId,
+          fileItem: internalImagePayload?.fileItem
         })
         return
       }
@@ -927,6 +1148,7 @@ export function useCanvasFileIntake({
 
       if (hasDirectoryStructure) {
         const packageName = droppedEntries[0]?.path.split('/')[0] || 'package'
+        const { extractModelPackageFiles } = await import('./modelArchive')
         const extractedPackage = extractModelPackageFiles(droppedEntries, packageName)
         if (extractedPackage) {
           await addModel3DToCanvas(extractedPackage.file, {
@@ -938,7 +1160,10 @@ export function useCanvasFileIntake({
       }
 
       const droppedFiles = Array.from(dropDataTransfer.files)
-      const files = hasDirectoryStructure ? droppedEntries.map((entry) => entry.file) : droppedFiles
+      const files =
+        hasDirectoryStructure || droppedFiles.length === 0
+          ? droppedEntries.map((entry) => entry.file)
+          : droppedFiles
 
       if (files.length === 0) {
         let text = dropDataTransfer.getData('text/plain')
@@ -971,11 +1196,11 @@ export function useCanvasFileIntake({
       addModel3DToCanvas,
       addModel3DUrlToCanvas,
       addOcrResultToCanvas,
+      addVideoToCanvas,
       addTextToCanvas,
       canvasId,
       focusCanvasStage,
-      handleFiles,
-      readFileAsDataURL
+      handleFiles
     ]
   )
 
@@ -1378,7 +1603,6 @@ export function useCanvasFileIntake({
       return false
     },
     [
-      canvasOwnsClipboardFocus,
       focusCanvasStage,
       handleClipboardData,
       handleNavigatorClipboardPaste,

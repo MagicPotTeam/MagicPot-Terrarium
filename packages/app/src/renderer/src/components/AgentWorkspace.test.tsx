@@ -119,14 +119,19 @@ describe('AgentWorkspace', () => {
     ])
   })
 
-  it('defers mounting ChatPage so the workspace shell can render first', async () => {
+  it('mounts ChatPage immediately with the workspace shell', async () => {
     renderWorkspace()
 
-    expect(chatPageMock).not.toHaveBeenCalled()
-    expect(screen.getByTestId('agent-workspace-pane-loading')).toBeInTheDocument()
+    expect(chatPageMock).toHaveBeenCalled()
+    expect(screen.queryByTestId('agent-workspace-pane-loading')).not.toBeInTheDocument()
+    expect(screen.getByTestId('mock-chat-page')).toHaveAttribute(
+      'data-storage-scope',
+      'project-1.agent-1'
+    )
 
     await waitFor(() => {
-      expect(chatPageMock).toHaveBeenCalled()
+      expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-1')
+      expect(screen.getByText('画布执行已开始。')).toBeInTheDocument()
     })
   })
 
@@ -168,12 +173,52 @@ describe('AgentWorkspace', () => {
       }
     ])
 
-    renderWorkspace()
+    const { container } = renderWorkspace()
 
     await waitFor(() => {
-      expect(screen.getByText('Model-specific answer')).toBeInTheDocument()
-      expect(screen.getByText('gpt-5.5')).toBeInTheDocument()
+      expect(screen.getAllByText('Model-specific answer').length).toBeGreaterThan(0)
     })
+
+    const addButton = container.querySelector('[data-testid="AddIcon"]')?.parentElement
+    expect(addButton).toBeTruthy()
+    fireEvent.click(addButton as Element)
+
+    await waitFor(() => {
+      expect(screen.getAllByText('gpt-5.5').length).toBeGreaterThan(0)
+    })
+  })
+
+  it('does not render pane preview thumbnails for image replies', async () => {
+    loadAllSessionsMock.mockResolvedValue([
+      {
+        id: 'session-image-preview',
+        title: 'Image preview',
+        messages: [
+          {
+            role: 'assistant',
+            content: '对话 4',
+            attachments: [{ type: 'image', url: 'blob:missing-preview' }]
+          }
+        ]
+      }
+    ])
+
+    const { container } = renderWorkspace()
+
+    await waitFor(() => {
+      expect(screen.getByText('对话 4')).toBeInTheDocument()
+    })
+
+    const addButton = container.querySelector('[data-testid="AddIcon"]')?.parentElement
+    expect(addButton).toBeTruthy()
+    fireEvent.click(addButton as Element)
+
+    await waitFor(() => {
+      expect(screen.getAllByText('对话 4').length).toBeGreaterThan(0)
+      expect(screen.getByText('最新回复')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('图片回复')).not.toBeInTheDocument()
+    expect(screen.queryByRole('img', { name: '对话 4' })).not.toBeInTheDocument()
   })
 
   it('dispatches scope termination before closing a pane', async () => {
@@ -270,9 +315,9 @@ describe('AgentWorkspace', () => {
 
     expect(chatPageUnmountMock).not.toHaveBeenCalledWith('project-1.agent-1')
 
-    const firstPaneButton = Array.from(
-      container.querySelectorAll('[data-agent-workspace-scope="project-1.agent-1"]')
-    ).find((element) => element.tagName.toLowerCase() === 'button')
+    const firstPaneButton = container.querySelector(
+      '[data-agent-workspace-scope="project-1.agent-1"][role="button"]'
+    )
     expect(firstPaneButton).toBeTruthy()
 
     fireEvent.click(firstPaneButton as Element)

@@ -1,13 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, renderHook } from '@testing-library/react'
-import * as THREE from 'three'
 import { useCanvasVisualMetrics } from './useCanvasVisualMetrics'
 import type { CanvasImageItem, CanvasModel3DItem, CanvasTextItem, CanvasVideoItem } from './types'
 import {
-  clearCachedSceneInstanceClones,
-  writeCachedSceneInstanceClone
-} from './components/modelLoaders/sceneInstanceCloneCache'
-import { resolveModelInspectionMetadata } from './components/modelLoaders/modelInspectionMetadata'
+  clearCanvasModel3DInspectionMetadataCache,
+  writeCanvasModel3DInspectionMetadataCache
+} from './components/modelLoaders/modelInspectionMetadataCache'
 import {
   DEFAULT_CANVAS_MODEL3D_SESSION_KEY,
   getSceneInstanceCloneCacheKey
@@ -135,7 +133,7 @@ function createModelItem(overrides: Partial<CanvasModel3DItem> = {}): CanvasMode
 afterEach(() => {
   cleanup()
   document.body.innerHTML = ''
-  clearCachedSceneInstanceClones()
+  clearCanvasModel3DInspectionMetadataCache()
 })
 
 describe('useCanvasVisualMetrics', () => {
@@ -316,41 +314,32 @@ describe('useCanvasVisualMetrics', () => {
     })
   })
 
-  it('extracts runtime 3D metadata from the cached scene template', () => {
+  it('extracts runtime 3D metadata from the lazy stage metadata cache', () => {
     const modelItem = createModelItem({
       textures: {
         'albedo.png': 'blob:albedo'
       }
     })
-    const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute(
-      'position',
-      new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1], 3)
-    )
-    geometry.setIndex([0, 1, 2, 0, 2, 3])
-    geometry.setAttribute(
-      'normal',
-      new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1], 3)
-    )
-    geometry.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 1, 1], 2))
-    geometry.setAttribute('uv2', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 1, 1], 2))
 
-    const material = new THREE.MeshStandardMaterial()
-    const mesh = new THREE.Mesh(geometry, material)
-    const root = new THREE.Group()
-    root.add(mesh)
-    resolveModelInspectionMetadata(root, { animationCount: 2 })
-
-    writeCachedSceneInstanceClone({
-      cacheKey: getSceneInstanceCloneCacheKey({
+    writeCanvasModel3DInspectionMetadataCache(
+      getSceneInstanceCloneCacheKey({
         sessionKey: DEFAULT_CANVAS_MODEL3D_SESSION_KEY,
         src: modelItem.src,
         fileName: modelItem.fileName,
         itemId: modelItem.id,
         textures: modelItem.textures
       }),
-      renderSceneData: root
-    })
+      {
+        vertexCount: 4,
+        faceCount: 2,
+        materialCount: 1,
+        animationCount: 2,
+        boneCount: 0,
+        uvSetCount: 2,
+        normalData: true,
+        tangentData: false
+      }
+    )
 
     const { result } = renderHook(() =>
       useCanvasVisualMetrics({

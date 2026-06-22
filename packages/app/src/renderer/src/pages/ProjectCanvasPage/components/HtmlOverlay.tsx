@@ -1,8 +1,9 @@
-import React, { useRef, useEffect } from 'react'
+import React, { useRef, useEffect, useMemo } from 'react'
 import { Box, IconButton } from '@mui/material'
 import { Close as CloseIcon, TouchApp as InteractiveIcon } from '@mui/icons-material'
 import type { CanvasHtmlItem } from '../types'
 import { CANVAS_OCR_HOVER_EVENT, type CanvasOcrHoverDetail } from '../ocrCanvasUtils'
+import { sanitizeHtmlOverlayContent } from './htmlOverlaySanitizer'
 
 interface HtmlOverlayProps {
   item: CanvasHtmlItem
@@ -33,6 +34,10 @@ const HtmlOverlay: React.FC<HtmlOverlayProps> = ({
   // Canvas coordinates (parent container handles translate + scale)
   const canvasW = item.width * item.scaleX
   const canvasH = item.height * item.scaleY
+  const sanitizedHtmlData = useMemo(
+    () => sanitizeHtmlOverlayContent(item.htmlData),
+    [item.htmlData]
+  )
 
   // Sync overlay drag position (canvas coords)
   useEffect(() => {
@@ -220,7 +225,7 @@ const HtmlOverlay: React.FC<HtmlOverlayProps> = ({
           width: '100%',
           height: '100%'
         }}
-        dangerouslySetInnerHTML={{ __html: item.htmlData }}
+        dangerouslySetInnerHTML={{ __html: sanitizedHtmlData }}
       />
     </Box>
   )

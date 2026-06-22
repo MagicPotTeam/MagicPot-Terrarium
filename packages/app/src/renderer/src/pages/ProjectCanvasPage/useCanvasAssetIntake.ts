@@ -3,10 +3,7 @@ import type { ChatAttachment, OCRResult } from '@shared/api/svcLLMProxy'
 import type { FileItem } from '@shared/comfy/types'
 import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
 import { FILE_NODE_DEFAULT_HEIGHT, FILE_NODE_DEFAULT_WIDTH } from './projectCanvasPageShared'
-import { resolveOfficeFileNodeData } from './officePreviewUtils'
 import { importCanvasFile, rememberCanvasSaveTargetPath } from './canvasStorage'
-import { extractModelArchive } from './modelArchive'
-import { materializePsdFile } from './psdImport'
 import { resolveCanvas3DRenderActivationDelay } from './canvas3DRenderActivation'
 import { getCanvasLocalMediaSourceUrl, getElectronCanvasFilePath } from './canvasLocalFileSource'
 import { readCanvasLocalImageBlobFromSource } from './canvasLocalImageSource'
@@ -618,6 +615,60 @@ async function resolveCanvasImageIntakeThumbnail({
   }
 }
 
+function canUseCanvasImageThumbnailFirstImport(
+  source: Pick<
+    NormalizedCanvasImageSource,
+    'sourceIdentity' | 'sourceWidthHint' | 'sourceHeightHint'
+  >
+): boolean {
+  return Boolean(
+    source.sourceIdentity &&
+    getPositiveCanvasImageSourceHint(source.sourceWidthHint) != null &&
+    getPositiveCanvasImageSourceHint(source.sourceHeightHint) != null
+  )
+}
+
+async function buildThumbnailFirstCanvasImageStreamEntry({
+  source,
+  sourceIndex,
+  maxPreviewSide,
+  fitImageToCanvasSize
+}: {
+  source: NormalizedCanvasImageSource
+  sourceIndex: number
+  maxPreviewSide: number
+  fitImageToCanvasSize: (width: number, height: number) => { width: number; height: number }
+}): Promise<CanvasImageStreamEntry | null> {
+  if (!canUseCanvasImageThumbnailFirstImport(source)) {
+    return null
+  }
+
+  const thumbnailPreview = await resolveCanvasImageIntakeThumbnail({
+    source,
+    maxPreviewSide
+  })
+  if (!thumbnailPreview.displayImage) {
+    return null
+  }
+
+  const { sourceWidth, sourceHeight } = resolveCanvasImageSourceDimensions(source)
+  const fittedSize = fitImageToCanvasSize(sourceWidth, sourceHeight)
+  const sizeBytes = resolveCanvasImageSourceSizeBytes(source)
+
+  return {
+    source,
+    sourceIndex,
+    displayImage: thumbnailPreview.displayImage,
+    ...(thumbnailPreview.thumbnailSet ? { thumbnailSet: thumbnailPreview.thumbnailSet } : {}),
+    ...(typeof sizeBytes === 'number' ? { sizeBytes } : {}),
+    hasAlpha: resolveCanvasImageSourceHasAlpha(source),
+    sourceWidth,
+    sourceHeight,
+    width: fittedSize.width,
+    height: fittedSize.height
+  }
+}
+
 async function buildDeferredCanvasImageStreamEntry({
   source,
   sourceIndex,
@@ -899,6 +950,7 @@ export function useCanvasAssetIntake({
   const handleImportPsdFile = useCallback(
     async (file: File) => {
       try {
+        const { materializePsdFile } = await import('./psdImport')
         const imported = await materializePsdFile(file, {
           startZIndex: nextZIndexRef.current
         })
@@ -1029,6 +1081,64 @@ export function useCanvasAssetIntake({
               : {}),
             sourceWidth,
             sourceHeight,
+            ...(reportBundleId ? { reportBundleId } : {}),
+            ...(reportBundleRole ? { reportBundleRole } : {}),
+            ...(reportBundleRefName ? { reportBundleRefName } : {}),
+            ...(reportBundleManifestUrl ? { reportBundleManifestUrl } : {})
+          })
+
+          setItemsWithHistory((prev) => [...prev, newItem])
+          if (select !== false) {
+            setSelectedIds(new Set([newItem.id]))
+            setTool('select')
+          }
+          return newItem
+        }
+
+        const thumbnailFirstEntry = await buildThumbnailFirstCanvasImageStreamEntry({
+          source: deferredSource,
+          sourceIndex: 0,
+          maxPreviewSide: getCanvasImagePreviewMaxSideForBatch(1),
+          fitImageToCanvasSize
+        })
+        if (thumbnailFirstEntry) {
+          const pos = resolvePlacement({
+            width: thumbnailFirstEntry.width,
+            height: thumbnailFirstEntry.height,
+            clientX,
+            clientY,
+            mode: 'auto'
+          })
+          const newItem = createCanvasImageItemDraft({
+            id: createCanvasItemId('img'),
+            src,
+            ...(fileName ? { fileName } : {}),
+            ...(sourceFile ? { sourceFile } : {}),
+            ...(typeof thumbnailFirstEntry.sizeBytes === 'number'
+              ? { sizeBytes: thumbnailFirstEntry.sizeBytes }
+              : {}),
+            ...(typeof thumbnailFirstEntry.hasAlpha === 'boolean'
+              ? { hasAlpha: thumbnailFirstEntry.hasAlpha }
+              : {}),
+            ...(promptId ? { promptId } : {}),
+            ...(fileItem ? { fileItem } : {}),
+            x: pos.x,
+            y: pos.y,
+            width: thumbnailFirstEntry.width,
+            height: thumbnailFirstEntry.height,
+            rotation: 0,
+            scaleX: 1,
+            scaleY: 1,
+            zIndex: nextZIndexRef.current++,
+            locked: false,
+            provenance: provenance ?? createMagicPotNativeProvenance(),
+            image: thumbnailFirstEntry.displayImage,
+            ...(sourceIdentity ? { sourceIdentity } : {}),
+            ...(thumbnailFirstEntry.thumbnailSet
+              ? { thumbnailSet: thumbnailFirstEntry.thumbnailSet }
+              : {}),
+            sourceWidth: thumbnailFirstEntry.sourceWidth,
+            sourceHeight: thumbnailFirstEntry.sourceHeight,
             ...(reportBundleId ? { reportBundleId } : {}),
             ...(reportBundleRole ? { reportBundleRole } : {}),
             ...(reportBundleRefName ? { reportBundleRefName } : {}),
@@ -1295,6 +1405,16 @@ export function useCanvasAssetIntake({
                 })
               }
 
+              const thumbnailFirstEntry = await buildThumbnailFirstCanvasImageStreamEntry({
+                source,
+                sourceIndex,
+                maxPreviewSide,
+                fitImageToCanvasSize
+              })
+              if (thumbnailFirstEntry) {
+                return thumbnailFirstEntry
+              }
+
               const { img, width, height } = await withCanvasImageIntakeTimeout(
                 loadImageFromSrc(source.src),
                 PROJECT_CANVAS_IMAGE_STREAM_LOAD_TIMEOUT_MS,
@@ -1384,8 +1504,32 @@ export function useCanvasAssetIntake({
       const loadedImages = await mapCanvasImageBatchWithConcurrency(
         normalizedSources,
         PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY,
-        async (source) => {
+        async (source, sourceIndex) => {
           try {
+            const thumbnailFirstEntry = await buildThumbnailFirstCanvasImageStreamEntry({
+              source,
+              sourceIndex,
+              maxPreviewSide,
+              fitImageToCanvasSize
+            })
+            if (thumbnailFirstEntry) {
+              return {
+                src: source.src,
+                fileName: source.fileName,
+                sourceFile: source.sourceFile,
+                sizeBytes: thumbnailFirstEntry.sizeBytes,
+                hasAlpha: thumbnailFirstEntry.hasAlpha,
+                provenance: source.provenance,
+                img: thumbnailFirstEntry.displayImage,
+                sourceIdentity: source.sourceIdentity,
+                thumbnailSet: thumbnailFirstEntry.thumbnailSet,
+                sourceWidth: thumbnailFirstEntry.sourceWidth,
+                sourceHeight: thumbnailFirstEntry.sourceHeight,
+                width: thumbnailFirstEntry.width,
+                height: thumbnailFirstEntry.height
+              }
+            }
+
             const { img, width, height } = await loadImageFromSrc(source.src)
             const displayImage = await buildCanvasImageDisplayAsset({
               src: source.src,
@@ -1510,6 +1654,7 @@ export function useCanvasAssetIntake({
       const src = getCanvasLocalMediaSourceUrl(file) || URL.createObjectURL(file)
 
       try {
+        const { resolveOfficeFileNodeData } = await import('./officePreviewUtils')
         const fileNodeData = await resolveOfficeFileNodeData(file)
         const normalizedFileNodeData = normalizeOfficeFileNodeDataForCanvas(fileNodeData)
         const pos = resolvePlacement({
@@ -1723,6 +1868,7 @@ export function useCanvasAssetIntake({
         )
 
         fileSrc = URL.createObjectURL(file)
+        const { resolveOfficeFileNodeData } = await import('./officePreviewUtils')
         const fileNodeData = await resolveOfficeFileNodeData(file)
         const normalizedFileNodeData = normalizeOfficeFileNodeDataForCanvas(fileNodeData)
         const linkedPreviewSheets =
@@ -1805,6 +1951,7 @@ export function useCanvasAssetIntake({
         let skipTexturePrompt = options?.skipTexturePrompt ?? false
 
         if (isModelArchiveFile(file.name)) {
+          const { extractModelArchive } = await import('./modelArchive')
           const extracted = await extractModelArchive(file)
           if (!extracted) return null
 
@@ -1993,7 +2140,15 @@ export function useCanvasAssetIntake({
   )
 
   const addVideoToCanvas = useCallback(
-    (file: File) => {
+    (
+      file: File,
+      options: {
+        clientX?: number
+        clientY?: number
+        promptId?: string
+        fileItem?: FileItem
+      } = {}
+    ) => {
       const probeObjectUrl = URL.createObjectURL(file)
       const persistentSrc = getCanvasLocalMediaSourceUrl(file) || probeObjectUrl
       const releaseProbeObjectUrl = () => {
@@ -2003,7 +2158,12 @@ export function useCanvasAssetIntake({
       }
 
       const createVideoItem = (width: number, height: number) => {
-        const pos = getCenterPosition(width, height)
+        const pos = resolvePlacement({
+          width,
+          height,
+          clientX: options.clientX,
+          clientY: options.clientY
+        })
         const newItem = createCanvasVideoItemDraft({
           id: createCanvasItemId('video'),
           src: persistentSrc,
@@ -2020,7 +2180,9 @@ export function useCanvasAssetIntake({
           locked: false,
           playing: false,
           muted: true,
-          volume: 0.5
+          volume: 0.5,
+          promptId: options.promptId,
+          fileItem: options.fileItem
         })
         setItemsWithHistory((prev) => [...prev, newItem])
         setSelectedIds(new Set([newItem.id]))
@@ -2049,7 +2211,7 @@ export function useCanvasAssetIntake({
       video.src = probeObjectUrl
       return undefined
     },
-    [getCenterPosition, nextZIndexRef, setItemsWithHistory, setSelectedIds, setTool]
+    [nextZIndexRef, resolvePlacement, setItemsWithHistory, setSelectedIds, setTool]
   )
 
   const addTextToCanvas = useCallback(

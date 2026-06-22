@@ -37,7 +37,7 @@ import {
   readActiveProjectTraceRealtime,
   type ProjectTraceCaptureStateEvent
 } from '@renderer/features/projectTrace/projectTraceRuntime'
-import type { ChatAttachment, ChatMessage } from '@shared/api/svcLLMProxy'
+import type { ChatMessage } from '@shared/api/svcLLMProxy'
 
 type AgentPane = {
   id: string
@@ -49,13 +49,11 @@ type PanePreviewStatus = 'idle' | 'running' | 'done'
 type PanePreview = {
   title: string
   subtitle: string
-  thumbnailUrl?: string
   status: PanePreviewStatus
 }
 
 type AgentWorkspaceStrings = {
   newConversation: string
-  imageReply: string
   latestReply: string
   latestPrompt: string
   conversationCreated: string
@@ -73,13 +71,14 @@ const PREVIEW_REFRESH_EVENTS = [
 ] as const
 
 const DEFAULT_PANES: AgentPane[] = [{ id: 'agent-1', enabled: true }]
-const CHAT_PAGE_DEFER_MOUNT_DELAY_MS = 16
 
 const buildWorkspaceStorageKey = (projectId: string): string => `agent.workspace.${projectId}`
 const buildActivePaneStorageKey = (projectId: string): string =>
   `agent.workspace.active.${projectId}`
 const buildThreadsCollapsedStorageKey = (projectId: string): string =>
   `agent.workspace.threadsCollapsed.${projectId}`
+const buildChatWorkspaceControlsPortalId = (scope: string): string =>
+  `agent-workspace-chat-controls-${encodeURIComponent(scope || 'default')}`
 
 const readLocalStorage = (key: string): string | null => {
   try {
@@ -162,7 +161,6 @@ const createAgentWorkspaceStrings = (
   t: ReturnType<typeof useTranslation>['t']
 ): AgentWorkspaceStrings => ({
   newConversation: t('chat.new_conversation'),
-  imageReply: t('agent_workspace.image_reply'),
   latestReply: t('agent_workspace.latest_reply'),
   latestPrompt: t('agent_workspace.latest_prompt'),
   conversationCreated: t('agent_workspace.conversation_created'),
@@ -185,9 +183,6 @@ const getLatestRenderableMessage = (messages: ChatMessage[]): ChatMessage | null
   return null
 }
 
-const getImageAttachment = (attachments?: ChatAttachment[]): ChatAttachment | undefined =>
-  attachments?.find((attachment) => attachment.type === 'image' && attachment.url)
-
 const arePanePreviewsEqual = (
   left: Record<string, PanePreview>,
   right: Record<string, PanePreview>
@@ -205,7 +200,6 @@ const arePanePreviewsEqual = (
       rightPreview !== undefined &&
       leftPreview.title === rightPreview.title &&
       leftPreview.subtitle === rightPreview.subtitle &&
-      leftPreview.thumbnailUrl === rightPreview.thumbnailUrl &&
       leftPreview.status === rightPreview.status
     )
   })
@@ -224,22 +218,12 @@ const buildPanePreview = (
 ): PanePreview => {
   const latestSession = sessions[sessions.length - 1]
   const latestMessage = latestSession ? getLatestRenderableMessage(latestSession.messages) : null
-  const imageAttachment = getImageAttachment(latestMessage?.attachments)
   const paneLabel = getPaneLabel(paneId, index, strings.paneLabel)
   const status: PanePreviewStatus = running
     ? 'running'
     : latestMessage || latestSession
       ? 'done'
       : 'idle'
-
-  if (imageAttachment) {
-    return {
-      title: compactText(latestMessage?.content || '', paneLabel),
-      subtitle: strings.imageReply,
-      thumbnailUrl: imageAttachment.url,
-      status
-    }
-  }
 
   if (latestMessage?.content) {
     const assistantModelName =
@@ -330,31 +314,11 @@ const PaneStatusIndicator: React.FC<{ status?: PanePreviewStatus }> = ({ status 
   )
 }
 
-const AgentPaneLoadingFallback: React.FC<{ label: string }> = ({ label }) => (
-  <Box
-    data-testid="agent-workspace-pane-loading"
-    sx={{
-      height: '100%',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      flexDirection: 'column',
-      gap: 1.2,
-      color: 'text.secondary',
-      backgroundColor: 'background.default'
-    }}
-  >
-    <CircularProgress size={22} thickness={4} />
-    <Typography variant="caption" sx={{ fontWeight: 600 }}>
-      {label}
-    </Typography>
-  </Box>
-)
-
 type PaneListItemProps = {
   index: number
   pane: AgentPane
   paneScope: string
+  controlsPortalId: string
   preview?: PanePreview
   defaultTitle: string
   defaultSubtitle: string
@@ -373,6 +337,7 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
   index,
   pane,
   paneScope,
+  controlsPortalId,
   preview,
   defaultTitle,
   defaultSubtitle,
@@ -387,9 +352,18 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
   onDrop
 }) => (
   <ButtonBase
+    component="div"
+    role="button"
+    tabIndex={0}
     data-agent-workspace-scope={paneScope}
     draggable
     onClick={() => onSelect(pane.id)}
+    onKeyDown={(event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        onSelect(pane.id)
+      }
+    }}
     onDragStart={(event) => {
       event.dataTransfer.effectAllowed = 'move'
       event.dataTransfer.setData('text/plain', pane.id)
@@ -434,22 +408,6 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0, flex: 1 }}>
       <PaneStatusIndicator status={preview?.status} />
 
-      {preview?.thumbnailUrl ? (
-        <Box
-          component="img"
-          src={preview.thumbnailUrl}
-          alt={preview.title}
-          sx={{
-            width: 28,
-            height: 28,
-            borderRadius: 1,
-            objectFit: 'cover',
-            flexShrink: 0,
-            border: '1px solid rgba(255,255,255,0.08)'
-          }}
-        />
-      ) : null}
-
       <Box sx={{ minWidth: 0, flex: 1 }}>
         <Typography
           variant="body2"
@@ -463,19 +421,39 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
         >
           {preview?.title || defaultTitle}
         </Typography>
-        <Typography
-          variant="caption"
-          sx={{
-            display: 'block',
-            mt: 0.15,
-            color: 'text.secondary',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap'
-          }}
-        >
-          {preview?.subtitle || defaultSubtitle}
-        </Typography>
+        {selected ? (
+          <Box
+            id={controlsPortalId}
+            data-testid="agent-workspace-chat-controls-slot"
+            onClick={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onDragStart={(event) => event.stopPropagation()}
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              minHeight: 22,
+              mt: 0.15,
+              minWidth: 0,
+              maxWidth: '100%',
+              overflow: 'hidden'
+            }}
+          />
+        ) : (
+          <Typography
+            variant="caption"
+            sx={{
+              display: 'block',
+              mt: 0.15,
+              color: 'text.secondary',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {preview?.subtitle || defaultSubtitle}
+          </Typography>
+        )}
       </Box>
     </Box>
 
@@ -545,34 +523,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   const openPanes = useMemo(() => getOpenPanes(panes), [panes])
   const workspaceStrings = useMemo(() => createAgentWorkspaceStrings(t), [t])
   const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? openPanes[0] ?? null
-  const activePaneScope = activePane ? buildAgentPaneScope(projectId, activePane.id) : null
-  const [mountedPaneScopes, setMountedPaneScopes] = useState<Set<string>>(() => new Set())
-
-  useEffect(() => {
-    if (!activePaneScope || mountedPaneScopes.has(activePaneScope)) {
-      return
-    }
-
-    const timer = window.setTimeout(() => {
-      setMountedPaneScopes((prev) => {
-        if (prev.has(activePaneScope)) return prev
-        return new Set([...prev, activePaneScope])
-      })
-    }, CHAT_PAGE_DEFER_MOUNT_DELAY_MS)
-
-    return () => window.clearTimeout(timer)
-  }, [activePaneScope, mountedPaneScopes])
-
-  useEffect(() => {
-    setMountedPaneScopes((prev) => {
-      const openPaneScopes = new Set(
-        openPanes.map((pane) => buildAgentPaneScope(projectId, pane.id))
-      )
-      const next = new Set(Array.from(prev).filter((scope) => openPaneScopes.has(scope)))
-      if (next.size === prev.size && Array.from(next).every((scope) => prev.has(scope))) return prev
-      return next
-    })
-  }, [openPanes, projectId])
 
   useEffect(() => {
     const nextPanes = readStoredPanes(storageKey)
@@ -993,6 +943,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
               index={index}
               pane={pane}
               paneScope={buildAgentPaneScope(projectId, pane.id)}
+              controlsPortalId={buildChatWorkspaceControlsPortalId(
+                buildAgentPaneScope(projectId, pane.id)
+              )}
               preview={panePreviews[pane.id]}
               defaultTitle={getPaneLabel(pane.id, index, workspaceStrings.paneLabel)}
               defaultSubtitle={workspaceStrings.emptyConversation}
@@ -1025,16 +978,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
           activePane ? buildAgentPaneScope(projectId, activePane.id) : undefined
         }
       >
-        {activePane && activePaneScope && !mountedPaneScopes.has(activePaneScope) ? (
-          <AgentPaneLoadingFallback
-            label={t('agent_workspace.loading_chat', { defaultValue: 'Loading chat...' })}
-          />
-        ) : null}
         {openPanes.map((pane) => {
           const scope = buildAgentPaneScope(projectId, pane.id)
           const isActivePane = activePane?.id === pane.id
-          const shouldMountPane = mountedPaneScopes.has(scope)
-          if (!shouldMountPane) return null
 
           return (
             <Box

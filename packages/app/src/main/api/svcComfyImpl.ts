@@ -5,6 +5,8 @@ import {
   COMFY_EVENT_CLIENT_ID_ALL,
   ComfySvc,
   ConnectWsReq,
+  FreeMemoryReq,
+  FreeMemoryResp,
   ConnectWsResp,
   GetHistoryReq,
   GetHistoryResp,
@@ -123,6 +125,7 @@ export class ComfySvcImpl implements ComfySvc {
       prompt_id: null,
       payload: req.prompt,
       extra_data: req.extra_data,
+      cleanupAfterRun: req.cleanupAfterRun === true,
       result: null
     })
     return { prompt_id: id }
@@ -226,6 +229,7 @@ export class ComfySvcImpl implements ComfySvc {
     const res = await this.postPrompt({
       prompt: processedPrompt,
       client_id: workflowClientId,
+      ...(req.cleanupAfterRun === true ? { cleanupAfterRun: true } : {}),
       extra_data: req.extra_data
     })
     // Store qAppKey separately (not in workflow) for later retrieval
@@ -310,6 +314,11 @@ export class ComfySvcImpl implements ComfySvc {
       await sleep(1000)
     }
   }
+  freeMemory = async (req: FreeMemoryReq = {}): Promise<FreeMemoryResp> => {
+    await this.cli().freeMemory(req)
+    return {}
+  }
+
   cancelQueueItem = async (req: CancelQueueItemReq): Promise<CancelQueueItemResp> => {
     // req.prompt_id 可能是内部 ID（格式为 task-xxx）或真实的 ComfyUI prompt_id
     // 先尝试作为内部 ID 取消

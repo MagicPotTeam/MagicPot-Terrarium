@@ -23,6 +23,24 @@ type CanvasDrawingState = {
   points?: number[]
 } | null
 
+function areSelectedIdsEqual(current: Set<string>, next: Set<string>) {
+  if (current === next) return true
+  if (current.size !== next.size) return false
+
+  const currentIterator = current.values()
+  const nextIterator = next.values()
+  while (true) {
+    const currentStep = currentIterator.next()
+    const nextStep = nextIterator.next()
+    if (currentStep.done || nextStep.done) {
+      return currentStep.done === nextStep.done
+    }
+    if (currentStep.value !== nextStep.value) {
+      return false
+    }
+  }
+}
+
 export function useProjectCanvasPageRuntimeState() {
   const [items, setItems] = useState<CanvasItem[]>([])
   const [groups, setGroups] = useState<CanvasGroup[]>([])
@@ -57,6 +75,8 @@ export function useProjectCanvasPageRuntimeState() {
         typeof updater === 'function'
           ? (updater as (prev: Set<string>) => Set<string>)(selectedIdsRef.current)
           : updater
+      if (areSelectedIdsEqual(selectedIdsRef.current, next)) return
+
       selectedIdsRef.current = next
       setSelectedIdsState(next)
     },

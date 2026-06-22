@@ -28,6 +28,8 @@ export type GetQueueResp = ComfyQueueResp
 export type PostPromptReq = {
   prompt: Workflow
   client_id: string
+  /** Optional: request a ComfyUI cache/model cleanup once this prompt has completed. */
+  cleanupAfterRun?: boolean
   extra_data?: JsonDict
 }
 export type PostPromptResp = {
@@ -90,8 +92,21 @@ export type SubmitWorkflowReq = {
   sessionKey?: string
   /** Optional: explicit client id override for ComfyUI queue/event correlation */
   clientId?: string
+  /**
+   * Request a ComfyUI cache/model cleanup once this workflow has completed.
+   * Useful for heavyweight quick-app runs that would otherwise keep VRAM occupied.
+   */
+  cleanupAfterRun?: boolean
   extra_data?: JsonDict
 }
+
+export type FreeMemoryReq = {
+  /** Ask ComfyUI to unload loaded models from VRAM. Defaults to true. */
+  unload_models?: boolean
+  /** Ask ComfyUI to clear execution/cache state and run GC/empty-cache. Defaults to true. */
+  free_memory?: boolean
+}
+export type FreeMemoryResp = {}
 export type SubmitWorkflowResp = {
   prompt_id: string
 }
@@ -193,6 +208,10 @@ export type ComfySvc = {
    * @param req
    */
   cancelQueueItem(req: CancelQueueItemReq): Promise<CancelQueueItemResp>
+  /**
+   * Request ComfyUI to unload cached models and release execution memory.
+   */
+  freeMemory(req?: FreeMemoryReq): Promise<FreeMemoryResp>
 }
 
 export const comfySvcDef: ServiceDefSheet<ComfySvc> = {
@@ -233,6 +252,9 @@ export const comfySvcDef: ServiceDefSheet<ComfySvc> = {
     type: 'serverStreaming'
   },
   cancelQueueItem: {
+    type: 'unary'
+  },
+  freeMemory: {
     type: 'unary'
   }
 }

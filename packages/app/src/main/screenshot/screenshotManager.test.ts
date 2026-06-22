@@ -155,7 +155,7 @@ beforeEach(() => {
 })
 
 describe('resolveScreenshotTempDir', () => {
-  it('uses desktop .Codex-Junk/MagicPot/<run-id> during automated test runs', async () => {
+  it('uses desktop .magicpot-trash/MagicPot/<run-id> during automated test runs', async () => {
     const { resolveScreenshotTempDir } = await loadModule()
 
     expect(
@@ -166,7 +166,13 @@ describe('resolveScreenshotTempDir', () => {
         runId: 'run-123'
       })
     ).toBe(
-      pathWin32.join('C:/Users/test/Desktop', '.Codex-Junk', 'MagicPot', 'run-123', 'screenshot')
+      pathWin32.join(
+        'C:/Users/test/Desktop',
+        '.magicpot-trash',
+        'MagicPot',
+        'run-123',
+        'screenshot'
+      )
     )
   })
 

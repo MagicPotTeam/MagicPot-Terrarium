@@ -849,26 +849,28 @@ export const QAppContextProvider = ({
   }, [qAppKey, qAppKeyChangedDuringRender, qAppCfg, workflow, formState])
 
   const setValidateFn = useCallback((next: (() => boolean) | undefined) => {
-    setValidateInternal(() => next)
+    setValidateInternal((prev) => (prev === next ? prev : next))
   }, [])
 
   const setBuildWorkflowFn = useCallback((next: (() => Workflow) | undefined) => {
-    setBuildWorkflowInternal(() => next)
+    setBuildWorkflowInternal((prev) => (prev === next ? prev : next))
   }, [])
 
   const setBuildSubmitExtraDataFn = useCallback(
     (next: (() => JsonDict | undefined) | undefined) => {
-      setBuildSubmitExtraDataInternal(() => next)
+      setBuildSubmitExtraDataInternal((prev) => (prev === next ? prev : next))
     },
     []
   )
 
   const setSubmitClientIdFn = useCallback((next: string | undefined) => {
-    setSubmitClientIdInternal(String(next || '').trim() || undefined)
+    const normalizedNext = String(next || '').trim() || undefined
+    setSubmitClientIdInternal((prev) => (prev === normalizedNext ? prev : normalizedNext))
   }, [])
 
   const setSubmitSessionKeyFn = useCallback((next: string | undefined) => {
-    setSubmitSessionKeyInternal(String(next || '').trim() || undefined)
+    const normalizedNext = String(next || '').trim() || undefined
+    setSubmitSessionKeyInternal((prev) => (prev === normalizedNext ? prev : normalizedNext))
   }, [])
 
   // 监听填充参数事件

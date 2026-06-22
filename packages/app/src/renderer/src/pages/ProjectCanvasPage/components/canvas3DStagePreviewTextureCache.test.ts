@@ -65,4 +65,24 @@ describe('canvas3DStagePreviewTextureCache', () => {
     expect(firstTexture).toBe(texture)
     expect(getCanvas3DStagePreviewTextureCacheCount()).toBe(1)
   })
+
+  it('evicts over-limit preview textures and disposes the removed texture', () => {
+    const disposeSpies: ReturnType<typeof vi.spyOn>[] = []
+
+    for (let index = 0; index < 49; index += 1) {
+      const texture = new THREE.Texture()
+      disposeSpies.push(vi.spyOn(texture, 'dispose'))
+
+      writeCanvas3DStagePreviewTexture({
+        cacheKey: `stage|item-${index}|glb|1.00|1.00|1.00`,
+        texture
+      })
+    }
+
+    expect(getCanvas3DStagePreviewTextureCacheCount()).toBe(48)
+    expect(disposeSpies[0]).toHaveBeenCalledTimes(1)
+    expect(disposeSpies.slice(1).every((disposeSpy) => disposeSpy.mock.calls.length === 0)).toBe(
+      true
+    )
+  })
 })

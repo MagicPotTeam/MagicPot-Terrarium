@@ -123,6 +123,7 @@ export type LLMChatReq = {
   messages: ChatMessage[]
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
+  maxOutputTokens?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
   videoGenerationOptions?: VideoGenerationOptions
   skillRuntime?: LLMChatSkillRuntime
@@ -150,6 +151,11 @@ export type LLMChatResp = {
   ocrResult?: OCRResult
   finishReason?: 'stop' | 'length' | 'tool_call' | 'cancelled' | 'error'
   metadata?: Record<string, unknown>
+  usage?: {
+    promptTokens?: number
+    completionTokens?: number
+    totalTokens?: number
+  }
 }
 
 export type LLMChatOptions = {
@@ -178,6 +184,11 @@ export type LLMChatStreamResp = {
   finishReason?: 'stop' | 'length' | 'tool_call' | 'cancelled' | 'error'
   error?: string
   metadata?: Record<string, unknown>
+  usage?: {
+    promptTokens?: number
+    completionTokens?: number
+    totalTokens?: number
+  }
 }
 
 /**
@@ -191,6 +202,8 @@ export type LLMListProfilesResp = {
     model_name: string
     deployment?: LLMDeployment
     model_use?: LLMModelUse
+    context_window_tokens?: number
+    context_budget_tokens?: number
     is_vision_model?: boolean
     is_ocr_model?: boolean
     tagger_provider?: TaggerProviderOption

@@ -2,7 +2,7 @@ import { Config } from '@shared/config/config'
 import { ComfyHistoryResp, FileItem, ObjectInfoMap } from '@shared/comfy/types'
 import { getConfig } from '../config/config'
 import { WebSocket } from 'ws'
-import { CustomNodeInfo, PostPromptReq, PostPromptResp } from '@shared/api/svcComfy'
+import { CustomNodeInfo, FreeMemoryReq, PostPromptReq, PostPromptResp } from '@shared/api/svcComfy'
 import { NewComfyPostError } from './error'
 import { JsonDict } from '@shared/utils/utilTypes'
 import { BuildEnv } from '@shared/config/buildEnv'
@@ -40,6 +40,10 @@ export class ComfyHttpCli {
     return this.configUtils.getComfyUIOrigin()
   }
 
+  isRemoteComfyUI(): boolean {
+    return this.config.use_remote_comfyui === true
+  }
+
   private async get<RESP>(path: string): Promise<RESP> {
     const url = new URL(path, this.host()).href
     const response = await fetch(url)
@@ -55,6 +59,16 @@ export class ComfyHttpCli {
     return new Uint8Array(await response.arrayBuffer())
   }
 
+  private async throwPostError(response: Response): Promise<never> {
+    let data: JsonDict
+    try {
+      data = await response.json()
+    } catch (error) {
+      throw new Error(`HTTP error! status: ${response.status}, message: ${error}`)
+    }
+    throw NewComfyPostError(response.status, data)
+  }
+
   private async post<REQ, RESP>(path: string, payload: REQ): Promise<RESP> {
     const url = new URL(path, this.host()).href
     const response = await fetch(url, {
@@ -65,15 +79,23 @@ export class ComfyHttpCli {
       }
     })
     if (!response.ok) {
-      let data: JsonDict
-      try {
-        data = await response.json()
-      } catch (error) {
-        throw new Error(`HTTP error! status: ${response.status}, message: ${error}`)
-      }
-      throw NewComfyPostError(response.status, data)
+      await this.throwPostError(response)
     }
     return response.json() as Promise<RESP>
+  }
+
+  private async postNoContent<REQ>(path: string, payload: REQ): Promise<void> {
+    const url = new URL(path, this.host()).href
+    const response = await fetch(url, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    })
+    if (!response.ok) {
+      await this.throwPostError(response)
+    }
   }
 
   async installed(): Promise<Record<string, CustomNodeInfo>> {
@@ -221,7 +243,7 @@ export class ComfyHttpCli {
    * @param promptId 要取消的 prompt_id
    */
   async cancel(promptId: string): Promise<void> {
-    await this.post('/queue', {
+    await this.postNoContent('/queue', {
       delete: [promptId]
     })
   }
@@ -230,6 +252,16 @@ export class ComfyHttpCli {
    * 中断当前正在执行的任务
    */
   async interrupt(): Promise<void> {
-    await this.post('/interrupt', {})
+    await this.postNoContent('/interrupt', {})
+  }
+
+  /**
+   * Ask ComfyUI to unload cached models and release execution memory.
+   */
+  async freeMemory(req: FreeMemoryReq = {}): Promise<void> {
+    await this.postNoContent('/free', {
+      unload_models: req.unload_models ?? true,
+      free_memory: req.free_memory ?? true
+    })
   }
 }

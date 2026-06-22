@@ -193,6 +193,7 @@ export function deleteSessionDraftBackup(sessionId: string, scope = 'default'): 
 
 function normalizeSession(session: ChatSession | LegacyChatSession, scope?: string): ChatSession {
   const { sessionUrl, draft, ...rest } = session
+  delete (rest as Record<string, unknown>).contextCompressionActivity
   const legacySessionUrlEntry = Object.entries(session as Record<string, unknown>).find(
     ([key, value]) =>
       key !== 'sessionUrl' && key.toLowerCase().endsWith('sessionurl') && typeof value === 'string'

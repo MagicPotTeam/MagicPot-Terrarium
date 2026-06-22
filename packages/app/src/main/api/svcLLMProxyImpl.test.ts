@@ -4,11 +4,19 @@ import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { cliFromProfile } from '@shared/llm'
 import * as configModule from '../config/config'
 import type { AssistantRuntime } from '../assistantRuntime/runtime'
+import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
+import { tripoMainLlmProxyExtension } from '../extensions/tripoMainExtension'
+import {
+  clearTrustedLocalFileSelectionsForTest,
+  rememberTrustedLocalFileSelections
+} from './trustedFileSelection'
 import { LLMProxySvcImpl } from './svcLLMProxyImpl'
 
 const {
   generateFromMessagesMock,
+  tripoGenerateFromMessagesMock,
   Hunyuan3DClientMock,
+  Tripo3DClientMock,
   clearHy3dCosPrefixMock,
   uploadLocalHy3dModelMock,
   uploadBufferedHy3dModelMock,
@@ -19,7 +27,9 @@ const {
   callToolMock
 } = vi.hoisted(() => ({
   generateFromMessagesMock: vi.fn(),
+  tripoGenerateFromMessagesMock: vi.fn(),
   Hunyuan3DClientMock: vi.fn(),
+  Tripo3DClientMock: vi.fn(),
   clearHy3dCosPrefixMock: vi.fn(),
   uploadLocalHy3dModelMock: vi.fn(),
   uploadBufferedHy3dModelMock: vi.fn(),
@@ -54,6 +64,18 @@ vi.mock(import('../llmProxy/hunyuan3dClient'), async (importOriginal) => {
       }
       return {
         generateFromMessages: generateFromMessagesMock
+      }
+    })
+  }
+})
+
+vi.mock(import('../llmProxy/tripo3dClient'), async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../llmProxy/tripo3dClient')>()
+  return {
+    ...actual,
+    Tripo3DClient: Tripo3DClientMock.mockImplementation(function MockTripo3DClient() {
+      return {
+        generateFromMessages: tripoGenerateFromMessagesMock
       }
     })
   }
@@ -96,7 +118,98 @@ const mockConfig = (overrides: Partial<Config>): void => {
 }
 
 describe('LLMProxySvcImpl', () => {
+  it('allows main-process LLM extensions to normalize requests and provide clients', async () => {
+    const extensionChat = vi.fn().mockResolvedValue({ content: 'extension response' })
+    const createCli = vi.fn().mockReturnValue({ chat: extensionChat })
+    const normalizeRequestedProfileId = vi.fn((profileId: string | undefined) =>
+      profileId === 'alias-profile' ? 'agent-profile' : undefined
+    )
+
+    mainHostExtensionApiV1.llmProxy.push({
+      id: 'test-extension',
+      createCli,
+      normalizeRequestedProfileId
+    })
+    vi.mocked(cliFromProfile).mockReturnValue(undefined as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'agent-profile',
+            model_name: 'Agent Model',
+            base_url: 'https://agent.example/v1',
+            api_key: 'agent-key'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const resp = await svc.chat({
+      profileId: 'alias-profile',
+      messages: [{ role: 'user', content: 'hello' }]
+    })
+
+    expect(normalizeRequestedProfileId).toHaveBeenCalledWith('alias-profile')
+    expect(createCli).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'agent-profile',
+        model_name: 'Agent Model'
+      }),
+      expect.objectContaining({
+        config: expect.any(Object),
+        fetchImpl: expect.any(Function),
+        rawProfileId: 'alias-profile',
+        requestedProfileId: 'agent-profile'
+      })
+    )
+    expect(cliFromProfile).not.toHaveBeenCalled()
+    expect(extensionChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [{ role: 'user', content: 'hello' }]
+      })
+    )
+    expect(resp).toEqual({ content: 'extension response' })
+  })
+
+  it('allows main-process LLM extensions to short-circuit chat requests', async () => {
+    const handleChatRequest = vi.fn().mockReturnValue({ content: 'handled by extension' })
+    mainHostExtensionApiV1.llmProxy.push({
+      id: 'test-handler',
+      handleChatRequest
+    })
+
+    mockConfig({})
+
+    const svc = new LLMProxySvcImpl()
+    const resp = await svc.chat({
+      profileId: 'agent-profile',
+      messages: [{ role: 'user', content: 'hello' }]
+    })
+
+    expect(handleChatRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ profileId: 'agent-profile' }),
+      expect.objectContaining({
+        config: expect.any(Object),
+        fetchImpl: expect.any(Function),
+        rawProfileId: 'agent-profile',
+        requestedProfileId: 'agent-profile'
+      })
+    )
+    expect(cliFromProfile).not.toHaveBeenCalled()
+    expect(resp).toEqual({ content: 'handled by extension' })
+  })
+
   afterEach(() => {
+    mainHostExtensionApiV1.apiServices.splice(0)
+    mainHostExtensionApiV1.llmProxy.splice(
+      0,
+      mainHostExtensionApiV1.llmProxy.length,
+      tripoMainLlmProxyExtension
+    )
+    clearTrustedLocalFileSelectionsForTest()
     useActualHunyuan3DClient.current = false
     fetchMock.mockReset()
     listToolsMock.mockReset()
@@ -2007,7 +2120,7 @@ describe('LLMProxySvcImpl', () => {
     )
   })
 
-  it('passes the encoded model source file name hint into Hunyuan3D post-process requests', async () => {
+  it('passes legacy encoded model source file name hints into Hunyuan3D post-process requests', async () => {
     generateFromMessagesMock.mockResolvedValue(
       '[Generated OBJ Package.zip](https://example.com/cup.zip)'
     )
@@ -2026,6 +2139,39 @@ describe('LLMProxySvcImpl', () => {
     await svc.chat({
       profileId:
         'hunyuan3d-pro::SubmitTextureTo3DJob::3.1::Normal::500000::DEFAULT::triangle::triangle::0::DEFAULT::Generated%20OBJ%20Package.zip',
+      messages: [
+        { role: 'user', content: 'https://example.com/download?id=obj-1\nadd bronze texture' }
+      ]
+    })
+
+    expect(generateFromMessagesMock).toHaveBeenCalledWith(
+      [{ role: 'user', content: 'https://example.com/download?id=obj-1\nadd bronze texture' }],
+      'SubmitTextureTo3DJob',
+      expect.objectContaining({
+        SourceFileName: 'Generated OBJ Package.zip'
+      })
+    )
+  })
+
+  it('parses keyed model source file name hints for Hunyuan3D fallback requests', async () => {
+    generateFromMessagesMock.mockResolvedValue(
+      '[Generated OBJ Package.zip](https://example.com/cup.zip)'
+    )
+
+    mockConfig({
+      aigc3d_config: {
+        ...DEFAULT_CONFIG.aigc3d_config!,
+        tencent_secret_id: 'secret-id',
+        tencent_secret_key: 'secret-key',
+        api_region: 'ap-shanghai',
+        cos_region: 'ap-guangzhou'
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    await svc.chat({
+      profileId:
+        'hunyuan3d-pro::SubmitTextureTo3DJob::3.1::Normal::500000::DEFAULT::triangle::triangle::0::DEFAULT::source=Generated%20OBJ%20Package.zip::task=tripo-task-1',
       messages: [
         { role: 'user', content: 'https://example.com/download?id=obj-1\nadd bronze texture' }
       ]
@@ -2139,6 +2285,226 @@ describe('LLMProxySvcImpl', () => {
       expect.any(Object)
     )
     expect(resp.content).toBe('[Generated 3D Model](https://example.com/cup.glb)')
+  })
+
+  it('routes explicit Tripo3D quick app requests to Tripo regardless of Hunyuan preference', async () => {
+    tripoGenerateFromMessagesMock.mockResolvedValue(
+      '[Generated 3D Model](https://example.com/tripo.glb)'
+    )
+
+    mockConfig({
+      aigc3d_config: {
+        ...DEFAULT_CONFIG.aigc3d_config!,
+        tencent_secret_id: '',
+        tencent_secret_key: '',
+        api_region: '',
+        cos_region: ''
+      },
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'plugin-hunyuan',
+            model_name: 'Hunyuan3D Pro',
+            base_url: 'https://proxy.example',
+            api_key: 'hy-token'
+          },
+          {
+            id: 'plugin-tripo',
+            model_name: 'Tripo v3.1',
+            base_url: 'https://api.tripo3d.ai/v2/openapi',
+            api_key: 'tripo-token'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const resp = await svc.chat({
+      profileId:
+        'tripo3d-pro::SubmitHunyuanTo3DProJob::3.1::Normal::500000::DEFAULT::triangle::triangle::1',
+      messages: [{ role: 'user', content: 'a small robot' }]
+    })
+
+    expect(Tripo3DClientMock).toHaveBeenCalledWith(
+      'tripo-token',
+      'https://api.tripo3d.ai/v2/openapi',
+      expect.objectContaining({
+        fetchImpl: expect.any(Function)
+      })
+    )
+    expect(Hunyuan3DClientMock).not.toHaveBeenCalled()
+    expect(tripoGenerateFromMessagesMock).toHaveBeenCalledWith(
+      [{ role: 'user', content: 'a small robot' }],
+      'SubmitHunyuanTo3DProJob',
+      expect.objectContaining({
+        Model: '3.1',
+        GenerateType: 'Normal',
+        FaceCount: 500000,
+        EnablePBR: true
+      })
+    )
+    expect(resp.content).toBe('[Generated 3D Model](https://example.com/tripo.glb)')
+  })
+
+  it('routes legacy Hunyuan3D quick app requests to Tripo when Tripo is preferred', async () => {
+    tripoGenerateFromMessagesMock.mockResolvedValue(
+      '[Generated 3D Model](https://example.com/tripo-legacy.glb)'
+    )
+
+    mockConfig({
+      aigc3d_config: {
+        ...DEFAULT_CONFIG.aigc3d_config!,
+        tencent_secret_id: '',
+        tencent_secret_key: '',
+        api_region: '',
+        cos_region: ''
+      },
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'plugin-tripo',
+            model_name: 'Tripo v3.1',
+            base_url: 'https://api.tripo3d.ai/v2/openapi',
+            api_key: 'tripo-token'
+          },
+          {
+            id: 'plugin-hunyuan',
+            model_name: 'Hunyuan3D Pro',
+            base_url: 'https://proxy.example',
+            api_key: 'hy-token'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const resp = await svc.chat({
+      profileId:
+        'hunyuan3d-pro::SubmitHunyuanTo3DProJob::3.1::Normal::500000::DEFAULT::triangle::triangle::1',
+      messages: [{ role: 'user', content: 'legacy tripo route' }]
+    })
+
+    expect(Tripo3DClientMock).toHaveBeenCalledWith(
+      'tripo-token',
+      'https://api.tripo3d.ai/v2/openapi',
+      expect.objectContaining({
+        fetchImpl: expect.any(Function)
+      })
+    )
+    expect(Hunyuan3DClientMock).not.toHaveBeenCalled()
+    expect(tripoGenerateFromMessagesMock).toHaveBeenCalledWith(
+      [{ role: 'user', content: 'legacy tripo route' }],
+      'SubmitHunyuanTo3DProJob',
+      expect.objectContaining({
+        Model: '3.1',
+        GenerateType: 'Normal',
+        FaceCount: 500000,
+        EnablePBR: true
+      })
+    )
+    expect(resp.content).toBe('[Generated 3D Model](https://example.com/tripo-legacy.glb)')
+  })
+
+  it('lets legacy Hunyuan3D requests fall through when Hunyuan is preferred', async () => {
+    generateFromMessagesMock.mockResolvedValue('[Generated 3D Model](https://example.com/hy.glb)')
+
+    mockConfig({
+      aigc3d_config: {
+        ...DEFAULT_CONFIG.aigc3d_config!,
+        tencent_secret_id: '',
+        tencent_secret_key: '',
+        api_region: '',
+        cos_region: ''
+      },
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'plugin-hunyuan',
+            model_name: 'Hunyuan3D Pro',
+            base_url: 'https://proxy.example',
+            api_key: 'hy-token'
+          },
+          {
+            id: 'plugin-tripo',
+            model_name: 'Tripo v3.1',
+            base_url: 'https://api.tripo3d.ai/v2/openapi',
+            api_key: 'tripo-token'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const resp = await svc.chat({
+      profileId: 'hunyuan3d-pro::SubmitHunyuanTo3DProJob',
+      messages: [{ role: 'user', content: 'hunyuan route' }]
+    })
+
+    expect(Tripo3DClientMock).not.toHaveBeenCalled()
+    expect(Hunyuan3DClientMock).toHaveBeenCalledWith(
+      'hy-token',
+      'https://proxy.example',
+      '',
+      '',
+      'ap-guangzhou'
+    )
+    expect(generateFromMessagesMock).toHaveBeenCalledWith(
+      [{ role: 'user', content: 'hunyuan route' }],
+      'SubmitHunyuanTo3DProJob',
+      expect.any(Object)
+    )
+    expect(resp.content).toBe('[Generated 3D Model](https://example.com/hy.glb)')
+  })
+
+  it('passes Tripo profile extras through to the Tripo client', async () => {
+    tripoGenerateFromMessagesMock.mockResolvedValue(
+      '[Generated 3D Model](https://example.com/rigged.glb)'
+    )
+
+    mockConfig({
+      aigc3d_config: {
+        ...DEFAULT_CONFIG.aigc3d_config!,
+        tencent_secret_id: '',
+        tencent_secret_key: '',
+        api_region: '',
+        cos_region: ''
+      },
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'plugin-tripo',
+            model_name: 'Tripo v3.1',
+            base_url: 'https://api.tripo3d.ai/v2/openapi',
+            api_key: 'tripo-token'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    await svc.chat({
+      profileId:
+        'hunyuan3d-pro::TripoRig::3.1::Normal::500000::DEFAULT::triangle::triangle::0::DEFAULT::task=task-rig-1::rigType=quadruped::rigSpec=mixamo::imageModel=flux-dev::template=toy::editView=left::animation=preset%3Arun',
+      messages: [{ role: 'user', content: 'task-rig-1' }]
+    })
+
+    expect(tripoGenerateFromMessagesMock).toHaveBeenCalledWith(
+      [{ role: 'user', content: 'task-rig-1' }],
+      'TripoRig',
+      expect.objectContaining({
+        OriginalTaskId: 'task-rig-1',
+        RigType: 'quadruped',
+        RigSpec: 'mixamo',
+        ImageModelVersion: 'flux-dev',
+        ImageTemplate: 'toy',
+        EditView: 'left',
+        Animation: 'preset:run'
+      })
+    )
   })
 
   it('verifies the Pro API-key submit and poll flow end-to-end through the service layer', async () => {
@@ -2414,6 +2780,8 @@ describe('LLMProxySvcImpl', () => {
       }
     })
 
+    rememberTrustedLocalFileSelections(['C:/models/model.glb'])
+
     const svc = new LLMProxySvcImpl()
     const resp = await svc.uploadHy3DModel({ filePath: 'C:/models/model.glb' })
 
@@ -2424,6 +2792,25 @@ describe('LLMProxySvcImpl', () => {
     )
     expect(resp.key).toBe('magicpot/hunyuan3d/2026/04/04/model.glb')
     expect(resp.fileName).toBe('model.glb')
+  })
+
+  it('rejects renderer-supplied local model paths that were not selected through the trusted dialog', async () => {
+    mockConfig({
+      aigc3d_config: {
+        ...DEFAULT_CONFIG.aigc3d_config!,
+        tencent_secret_id: 'secret-id',
+        tencent_secret_key: 'secret-key',
+        cos_bucket: 'magicpot-1314265479',
+        cos_region: 'ap-guangzhou',
+        cos_key_prefix: 'magicpot/hunyuan3d'
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    await expect(svc.uploadHy3DModel({ filePath: 'C:/models/secret.glb' })).rejects.toThrow(
+      'trusted dialog'
+    )
+    expect(uploadLocalHy3dModelMock).not.toHaveBeenCalled()
   })
 
   it('uploads a buffered model via uploadHy3DModel', async () => {

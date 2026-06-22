@@ -12,6 +12,7 @@ import {
 import { attachRendererDiagnostics } from './rendererDiagnostics'
 import { winController } from './winControls'
 import { attachWindowStatePersistence, readWindowState, type WindowState } from './windowState'
+import { normalizeAllowedExternalUrl } from './utils/externalUrl'
 
 type CanvasStartSystemDragPayload = {
   files: Array<{
@@ -135,8 +136,10 @@ export function createMainWindow(): BrowserWindow {
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
       sandbox: false,
-      webviewTag: true,
+      webviewTag: false,
       devTools: !app.isPackaged
     }
   })
@@ -154,7 +157,11 @@ export function createMainWindow(): BrowserWindow {
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    try {
+      shell.openExternal(normalizeAllowedExternalUrl(details.url))
+    } catch (error) {
+      console.warn('[App] blocked unsafe external URL:', details.url, error)
+    }
     return { action: 'deny' }
   })
 

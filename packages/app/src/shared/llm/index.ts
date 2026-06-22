@@ -32,6 +32,7 @@ export {
   OpenAIAPICli,
   GeminiAPICli,
   ClaudeAPICli,
+  OpencodeZenAPICli,
   OllamaAPICli,
   convertImageToBase64,
   describeFetchFailure,
@@ -48,6 +49,7 @@ export {
   isKlingUrl,
   isVolcengineUrl,
   isOllamaUrl,
+  isOpencodeZenUrl,
   isLocalBaseUrl,
   isOllamaProfile,
   resolveProfileCallType,
@@ -97,3 +99,13 @@ export {
   type NormalizedTaggingProviderMetadata,
   type NormalizedTaggingResult
 } from './taggingContract'
+
+export {
+  OPENCODE_ZEN_API_BASE_URL,
+  OPENCODE_ZEN_DEFAULT_MODEL,
+  fetchOpencodeZenModels,
+  getOpencodeZenStaticFallbackModels,
+  resolveOpencodeZenAlias,
+  resolveOpencodeZenModelApi,
+  type ModelDefinitionConfig
+} from './opencodeZenModels'

@@ -7,6 +7,7 @@ import ImageContextMenu from './ImageContextMenu'
 const notifySuccessMock = vi.fn()
 const notifyErrorMock = vi.fn()
 const saveImageToDirMock = vi.fn()
+const readFileFromPathMock = vi.fn()
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -21,11 +22,11 @@ vi.mock('@renderer/hooks/useMessage', () => ({
   })
 }))
 
-const renderImageContextMenu = () =>
+const renderImageContextMenu = (imageUrl = 'blob:chat-image') =>
   render(
     <ThemeProvider theme={createTheme()}>
       <ImageContextMenu
-        imageContextMenu={{ mouseX: 10, mouseY: 12, imageUrl: 'blob:chat-image' }}
+        imageContextMenu={{ mouseX: 10, mouseY: 12, imageUrl }}
         onClose={vi.fn()}
         config={{ download_dir: 'C:/downloads' }}
       />
@@ -38,6 +39,11 @@ describe('ImageContextMenu', () => {
     notifyErrorMock.mockReset()
     saveImageToDirMock.mockReset()
     saveImageToDirMock.mockResolvedValue({ savedPath: 'C:/downloads/image.png' })
+    readFileFromPathMock.mockReset()
+    readFileFromPathMock.mockResolvedValue({
+      data: new Uint8Array([4, 5, 6]),
+      filename: 'render.png'
+    })
     localStorage.removeItem('qapp.downloadDir')
 
     vi.stubGlobal(
@@ -58,6 +64,9 @@ describe('ImageContextMenu', () => {
         },
         svcDialog: {
           showOpenDialog: vi.fn()
+        },
+        svcFs: {
+          readFileFromPath: readFileFromPathMock
         },
         svcState: {
           saveConfig: vi.fn()
@@ -84,5 +93,21 @@ describe('ImageContextMenu', () => {
 
     expect(notifySuccessMock).not.toHaveBeenCalled()
     expect(notifyErrorMock).not.toHaveBeenCalled()
+  })
+
+  it('reads hosted local-media image URLs through the file system bridge', async () => {
+    const fetchMock = vi.mocked(fetch)
+    renderImageContextMenu('local-media://server/share/folder/render%201.png')
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'chat.save_image' }))
+
+    await waitFor(() => {
+      expect(readFileFromPathMock).toHaveBeenCalledWith({
+        fullPath: '//server/share/folder/render 1.png'
+      })
+    })
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(saveImageToDirMock).toHaveBeenCalledTimes(1)
   })
 })

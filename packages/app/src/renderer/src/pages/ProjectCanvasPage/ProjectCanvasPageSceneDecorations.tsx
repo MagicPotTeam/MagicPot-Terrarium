@@ -1,6 +1,5 @@
 import React from 'react'
 import { Box } from '@mui/material'
-import { STAGE_VIEWPORT_LAYER_BASE_STYLE } from './useStageViewportTransformDriver'
 
 type StagePosition = {
   x: number
@@ -45,9 +44,6 @@ type ExactSelectedGroup = {
   id: string
 } | null
 
-const GRID_SIZE = 100
-const GRID_PADDING_CELLS = 4
-const GRID_MIN_VISIBLE_SCREEN_STEP_PX = 8
 const SELECTION_RECT_BASE_STYLE = {
   position: 'absolute',
   overflow: 'visible'
@@ -166,104 +162,6 @@ function applySelectionRectGeometry(
   svg.setAttribute('height', String(selectionRect.h))
   rectEl.setAttribute('width', String(selectionRect.w))
   rectEl.setAttribute('height', String(selectionRect.h))
-}
-
-export function ProjectCanvasPageSceneGrid({
-  showGrid,
-  stagePos,
-  stageScale,
-  stageSize,
-  gridColor,
-  registerViewportCallback
-}: {
-  showGrid: boolean
-  stagePos: StagePosition
-  stageScale: number
-  stageSize?: { width: number; height: number }
-  gridColor?: string
-  registerViewportCallback?: (
-    fn: (pos: { x: number; y: number }, scale: number) => void
-  ) => () => void
-}) {
-  const gridRef = React.useRef<HTMLDivElement>(null)
-  const stageSizeRef = React.useRef(stageSize)
-  React.useEffect(() => {
-    stageSizeRef.current = stageSize
-  }, [stageSize])
-
-  const updateGridPlaneStyle = React.useCallback(
-    (el: HTMLDivElement, pos: StagePosition, scale: number) => {
-      const safeScale = Math.max(Math.abs(scale || 1), 0.0001)
-      const viewportWidth = stageSizeRef.current?.width ?? stageSize?.width ?? 1920
-      const viewportHeight = stageSizeRef.current?.height ?? stageSize?.height ?? 1080
-      const worldPadding = GRID_SIZE * GRID_PADDING_CELLS
-      const screenStep = Math.max(1, GRID_SIZE * safeScale)
-      const offsetX = ((pos.x % screenStep) + screenStep) % screenStep
-      const offsetY = ((pos.y % screenStep) + screenStep) % screenStep
-      const shouldDrawGrid = screenStep >= GRID_MIN_VISIBLE_SCREEN_STEP_PX
-
-      el.style.display = shouldDrawGrid ? 'block' : 'none'
-      if (!shouldDrawGrid) {
-        return
-      }
-
-      el.style.width = `${viewportWidth / safeScale + worldPadding * 2}px`
-      el.style.height = `${viewportHeight / safeScale + worldPadding * 2}px`
-      el.style.transform = `translate3d(${offsetX}px, ${offsetY}px, 0) scale(${safeScale})`
-    },
-    [stageSize]
-  )
-
-  React.useEffect(() => {
-    if (!registerViewportCallback || !gridRef.current) return
-    const el = gridRef.current
-    const unregister = registerViewportCallback((pos, scale) => {
-      updateGridPlaneStyle(el, pos, scale)
-    })
-    return unregister
-  }, [registerViewportCallback, updateGridPlaneStyle])
-
-  if (!showGrid) {
-    return null
-  }
-
-  const stroke = gridColor || 'rgba(128,128,128,0.08)'
-  const worldPadding = GRID_SIZE * GRID_PADDING_CELLS
-  const safeScale = Math.max(Math.abs(stageScale || 1), 0.0001)
-  const viewportWidth = stageSize?.width ?? 1920
-  const viewportHeight = stageSize?.height ?? 1080
-  const initialScreenStep = Math.max(1, GRID_SIZE * safeScale)
-  const initialOffsetX = ((stagePos.x % initialScreenStep) + initialScreenStep) % initialScreenStep
-  const initialOffsetY = ((stagePos.y % initialScreenStep) + initialScreenStep) % initialScreenStep
-  const shouldDrawInitialGrid = initialScreenStep >= GRID_MIN_VISIBLE_SCREEN_STEP_PX
-
-  return (
-    <Box
-      data-project-canvas-scene-grid="dom"
-      sx={{
-        position: 'absolute',
-        inset: 0,
-        pointerEvents: 'none',
-        overflow: 'hidden'
-      }}
-    >
-      <div
-        ref={gridRef}
-        style={{
-          ...STAGE_VIEWPORT_LAYER_BASE_STYLE,
-          display: shouldDrawInitialGrid ? 'block' : 'none',
-          left: `${-worldPadding}px`,
-          top: `${-worldPadding}px`,
-          width: `${viewportWidth / safeScale + worldPadding * 2}px`,
-          height: `${viewportHeight / safeScale + worldPadding * 2}px`,
-          transform: `translate3d(${initialOffsetX}px, ${initialOffsetY}px, 0) scale(${safeScale})`,
-          willChange: 'transform,width,height',
-          backgroundImage: `linear-gradient(to right, ${stroke} 1px, transparent 1px), linear-gradient(to bottom, ${stroke} 1px, transparent 1px)`,
-          backgroundSize: `${GRID_SIZE}px ${GRID_SIZE}px`
-        }}
-      />
-    </Box>
-  )
 }
 
 export function ProjectCanvasPageSceneOverlay({

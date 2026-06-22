@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ClaudeAPICli, GeminiAPICli, OpenAIAPICli } from './clients'
+import { ClaudeAPICli, GeminiAPICli, OpencodeZenAPICli, OpenAIAPICli } from './clients'
 
 describe('shared llm endpoint normalization', () => {
   afterEach(() => {
@@ -737,6 +737,140 @@ describe('shared llm endpoint normalization', () => {
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent'
     )
     expect(requestedUrl).not.toContain(':generateContent/models/')
+  })
+
+  it('normalizes Gemini model endpoints that omit :generateContent before appending the method', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new GeminiAPICli(
+      'sk-test',
+      'https://opencode.ai/zen/v1/models/gemini-3.1-pro',
+      'gemini-3.1-pro'
+    )
+
+    await expect(
+      client.chat({ messages: [{ role: 'user', content: 'hello' }] })
+    ).resolves.toMatchObject({
+      content: 'ok'
+    })
+    expect(String(fetchMock.mock.calls[0]?.[0] ?? '')).toContain(
+      'https://opencode.ai/zen/v1/models/gemini-3.1-pro:generateContent'
+    )
+  })
+
+  it('routes OpenCode Zen GPT models to Responses without OpenAI-hosted tools', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        output: [
+          {
+            type: 'message',
+            content: [{ type: 'output_text', text: 'ok' }]
+          }
+        ]
+      })
+    })
+
+    const client = new OpencodeZenAPICli('zen-key', 'opencode.ai/zen/v1', 'opencode/gpt-5.5', {
+      fetchImpl: fetchMock as typeof fetch
+    })
+
+    await expect(
+      client.chat({ messages: [{ role: 'user', content: 'hello' }] })
+    ).resolves.toMatchObject({ content: 'ok' })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://opencode.ai/zen/v1/responses',
+      expect.objectContaining({ method: 'POST' })
+    )
+    const requestInit = fetchMock.mock.calls[0]?.[1]
+    const requestBody = JSON.parse(String(requestInit?.body))
+    expect(requestBody).toMatchObject({ model: 'gpt-5.5' })
+    expect(requestBody).not.toHaveProperty('tools')
+    expect(requestInit?.headers).toMatchObject({ Authorization: 'Bearer zen-key' })
+  })
+
+  it('routes OpenCode Zen Claude and Qwen models to Anthropic Messages with x-api-key auth', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ content: [{ text: 'ok' }] })
+    })
+
+    const client = new OpencodeZenAPICli(
+      'zen-key',
+      'https://opencode.ai/zen/v1/messages',
+      'qwen3.6-plus',
+      {
+        fetchImpl: fetchMock as typeof fetch
+      }
+    )
+
+    await expect(
+      client.chat({ messages: [{ role: 'user', content: 'hello' }] })
+    ).resolves.toMatchObject({ content: 'ok' })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://opencode.ai/zen/v1/messages',
+      expect.objectContaining({ method: 'POST' })
+    )
+    const requestInit = fetchMock.mock.calls[0]?.[1]
+    expect(requestInit?.headers).toMatchObject({
+      'x-api-key': 'zen-key',
+      'anthropic-version': '2023-06-01'
+    })
+    expect(requestInit?.headers).not.toHaveProperty('Authorization')
+  })
+
+  it('routes OpenCode Zen Gemini models to Google generateContent with x-goog-api-key auth', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] })
+    })
+
+    const client = new OpencodeZenAPICli(
+      'zen-key',
+      'https://opencode.ai/zen/v1/models/gemini-3.1-pro',
+      'gemini-3.1-pro',
+      { fetchImpl: fetchMock as typeof fetch }
+    )
+
+    await expect(
+      client.chat({ messages: [{ role: 'user', content: 'hello' }] })
+    ).resolves.toMatchObject({ content: 'ok' })
+
+    const requestedUrl = String(fetchMock.mock.calls[0]?.[0] ?? '')
+    expect(requestedUrl).toBe('https://opencode.ai/zen/v1/models/gemini-3.1-pro:generateContent')
+    expect(requestedUrl).not.toContain('key=')
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ 'x-goog-api-key': 'zen-key' })
+  })
+
+  it('routes OpenCode Zen OpenAI-compatible models to chat completions', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'ok' } }] })
+    })
+
+    const client = new OpencodeZenAPICli(
+      'zen-key',
+      'https://opencode.ai/zen/v1/chat/completions',
+      'glm-5.1',
+      {
+        fetchImpl: fetchMock as typeof fetch
+      }
+    )
+
+    await expect(
+      client.chat({ messages: [{ role: 'user', content: 'hello' }] })
+    ).resolves.toMatchObject({ content: 'ok' })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://opencode.ai/zen/v1/chat/completions',
+      expect.objectContaining({ method: 'POST' })
+    )
   })
 
   it('collects included web-search sources even when the message has no annotations', async () => {

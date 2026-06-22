@@ -3,7 +3,10 @@ export const DEFERRED_COMFY_IMAGE_VALUE_PREFIX = 'MAGICPOT_DEFERRED_COMFY_IMAGE:
 export type DeferredComfyImageInputValue = {
   fileName: string
   mimeType: string
-  dataUrl: string
+  /** Inline legacy payload. Kept for backward compatibility with existing saved form state. */
+  dataUrl?: string
+  /** Durable app-local file path used for newly dragged/loaded images. */
+  filePath?: string
   sizeBytes: number
 }
 
@@ -23,12 +26,15 @@ export function parseDeferredComfyImageInputValue(
       decodeURIComponent(value.slice(DEFERRED_COMFY_IMAGE_VALUE_PREFIX.length))
     ) as Partial<DeferredComfyImageInputValue>
 
-    if (
-      typeof parsed.fileName !== 'string' ||
-      !parsed.fileName.trim() ||
-      typeof parsed.dataUrl !== 'string' ||
-      !parsed.dataUrl.startsWith('data:image/')
-    ) {
+    const hasInlineDataUrl =
+      typeof parsed.dataUrl === 'string' && parsed.dataUrl.startsWith('data:image/')
+    const filePath = typeof parsed.filePath === 'string' ? parsed.filePath.trim() : ''
+
+    if (typeof parsed.fileName !== 'string' || !parsed.fileName.trim()) {
+      return null
+    }
+
+    if (!hasInlineDataUrl && !filePath) {
       return null
     }
 
@@ -38,7 +44,8 @@ export function parseDeferredComfyImageInputValue(
         typeof parsed.mimeType === 'string' && parsed.mimeType.trim()
           ? parsed.mimeType
           : 'image/png',
-      dataUrl: parsed.dataUrl,
+      ...(hasInlineDataUrl ? { dataUrl: parsed.dataUrl } : {}),
+      ...(filePath ? { filePath } : {}),
       sizeBytes:
         typeof parsed.sizeBytes === 'number' && Number.isFinite(parsed.sizeBytes)
           ? parsed.sizeBytes

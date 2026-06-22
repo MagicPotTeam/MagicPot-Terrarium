@@ -5,7 +5,7 @@ import { useInputLabel } from './components/InputLabel'
 import InputNodeSelect from './components/InputNodeSelect'
 import { Alert, Typography } from '@mui/material'
 import { conditionNodeLoRALoader } from './conditions'
-import { getJsonPath, JsonPath } from '@shared/utils/jsonPath'
+import { getJsonPath, JsonPath, parseJsonPath } from '@shared/utils/jsonPath'
 import {
   ObjectInfo,
   ObjectInfoMap,
@@ -13,11 +13,7 @@ import {
   WorkflowInputRef,
   WorkflowNode
 } from '@shared/comfy/types'
-import {
-  fieldByJsonPath,
-  nodeIdAndClsByJsonPath,
-  parseAllNodeIdAndField
-} from '@shared/comfy/funcs'
+import { nodeIdAndClsByJsonPath, parseAllNodeIdAndField } from '@shared/comfy/funcs'
 import { QAppCfgInputLoRAChain } from '@shared/qApp/cfgTypes'
 
 type LoRAChain = {
@@ -238,7 +234,13 @@ const DsnInputLoRAChain: QAppDesignComponent<'InputLoRAChain'> = ({
     if (!outputModelSlot) {
       return null
     }
-    const modelSlotValue = getJsonPath(outputModelSlot, workflow)
+    let modelSlotValue: unknown
+    try {
+      modelSlotValue = getJsonPath(outputModelSlot, workflow)
+    } catch (error) {
+      console.warn(`InputLoRAChain ignored invalid outputModelSlot: ${outputModelSlot}`, error)
+      return null
+    }
     if (
       !modelSlotValue ||
       !Array.isArray(modelSlotValue) ||
@@ -273,13 +275,25 @@ const DsnInputLoRAChain: QAppDesignComponent<'InputLoRAChain'> = ({
   }, [label, outputModelSlots, outputClipSlots, inputModel, inputClip, setValue])
 
   useEffect(() => {
-    if (nodeSlot) {
+    if (!nodeSlot) {
+      setOutputModelSlots([])
+      setOutputClipSlots([])
+      setInputModel(['', 0])
+      setInputClip(['', 0])
+      return
+    }
+
+    try {
       const loRAChain = calculateLoRAChain(nodeSlot, workflow, objectInfos)
       setOutputModelSlots(loRAChain.outputModelSlots)
       setOutputClipSlots(loRAChain.outputClipSlots)
       setInputModel(loRAChain.inputModel)
       setInputClip(loRAChain.inputClip)
-    } else {
+    } catch (error) {
+      console.warn(
+        `InputLoRAChain failed to calculate LoRA chain from nodeSlot: ${nodeSlot}`,
+        error
+      )
       setOutputModelSlots([])
       setOutputClipSlots([])
       setInputModel(['', 0])
@@ -294,16 +308,21 @@ const DsnInputLoRAChain: QAppDesignComponent<'InputLoRAChain'> = ({
 
   const slotToDisplay = useCallback(
     (slot: JsonPath) => {
-      const [nodeId, cls] = nodeIdAndClsByJsonPath(slot, workflow)
+      const pathFields = parseJsonPath(slot)
+      const nodeId = pathFields[0]
+      if (!nodeId || pathFields.length < 3) {
+        return `${slot}（无效路径）`
+      }
+
       const node = workflow[nodeId]
       if (!node) {
-        return ''
+        return `${slot}（节点 ${nodeId} 不存在，请重新选择 LoRA 链节点）`
       }
       const nodeName = node._meta?.title
         ? `${node._meta?.title} (#${nodeId})`
-        : `${cls} (#${nodeId})`
+        : `${node.class_type} (#${nodeId})`
 
-      const field = fieldByJsonPath(slot, workflow)
+      const field = pathFields[pathFields.length - 1]
       return `${nodeName} ${field} 字段`
     },
     [workflow]

@@ -29,6 +29,7 @@ const canvasThumbnailRuntimeMetrics: CanvasThumbnailRuntimeMetrics = {
   thumbnailCount: 0,
   cacheHitCount: 0,
   generatedCount: 0,
+  sidecarGeneratedCount: 0,
   nativeGeneratedCount: 0,
   staleCount: 0,
   failedCount: 0
@@ -62,6 +63,9 @@ function recordCanvasThumbnailRuntimeStatus(
     case 'generated':
       canvasThumbnailRuntimeMetrics.generatedCount += 1
       break
+    case 'sidecar-generated':
+      canvasThumbnailRuntimeMetrics.sidecarGeneratedCount += 1
+      break
     case 'native-generated':
       canvasThumbnailRuntimeMetrics.nativeGeneratedCount += 1
       break
@@ -84,6 +88,7 @@ export function resetCanvasThumbnailRuntimeMetrics(): void {
   canvasThumbnailRuntimeMetrics.thumbnailCount = 0
   canvasThumbnailRuntimeMetrics.cacheHitCount = 0
   canvasThumbnailRuntimeMetrics.generatedCount = 0
+  canvasThumbnailRuntimeMetrics.sidecarGeneratedCount = 0
   canvasThumbnailRuntimeMetrics.nativeGeneratedCount = 0
   canvasThumbnailRuntimeMetrics.staleCount = 0
   canvasThumbnailRuntimeMetrics.failedCount = 0
@@ -333,6 +338,12 @@ function extractManifestFromWriteResponse(
   return response
 }
 
+function extractManifestFromGenerateResponse(
+  response: Awaited<ReturnType<NonNullable<CanvasThumbnailIpcBridge['generateThumbnailSet']>>>
+): CanvasThumbnailManifestLike | null {
+  return response?.manifest ?? null
+}
+
 function isManifestForIdentity(
   manifest: CanvasThumbnailManifestLike,
   identity: CanvasImageSourceIdentity
@@ -420,6 +431,39 @@ export async function readWarmCanvasThumbnailSet(
   }
 }
 
+async function generateSidecarThumbnailSet({
+  identity,
+  bridge,
+  levels,
+  preferWebp
+}: {
+  identity: CanvasImageSourceIdentity
+  bridge: CanvasThumbnailIpcBridge | null
+  levels: readonly CanvasThumbnailLevelSize[]
+  preferWebp: boolean
+}): Promise<CanvasImageThumbnailSet | null> {
+  if (!bridge?.generateThumbnailSet) {
+    return null
+  }
+
+  try {
+    const response = await bridge.generateThumbnailSet({
+      fullPath: identity.canonicalPath,
+      ...(identity.cacheRootDir ? { cacheRootDir: identity.cacheRootDir } : {}),
+      levels: [...levels],
+      format: preferWebp ? 'image/webp' : 'image/png'
+    })
+    const manifest = extractManifestFromGenerateResponse(response)
+    if (!manifest || !isManifestForIdentity(manifest, identity)) {
+      return null
+    }
+    return canvasThumbnailSetFromManifest(manifest, identity)
+  } catch (error) {
+    console.warn('[Canvas] Native sidecar thumbnail generation failed, falling back.', error)
+    return null
+  }
+}
+
 async function generateNativeThumbnailLevels({
   identity,
   bridge,
@@ -479,6 +523,20 @@ export async function ensureCanvasThumbnailSet({
   }
 
   const requestedLevels = normalizeLevelList(levels)
+  const sidecarThumbnailSet = await generateSidecarThumbnailSet({
+    identity,
+    bridge,
+    levels: requestedLevels,
+    preferWebp
+  })
+  if (sidecarThumbnailSet) {
+    recordCanvasThumbnailRuntimeStatus('sidecar-generated', true)
+    return {
+      status: 'sidecar-generated',
+      thumbnailSet: sidecarThumbnailSet
+    }
+  }
+
   let generatedLevels = await generateCanvasThumbnailLevels({
     source,
     identity,

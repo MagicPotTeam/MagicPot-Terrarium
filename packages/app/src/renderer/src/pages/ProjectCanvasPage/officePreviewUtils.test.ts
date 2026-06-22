@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import JSZip from 'jszip'
 
 import {
@@ -40,6 +40,17 @@ const concatBytes = (...chunks: Uint8Array<ArrayBufferLike>[]): Uint8Array<Array
 
   return result
 }
+
+const originalCreateObjectUrl = URL.createObjectURL
+
+beforeEach(() => {
+  URL.createObjectURL = vi.fn((blob: Blob) => `blob:mock-office-${blob.size}`)
+})
+
+afterEach(() => {
+  URL.createObjectURL = originalCreateObjectUrl
+  vi.restoreAllMocks()
+})
 
 describe('extractOfficePreviewText', () => {
   it('extracts plain text previews from txt and md files', async () => {
@@ -111,11 +122,13 @@ describe('extractOfficePreviewText', () => {
         fileName: 'image1.png'
       })
     )
-    expect(resolved.previewImages[0]?.src).toMatch(/^data:image\/png;base64,/)
+    expect(resolved.previewImages[0]?.src).toMatch(/^blob:mock-office-/)
+    expect(resolved.previewImages[0]?.src).not.toContain('data:image')
     expect(resolved.previewImages[1]).toEqual(
       expect.objectContaining({
         mimeType: 'image/jpeg',
-        fileName: 'image2.jpg'
+        fileName: 'image2.jpg',
+        src: expect.stringMatching(/^blob:mock-office-/)
       })
     )
   })
@@ -379,6 +392,62 @@ describe('extractOfficePreviewText', () => {
       previewImages: [],
       previewSheets: [],
       content: null
+    })
+  })
+
+  it('safely skips OOXML previews when archive size exceeds the preview limit', async () => {
+    const file = new File(['small'], 'large.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    })
+    Object.defineProperty(file, 'size', { value: 129 * 1024 * 1024 })
+
+    await expect(resolveOfficeFileNodeData(file)).resolves.toEqual({
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      fileKind: 'word',
+      editable: false,
+      previewText: null,
+      previewImages: [],
+      previewSheets: [],
+      content: null
+    })
+  })
+
+  it('safely skips OOXML previews when archive entry count exceeds the preview limit', async () => {
+    const files: Record<string, unknown> = {}
+    for (let index = 0; index < 4097; index += 1) {
+      files[`word/media/image-${index}.png`] = { dir: false }
+    }
+    vi.spyOn(JSZip, 'loadAsync').mockResolvedValue({ files } as JSZip)
+
+    const file = new File(['zip'], 'many.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    })
+
+    await expect(resolveOfficeFileNodeData(file)).resolves.toMatchObject({
+      previewText: null,
+      previewImages: [],
+      previewSheets: []
+    })
+  })
+
+  it('safely skips OOXML previews when declared uncompressed size exceeds the preview limit', async () => {
+    vi.spyOn(JSZip, 'loadAsync').mockResolvedValue({
+      files: {
+        'word/document.xml': {
+          dir: false,
+          _data: { uncompressedSize: 257 * 1024 * 1024 }
+        }
+      }
+    } as unknown as JSZip)
+
+    const file = new File(['zip'], 'expanded.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    })
+
+    await expect(resolveOfficeFileNodeData(file)).resolves.toMatchObject({
+      previewText: null,
+      previewImages: [],
+      previewSheets: []
     })
   })
 

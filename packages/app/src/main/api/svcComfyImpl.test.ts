@@ -248,6 +248,47 @@ describe('ComfySvcImpl', () => {
         extra_data: undefined
       })
     })
+    it('requests ComfyUI memory cleanup when requested by the caller', async () => {
+      const svc = new ComfySvcImpl()
+      ;(
+        svc as unknown as { cli: () => { objectInfo: () => Promise<Record<string, unknown>> } }
+      ).cli = () =>
+        ({
+          objectInfo: vi.fn().mockResolvedValue({})
+        }) as never
+
+      const postPromptSpy = vi.spyOn(svc, 'postPrompt').mockResolvedValue({
+        prompt_id: 'prompt-cleanup'
+      })
+      const workflow = {} as Workflow
+
+      await svc.submitWorkflow({
+        prompt: workflow,
+        clientId: 'renderer-qapp',
+        cleanupAfterRun: true
+      })
+
+      expect(postPromptSpy).toHaveBeenCalledWith({
+        prompt: workflow,
+        client_id: 'renderer-qapp',
+        cleanupAfterRun: true,
+        extra_data: undefined
+      })
+    })
+  })
+
+  describe('freeMemory', () => {
+    it('proxies ComfyUI memory cleanup requests', async () => {
+      const freeMemoryMock = vi.fn().mockResolvedValue(undefined)
+      const svc = new ComfySvcImpl()
+      ;(svc as unknown as { cli: () => { freeMemory: typeof freeMemoryMock } }).cli = () =>
+        ({
+          freeMemory: freeMemoryMock
+        }) as never
+
+      await expect(svc.freeMemory({ unload_models: true, free_memory: true })).resolves.toEqual({})
+      expect(freeMemoryMock).toHaveBeenCalledWith({ unload_models: true, free_memory: true })
+    })
   })
 
   describe('connectWs', () => {

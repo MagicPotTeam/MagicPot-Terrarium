@@ -1,4 +1,5 @@
 import { ServiceDefSheet } from './apiUtils/serviceDefSheet'
+import { ServiceValidationError } from './apiUtils/serviceValidation'
 
 /**
  * 文件系统相关 API
@@ -41,6 +42,17 @@ export type SaveImageToPathResp = {
   fullPath: string
 }
 
+export type SaveQAppInputImageReq = {
+  image: Uint8Array
+  filename: string
+}
+
+export type SaveQAppInputImageResp = {
+  success: boolean
+  fullPath: string
+  filename: string
+}
+
 export type ReadImageFromPathReq = {
   fullPath: string
 }
@@ -68,6 +80,18 @@ export type ReadFileFromPathResp = {
   filename: string
 }
 
+export type ReadFileSliceReq = {
+  fullPath: string
+  offset?: number
+  length: number
+}
+
+export type ReadFileSliceResp = {
+  data: Uint8Array
+  filename: string
+  fileSizeBytes: number
+}
+
 export type WriteTextFileReq = {
   outputPath: string
   filename: string
@@ -79,13 +103,80 @@ export type WriteTextFileResp = {
   fullPath: string
 }
 
+export const MAX_READ_FILE_SLICE_BYTES = 16 * 1024 * 1024
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const requireNonEmptyString = (value: unknown, field: string): string => {
+  if (typeof value === 'string' && value.trim()) {
+    return value
+  }
+  throw new ServiceValidationError(`svcFs.readFileSlice ${field}`, [
+    {
+      path: [field],
+      message: 'Expected a non-empty string',
+      code: 'invalid_type'
+    }
+  ])
+}
+
+const requireBoundedInteger = ({
+  value,
+  field,
+  min,
+  max
+}: {
+  value: unknown
+  field: string
+  min: number
+  max: number
+}): number => {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max) {
+    return value
+  }
+  throw new ServiceValidationError(`svcFs.readFileSlice ${field}`, [
+    {
+      path: [field],
+      message: `Expected an integer between ${min} and ${max}`,
+      code: 'invalid_type'
+    }
+  ])
+}
+
+const validateReadFileSliceReq = (value: unknown): ReadFileSliceReq => {
+  if (!isRecord(value)) {
+    throw new ServiceValidationError('svcFs.readFileSlice request')
+  }
+  return {
+    fullPath: requireNonEmptyString(value.fullPath, 'fullPath'),
+    offset:
+      value.offset === undefined
+        ? 0
+        : requireBoundedInteger({
+            value: value.offset,
+            field: 'offset',
+            min: 0,
+            max: Number.MAX_SAFE_INTEGER
+          }),
+    length: requireBoundedInteger({
+      value: value.length,
+      field: 'length',
+      min: 1,
+      max: MAX_READ_FILE_SLICE_BYTES
+    })
+  }
+}
+
 export type FsSvc = {
   listImagesInFolder(req: ListImagesInFolderReq): Promise<ListImagesInFolderResp>
   listFilesInFolder(req: ListFilesInFolderReq): Promise<ListFilesInFolderResp>
   saveImageToPath(req: SaveImageToPathReq): Promise<SaveImageToPathResp>
+  saveQAppInputImage(req: SaveQAppInputImageReq): Promise<SaveQAppInputImageResp>
   readImageFromPath(req: ReadImageFromPathReq): Promise<ReadImageFromPathResp>
   readTextFile(req: ReadTextFileReq): Promise<ReadTextFileResp>
   readFileFromPath(req: ReadFileFromPathReq): Promise<ReadFileFromPathResp>
+  readFileSlice(req: ReadFileSliceReq): Promise<ReadFileSliceResp>
   writeTextFile(req: WriteTextFileReq): Promise<WriteTextFileResp>
 }
 
@@ -99,6 +190,9 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
   saveImageToPath: {
     type: 'unary'
   },
+  saveQAppInputImage: {
+    type: 'unary'
+  },
   readImageFromPath: {
     type: 'unary'
   },
@@ -107,6 +201,10 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
   },
   readFileFromPath: {
     type: 'unary'
+  },
+  readFileSlice: {
+    type: 'unary',
+    request: validateReadFileSliceReq
   },
   writeTextFile: {
     type: 'unary'
