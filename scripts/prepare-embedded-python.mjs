@@ -217,6 +217,7 @@ function writeConstraints() {
       `transformers==${transformersVersion}`,
       `huggingface-hub==${huggingfaceHubVersion}`,
       `decorator==${decoratorVersion}`,
+      'numpy<2.5',
       ''
     ].join('\n')
   )
