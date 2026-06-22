@@ -14,10 +14,6 @@
   "outputNodeIds": [
     "5"
   ],
-  "batchProcess": {
-    "enabled": true,
-    "imageInputSlot": "$.2.inputs.image"
-  },
   "requiredModels": [
     {
       "name": "ema_vae_fp16.safetensors",

@@ -22,15 +22,15 @@
       "label": "LoRA",
       "component": "InputLoRAChain",
       "outputModelSlots": [
-        "$.32.inputs.*"
+        "$.38.inputs.model",
+        "$.39.inputs.model"
       ],
       "outputClipSlots": [
-        "$.28.inputs.clip",
         "$.35.inputs.clip",
         "$.44.inputs.clip"
       ],
       "inputModel": [
-        "57",
+        "32",
         0
       ],
       "inputClip": [
@@ -71,22 +71,13 @@
   ],
   "autoInputs": [],
   "customNodeUrls": [
-    "https://github.com/Fannovel16/comfyui_controlnet_aux",
     "https://github.com/pythongosssss/ComfyUI-Custom-Scripts",
     "https://github.com/yolain/ComfyUI-Easy-Use",
     "https://github.com/kijai/ComfyUI-KJNodes",
-    "https://github.com/shiimizu/ComfyUI_smZNodes",
-    "https://github.com/chinoll/ComfyUI-Advanced-ControlNet"
+    "https://github.com/shiimizu/ComfyUI_smZNodes"
   ],
   "outputNodeIds": [
     "37"
   ],
-  "requiredModels": [
-    {
-      "name": "Chenkin-UniControl-XL.safetensors",
-      "size": "2.5 GB",
-      "dir": "models/controlnet",
-      "url": "https://modelscope.cn/models/ChenkinNoob/Chenkin-UniControl-XL/resolve/master/Chenkin-UniControl-XL.safetensors"
-    }
-  ]
+  "requiredModels": []
 }

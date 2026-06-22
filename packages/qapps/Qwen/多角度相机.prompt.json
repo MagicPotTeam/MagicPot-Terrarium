@@ -1,9 +1,9 @@
 {
-  "178": {
+  "1": {
     "inputs": {
       "filename_prefix": "Qwen_Edit_2511",
       "images": [
-        "191",
+        "14",
         0
       ]
     },
@@ -12,7 +12,7 @@
       "title": "保存图像"
     }
   },
-  "179": {
+  "2": {
     "inputs": {
       "image": ""
     },
@@ -21,7 +21,7 @@
       "title": "加载图像"
     }
   },
-  "180": {
+  "3": {
     "inputs": {
       "unet_name": "qwen_image_edit_2511_fp8mixed.safetensors",
       "weight_dtype": "default"
@@ -31,12 +31,12 @@
       "title": "UNet加载器"
     }
   },
-  "181": {
+  "4": {
     "inputs": {
       "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
       "strength_model": 1,
       "model": [
-        "180",
+        "3",
         0
       ]
     },
@@ -45,7 +45,7 @@
       "title": "加载LoRA (Lightning)"
     }
   },
-  "182": {
+  "5": {
     "inputs": {
       "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
       "type": "qwen_image",
@@ -56,7 +56,7 @@
       "title": "加载CLIP"
     }
   },
-  "183": {
+  "6": {
     "inputs": {
       "vae_name": "qwen_image_vae.safetensors"
     },
@@ -65,12 +65,12 @@
       "title": "加载VAE"
     }
   },
-  "184": {
+  "7": {
     "inputs": {
       "lora_name": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
       "strength_model": 1,
       "model": [
-        "181",
+        "4",
         0
       ]
     },
@@ -79,11 +79,11 @@
       "title": "加载LoRA (多角度)"
     }
   },
-  "185": {
+  "8": {
     "inputs": {
       "reference_latents_method": "index_timestep_zero",
       "conditioning": [
-        "194",
+        "17",
         0
       ]
     },
@@ -92,11 +92,11 @@
       "title": "FluxKontextMultiReferenceLatentMethod"
     }
   },
-  "186": {
+  "9": {
     "inputs": {
       "shift": 3.1,
       "model": [
-        "184",
+        "7",
         0
       ]
     },
@@ -105,11 +105,11 @@
       "title": "采样算法(AuraFlow)"
     }
   },
-  "187": {
+  "10": {
     "inputs": {
       "reference_latents_method": "index_timestep_zero",
       "conditioning": [
-        "195",
+        "18",
         0
       ]
     },
@@ -118,11 +118,11 @@
       "title": "FluxKontextMultiReferenceLatentMethod"
     }
   },
-  "188": {
+  "11": {
     "inputs": {
       "strength": 1,
       "model": [
-        "186",
+        "9",
         0
       ]
     },
@@ -131,10 +131,10 @@
       "title": "CFGNorm"
     }
   },
-  "189": {
+  "12": {
     "inputs": {
       "image": [
-        "179",
+        "2",
         0
       ]
     },
@@ -143,14 +143,14 @@
       "title": "FluxKontextImageScale"
     }
   },
-  "190": {
+  "13": {
     "inputs": {
       "pixels": [
-        "189",
+        "12",
         0
       ],
       "vae": [
-        "183",
+        "6",
         0
       ]
     },
@@ -159,14 +159,14 @@
       "title": "VAE编码"
     }
   },
-  "191": {
+  "14": {
     "inputs": {
       "samples": [
-        "192",
+        "15",
         0
       ],
       "vae": [
-        "183",
+        "6",
         0
       ]
     },
@@ -175,7 +175,7 @@
       "title": "VAE解码"
     }
   },
-  "192": {
+  "15": {
     "inputs": {
       "seed": 513600792086494,
       "steps": 4,
@@ -184,19 +184,19 @@
       "scheduler": "simple",
       "denoise": 1,
       "model": [
-        "188",
+        "11",
         0
       ],
       "positive": [
-        "185",
+        "8",
         0
       ],
       "negative": [
-        "187",
+        "10",
         0
       ],
       "latent_image": [
-        "190",
+        "13",
         0
       ]
     },
@@ -205,7 +205,7 @@
       "title": "K采样器"
     }
   },
-  "193": {
+  "16": {
     "inputs": {
       "horizontal_angle": 77,
       "vertical_angle": 27,
@@ -213,7 +213,7 @@
       "default_prompts": false,
       "camera_view": false,
       "image": [
-        "179",
+        "2",
         0
       ]
     },
@@ -222,22 +222,22 @@
       "title": "Qwen多角度相机"
     }
   },
-  "194": {
+  "17": {
     "inputs": {
       "prompt": [
-        "193",
+        "16",
         0
       ],
       "clip": [
-        "182",
+        "5",
         0
       ],
       "vae": [
-        "183",
+        "6",
         0
       ],
       "image1": [
-        "189",
+        "12",
         0
       ]
     },
@@ -246,19 +246,19 @@
       "title": "TextEncodeQwenImageEditPlus (Positive)"
     }
   },
-  "195": {
+  "18": {
     "inputs": {
       "prompt": "",
       "clip": [
-        "182",
+        "5",
         0
       ],
       "vae": [
-        "183",
+        "6",
         0
       ],
       "image1": [
-        "189",
+        "12",
         0
       ]
     },

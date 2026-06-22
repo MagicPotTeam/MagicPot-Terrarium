@@ -9,27 +9,27 @@
     },
     {
       "label": "UNet加载器",
-      "slot": "$.180.inputs.unet_name",
+      "slot": "$.3.inputs.unet_name",
       "component": "InputComfySelect"
     },
     {
       "label": "CLIP加载器",
-      "slot": "$.182.inputs.clip_name",
+      "slot": "$.5.inputs.clip_name",
       "component": "InputComfySelect"
     },
     {
       "label": "加载VAE",
-      "slot": "$.183.inputs.vae_name",
+      "slot": "$.6.inputs.vae_name",
       "component": "InputComfySelect"
     },
     {
       "label": "Lightning LoRA",
-      "slot": "$.181.inputs.lora_name",
+      "slot": "$.4.inputs.lora_name",
       "component": "InputComfySelect"
     },
     {
       "label": "多角度 LoRA",
-      "slot": "$.184.inputs.lora_name",
+      "slot": "$.7.inputs.lora_name",
       "component": "InputComfySelect"
     },
     {
@@ -40,12 +40,12 @@
     },
     {
       "label": "加载图像",
-      "slot": "$.179.inputs.image",
+      "slot": "$.2.inputs.image",
       "component": "InputComfyImage"
     },
     {
       "label": "水平角度",
-      "slot": "$.193.inputs.horizontal_angle",
+      "slot": "$.16.inputs.horizontal_angle",
       "min": 0,
       "max": 360,
       "step": 1,
@@ -53,7 +53,7 @@
     },
     {
       "label": "垂直角度",
-      "slot": "$.193.inputs.vertical_angle",
+      "slot": "$.16.inputs.vertical_angle",
       "min": -30,
       "max": 60,
       "step": 1,
@@ -61,7 +61,7 @@
     },
     {
       "label": "缩放",
-      "slot": "$.193.inputs.zoom",
+      "slot": "$.16.inputs.zoom",
       "min": 0,
       "max": 10,
       "step": 0.1,
@@ -71,15 +71,15 @@
   "autoInputs": [
     {
       "label": "随机种子",
-      "slot": "$.192.inputs.seed",
+      "slot": "$.1.inputs.filename_prefix",
       "component": "AutoSeed"
     }
   ],
   "customNodeUrls": [
-    "https://github.com/RyoJerryYu/ComfyUI-qwenmultiangle"
+    "https://github.com/jtydhr88/ComfyUI-qwenmultiangle"
   ],
   "outputNodeIds": [
-    "178"
+    "1"
   ],
   "isHidden": false,
   "requiredModels": [
@@ -113,9 +113,5 @@
       "dir": "models/loras",
       "url": "https://modelscope.cn/models/fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA/resolve/master/qwen-image-edit-2511-multiple-angles-lora.safetensors"
     }
-  ],
-  "batchProcess": {
-    "enabled": true,
-    "imageInputSlot": "$.179.inputs.image"
-  }
+  ]
 }
