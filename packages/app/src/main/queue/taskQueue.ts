@@ -82,6 +82,21 @@ const dataUrlToUint8Array = (dataUrl: string): Uint8Array => {
     : new Uint8Array(Buffer.from(decodeURIComponent(payload), 'utf8'))
 }
 
+const readDeferredComfyImageBytes = async (deferredImage: {
+  dataUrl?: string
+  filePath?: string
+}): Promise<Uint8Array> => {
+  if (deferredImage.filePath) {
+    return new Uint8Array(await fs.readFile(deferredImage.filePath))
+  }
+
+  if (deferredImage.dataUrl) {
+    return dataUrlToUint8Array(deferredImage.dataUrl)
+  }
+
+  throw new Error('invalid deferred Comfy image data')
+}
+
 type DeferredComfyImageUploadResult = {
   /** Workflow submitted to ComfyUI. Deferred image values are replaced by uploaded file names. */
   promptWorkflow: Workflow
@@ -148,7 +163,7 @@ const uploadDeferredComfyImagesInWorkflow = async (
       if (!uploadedValue) {
         const uploadedFile = await cli.uploadImage(
           { filename: deferredImage.fileName, type: 'input' },
-          dataUrlToUint8Array(deferredImage.dataUrl)
+          await readDeferredComfyImageBytes(deferredImage)
         )
         uploadedValue = fileItemToValue(uploadedFile)
         uploadedValueByDeferredValue.set(inputValue, uploadedValue)

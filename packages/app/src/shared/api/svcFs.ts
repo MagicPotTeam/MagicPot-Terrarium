@@ -42,6 +42,17 @@ export type SaveImageToPathResp = {
   fullPath: string
 }
 
+export type SaveQAppInputImageReq = {
+  image: Uint8Array
+  filename: string
+}
+
+export type SaveQAppInputImageResp = {
+  success: boolean
+  fullPath: string
+  filename: string
+}
+
 export type ReadImageFromPathReq = {
   fullPath: string
 }
@@ -161,6 +172,7 @@ export type FsSvc = {
   listImagesInFolder(req: ListImagesInFolderReq): Promise<ListImagesInFolderResp>
   listFilesInFolder(req: ListFilesInFolderReq): Promise<ListFilesInFolderResp>
   saveImageToPath(req: SaveImageToPathReq): Promise<SaveImageToPathResp>
+  saveQAppInputImage(req: SaveQAppInputImageReq): Promise<SaveQAppInputImageResp>
   readImageFromPath(req: ReadImageFromPathReq): Promise<ReadImageFromPathResp>
   readTextFile(req: ReadTextFileReq): Promise<ReadTextFileResp>
   readFileFromPath(req: ReadFileFromPathReq): Promise<ReadFileFromPathResp>
@@ -176,6 +188,9 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
     type: 'unary'
   },
   saveImageToPath: {
+    type: 'unary'
+  },
+  saveQAppInputImage: {
     type: 'unary'
   },
   readImageFromPath: {

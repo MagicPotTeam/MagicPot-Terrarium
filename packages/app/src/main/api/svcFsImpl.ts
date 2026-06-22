@@ -7,6 +7,8 @@ import {
   ListImagesInFolderResp,
   SaveImageToPathReq,
   SaveImageToPathResp,
+  SaveQAppInputImageReq,
+  SaveQAppInputImageResp,
   ReadImageFromPathReq,
   ReadImageFromPathResp,
   ReadFileFromPathReq,
@@ -20,9 +22,11 @@ import {
 } from '@shared/api/svcFs'
 import fs from 'fs/promises'
 import * as path from 'path'
+import { app } from 'electron'
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tif', '.tiff']
 const MAX_CONCURRENT_FS_OPS = 16
+const QAPP_INPUT_IMAGE_DIR = 'qapp-input-images'
 
 let activeFsOps = 0
 const pendingFsOps: (() => void)[] = []
@@ -66,6 +70,16 @@ const pathExists = async (targetPath: string): Promise<boolean> => {
   } catch {
     return false
   }
+}
+
+const sanitizeFileName = (value: string): string => {
+  const normalized = path.basename(String(value || '').trim())
+  const withoutReservedChars = normalized.replace(/[<>:"/\\|?*]+/g, '_')
+  const withoutControlChars = Array.from(withoutReservedChars)
+    .map((char) => (char.charCodeAt(0) < 32 ? '_' : char))
+    .join('')
+    .trim()
+  return withoutControlChars || 'qapp-input-image.png'
 }
 
 function normalizeExtension(value: string): string {
@@ -163,6 +177,20 @@ export class FsSvcImpl implements FsSvc {
     await runBoundedFsOp(() => fs.writeFile(fullPath, Buffer.from(image)))
 
     return { success: true, fullPath }
+  }
+
+  saveQAppInputImage = async (req: SaveQAppInputImageReq): Promise<SaveQAppInputImageResp> => {
+    const outputPath = path.join(app.getPath('userData'), QAPP_INPUT_IMAGE_DIR)
+    await runBoundedFsOp(() => fs.mkdir(outputPath, { recursive: true }))
+
+    const safeName = sanitizeFileName(req.filename)
+    const extension = path.extname(safeName)
+    const baseName = extension ? safeName.slice(0, -extension.length) : safeName
+    const filename = `${baseName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${extension || '.png'}`
+    const fullPath = path.join(outputPath, filename)
+    await runBoundedFsOp(() => fs.writeFile(fullPath, Buffer.from(req.image)))
+
+    return { success: true, fullPath, filename }
   }
 
   readImageFromPath = async (req: ReadImageFromPathReq): Promise<ReadImageFromPathResp> => {

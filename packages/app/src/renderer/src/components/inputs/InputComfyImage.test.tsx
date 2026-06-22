@@ -9,7 +9,9 @@ import {
 const apiMocks = vi.hoisted(() => ({
   getView: vi.fn(),
   uploadImage: vi.fn(),
-  loadImageFromPhotoshop: vi.fn()
+  loadImageFromPhotoshop: vi.fn(),
+  saveQAppInputImage: vi.fn(),
+  readImageFromPath: vi.fn()
 }))
 
 vi.mock('@renderer/utils/windowUtils', () => ({
@@ -20,6 +22,10 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     },
     svcPhotoshop: {
       loadImageFromPhotoshop: apiMocks.loadImageFromPhotoshop
+    },
+    svcFs: {
+      saveQAppInputImage: apiMocks.saveQAppInputImage,
+      readImageFromPath: apiMocks.readImageFromPath
     }
   })
 }))
@@ -57,6 +63,8 @@ describe('InputComfyImage', () => {
     apiMocks.getView.mockReset()
     apiMocks.uploadImage.mockReset()
     apiMocks.loadImageFromPhotoshop.mockReset()
+    apiMocks.saveQAppInputImage.mockReset()
+    apiMocks.readImageFromPath.mockReset()
   })
 
   it('rejects unsupported external files with a clear error from the Quick App image-input path', async () => {
@@ -90,8 +98,22 @@ describe('InputComfyImage', () => {
     expect(notifyErrorMock.mock.calls[0][0]).toContain('.txt')
   })
 
-  it('accepts local images without uploading to ComfyUI and shows a local preview', async () => {
+  it('accepts local images without uploading to ComfyUI, persists them, and shows a local preview', async () => {
+    const createObjectURLMock = vi.fn(() => 'blob:persisted-preview')
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURLMock
+    })
     const onChange = vi.fn()
+    apiMocks.saveQAppInputImage.mockResolvedValue({
+      success: true,
+      fullPath: 'C:/MagicPot/qapp-input-images/folder-photo.png',
+      filename: 'folder-photo.png'
+    })
+    apiMocks.readImageFromPath.mockResolvedValue({
+      image: new Uint8Array([1, 2, 3]),
+      filename: 'folder-photo.png'
+    })
 
     render(
       <InputComfyImage
@@ -114,20 +136,31 @@ describe('InputComfyImage', () => {
       expect(onChange).toHaveBeenCalledTimes(1)
     })
 
+    expect(apiMocks.saveQAppInputImage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filename: 'folder-photo.png',
+        image: expect.any(Uint8Array)
+      })
+    )
+
     const nextValue = onChange.mock.calls[0][0] as string
     const deferredImage = parseDeferredComfyImageInputValue(nextValue)
     expect(deferredImage).toMatchObject({
       fileName: 'folder-photo.png',
       mimeType: 'image/png',
-      sizeBytes: file.size
+      sizeBytes: file.size,
+      filePath: 'C:/MagicPot/qapp-input-images/folder-photo.png'
     })
-    expect(deferredImage?.dataUrl).toMatch(/^data:image\/png;base64,/)
+    expect(deferredImage?.dataUrl).toBeUndefined()
     expect(apiMocks.uploadImage).not.toHaveBeenCalled()
     expect(apiMocks.getView).not.toHaveBeenCalled()
     expect(notifyErrorMock).not.toHaveBeenCalled()
 
     const preview = await screen.findByRole('img', { name: 'folder-photo.png' })
-    expect(preview).toHaveAttribute('src', deferredImage?.dataUrl)
+    expect(apiMocks.readImageFromPath).toHaveBeenCalledWith({
+      fullPath: 'C:/MagicPot/qapp-input-images/folder-photo.png'
+    })
+    expect(preview).toHaveAttribute('src', 'blob:persisted-preview')
   })
 
   it('rejects unsupported internal canvas nodes with a clear error from the Quick App image-input path', async () => {
