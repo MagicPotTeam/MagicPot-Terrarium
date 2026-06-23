@@ -284,7 +284,7 @@ export class OpenAIAPICli implements LLMCli {
       return this.chatViaResponsesApi(params, base)
     }
 
-    return this.chatViaChatCompletions(params, base)
+    return this.chatViaChatCompletions(params, this.baseUrl.trim().replace(/\/$/, ''))
   }
 
   private async chatViaResponsesApi(params: LLMChatParams, base: string): Promise<LLMChatResult> {
@@ -397,7 +397,7 @@ export class OpenAIAPICli implements LLMCli {
     base: string
   ): Promise<LLMChatResult> {
     const { messages, systemPrompt, signal } = params
-    const endpoint = `${base}/chat/completions`
+    const endpoint = base
 
     type Role = 'system' | 'user' | 'assistant'
     type TextMessage = { role: Role; content: string }
@@ -898,10 +898,15 @@ export class OpencodeZenAPICli implements LLMCli {
         }).chat(params)
       case 'openai-completions':
       default:
-        return new OpenAIAPICli(this.apiKey, baseUrl, modelName, {
-          apiMode: 'chat-completions',
-          fetchImpl: this.options?.fetchImpl
-        }).chat(params)
+        return new OpenAIAPICli(
+          this.apiKey,
+          `${baseUrl.replace(/\/$/, '')}/chat/completions`,
+          modelName,
+          {
+            apiMode: 'chat-completions',
+            fetchImpl: this.options?.fetchImpl
+          }
+        ).chat(params)
     }
   }
 }
