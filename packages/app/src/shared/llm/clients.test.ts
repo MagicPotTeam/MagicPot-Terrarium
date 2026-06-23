@@ -61,6 +61,30 @@ describe('shared llm endpoint normalization', () => {
     )
   })
 
+  it('uses the configured OpenAI-compatible endpoint without appending chat completions', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'ok' } }] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new OpenAIAPICli(
+      'sk-test',
+      'https://codexapis.com/v1/images/generations',
+      'gpt-image-2'
+    )
+
+    await expect(
+      client.chat({ messages: [{ role: 'user', content: 'draw an image' }] })
+    ).resolves.toMatchObject({
+      content: 'ok'
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://codexapis.com/v1/images/generations',
+      expect.objectContaining({ method: 'POST' })
+    )
+  })
+
   it('forces the OpenAI image generation tool for image profiles', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

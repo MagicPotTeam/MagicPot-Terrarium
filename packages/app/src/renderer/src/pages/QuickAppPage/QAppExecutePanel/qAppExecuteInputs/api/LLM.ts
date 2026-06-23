@@ -15,7 +15,6 @@ import {
   ClaudeAPICli as SharedClaudeAPICli,
   OllamaAPICli as SharedOllamaAPICli,
   convertImageToBase64,
-  normalizeOpenAIBaseUrl,
   normalizeGeminiModelName,
   normalizeGeminiBaseUrl,
   normalizeClaudeBaseUrl,
@@ -91,8 +90,7 @@ async function compressImage(
 export class OpenAIAPICli extends SharedOpenAIAPICli implements LLMCliWithPrompt {
   async generatePrompt(params: GeneratePromptParams): Promise<string> {
     const { prompt, systemPrompt, imageObjUrl } = params
-    const base = normalizeOpenAIBaseUrl(this.baseUrl)
-    const endpoint = `${base}/chat/completions`
+    const endpoint = this.baseUrl.trim().replace(/\/$/, '')
 
     type Role = 'system' | 'user' | 'assistant'
     type TextMessage = { role: Role; content: string }
