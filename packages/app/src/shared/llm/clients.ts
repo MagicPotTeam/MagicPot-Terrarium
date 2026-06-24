@@ -240,6 +240,114 @@ const isOfficialOpenAIBaseUrl = (baseUrl: string): boolean => {
   }
 }
 
+const isOpenAIImagesGenerationEndpoint = (endpoint: string): boolean => {
+  const fallbackPath = endpoint.trim().replace(/\/+$/g, '').toLowerCase()
+  try {
+    const parsed = new URL(endpoint)
+    return parsed.pathname.replace(/\/+$/g, '').toLowerCase().endsWith('/images/generations')
+  } catch {
+    return fallbackPath.endsWith('/images/generations')
+  }
+}
+
+const normalizeOpenAIImageMimeType = (value: unknown): string => {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+  if (normalized === 'png' || normalized === 'image/png') {
+    return 'image/png'
+  }
+  if (normalized === 'webp' || normalized === 'image/webp') {
+    return 'image/webp'
+  }
+  if (['jpeg', 'jpg', 'image/jpeg', 'image/jpg'].includes(normalized)) {
+    return 'image/jpeg'
+  }
+  return 'image/png'
+}
+
+const extensionFromOpenAIImageMimeType = (mimeType: string): string =>
+  mimeType === 'image/jpeg' ? 'jpg' : mimeType.replace(/^image\//, '') || 'png'
+
+const normalizeOpenAIImageDataUrl = (value: string, mimeType: string): string => {
+  const trimmed = value.trim()
+  return trimmed.startsWith('data:') ? trimmed : `data:${mimeType};base64,${trimmed}`
+}
+
+const resolveOpenAIImagesGenerationPrompt = (params: LLMChatParams): string => {
+  const latestUserPrompt = [...params.messages]
+    .reverse()
+    .find((message) => message.role === 'user' && message.content.trim())
+    ?.content.trim()
+  if (latestUserPrompt) {
+    return latestUserPrompt
+  }
+
+  const messagePrompt = params.messages
+    .map((message) => message.content.trim())
+    .filter(Boolean)
+    .join('\n')
+  return messagePrompt || params.systemPrompt?.trim() || 'Generate an image.'
+}
+
+const extractOpenAIImagesGenerationResult = (
+  payload: unknown,
+  fallbackMimeType = 'image/png'
+): LLMChatResult | null => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return null
+  }
+
+  const record = payload as Record<string, unknown>
+  const data = Array.isArray(record.data) ? record.data : []
+  const attachments: NonNullable<LLMChatResult['attachments']> = []
+  const textParts: string[] = []
+
+  for (const item of data) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      continue
+    }
+
+    const itemRecord = item as Record<string, unknown>
+    const mimeType = normalizeOpenAIImageMimeType(
+      itemRecord.mime_type ?? itemRecord.output_format ?? itemRecord.format ?? fallbackMimeType
+    )
+    const rawUrl =
+      typeof itemRecord.url === 'string'
+        ? itemRecord.url.trim()
+        : typeof itemRecord.image_url === 'string'
+          ? itemRecord.image_url.trim()
+          : ''
+    const rawBase64 = typeof itemRecord.b64_json === 'string' ? itemRecord.b64_json.trim() : ''
+    const imageUrl = rawUrl || (rawBase64 ? normalizeOpenAIImageDataUrl(rawBase64, mimeType) : '')
+
+    if (typeof itemRecord.revised_prompt === 'string' && itemRecord.revised_prompt.trim()) {
+      textParts.push(itemRecord.revised_prompt.trim())
+    }
+
+    if (!imageUrl) {
+      continue
+    }
+
+    attachments.push({
+      type: 'image',
+      url: imageUrl,
+      mimeType,
+      fileName: `openai-image.${extensionFromOpenAIImageMimeType(mimeType)}`
+    })
+  }
+
+  if (!attachments.length) {
+    return null
+  }
+
+  return {
+    content: textParts.join('\n').trim(),
+    imageUrl: attachments[0]?.url,
+    attachments
+  }
+}
+
 export function normalizeGeminiBaseUrl(baseUrl: string): string {
   return baseUrl
     .trim()
@@ -434,14 +542,39 @@ export class OpenAIAPICli implements LLMCli {
       }
     }
 
-    const requestBody: Record<string, unknown> = {
-      model: this.modelName,
-      messages: apiMessages,
-      temperature: 0.7,
-      stream: false
-    }
-    if (params.maxOutputTokens) {
+    const usesImagesGenerationEndpoint = isOpenAIImagesGenerationEndpoint(endpoint)
+    const imageGenerationOptions = params.imageGenerationOptions
+    const requestBody: Record<string, unknown> = usesImagesGenerationEndpoint
+      ? {
+          model: this.modelName,
+          prompt: resolveOpenAIImagesGenerationPrompt(params)
+        }
+      : {
+          model: this.modelName,
+          messages: apiMessages,
+          temperature: 0.7,
+          stream: false
+        }
+    if (params.maxOutputTokens && !usesImagesGenerationEndpoint) {
       requestBody.max_tokens = params.maxOutputTokens
+    }
+    if (usesImagesGenerationEndpoint) {
+      const normalizedSize = imageGenerationOptions?.size?.trim()
+      const normalizedQuality = imageGenerationOptions?.quality?.trim()
+      const normalizedOutputFormat = imageGenerationOptions?.outputFormat?.trim()
+      const normalizedBackground = imageGenerationOptions?.background?.trim()
+      if (normalizedSize) {
+        requestBody.size = normalizedSize
+      }
+      if (normalizedQuality) {
+        requestBody.quality = normalizedQuality
+      }
+      if (normalizedOutputFormat) {
+        requestBody.output_format = normalizedOutputFormat
+      }
+      if (normalizedBackground) {
+        requestBody.background = normalizedBackground
+      }
     }
     if (this.options?.serviceTier && isOfficialOpenAIBaseUrl(base)) {
       requestBody.service_tier = this.options.serviceTier
@@ -473,6 +606,23 @@ export class OpenAIAPICli implements LLMCli {
     }
 
     const data = await resp.json()
+    if (usesImagesGenerationEndpoint) {
+      const imageResult = extractOpenAIImagesGenerationResult(
+        data,
+        imageGenerationOptions?.outputFormat
+      )
+      if (!imageResult) {
+        throw new Error(
+          `OpenAI Images API returned empty or invalid content. Response: ${JSON.stringify(data)}`
+        )
+      }
+      const usage = normalizeProviderTokenUsage(data)
+      return {
+        ...imageResult,
+        ...(usage ? { usage } : {})
+      }
+    }
+
     const content =
       data?.choices?.[0]?.message?.content ??
       data?.choices?.[0]?.content ??
