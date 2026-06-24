@@ -61,10 +61,10 @@ describe('shared llm endpoint normalization', () => {
     )
   })
 
-  it('uses the configured OpenAI-compatible endpoint without appending chat completions', async () => {
+  it('uses the configured OpenAI images endpoint with a prompt body', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ choices: [{ message: { content: 'ok' } }] })
+      json: async () => ({ data: [{ b64_json: 'aW1hZ2U=' }] })
     })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -77,12 +77,19 @@ describe('shared llm endpoint normalization', () => {
     await expect(
       client.chat({ messages: [{ role: 'user', content: 'draw an image' }] })
     ).resolves.toMatchObject({
-      content: 'ok'
+      content: '',
+      attachments: [expect.objectContaining({ type: 'image' })]
     })
     expect(fetchMock).toHaveBeenCalledWith(
       'https://codexapis.com/v1/images/generations',
       expect.objectContaining({ method: 'POST' })
     )
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(requestBody).toMatchObject({
+      model: 'gpt-image-2',
+      prompt: 'draw an image'
+    })
+    expect(requestBody).not.toHaveProperty('messages')
   })
 
   it('forces the OpenAI image generation tool for image profiles', async () => {
