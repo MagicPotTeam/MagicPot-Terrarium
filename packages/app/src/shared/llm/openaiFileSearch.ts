@@ -1,4 +1,5 @@
 import type { ChatAttachment, ChatMessage } from './types'
+import type { FetchImpl } from './clients'
 
 const FILE_SEARCH_READY_TIMEOUT_MS = 30_000
 const FILE_SEARCH_POLL_INTERVAL_MS = 1_000
@@ -156,7 +157,8 @@ const dataUrlToBlob = (value: string): Blob | null => {
 const loadAttachmentBlob = async (
   attachment: ChatAttachment,
   index: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  fetchImpl: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl
 ): Promise<{ blob: Blob; fileName: string }> => {
   const fileName = inferAttachmentFileName(attachment, index)
   const directBlob = dataUrlToBlob(attachment.url)
@@ -164,7 +166,7 @@ const loadAttachmentBlob = async (
     return { blob: directBlob, fileName }
   }
 
-  const response = await fetch(attachment.url, { signal })
+  const response = await fetchImpl(attachment.url, { signal })
   if (!response.ok) {
     throw new Error(
       `OpenAI file search could not download ${fileName}: ${response.status} ${response.statusText}`
@@ -201,14 +203,15 @@ const uploadFile = async (
   baseUrl: string,
   attachment: ChatAttachment,
   index: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  fetchImpl: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl
 ): Promise<string> => {
-  const { blob, fileName } = await loadAttachmentBlob(attachment, index, signal)
+  const { blob, fileName } = await loadAttachmentBlob(attachment, index, signal, fetchImpl)
   const formData = new FormData()
   formData.append('purpose', 'assistants')
   formData.append('file', blob, fileName)
 
-  const response = await fetch(`${baseUrl}/files`, {
+  const response = await fetchImpl(`${baseUrl}/files`, {
     method: 'POST',
     headers: authHeaders(apiKey),
     body: formData,
@@ -234,9 +237,10 @@ const uploadFile = async (
 const createVectorStore = async (
   apiKey: string,
   baseUrl: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  fetchImpl: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl
 ): Promise<string> => {
-  const response = await fetch(`${baseUrl}/vector_stores`, {
+  const response = await fetchImpl(`${baseUrl}/vector_stores`, {
     method: 'POST',
     headers: jsonHeaders(apiKey),
     body: JSON.stringify({
@@ -266,9 +270,10 @@ const addFileToVectorStore = async (
   baseUrl: string,
   vectorStoreId: string,
   fileId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  fetchImpl: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl
 ): Promise<void> => {
-  const response = await fetch(
+  const response = await fetchImpl(
     `${baseUrl}/vector_stores/${encodeURIComponent(vectorStoreId)}/files`,
     {
       method: 'POST',
@@ -294,12 +299,13 @@ const waitForVectorStoreFiles = async (
   baseUrl: string,
   vectorStoreId: string,
   fileIds: string[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  fetchImpl: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl
 ): Promise<void> => {
   const deadline = Date.now() + FILE_SEARCH_READY_TIMEOUT_MS
 
   while (Date.now() < deadline) {
-    const response = await fetch(
+    const response = await fetchImpl(
       `${baseUrl}/vector_stores/${encodeURIComponent(vectorStoreId)}/files`,
       {
         method: 'GET',
@@ -357,9 +363,13 @@ const waitForVectorStoreFiles = async (
   throw new Error('OpenAI file search indexing timed out before the files became ready.')
 }
 
-const safeDelete = async (apiKey: string, url: string): Promise<void> => {
+const safeDelete = async (
+  apiKey: string,
+  url: string,
+  fetchImpl: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl
+): Promise<void> => {
   try {
-    await fetch(url, {
+    await fetchImpl(url, {
       method: 'DELETE',
       headers: authHeaders(apiKey)
     })
@@ -408,6 +418,7 @@ export async function createOpenAIFileSearchSession(options: {
   baseUrl: string
   messages: ChatMessage[]
   signal?: AbortSignal
+  fetchImpl?: FetchImpl
 }): Promise<OpenAIFileSearchSession | null> {
   const attachments = collectOpenAIFileSearchAttachments(options.messages)
   if (!attachments.length) {
@@ -420,18 +431,31 @@ export async function createOpenAIFileSearchSession(options: {
   try {
     for (const [index, attachment] of attachments.entries()) {
       fileIds.push(
-        await uploadFile(options.apiKey, options.baseUrl, attachment, index, options.signal)
+        await uploadFile(
+          options.apiKey,
+          options.baseUrl,
+          attachment,
+          index,
+          options.signal,
+          options.fetchImpl
+        )
       )
     }
 
-    vectorStoreId = await createVectorStore(options.apiKey, options.baseUrl, options.signal)
+    vectorStoreId = await createVectorStore(
+      options.apiKey,
+      options.baseUrl,
+      options.signal,
+      options.fetchImpl
+    )
     for (const fileId of fileIds) {
       await addFileToVectorStore(
         options.apiKey,
         options.baseUrl,
         vectorStoreId,
         fileId,
-        options.signal
+        options.signal,
+        options.fetchImpl
       )
     }
 
@@ -440,7 +464,8 @@ export async function createOpenAIFileSearchSession(options: {
       options.baseUrl,
       vectorStoreId,
       fileIds,
-      options.signal
+      options.signal,
+      options.fetchImpl
     )
 
     return {
@@ -449,13 +474,18 @@ export async function createOpenAIFileSearchSession(options: {
         if (vectorStoreId) {
           await safeDelete(
             options.apiKey,
-            `${options.baseUrl}/vector_stores/${encodeURIComponent(vectorStoreId)}`
+            `${options.baseUrl}/vector_stores/${encodeURIComponent(vectorStoreId)}`,
+            options.fetchImpl
           )
         }
 
         await Promise.allSettled(
           fileIds.map((fileId) =>
-            safeDelete(options.apiKey, `${options.baseUrl}/files/${encodeURIComponent(fileId)}`)
+            safeDelete(
+              options.apiKey,
+              `${options.baseUrl}/files/${encodeURIComponent(fileId)}`,
+              options.fetchImpl
+            )
           )
         )
       }
@@ -464,13 +494,18 @@ export async function createOpenAIFileSearchSession(options: {
     if (vectorStoreId) {
       await safeDelete(
         options.apiKey,
-        `${options.baseUrl}/vector_stores/${encodeURIComponent(vectorStoreId)}`
+        `${options.baseUrl}/vector_stores/${encodeURIComponent(vectorStoreId)}`,
+        options.fetchImpl
       )
     }
 
     await Promise.allSettled(
       fileIds.map((fileId) =>
-        safeDelete(options.apiKey, `${options.baseUrl}/files/${encodeURIComponent(fileId)}`)
+        safeDelete(
+          options.apiKey,
+          `${options.baseUrl}/files/${encodeURIComponent(fileId)}`,
+          options.fetchImpl
+        )
       )
     )
 

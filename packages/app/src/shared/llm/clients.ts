@@ -432,7 +432,8 @@ export class OpenAIAPICli implements LLMCli {
         apiKey: this.apiKey,
         baseUrl: base,
         messages: params.messages,
-        signal: params.signal
+        signal: params.signal,
+        fetchImpl: this.getFetchImpl()
       })
 
       requestBody.tools = [
