@@ -172,6 +172,25 @@ describe('CanvasImageDomPreview', () => {
     )
   })
 
+  it('does not render a source overlay when crop/source layout is not trustworthy', () => {
+    mockCanvas2DContext()
+
+    render(
+      <CanvasImageDomPreview
+        item={createItem({
+          crop: { x: 0, y: 0, width: 19_717, height: 1 },
+          image: createImage(512, 314)
+        })}
+        previewMode="high-res-source"
+        sourceImagePreview
+        stageScale={1}
+      />
+    )
+
+    expect(document.querySelector('canvas')).toBeNull()
+    expect(document.querySelector('img')).toBeNull()
+  })
+
   it('materializes local source previews through svcFs before rendering the image', async () => {
     const readImageFromPath = vi.fn(async () => ({
       image: new Uint8Array([1, 2, 3, 4]),

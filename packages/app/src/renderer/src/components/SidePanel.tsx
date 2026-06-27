@@ -817,7 +817,9 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
             src: primaryImage.url,
             fileName: primaryImage.fileName,
             projectId,
-            select: false
+            select: false,
+            sourceWidth: primaryImage.sourceWidth,
+            sourceHeight: primaryImage.sourceHeight
           }
         })
       )
@@ -1004,7 +1006,9 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
                     src: imageAttachment.url,
                     fileName: imageAttachment.fileName,
                     projectId,
-                    select: index === imageAttachments.length - 1
+                    select: index === imageAttachments.length - 1,
+                    sourceWidth: imageAttachment.sourceWidth,
+                    sourceHeight: imageAttachment.sourceHeight
                   }
                 })
               )
