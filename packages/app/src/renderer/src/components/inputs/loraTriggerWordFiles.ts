@@ -27,6 +27,8 @@ const TRIGGER_WORDS_TEXT_EXTENSION = '.txt'
 const METADATA_SIDECAR_SUFFIXES = ['.civitai.info', '.metadata.json', '.json']
 const MAX_TRIGGER_WORD_SEARCH_DEPTH = 6
 const COMFYUI_LORA_MODEL_FOLDER = 'loras'
+const SAFETENSORS_HEADER_PREFIX_BYTES = 8
+const MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null
@@ -383,23 +385,70 @@ const collectExplicitTriggerWords = (value: unknown, depth = 0): string[] => {
   return [...directMatches, ...nestedMatches]
 }
 
-const isFallbackTriggerWordMetadataKey = (key: string): boolean => {
+const isTagFrequencyMetadataKey = (key: string): boolean => {
   const normalizedKey = normalizeMetadataKey(key)
-  return ['ssoutputname', 'modelspectitle'].includes(normalizedKey)
+  return ['sstagfrequency', 'tagfrequency', 'tagfrequencies'].includes(normalizedKey)
 }
 
-const collectFallbackTriggerWords = (value: unknown, depth = 0): string[] => {
+const toPositiveFiniteNumber = (value: unknown): number | null => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsedValue = Number(value)
+    return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : null
+  }
+  return null
+}
+
+type TagFrequencyEntry = {
+  tag: string
+  count: number
+}
+
+const collectTagFrequencyEntriesFromValue = (value: unknown, depth = 0): TagFrequencyEntry[] => {
   if (depth > MAX_TRIGGER_WORD_SEARCH_DEPTH) {
     return []
   }
 
   if (typeof value === 'string') {
     const parsed = parseJsonString(value)
-    return parsed === null ? [] : collectFallbackTriggerWords(parsed, depth + 1)
+    return parsed === null ? [] : collectTagFrequencyEntriesFromValue(parsed, depth + 1)
   }
 
   if (Array.isArray(value)) {
-    return value.flatMap((item) => collectFallbackTriggerWords(item, depth + 1))
+    const tupleCount = value.length >= 2 ? toPositiveFiniteNumber(value[1]) : null
+    if (typeof value[0] === 'string' && tupleCount !== null) {
+      return [{ tag: value[0], count: tupleCount }]
+    }
+    return value.flatMap((item) => collectTagFrequencyEntriesFromValue(item, depth + 1))
+  }
+
+  if (!isRecord(value)) {
+    return []
+  }
+
+  return Object.entries(value).flatMap(([key, item]) => {
+    const directCount = toPositiveFiniteNumber(item)
+    if (directCount !== null) {
+      return [{ tag: key, count: directCount }]
+    }
+    return collectTagFrequencyEntriesFromValue(item, depth + 1)
+  })
+}
+
+const collectTagFrequencyEntries = (value: unknown, depth = 0): TagFrequencyEntry[] => {
+  if (depth > MAX_TRIGGER_WORD_SEARCH_DEPTH) {
+    return []
+  }
+
+  if (typeof value === 'string') {
+    const parsed = parseJsonString(value)
+    return parsed === null ? [] : collectTagFrequencyEntries(parsed, depth + 1)
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectTagFrequencyEntries(item, depth + 1))
   }
 
   if (!isRecord(value)) {
@@ -407,49 +456,57 @@ const collectFallbackTriggerWords = (value: unknown, depth = 0): string[] => {
   }
 
   const directMatches = Object.entries(value).flatMap(([key, item]) =>
-    isFallbackTriggerWordMetadataKey(key) ? collectStringsFromTriggerValue(item, depth + 1) : []
+    isTagFrequencyMetadataKey(key) ? collectTagFrequencyEntriesFromValue(item, depth + 1) : []
   )
   const nestedMatches = Object.values(value).flatMap((item) =>
-    collectFallbackTriggerWords(item, depth + 1)
+    collectTagFrequencyEntries(item, depth + 1)
   )
 
   return [...directMatches, ...nestedMatches]
 }
 
-const stripKnownModelExtension = (value: string): string => {
-  const lowerValue = value.toLocaleLowerCase()
-  const extension = LORA_MODEL_FILE_EXTENSIONS.find((item) => lowerValue.endsWith(item))
-  return extension ? value.slice(0, -extension.length) : value
+export const extractFrequentTriggerWordsFromMetadataObject = (metadataObject: unknown): string => {
+  const totals = new Map<string, { tag: string; count: number; order: number }>()
+
+  collectTagFrequencyEntries(metadataObject).forEach(({ tag, count }) => {
+    const cleanedTag = cleanTriggerWord(tag)
+    if (!cleanedTag) {
+      return
+    }
+
+    const key = cleanedTag.toLocaleLowerCase()
+    const current = totals.get(key)
+    if (current) {
+      current.count += count
+      return
+    }
+    totals.set(key, { tag: cleanedTag, count, order: totals.size })
+  })
+
+  const entries = Array.from(totals.values())
+  if (entries.length === 0) {
+    return ''
+  }
+
+  const maxCount = Math.max(...entries.map((entry) => entry.count))
+  return normalizeTriggerWordCandidates(
+    entries
+      .filter((entry) => entry.count === maxCount)
+      .sort((left, right) => left.order - right.order)
+      .map((entry) => entry.tag)
+  )
 }
-
-const cleanFallbackTriggerWord = (value: string): string => {
-  const cleanedValue = cleanTriggerWord(value)
-  const filename =
-    cleanedValue
-      .split(/[\\/]+/)
-      .filter(Boolean)
-      .pop() || cleanedValue
-  return stripKnownModelExtension(filename).trim()
-}
-
-const normalizeFallbackTriggerWordCandidates = (candidates: string[]): string =>
-  normalizeTriggerWordCandidates(candidates.map(cleanFallbackTriggerWord))
-
-export const getFallbackTriggerWordsFromLoraName = (loraName: string): string =>
-  normalizeFallbackTriggerWordCandidates([loraName])
 
 export const extractTriggerWordsFromMetadataObject = (metadataObject: unknown): string =>
   normalizeTriggerWordCandidates(collectExplicitTriggerWords(metadataObject))
 
-export const extractFallbackTriggerWordsFromMetadataObject = (metadataObject: unknown): string =>
-  normalizeFallbackTriggerWordCandidates(collectFallbackTriggerWords(metadataObject))
-
 export const extractTriggerWordsFromSafetensorsMetadata = (headerObject: unknown): string =>
-  extractTriggerWordsFromMetadataObject(headerObject)
+  extractTriggerWordsFromMetadataObject(headerObject) ||
+  extractFrequentTriggerWordsFromMetadataObject(headerObject)
 
 const readMetadataSidecarTriggerWords = (content: string): string => {
   const parsedContent = parseJsonString(content)
-  return parsedContent === null ? '' : extractTriggerWordsFromMetadataObject(parsedContent)
+  return parsedContent === null ? '' : extractTriggerWordsFromSafetensorsMetadata(parsedContent)
 }
 
 const readSidecarTriggerWords = (content: string, kind: LoraTriggerWordsSidecarKind): string =>
@@ -558,15 +615,72 @@ export const readLoraTriggerWordsComfyUIMetadata = async (
     extractTriggerWordsFromSafetensorsMetadata
   )
 
-const readLoraFallbackTriggerWordsComfyUIMetadata = async (
+const toUint8Array = (data: Uint8Array | ArrayBuffer | number[]): Uint8Array =>
+  data instanceof Uint8Array ? data : new Uint8Array(data)
+
+const readLittleEndianUint64AsNumber = (bytes: Uint8Array): number | null => {
+  if (bytes.length < SAFETENSORS_HEADER_PREFIX_BYTES) {
+    return null
+  }
+
+  let value = 0
+  let multiplier = 1
+  for (let index = 0; index < SAFETENSORS_HEADER_PREFIX_BYTES; index += 1) {
+    value += bytes[index] * multiplier
+    if (!Number.isSafeInteger(value) || value > MAX_SAFETENSORS_HEADER_BYTES) {
+      return null
+    }
+    multiplier *= 256
+  }
+
+  return value
+}
+
+const readSafetensorsHeaderObject = async (fullPath: string): Promise<unknown | null> => {
+  const prefixResponse = await api().svcFs.readFileSlice({
+    fullPath,
+    offset: 0,
+    length: SAFETENSORS_HEADER_PREFIX_BYTES
+  })
+  const headerLength = readLittleEndianUint64AsNumber(toUint8Array(prefixResponse.data))
+  if (!headerLength || headerLength > MAX_SAFETENSORS_HEADER_BYTES) {
+    return null
+  }
+
+  const headerResponse = await api().svcFs.readFileSlice({
+    fullPath,
+    offset: SAFETENSORS_HEADER_PREFIX_BYTES,
+    length: headerLength
+  })
+  const headerText = new TextDecoder().decode(toUint8Array(headerResponse.data))
+  return parseJsonString(headerText)
+}
+
+const isSafetensorsModelFile = (fileRef: LoraModelFileRef): boolean =>
+  fileRef.filename.toLocaleLowerCase().endsWith(SAFETENSORS_EXTENSION)
+
+export const readLoraTriggerWordsLocalSafetensorsMetadata = async (
   loraName: string,
   configUtils: ConfigUtils
-): Promise<string> =>
-  readLoraTriggerWordsComfyUIMetadataValue(
-    loraName,
-    configUtils,
-    extractFallbackTriggerWordsFromMetadataObject
+): Promise<string> => {
+  const modelFileRefs = resolveLoraModelFileCandidates(configUtils.getLoraDir(), loraName).filter(
+    isSafetensorsModelFile
   )
+
+  for (const modelFileRef of modelFileRefs) {
+    try {
+      const headerObject = await readSafetensorsHeaderObject(modelFileRef.fullPath)
+      const triggerWords = extractTriggerWordsFromSafetensorsMetadata(headerObject)
+      if (triggerWords) {
+        return triggerWords
+      }
+    } catch {
+      // Try the next supported local safetensors filename candidate.
+    }
+  }
+
+  return ''
+}
 
 export const readLoraTriggerWordsAuto = async (
   loraName: string,
@@ -582,13 +696,5 @@ export const readLoraTriggerWordsAuto = async (
     return triggerWordsFromSidecar
   }
 
-  const triggerWordsFromFallbackMetadata = await readLoraFallbackTriggerWordsComfyUIMetadata(
-    loraName,
-    configUtils
-  )
-  if (triggerWordsFromFallbackMetadata) {
-    return triggerWordsFromFallbackMetadata
-  }
-
-  return getFallbackTriggerWordsFromLoraName(loraName)
+  return readLoraTriggerWordsLocalSafetensorsMetadata(loraName, configUtils)
 }
