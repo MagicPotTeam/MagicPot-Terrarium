@@ -68,10 +68,12 @@ const deferred = <T,>() => {
 
 const renderControlled = ({
   initialValue,
+  loraOptions = ['alpha.safetensors', 'beta.safetensors'],
   onLoraSelected,
   onAppendLoraTriggerWords
 }: {
   initialValue: LoRAConfig[]
+  loraOptions?: string[]
   onLoraSelected?: (
     loraName: string,
     triggerWords?: string
@@ -93,7 +95,7 @@ const renderControlled = ({
           onChange(nextValue)
           setValue(nextValue)
         }}
-        lora_options={['alpha.safetensors', 'beta.safetensors']}
+        lora_options={loraOptions}
         onLoraSelected={onLoraSelected}
         onAppendLoraTriggerWords={onAppendLoraTriggerWords}
       />
@@ -260,6 +262,85 @@ describe('InputLoRAChain', () => {
         trigger_words: 'beta trigger'
       })
     )
+  })
+
+  it('does not overwrite manual trigger words typed while auto-load is pending', async () => {
+    comfyMocks.listImages.mockResolvedValue({})
+    const triggerWords = deferred<string>()
+    const onLoraSelected = vi.fn(() => triggerWords.promise)
+    const { latest } = renderControlled({
+      initialValue: [createLora('beta.safetensors')],
+      onLoraSelected
+    })
+
+    await waitFor(() => {
+      expect(onLoraSelected).toHaveBeenCalledWith('beta.safetensors', '', expect.any(Array))
+    })
+
+    const triggerWordsInput = screen.getByLabelText('Lora 0 Trigger words note')
+    fireEvent.change(triggerWordsInput, { target: { value: 'manual token' } })
+
+    await waitFor(() => {
+      expect(latest.value[0]).toMatchObject({
+        lora_name: 'beta.safetensors',
+        trigger_words: 'manual token'
+      })
+    })
+
+    triggerWords.resolve('auto token')
+
+    await waitFor(() => {
+      expect(latest.value[0]).toMatchObject({
+        lora_name: 'beta.safetensors',
+        trigger_words: 'manual token'
+      })
+      expect(screen.getByDisplayValue('manual token')).toBeInTheDocument()
+    })
+  })
+
+  it('auto-loads trigger words for an already selected LoRA with an empty note', async () => {
+    comfyMocks.listImages.mockResolvedValue({})
+    const selectedLoraName = '20260402\\qwen_image_lora_task01_000001'
+    const onLoraSelected = vi.fn(async () => 'task01_style, qwen_token')
+    const { latest } = renderControlled({
+      initialValue: [createLora(selectedLoraName)],
+      loraOptions: [selectedLoraName],
+      onLoraSelected
+    })
+
+    await waitFor(() => {
+      expect(onLoraSelected).toHaveBeenCalledWith(selectedLoraName, '', expect.any(Array))
+      expect(latest.value[0]).toMatchObject({
+        lora_name: selectedLoraName,
+        trigger_words: 'task01_style, qwen_token'
+      })
+      expect(screen.getByDisplayValue('task01_style, qwen_token')).toBeInTheDocument()
+    })
+  })
+
+  it('writes loaded trigger words into the note field for Windows-style LoRA option names', async () => {
+    comfyMocks.listImages.mockResolvedValue({})
+    const selectedLoraName = '马上用\\20260615\\Qwen\\HHCT_qwen'
+    const onLoraSelected = vi.fn(async () => 'hhct_style, restaurant_token')
+    const { latest } = renderControlled({
+      initialValue: [createLora('')],
+      loraOptions: [selectedLoraName],
+      onLoraSelected
+    })
+
+    const combo = await screen.findByLabelText('Lora 0')
+    fireEvent.mouseDown(combo)
+    fireEvent.change(combo, { target: { value: selectedLoraName } })
+    fireEvent.click(await screen.findByRole('option', { name: selectedLoraName }))
+
+    await waitFor(() => {
+      expect(onLoraSelected).toHaveBeenCalledWith(selectedLoraName, '', expect.any(Array))
+      expect(latest.value[0]).toMatchObject({
+        lora_name: selectedLoraName,
+        trigger_words: 'hhct_style, restaurant_token'
+      })
+      expect(screen.getByDisplayValue('hhct_style, restaurant_token')).toBeInTheDocument()
+    })
   })
 
   it('applies delayed trigger words to the same row after deleting a row before it', async () => {

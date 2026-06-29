@@ -51,6 +51,8 @@ type InputLoraProps = {
   ) => string | void | Promise<string | void>
   onAppendLoraTriggerWords?: (lora: LoRAConfig) => string | void | Promise<string | void>
   comfyUtilsRef: RefObject<ComfyUtils>
+  getCurrentLoras: () => LoRAConfig[]
+  getCurrentLoraByRowId: (rowId: string) => LoRAConfig | undefined
 }
 
 const InputLora: React.FC<InputLoraProps> = ({
@@ -63,7 +65,9 @@ const InputLora: React.FC<InputLoraProps> = ({
   onLoraSelected,
   onLoraTriggerWordsConfirmed,
   onAppendLoraTriggerWords,
-  comfyUtilsRef
+  comfyUtilsRef,
+  getCurrentLoras,
+  getCurrentLoraByRowId
 }) => {
   const { t } = useTranslation()
   const triggerWordsLabel = t('input.lora.trigger_words_label', {
@@ -95,6 +99,43 @@ const InputLora: React.FC<InputLoraProps> = ({
   useEffect(() => {
     currentLoraNameRef.current = currentLora.lora_name
   }, [currentLora.lora_name])
+
+  useEffect(() => {
+    const loraName = currentLora.lora_name
+    if (!loraName || currentLora.trigger_words?.trim()) {
+      return
+    }
+
+    const requestId = loraSelectionRequestRef.current + 1
+    loraSelectionRequestRef.current = requestId
+    void Promise.resolve(onLoraSelected?.(loraName, '', getCurrentLoras()))
+      .then((loadedTriggerWords) => {
+        const latestLora = getCurrentLoraByRowId(rowId)
+        if (
+          !loadedTriggerWords ||
+          loraSelectionRequestRef.current !== requestId ||
+          currentLoraNameRef.current !== loraName ||
+          latestLora?.lora_name !== loraName ||
+          latestLora?.trigger_words?.trim()
+        ) {
+          return
+        }
+        handleUpdateByRowIdRef.current(rowId, {
+          lora_name: loraName,
+          trigger_words: loadedTriggerWords
+        })
+      })
+      .catch((error) => {
+        console.warn('[InputLoRAChain] failed to auto-load LoRA trigger words:', error)
+      })
+  }, [
+    currentLora.lora_name,
+    currentLora.trigger_words,
+    getCurrentLoraByRowId,
+    getCurrentLoras,
+    onLoraSelected,
+    rowId
+  ])
 
   const updateImageObjUrl = useCallback((nextUrl: string | null) => {
     setImageObjUrl((prev) => {
@@ -182,32 +223,11 @@ const InputLora: React.FC<InputLoraProps> = ({
       <Autocomplete
         value={currentLora.lora_name || null}
         onChange={(event, newValue) => {
-          const requestId = loraSelectionRequestRef.current + 1
-          loraSelectionRequestRef.current = requestId
-          const nextLoraName = newValue || ''
-          const nextLoras = handleUpdateByRowIdRef.current(rowId, {
-            lora_name: nextLoraName,
+          loraSelectionRequestRef.current += 1
+          handleUpdateByRowIdRef.current(rowId, {
+            lora_name: newValue || '',
             trigger_words: ''
           })
-          if (nextLoraName) {
-            void Promise.resolve(onLoraSelected?.(nextLoraName, '', nextLoras))
-              .then((loadedTriggerWords) => {
-                if (
-                  !loadedTriggerWords ||
-                  loraSelectionRequestRef.current !== requestId ||
-                  currentLoraNameRef.current !== nextLoraName
-                ) {
-                  return
-                }
-                handleUpdateByRowIdRef.current(rowId, {
-                  lora_name: nextLoraName,
-                  trigger_words: loadedTriggerWords
-                })
-              })
-              .catch((error) => {
-                console.warn('[InputLoRAChain] failed to load LoRA trigger words:', error)
-              })
-          }
         }}
         options={loraOptions}
         freeSolo={false}
@@ -312,6 +332,7 @@ const InputLora: React.FC<InputLoraProps> = ({
                   return
                 }
                 const nextTriggerWords = event.target.value
+                loraSelectionRequestRef.current += 1
                 handleUpdateByRowIdRef.current(rowId, { trigger_words: nextTriggerWords })
               }}
               onBlur={() => {
@@ -412,6 +433,11 @@ const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
     rowIdsRef.current = rowIdsRef.current.slice(0, value.length)
   }
 
+  const getCurrentLoras = useCallback(() => valueRef.current, [])
+  const getCurrentLoraByRowId = useCallback((rowId: string) => {
+    const rowIndex = rowIdsRef.current.indexOf(rowId)
+    return rowIndex === -1 ? undefined : valueRef.current[rowIndex]
+  }, [])
   const handleChange = useCallback(
     (newValue: LoRAConfig[]) => {
       valueRef.current = newValue
@@ -501,6 +527,8 @@ const InputLoRAChain: React.FC<InputLoRAChainProps> = ({
                   onLoraTriggerWordsConfirmed={onLoraSelected}
                   onAppendLoraTriggerWords={onAppendLoraTriggerWords}
                   comfyUtilsRef={comfyUtilsRef}
+                  getCurrentLoras={getCurrentLoras}
+                  getCurrentLoraByRowId={getCurrentLoraByRowId}
                 />
               </CardContent>
               <CardActions>
