@@ -141,6 +141,42 @@ describe('loraTriggerWordFiles', () => {
     ).toBe('')
   })
 
+  it('uses the native Rust reader before ComfyUI and JS file fallbacks', async () => {
+    const fetchMock = vi.fn()
+    const readTextFileMock = vi.fn()
+    const readFileSliceMock = vi.fn()
+    const readLoraTriggerWordsNativeMock = vi.fn().mockResolvedValue({
+      triggerWords: 'native style\nnative token',
+      source: 'safetensors:C:\\ComfyUI\\models\\loras\\anime\\style.safetensors',
+      nativeAvailable: true
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('path', path.win32)
+    window.path = path.win32 as typeof window.path
+    window.api = {
+      svcFs: {
+        readLoraTriggerWordsNative: readLoraTriggerWordsNativeMock,
+        readTextFile: readTextFileMock,
+        readFileSlice: readFileSliceMock
+      }
+    } as unknown as typeof window.api
+
+    await expect(
+      readLoraTriggerWordsAuto('anime/style.safetensors', {
+        getComfyUIOrigin: () => 'http://remote-comfyui:8188',
+        getLoraDir: () => 'C:\\ComfyUI\\models\\loras'
+      } as never)
+    ).resolves.toBe('native style, native token')
+
+    expect(readLoraTriggerWordsNativeMock).toHaveBeenCalledWith({
+      loraDir: 'C:\\ComfyUI\\models\\loras',
+      loraName: 'anime/style.safetensors'
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(readTextFileMock).not.toHaveBeenCalled()
+    expect(readFileSliceMock).not.toHaveBeenCalled()
+  })
+
   it('reads trigger words from ComfyUI /view_metadata/loras before local txt sidecars', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

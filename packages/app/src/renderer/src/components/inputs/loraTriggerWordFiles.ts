@@ -682,10 +682,35 @@ export const readLoraTriggerWordsLocalSafetensorsMetadata = async (
   return ''
 }
 
+export const readLoraTriggerWordsNative = async (
+  loraName: string,
+  configUtils: ConfigUtils
+): Promise<string> => {
+  const loraDir = configUtils.getLoraDir().trim()
+  if (!loraDir || !loraName.trim()) {
+    return ''
+  }
+
+  try {
+    const response = await api().svcFs.readLoraTriggerWordsNative?.({
+      loraDir,
+      loraName
+    })
+    return normalizeTriggerWords(response?.triggerWords || '')
+  } catch {
+    return ''
+  }
+}
+
 export const readLoraTriggerWordsAuto = async (
   loraName: string,
   configUtils: ConfigUtils
 ): Promise<string> => {
+  const triggerWordsFromNative = await readLoraTriggerWordsNative(loraName, configUtils)
+  if (triggerWordsFromNative) {
+    return triggerWordsFromNative
+  }
+
   const triggerWordsFromMetadata = await readLoraTriggerWordsComfyUIMetadata(loraName, configUtils)
   if (triggerWordsFromMetadata) {
     return triggerWordsFromMetadata

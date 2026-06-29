@@ -132,6 +132,21 @@ describe('FsSvcImpl', () => {
     })
   })
 
+  describe('readLoraTriggerWordsNative', () => {
+    it('returns unavailable when the native sidecar binary is not present', async () => {
+      await expect(
+        service.readLoraTriggerWordsNative({
+          loraDir: testRoot,
+          loraName: 'style.safetensors'
+        })
+      ).resolves.toEqual({
+        triggerWords: '',
+        source: '',
+        nativeAvailable: false
+      })
+    })
+  })
+
   describe('listImagesInFolder', () => {
     it('propagates directory scan errors for invalid folder paths', async () => {
       const fullPath = path.join(testRoot, 'not-a-directory')

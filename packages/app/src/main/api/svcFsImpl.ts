@@ -15,6 +15,8 @@ import {
   ReadFileFromPathResp,
   ReadFileSliceReq,
   ReadFileSliceResp,
+  ReadLoraTriggerWordsNativeReq,
+  ReadLoraTriggerWordsNativeResp,
   ReadTextFileReq,
   ReadTextFileResp,
   WriteTextFileReq,
@@ -23,10 +25,16 @@ import {
 import fs from 'fs/promises'
 import * as path from 'path'
 import { app } from 'electron'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tif', '.tiff']
 const MAX_CONCURRENT_FS_OPS = 16
 const QAPP_INPUT_IMAGE_DIR = 'qapp-input-images'
+const LORA_TRIGGER_SIDECAR_EXE =
+  process.platform === 'win32' ? 'lora-trigger-sidecar.exe' : 'lora-trigger-sidecar'
+const LORA_TRIGGER_SIDECAR_TIMEOUT_MS = 1500
+const execFileAsync = promisify(execFile)
 
 let activeFsOps = 0
 const pendingFsOps: (() => void)[] = []
@@ -70,6 +78,62 @@ const pathExists = async (targetPath: string): Promise<boolean> => {
   } catch {
     return false
   }
+}
+
+const getLoraTriggerSidecarCandidates = (): string[] => {
+  const appPath = typeof app?.getAppPath === 'function' ? app.getAppPath() : process.cwd()
+  const resourcesPath = process.resourcesPath || process.cwd()
+  const candidatePaths = [
+    path.join(resourcesPath, 'bin', 'lora-trigger-sidecar', LORA_TRIGGER_SIDECAR_EXE),
+    path.join(
+      resourcesPath,
+      'packages',
+      'runtime-assets',
+      'resources',
+      'bin',
+      'lora-trigger-sidecar',
+      LORA_TRIGGER_SIDECAR_EXE
+    ),
+    path.join(
+      appPath,
+      'packages',
+      'runtime-assets',
+      'resources',
+      'bin',
+      'lora-trigger-sidecar',
+      LORA_TRIGGER_SIDECAR_EXE
+    ),
+    path.join(
+      appPath,
+      '..',
+      'packages',
+      'runtime-assets',
+      'resources',
+      'bin',
+      'lora-trigger-sidecar',
+      LORA_TRIGGER_SIDECAR_EXE
+    ),
+    path.join(
+      process.cwd(),
+      'packages',
+      'runtime-assets',
+      'resources',
+      'bin',
+      'lora-trigger-sidecar',
+      LORA_TRIGGER_SIDECAR_EXE
+    )
+  ]
+
+  return Array.from(new Set(candidatePaths.map((candidatePath) => path.normalize(candidatePath))))
+}
+
+const resolveLoraTriggerSidecarPath = async (): Promise<string | null> => {
+  for (const candidatePath of getLoraTriggerSidecarCandidates()) {
+    if (await pathExists(candidatePath)) {
+      return candidatePath
+    }
+  }
+  return null
 }
 
 const sanitizeFileName = (value: string): string => {
@@ -296,6 +360,41 @@ export class FsSvcImpl implements FsSvc {
     return {
       success: true,
       fullPath
+    }
+  }
+
+  readLoraTriggerWordsNative = async (
+    req: ReadLoraTriggerWordsNativeReq
+  ): Promise<ReadLoraTriggerWordsNativeResp> => {
+    const loraDir = req.loraDir.trim()
+    const loraName = req.loraName.trim()
+    if (!loraDir || !loraName) {
+      return { triggerWords: '', source: '', nativeAvailable: false }
+    }
+
+    const sidecarPath = await resolveLoraTriggerSidecarPath()
+    if (!sidecarPath) {
+      return { triggerWords: '', source: '', nativeAvailable: false }
+    }
+
+    const { stdout } = await execFileAsync(
+      sidecarPath,
+      ['--lora-dir', loraDir, '--lora-name', loraName],
+      {
+        timeout: LORA_TRIGGER_SIDECAR_TIMEOUT_MS,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024
+      }
+    )
+    const parsed = JSON.parse(stdout.trim() || '{}') as Partial<{
+      trigger_words: unknown
+      source: unknown
+    }>
+
+    return {
+      triggerWords: typeof parsed.trigger_words === 'string' ? parsed.trigger_words : '',
+      source: typeof parsed.source === 'string' ? parsed.source : '',
+      nativeAvailable: true
     }
   }
 }
