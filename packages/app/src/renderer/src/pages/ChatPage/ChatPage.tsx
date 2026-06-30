@@ -53,12 +53,14 @@ import {
   resolveLocalMediaPathFromUrl,
   HUNYUAN_3D_PROFILE_ID,
   normalizeChatProfileIdForStorage,
+  readScopedActiveLoadingSessionIds,
   readScopedExternalLoadingSessionIds,
   recordAutoSavedChatImageKey,
   scopedStorageKey,
   STORAGE_KEY_CURRENT_SESSION_ID,
   STORAGE_KEY_LOADING_IDS,
   STORAGE_KEY_SELECTED_PROFILE,
+  updateScopedActiveLoadingSessionId,
   updateScopedExternalLoadingSessionId
 } from './chatPageShared'
 import {
@@ -864,6 +866,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       loadingSessionIdsRef.current = nextLoadingIds
       setLoadingSessionIds(nextLoadingIds)
       setSessionLoadingStatus(sessionId, null)
+      updateScopedActiveLoadingSessionId(storageScope, sessionId, false)
 
       try {
         const stored = JSON.parse(localStorage.getItem(loadingIdsStorageKey) || '[]') as string[]
@@ -877,7 +880,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       updateExternalLoadingSessionState(sessionId, false)
     },
-    [loadingIdsStorageKey, setSessionLoadingStatus, updateExternalLoadingSessionState]
+    [loadingIdsStorageKey, setSessionLoadingStatus, storageScope, updateExternalLoadingSessionState]
   )
 
   const terminateSession = useCallback(
@@ -969,6 +972,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const session = sessions.find((item) => item.id === sessionId)
       const hasLiveRequest =
         sessionAbortControllersRef.current.has(sessionId) ||
+        readScopedActiveLoadingSessionIds(storageScope).includes(sessionId) ||
         externalLoadingSessionIdsRef.current.has(sessionId)
       if (!session || session.messages.length === 0 || !hasLiveRequest) {
         removedLoadingIds.push(sessionId)
@@ -4174,6 +4178,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       if (targetSessionId) {
         loadingSessionIdsRef.current = new Set(loadingSessionIdsRef.current).add(targetSessionId)
+        updateScopedActiveLoadingSessionId(storageScope, targetSessionId, true)
         setLoadingSessionIds((prev) => new Set(prev).add(targetSessionId as string))
         try {
           const existing = JSON.parse(

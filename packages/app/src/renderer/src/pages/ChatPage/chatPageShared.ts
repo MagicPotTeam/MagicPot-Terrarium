@@ -186,6 +186,7 @@ const readStoredSessionIds = (storageKey: string): string[] => {
 }
 
 const externalLoadingSessionIdsByScope = new Map<string, Set<string>>()
+const activeLoadingSessionIdsByScope = new Map<string, Set<string>>()
 
 export const getScopedLoadingIdsStorageKey = (scope: string): string =>
   scopedStorageKey(STORAGE_KEY_LOADING_IDS, scope)
@@ -211,6 +212,41 @@ export const clearScopedExternalLoadingSessionIds = (scope?: string): void => {
   externalLoadingSessionIdsByScope.clear()
 }
 
+export const clearScopedActiveLoadingSessionIds = (scope?: string): void => {
+  if (scope) {
+    activeLoadingSessionIdsByScope.delete(scope)
+    return
+  }
+
+  activeLoadingSessionIdsByScope.clear()
+}
+
+export const readScopedActiveLoadingSessionIds = (scope: string): string[] => [
+  ...(activeLoadingSessionIdsByScope.get(scope) || new Set<string>())
+]
+
+export const updateScopedActiveLoadingSessionId = (
+  scope: string,
+  sessionId: string,
+  loading: boolean
+): string[] => {
+  const nextIds = new Set(activeLoadingSessionIdsByScope.get(scope) || [])
+
+  if (loading) {
+    nextIds.add(sessionId)
+  } else {
+    nextIds.delete(sessionId)
+  }
+
+  if (nextIds.size > 0) {
+    activeLoadingSessionIdsByScope.set(scope, nextIds)
+  } else {
+    activeLoadingSessionIdsByScope.delete(scope)
+  }
+
+  return [...nextIds]
+}
+
 export const readScopedExternalLoadingSessionIds = (scope: string): string[] => {
   clearLegacyExternalLoadingSessionIds(scope)
   return [...(externalLoadingSessionIdsByScope.get(scope) || new Set<string>())]
@@ -220,6 +256,7 @@ export const readScopedLoadingSessionIds = (scope: string): string[] =>
   Array.from(
     new Set([
       ...readStoredSessionIds(getScopedLoadingIdsStorageKey(scope)),
+      ...readScopedActiveLoadingSessionIds(scope),
       ...readScopedExternalLoadingSessionIds(scope)
     ])
   )

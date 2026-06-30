@@ -5,6 +5,7 @@ import {
   autoSavedChatImageTracker,
   buildAutoSavedChatImageKey,
   buildHy3dProfileId,
+  clearScopedActiveLoadingSessionIds,
   clearScopedExternalLoadingSessionIds,
   getBaseProfileId,
   getDownloadFileNameFromUrl,
@@ -12,6 +13,7 @@ import {
   isModel3DUrl,
   normalizeChatProfileIdForStorage,
   normalizeLocalMediaUrl,
+  readScopedActiveLoadingSessionIds,
   readScopedExternalLoadingSessionIds,
   resolveLocalMediaPathFromUrl,
   readScopedLoadingSessionIds,
@@ -19,12 +21,14 @@ import {
   scopedStorageKey,
   STORAGE_KEY_EXTERNAL_LOADING_IDS,
   STORAGE_KEY_LOADING_IDS,
+  updateScopedActiveLoadingSessionId,
   updateScopedExternalLoadingSessionId
 } from './chatPageShared'
 import { DEFAULT_PARAMS } from './hy3d/types'
 
 beforeEach(() => {
   localStorage.clear()
+  clearScopedActiveLoadingSessionIds()
   clearScopedExternalLoadingSessionIds()
   autoSavedChatImageTracker.clear()
 })
@@ -170,15 +174,34 @@ describe('auto-saved chat image tracker', () => {
 })
 
 describe('external loading session ids', () => {
-  it('merges regular and external loading session ids for the same scope', () => {
+  it('merges persisted, active, and external loading session ids for the same scope', () => {
     localStorage.setItem(
       scopedStorageKey(STORAGE_KEY_LOADING_IDS, 'project.agent-1'),
       JSON.stringify(['session-a'])
     )
-    updateScopedExternalLoadingSessionId('project.agent-1', 'session-b', true)
+    updateScopedActiveLoadingSessionId('project.agent-1', 'session-b', true)
+    updateScopedExternalLoadingSessionId('project.agent-1', 'session-c', true)
     updateScopedExternalLoadingSessionId('project.agent-1', 'session-a', true)
 
-    expect(readScopedLoadingSessionIds('project.agent-1')).toEqual(['session-a', 'session-b'])
+    expect(readScopedLoadingSessionIds('project.agent-1')).toEqual([
+      'session-a',
+      'session-b',
+      'session-c'
+    ])
+  })
+
+  it('adds and removes active loading session ids without touching other scopes', () => {
+    expect(updateScopedActiveLoadingSessionId('project.agent-1', 'session-a', true)).toEqual([
+      'session-a'
+    ])
+    expect(readScopedActiveLoadingSessionIds('project.agent-1')).toEqual(['session-a'])
+
+    updateScopedActiveLoadingSessionId('project.agent-2', 'session-b', true)
+    expect(readScopedActiveLoadingSessionIds('project.agent-2')).toEqual(['session-b'])
+
+    expect(updateScopedActiveLoadingSessionId('project.agent-1', 'session-a', false)).toEqual([])
+    expect(readScopedActiveLoadingSessionIds('project.agent-1')).toEqual([])
+    expect(readScopedActiveLoadingSessionIds('project.agent-2')).toEqual(['session-b'])
   })
 
   it('adds and removes external loading session ids without touching other scopes', () => {
