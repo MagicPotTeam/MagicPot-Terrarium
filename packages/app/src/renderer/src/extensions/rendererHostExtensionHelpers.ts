@@ -3,6 +3,12 @@ import type { Config, LLMAPIProfile } from '@shared/config/config'
 import type { ChatCapabilityProfile } from '@shared/llm'
 import {
   rendererHostExtensionApiV1,
+  type AgentApiProfileApplyCallTypeOptions,
+  type AgentApiProfileCallTypeOption,
+  type AgentApiProfileCallTypeOptions,
+  type AgentApiProfileCardRenderOptions,
+  type AgentApiProfileUi,
+  type AgentApiProfileUiOptions,
   type QuickAppApiProfileLists,
   type QuickAppApiProfilesSectionActionOptions
 } from './generatedRegistry'
@@ -40,6 +46,30 @@ export const resolveRendererAssistantImageAutoSaveDir = (
 
   return fallback()
 }
+
+export const applyRendererAgentApiProfileCallType = (
+  options: AgentApiProfileApplyCallTypeOptions,
+  fallback: () => LLMAPIProfile
+): LLMAPIProfile =>
+  rendererHostExtensionApiV1.settings?.applyAgentApiProfileCallType?.(options) ?? fallback()
+
+export const buildRendererAgentApiProfileCallTypeOptions = (
+  options: AgentApiProfileCallTypeOptions,
+  fallback: () => AgentApiProfileCallTypeOption[]
+): AgentApiProfileCallTypeOption[] =>
+  rendererHostExtensionApiV1.settings?.buildAgentApiProfileCallTypeOptions?.(options) ?? fallback()
+
+export const resolveRendererAgentApiProfileUi = (
+  options: AgentApiProfileUiOptions,
+  fallback: () => AgentApiProfileUi
+): AgentApiProfileUi =>
+  rendererHostExtensionApiV1.settings?.resolveAgentApiProfileUi?.(options) ?? fallback()
+
+export const renderRendererAgentApiProfileCardExtra = (
+  options: AgentApiProfileCardRenderOptions,
+  fallback: () => React.ReactNode = () => null
+): React.ReactNode =>
+  rendererHostExtensionApiV1.settings?.renderAgentApiProfileCardExtra?.(options) ?? fallback()
 
 export const buildRendererQuickAppLegacyHunyuanProfile = (
   settingsValue: Config,

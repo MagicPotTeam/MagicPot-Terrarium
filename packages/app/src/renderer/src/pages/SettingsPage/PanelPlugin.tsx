@@ -756,6 +756,7 @@ const PanelPlugin: React.FC<PanelProps> = ({ settingsValue, saveSettings }: Pane
           onAdd={handleAddPluginApiProfile}
           onClone={handleClonePluginApiProfile}
           onDelete={handleDeletePluginApiProfile}
+          onReplaceProfiles={savePluginProfiles}
           onUpdate={handleSetPluginApiProfile}
           isChineseUi={isChineseUi}
           profiles={pluginProfileCards}
