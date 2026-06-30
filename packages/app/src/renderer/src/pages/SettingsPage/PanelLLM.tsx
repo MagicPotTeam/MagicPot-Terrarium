@@ -42,6 +42,12 @@ import {
   createEmptyDuplicateCheckVisualModel,
   type DuplicateCheckVisualModelConfig
 } from '@shared/duplicateCheck/types'
+import {
+  applyRendererAgentApiProfileCallType,
+  buildRendererAgentApiProfileCallTypeOptions,
+  renderRendererAgentApiProfileCardExtra,
+  resolveRendererAgentApiProfileUi
+} from '@renderer/extensions/rendererHostExtensionHelpers'
 import type { DeepPartial } from '@shared/utils/utilTypes'
 
 export type SaveSettings = (value: DeepPartial<Config>) => void
@@ -306,7 +312,7 @@ const applyHunyuan3DPresetToProfile = (profile: LLMAPIProfile): LLMAPIProfile =>
 const normalizeHy3dCosPrefix = (value?: string): string =>
   value?.trim().replace(/^\/+|\/+$/g, '') || DEFAULT_HY3D_COS_PREFIX
 
-const applyCallTypeToProfile = (
+const applyBuiltInCallTypeToProfile = (
   profile: LLMAPIProfile,
   callType: ProfileCallTypeSelectValue
 ): LLMAPIProfile => {
@@ -359,6 +365,14 @@ const applyCallTypeToProfile = (
     }
   }
 }
+
+const applyCallTypeToProfile = (
+  profile: LLMAPIProfile,
+  callType: ProfileCallTypeSelectValue
+): LLMAPIProfile =>
+  applyRendererAgentApiProfileCallType({ profile, callType }, () =>
+    applyBuiltInCallTypeToProfile(profile, callType)
+  )
 
 const isSyncedLocalDuplicateCheckModel = (
   model: Pick<DuplicateCheckVisualModelConfig, 'id'>
@@ -480,7 +494,8 @@ const useApiProfiles = (
     handleSetApiProfile,
     handleDeleteApiProfile,
     handleAddApiProfile,
-    handleCloneApiProfile
+    handleCloneApiProfile,
+    handleReplaceApiProfiles: saveProfiles
   }
 }
 
@@ -529,8 +544,10 @@ const BackupKeysEditor: React.FC<BackupKeysEditorProps> = ({ profile, onChange, 
 type ApiProfileCardProps = {
   onClone: (profile: LLMAPIProfile) => void
   onDelete: (profileId: string) => void
+  onReplaceProfiles: (nextProfiles: LLMAPIProfile[]) => void
   onUpdate: (profileId: string, nextProfile: LLMAPIProfile) => void
   profile: LLMAPIProfile
+  profiles: LLMAPIProfile[]
   isChineseUi: boolean
   t: ReturnType<typeof useTranslation>['t']
 }
@@ -538,8 +555,10 @@ type ApiProfileCardProps = {
 const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   onClone,
   onDelete,
+  onReplaceProfiles,
   onUpdate,
   profile,
+  profiles,
   isChineseUi,
   t
 }) => {
@@ -577,53 +596,80 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     profile.model_use === DEFAULT_MODEL_USE_OPTION ? DEFAULT_MODEL_USE_OPTION : effectiveModelUse
   const isLocalCallType = profileCallType === 'local'
   const isVideoProvider = effectiveProvider === 'kling' || effectiveProvider === 'volcengine'
-  const showApiKeyInput = !isLocalCallType && effectiveProvider !== 'ollama'
-  const showKlingSecretInput = !isLocalCallType && effectiveProvider === 'kling'
-  const showBackupKeys =
-    !isLocalCallType &&
-    !isTripo3DCallType &&
-    !isHunyuan3DCallType &&
-    !isVideoProvider &&
-    effectiveDeployment === 'cloud' &&
-    effectiveProvider !== 'ollama'
-  const showBaseUrlInput = !isLocalCallType
-  const baseUrlPlaceholder = isTripo3DCallType
-    ? TRIPO_INTERNATIONAL_BASE_URL
-    : isHunyuan3DCallType
-      ? HUNYUAN_AI3D_BASE_URL
-      : getSuggestedBaseUrl(effectiveProvider, effectiveDeployment)
-  const apiKeyPlaceholder = isTripo3DCallType
-    ? copy('请输入 Tripo API Key', 'Enter Tripo API key')
-    : isHunyuan3DCallType
-      ? quickAppText('hunyuan_api_key_placeholder', 'Optional Hunyuan3D API Key')
-      : effectiveProvider === 'kling'
-        ? 'AccessKey ID'
-        : effectiveProvider === 'volcengine'
-          ? 'Bearer API Key'
-          : effectiveProvider === 'ollama'
-            ? copy('Ollama 本地服务无需密钥', 'No API key needed for Ollama')
+  const baseUi = {
+    showApiKeyInput: !isLocalCallType && effectiveProvider !== 'ollama',
+    showKlingSecretInput: !isLocalCallType && effectiveProvider === 'kling',
+    showBackupKeys:
+      !isLocalCallType &&
+      !isTripo3DCallType &&
+      !isHunyuan3DCallType &&
+      !isVideoProvider &&
+      effectiveDeployment === 'cloud' &&
+      effectiveProvider !== 'ollama',
+    showBaseUrlInput: !isLocalCallType,
+    baseUrlPlaceholder: isTripo3DCallType
+      ? TRIPO_INTERNATIONAL_BASE_URL
+      : isHunyuan3DCallType
+        ? HUNYUAN_AI3D_BASE_URL
+        : getSuggestedBaseUrl(effectiveProvider, effectiveDeployment),
+    apiKeyLabel: isTripo3DCallType
+      ? 'Tripo API Key'
+      : isHunyuan3DCallType
+        ? quickAppText('hunyuan_api_key_optional', 'Hunyuan3D API Key (Optional)')
+        : effectiveProvider === 'kling'
+          ? 'Kling AccessKey'
+          : effectiveProvider === 'volcengine'
+            ? quickAppText('volcengine_api_key', 'Volcengine API Key')
             : effectiveDeployment === 'local'
-              ? copy('本地服务如无鉴权可留空', 'Optional for local servers without auth')
-              : isChineseUi
-                ? '请输入 API 密钥'
-                : t('llm.api_key_placeholder')
-  const modelNamePlaceholder = isTripo3DCallType
-    ? 'Tripo3D'
-    : isLocalCallType
-      ? copy('例如：本地 CLIP 模型', 'e.g. Local CLIP Model')
-      : effectiveProvider === 'ollama'
-        ? usesVisualCapabilities
-          ? 'qwen2.5vl:7b'
-          : 'llama3.2'
-        : effectiveModelUse === 'video' && effectiveProvider === 'kling'
-          ? 'kling-v3'
-          : effectiveModelUse === 'video' && effectiveProvider === 'volcengine'
-            ? 'doubao-seedance-1-0-pro-250528'
-            : usesVisualCapabilities
-              ? copy('例如：qwen2.5-vl-7b-instruct', 'e.g. qwen2.5-vl-7b-instruct')
-              : effectiveModelUse === 'image'
-                ? copy('例如：gpt-5.4', 'e.g. gpt-5.4')
-                : t('llm.model_name_placeholder')
+              ? copy('API 密钥（可选）', 'API Key (Optional)')
+              : copy('API 密钥', t('llm.api_key')),
+    apiKeyPlaceholder: isTripo3DCallType
+      ? copy('请输入 Tripo API Key', 'Enter Tripo API key')
+      : isHunyuan3DCallType
+        ? quickAppText('hunyuan_api_key_placeholder', 'Optional Hunyuan3D API Key')
+        : effectiveProvider === 'kling'
+          ? 'AccessKey ID'
+          : effectiveProvider === 'volcengine'
+            ? 'Bearer API Key'
+            : effectiveProvider === 'ollama'
+              ? copy('Ollama 本地服务无需密钥', 'No API key needed for Ollama')
+              : effectiveDeployment === 'local'
+                ? copy('本地服务如无鉴权可留空', 'Optional for local servers without auth')
+                : isChineseUi
+                  ? '请输入 API 密钥'
+                  : t('llm.api_key_placeholder'),
+    modelNameLabel: copy('模型名称', t('llm.model_name')),
+    modelNamePlaceholder: isTripo3DCallType
+      ? 'Tripo3D'
+      : isLocalCallType
+        ? copy('例如：本地 CLIP 模型', 'e.g. Local CLIP Model')
+        : effectiveProvider === 'ollama'
+          ? usesVisualCapabilities
+            ? 'qwen2.5vl:7b'
+            : 'llama3.2'
+          : effectiveModelUse === 'video' && effectiveProvider === 'kling'
+            ? 'kling-v3'
+            : effectiveModelUse === 'video' && effectiveProvider === 'volcengine'
+              ? 'doubao-seedance-1-0-pro-250528'
+              : usesVisualCapabilities
+                ? copy('例如：qwen2.5-vl-7b-instruct', 'e.g. qwen2.5-vl-7b-instruct')
+                : effectiveModelUse === 'image'
+                  ? copy('例如：gpt-5.4', 'e.g. gpt-5.4')
+                  : t('llm.model_name_placeholder')
+  }
+  const profileUi = resolveRendererAgentApiProfileUi(
+    { baseUi, isChineseUi, profile },
+    () => baseUi
+  )
+  const showApiKeyInput = profileUi.showApiKeyInput ?? baseUi.showApiKeyInput
+  const showKlingSecretInput = profileUi.showKlingSecretInput ?? baseUi.showKlingSecretInput
+  const showBackupKeys = profileUi.showBackupKeys ?? baseUi.showBackupKeys
+  const showBaseUrlInput = profileUi.showBaseUrlInput ?? baseUi.showBaseUrlInput
+  const baseUrlPlaceholder = profileUi.baseUrlPlaceholder ?? baseUi.baseUrlPlaceholder
+  const apiKeyLabel = profileUi.apiKeyLabel ?? baseUi.apiKeyLabel
+  const apiKeyPlaceholder = profileUi.apiKeyPlaceholder ?? baseUi.apiKeyPlaceholder
+  const modelNameLabel = profileUi.modelNameLabel ?? baseUi.modelNameLabel
+  const modelNamePlaceholder = profileUi.modelNamePlaceholder ?? baseUi.modelNamePlaceholder
 
   const modelUseOptions = [
     { label: copy('默认', 'Default'), value: DEFAULT_MODEL_USE_OPTION },
@@ -635,12 +681,16 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     { label: copy('图像生成', 'Image Generation'), value: 'image' },
     { label: quickAppText('model_use_video', 'Video Generation'), value: 'video' }
   ]
-  const callTypeOptions = [
+  const builtInCallTypeOptions = [
     { label: copy('API模型', 'API Model'), value: 'api' },
     { label: 'Tripo API', value: 'tripo' },
     { label: 'Hunyuan3D', value: 'hunyuan3d' },
     { label: copy('本地模型', 'Local Model'), value: 'local' }
   ]
+  const callTypeOptions = buildRendererAgentApiProfileCallTypeOptions(
+    { baseOptions: builtInCallTypeOptions, isChineseUi, profile },
+    () => builtInCallTypeOptions
+  )
   const videoProviderOptions = [
     { label: 'Kling', value: 'kling' },
     {
@@ -683,6 +733,17 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   const updateProfile = React.useCallback(
     (nextProfile: LLMAPIProfile) => {
       const nextCallType = resolveProfileCallType(nextProfile)
+      if (nextCallType !== 'api' && nextCallType !== 'local') {
+        const extensionProfile = applyRendererAgentApiProfileCallType(
+          { profile: nextProfile, callType: nextCallType },
+          () => nextProfile
+        )
+        if (extensionProfile !== nextProfile) {
+          onUpdate(profile.id, extensionProfile)
+          return
+        }
+      }
+
       if (nextCallType === 'local') {
         onUpdate(profile.id, {
           ...stripVideoSecretProfile(stripHunyuan3DProfile(stripExternalAuthProfile(nextProfile))),
@@ -918,7 +979,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           )}
 
         <InputText
-          label={copy('模型名称', t('llm.model_name'))}
+          label={modelNameLabel}
           value={profile.model_name}
           onChange={commitModelName}
           placeholder={modelNamePlaceholder}
@@ -952,6 +1013,18 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           </Alert>
         )}
 
+        {renderRendererAgentApiProfileCardExtra({
+          callTypeOptions,
+          isChineseUi,
+          onChangeCallType: handleCallTypeChange,
+          onClone,
+          onDelete,
+          onReplaceProfiles,
+          onUpdate,
+          profile,
+          profiles
+        })}
+
         {showBaseUrlInput && (
           <InputText
             label={copy('API 地址', t('llm.base_url'))}
@@ -964,19 +1037,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
 
         {showApiKeyInput && (
           <InputText
-            label={
-              isTripo3DCallType
-                ? 'Tripo API Key'
-                : isHunyuan3DCallType
-                  ? quickAppText('hunyuan_api_key_optional', 'Hunyuan3D API Key (Optional)')
-                  : effectiveProvider === 'kling'
-                    ? 'Kling AccessKey'
-                    : effectiveProvider === 'volcengine'
-                      ? quickAppText('volcengine_api_key', 'Volcengine API Key')
-                      : effectiveDeployment === 'local'
-                        ? copy('API 密钥（可选）', 'API Key (Optional)')
-                        : copy('API 密钥', t('llm.api_key'))
-            }
+            label={apiKeyLabel}
             value={profile.api_key}
             onChange={(value) =>
               updateProfile({
@@ -1164,6 +1225,7 @@ type ApiProfilesSectionProps = {
   onAdd: () => void
   onClone: (profile: LLMAPIProfile) => void
   onDelete: (profileId: string) => void
+  onReplaceProfiles: (nextProfiles: LLMAPIProfile[]) => void
   onUpdate: (profileId: string, nextProfile: LLMAPIProfile) => void
   profiles: LLMAPIProfile[]
   isChineseUi: boolean
@@ -1176,6 +1238,7 @@ export const ApiProfilesSection: React.FC<ApiProfilesSectionProps> = ({
   onAdd,
   onClone,
   onDelete,
+  onReplaceProfiles,
   onUpdate,
   profiles,
   isChineseUi,
@@ -1199,8 +1262,10 @@ export const ApiProfilesSection: React.FC<ApiProfilesSectionProps> = ({
             key={profile.id}
             onClone={onClone}
             onDelete={onDelete}
+            onReplaceProfiles={onReplaceProfiles}
             onUpdate={onUpdate}
             profile={profile}
+            profiles={profiles}
             isChineseUi={isChineseUi}
             t={t}
           />
@@ -1488,7 +1553,8 @@ const PanelLLM: React.FC<PanelProps> = ({ settingsValue, saveSettings }) => {
     handleSetApiProfile,
     handleDeleteApiProfile,
     handleAddApiProfile,
-    handleCloneApiProfile
+    handleCloneApiProfile,
+    handleReplaceApiProfiles
   } = useApiProfiles(
     apiProfiles,
     settingsValue.plugin_config?.duplicateCheck?.visualModels ?? [],
@@ -1502,6 +1568,7 @@ const PanelLLM: React.FC<PanelProps> = ({ settingsValue, saveSettings }) => {
           onAdd={handleAddApiProfile}
           onClone={handleCloneApiProfile}
           onDelete={handleDeleteApiProfile}
+          onReplaceProfiles={handleReplaceApiProfiles}
           onUpdate={handleSetApiProfile}
           isChineseUi={isChineseUi}
           profiles={apiProfilesForView}
