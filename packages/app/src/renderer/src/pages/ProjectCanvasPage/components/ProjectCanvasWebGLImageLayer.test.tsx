@@ -112,10 +112,21 @@ type MockContainerInstance = {
   sortChildren: () => void
 }
 
+type MockWebGLContext = {
+  getError: ReturnType<typeof vi.fn>
+  NO_ERROR: number
+  INVALID_ENUM: number
+  INVALID_VALUE: number
+  INVALID_OPERATION: number
+  INVALID_FRAMEBUFFER_OPERATION: number
+  OUT_OF_MEMORY: number
+  CONTEXT_LOST_WEBGL: number
+}
+
 type MockApplicationInstance = {
   stage: MockContainerInstance
   canvas: HTMLCanvasElement
-  renderer: { resize: ReturnType<typeof vi.fn> }
+  renderer: { resize: ReturnType<typeof vi.fn>; gl: MockWebGLContext }
   render: ReturnType<typeof vi.fn>
   destroy: ReturnType<typeof vi.fn>
   initOptions?: Record<string, unknown>
@@ -279,7 +290,17 @@ function installPixiMock() {
         resize: vi.fn((width: number, height: number) => {
           this.canvas.width = width
           this.canvas.height = height
-        })
+        }),
+        gl: {
+          getError: vi.fn(() => 0),
+          NO_ERROR: 0,
+          INVALID_ENUM: 1280,
+          INVALID_VALUE: 1281,
+          INVALID_OPERATION: 1282,
+          INVALID_FRAMEBUFFER_OPERATION: 1286,
+          OUT_OF_MEMORY: 1285,
+          CONTEXT_LOST_WEBGL: 37442
+        }
       }
       render = vi.fn()
       destroy = vi.fn()
@@ -1144,6 +1165,63 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       { timeout: 15000 }
     )
     expect(event.defaultPrevented).toBe(true)
+  }, 30000)
+
+  it('tears down the WebGL canvas and reports not-ready when WebGL reports a runtime error', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+    const readyCalls: boolean[] = []
+    const residentIdsCalls: Set<string>[] = []
+    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      render(
+        <ProjectCanvasWebGLImageLayer
+          ref={ref}
+          items={[createItem()]}
+          stagePos={{ x: 0, y: 0 }}
+          stageScale={1}
+          stageSize={{ width: 1280, height: 720 }}
+          onReadyChange={(ready) => readyCalls.push(ready)}
+          onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
+        />
+      )
+
+      await waitFor(
+        () => {
+          expect(ref.current).not.toBeNull()
+          expect(readyCalls).toContain(true)
+          expect(createdApplications).toHaveLength(1)
+          expect(document.querySelector('canvas')).not.toBeNull()
+        },
+        { timeout: 15000 }
+      )
+
+      const app = createdApplications[0]
+      app.renderer.gl.getError.mockImplementationOnce(() => app.renderer.gl.OUT_OF_MEMORY)
+
+      act(() => {
+        ref.current?.syncViewport({ x: 96, y: 72 }, 1.25)
+      })
+
+      await waitFor(
+        () => {
+          expect(readyCalls.at(-1)).toBe(false)
+          expect(residentIdsCalls.at(-1)).toEqual(new Set())
+          expect(document.querySelector('canvas')).toBeNull()
+          expect(app.destroy).toHaveBeenCalled()
+        },
+        { timeout: 15000 }
+      )
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        '[Canvas WebGL] Pixi render failed; falling back to non-WebGL image rendering.',
+        expect.objectContaining({
+          message: 'WebGL renderer reported OUT_OF_MEMORY (1285).'
+        })
+      )
+    } finally {
+      consoleWarnSpy.mockRestore()
+    }
   }, 30000)
 
   it('tears down the WebGL canvas and reports not-ready when Pixi rendering fails', async () => {

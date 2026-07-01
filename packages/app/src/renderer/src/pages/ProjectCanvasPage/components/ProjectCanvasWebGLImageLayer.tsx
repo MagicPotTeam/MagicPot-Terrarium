@@ -97,6 +97,25 @@ type ResizablePixiApplication = Application & {
   }
 }
 
+type ProjectCanvasWebGLRenderingContext = Pick<
+  WebGLRenderingContext,
+  | 'getError'
+  | 'NO_ERROR'
+  | 'INVALID_ENUM'
+  | 'INVALID_VALUE'
+  | 'INVALID_OPERATION'
+  | 'INVALID_FRAMEBUFFER_OPERATION'
+  | 'OUT_OF_MEMORY'
+  | 'CONTEXT_LOST_WEBGL'
+>
+
+type PixiRendererWithWebGLContext = {
+  gl?: ProjectCanvasWebGLRenderingContext
+  context?: {
+    gl?: ProjectCanvasWebGLRenderingContext
+  }
+}
+
 export const PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT = 512
 export const PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES = 768 * 1024 * 1024
 export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES = 128 * 1024 * 1024
@@ -423,6 +442,51 @@ function areProjectCanvasWebGLMetricsEqual(
     left.renderCount === right.renderCount &&
     left.lastRenderDurationMs === right.lastRenderDurationMs &&
     left.lastUpdateReason === right.lastUpdateReason
+  )
+}
+
+function getProjectCanvasWebGLErrorName(
+  gl: ProjectCanvasWebGLRenderingContext,
+  errorCode: number
+): string {
+  switch (errorCode) {
+    case gl.INVALID_ENUM:
+      return 'INVALID_ENUM'
+    case gl.INVALID_VALUE:
+      return 'INVALID_VALUE'
+    case gl.INVALID_OPERATION:
+      return 'INVALID_OPERATION'
+    case gl.INVALID_FRAMEBUFFER_OPERATION:
+      return 'INVALID_FRAMEBUFFER_OPERATION'
+    case gl.OUT_OF_MEMORY:
+      return 'OUT_OF_MEMORY'
+    case gl.CONTEXT_LOST_WEBGL:
+      return 'CONTEXT_LOST_WEBGL'
+    default:
+      return `UNKNOWN_${errorCode}`
+  }
+}
+
+function getProjectCanvasWebGLRuntimeFailure(app: Application | null): Error | null {
+  const renderer = app?.renderer as PixiRendererWithWebGLContext | undefined
+  const gl = renderer?.gl ?? renderer?.context?.gl
+  if (!gl || typeof gl.getError !== 'function') {
+    return null
+  }
+
+  let errorCode: number = gl.NO_ERROR
+  try {
+    errorCode = gl.getError()
+  } catch {
+    return null
+  }
+
+  if (errorCode === gl.NO_ERROR) {
+    return null
+  }
+
+  return new Error(
+    `WebGL renderer reported ${getProjectCanvasWebGLErrorName(gl, errorCode)} (${errorCode}).`
   )
 }
 
@@ -1398,17 +1462,25 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   }, [items])
 
   const renderApp = useCallback(() => {
-    if (!appRef.current) {
+    const app = appRef.current
+    if (!app) {
       return
     }
 
     const startedAt = window.performance.now()
     try {
-      appRef.current.render()
+      app.render()
     } catch (error) {
       runtimeFailureHandlerRef.current?.(error)
       return
     }
+
+    const webglRuntimeFailure = getProjectCanvasWebGLRuntimeFailure(app)
+    if (webglRuntimeFailure) {
+      runtimeFailureHandlerRef.current?.(webglRuntimeFailure)
+      return
+    }
+
     lastRenderAtRef.current = window.performance.now()
     const lastRenderDurationMs = Math.max(0, lastRenderAtRef.current - startedAt)
     if (isViewportInteractingRef.current) {
@@ -1936,6 +2008,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         canvas.addEventListener('webglcontextlost', handleContextLost)
         host.replaceChildren(canvas)
         resizeRendererToStage(stageSizeRef.current)
+        if (disposed || runtimeDisposed) {
+          return
+        }
         setIsInitialized(true)
         onReadyChange?.(true)
         reportMetrics(

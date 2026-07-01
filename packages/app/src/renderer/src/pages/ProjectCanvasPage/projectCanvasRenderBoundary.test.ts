@@ -10,7 +10,9 @@ import {
   getProjectCanvasRenderTransformKey,
   resolveProjectCanvasImageRuntimeRoute,
   summarizeProjectCanvasVideoBudget,
-  summarizeProjectCanvasRuntimeSurfaces
+  summarizeProjectCanvasImageFallbacks,
+  summarizeProjectCanvasRuntimeSurfaces,
+  resolveProjectCanvasRenderBoundary
 } from './projectCanvasRenderBoundary'
 
 function createImage(width: number, height: number) {
@@ -247,6 +249,61 @@ describe('projectCanvasRenderBoundary', () => {
         loadedImageIds: new Set([item.id])
       })
     ).toBe('crop-excluded')
+  })
+
+  it('routes images to fallback while WebGL is unavailable or generated cooldown is active', () => {
+    const item = createItem()
+
+    expect(
+      resolveProjectCanvasImageRuntimeRoute({
+        item,
+        isCropTarget: false,
+        webglReady: false,
+        loadedImageIds: new Set([item.id]),
+        residentImageIds: new Set([item.id])
+      })
+    ).toBe('fallback-image-proxy')
+
+    expect(
+      resolveProjectCanvasImageRuntimeRoute({
+        item,
+        isCropTarget: false,
+        webglReady: true,
+        loadedImageIds: new Set([item.id]),
+        residentImageIds: new Set([item.id]),
+        generatedCooldownImageIds: new Set([item.id])
+      })
+    ).toBe('fallback-image-proxy')
+  })
+
+  it('reports explicit WebGL and generated cooldown fallback reasons', () => {
+    const item = createItem()
+    const [webglUnavailable] = resolveProjectCanvasRenderBoundary({
+      items: [item],
+      webglReady: false,
+      loadedImageIds: new Set([item.id]),
+      residentImageIds: new Set([item.id])
+    })
+    const [generatedCooldown] = resolveProjectCanvasRenderBoundary({
+      items: [item],
+      webglReady: true,
+      loadedImageIds: new Set([item.id]),
+      residentImageIds: new Set([item.id]),
+      generatedCooldownImageIds: new Set([item.id])
+    })
+
+    expect(webglUnavailable.imageRuntimeRoute).toBe('fallback-image-proxy')
+    expect(webglUnavailable.imageFallbackReason).toBe('webgl-unavailable')
+    expect(generatedCooldown.imageRuntimeRoute).toBe('fallback-image-proxy')
+    expect(generatedCooldown.imageFallbackReason).toBe('generated-cooldown')
+    expect(summarizeProjectCanvasImageFallbacks([webglUnavailable, generatedCooldown])).toEqual({
+      fallbackImageItems: 2,
+      unloadedImageItems: 0,
+      failedImageItems: 0,
+      unsupportedImageItems: 0,
+      webglUnavailableImageItems: 1,
+      generatedCooldownImageItems: 1
+    })
   })
 
   it('resolves image interaction modes from runtime route, selection, and tool state', () => {

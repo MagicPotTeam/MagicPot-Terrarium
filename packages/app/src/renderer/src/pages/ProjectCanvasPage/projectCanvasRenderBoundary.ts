@@ -52,7 +52,12 @@ export type ProjectCanvasVideoBudgetSummary = {
 
 export type ProjectCanvasResolvedRenderSurface = ProjectCanvasRenderableSurface | 'fallback-image'
 
-export type ProjectCanvasImageFallbackReason = 'unloaded' | 'failed' | 'unsupported'
+export type ProjectCanvasImageFallbackReason =
+  | 'unloaded'
+  | 'failed'
+  | 'unsupported'
+  | 'webgl-unavailable'
+  | 'generated-cooldown'
 
 export type ProjectCanvasResolvedRenderItem = ProjectCanvasRenderableItem & {
   runtimeSurface: ProjectCanvasResolvedRenderSurface
@@ -67,6 +72,8 @@ export type ProjectCanvasImageFallbackSummary = {
   unloadedImageItems: number
   failedImageItems: number
   unsupportedImageItems: number
+  webglUnavailableImageItems: number
+  generatedCooldownImageItems: number
 }
 
 export const PROJECT_CANVAS_RENDERABLE_MEDIA_KINDS = ['image', 'video', 'model3d', 'html'] as const
@@ -209,6 +216,7 @@ export type ResolveProjectCanvasRenderBoundaryParams = {
   residentImageIds?: ReadonlySet<string>
   failedImageIds?: ReadonlySet<string>
   unsupportedImageIds?: ReadonlySet<string>
+  generatedCooldownImageIds?: ReadonlySet<string>
   selectedIds?: ReadonlySet<string>
   stagePos?: { x: number; y: number }
   stageScale?: number
@@ -400,24 +408,30 @@ export function resolveProjectCanvasImageRuntimeRoute({
   isCropTarget,
   webglReady,
   loadedImageIds,
-  residentImageIds
+  residentImageIds,
+  generatedCooldownImageIds
 }: {
   item: Pick<CanvasImageItem, 'id'>
   isCropTarget: boolean
   webglReady: boolean
   loadedImageIds: ReadonlySet<string>
   residentImageIds?: ReadonlySet<string>
+  generatedCooldownImageIds?: ReadonlySet<string>
 }): ProjectCanvasImageRuntimeRoute {
   if (isCropTarget) {
     return 'crop-excluded'
   }
 
+  if (!webglReady || generatedCooldownImageIds?.has(item.id)) {
+    return 'fallback-image-proxy'
+  }
+
   const activeResidentImageIds = residentImageIds ?? loadedImageIds
-  if (webglReady && activeResidentImageIds.has(item.id)) {
+  if (activeResidentImageIds.has(item.id)) {
     return 'webgl-primary'
   }
 
-  if (webglReady && loadedImageIds.has(item.id)) {
+  if (loadedImageIds.has(item.id)) {
     return 'budget-image-proxy'
   }
 
@@ -450,12 +464,16 @@ export function resolveProjectCanvasImageFallbackReason({
   item,
   runtimeRoute,
   failedImageIds,
-  unsupportedImageIds
+  unsupportedImageIds,
+  generatedCooldownImageIds,
+  webglReady
 }: {
   item: Pick<CanvasImageItem, 'id'>
   runtimeRoute: ProjectCanvasImageRuntimeRoute
   failedImageIds?: ReadonlySet<string>
   unsupportedImageIds?: ReadonlySet<string>
+  generatedCooldownImageIds?: ReadonlySet<string>
+  webglReady?: boolean
 }): ProjectCanvasImageFallbackReason | null {
   if (runtimeRoute !== 'fallback-image-proxy') {
     return null
@@ -467,6 +485,14 @@ export function resolveProjectCanvasImageFallbackReason({
 
   if (failedImageIds?.has(item.id)) {
     return 'failed'
+  }
+
+  if (generatedCooldownImageIds?.has(item.id)) {
+    return 'generated-cooldown'
+  }
+
+  if (webglReady === false) {
+    return 'webgl-unavailable'
   }
 
   return 'unloaded'
@@ -486,6 +512,10 @@ export function summarizeProjectCanvasImageFallbacks(
         summary.failedImageItems += 1
       } else if (item.imageFallbackReason === 'unsupported') {
         summary.unsupportedImageItems += 1
+      } else if (item.imageFallbackReason === 'webgl-unavailable') {
+        summary.webglUnavailableImageItems += 1
+      } else if (item.imageFallbackReason === 'generated-cooldown') {
+        summary.generatedCooldownImageItems += 1
       } else {
         summary.unloadedImageItems += 1
       }
@@ -496,7 +526,9 @@ export function summarizeProjectCanvasImageFallbacks(
       fallbackImageItems: 0,
       unloadedImageItems: 0,
       failedImageItems: 0,
-      unsupportedImageItems: 0
+      unsupportedImageItems: 0,
+      webglUnavailableImageItems: 0,
+      generatedCooldownImageItems: 0
     }
   )
 }
@@ -509,6 +541,7 @@ export function resolveProjectCanvasRenderBoundary({
   residentImageIds,
   failedImageIds,
   unsupportedImageIds,
+  generatedCooldownImageIds,
   selectedIds = new Set<string>(),
   stagePos,
   stageScale,
@@ -541,13 +574,16 @@ export function resolveProjectCanvasRenderBoundary({
         isCropTarget: cropTargetId === item.id,
         webglReady,
         loadedImageIds,
-        residentImageIds
+        residentImageIds,
+        generatedCooldownImageIds
       })
       const imageFallbackReason = resolveProjectCanvasImageFallbackReason({
         item: item.item,
         runtimeRoute: imageRuntimeRoute,
         failedImageIds,
-        unsupportedImageIds
+        unsupportedImageIds,
+        generatedCooldownImageIds,
+        webglReady
       })
 
       return {
@@ -586,6 +622,7 @@ export function summarizeProjectCanvasRuntimeSurfaces({
   residentImageIds,
   failedImageIds,
   unsupportedImageIds,
+  generatedCooldownImageIds,
   selectedIds,
   stagePos,
   stageScale,
@@ -600,6 +637,7 @@ export function summarizeProjectCanvasRuntimeSurfaces({
     residentImageIds,
     failedImageIds,
     unsupportedImageIds,
+    generatedCooldownImageIds,
     selectedIds,
     stagePos,
     stageScale,

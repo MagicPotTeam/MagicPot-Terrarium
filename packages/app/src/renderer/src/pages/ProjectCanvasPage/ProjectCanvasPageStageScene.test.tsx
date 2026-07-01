@@ -3584,14 +3584,15 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(root).toHaveAttribute('data-project-canvas-budget-downgraded-image-count', '0')
     expect(root).toHaveAttribute('data-project-canvas-fallback-image-count', '1')
     expect(root).toHaveAttribute('data-project-canvas-proxy-layer-candidate-count', '1')
-    expect(root).toHaveAttribute('data-project-canvas-unloaded-fallback-image-count', '1')
+    expect(root).toHaveAttribute('data-project-canvas-unloaded-fallback-image-count', '0')
     expect(root).toHaveAttribute('data-project-canvas-failed-fallback-image-count', '0')
     expect(root).toHaveAttribute('data-project-canvas-unsupported-fallback-image-count', '0')
+    expect(root).toHaveAttribute('data-project-canvas-webgl-unavailable-fallback-image-count', '1')
     expect(root).toHaveAttribute('data-project-canvas-crop-excluded-image-count', '0')
     expect(imageInteractionOverlayProps.has(item.id)).toBe(false)
     expect(rectInteractionOverlayProps.has(item.id)).toBe(false)
     expect(canvasPlaceholderProps.get(item.id)?.renderMode).toBe('dom-placeholder-proxy')
-    expect(canvasPlaceholderProps.get(item.id)?.visualVariant).toBe('transparent')
+    expect(canvasPlaceholderProps.get(item.id)?.visualVariant).toBe('image-fallback')
   })
 
   it('commits crop confirmation back into history and resets crop mode', async () => {
