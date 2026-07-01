@@ -6,7 +6,10 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config, type SkillReferenceAttachment } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
-import type { ChatAttachment } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
+import type {
+  ChatAttachment,
+  ChatMessage
+} from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import type { ChatSession, ChatSessionDraft } from './chatStorage'
 import ChatPage from './ChatPage'
 import {
@@ -64,6 +67,7 @@ const hoisted = vi.hoisted(() => ({
   fileToBlobUrlMock: vi.fn(() => 'blob:chat-draft'),
   fileToDataUrlMock: vi.fn(async () => 'data:application/octet-stream;base64,QUJD'),
   readTextFileMock: vi.fn(),
+  saveImageToDirMock: vi.fn(),
   chatMessageListMock: vi.fn(),
   notifySuccessMock: vi.fn(),
   notifyErrorMock: vi.fn(),
@@ -157,6 +161,9 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     },
     svcLLMProxy: {
       signHy3DModel: vi.fn()
+    },
+    svcHyper: {
+      saveImageToDir: hoisted.saveImageToDirMock
     }
   })
 }))
@@ -639,6 +646,10 @@ describe('ChatPage runtime workflow integration', () => {
       hoisted.storedSessions.value = cloneValue(sessions)
     })
     hoisted.readTextFileMock.mockReset()
+    hoisted.saveImageToDirMock.mockReset()
+    hoisted.saveImageToDirMock.mockResolvedValue({
+      savedPath: 'C:/MagicPot/AutoSave/Agent/chat_upload.png'
+    })
     hoisted.chatMessageListMock.mockClear()
     hoisted.notifySuccessMock.mockReset()
     hoisted.notifyErrorMock.mockReset()
@@ -728,6 +739,76 @@ describe('ChatPage runtime workflow integration', () => {
 
     await waitFor(() => {
       expect(hoisted.chatMessageListMock).toHaveBeenCalled()
+    })
+  })
+
+  it('persists outgoing blob image attachments before storing user messages', async () => {
+    const fetchMock = vi.fn(async () => ({
+      blob: async () =>
+        new Blob([new Uint8Array([1, 2, 3])], {
+          type: 'image/png'
+        })
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    hoisted.storedSessions.value = [
+      {
+        id: 'session-blob-user-image',
+        title: 'Blob user image',
+        profileId: 'vision-model',
+        messages: []
+      }
+    ]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      'session-blob-user-image'
+    )
+
+    renderChatPage()
+
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe('session-blob-user-image'))
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            targetScope: 'runtime-flow',
+            autoSend: true,
+            text: 'describe this',
+            attachments: [
+              {
+                type: 'image',
+                url: 'blob:user-upload-image',
+                fileName: 'upload.png',
+                mimeType: 'image/png'
+              }
+            ]
+          }
+        })
+      )
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+
+    expect(fetchMock).toHaveBeenCalledWith('blob:user-upload-image')
+    expect(hoisted.saveImageToDirMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fileName: expect.stringMatching(/^chat_upload_.*_1\.png$/),
+        dir: undefined,
+        data: expect.any(Uint8Array)
+      })
+    )
+
+    const requestMessages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]?.messages as
+      | ChatMessage[]
+      | undefined
+    const requestAttachment = requestMessages?.at(-1)?.attachments?.[0]
+    expect(requestAttachment?.url).toBe('file://C:/MagicPot/AutoSave/Agent/chat_upload.png')
+
+    await waitFor(() => {
+      const currentSession = readCurrentSessionState()
+      expect(currentSession?.messages[0]?.attachments?.[0]?.url).toBe(
+        'file://C:/MagicPot/AutoSave/Agent/chat_upload.png'
+      )
     })
   })
 

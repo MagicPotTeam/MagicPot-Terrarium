@@ -387,6 +387,76 @@ const resolveChatFailureArchiveDir = (baseDir: string, runId: string): string =>
 
 const CHAT_LOADING_TOTAL_STEPS = 4
 
+const normalizeImageAttachmentExtension = (mimeType?: string, fileName?: string): string => {
+  const fileExtension = fileName?.match(/\.([a-z0-9]{1,8})$/i)?.[1]
+  if (fileExtension) return fileExtension.toLowerCase()
+
+  if (mimeType?.includes('jpeg') || mimeType?.includes('jpg')) return 'jpg'
+  if (mimeType?.includes('webp')) return 'webp'
+  if (mimeType?.includes('gif')) return 'gif'
+  if (mimeType?.includes('bmp')) return 'bmp'
+  if (mimeType?.includes('svg')) return 'svg'
+  return 'png'
+}
+
+const buildChatImageAttachmentAutoSaveFileName = (
+  attachment: ChatAttachment,
+  index: number
+): string => {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  const extension = normalizeImageAttachmentExtension(attachment.mimeType, attachment.fileName)
+  return `chat_upload_${timestamp}_${index + 1}.${extension}`
+}
+
+const readBlobAsUint8Array = (blob: Blob): Promise<Uint8Array> => {
+  if (typeof blob.arrayBuffer === 'function') {
+    return blob.arrayBuffer().then((buffer) => new Uint8Array(buffer))
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) {
+        resolve(new Uint8Array(reader.result))
+        return
+      }
+
+      reject(new Error('Failed to read blob as ArrayBuffer'))
+    }
+    reader.onerror = () => reject(reader.error || new Error('Failed to read blob'))
+    reader.readAsArrayBuffer(blob)
+  })
+}
+
+const saveChatImageAttachmentBlobToDir = async (options: {
+  attachment: ChatAttachment
+  attachmentIndex: number
+  targetDir: string | undefined
+}): Promise<string | null> => {
+  try {
+    const response = await fetch(options.attachment.url)
+    const blob = await response.blob()
+    const data = await readBlobAsUint8Array(blob)
+    const fileName = buildChatImageAttachmentAutoSaveFileName(
+      {
+        ...options.attachment,
+        mimeType: options.attachment.mimeType || blob.type || undefined
+      },
+      options.attachmentIndex
+    )
+    const result = await api().svcHyper.saveImageToDir({
+      data,
+      fileName,
+      dir: options.targetDir
+    })
+
+    return result.savedPath || null
+  } catch (error) {
+    console.warn('[ChatPage] Failed to persist chat image attachment:', error)
+    return null
+  }
+}
+
 const dispatchReasoningEffortSync = (map: Record<string, LLMReasoningEffort>) => {
   window.dispatchEvent(
     new CustomEvent<Record<string, LLMReasoningEffort>>(CHAT_REASONING_EFFORT_SYNC_EVENT, {
@@ -2707,8 +2777,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   const fileName = `agent_auto_${timestamp}.png`
                   const response = await fetch(attachment.url)
                   const blob = await response.blob()
-                  const arrayBuffer = await blob.arrayBuffer()
-                  const data = new Uint8Array(arrayBuffer)
+                  const data = await readBlobAsUint8Array(blob)
                   const res = await api().svcHyper.saveImageToDir({
                     data,
                     fileName,
@@ -3941,12 +4010,49 @@ const ChatPage: React.FC<ChatPageProps> = ({
     ]
   )
   // ==================== 发送消息 ====================
+  const persistUserImageAttachments = useCallback(
+    async (attachments: ChatAttachment[] | undefined): Promise<ChatAttachment[] | undefined> => {
+      if (!attachments?.length) return attachments
+
+      const targetDir = resolveAssistantImageAutoSaveDir({
+        config: { download_dir: config.download_dir },
+        storageScope
+      })
+      const persistedAttachments = await Promise.all(
+        attachments.map(async (attachment, attachmentIndex): Promise<ChatAttachment> => {
+          if (attachment.type !== 'image' || !attachment.url.startsWith('blob:')) {
+            return attachment
+          }
+
+          const savedPath = await saveChatImageAttachmentBlobToDir({
+            attachment,
+            attachmentIndex,
+            targetDir
+          })
+
+          if (!savedPath) {
+            return attachment
+          }
+
+          return {
+            ...attachment,
+            url: `file://${savedPath}`
+          }
+        })
+      )
+
+      return persistedAttachments
+    },
+    [config.download_dir, storageScope]
+  )
+
   const prepareOutgoingUserMessage = useCallback(
     async (content: string, attachments?: ChatAttachment[]): Promise<ChatMessage> => {
+      const persistedAttachments = await persistUserImageAttachments(attachments)
       const preparedMessage: ChatMessage = {
         role: 'user',
         content: content || '',
-        attachments
+        attachments: persistedAttachments
       }
 
       const augmentedMessage = await augmentAttachmentsWithVideoBoundaryFrames(
@@ -3958,7 +4064,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       return preparedMessage
     },
-    []
+    [persistUserImageAttachments]
   )
 
   const sendMessage = useCallback(
