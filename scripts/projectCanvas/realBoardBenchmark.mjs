@@ -27,11 +27,6 @@ function parseNonNegativeIntegerEnv(name, fallback) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
 }
 
-function parsePositiveIntegerEnv(name, fallback) {
-  const parsed = Number.parseInt(process.env[name] || '', 10)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
-}
-
 function parseFractionEnv(name, fallback) {
   const parsed = Number.parseFloat(process.env[name] || '')
   return Number.isFinite(parsed) && parsed > 0 && parsed <= 1 ? parsed : fallback
@@ -60,7 +55,7 @@ const REAL_BOARD_IMPORT_BATCH_SIZE =
     : REAL_BOARD_IMAGE_COUNT >= 1000
       ? 128
       : 0
-const REAL_BOARD_CANVAS_IMPORT_TOTAL_SIZE = parsePositiveIntegerEnv(
+const REAL_BOARD_CANVAS_IMPORT_TOTAL_SIZE = parseNonNegativeIntegerEnv(
   'MAGICPOT_REAL_BOARD_CANVAS_IMPORT_TOTAL_SIZE',
   REAL_BOARD_IMAGE_COUNT
 )

@@ -91,6 +91,40 @@ describe('projectCanvasBenchmarkRuntime', () => {
     expect(readProjectCanvasBenchmarkSharedThumbnailCacheRoot()).toBeUndefined()
   })
 
+  it('does not trust a non-configurable accessor benchmark runtime property', () => {
+    const benchmarkWindow = installTestBenchmarkWindow()
+    const runtime = Object.freeze({
+      enabled: true,
+      canvasImportTotalSize: 123,
+      sharedThumbnailCacheRoot: '/tmp/cache'
+    })
+    Object.defineProperty(benchmarkWindow, 'magicpotProjectCanvasBenchmarkRuntime', {
+      get: () => runtime,
+      configurable: false,
+      enumerable: true
+    })
+
+    expect(hasProjectCanvasRealBoardBenchmarkRuntime()).toBe(false)
+    expect(readProjectCanvasBenchmarkImportTotalSize()).toBe(0)
+    expect(readProjectCanvasBenchmarkSharedThumbnailCacheRoot()).toBeUndefined()
+
+    const setter = vi.fn(() => ({ scale: 1, x: 0, y: 0 }))
+    const cleanup = installProjectCanvasBenchmarkViewportSetter(setter)
+    expect(benchmarkWindow.__MAGICPOT_REAL_BOARD_SET_PROJECT_CANVAS_VIEWPORT__).toBeUndefined()
+    cleanup()
+  })
+
+  it('accepts an explicit zero import-size hint from the trusted preload runtime', () => {
+    installTestBenchmarkWindow()
+    defineBenchmarkRuntime({
+      enabled: true,
+      canvasImportTotalSize: 0
+    })
+
+    expect(hasProjectCanvasRealBoardBenchmarkRuntime()).toBe(true)
+    expect(readProjectCanvasBenchmarkImportTotalSize()).toBe(0)
+  })
+
   it('reads benchmark hints and installs viewport controls only when the preload runtime gate is enabled', () => {
     const benchmarkWindow = installTestBenchmarkWindow()
     defineBenchmarkRuntime({
@@ -107,6 +141,17 @@ describe('projectCanvasBenchmarkRuntime', () => {
     const cleanup = installProjectCanvasBenchmarkViewportSetter(setter)
 
     expect(benchmarkWindow.__MAGICPOT_REAL_BOARD_SET_PROJECT_CANVAS_VIEWPORT__).toBe(setter)
+    expect(
+      Object.getOwnPropertyDescriptor(
+        benchmarkWindow,
+        '__MAGICPOT_REAL_BOARD_SET_PROJECT_CANVAS_VIEWPORT__'
+      )
+    ).toMatchObject({
+      value: setter,
+      configurable: true,
+      enumerable: false,
+      writable: false
+    })
     expect(
       benchmarkWindow.__MAGICPOT_REAL_BOARD_SET_PROJECT_CANVAS_VIEWPORT__?.({ scale: 2 })
     ).toEqual({

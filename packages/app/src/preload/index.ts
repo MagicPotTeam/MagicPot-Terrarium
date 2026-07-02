@@ -30,9 +30,9 @@ function isTruthyEnvValue(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test(`${value || ''}`.trim())
 }
 
-function readPositiveIntegerEnv(name: string): number | undefined {
+function readNonNegativeIntegerEnv(name: string): number | undefined {
   const value = Number.parseInt(`${process.env[name] || ''}`, 10)
-  return Number.isFinite(value) && value > 0 ? value : undefined
+  return Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
 function readNonEmptyStringEnv(name: string): string | undefined {
@@ -46,7 +46,7 @@ function createProjectCanvasBenchmarkRuntime(): ProjectCanvasBenchmarkRuntimeBri
     return Object.freeze({ enabled: false })
   }
 
-  const canvasImportTotalSize = readPositiveIntegerEnv(
+  const canvasImportTotalSize = readNonNegativeIntegerEnv(
     'MAGICPOT_REAL_BOARD_CANVAS_IMPORT_TOTAL_SIZE'
   )
   const sharedThumbnailCacheRoot = readNonEmptyStringEnv(

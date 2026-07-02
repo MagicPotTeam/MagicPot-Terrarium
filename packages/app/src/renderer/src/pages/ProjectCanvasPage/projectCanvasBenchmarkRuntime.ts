@@ -34,19 +34,16 @@ function isTrustedProjectCanvasBenchmarkRuntime(
   runtime: ProjectCanvasBenchmarkRuntimeBridge | undefined,
   descriptor: PropertyDescriptor | undefined
 ): runtime is ProjectCanvasBenchmarkRuntimeBridge & { enabled: true } {
-  if (runtime?.enabled !== true || !descriptor || descriptor.configurable !== false) {
+  if (runtime?.enabled !== true || !descriptor) {
     return false
   }
 
-  if ('writable' in descriptor && descriptor.writable !== false) {
-    return false
-  }
-
-  if ('set' in descriptor && descriptor.set !== undefined) {
-    return false
-  }
-
-  return true
+  return (
+    Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
+    descriptor.value === runtime &&
+    descriptor.writable === false &&
+    descriptor.configurable === false
+  )
 }
 
 function getProjectCanvasBenchmarkRuntime(): ProjectCanvasBenchmarkRuntimeBridge | null {
@@ -85,9 +82,19 @@ export function installProjectCanvasBenchmarkViewportSetter(
     return () => undefined
   }
 
-  benchmarkWindow.__MAGICPOT_REAL_BOARD_SET_PROJECT_CANVAS_VIEWPORT__ = setter
+  Object.defineProperty(benchmarkWindow, '__MAGICPOT_REAL_BOARD_SET_PROJECT_CANVAS_VIEWPORT__', {
+    value: setter,
+    configurable: true,
+    enumerable: false,
+    writable: false
+  })
+
   return () => {
-    if (benchmarkWindow.__MAGICPOT_REAL_BOARD_SET_PROJECT_CANVAS_VIEWPORT__ === setter) {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      benchmarkWindow,
+      '__MAGICPOT_REAL_BOARD_SET_PROJECT_CANVAS_VIEWPORT__'
+    )
+    if (descriptor?.value === setter) {
       delete benchmarkWindow.__MAGICPOT_REAL_BOARD_SET_PROJECT_CANVAS_VIEWPORT__
     }
   }
