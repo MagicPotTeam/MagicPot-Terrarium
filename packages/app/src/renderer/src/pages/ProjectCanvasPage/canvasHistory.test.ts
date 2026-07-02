@@ -6,7 +6,12 @@ import {
 } from './canvasHistory'
 import type { CanvasImageItem, CanvasModel3DItem, CanvasTextItem } from './types'
 
-function createImageItem(id: string, src: string, image?: HTMLImageElement): CanvasImageItem {
+function createImageItem(
+  id: string,
+  src: string,
+  image?: HTMLImageElement,
+  overrides: Partial<CanvasImageItem> = {}
+): CanvasImageItem {
   return {
     id,
     type: 'image',
@@ -20,7 +25,8 @@ function createImageItem(id: string, src: string, image?: HTMLImageElement): Can
     scaleX: 1,
     scaleY: 1,
     zIndex: 0,
-    locked: false
+    locked: false,
+    ...overrides
   }
 }
 
@@ -74,7 +80,8 @@ describe('canvasHistory', () => {
 
   it('strips runtime image references from history snapshots while preserving item data', () => {
     const image = {} as HTMLImageElement
-    const imageItem = createImageItem('image-1', 'blob:one', image)
+    const sourceFile = new Blob(['history-source'], { type: 'image/png' })
+    const imageItem = createImageItem('image-1', 'blob:one', image, { sourceFile })
     const sourceItems = [imageItem, createTextItem('text-1', 'Note')]
 
     const snapshot = createCanvasHistorySnapshot(sourceItems)
@@ -88,7 +95,9 @@ describe('canvasHistory', () => {
       sourceItems[1]
     ])
     expect(snapshot[0]).not.toHaveProperty('image')
+    expect(snapshot[0]).not.toHaveProperty('sourceFile')
     expect(imageItem.image).toBe(image)
+    expect(imageItem.sourceFile).toBe(sourceFile)
   })
 
   it('strips runtime 3D render deferral flags from history snapshots', () => {

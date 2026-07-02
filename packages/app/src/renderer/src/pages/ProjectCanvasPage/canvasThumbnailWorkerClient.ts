@@ -481,6 +481,7 @@ async function generateNativeThumbnailLevels({
   for (const maxSide of levels) {
     const native = await bridge.createNativeThumbnail({
       fullPath: identity.canonicalPath,
+      ...(identity.cacheRootDir ? { cacheRootDir: identity.cacheRootDir } : {}),
       maxSide
     })
     if (!native) {

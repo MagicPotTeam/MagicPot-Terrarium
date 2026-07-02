@@ -491,7 +491,13 @@ function loadImageElementFromSrc(src: string, logSource = src): Promise<LoadedCa
 
 export async function loadImageFromSrc(src: string): Promise<LoadedCanvasImage> {
   const localObjectUrl = await createCanvasLocalImageObjectUrl(src)
-  return await loadImageElementFromSrc(localObjectUrl ?? src, src)
+  try {
+    return await loadImageElementFromSrc(localObjectUrl ?? src, src)
+  } finally {
+    if (localObjectUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      URL.revokeObjectURL(localObjectUrl)
+    }
+  }
 }
 
 async function createComfyImageObjectUrl(item: CanvasImageItem): Promise<string | null> {

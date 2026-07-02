@@ -3,8 +3,8 @@ import type { CanvasImageAsset, CanvasItem } from './types'
 export const CANVAS_HISTORY_LIMIT = 50
 
 function stripCanvasRuntimeRefs(item: CanvasItem): CanvasItem {
-  if (item.type === 'image' && item.image) {
-    const { image: _image, ...rest } = item
+  if (item.type === 'image') {
+    const { image: _image, sourceFile: _sourceFile, ...rest } = item
     return rest
   }
 
