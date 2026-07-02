@@ -43,6 +43,9 @@ function buildOfficialProfileMetadata(overrides = {}) {
     memoryWatchdogEnabled: true,
     memorySoftLimitFraction: 0.75,
     memoryHardLimitFraction: 0.8,
+    importBatchSize: 128,
+    importBatchSettleMs: 500,
+    importBatchWaitMetrics: true,
     ...overrides
   })
 }
@@ -203,6 +206,24 @@ describe('realBoardBenchmark acceptance gates', () => {
 
     expect(profile.officialProfile).toBe(false)
     expect(profile.diagnosticReasons.join(' ')).toContain('pressureDurationMs=0')
+    expect(aggregate.acceptanceAllPassed).toBe(true)
+    expect(aggregate.officialAllPassed).toBe(false)
+    expect(aggregate.allPassed).toBe(false)
+  })
+
+  it('prevents import batching overrides from reporting official aggregate allPassed', () => {
+    const profile = buildOfficialProfileMetadata({
+      importBatchSize: 64,
+      importBatchSettleMs: 0,
+      importBatchWaitMetrics: false
+    })
+    const aggregate = buildAggregateWithProfile({ profileMetadata: profile })
+    const reasons = profile.diagnosticReasons.join(' ')
+
+    expect(profile.officialProfile).toBe(false)
+    expect(reasons).toContain('importBatchSize=64')
+    expect(reasons).toContain('importBatchSettleMs=0')
+    expect(reasons).toContain('importBatchWaitMetrics=false')
     expect(aggregate.acceptanceAllPassed).toBe(true)
     expect(aggregate.officialAllPassed).toBe(false)
     expect(aggregate.allPassed).toBe(false)

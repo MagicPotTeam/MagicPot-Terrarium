@@ -82,7 +82,7 @@
     "benchmark:project-canvas:webgl:raw": "cross-env NODE_OPTIONS=--max-old-space-size=6144 node scripts/projectCanvas/webglBenchmark.mjs",
     "benchmark:project-canvas:overlay:raw": "cross-env NODE_OPTIONS=--max-old-space-size=6144 node scripts/projectCanvas/overlayBenchmark.mjs",
     "benchmark:project-canvas:video:raw": "cross-env NODE_OPTIONS=--max-old-space-size=6144 node scripts/projectCanvas/videoBenchmark.mjs",
-    "benchmark:project-canvas:real-board:raw": "cross-env NODE_OPTIONS=--max-old-space-size=6144 node scripts/projectCanvas/realBoardBenchmark.mjs",
+    "benchmark:project-canvas:real-board:raw": "node --expose-gc --max-old-space-size=4096 scripts/projectCanvas/realBoardBenchmark.mjs",
     "benchmark:project-canvas:real-board:import-1800:raw": "cross-env MAGICPOT_REAL_BOARD_MODE=import MAGICPOT_REAL_BOARD_IMAGE_COUNT=1800 MAGICPOT_REAL_BOARD_PRESSURE_DURATION_MS=30000 npm run benchmark:project-canvas:real-board:raw",
     "benchmark:project-canvas:real-board:mixed-3000:raw": "cross-env MAGICPOT_REAL_BOARD_MODE=mixed MAGICPOT_REAL_BOARD_IMAGE_COUNT=3000 MAGICPOT_REAL_BOARD_PRESSURE_DURATION_MS=30000 npm run benchmark:project-canvas:real-board:raw",
     "benchmark:project-canvas:webgl": "npm run build:pure && npm run benchmark:project-canvas:webgl:raw",
