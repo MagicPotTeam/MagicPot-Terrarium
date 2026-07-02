@@ -203,108 +203,71 @@ async function writeBenchmarkImages(tempRoot, count) {
   return paths
 }
 
-async function waitForBenchmarkMetrics(page, expectedImageCount) {
+function isWebglBenchmarkMetricsReady(metrics, expectedImageCount, baselineRenderCount = 0) {
+  const expectedResidentCount =
+    metrics.residentLimit > 0
+      ? Math.min(expectedImageCount, metrics.residentLimit)
+      : expectedImageCount
+  const expectedNonResidentProxyCount = Math.max(0, expectedImageCount - expectedResidentCount)
+  const observedNonResidentProxyCount =
+    Number(metrics.summary?.budgetDowngradedImageItems || '0') +
+    Number(metrics.summary?.fallbackImageItems || '0')
+
+  return (
+    metrics.hasWebglContext &&
+    metrics.summary?.webglImageItems >= expectedResidentCount &&
+    observedNonResidentProxyCount === expectedNonResidentProxyCount &&
+    metrics.loadedImageCount >= expectedResidentCount &&
+    metrics.pendingImageCount === 0 &&
+    metrics.sourceUpgradeQueueCount === 0 &&
+    metrics.thumbnailLoadQueueCount === 0 &&
+    metrics.initialLoadQueueCount === 0 &&
+    metrics.residentCandidateImageCount + metrics.viewportCulledImageCount ===
+      expectedImageCount &&
+    ['available', 'full', 'count-full', 'texture-full'].includes(metrics.residentBudgetState) &&
+    metrics.renderCount > baselineRenderCount &&
+    Number.isFinite(metrics.lastRenderDurationMs) &&
+    metrics.lastRenderDurationMs > 0 &&
+    metrics.lastUpdateReason !== 'cleanup'
+  )
+}
+
+export { isWebglBenchmarkMetricsReady }
+
+async function waitForBenchmarkMetrics(page, expectedImageCount, baselineRenderCount = 0) {
   await page.waitForSelector('.project-canvas-webgl-layer', { timeout: 60000 })
-  try {
-    await page.waitForFunction(
-      (expectedCount) => {
-        const root = document.querySelector('[data-testid="project-canvas-stage-root"]')
-        if (!(root instanceof HTMLElement)) {
-          return false
-        }
+  const startedAt = Date.now()
+  let lastError = null
+  let observedMetrics = null
 
-        const snapshotText = root.dataset.projectCanvasMetricsSnapshot
-        let snapshot = null
-        try {
-          snapshot = snapshotText ? JSON.parse(snapshotText) : null
-        } catch {
-          snapshot = null
-        }
-
-        const summaryText = root.dataset.projectCanvasRenderSurfaceSummary
-        if (!snapshot && !summaryText) {
-          return false
-        }
-
-        let summary
-        try {
-          summary = snapshot?.renderSurface || JSON.parse(summaryText)
-        } catch {
-          return false
-        }
-
-        const webglMetrics = snapshot?.webgl || null
-        const loadedImageCount = Number(
-          webglMetrics?.loadedImageCount ?? root.dataset.projectCanvasWebglLoadedImageCount ?? '0'
-        )
-        const residentCandidateImageCount = Number(
-          webglMetrics?.residentCandidateImageCount ??
-            root.dataset.projectCanvasWebglResidentCandidateImageCount ??
-            '0'
-        )
-        const viewportCulledImageCount = Number(
-          webglMetrics?.viewportCulledImageCount ??
-            root.dataset.projectCanvasWebglViewportCulledImageCount ??
-            '0'
-        )
-        const residentLimit = Number(
-          webglMetrics?.residentLimit ?? root.dataset.projectCanvasWebglResidentLimit ?? '0'
-        )
-        const residentBudgetState =
-          webglMetrics?.residentBudgetState ||
-          root.dataset.projectCanvasWebglResidentBudgetState ||
-          ''
-        const renderCount = Number(
-          webglMetrics?.renderCount ?? root.dataset.projectCanvasWebglRenderCount ?? '0'
-        )
-        const lastRenderDurationMs = Number(
-          webglMetrics?.lastRenderDurationMs ??
-            root.dataset.projectCanvasWebglLastRenderDurationMs ??
-            ''
-        )
-        const webglCanvas = document.querySelector('.project-canvas-webgl-layer canvas')
-        const expectedResidentCount =
-          residentLimit > 0 ? Math.min(expectedCount, residentLimit) : expectedCount
-        const expectedNonResidentProxyCount = Math.max(0, expectedCount - expectedResidentCount)
-        const observedNonResidentProxyCount =
-          Number(summary.budgetDowngradedImageItems || '0') +
-          Number(summary.fallbackImageItems || '0')
-        const hasWebglContext = Boolean(
-          webglCanvas instanceof HTMLCanvasElement &&
-          (webglCanvas.getContext('webgl2') || webglCanvas.getContext('webgl'))
-        )
-
-        return (
-          hasWebglContext &&
-          summary.webglImageItems >= expectedResidentCount &&
-          observedNonResidentProxyCount === expectedNonResidentProxyCount &&
-          loadedImageCount >= expectedResidentCount &&
-          residentCandidateImageCount + viewportCulledImageCount === expectedCount &&
-          ['available', 'full', 'count-full', 'texture-full'].includes(residentBudgetState) &&
-          renderCount > 0 &&
-          Number.isFinite(lastRenderDurationMs) &&
-          lastRenderDurationMs > 0
-        )
-      },
-      expectedImageCount,
-      { timeout: BENCHMARK_METRIC_WAIT_TIMEOUT_MS }
-    )
-  } catch (error) {
-    let observedMetrics = null
+  while (Date.now() - startedAt < BENCHMARK_METRIC_WAIT_TIMEOUT_MS) {
     try {
       observedMetrics = await readBenchmarkMetrics(page)
-    } catch (metricsError) {
-      observedMetrics = {
-        error: metricsError instanceof Error ? metricsError.message : String(metricsError)
+      if (
+        isWebglBenchmarkMetricsReady(observedMetrics, expectedImageCount, baselineRenderCount)
+      ) {
+        return observedMetrics
       }
+      lastError = null
+    } catch (error) {
+      lastError = error
     }
-
-    throw new Error(
-      `Timed out waiting for WebGL benchmark metrics after ${BENCHMARK_METRIC_WAIT_TIMEOUT_MS}ms. Expected images: ${expectedImageCount}. Observed metrics: ${JSON.stringify(observedMetrics)}. ${error instanceof Error ? error.message : String(error)}`
-    )
+    await page.waitForTimeout(250)
   }
 
-  return readBenchmarkMetrics(page)
+  try {
+    observedMetrics = await readBenchmarkMetrics(page)
+  } catch (metricsError) {
+    observedMetrics = {
+      error: metricsError instanceof Error ? metricsError.message : String(metricsError)
+    }
+  }
+
+  const reason = lastError instanceof Error ? lastError.message : String(lastError || 'not ready')
+  const observedMetricsText = JSON.stringify(observedMetrics)
+  throw new Error(
+    `Timed out waiting for WebGL benchmark metrics after ${BENCHMARK_METRIC_WAIT_TIMEOUT_MS}ms. Expected images: ${expectedImageCount}. Baseline render count: ${baselineRenderCount}. Observed metrics: ${observedMetricsText}. ${reason}`
+  )
 }
 
 export function readProjectCanvasBenchmarkMetricsFromDomSnapshot(snapshotInput) {
@@ -419,6 +382,31 @@ export function readProjectCanvasBenchmarkMetricsFromDomSnapshot(snapshotInput) 
       sourceUpgradeFailedImageCount: Number(
         webglMetrics?.sourceUpgradeFailedImageCount ??
           rootDataset.projectCanvasWebglSourceUpgradeFailedImageCount ??
+          '0'
+      ),
+      sourceImageCacheCount: Number(
+        webglMetrics?.sourceImageCacheCount ??
+          rootDataset.projectCanvasWebglSourceImageCacheCount ??
+          '0'
+      ),
+      thumbnailImageCacheCount: Number(
+        webglMetrics?.thumbnailImageCacheCount ??
+          rootDataset.projectCanvasWebglThumbnailImageCacheCount ??
+          '0'
+      ),
+      sourceUpgradeQueueCount: Number(
+        webglMetrics?.sourceUpgradeQueueCount ??
+          rootDataset.projectCanvasWebglSourceUpgradeQueueCount ??
+          '0'
+      ),
+      thumbnailLoadQueueCount: Number(
+        webglMetrics?.thumbnailLoadQueueCount ??
+          rootDataset.projectCanvasWebglThumbnailLoadQueueCount ??
+          '0'
+      ),
+      initialLoadQueueCount: Number(
+        webglMetrics?.initialLoadQueueCount ??
+          rootDataset.projectCanvasWebglInitialLoadQueueCount ??
           '0'
       ),
       renderCount: Number(
@@ -740,12 +728,18 @@ export async function runWebglBenchmark() {
     await navigateToHash(page, '#/canvas?id=webgl-benchmark')
     await waitForHealthyPage(page, fatalErrors)
 
+    const baselineMetrics = await readBenchmarkMetrics(page).catch(() => null)
+    const baselineRenderCount = Number(baselineMetrics?.renderCount || 0)
     const benchmarkImages = await writeBenchmarkImages(tempRoot, BENCHMARK_IMAGE_COUNT)
     const importInput = await getCanvasImportInput(page)
     await importInput.setInputFiles(benchmarkImages, { timeout: 30000 })
     await page.waitForTimeout(2500)
 
-    const metrics = await waitForBenchmarkMetrics(page, benchmarkImages.length)
+    const metrics = await waitForBenchmarkMetrics(
+      page,
+      benchmarkImages.length,
+      baselineRenderCount
+    )
     const cullingBenchmark = await zoomUntilViewportCull(page, benchmarkImages.length)
     const interactionBenchmark = await runInteractionBenchmark(
       page,

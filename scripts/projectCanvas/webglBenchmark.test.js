@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { readProjectCanvasBenchmarkMetricsFromDomSnapshot } from './webglBenchmark.mjs'
+import {
+  isWebglBenchmarkMetricsReady,
+  readProjectCanvasBenchmarkMetricsFromDomSnapshot
+} from './webglBenchmark.mjs'
 
 describe('webglBenchmark metrics reader', () => {
   it('prefers the metrics snapshot over legacy dataset fields', () => {
@@ -21,7 +24,12 @@ describe('webglBenchmark metrics reader', () => {
             residentBudgetState: 'full',
             renderCount: 11,
             lastRenderDurationMs: 4.5,
-            lastUpdateReason: 'snapshot'
+            lastUpdateReason: 'snapshot',
+            sourceImageCacheCount: 7,
+            thumbnailImageCacheCount: 6,
+            sourceUpgradeQueueCount: 0,
+            thumbnailLoadQueueCount: 0,
+            initialLoadQueueCount: 0
           },
           viewport: {
             scale: 2,
@@ -64,6 +72,11 @@ describe('webglBenchmark metrics reader', () => {
     expect(metrics.renderCount).toBe(11)
     expect(metrics.lastRenderDurationMs).toBe(4.5)
     expect(metrics.lastUpdateReason).toBe('snapshot')
+    expect(metrics.sourceImageCacheCount).toBe(7)
+    expect(metrics.thumbnailImageCacheCount).toBe(6)
+    expect(metrics.sourceUpgradeQueueCount).toBe(0)
+    expect(metrics.thumbnailLoadQueueCount).toBe(0)
+    expect(metrics.initialLoadQueueCount).toBe(0)
     expect(metrics.reactCommits).toBe(12)
     expect(metrics.stageScale).toBe(2)
     expect(metrics.stagePosX).toBe(33)
@@ -108,6 +121,38 @@ describe('webglBenchmark metrics reader', () => {
     expect(metrics.stagePosX).toBe(12)
     expect(metrics.stagePosY).toBe(24)
     expect(metrics.largeImageResourceMetrics.values.residentTextureBytes).toBeNull()
+  })
+
+  it('checks initial WebGL readiness against a post-import render baseline', () => {
+    const readyMetrics = {
+      summary: {
+        webglImageItems: 4,
+        fallbackImageItems: 0,
+        budgetDowngradedImageItems: 0
+      },
+      hasWebglContext: true,
+      loadedImageCount: 4,
+      pendingImageCount: 0,
+      residentCandidateImageCount: 4,
+      viewportCulledImageCount: 0,
+      residentLimit: 8,
+      residentBudgetState: 'available',
+      sourceUpgradeQueueCount: 0,
+      thumbnailLoadQueueCount: 0,
+      initialLoadQueueCount: 0,
+      renderCount: 12,
+      lastRenderDurationMs: 5.5,
+      lastUpdateReason: 'items'
+    }
+
+    expect(isWebglBenchmarkMetricsReady(readyMetrics, 4, 11)).toBe(true)
+    expect(isWebglBenchmarkMetricsReady({ ...readyMetrics, renderCount: 11 }, 4, 11)).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady({ ...readyMetrics, sourceUpgradeQueueCount: 1 }, 4, 11)
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady({ ...readyMetrics, lastUpdateReason: 'cleanup' }, 4, 11)
+    ).toBe(false)
   })
 
   it('attaches optional large image resource diagnostics from snapshot and dataset fields', () => {
