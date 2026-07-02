@@ -40,7 +40,10 @@ import {
 import { isCanvasThumbnailSetFresh, pickBestCanvasThumbnailLevel } from '../canvasThumbnailCache'
 import type { CanvasImageThumbnailLevel, CanvasImageThumbnailSet } from '../canvasThumbnailTypes'
 import { PROJECT_CANVAS_MIN_STAGE_SCALE } from '../projectCanvasViewportScale'
-import type { ProjectCanvasWebGLRuntimeMetrics } from '../projectCanvasWebGLRuntimeState'
+import {
+  areProjectCanvasWebGLRuntimeMetricsEqual,
+  type ProjectCanvasWebGLRuntimeMetrics
+} from '../projectCanvasWebGLRuntimeState'
 import {
   insertProjectCanvasWebGLPriorityQueueEntry,
   refreshProjectCanvasWebGLPriorityQueuePriorities,
@@ -407,38 +410,18 @@ function areProjectCanvasWebGLMetricsEqual(
   left: ProjectCanvasWebGLImageLayerMetrics | null,
   right: ProjectCanvasWebGLImageLayerMetrics
 ) {
-  return (
-    left !== null &&
-    left.isInitialized === right.isInitialized &&
-    left.imageCount === right.imageCount &&
-    left.loadedImageCount === right.loadedImageCount &&
-    left.failedImageCount === right.failedImageCount &&
-    left.residentImageCount === right.residentImageCount &&
-    left.residentTextureBytes === right.residentTextureBytes &&
-    left.residentCandidateTextureBytes === right.residentCandidateTextureBytes &&
-    left.residentTextureBudgetBytes === right.residentTextureBudgetBytes &&
-    left.pendingImageCount === right.pendingImageCount &&
-    left.spriteCount === right.spriteCount &&
-    left.residentCandidateImageCount === right.residentCandidateImageCount &&
-    left.viewportCulledImageCount === right.viewportCulledImageCount &&
-    left.usingPreviewImageCount === right.usingPreviewImageCount &&
-    left.usingSourceImageCount === right.usingSourceImageCount &&
-    left.thumbnailPreviewImageCount === right.thumbnailPreviewImageCount &&
-    left.placeholderImageCount === right.placeholderImageCount &&
-    left.sourceUpgradeSuppressedImageCount === right.sourceUpgradeSuppressedImageCount &&
-    left.sourceUpgradeablePreviewImageCount === right.sourceUpgradeablePreviewImageCount &&
-    left.sourceUpgradePendingImageCount === right.sourceUpgradePendingImageCount &&
-    left.sourceUpgradeFailedImageCount === right.sourceUpgradeFailedImageCount &&
-    left.missingImageCount === right.missingImageCount &&
-    left.activeObjectUrlCount === right.activeObjectUrlCount &&
-    left.revokedObjectUrlCount === right.revokedObjectUrlCount &&
-    left.activeImageBitmapCount === right.activeImageBitmapCount &&
-    left.closedImageBitmapCount === right.closedImageBitmapCount &&
-    left.releaseErrorCount === right.releaseErrorCount &&
-    left.decodedInFlightBytes === right.decodedInFlightBytes &&
-    left.activeSourceUpgradeCount === right.activeSourceUpgradeCount &&
-    left.residentTextureBudgetPressureCount === right.residentTextureBudgetPressureCount &&
-    left.textureBudgetEvictionCount === right.textureBudgetEvictionCount
+  if (!left) {
+    return false
+  }
+
+  return areProjectCanvasWebGLRuntimeMetricsEqual(
+    {
+      ...left,
+      renderCount: right.renderCount,
+      lastRenderDurationMs: right.lastRenderDurationMs,
+      lastUpdateReason: right.lastUpdateReason
+    },
+    right
   )
 }
 

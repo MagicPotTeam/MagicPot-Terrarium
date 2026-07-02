@@ -2443,9 +2443,7 @@ async function runTinyZoomAcceptanceProbe(page) {
     }
   }
 
-  const stageBounds = await readProjectCanvasStageBounds(page, 'tiny-zoom acceptance')
-  const centerX = stageBounds.x + stageBounds.width / 2
-  const centerY = stageBounds.y + stageBounds.height / 2
+  await readProjectCanvasStageBounds(page, 'tiny-zoom acceptance')
 
   let metrics = await readBenchmarkMetrics(page)
   let bestMetrics = metrics
