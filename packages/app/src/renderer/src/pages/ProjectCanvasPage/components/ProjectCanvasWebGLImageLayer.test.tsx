@@ -1338,7 +1338,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       act(() => {
         vi.advanceTimersByTime(250)
       })
-      expect(metricsCalls.at(-1)?.renderCount ?? 0).toBe(initialMetricsRenderCount)
+      expect(metricsCalls.at(-1)?.renderCount ?? 0).toBeGreaterThan(initialMetricsRenderCount)
     } finally {
       vi.useRealTimers()
       vi.unstubAllGlobals()

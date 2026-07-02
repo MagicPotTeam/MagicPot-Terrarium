@@ -406,24 +406,7 @@ function getProjectCanvasRenderDeviceScale() {
     : 1
 }
 
-function areProjectCanvasWebGLMetricsEqual(
-  left: ProjectCanvasWebGLImageLayerMetrics | null,
-  right: ProjectCanvasWebGLImageLayerMetrics
-) {
-  if (!left) {
-    return false
-  }
-
-  return areProjectCanvasWebGLRuntimeMetricsEqual(
-    {
-      ...left,
-      renderCount: right.renderCount,
-      lastRenderDurationMs: right.lastRenderDurationMs,
-      lastUpdateReason: right.lastUpdateReason
-    },
-    right
-  )
-}
+const areProjectCanvasWebGLMetricsEqual = areProjectCanvasWebGLRuntimeMetricsEqual
 
 function getProjectCanvasWebGLErrorName(
   gl: ProjectCanvasWebGLRenderingContext,

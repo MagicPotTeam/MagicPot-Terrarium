@@ -225,40 +225,8 @@ export function areProjectCanvasWebGLRuntimeMetricsEqual(
   )
 }
 
-const PROJECT_CANVAS_WEBGL_REACT_STATE_IGNORED_METRIC_KEYS = new Set<
-  keyof ProjectCanvasWebGLRuntimeMetrics
->([
-  'renderCount',
-  'lastRenderDurationMs',
-  'lastUpdateReason',
-  'activeObjectUrlCount',
-  'revokedObjectUrlCount',
-  'activeImageBitmapCount',
-  'closedImageBitmapCount',
-  'releaseErrorCount',
-  'decodedInFlightBytes',
-  'activeSourceUpgradeCount',
-  'residentTextureBudgetPressureCount',
-  'textureBudgetEvictionCount',
-  'sourceImageCacheCount',
-  'thumbnailImageCacheCount',
-  'sourceUpgradeQueueCount',
-  'thumbnailLoadQueueCount',
-  'initialLoadQueueCount'
-])
-
-export function areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
-  left: ProjectCanvasWebGLRuntimeMetrics | null,
-  right: ProjectCanvasWebGLRuntimeMetrics
-) {
-  return (
-    left !== null &&
-    PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS.every(
-      (key) =>
-        PROJECT_CANVAS_WEBGL_REACT_STATE_IGNORED_METRIC_KEYS.has(key) || left[key] === right[key]
-    )
-  )
-}
+export const areProjectCanvasWebGLRuntimeMetricsEqualForReactState =
+  areProjectCanvasWebGLRuntimeMetricsEqual
 
 export function buildProjectCanvasMetricsSnapshot({
   stageScale,

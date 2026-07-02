@@ -89,7 +89,7 @@ describe('projectCanvasWebGLRuntimeState', () => {
     ).toBe(false)
   })
 
-  it('keeps React state in sync for visual metrics while ignoring render/resource diagnostics', () => {
+  it('keeps React state in sync for benchmark-visible WebGL metrics', () => {
     const metrics = createMetrics()
 
     expect(areProjectCanvasWebGLRuntimeMetricsEqualForReactState(null, metrics)).toBe(false)
@@ -101,25 +101,25 @@ describe('projectCanvasWebGLRuntimeState', () => {
         createMetrics({ renderCount: metrics.renderCount + 1 }),
         metrics
       )
-    ).toBe(true)
+    ).toBe(false)
     expect(
       areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
         createMetrics({ lastRenderDurationMs: metrics.lastRenderDurationMs! + 1 }),
         metrics
       )
-    ).toBe(true)
+    ).toBe(false)
     expect(
       areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
         createMetrics({ thumbnailImageCacheCount: metrics.thumbnailImageCacheCount + 1 }),
         metrics
       )
-    ).toBe(true)
+    ).toBe(false)
     expect(
       areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
         createMetrics({ sourceUpgradeQueueCount: metrics.sourceUpgradeQueueCount + 1 }),
         metrics
       )
-    ).toBe(true)
+    ).toBe(false)
     expect(
       areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
         createMetrics({ usingSourceImageCount: metrics.usingSourceImageCount + 1 }),
@@ -131,7 +131,7 @@ describe('projectCanvasWebGLRuntimeState', () => {
         createMetrics({ lastUpdateReason: 'preview' }),
         metrics
       )
-    ).toBe(true)
+    ).toBe(false)
   })
 
   it('queues the latest pending runtime state and clears it after taking a flush snapshot', () => {
