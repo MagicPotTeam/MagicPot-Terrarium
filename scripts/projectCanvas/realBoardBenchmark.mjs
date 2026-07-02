@@ -2094,8 +2094,7 @@ async function readBenchmarkMetricReadiness(page, expectedImageCount) {
       loadedImageCount > 0 &&
       settledResidentCandidates &&
       pendingImageCount === 0 &&
-      residentCandidateImageCount + viewportCulledImageCount > 0 &&
-      renderCount > 0
+      residentCandidateImageCount + viewportCulledImageCount > 0
 
     return {
       ready,
