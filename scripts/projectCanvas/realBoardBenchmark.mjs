@@ -1712,6 +1712,8 @@ function readProjectCanvasRealBoardMetricsFromDomSnapshot(snapshotInput) {
     }
     return fallback
   }
+  const readWebglNumber = (snapshotKey, datasetValue, fallback = 0) =>
+    readFirstNumber([snapshotWebgl?.[snapshotKey], datasetValue], fallback)
   const hasPlaceholderCountMetric =
     hasOwn(snapshotWebgl, 'placeholderCount') ||
     hasOwn(snapshotWebgl, 'placeholderImageCount') ||
@@ -1779,40 +1781,80 @@ function readProjectCanvasRealBoardMetricsFromDomSnapshot(snapshotInput) {
       mountedVideoOverlayCount: Number(overlayDataset.projectCanvasMountedVideoOverlayCount || '0')
     },
     webgl: {
-      loadedImageCount: Number(rootDataset.projectCanvasWebglLoadedImageCount || '0'),
-      failedImageCount: Number(rootDataset.projectCanvasWebglFailedImageCount || '0'),
-      pendingImageCount: Number(rootDataset.projectCanvasWebglPendingImageCount || '0'),
-      residentImageCount: Number(rootDataset.projectCanvasWebglResidentImageCount || '0'),
-      residentCandidateImageCount: Number(
-        rootDataset.projectCanvasWebglResidentCandidateImageCount || '0'
+      loadedImageCount: readWebglNumber(
+        'loadedImageCount',
+        rootDataset.projectCanvasWebglLoadedImageCount
       ),
-      viewportCulledImageCount: Number(
-        rootDataset.projectCanvasWebglViewportCulledImageCount || '0'
+      failedImageCount: readWebglNumber(
+        'failedImageCount',
+        rootDataset.projectCanvasWebglFailedImageCount
       ),
-      residentTextureBytes: Number(rootDataset.projectCanvasWebglResidentTextureBytes || '0'),
-      residentTextureBudgetBytes: Number(
-        rootDataset.projectCanvasWebglResidentTextureBudgetBytes || '0'
+      pendingImageCount: readWebglNumber(
+        'pendingImageCount',
+        rootDataset.projectCanvasWebglPendingImageCount
       ),
-      missingImageCount: Number(rootDataset.projectCanvasWebglMissingImageCount || '0'),
-      previewCount: Number(rootDataset.projectCanvasWebglUsingPreviewImageCount || '0'),
-      sourceCount: Number(rootDataset.projectCanvasWebglUsingSourceImageCount || '0'),
-      sourceUpgradeSuppressedImageCount: Number(
-        rootDataset.projectCanvasWebglSourceUpgradeSuppressedImageCount || '0'
+      residentImageCount: readWebglNumber(
+        'residentImageCount',
+        rootDataset.projectCanvasWebglResidentImageCount
       ),
-      sourceUpgradeablePreviewCount: Number(
-        rootDataset.projectCanvasWebglSourceUpgradeablePreviewImageCount || '0'
+      residentCandidateImageCount: readWebglNumber(
+        'residentCandidateImageCount',
+        rootDataset.projectCanvasWebglResidentCandidateImageCount
       ),
-      upgradePendingCount: Number(
-        rootDataset.projectCanvasWebglSourceUpgradePendingImageCount || '0'
+      viewportCulledImageCount: readWebglNumber(
+        'viewportCulledImageCount',
+        rootDataset.projectCanvasWebglViewportCulledImageCount
       ),
-      sourceUpgradeFailedImageCount: Number(
-        rootDataset.projectCanvasWebglSourceUpgradeFailedImageCount || '0'
+      residentTextureBytes: readWebglNumber(
+        'residentTextureBytes',
+        rootDataset.projectCanvasWebglResidentTextureBytes
       ),
+      residentTextureBudgetBytes: readWebglNumber(
+        'residentTextureBudgetBytes',
+        rootDataset.projectCanvasWebglResidentTextureBudgetBytes
+      ),
+      missingImageCount: readWebglNumber(
+        'missingImageCount',
+        rootDataset.projectCanvasWebglMissingImageCount
+      ),
+      previewCount: readWebglNumber(
+        'usingPreviewImageCount',
+        rootDataset.projectCanvasWebglUsingPreviewImageCount
+      ),
+      sourceCount: readWebglNumber(
+        'usingSourceImageCount',
+        rootDataset.projectCanvasWebglUsingSourceImageCount
+      ),
+      sourceUpgradeSuppressedImageCount: readWebglNumber(
+        'sourceUpgradeSuppressedImageCount',
+        rootDataset.projectCanvasWebglSourceUpgradeSuppressedImageCount
+      ),
+      sourceUpgradeablePreviewCount: readWebglNumber(
+        'sourceUpgradeablePreviewImageCount',
+        rootDataset.projectCanvasWebglSourceUpgradeablePreviewImageCount
+      ),
+      upgradePendingCount: readWebglNumber(
+        'sourceUpgradePendingImageCount',
+        rootDataset.projectCanvasWebglSourceUpgradePendingImageCount
+      ),
+      sourceUpgradeFailedImageCount: readWebglNumber(
+        'sourceUpgradeFailedImageCount',
+        rootDataset.projectCanvasWebglSourceUpgradeFailedImageCount
+      ),
+      sourceImageCacheCount: readWebglNumber('sourceImageCacheCount'),
+      thumbnailImageCacheCount: readWebglNumber('thumbnailImageCacheCount'),
+      sourceUpgradeQueueCount: readWebglNumber('sourceUpgradeQueueCount'),
+      thumbnailLoadQueueCount: readWebglNumber('thumbnailLoadQueueCount'),
+      initialLoadQueueCount: readWebglNumber('initialLoadQueueCount'),
       placeholderMetricAvailable: hasPlaceholderCountMetric,
       placeholderCount,
-      renderCount: Number(rootDataset.projectCanvasWebglRenderCount || '0'),
-      lastRenderDurationMs: Number(rootDataset.projectCanvasWebglLastRenderDurationMs || '0'),
-      lastUpdateReason: rootDataset.projectCanvasWebglLastUpdateReason || '',
+      renderCount: readWebglNumber('renderCount', rootDataset.projectCanvasWebglRenderCount),
+      lastRenderDurationMs: readWebglNumber(
+        'lastRenderDurationMs',
+        rootDataset.projectCanvasWebglLastRenderDurationMs
+      ),
+      lastUpdateReason:
+        snapshotWebgl?.lastUpdateReason || rootDataset.projectCanvasWebglLastUpdateReason || '',
       hasWebglContext: Boolean(domMetrics.hasWebglContext)
     },
     thumbnailCache: {

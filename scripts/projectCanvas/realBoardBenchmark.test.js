@@ -408,6 +408,17 @@ describe('realBoardBenchmark acceptance gates', () => {
             sidecarGeneratedCount: 3
           },
           webgl: {
+            loadedImageCount: 7,
+            pendingImageCount: 2,
+            residentTextureBytes: 16384,
+            sourceImageCacheCount: 11,
+            thumbnailImageCacheCount: 12,
+            sourceUpgradeQueueCount: 13,
+            thumbnailLoadQueueCount: 14,
+            initialLoadQueueCount: 15,
+            renderCount: 3,
+            lastRenderDurationMs: 4.5,
+            lastUpdateReason: 'items',
             sourceUpgradeCompletedCount: 4,
             evictionReasons: [{ reason: 'budget', count: 2 }]
           }
@@ -430,14 +441,27 @@ describe('realBoardBenchmark acceptance gates', () => {
       cacheHitCount: 5,
       nativeGeneratedCount: 2,
       sidecarGeneratedCount: 3,
-      residentTextureBytes: 8192,
+      residentTextureBytes: 16384,
       sourceUpgradeCount: 4,
       evictionCount: 2,
       evictionReasons: { budget: 2 },
       objectUrlCount: 6
     })
     expect(metrics.diagnosticMetrics.largeImageResources).toBe(metrics.largeImageResourceMetrics)
-    expect(metrics.webgl.hasWebglContext).toBe(true)
+    expect(metrics.webgl).toMatchObject({
+      hasWebglContext: true,
+      loadedImageCount: 7,
+      pendingImageCount: 2,
+      residentTextureBytes: 16384,
+      sourceImageCacheCount: 11,
+      thumbnailImageCacheCount: 12,
+      sourceUpgradeQueueCount: 13,
+      thumbnailLoadQueueCount: 14,
+      initialLoadQueueCount: 15,
+      renderCount: 3,
+      lastRenderDurationMs: 4.5,
+      lastUpdateReason: 'items'
+    })
   })
 
   it('allows bounded deferred React commits for idle source texture upgrades', () => {
