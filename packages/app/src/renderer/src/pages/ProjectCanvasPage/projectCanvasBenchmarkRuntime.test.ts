@@ -33,8 +33,9 @@ function defineBenchmarkRuntime(
   runtime: TestBenchmarkWindow['magicpotProjectCanvasBenchmarkRuntime'],
   descriptor: Partial<PropertyDescriptor> = {}
 ): void {
+  const value = runtime && typeof runtime === 'object' ? Object.freeze(runtime) : runtime
   Object.defineProperty(getTestBenchmarkWindow(), 'magicpotProjectCanvasBenchmarkRuntime', {
-    value: runtime,
+    value,
     configurable: false,
     enumerable: true,
     writable: false,
@@ -98,8 +99,9 @@ describe('projectCanvasBenchmarkRuntime', () => {
       canvasImportTotalSize: 123,
       sharedThumbnailCacheRoot: '/tmp/cache'
     })
+    const getter = vi.fn(() => runtime)
     Object.defineProperty(benchmarkWindow, 'magicpotProjectCanvasBenchmarkRuntime', {
-      get: () => runtime,
+      get: getter,
       configurable: false,
       enumerable: true
     })
@@ -107,11 +109,65 @@ describe('projectCanvasBenchmarkRuntime', () => {
     expect(hasProjectCanvasRealBoardBenchmarkRuntime()).toBe(false)
     expect(readProjectCanvasBenchmarkImportTotalSize()).toBe(0)
     expect(readProjectCanvasBenchmarkSharedThumbnailCacheRoot()).toBeUndefined()
+    expect(getter).not.toHaveBeenCalled()
 
     const setter = vi.fn(() => ({ scale: 1, x: 0, y: 0 }))
     const cleanup = installProjectCanvasBenchmarkViewportSetter(setter)
     expect(benchmarkWindow.__MAGICPOT_REAL_BOARD_SET_PROJECT_CANVAS_VIEWPORT__).toBeUndefined()
+    expect(getter).not.toHaveBeenCalled()
     cleanup()
+  })
+
+  it('does not trust a configurable self-hardening accessor benchmark runtime property', () => {
+    const benchmarkWindow = installTestBenchmarkWindow()
+    const runtime = Object.freeze({
+      enabled: true,
+      canvasImportTotalSize: 123,
+      sharedThumbnailCacheRoot: '/tmp/cache'
+    })
+    const getter = vi.fn(() => {
+      Object.defineProperty(benchmarkWindow, 'magicpotProjectCanvasBenchmarkRuntime', {
+        value: runtime,
+        configurable: false,
+        enumerable: true,
+        writable: false
+      })
+      return runtime
+    })
+    Object.defineProperty(benchmarkWindow, 'magicpotProjectCanvasBenchmarkRuntime', {
+      get: getter,
+      configurable: true,
+      enumerable: true
+    })
+
+    expect(hasProjectCanvasRealBoardBenchmarkRuntime()).toBe(false)
+    expect(readProjectCanvasBenchmarkImportTotalSize()).toBe(0)
+    expect(readProjectCanvasBenchmarkSharedThumbnailCacheRoot()).toBeUndefined()
+    expect(getter).not.toHaveBeenCalled()
+
+    const setter = vi.fn(() => ({ scale: 1, x: 0, y: 0 }))
+    const cleanup = installProjectCanvasBenchmarkViewportSetter(setter)
+    expect(benchmarkWindow.__MAGICPOT_REAL_BOARD_SET_PROJECT_CANVAS_VIEWPORT__).toBeUndefined()
+    expect(getter).not.toHaveBeenCalled()
+    cleanup()
+  })
+
+  it('does not trust a non-frozen immutable data benchmark runtime property', () => {
+    const benchmarkWindow = installTestBenchmarkWindow()
+    Object.defineProperty(benchmarkWindow, 'magicpotProjectCanvasBenchmarkRuntime', {
+      value: {
+        enabled: true,
+        canvasImportTotalSize: 123,
+        sharedThumbnailCacheRoot: '/tmp/cache'
+      },
+      configurable: false,
+      enumerable: true,
+      writable: false
+    })
+
+    expect(hasProjectCanvasRealBoardBenchmarkRuntime()).toBe(false)
+    expect(readProjectCanvasBenchmarkImportTotalSize()).toBe(0)
+    expect(readProjectCanvasBenchmarkSharedThumbnailCacheRoot()).toBeUndefined()
   })
 
   it('accepts an explicit zero import-size hint from the trusted preload runtime', () => {

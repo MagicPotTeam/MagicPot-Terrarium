@@ -31,18 +31,39 @@ function getBenchmarkWindow(): ProjectCanvasBenchmarkWindow | null {
 }
 
 function isTrustedProjectCanvasBenchmarkRuntime(
-  runtime: ProjectCanvasBenchmarkRuntimeBridge | undefined,
   descriptor: PropertyDescriptor | undefined
-): runtime is ProjectCanvasBenchmarkRuntimeBridge & { enabled: true } {
-  if (runtime?.enabled !== true || !descriptor) {
+): descriptor is PropertyDescriptor & {
+  value: ProjectCanvasBenchmarkRuntimeBridge & { enabled: true }
+} {
+  if (
+    !descriptor ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+    descriptor.writable !== false ||
+    descriptor.configurable !== false
+  ) {
+    return false
+  }
+
+  const runtime = descriptor.value as ProjectCanvasBenchmarkRuntimeBridge | undefined
+  if (
+    !runtime ||
+    typeof runtime !== 'object' ||
+    runtime.enabled !== true ||
+    !Object.isFrozen(runtime)
+  ) {
+    return false
+  }
+
+  if (
+    runtime.canvasImportTotalSize !== undefined &&
+    (!Number.isFinite(runtime.canvasImportTotalSize) || runtime.canvasImportTotalSize < 0)
+  ) {
     return false
   }
 
   return (
-    Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
-    descriptor.value === runtime &&
-    descriptor.writable === false &&
-    descriptor.configurable === false
+    runtime.sharedThumbnailCacheRoot === undefined ||
+    typeof runtime.sharedThumbnailCacheRoot === 'string'
   )
 }
 
@@ -52,12 +73,11 @@ function getProjectCanvasBenchmarkRuntime(): ProjectCanvasBenchmarkRuntimeBridge
     return null
   }
 
-  const runtime = benchmarkWindow.magicpotProjectCanvasBenchmarkRuntime
   const descriptor = Object.getOwnPropertyDescriptor(
     benchmarkWindow,
     'magicpotProjectCanvasBenchmarkRuntime'
   )
-  return isTrustedProjectCanvasBenchmarkRuntime(runtime, descriptor) ? runtime : null
+  return isTrustedProjectCanvasBenchmarkRuntime(descriptor) ? descriptor.value : null
 }
 
 export function hasProjectCanvasRealBoardBenchmarkRuntime(): boolean {

@@ -898,15 +898,20 @@ async function navigateToHash(page, hash) {
 
 async function assertBenchmarkRendererHints(page, reason) {
   const hints = await page.evaluate(() => {
-    const runtime = window.magicpotProjectCanvasBenchmarkRuntime
     const descriptor = Object.getOwnPropertyDescriptor(
       window,
       'magicpotProjectCanvasBenchmarkRuntime'
     )
+    const isDataDescriptor = Boolean(
+      descriptor && Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    )
+    const runtime = isDataDescriptor ? descriptor.value : null
     return {
       enabled: runtime?.enabled,
       importTotalSize: runtime?.canvasImportTotalSize,
       sharedThumbnailCacheRoot: runtime?.sharedThumbnailCacheRoot,
+      isDataDescriptor,
+      frozen: Boolean(runtime && Object.isFrozen(runtime)),
       writable: descriptor?.writable,
       configurable: descriptor?.configurable
     }
@@ -914,9 +919,14 @@ async function assertBenchmarkRendererHints(page, reason) {
   if (hints.enabled !== true) {
     throw new Error(`${reason}: renderer real-board benchmark runtime is not enabled.`)
   }
-  if (hints.writable !== false || hints.configurable !== false) {
+  if (
+    hints.isDataDescriptor !== true ||
+    hints.frozen !== true ||
+    hints.writable !== false ||
+    hints.configurable !== false
+  ) {
     throw new Error(
-      `${reason}: renderer real-board benchmark runtime must be exposed as an immutable window property.`
+      `${reason}: renderer real-board benchmark runtime must be exposed as an immutable frozen data window property.`
     )
   }
   if (hints.importTotalSize !== REAL_BOARD_CANVAS_IMPORT_TOTAL_SIZE) {
