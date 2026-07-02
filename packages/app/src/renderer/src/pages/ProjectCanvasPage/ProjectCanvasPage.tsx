@@ -174,6 +174,7 @@ import { useProjectCanvasPageShellState } from './useProjectCanvasPageShellState
 import { useCanvasViewportPlacement } from './useCanvasViewportPlacement'
 import { useCanvasVisualMetrics } from './useCanvasVisualMetrics'
 import { useCanvasViewerPlayback } from './useCanvasViewerPlayback'
+import { installProjectCanvasBenchmarkViewportSetter } from './projectCanvasBenchmarkRuntime'
 import { useCanvasAssetIntake, type CanvasImageBatchImportProgress } from './useCanvasAssetIntake'
 import { useCanvasImageExtract } from './useCanvasImageExtract'
 import { useMessage } from '../../hooks/useMessage'
@@ -1303,6 +1304,61 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     addVideoToCanvas,
     suspendAutoSave: isImageBatchImportActive
   })
+
+  useEffect(() => {
+    return installProjectCanvasBenchmarkViewportSetter((viewport) => {
+      const nextScale = clampStageScale(Number(viewport?.scale ?? stageScaleRef.current))
+      let focusedImageId: string | undefined
+      const focusedImage = viewport?.focusLargestImage
+        ? items.reduce<CanvasImageItem | null>((best, item) => {
+            if (item.type !== 'image') return best
+            const itemArea =
+              (typeof item.sourceWidth === 'number' && Number.isFinite(item.sourceWidth)
+                ? item.sourceWidth
+                : item.width) *
+              (typeof item.sourceHeight === 'number' && Number.isFinite(item.sourceHeight)
+                ? item.sourceHeight
+                : item.height)
+            const bestArea = best
+              ? (typeof best.sourceWidth === 'number' && Number.isFinite(best.sourceWidth)
+                  ? best.sourceWidth
+                  : best.width) *
+                (typeof best.sourceHeight === 'number' && Number.isFinite(best.sourceHeight)
+                  ? best.sourceHeight
+                  : best.height)
+              : -1
+            return itemArea > bestArea ? item : best
+          }, null)
+        : null
+      const nextPos = focusedImage
+        ? {
+            x: stageSize.width / 2 - (focusedImage.x + focusedImage.width / 2) * nextScale,
+            y: stageSize.height / 2 - (focusedImage.y + focusedImage.height / 2) * nextScale
+          }
+        : {
+            x: Number.isFinite(Number(viewport?.x)) ? Number(viewport?.x) : stagePosRef.current.x,
+            y: Number.isFinite(Number(viewport?.y)) ? Number(viewport?.y) : stagePosRef.current.y
+          }
+      if (focusedImage && viewport?.selectFocused !== false) {
+        focusedImageId = focusedImage.id
+        setSelectedIds(new Set([focusedImage.id]))
+      }
+      stageScaleRef.current = nextScale
+      stagePosRef.current = nextPos
+      setStageScale(nextScale)
+      setStagePos(nextPos)
+      return { scale: nextScale, ...nextPos, ...(focusedImageId ? { focusedImageId } : {}) }
+    })
+  }, [
+    clampStageScale,
+    items,
+    setSelectedIds,
+    setStagePos,
+    setStageScale,
+    stagePosRef,
+    stageScaleRef,
+    stageSize
+  ])
 
   const inlineTextAreaRef = useRef<HTMLTextAreaElement>(null)
   const itemIdSet = useMemo(() => new Set(items.map((item) => item.id)), [items])

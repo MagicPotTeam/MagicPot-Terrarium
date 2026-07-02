@@ -20,6 +20,57 @@ const electronFile = {
   }
 }
 
+type ProjectCanvasBenchmarkRuntimeBridge = Readonly<{
+  enabled: boolean
+  canvasImportTotalSize?: number
+  sharedThumbnailCacheRoot?: string
+}>
+
+function isTruthyEnvValue(value: string | undefined): boolean {
+  return /^(1|true|yes|on)$/i.test(`${value || ''}`.trim())
+}
+
+function readPositiveIntegerEnv(name: string): number | undefined {
+  const value = Number.parseInt(`${process.env[name] || ''}`, 10)
+  return Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function readNonEmptyStringEnv(name: string): string | undefined {
+  const value = `${process.env[name] || ''}`.trim()
+  return value ? value : undefined
+}
+
+function createProjectCanvasBenchmarkRuntime(): ProjectCanvasBenchmarkRuntimeBridge {
+  const enabled = isTruthyEnvValue(process.env['MAGICPOT_PROJECT_CANVAS_REAL_BOARD_BENCHMARK'])
+  if (!enabled) {
+    return Object.freeze({ enabled: false })
+  }
+
+  const canvasImportTotalSize = readPositiveIntegerEnv(
+    'MAGICPOT_REAL_BOARD_CANVAS_IMPORT_TOTAL_SIZE'
+  )
+  const sharedThumbnailCacheRoot = readNonEmptyStringEnv(
+    'MAGICPOT_REAL_BOARD_SHARED_THUMBNAIL_CACHE_ROOT'
+  )
+
+  return Object.freeze({
+    enabled: true,
+    ...(canvasImportTotalSize !== undefined ? { canvasImportTotalSize } : {}),
+    ...(sharedThumbnailCacheRoot !== undefined ? { sharedThumbnailCacheRoot } : {})
+  })
+}
+
+const projectCanvasBenchmarkRuntime = createProjectCanvasBenchmarkRuntime()
+
+function defineImmutableMainWorldValue(name: string, value: unknown): void {
+  Object.defineProperty(window, name, {
+    value,
+    enumerable: true,
+    configurable: false,
+    writable: false
+  })
+}
+
 if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('electron', electronAPI)
@@ -27,6 +78,10 @@ if (process.contextIsolated) {
     contextBridge.exposeInMainWorld('api', api)
     contextBridge.exposeInMainWorld('path', path)
     contextBridge.exposeInMainWorld('win', winBridge)
+    contextBridge.exposeInMainWorld(
+      'magicpotProjectCanvasBenchmarkRuntime',
+      projectCanvasBenchmarkRuntime
+    )
   } catch (error) {
     console.error('[preload] exposeInMainWorld error:', error)
   }
@@ -47,4 +102,8 @@ if (process.contextIsolated) {
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- winBridge 暴露给 TitleBar 控制窗口
   // @ts-ignore
   window.win = winBridge
+  defineImmutableMainWorldValue(
+    'magicpotProjectCanvasBenchmarkRuntime',
+    projectCanvasBenchmarkRuntime
+  )
 }
