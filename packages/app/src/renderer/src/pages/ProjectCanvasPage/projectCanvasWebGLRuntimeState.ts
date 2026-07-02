@@ -31,6 +31,11 @@ export type ProjectCanvasWebGLRuntimeMetrics = {
   activeSourceUpgradeCount: number
   residentTextureBudgetPressureCount: number
   textureBudgetEvictionCount: number
+  sourceImageCacheCount: number
+  thumbnailImageCacheCount: number
+  sourceUpgradeQueueCount: number
+  thumbnailLoadQueueCount: number
+  initialLoadQueueCount: number
   renderCount: number
   lastRenderDurationMs: number | null
   lastUpdateReason: 'initialize' | 'items' | 'preview' | 'cleanup'
@@ -113,6 +118,11 @@ const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   activeSourceUpgradeCount: 0,
   residentTextureBudgetPressureCount: 0,
   textureBudgetEvictionCount: 0,
+  sourceImageCacheCount: 0,
+  thumbnailImageCacheCount: 0,
+  sourceUpgradeQueueCount: 0,
+  thumbnailLoadQueueCount: 0,
+  initialLoadQueueCount: 0,
   renderCount: 0,
   lastRenderDurationMs: null,
   lastUpdateReason: 'cleanup'
@@ -149,6 +159,11 @@ const PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS = [
   'activeSourceUpgradeCount',
   'residentTextureBudgetPressureCount',
   'textureBudgetEvictionCount',
+  'sourceImageCacheCount',
+  'thumbnailImageCacheCount',
+  'sourceUpgradeQueueCount',
+  'thumbnailLoadQueueCount',
+  'initialLoadQueueCount',
   'renderCount',
   'lastRenderDurationMs',
   'lastUpdateReason'
@@ -207,6 +222,41 @@ export function areProjectCanvasWebGLRuntimeMetricsEqual(
   return (
     left !== null &&
     PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS.every((key) => left[key] === right[key])
+  )
+}
+
+const PROJECT_CANVAS_WEBGL_REACT_STATE_IGNORED_METRIC_KEYS = new Set<
+  keyof ProjectCanvasWebGLRuntimeMetrics
+>([
+  'renderCount',
+  'lastRenderDurationMs',
+  'lastUpdateReason',
+  'activeObjectUrlCount',
+  'revokedObjectUrlCount',
+  'activeImageBitmapCount',
+  'closedImageBitmapCount',
+  'releaseErrorCount',
+  'decodedInFlightBytes',
+  'activeSourceUpgradeCount',
+  'residentTextureBudgetPressureCount',
+  'textureBudgetEvictionCount',
+  'sourceImageCacheCount',
+  'thumbnailImageCacheCount',
+  'sourceUpgradeQueueCount',
+  'thumbnailLoadQueueCount',
+  'initialLoadQueueCount'
+])
+
+export function areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
+  left: ProjectCanvasWebGLRuntimeMetrics | null,
+  right: ProjectCanvasWebGLRuntimeMetrics
+) {
+  return (
+    left !== null &&
+    PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS.every(
+      (key) =>
+        PROJECT_CANVAS_WEBGL_REACT_STATE_IGNORED_METRIC_KEYS.has(key) || left[key] === right[key]
+    )
   )
 }
 

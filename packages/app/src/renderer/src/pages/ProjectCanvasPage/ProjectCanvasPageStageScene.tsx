@@ -52,7 +52,7 @@ import { getCanvasItemBounds, isFillableAnnotationShape } from './projectCanvasP
 import { getCanvasThumbnailRuntimeMetrics } from './canvasThumbnailWorkerClient'
 import {
   areProjectCanvasSetsEqual,
-  areProjectCanvasWebGLRuntimeMetricsEqual,
+  areProjectCanvasWebGLRuntimeMetricsEqualForReactState,
   buildProjectCanvasMetricsSnapshot,
   createProjectCanvasWebGLPendingRuntimeState,
   queueProjectCanvasWebGLPendingRuntimeIds,
@@ -1011,7 +1011,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
   }, [])
   const commitWebglMetrics = React.useCallback((metrics: ProjectCanvasWebGLImageLayerMetrics) => {
     setWebglMetrics((previousMetrics) =>
-      areProjectCanvasWebGLRuntimeMetricsEqual(previousMetrics, metrics)
+      areProjectCanvasWebGLRuntimeMetricsEqualForReactState(previousMetrics, metrics)
         ? previousMetrics
         : { ...metrics }
     )

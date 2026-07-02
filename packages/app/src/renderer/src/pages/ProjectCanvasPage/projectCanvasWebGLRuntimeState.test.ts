@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   areProjectCanvasSetsEqual,
   areProjectCanvasWebGLRuntimeMetricsEqual,
+  areProjectCanvasWebGLRuntimeMetricsEqualForReactState,
   buildProjectCanvasMetricsSnapshot,
   createProjectCanvasWebGLPendingRuntimeState,
   parseProjectCanvasMetricsSnapshot,
@@ -46,6 +47,11 @@ function createMetrics(
     activeSourceUpgradeCount: 0,
     residentTextureBudgetPressureCount: 0,
     textureBudgetEvictionCount: 0,
+    sourceImageCacheCount: 0,
+    thumbnailImageCacheCount: 0,
+    sourceUpgradeQueueCount: 0,
+    thumbnailLoadQueueCount: 0,
+    initialLoadQueueCount: 0,
     renderCount: 4,
     lastRenderDurationMs: 5.25,
     lastUpdateReason: 'items',
@@ -81,6 +87,51 @@ describe('projectCanvasWebGLRuntimeState', () => {
         metrics
       )
     ).toBe(false)
+  })
+
+  it('keeps React state in sync for visual metrics while ignoring render/resource diagnostics', () => {
+    const metrics = createMetrics()
+
+    expect(areProjectCanvasWebGLRuntimeMetricsEqualForReactState(null, metrics)).toBe(false)
+    expect(areProjectCanvasWebGLRuntimeMetricsEqualForReactState(createMetrics(), metrics)).toBe(
+      true
+    )
+    expect(
+      areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
+        createMetrics({ renderCount: metrics.renderCount + 1 }),
+        metrics
+      )
+    ).toBe(true)
+    expect(
+      areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
+        createMetrics({ lastRenderDurationMs: metrics.lastRenderDurationMs! + 1 }),
+        metrics
+      )
+    ).toBe(true)
+    expect(
+      areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
+        createMetrics({ thumbnailImageCacheCount: metrics.thumbnailImageCacheCount + 1 }),
+        metrics
+      )
+    ).toBe(true)
+    expect(
+      areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
+        createMetrics({ sourceUpgradeQueueCount: metrics.sourceUpgradeQueueCount + 1 }),
+        metrics
+      )
+    ).toBe(true)
+    expect(
+      areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
+        createMetrics({ usingSourceImageCount: metrics.usingSourceImageCount + 1 }),
+        metrics
+      )
+    ).toBe(false)
+    expect(
+      areProjectCanvasWebGLRuntimeMetricsEqualForReactState(
+        createMetrics({ lastUpdateReason: 'preview' }),
+        metrics
+      )
+    ).toBe(true)
   })
 
   it('queues the latest pending runtime state and clears it after taking a flush snapshot', () => {

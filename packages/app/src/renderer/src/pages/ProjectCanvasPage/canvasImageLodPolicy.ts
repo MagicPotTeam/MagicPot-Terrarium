@@ -145,10 +145,14 @@ export function resolveCanvasImageLodDecision({
     !hasPreviewImage ||
     (Number.isFinite(sourceMaxSide) &&
       sourceMaxSide > previewMaxSide * PROJECT_CANVAS_IMAGE_LOD_SOURCE_TEXTURE_MIN_GAIN_RATIO)
-  const usesThumbnailPreview = Boolean(
-    hasPreviewImage && !usesPlaceholderPreview && hasEnoughSourceGain
+  const shouldBypassSourceGainForForcedSource = Boolean(
+    forceSource && hasPreviewImage && !usesPlaceholderPreview
   )
-  const canConsiderSource = Boolean(item.src) && hasEnoughSourceGain
+  const canUseThumbnailPreview = hasEnoughSourceGain || shouldBypassSourceGainForForcedSource
+  const usesThumbnailPreview = Boolean(
+    hasPreviewImage && !usesPlaceholderPreview && canUseThumbnailPreview
+  )
+  const canConsiderSource = Boolean(item.src) && canUseThumbnailPreview
 
   let sourceTextureNeeded = false
   let shouldUseSourceTexture = false

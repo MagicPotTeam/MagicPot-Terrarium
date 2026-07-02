@@ -438,10 +438,7 @@ function areProjectCanvasWebGLMetricsEqual(
     left.decodedInFlightBytes === right.decodedInFlightBytes &&
     left.activeSourceUpgradeCount === right.activeSourceUpgradeCount &&
     left.residentTextureBudgetPressureCount === right.residentTextureBudgetPressureCount &&
-    left.textureBudgetEvictionCount === right.textureBudgetEvictionCount &&
-    left.renderCount === right.renderCount &&
-    left.lastRenderDurationMs === right.lastRenderDurationMs &&
-    left.lastUpdateReason === right.lastUpdateReason
+    left.textureBudgetEvictionCount === right.textureBudgetEvictionCount
   )
 }
 
@@ -956,6 +953,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     activeSourceUpgradeCount: 0,
     residentTextureBudgetPressureCount: 0,
     textureBudgetEvictionCount: 0,
+    sourceImageCacheCount: 0,
+    thumbnailImageCacheCount: 0,
+    sourceUpgradeQueueCount: 0,
+    thumbnailLoadQueueCount: 0,
+    initialLoadQueueCount: 0,
     renderCount: 0,
     lastRenderDurationMs: null,
     lastUpdateReason: 'initialize'
@@ -1028,7 +1030,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       decodedInFlightBytes: budgetMetrics.usage.decodedInFlightBytes,
       activeSourceUpgradeCount: budgetMetrics.usage.activeSourceUpgrades,
       residentTextureBudgetPressureCount: textureBudgetPressureCount,
-      textureBudgetEvictionCount: textureBudgetEvictionCountRef.current
+      textureBudgetEvictionCount: textureBudgetEvictionCountRef.current,
+      sourceImageCacheCount: imageCacheRef.current.size,
+      thumbnailImageCacheCount: thumbnailCacheRef.current.size,
+      sourceUpgradeQueueCount: sourceUpgradeQueueRef.current.length,
+      thumbnailLoadQueueCount: thumbnailLoadQueueRef.current.length,
+      initialLoadQueueCount: initialLoadQueueRef.current.length
     }
   }, [])
 
@@ -1135,6 +1142,40 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       cache.clear()
     },
     [releaseCachedImageRecord]
+  )
+
+  const pruneDecodedImageCacheForResidentTargets = useCallback(
+    ({
+      cache,
+      liveIds,
+      residentTargetIds,
+      reason = 'budget-pressure'
+    }: {
+      cache: Map<string, CachedImageRecord>
+      liveIds: ReadonlySet<string>
+      residentTargetIds: ReadonlySet<string>
+      reason?: CanvasImageReleaseReason
+    }) => {
+      for (const itemId of Array.from(cache.keys())) {
+        if (!liveIds.has(itemId)) {
+          deleteCachedImageRecord(cache, itemId, 'removed')
+        }
+      }
+
+      if (cache.size <= PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT) {
+        return
+      }
+
+      for (const itemId of Array.from(cache.keys())) {
+        if (cache.size <= PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT) {
+          return
+        }
+        if (!residentTargetIds.has(itemId)) {
+          deleteCachedImageRecord(cache, itemId, reason)
+        }
+      }
+    },
+    [deleteCachedImageRecord]
   )
 
   const setCachedImageRecord = useCallback(
@@ -1528,6 +1569,18 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     setViewportVersion((version) => version + 1)
   }, [])
 
+  const clearSourceUpgradeQueue = useCallback(() => {
+    sourceUpgradeQueueRef.current.forEach((entry) => {
+      if (pendingLoadSrcByIdRef.current.get(entry.itemId) === entry.src) {
+        pendingLoadsRef.current.delete(entry.itemId)
+        pendingLoadSrcByIdRef.current.delete(entry.itemId)
+      }
+    })
+    sourceUpgradeQueueRef.current = []
+    activeSourceUpgradeSrcByIdRef.current.clear()
+    sourceUpgradeEligibleIdsRef.current.clear()
+  }, [])
+
   const scheduleSourceUpgradeIdleReconcile = useCallback(() => {
     if (sourceUpgradeIdleTimerRef.current !== null) {
       clearTimeout(sourceUpgradeIdleTimerRef.current)
@@ -1535,7 +1588,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
 
     if (isPerformanceThrottledRef.current) {
-      sourceUpgradeAllowedAtRef.current = Number.POSITIVE_INFINITY
+      sourceUpgradeAllowedAtRef.current = 0
       return
     }
 
@@ -1570,11 +1623,13 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         sourceUpgradeAllowedAtRef.current = Number.POSITIVE_INFINITY
         thumbnailLoadQueueRef.current = []
         pendingThumbnailLoadSrcByIdRef.current.clear()
+        clearSourceUpgradeQueue()
         return
       }
 
       if (isPerformanceThrottledRef.current) {
-        sourceUpgradeAllowedAtRef.current = Number.POSITIVE_INFINITY
+        sourceUpgradeAllowedAtRef.current = 0
+        forceViewportReconcile()
         return
       }
 
@@ -1591,6 +1646,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       flushMetricsReport,
       forceViewportReconcile,
       scheduleImageVersionUpdate,
+      clearSourceUpgradeQueue,
       scheduleSourceUpgradeIdleReconcile
     ]
   )
@@ -1606,10 +1662,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         clearTimeout(sourceUpgradeIdleTimerRef.current)
         sourceUpgradeIdleTimerRef.current = null
       }
-      sourceUpgradeAllowedAtRef.current = Number.POSITIVE_INFINITY
+      sourceUpgradeAllowedAtRef.current = 0
       thumbnailLoadQueueRef.current = []
       pendingThumbnailLoadSrcByIdRef.current.clear()
       hasDeferredMetricsReportRef.current = true
+      forceViewportReconcile()
       return
     }
 
@@ -1627,6 +1684,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   }, [
     flushMetricsReport,
     forceViewportReconcile,
+    clearSourceUpgradeQueue,
     isPerformanceThrottled,
     scheduleImageVersionUpdate,
     scheduleSourceUpgradeIdleReconcile
@@ -2537,17 +2595,29 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               stageScaleRef.current
             )
           : false
+        const currentThumbnail = currentItem
+          ? thumbnailCacheRef.current.get(currentItem.id)
+          : undefined
+        const hasCurrentThumbnailCache = Boolean(
+          currentItem &&
+          currentThumbnail &&
+          isCanvasThumbnailSetFresh(currentItem.thumbnailSet, currentItem.sourceIdentity) &&
+          currentItem.thumbnailSet.levels.some((level) => level.src === currentThumbnail.src)
+        )
+        const upgradePreviewImage = hasCurrentThumbnailCache
+          ? currentThumbnail?.image
+          : currentItem?.image
         if (
           !currentItem ||
           currentItem.src !== queued.src ||
           pendingLoadSrcByIdRef.current.get(queued.itemId) !== queued.src ||
           !sourceUpgradeEligibleIdsRef.current.has(queued.itemId) ||
-          !currentItem.image ||
+          !upgradePreviewImage ||
           shouldSuppressSourceUpgradeForItem(currentItem, forceSelectedSourceTexture) ||
-          !shouldLoadSourceTexture(currentItem, currentItem.image, stageScaleRef.current, {
+          !shouldLoadSourceTexture(currentItem, upgradePreviewImage, stageScaleRef.current, {
             force: forceSelectedSourceTexture,
             isVisible: sourceUpgradeEligibleIdsRef.current.has(currentItem.id),
-            sourceTextureByteSize: estimateSourceTextureByteSize(currentItem, currentItem.image),
+            sourceTextureByteSize: estimateSourceTextureByteSize(currentItem, upgradePreviewImage),
             residentTextureBytes: getResidentTextureBytes(),
             existingTextureBytes:
               spriteRecordsRef.current.get(currentItem.id)?.textureByteSize ?? 0,
@@ -2574,6 +2644,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         src: item.src,
         priority
       })
+      pumpSourceUpgradeQueue()
     }
 
     const clearPendingThumbnailLoad = (itemId: string, src: string) => {
@@ -2788,10 +2859,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         failedLoadSrcByIdRef.current.delete(item.id)
         return fallbackImage
       }
-      if (
-        fallbackImage &&
-        (isViewportInteractingRef.current || isPerformanceThrottledRef.current)
-      ) {
+      if (fallbackImage && isViewportInteractingRef.current) {
         failedLoadSrcByIdRef.current.delete(item.id)
         return fallbackImage
       }
@@ -2955,6 +3023,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         stageScaleRef.current
       )
       const shouldKeep =
+        item.src === entry.src &&
         residentCandidateIds.has(entry.itemId) &&
         nextIds.has(entry.itemId) &&
         pendingLoadSrcByIdRef.current.get(entry.itemId) === entry.src &&
@@ -3033,6 +3102,16 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       selectedIds?.forEach((itemId) => addResidentTarget(itemId))
     }
     orderedItems.forEach((item) => addResidentTarget(item.id))
+    pruneDecodedImageCacheForResidentTargets({
+      cache: imageCacheRef.current,
+      liveIds: nextIds,
+      residentTargetIds
+    })
+    pruneDecodedImageCacheForResidentTargets({
+      cache: thumbnailCacheRef.current,
+      liveIds: nextIds,
+      residentTargetIds
+    })
     const residentCandidateImageCount = residentCandidateIds.size
     residentCandidateImageCountForThumbnailLod = residentCandidateImageCount
     const viewportCulledImageCount = Math.max(0, items.length - residentCandidateImageCount)
@@ -3350,6 +3429,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     itemSpatialIndex,
     items,
     markSpriteRecordUsed,
+    pruneDecodedImageCacheForResidentTargets,
     cancelScheduledRender,
     scheduleRender,
     scheduleImageVersionUpdate,
