@@ -3,6 +3,12 @@ import type { Config, LLMAPIProfile } from '@shared/config/config'
 import type { ChatCapabilityProfile } from '@shared/llm'
 import {
   rendererHostExtensionApiV1,
+  type AgentApiProfileApplyCallTypeOptions,
+  type AgentApiProfileCallTypeOption,
+  type AgentApiProfileCallTypeOptions,
+  type AgentApiProfileCardRenderOptions,
+  type AgentApiProfileUi,
+  type AgentApiProfileUiOptions,
   type QuickAppApiProfileLists,
   type QuickAppApiProfilesSectionActionOptions
 } from './generatedRegistry'
@@ -40,6 +46,50 @@ export const resolveRendererAssistantImageAutoSaveDir = (
 
   return fallback()
 }
+
+export const applyRendererAgentApiProfileCallType = (
+  options: AgentApiProfileApplyCallTypeOptions,
+  fallback: () => LLMAPIProfile
+): LLMAPIProfile => {
+  const extensionValue =
+    rendererHostExtensionApiV1.settings?.applyAgentApiProfileCallType?.(options)
+  if (extensionValue !== undefined) {
+    return extensionValue
+  }
+
+  return fallback()
+}
+
+export const buildRendererAgentApiProfileCallTypeOptions = (
+  options: AgentApiProfileCallTypeOptions,
+  fallback: () => AgentApiProfileCallTypeOption[]
+): AgentApiProfileCallTypeOption[] => {
+  const extensionValue =
+    rendererHostExtensionApiV1.settings?.buildAgentApiProfileCallTypeOptions?.(options)
+  if (extensionValue !== undefined) {
+    return extensionValue
+  }
+
+  return fallback()
+}
+
+export const resolveRendererAgentApiProfileUi = (
+  options: AgentApiProfileUiOptions,
+  fallback: () => AgentApiProfileUi
+): AgentApiProfileUi => {
+  const extensionValue = rendererHostExtensionApiV1.settings?.resolveAgentApiProfileUi?.(options)
+  if (extensionValue !== undefined) {
+    return extensionValue
+  }
+
+  return fallback()
+}
+
+export const renderRendererAgentApiProfileCardExtra = (
+  options: AgentApiProfileCardRenderOptions,
+  fallback: () => React.ReactNode = () => null
+): React.ReactNode =>
+  rendererHostExtensionApiV1.settings?.renderAgentApiProfileCardExtra?.(options) ?? fallback()
 
 export const buildRendererQuickAppLegacyHunyuanProfile = (
   settingsValue: Config,

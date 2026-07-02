@@ -13,6 +13,52 @@ export type QuickAppApiProfilesSectionActionOptions = {
   savePluginProfiles: (nextProfiles: LLMAPIProfile[]) => void
 }
 
+export type AgentApiProfileCallTypeOption = {
+  label: string
+  value: string
+}
+
+export type AgentApiProfileCallTypeOptions = {
+  baseOptions: AgentApiProfileCallTypeOption[]
+  isChineseUi: boolean
+  profile: LLMAPIProfile
+}
+
+export type AgentApiProfileApplyCallTypeOptions = {
+  callType: string
+  profile: LLMAPIProfile
+}
+
+export type AgentApiProfileUi = {
+  apiKeyLabel?: string
+  apiKeyPlaceholder?: string
+  baseUrlPlaceholder?: string
+  modelNameLabel?: string
+  modelNamePlaceholder?: string
+  showApiKeyInput?: boolean
+  showBackupKeys?: boolean
+  showBaseUrlInput?: boolean
+  showKlingSecretInput?: boolean
+}
+
+export type AgentApiProfileUiOptions = {
+  baseUi: AgentApiProfileUi
+  isChineseUi: boolean
+  profile: LLMAPIProfile
+}
+
+export type AgentApiProfileCardRenderOptions = {
+  callTypeOptions: AgentApiProfileCallTypeOption[]
+  isChineseUi: boolean
+  onChangeCallType: (callType: string) => void
+  onClone: (profile: LLMAPIProfile) => void
+  onDelete: (profileId: string) => void
+  onReplaceProfiles: (nextProfiles: LLMAPIProfile[]) => void
+  onUpdate: (profileId: string, nextProfile: LLMAPIProfile) => void
+  profile: LLMAPIProfile
+  profiles: LLMAPIProfile[]
+}
+
 export type RendererHostExtensionApiV1 = {
   chat?: {
     resolveAssistantImageAutoSaveDir?: (options: {
@@ -25,6 +71,14 @@ export type RendererHostExtensionApiV1 = {
     ) => string | null | undefined
   }
   settings?: {
+    applyAgentApiProfileCallType?: (
+      options: AgentApiProfileApplyCallTypeOptions
+    ) => LLMAPIProfile | undefined
+    buildAgentApiProfileCallTypeOptions?: (
+      options: AgentApiProfileCallTypeOptions
+    ) => AgentApiProfileCallTypeOption[] | undefined
+    resolveAgentApiProfileUi?: (options: AgentApiProfileUiOptions) => AgentApiProfileUi | undefined
+    renderAgentApiProfileCardExtra?: (options: AgentApiProfileCardRenderOptions) => React.ReactNode
     buildQuickAppLegacyHunyuanProfile?: (settingsValue: Config) => LLMAPIProfile | null
     buildClearedQuickAppLegacyHunyuanConfig?: () => NonNullable<Config['aigc3d_config']>
     getQuickAppApiProfilesSectionAction?: (

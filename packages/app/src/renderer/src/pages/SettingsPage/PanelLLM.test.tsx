@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
+import { rendererHostExtensionApiV1 } from '@renderer/extensions/generatedRegistry'
 import { createEmptyCustomSkill, getCustomSkillValidationIssues } from './PanelLLM'
 import PanelLLM from './PanelLLM'
 
@@ -99,6 +100,8 @@ beforeEach(() => {
     'llm.backup_key': 'Backup Key',
     'llm.add_api_profile': 'Add API Profile'
   }
+  delete rendererHostExtensionApiV1.chat
+  delete rendererHostExtensionApiV1.settings
   vi.clearAllMocks()
 })
 
@@ -148,6 +151,136 @@ describe('PanelLLM Agent API settings', () => {
     expect(screen.getByLabelText('Model Name')).toBeInTheDocument()
     expect(screen.queryByText('Protocol')).toBeNull()
     expect(screen.queryByText('Cloud / Local')).toBeNull()
+  })
+
+  it('routes Agent API settings through renderer extension seams', () => {
+    const saveSettings = vi.fn()
+    rendererHostExtensionApiV1.settings = {
+      applyAgentApiProfileCallType: ({ callType, profile }) =>
+        callType === 'codex'
+          ? {
+              ...profile,
+              call_type: 'codex',
+              base_url: 'https://api.openai.com/v1',
+              api_key: ''
+            }
+          : undefined,
+      buildAgentApiProfileCallTypeOptions: ({ baseOptions }) => [
+        ...baseOptions,
+        { label: 'Codex', value: 'codex' }
+      ],
+      renderAgentApiProfileCardExtra: () => <div>Extension settings loaded</div>,
+      resolveAgentApiProfileUi: ({ baseUi }) => ({
+        ...baseUi,
+        modelNamePlaceholder: 'extension-model',
+        showBaseUrlInput: false
+      })
+    }
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({})}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    expect(screen.queryByLabelText('Base URL')).toBeNull()
+    expect(screen.getByText('Extension settings loaded')).toBeInTheDocument()
+
+    fireEvent.mouseDown(screen.getByLabelText('Call Type'))
+    fireEvent.click(screen.getByRole('option', { name: 'Codex' }))
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'profile-1',
+            call_type: 'codex',
+            base_url: 'https://api.openai.com/v1',
+            api_key: ''
+          })
+        ]
+      }
+    })
+  })
+
+  it('lets renderer extension extras replace the full Agent API profile list', () => {
+    const saveSettings = vi.fn()
+    rendererHostExtensionApiV1.settings = {
+      buildAgentApiProfileCallTypeOptions: ({ baseOptions }) => [
+        ...baseOptions,
+        { label: 'Codex', value: 'codex' }
+      ],
+      renderAgentApiProfileCardExtra: ({ onReplaceProfiles, profiles }) => (
+        <button
+          type="button"
+          onClick={() =>
+            onReplaceProfiles(
+              profiles.map((profile) => ({
+                ...profile,
+                api_key: '',
+                auth_mode: undefined,
+                call_type: undefined
+              }))
+            )
+          }
+        >
+          Extension disconnect all
+        </button>
+      )
+    }
+
+    render(
+      <PanelLLM
+        settingsValue={{
+          ...DEFAULT_CONFIG,
+          llm_config: {
+            ...DEFAULT_CONFIG.llm_config,
+            api_profiles: [
+              {
+                id: 'codex-oauth',
+                model_name: 'Codex OAuth',
+                base_url: 'https://api.openai.com/v1',
+                api_key: '',
+                auth_mode: 'codex_oauth',
+                call_type: 'codex'
+              },
+              {
+                id: 'codex-call-type',
+                model_name: 'Codex Call Type',
+                base_url: 'https://api.openai.com/v1',
+                api_key: 'codex-token',
+                call_type: 'codex'
+              }
+            ]
+          }
+        }}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Extension disconnect all' })[0])
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'codex-oauth',
+            api_key: '',
+            auth_mode: undefined,
+            call_type: undefined
+          }),
+          expect.objectContaining({
+            id: 'codex-call-type',
+            api_key: '',
+            auth_mode: undefined,
+            call_type: undefined
+          })
+        ]
+      }
+    })
   })
 
   it('creates new profiles with the explicit default provider and capability options', () => {
