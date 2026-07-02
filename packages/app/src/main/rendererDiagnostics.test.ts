@@ -115,4 +115,26 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
 
     expect(recoverRenderer).toHaveBeenCalledWith(window, details)
   })
+
+  it('does not recursively forward renderer diagnostic console echoes', () => {
+    const window = createWindow()
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    attachRendererDiagnostics(window as never)
+
+    const consoleListener = window.webContents.on.mock.calls.find(
+      ([event]) => event === 'console-message'
+    )?.[1]
+
+    expect(consoleListener).toBeTypeOf('function')
+    consoleListener?.({}, 3, '[Renderer] echoed diagnostic line', 123, 'index.js')
+    consoleListener?.({}, 3, '13:34:44.770 › [Renderer] timestamp-prefixed echo', 124, 'index.js')
+
+    expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('[Renderer] echoed'))
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('[Renderer] echoed'))
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('[Renderer] echoed'))
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('timestamp-prefixed echo'))
+  })
 })

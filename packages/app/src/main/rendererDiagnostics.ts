@@ -86,7 +86,13 @@ export function attachRendererDiagnostics(
   window.webContents.on('console-message', (_event, level, message, line, sourceId) => {
     if (
       (sourceId && sourceId.includes('electron-log_renderer')) ||
-      (message && message.includes('[RendererConsole]'))
+      (message && message.includes('[RendererConsole]')) ||
+      // Avoid recursively forwarding diagnostic lines that this handler emits below.
+      // Electron/log sinks can echo main-process lines back through webContents
+      // console-message, often prefixed with a timestamp. Re-forwarding those lines
+      // creates exponentially nested `[Renderer] ...` payloads and bloats benchmark
+      // memory while adding no signal.
+      (message && message.includes('[Renderer]'))
     ) {
       return
     }
@@ -102,7 +108,13 @@ export function attachRendererDiagnostics(
       }
     }
 
-    const logStr = `[Renderer] ${message} (${shortSource}:${line})`
+    const normalizedMessage = typeof message === 'string' ? message : String(message ?? '')
+    const maxMessageLength = 2000
+    const renderedMessage =
+      normalizedMessage.length > maxMessageLength
+        ? `${normalizedMessage.slice(0, maxMessageLength)}… [truncated ${normalizedMessage.length - maxMessageLength} chars]`
+        : normalizedMessage
+    const logStr = `[Renderer] ${renderedMessage} (${shortSource}:${line})`
     if (level === 2) {
       console.warn(logStr)
     } else if (level >= 3) {

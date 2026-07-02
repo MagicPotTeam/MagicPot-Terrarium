@@ -140,9 +140,14 @@ export function createMainWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: false,
       webviewTag: false,
+      backgroundThrottling: !testUiPolicy.hideWindow,
       devTools: !app.isPackaged
     }
   })
+
+  ;(mainWindow as BrowserWindow & { [key: symbol]: boolean | undefined })[
+    Symbol.for('magicpot.testWindowRuntime.skipTaskbar')
+  ] = testUiPolicy.suppressTaskbar ? true : undefined
 
   attachWindowStatePersistence(mainWindow, statePath)
   winController.registerWindow(mainWindow)
