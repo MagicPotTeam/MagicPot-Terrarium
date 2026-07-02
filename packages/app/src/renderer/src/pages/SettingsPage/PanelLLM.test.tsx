@@ -205,6 +205,98 @@ describe('PanelLLM Agent API settings', () => {
     })
   })
 
+  it('lets renderer extensions clean Codex private state when changing call type from the dropdown', () => {
+    const saveSettings = vi.fn()
+    rendererHostExtensionApiV1.settings = {
+      applyAgentApiProfileCallType: ({ callType, profile }) => {
+        if (callType !== 'api' || profile.call_type !== 'codex') {
+          return undefined
+        }
+
+        const {
+          auth_mode: _authMode,
+          auth_account_email: _authAccountEmail,
+          auth_connected_at: _authConnectedAt,
+          call_type: _callType,
+          codex_fast_mode: _codexFastMode,
+          api_secret: _apiSecret,
+          backup_api_keys: _backupApiKeys,
+          tencent_secret_id: _tencentSecretId,
+          tencent_secret_key: _tencentSecretKey,
+          api_region: _apiRegion,
+          cos_bucket: _cosBucket,
+          cos_region: _cosRegion,
+          cos_key_prefix: _CosKeyPrefix,
+          ...cleanedProfile
+        } = profile
+
+        return {
+          ...cleanedProfile,
+          api_key: '',
+          base_url: 'https://api.openai.com/v1',
+          provider: 'default',
+          deployment: undefined,
+          is_ollama: false
+        }
+      },
+      buildAgentApiProfileCallTypeOptions: ({ baseOptions }) => [
+        ...baseOptions,
+        { label: 'Codex', value: 'codex' }
+      ]
+    }
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'Codex OAuth',
+          base_url: 'https://api.openai.com/v1',
+          api_key: 'codex-token',
+          backup_api_keys: ['backup-token'],
+          api_secret: 'video-secret',
+          auth_mode: 'codex_oauth',
+          auth_account_email: 'agent@example.com',
+          auth_connected_at: '2025-01-01T00:00:00.000Z',
+          call_type: 'codex',
+          codex_fast_mode: false,
+          tencent_secret_id: 'hy3d-id',
+          tencent_secret_key: 'hy3d-secret',
+          api_region: 'ap-guangzhou',
+          cos_bucket: 'bucket',
+          cos_region: 'ap-guangzhou',
+          cos_key_prefix: 'prefix'
+        })}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    fireEvent.mouseDown(screen.getByLabelText('Call Type'))
+    fireEvent.click(screen.getByRole('option', { name: 'API Model' }))
+
+    const savedProfile = saveSettings.mock.calls.at(-1)?.[0]?.llm_config?.api_profiles?.[0]
+    expect(savedProfile).toMatchObject({
+      id: 'profile-1',
+      model_name: 'Codex OAuth',
+      api_key: '',
+      base_url: 'https://api.openai.com/v1',
+      provider: 'default',
+      is_ollama: false
+    })
+    expect(savedProfile).not.toHaveProperty('auth_mode')
+    expect(savedProfile).not.toHaveProperty('auth_account_email')
+    expect(savedProfile).not.toHaveProperty('auth_connected_at')
+    expect(savedProfile).not.toHaveProperty('call_type')
+    expect(savedProfile).not.toHaveProperty('codex_fast_mode')
+    expect(savedProfile).not.toHaveProperty('backup_api_keys')
+    expect(savedProfile).not.toHaveProperty('api_secret')
+    expect(savedProfile).not.toHaveProperty('tencent_secret_id')
+    expect(savedProfile).not.toHaveProperty('tencent_secret_key')
+    expect(savedProfile).not.toHaveProperty('api_region')
+    expect(savedProfile).not.toHaveProperty('cos_bucket')
+    expect(savedProfile).not.toHaveProperty('cos_region')
+    expect(savedProfile).not.toHaveProperty('cos_key_prefix')
+  })
+
   it('lets renderer extension extras replace the full Agent API profile list', () => {
     const saveSettings = vi.fn()
     rendererHostExtensionApiV1.settings = {

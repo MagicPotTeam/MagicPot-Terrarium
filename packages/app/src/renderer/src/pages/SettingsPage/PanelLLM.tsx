@@ -411,17 +411,6 @@ const syncDuplicateCheckVisualModelsFromProfiles = (
   return [...preservedManualModels, ...syncedLocalModels]
 }
 
-const isCodexProfile = (profile: Pick<LLMAPIProfile, 'auth_mode' | 'call_type'>): boolean =>
-  profile.auth_mode === 'codex_oauth' || profile.call_type === 'codex'
-
-const withProfileDefaults = (profile: LLMAPIProfile): LLMAPIProfile =>
-  isCodexProfile(profile)
-    ? {
-        ...profile,
-        codex_fast_mode: profile.codex_fast_mode !== false
-      }
-    : profile
-
 const useApiProfiles = (
   profiles: LLMAPIProfile[],
   duplicateCheckVisualModels: DuplicateCheckVisualModelConfig[],
@@ -1566,10 +1555,6 @@ const PanelLLM: React.FC<PanelProps> = ({ settingsValue, saveSettings }) => {
   const { t, i18n } = useTranslation()
   const isChineseUi = i18n.language?.toLowerCase().startsWith('zh')
   const apiProfiles = settingsValue.llm_config.api_profiles
-  const apiProfilesForView = React.useMemo(
-    () => apiProfiles.map(withProfileDefaults),
-    [apiProfiles]
-  )
   const {
     saveProfiles,
     handleSetApiProfile,
@@ -1592,7 +1577,7 @@ const PanelLLM: React.FC<PanelProps> = ({ settingsValue, saveSettings }) => {
           onReplaceProfiles={saveProfiles}
           onUpdate={handleSetApiProfile}
           isChineseUi={isChineseUi}
-          profiles={apiProfilesForView}
+          profiles={apiProfiles}
           t={t}
         />
       )}
