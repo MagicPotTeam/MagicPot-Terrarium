@@ -34,7 +34,7 @@ All run-state calls use this fixed route:
 { channel: 'generic', scopeType: 'dm', scopeId: 'agent-studio' }
 ```
 
-The main service derives the session identity from that route. Listing, lookup, and cancellation are expected to be filtered by session identity so Agent Studio cannot inspect or control runs from another renderer route.
+The main service derives the session identity from that route. Listing, lookup, and cancellation are filtered by session identity for honest callers and product flows, but the route value is still supplied by renderer IPC. Treat this as run-state partitioning, not a complete authorization boundary; stronger isolation would require binding caller identity or window context to the allowed route in main/preload.
 
 ## Feature flag behavior
 

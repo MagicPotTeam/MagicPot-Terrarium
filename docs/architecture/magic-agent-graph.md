@@ -111,7 +111,7 @@ MagicAgent Platform graph execution is route-scoped. Renderer-facing requests th
 - `getGraphRun`
 - `cancelGraphRun`
 
-The service registers that route with `AgentKernel`, derives a `sessionKey`, and stores the normalized route/session identity on each `MagicAgentGraphRunRecord`. Run listing, run lookup, and cancellation are filtered by `sessionKey`, so one renderer route cannot inspect or control graph runs created by another route. Read-only catalog operations such as `listGraphs` and `inspectGraph` remain non-mutating graph catalog reads.
+The service registers that route with `AgentKernel`, derives a `sessionKey`, and stores the normalized route/session identity on each `MagicAgentGraphRunRecord`. Run listing, run lookup, and cancellation are filtered by `sessionKey` for product flows, so honest callers only see or affect runs for the route they use. This route filter is not, by itself, a renderer authorization boundary because renderer IPC currently supplies the route value; preventing a compromised or arbitrary renderer caller from selecting another known route would require main/preload to bind caller identity or window context to allowed routes. Read-only catalog operations such as `listGraphs` and `inspectGraph` remain non-mutating graph catalog reads.
 
 Graph-specific events are recorded through the kernel's supported event vocabulary (`run.*`) with `metadata.graphEventType` carrying values such as `graph.completed` or `graph.cancelled`. This keeps audit events type-safe while preserving graph-level detail.
 
