@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/explicit-function-return-type */
 import { describe, expect, it } from 'vitest'
 import {
   buildAcceptance,
@@ -8,6 +7,7 @@ import {
   buildRepeatWorkloadAssessment,
   resolveRealBoardCachePasses,
   buildSourceTextureVisualFailures,
+  isRealBoardBenchmarkMetricsReady,
   readProjectCanvasRealBoardMetricsFromDomSnapshot
 } from './realBoardBenchmark.mjs'
 
@@ -462,6 +462,72 @@ describe('realBoardBenchmark acceptance gates', () => {
       lastRenderDurationMs: 4.5,
       lastUpdateReason: 'items'
     })
+  })
+
+  it('requires real-board readiness to observe post-import render metrics and drained queues', () => {
+    const readyMetrics = {
+      itemCounts: {
+        totalImageItemCount: 4
+      },
+      webgl: {
+        hasWebglContext: true,
+        loadedImageCount: 4,
+        failedImageCount: 0,
+        pendingImageCount: 0,
+        residentCandidateImageCount: 4,
+        viewportCulledImageCount: 0,
+        sourceUpgradeQueueCount: 0,
+        thumbnailLoadQueueCount: 0,
+        initialLoadQueueCount: 0,
+        renderCount: 12,
+        lastRenderDurationMs: 5.5,
+        lastUpdateReason: 'items'
+      }
+    }
+
+    expect(isRealBoardBenchmarkMetricsReady(readyMetrics, 4, 11)).toBe(true)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, renderCount: 11 } },
+        4,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, sourceUpgradeQueueCount: 1 } },
+        4,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, thumbnailLoadQueueCount: 1 } },
+        4,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, initialLoadQueueCount: 1 } },
+        4,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, lastRenderDurationMs: 0 } },
+        4,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, lastUpdateReason: 'cleanup' } },
+        4,
+        11
+      )
+    ).toBe(false)
   })
 
   it('allows bounded deferred React commits for idle source texture upgrades', () => {

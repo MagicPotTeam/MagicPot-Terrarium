@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/explicit-function-return-type */
 import fs from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { execFile } from 'node:child_process'
@@ -245,7 +244,7 @@ function formatPercentFraction(value) {
   return Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : 'unknown'
 }
 
-function runBenchmarkGarbageCollection(_label = 'benchmark-gc') {
+function runBenchmarkGarbageCollection() {
   const gc = globalThis.gc
   if (typeof gc !== 'function') {
     return false
@@ -2102,63 +2101,79 @@ async function runPressureSampling(page, durationMs, sampleIntervalMs) {
   }
 }
 
-async function readBenchmarkMetricReadiness(page, expectedImageCount) {
-  return page.evaluate((expectedCount) => {
-    const root = document.querySelector('[data-testid="project-canvas-stage-root"]')
-    if (!(root instanceof HTMLElement)) {
-      return { ready: false, reason: 'stage-root-missing' }
-    }
+function buildRealBoardBenchmarkMetricReadiness(
+  metrics,
+  expectedImageCount,
+  baselineRenderCount = 0
+) {
+  const webgl = metrics?.webgl ?? {}
+  const totalImageItemCount = Number(
+    metrics?.itemCounts?.totalImageItemCount ?? metrics?.summary?.imageItems ?? 0
+  )
+  const loadedImageCount = Number(webgl.loadedImageCount || 0)
+  const failedImageCount = Number(webgl.failedImageCount || 0)
+  const pendingImageCount = Number(webgl.pendingImageCount || 0)
+  const residentCandidateImageCount = Number(webgl.residentCandidateImageCount || 0)
+  const viewportCulledImageCount = Number(webgl.viewportCulledImageCount || 0)
+  const sourceUpgradeQueueCount = Number(webgl.sourceUpgradeQueueCount || 0)
+  const thumbnailLoadQueueCount = Number(webgl.thumbnailLoadQueueCount || 0)
+  const initialLoadQueueCount = Number(webgl.initialLoadQueueCount || 0)
+  const renderCount = Number(webgl.renderCount || 0)
+  const lastRenderDurationMs = Number(webgl.lastRenderDurationMs || 0)
+  const lastUpdateReason = webgl.lastUpdateReason || ''
+  const settledResidentCandidates =
+    loadedImageCount + failedImageCount >= Math.max(1, residentCandidateImageCount)
+  const queuesDrained =
+    sourceUpgradeQueueCount === 0 && thumbnailLoadQueueCount === 0 && initialLoadQueueCount === 0
+  const postImportRenderObserved = renderCount > baselineRenderCount
+  const renderDurationObserved = Number.isFinite(lastRenderDurationMs) && lastRenderDurationMs > 0
+  const ready =
+    Boolean(webgl.hasWebglContext) &&
+    totalImageItemCount >= expectedImageCount &&
+    loadedImageCount > 0 &&
+    settledResidentCandidates &&
+    pendingImageCount === 0 &&
+    queuesDrained &&
+    residentCandidateImageCount + viewportCulledImageCount > 0 &&
+    postImportRenderObserved &&
+    renderDurationObserved &&
+    lastUpdateReason !== 'cleanup'
 
-    const webglCanvas = document.querySelector('.project-canvas-webgl-layer canvas')
-    const hasWebglContext = Boolean(
-      webglCanvas instanceof HTMLCanvasElement &&
-      (webglCanvas.getContext('webgl2') || webglCanvas.getContext('webgl'))
-    )
-    let visibleSummary = {}
-    try {
-      visibleSummary = JSON.parse(root.dataset.projectCanvasRenderSurfaceSummary || '{}')
-    } catch {
-      visibleSummary = {}
-    }
-    const totalImageItemCount = Number(
-      root.dataset.projectCanvasTotalImageItemCount || visibleSummary.imageItems || '0'
-    )
-    const loadedImageCount = Number(root.dataset.projectCanvasWebglLoadedImageCount || '0')
-    const failedImageCount = Number(root.dataset.projectCanvasWebglFailedImageCount || '0')
-    const pendingImageCount = Number(root.dataset.projectCanvasWebglPendingImageCount || '0')
-    const residentCandidateImageCount = Number(
-      root.dataset.projectCanvasWebglResidentCandidateImageCount || '0'
-    )
-    const viewportCulledImageCount = Number(
-      root.dataset.projectCanvasWebglViewportCulledImageCount || '0'
-    )
-    const renderCount = Number(root.dataset.projectCanvasWebglRenderCount || '0')
-    const settledResidentCandidates =
-      loadedImageCount + failedImageCount >= Math.max(1, residentCandidateImageCount)
-    const ready =
-      hasWebglContext &&
-      totalImageItemCount >= expectedCount &&
-      loadedImageCount > 0 &&
-      settledResidentCandidates &&
-      pendingImageCount === 0 &&
-      residentCandidateImageCount + viewportCulledImageCount > 0
-
-    return {
-      ready,
-      hasWebglContext,
-      totalImageItemCount,
-      loadedImageCount,
-      failedImageCount,
-      pendingImageCount,
-      residentCandidateImageCount,
-      viewportCulledImageCount,
-      renderCount,
-      expectedImageCount: expectedCount
-    }
-  }, expectedImageCount)
+  return {
+    ready,
+    hasWebglContext: Boolean(webgl.hasWebglContext),
+    totalImageItemCount,
+    loadedImageCount,
+    failedImageCount,
+    pendingImageCount,
+    residentCandidateImageCount,
+    viewportCulledImageCount,
+    sourceUpgradeQueueCount,
+    thumbnailLoadQueueCount,
+    initialLoadQueueCount,
+    renderCount,
+    baselineRenderCount,
+    lastRenderDurationMs,
+    lastUpdateReason,
+    settledResidentCandidates,
+    queuesDrained,
+    postImportRenderObserved,
+    renderDurationObserved,
+    expectedImageCount
+  }
 }
 
-async function waitForBenchmarkMetrics(page, expectedImageCount) {
+function isRealBoardBenchmarkMetricsReady(metrics, expectedImageCount, baselineRenderCount = 0) {
+  return buildRealBoardBenchmarkMetricReadiness(metrics, expectedImageCount, baselineRenderCount)
+    .ready
+}
+
+async function readBenchmarkMetricReadiness(page, expectedImageCount, baselineRenderCount = 0) {
+  const metrics = await readBenchmarkMetrics(page)
+  return buildRealBoardBenchmarkMetricReadiness(metrics, expectedImageCount, baselineRenderCount)
+}
+
+async function waitForBenchmarkMetrics(page, expectedImageCount, baselineRenderCount = 0) {
   await page.waitForSelector('.project-canvas-webgl-layer', { timeout: 60000 })
   const deadline = Date.now() + METRIC_WAIT_TIMEOUT_MS
   let observedReadiness = null
@@ -2167,7 +2182,11 @@ async function waitForBenchmarkMetrics(page, expectedImageCount) {
 
   while (Date.now() < deadline) {
     try {
-      observedReadiness = await readBenchmarkMetricReadiness(page, expectedImageCount)
+      observedReadiness = await readBenchmarkMetricReadiness(
+        page,
+        expectedImageCount,
+        baselineRenderCount
+      )
       if (observedReadiness.ready) {
         runBenchmarkGarbageCollection('wait-benchmark-metrics:ready')
         return readBenchmarkMetrics(page)
@@ -2494,7 +2513,9 @@ async function runTinyZoomAcceptanceProbe(page) {
     }
   }
 
-  await readProjectCanvasStageBounds(page, 'tiny-zoom acceptance')
+  const stageBounds = await readProjectCanvasStageBounds(page, 'tiny-zoom acceptance')
+  const centerX = stageBounds.x + stageBounds.width / 2
+  const centerY = stageBounds.y + stageBounds.height / 2
 
   let metrics = await readBenchmarkMetrics(page)
   let bestMetrics = metrics
@@ -3063,6 +3084,8 @@ async function runRealBoardScenarioPass({
     await BENCHMARK_MEMORY_WATCHDOG.guard(`${scenarioName}:assert-renderer-hints`, () =>
       assertBenchmarkRendererHints(page, scenarioName)
     )
+    const baselineMetrics = await readBenchmarkMetrics(page).catch(() => null)
+    const baselineRenderCount = Number(baselineMetrics?.webgl?.renderCount || 0)
     const importPlan = await importBenchmarkImageFiles(page, staged.stagedImages, scenarioName)
     await BENCHMARK_MEMORY_WATCHDOG.guard(`${scenarioName}:post-import-settle`, () =>
       page.waitForTimeout(3000)
@@ -3070,7 +3093,7 @@ async function runRealBoardScenarioPass({
 
     const initialMetrics = await BENCHMARK_MEMORY_WATCHDOG.guard(
       `${scenarioName}:wait-benchmark-metrics`,
-      () => waitForBenchmarkMetrics(page, staged.stagedImages.length)
+      () => waitForBenchmarkMetrics(page, staged.stagedImages.length, baselineRenderCount)
     )
     const interactionBurst = await BENCHMARK_MEMORY_WATCHDOG.guard(
       `${scenarioName}:interaction-burst`,
@@ -3498,6 +3521,7 @@ export {
   buildRepeatWorkloadAssessment,
   buildSourceTextureVisualFailures,
   buildImportFileBatches,
+  isRealBoardBenchmarkMetricsReady,
   readProjectCanvasRealBoardMetricsFromDomSnapshot,
   main
 }
