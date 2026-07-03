@@ -215,7 +215,15 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   private getGraphRuntime(): MagicAgentGraphRuntime {
     assertMagicAgentPlatformEnabled()
     if (!this.graphRuntimeInstance) {
-      this.graphRuntimeInstance = this.deps.graphRuntime || getMagicAgentGraphRuntime()
+      if (this.deps.graphRuntime) {
+        this.graphRuntimeInstance = this.deps.graphRuntime
+      } else {
+        const adapter = this.getAdapter()
+        this.graphRuntimeInstance = getMagicAgentGraphRuntime({
+          runAgent: (request) => adapter.runAgent(request),
+          callTool: (request) => adapter.callTool(request)
+        })
+      }
     }
     return this.graphRuntimeInstance
   }
@@ -394,6 +402,10 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
           sessionKey: session.sessionKey
         }
       })
+      for (const graphEvent of result.events || []) {
+        const graphRuntimeEventType = graphEvent.type === 'node.started' ? 'step.started' : graphEvent.type === 'node.completed' ? 'step.completed' : graphEvent.type === 'node.failed' ? 'step.failed' : 'run.updated'
+        kernel.recordEvent({ runId: kernelRun.runId, sessionKey: session.sessionKey, type: graphRuntimeEventType, message: graphEvent.message, metadata: { ...(graphEvent.metadata || {}), graphEventType: graphEvent.type, graphId: graphEvent.graphId, graphRunId: graphEvent.runId, graphNodeId: graphEvent.nodeId, graphChannelId: graphEvent.channelId, graphOutputId: graphEvent.outputId } })
+      }
       const kernelStatus =
         result.status === 'completed'
           ? 'completed'

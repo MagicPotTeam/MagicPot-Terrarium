@@ -2,18 +2,32 @@ import {
   builtInMagicAgentGraphs,
   type MagicAgentGraphCancelResult,
   type MagicAgentGraphChannelDefinition,
+  type MagicAgentGraphConditionDefinition,
   type MagicAgentGraphCreateRequest,
   type MagicAgentGraphDefinition,
   type MagicAgentGraphListItem,
   type MagicAgentGraphNodeDefinition,
   type MagicAgentGraphOutputDefinition,
   type MagicAgentGraphRunChannelRecord,
+  type MagicAgentGraphRunEventType,
+  type MagicAgentGraphRunNodeRecord,
   type MagicAgentGraphRunOutput,
   type MagicAgentGraphRunRecord,
   type MagicAgentGraphRunRequest,
   type MagicAgentGraphRunResult
 } from '@shared/magicAgent'
 import { getAgentSessionKey, type AgentRouteLike } from '@shared/agent'
+import type {
+  MagicAgentPlatformRunReq,
+  MagicAgentPlatformRunResp,
+  MagicAgentPlatformToolCallReq,
+  MagicAgentPlatformToolCallResp
+} from '@shared/api/svcMagicAgentPlatform'
+
+export type MagicAgentGraphRuntimeDeps = {
+  runAgent?: (request: MagicAgentPlatformRunReq) => Promise<MagicAgentPlatformRunResp>
+  callTool?: (request: MagicAgentPlatformToolCallReq) => Promise<MagicAgentPlatformToolCallResp>
+}
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
@@ -21,10 +35,32 @@ const now = (): number => Date.now()
 
 const cleanString = (value: unknown): string => String(value || '').trim()
 
+const stringifyValue = (value: unknown): string => {
+  if (value === undefined || value === null) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value)
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
 const GRAPH_ROUTE_SCOPE_TYPES = new Set(['dm', 'group', 'channel', 'thread', 'topic'])
+const SUPPORTED_GRAPH_NODE_KINDS = new Set(['agent', 'tool', 'input', 'condition', 'merge', 'output'])
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
+
+type GraphExecutionContext = {
+  graph: MagicAgentGraphDefinition
+  request: MagicAgentGraphRunRequest
+  route: AgentRouteLike
+  run: MagicAgentGraphRunRecord
+  nodeOutputs: Map<string, string>
+  deliveredChannelIds: Set<string>
+  allowedToolNames: Set<string>
+}
 
 const assertGraphRoute = (value: unknown): AgentRouteLike => {
   if (!isRecord(value)) {
@@ -94,13 +130,22 @@ export class MagicAgentGraphRuntime {
   private readonly builtInGraphIds = new Set<string>()
   private readonly runs = new Map<string, MagicAgentGraphRunRecord>()
   private readonly controllers = new Map<string, AbortController>()
+  private deps: MagicAgentGraphRuntimeDeps
 
-  constructor(graphs: MagicAgentGraphDefinition[] = builtInMagicAgentGraphs) {
+  constructor(
+    graphs: MagicAgentGraphDefinition[] = builtInMagicAgentGraphs,
+    deps: MagicAgentGraphRuntimeDeps = {}
+  ) {
+    this.deps = deps
     for (const graph of graphs) {
       const normalized = this.normalizeGraph(graph)
       this.graphs.set(normalized.graphId, normalized)
       this.builtInGraphIds.add(normalized.graphId)
     }
+  }
+
+  setDeps(deps: MagicAgentGraphRuntimeDeps): void {
+    this.deps = { ...this.deps, ...deps }
   }
 
   create(request: MagicAgentGraphCreateRequest): MagicAgentGraphDefinition {
@@ -177,8 +222,10 @@ export class MagicAgentGraphRuntime {
       sessionKey,
       createdAt,
       updatedAt: createdAt,
+      nodes: graph.nodes.map((node) => ({ nodeId: node.nodeId, kind: node.kind, status: 'pending' })),
       channels: [],
       outputs: [],
+      events: [],
       metadata: {
         ...(request.metadata || {}),
         route,
@@ -194,24 +241,16 @@ export class MagicAgentGraphRuntime {
       await Promise.resolve()
       this.throwIfCancelled(controller.signal)
 
-      const outputFilter = new Set((request.outputIds || []).map(cleanString).filter(Boolean))
-      const outputsToBuild = graph.outputs.filter(
-        (output) => outputFilter.size === 0 || outputFilter.has(output.outputId)
-      )
-      if (outputsToBuild.length === 0 && outputFilter.size > 0) {
-        throw new Error(`No requested outputs exist on MagicAgentGraph "${graph.graphId}".`)
-      }
-
-      runRecord.channels = this.buildChannelRecords(graph, request.input)
+      this.recordRunEvent(runRecord, 'graph.started', `MagicAgentGraph run started: ${graph.graphId}`)
+      await this.executeGraph(graph, request, route, runRecord, controller.signal)
       this.throwIfCancelled(controller.signal)
-      runRecord.outputs = outputsToBuild.map((output) =>
-        this.buildOutput(graph, output, request.input, runRecord.channels)
-      )
       this.markRun(runRecord, 'completed', { endedAt: now() })
+      this.recordRunEvent(runRecord, 'graph.completed', `MagicAgentGraph run completed: ${graph.graphId}`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const status = controller.signal.aborted ? 'cancelled' : 'failed'
       this.markRun(runRecord, status, { endedAt: now(), error: message })
+      this.recordRunEvent(runRecord, status === 'cancelled' ? 'graph.cancelled' : 'graph.failed', status === 'cancelled' ? `MagicAgentGraph run cancelled: ${message}` : `MagicAgentGraph run failed: ${message}`, { error: message })
     } finally {
       this.controllers.delete(runId)
       this.runs.set(runId, runRecord)
@@ -239,6 +278,7 @@ export class MagicAgentGraphRuntime {
     const controller = this.controllers.get(normalizedRunId)
     controller?.abort(reason)
     this.markRun(run, 'cancelled', { endedAt: now(), error: reason })
+    this.recordRunEvent(run, 'graph.cancelled', `MagicAgentGraph run cancelled: ${reason}`, { reason })
     return { runId: normalizedRunId, cancelled: true, status: run.status }
   }
 
@@ -294,6 +334,9 @@ export class MagicAgentGraphRuntime {
     for (const node of graph.nodes) {
       if (!node.nodeId)
         throw new Error(`MagicAgentGraph "${graph.graphId}" contains a node without nodeId.`)
+      if (!SUPPORTED_GRAPH_NODE_KINDS.has(node.kind)) {
+        throw new Error(`Unsupported MagicAgentGraph node kind: ${node.kind}`)
+      }
       if (nodeIds.has(node.nodeId)) {
         throw new Error(
           `MagicAgentGraph "${graph.graphId}" contains duplicate node "${node.nodeId}".`
@@ -344,6 +387,108 @@ export class MagicAgentGraphRuntime {
         throw new Error(`MagicAgentGraph entry node "${entryNodeId}" does not exist.`)
       }
     }
+  }
+
+  private async executeGraph(
+    graph: MagicAgentGraphDefinition, request: MagicAgentGraphRunRequest, route: AgentRouteLike, runRecord: MagicAgentGraphRunRecord, signal: AbortSignal
+  ): Promise<void> {
+    const outputFilter = new Set((request.outputIds || []).map(cleanString).filter(Boolean))
+    const outputsToBuild = graph.outputs.filter((output) => outputFilter.size === 0 || outputFilter.has(output.outputId))
+    if (outputsToBuild.length === 0 && outputFilter.size > 0) throw new Error(`No requested outputs exist on MagicAgentGraph "${graph.graphId}".`)
+    const incomingByNode = new Map<string, MagicAgentGraphChannelDefinition[]>()
+    for (const channel of graph.channels) incomingByNode.set(channel.to, [...(incomingByNode.get(channel.to) || []), channel])
+    const context: GraphExecutionContext = { graph, request, route, run: runRecord, nodeOutputs: new Map(), deliveredChannelIds: new Set(), allowedToolNames: new Set(Array.isArray(request.allowedToolNames) ? request.allowedToolNames.map(cleanString).filter(Boolean) : []) }
+    const entryNodeIds = new Set(graph.entryNodeIds)
+    const hasEntries = entryNodeIds.size > 0
+    for (const node of this.sortGraphNodes(graph)) {
+      this.throwIfCancelled(signal)
+      const incoming = incomingByNode.get(node.nodeId) || []
+      const hasDeliveredInput = incoming.some((channel) => context.deliveredChannelIds.has(channel.channelId))
+      const shouldRun = node.kind === 'input' || entryNodeIds.has(node.nodeId) || hasDeliveredInput || (!hasEntries && incoming.length === 0)
+      if (!shouldRun) { this.updateNodeRun(runRecord, node, 'skipped', { endedAt: now(), metadata: { reason: 'No active inbound channel reached this node.' } }); this.recordRunEvent(runRecord, 'node.skipped', `MagicAgentGraph node skipped: ${node.nodeId}`, { nodeId: node.nodeId, reason: 'inactive-inbound' }); continue }
+      const input = this.collectNodeInput(node, incoming, context)
+      try {
+        this.updateNodeRun(runRecord, node, 'running', { startedAt: now(), input })
+        this.recordRunEvent(runRecord, 'node.started', `MagicAgentGraph node started: ${node.nodeId}`, { nodeId: node.nodeId, kind: node.kind })
+        const output = await this.executeNode(node, input, context)
+        this.throwIfCancelled(signal)
+        context.nodeOutputs.set(node.nodeId, output)
+        this.updateNodeRun(runRecord, node, 'completed', { endedAt: now(), output })
+        this.recordRunEvent(runRecord, 'node.completed', `MagicAgentGraph node completed: ${node.nodeId}`, { nodeId: node.nodeId, kind: node.kind })
+        this.emitOutgoingChannels(node, output, context)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.updateNodeRun(runRecord, node, 'failed', { endedAt: now(), error: message })
+        this.recordRunEvent(runRecord, 'node.failed', `MagicAgentGraph node failed: ${node.nodeId}: ${message}`, { nodeId: node.nodeId, kind: node.kind, error: message })
+        throw error
+      }
+    }
+    runRecord.outputs = outputsToBuild.map((output) => this.buildOutput(graph, output, request.input, runRecord.channels))
+    for (const output of runRecord.outputs) this.recordRunEvent(runRecord, 'output.created', `MagicAgentGraph output created: ${output.outputId}`, { outputId: output.outputId, nodeId: output.sourceNodeId })
+  }
+
+  private sortGraphNodes(graph: MagicAgentGraphDefinition): MagicAgentGraphNodeDefinition[] {
+    const nodesById = new Map(graph.nodes.map((node) => [node.nodeId, node]))
+    const indegree = new Map(graph.nodes.map((node) => [node.nodeId, 0]))
+    const outgoing = new Map<string, MagicAgentGraphChannelDefinition[]>()
+    for (const channel of graph.channels) { indegree.set(channel.to, (indegree.get(channel.to) || 0) + 1); outgoing.set(channel.from, [...(outgoing.get(channel.from) || []), channel]) }
+    const queue = graph.nodes.filter((node) => (indegree.get(node.nodeId) || 0) === 0)
+    const sorted: MagicAgentGraphNodeDefinition[] = []
+    for (let index = 0; index < queue.length; index += 1) {
+      const node = queue[index]; sorted.push(node)
+      for (const channel of outgoing.get(node.nodeId) || []) { const nextCount = (indegree.get(channel.to) || 0) - 1; indegree.set(channel.to, nextCount); if (nextCount === 0) { const nextNode = nodesById.get(channel.to); if (nextNode) queue.push(nextNode) } }
+    }
+    if (sorted.length !== graph.nodes.length) throw new Error(`MagicAgentGraph "${graph.graphId}" contains a cycle.`)
+    return sorted
+  }
+
+  private collectNodeInput(node: MagicAgentGraphNodeDefinition, incoming: MagicAgentGraphChannelDefinition[], context: GraphExecutionContext): string {
+    const deliveredInputs = incoming.filter((channel) => context.deliveredChannelIds.has(channel.channelId)).map((channel) => context.nodeOutputs.get(channel.from) || '').filter(Boolean)
+    if (deliveredInputs.length > 0) return deliveredInputs.join('\n\n')
+    if (node.kind === 'input' || context.graph.entryNodeIds.includes(node.nodeId)) return context.request.input
+    return ''
+  }
+
+  private async executeNode(node: MagicAgentGraphNodeDefinition, input: string, context: GraphExecutionContext): Promise<string> {
+    switch (node.kind) { case 'input': return context.request.input; case 'agent': return this.executeAgentNode(node, input || context.request.input, context); case 'condition': return this.evaluateCondition(node.condition, input, context) ? 'true' : 'false'; case 'merge': case 'output': return input || context.request.input; case 'tool': return this.executeToolNode(node, input || context.request.input, context); default: { const exhaustive: never = node.kind; throw new Error(`Unsupported MagicAgentGraph node kind: ${exhaustive}`) } }
+  }
+
+  private async executeAgentNode(node: MagicAgentGraphNodeDefinition, input: string, context: GraphExecutionContext): Promise<string> {
+    if (!this.deps.runAgent) return formatAgentSection(node, input)
+    const result = await this.deps.runAgent({ agentId: cleanString(node.agentId) || node.nodeId, text: input, route: context.route, ...(node.modelName ? { profileId: node.modelName } : {}), ...(node.instruction ? { systemPrompt: node.instruction } : {}), ...(context.request.allowedToolNames !== undefined ? { allowedToolNames: context.request.allowedToolNames } : {}), metadata: { ...(context.request.metadata || {}), graphId: context.graph.graphId, graphRunId: context.run.runId, nodeId: node.nodeId, route: context.route, sessionKey: context.run.sessionKey } })
+    if (result.status !== 'completed') throw new Error(result.error || `MagicAgentGraph agent node ended with status: ${result.status}`)
+    const lastAssistant = [...result.messages].reverse().find((message) => message.role === 'assistant')
+    return result.content || lastAssistant?.content || ''
+  }
+
+  private async executeToolNode(node: MagicAgentGraphNodeDefinition, input: string, context: GraphExecutionContext): Promise<string> {
+    const config = isRecord(node.config) ? node.config : {}
+    const toolName = cleanString(node.toolName) || cleanString(config.toolName)
+    if (!toolName) throw new Error(`MagicAgentGraph tool node "${node.nodeId}" is missing toolName.`)
+    if (!context.allowedToolNames.has(toolName)) throw new Error(`MagicAgentGraph tool "${toolName}" is not allowed for this graph run.`)
+    if (!this.deps.callTool) throw new Error(`MagicAgentGraph tool "${toolName}" has no configured executor.`)
+    const args = isRecord(config.args) ? { ...config.args } : Object.fromEntries(Object.entries(config).filter(([key]) => key !== 'toolName'))
+    if (!Object.keys(args).length && input) args.input = input
+    this.recordRunEvent(context.run, 'tool.invoked', `MagicAgentGraph tool invoked: ${toolName}`, { nodeId: node.nodeId, toolName })
+    const result = await this.deps.callTool({ name: toolName, args, route: context.route, ...(cleanString(node.agentId) ? { agentId: cleanString(node.agentId) } : {}), metadata: { ...(context.request.metadata || {}), graphId: context.graph.graphId, graphRunId: context.run.runId, nodeId: node.nodeId, route: context.route, sessionKey: context.run.sessionKey, allowedToolNames: [...context.allowedToolNames] } })
+    if (!result.ok) throw new Error(result.error || result.unavailableReason || result.content || `MagicAgentGraph tool failed: ${toolName}`)
+    return result.content || stringifyValue(result.data)
+  }
+
+  private emitOutgoingChannels(node: MagicAgentGraphNodeDefinition, nodeOutput: string, context: GraphExecutionContext): void {
+    const nodes = new Map(context.graph.nodes.map((candidate) => [candidate.nodeId, candidate]))
+    for (const channel of context.graph.channels.filter((candidate) => candidate.from === node.nodeId)) {
+      if (!this.evaluateCondition(channel.condition, nodeOutput, context)) continue
+      const record: MagicAgentGraphRunChannelRecord = { channelId: channel.channelId, from: channel.from, to: channel.to, kind: channel.kind, content: formatChannelContent(channel, nodes.get(channel.from), nodes.get(channel.to), nodeOutput), createdAt: now(), ...(channel.metadata ? { metadata: channel.metadata } : {}) }
+      context.run.channels.push(record); context.deliveredChannelIds.add(channel.channelId); this.recordRunEvent(context.run, 'channel.message', `MagicAgentGraph channel emitted: ${channel.channelId}`, { nodeId: node.nodeId, channelId: channel.channelId, from: channel.from, to: channel.to, kind: channel.kind })
+    }
+  }
+
+  private evaluateCondition(condition: MagicAgentGraphConditionDefinition | undefined, fallbackValue: string, context: GraphExecutionContext): boolean {
+    if (!condition) return true
+    const source = condition.sourceNodeId ? context.nodeOutputs.get(condition.sourceNodeId) || '' : fallbackValue
+    const sourceText = stringifyValue(source); const compareText = stringifyValue(condition.value)
+    switch (condition.operator || 'truthy') { case 'always': return true; case 'truthy': return Boolean(sourceText && sourceText !== 'false' && sourceText !== '0'); case 'falsy': return !sourceText || sourceText === 'false' || sourceText === '0'; case 'equals': return sourceText === compareText; case 'contains': return sourceText.includes(compareText); case 'matches': try { return new RegExp(compareText).test(sourceText) } catch { return false }; default: return false }
   }
 
   private buildChannelRecords(
@@ -398,6 +543,18 @@ export class MagicAgentGraphRuntime {
     }
   }
 
+  private updateNodeRun(run: MagicAgentGraphRunRecord, node: MagicAgentGraphNodeDefinition, status: MagicAgentGraphRunNodeRecord['status'], updates?: Partial<MagicAgentGraphRunNodeRecord>): void {
+    let record = run.nodes?.find((candidate) => candidate.nodeId === node.nodeId)
+    if (!record) { record = { nodeId: node.nodeId, kind: node.kind, status: 'pending' }; run.nodes = [...(run.nodes || []), record] }
+    Object.assign(record, updates || {}); record.status = status; run.updatedAt = now(); this.runs.set(run.runId, run)
+  }
+
+  private recordRunEvent(run: MagicAgentGraphRunRecord, type: MagicAgentGraphRunEventType, message: string, metadata?: Record<string, unknown>): void {
+    const createdAt = now()
+    const event = { eventId: createId('magic-agent-graph-event'), runId: run.runId, graphId: run.graphId, type, message, createdAt, ...(cleanString(metadata?.nodeId) ? { nodeId: cleanString(metadata?.nodeId) } : {}), ...(cleanString(metadata?.channelId) ? { channelId: cleanString(metadata?.channelId) } : {}), ...(cleanString(metadata?.outputId) ? { outputId: cleanString(metadata?.outputId) } : {}), ...(metadata ? { metadata } : {}) }
+    run.events = [...(run.events || []), event]; run.updatedAt = createdAt; this.runs.set(run.runId, run)
+  }
+
   private markRun(
     run: MagicAgentGraphRunRecord,
     status: MagicAgentGraphRunRecord['status'],
@@ -421,9 +578,11 @@ export class MagicAgentGraphRuntime {
 
 let runtimeSingleton: MagicAgentGraphRuntime | null = null
 
-export const getMagicAgentGraphRuntime = (): MagicAgentGraphRuntime => {
+export const getMagicAgentGraphRuntime = (deps?: MagicAgentGraphRuntimeDeps): MagicAgentGraphRuntime => {
   if (!runtimeSingleton) {
-    runtimeSingleton = new MagicAgentGraphRuntime()
+    runtimeSingleton = new MagicAgentGraphRuntime(builtInMagicAgentGraphs, deps)
+  } else if (deps) {
+    runtimeSingleton.setDeps(deps)
   }
   return runtimeSingleton
 }
