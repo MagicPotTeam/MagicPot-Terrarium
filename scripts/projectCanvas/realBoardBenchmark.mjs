@@ -2504,6 +2504,38 @@ function getTinyZoomBandDistance(stageScale) {
   )
 }
 
+async function waitForTinyZoomSourceSuppression(page, initialMetrics) {
+  const startedAt = Date.now()
+  let metrics = initialMetrics
+  let bestMetrics = metrics
+
+  while (Date.now() - startedAt < REAL_BOARD_SOURCE_UPGRADE_WAIT_MS) {
+    if (
+      getTinyZoomBandDistance(metrics.viewport.stageScale) === 0 &&
+      metrics.viewport.stageScale <= REAL_BOARD_OVERVIEW_SOURCE_SUPPRESSION_MAX_SCALE &&
+      metrics.webgl.sourceCount === 0 &&
+      metrics.webgl.upgradePendingCount === 0 &&
+      metrics.webgl.pendingImageCount === 0
+    ) {
+      return metrics
+    }
+
+    await page.waitForTimeout(REAL_BOARD_METRICS_SETTLE_MS)
+    metrics = await readBenchmarkMetrics(page)
+    const metricsBandDistance = getTinyZoomBandDistance(metrics.viewport.stageScale)
+    const bestBandDistance = getTinyZoomBandDistance(bestMetrics.viewport.stageScale)
+    if (
+      metrics.webgl.sourceCount < bestMetrics.webgl.sourceCount ||
+      (metrics.webgl.sourceCount === bestMetrics.webgl.sourceCount &&
+        metricsBandDistance < bestBandDistance)
+    ) {
+      bestMetrics = metrics
+    }
+  }
+
+  return bestMetrics
+}
+
 async function runTinyZoomAcceptanceProbe(page) {
   if (!REAL_BOARD_TINY_ZOOM_ENABLED) {
     return {
@@ -2546,6 +2578,8 @@ async function runTinyZoomAcceptanceProbe(page) {
   if (getTinyZoomBandDistance(metrics.viewport.stageScale) !== 0) {
     metrics = bestMetrics
   }
+
+  metrics = await waitForTinyZoomSourceSuppression(page, metrics)
 
   const stageScale = metrics.viewport.stageScale
   const coordinateScale = Math.max(Math.abs(stageScale), 0.0001)
