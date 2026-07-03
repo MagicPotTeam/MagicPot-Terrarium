@@ -1,10 +1,31 @@
 import type { AgentRouteLike } from '@shared/agent'
 
-export type MagicAgentGraphNodeKind = 'agent' | 'tool' | 'input' | 'output'
+export type MagicAgentGraphNodeKind = 'agent' | 'tool' | 'input' | 'condition' | 'merge' | 'output'
 
 export type MagicAgentGraphChannelKind = 'handoff' | 'artifact' | 'message' | 'control'
 
 export type MagicAgentGraphRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+export type MagicAgentGraphNodeRunStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+
+export type MagicAgentGraphConditionOperator =
+  | 'always'
+  | 'truthy'
+  | 'falsy'
+  | 'equals'
+  | 'contains'
+  | 'matches'
+
+export type MagicAgentGraphConditionDefinition = {
+  sourceNodeId?: string
+  operator?: MagicAgentGraphConditionOperator
+  value?: unknown
+}
 
 export type MagicAgentGraphNodeDefinition = {
   nodeId: string
@@ -14,6 +35,10 @@ export type MagicAgentGraphNodeDefinition = {
   instruction?: string
   modelName?: string
   capabilities?: string[]
+  agentId?: string
+  toolName?: string
+  config?: Record<string, unknown>
+  condition?: MagicAgentGraphConditionDefinition
   metadata?: Record<string, unknown>
 }
 
@@ -24,6 +49,7 @@ export type MagicAgentGraphChannelDefinition = {
   kind: MagicAgentGraphChannelKind
   label?: string
   required?: boolean
+  condition?: MagicAgentGraphConditionDefinition
   metadata?: Record<string, unknown>
 }
 
@@ -72,6 +98,7 @@ export type MagicAgentGraphRunRequest = {
   route: AgentRouteLike
   runId?: string
   outputIds?: string[]
+  allowedToolNames?: string[] | null
   metadata?: Record<string, unknown>
 }
 
@@ -85,6 +112,18 @@ export type MagicAgentGraphRunOutput = {
   metadata?: Record<string, unknown>
 }
 
+export type MagicAgentGraphRunNodeRecord = {
+  nodeId: string
+  kind: MagicAgentGraphNodeKind
+  status: MagicAgentGraphNodeRunStatus
+  input?: string
+  output?: string
+  startedAt?: number
+  endedAt?: number
+  error?: string
+  metadata?: Record<string, unknown>
+}
+
 export type MagicAgentGraphRunChannelRecord = {
   channelId: string
   from: string
@@ -92,6 +131,32 @@ export type MagicAgentGraphRunChannelRecord = {
   kind: MagicAgentGraphChannelKind
   content: string
   createdAt: number
+  metadata?: Record<string, unknown>
+}
+
+export type MagicAgentGraphRunEventType =
+  | 'graph.started'
+  | 'graph.completed'
+  | 'graph.failed'
+  | 'graph.cancelled'
+  | 'node.started'
+  | 'node.completed'
+  | 'node.failed'
+  | 'node.skipped'
+  | 'tool.invoked'
+  | 'channel.message'
+  | 'output.created'
+
+export type MagicAgentGraphRunEvent = {
+  eventId: string
+  runId: string
+  graphId: string
+  type: MagicAgentGraphRunEventType
+  message: string
+  createdAt: number
+  nodeId?: string
+  channelId?: string
+  outputId?: string
   metadata?: Record<string, unknown>
 }
 
@@ -106,8 +171,10 @@ export type MagicAgentGraphRunRecord = {
   updatedAt: number
   startedAt?: number
   endedAt?: number
+  nodes?: MagicAgentGraphRunNodeRecord[]
   channels: MagicAgentGraphRunChannelRecord[]
   outputs: MagicAgentGraphRunOutput[]
+  events?: MagicAgentGraphRunEvent[]
   error?: string
   metadata?: Record<string, unknown>
 }

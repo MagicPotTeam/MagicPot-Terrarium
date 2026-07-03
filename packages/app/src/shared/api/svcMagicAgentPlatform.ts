@@ -479,6 +479,9 @@ const validateRunGraphReq = (value: unknown): MagicAgentGraphRunRequest => {
     ...(optionalStringArray(req.outputIds, 'outputIds')
       ? { outputIds: optionalStringArray(req.outputIds, 'outputIds') }
       : {}),
+    ...(req.allowedToolNames !== undefined
+      ? { allowedToolNames: optionalNullableStringArray(req.allowedToolNames, 'allowedToolNames') }
+      : {}),
     ...(optionalRecord(req.metadata, 'metadata')
       ? { metadata: optionalRecord(req.metadata, 'metadata') }
       : {})
