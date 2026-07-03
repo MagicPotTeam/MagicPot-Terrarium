@@ -153,10 +153,22 @@ describe('apiDef', () => {
     ).toMatchObject({ graphId: 'graph.demo', input: 'hello', route })
     expect(
       validateServiceValue(
-        { graphId: 'graph.demo', route },
+        { graphId: 'graph.demo', route, limit: 50 },
         apiDef.svcMagicAgentPlatform.listGraphRuns.request
       )
-    ).toMatchObject({ graphId: 'graph.demo', route })
+    ).toMatchObject({ graphId: 'graph.demo', route, limit: 50 })
+    expect(() =>
+      validateServiceValue(
+        { graphId: 'graph.demo', route, limit: 0 },
+        apiDef.svcMagicAgentPlatform.listGraphRuns.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        { graphId: 'graph.demo', route, limit: 1.5 },
+        apiDef.svcMagicAgentPlatform.listGraphRuns.request
+      )
+    ).toThrow(ServiceValidationError)
     expect(
       validateServiceValue(
         { runId: 'run-1', route },

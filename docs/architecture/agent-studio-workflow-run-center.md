@@ -20,13 +20,13 @@ This is an orchestration shell. The current main-process graph runtime builds ru
 
 ## IPC boundary
 
-| UI action        | IPC method                                                           | Contract                                                    |
-| ---------------- | -------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Initial load     | `getStatus`, `listAgents`, `listTools`, `listGraphs`, `listPackages` | Catalog/status reads.                                       |
-| History refresh  | `listGraphRuns`                                                      | Route-scoped and filtered by selected graph.                |
-| Run graph        | `runGraph`                                                           | Sends trimmed input and `metadata.source = "agent-studio"`. |
-| View/refresh run | `getGraphRun`                                                        | Route-scoped lookup; missing runs are shown as errors.      |
-| Cancel run       | `cancelGraphRun`                                                     | Best-effort request for non-terminal runs.                  |
+| UI action        | IPC method                                                           | Contract                                                               |
+| ---------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Initial load     | `getStatus`, `listAgents`, `listTools`, `listGraphs`, `listPackages` | Catalog/status reads.                                                  |
+| History refresh  | `listGraphRuns`                                                      | Route-scoped, filtered by selected graph, and bounded by `limit = 50`. |
+| Run graph        | `runGraph`                                                           | Sends trimmed input and `metadata.source = "agent-studio"`.            |
+| View/refresh run | `getGraphRun`                                                        | Route-scoped lookup; missing runs are shown as errors.                 |
+| Cancel run       | `cancelGraphRun`                                                     | Best-effort request for non-terminal runs.                             |
 
 All run-state calls use this fixed route:
 
@@ -47,7 +47,7 @@ Render page
   -> getStatus
   -> if disabled: show flag guidance and stop
   -> list inventory and choose the first graph by default
-  -> listGraphRuns({ route, graphId })
+  -> listGraphRuns({ route, graphId, limit: 50 })
   -> show newest run as active
 
 Run Graph
@@ -62,13 +62,13 @@ View / Refresh / Cancel
   -> refresh active run and history after cancellation
 ```
 
-History is sorted by `updatedAt` descending with `createdAt` as a tie breaker. `completed`, `failed`, and `cancelled` are terminal statuses; only non-terminal runs render cancel actions.
+History requests are bounded to 50 runs at the IPC boundary. The runtime returns route-scoped runs sorted by `updatedAt` descending with `createdAt` as a tie breaker; the renderer keeps the same sort as a display guard. `completed`, `failed`, and `cancelled` are terminal statuses; only non-terminal runs render cancel actions.
 
 ## Test coverage
 
 `packages/app/src/renderer/src/pages/AgentStudioPage/AgentStudioPage.test.tsx` mocks `@renderer/utils/windowUtils` and verifies the UI/API contract without exporting internals. It covers disabled-flag behavior, enabled initial load, route-scoped history, graph switching, prompt trimming, missing run lookup, and cancellation payloads.
 
-Main-process hardening tests also cover service fail-closed behavior when `MAGICPOT_MAGICAGENT_PLATFORM` is disabled and route/session partitioning across `svcMagicAgentPlatformImpl.test.ts` and `MagicAgentGraphRuntime.test.ts`.
+Main-process hardening tests also cover service fail-closed behavior when `MAGICPOT_MAGICAGENT_PLATFORM` is disabled, route/session partitioning, and bounded graph-run history across `svcMagicAgentPlatformImpl.test.ts` and `MagicAgentGraphRuntime.test.ts`. Shared API validator coverage in `packages/app/src/shared/api/index.test.ts` rejects invalid `listGraphRuns.limit` values before IPC dispatch.
 
 Recommended focused validation:
 
@@ -77,7 +77,8 @@ npm run typecheck:node
 npm run typecheck:web
 npm run lint:main
 npm run lint:renderer
-npx vitest run --config config/vitest/vitest.node.config.mjs packages/app/src/main/api/svcMagicAgentPlatformImpl.test.ts packages/app/src/main/magicAgentRuntime/graph/MagicAgentGraphRuntime.test.ts --pool=forks --maxWorkers=1
+npm run lint:shared
+npx vitest run --config config/vitest/vitest.node.config.mjs packages/app/src/shared/api/index.test.ts packages/app/src/main/api/svcMagicAgentPlatformImpl.test.ts packages/app/src/main/magicAgentRuntime/graph/MagicAgentGraphRuntime.test.ts --pool=forks --maxWorkers=1
 npx vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/pages/AgentStudioPage/AgentStudioPage.test.tsx --pool=forks --maxWorkers=1
 npm run check:text-encoding
 ```
@@ -86,5 +87,5 @@ npm run check:text-encoding
 
 - No automatic polling or streaming events in v1.
 - No graph definition editing.
-- No shared IPC, preload, or main runtime contract changes.
+- No preload or direct renderer runtime access changes. v1.3 only adds the backwards-compatible `listGraphRuns.limit` request option for bounded history.
 - No direct renderer access to MagicAgent runtime internals.

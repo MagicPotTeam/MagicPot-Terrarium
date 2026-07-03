@@ -31,6 +31,7 @@ const AGENT_STUDIO_ROUTE: AgentRouteLike = {
   scopeId: 'agent-studio'
 }
 const DEFAULT_GRAPH_PROMPT = 'Create a concise game concept pitch for a cozy puzzle adventure.'
+const GRAPH_RUN_HISTORY_LIMIT = 50
 
 const terminalGraphRunStatuses = new Set<MagicAgentGraphRunStatus>([
   'completed',
@@ -129,7 +130,8 @@ const AgentStudioPage: React.FC = () => {
     try {
       const response = await api().svcMagicAgentPlatform.listGraphRuns({
         route: AGENT_STUDIO_ROUTE,
-        graphId
+        graphId,
+        limit: GRAPH_RUN_HISTORY_LIMIT
       })
       const runs = sortRuns(response.runs)
       setRunHistory(runs)
@@ -171,7 +173,8 @@ const AgentStudioPage: React.FC = () => {
             (
               await api().svcMagicAgentPlatform.listGraphRuns({
                 route: AGENT_STUDIO_ROUTE,
-                graphId: nextGraphId
+                graphId: nextGraphId,
+                limit: GRAPH_RUN_HISTORY_LIMIT
               })
             ).runs
           )

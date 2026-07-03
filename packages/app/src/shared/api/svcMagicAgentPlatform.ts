@@ -187,6 +187,7 @@ export type MagicAgentPlatformGraphListResp = {
 export type MagicAgentPlatformGraphRunListReq = {
   route: AgentRouteLike
   graphId?: string
+  limit?: number
 }
 
 export type MagicAgentPlatformGraphRunListResp = {
@@ -326,6 +327,13 @@ const optionalPositiveNumber = (value: unknown, field: string): number | undefin
   if (parsed === undefined) return undefined
   if (parsed > 0) return parsed
   throw issue(field, 'Expected a positive number')
+}
+
+const optionalPositiveInteger = (value: unknown, field: string): number | undefined => {
+  const parsed = optionalPositiveNumber(value, field)
+  if (parsed === undefined) return undefined
+  if (Number.isInteger(parsed)) return parsed
+  throw issue(field, 'Expected a positive integer')
 }
 
 const validateEmptyReq = (value: unknown): MagicAgentPlatformEmptyReq => {
@@ -479,11 +487,12 @@ const validateRunGraphReq = (value: unknown): MagicAgentGraphRunRequest => {
 
 const validateGraphRunListReq = (value: unknown): MagicAgentPlatformGraphRunListReq => {
   const req = requireRecord(value, 'listGraphRuns')
+  const graphId = optionalCleanString(req.graphId, 'graphId')
+  const limit = optionalPositiveInteger(req.limit, 'limit')
   return {
     route: validateRoute(req.route),
-    ...(optionalCleanString(req.graphId, 'graphId') !== undefined
-      ? { graphId: optionalCleanString(req.graphId, 'graphId') }
-      : {})
+    ...(graphId !== undefined ? { graphId } : {}),
+    ...(limit !== undefined ? { limit } : {})
   }
 }
 

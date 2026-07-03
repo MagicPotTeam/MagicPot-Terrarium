@@ -442,7 +442,9 @@ describe('MagicAgentPlatformSvcImpl', () => {
       route: req.route,
       metadata: req.metadata
     }))
-    const listGraphRuns = vi.fn((_sessionKey: string, _graphId?: string) => [graphRunRecord])
+    const listGraphRuns = vi.fn((_sessionKey: string, _graphId?: string, _limit?: number) => [
+      graphRunRecord
+    ])
     const getGraphRun = vi.fn((_runId: string, _sessionKey: string) => graphRunRecord)
     const cancelGraphRun = vi.fn((_runId: string, _sessionKey: string, _reason?: string) => ({
       runId: 'run-1',
@@ -530,9 +532,9 @@ describe('MagicAgentPlatformSvcImpl', () => {
     ).toBe(true)
 
     await expect(
-      service.listGraphRuns({ route: graphRoute, graphId: 'graph.one' })
+      service.listGraphRuns({ route: graphRoute, graphId: 'graph.one', limit: 50 })
     ).resolves.toMatchObject({ runs: [{ runId: 'run-1', sessionKey: 'generic:dm:graph-test' }] })
-    expect(listGraphRuns).toHaveBeenCalledWith('generic:dm:graph-test', 'graph.one')
+    expect(listGraphRuns).toHaveBeenCalledWith('generic:dm:graph-test', 'graph.one', 50)
 
     await expect(service.getGraphRun({ route: graphRoute, runId: 'run-1' })).resolves.toMatchObject(
       {

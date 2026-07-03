@@ -25,6 +25,7 @@ vi.mock('@renderer/utils/windowUtils', () => ({
 }))
 
 const FLAG_HELP = 'Set MAGICPOT_MAGICAGENT_PLATFORM=1 to enable Agent Studio actions.'
+const GRAPH_RUN_HISTORY_LIMIT = 50
 const ROUTE: AgentRouteLike = { channel: 'generic', scopeType: 'dm', scopeId: 'agent-studio' }
 const graphs = [
   {
@@ -185,7 +186,11 @@ describe('AgentStudioPage Graph Run Center', () => {
 
     await screen.findByText('Newest output')
 
-    expect(platformApi.listGraphRuns).toHaveBeenCalledWith({ route: ROUTE, graphId: 'graph-alpha' })
+    expect(platformApi.listGraphRuns).toHaveBeenCalledWith({
+      route: ROUTE,
+      graphId: 'graph-alpha',
+      limit: GRAPH_RUN_HISTORY_LIMIT
+    })
     expect(screen.getByRole('combobox', { name: 'Graph' })).toHaveValue('graph-alpha')
     expect(
       screen.getByText(/Designs cozy product pitches.*2 nodes.*1 channels.*1 outputs/)
@@ -198,31 +203,33 @@ describe('AgentStudioPage Graph Run Center', () => {
   })
 
   it('refreshes route-scoped history and clears active output when switching graphs', async () => {
-    platformApi.listGraphRuns.mockImplementation(async ({ graphId }: { graphId?: string }) => ({
-      runs:
-        graphId === 'graph-beta'
-          ? [
-              makeRun({
-                runId: 'run-beta',
-                graphId: 'graph-beta',
-                input: 'Beta prompt',
-                outputs: [],
-                channels: []
-              })
-            ]
-          : [
-              makeRun({
-                outputs: [
-                  {
-                    outputId: 'alpha',
-                    name: 'Alpha',
-                    content: 'Alpha output',
-                    sourceNodeId: 'writer'
-                  }
-                ]
-              })
-            ]
-    }))
+    platformApi.listGraphRuns.mockImplementation(
+      async ({ graphId }: { graphId?: string; limit?: number }) => ({
+        runs:
+          graphId === 'graph-beta'
+            ? [
+                makeRun({
+                  runId: 'run-beta',
+                  graphId: 'graph-beta',
+                  input: 'Beta prompt',
+                  outputs: [],
+                  channels: []
+                })
+              ]
+            : [
+                makeRun({
+                  outputs: [
+                    {
+                      outputId: 'alpha',
+                      name: 'Alpha',
+                      content: 'Alpha output',
+                      sourceNodeId: 'writer'
+                    }
+                  ]
+                })
+              ]
+      })
+    )
 
     renderPage()
 
@@ -234,7 +241,8 @@ describe('AgentStudioPage Graph Run Center', () => {
     await waitFor(() => {
       expect(platformApi.listGraphRuns).toHaveBeenLastCalledWith({
         route: ROUTE,
-        graphId: 'graph-beta'
+        graphId: 'graph-beta',
+        limit: GRAPH_RUN_HISTORY_LIMIT
       })
     })
 
@@ -285,7 +293,8 @@ describe('AgentStudioPage Graph Run Center', () => {
     expect(screen.getByText('Lava level pitch')).toBeInTheDocument()
     expect(platformApi.listGraphRuns).toHaveBeenLastCalledWith({
       route: ROUTE,
-      graphId: 'graph-alpha'
+      graphId: 'graph-alpha',
+      limit: GRAPH_RUN_HISTORY_LIMIT
     })
   })
 

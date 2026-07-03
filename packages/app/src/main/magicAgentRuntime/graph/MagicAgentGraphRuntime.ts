@@ -137,15 +137,20 @@ export class MagicAgentGraphRuntime {
     return clone(run)
   }
 
-  listRuns(sessionKey: string, graphId?: string): MagicAgentGraphRunRecord[] {
+  listRuns(sessionKey: string, graphId?: string, limit?: number): MagicAgentGraphRunRecord[] {
     const normalizedSessionKey = cleanString(sessionKey)
+    const normalizedGraphId = cleanString(graphId)
+    const normalizedLimit = Number.isInteger(limit) && Number(limit) > 0 ? Number(limit) : undefined
     if (!normalizedSessionKey) {
       return []
     }
-    return [...this.runs.values()]
-      .filter((run) => !graphId || run.graphId === graphId)
+    const runs = [...this.runs.values()]
+      .filter((run) => !normalizedGraphId || run.graphId === normalizedGraphId)
       .filter((run) => run.sessionKey === normalizedSessionKey)
-      .map((run) => clone(run))
+      .sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt)
+    return (normalizedLimit === undefined ? runs : runs.slice(0, normalizedLimit)).map((run) =>
+      clone(run)
+    )
   }
 
   async run(request: MagicAgentGraphRunRequest): Promise<MagicAgentGraphRunResult> {

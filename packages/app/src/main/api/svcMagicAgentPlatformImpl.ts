@@ -451,7 +451,7 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     const session = this.getAgentKernel().registerSession(req.route as AssistantRoute, {
       source: 'kernel'
     })
-    return { runs: this.getGraphRuntime().listRuns(session.sessionKey, req.graphId) }
+    return { runs: this.getGraphRuntime().listRuns(session.sessionKey, req.graphId, req.limit) }
   }
 
   getGraphRun = async (req: MagicAgentPlatformGraphRunGetReq) => {

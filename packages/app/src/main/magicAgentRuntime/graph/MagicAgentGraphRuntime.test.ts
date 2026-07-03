@@ -1,8 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MagicAgentGraphDefinition } from '@shared/magicAgent'
 import { MagicAgentGraphRuntime } from './MagicAgentGraphRuntime'
 
 const testRoute = { channel: 'generic', scopeType: 'dm', scopeId: 'graph-test' } as const
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 const createTestGraph = (graphId = 'test.graph'): MagicAgentGraphDefinition => ({
   graphId,
@@ -165,7 +169,9 @@ describe('MagicAgentGraphRuntime', () => {
     expect(runtime.listRuns('')).toEqual([])
   })
 
-  it('partitions graph runs by route session key and graph id', async () => {
+  it('partitions and bounds graph runs by route session key and graph id', async () => {
+    let timestamp = 1_700_000_000_000
+    vi.spyOn(Date, 'now').mockImplementation(() => timestamp++)
     const runtime = new MagicAgentGraphRuntime([])
     const graphA = createTestGraph('test.graph-a')
     const graphB = createTestGraph('test.graph-b')
@@ -194,8 +200,8 @@ describe('MagicAgentGraphRuntime', () => {
     })
 
     expect(runtime.listRuns('generic:dm:graph-test').map((run) => run.runId)).toEqual([
-      'run-a-1',
-      'run-a-2'
+      'run-a-2',
+      'run-a-1'
     ])
     expect(
       runtime.listRuns('generic:dm:graph-test', 'test.graph-a').map((run) => run.runId)
@@ -206,6 +212,12 @@ describe('MagicAgentGraphRuntime', () => {
     expect(
       runtime.listRuns('generic:dm:graph-other', 'test.graph-a').map((run) => run.runId)
     ).toEqual(['run-b-1'])
+    expect(runtime.listRuns('generic:dm:graph-test', undefined, 1).map((run) => run.runId)).toEqual(
+      ['run-a-2']
+    )
+    expect(runtime.listRuns('generic:dm:graph-test', undefined, 0).map((run) => run.runId)).toEqual(
+      ['run-a-2', 'run-a-1']
+    )
     expect(runtime.listRuns('generic:dm:unknown', 'test.graph-a')).toEqual([])
     expect(runtime.getRun('run-a-1', 'generic:dm:graph-test')?.runId).toBe('run-a-1')
     expect(runtime.getRun('run-a-1', 'generic:dm:graph-other')).toBeUndefined()
