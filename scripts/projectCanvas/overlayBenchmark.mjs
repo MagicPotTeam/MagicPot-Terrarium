@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { _electron as electron } from 'playwright'
 import {
   assertNonIntrusiveWindowPlacement,
@@ -296,7 +297,7 @@ async function seedCanvasItems(page, canvasId, items) {
   )
 }
 
-function getOverlayKindTotal(metrics) {
+export function getOverlayKindTotal(metrics) {
   return (
     metrics.htmlOverlayCount +
     metrics.fileOverlayCount +
@@ -305,7 +306,7 @@ function getOverlayKindTotal(metrics) {
   )
 }
 
-function hasConsistentOverlayAccounting(metrics) {
+export function hasConsistentOverlayAccounting(metrics) {
   const overlayKindTotal = getOverlayKindTotal(metrics)
   return (
     metrics.overlayTotalCount === metrics.domOverlayCount &&
@@ -458,93 +459,99 @@ async function zoomUntilOverlayCull(page, totalSeededItems) {
   )
 }
 
-let appHandle = null
-let tempRoot = null
-let artifactRoot = null
+export async function runOverlayBenchmark() {
+  let appHandle = null
+  let tempRoot = null
+  let artifactRoot = null
 
-try {
-  artifactRoot = resolveProjectCanvasArtifactRoot(BENCHMARK_RUN_ID)
-  await fs.mkdir(artifactRoot, { recursive: true })
-  tempRoot = await fs.mkdtemp(path.join(artifactRoot, 'magicpot-overlay-benchmark-'))
-  const userDataDir = path.join(tempRoot, 'user-data')
-  await writeSmokeConfig(userDataDir)
+  try {
+    artifactRoot = resolveProjectCanvasArtifactRoot(BENCHMARK_RUN_ID)
+    await fs.mkdir(artifactRoot, { recursive: true })
+    tempRoot = await fs.mkdtemp(path.join(artifactRoot, 'magicpot-overlay-benchmark-'))
+    const userDataDir = path.join(tempRoot, 'user-data')
+    await writeSmokeConfig(userDataDir)
 
-  appHandle = await launchApp(userDataDir)
-  const { page, fatalErrors } = appHandle
-  const canvasId = `overlay-benchmark-${Date.now().toString(36)}`
-  const items = createOverlayBenchmarkItems(BENCHMARK_ITEMS_PER_KIND)
-  await seedCanvasItems(page, canvasId, items)
-  await navigateToHash(page, `#/canvas?id=${canvasId}`)
-  await waitForHealthyPage(page, fatalErrors)
+    appHandle = await launchApp(userDataDir)
+    const { page, fatalErrors } = appHandle
+    const canvasId = `overlay-benchmark-${Date.now().toString(36)}`
+    const items = createOverlayBenchmarkItems(BENCHMARK_ITEMS_PER_KIND)
+    await seedCanvasItems(page, canvasId, items)
+    await navigateToHash(page, `#/canvas?id=${canvasId}`)
+    await waitForHealthyPage(page, fatalErrors)
 
-  const initialOverlayMetrics = await waitForOverlayMetrics(
-    page,
-    BENCHMARK_ITEMS_PER_KIND,
-    items.length
-  )
-  const zoomedOverlay = await zoomUntilOverlayCull(page, items.length)
-  const windowPlacement = await readWindowPlacement(appHandle.app)
-  assertNonIntrusiveWindowPlacement(windowPlacement, 'Overlay benchmark')
-  const payload = {
-    itemsPerKind: BENCHMARK_ITEMS_PER_KIND,
-    totalSeededItems: items.length,
-    windowPlacement,
-    initialOverlayMetrics,
-    zoomedOverlayMetrics: zoomedOverlay.metrics,
-    zoomStepsApplied: zoomedOverlay.zoomSteps
-  }
+    const initialOverlayMetrics = await waitForOverlayMetrics(
+      page,
+      BENCHMARK_ITEMS_PER_KIND,
+      items.length
+    )
+    const zoomedOverlay = await zoomUntilOverlayCull(page, items.length)
+    const windowPlacement = await readWindowPlacement(appHandle.app)
+    assertNonIntrusiveWindowPlacement(windowPlacement, 'Overlay benchmark')
+    const payload = {
+      itemsPerKind: BENCHMARK_ITEMS_PER_KIND,
+      totalSeededItems: items.length,
+      windowPlacement,
+      initialOverlayMetrics,
+      zoomedOverlayMetrics: zoomedOverlay.metrics,
+      zoomStepsApplied: zoomedOverlay.zoomSteps
+    }
 
-  await fs.writeFile(
-    path.join(artifactRoot, 'overlay-benchmark-report.json'),
-    JSON.stringify(payload, null, 2),
-    'utf8'
-  )
-  console.log(JSON.stringify(payload, null, 2))
+    await fs.writeFile(
+      path.join(artifactRoot, 'overlay-benchmark-report.json'),
+      JSON.stringify(payload, null, 2),
+      'utf8'
+    )
+    console.log(JSON.stringify(payload, null, 2))
 
-  if (
-    !hasConsistentOverlayAccounting(initialOverlayMetrics) ||
-    initialOverlayMetrics.overlayTotalCount !== items.length ||
-    initialOverlayMetrics.htmlOverlayCount !== BENCHMARK_ITEMS_PER_KIND ||
-    initialOverlayMetrics.fileOverlayCount !== BENCHMARK_ITEMS_PER_KIND ||
-    initialOverlayMetrics.textOverlayCount !== BENCHMARK_ITEMS_PER_KIND ||
-    initialOverlayMetrics.annotationOverlayCount !== BENCHMARK_ITEMS_PER_KIND ||
-    !hasConsistentOverlayAccounting(zoomedOverlay.metrics) ||
-    zoomedOverlay.metrics.overlayTotalCount <= 0 ||
-    zoomedOverlay.metrics.overlayTotalCount >= items.length
-  ) {
+    if (
+      !hasConsistentOverlayAccounting(initialOverlayMetrics) ||
+      initialOverlayMetrics.overlayTotalCount !== items.length ||
+      initialOverlayMetrics.htmlOverlayCount !== BENCHMARK_ITEMS_PER_KIND ||
+      initialOverlayMetrics.fileOverlayCount !== BENCHMARK_ITEMS_PER_KIND ||
+      initialOverlayMetrics.textOverlayCount !== BENCHMARK_ITEMS_PER_KIND ||
+      initialOverlayMetrics.annotationOverlayCount !== BENCHMARK_ITEMS_PER_KIND ||
+      !hasConsistentOverlayAccounting(zoomedOverlay.metrics) ||
+      zoomedOverlay.metrics.overlayTotalCount <= 0 ||
+      zoomedOverlay.metrics.overlayTotalCount >= items.length
+    ) {
+      process.exitCode = 1
+    }
+  } catch (error) {
+    if (artifactRoot) {
+      try {
+        await fs.writeFile(
+          path.join(artifactRoot, 'overlay-benchmark-error.txt'),
+          error instanceof Error ? error.stack || error.message : String(error),
+          'utf8'
+        )
+      } catch {
+        // Ignore artifact persistence failures.
+      }
+    }
+    console.error(
+      error instanceof Error
+        ? error.stack || error.message
+        : `Unknown overlay benchmark error: ${String(error)}`
+    )
     process.exitCode = 1
-  }
-} catch (error) {
-  if (artifactRoot) {
-    try {
-      await fs.writeFile(
-        path.join(artifactRoot, 'overlay-benchmark-error.txt'),
-        error instanceof Error ? error.stack || error.message : String(error),
-        'utf8'
-      )
-    } catch {
-      // Ignore artifact persistence failures.
+  } finally {
+    if (appHandle?.app) {
+      try {
+        await appHandle.app.close()
+      } catch {
+        // Ignore cleanup failures.
+      }
+    }
+    if (tempRoot) {
+      try {
+        await fs.rm(tempRoot, { recursive: true, force: true })
+      } catch {
+        // Ignore cleanup failures.
+      }
     }
   }
-  console.error(
-    error instanceof Error
-      ? error.stack || error.message
-      : `Unknown overlay benchmark error: ${String(error)}`
-  )
-  process.exitCode = 1
-} finally {
-  if (appHandle?.app) {
-    try {
-      await appHandle.app.close()
-    } catch {
-      // Ignore cleanup failures.
-    }
-  }
-  if (tempRoot) {
-    try {
-      await fs.rm(tempRoot, { recursive: true, force: true })
-    } catch {
-      // Ignore cleanup failures.
-    }
-  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await runOverlayBenchmark()
 }

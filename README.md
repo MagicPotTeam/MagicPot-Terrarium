@@ -223,6 +223,12 @@ npm run test:web:light:2
 npm run test:web:light:3
 ```
 
+本地组合 CI 关键检查（typecheck + Project Canvas benchmark smoke + overlay/QA 校验）：
+
+```bash
+npm run verify:ci-local
+```
+
 完整测试：
 
 ```bash
@@ -238,6 +244,7 @@ npm run smoke:startup
 Project Canvas 压测与专项验证：
 
 ```bash
+npm run test:project-canvas:benchmark-smoke
 npm run stress:project-canvas
 npm run benchmark:project-canvas:webgl
 npm run benchmark:project-canvas:overlay

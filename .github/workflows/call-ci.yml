@@ -60,3 +60,9 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Project Canvas benchmark smoke
+        run: npm run test:project-canvas:benchmark-smoke
+
+      - name: QA security posture
+        run: npm run qa:security-posture
