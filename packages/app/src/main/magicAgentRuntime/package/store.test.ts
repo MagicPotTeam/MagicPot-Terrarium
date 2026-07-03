@@ -7,7 +7,9 @@ import path from 'path'
 import { MagicAgentPackageStore } from './store'
 import { validateMagicAgentPackageManifest } from './manifest'
 import {
+  MAGIC_AGENT_PACKAGE_AGENT_MAX_TOOL_ITERATIONS,
   MAGIC_AGENT_PACKAGE_AGENT_SPEC_VERSION,
+  MAGIC_AGENT_PACKAGE_AGENT_TOOL_NAME_MAX_COUNT,
   MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS,
   MAGIC_AGENT_PACKAGE_MANIFEST_FILE
 } from '@shared/magicAgentRuntime/packageContracts'
@@ -181,6 +183,32 @@ describe('MagicAgentPackageStore', () => {
     expect(inspection.validation.ok).toBe(false)
     if (!inspection.validation.ok) {
       expect(inspection.validation.errors[0].path).toBe('contributions.0.entry')
+    }
+  })
+
+  it('rejects absolute, Windows, UNC, backslash traversal, and parent contribution entries', () => {
+    for (const entry of [
+      '/tmp/outside.json',
+      'C:/Users/Jane/outside.json',
+      'C:\\Users\\Jane\\outside.json',
+      '\\\\server\\share\\outside.json',
+      'agents\\..\\outside.json',
+      '../outside.json'
+    ]) {
+      const result = validateMagicAgentPackageManifest(
+        manifest({ contributions: [{ id: 'unsafe-entry', kind: 'tool', entry }] })
+      )
+      expect(result.ok, `entry=${entry}`).toBe(false)
+      if (!result.ok) {
+        expect(result.errors).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              path: 'contributions.0.entry',
+              message: expect.stringMatching(/relative package path/)
+            })
+          ])
+        )
+      }
     }
   })
 
@@ -404,6 +432,52 @@ describe('MagicAgentPackageStore', () => {
       profileId: 'package-profile'
     })
     expect((globalThis as Record<string, unknown>).__magicPackageExecuted).toBeUndefined()
+  })
+
+  it('rejects unsafe or unbounded package agent spec permissions before install', async () => {
+    const packageDir = path.join(ROOT, 'unsafe-agent-package')
+    await writePackage(packageDir, {
+      contributions: [{ id: 'unsafe-agent', kind: 'agent', entry: 'agents/unsafe.json' }]
+    })
+    await fsp.mkdir(path.join(packageDir, 'agents'), { recursive: true })
+    await fsp.writeFile(
+      path.join(packageDir, 'agents', 'unsafe.json'),
+      JSON.stringify(
+        {
+          schemaVersion: MAGIC_AGENT_PACKAGE_AGENT_SPEC_VERSION,
+          name: 'Unsafe Agent',
+          toolNames: [
+            'session.status',
+            'bad tool name',
+            ...Array.from(
+              { length: MAGIC_AGENT_PACKAGE_AGENT_TOOL_NAME_MAX_COUNT },
+              (_, index) => `extra.tool.${index}`
+            )
+          ],
+          maxToolIterations: MAGIC_AGENT_PACKAGE_AGENT_MAX_TOOL_ITERATIONS + 1,
+          profileId: '../secret-profile'
+        },
+        null,
+        2
+      )
+    )
+
+    const store = new MagicAgentPackageStore(ROOT, STORE)
+    const inspection = await store.scanLocalDirectory(packageDir)
+    expect(inspection.validation.ok).toBe(false)
+    if (!inspection.validation.ok) {
+      expect(inspection.validation.errors).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: 'contributions.0.entry',
+            message: expect.stringMatching(
+              /toolNames|MagicAgent tool name rules|maxToolIterations|profileId/
+            )
+          })
+        ])
+      )
+    }
+    await expect(store.install(packageDir)).rejects.toThrow(/Invalid agent contribution spec/)
   })
 
   it('fails closed when a package agent spec is invalid', async () => {

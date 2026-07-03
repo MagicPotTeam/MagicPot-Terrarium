@@ -17,6 +17,7 @@ import { validateMagicAgentPackageManifest } from './manifest'
 const METADATA_FILE = 'magicpot-installed-package.json'
 const PACKAGE_CONTENT_DIR = 'package'
 const UTF8_BOM_PATTERN = /^\uFEFF/
+const WINDOWS_DRIVE_ENTRY_PATTERN = /^[A-Za-z]:[\\/]/
 
 const DEFAULT_PACKAGE_RESOURCE_LIMITS = {
   maxDepth: 12,
@@ -95,7 +96,8 @@ function assertRelativeEntryPath(entry: string, _manifestPath: string): void {
     normalized.startsWith('/') ||
     normalized === '..' ||
     normalized.startsWith('../') ||
-    normalized.includes('/../')
+    normalized.includes('/../') ||
+    WINDOWS_DRIVE_ENTRY_PATTERN.test(entry)
   ) {
     throw new Error('Manifest contains an unsafe contribution entry path.')
   }

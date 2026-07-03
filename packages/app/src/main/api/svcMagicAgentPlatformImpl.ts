@@ -145,6 +145,28 @@ const mergeAgentDefinitions = (
   return [...agentsById.values()].sort((left, right) => left.id.localeCompare(right.id))
 }
 
+const resolvePackageAgentAllowedToolNames = (
+  requested: MagicAgentPlatformRunReq['allowedToolNames'],
+  packageToolNames: MagicAgentPlatformAgentDefinition['toolNames']
+): MagicAgentPlatformRunReq['allowedToolNames'] => {
+  if (requested === undefined) {
+    return undefined
+  }
+  if (!Array.isArray(requested)) {
+    return requested
+  }
+  if (!Array.isArray(packageToolNames)) {
+    return requested
+  }
+
+  const packageToolNameSet = new Set(
+    packageToolNames.map((toolName) => String(toolName || '').trim()).filter(Boolean)
+  )
+  return requested
+    .map((toolName) => String(toolName || '').trim())
+    .filter((toolName) => Boolean(toolName) && packageToolNameSet.has(toolName))
+}
+
 const normalizePathSeparators = (input: string): string => input.replace(/\\/g, '/')
 
 const isPathLikePackageIdentifier = (value: string): boolean =>
@@ -249,7 +271,10 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     const packageStore = this.getPackageStore()
     const tools = adapter.listTools()
     const packages = await packageStore.list().catch(() => undefined)
-    const agents = await this.listAllAgents()
+    const runtimeAgents = adapter.listAgents()
+    const agents = await this.listPackageAgents()
+      .then((packageAgents) => mergeAgentDefinitions(runtimeAgents, packageAgents))
+      .catch(() => runtimeAgents)
     return {
       enabled,
       featureFlag: MAGIC_AGENT_PLATFORM_ENV,
@@ -279,15 +304,21 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   runAgent = async (req: MagicAgentPlatformRunReq): Promise<MagicAgentPlatformRunResp> => {
     const agentId = req.agentId?.trim()
     if (agentId) {
-      const packageAgent = (await this.listPackageAgents()).find((agent) => agent.id === agentId)
+      const adapter = this.getAdapter()
+      const packageAgents = await this.listPackageAgents()
+      mergeAgentDefinitions(adapter.listAgents(), packageAgents)
+      const packageAgent = packageAgents.find((agent) => agent.id === agentId)
       if (packageAgent) {
-        return this.getAdapter().runAgent({
+        const allowedToolNames = resolvePackageAgentAllowedToolNames(
+          req.allowedToolNames,
+          packageAgent.toolNames
+        )
+        return adapter.runAgent({
           ...req,
           systemPrompt: req.systemPrompt ?? packageAgent.systemPrompt,
           profileId: req.profileId ?? packageAgent.profileId,
           maxToolIterations: req.maxToolIterations ?? packageAgent.maxToolIterations,
-          allowedToolNames:
-            req.allowedToolNames !== undefined ? req.allowedToolNames : packageAgent.toolNames
+          ...(allowedToolNames !== undefined ? { allowedToolNames } : {})
         })
       }
     }

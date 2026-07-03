@@ -27,6 +27,7 @@ const MANIFEST_KEYS = new Set([
 ])
 const CONTRIBUTION_KEYS = new Set(['id', 'kind', 'title', 'description', 'entry', 'config'])
 const CONTRIBUTION_KIND_SET = new Set<string>(MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS)
+const WINDOWS_DRIVE_ENTRY_PATTERN = /^[A-Za-z]:[\\/]/
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -191,7 +192,12 @@ function normalizeContribution(
 
   const entry = normalizeOptionalText(value.entry, `${path}.entry`, issues)
   if (entry) {
-    if (entry.includes('..') || entry.startsWith('/') || entry.startsWith('\\')) {
+    const normalizedEntry = entry.replace(/\\/g, '/')
+    if (
+      normalizedEntry.includes('..') ||
+      normalizedEntry.startsWith('/') ||
+      WINDOWS_DRIVE_ENTRY_PATTERN.test(entry)
+    ) {
       pushIssue(issues, `${path}.entry`, 'Contribution entry must be a relative package path.')
     } else {
       contribution.entry = entry

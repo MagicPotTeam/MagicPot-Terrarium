@@ -1,6 +1,11 @@
 import {
+  MAGIC_AGENT_PACKAGE_AGENT_IDENTIFIER_PATTERN,
+  MAGIC_AGENT_PACKAGE_AGENT_MAX_TOOL_ITERATIONS,
+  MAGIC_AGENT_PACKAGE_AGENT_PROFILE_ID_MAX_LENGTH,
   MAGIC_AGENT_PACKAGE_AGENT_SPEC_VERSION,
   MAGIC_AGENT_PACKAGE_AGENT_SYSTEM_PROMPT_MAX_LENGTH,
+  MAGIC_AGENT_PACKAGE_AGENT_TOOL_NAME_MAX_COUNT,
+  MAGIC_AGENT_PACKAGE_AGENT_TOOL_NAME_MAX_LENGTH,
   MAGIC_AGENT_PACKAGE_DESCRIPTION_MAX_LENGTH,
   MAGIC_AGENT_PACKAGE_NAME_MAX_LENGTH,
   type MagicAgentInstalledPackage,
@@ -18,6 +23,9 @@ const AGENT_SPEC_KEYS = new Set([
   'maxToolIterations',
   'profileId'
 ])
+
+const TOOL_NAME_PATTERN = MAGIC_AGENT_PACKAGE_AGENT_IDENTIFIER_PATTERN
+const PROFILE_ID_PATTERN = MAGIC_AGENT_PACKAGE_AGENT_IDENTIFIER_PATTERN
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -71,12 +79,32 @@ const normalizeToolNames = (
     return undefined
   }
 
+  if (value.length > MAGIC_AGENT_PACKAGE_AGENT_TOOL_NAME_MAX_COUNT) {
+    pushIssue(
+      issues,
+      path,
+      `Expected "${path}" to contain at most ${MAGIC_AGENT_PACKAGE_AGENT_TOOL_NAME_MAX_COUNT} tool names.`
+    )
+  }
+
   const toolNames: string[] = []
   for (const [index, item] of value.entries()) {
     const itemPath = `${path}.${index}`
     const toolName = normalizeOptionalText(item, itemPath, issues)
     if (!toolName) {
       pushIssue(issues, itemPath, 'Expected tool name to be a non-empty string.')
+      continue
+    }
+    if (toolName.length > MAGIC_AGENT_PACKAGE_AGENT_TOOL_NAME_MAX_LENGTH) {
+      pushIssue(
+        issues,
+        itemPath,
+        `Expected tool name to be at most ${MAGIC_AGENT_PACKAGE_AGENT_TOOL_NAME_MAX_LENGTH} characters.`
+      )
+      continue
+    }
+    if (!TOOL_NAME_PATTERN.test(toolName)) {
+      pushIssue(issues, itemPath, 'Expected tool name to match MagicAgent tool name rules.')
       continue
     }
     if (!toolNames.includes(toolName)) {
@@ -156,21 +184,28 @@ export function validateMagicAgentPackageAgentSpec(
       typeof value.maxToolIterations === 'number' &&
       Number.isInteger(value.maxToolIterations) &&
       Number.isFinite(value.maxToolIterations) &&
-      value.maxToolIterations >= 0
+      value.maxToolIterations >= 0 &&
+      value.maxToolIterations <= MAGIC_AGENT_PACKAGE_AGENT_MAX_TOOL_ITERATIONS
     ) {
       spec.maxToolIterations = value.maxToolIterations
     } else {
       pushIssue(
         errors,
         'maxToolIterations',
-        'Expected maxToolIterations to be a non-negative integer.'
+        `Expected maxToolIterations to be a non-negative integer no greater than ${MAGIC_AGENT_PACKAGE_AGENT_MAX_TOOL_ITERATIONS}.`
       )
     }
   }
 
-  const profileId = normalizeOptionalText(value.profileId, 'profileId', errors)
+  const profileId = normalizeOptionalText(value.profileId, 'profileId', errors, {
+    maxLength: MAGIC_AGENT_PACKAGE_AGENT_PROFILE_ID_MAX_LENGTH
+  })
   if (profileId) {
-    spec.profileId = profileId
+    if (!PROFILE_ID_PATTERN.test(profileId)) {
+      pushIssue(errors, 'profileId', 'Expected profileId to match MagicAgent profile id rules.')
+    } else {
+      spec.profileId = profileId
+    }
   }
 
   return errors.length > 0

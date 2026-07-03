@@ -103,7 +103,7 @@ describe('MagicAgentPlatformSvcImpl', () => {
     await expect(service.listAgents({})).rejects.toThrow(/MAGICPOT_MAGICAGENT_PLATFORM=1/)
   })
 
-  it('exposes installed package agents and applies package agent defaults when running them', async () => {
+  it('exposes installed package agents, applies safe package defaults, and narrows explicit tool allowlists', async () => {
     const runAgent = vi.fn(async (req) => ({
       runId: 'run-package-agent',
       agentId: req.agentId,
@@ -163,10 +163,95 @@ describe('MagicAgentPlatformSvcImpl', () => {
         agentId: 'package.demo.package.assistant',
         systemPrompt: 'Package prompt.',
         profileId: 'package-profile',
-        maxToolIterations: 1,
+        maxToolIterations: 1
+      })
+    )
+    expect(runAgent.mock.calls[0]?.[0]).not.toHaveProperty('allowedToolNames')
+
+    await service.runAgent({
+      agentId: 'package.demo.package.assistant',
+      text: 'hello with tools',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'agent-test' },
+      allowedToolNames: ['session.status', 'artifact.create']
+    })
+    expect(runAgent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
         allowedToolNames: ['session.status']
       })
     )
+  })
+
+  it('keeps status tolerant but fails closed for package agent load errors', async () => {
+    const runAgent = vi.fn()
+    const service = new MagicAgentPlatformSvcImpl({
+      adapter: {
+        listTools: () => [],
+        listAgents: () => [{ id: 'agent.one', name: 'Runtime Agent' }],
+        runAgent
+      } as never,
+      graphRuntime: {
+        list: () => []
+      } as never,
+      packageStore: {
+        list: vi.fn(async () => []),
+        listAgents: vi.fn(async () => {
+          throw new Error('bad package agent metadata')
+        }),
+        getPackageRoot: () => '/packages',
+        getStoreDir: () => '/packages/installed'
+      } as never
+    })
+
+    await expect(service.getStatus({})).resolves.toMatchObject({ agentCount: 1 })
+    await expect(service.listAgents({})).rejects.toThrow(/bad package agent metadata/)
+    await expect(
+      service.runAgent({
+        agentId: 'package.bad.agent',
+        text: 'hello',
+        route: { channel: 'generic', scopeType: 'dm', scopeId: 'agent-test' }
+      })
+    ).rejects.toThrow(/bad package agent metadata/)
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it('rejects duplicate runtime and package agent ids for list and run paths', async () => {
+    const runAgent = vi.fn()
+    const service = new MagicAgentPlatformSvcImpl({
+      adapter: {
+        listTools: () => [],
+        listAgents: () => [{ id: 'package.demo.package.assistant', name: 'Runtime Agent' }],
+        runAgent
+      } as never,
+      graphRuntime: {
+        list: () => []
+      } as never,
+      packageStore: {
+        list: vi.fn(async () => []),
+        listAgents: vi.fn(async () => [
+          {
+            id: 'package.demo.package.assistant',
+            name: 'Package Assistant',
+            sourcePackageId: 'demo.package',
+            sourcePackageName: 'Demo Package',
+            sourcePackageVersion: '1.0.0',
+            contributionId: 'assistant'
+          }
+        ]),
+        getPackageRoot: () => '/packages',
+        getStoreDir: () => '/packages/installed'
+      } as never
+    })
+
+    await expect(service.getStatus({})).resolves.toMatchObject({ agentCount: 1 })
+    await expect(service.listAgents({})).rejects.toThrow(/Duplicate MagicAgent id/)
+    await expect(
+      service.runAgent({
+        agentId: 'package.demo.package.assistant',
+        text: 'hello',
+        route: { channel: 'generic', scopeType: 'dm', scopeId: 'agent-test' }
+      })
+    ).rejects.toThrow(/Duplicate MagicAgent id/)
+    expect(runAgent).not.toHaveBeenCalled()
   })
 
   it('validates package manifests through the v1 service', async () => {
