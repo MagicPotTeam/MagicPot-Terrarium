@@ -20,13 +20,13 @@ This is an orchestration shell. The current main-process graph runtime builds ru
 
 ## IPC boundary
 
-| UI action | IPC method | Contract |
-| --- | --- | --- |
-| Initial load | `getStatus`, `listAgents`, `listTools`, `listGraphs`, `listPackages` | Catalog/status reads. |
-| History refresh | `listGraphRuns` | Route-scoped and filtered by selected graph. |
-| Run graph | `runGraph` | Sends trimmed input and `metadata.source = "agent-studio"`. |
-| View/refresh run | `getGraphRun` | Route-scoped lookup; missing runs are shown as errors. |
-| Cancel run | `cancelGraphRun` | Best-effort request for non-terminal runs. |
+| UI action        | IPC method                                                           | Contract                                                    |
+| ---------------- | -------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Initial load     | `getStatus`, `listAgents`, `listTools`, `listGraphs`, `listPackages` | Catalog/status reads.                                       |
+| History refresh  | `listGraphRuns`                                                      | Route-scoped and filtered by selected graph.                |
+| Run graph        | `runGraph`                                                           | Sends trimmed input and `metadata.source = "agent-studio"`. |
+| View/refresh run | `getGraphRun`                                                        | Route-scoped lookup; missing runs are shown as errors.      |
+| Cancel run       | `cancelGraphRun`                                                     | Best-effort request for non-terminal runs.                  |
 
 All run-state calls use this fixed route:
 
@@ -38,7 +38,7 @@ The main service derives the session identity from that route. Listing, lookup, 
 
 ## Feature flag behavior
 
-`svcMagicAgentPlatform.getStatus({})` gates the page with `MAGICPOT_MAGICAGENT_PLATFORM`. When disabled, the UI displays `Set MAGICPOT_MAGICAGENT_PLATFORM=1 to enable Agent Studio actions.`, skips catalog/history calls, disables graph run controls, and clears active run/history state.
+`svcMagicAgentPlatform.getStatus({})` gates the page with `MAGICPOT_MAGICAGENT_PLATFORM`. When disabled, the UI displays `Set MAGICPOT_MAGICAGENT_PLATFORM=1 to enable Agent Studio actions.`, skips catalog/history calls, disables graph run controls, and clears active run/history state. The main-process service is expected to fail closed before touching graph runtime, kernel, or package-store dependencies when this flag is off.
 
 ## UI lifecycle
 
@@ -68,11 +68,16 @@ History is sorted by `updatedAt` descending with `createdAt` as a tie breaker. `
 
 `packages/app/src/renderer/src/pages/AgentStudioPage/AgentStudioPage.test.tsx` mocks `@renderer/utils/windowUtils` and verifies the UI/API contract without exporting internals. It covers disabled-flag behavior, enabled initial load, route-scoped history, graph switching, prompt trimming, missing run lookup, and cancellation payloads.
 
+Main-process hardening tests also cover service fail-closed behavior when `MAGICPOT_MAGICAGENT_PLATFORM` is disabled and route/session partitioning across `svcMagicAgentPlatformImpl.test.ts` and `MagicAgentGraphRuntime.test.ts`.
+
 Recommended focused validation:
 
 ```bash
+npm run typecheck:node
 npm run typecheck:web
+npm run lint:main
 npm run lint:renderer
+npx vitest run --config config/vitest/vitest.node.config.mjs packages/app/src/main/api/svcMagicAgentPlatformImpl.test.ts packages/app/src/main/magicAgentRuntime/graph/MagicAgentGraphRuntime.test.ts --pool=forks --maxWorkers=1
 npx vitest run --config config/vitest/vitest.web.config.mjs packages/app/src/renderer/src/pages/AgentStudioPage/AgentStudioPage.test.tsx --pool=forks --maxWorkers=1
 npm run check:text-encoding
 ```

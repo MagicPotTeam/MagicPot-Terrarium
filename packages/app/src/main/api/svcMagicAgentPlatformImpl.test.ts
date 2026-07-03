@@ -1,6 +1,8 @@
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { MagicAgentGraphDefinition } from '@shared/magicAgent'
 import { AgentKernel } from '../agentKernel'
+import { MagicAgentGraphRuntime } from '../magicAgentRuntime/graph'
 import { MagicAgentPlatformSvcImpl } from './svcMagicAgentPlatformImpl'
 
 vi.mock('electron', () => ({
@@ -10,6 +12,48 @@ vi.mock('electron', () => ({
 }))
 
 const originalMagicAgentPlatformFlag = process.env['MAGICPOT_MAGICAGENT_PLATFORM']
+
+const createSvcTestGraph = (graphId = 'graph.service.partition'): MagicAgentGraphDefinition => ({
+  graphId,
+  name: 'Service Partition Graph',
+  description: 'Graph used by service partition tests.',
+  version: '1.0.0',
+  tags: ['test'],
+  entryNodeIds: ['planner'],
+  nodes: [
+    {
+      nodeId: 'planner',
+      kind: 'agent',
+      name: 'Planner',
+      description: 'Plans the answer.',
+      instruction: 'Plan the answer.'
+    },
+    {
+      nodeId: 'final',
+      kind: 'output',
+      name: 'Final',
+      description: 'Final output node.'
+    }
+  ],
+  channels: [
+    {
+      channelId: 'planner-to-final',
+      from: 'planner',
+      to: 'final',
+      kind: 'artifact'
+    }
+  ],
+  outputs: [
+    {
+      outputId: 'final-doc',
+      name: 'Final Document',
+      description: 'Final generated document.',
+      sourceNodeId: 'final',
+      channelId: 'planner-to-final',
+      mimeType: 'text/markdown'
+    }
+  ]
+})
 
 beforeEach(() => {
   process.env['MAGICPOT_MAGICAGENT_PLATFORM'] = '1'
@@ -69,7 +113,7 @@ describe('MagicAgentPlatformSvcImpl', () => {
   })
 
   it('reports disabled status and gates platform operations without initializing platform deps when the feature flag is off', async () => {
-    delete process.env['MAGICPOT_MAGICAGENT_PLATFORM']
+    process.env['MAGICPOT_MAGICAGENT_PLATFORM'] = '0'
     const listTools = vi.fn(() => [])
     const listAgents = vi.fn(() => [])
     const listGraphs = vi.fn(() => [])
@@ -101,6 +145,87 @@ describe('MagicAgentPlatformSvcImpl', () => {
     expect(listGraphs).not.toHaveBeenCalled()
     expect(listPackages).not.toHaveBeenCalled()
     await expect(service.listAgents({})).rejects.toThrow(/MAGICPOT_MAGICAGENT_PLATFORM=1/)
+  })
+
+  it('fails closed for Agent Studio graph and package operations when the feature flag is off', async () => {
+    process.env['MAGICPOT_MAGICAGENT_PLATFORM'] = '0'
+    const listTools = vi.fn(() => [])
+    const listAgents = vi.fn(() => [])
+    const listGraphs = vi.fn(() => [])
+    const createGraph = vi.fn()
+    const runGraph = vi.fn()
+    const listGraphRuns = vi.fn()
+    const getGraphRun = vi.fn()
+    const cancelGraphRun = vi.fn()
+    const listPackages = vi.fn(async () => [])
+    const scanLocalDirectory = vi.fn()
+    const install = vi.fn()
+    const inspect = vi.fn()
+    const uninstall = vi.fn()
+    const registerSession = vi.fn()
+    const service = new MagicAgentPlatformSvcImpl({
+      agentKernel: { registerSession } as never,
+      adapter: {
+        listTools,
+        listAgents
+      } as never,
+      graphRuntime: {
+        list: listGraphs,
+        create: createGraph,
+        run: runGraph,
+        listRuns: listGraphRuns,
+        getRun: getGraphRun,
+        cancel: cancelGraphRun
+      } as never,
+      packageStore: {
+        list: listPackages,
+        getPackageRoot: () => '/packages',
+        getStoreDir: () => '/packages/installed',
+        scanLocalDirectory,
+        install,
+        inspect,
+        uninstall
+      } as never
+    })
+    const route = { channel: 'generic', scopeType: 'dm', scopeId: 'agent-studio' } as const
+    const rejectedOperations: Array<() => Promise<unknown>> = [
+      () => service.listAgents({}),
+      () => service.listTools({}),
+      () => service.listGraphs({}),
+      () => service.createGraph({ graph: createSvcTestGraph(), route }),
+      () => service.runGraph({ graphId: 'graph.service.partition', input: 'hello', route }),
+      () => service.listGraphRuns({ route, graphId: 'graph.service.partition' }),
+      () => service.getGraphRun({ route, runId: 'run-1' }),
+      () => service.cancelGraphRun({ route, runId: 'run-1', reason: 'Stop requested.' }),
+      () => service.validatePackageManifest({ manifest: { manifestVersion: 1 } }),
+      () => service.listPackages({}),
+      () => service.scanPackage({ packageDir: '/packages/candidate' }),
+      () => service.installPackage({ packageDir: '/packages/candidate' }),
+      () => service.inspectPackage({ packageIdOrDir: 'demo.package' }),
+      () => service.uninstallPackage({ packageId: 'demo.package' })
+    ]
+
+    for (const operation of rejectedOperations) {
+      await expect(operation()).rejects.toThrow(/MAGICPOT_MAGICAGENT_PLATFORM=1/)
+    }
+    expect(registerSession).not.toHaveBeenCalled()
+    for (const dependencyCall of [
+      listTools,
+      listAgents,
+      listGraphs,
+      createGraph,
+      runGraph,
+      listGraphRuns,
+      getGraphRun,
+      cancelGraphRun,
+      listPackages,
+      scanLocalDirectory,
+      install,
+      inspect,
+      uninstall
+    ]) {
+      expect(dependencyCall).not.toHaveBeenCalled()
+    }
   })
 
   it('exposes installed package agents, applies safe package defaults, and narrows explicit tool allowlists', async () => {
@@ -455,6 +580,60 @@ describe('MagicAgentPlatformSvcImpl', () => {
     expect(inspected).not.toHaveProperty('packagePath')
     expect(inspected.installed).not.toHaveProperty('sourcePath')
     expect(inspected.installed).not.toHaveProperty('packagePath')
+  })
+
+  it('partitions graph run service operations by route session key with the real graph runtime', async () => {
+    const graphId = 'graph.service.partition'
+    const graphRuntime = new MagicAgentGraphRuntime([createSvcTestGraph(graphId)])
+    const service = new MagicAgentPlatformSvcImpl({
+      agentKernel: new AgentKernel(),
+      adapter: {
+        listTools: () => [],
+        listAgents: () => []
+      } as never,
+      graphRuntime
+    })
+    const route = { channel: 'generic', scopeType: 'dm', scopeId: 'agent-studio' } as const
+    const otherRoute = {
+      channel: 'generic',
+      scopeType: 'dm',
+      scopeId: 'other-agent-studio'
+    } as const
+
+    await expect(
+      service.runGraph({ graphId, input: 'Route A prompt', route, runId: 'run-route-a' })
+    ).resolves.toMatchObject({
+      runId: 'run-route-a',
+      graphId,
+      sessionKey: 'generic:dm:agent-studio'
+    })
+    await expect(service.listGraphRuns({ route, graphId })).resolves.toMatchObject({
+      runs: [{ runId: 'run-route-a', sessionKey: 'generic:dm:agent-studio' }]
+    })
+    await expect(service.listGraphRuns({ route: otherRoute, graphId })).resolves.toEqual({
+      runs: []
+    })
+    await expect(service.getGraphRun({ route, runId: 'run-route-a' })).resolves.toMatchObject({
+      run: { runId: 'run-route-a', sessionKey: 'generic:dm:agent-studio' }
+    })
+    await expect(service.getGraphRun({ route: otherRoute, runId: 'run-route-a' })).resolves.toEqual(
+      {}
+    )
+
+    await expect(
+      service.cancelGraphRun({ route: otherRoute, runId: 'run-route-a', reason: 'Wrong route.' })
+    ).resolves.toEqual({
+      runId: 'run-route-a',
+      cancelled: false,
+      error: 'Run not found.'
+    })
+    await expect(
+      service.cancelGraphRun({
+        route,
+        runId: 'run-route-a',
+        reason: 'Completed runs do not cancel.'
+      })
+    ).resolves.toEqual({ runId: 'run-route-a', cancelled: false, status: 'completed' })
   })
 
   it('does not inspect cwd-relative bare package ids as local paths and redacts nested package validation paths', async () => {

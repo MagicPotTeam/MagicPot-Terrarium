@@ -165,6 +165,78 @@ describe('MagicAgentGraphRuntime', () => {
     expect(runtime.listRuns('')).toEqual([])
   })
 
+  it('partitions graph runs by route session key and graph id', async () => {
+    const runtime = new MagicAgentGraphRuntime([])
+    const graphA = createTestGraph('test.graph-a')
+    const graphB = createTestGraph('test.graph-b')
+    const routeA = testRoute
+    const routeB = { channel: 'generic', scopeType: 'dm', scopeId: 'graph-other' } as const
+    runtime.create({ graph: graphA, route: routeA })
+    runtime.create({ graph: graphB, route: routeA })
+
+    await runtime.run({
+      graphId: 'test.graph-a',
+      input: 'Route A graph A.',
+      route: routeA,
+      runId: 'run-a-1'
+    })
+    await runtime.run({
+      graphId: 'test.graph-b',
+      input: 'Route A graph B.',
+      route: routeA,
+      runId: 'run-a-2'
+    })
+    await runtime.run({
+      graphId: 'test.graph-a',
+      input: 'Route B graph A.',
+      route: routeB,
+      runId: 'run-b-1'
+    })
+
+    expect(runtime.listRuns('generic:dm:graph-test').map((run) => run.runId)).toEqual([
+      'run-a-1',
+      'run-a-2'
+    ])
+    expect(
+      runtime.listRuns('generic:dm:graph-test', 'test.graph-a').map((run) => run.runId)
+    ).toEqual(['run-a-1'])
+    expect(
+      runtime.listRuns('generic:dm:graph-test', 'test.graph-b').map((run) => run.runId)
+    ).toEqual(['run-a-2'])
+    expect(
+      runtime.listRuns('generic:dm:graph-other', 'test.graph-a').map((run) => run.runId)
+    ).toEqual(['run-b-1'])
+    expect(runtime.listRuns('generic:dm:unknown', 'test.graph-a')).toEqual([])
+    expect(runtime.getRun('run-a-1', 'generic:dm:graph-test')?.runId).toBe('run-a-1')
+    expect(runtime.getRun('run-a-1', 'generic:dm:graph-other')).toBeUndefined()
+
+    const pendingRun = runtime.run({
+      graphId: 'test.graph-a',
+      input: 'Cancel only from the owning route.',
+      route: routeA,
+      runId: 'run-pending-route-a'
+    })
+    expect(runtime.cancel('run-pending-route-a', 'generic:dm:graph-other', 'Wrong route.')).toEqual(
+      {
+        runId: 'run-pending-route-a',
+        cancelled: false,
+        error: 'Run not found.'
+      }
+    )
+    expect(
+      runtime.cancel('run-pending-route-a', 'generic:dm:graph-test', 'Stop requested.')
+    ).toEqual({
+      runId: 'run-pending-route-a',
+      cancelled: true,
+      status: 'cancelled'
+    })
+    await expect(pendingRun).resolves.toMatchObject({
+      runId: 'run-pending-route-a',
+      status: 'cancelled',
+      error: 'Stop requested.'
+    })
+  })
+
   it('can run only requested outputs', async () => {
     const runtime = new MagicAgentGraphRuntime([])
     runtime.create({
