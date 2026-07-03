@@ -2,19 +2,59 @@ export const MAGIC_AGENT_PACKAGE_MANIFEST_FILE = 'magicpot-package.json'
 
 export const MAGIC_AGENT_PACKAGE_MANIFEST_VERSION = 1
 
+export const MAGIC_AGENT_PACKAGE_AGENT_SPEC_VERSION = 1
+
 export const MAGIC_AGENT_PACKAGE_ID_PATTERN = /^(?!.*\.\.)[a-z0-9][a-z0-9._-]{0,63}$/
 
 export const MAGIC_AGENT_PACKAGE_NAME_MAX_LENGTH = 120
 
 export const MAGIC_AGENT_PACKAGE_DESCRIPTION_MAX_LENGTH = 2000
 
+export const MAGIC_AGENT_PACKAGE_AGENT_SYSTEM_PROMPT_MAX_LENGTH = 12000
+
+export const MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS = [
+  'agent',
+  'tool',
+  'trigger',
+  'graph',
+  'plugin'
+] as const
+
+export type MagicAgentPackageContributionKind =
+  (typeof MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS)[number]
+
 export type MagicAgentPackageContribution = {
   id: string
-  kind: string
+  kind: MagicAgentPackageContributionKind
   title?: string
   description?: string
   entry?: string
   config?: Record<string, unknown>
+}
+
+export type MagicAgentPackageAgentSpec = {
+  schemaVersion: typeof MAGIC_AGENT_PACKAGE_AGENT_SPEC_VERSION
+  name: string
+  description?: string
+  systemPrompt?: string
+  toolNames?: string[] | null
+  maxToolIterations?: number
+  profileId?: string
+}
+
+export type MagicAgentPackageAgentDefinition = {
+  id: string
+  name: string
+  description?: string
+  systemPrompt?: string
+  toolNames?: string[] | null
+  maxToolIterations?: number
+  profileId?: string
+  sourcePackageId: string
+  sourcePackageName: string
+  sourcePackageVersion: string
+  contributionId: string
+  contributionTitle?: string
 }
 
 export type MagicAgentPackageManifest = {

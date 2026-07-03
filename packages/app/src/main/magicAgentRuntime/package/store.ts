@@ -4,12 +4,14 @@ import path from 'path'
 import {
   MAGIC_AGENT_PACKAGE_MANIFEST_FILE,
   type MagicAgentInstalledPackage,
+  type MagicAgentPackageAgentDefinition,
   type MagicAgentPackageInspection,
   type MagicAgentPackageInstallResult,
   type MagicAgentPackageListEntry,
   type MagicAgentPackageValidationResult
 } from '@shared/magicAgentRuntime/packageContracts'
 
+import { packageAgentSpecToDefinition, validateMagicAgentPackageAgentSpec } from './agentSpec'
 import { validateMagicAgentPackageManifest } from './manifest'
 
 const METADATA_FILE = 'magicpot-installed-package.json'
@@ -30,6 +32,8 @@ type CopyOptions = {
     bytes: number
   }
   depth?: number
+  sourceRoot?: string
+  sourceRootRealPath?: string
 }
 
 type PackageResourceUsage = {
@@ -123,6 +127,39 @@ async function validateContributionEntries(
           path: `contributions.${index}.entry`,
           message: `Contribution entry does not exist: ${contribution.entry}`
         })
+        continue
+      }
+
+      if (contribution.kind === 'agent') {
+        if (!contribution.entry.toLowerCase().endsWith('.json')) {
+          errors.push({
+            path: `contributions.${index}.entry`,
+            message: 'Agent contribution entry must be a JSON file.'
+          })
+          continue
+        }
+
+        let rawAgentSpec: unknown
+        try {
+          rawAgentSpec = await readJsonFile(entryPath)
+        } catch {
+          errors.push({
+            path: `contributions.${index}.entry`,
+            message: 'Unable to read or parse agent contribution spec.'
+          })
+          continue
+        }
+
+        const agentSpecValidation = validateMagicAgentPackageAgentSpec(rawAgentSpec)
+        if (!agentSpecValidation.ok) {
+          const messages = agentSpecValidation.errors.map(
+            (issue) => `${issue.path}: ${issue.message}`
+          )
+          errors.push({
+            path: `contributions.${index}.entry`,
+            message: `Invalid agent contribution spec. ${messages.join('; ')}`
+          })
+        }
       }
     } catch (error) {
       errors.push({
@@ -226,33 +263,51 @@ async function copyDirectoryContents(
     throw new Error(`Package exceeds maximum directory depth of ${limits.maxDepth}.`)
   }
 
+  const sourceRoot = path.resolve(options.sourceRoot ?? sourceDir)
+  const sourceRootRealPath = options.sourceRootRealPath ?? (await realpathOrResolved(sourceRoot))
+  const resolvedSourceDir = path.resolve(sourceDir)
+  assertWithinRoot(sourceRoot, resolvedSourceDir)
+
+  const sourceStats = await fs.lstat(resolvedSourceDir)
+  if (sourceStats.isSymbolicLink()) {
+    throw new Error('Package contains unsupported symbolic link.')
+  }
+  if (!sourceStats.isDirectory()) {
+    throw new Error('Package copy source must be a directory.')
+  }
+
+  const sourceRealPath = await fs.realpath(resolvedSourceDir)
+  assertWithinRoot(sourceRootRealPath, sourceRealPath)
+
   await fs.mkdir(targetDir, { recursive: true })
-  const entries = await fs.readdir(sourceDir, { withFileTypes: true })
+  const entries = await fs.readdir(resolvedSourceDir, { withFileTypes: true })
 
   for (const entry of entries) {
     if (options.ignoreFileNames?.has(entry.name)) {
       continue
     }
 
-    const sourcePath = path.join(sourceDir, entry.name)
+    const sourcePath = path.join(resolvedSourceDir, entry.name)
     const targetPath = path.join(targetDir, entry.name)
+    const stats = await fs.lstat(sourcePath)
 
-    if (entry.isDirectory()) {
+    if (stats.isSymbolicLink()) {
+      throw new Error('Package contains unsupported symbolic link.')
+    }
+
+    if (stats.isDirectory()) {
       await copyDirectoryContents(sourcePath, targetPath, {
         ...options,
         limits,
         state,
-        depth: depth + 1
+        depth: depth + 1,
+        sourceRoot,
+        sourceRootRealPath
       })
       continue
     }
 
-    if (entry.isSymbolicLink()) {
-      throw new Error('Package contains unsupported symbolic link.')
-    }
-
-    if (entry.isFile()) {
-      const stats = await fs.stat(sourcePath)
+    if (stats.isFile()) {
       state.files += 1
       state.bytes += stats.size
       if (state.files > limits.maxFiles) {
@@ -279,7 +334,55 @@ async function readInstalledMetadata(
     return undefined
   }
 
-  return parsed as MagicAgentInstalledPackage
+  return {
+    ...(parsed as MagicAgentInstalledPackage),
+    packagePath
+  }
+}
+
+async function readPackageAgentDefinitions(
+  installed: MagicAgentInstalledPackage
+): Promise<MagicAgentPackageAgentDefinition[]> {
+  const packageContentPath = path.join(installed.packagePath, PACKAGE_CONTENT_DIR)
+  const agents: MagicAgentPackageAgentDefinition[] = []
+
+  for (const contribution of installed.manifest.contributions || []) {
+    if (contribution.kind !== 'agent') {
+      continue
+    }
+    if (!contribution.entry) {
+      throw new Error(`Agent contribution "${contribution.id}" is missing an entry file.`)
+    }
+    if (!contribution.entry.toLowerCase().endsWith('.json')) {
+      throw new Error(`Agent contribution "${contribution.id}" must use a JSON entry file.`)
+    }
+
+    assertRelativeEntryPath(
+      contribution.entry,
+      path.join(packageContentPath, MAGIC_AGENT_PACKAGE_MANIFEST_FILE)
+    )
+    const entryPath = path.resolve(packageContentPath, contribution.entry)
+    assertWithinRoot(packageContentPath, entryPath)
+    const parsed = await readJsonFile(entryPath)
+    const validation = validateMagicAgentPackageAgentSpec(parsed)
+    if (!validation.ok) {
+      const messages = validation.errors.map((issue) => `${issue.path}: ${issue.message}`)
+      throw new Error(
+        `Invalid agent contribution "${contribution.id}" in package "${installed.id}". ${messages.join('; ')}`
+      )
+    }
+
+    agents.push(
+      packageAgentSpecToDefinition({
+        installedPackage: installed,
+        contributionId: contribution.id,
+        ...(contribution.title ? { contributionTitle: contribution.title } : {}),
+        spec: validation.spec
+      })
+    )
+  }
+
+  return agents
 }
 
 export class MagicAgentPackageStore {
@@ -432,6 +535,22 @@ export class MagicAgentPackageStore {
         warnings: []
       }
     }
+  }
+
+  async listAgents(): Promise<MagicAgentPackageAgentDefinition[]> {
+    const packages = await this.list()
+    const agentsById = new Map<string, MagicAgentPackageAgentDefinition>()
+
+    for (const installed of packages) {
+      for (const agent of await readPackageAgentDefinitions(installed)) {
+        if (agentsById.has(agent.id)) {
+          throw new Error(`Duplicate package agent id: ${agent.id}`)
+        }
+        agentsById.set(agent.id, agent)
+      }
+    }
+
+    return [...agentsById.values()].sort((left, right) => left.id.localeCompare(right.id))
   }
 
   async uninstall(packageId: string): Promise<boolean> {

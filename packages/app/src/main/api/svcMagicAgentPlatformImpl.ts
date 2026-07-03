@@ -3,6 +3,7 @@ import { app } from 'electron'
 import type { AssistantRoute } from '../assistantRuntime/types'
 import { getAgentKernel, type AgentKernel } from '../agentKernel'
 import type {
+  MagicAgentPlatformAgentDefinition,
   MagicAgentPlatformEmptyReq,
   MagicAgentPlatformGraphCancelReq,
   MagicAgentPlatformGraphInspectReq,
@@ -37,6 +38,7 @@ import type {
 } from '@shared/magicAgent'
 import type {
   MagicAgentInstalledPackage,
+  MagicAgentPackageAgentDefinition,
   MagicAgentPackageInspection
 } from '@shared/magicAgentRuntime'
 import {
@@ -114,6 +116,35 @@ const redactPackageInspection = (
   }
 }
 
+const packageAgentToPlatformAgent = (
+  agent: MagicAgentPackageAgentDefinition
+): MagicAgentPlatformAgentDefinition => ({
+  id: agent.id,
+  name: agent.name,
+  ...(agent.description ? { description: agent.description } : {}),
+  ...(agent.systemPrompt ? { systemPrompt: agent.systemPrompt } : {}),
+  ...(agent.toolNames !== undefined ? { toolNames: agent.toolNames } : {}),
+  ...(agent.maxToolIterations !== undefined ? { maxToolIterations: agent.maxToolIterations } : {}),
+  ...(agent.profileId ? { profileId: agent.profileId } : {})
+})
+
+const mergeAgentDefinitions = (
+  runtimeAgents: MagicAgentPlatformAgentDefinition[],
+  packageAgents: MagicAgentPlatformAgentDefinition[]
+): MagicAgentPlatformAgentDefinition[] => {
+  const agentsById = new Map<string, MagicAgentPlatformAgentDefinition>()
+  for (const agent of runtimeAgents) {
+    agentsById.set(agent.id, agent)
+  }
+  for (const agent of packageAgents) {
+    if (agentsById.has(agent.id)) {
+      throw new Error(`Duplicate MagicAgent id from installed package: ${agent.id}`)
+    }
+    agentsById.set(agent.id, agent)
+  }
+  return [...agentsById.values()].sort((left, right) => left.id.localeCompare(right.id))
+}
+
 const normalizePathSeparators = (input: string): string => input.replace(/\\/g, '/')
 
 const isPathLikePackageIdentifier = (value: string): boolean =>
@@ -184,6 +215,19 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     return this.agentKernelInstance
   }
 
+  private async listPackageAgents(): Promise<MagicAgentPlatformAgentDefinition[]> {
+    const packageStore = this.getPackageStore()
+    const listAgents = packageStore.listAgents?.bind(packageStore)
+    if (!listAgents) {
+      return []
+    }
+    return (await listAgents()).map(packageAgentToPlatformAgent)
+  }
+
+  private async listAllAgents(): Promise<MagicAgentPlatformAgentDefinition[]> {
+    return mergeAgentDefinitions(this.getAdapter().listAgents(), await this.listPackageAgents())
+  }
+
   getStatus = async (_req: MagicAgentPlatformEmptyReq): Promise<MagicAgentPlatformStatusResp> => {
     const enabled = isMagicAgentPlatformEnabled()
     if (!enabled) {
@@ -205,12 +249,13 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     const packageStore = this.getPackageStore()
     const tools = adapter.listTools()
     const packages = await packageStore.list().catch(() => undefined)
+    const agents = await this.listAllAgents()
     return {
       enabled,
       featureFlag: MAGIC_AGENT_PLATFORM_ENV,
       platformVersion: 1,
       assistantRuntimeCompatible: true,
-      agentCount: adapter.listAgents().length,
+      agentCount: agents.length,
       toolCount: tools.length,
       assistantToolCount: tools.filter((tool) => tool.source === 'assistantRuntime').length,
       creativeToolCount: tools.filter((tool) => tool.source === 'creative').length,
@@ -222,7 +267,7 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   listAgents = async (
     _req: MagicAgentPlatformEmptyReq
   ): Promise<MagicAgentPlatformListAgentsResp> => {
-    return { agents: this.getAdapter().listAgents() }
+    return { agents: await this.listAllAgents() }
   }
 
   registerAgent = async (
@@ -232,6 +277,20 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   }
 
   runAgent = async (req: MagicAgentPlatformRunReq): Promise<MagicAgentPlatformRunResp> => {
+    const agentId = req.agentId?.trim()
+    if (agentId) {
+      const packageAgent = (await this.listPackageAgents()).find((agent) => agent.id === agentId)
+      if (packageAgent) {
+        return this.getAdapter().runAgent({
+          ...req,
+          systemPrompt: req.systemPrompt ?? packageAgent.systemPrompt,
+          profileId: req.profileId ?? packageAgent.profileId,
+          maxToolIterations: req.maxToolIterations ?? packageAgent.maxToolIterations,
+          allowedToolNames:
+            req.allowedToolNames !== undefined ? req.allowedToolNames : packageAgent.toolNames
+        })
+      }
+    }
     return this.getAdapter().runAgent(req)
   }
 

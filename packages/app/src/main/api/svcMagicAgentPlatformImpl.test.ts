@@ -103,6 +103,72 @@ describe('MagicAgentPlatformSvcImpl', () => {
     await expect(service.listAgents({})).rejects.toThrow(/MAGICPOT_MAGICAGENT_PLATFORM=1/)
   })
 
+  it('exposes installed package agents and applies package agent defaults when running them', async () => {
+    const runAgent = vi.fn(async (req) => ({
+      runId: 'run-package-agent',
+      agentId: req.agentId,
+      status: 'completed' as const,
+      content: 'ok',
+      messages: [],
+      toolCalls: [],
+      events: [],
+      startedAt: 1,
+      finishedAt: 2
+    }))
+    const service = new MagicAgentPlatformSvcImpl({
+      adapter: {
+        listTools: () => [],
+        listAgents: () => [{ id: 'magicpot.default.chat', name: 'Default Agent' }],
+        runAgent
+      } as never,
+      graphRuntime: {
+        list: () => []
+      } as never,
+      packageStore: {
+        list: vi.fn(async () => []),
+        listAgents: vi.fn(async () => [
+          {
+            id: 'package.demo.package.assistant',
+            name: 'Package Assistant',
+            description: 'Installed package agent.',
+            systemPrompt: 'Package prompt.',
+            toolNames: ['session.status'],
+            maxToolIterations: 1,
+            profileId: 'package-profile',
+            sourcePackageId: 'demo.package',
+            sourcePackageName: 'Demo Package',
+            sourcePackageVersion: '1.0.0',
+            contributionId: 'assistant'
+          }
+        ]),
+        getPackageRoot: () => '/packages',
+        getStoreDir: () => '/packages/installed'
+      } as never
+    })
+
+    await expect(service.listAgents({})).resolves.toMatchObject({
+      agents: [
+        { id: 'magicpot.default.chat', name: 'Default Agent' },
+        { id: 'package.demo.package.assistant', name: 'Package Assistant' }
+      ]
+    })
+
+    await service.runAgent({
+      agentId: 'package.demo.package.assistant',
+      text: 'hello',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'agent-test' }
+    })
+    expect(runAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: 'package.demo.package.assistant',
+        systemPrompt: 'Package prompt.',
+        profileId: 'package-profile',
+        maxToolIterations: 1,
+        allowedToolNames: ['session.status']
+      })
+    )
+  })
+
   it('validates package manifests through the v1 service', async () => {
     const service = new MagicAgentPlatformSvcImpl({
       adapter: {

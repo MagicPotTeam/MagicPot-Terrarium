@@ -6,7 +6,11 @@ import path from 'path'
 
 import { MagicAgentPackageStore } from './store'
 import { validateMagicAgentPackageManifest } from './manifest'
-import { MAGIC_AGENT_PACKAGE_MANIFEST_FILE } from '@shared/magicAgentRuntime/packageContracts'
+import {
+  MAGIC_AGENT_PACKAGE_AGENT_SPEC_VERSION,
+  MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS,
+  MAGIC_AGENT_PACKAGE_MANIFEST_FILE
+} from '@shared/magicAgentRuntime/packageContracts'
 
 const ROOT = '/magic-agent-packages'
 const STORE = '/magic-agent-store'
@@ -108,6 +112,59 @@ describe('MagicAgentPackageStore', () => {
           'contributions.0.entry',
           'contributions.0.extra'
         ])
+      )
+    }
+  })
+
+  it('accepts only known contribution kinds and requires agent JSON entries', () => {
+    const accepted = validateMagicAgentPackageManifest({
+      ...manifest({ contributions: undefined }),
+      contributions: MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS.map((kind) => ({
+        id: `demo-${kind}`,
+        kind,
+        ...(kind === 'agent' ? { entry: 'agent.json' } : {})
+      }))
+    })
+    expect(accepted.ok).toBe(true)
+
+    const unknownKind = validateMagicAgentPackageManifest(
+      manifest({ contributions: [{ id: 'demo-workflow', kind: 'workflow' }] })
+    )
+    expect(unknownKind.ok).toBe(false)
+    if (!unknownKind.ok) {
+      expect(unknownKind.errors.map((issue) => issue.path)).toContain('contributions.0.kind')
+    }
+
+    const agentWithoutEntry = validateMagicAgentPackageManifest(
+      manifest({ contributions: [{ id: 'demo-agent', kind: 'agent' }] })
+    )
+    expect(agentWithoutEntry.ok).toBe(false)
+    if (!agentWithoutEntry.ok) {
+      expect(agentWithoutEntry.errors.map((issue) => issue.path)).toContain('contributions.0.entry')
+    }
+
+    const agentWithExecutableEntry = validateMagicAgentPackageManifest(
+      manifest({ contributions: [{ id: 'demo-agent', kind: 'agent', entry: 'agent.js' }] })
+    )
+    expect(agentWithExecutableEntry.ok).toBe(false)
+    if (!agentWithExecutableEntry.ok) {
+      expect(agentWithExecutableEntry.errors.map((issue) => issue.path)).toContain(
+        'contributions.0.entry'
+      )
+    }
+
+    const duplicateContributionId = validateMagicAgentPackageManifest(
+      manifest({
+        contributions: [
+          { id: 'duplicate-agent', kind: 'agent', entry: 'agents/one.json' },
+          { id: 'duplicate-agent', kind: 'agent', entry: 'agents/two.json' }
+        ]
+      })
+    )
+    expect(duplicateContributionId.ok).toBe(false)
+    if (!duplicateContributionId.ok) {
+      expect(duplicateContributionId.errors.map((issue) => issue.path)).toContain(
+        'contributions.1.id'
       )
     }
   })
@@ -300,5 +357,76 @@ describe('MagicAgentPackageStore', () => {
     await expect(store.uninstall('demo.package')).resolves.toBe(true)
     await expect(store.uninstall('demo.package')).resolves.toBe(false)
     expect(await store.list()).toEqual([])
+  })
+
+  it('loads installed package agents from data-only JSON specs without executing package code', async () => {
+    const packageDir = path.join(ROOT, 'agent-package')
+    await writePackage(packageDir, {
+      contributions: [
+        {
+          id: 'assistant',
+          kind: 'agent',
+          title: 'Package Assistant',
+          entry: 'agents/assistant.json'
+        }
+      ]
+    })
+    await fsp.mkdir(path.join(packageDir, 'agents'), { recursive: true })
+    await fsp.writeFile(
+      path.join(packageDir, 'agents', 'assistant.json'),
+      JSON.stringify(
+        {
+          schemaVersion: MAGIC_AGENT_PACKAGE_AGENT_SPEC_VERSION,
+          name: 'Installed Assistant',
+          description: 'Loaded from a package JSON file.',
+          systemPrompt: 'Use only package metadata.',
+          toolNames: ['session.status', 'artifact.create'],
+          maxToolIterations: 2,
+          profileId: 'package-profile'
+        },
+        null,
+        2
+      )
+    )
+
+    const store = new MagicAgentPackageStore(ROOT, STORE)
+    await store.install(packageDir)
+
+    const agents = await store.listAgents()
+    expect(agents).toHaveLength(1)
+    expect(agents[0]).toMatchObject({
+      id: 'package.demo.package.assistant',
+      name: 'Installed Assistant',
+      sourcePackageId: 'demo.package',
+      contributionId: 'assistant',
+      toolNames: ['session.status', 'artifact.create'],
+      maxToolIterations: 2,
+      profileId: 'package-profile'
+    })
+    expect((globalThis as Record<string, unknown>).__magicPackageExecuted).toBeUndefined()
+  })
+
+  it('fails closed when a package agent spec is invalid', async () => {
+    const packageDir = path.join(ROOT, 'bad-agent-package')
+    await writePackage(packageDir, {
+      contributions: [{ id: 'bad-agent', kind: 'agent', entry: 'agents/bad.json' }]
+    })
+    await fsp.mkdir(path.join(packageDir, 'agents'), { recursive: true })
+    await fsp.writeFile(path.join(packageDir, 'agents', 'bad.json'), JSON.stringify({ name: '' }))
+
+    const store = new MagicAgentPackageStore(ROOT, STORE)
+    const inspection = await store.scanLocalDirectory(packageDir)
+    expect(inspection.validation.ok).toBe(false)
+    if (!inspection.validation.ok) {
+      expect(inspection.validation.errors).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: 'contributions.0.entry',
+            message: expect.stringMatching(/Invalid agent contribution spec/)
+          })
+        ])
+      )
+    }
+    await expect(store.install(packageDir)).rejects.toThrow(/Invalid agent contribution spec/)
   })
 })
