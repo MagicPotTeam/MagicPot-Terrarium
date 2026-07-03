@@ -279,6 +279,338 @@ describe('MagicAgentGraphRuntime', () => {
     expect(result.outputs.map((output) => output.outputId)).toEqual(['brief'])
   })
 
+  it('executes agent and tool nodes with fail-closed graph tool allowlists', async () => {
+    const runAgent = vi.fn(async (req) => ({
+      runId: `agent-run-${req.agentId}`,
+      agentId: req.agentId || 'unknown',
+      status: 'completed' as const,
+      content: `agent:${req.agentId}:${req.text}`,
+      messages: [{ role: 'assistant' as const, content: `agent:${req.agentId}:${req.text}` }],
+      toolCalls: [],
+      events: [],
+      startedAt: 1,
+      finishedAt: 2
+    }))
+    const callTool = vi.fn(async (req) => ({
+      ok: true,
+      toolName: req.name,
+      source: 'magicAgentRuntime' as const,
+      status: 'ok' as const,
+      content: `tool:${req.name}:${String(req.args?.input || '')}`
+    }))
+    const runtime = new MagicAgentGraphRuntime([], { runAgent, callTool })
+    runtime.create({
+      route: testRoute,
+      graph: {
+        graphId: 'test.executable-tool',
+        name: 'Executable Tool Graph',
+        description: 'Runs an agent and a graph-scoped tool.',
+        version: '1.0.0',
+        tags: ['test'],
+        entryNodeIds: ['planner'],
+        nodes: [
+          {
+            nodeId: 'planner',
+            kind: 'agent',
+            name: 'Planner',
+            description: 'Planner.',
+            agentId: 'planner-agent',
+            instruction: 'Plan with tools.'
+          },
+          {
+            nodeId: 'formatter',
+            kind: 'tool',
+            name: 'Formatter',
+            description: 'Formats planner output.',
+            toolName: 'graph.format'
+          },
+          {
+            nodeId: 'final',
+            kind: 'output',
+            name: 'Final',
+            description: 'Final output.'
+          }
+        ],
+        channels: [
+          {
+            channelId: 'planner-to-formatter',
+            from: 'planner',
+            to: 'formatter',
+            kind: 'handoff',
+            required: true
+          },
+          {
+            channelId: 'formatter-to-final',
+            from: 'formatter',
+            to: 'final',
+            kind: 'artifact',
+            required: true
+          }
+        ],
+        outputs: [
+          {
+            outputId: 'final-output',
+            name: 'Final Output',
+            description: 'Final output.',
+            sourceNodeId: 'final',
+            channelId: 'formatter-to-final',
+            mimeType: 'text/plain'
+          }
+        ]
+      }
+    })
+
+    await expect(
+      runtime.run({
+        graphId: 'test.executable-tool',
+        input: 'format this',
+        route: testRoute,
+        runId: 'run-tool-denied'
+      })
+    ).resolves.toMatchObject({
+      status: 'failed',
+      error: expect.stringContaining('not allowed')
+    })
+    expect(callTool).not.toHaveBeenCalled()
+
+    const result = await runtime.run({
+      graphId: 'test.executable-tool',
+      input: 'format this',
+      route: testRoute,
+      runId: 'run-tool-allowed',
+      allowedToolNames: ['graph.format']
+    })
+
+    expect(result.status).toBe('completed')
+    expect(runAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: 'planner-agent',
+        text: 'format this',
+        route: testRoute,
+        allowedToolNames: ['graph.format'],
+        metadata: expect.objectContaining({
+          graphId: 'test.executable-tool',
+          graphRunId: 'run-tool-allowed',
+          nodeId: 'planner',
+          sessionKey: 'generic:dm:graph-test'
+        })
+      })
+    )
+    expect(callTool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'graph.format',
+        route: testRoute,
+        args: expect.objectContaining({ input: expect.stringContaining('agent:planner-agent') }),
+        metadata: expect.objectContaining({
+          graphId: 'test.executable-tool',
+          graphRunId: 'run-tool-allowed',
+          nodeId: 'formatter',
+          allowedToolNames: ['graph.format']
+        })
+      })
+    )
+    expect(result.nodes?.map((node) => [node.nodeId, node.status])).toEqual([
+      ['planner', 'completed'],
+      ['formatter', 'completed'],
+      ['final', 'completed']
+    ])
+    expect(result.channels.map((channel) => channel.channelId)).toEqual([
+      'planner-to-formatter',
+      'formatter-to-final'
+    ])
+    expect(result.outputs[0]?.content).toContain('tool:graph.format')
+    expect(result.events?.map((event) => event.type)).toEqual(
+      expect.arrayContaining(['tool.invoked', 'channel.message', 'output.created'])
+    )
+  })
+
+  it('skips inactive conditional branches and uses real source node output', async () => {
+    const runAgent = vi.fn(async (req) => ({
+      runId: `agent-run-${req.agentId}`,
+      agentId: req.agentId || 'unknown',
+      status: 'completed' as const,
+      content: req.agentId === 'planner-agent' ? 'NO_GO' : `unexpected:${req.agentId}`,
+      messages: [{ role: 'assistant' as const, content: 'NO_GO' }],
+      toolCalls: [],
+      events: [],
+      startedAt: 1,
+      finishedAt: 2
+    }))
+    const runtime = new MagicAgentGraphRuntime([], { runAgent })
+    runtime.create({
+      route: testRoute,
+      graph: {
+        graphId: 'test.conditional-skip',
+        name: 'Conditional Skip Graph',
+        description: 'Skips optional inactive branches.',
+        version: '1.0.0',
+        tags: ['test'],
+        entryNodeIds: ['planner'],
+        nodes: [
+          {
+            nodeId: 'planner',
+            kind: 'agent',
+            name: 'Planner',
+            description: 'Planner.',
+            agentId: 'planner-agent'
+          },
+          {
+            nodeId: 'reviewer',
+            kind: 'agent',
+            name: 'Reviewer',
+            description: 'Should be skipped.',
+            agentId: 'reviewer-agent'
+          },
+          {
+            nodeId: 'final',
+            kind: 'output',
+            name: 'Final',
+            description: 'Final output.'
+          }
+        ],
+        channels: [
+          {
+            channelId: 'planner-to-reviewer',
+            from: 'planner',
+            to: 'reviewer',
+            kind: 'handoff',
+            required: false,
+            condition: { operator: 'contains', value: 'APPROVE' }
+          },
+          {
+            channelId: 'planner-to-final',
+            from: 'planner',
+            to: 'final',
+            kind: 'artifact',
+            required: true
+          }
+        ],
+        outputs: [
+          {
+            outputId: 'final-output',
+            name: 'Final Output',
+            description: 'Final output.',
+            sourceNodeId: 'final',
+            channelId: 'planner-to-final',
+            mimeType: 'text/plain'
+          }
+        ]
+      }
+    })
+
+    const result = await runtime.run({
+      graphId: 'test.conditional-skip',
+      input: 'conditional input',
+      route: testRoute,
+      runId: 'run-conditional-skip'
+    })
+
+    expect(result.status).toBe('completed')
+    expect(runAgent).toHaveBeenCalledTimes(1)
+    expect(result.channels.map((channel) => channel.channelId)).toEqual(['planner-to-final'])
+    expect(result.nodes?.find((node) => node.nodeId === 'reviewer')).toMatchObject({
+      status: 'skipped',
+      metadata: expect.objectContaining({ reason: expect.stringContaining('No active inbound') })
+    })
+    expect(result.outputs[0]?.content).toContain('## Source Output\nNO_GO')
+    expect(result.outputs[0]?.content).not.toContain('unexpected:reviewer-agent')
+    expect(result.events?.map((event) => event.type)).toEqual(
+      expect.arrayContaining(['node.skipped'])
+    )
+  })
+
+  it('fails when a required channel is not delivered', async () => {
+    const runAgent = vi.fn(async (req) => ({
+      runId: `agent-run-${req.agentId}`,
+      agentId: req.agentId || 'unknown',
+      status: 'completed' as const,
+      content: 'NO_GO',
+      messages: [{ role: 'assistant' as const, content: 'NO_GO' }],
+      toolCalls: [],
+      events: [],
+      startedAt: 1,
+      finishedAt: 2
+    }))
+    const runtime = new MagicAgentGraphRuntime([], { runAgent })
+    runtime.create({
+      route: testRoute,
+      graph: {
+        graphId: 'test.required-channel',
+        name: 'Required Channel Graph',
+        description: 'Required conditional channel must be delivered.',
+        version: '1.0.0',
+        tags: ['test'],
+        entryNodeIds: ['planner'],
+        nodes: [
+          {
+            nodeId: 'planner',
+            kind: 'agent',
+            name: 'Planner',
+            description: 'Planner.',
+            agentId: 'planner-agent'
+          },
+          {
+            nodeId: 'reviewer',
+            kind: 'agent',
+            name: 'Reviewer',
+            description: 'Requires planner channel.',
+            agentId: 'reviewer-agent'
+          },
+          {
+            nodeId: 'final',
+            kind: 'output',
+            name: 'Final',
+            description: 'Final output.'
+          }
+        ],
+        channels: [
+          {
+            channelId: 'planner-to-reviewer',
+            from: 'planner',
+            to: 'reviewer',
+            kind: 'handoff',
+            required: true,
+            condition: { operator: 'contains', value: 'APPROVE' }
+          },
+          {
+            channelId: 'reviewer-to-final',
+            from: 'reviewer',
+            to: 'final',
+            kind: 'artifact',
+            required: true
+          }
+        ],
+        outputs: [
+          {
+            outputId: 'final-output',
+            name: 'Final Output',
+            description: 'Final output.',
+            sourceNodeId: 'final',
+            channelId: 'reviewer-to-final',
+            mimeType: 'text/plain'
+          }
+        ]
+      }
+    })
+
+    const result = await runtime.run({
+      graphId: 'test.required-channel',
+      input: 'conditional input',
+      route: testRoute,
+      runId: 'run-required-missing'
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain('Required MagicAgentGraph channel')
+    expect(result.nodes?.find((node) => node.nodeId === 'reviewer')).toMatchObject({
+      status: 'failed',
+      error: expect.stringContaining('planner-to-reviewer')
+    })
+    expect(result.events?.map((event) => event.type)).toEqual(
+      expect.arrayContaining(['node.failed', 'graph.failed'])
+    )
+  })
+
   it('cancels a pending run', () => {
     const runtime = new MagicAgentGraphRuntime([])
     runtime.create({ graph: createTestGraph(), route: testRoute })
