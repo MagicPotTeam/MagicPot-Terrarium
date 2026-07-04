@@ -796,8 +796,9 @@ export class MagicAgentGraphRuntime {
       .filter((node) => node.kind === 'agent')
       .map((node) => {
         const nodeOutput = nodeOutputs.get(node.nodeId)
-        return nodeOutput ? `### ${node.name}\n${nodeOutput}` : formatAgentSection(node, input)
+        return nodeOutput ? `### ${node.name}\n${nodeOutput}` : undefined
       })
+      .filter(Boolean)
       .join('\n\n')
     const content = [
       `# ${output.name}`,
