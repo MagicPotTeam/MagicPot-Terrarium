@@ -1,9 +1,13 @@
 import type { AgentRouteLike } from '@shared/agent'
 import type {
   MagicAgentGraphCancelResult,
+  MagicAgentGraphChannelDefinition,
+  MagicAgentGraphConditionDefinition,
   MagicAgentGraphCreateRequest,
   MagicAgentGraphDefinition,
   MagicAgentGraphListItem,
+  MagicAgentGraphNodeDefinition,
+  MagicAgentGraphOutputDefinition,
   MagicAgentGraphRunRecord,
   MagicAgentGraphRunRequest,
   MagicAgentGraphRunResult
@@ -260,6 +264,23 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const MAGIC_AGENT_ROUTE_SCOPE_TYPES = new Set(['dm', 'group', 'channel', 'thread', 'topic'])
+const MAGIC_AGENT_GRAPH_NODE_KINDS = new Set([
+  'agent',
+  'tool',
+  'input',
+  'condition',
+  'merge',
+  'output'
+])
+const MAGIC_AGENT_GRAPH_CHANNEL_KINDS = new Set(['handoff', 'artifact', 'message', 'control'])
+const MAGIC_AGENT_GRAPH_CONDITION_OPERATORS = new Set([
+  'always',
+  'truthy',
+  'falsy',
+  'equals',
+  'contains',
+  'matches'
+])
 
 const issue = (field: string, message: string) =>
   new ServiceValidationError(`svcMagicAgentPlatform ${field}`, [
@@ -383,6 +404,201 @@ const validateAgentDefinition = (value: unknown): MagicAgentPlatformAgentDefinit
   }
 }
 
+const requireArray = (value: unknown, field: string): unknown[] => {
+  if (Array.isArray(value)) return value
+  throw issue(field, 'Expected an array')
+}
+
+const validateGraphCondition = (
+  value: unknown,
+  field: string
+): MagicAgentGraphConditionDefinition | undefined => {
+  if (value === undefined) return undefined
+  const condition = requireRecord(value, field)
+  const sourceNodeId = optionalCleanString(condition.sourceNodeId, `${field}.sourceNodeId`)
+  const operator = optionalCleanString(condition.operator, `${field}.operator`)
+  if (operator && !MAGIC_AGENT_GRAPH_CONDITION_OPERATORS.has(operator)) {
+    throw issue(`${field}.operator`, 'Expected a valid MagicAgentGraph condition operator')
+  }
+  return {
+    ...(sourceNodeId !== undefined ? { sourceNodeId } : {}),
+    ...(operator !== undefined
+      ? { operator: operator as MagicAgentGraphConditionDefinition['operator'] }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(condition, 'value') ? { value: condition.value } : {})
+  }
+}
+
+const validateGraphNodeDefinition = (
+  value: unknown,
+  index: number
+): MagicAgentGraphNodeDefinition => {
+  const field = `graph.nodes.${index}`
+  const node = requireRecord(value, field)
+  const kind = requireString(node.kind, `${field}.kind`)
+  if (!MAGIC_AGENT_GRAPH_NODE_KINDS.has(kind)) {
+    throw issue(`${field}.kind`, 'Expected a valid MagicAgentGraph node kind')
+  }
+  const capabilities = optionalStringArray(node.capabilities, `${field}.capabilities`)
+  const config = optionalRecord(node.config, `${field}.config`)
+  const condition = validateGraphCondition(node.condition, `${field}.condition`)
+  const metadata = optionalRecord(node.metadata, `${field}.metadata`)
+  return {
+    ...(node as MagicAgentGraphNodeDefinition),
+    nodeId: requireString(node.nodeId, `${field}.nodeId`),
+    kind: kind as MagicAgentGraphNodeDefinition['kind'],
+    name: requireString(node.name, `${field}.name`),
+    description: requireString(node.description, `${field}.description`),
+    ...(optionalCleanString(node.instruction, `${field}.instruction`) !== undefined
+      ? { instruction: optionalCleanString(node.instruction, `${field}.instruction`) }
+      : {}),
+    ...(optionalCleanString(node.modelName, `${field}.modelName`) !== undefined
+      ? { modelName: optionalCleanString(node.modelName, `${field}.modelName`) }
+      : {}),
+    ...(optionalCleanString(node.agentId, `${field}.agentId`) !== undefined
+      ? { agentId: optionalCleanString(node.agentId, `${field}.agentId`) }
+      : {}),
+    ...(optionalCleanString(node.toolName, `${field}.toolName`) !== undefined
+      ? { toolName: optionalCleanString(node.toolName, `${field}.toolName`) }
+      : {}),
+    ...(capabilities !== undefined ? { capabilities } : {}),
+    ...(config !== undefined ? { config } : {}),
+    ...(condition !== undefined ? { condition } : {}),
+    ...(metadata !== undefined ? { metadata } : {})
+  }
+}
+
+const validateGraphChannelDefinition = (
+  value: unknown,
+  index: number
+): MagicAgentGraphChannelDefinition => {
+  const field = `graph.channels.${index}`
+  const channel = requireRecord(value, field)
+  const kind = requireString(channel.kind, `${field}.kind`)
+  if (!MAGIC_AGENT_GRAPH_CHANNEL_KINDS.has(kind)) {
+    throw issue(`${field}.kind`, 'Expected a valid MagicAgentGraph channel kind')
+  }
+  if (channel.required !== undefined && typeof channel.required !== 'boolean') {
+    throw issue(`${field}.required`, 'Expected a boolean')
+  }
+  const condition = validateGraphCondition(channel.condition, `${field}.condition`)
+  const metadata = optionalRecord(channel.metadata, `${field}.metadata`)
+  return {
+    ...(channel as MagicAgentGraphChannelDefinition),
+    channelId: requireString(channel.channelId, `${field}.channelId`),
+    from: requireString(channel.from, `${field}.from`),
+    to: requireString(channel.to, `${field}.to`),
+    kind: kind as MagicAgentGraphChannelDefinition['kind'],
+    ...(optionalCleanString(channel.label, `${field}.label`) !== undefined
+      ? { label: optionalCleanString(channel.label, `${field}.label`) }
+      : {}),
+    ...(channel.required !== undefined ? { required: channel.required } : {}),
+    ...(condition !== undefined ? { condition } : {}),
+    ...(metadata !== undefined ? { metadata } : {})
+  }
+}
+
+const validateGraphOutputDefinition = (
+  value: unknown,
+  index: number
+): MagicAgentGraphOutputDefinition => {
+  const field = `graph.outputs.${index}`
+  const output = requireRecord(value, field)
+  const metadata = optionalRecord(output.metadata, `${field}.metadata`)
+  return {
+    ...(output as MagicAgentGraphOutputDefinition),
+    outputId: requireString(output.outputId, `${field}.outputId`),
+    name: requireString(output.name, `${field}.name`),
+    description: requireString(output.description, `${field}.description`),
+    sourceNodeId: requireString(output.sourceNodeId, `${field}.sourceNodeId`),
+    ...(optionalCleanString(output.channelId, `${field}.channelId`) !== undefined
+      ? { channelId: optionalCleanString(output.channelId, `${field}.channelId`) }
+      : {}),
+    ...(optionalCleanString(output.mimeType, `${field}.mimeType`) !== undefined
+      ? { mimeType: optionalCleanString(output.mimeType, `${field}.mimeType`) }
+      : {}),
+    ...(metadata !== undefined ? { metadata } : {})
+  }
+}
+
+const assertUnique = (values: string[], field: string): void => {
+  const seen = new Set<string>()
+  for (const value of values) {
+    if (seen.has(value)) {
+      throw issue(field, 'Expected unique MagicAgentGraph identifiers')
+    }
+    seen.add(value)
+  }
+}
+
+const validateGraphDefinition = (value: unknown): MagicAgentGraphDefinition => {
+  const graph = requireRecord(value, 'graph')
+  const nodes = requireArray(graph.nodes, 'graph.nodes').map(validateGraphNodeDefinition)
+  const channels = requireArray(graph.channels, 'graph.channels').map(
+    validateGraphChannelDefinition
+  )
+  const outputs = requireArray(graph.outputs, 'graph.outputs').map(validateGraphOutputDefinition)
+  const entryNodeIds = optionalStringArray(graph.entryNodeIds, 'graph.entryNodeIds') || []
+  const tags = optionalStringArray(graph.tags, 'graph.tags') || []
+  const metadata = optionalRecord(graph.metadata, 'graph.metadata')
+
+  if (nodes.length === 0) throw issue('graph.nodes', 'Expected at least one graph node')
+  if (outputs.length === 0) throw issue('graph.outputs', 'Expected at least one graph output')
+  assertUnique(
+    nodes.map((node) => node.nodeId),
+    'graph.nodes'
+  )
+  assertUnique(
+    channels.map((channel) => channel.channelId),
+    'graph.channels'
+  )
+  assertUnique(
+    outputs.map((output) => output.outputId),
+    'graph.outputs'
+  )
+
+  const nodeIds = new Set(nodes.map((node) => node.nodeId))
+  const channelIds = new Set(channels.map((channel) => channel.channelId))
+  for (const channel of channels) {
+    if (!nodeIds.has(channel.from))
+      throw issue('graph.channels.from', 'Expected existing from node')
+    if (!nodeIds.has(channel.to)) throw issue('graph.channels.to', 'Expected existing to node')
+    if (channel.condition?.sourceNodeId && !nodeIds.has(channel.condition.sourceNodeId)) {
+      throw issue('graph.channels.condition.sourceNodeId', 'Expected existing source node')
+    }
+  }
+  for (const node of nodes) {
+    if (node.condition?.sourceNodeId && !nodeIds.has(node.condition.sourceNodeId)) {
+      throw issue('graph.nodes.condition.sourceNodeId', 'Expected existing source node')
+    }
+  }
+  for (const output of outputs) {
+    if (!nodeIds.has(output.sourceNodeId)) {
+      throw issue('graph.outputs.sourceNodeId', 'Expected existing source node')
+    }
+    if (output.channelId && !channelIds.has(output.channelId)) {
+      throw issue('graph.outputs.channelId', 'Expected existing channel')
+    }
+  }
+  for (const entryNodeId of entryNodeIds) {
+    if (!nodeIds.has(entryNodeId)) throw issue('graph.entryNodeIds', 'Expected existing entry node')
+  }
+
+  return {
+    ...(graph as MagicAgentGraphDefinition),
+    graphId: requireString(graph.graphId, 'graph.graphId'),
+    name: requireString(graph.name, 'graph.name'),
+    description: requireString(graph.description, 'graph.description'),
+    version: optionalCleanString(graph.version, 'graph.version') || '0.0.0',
+    tags,
+    nodes,
+    channels,
+    outputs,
+    entryNodeIds,
+    ...(metadata !== undefined ? { metadata } : {})
+  }
+}
+
 const validateRegisterAgentReq = (value: unknown): MagicAgentPlatformRegisterAgentReq => {
   const req = requireRecord(value, 'registerAgent')
   return { agent: validateAgentDefinition(req.agent) }
@@ -454,9 +670,8 @@ const validateRunAgentReq = (value: unknown): MagicAgentPlatformRunReq => {
 
 const validateGraphCreateReq = (value: unknown): MagicAgentGraphCreateRequest => {
   const req = requireRecord(value, 'createGraph')
-  const graph = requireRecord(req.graph, 'graph')
   return {
-    graph: graph as unknown as MagicAgentGraphDefinition,
+    graph: validateGraphDefinition(req.graph),
     route: validateRoute(req.route),
     ...(req.replace === true ? { replace: true } : {})
   }

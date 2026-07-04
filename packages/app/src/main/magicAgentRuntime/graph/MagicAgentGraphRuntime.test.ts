@@ -894,49 +894,198 @@ describe('MagicAgentGraphRuntime', () => {
     ).toThrow(/missing channel/i)
   })
 
-  it('fails cyclic graph runs before executing nodes', async () => {
-    const runtime = new MagicAgentGraphRuntime([])
-    runtime.create({
-      route: testRoute,
-      graph: {
-        ...createTestGraph('test.cyclic'),
-        entryNodeIds: ['planner'],
-        channels: [
-          {
-            channelId: 'planner-to-writer',
-            from: 'planner',
-            to: 'writer',
-            kind: 'handoff',
-            required: true
-          },
-          {
-            channelId: 'writer-to-planner',
-            from: 'writer',
-            to: 'planner',
-            kind: 'handoff',
-            required: true
-          },
-          {
-            channelId: 'writer-to-final',
-            from: 'writer',
-            to: 'final',
-            kind: 'artifact',
-            required: false
-          }
-        ]
+  it('rejects graph definitions that exceed runtime policy limits', () => {
+    expect(
+      () =>
+        new MagicAgentGraphRuntime([createTestGraph('test.policy-max-nodes')], {
+          policy: { maxNodes: 2 }
+        })
+    ).toThrow(/maximum node count/i)
+
+    expect(
+      () =>
+        new MagicAgentGraphRuntime([createTestGraph('test.policy-max-channels')], {
+          policy: { maxChannels: 1 }
+        })
+    ).toThrow(/maximum channel count/i)
+
+    const outputLimitGraph = createTestGraph('test.policy-max-outputs')
+    outputLimitGraph.outputs = [
+      ...outputLimitGraph.outputs,
+      {
+        ...outputLimitGraph.outputs[0],
+        outputId: 'alternate-final-doc'
       }
+    ]
+    expect(
+      () => new MagicAgentGraphRuntime([outputLimitGraph], { policy: { maxOutputs: 1 } })
+    ).toThrow(/maximum output count/i)
+
+    const duplicateOutputGraph = createTestGraph('test.duplicate-output')
+    duplicateOutputGraph.outputs = [
+      ...duplicateOutputGraph.outputs,
+      {
+        ...duplicateOutputGraph.outputs[0],
+        name: 'Duplicate Final Document'
+      }
+    ]
+    expect(() => new MagicAgentGraphRuntime([duplicateOutputGraph])).toThrow(/duplicate output/i)
+
+    const longPatternGraph = createTestGraph('test.condition-pattern-limit')
+    longPatternGraph.channels = [
+      {
+        ...longPatternGraph.channels[0],
+        condition: { operator: 'matches', value: 'abcdef' }
+      },
+      longPatternGraph.channels[1]
+    ]
+    expect(
+      () =>
+        new MagicAgentGraphRuntime([longPatternGraph], { policy: { maxConditionPatternChars: 3 } })
+    ).toThrow(/condition pattern exceeds maximum length/i)
+
+    const invalidPatternGraph = createTestGraph('test.condition-pattern-invalid')
+    invalidPatternGraph.channels = [
+      {
+        ...invalidPatternGraph.channels[0],
+        condition: { operator: 'matches', value: '(' }
+      },
+      invalidPatternGraph.channels[1]
+    ]
+    expect(() => new MagicAgentGraphRuntime([invalidPatternGraph])).toThrow(/invalid pattern/i)
+  })
+
+  it('fails oversized graph input before executing graph nodes', async () => {
+    const runAgent = vi.fn(async (req) => ({
+      runId: `agent-run-${req.agentId}`,
+      agentId: req.agentId || 'unknown',
+      status: 'completed' as const,
+      content: 'should not run',
+      messages: [{ role: 'assistant' as const, content: 'should not run' }],
+      toolCalls: [],
+      events: [],
+      startedAt: 1,
+      finishedAt: 2
+    }))
+    const runtime = new MagicAgentGraphRuntime([], { runAgent, policy: { maxInputChars: 5 } })
+    runtime.create({ graph: createTestGraph('test.input-limit'), route: testRoute })
+
+    const result = await runtime.run({
+      graphId: 'test.input-limit',
+      input: '123456',
+      route: testRoute,
+      runId: 'run-input-limit'
     })
 
-    await expect(
-      runtime.run({
-        graphId: 'test.cyclic',
-        input: 'cycle check',
-        route: testRoute,
-        runId: 'run-cyclic'
-      })
-    ).resolves.toMatchObject({
-      status: 'failed',
-      error: expect.stringContaining('contains a cycle')
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain('input exceeds maximum length')
+    expect(result.input).toHaveLength(5)
+    expect(runAgent).not.toHaveBeenCalled()
+    expect(result.events?.map((event) => event.type)).toEqual(
+      expect.arrayContaining(['graph.started', 'graph.failed'])
+    )
+  })
+
+  it('bounds events, node output, final output, and retained runs per session', async () => {
+    let timestamp = 1_700_000_100_000
+    vi.spyOn(Date, 'now').mockImplementation(() => timestamp++)
+    const runAgent = vi.fn(async (req) => ({
+      runId: `agent-run-${req.agentId}`,
+      agentId: req.agentId || 'unknown',
+      status: 'completed' as const,
+      content: 'x'.repeat(100),
+      messages: [{ role: 'assistant' as const, content: 'x'.repeat(100) }],
+      toolCalls: [],
+      events: [],
+      startedAt: 1,
+      finishedAt: 2
+    }))
+    const runtime = new MagicAgentGraphRuntime([], {
+      runAgent,
+      policy: {
+        maxEvents: 3,
+        maxNodeOutputChars: 20,
+        maxOutputContentChars: 60,
+        maxRunRecordsPerSession: 2
+      }
     })
+    runtime.create({ graph: createTestGraph('test.budgeted-run'), route: testRoute })
+
+    const first = await runtime.run({
+      graphId: 'test.budgeted-run',
+      input: 'Budget this run.',
+      route: testRoute,
+      runId: 'run-budget-1'
+    })
+
+    expect(first.status).toBe('completed')
+    expect(first.events).toHaveLength(3)
+    expect(first.nodes?.find((node) => node.nodeId === 'planner')).toMatchObject({
+      status: 'completed',
+      output: expect.stringContaining('[truncated]'),
+      metadata: expect.objectContaining({ outputTruncated: true, maxOutputChars: 20 })
+    })
+    expect(first.nodes?.find((node) => node.nodeId === 'planner')?.output).toHaveLength(20)
+    expect(first.outputs[0]?.content).toHaveLength(60)
+    expect(first.outputs[0]?.metadata).toMatchObject({
+      contentTruncated: true,
+      maxContentChars: 60
+    })
+
+    await runtime.run({
+      graphId: 'test.budgeted-run',
+      input: 'Second run.',
+      route: testRoute,
+      runId: 'run-budget-2'
+    })
+    await runtime.run({
+      graphId: 'test.budgeted-run',
+      input: 'Third run.',
+      route: testRoute,
+      runId: 'run-budget-3'
+    })
+
+    expect(runtime.listRuns('generic:dm:graph-test').map((run) => run.runId)).toEqual([
+      'run-budget-3',
+      'run-budget-2'
+    ])
+    expect(runtime.getRun('run-budget-1', 'generic:dm:graph-test')).toBeUndefined()
+  })
+
+  it('rejects cyclic graphs before they can execute nodes', () => {
+    const runtime = new MagicAgentGraphRuntime([])
+
+    expect(() =>
+      runtime.create({
+        route: testRoute,
+        graph: {
+          ...createTestGraph('test.cyclic'),
+          entryNodeIds: ['planner'],
+          channels: [
+            {
+              channelId: 'planner-to-writer',
+              from: 'planner',
+              to: 'writer',
+              kind: 'handoff',
+              required: true
+            },
+            {
+              channelId: 'writer-to-planner',
+              from: 'writer',
+              to: 'planner',
+              kind: 'handoff',
+              required: true
+            },
+            {
+              channelId: 'writer-to-final',
+              from: 'writer',
+              to: 'final',
+              kind: 'artifact',
+              required: false
+            }
+          ]
+        }
+      })
+    ).toThrow(/contains a cycle/i)
   })
 })

@@ -24,9 +24,77 @@ import type {
   MagicAgentPlatformToolCallResp
 } from '@shared/api/svcMagicAgentPlatform'
 
+export type MagicAgentGraphRuntimePolicy = {
+  maxNodes: number
+  maxChannels: number
+  maxOutputs: number
+  maxInputChars: number
+  maxNodeOutputChars: number
+  maxOutputContentChars: number
+  maxEvents: number
+  maxRunRecordsPerSession: number
+  maxConditionPatternChars: number
+}
+
 export type MagicAgentGraphRuntimeDeps = {
   runAgent?: (request: MagicAgentPlatformRunReq) => Promise<MagicAgentPlatformRunResp>
   callTool?: (request: MagicAgentPlatformToolCallReq) => Promise<MagicAgentPlatformToolCallResp>
+  policy?: Partial<MagicAgentGraphRuntimePolicy>
+}
+
+const DEFAULT_GRAPH_RUNTIME_POLICY: MagicAgentGraphRuntimePolicy = {
+  maxNodes: 100,
+  maxChannels: 200,
+  maxOutputs: 50,
+  maxInputChars: 120_000,
+  maxNodeOutputChars: 80_000,
+  maxOutputContentChars: 120_000,
+  maxEvents: 2_000,
+  maxRunRecordsPerSession: 200,
+  maxConditionPatternChars: 500
+}
+
+const normalizePositiveInteger = (value: unknown, fallback: number): number => {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) && numeric >= 1 ? Math.floor(numeric) : fallback
+}
+
+const normalizePolicy = (
+  overrides?: Partial<MagicAgentGraphRuntimePolicy>
+): MagicAgentGraphRuntimePolicy => {
+  const merged = { ...DEFAULT_GRAPH_RUNTIME_POLICY, ...(overrides || {}) }
+  return {
+    maxNodes: normalizePositiveInteger(merged.maxNodes, DEFAULT_GRAPH_RUNTIME_POLICY.maxNodes),
+    maxChannels: normalizePositiveInteger(
+      merged.maxChannels,
+      DEFAULT_GRAPH_RUNTIME_POLICY.maxChannels
+    ),
+    maxOutputs: normalizePositiveInteger(
+      merged.maxOutputs,
+      DEFAULT_GRAPH_RUNTIME_POLICY.maxOutputs
+    ),
+    maxInputChars: normalizePositiveInteger(
+      merged.maxInputChars,
+      DEFAULT_GRAPH_RUNTIME_POLICY.maxInputChars
+    ),
+    maxNodeOutputChars: normalizePositiveInteger(
+      merged.maxNodeOutputChars,
+      DEFAULT_GRAPH_RUNTIME_POLICY.maxNodeOutputChars
+    ),
+    maxOutputContentChars: normalizePositiveInteger(
+      merged.maxOutputContentChars,
+      DEFAULT_GRAPH_RUNTIME_POLICY.maxOutputContentChars
+    ),
+    maxEvents: normalizePositiveInteger(merged.maxEvents, DEFAULT_GRAPH_RUNTIME_POLICY.maxEvents),
+    maxRunRecordsPerSession: normalizePositiveInteger(
+      merged.maxRunRecordsPerSession,
+      DEFAULT_GRAPH_RUNTIME_POLICY.maxRunRecordsPerSession
+    ),
+    maxConditionPatternChars: normalizePositiveInteger(
+      merged.maxConditionPatternChars,
+      DEFAULT_GRAPH_RUNTIME_POLICY.maxConditionPatternChars
+    )
+  }
 }
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -47,6 +115,20 @@ const stringifyValue = (value: unknown): string => {
   }
 }
 
+const truncateText = (value: string, maxChars: number): string => {
+  if (!Number.isFinite(maxChars) || maxChars < 0 || value.length <= maxChars) {
+    return value
+  }
+  if (maxChars <= 0) {
+    return ''
+  }
+  const marker = '...[truncated]'
+  if (maxChars <= marker.length) {
+    return marker.slice(0, maxChars)
+  }
+  return `${value.slice(0, maxChars - marker.length)}${marker}`
+}
+
 const GRAPH_ROUTE_SCOPE_TYPES = new Set(['dm', 'group', 'channel', 'thread', 'topic'])
 const SUPPORTED_GRAPH_NODE_KINDS = new Set([
   'agent',
@@ -56,9 +138,31 @@ const SUPPORTED_GRAPH_NODE_KINDS = new Set([
   'merge',
   'output'
 ])
+const SUPPORTED_GRAPH_CONDITION_OPERATORS = new Set([
+  'always',
+  'truthy',
+  'falsy',
+  'equals',
+  'contains',
+  'matches'
+])
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const normalizeCondition = (condition: unknown): MagicAgentGraphConditionDefinition | undefined => {
+  if (condition === undefined || condition === null) return undefined
+  if (!isRecord(condition)) {
+    throw new Error('MagicAgentGraph condition must be an object.')
+  }
+  const sourceNodeId = cleanString(condition.sourceNodeId)
+  const operator = cleanString(condition.operator)
+  return {
+    ...(sourceNodeId ? { sourceNodeId } : {}),
+    ...(operator ? { operator: operator as MagicAgentGraphConditionDefinition['operator'] } : {}),
+    ...(Object.prototype.hasOwnProperty.call(condition, 'value') ? { value: condition.value } : {})
+  }
+}
 
 type GraphExecutionContext = {
   graph: MagicAgentGraphDefinition
@@ -147,12 +251,14 @@ export class MagicAgentGraphRuntime {
   private readonly runs = new Map<string, MagicAgentGraphRunRecord>()
   private readonly controllers = new Map<string, AbortController>()
   private deps: MagicAgentGraphRuntimeDeps
+  private policy: MagicAgentGraphRuntimePolicy
 
   constructor(
     graphs: MagicAgentGraphDefinition[] = builtInMagicAgentGraphs,
     deps: MagicAgentGraphRuntimeDeps = {}
   ) {
     this.deps = deps
+    this.policy = normalizePolicy(deps.policy)
     for (const graph of graphs) {
       const normalized = this.normalizeGraph(graph)
       this.graphs.set(normalized.graphId, normalized)
@@ -162,6 +268,9 @@ export class MagicAgentGraphRuntime {
 
   setDeps(deps: MagicAgentGraphRuntimeDeps): void {
     this.deps = { ...this.deps, ...deps }
+    if (deps.policy) {
+      this.policy = normalizePolicy({ ...this.policy, ...deps.policy })
+    }
   }
 
   create(request: MagicAgentGraphCreateRequest): MagicAgentGraphDefinition {
@@ -222,6 +331,12 @@ export class MagicAgentGraphRuntime {
       throw new Error(`MagicAgentGraph "${request.graphId}" does not exist.`)
     }
 
+    const inputLimit = this.limitText(stringifyValue(request.input), this.policy.maxInputChars)
+    const effectiveRequest: MagicAgentGraphRunRequest = { ...request, input: inputLimit.text }
+    const inputLimitError = inputLimit.truncated
+      ? `MagicAgentGraph run input exceeds maximum length of ${this.policy.maxInputChars} characters.`
+      : undefined
+
     const runId = cleanString(request.runId) || createId('magic-agent-graph-run')
     if (this.runs.has(runId)) {
       throw new Error(`MagicAgentGraph run "${runId}" already exists.`)
@@ -233,7 +348,7 @@ export class MagicAgentGraphRuntime {
       runId,
       graphId: graph.graphId,
       status: 'pending',
-      input: request.input,
+      input: effectiveRequest.input,
       route,
       sessionKey,
       createdAt,
@@ -266,7 +381,10 @@ export class MagicAgentGraphRuntime {
         'graph.started',
         `MagicAgentGraph run started: ${graph.graphId}`
       )
-      await this.executeGraph(graph, request, route, runRecord, controller.signal)
+      if (inputLimitError) {
+        throw new Error(inputLimitError)
+      }
+      await this.executeGraph(graph, effectiveRequest, route, runRecord, controller.signal)
       this.throwIfCancelled(controller.signal)
       this.markRun(runRecord, 'completed', { endedAt: now() })
       this.recordRunEvent(
@@ -289,6 +407,7 @@ export class MagicAgentGraphRuntime {
     } finally {
       this.controllers.delete(runId)
       this.runs.set(runId, runRecord)
+      this.pruneRunsForSession(sessionKey)
     }
 
     return clone(runRecord)
@@ -333,6 +452,7 @@ export class MagicAgentGraphRuntime {
         name: cleanString(node.name),
         description: cleanString(node.description),
         capabilities: node.capabilities ? [...node.capabilities] : undefined,
+        condition: normalizeCondition(node.condition),
         metadata: node.metadata ? { ...node.metadata } : undefined
       })),
       channels: (graph.channels || []).map((channel) => ({
@@ -341,6 +461,7 @@ export class MagicAgentGraphRuntime {
         from: cleanString(channel.from),
         to: cleanString(channel.to),
         required: channel.required !== false,
+        condition: normalizeCondition(channel.condition),
         metadata: channel.metadata ? { ...channel.metadata } : undefined
       })),
       outputs: (graph.outputs || []).map((output) => ({
@@ -366,6 +487,17 @@ export class MagicAgentGraphRuntime {
     if (graph.nodes.length === 0) throw new Error('MagicAgentGraph must contain at least one node.')
     if (graph.outputs.length === 0)
       throw new Error('MagicAgentGraph must contain at least one output.')
+    if (graph.nodes.length > this.policy.maxNodes) {
+      throw new Error(`MagicAgentGraph exceeds maximum node count of ${this.policy.maxNodes}.`)
+    }
+    if (graph.channels.length > this.policy.maxChannels) {
+      throw new Error(
+        `MagicAgentGraph exceeds maximum channel count of ${this.policy.maxChannels}.`
+      )
+    }
+    if (graph.outputs.length > this.policy.maxOutputs) {
+      throw new Error(`MagicAgentGraph exceeds maximum output count of ${this.policy.maxOutputs}.`)
+    }
 
     const nodeIds = new Set<string>()
     for (const node of graph.nodes) {
@@ -380,6 +512,10 @@ export class MagicAgentGraphRuntime {
         )
       }
       nodeIds.add(node.nodeId)
+    }
+
+    for (const node of graph.nodes) {
+      this.validateCondition(node.condition, nodeIds, `node "${node.nodeId}"`)
     }
 
     const channelIds = new Set<string>()
@@ -402,12 +538,19 @@ export class MagicAgentGraphRuntime {
           `MagicAgentGraph channel "${channel.channelId}" references missing to node.`
         )
       }
+      this.validateCondition(channel.condition, nodeIds, `channel "${channel.channelId}"`)
       channelIds.add(channel.channelId)
     }
 
+    const outputIds = new Set<string>()
     for (const output of graph.outputs) {
       if (!output.outputId) {
         throw new Error(`MagicAgentGraph "${graph.graphId}" contains an output without outputId.`)
+      }
+      if (outputIds.has(output.outputId)) {
+        throw new Error(
+          `MagicAgentGraph "${graph.graphId}" contains duplicate output "${output.outputId}".`
+        )
       }
       if (!nodeIds.has(output.sourceNodeId)) {
         throw new Error(
@@ -417,12 +560,44 @@ export class MagicAgentGraphRuntime {
       if (output.channelId && !channelIds.has(output.channelId)) {
         throw new Error(`MagicAgentGraph output "${output.outputId}" references missing channel.`)
       }
+      outputIds.add(output.outputId)
     }
 
     for (const entryNodeId of graph.entryNodeIds) {
       if (!nodeIds.has(entryNodeId)) {
         throw new Error(`MagicAgentGraph entry node "${entryNodeId}" does not exist.`)
       }
+    }
+
+    this.sortGraphNodes(graph)
+  }
+
+  private validateCondition(
+    condition: MagicAgentGraphConditionDefinition | undefined,
+    nodeIds: Set<string>,
+    owner: string
+  ): void {
+    if (!condition) return
+    const operator = condition.operator || 'truthy'
+    if (!SUPPORTED_GRAPH_CONDITION_OPERATORS.has(operator)) {
+      throw new Error(`MagicAgentGraph ${owner} contains unsupported condition operator.`)
+    }
+    if (condition.sourceNodeId && !nodeIds.has(condition.sourceNodeId)) {
+      throw new Error(`MagicAgentGraph ${owner} condition references missing source node.`)
+    }
+    if (operator !== 'matches') {
+      return
+    }
+    const pattern = stringifyValue(condition.value)
+    if (pattern.length > this.policy.maxConditionPatternChars) {
+      throw new Error(
+        `MagicAgentGraph ${owner} condition pattern exceeds maximum length of ${this.policy.maxConditionPatternChars}.`
+      )
+    }
+    try {
+      new RegExp(pattern)
+    } catch {
+      throw new Error(`MagicAgentGraph ${owner} condition contains an invalid pattern.`)
     }
   }
 
@@ -513,17 +688,28 @@ export class MagicAgentGraphRuntime {
           `MagicAgentGraph node started: ${node.nodeId}`,
           { nodeId: node.nodeId, kind: node.kind }
         )
-        const output = await this.executeNode(node, input, context)
+        const rawOutput = await this.executeNode(node, input, context)
         this.throwIfCancelled(signal)
-        context.nodeOutputs.set(node.nodeId, output)
-        this.updateNodeRun(runRecord, node, 'completed', { endedAt: now(), output })
+        const outputLimit = this.limitText(
+          stringifyValue(rawOutput),
+          this.policy.maxNodeOutputChars
+        )
+        const outputMetadata = outputLimit.truncated
+          ? { outputTruncated: true, maxOutputChars: this.policy.maxNodeOutputChars }
+          : undefined
+        context.nodeOutputs.set(node.nodeId, outputLimit.text)
+        this.updateNodeRun(runRecord, node, 'completed', {
+          endedAt: now(),
+          output: outputLimit.text,
+          ...(outputMetadata ? { metadata: outputMetadata } : {})
+        })
         this.recordRunEvent(
           runRecord,
           'node.completed',
           `MagicAgentGraph node completed: ${node.nodeId}`,
-          { nodeId: node.nodeId, kind: node.kind }
+          { nodeId: node.nodeId, kind: node.kind, ...(outputMetadata || {}) }
         )
-        this.emitOutgoingChannels(node, output, context)
+        this.emitOutgoingChannels(node, outputLimit.text, context)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         this.updateNodeRun(runRecord, node, 'failed', { endedAt: now(), error: message })
@@ -753,19 +939,24 @@ export class MagicAgentGraphRuntime {
         candidate.from === node.nodeId && context.plannedChannelIds.has(candidate.channelId)
     )) {
       if (!this.evaluateCondition(channel.condition, nodeOutput, context)) continue
+      const contentLimit = this.limitText(
+        formatChannelContent(channel, nodes.get(channel.from), nodes.get(channel.to), nodeOutput),
+        this.policy.maxOutputContentChars
+      )
+      const metadata = {
+        ...(channel.metadata || {}),
+        ...(contentLimit.truncated
+          ? { contentTruncated: true, maxContentChars: this.policy.maxOutputContentChars }
+          : {})
+      }
       const record: MagicAgentGraphRunChannelRecord = {
         channelId: channel.channelId,
         from: channel.from,
         to: channel.to,
         kind: channel.kind,
-        content: formatChannelContent(
-          channel,
-          nodes.get(channel.from),
-          nodes.get(channel.to),
-          nodeOutput
-        ),
+        content: contentLimit.text,
         createdAt: now(),
-        ...(channel.metadata ? { metadata: channel.metadata } : {})
+        ...(Object.keys(metadata).length ? { metadata } : {})
       }
       context.run.channels.push(record)
       context.deliveredChannelIds.add(channel.channelId)
@@ -807,6 +998,9 @@ export class MagicAgentGraphRuntime {
       case 'contains':
         return sourceText.includes(compareText)
       case 'matches':
+        if (compareText.length > this.policy.maxConditionPatternChars) {
+          return false
+        }
         try {
           return new RegExp(compareText).test(sourceText)
         } catch {
@@ -815,22 +1009,6 @@ export class MagicAgentGraphRuntime {
       default:
         return false
     }
-  }
-
-  private buildChannelRecords(
-    graph: MagicAgentGraphDefinition,
-    input: string
-  ): MagicAgentGraphRunChannelRecord[] {
-    const nodes = new Map(graph.nodes.map((node) => [node.nodeId, node]))
-    return graph.channels.map((channel) => ({
-      channelId: channel.channelId,
-      from: channel.from,
-      to: channel.to,
-      kind: channel.kind,
-      content: formatChannelContent(channel, nodes.get(channel.from), nodes.get(channel.to), input),
-      createdAt: now(),
-      ...(channel.metadata ? { metadata: channel.metadata } : {})
-    }))
   }
 
   private buildOutput(
@@ -864,15 +1042,22 @@ export class MagicAgentGraphRuntime {
     ]
       .filter(Boolean)
       .join('\n\n')
+    const contentLimit = this.limitText(content, this.policy.maxOutputContentChars)
+    const metadata = {
+      ...(output.metadata || {}),
+      ...(contentLimit.truncated
+        ? { contentTruncated: true, maxContentChars: this.policy.maxOutputContentChars }
+        : {})
+    }
 
     return {
       outputId: output.outputId,
       name: output.name,
-      content,
+      content: contentLimit.text,
       sourceNodeId: output.sourceNodeId,
       ...(output.channelId ? { channelId: output.channelId } : {}),
       ...(output.mimeType ? { mimeType: output.mimeType } : {}),
-      ...(output.metadata ? { metadata: output.metadata } : {})
+      ...(Object.keys(metadata).length ? { metadata } : {})
     }
   }
 
@@ -928,7 +1113,7 @@ export class MagicAgentGraphRuntime {
       ...(cleanString(metadata?.outputId) ? { outputId: cleanString(metadata?.outputId) } : {}),
       ...(metadata ? { metadata } : {})
     }
-    run.events = [...(run.events || []), event]
+    run.events = [...(run.events || []), event].slice(-this.policy.maxEvents)
     run.updatedAt = createdAt
     this.runs.set(run.runId, run)
   }
@@ -942,6 +1127,25 @@ export class MagicAgentGraphRuntime {
     run.status = status
     run.updatedAt = now()
     this.runs.set(run.runId, run)
+  }
+
+  private limitText(value: string, maxChars: number): { text: string; truncated: boolean } {
+    const text = stringifyValue(value)
+    const limited = truncateText(text, maxChars)
+    return { text: limited, truncated: limited.length !== text.length }
+  }
+
+  private pruneRunsForSession(sessionKey: string): void {
+    const maxRunRecords = this.policy.maxRunRecordsPerSession
+    const sessionRuns = [...this.runs.values()]
+      .filter((run) => run.sessionKey === sessionKey)
+      .sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt)
+    const runsToRemove = sessionRuns.slice(maxRunRecords)
+    for (const run of runsToRemove) {
+      if (!this.controllers.has(run.runId)) {
+        this.runs.delete(run.runId)
+      }
+    }
   }
 
   private throwIfCancelled(signal: AbortSignal): void {
