@@ -403,8 +403,29 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
         }
       })
       for (const graphEvent of result.events || []) {
-        const graphRuntimeEventType = graphEvent.type === 'node.started' ? 'step.started' : graphEvent.type === 'node.completed' ? 'step.completed' : graphEvent.type === 'node.failed' ? 'step.failed' : 'run.updated'
-        kernel.recordEvent({ runId: kernelRun.runId, sessionKey: session.sessionKey, type: graphRuntimeEventType, message: graphEvent.message, metadata: { ...(graphEvent.metadata || {}), graphEventType: graphEvent.type, graphId: graphEvent.graphId, graphRunId: graphEvent.runId, graphNodeId: graphEvent.nodeId, graphChannelId: graphEvent.channelId, graphOutputId: graphEvent.outputId } })
+        const graphRuntimeEventType =
+          graphEvent.type === 'node.started'
+            ? 'step.started'
+            : graphEvent.type === 'node.completed'
+              ? 'step.completed'
+              : graphEvent.type === 'node.failed'
+                ? 'step.failed'
+                : 'run.updated'
+        kernel.recordEvent({
+          runId: kernelRun.runId,
+          sessionKey: session.sessionKey,
+          type: graphRuntimeEventType,
+          message: graphEvent.message,
+          metadata: {
+            ...(graphEvent.metadata || {}),
+            graphEventType: graphEvent.type,
+            graphId: graphEvent.graphId,
+            graphRunId: graphEvent.runId,
+            graphNodeId: graphEvent.nodeId,
+            graphChannelId: graphEvent.channelId,
+            graphOutputId: graphEvent.outputId
+          }
+        })
       }
       const kernelStatus =
         result.status === 'completed'
@@ -423,13 +444,25 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
           sessionKey: session.sessionKey
         }
       })
+      const kernelEventType =
+        kernelStatus === 'completed'
+          ? 'run.completed'
+          : kernelStatus === 'cancelled'
+            ? 'run.updated'
+            : 'run.failed'
+      const graphEventType =
+        kernelStatus === 'completed'
+          ? 'graph.completed'
+          : kernelStatus === 'cancelled'
+            ? 'graph.cancelled'
+            : 'graph.failed'
       kernel.recordEvent({
         runId: kernelRun.runId,
         sessionKey: session.sessionKey,
-        type: kernelStatus === 'completed' ? 'run.completed' : 'run.failed',
+        type: kernelEventType,
         message: `MagicAgentGraph run ${result.status}: ${req.graphId}`,
         metadata: {
-          graphEventType: kernelStatus === 'completed' ? 'graph.completed' : 'graph.failed',
+          graphEventType,
           graphId: req.graphId,
           graphRunId: result.runId,
           graphStatus: result.status

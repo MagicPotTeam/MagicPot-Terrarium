@@ -422,6 +422,62 @@ describe('MagicAgentPlatformSvcImpl', () => {
     })
   })
 
+  it('records cancelled graph run outcomes without collapsing them into graph.failed events', async () => {
+    const graphRunRecord = {
+      runId: 'run-cancelled',
+      graphId: 'graph.cancelled',
+      status: 'cancelled' as const,
+      input: 'hello',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'graph-test' },
+      sessionKey: 'generic:dm:graph-test',
+      createdAt: 1,
+      updatedAt: 2,
+      channels: [],
+      outputs: [],
+      events: [
+        {
+          eventId: 'event-cancelled',
+          runId: 'run-cancelled',
+          graphId: 'graph.cancelled',
+          type: 'graph.cancelled' as const,
+          message: 'cancelled',
+          createdAt: 2
+        }
+      ]
+    }
+    const agentKernel = new AgentKernel()
+    const service = new MagicAgentPlatformSvcImpl({
+      agentKernel,
+      adapter: {
+        listTools: () => [],
+        listAgents: () => []
+      } as never,
+      graphRuntime: {
+        run: vi.fn(async () => graphRunRecord)
+      } as never
+    })
+    const graphRoute = { channel: 'generic', scopeType: 'dm', scopeId: 'graph-test' } as const
+
+    await expect(
+      service.runGraph({ graphId: 'graph.cancelled', input: 'hello', route: graphRoute })
+    ).resolves.toMatchObject({ status: 'cancelled' })
+
+    const events = agentKernel.listEvents('generic:dm:graph-test')
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'run.updated',
+          metadata: expect.objectContaining({ graphEventType: 'graph.cancelled' })
+        })
+      ])
+    )
+    expect(
+      events.some(
+        (event) => event.type === 'run.failed' && event.metadata?.graphEventType === 'graph.failed'
+      )
+    ).toBe(false)
+  })
+
   it('delegates graph and package operations through the v1 service', async () => {
     const graphRunRecord = {
       runId: 'run-1',
