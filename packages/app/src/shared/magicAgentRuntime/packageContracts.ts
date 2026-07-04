@@ -1,3 +1,5 @@
+import type { MagicAgentGraphDefinition } from '../magicAgent/graphTypes'
+
 export const MAGIC_AGENT_PACKAGE_MANIFEST_FILE = 'magicpot-package.json'
 
 export const MAGIC_AGENT_PACKAGE_MANIFEST_VERSION = 1
@@ -65,6 +67,16 @@ export type MagicAgentPackageAgentDefinition = {
   sourcePackageVersion: string
   contributionId: string
   contributionTitle?: string
+}
+
+export type MagicAgentPackageGraphDefinition = MagicAgentGraphDefinition & {
+  sourcePackageId: string
+  sourcePackageName: string
+  sourcePackageVersion: string
+  contributionId: string
+  contributionTitle?: string
+  runnable: false
+  unavailableReason: string
 }
 
 export type MagicAgentPackageManifest = {

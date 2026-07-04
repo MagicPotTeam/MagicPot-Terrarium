@@ -5,12 +5,14 @@ import {
   MAGIC_AGENT_PACKAGE_MANIFEST_FILE,
   type MagicAgentInstalledPackage,
   type MagicAgentPackageAgentDefinition,
+  type MagicAgentPackageGraphDefinition,
   type MagicAgentPackageInspection,
   type MagicAgentPackageInstallResult,
   type MagicAgentPackageListEntry,
   type MagicAgentPackageValidationResult
 } from '@shared/magicAgentRuntime/packageContracts'
 
+import { validateMagicAgentGraphDefinition } from '../graph/graphDefinition'
 import { packageAgentSpecToDefinition, validateMagicAgentPackageAgentSpec } from './agentSpec'
 import { validateMagicAgentPackageManifest } from './manifest'
 
@@ -160,6 +162,36 @@ async function validateContributionEntries(
           errors.push({
             path: `contributions.${index}.entry`,
             message: `Invalid agent contribution spec. ${messages.join('; ')}`
+          })
+        }
+      }
+
+      if (contribution.kind === 'graph') {
+        if (!contribution.entry.toLowerCase().endsWith('.json')) {
+          errors.push({
+            path: `contributions.${index}.entry`,
+            message: 'Graph contribution entry must be a JSON file.'
+          })
+          continue
+        }
+
+        let rawGraphSpec: unknown
+        try {
+          rawGraphSpec = await readJsonFile(entryPath)
+        } catch {
+          errors.push({
+            path: `contributions.${index}.entry`,
+            message: 'Unable to read or parse graph contribution definition.'
+          })
+          continue
+        }
+
+        const graphValidation = validateMagicAgentGraphDefinition(rawGraphSpec)
+        if (!graphValidation.ok) {
+          const messages = graphValidation.errors.map((issue) => `${issue.path}: ${issue.message}`)
+          errors.push({
+            path: `contributions.${index}.entry`,
+            message: `Invalid graph contribution definition. ${messages.join('; ')}`
           })
         }
       }
@@ -387,6 +419,54 @@ async function readPackageAgentDefinitions(
   return agents
 }
 
+async function readPackageGraphDefinitions(
+  installed: MagicAgentInstalledPackage
+): Promise<MagicAgentPackageGraphDefinition[]> {
+  const packageContentPath = path.join(installed.packagePath, PACKAGE_CONTENT_DIR)
+  const graphs: MagicAgentPackageGraphDefinition[] = []
+
+  for (const contribution of installed.manifest.contributions || []) {
+    if (contribution.kind !== 'graph') {
+      continue
+    }
+    if (!contribution.entry) {
+      throw new Error(`Graph contribution "${contribution.id}" is missing an entry file.`)
+    }
+    if (!contribution.entry.toLowerCase().endsWith('.json')) {
+      throw new Error(`Graph contribution "${contribution.id}" must use a JSON entry file.`)
+    }
+
+    assertRelativeEntryPath(
+      contribution.entry,
+      path.join(packageContentPath, MAGIC_AGENT_PACKAGE_MANIFEST_FILE)
+    )
+    const entryPath = path.resolve(packageContentPath, contribution.entry)
+    assertWithinRoot(packageContentPath, entryPath)
+    const parsed = await readJsonFile(entryPath)
+    const validation = validateMagicAgentGraphDefinition(parsed)
+    if (!validation.ok) {
+      const messages = validation.errors.map((issue) => `${issue.path}: ${issue.message}`)
+      throw new Error(
+        `Invalid graph contribution "${contribution.id}" in package "${installed.id}". ${messages.join('; ')}`
+      )
+    }
+
+    graphs.push({
+      ...validation.graph,
+      sourcePackageId: installed.id,
+      sourcePackageName: installed.name,
+      sourcePackageVersion: installed.version,
+      contributionId: contribution.id,
+      ...(contribution.title ? { contributionTitle: contribution.title } : {}),
+      runnable: false,
+      unavailableReason:
+        'Package graph contributions are currently read-only and cannot be executed by MagicAgent GraphRuntime.'
+    })
+  }
+
+  return graphs
+}
+
 export class MagicAgentPackageStore {
   private readonly packageRoot: string
   private readonly storeDir: string
@@ -553,6 +633,22 @@ export class MagicAgentPackageStore {
     }
 
     return [...agentsById.values()].sort((left, right) => left.id.localeCompare(right.id))
+  }
+
+  async listGraphs(): Promise<MagicAgentPackageGraphDefinition[]> {
+    const packages = await this.list()
+    const graphsById = new Map<string, MagicAgentPackageGraphDefinition>()
+
+    for (const installed of packages) {
+      for (const graph of await readPackageGraphDefinitions(installed)) {
+        if (graphsById.has(graph.graphId)) {
+          throw new Error(`Duplicate package graph id: ${graph.graphId}`)
+        }
+        graphsById.set(graph.graphId, graph)
+      }
+    }
+
+    return [...graphsById.values()].sort((left, right) => left.graphId.localeCompare(right.graphId))
   }
 
   async uninstall(packageId: string): Promise<boolean> {

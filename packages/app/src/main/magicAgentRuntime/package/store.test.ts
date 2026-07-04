@@ -124,7 +124,7 @@ describe('MagicAgentPackageStore', () => {
       contributions: MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS.map((kind) => ({
         id: `demo-${kind}`,
         kind,
-        ...(kind === 'agent' ? { entry: 'agent.json' } : {})
+        ...(kind === 'agent' || kind === 'graph' ? { entry: `${kind}.json` } : {})
       }))
     })
     expect(accepted.ok).toBe(true)
@@ -137,22 +137,26 @@ describe('MagicAgentPackageStore', () => {
       expect(unknownKind.errors.map((issue) => issue.path)).toContain('contributions.0.kind')
     }
 
-    const agentWithoutEntry = validateMagicAgentPackageManifest(
-      manifest({ contributions: [{ id: 'demo-agent', kind: 'agent' }] })
-    )
-    expect(agentWithoutEntry.ok).toBe(false)
-    if (!agentWithoutEntry.ok) {
-      expect(agentWithoutEntry.errors.map((issue) => issue.path)).toContain('contributions.0.entry')
-    }
-
-    const agentWithExecutableEntry = validateMagicAgentPackageManifest(
-      manifest({ contributions: [{ id: 'demo-agent', kind: 'agent', entry: 'agent.js' }] })
-    )
-    expect(agentWithExecutableEntry.ok).toBe(false)
-    if (!agentWithExecutableEntry.ok) {
-      expect(agentWithExecutableEntry.errors.map((issue) => issue.path)).toContain(
-        'contributions.0.entry'
+    for (const kind of ['agent', 'graph'] as const) {
+      const contributionWithoutEntry = validateMagicAgentPackageManifest(
+        manifest({ contributions: [{ id: `demo-${kind}`, kind }] })
       )
+      expect(contributionWithoutEntry.ok).toBe(false)
+      if (!contributionWithoutEntry.ok) {
+        expect(contributionWithoutEntry.errors.map((issue) => issue.path)).toContain(
+          'contributions.0.entry'
+        )
+      }
+
+      const contributionWithExecutableEntry = validateMagicAgentPackageManifest(
+        manifest({ contributions: [{ id: `demo-${kind}`, kind, entry: `${kind}.js` }] })
+      )
+      expect(contributionWithExecutableEntry.ok).toBe(false)
+      if (!contributionWithExecutableEntry.ok) {
+        expect(contributionWithExecutableEntry.errors.map((issue) => issue.path)).toContain(
+          'contributions.0.entry'
+        )
+      }
     }
 
     const duplicateContributionId = validateMagicAgentPackageManifest(
@@ -502,5 +506,199 @@ describe('MagicAgentPackageStore', () => {
       )
     }
     await expect(store.install(packageDir)).rejects.toThrow(/Invalid agent contribution spec/)
+  })
+
+  it('loads installed package graphs as read-only data-only definitions', async () => {
+    const packageDir = path.join(ROOT, 'graph-package')
+    await writePackage(packageDir, {
+      contributions: [
+        {
+          id: 'concept-graph',
+          kind: 'graph',
+          title: 'Concept Graph',
+          entry: 'graphs/concept.json'
+        }
+      ]
+    })
+    await fsp.mkdir(path.join(packageDir, 'graphs'), { recursive: true })
+    await fsp.writeFile(
+      path.join(packageDir, 'graphs', 'concept.json'),
+      JSON.stringify(
+        {
+          graphId: 'package.graph.concept',
+          name: 'Package Concept Graph',
+          description: 'A read-only graph contribution.',
+          version: '1.0.0',
+          tags: ['package', 'graph'],
+          entryNodeIds: ['planner'],
+          nodes: [
+            {
+              nodeId: 'planner',
+              kind: 'agent',
+              name: 'Planner',
+              description: 'Plans from package data only.'
+            },
+            {
+              nodeId: 'final',
+              kind: 'output',
+              name: 'Final',
+              description: 'Final output.'
+            }
+          ],
+          channels: [
+            {
+              channelId: 'planner-to-final',
+              from: 'planner',
+              to: 'final',
+              kind: 'artifact',
+              required: true
+            }
+          ],
+          outputs: [
+            {
+              outputId: 'final-output',
+              name: 'Final Output',
+              description: 'Final output.',
+              sourceNodeId: 'final',
+              channelId: 'planner-to-final',
+              mimeType: 'text/markdown'
+            }
+          ]
+        },
+        null,
+        2
+      )
+    )
+
+    const store = new MagicAgentPackageStore(ROOT, STORE)
+    await store.install(packageDir)
+
+    const graphs = await store.listGraphs()
+    expect(graphs).toHaveLength(1)
+    expect(graphs[0]).toMatchObject({
+      graphId: 'package.graph.concept',
+      sourcePackageId: 'demo.package',
+      contributionId: 'concept-graph',
+      contributionTitle: 'Concept Graph',
+      runnable: false,
+      unavailableReason: expect.stringMatching(/read-only/)
+    })
+    expect((globalThis as Record<string, unknown>).__magicPackageExecuted).toBeUndefined()
+  })
+
+  it('rejects invalid package graph definitions before install', async () => {
+    const packageDir = path.join(ROOT, 'bad-graph-package')
+    await writePackage(packageDir, {
+      contributions: [{ id: 'bad-graph', kind: 'graph', entry: 'graphs/bad.json' }]
+    })
+    await fsp.mkdir(path.join(packageDir, 'graphs'), { recursive: true })
+    await fsp.writeFile(
+      path.join(packageDir, 'graphs', 'bad.json'),
+      JSON.stringify(
+        {
+          graphId: 'bad.graph',
+          name: 'Bad Graph',
+          description: 'Invalid graph.',
+          version: '1.0.0',
+          tags: ['bad'],
+          entryNodeIds: ['missing'],
+          nodes: [
+            {
+              nodeId: 'planner',
+              kind: 'agent',
+              name: 'Planner',
+              description: 'Planner.'
+            }
+          ],
+          channels: [
+            {
+              channelId: 'planner-to-missing',
+              from: 'planner',
+              to: 'missing',
+              kind: 'artifact'
+            }
+          ],
+          outputs: [
+            {
+              outputId: 'bad-output',
+              name: 'Bad Output',
+              description: 'Bad output.',
+              sourceNodeId: 'missing',
+              channelId: 'missing-channel'
+            }
+          ]
+        },
+        null,
+        2
+      )
+    )
+
+    const store = new MagicAgentPackageStore(ROOT, STORE)
+    const inspection = await store.scanLocalDirectory(packageDir)
+    expect(inspection.validation.ok).toBe(false)
+    if (!inspection.validation.ok) {
+      expect(inspection.validation.errors).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: 'contributions.0.entry',
+            message: expect.stringMatching(/Invalid graph contribution definition/)
+          })
+        ])
+      )
+    }
+    await expect(store.install(packageDir)).rejects.toThrow(/Invalid graph contribution definition/)
+  })
+
+  it('rejects duplicate package graph ids during read-only discovery', async () => {
+    const firstPackageDir = path.join(ROOT, 'graph-package-one')
+    const secondPackageDir = path.join(ROOT, 'graph-package-two')
+    for (const [packageDir, packageId] of [
+      [firstPackageDir, 'graph.package.one'],
+      [secondPackageDir, 'graph.package.two']
+    ] as const) {
+      await writePackage(packageDir, {
+        id: packageId,
+        contributions: [{ id: 'concept-graph', kind: 'graph', entry: 'graphs/concept.json' }]
+      })
+      await fsp.mkdir(path.join(packageDir, 'graphs'), { recursive: true })
+      await fsp.writeFile(
+        path.join(packageDir, 'graphs', 'concept.json'),
+        JSON.stringify(
+          {
+            graphId: 'duplicate.graph',
+            name: 'Duplicate Graph',
+            description: 'Duplicate graph id.',
+            version: '1.0.0',
+            tags: ['duplicate'],
+            entryNodeIds: ['input'],
+            nodes: [
+              {
+                nodeId: 'input',
+                kind: 'input',
+                name: 'Input',
+                description: 'Input.'
+              }
+            ],
+            channels: [],
+            outputs: [
+              {
+                outputId: 'input-output',
+                name: 'Input Output',
+                description: 'Input output.',
+                sourceNodeId: 'input'
+              }
+            ]
+          },
+          null,
+          2
+        )
+      )
+    }
+
+    const store = new MagicAgentPackageStore(ROOT, STORE)
+    await store.install(firstPackageDir)
+    await store.install(secondPackageDir)
+
+    await expect(store.listGraphs()).rejects.toThrow(/Duplicate package graph id: duplicate.graph/)
   })
 })

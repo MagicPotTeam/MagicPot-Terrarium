@@ -204,11 +204,20 @@ function normalizeContribution(
     }
   }
 
-  if (contribution.kind === 'agent') {
+  if (contribution.kind === 'agent' || contribution.kind === 'graph') {
+    const contributionLabel = contribution.kind === 'agent' ? 'Agent' : 'Graph'
     if (!contribution.entry) {
-      pushIssue(issues, `${path}.entry`, 'Agent contributions must declare a JSON entry file.')
+      pushIssue(
+        issues,
+        `${path}.entry`,
+        `${contributionLabel} contributions must declare a JSON entry file.`
+      )
     } else if (!contribution.entry.toLowerCase().endsWith('.json')) {
-      pushIssue(issues, `${path}.entry`, 'Agent contribution entry must be a JSON file.')
+      pushIssue(
+        issues,
+        `${path}.entry`,
+        `${contributionLabel} contribution entry must be a JSON file.`
+      )
     }
   }
 
