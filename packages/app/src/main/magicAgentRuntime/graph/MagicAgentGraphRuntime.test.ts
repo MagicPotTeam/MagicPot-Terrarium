@@ -249,7 +249,161 @@ describe('MagicAgentGraphRuntime', () => {
     })
   })
 
-  it('can run only requested outputs', async () => {
+  it('uses requested output ids as execution goals', async () => {
+    const runAgent = vi.fn(async (req) => ({
+      runId: `agent-run-${req.agentId}`,
+      agentId: req.agentId || 'unknown',
+      status: 'completed' as const,
+      content: `agent:${req.agentId}:${req.text}`,
+      messages: [{ role: 'assistant' as const, content: `agent:${req.agentId}:${req.text}` }],
+      toolCalls: [],
+      events: [],
+      startedAt: 1,
+      finishedAt: 2
+    }))
+    const callTool = vi.fn(async (req) => ({
+      ok: true,
+      toolName: req.name,
+      source: 'magicAgentRuntime' as const,
+      status: 'ok' as const,
+      content: `tool:${req.name}:${String(req.args?.input || '')}`
+    }))
+    const runtime = new MagicAgentGraphRuntime([], { runAgent, callTool })
+    runtime.create({
+      route: testRoute,
+      graph: {
+        graphId: 'test.objective-outputs',
+        name: 'Objective Output Graph',
+        description: 'Two independent branches with separate outputs.',
+        version: '1.0.0',
+        tags: ['test'],
+        entryNodeIds: ['planner-a', 'planner-b'],
+        nodes: [
+          {
+            nodeId: 'planner-a',
+            kind: 'agent',
+            name: 'Planner A',
+            description: 'Plans branch A.',
+            agentId: 'planner-a'
+          },
+          {
+            nodeId: 'tool-a',
+            kind: 'tool',
+            name: 'Tool A',
+            description: 'Formats branch A.',
+            toolName: 'graph.formatA'
+          },
+          {
+            nodeId: 'output-a',
+            kind: 'output',
+            name: 'Output A',
+            description: 'Output branch A.'
+          },
+          {
+            nodeId: 'planner-b',
+            kind: 'agent',
+            name: 'Planner B',
+            description: 'Plans branch B.',
+            agentId: 'planner-b'
+          },
+          {
+            nodeId: 'tool-b',
+            kind: 'tool',
+            name: 'Tool B',
+            description: 'Formats branch B.',
+            toolName: 'graph.formatB'
+          },
+          {
+            nodeId: 'output-b',
+            kind: 'output',
+            name: 'Output B',
+            description: 'Output branch B.'
+          }
+        ],
+        channels: [
+          {
+            channelId: 'planner-a-to-tool-a',
+            from: 'planner-a',
+            to: 'tool-a',
+            kind: 'handoff',
+            required: true
+          },
+          {
+            channelId: 'tool-a-to-output-a',
+            from: 'tool-a',
+            to: 'output-a',
+            kind: 'artifact',
+            required: true
+          },
+          {
+            channelId: 'planner-b-to-tool-b',
+            from: 'planner-b',
+            to: 'tool-b',
+            kind: 'handoff',
+            required: true
+          },
+          {
+            channelId: 'tool-b-to-output-b',
+            from: 'tool-b',
+            to: 'output-b',
+            kind: 'artifact',
+            required: true,
+            condition: { sourceNodeId: 'planner-b', operator: 'contains', value: 'NEVER' }
+          }
+        ],
+        outputs: [
+          {
+            outputId: 'output-a-doc',
+            name: 'Output A Document',
+            description: 'Branch A document.',
+            sourceNodeId: 'output-a',
+            channelId: 'tool-a-to-output-a',
+            mimeType: 'text/plain'
+          },
+          {
+            outputId: 'output-b-doc',
+            name: 'Output B Document',
+            description: 'Branch B document.',
+            sourceNodeId: 'output-b',
+            channelId: 'tool-b-to-output-b',
+            mimeType: 'text/plain'
+          }
+        ]
+      }
+    })
+
+    const result = await runtime.run({
+      graphId: 'test.objective-outputs',
+      input: 'Only branch A please.',
+      route: testRoute,
+      outputIds: ['output-a-doc'],
+      allowedToolNames: ['graph.formatA']
+    })
+
+    expect(result.status).toBe('completed')
+    expect(result.outputs.map((output) => output.outputId)).toEqual(['output-a-doc'])
+    expect(runAgent).toHaveBeenCalledTimes(1)
+    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'planner-a' }))
+    expect(callTool).toHaveBeenCalledTimes(1)
+    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({ name: 'graph.formatA' }))
+    expect(result.channels.map((channel) => channel.channelId)).toEqual([
+      'planner-a-to-tool-a',
+      'tool-a-to-output-a'
+    ])
+    expect(result.nodes?.map((node) => [node.nodeId, node.status])).toEqual([
+      ['planner-a', 'completed'],
+      ['tool-a', 'completed'],
+      ['output-a', 'completed'],
+      ['planner-b', 'skipped'],
+      ['tool-b', 'skipped'],
+      ['output-b', 'skipped']
+    ])
+    expect(result.nodes?.find((node) => node.nodeId === 'planner-b')?.metadata).toMatchObject({
+      reason: 'Node is outside requested outputs.'
+    })
+  })
+
+  it('runs all outputs when output ids are omitted', async () => {
     const runtime = new MagicAgentGraphRuntime([])
     runtime.create({
       route: testRoute,
@@ -270,13 +424,12 @@ describe('MagicAgentGraphRuntime', () => {
 
     const result = await runtime.run({
       graphId: 'test.graph',
-      input: 'Only brief please.',
-      route: testRoute,
-      outputIds: ['brief']
+      input: 'All outputs please.',
+      route: testRoute
     })
 
     expect(result.status).toBe('completed')
-    expect(result.outputs.map((output) => output.outputId)).toEqual(['brief'])
+    expect(result.outputs.map((output) => output.outputId)).toEqual(['final-doc', 'brief'])
   })
 
   it('executes agent and tool nodes with fail-closed graph tool allowlists', async () => {
@@ -510,7 +663,7 @@ describe('MagicAgentGraphRuntime', () => {
     expect(result.channels.map((channel) => channel.channelId)).toEqual(['planner-to-final'])
     expect(result.nodes?.find((node) => node.nodeId === 'reviewer')).toMatchObject({
       status: 'skipped',
-      metadata: expect.objectContaining({ reason: expect.stringContaining('No active inbound') })
+      metadata: expect.objectContaining({ reason: 'Node is outside requested outputs.' })
     })
     expect(result.outputs[0]?.content).toContain('## Source Output\nNO_GO')
     expect(result.outputs[0]?.content).not.toContain('unexpected:reviewer-agent')

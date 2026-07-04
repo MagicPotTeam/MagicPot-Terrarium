@@ -68,6 +68,14 @@ type GraphExecutionContext = {
   nodeOutputs: Map<string, string>
   deliveredChannelIds: Set<string>
   allowedToolNames: Set<string>
+  plannedNodeIds: Set<string>
+  plannedChannelIds: Set<string>
+}
+
+type GraphObjectivePlan = {
+  outputsToBuild: MagicAgentGraphOutputDefinition[]
+  plannedNodeIds: Set<string>
+  plannedChannelIds: Set<string>
 }
 
 const assertGraphRoute = (value: unknown): AgentRouteLike => {
@@ -425,12 +433,7 @@ export class MagicAgentGraphRuntime {
     runRecord: MagicAgentGraphRunRecord,
     signal: AbortSignal
   ): Promise<void> {
-    const outputFilter = new Set((request.outputIds || []).map(cleanString).filter(Boolean))
-    const outputsToBuild = graph.outputs.filter(
-      (output) => outputFilter.size === 0 || outputFilter.has(output.outputId)
-    )
-    if (outputsToBuild.length === 0 && outputFilter.size > 0)
-      throw new Error(`No requested outputs exist on MagicAgentGraph "${graph.graphId}".`)
+    const objectivePlan = this.buildObjectivePlan(graph, request)
     const incomingByNode = new Map<string, MagicAgentGraphChannelDefinition[]>()
     for (const channel of graph.channels)
       incomingByNode.set(channel.to, [...(incomingByNode.get(channel.to) || []), channel])
@@ -445,13 +448,21 @@ export class MagicAgentGraphRuntime {
         Array.isArray(request.allowedToolNames)
           ? request.allowedToolNames.map(cleanString).filter(Boolean)
           : []
-      )
+      ),
+      plannedNodeIds: objectivePlan.plannedNodeIds,
+      plannedChannelIds: objectivePlan.plannedChannelIds
     }
     const entryNodeIds = new Set(graph.entryNodeIds)
     const hasEntries = entryNodeIds.size > 0
     for (const node of this.sortGraphNodes(graph)) {
       this.throwIfCancelled(signal)
-      const incoming = incomingByNode.get(node.nodeId) || []
+      if (!context.plannedNodeIds.has(node.nodeId)) {
+        this.skipNode(runRecord, node, 'outside-objective', 'Node is outside requested outputs.')
+        continue
+      }
+      const incoming = (incomingByNode.get(node.nodeId) || []).filter((channel) =>
+        context.plannedChannelIds.has(channel.channelId)
+      )
       const hasDeliveredInput = incoming.some((channel) =>
         context.deliveredChannelIds.has(channel.channelId)
       )
@@ -485,18 +496,11 @@ export class MagicAgentGraphRuntime {
         hasDeliveredInput ||
         (!hasEntries && incoming.length === 0)
       if (!shouldRun) {
-        this.updateNodeRun(runRecord, node, 'skipped', {
-          endedAt: now(),
-          metadata: { reason: 'No active inbound channel reached this node.' }
-        })
-        this.recordRunEvent(
+        this.skipNode(
           runRecord,
-          'node.skipped',
-          `MagicAgentGraph node skipped: ${node.nodeId}`,
-          {
-            nodeId: node.nodeId,
-            reason: 'inactive-inbound'
-          }
+          node,
+          'inactive-inbound',
+          'No active inbound channel reached this node.'
         )
         continue
       }
@@ -532,7 +536,7 @@ export class MagicAgentGraphRuntime {
         throw error
       }
     }
-    runRecord.outputs = outputsToBuild.map((output) =>
+    runRecord.outputs = objectivePlan.outputsToBuild.map((output) =>
       this.buildOutput(graph, output, request.input, runRecord.channels, context.nodeOutputs)
     )
     for (const output of runRecord.outputs)
@@ -542,6 +546,54 @@ export class MagicAgentGraphRuntime {
         `MagicAgentGraph output created: ${output.outputId}`,
         { outputId: output.outputId, nodeId: output.sourceNodeId }
       )
+  }
+
+  private buildObjectivePlan(
+    graph: MagicAgentGraphDefinition,
+    request: MagicAgentGraphRunRequest
+  ): GraphObjectivePlan {
+    const outputFilter = new Set((request.outputIds || []).map(cleanString).filter(Boolean))
+    const outputsToBuild = graph.outputs.filter(
+      (output) => outputFilter.size === 0 || outputFilter.has(output.outputId)
+    )
+    if (outputsToBuild.length === 0 && outputFilter.size > 0)
+      throw new Error(`No requested outputs exist on MagicAgentGraph "${graph.graphId}".`)
+
+    const incomingByNode = new Map<string, MagicAgentGraphChannelDefinition[]>()
+    for (const channel of graph.channels) {
+      incomingByNode.set(channel.to, [...(incomingByNode.get(channel.to) || []), channel])
+    }
+
+    const plannedNodeIds = new Set<string>()
+    const plannedChannelIds = new Set<string>()
+    const visitNode = (nodeId: string): void => {
+      if (plannedNodeIds.has(nodeId)) {
+        return
+      }
+      plannedNodeIds.add(nodeId)
+      for (const channel of incomingByNode.get(nodeId) || []) {
+        plannedChannelIds.add(channel.channelId)
+        visitNode(channel.from)
+      }
+    }
+
+    for (const output of outputsToBuild) {
+      plannedNodeIds.add(output.sourceNodeId)
+      if (output.channelId) {
+        const outputChannel = graph.channels.find(
+          (channel) => channel.channelId === output.channelId
+        )
+        if (outputChannel) {
+          plannedChannelIds.add(outputChannel.channelId)
+          visitNode(outputChannel.from)
+          plannedNodeIds.add(outputChannel.to)
+        }
+      } else {
+        visitNode(output.sourceNodeId)
+      }
+    }
+
+    return { outputsToBuild, plannedNodeIds, plannedChannelIds }
   }
 
   private sortGraphNodes(graph: MagicAgentGraphDefinition): MagicAgentGraphNodeDefinition[] {
@@ -697,7 +749,8 @@ export class MagicAgentGraphRuntime {
   ): void {
     const nodes = new Map(context.graph.nodes.map((candidate) => [candidate.nodeId, candidate]))
     for (const channel of context.graph.channels.filter(
-      (candidate) => candidate.from === node.nodeId
+      (candidate) =>
+        candidate.from === node.nodeId && context.plannedChannelIds.has(candidate.channelId)
     )) {
       if (!this.evaluateCondition(channel.condition, nodeOutput, context)) continue
       const record: MagicAgentGraphRunChannelRecord = {
@@ -821,6 +874,22 @@ export class MagicAgentGraphRuntime {
       ...(output.mimeType ? { mimeType: output.mimeType } : {}),
       ...(output.metadata ? { metadata: output.metadata } : {})
     }
+  }
+
+  private skipNode(
+    run: MagicAgentGraphRunRecord,
+    node: MagicAgentGraphNodeDefinition,
+    reason: string,
+    message: string
+  ): void {
+    this.updateNodeRun(run, node, 'skipped', {
+      endedAt: now(),
+      metadata: { reason: message }
+    })
+    this.recordRunEvent(run, 'node.skipped', `MagicAgentGraph node skipped: ${node.nodeId}`, {
+      nodeId: node.nodeId,
+      reason
+    })
   }
 
   private updateNodeRun(

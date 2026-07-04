@@ -115,6 +115,10 @@ The service registers that route with `AgentKernel`, derives a `sessionKey`, and
 
 Graph-specific events are recorded through the kernel's supported event vocabulary (`run.*`) with `metadata.graphEventType` carrying values such as `graph.completed` or `graph.cancelled`. This keeps audit events type-safe while preserving graph-level detail.
 
+### Output objective execution
+
+`runGraph.outputIds` is an execution-goal selector, not only a response filter. When `outputIds` is supplied, GraphRuntime builds an objective plan from the requested outputs, walks the required inbound channels/nodes, and executes only the planned subgraph. Nodes outside the requested objective are marked `skipped` with outside-objective metadata, and their channels are not emitted. Required-channel failures on non-goal branches do not fail the requested output. When `outputIds` is omitted, all graph outputs remain requested and the runtime executes the full graph as before.
+
 ## Artifacts and replay
 
 LLM replies can include attachments. The execution adapter converts response attachments into artifact references with:
