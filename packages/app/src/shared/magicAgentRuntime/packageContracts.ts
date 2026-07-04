@@ -24,16 +24,23 @@ export const MAGIC_AGENT_PACKAGE_AGENT_PROFILE_ID_MAX_LENGTH = 128
 
 export const MAGIC_AGENT_PACKAGE_AGENT_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 
-export const MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS = [
-  'agent',
+export const MAGIC_AGENT_PACKAGE_EXECUTABLE_CONTRIBUTION_KINDS = [
   'tool',
   'trigger',
-  'graph',
   'plugin'
+] as const
+
+export const MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS = [
+  'agent',
+  ...MAGIC_AGENT_PACKAGE_EXECUTABLE_CONTRIBUTION_KINDS,
+  'graph'
 ] as const
 
 export type MagicAgentPackageContributionKind =
   (typeof MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS)[number]
+
+export type MagicAgentPackageExecutableContributionKind =
+  (typeof MAGIC_AGENT_PACKAGE_EXECUTABLE_CONTRIBUTION_KINDS)[number]
 
 export type MagicAgentPackageContribution = {
   id: string

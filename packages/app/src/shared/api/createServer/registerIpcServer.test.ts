@@ -48,11 +48,31 @@ describe('registerIpcServer', () => {
     expect(handleMock).toHaveBeenCalledWith('svcDemo.ping', expect.any(Function))
 
     const handler = handleMock.mock.calls[0][1] as (
-      event: unknown,
+      event: {
+        sender?: { id?: number; getURL?: () => string }
+        senderFrame?: { url?: string; parent?: unknown }
+      },
       req: { value: string }
     ) => Promise<{ ok: boolean; value: string }>
-    await expect(handler({}, { value: 'demo' })).resolves.toEqual({ ok: true, value: 'demo' })
-    expect(api.svcDemo.ping).toHaveBeenCalledWith({ value: 'demo' })
+    await expect(
+      handler(
+        {
+          sender: { id: 42, getURL: () => 'app://renderer/index.html' },
+          senderFrame: { url: 'app://renderer/index.html#/agent-studio', parent: null }
+        },
+        { value: 'demo' }
+      )
+    ).resolves.toEqual({ ok: true, value: 'demo' })
+    expect(api.svcDemo.ping).toHaveBeenCalledWith(
+      { value: 'demo' },
+      expect.objectContaining({
+        methodName: 'svcDemo.ping',
+        senderId: 42,
+        senderUrl: 'app://renderer/index.html',
+        frameUrl: 'app://renderer/index.html#/agent-studio',
+        isMainFrame: true
+      })
+    )
   })
 
   it('propagates unary handler failures without rewriting them', async () => {
@@ -92,11 +112,32 @@ describe('registerIpcServer', () => {
     expect(onMock).toHaveBeenCalledWith('svcDemo.watch', expect.any(Function))
 
     const listener = onMock.mock.calls[0][1] as (
-      event: { ports: FakeMessagePortMain[] },
+      event: {
+        ports: FakeMessagePortMain[]
+        sender?: { id?: number; getURL?: () => string }
+        senderFrame?: { url?: string; parent?: unknown }
+      },
       req: { value: string }
     ) => Promise<void>
-    await listener({ ports: [port] }, { value: 'demo' })
+    await listener(
+      {
+        ports: [port],
+        sender: { id: 7, getURL: () => 'app://renderer/index.html' },
+        senderFrame: { url: 'app://renderer/index.html#/watch', parent: null }
+      },
+      { value: 'demo' }
+    )
 
+    expect(api.svcDemo.watch).toHaveBeenCalledWith(
+      { value: 'demo' },
+      expect.any(Object),
+      expect.objectContaining({
+        methodName: 'svcDemo.watch',
+        senderId: 7,
+        frameUrl: 'app://renderer/index.html#/watch',
+        isMainFrame: true
+      })
+    )
     expect(port.start).toHaveBeenCalledTimes(1)
     expect(port.postMessage).toHaveBeenCalledWith({ data: { chunk: 'first' } })
     expect(port.close).toHaveBeenCalledTimes(1)

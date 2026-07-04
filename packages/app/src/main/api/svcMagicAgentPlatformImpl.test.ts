@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MagicAgentGraphDefinition } from '@shared/magicAgent'
 import { AgentKernel } from '../agentKernel'
 import { MagicAgentGraphRuntime } from '../magicAgentRuntime/graph'
+import {
+  clearMagicAgentTrustedRouteBindingsForTest,
+  registerMagicAgentTrustedRouteBinding
+} from '../magicAgentRuntime/trustedRouteBinding'
 import { MagicAgentPlatformSvcImpl } from './svcMagicAgentPlatformImpl'
 
 vi.mock('electron', () => ({
@@ -60,6 +64,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  clearMagicAgentTrustedRouteBindingsForTest()
   if (originalMagicAgentPlatformFlag === undefined) {
     delete process.env['MAGICPOT_MAGICAGENT_PLATFORM']
   } else {
@@ -257,7 +262,7 @@ describe('MagicAgentPlatformSvcImpl', () => {
             name: 'Package Assistant',
             description: 'Installed package agent.',
             systemPrompt: 'Package prompt.',
-            toolNames: ['session.status'],
+            toolNames: [' Session.Status ', ' Agent.Terminal.Run '],
             maxToolIterations: 1,
             profileId: 'package-profile',
             sourcePackageId: 'demo.package',
@@ -297,7 +302,7 @@ describe('MagicAgentPlatformSvcImpl', () => {
       agentId: 'package.demo.package.assistant',
       text: 'hello with tools',
       route: { channel: 'generic', scopeType: 'dm', scopeId: 'agent-test' },
-      allowedToolNames: ['session.status', 'artifact.create']
+      allowedToolNames: [' Session.Status ', 'artifact.create', ' Agent.Terminal.Run ']
     })
     expect(runAgent).toHaveBeenLastCalledWith(
       expect.objectContaining({
@@ -692,6 +697,173 @@ describe('MagicAgentPlatformSvcImpl', () => {
         reason: 'Completed runs do not cancel.'
       })
     ).resolves.toEqual({ runId: 'run-route-a', cancelled: false, status: 'completed' })
+  })
+
+  it('rejects renderer route spoofing and non-Agent-Studio frames for trusted IPC operations', async () => {
+    const graphId = 'graph.service.trusted-route'
+    const graphRuntime = new MagicAgentGraphRuntime([createSvcTestGraph(graphId)])
+    const runAgent = vi.fn(async (req) => ({
+      runId: 'trusted-agent-run',
+      agentId: req.agentId || 'magicpot.default.chat',
+      status: 'completed' as const,
+      content: 'trusted agent ok',
+      messages: [],
+      toolCalls: [],
+      events: [],
+      startedAt: 1,
+      finishedAt: 2
+    }))
+    const callTool = vi.fn(async (req) => ({
+      ok: true,
+      toolName: req.name,
+      source: 'creative' as const,
+      status: 'ok' as const,
+      content: 'trusted tool ok'
+    }))
+    const service = new MagicAgentPlatformSvcImpl({
+      agentKernel: new AgentKernel(),
+      adapter: {
+        listTools: () => [],
+        listAgents: () => [],
+        runAgent,
+        callTool
+      } as never,
+      graphRuntime,
+      packageStore: {
+        listAgents: vi.fn(async () => []),
+        getPackageRoot: () => '/packages',
+        getStoreDir: () => '/packages/installed'
+      } as never
+    })
+    const route = { channel: 'generic', scopeType: 'dm', scopeId: 'agent-studio' } as const
+    const spoofedRoute = {
+      channel: 'generic',
+      scopeType: 'dm',
+      scopeId: 'other-agent-studio'
+    } as const
+    const trustedInvocation = {
+      methodName: 'svcMagicAgentPlatform.runGraph',
+      senderId: 42,
+      senderUrl: 'file:///app/index.html#/agent-studio',
+      frameUrl: 'file:///app/index.html#/agent-studio',
+      isMainFrame: true
+    }
+    const nonStudioFrameInvocation = {
+      ...trustedInvocation,
+      methodName: 'svcMagicAgentPlatform.runAgent',
+      senderUrl: 'file:///app/index.html#/chat',
+      frameUrl: 'file:///app/index.html#/chat'
+    }
+    const subframeInvocation = {
+      ...trustedInvocation,
+      methodName: 'svcMagicAgentPlatform.callTool',
+      frameUrl: 'https://example.invalid/embed.html#/agent-studio',
+      isMainFrame: false
+    }
+    const foreignOriginInvocation = {
+      ...trustedInvocation,
+      methodName: 'svcMagicAgentPlatform.runGraph',
+      senderUrl: 'https://evil.invalid/#/agent-studio',
+      frameUrl: 'https://evil.invalid/#/agent-studio'
+    }
+    const unregisteredSenderInvocation = {
+      ...trustedInvocation,
+      methodName: 'svcMagicAgentPlatform.runGraph',
+      senderId: 43
+    }
+    registerMagicAgentTrustedRouteBinding(42, route, { trustedUrl: 'file:///app/index.html' })
+
+    await expect(
+      service.runGraph(
+        { graphId, input: 'trusted prompt', route, runId: 'run-trusted-route' },
+        trustedInvocation
+      )
+    ).resolves.toMatchObject({
+      runId: 'run-trusted-route',
+      sessionKey: 'generic:dm:agent-studio'
+    })
+    await expect(
+      service.runAgent(
+        { agentId: 'magicpot.default.chat', text: 'trusted agent', route },
+        trustedInvocation
+      )
+    ).resolves.toMatchObject({ runId: 'trusted-agent-run', status: 'completed' })
+    await expect(
+      service.callTool({ name: 'creative.echo', args: {}, route }, trustedInvocation)
+    ).resolves.toMatchObject({ ok: true, content: 'trusted tool ok' })
+
+    await expect(
+      service.createGraph(
+        { graph: createSvcTestGraph('graph.service.spoofed-create'), route: spoofedRoute },
+        trustedInvocation
+      )
+    ).rejects.toThrow(/not trusted/)
+    await expect(
+      service.runGraph({ graphId, input: 'spoofed prompt', route: spoofedRoute }, trustedInvocation)
+    ).rejects.toThrow(/not trusted/)
+    await expect(
+      service.listGraphRuns({ route: spoofedRoute, graphId }, trustedInvocation)
+    ).rejects.toThrow(/not trusted/)
+    await expect(
+      service.getGraphRun({ route: spoofedRoute, runId: 'run-trusted-route' }, trustedInvocation)
+    ).rejects.toThrow(/not trusted/)
+    await expect(
+      service.cancelGraphRun(
+        { route: spoofedRoute, runId: 'run-trusted-route', reason: 'Spoofed cancel.' },
+        trustedInvocation
+      )
+    ).rejects.toThrow(/not trusted/)
+    await expect(
+      service.runAgent(
+        { agentId: 'magicpot.default.chat', text: 'spoofed agent', route: spoofedRoute },
+        trustedInvocation
+      )
+    ).rejects.toThrow(/not trusted/)
+    await expect(
+      service.callTool({ name: 'creative.echo', args: {}, route: spoofedRoute }, trustedInvocation)
+    ).rejects.toThrow(/not trusted/)
+
+    for (const blockedInvocation of [
+      nonStudioFrameInvocation,
+      subframeInvocation,
+      foreignOriginInvocation,
+      unregisteredSenderInvocation
+    ]) {
+      await expect(service.getStatus({}, blockedInvocation)).rejects.toThrow(/not trusted/)
+      await expect(service.listAgents({}, blockedInvocation)).rejects.toThrow(/not trusted/)
+      await expect(service.listTools({}, blockedInvocation)).rejects.toThrow(/not trusted/)
+      await expect(service.listGraphs({}, blockedInvocation)).rejects.toThrow(/not trusted/)
+      await expect(
+        service.validatePackageManifest(
+          { manifest: { manifestVersion: 1, id: 'demo.package', name: 'Demo', version: '1.0.0' } },
+          blockedInvocation
+        )
+      ).rejects.toThrow(/not trusted/)
+      await expect(
+        service.createGraph(
+          { graph: createSvcTestGraph('graph.service.blocked-create'), route },
+          blockedInvocation
+        )
+      ).rejects.toThrow(/not trusted/)
+      await expect(
+        service.runGraph({ graphId, input: 'blocked frame', route }, blockedInvocation)
+      ).rejects.toThrow(/not trusted/)
+      await expect(
+        service.runAgent(
+          { agentId: 'magicpot.default.chat', text: 'blocked frame', route },
+          blockedInvocation
+        )
+      ).rejects.toThrow(/not trusted/)
+      await expect(
+        service.callTool({ name: 'creative.echo', args: {}, route }, blockedInvocation)
+      ).rejects.toThrow(/not trusted/)
+    }
+
+    await expect(
+      service.getGraphRun({ route, runId: 'run-trusted-route' }, trustedInvocation)
+    ).resolves.toMatchObject({
+      run: { runId: 'run-trusted-route', sessionKey: 'generic:dm:agent-studio' }
+    })
   })
 
   it('does not inspect cwd-relative bare package ids as local paths and redacts nested package validation paths', async () => {

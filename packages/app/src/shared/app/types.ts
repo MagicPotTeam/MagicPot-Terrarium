@@ -91,7 +91,7 @@ export const MAGICPOT_SESSION_STATUS_TOOL_NAME = 'session.status'
 const cleanString = (value?: string | null): string => String(value || '').trim()
 
 export const normalizeMagicPotToolName = (value?: string | null): string => {
-  return cleanString(value)
+  return cleanString(value).toLowerCase()
 }
 
 export const normalizeMagicPotResourceUri = (value?: string | null): string => cleanString(value)

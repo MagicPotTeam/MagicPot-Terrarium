@@ -17,6 +17,8 @@ import {
   type MagicAgentGraphRunResult
 } from '@shared/magicAgent'
 import { getAgentSessionKey, type AgentRouteLike } from '@shared/agent'
+import { normalizeMagicPotToolName } from '@shared/app/types'
+import { isMagicAgentPlatformDeniedToolName } from '../toolPolicy'
 import type {
   MagicAgentPlatformRunReq,
   MagicAgentPlatformRunResp,
@@ -621,7 +623,9 @@ export class MagicAgentGraphRuntime {
       deliveredChannelIds: new Set(),
       allowedToolNames: new Set(
         Array.isArray(request.allowedToolNames)
-          ? request.allowedToolNames.map(cleanString).filter(Boolean)
+          ? request.allowedToolNames
+              .map((name) => normalizeMagicPotToolName(name))
+              .filter((name) => Boolean(name) && !isMagicAgentPlatformDeniedToolName(name))
           : []
       ),
       plannedNodeIds: objectivePlan.plannedNodeIds,
@@ -861,7 +865,7 @@ export class MagicAgentGraphRuntime {
       ...(node.modelName ? { profileId: node.modelName } : {}),
       ...(node.instruction ? { systemPrompt: node.instruction } : {}),
       ...(context.request.allowedToolNames !== undefined
-        ? { allowedToolNames: context.request.allowedToolNames }
+        ? { allowedToolNames: [...context.allowedToolNames] }
         : {}),
       metadata: {
         ...(context.request.metadata || {}),
@@ -888,10 +892,12 @@ export class MagicAgentGraphRuntime {
     context: GraphExecutionContext
   ): Promise<string> {
     const config = isRecord(node.config) ? node.config : {}
-    const toolName = cleanString(node.toolName) || cleanString(config.toolName)
+    const toolName =
+      normalizeMagicPotToolName(node.toolName) ||
+      normalizeMagicPotToolName(config.toolName as string | undefined)
     if (!toolName)
       throw new Error(`MagicAgentGraph tool node "${node.nodeId}" is missing toolName.`)
-    if (!context.allowedToolNames.has(toolName))
+    if (isMagicAgentPlatformDeniedToolName(toolName) || !context.allowedToolNames.has(toolName))
       throw new Error(`MagicAgentGraph tool "${toolName}" is not allowed for this graph run.`)
     if (!this.deps.callTool)
       throw new Error(`MagicAgentGraph tool "${toolName}" has no configured executor.`)

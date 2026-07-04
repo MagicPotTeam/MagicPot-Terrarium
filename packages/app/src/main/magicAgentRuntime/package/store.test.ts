@@ -11,6 +11,7 @@ import {
   MAGIC_AGENT_PACKAGE_AGENT_SPEC_VERSION,
   MAGIC_AGENT_PACKAGE_AGENT_TOOL_NAME_MAX_COUNT,
   MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS,
+  MAGIC_AGENT_PACKAGE_EXECUTABLE_CONTRIBUTION_KINDS,
   MAGIC_AGENT_PACKAGE_MANIFEST_FILE
 } from '@shared/magicAgentRuntime/packageContracts'
 
@@ -24,14 +25,6 @@ function manifest(overrides: Record<string, unknown> = {}): Record<string, unkno
     name: 'Demo Package',
     version: '1.0.0',
     description: 'A package that must never be executed by the store.',
-    contributions: [
-      {
-        id: 'demo-tool',
-        kind: 'tool',
-        title: 'Demo Tool',
-        entry: 'contributions/demo.json'
-      }
-    ],
     ...overrides
   }
 }
@@ -90,7 +83,7 @@ describe('MagicAgentPackageStore', () => {
       contributions: [
         {
           id: 'demo-tool',
-          kind: 'tool',
+          kind: 'agent',
           title: ['not a title'],
           description: null,
           entry: null,
@@ -118,16 +111,39 @@ describe('MagicAgentPackageStore', () => {
     }
   })
 
-  it('accepts only known contribution kinds and requires agent JSON entries', () => {
+  it('accepts only data-only contribution kinds and rejects executable package contributions', () => {
     const accepted = validateMagicAgentPackageManifest({
       ...manifest({ contributions: undefined }),
-      contributions: MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS.map((kind) => ({
-        id: `demo-${kind}`,
-        kind,
-        ...(kind === 'agent' || kind === 'graph' ? { entry: `${kind}.json` } : {})
-      }))
+      contributions: [
+        { id: 'demo-agent', kind: 'agent', entry: 'agent.json' },
+        { id: 'demo-graph', kind: 'graph', entry: 'graph.json' }
+      ]
     })
     expect(accepted.ok).toBe(true)
+
+    for (const kind of MAGIC_AGENT_PACKAGE_EXECUTABLE_CONTRIBUTION_KINDS) {
+      const executableContribution = validateMagicAgentPackageManifest(
+        manifest({ contributions: [{ id: `demo-${kind}`, kind, entry: `${kind}.json` }] })
+      )
+      expect(executableContribution.ok).toBe(false)
+      if (!executableContribution.ok) {
+        expect(executableContribution.errors).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              path: 'contributions.0.kind',
+              message: expect.stringMatching(/Executable contribution kind/)
+            })
+          ])
+        )
+      }
+    }
+    expect(MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS).toEqual(
+      expect.arrayContaining([
+        'agent',
+        'graph',
+        ...MAGIC_AGENT_PACKAGE_EXECUTABLE_CONTRIBUTION_KINDS
+      ])
+    )
 
     const unknownKind = validateMagicAgentPackageManifest(
       manifest({ contributions: [{ id: 'demo-workflow', kind: 'workflow' }] })
@@ -178,7 +194,7 @@ describe('MagicAgentPackageStore', () => {
   it('scans a local directory and reports missing contribution entries', async () => {
     const packageDir = path.join(ROOT, 'bad-entry')
     await writePackage(packageDir, {
-      contributions: [{ id: 'missing-entry', kind: 'tool', entry: 'missing.json' }]
+      contributions: [{ id: 'missing-entry', kind: 'agent', entry: 'missing.json' }]
     })
 
     const store = new MagicAgentPackageStore(ROOT, STORE)
@@ -200,7 +216,7 @@ describe('MagicAgentPackageStore', () => {
       '../outside.json'
     ]) {
       const result = validateMagicAgentPackageManifest(
-        manifest({ contributions: [{ id: 'unsafe-entry', kind: 'tool', entry }] })
+        manifest({ contributions: [{ id: 'unsafe-entry', kind: 'agent', entry }] })
       )
       expect(result.ok, `entry=${entry}`).toBe(false)
       if (!result.ok) {
@@ -219,7 +235,7 @@ describe('MagicAgentPackageStore', () => {
   it('rejects contribution entries that escape the package root', async () => {
     const packageDir = path.join(ROOT, 'escape-entry')
     await writePackage(packageDir, {
-      contributions: [{ id: 'escape-entry', kind: 'tool', entry: '../outside.json' }]
+      contributions: [{ id: 'escape-entry', kind: 'agent', entry: '../outside.json' }]
     })
 
     const store = new MagicAgentPackageStore(ROOT, STORE)
@@ -251,6 +267,32 @@ describe('MagicAgentPackageStore', () => {
       /must not be a symbolic link/
     )
     await expect(store.install(packageLink)).rejects.toThrow(/must not be a symbolic link/)
+  })
+
+  it('rejects executable package contributions during scan and before staging install data', async () => {
+    for (const kind of MAGIC_AGENT_PACKAGE_EXECUTABLE_CONTRIBUTION_KINDS) {
+      vol.reset()
+      const packageDir = path.join(ROOT, `executable-${kind}`)
+      await writePackage(packageDir, {
+        contributions: [{ id: `demo-${kind}`, kind, entry: `${kind}.json` }]
+      })
+      const store = new MagicAgentPackageStore(ROOT, STORE)
+      const inspection = await store.scanLocalDirectory(packageDir)
+
+      expect(inspection.validation.ok, `kind=${kind}`).toBe(false)
+      if (!inspection.validation.ok) {
+        expect(inspection.validation.errors).toEqual(
+          expect.arrayContaining([expect.objectContaining({ path: 'contributions.0.kind' })])
+        )
+      }
+      await expect(store.install(packageDir)).rejects.toThrow(/Executable contribution kind/)
+      expect(fs.existsSync(path.join(STORE, 'demo.package'))).toBe(false)
+      expect(
+        fs.existsSync(STORE)
+          ? fs.readdirSync(STORE).filter((entry) => entry.startsWith('.install-'))
+          : []
+      ).toEqual([])
+    }
   })
 
   it('rejects symbolic links during install and cleans up staged package data without leaking local paths', async () => {

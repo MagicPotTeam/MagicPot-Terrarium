@@ -1,6 +1,7 @@
 import {
   MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS,
   MAGIC_AGENT_PACKAGE_DESCRIPTION_MAX_LENGTH,
+  MAGIC_AGENT_PACKAGE_EXECUTABLE_CONTRIBUTION_KINDS,
   MAGIC_AGENT_PACKAGE_ID_PATTERN,
   MAGIC_AGENT_PACKAGE_MANIFEST_VERSION,
   MAGIC_AGENT_PACKAGE_NAME_MAX_LENGTH,
@@ -27,6 +28,9 @@ const MANIFEST_KEYS = new Set([
 ])
 const CONTRIBUTION_KEYS = new Set(['id', 'kind', 'title', 'description', 'entry', 'config'])
 const CONTRIBUTION_KIND_SET = new Set<string>(MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS)
+const EXECUTABLE_CONTRIBUTION_KIND_SET = new Set<string>(
+  MAGIC_AGENT_PACKAGE_EXECUTABLE_CONTRIBUTION_KINDS
+)
 const WINDOWS_DRIVE_ENTRY_PATTERN = /^[A-Za-z]:[\\/]/
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -175,6 +179,12 @@ function normalizeContribution(
       issues,
       `${path}.kind`,
       `Expected contribution kind to be one of: ${MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS.join(', ')}.`
+    )
+  } else if (EXECUTABLE_CONTRIBUTION_KIND_SET.has(kind)) {
+    pushIssue(
+      issues,
+      `${path}.kind`,
+      `Executable contribution kind "${kind}" is not supported by MagicAgent packages yet.`
     )
   } else {
     contribution.kind = kind as MagicAgentPackageContributionKind

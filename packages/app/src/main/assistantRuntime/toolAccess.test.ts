@@ -6,9 +6,9 @@ import {
 } from './toolAccess'
 
 describe('toolAccess', () => {
-  it('normalizes allowlists into trimmed unique names', () => {
+  it('normalizes allowlists into trimmed, lowercase, unique names', () => {
     expect(
-      normalizeAllowedToolNames([' session.status ', 'session.status', '', 'mcp.tool'])
+      normalizeAllowedToolNames([' Session.Status ', 'session.status', '', 'MCP.Tool'])
     ).toEqual(['session.status', 'mcp.tool'])
     expect(normalizeAllowedToolNames(undefined)).toBeNull()
   })
@@ -19,14 +19,14 @@ describe('toolAccess', () => {
       { name: 'context.pinned', description: 'Pins', inputSchema: {} }
     ]
 
-    expect(filterAssistantToolsByAllowlist(tools, ['context.pinned'])).toEqual([
+    expect(filterAssistantToolsByAllowlist(tools, [' CONTEXT.PINNED '])).toEqual([
       { name: 'context.pinned', description: 'Pins', inputSchema: {} }
     ])
     expect(filterAssistantToolsByAllowlist(tools, undefined)).toEqual(tools)
   })
 
   it('rejects unbound tool names when an allowlist is active', () => {
-    expect(() => assertAssistantToolAllowed('session.status', ['session.status'])).not.toThrow()
+    expect(() => assertAssistantToolAllowed('Session.Status', [' session.status '])).not.toThrow()
     expect(() => assertAssistantToolAllowed('context.pinned', ['session.status'])).toThrow(
       'Tool "context.pinned" is not bound to the current skill.'
     )

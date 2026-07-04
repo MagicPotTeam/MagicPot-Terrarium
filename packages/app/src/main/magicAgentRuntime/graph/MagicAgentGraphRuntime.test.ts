@@ -385,7 +385,7 @@ describe('MagicAgentGraphRuntime', () => {
     expect(runAgent).toHaveBeenCalledTimes(1)
     expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'planner-a' }))
     expect(callTool).toHaveBeenCalledTimes(1)
-    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({ name: 'graph.formatA' }))
+    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({ name: 'graph.formata' }))
     expect(result.channels.map((channel) => channel.channelId)).toEqual([
       'planner-a-to-tool-a',
       'tool-a-to-output-a'
@@ -531,7 +531,7 @@ describe('MagicAgentGraphRuntime', () => {
       input: 'format this',
       route: testRoute,
       runId: 'run-tool-allowed',
-      allowedToolNames: ['graph.format']
+      allowedToolNames: [' Graph.Format ']
     })
 
     expect(result.status).toBe('completed')

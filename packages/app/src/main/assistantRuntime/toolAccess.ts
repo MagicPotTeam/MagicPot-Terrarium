@@ -21,7 +21,7 @@ export const filterAssistantToolsByAllowlist = (
   }
 
   const allowed = new Set(allowlist)
-  return tools.filter((tool) => allowed.has(tool.name))
+  return tools.filter((tool) => allowed.has(normalizeToolName(tool.name)))
 }
 
 export const assertAssistantToolAllowed = (
@@ -33,7 +33,7 @@ export const assertAssistantToolAllowed = (
     return
   }
 
-  if (!allowlist.includes(toolName)) {
+  if (!allowlist.includes(normalizeToolName(toolName))) {
     throw new Error(`Tool "${toolName}" is not bound to the current skill.`)
   }
 }

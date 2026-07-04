@@ -1,5 +1,8 @@
 import path from 'node:path'
 import { app } from 'electron'
+import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
+import { normalizeMagicPotToolName } from '@shared/app/types'
+import type { AgentRouteLike } from '@shared/agent'
 import type { AssistantRoute } from '../assistantRuntime/types'
 import { getAgentKernel, type AgentKernel } from '../agentKernel'
 import type {
@@ -31,10 +34,11 @@ import type {
   MagicAgentPlatformValidatePackageManifestReq,
   MagicAgentPlatformValidatePackageManifestResp
 } from '@shared/api/svcMagicAgentPlatform'
-import type {
-  MagicAgentGraphCreateRequest,
-  MagicAgentGraphRunRequest,
-  MagicAgentGraphRunResult
+import {
+  MAGIC_AGENT_TRUSTED_AGENT_STUDIO_ROUTE,
+  type MagicAgentGraphCreateRequest,
+  type MagicAgentGraphRunRequest,
+  type MagicAgentGraphRunResult
 } from '@shared/magicAgent'
 import type {
   MagicAgentInstalledPackage,
@@ -55,12 +59,20 @@ import {
   isMagicAgentPlatformEnabled,
   MAGIC_AGENT_PLATFORM_ENV
 } from '../magicAgentRuntime/featureFlag'
+import { authorizeMagicAgentTrustedRoute } from '../magicAgentRuntime/trustedRouteBinding'
+import { isMagicAgentPlatformDeniedToolName } from '../magicAgentRuntime/toolPolicy'
+
+export type MagicAgentPlatformRouteAuthorizer = (
+  route: AgentRouteLike,
+  invocation?: ServiceInvocationContext
+) => AgentRouteLike
 
 export type MagicAgentPlatformSvcImplDeps = {
   adapter?: MagicAgentPlatformAdapter
   graphRuntime?: MagicAgentGraphRuntime
   packageStore?: MagicAgentPackageStore
   agentKernel?: AgentKernel
+  routeAuthorizer?: MagicAgentPlatformRouteAuthorizer
 }
 
 const resolveDefaultPackageRoot = (): string => {
@@ -160,11 +172,13 @@ const resolvePackageAgentAllowedToolNames = (
   }
 
   const packageToolNameSet = new Set(
-    packageToolNames.map((toolName) => String(toolName || '').trim()).filter(Boolean)
+    packageToolNames
+      .map((toolName) => normalizeMagicPotToolName(toolName))
+      .filter((toolName) => Boolean(toolName) && !isMagicAgentPlatformDeniedToolName(toolName))
   )
-  return requested
-    .map((toolName) => String(toolName || '').trim())
-    .filter((toolName) => Boolean(toolName) && packageToolNameSet.has(toolName))
+  return [
+    ...new Set(requested.map((toolName) => normalizeMagicPotToolName(toolName)).filter(Boolean))
+  ].filter((toolName) => packageToolNameSet.has(toolName))
 }
 
 const normalizePathSeparators = (input: string): string => input.replace(/\\/g, '/')
@@ -245,6 +259,18 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     return this.agentKernelInstance
   }
 
+  private authorizeRoute(
+    route: AgentRouteLike,
+    invocation?: ServiceInvocationContext
+  ): AssistantRoute {
+    const authorizer = this.deps.routeAuthorizer || authorizeMagicAgentTrustedRoute
+    return authorizer(route, invocation) as AssistantRoute
+  }
+
+  private authorizeAgentStudioInvocation(invocation?: ServiceInvocationContext): void {
+    this.authorizeRoute(MAGIC_AGENT_TRUSTED_AGENT_STUDIO_ROUTE, invocation)
+  }
+
   private async listPackageAgents(): Promise<MagicAgentPlatformAgentDefinition[]> {
     const packageStore = this.getPackageStore()
     const listAgents = packageStore.listAgents?.bind(packageStore)
@@ -258,7 +284,11 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     return mergeAgentDefinitions(this.getAdapter().listAgents(), await this.listPackageAgents())
   }
 
-  getStatus = async (_req: MagicAgentPlatformEmptyReq): Promise<MagicAgentPlatformStatusResp> => {
+  getStatus = async (
+    _req: MagicAgentPlatformEmptyReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformStatusResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     const enabled = isMagicAgentPlatformEnabled()
     if (!enabled) {
       return {
@@ -298,19 +328,28 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   }
 
   listAgents = async (
-    _req: MagicAgentPlatformEmptyReq
+    _req: MagicAgentPlatformEmptyReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformListAgentsResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     return { agents: await this.listAllAgents() }
   }
 
   registerAgent = async (
-    req: MagicAgentPlatformRegisterAgentReq
+    req: MagicAgentPlatformRegisterAgentReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformRegisterAgentResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     return { agent: this.getAdapter().registerAgent(req.agent) }
   }
 
-  runAgent = async (req: MagicAgentPlatformRunReq): Promise<MagicAgentPlatformRunResp> => {
-    const agentId = req.agentId?.trim()
+  runAgent = async (
+    req: MagicAgentPlatformRunReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformRunResp> => {
+    const route = this.authorizeRoute(req.route, invocation)
+    const authorizedReq = { ...req, route }
+    const agentId = normalizeMagicPotToolName(authorizedReq.agentId)
     if (agentId) {
       const adapter = this.getAdapter()
       const packageAgents = await this.listPackageAgents()
@@ -318,41 +357,49 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
       const packageAgent = packageAgents.find((agent) => agent.id === agentId)
       if (packageAgent) {
         const allowedToolNames = resolvePackageAgentAllowedToolNames(
-          req.allowedToolNames,
+          authorizedReq.allowedToolNames,
           packageAgent.toolNames
         )
         return adapter.runAgent({
-          ...req,
-          systemPrompt: req.systemPrompt ?? packageAgent.systemPrompt,
-          profileId: req.profileId ?? packageAgent.profileId,
-          maxToolIterations: req.maxToolIterations ?? packageAgent.maxToolIterations,
+          ...authorizedReq,
+          systemPrompt: authorizedReq.systemPrompt ?? packageAgent.systemPrompt,
+          profileId: authorizedReq.profileId ?? packageAgent.profileId,
+          maxToolIterations: authorizedReq.maxToolIterations ?? packageAgent.maxToolIterations,
           ...(allowedToolNames !== undefined ? { allowedToolNames } : {})
         })
       }
     }
-    return this.getAdapter().runAgent(req)
+    return this.getAdapter().runAgent(authorizedReq)
   }
 
   listTools = async (
-    req: MagicAgentPlatformListToolsReq
+    req: MagicAgentPlatformListToolsReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformListToolsResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     return { tools: this.getAdapter().listTools(req) }
   }
 
   callTool = async (
-    req: MagicAgentPlatformToolCallReq
+    req: MagicAgentPlatformToolCallReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformToolCallResp> => {
-    return this.getAdapter().callTool(req)
+    return this.getAdapter().callTool({ ...req, route: this.authorizeRoute(req.route, invocation) })
   }
 
-  listGraphs = async (_req: MagicAgentPlatformEmptyReq) => {
+  listGraphs = async (_req: MagicAgentPlatformEmptyReq, invocation?: ServiceInvocationContext) => {
+    this.authorizeAgentStudioInvocation(invocation)
     return { graphs: this.getGraphRuntime().list() }
   }
 
-  createGraph = async (req: MagicAgentGraphCreateRequest) => {
+  createGraph = async (
+    req: MagicAgentGraphCreateRequest,
+    invocation?: ServiceInvocationContext
+  ) => {
+    const route = this.authorizeRoute(req.route, invocation)
     const kernel = this.getAgentKernel()
-    const session = kernel.registerSession(req.route as AssistantRoute, { source: 'kernel' })
-    const graph = this.getGraphRuntime().create(req)
+    const session = kernel.registerSession(route, { source: 'kernel' })
+    const graph = this.getGraphRuntime().create({ ...req, route })
     kernel.recordEvent({
       runId: `magic-agent-graph:create:${graph.graphId}`,
       sessionKey: session.sessionKey,
@@ -367,14 +414,22 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     return { graph }
   }
 
-  inspectGraph = async (req: MagicAgentPlatformGraphInspectReq) => {
+  inspectGraph = async (
+    req: MagicAgentPlatformGraphInspectReq,
+    invocation?: ServiceInvocationContext
+  ) => {
+    this.authorizeAgentStudioInvocation(invocation)
     const graph = this.getGraphRuntime().inspect(req.graphId)
     return graph ? { graph } : {}
   }
 
-  runGraph = async (req: MagicAgentGraphRunRequest): Promise<MagicAgentGraphRunResult> => {
+  runGraph = async (
+    req: MagicAgentGraphRunRequest,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentGraphRunResult> => {
+    const route = this.authorizeRoute(req.route, invocation)
     const kernel = this.getAgentKernel()
-    const session = kernel.registerSession(req.route as AssistantRoute, { source: 'kernel' })
+    const session = kernel.registerSession(route, { source: 'kernel' })
     const kernelRun = kernel.createMasterRun({
       session,
       goal: req.input,
@@ -395,6 +450,7 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     try {
       const result = await this.getGraphRuntime().run({
         ...req,
+        route,
         metadata: {
           ...(req.metadata || {}),
           kernelRunId: kernelRun.runId,
@@ -492,24 +548,41 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     }
   }
 
-  listGraphRuns = async (req: MagicAgentPlatformGraphRunListReq) => {
-    const session = this.getAgentKernel().registerSession(req.route as AssistantRoute, {
-      source: 'kernel'
-    })
+  listGraphRuns = async (
+    req: MagicAgentPlatformGraphRunListReq,
+    invocation?: ServiceInvocationContext
+  ) => {
+    const session = this.getAgentKernel().registerSession(
+      this.authorizeRoute(req.route, invocation),
+      {
+        source: 'kernel'
+      }
+    )
     return { runs: this.getGraphRuntime().listRuns(session.sessionKey, req.graphId, req.limit) }
   }
 
-  getGraphRun = async (req: MagicAgentPlatformGraphRunGetReq) => {
-    const session = this.getAgentKernel().registerSession(req.route as AssistantRoute, {
-      source: 'kernel'
-    })
+  getGraphRun = async (
+    req: MagicAgentPlatformGraphRunGetReq,
+    invocation?: ServiceInvocationContext
+  ) => {
+    const session = this.getAgentKernel().registerSession(
+      this.authorizeRoute(req.route, invocation),
+      {
+        source: 'kernel'
+      }
+    )
     const run = this.getGraphRuntime().getRun(req.runId, session.sessionKey)
     return run ? { run } : {}
   }
 
-  cancelGraphRun = async (req: MagicAgentPlatformGraphCancelReq) => {
+  cancelGraphRun = async (
+    req: MagicAgentPlatformGraphCancelReq,
+    invocation?: ServiceInvocationContext
+  ) => {
     const kernel = this.getAgentKernel()
-    const session = kernel.registerSession(req.route as AssistantRoute, { source: 'kernel' })
+    const session = kernel.registerSession(this.authorizeRoute(req.route, invocation), {
+      source: 'kernel'
+    })
     const result = this.getGraphRuntime().cancel(req.runId, session.sessionKey, req.reason)
     kernel.recordEvent({
       runId: req.runId,
@@ -530,15 +603,19 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   }
 
   validatePackageManifest = async (
-    req: MagicAgentPlatformValidatePackageManifestReq
+    req: MagicAgentPlatformValidatePackageManifestReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformValidatePackageManifestResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     assertMagicAgentPlatformEnabled()
     return { validation: validateMagicAgentPackageManifest(req.manifest) }
   }
 
   scanPackage = async (
-    req: MagicAgentPlatformPackagePathReq
+    req: MagicAgentPlatformPackagePathReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformPackageScanResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     const packageStore = this.getPackageStore()
     return redactPackageInspection(
       await packageStore.scanLocalDirectory(assertPackagePathApproved(packageStore, req.packageDir))
@@ -546,8 +623,10 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   }
 
   installPackage = async (
-    req: MagicAgentPlatformPackagePathReq
+    req: MagicAgentPlatformPackagePathReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformPackageInstallResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     const packageStore = this.getPackageStore()
     try {
       const result = await packageStore.install(
@@ -561,14 +640,18 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   }
 
   listPackages = async (
-    _req: MagicAgentPlatformEmptyReq
+    _req: MagicAgentPlatformEmptyReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformPackageListResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     return { packages: (await this.getPackageStore().list()).map(redactInstalledPackage) }
   }
 
   inspectPackage = async (
-    req: MagicAgentPlatformPackageInspectReq
+    req: MagicAgentPlatformPackageInspectReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformPackageInspectResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     const packageStore = this.getPackageStore()
     if (isPathLikePackageIdentifier(req.packageIdOrDir)) {
       return redactPackageInspection(
@@ -581,8 +664,10 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   }
 
   uninstallPackage = async (
-    req: MagicAgentPlatformPackageUninstallReq
+    req: MagicAgentPlatformPackageUninstallReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformPackageUninstallResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     return { uninstalled: await this.getPackageStore().uninstall(req.packageId) }
   }
 }

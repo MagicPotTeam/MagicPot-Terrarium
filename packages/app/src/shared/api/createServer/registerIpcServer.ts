@@ -1,9 +1,11 @@
 import { ipcMain, MessagePortMain } from 'electron'
-import { Api } from '@shared/api'
+import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
 import { ServerStreaming, ServerStreamingTransport } from '@shared/api/apiUtils/streaming'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import {
   serializeServiceError,
+  type ServerStreamingServiceHandler,
+  type UnaryServiceHandler,
   withServerStreamingValidation,
   withServiceValidation
 } from '@shared/api/apiUtils/serviceValidation'
@@ -32,13 +34,39 @@ function cleanupPort(port: MessagePortMain, handleResult: Promise<void>): Promis
     })
 }
 
-function registerUnary<REQ, RESP>(name: string, handler: (req: REQ) => Promise<RESP>) {
-  ipcMain.handle(name, async (_event, req: REQ): Promise<RESP> => {
+type IpcServiceEvent = {
+  sender?: { id?: unknown; getURL?: () => string | undefined }
+  senderFrame?: { url?: unknown; parent?: unknown } | null
+}
+
+function createInvocationContext(
+  methodName: string,
+  event: IpcServiceEvent
+): ServiceInvocationContext {
+  const sender = event.sender
+  const senderId = typeof sender?.id === 'number' ? sender.id : undefined
+  const senderUrl = typeof sender?.getURL === 'function' ? sender.getURL() : undefined
+  const frameUrl =
+    typeof event.senderFrame?.url === 'string' && event.senderFrame.url.trim()
+      ? event.senderFrame.url
+      : undefined
+  const isMainFrame = event.senderFrame ? event.senderFrame.parent === null : undefined
+  return {
+    methodName,
+    ...(senderId !== undefined ? { senderId } : {}),
+    ...(senderUrl ? { senderUrl } : {}),
+    ...(frameUrl ? { frameUrl } : {}),
+    ...(isMainFrame !== undefined ? { isMainFrame } : {})
+  }
+}
+
+function registerUnary<REQ, RESP>(name: string, handler: UnaryServiceHandler<REQ, RESP>) {
+  ipcMain.handle(name, async (event, req: REQ): Promise<RESP> => {
     // if (name !== 'svcPhotoshop.getRealtimeGenerationStatus') {
     //   console.log(name, 'req', req)
     // }
     const startTime = Date.now()
-    return handler(req)
+    return handler(req, createInvocationContext(name, event))
       .then((resp) => {
         // if (name !== 'svcPhotoshop.getRealtimeGenerationStatus') {
         //   console.log(name, 'req', req, 'resp', resp, 'time', Date.now() - startTime)
@@ -54,7 +82,7 @@ function registerUnary<REQ, RESP>(name: string, handler: (req: REQ) => Promise<R
 
 function registerServerStreaming<REQ, RESP>(
   name: string,
-  handler: (req: REQ, resp: ServerStreaming<RESP>) => Promise<void>
+  handler: ServerStreamingServiceHandler<REQ, RESP>
 ) {
   ipcMain.on(name, (event, req: REQ) => {
     const port = event.ports[0]
@@ -69,7 +97,7 @@ function registerServerStreaming<REQ, RESP>(
     })
     // MessagePortMain 需要 start 才能正常接收消息
     port.start()
-    return cleanupPort(port, handler(req, resp))
+    return cleanupPort(port, handler(req, resp, createInvocationContext(name, event)))
   })
 }
 

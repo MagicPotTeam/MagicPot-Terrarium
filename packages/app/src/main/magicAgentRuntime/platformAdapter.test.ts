@@ -12,6 +12,7 @@ vi.mock('electron', () => ({
 
 import { AgentKernel } from '../agentKernel'
 import { MagicAgentPlatformAdapter } from './platformAdapter'
+import { MagicAgentToolRegistry } from './toolRegistry'
 import { MagicAgentCreativeToolRegistry } from './tools'
 import type { MagicAgentCreativeToolAdapter } from './tools'
 
@@ -115,7 +116,83 @@ describe('MagicAgentPlatformAdapter', () => {
     )
   })
 
-  it('rejects direct AssistantRuntime tool calls at the platform boundary', async () => {
+  it('filters terminal creative tools from platform listing, direct calls, and kernel surface', async () => {
+    const terminalCall = vi.fn(async (name: string, args: Record<string, unknown>) => ({
+      ok: true,
+      toolName: name,
+      category: 'terminal' as const,
+      status: 'available' as const,
+      data: { args }
+    }))
+    const terminalAdapter: MagicAgentCreativeToolAdapter = {
+      definitions: () => [
+        {
+          name: 'terminal.run',
+          category: 'terminal',
+          description: 'Terminal run.',
+          inputSchema: { type: 'object' },
+          status: 'available',
+          permissionLevel: 'destructive',
+          requiresConfirmation: false,
+          disabledByDefault: false
+        }
+      ],
+      callTool: terminalCall
+    }
+    const assistantRuntime = createAssistantRuntime()
+    assistantRuntime.listTools.mockReturnValue([
+      {
+        name: 'assistant.echo',
+        description: 'Assistant echo.',
+        inputSchema: { type: 'object' }
+      },
+      {
+        name: ' Agent.Terminal.Run ',
+        description: 'Assistant terminal.',
+        inputSchema: { type: 'object' }
+      }
+    ])
+    const agentKernel = new AgentKernel()
+    const toolRegistry = new MagicAgentToolRegistry()
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({
+        adapters: [creativeAdapter, terminalAdapter]
+      }),
+      agentKernel,
+      toolRegistry
+    })
+
+    const listedTools = adapter
+      .listTools()
+      .map((tool) => `${tool.source}:${tool.name.trim().toLowerCase()}`)
+    expect(listedTools).not.toContain('assistantRuntime:agent.terminal.run')
+    expect(listedTools).not.toContain('creative:terminal.run')
+    expect(
+      agentKernel.listCapabilities().map((capability) => capability.capabilityId)
+    ).not.toContain('magicagent.platform.tool.creative.terminal.run')
+    expect(agentKernel.getTool('magicagent.creative.terminal.run')).toBeUndefined()
+    expect(toolRegistry.get('agent.terminal.run')).toBeUndefined()
+    expect(toolRegistry.get('terminal.run')).toBeUndefined()
+
+    await expect(
+      adapter.callTool({
+        source: 'creative',
+        name: ' Terminal.Run ',
+        args: { command: 'pwd' },
+        route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      toolName: 'terminal.run',
+      source: 'creative',
+      status: 'permission-denied'
+    })
+    expect(terminalCall).not.toHaveBeenCalled()
+  })
+
+  it('rejects mixed-case direct AssistantRuntime tool calls at the platform boundary', async () => {
     const assistantRuntime = createAssistantRuntime()
     const adapter = new MagicAgentPlatformAdapter({
       chatService: createChatService(),
@@ -125,7 +202,7 @@ describe('MagicAgentPlatformAdapter', () => {
 
     await expect(
       adapter.callTool({
-        name: 'assistant.echo',
+        name: ' Assistant.Echo ',
         args: { text: 'hi' },
         route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
       })
@@ -216,7 +293,7 @@ describe('MagicAgentPlatformAdapter', () => {
       agentId: 'magicpot.default.chat',
       text: 'try terminal',
       route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' },
-      allowedToolNames: ['assistant.echo', 'agent.terminal.run']
+      allowedToolNames: ['assistant.echo', ' Agent.Terminal.Run ']
     })
 
     expect(assistantRuntime.handleMessage).toHaveBeenCalledWith(
