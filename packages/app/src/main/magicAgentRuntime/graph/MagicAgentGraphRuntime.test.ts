@@ -641,14 +641,61 @@ describe('MagicAgentGraphRuntime', () => {
     })
   })
 
-  it('rejects invalid channel and output wiring', () => {
+  it('rejects invalid node, channel, and output wiring', () => {
     const runtime = new MagicAgentGraphRuntime([])
 
     expect(() =>
       runtime.create({
         route: testRoute,
         graph: {
-          ...createTestGraph(),
+          ...createTestGraph('test.unsupported-kind'),
+          nodes: [
+            {
+              ...createTestGraph('test.unsupported-kind').nodes[0],
+              kind: 'unsupported'
+            } as never
+          ]
+        }
+      })
+    ).toThrow(/unsupported magicagentgraph node kind/i)
+
+    expect(() =>
+      runtime.create({
+        route: testRoute,
+        graph: {
+          ...createTestGraph('test.duplicate-node'),
+          nodes: [
+            ...createTestGraph('test.duplicate-node').nodes,
+            {
+              ...createTestGraph('test.duplicate-node').nodes[0],
+              name: 'Duplicate Planner'
+            }
+          ]
+        }
+      })
+    ).toThrow(/duplicate node/i)
+
+    expect(() =>
+      runtime.create({
+        route: testRoute,
+        graph: {
+          ...createTestGraph('test.duplicate-channel'),
+          channels: [
+            ...createTestGraph('test.duplicate-channel').channels,
+            {
+              ...createTestGraph('test.duplicate-channel').channels[0],
+              label: 'Duplicate channel'
+            }
+          ]
+        }
+      })
+    ).toThrow(/duplicate channel/i)
+
+    expect(() =>
+      runtime.create({
+        route: testRoute,
+        graph: {
+          ...createTestGraph('test.missing-channel-to'),
           channels: [
             {
               channelId: 'missing-wire',
@@ -665,7 +712,7 @@ describe('MagicAgentGraphRuntime', () => {
       runtime.create({
         route: testRoute,
         graph: {
-          ...createTestGraph('test.invalid-output'),
+          ...createTestGraph('test.invalid-output-source'),
           outputs: [
             {
               outputId: 'bad-output',
@@ -677,5 +724,66 @@ describe('MagicAgentGraphRuntime', () => {
         }
       })
     ).toThrow(/missing source node/i)
+
+    expect(() =>
+      runtime.create({
+        route: testRoute,
+        graph: {
+          ...createTestGraph('test.invalid-output-channel'),
+          outputs: [
+            {
+              ...createTestGraph('test.invalid-output-channel').outputs[0],
+              channelId: 'missing-channel'
+            }
+          ]
+        }
+      })
+    ).toThrow(/missing channel/i)
+  })
+
+  it('fails cyclic graph runs before executing nodes', async () => {
+    const runtime = new MagicAgentGraphRuntime([])
+    runtime.create({
+      route: testRoute,
+      graph: {
+        ...createTestGraph('test.cyclic'),
+        entryNodeIds: ['planner'],
+        channels: [
+          {
+            channelId: 'planner-to-writer',
+            from: 'planner',
+            to: 'writer',
+            kind: 'handoff',
+            required: true
+          },
+          {
+            channelId: 'writer-to-planner',
+            from: 'writer',
+            to: 'planner',
+            kind: 'handoff',
+            required: true
+          },
+          {
+            channelId: 'writer-to-final',
+            from: 'writer',
+            to: 'final',
+            kind: 'artifact',
+            required: false
+          }
+        ]
+      }
+    })
+
+    await expect(
+      runtime.run({
+        graphId: 'test.cyclic',
+        input: 'cycle check',
+        route: testRoute,
+        runId: 'run-cyclic'
+      })
+    ).resolves.toMatchObject({
+      status: 'failed',
+      error: expect.stringContaining('contains a cycle')
+    })
   })
 })
