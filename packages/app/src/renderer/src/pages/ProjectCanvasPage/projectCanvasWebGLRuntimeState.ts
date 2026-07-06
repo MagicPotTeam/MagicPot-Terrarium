@@ -13,6 +13,14 @@ export type ProjectCanvasWebGLRuntimeMetrics = {
   spriteCount: number
   residentCandidateImageCount: number
   viewportCulledImageCount: number
+  spriteReconcilePassCount?: number
+  lastSpriteReconcileDurationMs?: number | null
+  lastSpriteReconcileCandidateCount?: number
+  lastSpriteReconcileTargetCount?: number
+  lastSpriteReconcileCreatedCount?: number
+  lastSpriteReconcileReusedCount?: number
+  lastSpriteReconcileRemovedCount?: number
+  lastSpriteReconcileDeferredCount?: number
   usingPreviewImageCount: number
   usingSourceImageCount: number
   thumbnailPreviewImageCount: number
@@ -100,6 +108,14 @@ const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   spriteCount: 0,
   residentCandidateImageCount: 0,
   viewportCulledImageCount: 0,
+  spriteReconcilePassCount: 0,
+  lastSpriteReconcileDurationMs: null,
+  lastSpriteReconcileCandidateCount: 0,
+  lastSpriteReconcileTargetCount: 0,
+  lastSpriteReconcileCreatedCount: 0,
+  lastSpriteReconcileReusedCount: 0,
+  lastSpriteReconcileRemovedCount: 0,
+  lastSpriteReconcileDeferredCount: 0,
   usingPreviewImageCount: 0,
   usingSourceImageCount: 0,
   thumbnailPreviewImageCount: 0,
@@ -141,6 +157,14 @@ const PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS = [
   'spriteCount',
   'residentCandidateImageCount',
   'viewportCulledImageCount',
+  'spriteReconcilePassCount',
+  'lastSpriteReconcileDurationMs',
+  'lastSpriteReconcileCandidateCount',
+  'lastSpriteReconcileTargetCount',
+  'lastSpriteReconcileCreatedCount',
+  'lastSpriteReconcileReusedCount',
+  'lastSpriteReconcileRemovedCount',
+  'lastSpriteReconcileDeferredCount',
   'usingPreviewImageCount',
   'usingSourceImageCount',
   'thumbnailPreviewImageCount',

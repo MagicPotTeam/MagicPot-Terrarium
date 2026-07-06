@@ -60,6 +60,14 @@ type ProjectCanvasWebGLImageLayerMetrics = {
   spriteCount: number
   residentCandidateImageCount: number
   viewportCulledImageCount: number
+  spriteReconcilePassCount?: number
+  lastSpriteReconcileDurationMs?: number | null
+  lastSpriteReconcileCandidateCount?: number
+  lastSpriteReconcileTargetCount?: number
+  lastSpriteReconcileCreatedCount?: number
+  lastSpriteReconcileReusedCount?: number
+  lastSpriteReconcileRemovedCount?: number
+  lastSpriteReconcileDeferredCount?: number
   usingPreviewImageCount: number
   usingSourceImageCount: number
   thumbnailPreviewImageCount: number
@@ -931,6 +939,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         spriteCount: 0,
         residentCandidateImageCount: 0,
         viewportCulledImageCount: 0,
+        spriteReconcilePassCount: 0,
+        lastSpriteReconcileDurationMs: null,
+        lastSpriteReconcileCandidateCount: 0,
+        lastSpriteReconcileTargetCount: 0,
+        lastSpriteReconcileCreatedCount: 0,
+        lastSpriteReconcileReusedCount: 0,
+        lastSpriteReconcileRemovedCount: 0,
+        lastSpriteReconcileDeferredCount: 0,
         usingPreviewImageCount: 0,
         usingSourceImageCount: 0,
         thumbnailPreviewImageCount: 0,
@@ -978,16 +994,29 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
     expect(getLiveSpriteByLabel('image-visible')).not.toBeNull()
     expect(getLiveSpriteByLabel('image-far')).toBeNull()
-    expect(metricsCalls.at(-1)).toEqual(
+    const latestMetrics = metricsCalls.at(-1)
+    expect(latestMetrics).toEqual(
       expect.objectContaining({
         imageCount: 2,
         loadedImageCount: 2,
         failedImageCount: 0,
         residentImageCount: 1,
         residentCandidateImageCount: 1,
-        viewportCulledImageCount: 1
+        viewportCulledImageCount: 1,
+        lastSpriteReconcileCandidateCount: 1,
+        lastSpriteReconcileTargetCount: 1,
+        lastSpriteReconcileDeferredCount: 0
       })
     )
+    expect(latestMetrics?.lastSpriteReconcileCreatedCount).toBeGreaterThanOrEqual(0)
+    expect(latestMetrics?.lastSpriteReconcileReusedCount).toBeGreaterThanOrEqual(0)
+    expect(
+      (latestMetrics?.lastSpriteReconcileCreatedCount ?? 0) +
+        (latestMetrics?.lastSpriteReconcileReusedCount ?? 0)
+    ).toBeGreaterThanOrEqual(1)
+    expect(latestMetrics?.lastSpriteReconcileRemovedCount).toBeGreaterThanOrEqual(0)
+    expect(latestMetrics?.spriteReconcilePassCount).toBeGreaterThanOrEqual(1)
+    expect(latestMetrics?.lastSpriteReconcileDurationMs).toBeGreaterThanOrEqual(0)
   }, 30000)
 
   it('keeps selected images resident even when they sit just outside the viewport budget', async () => {

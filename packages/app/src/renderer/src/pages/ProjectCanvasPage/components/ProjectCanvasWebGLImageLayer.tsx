@@ -934,6 +934,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     spriteCount: 0,
     residentCandidateImageCount: 0,
     viewportCulledImageCount: 0,
+    spriteReconcilePassCount: 0,
+    lastSpriteReconcileDurationMs: null,
+    lastSpriteReconcileCandidateCount: 0,
+    lastSpriteReconcileTargetCount: 0,
+    lastSpriteReconcileCreatedCount: 0,
+    lastSpriteReconcileReusedCount: 0,
+    lastSpriteReconcileRemovedCount: 0,
+    lastSpriteReconcileDeferredCount: 0,
     usingPreviewImageCount: 0,
     usingSourceImageCount: 0,
     thumbnailPreviewImageCount: 0,
@@ -1995,6 +2003,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           spriteCount: 0,
           residentCandidateImageCount: 0,
           viewportCulledImageCount: 0,
+          spriteReconcilePassCount: 0,
+          lastSpriteReconcileDurationMs: null,
+          lastSpriteReconcileCandidateCount: 0,
+          lastSpriteReconcileTargetCount: 0,
+          lastSpriteReconcileCreatedCount: 0,
+          lastSpriteReconcileReusedCount: 0,
+          lastSpriteReconcileRemovedCount: 0,
+          lastSpriteReconcileDeferredCount: 0,
           usingPreviewImageCount: 0,
           usingSourceImageCount: 0,
           thumbnailPreviewImageCount: 0,
@@ -2225,6 +2241,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       return
     }
 
+    const spriteReconcileStartedAt = window.performance.now()
+    const previousSpriteRecords = new Map(spriteRecordsRef.current)
     activeItemCountRef.current = items.length
     if (currentItemsRef.current !== items) {
       currentItemsRef.current = items
@@ -3407,6 +3425,28 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       world.sortChildren()
     }
     renderItemsRef.current = nextRenderItems
+    let createdSpriteCount = 0
+    let reusedSpriteCount = 0
+    let removedSpriteCount = 0
+    spriteRecordsRef.current.forEach((record, itemId) => {
+      const previousRecord = previousSpriteRecords.get(itemId)
+      if (!previousRecord) {
+        createdSpriteCount += 1
+      } else if (previousRecord === record) {
+        reusedSpriteCount += 1
+      } else {
+        createdSpriteCount += 1
+      }
+    })
+    previousSpriteRecords.forEach((previousRecord, itemId) => {
+      if (spriteRecordsRef.current.get(itemId) !== previousRecord) {
+        removedSpriteCount += 1
+      }
+    })
+    const spriteReconcileDurationMs = Math.max(
+      0,
+      window.performance.now() - spriteReconcileStartedAt
+    )
     const imageHealthCounts = collectImageHealthCounts(residentCandidateIds)
     const isSpriteReconcileDeferred = deferredNewSpriteCount > 0
     const shouldHideIntermediateOverviewRender =
@@ -3418,6 +3458,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         residentCandidateImageCount,
         residentCandidateTextureBytes,
         viewportCulledImageCount,
+        spriteReconcilePassCount: (metricsRef.current.spriteReconcilePassCount ?? 0) + 1,
+        lastSpriteReconcileDurationMs: spriteReconcileDurationMs,
+        lastSpriteReconcileCandidateCount: residentCandidateImageCount,
+        lastSpriteReconcileTargetCount: residentTargetIds.size,
+        lastSpriteReconcileCreatedCount: createdSpriteCount,
+        lastSpriteReconcileReusedCount: reusedSpriteCount,
+        lastSpriteReconcileRemovedCount: removedSpriteCount,
+        lastSpriteReconcileDeferredCount: deferredNewSpriteCount,
         ...imageHealthCounts
       },
       'items',

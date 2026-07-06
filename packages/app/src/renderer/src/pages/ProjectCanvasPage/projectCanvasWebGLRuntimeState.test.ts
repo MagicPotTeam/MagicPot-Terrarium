@@ -29,6 +29,14 @@ function createMetrics(
     spriteCount: 1,
     residentCandidateImageCount: 2,
     viewportCulledImageCount: 1,
+    spriteReconcilePassCount: 3,
+    lastSpriteReconcileDurationMs: 1.5,
+    lastSpriteReconcileCandidateCount: 2,
+    lastSpriteReconcileTargetCount: 1,
+    lastSpriteReconcileCreatedCount: 1,
+    lastSpriteReconcileReusedCount: 2,
+    lastSpriteReconcileRemovedCount: 0,
+    lastSpriteReconcileDeferredCount: 0,
     usingPreviewImageCount: 1,
     usingSourceImageCount: 1,
     thumbnailPreviewImageCount: 1,
@@ -78,6 +86,18 @@ describe('projectCanvasWebGLRuntimeState', () => {
     expect(
       areProjectCanvasWebGLRuntimeMetricsEqual(
         createMetrics({ residentCandidateTextureBytes: metrics.residentCandidateTextureBytes + 1 }),
+        metrics
+      )
+    ).toBe(false)
+    expect(
+      areProjectCanvasWebGLRuntimeMetricsEqual(
+        createMetrics({ spriteReconcilePassCount: metrics.spriteReconcilePassCount! + 1 }),
+        metrics
+      )
+    ).toBe(false)
+    expect(
+      areProjectCanvasWebGLRuntimeMetricsEqual(
+        createMetrics({ lastSpriteReconcileDeferredCount: 1 }),
         metrics
       )
     ).toBe(false)
@@ -216,6 +236,10 @@ describe('projectCanvasWebGLRuntimeState', () => {
     expect(parsed?.webgl).toEqual(
       expect.objectContaining({
         renderCount: 4,
+        spriteReconcilePassCount: 3,
+        lastSpriteReconcileDurationMs: 1.5,
+        lastSpriteReconcileTargetCount: 1,
+        lastSpriteReconcileDeferredCount: 0,
         residentLimit: 48,
         residentBudgetState: 'available'
       })
