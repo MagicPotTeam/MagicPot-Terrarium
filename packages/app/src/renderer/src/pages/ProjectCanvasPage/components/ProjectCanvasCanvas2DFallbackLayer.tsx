@@ -4,6 +4,7 @@ import React, {
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
+  useMemo,
   useRef
 } from 'react'
 import type { CanvasImageAsset, CanvasImageItem } from '../types'
@@ -11,6 +12,11 @@ import type { ProjectCanvasImagePreview } from '../projectCanvasRenderBoundary'
 import { getCanvasImageAssetSize } from '../canvasImageAssetUtils'
 import { resolveCanvasImageDisplayCrop } from '../canvasImageDisplayUtils'
 import { getCanvasViewportBounds } from '../canvasViewportPlacementUtils'
+import {
+  buildCanvasSpatialIndex,
+  queryCanvasSpatialIndex,
+  type CanvasSpatialIndex
+} from '../canvasSpatialIndex'
 
 export type ProjectCanvasCanvas2DFallbackLayerHandle = {
   syncItemPreview: (itemId: string, preview: ProjectCanvasImagePreview | null) => void
@@ -79,40 +85,41 @@ function getImageItemBounds(item: CanvasImageItem) {
   const scaledWidth = item.width * (item.scaleX || 1)
   const scaledHeight = item.height * (item.scaleY || 1)
   return {
-    x: Math.min(item.x, item.x + scaledWidth),
-    y: Math.min(item.y, item.y + scaledHeight),
-    width: Math.abs(scaledWidth),
-    height: Math.abs(scaledHeight)
+    minX: Math.min(item.x, item.x + scaledWidth),
+    minY: Math.min(item.y, item.y + scaledHeight),
+    maxX: Math.max(item.x, item.x + scaledWidth),
+    maxY: Math.max(item.y, item.y + scaledHeight)
   }
 }
 
-function intersectsViewport(
-  item: CanvasImageItem,
-  viewport: { x: number; y: number; width: number; height: number },
-  selectedIds: ReadonlySet<string>
-) {
-  if (selectedIds.has(item.id)) {
-    return true
-  }
+function sortCanvasImageItemsByZIndex(left: CanvasImageItem, right: CanvasImageItem) {
+  return left.zIndex - right.zIndex
+}
 
-  const bounds = getImageItemBounds(item)
-  return (
-    bounds.x + bounds.width > viewport.x &&
-    bounds.x < viewport.x + viewport.width &&
-    bounds.y + bounds.height > viewport.y &&
-    bounds.y < viewport.y + viewport.height
-  )
+type Canvas2DFallbackVisibilityIndex = {
+  items: CanvasImageItem[]
+  spatialIndex: CanvasSpatialIndex<CanvasImageItem>
+}
+
+function buildCanvas2DFallbackVisibilityIndex(
+  items: CanvasImageItem[]
+): Canvas2DFallbackVisibilityIndex {
+  const orderedItems = items.slice().sort(sortCanvasImageItemsByZIndex)
+  return {
+    items: orderedItems,
+    spatialIndex: buildCanvasSpatialIndex(orderedItems, getImageItemBounds)
+  }
 }
 
 function resolveVisibleItems({
-  items,
+  visibilityIndex,
   selectedIds,
   stagePos,
   stageScale,
   stageSize,
   overscanPx
 }: {
-  items: CanvasImageItem[]
+  visibilityIndex: Canvas2DFallbackVisibilityIndex
   selectedIds: ReadonlySet<string>
   stagePos: { x: number; y: number }
   stageScale: number
@@ -120,21 +127,24 @@ function resolveVisibleItems({
   overscanPx: number
 }) {
   if (!stageSize || stageSize.width <= 0 || stageSize.height <= 0) {
-    return items.slice().sort((left, right) => left.zIndex - right.zIndex)
+    return visibilityIndex.items
   }
 
   const safeScale = Math.max(Math.abs(stageScale), 0.0001)
   const viewport = getCanvasViewportBounds(stagePos, stageSize, stageScale || safeScale)
-  const normalizedViewport = {
-    x: Math.min(viewport.x, viewport.x + viewport.width) - overscanPx / safeScale,
-    y: Math.min(viewport.y, viewport.y + viewport.height) - overscanPx / safeScale,
-    width: Math.abs(viewport.width) + (overscanPx * 2) / safeScale,
-    height: Math.abs(viewport.height) + (overscanPx * 2) / safeScale
+  const viewportBounds = {
+    minX: Math.min(viewport.x, viewport.x + viewport.width) - overscanPx / safeScale,
+    minY: Math.min(viewport.y, viewport.y + viewport.height) - overscanPx / safeScale,
+    maxX: Math.max(viewport.x, viewport.x + viewport.width) + overscanPx / safeScale,
+    maxY: Math.max(viewport.y, viewport.y + viewport.height) + overscanPx / safeScale
   }
+  const visibleItemIds = new Set<string>()
+  queryCanvasSpatialIndex(visibilityIndex.spatialIndex, viewportBounds).forEach((item) => {
+    visibleItemIds.add(item.id)
+  })
+  selectedIds.forEach((itemId) => visibleItemIds.add(itemId))
 
-  return items
-    .filter((item) => intersectsViewport(item, normalizedViewport, selectedIds))
-    .sort((left, right) => left.zIndex - right.zIndex)
+  return visibilityIndex.items.filter((item) => visibleItemIds.has(item.id))
 }
 
 function drawCanvasImageItem({
@@ -225,8 +235,10 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
   const resolvedIdsRef = useRef(new Set<string>())
   const viewportRef = useRef({ pos: stagePos, scale: stageScale })
   const viewportInteractingRef = useRef(isViewportInteracting)
+  const visibilityIndex = useMemo(() => buildCanvas2DFallbackVisibilityIndex(items), [items])
   const propsRef = useRef({
     items,
+    visibilityIndex,
     selectedIds,
     stagePos,
     stageScale,
@@ -331,7 +343,7 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
     }
 
     const {
-      items: currentItems,
+      visibilityIndex: currentVisibilityIndex,
       selectedIds: currentSelectedIds,
       stageSize: currentStageSize,
       maxDevicePixelRatio: currentMaxDpr,
@@ -376,7 +388,7 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
 
     const nextResolvedIds = new Set<string>()
     const visibleItems = resolveVisibleItems({
-      items: currentItems,
+      visibilityIndex: currentVisibilityIndex,
       selectedIds: currentSelectedIds,
       stagePos: pos,
       stageScale: scale,
@@ -434,6 +446,7 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
   useLayoutEffect(() => {
     propsRef.current = {
       items,
+      visibilityIndex,
       selectedIds,
       stagePos,
       stageScale,
@@ -453,6 +466,7 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
     scheduleDraw()
   }, [
     items,
+    visibilityIndex,
     selectedIds,
     stagePos,
     stageScale,

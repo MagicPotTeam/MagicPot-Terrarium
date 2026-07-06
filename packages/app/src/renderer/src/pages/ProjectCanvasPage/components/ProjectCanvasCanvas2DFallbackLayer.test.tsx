@@ -154,6 +154,34 @@ describe('ProjectCanvasCanvas2DFallbackLayer', () => {
     )
   })
 
+  it('uses the spatial visibility index while preserving zIndex draw order', async () => {
+    const offscreen = createItem('offscreen', { zIndex: 0, x: 2000, y: 2000 })
+    const front = createItem('front', { zIndex: 3, x: 32, y: 24 })
+    const back = createItem('back', { zIndex: 1, x: 16, y: 12 })
+    const selectedOffscreen = createItem('selected-offscreen', {
+      zIndex: 2,
+      x: 2600,
+      y: 2600
+    })
+
+    render(
+      <ProjectCanvasCanvas2DFallbackLayer
+        items={[offscreen, front, selectedOffscreen, back]}
+        selectedIds={new Set(['selected-offscreen'])}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 320, height: 240 }}
+        overscanPx={0}
+      />
+    )
+
+    await waitFor(() => expect(context.drawImage).toHaveBeenCalledTimes(3))
+    expect(context.translate).not.toHaveBeenCalledWith(2000, 2000)
+    expect(context.translate).toHaveBeenNthCalledWith(2, 16, 12)
+    expect(context.translate).toHaveBeenNthCalledWith(3, 2600, 2600)
+    expect(context.translate).toHaveBeenNthCalledWith(4, 32, 24)
+  })
+
   it('redraws imperative item previews and viewport changes', async () => {
     const ref = React.createRef<ProjectCanvasCanvas2DFallbackLayerHandle>()
     const item = createItem('preview')
