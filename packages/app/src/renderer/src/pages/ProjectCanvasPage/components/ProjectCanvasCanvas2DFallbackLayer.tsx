@@ -98,6 +98,8 @@ function sortCanvasImageItemsByZIndex(left: CanvasImageItem, right: CanvasImageI
 
 type Canvas2DFallbackVisibilityIndex = {
   items: CanvasImageItem[]
+  itemById: Map<string, CanvasImageItem>
+  orderById: Map<string, number>
   spatialIndex: CanvasSpatialIndex<CanvasImageItem>
 }
 
@@ -105,8 +107,16 @@ function buildCanvas2DFallbackVisibilityIndex(
   items: CanvasImageItem[]
 ): Canvas2DFallbackVisibilityIndex {
   const orderedItems = items.slice().sort(sortCanvasImageItemsByZIndex)
+  const itemById = new Map<string, CanvasImageItem>()
+  const orderById = new Map<string, number>()
+  orderedItems.forEach((item, index) => {
+    itemById.set(item.id, item)
+    orderById.set(item.id, index)
+  })
   return {
     items: orderedItems,
+    itemById,
+    orderById,
     spatialIndex: buildCanvasSpatialIndex(orderedItems, getImageItemBounds)
   }
 }
@@ -138,13 +148,33 @@ function resolveVisibleItems({
     maxX: Math.max(viewport.x, viewport.x + viewport.width) + overscanPx / safeScale,
     maxY: Math.max(viewport.y, viewport.y + viewport.height) + overscanPx / safeScale
   }
-  const visibleItemIds = new Set<string>()
-  queryCanvasSpatialIndex(visibilityIndex.spatialIndex, viewportBounds).forEach((item) => {
-    visibleItemIds.add(item.id)
-  })
-  selectedIds.forEach((itemId) => visibleItemIds.add(itemId))
+  const visibleItems = queryCanvasSpatialIndex(visibilityIndex.spatialIndex, viewportBounds)
+  if (selectedIds.size === 0) {
+    return visibleItems
+  }
 
-  return visibilityIndex.items.filter((item) => visibleItemIds.has(item.id))
+  const visibleItemIds = new Set(visibleItems.map((item) => item.id))
+  const mergedItems = visibleItems.slice()
+  selectedIds.forEach((itemId) => {
+    if (visibleItemIds.has(itemId)) {
+      return
+    }
+    const item = visibilityIndex.itemById.get(itemId)
+    if (!item) {
+      return
+    }
+    visibleItemIds.add(itemId)
+    mergedItems.push(item)
+  })
+
+  if (mergedItems.length === visibleItems.length) {
+    return visibleItems
+  }
+
+  return mergedItems.sort(
+    (left, right) =>
+      (visibilityIndex.orderById.get(left.id) ?? 0) - (visibilityIndex.orderById.get(right.id) ?? 0)
+  )
 }
 
 function drawCanvasImageItem({

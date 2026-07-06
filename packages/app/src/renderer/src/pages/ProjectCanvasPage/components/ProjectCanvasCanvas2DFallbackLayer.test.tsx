@@ -167,7 +167,7 @@ describe('ProjectCanvasCanvas2DFallbackLayer', () => {
     render(
       <ProjectCanvasCanvas2DFallbackLayer
         items={[offscreen, front, selectedOffscreen, back]}
-        selectedIds={new Set(['selected-offscreen'])}
+        selectedIds={new Set(['selected-offscreen', 'front', 'missing-selected'])}
         stagePos={{ x: 0, y: 0 }}
         stageScale={1}
         stageSize={{ width: 320, height: 240 }}
@@ -180,6 +180,40 @@ describe('ProjectCanvasCanvas2DFallbackLayer', () => {
     expect(context.translate).toHaveBeenNthCalledWith(2, 16, 12)
     expect(context.translate).toHaveBeenNthCalledWith(3, 2600, 2600)
     expect(context.translate).toHaveBeenNthCalledWith(4, 32, 24)
+    const frontTranslateCalls = context.translate.mock.calls.filter(
+      (call) => call[0] === 32 && call[1] === 24
+    )
+    expect(frontTranslateCalls).toHaveLength(1)
+  })
+
+  it('draws only spatially visible fallback images from a large offscreen set', async () => {
+    const offscreenItems = Array.from({ length: 120 }, (_, index) =>
+      createItem(`offscreen-${index}`, {
+        zIndex: index,
+        x: 10_000 + index * 120,
+        y: 10_000 + index * 120
+      })
+    )
+    const back = createItem('visible-back', { zIndex: 1000, x: 12, y: 16 })
+    const front = createItem('visible-front', { zIndex: 1001, x: 72, y: 48 })
+
+    render(
+      <ProjectCanvasCanvas2DFallbackLayer
+        items={[...offscreenItems, front, back]}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 320, height: 240 }}
+        overscanPx={0}
+      />
+    )
+
+    await waitFor(() => expect(context.drawImage).toHaveBeenCalledTimes(2))
+    expect(context.translate).toHaveBeenNthCalledWith(2, 12, 16)
+    expect(context.translate).toHaveBeenNthCalledWith(3, 72, 48)
+    const drewOffscreenItem = context.translate.mock.calls.some(
+      (call) => call[0] >= 10_000 && call[1] >= 10_000
+    )
+    expect(drewOffscreenItem).toBe(false)
   })
 
   it('redraws imperative item previews and viewport changes', async () => {
