@@ -1381,10 +1381,19 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(createdSprites[0].parent?.scale.y).toBe(1.25)
     expect(app.render.mock.calls.length).toBeGreaterThan(initialRenderCount)
 
+    const rendersAfterFirstSync = app.render.mock.calls.length
+
+    act(() => {
+      ref.current?.syncViewport({ x: 96, y: 72 }, 1.25)
+    })
+
+    expect(app.render.mock.calls.length).toBe(rendersAfterFirstSync)
+
     act(() => {
       ref.current?.syncViewport({ x: 96, y: 72 }, 8)
     })
 
+    expect(app.render.mock.calls.length).toBeGreaterThan(rendersAfterFirstSync)
     expect((createdSprites[0].texture.source as { scaleMode?: string }).scaleMode).toBe('linear')
   }, 15000)
 

@@ -184,6 +184,24 @@ describe('projectCanvasRuntime', () => {
     ).toEqual(['overscan', 'visible'])
   })
 
+  it('can return visibility-only viewport matches without top-first sorting', () => {
+    const runtime = createProjectCanvasRuntime()
+    runtime.setViewport({ x: 0, y: 0, scale: 1 })
+    runtime.setItems([
+      createCanvasItem({ id: 'bottom', x: 20, y: 20, width: 20, height: 20, zIndex: 1 }),
+      createCanvasItem({ id: 'top', x: 22, y: 22, width: 20, height: 20, zIndex: 9 })
+    ])
+
+    expect(
+      runtime
+        .getVisibleItems({ stageSize: { width: 100, height: 100 }, preserveOrder: false })
+        .map((item) => item.id)
+    ).toEqual(['bottom', 'top'])
+    expect(
+      runtime.getVisibleItems({ stageSize: { width: 100, height: 100 } }).map((item) => item.id)
+    ).toEqual(['top', 'bottom'])
+  })
+
   it('keeps 3000-item boards spatially indexed while viewport queries stay local', () => {
     const runtime = createProjectCanvasRuntime()
     const items = Array.from({ length: 3000 }, (_, index) => {

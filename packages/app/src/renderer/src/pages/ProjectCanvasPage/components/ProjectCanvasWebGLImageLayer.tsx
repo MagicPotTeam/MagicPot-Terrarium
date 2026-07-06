@@ -158,6 +158,38 @@ const PROJECT_CANVAS_IMAGE_BITMAP_PREMULTIPLY_ALPHA = 'none' as const
 
 export type ProjectCanvasWebGLImageLayerMetrics = ProjectCanvasWebGLRuntimeMetrics
 
+type ProjectCanvasImageHealthMetrics = Pick<
+  ProjectCanvasWebGLImageLayerMetrics,
+  | 'usingPreviewImageCount'
+  | 'usingSourceImageCount'
+  | 'thumbnailPreviewImageCount'
+  | 'placeholderImageCount'
+  | 'sourceUpgradeSuppressedImageCount'
+  | 'sourceUpgradeablePreviewImageCount'
+  | 'sourceUpgradePendingImageCount'
+  | 'sourceUpgradeFailedImageCount'
+  | 'missingImageCount'
+>
+
+const PROJECT_CANVAS_IMAGE_HEALTH_METRIC_KEYS: readonly (keyof ProjectCanvasImageHealthMetrics)[] =
+  [
+    'usingPreviewImageCount',
+    'usingSourceImageCount',
+    'thumbnailPreviewImageCount',
+    'placeholderImageCount',
+    'sourceUpgradeSuppressedImageCount',
+    'sourceUpgradeablePreviewImageCount',
+    'sourceUpgradePendingImageCount',
+    'sourceUpgradeFailedImageCount',
+    'missingImageCount'
+  ]
+
+function hasCompleteProjectCanvasImageHealthMetrics(
+  patch: Partial<ProjectCanvasWebGLImageLayerMetrics>
+): patch is Partial<ProjectCanvasWebGLImageLayerMetrics> & ProjectCanvasImageHealthMetrics {
+  return PROJECT_CANVAS_IMAGE_HEALTH_METRIC_KEYS.every((key) => typeof patch[key] === 'number')
+}
+
 export type ProjectCanvasWebGLImageLayerHandle = {
   syncItemPreview: (itemId: string, preview: ProjectCanvasImagePreview | null) => void
   syncViewport: (pos: { x: number; y: number }, scale: number) => void
@@ -874,6 +906,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const selectedIdsRef = useRef(selectedIds)
   const residentCandidateIdsRef = useRef<ReadonlySet<string> | null>(null)
   const rendererSizeRef = useRef<{ width: number; height: number } | null>(null)
+  const lastAppliedViewportRef = useRef<{ x: number; y: number; scale: number } | null>(null)
   const runtimeFailureHandlerRef = useRef<((error: unknown) => void) | null>(null)
   const viewportReconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sourceUpgradeIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1418,9 +1451,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       const resolvedIds = collectResolvedImageIds()
       const failedIds = new Set(failedLoadSrcByIdRef.current.keys())
       const residentTextureBytes = getResidentTextureBytes()
-      const imageHealthCounts = collectImageHealthCounts(
-        residentCandidateIdsRef.current ?? undefined
-      )
+      const imageHealthCounts = hasCompleteProjectCanvasImageHealthMetrics(patch)
+        ? null
+        : collectImageHealthCounts(residentCandidateIdsRef.current ?? undefined)
       if (options.emitIdSets !== false) {
         onResidentIdsChange?.(residentIds)
         onResolvedIdsChange?.(resolvedIds)
@@ -1436,7 +1469,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           pendingLoadsRef.current.size + pendingThumbnailLoadSrcByIdRef.current.size,
         spriteCount: residentIds.size,
         residentTextureBudgetBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-        ...imageHealthCounts,
+        ...(imageHealthCounts ?? {}),
         lastUpdateReason,
         ...patch
       }
@@ -1773,14 +1806,26 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       stagePosRef.current = pos
       stageScaleRef.current = scale
 
-      const world = worldRef.current
-      if (!world || !isInitialized) {
-        return
+      const lastAppliedViewport = lastAppliedViewportRef.current
+      if (
+        lastAppliedViewport &&
+        lastAppliedViewport.x === pos.x &&
+        lastAppliedViewport.y === pos.y &&
+        lastAppliedViewport.scale === scale
+      ) {
+        return false
       }
 
+      const world = worldRef.current
+      if (!world || !isInitialized) {
+        return false
+      }
+
+      lastAppliedViewportRef.current = { x: pos.x, y: pos.y, scale }
       world.position.set(pos.x, pos.y)
       world.scale.set(scale)
       renderImmediateOrSchedule()
+      return true
     },
     [isInitialized, renderImmediateOrSchedule]
   )
@@ -1933,6 +1978,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       spriteUsageCounterRef.current = 0
       activeItemCountRef.current = 0
       rendererSizeRef.current = null
+      lastAppliedViewportRef.current = null
       previewState.clear()
       renderItems.clear()
       reportMetrics(
@@ -2072,8 +2118,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     ref,
     () => ({
       syncViewport(pos, scale) {
-        applyViewportTransform(pos, scale)
-        scheduleViewportReconcile()
+        if (applyViewportTransform(pos, scale)) {
+          scheduleViewportReconcile()
+        }
       },
       setViewportInteracting(active) {
         setViewportInteractingState(active)
@@ -3093,6 +3140,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       : Number.POSITIVE_INFINITY
     let deferredNewSpriteCount = 0
     let residentCandidateTextureBytes = 0
+    let worldOrderDirty = false
     const nextRenderItems = new Map<string, ProjectCanvasRenderableImage>()
 
     for (const [itemId, record] of spriteRecordsRef.current) {
@@ -3105,6 +3153,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       destroySpriteRecord(itemId, { retainPreview: true })
+      worldOrderDirty = true
       if (!nextIds.has(itemId)) {
         deleteCachedImageRecord(imageCacheRef.current, itemId, 'removed')
         deleteCachedImageRecord(thumbnailCacheRef.current, itemId, 'removed')
@@ -3138,6 +3187,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           shouldSuppressIntermediateOverviewRender(safeScale, isPerformanceThrottledRef.current)
         ) {
           destroySpriteRecord(item.id, { retainPreview: false })
+          worldOrderDirty = true
           renderItemsRef.current.delete(item.id)
         }
         return
@@ -3197,7 +3247,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       if (existingRecord && existingRecord.textureKey === textureKey) {
         nextRenderItems.set(item.id, renderItem)
-        existingRecord.sprite.zIndex = item.zIndex
+        if (existingRecord.sprite.zIndex !== item.zIndex) {
+          existingRecord.sprite.zIndex = item.zIndex
+          worldOrderDirty = true
+        }
         if (existingRecord.transformKey !== transformKey) {
           applySpriteTransform(
             existingRecord.sprite,
@@ -3247,6 +3300,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         if (!evictedItemId) {
           break
         }
+        worldOrderDirty = true
       }
 
       const residentTextureBytes = currentResidentTextureBytes()
@@ -3321,6 +3375,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         }
         markSpriteRecordUsed(spriteRecordsRef.current.get(item.id)!)
         world.addChild(sprite)
+        worldOrderDirty = true
         nextRenderItems.set(item.id, renderItem)
       } catch (error) {
         if (item.image && image !== item.image) {
@@ -3348,7 +3403,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     })
 
     pumpSourceUpgradeQueue()
-    world.sortChildren()
+    if (worldOrderDirty && world.children.length > 1) {
+      world.sortChildren()
+    }
     renderItemsRef.current = nextRenderItems
     const imageHealthCounts = collectImageHealthCounts(residentCandidateIds)
     const isSpriteReconcileDeferred = deferredNewSpriteCount > 0

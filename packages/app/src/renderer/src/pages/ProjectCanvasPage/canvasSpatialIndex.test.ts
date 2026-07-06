@@ -5,6 +5,7 @@ import {
   CANVAS_SPATIAL_INDEX_MAX_QUERY_CELLS,
   buildCanvasSpatialIndex,
   queryCanvasSpatialIndex,
+  queryCanvasSpatialIndexUnordered,
   type CanvasSpatialBounds
 } from './canvasSpatialIndex'
 import {
@@ -198,5 +199,24 @@ describe('canvasSpatialIndex', () => {
     })
 
     expect(matches.map((item) => item.id)).toEqual(['inside'])
+  })
+
+  it('can skip stable ordering work for visibility-only unordered queries', () => {
+    const items = [
+      createItem('left', { minX: 0, minY: 0, maxX: 220, maxY: 220 }),
+      createItem('right', { minX: 128, minY: 0, maxX: 300, maxY: 220 }),
+      createItem('far', { minX: 800, minY: 800, maxX: 900, maxY: 900 })
+    ]
+    const index = buildCanvasSpatialIndex(items, (item) => item.bounds, 64)
+
+    const matches = queryCanvasSpatialIndexUnordered(index, {
+      minX: 160,
+      minY: 40,
+      maxX: 180,
+      maxY: 80
+    })
+
+    expect(new Set(matches.map((item) => item.id))).toEqual(new Set(['left', 'right']))
+    expect(matches).toHaveLength(2)
   })
 })

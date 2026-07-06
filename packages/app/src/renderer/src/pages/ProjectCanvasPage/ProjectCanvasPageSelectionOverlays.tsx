@@ -19,7 +19,11 @@ import { useTranslation } from 'react-i18next'
 import CanvasMultiSelectionOverlay from './components/CanvasMultiSelectionOverlay'
 import { useLiveSelectionOverlayGroups } from './canvasLiveOverlayBounds'
 import { getCanvasFileExportOptions, type CanvasFileExportFormat } from './canvasFileExportUtils'
-import { findCanvasItemOverlayElement } from './canvasDomOverlayLookup'
+import {
+  createCanvasDomOverlayLookupCache,
+  findCanvasItemOverlayElement,
+  type CanvasDomOverlayLookupCache
+} from './canvasDomOverlayLookup'
 import { resolveSelectionActionToolbarPosition } from './canvasSelectionLayoutUtils'
 import {
   getCanvasItemBounds,
@@ -72,6 +76,34 @@ type ClientRectLike = {
   y: number
   width: number
   height: number
+}
+
+type SelectionOverlayMeasurementCache = {
+  containerRect: DOMRect | null
+  elementRects: Map<HTMLElement, DOMRect>
+  lookupCache: CanvasDomOverlayLookupCache
+}
+
+function createSelectionOverlayMeasurementCache(): SelectionOverlayMeasurementCache {
+  return {
+    containerRect: null,
+    elementRects: new Map(),
+    lookupCache: createCanvasDomOverlayLookupCache()
+  }
+}
+
+function getCachedSelectionOverlayElementRect(
+  cache: SelectionOverlayMeasurementCache,
+  element: HTMLElement
+) {
+  const cachedRect = cache.elementRects.get(element)
+  if (cachedRect) {
+    return cachedRect
+  }
+
+  const rect = element.getBoundingClientRect()
+  cache.elementRects.set(element, rect)
+  return rect
 }
 
 type StageNodeLike = {
@@ -445,15 +477,26 @@ export default function ProjectCanvasPageSelectionOverlays({
     [getLiveStageSnapshot]
   )
   const getOverlayClientRect = React.useCallback(
-    (item: CanvasItem): ClientRectLike | null => {
+    (
+      item: CanvasItem,
+      measurementCache?: SelectionOverlayMeasurementCache
+    ): ClientRectLike | null => {
       const container = portalHost ?? canvasContainerRef.current
       if (!container) return null
 
-      const element = findCanvasItemOverlayElement(container, item)
+      const element = findCanvasItemOverlayElement(container, item, measurementCache?.lookupCache)
       if (!element) return null
 
-      const containerRect = container.getBoundingClientRect()
-      const elementRect = element.getBoundingClientRect()
+      let containerRect = measurementCache?.containerRect ?? null
+      if (!containerRect) {
+        containerRect = container.getBoundingClientRect()
+        if (measurementCache) {
+          measurementCache.containerRect = containerRect
+        }
+      }
+      const elementRect = measurementCache
+        ? getCachedSelectionOverlayElementRect(measurementCache, element)
+        : element.getBoundingClientRect()
       return {
         x: elementRect.left - containerRect.left,
         y: elementRect.top - containerRect.top,
@@ -527,11 +570,20 @@ export default function ProjectCanvasPageSelectionOverlays({
     const { pos, scale } = getLiveStageSnapshot()
     const viewportWidth = container?.clientWidth ?? stageSize.width
     const viewportHeight = container?.clientHeight ?? stageSize.height
+    const groupChipElementsById = new Map<string, HTMLElement>()
+    if (container && liveSelectionOverlayGroups.length > 0) {
+      for (const chipElement of container.querySelectorAll<HTMLElement>(
+        '[data-canvas-group-chip-id]'
+      )) {
+        const groupChipId = chipElement.dataset.canvasGroupChipId
+        if (groupChipId != null && !groupChipElementsById.has(groupChipId)) {
+          groupChipElementsById.set(groupChipId, chipElement)
+        }
+      }
+    }
 
     return liveSelectionOverlayGroups.map((group) => {
-      const chipElement = container?.querySelector(
-        `[data-canvas-group-chip-id="${group.id}"]`
-      ) as HTMLElement | null
+      const chipElement = groupChipElementsById.get(group.id) ?? null
 
       if (chipElement && containerRect) {
         const chipRect = chipElement.getBoundingClientRect()
@@ -579,8 +631,12 @@ export default function ProjectCanvasPageSelectionOverlays({
   ])
 
   const resolveItemClientRect = React.useCallback(
-    (item: CanvasItem, stage: StageLike | null | undefined): ClientRectLike => {
-      const overlayRect = getOverlayClientRect(item)
+    (
+      item: CanvasItem,
+      stage: StageLike | null | undefined,
+      measurementCache?: SelectionOverlayMeasurementCache
+    ): ClientRectLike => {
+      const overlayRect = getOverlayClientRect(item, measurementCache)
       if (hasRenderableClientRect(overlayRect)) {
         return overlayRect
       }
@@ -608,13 +664,14 @@ export default function ProjectCanvasPageSelectionOverlays({
       const excludedItemIds = options.excludedItemIds ?? new Set<string>()
       const excludedGroupChipIds = options.excludedGroupChipIds ?? new Set<string>()
       const protectedItemTypes = options.protectedItemTypes ?? null
+      const measurementCache = createSelectionOverlayMeasurementCache()
       const itemRects = items
         .filter(
           (item) =>
             !excludedItemIds.has(item.id) &&
             (!protectedItemTypes || protectedItemTypes.has(item.type))
         )
-        .map((item) => resolveItemClientRect(item, stage))
+        .map((item) => resolveItemClientRect(item, stage, measurementCache))
         .filter(hasRenderableClientRect)
 
       const groupChipRects =
@@ -682,7 +739,8 @@ export default function ProjectCanvasPageSelectionOverlays({
       }
 
       const stage = stageRef.current?.getStage?.()
-      const clientRect = resolveItemClientRect(item, stage)
+      const measurementCache = createSelectionOverlayMeasurementCache()
+      const clientRect = resolveItemClientRect(item, stage, measurementCache)
       if (!hasRenderableClientRect(clientRect)) {
         return
       }
@@ -1074,10 +1132,18 @@ export default function ProjectCanvasPageSelectionOverlays({
 
     const stageTransform = getLiveStageSnapshot()
 
+    const groupChipElementsById = new Map<string, HTMLElement>()
+    for (const chipElement of container.querySelectorAll<HTMLElement>(
+      '[data-canvas-group-chip-id]'
+    )) {
+      const groupChipId = chipElement.dataset.canvasGroupChipId
+      if (groupChipId != null && !groupChipElementsById.has(groupChipId)) {
+        groupChipElementsById.set(groupChipId, chipElement)
+      }
+    }
+
     liveSelectionOverlayGroups.forEach((group) => {
-      const chipElement = container.querySelector(
-        `[data-canvas-group-chip-id="${group.id}"]`
-      ) as HTMLElement | null
+      const chipElement = groupChipElementsById.get(group.id)
 
       if (!chipElement) {
         return

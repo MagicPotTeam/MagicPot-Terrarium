@@ -132,6 +132,98 @@ describe('useLiveSelectionOverlayGroups', () => {
     })
   })
 
+  it('reuses overlay lookup and element rect measurements while resolving group bounds', () => {
+    const canvasContainer = document.createElement('div')
+    const firstOverlayElement = document.createElement('div')
+    firstOverlayElement.setAttribute('data-canvas-item-id', 'image-1')
+    firstOverlayElement.setAttribute('data-canvas-overlay', 'image-interaction')
+    const secondOverlayElement = document.createElement('div')
+    secondOverlayElement.setAttribute('data-canvas-item-id', 'image-2')
+    secondOverlayElement.setAttribute('data-canvas-overlay', 'image-interaction')
+    canvasContainer.append(firstOverlayElement, secondOverlayElement)
+    document.body.appendChild(canvasContainer)
+
+    Object.defineProperty(canvasContainer, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        left: 0,
+        top: 0,
+        width: 800,
+        height: 600,
+        right: 800,
+        bottom: 600
+      })
+    })
+    const firstRect = vi.fn(() => ({
+      left: 10,
+      top: 20,
+      width: 100,
+      height: 80,
+      right: 110,
+      bottom: 100
+    }))
+    const secondRect = vi.fn(() => ({
+      left: 110,
+      top: 120,
+      width: 100,
+      height: 80,
+      right: 210,
+      bottom: 200
+    }))
+    Object.defineProperty(firstOverlayElement, 'getBoundingClientRect', {
+      configurable: true,
+      value: firstRect
+    })
+    Object.defineProperty(secondOverlayElement, 'getBoundingClientRect', {
+      configurable: true,
+      value: secondRect
+    })
+    const querySelectorAll = vi.spyOn(canvasContainer, 'querySelectorAll')
+
+    const firstItem = createImageItem('image-1')
+    const secondItem = createImageItem('image-2')
+    const { result } = renderHook(() =>
+      useLiveSelectionOverlayGroups({
+        canvasContainerRef: { current: canvasContainer },
+        selectionOverlayGroups: [
+          {
+            id: 'group-1',
+            name: 'Group 1',
+            itemIds: [firstItem.id, secondItem.id, firstItem.id],
+            validItems: [firstItem, secondItem, firstItem],
+            validCount: 3,
+            totalCount: 3,
+            createdAt: '2026-04-22T00:00:00.000Z',
+            bounds: {
+              x: firstItem.x,
+              y: firstItem.y,
+              width: firstItem.width,
+              height: firstItem.height
+            },
+            selectedMemberIds: [firstItem.id, secondItem.id]
+          }
+        ],
+        stagePos: { x: 0, y: 0 },
+        stageRef: { current: null },
+        stageScale: 1
+      })
+    )
+
+    expect(result.current[0].bounds).toEqual({
+      x: 10,
+      y: 20,
+      width: 200,
+      height: 180
+    })
+    expect(firstRect).toHaveBeenCalledTimes(1)
+    expect(secondRect).toHaveBeenCalledTimes(1)
+    expect(
+      querySelectorAll.mock.calls.filter(
+        ([selector]) => selector === '[data-canvas-overlay="image-interaction"]'
+      )
+    ).toHaveLength(1)
+  })
+
   it('prefers the matching image interaction overlay when duplicate item ids exist in the container', () => {
     const canvasContainer = document.createElement('div')
     const staleElement = document.createElement('div')

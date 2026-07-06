@@ -1,7 +1,11 @@
 import React from 'react'
 
 import type { CanvasExportBounds } from './groupPlaybackUtils'
-import { findCanvasItemOverlayElement } from './canvasDomOverlayLookup'
+import {
+  createCanvasDomOverlayLookupCache,
+  findCanvasItemOverlayElement,
+  type CanvasDomOverlayLookupCache
+} from './canvasDomOverlayLookup'
 import { getCanvasItemBounds } from './projectCanvasPageShared'
 import type { CanvasItem } from './types'
 
@@ -47,15 +51,17 @@ export function dispatchCanvasLiveVisualBoundsChange(itemIds?: string[]) {
 function getOverlayStageRect(
   canvasContainer: HTMLDivElement | null,
   item: CanvasItem,
-  getContainerRect?: () => CanvasViewportRect | null
+  getContainerRect?: () => CanvasViewportRect | null,
+  lookupCache?: CanvasDomOverlayLookupCache,
+  getElementRect?: (element: HTMLElement) => DOMRect
 ): CanvasExportBounds | null {
   if (!canvasContainer) return null
 
-  const element = findCanvasItemOverlayElement(canvasContainer, item)
+  const element = findCanvasItemOverlayElement(canvasContainer, item, lookupCache)
   if (!element) return null
 
   const containerRect = getContainerRect?.() ?? canvasContainer.getBoundingClientRect()
-  const elementRect = element.getBoundingClientRect()
+  const elementRect = getElementRect?.(element) ?? element.getBoundingClientRect()
 
   return {
     x: elementRect.left - containerRect.left,
@@ -84,6 +90,8 @@ function getCanvasItemVisualBounds(
   options: {
     canvasContainer: HTMLDivElement | null
     getOverlayContainerRect?: () => CanvasViewportRect | null
+    getOverlayElementRect?: (element: HTMLElement) => DOMRect
+    overlayLookupCache?: CanvasDomOverlayLookupCache
     stagePos: { x: number; y: number }
     stageRef: React.RefObject<StageRefLike | null>
     stageScale: number
@@ -97,7 +105,13 @@ function getCanvasItemVisualBounds(
     item.type === 'model3d' ||
     item.type === 'html'
   ) {
-    const overlayRect = getOverlayStageRect(canvasContainer, item, options.getOverlayContainerRect)
+    const overlayRect = getOverlayStageRect(
+      canvasContainer,
+      item,
+      options.getOverlayContainerRect,
+      options.overlayLookupCache,
+      options.getOverlayElementRect
+    )
     if (overlayRect && overlayRect.width > 0 && overlayRect.height > 0) {
       return stageRectToCanvasBounds(overlayRect, stagePos, stageScale)
     }
@@ -129,6 +143,17 @@ function getCanvasItemsVisualBounds(
 ): CanvasExportBounds | null {
   if (items.length === 0) return null
 
+  const overlayLookupCache = createCanvasDomOverlayLookupCache()
+  const overlayElementRectCache = new Map<HTMLElement, DOMRect>()
+  const getOverlayElementRect = (element: HTMLElement) => {
+    const cached = overlayElementRectCache.get(element)
+    if (cached) {
+      return cached
+    }
+    const rect = element.getBoundingClientRect()
+    overlayElementRectCache.set(element, rect)
+    return rect
+  }
   let overlayContainerRect: CanvasViewportRect | null | undefined
   const getOverlayContainerRect = () => {
     if (overlayContainerRect !== undefined) {
@@ -155,7 +180,9 @@ function getCanvasItemsVisualBounds(
   let maxY = -Infinity
   const visualBoundsOptions = {
     ...options,
-    getOverlayContainerRect
+    getOverlayContainerRect,
+    getOverlayElementRect,
+    overlayLookupCache
   }
 
   for (const item of items) {

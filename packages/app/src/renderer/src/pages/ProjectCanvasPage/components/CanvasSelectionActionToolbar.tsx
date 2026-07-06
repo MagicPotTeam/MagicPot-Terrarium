@@ -34,6 +34,7 @@ type CanvasSelectionActionToolbarProps = {
   selectionActionStackPosition: SelectionActionStackPosition
   stagePos: { x: number; y: number }
   stageScale: number
+  groupCreateLabel?: string
   onDragSelectedItems: (items: CanvasItem[], dataTransfer: DataTransfer) => void
   onCopySelectedItems: (items: CanvasItem[]) => void
   onDownloadSelectedItems: (items: CanvasItem[], fileName: string) => void
@@ -124,6 +125,7 @@ export default function CanvasSelectionActionToolbar({
   selectionActionStackPosition,
   stagePos,
   stageScale,
+  groupCreateLabel,
   onDragSelectedItems,
   onCopySelectedItems,
   onDownloadSelectedItems,
@@ -144,7 +146,7 @@ export default function CanvasSelectionActionToolbar({
     'canvas.action_generate_from_selection',
     '\u6309\u9700\u6c42\u751f\u6210'
   )
-  const groupLabel = getLabel('canvas.group_create_button', GROUP_LABEL)
+  const groupLabel = groupCreateLabel || getLabel('canvas.group_create_button', GROUP_LABEL)
 
   const toolbarItems = exactSelectedGroup?.validItems ?? selectedItems
   const toolbarFileName = exactSelectedGroup?.name ?? 'canvas-selection'

@@ -2,6 +2,7 @@ import {
   buildCanvasItemSpatialIndex,
   doCanvasSpatialBoundsIntersect,
   queryCanvasSpatialIndex,
+  queryCanvasSpatialIndexUnordered,
   type CanvasSpatialBounds,
   type CanvasSpatialIndex
 } from './canvasSpatialIndex'
@@ -342,6 +343,11 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
       .sort((left, right) => sortCanvasItemsTopFirst(left, right, orderById))
   }
 
+  const queryCanvasItemsUnordered = (canvasBounds: CanvasSpatialBounds, includeHidden = false) => {
+    const matchedItems = queryCanvasSpatialIndexUnordered(spatialIndex, canvasBounds)
+    return includeHidden ? matchedItems : matchedItems.filter((item) => !isCanvasItemHidden(item))
+  }
+
   const queryItems = (
     bounds: CanvasSpatialBounds,
     options: ProjectCanvasRuntimeMarqueeOptions = {}
@@ -406,7 +412,16 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
     },
 
     setViewport(nextViewport: Partial<CanvasViewport>) {
-      viewport = normalizeViewport({ ...viewport, ...nextViewport })
+      const normalizedViewport = normalizeViewport({ ...viewport, ...nextViewport })
+      if (
+        viewport.x === normalizedViewport.x &&
+        viewport.y === normalizedViewport.y &&
+        viewport.scale === normalizedViewport.scale
+      ) {
+        return
+      }
+
+      viewport = normalizedViewport
     },
 
     getViewport() {
@@ -439,11 +454,12 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
       stageSize: CanvasStageSize
       overscanPx?: number
       includeHidden?: boolean
+      preserveOrder?: boolean
     }) {
-      return queryCanvasItems(
-        resolveViewportCanvasBounds(options.stageSize, options.overscanPx),
-        options.includeHidden
-      )
+      const canvasBounds = resolveViewportCanvasBounds(options.stageSize, options.overscanPx)
+      return options.preserveOrder === false
+        ? queryCanvasItemsUnordered(canvasBounds, options.includeHidden)
+        : queryCanvasItems(canvasBounds, options.includeHidden)
     },
 
     getSelectionBounds(ids: Iterable<string>) {

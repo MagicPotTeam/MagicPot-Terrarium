@@ -1772,6 +1772,128 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
     canvasContainer.remove()
   })
 
+  it('queries rendered group chip elements once while resolving toolbar avoidance layouts', async () => {
+    const canvasContainer = document.createElement('div')
+    Object.defineProperty(canvasContainer, 'clientWidth', {
+      configurable: true,
+      value: 800
+    })
+    Object.defineProperty(canvasContainer, 'clientHeight', {
+      configurable: true,
+      value: 600
+    })
+    mockCanvasContainerRect(canvasContainer)
+    document.body.appendChild(canvasContainer)
+
+    const firstItem = createImageItem({ id: 'image-1', x: 120, y: 120 })
+    const secondItem = createImageItem({ id: 'image-2', x: 260, y: 120 })
+    const stage = {
+      findOne: vi.fn((selector: string) => ({
+        getClientRect: () => {
+          const item = selector === '#image-1' ? firstItem : secondItem
+          return { x: item.x, y: item.y, width: item.width, height: item.height }
+        }
+      }))
+    }
+    let viewportCallback: ((pos: { x: number; y: number }, scale: number) => void) | null = null
+
+    render(
+      <ThemeProvider theme={theme}>
+        <ProjectCanvasPageSelectionOverlays
+          tool="select"
+          selectionOverlayGroups={[
+            {
+              id: 'group-1',
+              name: 'Group 1',
+              itemIds: [firstItem.id],
+              validItems: [firstItem],
+              createdAt: '2026-04-22T00:00:00.000Z',
+              bounds: { x: 100, y: 100, width: 160, height: 120 }
+            },
+            {
+              id: 'group-2',
+              name: 'Group 2',
+              itemIds: [secondItem.id],
+              validItems: [secondItem],
+              createdAt: '2026-04-22T00:00:00.000Z',
+              bounds: { x: 260, y: 100, width: 160, height: 120 }
+            }
+          ]}
+          exactSelectedGroup={null}
+          stagePos={{ x: 0, y: 0 }}
+          stageScale={1}
+          stageSize={{ width: 800, height: 600 }}
+          selectedIds={new Set([firstItem.id, secondItem.id])}
+          items={[firstItem, secondItem]}
+          stageRef={{ current: stage as unknown as KonvaStage }}
+          canvasContainerRef={{ current: canvasContainer }}
+          canvasContainerElement={canvasContainer}
+          registerViewportCallback={(callback) => {
+            viewportCallback = callback
+          }}
+          lastClickedId={secondItem.id}
+          mediaCaptionActionLabel="Caption"
+          legacySelectionToolbarEnabled={false}
+          groupCreateLabel="Create group"
+          handleFocusGroup={vi.fn()}
+          buildCanvasDragPayload={vi.fn(() => ({ sourceCanvasId: 'canvas-1' }))}
+          setCanvasDragPayload={vi.fn()}
+          handleFlipImage={vi.fn()}
+          handleCropImage={vi.fn()}
+          handleExplodeImage={vi.fn()}
+          handleCopyCanvasImage={vi.fn()}
+          handleDownloadCanvasImage={vi.fn()}
+          handleOpenAgentSendMenu={vi.fn()}
+          handleOpenMediaCaptionEditor={vi.fn()}
+          handleSendCanvasItemsToAgent={vi.fn()}
+          handleToggleVideoPlayback={vi.fn()}
+          resolvedVideoBudgetModeById={new Map()}
+          handleOpenModel3DViewer={vi.fn()}
+          handleOpenDccExportMenu={vi.fn()}
+          handleDownloadBlobItem={vi.fn()}
+          handleExportCanvasFile={vi.fn()}
+          handleCopyCanvasItemsAsImage={vi.fn()}
+          handleDownloadCanvasItemsAsImage={vi.fn()}
+          getQuickCanvasItemsImageUrl={vi.fn(() => null)}
+          prepareQuickCanvasItemsImageUrl={vi.fn(async () => null)}
+          handleGenerateCanvasItems={vi.fn()}
+          handleCreateGroup={vi.fn()}
+          fileExportActionLabel="Export file"
+          Model3DIcon={() => null}
+          ExportIcon={() => null}
+        />
+      </ThemeProvider>
+    )
+
+    await screen.findByRole('button', { name: 'Create group' })
+    const groupChipElements = Array.from(
+      canvasContainer.querySelectorAll<HTMLElement>('[data-canvas-group-chip-id]')
+    )
+    expect(groupChipElements).toHaveLength(2)
+    groupChipElements.forEach((element, index) => {
+      mockElementRect(element, {
+        left: 40 + index * 160,
+        top: 48,
+        width: 96,
+        height: 28
+      })
+    })
+
+    const querySelectorAll = vi.spyOn(Element.prototype, 'querySelectorAll')
+    expect(viewportCallback).toBeTruthy()
+    act(() => {
+      viewportCallback?.({ x: 0, y: 0 }, 1)
+    })
+
+    await waitFor(() => {
+      expect(
+        querySelectorAll.mock.calls.filter(
+          ([selector]) => selector === '[data-canvas-group-chip-id]'
+        )
+      ).toHaveLength(1)
+    })
+  })
+
   it('keeps the single-image toolbar centered even when an exact-group chip is present', async () => {
     const canvasContainer = document.createElement('div')
     Object.defineProperty(canvasContainer, 'clientWidth', {

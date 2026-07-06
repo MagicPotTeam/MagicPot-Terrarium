@@ -40,11 +40,8 @@ import {
   type CanvasLayoutResizeInteractionDetail
 } from './canvasLayoutResizeInteraction'
 import {
-  buildProjectCanvasRenderableItems,
+  deriveProjectCanvasRenderBoundary,
   resolveProjectCanvasImageInteractionMode,
-  resolveProjectCanvasRenderBoundary,
-  summarizeProjectCanvasImageFallbacks,
-  summarizeProjectCanvasRuntimeSurfaces,
   type ProjectCanvasImagePreview
 } from './projectCanvasRenderBoundary'
 import { materializeCanvasImageAttachmentSource } from './canvasAgentAttachmentUtils'
@@ -1215,10 +1212,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const regionSelectionTargetId =
     tool === 'crop-select' ? croppingImageId : tool === 'extract-select' ? extractingImageId : null
   const cropTargetId = regionSelectionTargetId
-  const renderableMediaItems = React.useMemo(
-    () => buildProjectCanvasRenderableItems(visibleItems),
-    [visibleItems]
-  )
   const effectiveFailedImageIds = React.useMemo(() => {
     if (canvas2DFailedImageIds.size === 0) {
       return webglFailedImageIds
@@ -1259,9 +1252,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
     })
   }, [allCanvasItems])
   const generatedCooldownImageIds = newResultHintIds
-  const resolvedRenderBoundaryItems = React.useMemo(
+  const renderBoundaryDerivation = React.useMemo(
     () =>
-      resolveProjectCanvasRenderBoundary({
+      deriveProjectCanvasRenderBoundary({
         items: visibleItems,
         cropTargetId,
         webglReady: webglImageLayerReady,
@@ -1285,36 +1278,13 @@ export default function ProjectCanvasPageStageScene(props: any) {
       webglResidentImageIds
     ]
   )
-  const imageRuntimeRouteById = React.useMemo(() => {
-    const routes = new Map<
-      string,
-      'webgl-primary' | 'budget-image-proxy' | 'fallback-image-proxy' | 'crop-excluded'
-    >()
-
-    for (const item of resolvedRenderBoundaryItems) {
-      if (item.kind !== 'image' || !item.imageRuntimeRoute) {
-        continue
-      }
-
-      routes.set(item.id, item.imageRuntimeRoute)
-    }
-
-    return routes
-  }, [resolvedRenderBoundaryItems])
-  const imageFallbackReasonById = React.useMemo(() => {
-    const reasons = new Map<
-      string,
-      'unloaded' | 'failed' | 'unsupported' | 'webgl-unavailable' | 'generated-cooldown'
-    >()
-
-    for (const item of resolvedRenderBoundaryItems) {
-      if (item.kind === 'image' && item.imageFallbackReason) {
-        reasons.set(item.id, item.imageFallbackReason)
-      }
-    }
-
-    return reasons
-  }, [resolvedRenderBoundaryItems])
+  const resolvedRenderBoundaryItems = renderBoundaryDerivation.resolvedItems
+  const renderableMediaItems = resolvedRenderBoundaryItems
+  const imageRuntimeRouteById = renderBoundaryDerivation.imageRuntimeRouteById
+  const imageFallbackReasonById = renderBoundaryDerivation.imageFallbackReasonById
+  const renderSurfaceSummary = renderBoundaryDerivation.renderSurfaceSummary
+  const fallbackImageSummary = renderBoundaryDerivation.fallbackImageSummary
+  const webglPrimaryImageCount = renderBoundaryDerivation.webglPrimaryImageCount
   const webglImageItems = React.useMemo(
     () =>
       allCanvasItems
@@ -1345,15 +1315,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
     [canvas2DFallbackImageItems]
   )
   const canvas2DVisualOwnerImageIdSet = canvas2DResolvedImageIds
-  const webglPrimaryImageCount = React.useMemo(() => {
-    let count = 0
-    for (const runtimeRoute of imageRuntimeRouteById.values()) {
-      if (runtimeRoute === 'webgl-primary') {
-        count += 1
-      }
-    }
-    return count
-  }, [imageRuntimeRouteById])
   const highResolutionDomImagePreviewItems = React.useMemo(() => {
     if (isViewportInteracting || isCanvasPerformanceThrottled || isCanvasLayoutResizeInteracting) {
       return []
@@ -1721,36 +1682,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
           : null,
       [selectedSinglePlaceholderItem]
     )
-  const renderSurfaceSummary = React.useMemo(
-    () =>
-      summarizeProjectCanvasRuntimeSurfaces({
-        items: visibleItems,
-        cropTargetId,
-        webglReady: webglImageLayerReady,
-        loadedImageIds: webglResolvedImageIds,
-        residentImageIds: webglResidentImageIds,
-        failedImageIds: effectiveFailedImageIds,
-        generatedCooldownImageIds,
-        selectedIds,
-        stagePos: stagePosRef?.current ?? stagePos,
-        stageScale: stageScaleRef?.current ?? stageScale,
-        stageSize: stageSizeRef.current
-      }),
-    [
-      cropTargetId,
-      effectiveFailedImageIds,
-      generatedCooldownImageIds,
-      selectedIds,
-      visibleItems,
-      webglImageLayerReady,
-      webglResolvedImageIds,
-      webglResidentImageIds
-    ]
-  )
-  const fallbackImageSummary = React.useMemo(
-    () => summarizeProjectCanvasImageFallbacks(resolvedRenderBoundaryItems),
-    [resolvedRenderBoundaryItems]
-  )
   const thumbnailCacheMetrics = getCanvasThumbnailRuntimeMetrics()
   const webglResidentImageCount = webglMetrics?.residentImageCount ?? 0
   const webglResidentTextureBytes = webglMetrics?.residentTextureBytes ?? 0
