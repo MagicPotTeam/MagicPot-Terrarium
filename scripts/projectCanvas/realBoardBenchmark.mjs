@@ -1857,6 +1857,38 @@ function readProjectCanvasRealBoardMetricsFromDomSnapshot(snapshotInput) {
         'lastRenderDurationMs',
         rootDataset.projectCanvasWebglLastRenderDurationMs
       ),
+      spriteReconcilePassCount: readWebglNumber(
+        'spriteReconcilePassCount',
+        rootDataset.projectCanvasWebglSpriteReconcilePassCount
+      ),
+      lastSpriteReconcileDurationMs: readWebglNumber(
+        'lastSpriteReconcileDurationMs',
+        rootDataset.projectCanvasWebglLastSpriteReconcileDurationMs
+      ),
+      lastSpriteReconcileCandidateCount: readWebglNumber(
+        'lastSpriteReconcileCandidateCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileCandidateCount
+      ),
+      lastSpriteReconcileTargetCount: readWebglNumber(
+        'lastSpriteReconcileTargetCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileTargetCount
+      ),
+      lastSpriteReconcileCreatedCount: readWebglNumber(
+        'lastSpriteReconcileCreatedCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileCreatedCount
+      ),
+      lastSpriteReconcileReusedCount: readWebglNumber(
+        'lastSpriteReconcileReusedCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileReusedCount
+      ),
+      lastSpriteReconcileRemovedCount: readWebglNumber(
+        'lastSpriteReconcileRemovedCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileRemovedCount
+      ),
+      lastSpriteReconcileDeferredCount: readWebglNumber(
+        'lastSpriteReconcileDeferredCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileDeferredCount
+      ),
       lastUpdateReason:
         snapshotWebgl?.lastUpdateReason || rootDataset.projectCanvasWebglLastUpdateReason || '',
       hasWebglContext: Boolean(domMetrics.hasWebglContext)

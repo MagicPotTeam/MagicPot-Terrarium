@@ -292,6 +292,8 @@ export function readProjectCanvasBenchmarkMetricsFromDomSnapshot(snapshotInput) 
 
   const largeImageResourceMetrics =
     collectProjectCanvasLargeImageResourceMetricsFromDomSnapshot(snapshotInput)
+  const readWebglNumber = (snapshotKey, datasetValue, fallback = 0) =>
+    Number(webglMetrics?.[snapshotKey] ?? datasetValue ?? String(fallback))
 
   return attachProjectCanvasLargeImageResourceDiagnostics(
     {
@@ -416,6 +418,38 @@ export function readProjectCanvasBenchmarkMetricsFromDomSnapshot(snapshotInput) 
         webglMetrics?.lastRenderDurationMs ??
           rootDataset.projectCanvasWebglLastRenderDurationMs ??
           '0'
+      ),
+      spriteReconcilePassCount: readWebglNumber(
+        'spriteReconcilePassCount',
+        rootDataset.projectCanvasWebglSpriteReconcilePassCount
+      ),
+      lastSpriteReconcileDurationMs: readWebglNumber(
+        'lastSpriteReconcileDurationMs',
+        rootDataset.projectCanvasWebglLastSpriteReconcileDurationMs
+      ),
+      lastSpriteReconcileCandidateCount: readWebglNumber(
+        'lastSpriteReconcileCandidateCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileCandidateCount
+      ),
+      lastSpriteReconcileTargetCount: readWebglNumber(
+        'lastSpriteReconcileTargetCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileTargetCount
+      ),
+      lastSpriteReconcileCreatedCount: readWebglNumber(
+        'lastSpriteReconcileCreatedCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileCreatedCount
+      ),
+      lastSpriteReconcileReusedCount: readWebglNumber(
+        'lastSpriteReconcileReusedCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileReusedCount
+      ),
+      lastSpriteReconcileRemovedCount: readWebglNumber(
+        'lastSpriteReconcileRemovedCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileRemovedCount
+      ),
+      lastSpriteReconcileDeferredCount: readWebglNumber(
+        'lastSpriteReconcileDeferredCount',
+        rootDataset.projectCanvasWebglLastSpriteReconcileDeferredCount
       ),
       lastUpdateReason:
         webglMetrics?.lastUpdateReason || rootDataset.projectCanvasWebglLastUpdateReason || '',

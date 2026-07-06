@@ -75,6 +75,14 @@ let latestWebGLMetrics: {
   spriteCount: number
   residentCandidateImageCount: number
   viewportCulledImageCount: number
+  spriteReconcilePassCount?: number
+  lastSpriteReconcileDurationMs?: number | null
+  lastSpriteReconcileCandidateCount?: number
+  lastSpriteReconcileTargetCount?: number
+  lastSpriteReconcileCreatedCount?: number
+  lastSpriteReconcileReusedCount?: number
+  lastSpriteReconcileRemovedCount?: number
+  lastSpriteReconcileDeferredCount?: number
   usingPreviewImageCount: number
   usingSourceImageCount: number
   thumbnailPreviewImageCount: number
@@ -554,6 +562,14 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       spriteCount: 1,
       residentCandidateImageCount: 1,
       viewportCulledImageCount: 0,
+      spriteReconcilePassCount: 6,
+      lastSpriteReconcileDurationMs: 1.75,
+      lastSpriteReconcileCandidateCount: 3,
+      lastSpriteReconcileTargetCount: 2,
+      lastSpriteReconcileCreatedCount: 1,
+      lastSpriteReconcileReusedCount: 1,
+      lastSpriteReconcileRemovedCount: 1,
+      lastSpriteReconcileDeferredCount: 0,
       usingPreviewImageCount: 0,
       usingSourceImageCount: 1,
       thumbnailPreviewImageCount: 0,
@@ -595,6 +611,35 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(root).toHaveAttribute('data-project-canvas-webgl-resident-image-count', '1')
     expect(root).toHaveAttribute('data-project-canvas-webgl-resident-candidate-image-count', '1')
     expect(root).toHaveAttribute('data-project-canvas-webgl-viewport-culled-image-count', '0')
+    expect(root).toHaveAttribute('data-project-canvas-webgl-sprite-reconcile-pass-count', '6')
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-duration-ms',
+      '1.75'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-candidate-count',
+      '3'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-target-count',
+      '2'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-created-count',
+      '1'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-reused-count',
+      '1'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-removed-count',
+      '1'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-deferred-count',
+      '0'
+    )
     expect(root).toHaveAttribute('data-project-canvas-webgl-using-preview-image-count', '0')
     expect(root).toHaveAttribute('data-project-canvas-webgl-using-source-image-count', '1')
     expect(root).toHaveAttribute(
@@ -622,6 +667,19 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(root).toHaveAttribute('data-project-canvas-webgl-render-count', '4')
     expect(root).toHaveAttribute('data-project-canvas-webgl-last-render-duration-ms', '5.25')
     expect(root).toHaveAttribute('data-project-canvas-webgl-last-update-reason', 'items')
+    const metricsSnapshot = JSON.parse(
+      root.getAttribute('data-project-canvas-metrics-snapshot') ?? '{}'
+    )
+    expect(metricsSnapshot.webgl).toMatchObject({
+      spriteReconcilePassCount: 6,
+      lastSpriteReconcileDurationMs: 1.75,
+      lastSpriteReconcileCandidateCount: 3,
+      lastSpriteReconcileTargetCount: 2,
+      lastSpriteReconcileCreatedCount: 1,
+      lastSpriteReconcileReusedCount: 1,
+      lastSpriteReconcileRemovedCount: 1,
+      lastSpriteReconcileDeferredCount: 0
+    })
 
     await waitFor(() => {
       expect(imageInteractionOverlayProps.has(item.id)).toBe(true)

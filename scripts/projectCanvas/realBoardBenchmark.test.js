@@ -418,6 +418,14 @@ describe('realBoardBenchmark acceptance gates', () => {
             initialLoadQueueCount: 15,
             renderCount: 3,
             lastRenderDurationMs: 4.5,
+            spriteReconcilePassCount: 8,
+            lastSpriteReconcileDurationMs: 1.125,
+            lastSpriteReconcileCandidateCount: 10,
+            lastSpriteReconcileTargetCount: 7,
+            lastSpriteReconcileCreatedCount: 3,
+            lastSpriteReconcileReusedCount: 4,
+            lastSpriteReconcileRemovedCount: 2,
+            lastSpriteReconcileDeferredCount: 1,
             lastUpdateReason: 'items',
             sourceUpgradeCompletedCount: 4,
             evictionReasons: [{ reason: 'budget', count: 2 }]
@@ -460,7 +468,45 @@ describe('realBoardBenchmark acceptance gates', () => {
       initialLoadQueueCount: 15,
       renderCount: 3,
       lastRenderDurationMs: 4.5,
+      spriteReconcilePassCount: 8,
+      lastSpriteReconcileDurationMs: 1.125,
+      lastSpriteReconcileCandidateCount: 10,
+      lastSpriteReconcileTargetCount: 7,
+      lastSpriteReconcileCreatedCount: 3,
+      lastSpriteReconcileReusedCount: 4,
+      lastSpriteReconcileRemovedCount: 2,
+      lastSpriteReconcileDeferredCount: 1,
       lastUpdateReason: 'items'
+    })
+  })
+
+  it('falls back to real-board dataset fields for WebGL sprite reconcile metrics', () => {
+    const metrics = readProjectCanvasRealBoardMetricsFromDomSnapshot({
+      rootDataset: {
+        projectCanvasRenderSurfaceSummary: JSON.stringify({
+          totalItems: 4,
+          imageItems: 4
+        }),
+        projectCanvasWebglSpriteReconcilePassCount: '3',
+        projectCanvasWebglLastSpriteReconcileDurationMs: '0.75',
+        projectCanvasWebglLastSpriteReconcileCandidateCount: '4',
+        projectCanvasWebglLastSpriteReconcileTargetCount: '4',
+        projectCanvasWebglLastSpriteReconcileCreatedCount: '2',
+        projectCanvasWebglLastSpriteReconcileReusedCount: '2',
+        projectCanvasWebglLastSpriteReconcileRemovedCount: '1',
+        projectCanvasWebglLastSpriteReconcileDeferredCount: '0'
+      }
+    })
+
+    expect(metrics.webgl).toMatchObject({
+      spriteReconcilePassCount: 3,
+      lastSpriteReconcileDurationMs: 0.75,
+      lastSpriteReconcileCandidateCount: 4,
+      lastSpriteReconcileTargetCount: 4,
+      lastSpriteReconcileCreatedCount: 2,
+      lastSpriteReconcileReusedCount: 2,
+      lastSpriteReconcileRemovedCount: 1,
+      lastSpriteReconcileDeferredCount: 0
     })
   })
 

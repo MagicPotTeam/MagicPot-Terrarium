@@ -3098,6 +3098,32 @@ export default function ProjectCanvasPageStageScene(props: any) {
       data-project-canvas-webgl-viewport-culled-image-count={
         webglMetrics?.viewportCulledImageCount ?? 0
       }
+      data-project-canvas-webgl-sprite-reconcile-pass-count={
+        webglMetrics?.spriteReconcilePassCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-duration-ms={
+        webglMetrics?.lastSpriteReconcileDurationMs != null
+          ? String(webglMetrics.lastSpriteReconcileDurationMs)
+          : ''
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-candidate-count={
+        webglMetrics?.lastSpriteReconcileCandidateCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-target-count={
+        webglMetrics?.lastSpriteReconcileTargetCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-created-count={
+        webglMetrics?.lastSpriteReconcileCreatedCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-reused-count={
+        webglMetrics?.lastSpriteReconcileReusedCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-removed-count={
+        webglMetrics?.lastSpriteReconcileRemovedCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-deferred-count={
+        webglMetrics?.lastSpriteReconcileDeferredCount ?? 0
+      }
       data-project-canvas-webgl-using-preview-image-count={
         webglMetrics?.usingPreviewImageCount ?? 0
       }
