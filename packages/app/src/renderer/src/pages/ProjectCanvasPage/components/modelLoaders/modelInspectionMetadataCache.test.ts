@@ -58,4 +58,20 @@ describe('modelInspectionMetadataCache', () => {
     expect(readCanvasModel3DInspectionMetadataCache('model:0')).toEqual(createMetadata(0))
     expect(readCanvasModel3DInspectionMetadataCache('model:overflow')).toEqual(createMetadata(999))
   })
+
+  it('refreshes least-recently-used order and metadata when writing an existing key', () => {
+    for (let index = 0; index < MODEL_INSPECTION_METADATA_CACHE_MAX_ENTRIES; index += 1) {
+      writeCanvasModel3DInspectionMetadataCache(`model:${index}`, createMetadata(index))
+    }
+
+    writeCanvasModel3DInspectionMetadataCache('model:0', createMetadata(500))
+    writeCanvasModel3DInspectionMetadataCache('model:overflow', createMetadata(999))
+
+    expect(getCanvasModel3DInspectionMetadataCacheCount()).toBe(
+      MODEL_INSPECTION_METADATA_CACHE_MAX_ENTRIES
+    )
+    expect(readCanvasModel3DInspectionMetadataCache('model:1')).toBeNull()
+    expect(readCanvasModel3DInspectionMetadataCache('model:0')).toEqual(createMetadata(500))
+    expect(readCanvasModel3DInspectionMetadataCache('model:overflow')).toEqual(createMetadata(999))
+  })
 })

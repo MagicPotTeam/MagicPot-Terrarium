@@ -779,6 +779,47 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     )
   }, 30000)
 
+  it('keeps sprite order deterministic for equal zIndex items', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const firstItem = createItem({
+      id: 'image-equal-first',
+      src: 'file:///image-equal-first.png',
+      fileName: 'image-equal-first.png',
+      x: 80,
+      y: 96,
+      zIndex: 5
+    })
+    const secondItem = createItem({
+      id: 'image-equal-second',
+      src: 'file:///image-equal-second.png',
+      fileName: 'image-equal-second.png',
+      x: 80,
+      y: 96,
+      zIndex: 5
+    })
+
+    render(
+      <ProjectCanvasWebGLImageLayer
+        items={[secondItem, firstItem]}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 1280, height: 720 }}
+      />
+    )
+
+    await waitFor(
+      () => {
+        expect(createdSprites).toHaveLength(2)
+      },
+      { timeout: 15000 }
+    )
+
+    expect(createdSprites[0].parent?.children.map((sprite) => sprite.label)).toEqual([
+      'image-equal-second',
+      'image-equal-first'
+    ])
+  }, 30000)
+
   it('caps the resident sprite set and admits deferred images when capacity frees up', async () => {
     const { PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT, default: ProjectCanvasWebGLImageLayer } =
       await import('./ProjectCanvasWebGLImageLayer')
