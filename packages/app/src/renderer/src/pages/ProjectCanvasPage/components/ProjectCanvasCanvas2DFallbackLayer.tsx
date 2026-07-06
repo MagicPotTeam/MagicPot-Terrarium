@@ -17,6 +17,7 @@ import {
   queryCanvasSpatialIndex,
   type CanvasSpatialIndex
 } from '../canvasSpatialIndex'
+import { getCanvasItemBounds } from '../projectCanvasPageShared'
 
 export type ProjectCanvasCanvas2DFallbackLayerHandle = {
   syncItemPreview: (itemId: string, preview: ProjectCanvasImagePreview | null) => void
@@ -81,21 +82,6 @@ function shouldUseAnonymousCrossOrigin(src: string): boolean {
   return /^https?:\/\//i.test(src)
 }
 
-function getImageItemBounds(item: CanvasImageItem) {
-  const scaledWidth = item.width * (item.scaleX || 1)
-  const scaledHeight = item.height * (item.scaleY || 1)
-  return {
-    minX: Math.min(item.x, item.x + scaledWidth),
-    minY: Math.min(item.y, item.y + scaledHeight),
-    maxX: Math.max(item.x, item.x + scaledWidth),
-    maxY: Math.max(item.y, item.y + scaledHeight)
-  }
-}
-
-function sortCanvasImageItemsByZIndex(left: CanvasImageItem, right: CanvasImageItem) {
-  return left.zIndex - right.zIndex
-}
-
 type Canvas2DFallbackVisibilityIndex = {
   items: CanvasImageItem[]
   itemById: Map<string, CanvasImageItem>
@@ -106,7 +92,17 @@ type Canvas2DFallbackVisibilityIndex = {
 function buildCanvas2DFallbackVisibilityIndex(
   items: CanvasImageItem[]
 ): Canvas2DFallbackVisibilityIndex {
-  const orderedItems = items.slice().sort(sortCanvasImageItemsByZIndex)
+  const sourceOrderById = new Map<string, number>()
+  items.forEach((item, index) => {
+    sourceOrderById.set(item.id, index)
+  })
+  const orderedItems = items.slice().sort((left, right) => {
+    if (left.zIndex !== right.zIndex) {
+      return left.zIndex - right.zIndex
+    }
+
+    return (sourceOrderById.get(left.id) ?? 0) - (sourceOrderById.get(right.id) ?? 0)
+  })
   const itemById = new Map<string, CanvasImageItem>()
   const orderById = new Map<string, number>()
   orderedItems.forEach((item, index) => {
@@ -117,7 +113,7 @@ function buildCanvas2DFallbackVisibilityIndex(
     items: orderedItems,
     itemById,
     orderById,
-    spatialIndex: buildCanvasSpatialIndex(orderedItems, getImageItemBounds)
+    spatialIndex: buildCanvasSpatialIndex(orderedItems, getCanvasItemBounds)
   }
 }
 

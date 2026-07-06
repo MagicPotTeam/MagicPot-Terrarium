@@ -186,6 +186,52 @@ describe('ProjectCanvasCanvas2DFallbackLayer', () => {
     expect(frontTranslateCalls).toHaveLength(1)
   })
 
+  it('preserves source order for fallback images with equal zIndex', async () => {
+    const first = createItem('same-z-first', { zIndex: 5, x: 18, y: 20 })
+    const second = createItem('same-z-second', { zIndex: 5, x: 88, y: 30 })
+
+    render(
+      <ProjectCanvasCanvas2DFallbackLayer
+        items={[second, first]}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 320, height: 240 }}
+        overscanPx={0}
+      />
+    )
+
+    await waitFor(() => expect(context.drawImage).toHaveBeenCalledTimes(2))
+    expect(context.translate).toHaveBeenNthCalledWith(2, 88, 30)
+    expect(context.translate).toHaveBeenNthCalledWith(3, 18, 20)
+  })
+
+  it('keeps rotated visual bounds visible when unrotated bounds sit outside the viewport', async () => {
+    const rotatedVisible = createItem('rotated-visible', {
+      x: 340,
+      y: 120,
+      width: 120,
+      height: 120,
+      rotation: 45,
+      zIndex: 1
+    })
+    const far = createItem('far', { x: 1200, y: 1200, zIndex: 2 })
+
+    render(
+      <ProjectCanvasCanvas2DFallbackLayer
+        items={[far, rotatedVisible]}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 320, height: 240 }}
+        overscanPx={0}
+      />
+    )
+
+    await waitFor(() => expect(context.drawImage).toHaveBeenCalledTimes(1))
+    expect(context.translate).toHaveBeenCalledWith(340, 120)
+    expect(context.rotate).toHaveBeenCalledWith(Math.PI / 4)
+    expect(context.translate).not.toHaveBeenCalledWith(1200, 1200)
+  })
+
   it('draws only spatially visible fallback images from a large offscreen set', async () => {
     const offscreenItems = Array.from({ length: 120 }, (_, index) =>
       createItem(`offscreen-${index}`, {
