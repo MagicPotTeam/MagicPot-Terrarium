@@ -154,6 +154,7 @@ export type MagicAgentGraphRunEvent = {
   type: MagicAgentGraphRunEventType
   message: string
   createdAt: number
+  sequence?: number
   nodeId?: string
   channelId?: string
   outputId?: string
@@ -177,6 +178,20 @@ export type MagicAgentGraphRunRecord = {
   events?: MagicAgentGraphRunEvent[]
   error?: string
   metadata?: Record<string, unknown>
+}
+
+export type MagicAgentGraphRunStreamEventType = 'snapshot' | 'event' | 'closed'
+
+export type MagicAgentGraphRunStreamEvent = {
+  type: MagicAgentGraphRunStreamEventType
+  sequence: number
+  runId: string
+  graphId: string
+  status: MagicAgentGraphRunStatus
+  createdAt: number
+  run?: MagicAgentGraphRunRecord
+  event?: MagicAgentGraphRunEvent
+  error?: string
 }
 
 export type MagicAgentGraphRunResult = MagicAgentGraphRunRecord

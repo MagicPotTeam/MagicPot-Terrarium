@@ -9,12 +9,14 @@ import {
   type MagicAgentGraphNodeDefinition,
   type MagicAgentGraphOutputDefinition,
   type MagicAgentGraphRunChannelRecord,
+  type MagicAgentGraphRunEvent,
   type MagicAgentGraphRunEventType,
   type MagicAgentGraphRunNodeRecord,
   type MagicAgentGraphRunOutput,
   type MagicAgentGraphRunRecord,
   type MagicAgentGraphRunRequest,
-  type MagicAgentGraphRunResult
+  type MagicAgentGraphRunResult,
+  type MagicAgentGraphRunStreamEvent
 } from '@shared/magicAgent'
 import { getAgentSessionKey, type AgentRouteLike } from '@shared/agent'
 import { normalizeMagicPotToolName } from '@shared/app/types'
@@ -36,6 +38,8 @@ export type MagicAgentGraphRuntimePolicy = {
   maxEvents: number
   maxRunRecordsPerSession: number
   maxConditionPatternChars: number
+  maxSubscribersPerRun: number
+  maxSubscribersTotal: number
 }
 
 export type MagicAgentGraphRuntimeDeps = {
@@ -53,7 +57,9 @@ const DEFAULT_GRAPH_RUNTIME_POLICY: MagicAgentGraphRuntimePolicy = {
   maxOutputContentChars: 120_000,
   maxEvents: 2_000,
   maxRunRecordsPerSession: 200,
-  maxConditionPatternChars: 500
+  maxConditionPatternChars: 500,
+  maxSubscribersPerRun: 20,
+  maxSubscribersTotal: 100
 }
 
 const normalizePositiveInteger = (value: unknown, fallback: number): number => {
@@ -95,6 +101,14 @@ const normalizePolicy = (
     maxConditionPatternChars: normalizePositiveInteger(
       merged.maxConditionPatternChars,
       DEFAULT_GRAPH_RUNTIME_POLICY.maxConditionPatternChars
+    ),
+    maxSubscribersPerRun: normalizePositiveInteger(
+      merged.maxSubscribersPerRun,
+      DEFAULT_GRAPH_RUNTIME_POLICY.maxSubscribersPerRun
+    ),
+    maxSubscribersTotal: normalizePositiveInteger(
+      merged.maxSubscribersTotal,
+      DEFAULT_GRAPH_RUNTIME_POLICY.maxSubscribersTotal
     )
   }
 }
@@ -148,6 +162,17 @@ const SUPPORTED_GRAPH_CONDITION_OPERATORS = new Set([
   'contains',
   'matches'
 ])
+
+const TERMINAL_GRAPH_RUN_STATUSES = new Set<MagicAgentGraphRunRecord['status']>([
+  'completed',
+  'failed',
+  'cancelled'
+])
+
+type MagicAgentGraphRunSubscriber = {
+  sessionKey: string
+  handler: (event: MagicAgentGraphRunStreamEvent) => void
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -252,6 +277,9 @@ export class MagicAgentGraphRuntime {
   private readonly builtInGraphIds = new Set<string>()
   private readonly runs = new Map<string, MagicAgentGraphRunRecord>()
   private readonly controllers = new Map<string, AbortController>()
+  private readonly runSubscribers = new Map<string, Map<number, MagicAgentGraphRunSubscriber>>()
+  private readonly runStreamSequences = new Map<string, number>()
+  private nextRunSubscriberId = 1
   private deps: MagicAgentGraphRuntimeDeps
   private policy: MagicAgentGraphRuntimePolicy
 
@@ -397,18 +425,29 @@ export class MagicAgentGraphRuntime {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const status = controller.signal.aborted ? 'cancelled' : 'failed'
-      this.markRun(runRecord, status, { endedAt: now(), error: message })
-      this.recordRunEvent(
-        runRecord,
-        status === 'cancelled' ? 'graph.cancelled' : 'graph.failed',
-        status === 'cancelled'
-          ? `MagicAgentGraph run cancelled: ${message}`
-          : `MagicAgentGraph run failed: ${message}`,
-        { error: message }
-      )
+      const alreadyCancelled =
+        status === 'cancelled' &&
+        runRecord.status === 'cancelled' &&
+        (runRecord.events || []).some((event) => event.type === 'graph.cancelled')
+      if (alreadyCancelled) {
+        runRecord.error = runRecord.error || message
+        runRecord.endedAt = runRecord.endedAt || now()
+        this.runs.set(runId, runRecord)
+      } else {
+        this.markRun(runRecord, status, { endedAt: now(), error: message })
+        this.recordRunEvent(
+          runRecord,
+          status === 'cancelled' ? 'graph.cancelled' : 'graph.failed',
+          status === 'cancelled'
+            ? `MagicAgentGraph run cancelled: ${message}`
+            : `MagicAgentGraph run failed: ${message}`,
+          { error: message }
+        )
+      }
     } finally {
       this.controllers.delete(runId)
       this.runs.set(runId, runRecord)
+      this.notifyRunClosed(runRecord)
       this.pruneRunsForSession(sessionKey)
     }
 
@@ -438,6 +477,61 @@ export class MagicAgentGraphRuntime {
       reason
     })
     return { runId: normalizedRunId, cancelled: true, status: run.status }
+  }
+
+  subscribeToRun(
+    runId: string,
+    sessionKey: string,
+    handler: (event: MagicAgentGraphRunStreamEvent) => void
+  ): (() => void) | undefined {
+    const normalizedRunId = cleanString(runId)
+    const normalizedSessionKey = cleanString(sessionKey)
+    if (!normalizedRunId || !normalizedSessionKey) {
+      return undefined
+    }
+
+    const run = this.runs.get(normalizedRunId)
+    if (!run || run.sessionKey !== normalizedSessionKey) {
+      return undefined
+    }
+
+    let subscribers = this.runSubscribers.get(normalizedRunId)
+    if (!subscribers) {
+      subscribers = new Map<number, MagicAgentGraphRunSubscriber>()
+      this.runSubscribers.set(normalizedRunId, subscribers)
+    }
+    if (subscribers.size >= this.policy.maxSubscribersPerRun) {
+      throw new Error(
+        `MagicAgentGraph run "${normalizedRunId}" exceeded watcher limit of ${this.policy.maxSubscribersPerRun}.`
+      )
+    }
+    if (this.countRunSubscribers() >= this.policy.maxSubscribersTotal) {
+      throw new Error(
+        `MagicAgentGraph exceeded total watcher limit of ${this.policy.maxSubscribersTotal}.`
+      )
+    }
+
+    const subscriberId = this.nextRunSubscriberId++
+    const subscriber: MagicAgentGraphRunSubscriber = { sessionKey: normalizedSessionKey, handler }
+    subscribers.set(subscriberId, subscriber)
+    let active = true
+    const unsubscribe = (): void => {
+      if (!active) return
+      active = false
+      const currentSubscribers = this.runSubscribers.get(normalizedRunId)
+      currentSubscribers?.delete(subscriberId)
+      if (currentSubscribers?.size === 0) {
+        this.runSubscribers.delete(normalizedRunId)
+      }
+    }
+
+    this.sendRunSubscriberEvent(subscriber, this.buildSnapshotStreamEvent(run), unsubscribe)
+    if (active && TERMINAL_GRAPH_RUN_STATUSES.has(run.status)) {
+      this.sendRunSubscriberEvent(subscriber, this.buildClosedStreamEvent(run), unsubscribe)
+      unsubscribe()
+    }
+
+    return unsubscribe
   }
 
   private normalizeGraph(graph: MagicAgentGraphDefinition): MagicAgentGraphDefinition {
@@ -1107,13 +1201,14 @@ export class MagicAgentGraphRuntime {
     metadata?: Record<string, unknown>
   ): void {
     const createdAt = now()
-    const event = {
+    const event: MagicAgentGraphRunEvent = {
       eventId: createId('magic-agent-graph-event'),
       runId: run.runId,
       graphId: run.graphId,
       type,
       message,
       createdAt,
+      sequence: this.nextRunStreamSequence(run.runId),
       ...(cleanString(metadata?.nodeId) ? { nodeId: cleanString(metadata?.nodeId) } : {}),
       ...(cleanString(metadata?.channelId) ? { channelId: cleanString(metadata?.channelId) } : {}),
       ...(cleanString(metadata?.outputId) ? { outputId: cleanString(metadata?.outputId) } : {}),
@@ -1122,6 +1217,7 @@ export class MagicAgentGraphRuntime {
     run.events = [...(run.events || []), event].slice(-this.policy.maxEvents)
     run.updatedAt = createdAt
     this.runs.set(run.runId, run)
+    this.notifyRunEvent(run, event)
   }
 
   private markRun(
@@ -1141,6 +1237,105 @@ export class MagicAgentGraphRuntime {
     return { text: limited, truncated: limited.length !== text.length }
   }
 
+  private countRunSubscribers(): number {
+    return [...this.runSubscribers.values()].reduce(
+      (total, subscribers) => total + subscribers.size,
+      0
+    )
+  }
+
+  private nextRunStreamSequence(runId: string): number {
+    const nextSequence = (this.runStreamSequences.get(runId) || 0) + 1
+    this.runStreamSequences.set(runId, nextSequence)
+    return nextSequence
+  }
+
+  private getLastRunStreamSequence(run: MagicAgentGraphRunRecord): number {
+    const events = run.events || []
+    return this.runStreamSequences.get(run.runId) || events[events.length - 1]?.sequence || 0
+  }
+
+  private buildSnapshotStreamEvent(run: MagicAgentGraphRunRecord): MagicAgentGraphRunStreamEvent {
+    return {
+      type: 'snapshot',
+      sequence: 0,
+      runId: run.runId,
+      graphId: run.graphId,
+      status: run.status,
+      createdAt: now(),
+      run: clone(run)
+    }
+  }
+
+  private buildEventStreamEvent(
+    run: MagicAgentGraphRunRecord,
+    event: MagicAgentGraphRunEvent
+  ): MagicAgentGraphRunStreamEvent {
+    return {
+      type: 'event',
+      sequence: event.sequence ?? this.nextRunStreamSequence(run.runId),
+      runId: run.runId,
+      graphId: run.graphId,
+      status: run.status,
+      createdAt: event.createdAt,
+      event: clone(event),
+      run: clone(run)
+    }
+  }
+
+  private buildClosedStreamEvent(run: MagicAgentGraphRunRecord): MagicAgentGraphRunStreamEvent {
+    return {
+      type: 'closed',
+      sequence: this.getLastRunStreamSequence(run) + 1,
+      runId: run.runId,
+      graphId: run.graphId,
+      status: run.status,
+      createdAt: now(),
+      run: clone(run),
+      ...(run.error ? { error: run.error } : {})
+    }
+  }
+
+  private sendRunSubscriberEvent(
+    subscriber: MagicAgentGraphRunSubscriber,
+    event: MagicAgentGraphRunStreamEvent,
+    unsubscribe: () => void
+  ): void {
+    try {
+      subscriber.handler(event)
+    } catch {
+      unsubscribe()
+    }
+  }
+
+  private notifyRunEvent(run: MagicAgentGraphRunRecord, event: MagicAgentGraphRunEvent): void {
+    const subscribers = this.runSubscribers.get(run.runId)
+    if (!subscribers?.size) return
+    const streamEvent = this.buildEventStreamEvent(run, event)
+    for (const [subscriberId, subscriber] of [...subscribers.entries()]) {
+      if (subscriber.sessionKey !== run.sessionKey) continue
+      this.sendRunSubscriberEvent(subscriber, streamEvent, () => {
+        subscribers.delete(subscriberId)
+        if (subscribers.size === 0) this.runSubscribers.delete(run.runId)
+      })
+    }
+  }
+
+  private notifyRunClosed(run: MagicAgentGraphRunRecord): void {
+    const subscribers = this.runSubscribers.get(run.runId)
+    if (!subscribers?.size) return
+    const streamEvent = this.buildClosedStreamEvent(run)
+    for (const subscriber of [...subscribers.values()]) {
+      if (subscriber.sessionKey !== run.sessionKey) continue
+      try {
+        subscriber.handler(streamEvent)
+      } catch {
+        // Ignore subscriber failures while closing the run stream.
+      }
+    }
+    this.runSubscribers.delete(run.runId)
+  }
+
   private pruneRunsForSession(sessionKey: string): void {
     const maxRunRecords = this.policy.maxRunRecordsPerSession
     const sessionRuns = [...this.runs.values()]
@@ -1150,6 +1345,8 @@ export class MagicAgentGraphRuntime {
     for (const run of runsToRemove) {
       if (!this.controllers.has(run.runId)) {
         this.runs.delete(run.runId)
+        this.runStreamSequences.delete(run.runId)
+        this.runSubscribers.delete(run.runId)
       }
     }
   }

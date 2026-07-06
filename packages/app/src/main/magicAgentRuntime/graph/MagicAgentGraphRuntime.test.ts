@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { MagicAgentGraphDefinition } from '@shared/magicAgent'
+import type { MagicAgentGraphDefinition, MagicAgentGraphRunStreamEvent } from '@shared/magicAgent'
 import { MagicAgentGraphRuntime } from './MagicAgentGraphRuntime'
 
 const testRoute = { channel: 'generic', scopeType: 'dm', scopeId: 'graph-test' } as const
@@ -1050,6 +1050,79 @@ describe('MagicAgentGraphRuntime', () => {
       'run-budget-2'
     ])
     expect(runtime.getRun('run-budget-1', 'generic:dm:graph-test')).toBeUndefined()
+  })
+
+  it('streams graph run snapshots, events, and terminal close frames with deterministic sequences', async () => {
+    const runtime = new MagicAgentGraphRuntime([])
+    runtime.create({ graph: createTestGraph('test.watch'), route: testRoute })
+
+    const runPromise = runtime.run({
+      graphId: 'test.watch',
+      input: 'Watch this run.',
+      route: testRoute,
+      runId: 'run-watch'
+    })
+    const streamed: MagicAgentGraphRunStreamEvent[] = []
+    const unsubscribe = runtime.subscribeToRun('run-watch', 'generic:dm:graph-test', (event) => {
+      streamed.push(event)
+    })
+
+    expect(unsubscribe).toEqual(expect.any(Function))
+    await expect(runPromise).resolves.toMatchObject({ runId: 'run-watch', status: 'completed' })
+
+    expect(streamed[0]).toMatchObject({
+      type: 'snapshot',
+      sequence: 0,
+      runId: 'run-watch',
+      status: 'running'
+    })
+    const eventFrames = streamed.filter((event) => event.type === 'event')
+    expect(eventFrames.length).toBeGreaterThan(0)
+    expect(eventFrames.map((event) => event.sequence)).toEqual(
+      eventFrames.map((_event, index) => index + 1)
+    )
+    expect(eventFrames.every((event) => event.event?.sequence === event.sequence)).toBe(true)
+    const last = streamed[streamed.length - 1]
+    const lastEvent = eventFrames[eventFrames.length - 1]
+    expect(last).toMatchObject({
+      type: 'closed',
+      sequence: (lastEvent?.sequence || 0) + 1,
+      runId: 'run-watch',
+      status: 'completed'
+    })
+    expect(runtime.subscribeToRun('run-watch', 'generic:dm:other', () => undefined)).toBeUndefined()
+  })
+
+  it('enforces graph run watcher limits and releases slots on unsubscribe', async () => {
+    const runtime = new MagicAgentGraphRuntime([], {
+      policy: { maxSubscribersPerRun: 1, maxSubscribersTotal: 1 }
+    })
+    runtime.create({ graph: createTestGraph('test.watch-limit'), route: testRoute })
+
+    const runPromise = runtime.run({
+      graphId: 'test.watch-limit',
+      input: 'Limit watchers.',
+      route: testRoute,
+      runId: 'run-watch-limit'
+    })
+    const first = runtime.subscribeToRun(
+      'run-watch-limit',
+      'generic:dm:graph-test',
+      () => undefined
+    )
+    expect(first).toEqual(expect.any(Function))
+    expect(() =>
+      runtime.subscribeToRun('run-watch-limit', 'generic:dm:graph-test', () => undefined)
+    ).toThrow(/watcher limit/i)
+    first?.()
+    const second = runtime.subscribeToRun(
+      'run-watch-limit',
+      'generic:dm:graph-test',
+      () => undefined
+    )
+    expect(second).toEqual(expect.any(Function))
+    second?.()
+    await expect(runPromise).resolves.toMatchObject({ runId: 'run-watch-limit' })
   })
 
   it('rejects cyclic graphs before they can execute nodes', () => {

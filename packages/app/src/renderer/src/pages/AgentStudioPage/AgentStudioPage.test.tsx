@@ -16,6 +16,7 @@ const platformApi = vi.hoisted(() => ({
   listPackages: vi.fn(),
   listGraphRuns: vi.fn(),
   runGraph: vi.fn(),
+  watchGraphRun: vi.fn(),
   getGraphRun: vi.fn(),
   cancelGraphRun: vi.fn()
 }))
@@ -124,6 +125,7 @@ const seedEnabled = () => {
   })
   platformApi.listGraphRuns.mockResolvedValue({ runs: [makeRun()] })
   platformApi.runGraph.mockResolvedValue(makeRun())
+  platformApi.watchGraphRun.mockResolvedValue(undefined)
   platformApi.getGraphRun.mockResolvedValue({ run: makeRun() })
   platformApi.cancelGraphRun.mockResolvedValue({
     runId: 'run-alpha',
@@ -165,6 +167,7 @@ describe('AgentStudioPage Graph Run Center', () => {
     expect(platformApi.listGraphs).not.toHaveBeenCalled()
     expect(platformApi.listPackages).not.toHaveBeenCalled()
     expect(platformApi.listGraphRuns).not.toHaveBeenCalled()
+    expect(platformApi.watchGraphRun).not.toHaveBeenCalled()
   })
 
   it('loads inventory, default graph, route-scoped history, and newest active run', async () => {
@@ -283,13 +286,21 @@ describe('AgentStudioPage Graph Run Center', () => {
     await user.click(screen.getByRole('button', { name: 'Run Graph' }))
 
     await waitFor(() => {
-      expect(platformApi.runGraph).toHaveBeenCalledWith({
-        graphId: 'graph-alpha',
-        input: 'Build a lava level',
-        route: ROUTE,
-        metadata: { source: 'agent-studio' }
-      })
+      expect(platformApi.runGraph).toHaveBeenCalledWith(
+        expect.objectContaining({
+          runId: expect.stringMatching(/^agent-studio-graph-run-/),
+          graphId: 'graph-alpha',
+          input: 'Build a lava level',
+          route: ROUTE,
+          metadata: { source: 'agent-studio' }
+        })
+      )
     })
+    const runReq = platformApi.runGraph.mock.calls[0]?.[0]
+    expect(platformApi.watchGraphRun).toHaveBeenCalledWith(
+      { runId: runReq.runId, route: ROUTE },
+      expect.objectContaining({ onData: expect.any(Function), abortReceiver: expect.any(Object) })
+    )
     expect(screen.getByText('Lava level pitch')).toBeInTheDocument()
     expect(platformApi.listGraphRuns).toHaveBeenLastCalledWith({
       route: ROUTE,

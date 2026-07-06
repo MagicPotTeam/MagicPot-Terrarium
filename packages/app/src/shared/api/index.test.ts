@@ -34,10 +34,12 @@ describe('apiDef', () => {
     expect(apiDef.svcMagicAgentPlatform.runAgent.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.listGraphs.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.runGraph.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.watchGraphRun.type).toBe('serverStreaming')
     expect(apiDef.svcMagicAgentPlatform.validatePackageManifest.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.installPackage.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.callTool.request).toBeDefined()
     expect(apiDef.svcMagicAgentPlatform.runAgent.request).toBeDefined()
+    expect(apiDef.svcMagicAgentPlatform.watchGraphRun.request).toBeDefined()
     expect(apiDef.svcMagicAgentPlatform.installPackage.request).toBeDefined()
   })
 
@@ -159,6 +161,10 @@ describe('apiDef', () => {
       ],
       [
         { runId: 'run-1' },
+        apiDef.svcMagicAgentPlatform.watchGraphRun.request as ServiceValidator<unknown>
+      ],
+      [
+        { runId: 'run-1' },
         apiDef.svcMagicAgentPlatform.cancelGraphRun.request as ServiceValidator<unknown>
       ]
     ]
@@ -232,6 +238,12 @@ describe('apiDef', () => {
       validateServiceValue(
         { runId: 'run-1', route },
         apiDef.svcMagicAgentPlatform.getGraphRun.request
+      )
+    ).toMatchObject({ runId: 'run-1', route })
+    expect(
+      validateServiceValue(
+        { runId: 'run-1', route },
+        apiDef.svcMagicAgentPlatform.watchGraphRun.request
       )
     ).toMatchObject({ runId: 'run-1', route })
     expect(

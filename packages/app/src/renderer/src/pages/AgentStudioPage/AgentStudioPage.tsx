@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Box,
@@ -14,6 +14,7 @@ import {
   Typography
 } from '@mui/material'
 import { api } from '@renderer/utils/windowUtils'
+import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import type { AgentRouteLike } from '@shared/agent'
 import type {
   MagicAgentPlatformAgentDefinition,
@@ -22,7 +23,11 @@ import type {
   MagicAgentPlatformPackageListResp,
   MagicAgentPlatformStatusResp
 } from '@shared/api/svcMagicAgentPlatform'
-import type { MagicAgentGraphRunRecord, MagicAgentGraphRunStatus } from '@shared/magicAgent'
+import type {
+  MagicAgentGraphRunRecord,
+  MagicAgentGraphRunStatus,
+  MagicAgentGraphRunStreamEvent
+} from '@shared/magicAgent'
 
 const MAGIC_AGENT_FLAG_HELP = 'Set MAGICPOT_MAGICAGENT_PLATFORM=1 to enable Agent Studio actions.'
 const AGENT_STUDIO_ROUTE: AgentRouteLike = {
@@ -76,6 +81,21 @@ const sortRuns = (runs: MagicAgentGraphRunRecord[]): MagicAgentGraphRunRecord[] 
     (left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt
   )
 
+const upsertRunHistory = (
+  runs: MagicAgentGraphRunRecord[],
+  run: MagicAgentGraphRunRecord
+): MagicAgentGraphRunRecord[] =>
+  sortRuns([run, ...runs.filter((candidate) => candidate.runId !== run.runId)]).slice(
+    0,
+    GRAPH_RUN_HISTORY_LIMIT
+  )
+
+const createAgentStudioGraphRunId = (): string =>
+  `agent-studio-graph-run-${
+    globalThis.crypto?.randomUUID?.() ||
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  }`
+
 const isGraphRunCancellable = (run?: MagicAgentGraphRunRecord | null): boolean =>
   Boolean(run && !terminalGraphRunStatuses.has(run.status))
 
@@ -117,6 +137,69 @@ const AgentStudioPage: React.FC = () => {
     [selectedGraphId, state.graphs]
   )
   const outputFallback = result && !activeRun?.outputs.length ? result : ''
+  const activeWatchAbortRef = useRef<(() => void) | null>(null)
+
+  const stopActiveGraphRunWatch = useCallback(() => {
+    activeWatchAbortRef.current?.()
+    activeWatchAbortRef.current = null
+  }, [])
+
+  const applyGraphRunUpdate = useCallback((run: MagicAgentGraphRunRecord) => {
+    setActiveRun(run)
+    setSelectedGraphId(run.graphId)
+    setResult(formatGraphRunText(run))
+    setRunHistory((current) => upsertRunHistory(current, run))
+  }, [])
+
+  const startGraphRunWatch = useCallback(
+    (runId: string) => {
+      if (!runId) return
+      stopActiveGraphRunWatch()
+      const [abortSender, abortReceiver] = newAbortHandler()
+      let aborted = false
+      const abortWatch = (): void => {
+        if (aborted) return
+        aborted = true
+        abortSender.abort()
+      }
+      activeWatchAbortRef.current = abortWatch
+
+      void api()
+        .svcMagicAgentPlatform.watchGraphRun(
+          { runId, route: AGENT_STUDIO_ROUTE },
+          {
+            abortReceiver,
+            onData: (event: MagicAgentGraphRunStreamEvent) => {
+              if (aborted || activeWatchAbortRef.current !== abortWatch || event.runId !== runId) {
+                return
+              }
+              if (event.run?.runId === runId) {
+                applyGraphRunUpdate(event.run)
+              }
+              if (event.type === 'closed') {
+                activeWatchAbortRef.current = null
+              }
+            }
+          }
+        )
+        .catch((err) => {
+          const message = getErrorMessage(err)
+          if (
+            !aborted &&
+            activeWatchAbortRef.current === abortWatch &&
+            !message.includes('was not found for this route')
+          ) {
+            setError(message)
+          }
+        })
+        .finally(() => {
+          if (activeWatchAbortRef.current === abortWatch) {
+            activeWatchAbortRef.current = null
+          }
+        })
+    },
+    [applyGraphRunUpdate, stopActiveGraphRunWatch]
+  )
 
   const refreshGraphRuns = async (
     graphId = selectedGraphId
@@ -150,6 +233,7 @@ const AgentStudioPage: React.FC = () => {
     try {
       const status = await api().svcMagicAgentPlatform.getStatus({})
       if (!status.enabled) {
+        stopActiveGraphRunWatch()
         setState({ ...emptyState, status })
         setSelectedGraphId('')
         setActiveRun(null)
@@ -204,8 +288,11 @@ const AgentStudioPage: React.FC = () => {
     void loadStudio()
   }, [])
 
+  useEffect(() => () => stopActiveGraphRunWatch(), [stopActiveGraphRunWatch])
+
   const handleGraphChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
     const graphId = event.target.value
+    stopActiveGraphRunWatch()
     setSelectedGraphId(graphId)
     setActiveRun(null)
     setResult('')
@@ -224,14 +311,17 @@ const AgentStudioPage: React.FC = () => {
     setRunning(true)
     setError(null)
     try {
-      const response = await api().svcMagicAgentPlatform.runGraph({
+      const runId = createAgentStudioGraphRunId()
+      const runPromise = api().svcMagicAgentPlatform.runGraph({
+        runId,
         graphId: selectedGraphId,
         input,
         route: AGENT_STUDIO_ROUTE,
         metadata: { source: 'agent-studio' }
       })
-      setActiveRun(response)
-      setResult(formatGraphRunText(response))
+      startGraphRunWatch(runId)
+      const response = await runPromise
+      applyGraphRunUpdate(response)
       await refreshGraphRuns(response.graphId)
     } catch (err) {
       setError(getErrorMessage(err))
@@ -257,9 +347,12 @@ const AgentStudioPage: React.FC = () => {
         setError(`Graph run ${runId} was not found for the Agent Studio route.`)
         return
       }
-      setActiveRun(response.run)
-      setSelectedGraphId(response.run.graphId)
-      setResult(formatGraphRunText(response.run))
+      applyGraphRunUpdate(response.run)
+      if (isGraphRunCancellable(response.run)) {
+        startGraphRunWatch(response.run.runId)
+      } else {
+        stopActiveGraphRunWatch()
+      }
     } catch (err) {
       setError(getErrorMessage(err))
     } finally {
@@ -289,9 +382,10 @@ const AgentStudioPage: React.FC = () => {
         route: AGENT_STUDIO_ROUTE
       })
       if (response.run) {
-        setActiveRun(response.run)
-        setSelectedGraphId(response.run.graphId)
-        setResult(formatGraphRunText(response.run))
+        applyGraphRunUpdate(response.run)
+        if (!isGraphRunCancellable(response.run)) {
+          stopActiveGraphRunWatch()
+        }
         await refreshGraphRuns(response.run.graphId)
       } else {
         await refreshGraphRuns(selectedGraphId)

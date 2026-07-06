@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { app } from 'electron'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
+import type { ServerStreaming } from '@shared/api/apiUtils/streaming'
 import { normalizeMagicPotToolName } from '@shared/app/types'
 import type { AgentRouteLike } from '@shared/agent'
 import type { AssistantRoute } from '../assistantRuntime/types'
@@ -12,6 +13,7 @@ import type {
   MagicAgentPlatformGraphInspectReq,
   MagicAgentPlatformGraphRunGetReq,
   MagicAgentPlatformGraphRunListReq,
+  MagicAgentPlatformGraphRunWatchReq,
   MagicAgentPlatformListAgentsResp,
   MagicAgentPlatformListToolsReq,
   MagicAgentPlatformListToolsResp,
@@ -38,7 +40,8 @@ import {
   MAGIC_AGENT_TRUSTED_AGENT_STUDIO_ROUTE,
   type MagicAgentGraphCreateRequest,
   type MagicAgentGraphRunRequest,
-  type MagicAgentGraphRunResult
+  type MagicAgentGraphRunResult,
+  type MagicAgentGraphRunStreamEvent
 } from '@shared/magicAgent'
 import type {
   MagicAgentInstalledPackage,
@@ -74,6 +77,11 @@ export type MagicAgentPlatformSvcImplDeps = {
   agentKernel?: AgentKernel
   routeAuthorizer?: MagicAgentPlatformRouteAuthorizer
 }
+
+const WATCH_GRAPH_RUN_SUBSCRIBE_TIMEOUT_MS = 2_000
+const WATCH_GRAPH_RUN_SUBSCRIBE_RETRY_MS = 25
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 const resolveDefaultPackageRoot = (): string => {
   const userData = app?.getPath?.('userData') || process.cwd()
@@ -573,6 +581,90 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     )
     const run = this.getGraphRuntime().getRun(req.runId, session.sessionKey)
     return run ? { run } : {}
+  }
+
+  watchGraphRun = async (
+    req: MagicAgentPlatformGraphRunWatchReq,
+    resp: ServerStreaming<MagicAgentGraphRunStreamEvent>,
+    invocation?: ServiceInvocationContext
+  ): Promise<void> => {
+    assertMagicAgentPlatformEnabled()
+    const route = this.authorizeRoute(req.route, invocation)
+    const kernel = this.getAgentKernel()
+    const session = kernel.registerSession(route, {
+      source: 'kernel'
+    })
+    const runtime = this.getGraphRuntime()
+    let unsubscribe: (() => void) | undefined
+    let settled = false
+
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        const currentUnsubscribe = unsubscribe
+        unsubscribe = undefined
+        currentUnsubscribe?.()
+      }
+      const settle = (error?: unknown): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        if (error) {
+          reject(error)
+        } else {
+          resolve()
+        }
+      }
+      const handleStreamEvent = (event: MagicAgentGraphRunStreamEvent): void => {
+        if (settled) return
+        try {
+          resp.onData(event)
+        } catch (error) {
+          settle(error)
+          return
+        }
+        if (event.type === 'closed') {
+          settle()
+        }
+      }
+
+      resp.abortReceiver?.onAbort(() => settle())
+      if (resp.abortReceiver?.isAborted()) {
+        settle()
+        return
+      }
+
+      const subscribeWithGrace = async (): Promise<void> => {
+        const deadline = Date.now() + WATCH_GRAPH_RUN_SUBSCRIBE_TIMEOUT_MS
+        while (!settled) {
+          try {
+            const nextUnsubscribe = runtime.subscribeToRun(
+              req.runId,
+              session.sessionKey,
+              handleStreamEvent
+            )
+            if (nextUnsubscribe) {
+              if (settled) {
+                nextUnsubscribe()
+              } else {
+                unsubscribe = nextUnsubscribe
+              }
+              return
+            }
+          } catch (error) {
+            settle(error)
+            return
+          }
+
+          if (Date.now() >= deadline) {
+            settle(new Error(`Graph run ${req.runId} was not found for this route.`))
+            return
+          }
+          await delay(WATCH_GRAPH_RUN_SUBSCRIBE_RETRY_MS)
+        }
+      }
+
+      void subscribeWithGrace().catch(settle)
+    })
   }
 
   cancelGraphRun = async (

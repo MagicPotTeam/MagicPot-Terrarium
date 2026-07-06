@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { MagicAgentGraphDefinition } from '@shared/magicAgent'
+import type { MagicAgentGraphDefinition, MagicAgentGraphRunStreamEvent } from '@shared/magicAgent'
 import { AgentKernel } from '../agentKernel'
 import { MagicAgentGraphRuntime } from '../magicAgentRuntime/graph'
 import {
@@ -161,6 +161,7 @@ describe('MagicAgentPlatformSvcImpl', () => {
     const runGraph = vi.fn()
     const listGraphRuns = vi.fn()
     const getGraphRun = vi.fn()
+    const subscribeToRun = vi.fn()
     const cancelGraphRun = vi.fn()
     const listPackages = vi.fn(async () => [])
     const scanLocalDirectory = vi.fn()
@@ -180,6 +181,7 @@ describe('MagicAgentPlatformSvcImpl', () => {
         run: runGraph,
         listRuns: listGraphRuns,
         getRun: getGraphRun,
+        subscribeToRun,
         cancel: cancelGraphRun
       } as never,
       packageStore: {
@@ -201,6 +203,7 @@ describe('MagicAgentPlatformSvcImpl', () => {
       () => service.runGraph({ graphId: 'graph.service.partition', input: 'hello', route }),
       () => service.listGraphRuns({ route, graphId: 'graph.service.partition' }),
       () => service.getGraphRun({ route, runId: 'run-1' }),
+      () => service.watchGraphRun({ route, runId: 'run-1' }, { onData: vi.fn() }),
       () => service.cancelGraphRun({ route, runId: 'run-1', reason: 'Stop requested.' }),
       () => service.validatePackageManifest({ manifest: { manifestVersion: 1 } }),
       () => service.listPackages({}),
@@ -222,6 +225,7 @@ describe('MagicAgentPlatformSvcImpl', () => {
       runGraph,
       listGraphRuns,
       getGraphRun,
+      subscribeToRun,
       cancelGraphRun,
       listPackages,
       scanLocalDirectory,
@@ -512,6 +516,33 @@ describe('MagicAgentPlatformSvcImpl', () => {
       cancelled: true,
       status: 'cancelled' as const
     }))
+    const subscribeToRun = vi.fn(
+      (
+        _runId: string,
+        _sessionKey: string,
+        handler: (event: MagicAgentGraphRunStreamEvent) => void
+      ) => {
+        handler({
+          type: 'snapshot',
+          sequence: 0,
+          runId: graphRunRecord.runId,
+          graphId: graphRunRecord.graphId,
+          status: graphRunRecord.status,
+          createdAt: graphRunRecord.updatedAt,
+          run: graphRunRecord
+        })
+        handler({
+          type: 'closed',
+          sequence: 1,
+          runId: graphRunRecord.runId,
+          graphId: graphRunRecord.graphId,
+          status: graphRunRecord.status,
+          createdAt: graphRunRecord.updatedAt,
+          run: graphRunRecord
+        })
+        return vi.fn()
+      }
+    )
     const installedPackage = {
       id: 'demo.package',
       name: 'Demo Package',
@@ -555,6 +586,7 @@ describe('MagicAgentPlatformSvcImpl', () => {
         run: runGraph,
         listRuns: listGraphRuns,
         getRun: getGraphRun,
+        subscribeToRun,
         cancel: cancelGraphRun
       } as never,
       packageStore: {
@@ -604,6 +636,20 @@ describe('MagicAgentPlatformSvcImpl', () => {
     )
     expect(getGraphRun).toHaveBeenCalledWith('run-1', 'generic:dm:graph-test')
 
+    const streamEvents: MagicAgentGraphRunStreamEvent[] = []
+    await expect(
+      service.watchGraphRun(
+        { route: graphRoute, runId: 'run-1' },
+        { onData: (event) => streamEvents.push(event) }
+      )
+    ).resolves.toBeUndefined()
+    expect(subscribeToRun).toHaveBeenCalledWith(
+      'run-1',
+      'generic:dm:graph-test',
+      expect.any(Function)
+    )
+    expect(streamEvents.map((event) => event.type)).toEqual(['snapshot', 'closed'])
+
     await expect(
       service.cancelGraphRun({ route: graphRoute, runId: 'run-1', reason: 'Stop requested.' })
     ).resolves.toMatchObject({ runId: 'run-1', cancelled: true, status: 'cancelled' })
@@ -643,6 +689,40 @@ describe('MagicAgentPlatformSvcImpl', () => {
     expect(inspected).not.toHaveProperty('packagePath')
     expect(inspected.installed).not.toHaveProperty('sourcePath')
     expect(inspected.installed).not.toHaveProperty('packagePath')
+  })
+
+  it('cleans up graph run watch subscriptions when the renderer aborts', async () => {
+    const unsubscribe = vi.fn()
+    const subscribeToRun = vi.fn(() => unsubscribe)
+    const service = new MagicAgentPlatformSvcImpl({
+      agentKernel: new AgentKernel(),
+      adapter: { listTools: () => [], listAgents: () => [] } as never,
+      graphRuntime: { subscribeToRun } as never
+    })
+    const route = { channel: 'generic', scopeType: 'dm', scopeId: 'agent-studio' } as const
+    let abortHandler: (() => void) | undefined
+    const watchPromise = service.watchGraphRun(
+      { route, runId: 'run-abort' },
+      {
+        onData: vi.fn(),
+        abortReceiver: {
+          isAborted: () => false,
+          onAbort: (handler) => {
+            abortHandler = handler
+          }
+        }
+      }
+    )
+
+    await Promise.resolve()
+    expect(subscribeToRun).toHaveBeenCalledWith(
+      'run-abort',
+      'generic:dm:agent-studio',
+      expect.any(Function)
+    )
+    abortHandler?.()
+    await expect(watchPromise).resolves.toBeUndefined()
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
   })
 
   it('partitions graph run service operations by route session key with the real graph runtime', async () => {

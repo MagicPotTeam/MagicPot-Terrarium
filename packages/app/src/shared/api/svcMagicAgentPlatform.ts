@@ -10,7 +10,8 @@ import type {
   MagicAgentGraphOutputDefinition,
   MagicAgentGraphRunRecord,
   MagicAgentGraphRunRequest,
-  MagicAgentGraphRunResult
+  MagicAgentGraphRunResult,
+  MagicAgentGraphRunStreamEvent
 } from '@shared/magicAgent'
 import type {
   MagicAgentInstalledPackage,
@@ -18,6 +19,7 @@ import type {
   MagicAgentPackageValidationResult
 } from '@shared/magicAgentRuntime'
 import type { ChatAttachment } from './svcLLMProxy'
+import type { ServerStreaming } from './apiUtils/streaming'
 import { ServiceDefSheet } from './apiUtils/serviceDefSheet'
 import { ServiceValidationError } from './apiUtils/serviceValidation'
 
@@ -207,6 +209,11 @@ export type MagicAgentPlatformGraphRunGetResp = {
   run?: MagicAgentGraphRunRecord
 }
 
+export type MagicAgentPlatformGraphRunWatchReq = {
+  runId: string
+  route: AgentRouteLike
+}
+
 export type MagicAgentPlatformGraphCancelReq = {
   runId: string
   route: AgentRouteLike
@@ -273,6 +280,14 @@ const MAGIC_AGENT_GRAPH_NODE_KINDS = new Set([
   'output'
 ])
 const MAGIC_AGENT_GRAPH_CHANNEL_KINDS = new Set(['handoff', 'artifact', 'message', 'control'])
+const MAGIC_AGENT_GRAPH_RUN_STATUSES = new Set([
+  'pending',
+  'running',
+  'completed',
+  'failed',
+  'cancelled'
+])
+const MAGIC_AGENT_GRAPH_RUN_STREAM_EVENT_TYPES = new Set(['snapshot', 'event', 'closed'])
 const MAGIC_AGENT_GRAPH_CONDITION_OPERATORS = new Set([
   'always',
   'truthy',
@@ -355,6 +370,16 @@ const optionalPositiveInteger = (value: unknown, field: string): number | undefi
   if (parsed === undefined) return undefined
   if (Number.isInteger(parsed)) return parsed
   throw issue(field, 'Expected a positive integer')
+}
+
+const requireNonNegativeInteger = (value: unknown, field: string): number => {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value
+  throw issue(field, 'Expected a non-negative integer')
+}
+
+const requireFiniteNumber = (value: unknown, field: string): number => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  throw issue(field, 'Expected a finite number')
 }
 
 const validateEmptyReq = (value: unknown): MagicAgentPlatformEmptyReq => {
@@ -719,6 +744,43 @@ const validateGraphRunGetReq = (value: unknown): MagicAgentPlatformGraphRunGetRe
   return { runId: requireString(req.runId, 'runId'), route: validateRoute(req.route) }
 }
 
+const validateGraphRunWatchReq = (value: unknown): MagicAgentPlatformGraphRunWatchReq => {
+  const req = requireRecord(value, 'watchGraphRun')
+  return { runId: requireString(req.runId, 'runId'), route: validateRoute(req.route) }
+}
+
+const validateGraphRunStreamEvent = (value: unknown): MagicAgentGraphRunStreamEvent => {
+  const event = requireRecord(value, 'watchGraphRun.stream')
+  const type = requireString(event.type, 'stream.type')
+  if (!MAGIC_AGENT_GRAPH_RUN_STREAM_EVENT_TYPES.has(type)) {
+    throw issue('stream.type', 'Expected a valid MagicAgentGraph run stream event type')
+  }
+  const status = requireString(event.status, 'stream.status')
+  if (!MAGIC_AGENT_GRAPH_RUN_STATUSES.has(status)) {
+    throw issue('stream.status', 'Expected a valid MagicAgentGraph run status')
+  }
+  if (event.run !== undefined && !isRecord(event.run)) {
+    throw issue('stream.run', 'Expected an object')
+  }
+  if (event.event !== undefined && !isRecord(event.event)) {
+    throw issue('stream.event', 'Expected an object')
+  }
+  const error = optionalCleanString(event.error, 'stream.error')
+  return {
+    type: type as MagicAgentGraphRunStreamEvent['type'],
+    sequence: requireNonNegativeInteger(event.sequence, 'stream.sequence'),
+    runId: requireString(event.runId, 'stream.runId'),
+    graphId: requireString(event.graphId, 'stream.graphId'),
+    status: status as MagicAgentGraphRunStreamEvent['status'],
+    createdAt: requireFiniteNumber(event.createdAt, 'stream.createdAt'),
+    ...(event.run !== undefined ? { run: event.run as MagicAgentGraphRunRecord } : {}),
+    ...(event.event !== undefined
+      ? { event: event.event as MagicAgentGraphRunStreamEvent['event'] }
+      : {}),
+    ...(error !== undefined ? { error } : {})
+  }
+}
+
 const validateGraphCancelReq = (value: unknown): MagicAgentPlatformGraphCancelReq => {
   const req = requireRecord(value, 'cancelGraphRun')
   return {
@@ -767,6 +829,10 @@ export type MagicAgentPlatformSvc = {
   runGraph(req: MagicAgentGraphRunRequest): Promise<MagicAgentGraphRunResult>
   listGraphRuns(req: MagicAgentPlatformGraphRunListReq): Promise<MagicAgentPlatformGraphRunListResp>
   getGraphRun(req: MagicAgentPlatformGraphRunGetReq): Promise<MagicAgentPlatformGraphRunGetResp>
+  watchGraphRun(
+    req: MagicAgentPlatformGraphRunWatchReq,
+    resp: ServerStreaming<MagicAgentGraphRunStreamEvent>
+  ): Promise<void>
   cancelGraphRun(req: MagicAgentPlatformGraphCancelReq): Promise<MagicAgentGraphCancelResult>
   validatePackageManifest(
     req: MagicAgentPlatformValidatePackageManifestReq
@@ -797,6 +863,11 @@ export const magicAgentPlatformSvcDef: ServiceDefSheet<MagicAgentPlatformSvc> = 
   runGraph: { type: 'unary', request: validateRunGraphReq },
   listGraphRuns: { type: 'unary', request: validateGraphRunListReq },
   getGraphRun: { type: 'unary', request: validateGraphRunGetReq },
+  watchGraphRun: {
+    type: 'serverStreaming',
+    request: validateGraphRunWatchReq,
+    data: validateGraphRunStreamEvent
+  },
   cancelGraphRun: { type: 'unary', request: validateGraphCancelReq },
   validatePackageManifest: { type: 'unary', request: validatePackageManifestReq },
   scanPackage: { type: 'unary', request: validatePackagePathReq },
