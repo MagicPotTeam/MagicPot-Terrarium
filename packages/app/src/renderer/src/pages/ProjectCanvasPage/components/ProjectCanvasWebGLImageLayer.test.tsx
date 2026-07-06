@@ -412,6 +412,7 @@ function getLiveSpriteByLabel(label: string) {
 describe('ProjectCanvasWebGLImageLayer', () => {
   beforeEach(() => {
     vi.resetModules()
+    vi.doUnmock('../projectCanvasRenderBoundary')
     createdSprites = []
     createdApplications = []
     textureFromThrowForNaturalWidth = null
@@ -512,6 +513,97 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     )
 
     expect(textureFromAlphaModes).toEqual(['no-premultiply-alpha'])
+  }, 30000)
+
+  it('skips clean resident sprite rebuilds while preserving full reconcile emissions', async () => {
+    const buildRenderableImageSpy = vi.fn()
+    vi.doMock('../projectCanvasRenderBoundary', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../projectCanvasRenderBoundary')>()
+      buildRenderableImageSpy.mockImplementation(actual.buildProjectCanvasRenderableImage)
+      return {
+        ...actual,
+        buildProjectCanvasRenderableImage: buildRenderableImageSpy
+      }
+    })
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const initialItems = createItems(3)
+    const residentIdsCalls: Set<string>[] = []
+    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const handleResidentIdsChange = (residentIds: Set<string>) => {
+      residentIdsCalls.push(new Set(residentIds))
+    }
+    const handleMetricsChange = (metrics: ProjectCanvasWebGLImageLayerMetrics) => {
+      metricsCalls.push(metrics)
+    }
+    const expectedResidentIds = new Set(initialItems.map((item) => item.id))
+
+    const { rerender } = render(
+      <ProjectCanvasWebGLImageLayer
+        items={initialItems}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 1280, height: 720 }}
+        onResidentIdsChange={handleResidentIdsChange}
+        onMetricsChange={handleMetricsChange}
+      />
+    )
+
+    await waitFor(
+      () => {
+        expect(createdSprites.filter((sprite) => !sprite.destroyed)).toHaveLength(3)
+        expect(residentIdsCalls.at(-1)).toEqual(expectedResidentIds)
+      },
+      { timeout: 15000 }
+    )
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    })
+    const initialPassCount = metricsCalls.at(-1)?.spriteReconcilePassCount ?? 0
+    buildRenderableImageSpy.mockClear()
+
+    const movedItem = { ...initialItems[1], x: initialItems[1].x + 37 }
+    const updatedItems = [initialItems[0], movedItem, initialItems[2]]
+    rerender(
+      <ProjectCanvasWebGLImageLayer
+        items={updatedItems}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        stageSize={{ width: 1280, height: 720 }}
+        onResidentIdsChange={handleResidentIdsChange}
+        onMetricsChange={handleMetricsChange}
+      />
+    )
+
+    await waitFor(
+      () => {
+        expect(getLiveSpriteByLabel(movedItem.id)?.position.x).toBe(movedItem.x)
+        expect(metricsCalls.at(-1)?.spriteReconcilePassCount ?? 0).toBeGreaterThan(initialPassCount)
+      },
+      { timeout: 15000 }
+    )
+
+    expect(buildRenderableImageSpy).toHaveBeenCalledTimes(1)
+    expect(buildRenderableImageSpy.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        id: movedItem.id
+      })
+    )
+    expect(createdSprites.filter((sprite) => !sprite.destroyed)).toHaveLength(3)
+    expect(createdSprites).toHaveLength(3)
+    expect(residentIdsCalls.at(-1)).toEqual(expectedResidentIds)
+    expect(metricsCalls.at(-1)).toEqual(
+      expect.objectContaining({
+        imageCount: 3,
+        residentImageCount: 3,
+        residentCandidateImageCount: 3,
+        lastSpriteReconcileTargetCount: 3,
+        lastSpriteReconcileCreatedCount: 0,
+        lastSpriteReconcileReusedCount: 3,
+        lastSpriteReconcileRemovedCount: 0,
+        lastSpriteReconcileDeferredCount: 0
+      })
+    )
   }, 30000)
 
   it('does not rescan resident texture sampling on every viewport sync', async () => {
@@ -2928,6 +3020,135 @@ describe('ProjectCanvasWebGLImageLayer', () => {
             metrics.sourceUpgradePendingImageCount === 0
         )
       ).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }, 30000)
+
+  it('reprioritizes queued thumbnail upgrades even when resident sprites stay clean', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const attemptedSrcs: string[] = []
+    const imageInstances: MockImage[] = []
+
+    class MockImage {
+      onload: null | (() => void) = null
+      onerror: null | (() => void) = null
+      crossOrigin: string | null = null
+      naturalWidth = 1024
+      naturalHeight = 512
+      width = 1024
+      height = 512
+      private _src = ''
+
+      constructor() {
+        imageInstances.push(this)
+      }
+
+      set src(value: string) {
+        this._src = value
+        attemptedSrcs.push(value)
+      }
+
+      get src() {
+        return this._src
+      }
+    }
+
+    const createPrioritizedThumbnailItem = (index: number) => {
+      const cacheKey = `thumbnail-priority-${index}`
+      const sourceIdentity: CanvasImageSourceIdentity = {
+        kind: 'local-file',
+        canonicalPath: `C:/images/thumbnail-priority-${index}.png`,
+        sizeBytes: 123456 + index,
+        lastModifiedMs: 456789 + index,
+        cacheKey
+      }
+      const thumbnailSet: CanvasImageThumbnailSet = {
+        version: 1,
+        cacheKey,
+        sourceIdentity,
+        levels: ([128, 256, 512, 1024, 2048] as const).map((maxSide) => ({
+          maxSide,
+          src: `local-media:///thumbnail-priority-${index}/${maxSide}.webp`,
+          filename: `${maxSide}.webp`,
+          mimeType: 'image/webp' as const,
+          width: maxSide,
+          height: Math.round(maxSide / 2),
+          sizeBytes: maxSide * 8
+        })),
+        createdAt: '2026-05-02T00:00:00.000Z',
+        updatedAt: '2026-05-02T00:00:00.000Z'
+      }
+
+      return createItem({
+        id: `image-thumbnail-priority-${index}`,
+        src: `file:///image-thumbnail-priority-${index}.png`,
+        fileName: `image-thumbnail-priority-${index}.png`,
+        x: (index - 1) * 200,
+        y: 0,
+        width: 800,
+        height: 400,
+        sourceWidth: 2048,
+        sourceHeight: 1024,
+        image: createImage(128, 64),
+        sourceIdentity,
+        thumbnailSet
+      })
+    }
+
+    vi.stubGlobal('Image', MockImage as unknown as typeof Image)
+
+    try {
+      const items = Array.from({ length: 8 }, (_, index) =>
+        createPrioritizedThumbnailItem(index + 1)
+      )
+      const { rerender } = render(
+        <ProjectCanvasWebGLImageLayer
+          items={items}
+          stagePos={{ x: 0, y: 0 }}
+          stageScale={1}
+          stageSize={{ width: 1280, height: 720 }}
+        />
+      )
+
+      await waitFor(
+        () => {
+          expect(createdSprites.filter((sprite) => !sprite.destroyed)).toHaveLength(8)
+          expect(attemptedSrcs).toHaveLength(6)
+        },
+        { timeout: 15000 }
+      )
+      expect(attemptedSrcs).toEqual(
+        Array.from(
+          { length: 6 },
+          (_, index) => `local-media:///thumbnail-priority-${index + 1}/2048.webp`
+        )
+      )
+
+      rerender(
+        <ProjectCanvasWebGLImageLayer
+          items={items}
+          stagePos={{ x: -1080, y: 0 }}
+          stageScale={1}
+          stageSize={{ width: 1280, height: 720 }}
+        />
+      )
+
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 120))
+      })
+
+      act(() => {
+        imageInstances[0].onload?.()
+      })
+
+      await waitFor(
+        () => {
+          expect(attemptedSrcs).toHaveLength(7)
+        },
+        { timeout: 15000 }
+      )
+      expect(attemptedSrcs[6]).toBe('local-media:///thumbnail-priority-8/2048.webp')
     } finally {
       vi.unstubAllGlobals()
     }

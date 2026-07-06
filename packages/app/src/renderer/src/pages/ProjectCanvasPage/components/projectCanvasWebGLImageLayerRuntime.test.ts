@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  areProjectCanvasWebGLItemReconcileSnapshotsEqual,
+  buildProjectCanvasWebGLItemReconcileSnapshot,
   createProjectCanvasWebGLResidentTextureByteTracker,
   insertProjectCanvasWebGLPriorityQueueEntry,
   refreshProjectCanvasWebGLPriorityQueuePriorities,
@@ -110,5 +112,107 @@ describe('projectCanvasWebGLImageLayerRuntime', () => {
 
     tracker.clear()
     expect(tracker.getTotal()).toBe(0)
+  })
+
+  it('builds stable per-item reconcile snapshots and detects render-affecting changes', () => {
+    const sourceIdentity = {
+      kind: 'local-file',
+      canonicalPath: 'C:/images/source.png',
+      sizeBytes: 4096,
+      lastModifiedMs: 123456,
+      cacheKey: 'source-cache-key'
+    }
+    const thumbnailSet = {
+      version: 1,
+      cacheKey: 'thumbnail-cache-key',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+      sourceIdentity,
+      levels: [
+        {
+          maxSide: 128,
+          src: 'local-media:///thumb/128.webp',
+          width: 128,
+          height: 64,
+          sizeBytes: 512
+        }
+      ]
+    }
+    const baseItem = {
+      id: 'image-1',
+      src: 'file:///image-1.png',
+      x: 10,
+      y: 20,
+      width: 200,
+      height: 100,
+      scaleX: 1,
+      scaleY: 1,
+      rotation: 0,
+      zIndex: 2,
+      crop: { x: 4, y: 8, width: 64, height: 32 },
+      imageIdentityKey: 'preview-image',
+      image: { naturalWidth: 256, naturalHeight: 128 },
+      sourceWidth: 1024,
+      sourceHeight: 512,
+      sourceIdentity,
+      thumbnailSet,
+      extraKeys: ['cache-src', 1024, false]
+    }
+    const baseOptions = {
+      selected: false,
+      stageScale: 1,
+      deviceScale: 2,
+      sourceUpgradeBlocked: false,
+      performanceThrottled: false,
+      viewportInteracting: false
+    }
+
+    const snapshot = buildProjectCanvasWebGLItemReconcileSnapshot(baseItem, baseOptions)
+
+    expect(
+      areProjectCanvasWebGLItemReconcileSnapshotsEqual(
+        snapshot,
+        buildProjectCanvasWebGLItemReconcileSnapshot({ ...baseItem }, { ...baseOptions })
+      )
+    ).toBe(true)
+    expect(
+      areProjectCanvasWebGLItemReconcileSnapshotsEqual(
+        snapshot,
+        buildProjectCanvasWebGLItemReconcileSnapshot({ ...baseItem, x: 11 }, baseOptions)
+      )
+    ).toBe(false)
+    expect(
+      areProjectCanvasWebGLItemReconcileSnapshotsEqual(
+        snapshot,
+        buildProjectCanvasWebGLItemReconcileSnapshot(
+          { ...baseItem, imageIdentityKey: 'source-image' },
+          baseOptions
+        )
+      )
+    ).toBe(false)
+    expect(
+      areProjectCanvasWebGLItemReconcileSnapshotsEqual(
+        snapshot,
+        buildProjectCanvasWebGLItemReconcileSnapshot(
+          {
+            ...baseItem,
+            thumbnailSet: {
+              ...thumbnailSet,
+              updatedAt: '2026-06-02T00:00:00.000Z'
+            }
+          },
+          baseOptions
+        )
+      )
+    ).toBe(false)
+    expect(
+      areProjectCanvasWebGLItemReconcileSnapshotsEqual(
+        snapshot,
+        buildProjectCanvasWebGLItemReconcileSnapshot(baseItem, {
+          ...baseOptions,
+          selected: true
+        })
+      )
+    ).toBe(false)
+    expect(areProjectCanvasWebGLItemReconcileSnapshotsEqual(undefined, snapshot)).toBe(false)
   })
 })

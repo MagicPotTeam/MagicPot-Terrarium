@@ -49,6 +49,9 @@ import {
   refreshProjectCanvasWebGLPriorityQueuePriorities,
   reprioritizeProjectCanvasWebGLPriorityQueueEntry,
   createProjectCanvasWebGLResidentTextureByteTracker,
+  buildProjectCanvasWebGLItemReconcileSnapshot,
+  areProjectCanvasWebGLItemReconcileSnapshotsEqual,
+  type ProjectCanvasWebGLItemReconcileSnapshot,
   type ProjectCanvasWebGLPriorityQueueEntry
 } from './projectCanvasWebGLImageLayerRuntime'
 import {
@@ -876,6 +879,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const activeSourceUpgradeSrcByIdRef = useRef(new Map<string, string>())
   const activeSourceUpgradeCountRef = useRef(0)
   const spriteRecordsRef = useRef(new Map<string, SpriteRecord>())
+  const itemReconcileSnapshotByIdRef = useRef(
+    new Map<string, ProjectCanvasWebGLItemReconcileSnapshot>()
+  )
+  const imageIdentityIdsRef = useRef(new WeakMap<object, number>())
+  const nextImageIdentityIdRef = useRef(1)
   const residentTextureByteTrackerRef = useRef(createProjectCanvasWebGLResidentTextureByteTracker())
   const releaseManagerRef = useRef(new CanvasImageReleaseManager())
   const resourceBudgetTrackerRef = useRef(
@@ -1106,6 +1114,25 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
   const getResidentTextureBytes = useCallback(
     () => residentTextureByteTrackerRef.current.getTotal(),
+    []
+  )
+
+  const getCanvasImageAssetIdentityKey = useCallback(
+    (image: CanvasImageAsset | null | undefined) => {
+      if (!image || typeof image !== 'object') {
+        return ''
+      }
+
+      const existingIdentity = imageIdentityIdsRef.current.get(image)
+      if (existingIdentity !== undefined) {
+        return existingIdentity
+      }
+
+      const nextIdentity = nextImageIdentityIdRef.current
+      nextImageIdentityIdRef.current += 1
+      imageIdentityIdsRef.current.set(image, nextIdentity)
+      return nextIdentity
+    },
     []
   )
 
@@ -1852,6 +1879,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       destroyProjectCanvasSpriteRecord(record)
       spriteRecordsRef.current.delete(itemId)
+      itemReconcileSnapshotByIdRef.current.delete(itemId)
       residentTextureByteTrackerRef.current.delete(itemId)
       removeTextureBudgetReservation(itemId)
 
@@ -1981,6 +2009,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         destroyProjectCanvasSpriteRecord(record)
       })
       spriteRecords.clear()
+      itemReconcileSnapshotByIdRef.current.clear()
       residentTextureByteTrackerRef.current.clear()
       resourceBudgetTrackerRef.current.clear()
       spriteUsageCounterRef.current = 0
@@ -3133,6 +3162,24 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       selectedIds?.forEach((itemId) => addResidentTarget(itemId))
     }
     orderedItems.forEach((item) => addResidentTarget(item.id))
+    thumbnailLoadQueueRef.current = thumbnailLoadQueueRef.current.filter((entry) => {
+      const item = itemById.get(entry.itemId)
+      const shouldKeep =
+        Boolean(item?.thumbnailSet?.levels.some((level) => level.src === entry.src)) &&
+        residentCandidateIds.has(entry.itemId) &&
+        residentTargetIds.has(entry.itemId) &&
+        nextIds.has(entry.itemId) &&
+        pendingThumbnailLoadSrcByIdRef.current.get(entry.itemId) === entry.src
+      if (!shouldKeep) {
+        clearPendingThumbnailLoad(entry.itemId, entry.src)
+      }
+      return shouldKeep
+    })
+    refreshProjectCanvasWebGLPriorityQueuePriorities(thumbnailLoadQueueRef.current, (entry) => {
+      const item = itemById.get(entry.itemId)
+      return item ? getSourceUpgradePriority(item) : undefined
+    })
+    pumpThumbnailLoadQueue()
     pruneDecodedImageCacheForResidentTargets({
       cache: imageCacheRef.current,
       liveIds: nextIds,
@@ -3179,6 +3226,48 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
     }
 
+    const sourceUpgradeBlockedForReconcileSnapshot = isSourceUpgradeIdleBlocked()
+    const residentTextureBytesForReconcileSnapshot = getResidentTextureBytes()
+    const deviceScaleForReconcileSnapshot = getProjectCanvasRenderDeviceScale()
+    const reconciledSnapshotItems = new Map<string, CanvasImageItem>()
+    const buildItemReconcileSnapshot = (
+      item: CanvasImageItem,
+      residentTextureBytes: number = residentTextureBytesForReconcileSnapshot
+    ) => {
+      const cachedSource = imageCacheRef.current.get(item.id)
+      const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
+      return buildProjectCanvasWebGLItemReconcileSnapshot(
+        {
+          ...item,
+          imageIdentityKey: getCanvasImageAssetIdentityKey(item.image),
+          extraKeys: [
+            residentCandidateImageCount,
+            residentTextureBytes,
+            suppressDenseSourceUpgrades,
+            pendingLoadSrcByIdRef.current.get(item.id),
+            pendingThumbnailLoadSrcByIdRef.current.get(item.id),
+            failedLoadSrcByIdRef.current.get(item.id),
+            failedSourceUpgradeSrcByIdRef.current.get(item.id),
+            skippedSourceUpgradeSrcByIdRef.current.get(item.id),
+            failedThumbnailLoadSrcByIdRef.current.get(item.id),
+            cachedSource?.src,
+            getCanvasImageAssetIdentityKey(cachedSource?.image),
+            cachedThumbnail?.src,
+            getCanvasImageAssetIdentityKey(cachedThumbnail?.image),
+            activeSourceUpgradeSrcByIdRef.current.get(item.id)
+          ]
+        },
+        {
+          selected: selectedIds?.has(item.id) === true,
+          stageScale: safeScale,
+          deviceScale: deviceScaleForReconcileSnapshot,
+          sourceUpgradeBlocked: sourceUpgradeBlockedForReconcileSnapshot,
+          performanceThrottled: isPerformanceThrottledRef.current,
+          viewportInteracting: isViewportInteractingRef.current
+        }
+      )
+    }
+
     orderedItems.forEach((item) => {
       if (!residentCandidateIds.has(item.id) || !residentTargetIds.has(item.id)) {
         return
@@ -3196,6 +3285,33 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         item.rotation === preview.rotation
       ) {
         previewStateRef.current.delete(item.id)
+      }
+
+      const existingRecord = spriteRecordsRef.current.get(item.id)
+      const previousRenderItem = renderItemsRef.current.get(item.id)
+      const currentReconcileSnapshot = buildItemReconcileSnapshot(item)
+      if (
+        existingRecord &&
+        previousRenderItem &&
+        !previewStateRef.current.has(item.id) &&
+        areProjectCanvasWebGLItemReconcileSnapshotsEqual(
+          itemReconcileSnapshotByIdRef.current.get(item.id),
+          currentReconcileSnapshot
+        )
+      ) {
+        nextRenderItems.set(item.id, previousRenderItem)
+        residentCandidateTextureBytes += existingRecord.textureByteSize
+        markSpriteRecordUsed(existingRecord)
+        setTextureBudgetReservation({
+          itemId: item.id,
+          image: previousRenderItem.image,
+          textureByteSize: existingRecord.textureByteSize,
+          selected: selectedIds?.has(item.id) === true,
+          priority: getSourceUpgradePriority(item),
+          lastAccessedAt: existingRecord.lastUsedAt
+        })
+        reconciledSnapshotItems.set(item.id, item)
+        return
       }
 
       let image = ensureImage(item, getSourceUpgradePriority(item))
@@ -3218,7 +3334,6 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       if (!renderItem) {
         return
       }
-      const existingRecord = spriteRecordsRef.current.get(item.id)
       let textureByteSize = getProjectCanvasTextureByteSize(renderItem)
       if (item.image && image !== item.image && !canUploadProjectCanvasTexture(textureByteSize)) {
         failedSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
@@ -3286,6 +3401,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           stageScaleRef.current
         )
         markSpriteRecordUsed(existingRecord)
+        reconciledSnapshotItems.set(item.id, item)
         return
       }
 
@@ -3392,6 +3508,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           newSpriteCreationBudget -= 1
         }
         markSpriteRecordUsed(spriteRecordsRef.current.get(item.id)!)
+        reconciledSnapshotItems.set(item.id, item)
         world.addChild(sprite)
         worldOrderDirty = true
         nextRenderItems.set(item.id, renderItem)
@@ -3425,6 +3542,17 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       world.sortChildren()
     }
     renderItemsRef.current = nextRenderItems
+    if (reconciledSnapshotItems.size > 0) {
+      const finalResidentTextureBytesForReconcileSnapshot = getResidentTextureBytes()
+      reconciledSnapshotItems.forEach((item, itemId) => {
+        if (spriteRecordsRef.current.has(itemId) && nextRenderItems.has(itemId)) {
+          itemReconcileSnapshotByIdRef.current.set(
+            itemId,
+            buildItemReconcileSnapshot(item, finalResidentTextureBytesForReconcileSnapshot)
+          )
+        }
+      })
+    }
     let createdSpriteCount = 0
     let reusedSpriteCount = 0
     let removedSpriteCount = 0
@@ -3504,6 +3632,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     cancelScheduledRender,
     scheduleRender,
     scheduleImageVersionUpdate,
+    getCanvasImageAssetIdentityKey,
     getResidentTextureBytes,
     setCachedImageRecord,
     setTextureBudgetReservation,
