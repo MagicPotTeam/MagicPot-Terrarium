@@ -203,7 +203,12 @@ async function writeBenchmarkImages(tempRoot, count) {
   return paths
 }
 
-function isWebglBenchmarkMetricsReady(metrics, expectedImageCount, baselineRenderCount = 0) {
+function isWebglBenchmarkMetricsReady(
+  metrics,
+  expectedImageCount,
+  baselineRenderCount = 0,
+  baselineSpriteReconcilePassCount = 0
+) {
   const expectedResidentCount =
     metrics.residentLimit > 0
       ? Math.min(expectedImageCount, metrics.residentLimit)
@@ -212,9 +217,21 @@ function isWebglBenchmarkMetricsReady(metrics, expectedImageCount, baselineRende
   const observedNonResidentProxyCount =
     Number(metrics.summary?.budgetDowngradedImageItems || '0') +
     Number(metrics.summary?.fallbackImageItems || '0')
+  const summaryImageCount = Number(metrics.summary?.imageItems || '0')
+  const residentCandidateImageCount = Number(metrics.residentCandidateImageCount || 0)
+  const viewportCulledImageCount = Number(metrics.viewportCulledImageCount || 0)
+  const spriteReconcilePassCount = Number(metrics.spriteReconcilePassCount || 0)
+  const lastSpriteReconcileCandidateCount = Number(metrics.lastSpriteReconcileCandidateCount || 0)
+  const lastSpriteReconcileDeferredCount = Number(metrics.lastSpriteReconcileDeferredCount || 0)
+  const postImportSpriteReconcileObserved =
+    spriteReconcilePassCount > baselineSpriteReconcilePassCount
+  const spriteReconcileSettled =
+    lastSpriteReconcileDeferredCount === 0 &&
+    lastSpriteReconcileCandidateCount === residentCandidateImageCount
 
   return (
     metrics.hasWebglContext &&
+    summaryImageCount >= expectedImageCount &&
     metrics.summary?.webglImageItems >= expectedResidentCount &&
     observedNonResidentProxyCount === expectedNonResidentProxyCount &&
     metrics.loadedImageCount >= expectedResidentCount &&
@@ -222,10 +239,11 @@ function isWebglBenchmarkMetricsReady(metrics, expectedImageCount, baselineRende
     metrics.sourceUpgradeQueueCount === 0 &&
     metrics.thumbnailLoadQueueCount === 0 &&
     metrics.initialLoadQueueCount === 0 &&
-    metrics.residentCandidateImageCount + metrics.viewportCulledImageCount ===
-      expectedImageCount &&
+    residentCandidateImageCount + viewportCulledImageCount === expectedImageCount &&
     ['available', 'full', 'count-full', 'texture-full'].includes(metrics.residentBudgetState) &&
     metrics.renderCount > baselineRenderCount &&
+    postImportSpriteReconcileObserved &&
+    spriteReconcileSettled &&
     Number.isFinite(metrics.lastRenderDurationMs) &&
     metrics.lastRenderDurationMs > 0 &&
     metrics.lastUpdateReason !== 'cleanup'
@@ -234,7 +252,12 @@ function isWebglBenchmarkMetricsReady(metrics, expectedImageCount, baselineRende
 
 export { isWebglBenchmarkMetricsReady }
 
-async function waitForBenchmarkMetrics(page, expectedImageCount, baselineRenderCount = 0) {
+async function waitForBenchmarkMetrics(
+  page,
+  expectedImageCount,
+  baselineRenderCount = 0,
+  baselineSpriteReconcilePassCount = 0
+) {
   await page.waitForSelector('.project-canvas-webgl-layer', { timeout: 60000 })
   const startedAt = Date.now()
   let lastError = null
@@ -244,7 +267,12 @@ async function waitForBenchmarkMetrics(page, expectedImageCount, baselineRenderC
     try {
       observedMetrics = await readBenchmarkMetrics(page)
       if (
-        isWebglBenchmarkMetricsReady(observedMetrics, expectedImageCount, baselineRenderCount)
+        isWebglBenchmarkMetricsReady(
+          observedMetrics,
+          expectedImageCount,
+          baselineRenderCount,
+          baselineSpriteReconcilePassCount
+        )
       ) {
         return observedMetrics
       }
@@ -266,7 +294,7 @@ async function waitForBenchmarkMetrics(page, expectedImageCount, baselineRenderC
   const reason = lastError instanceof Error ? lastError.message : String(lastError || 'not ready')
   const observedMetricsText = JSON.stringify(observedMetrics)
   throw new Error(
-    `Timed out waiting for WebGL benchmark metrics after ${BENCHMARK_METRIC_WAIT_TIMEOUT_MS}ms. Expected images: ${expectedImageCount}. Baseline render count: ${baselineRenderCount}. Observed metrics: ${observedMetricsText}. ${reason}`
+    `Timed out waiting for WebGL benchmark metrics after ${BENCHMARK_METRIC_WAIT_TIMEOUT_MS}ms. Expected images: ${expectedImageCount}. Baseline render count: ${baselineRenderCount}. Baseline sprite reconcile pass count: ${baselineSpriteReconcilePassCount}. Observed metrics: ${observedMetricsText}. ${reason}`
   )
 }
 
@@ -764,6 +792,7 @@ export async function runWebglBenchmark() {
 
     const baselineMetrics = await readBenchmarkMetrics(page).catch(() => null)
     const baselineRenderCount = Number(baselineMetrics?.renderCount || 0)
+    const baselineSpriteReconcilePassCount = Number(baselineMetrics?.spriteReconcilePassCount || 0)
     const benchmarkImages = await writeBenchmarkImages(tempRoot, BENCHMARK_IMAGE_COUNT)
     const importInput = await getCanvasImportInput(page)
     await importInput.setInputFiles(benchmarkImages, { timeout: 30000 })
@@ -772,7 +801,8 @@ export async function runWebglBenchmark() {
     const metrics = await waitForBenchmarkMetrics(
       page,
       benchmarkImages.length,
-      baselineRenderCount
+      baselineRenderCount,
+      baselineSpriteReconcilePassCount
     )
     const cullingBenchmark = await zoomUntilViewportCull(page, benchmarkImages.length)
     const interactionBenchmark = await runInteractionBenchmark(

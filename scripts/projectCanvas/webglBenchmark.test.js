@@ -163,9 +163,10 @@ describe('webglBenchmark metrics reader', () => {
     expect(metrics.largeImageResourceMetrics.values.residentTextureBytes).toBeNull()
   })
 
-  it('checks initial WebGL readiness against a post-import render baseline', () => {
+  it('checks initial WebGL readiness against post-import render and sprite reconcile baselines', () => {
     const readyMetrics = {
       summary: {
+        imageItems: 4,
         webglImageItems: 4,
         fallbackImageItems: 0,
         budgetDowngradedImageItems: 0
@@ -181,17 +182,62 @@ describe('webglBenchmark metrics reader', () => {
       thumbnailLoadQueueCount: 0,
       initialLoadQueueCount: 0,
       renderCount: 12,
+      spriteReconcilePassCount: 12,
+      lastSpriteReconcileCandidateCount: 4,
+      lastSpriteReconcileDeferredCount: 0,
       lastRenderDurationMs: 5.5,
       lastUpdateReason: 'items'
     }
 
-    expect(isWebglBenchmarkMetricsReady(readyMetrics, 4, 11)).toBe(true)
-    expect(isWebglBenchmarkMetricsReady({ ...readyMetrics, renderCount: 11 }, 4, 11)).toBe(false)
+    expect(isWebglBenchmarkMetricsReady(readyMetrics, 4, 11, 11)).toBe(true)
+    expect(isWebglBenchmarkMetricsReady({ ...readyMetrics, renderCount: 11 }, 4, 11, 11)).toBe(
+      false
+    )
     expect(
-      isWebglBenchmarkMetricsReady({ ...readyMetrics, sourceUpgradeQueueCount: 1 }, 4, 11)
+      isWebglBenchmarkMetricsReady({ ...readyMetrics, spriteReconcilePassCount: 11 }, 4, 11, 11)
     ).toBe(false)
     expect(
-      isWebglBenchmarkMetricsReady({ ...readyMetrics, lastUpdateReason: 'cleanup' }, 4, 11)
+      isWebglBenchmarkMetricsReady(
+        { ...readyMetrics, lastSpriteReconcileDeferredCount: 1 },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady(
+        { ...readyMetrics, lastSpriteReconcileCandidateCount: 3 },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady(
+        { ...readyMetrics, summary: { ...readyMetrics.summary, imageItems: 3 } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady(
+        {
+          ...readyMetrics,
+          residentCandidateImageCount: 3,
+          viewportCulledImageCount: 0,
+          lastSpriteReconcileCandidateCount: 3
+        },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady({ ...readyMetrics, sourceUpgradeQueueCount: 1 }, 4, 11, 11)
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady({ ...readyMetrics, lastUpdateReason: 'cleanup' }, 4, 11, 11)
     ).toBe(false)
   })
 

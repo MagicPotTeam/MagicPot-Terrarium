@@ -510,7 +510,7 @@ describe('realBoardBenchmark acceptance gates', () => {
     })
   })
 
-  it('requires real-board readiness to observe post-import render metrics and drained queues', () => {
+  it('requires real-board readiness to observe post-import render and sprite reconcile metrics', () => {
     const readyMetrics = {
       itemCounts: {
         totalImageItemCount: 4
@@ -526,16 +526,74 @@ describe('realBoardBenchmark acceptance gates', () => {
         thumbnailLoadQueueCount: 0,
         initialLoadQueueCount: 0,
         renderCount: 12,
+        spriteReconcilePassCount: 12,
+        lastSpriteReconcileCandidateCount: 4,
+        lastSpriteReconcileDeferredCount: 0,
         lastRenderDurationMs: 5.5,
         lastUpdateReason: 'items'
       }
     }
 
-    expect(isRealBoardBenchmarkMetricsReady(readyMetrics, 4, 11)).toBe(true)
+    expect(isRealBoardBenchmarkMetricsReady(readyMetrics, 4, 11, 11)).toBe(true)
     expect(
       isRealBoardBenchmarkMetricsReady(
         { ...readyMetrics, webgl: { ...readyMetrics.webgl, renderCount: 11 } },
         4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, spriteReconcilePassCount: 11 } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        {
+          ...readyMetrics,
+          webgl: { ...readyMetrics.webgl, lastSpriteReconcileDeferredCount: 1 }
+        },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        {
+          ...readyMetrics,
+          webgl: { ...readyMetrics.webgl, lastSpriteReconcileCandidateCount: 3 }
+        },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, itemCounts: { totalImageItemCount: 3 } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        {
+          ...readyMetrics,
+          webgl: {
+            ...readyMetrics.webgl,
+            residentCandidateImageCount: 3,
+            viewportCulledImageCount: 0,
+            lastSpriteReconcileCandidateCount: 3
+          }
+        },
+        4,
+        11,
         11
       )
     ).toBe(false)
@@ -543,6 +601,7 @@ describe('realBoardBenchmark acceptance gates', () => {
       isRealBoardBenchmarkMetricsReady(
         { ...readyMetrics, webgl: { ...readyMetrics.webgl, sourceUpgradeQueueCount: 1 } },
         4,
+        11,
         11
       )
     ).toBe(false)
@@ -550,6 +609,7 @@ describe('realBoardBenchmark acceptance gates', () => {
       isRealBoardBenchmarkMetricsReady(
         { ...readyMetrics, webgl: { ...readyMetrics.webgl, thumbnailLoadQueueCount: 1 } },
         4,
+        11,
         11
       )
     ).toBe(false)
@@ -557,6 +617,7 @@ describe('realBoardBenchmark acceptance gates', () => {
       isRealBoardBenchmarkMetricsReady(
         { ...readyMetrics, webgl: { ...readyMetrics.webgl, initialLoadQueueCount: 1 } },
         4,
+        11,
         11
       )
     ).toBe(false)
@@ -564,6 +625,7 @@ describe('realBoardBenchmark acceptance gates', () => {
       isRealBoardBenchmarkMetricsReady(
         { ...readyMetrics, webgl: { ...readyMetrics.webgl, lastRenderDurationMs: 0 } },
         4,
+        11,
         11
       )
     ).toBe(false)
@@ -571,6 +633,7 @@ describe('realBoardBenchmark acceptance gates', () => {
       isRealBoardBenchmarkMetricsReady(
         { ...readyMetrics, webgl: { ...readyMetrics.webgl, lastUpdateReason: 'cleanup' } },
         4,
+        11,
         11
       )
     ).toBe(false)

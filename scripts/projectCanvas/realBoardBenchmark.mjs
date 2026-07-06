@@ -2136,7 +2136,8 @@ async function runPressureSampling(page, durationMs, sampleIntervalMs) {
 function buildRealBoardBenchmarkMetricReadiness(
   metrics,
   expectedImageCount,
-  baselineRenderCount = 0
+  baselineRenderCount = 0,
+  baselineSpriteReconcilePassCount = 0
 ) {
   const webgl = metrics?.webgl ?? {}
   const totalImageItemCount = Number(
@@ -2153,11 +2154,22 @@ function buildRealBoardBenchmarkMetricReadiness(
   const renderCount = Number(webgl.renderCount || 0)
   const lastRenderDurationMs = Number(webgl.lastRenderDurationMs || 0)
   const lastUpdateReason = webgl.lastUpdateReason || ''
+  const spriteReconcilePassCount = Number(webgl.spriteReconcilePassCount || 0)
+  const lastSpriteReconcileCandidateCount = Number(webgl.lastSpriteReconcileCandidateCount || 0)
+  const lastSpriteReconcileDeferredCount = Number(webgl.lastSpriteReconcileDeferredCount || 0)
   const settledResidentCandidates =
     loadedImageCount + failedImageCount >= Math.max(1, residentCandidateImageCount)
   const queuesDrained =
     sourceUpgradeQueueCount === 0 && thumbnailLoadQueueCount === 0 && initialLoadQueueCount === 0
   const postImportRenderObserved = renderCount > baselineRenderCount
+  const postImportSpriteReconcileObserved =
+    spriteReconcilePassCount > baselineSpriteReconcilePassCount
+  const candidateUniverseImageCount = residentCandidateImageCount + viewportCulledImageCount
+  const reconcileCandidateUniverseObserved =
+    candidateUniverseImageCount === totalImageItemCount && totalImageItemCount >= expectedImageCount
+  const spriteReconcileSettled =
+    lastSpriteReconcileDeferredCount === 0 &&
+    lastSpriteReconcileCandidateCount === residentCandidateImageCount
   const renderDurationObserved = Number.isFinite(lastRenderDurationMs) && lastRenderDurationMs > 0
   const ready =
     Boolean(webgl.hasWebglContext) &&
@@ -2166,8 +2178,10 @@ function buildRealBoardBenchmarkMetricReadiness(
     settledResidentCandidates &&
     pendingImageCount === 0 &&
     queuesDrained &&
-    residentCandidateImageCount + viewportCulledImageCount > 0 &&
+    reconcileCandidateUniverseObserved &&
     postImportRenderObserved &&
+    postImportSpriteReconcileObserved &&
+    spriteReconcileSettled &&
     renderDurationObserved &&
     lastUpdateReason !== 'cleanup'
 
@@ -2185,27 +2199,59 @@ function buildRealBoardBenchmarkMetricReadiness(
     initialLoadQueueCount,
     renderCount,
     baselineRenderCount,
+    spriteReconcilePassCount,
+    baselineSpriteReconcilePassCount,
+    lastSpriteReconcileCandidateCount,
+    lastSpriteReconcileDeferredCount,
     lastRenderDurationMs,
     lastUpdateReason,
     settledResidentCandidates,
     queuesDrained,
+    candidateUniverseImageCount,
+    reconcileCandidateUniverseObserved,
     postImportRenderObserved,
+    postImportSpriteReconcileObserved,
+    spriteReconcileSettled,
     renderDurationObserved,
     expectedImageCount
   }
 }
 
-function isRealBoardBenchmarkMetricsReady(metrics, expectedImageCount, baselineRenderCount = 0) {
-  return buildRealBoardBenchmarkMetricReadiness(metrics, expectedImageCount, baselineRenderCount)
-    .ready
+function isRealBoardBenchmarkMetricsReady(
+  metrics,
+  expectedImageCount,
+  baselineRenderCount = 0,
+  baselineSpriteReconcilePassCount = 0
+) {
+  return buildRealBoardBenchmarkMetricReadiness(
+    metrics,
+    expectedImageCount,
+    baselineRenderCount,
+    baselineSpriteReconcilePassCount
+  ).ready
 }
 
-async function readBenchmarkMetricReadiness(page, expectedImageCount, baselineRenderCount = 0) {
+async function readBenchmarkMetricReadiness(
+  page,
+  expectedImageCount,
+  baselineRenderCount = 0,
+  baselineSpriteReconcilePassCount = 0
+) {
   const metrics = await readBenchmarkMetrics(page)
-  return buildRealBoardBenchmarkMetricReadiness(metrics, expectedImageCount, baselineRenderCount)
+  return buildRealBoardBenchmarkMetricReadiness(
+    metrics,
+    expectedImageCount,
+    baselineRenderCount,
+    baselineSpriteReconcilePassCount
+  )
 }
 
-async function waitForBenchmarkMetrics(page, expectedImageCount, baselineRenderCount = 0) {
+async function waitForBenchmarkMetrics(
+  page,
+  expectedImageCount,
+  baselineRenderCount = 0,
+  baselineSpriteReconcilePassCount = 0
+) {
   await page.waitForSelector('.project-canvas-webgl-layer', { timeout: 60000 })
   const deadline = Date.now() + METRIC_WAIT_TIMEOUT_MS
   let observedReadiness = null
@@ -2217,7 +2263,8 @@ async function waitForBenchmarkMetrics(page, expectedImageCount, baselineRenderC
       observedReadiness = await readBenchmarkMetricReadiness(
         page,
         expectedImageCount,
-        baselineRenderCount
+        baselineRenderCount,
+        baselineSpriteReconcilePassCount
       )
       if (observedReadiness.ready) {
         runBenchmarkGarbageCollection('wait-benchmark-metrics:ready')
@@ -2245,7 +2292,7 @@ async function waitForBenchmarkMetrics(page, expectedImageCount, baselineRenderC
   }
 
   throw new Error(
-    `Timed out waiting for real board metrics after ${METRIC_WAIT_TIMEOUT_MS}ms. Expected images: ${expectedImageCount}. Observed readiness: ${JSON.stringify(observedReadiness)}. Observed metrics: ${JSON.stringify(observedMetrics)}. ${lastError instanceof Error ? lastError.message : lastError ? String(lastError) : ''}`
+    `Timed out waiting for real board metrics after ${METRIC_WAIT_TIMEOUT_MS}ms. Expected images: ${expectedImageCount}. Baseline render count: ${baselineRenderCount}. Baseline sprite reconcile pass count: ${baselineSpriteReconcilePassCount}. Observed readiness: ${JSON.stringify(observedReadiness)}. Observed metrics: ${JSON.stringify(observedMetrics)}. ${lastError instanceof Error ? lastError.message : lastError ? String(lastError) : ''}`
   )
 }
 
@@ -3152,6 +3199,9 @@ async function runRealBoardScenarioPass({
     )
     const baselineMetrics = await readBenchmarkMetrics(page).catch(() => null)
     const baselineRenderCount = Number(baselineMetrics?.webgl?.renderCount || 0)
+    const baselineSpriteReconcilePassCount = Number(
+      baselineMetrics?.webgl?.spriteReconcilePassCount || 0
+    )
     const importPlan = await importBenchmarkImageFiles(page, staged.stagedImages, scenarioName)
     await BENCHMARK_MEMORY_WATCHDOG.guard(`${scenarioName}:post-import-settle`, () =>
       page.waitForTimeout(3000)
@@ -3159,7 +3209,13 @@ async function runRealBoardScenarioPass({
 
     const initialMetrics = await BENCHMARK_MEMORY_WATCHDOG.guard(
       `${scenarioName}:wait-benchmark-metrics`,
-      () => waitForBenchmarkMetrics(page, staged.stagedImages.length, baselineRenderCount)
+      () =>
+        waitForBenchmarkMetrics(
+          page,
+          staged.stagedImages.length,
+          baselineRenderCount,
+          baselineSpriteReconcilePassCount
+        )
     )
     const interactionBurst = await BENCHMARK_MEMORY_WATCHDOG.guard(
       `${scenarioName}:interaction-burst`,
