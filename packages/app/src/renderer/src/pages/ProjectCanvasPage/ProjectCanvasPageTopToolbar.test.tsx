@@ -146,7 +146,7 @@ function buildBaseProps(overrides: Record<string, unknown> = {}) {
     exportCtxMenuPos: null,
     exportMenuAnchor: null,
     exportSubmenuAnchor: null,
-    exportSubmenuPlacement: 'bottom-end',
+    exportSubmenuPlacement: 'right' as const,
     exportableItems: [],
     figmaAccessToken: '',
     figmaAutoCheckIntervalMinutes: 60,
@@ -354,7 +354,7 @@ function buildBaseProps(overrides: Record<string, unknown> = {}) {
     textureImportDialogOpen: false,
     textureInputRef: { current: null },
     theme,
-    tool: 'select',
+    tool: 'select' as const,
     toolShortcutCtxMenu: null,
     toolShortcutRecorded: '',
     toolShortcuts: {
@@ -637,33 +637,23 @@ describe('ProjectCanvasPageTopToolbar', () => {
     )
   })
 
-  it('still renders the group tree when branch handlers are temporarily missing', async () => {
+  it('passes required group tree branch handlers instead of using noop fallbacks', async () => {
     const toolbarLabel = createTranslate()('canvas.group_toolbar')
-    const group = {
-      id: 'group-1',
-      name: 'Legacy Group',
-      itemIds: ['item-1'],
-      createdAt: '2026-04-21T00:00:00.000Z',
-      validItems: [],
-      validCount: 1,
-      totalCount: 1
-    }
+    const handleCreateGroupBranch = vi.fn(() => ({
+      id: 'branch-1',
+      name: 'Branch 1',
+      createdAt: '2026-04-21T00:00:00.000Z'
+    }))
 
     function TestHarness() {
       const [groupMenuAnchor, setGroupMenuAnchor] = React.useState<HTMLElement | null>(null)
 
       const props = buildBaseProps({
-        groupBranches: undefined,
+        groupBranches: [],
         groupMenuAnchor,
-        groupSummaries: [group],
-        handleCreateGroupBranch: undefined,
-        handleDeleteGroupBranch: undefined,
-        handleFocusGroupBranch: undefined,
-        handleMoveGroupToBranch: undefined,
+        handleCreateGroupBranch,
         handleOpenGroupMenu: (anchor: HTMLElement) => setGroupMenuAnchor(anchor),
-        handleCloseGroupMenu: () => setGroupMenuAnchor(null),
-        handleRenameGroup: undefined,
-        handleRenameGroupBranch: undefined
+        handleCloseGroupMenu: () => setGroupMenuAnchor(null)
       })
 
       return (
@@ -676,8 +666,10 @@ describe('ProjectCanvasPageTopToolbar', () => {
     render(<TestHarness />)
 
     fireEvent.click(screen.getByRole('button', { name: toolbarLabel }))
+    fireEvent.click(await screen.findByRole('button', { name: '分枝' }))
+    fireEvent.click(screen.getByRole('button', { name: 'canvas.group_create_confirm' }))
 
-    expect(await screen.findByRole('button', { name: 'Legacy Group' })).toBeInTheDocument()
+    expect(handleCreateGroupBranch).toHaveBeenCalledTimes(1)
   })
 
   it('renders the group toolbar chip without the group count suffix', () => {

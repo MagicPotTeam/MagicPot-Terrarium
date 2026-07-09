@@ -434,6 +434,16 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
   const mountedDomOverlayItemsRef = React.useRef<MountedDomOverlayItems | null>(null)
   const domOverlayVisibilityRuntimeRef = React.useRef<ProjectCanvasRuntime | null>(null)
   const domOverlayVisibilityItemsRef = React.useRef<CanvasItem[] | null>(null)
+
+  React.useEffect(
+    () => () => {
+      domOverlayVisibilityRuntimeRef.current?.dispose()
+      domOverlayVisibilityRuntimeRef.current = null
+      domOverlayVisibilityItemsRef.current = null
+    },
+    []
+  )
+
   const domCanvasItems = React.useMemo<CanvasItem[]>(
     () => [...renderableHtmlCanvasItems, ...fileItems, ...textItems, ...annotationItems],
     [annotationItems, fileItems, renderableHtmlCanvasItems, textItems]

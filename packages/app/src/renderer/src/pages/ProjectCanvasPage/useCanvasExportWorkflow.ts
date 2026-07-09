@@ -21,8 +21,8 @@ import { buildRasterBackedSvgMarkup, SVG_EXPORT_MIME_TYPE } from './canvasExport
 import { type ExportSubmenuPlacement, resolveExportSubmenuPlacement } from './exportMenuPlacement'
 import type { CanvasExportBounds } from './groupPlaybackUtils'
 import {
-  createProjectCanvasRuntime,
   getProjectCanvasRuntimeExportBounds,
+  withProjectCanvasRuntime,
   type ProjectCanvasRuntimeSnapshot
 } from './projectCanvasRuntime'
 import {
@@ -897,12 +897,12 @@ export function useCanvasExportWorkflow({
   )
 
   const createRuntimeExportSnapshot = useCallback(
-    (targetItems: CanvasItem[]) => {
-      const runtime = createProjectCanvasRuntime()
-      runtime.setItems(targetItems)
-      runtime.setViewport({ x: stagePos.x, y: stagePos.y, scale: stageScale })
-      return runtime.createSnapshot({ selectedIds })
-    },
+    (targetItems: CanvasItem[]) =>
+      withProjectCanvasRuntime((runtime) => {
+        runtime.setItems(targetItems)
+        runtime.setViewport({ x: stagePos.x, y: stagePos.y, scale: stageScale })
+        return runtime.createSnapshot({ selectedIds })
+      }),
     [selectedIds, stagePos.x, stagePos.y, stageScale]
   )
 

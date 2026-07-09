@@ -103,14 +103,12 @@ import {
   applySelectedTextSizeChange,
   getCanvasItemBounds,
   getCanvasItemsBounds,
-  isCanvasExportableItem,
   isFillableAnnotationShape as sharedIsFillableAnnotationShape,
   normalizeOfficeFileNodeDataForCanvas,
   resolveDroppedAgentImageDataUrl,
   translateCanvasItem,
   type AvailableQAppOption,
   type CanvasDragPayload,
-  type CanvasExportableItem,
   type CanvasTool
 } from './projectCanvasPageShared'
 import { type ProjectStyleModelOption } from './projectStyleModelRegistry'
@@ -158,6 +156,7 @@ import { useCanvasSelectionInfo } from './useCanvasSelectionInfo'
 import { useCanvasSelectionActions } from './useCanvasSelectionActions'
 import { useCanvasSelectionUiActions } from './useCanvasSelectionUiActions'
 import { useCanvasStageInteraction } from './useCanvasStageInteraction'
+import { useCanvasSelectionRectDomDriver } from './useCanvasSelectionRectDomDriver'
 import { useStageViewportTransformDriver } from './useStageViewportTransformDriver'
 import { useCanvasFileIntake } from './useCanvasFileIntake'
 import { useCanvasCustomAddEvents } from './useCanvasCustomAddEvents'
@@ -175,41 +174,31 @@ import { useCanvasViewportPlacement } from './useCanvasViewportPlacement'
 import { useCanvasVisualMetrics } from './useCanvasVisualMetrics'
 import { useCanvasViewerPlayback } from './useCanvasViewerPlayback'
 import { installProjectCanvasBenchmarkViewportSetter } from './projectCanvasBenchmarkRuntime'
-import { useCanvasAssetIntake, type CanvasImageBatchImportProgress } from './useCanvasAssetIntake'
+import { resolveProjectCanvasBenchmarkViewport } from './projectCanvasBenchmarkViewport'
+import { useCanvasAssetIntake } from './useCanvasAssetIntake'
+import { useCanvasImageBatchImportProgress } from './useCanvasImageBatchImportProgress'
+import {
+  getCanvasExportableItems,
+  getSelectedCanvasExportableItems
+} from './canvasExportableSelectionUtils'
+import { useComfyExecutionActivity } from './useComfyExecutionActivity'
+import { useCanvasScreenshotShortcutSync } from './useCanvasScreenshotShortcutSync'
+import { useProjectTraceCanvasEvents } from './useProjectTraceCanvasEvents'
+import { useProjectTraceRealtimeAdvice } from './useProjectTraceRealtimeAdvice'
+import { useCanvasDuplicateCheckRuntimeBridge } from './useCanvasDuplicateCheckRuntimeBridge'
+import { useCanvasLastViewportPoint } from './useCanvasLastViewportPoint'
 import { useCanvasImageExtract } from './useCanvasImageExtract'
 import { useMessage } from '../../hooks/useMessage'
 import { useConfig } from '../../hooks/useConfig'
 import { api } from '../../utils/windowUtils'
-import {
-  COMFY_EXECUTION_ACTIVITY_CHANGE_EVENT,
-  getComfyExecutionActivitySnapshot,
-  type ComfyExecutionActivitySnapshot
-} from '../../utils/comfyExecutionActivity'
 import { useDispatch, useSelector } from 'react-redux'
 import { openRightPanel, openSidePanel } from '../../store/slices/layoutSlice'
 import { useTranslation } from 'react-i18next'
 import type { ChatAttachment, OCRResult } from '@shared/api/svcLLMProxy'
 import type { CanvasFigmaBinding } from '@shared/figma'
-import {
-  DEFAULT_SCREENSHOT_SHORTCUT,
-  buildReservedCanvasShortcuts,
-  conflictsWithCanvasShortcut,
-  toDisplayShortcut,
-  toElectronAccelerator
-} from '@shared/shortcutConflictUtils'
 import { extractVideoBoundaryFrameDataUrls } from '../ChatPage/chatVideoAttachmentUtils'
 import { buildBboxToCellIdsMap, buildOcrResultHtml, isNormalizedOcrBox } from './ocrCanvasUtils'
 import { createCanvasStageHandle } from './canvasStageHandle'
-import {
-  CANVAS_DUPLICATE_CHECK_FOCUS_EVENT,
-  publishCanvasDuplicateCheckRuntimeSnapshot,
-  type CanvasDuplicateCheckFocusDetail
-} from './canvasDuplicateCheckRuntime'
-import {
-  PROJECT_TRACE_REALTIME_ADVICE_EVENT,
-  emitProjectTraceRuntimeEvent,
-  type ProjectTraceRealtimeAdviceEvent
-} from '@renderer/features/projectTrace/projectTraceRuntime'
 
 export {
   applySelectedTextSizeChange,
@@ -233,226 +222,6 @@ function isCanvasInteractionDebugEnabled() {
   )
 }
 
-type ProjectTraceCanvasItemMetric = {
-  id: string
-  type: string
-  x: number
-  y: number
-  width: number
-  height: number
-  rotation: number
-  zIndex: number
-}
-
-type ProjectTraceCanvasSnapshot = {
-  signature: string
-  itemCount: number
-  selectionCount: number
-  items: Record<string, ProjectTraceCanvasItemMetric>
-}
-
-function roundProjectTraceCanvasNumber(value: unknown): number {
-  return Math.round((typeof value === 'number' ? value : 0) * 10) / 10
-}
-
-function buildProjectTraceCanvasItemMetrics(
-  items: CanvasItem[]
-): Record<string, ProjectTraceCanvasItemMetric> {
-  return Object.fromEntries(
-    items.map((item) => {
-      const measured = item as CanvasItem & {
-        x?: number
-        y?: number
-        width?: number
-        height?: number
-        rotation?: number
-        zIndex?: number
-      }
-      return [
-        item.id,
-        {
-          id: item.id,
-          type: item.type,
-          x: roundProjectTraceCanvasNumber(measured.x),
-          y: roundProjectTraceCanvasNumber(measured.y),
-          width: roundProjectTraceCanvasNumber(measured.width),
-          height: roundProjectTraceCanvasNumber(measured.height),
-          rotation: roundProjectTraceCanvasNumber(measured.rotation),
-          zIndex: measured.zIndex || 0
-        }
-      ]
-    })
-  )
-}
-
-function buildProjectTraceCanvasItemSignature(
-  metrics: Record<string, ProjectTraceCanvasItemMetric>
-): string {
-  return Object.values(metrics)
-    .map((item) =>
-      [
-        item.id,
-        item.type,
-        item.x,
-        item.y,
-        item.width,
-        item.height,
-        item.rotation,
-        item.zIndex
-      ].join(':')
-    )
-    .sort()
-    .join('|')
-}
-
-function summarizeProjectTraceCanvasChange(
-  previous: Record<string, ProjectTraceCanvasItemMetric>,
-  next: Record<string, ProjectTraceCanvasItemMetric>,
-  selectedCount: number,
-  selectionChanged: boolean,
-  isChineseUi: boolean
-): { summary: string; affectedItemCount: number; movementDistancePx?: number } {
-  const previousIds = new Set(Object.keys(previous))
-  const nextIds = new Set(Object.keys(next))
-  const created = Object.values(next).filter((item) => !previousIds.has(item.id))
-  const removed = Object.values(previous).filter((item) => !nextIds.has(item.id))
-  const changedPairs = Object.values(next)
-    .map((item) => ({ before: previous[item.id], after: item }))
-    .filter(
-      (
-        entry
-      ): entry is { before: ProjectTraceCanvasItemMetric; after: ProjectTraceCanvasItemMetric } =>
-        Boolean(entry.before)
-    )
-
-  const moved = changedPairs.filter(
-    ({ before, after }) => before.x !== after.x || before.y !== after.y
-  )
-  const movementDistancePx = Math.max(
-    0,
-    ...moved.map(({ before, after }) => Math.hypot(after.x - before.x, after.y - before.y))
-  )
-  const resized = changedPairs.filter(
-    ({ before, after }) => before.width !== after.width || before.height !== after.height
-  )
-  const rotated = changedPairs.filter(({ before, after }) => before.rotation !== after.rotation)
-  const reordered = changedPairs.filter(({ before, after }) => before.zIndex !== after.zIndex)
-  const parts = isChineseUi
-    ? [
-        created.length ? `新增 ${created.length} 个画布元素` : '',
-        removed.length ? `删除 ${removed.length} 个画布元素` : '',
-        moved.length
-          ? `移动 ${moved.length} 个画布元素，最大位移 ${roundProjectTraceCanvasNumber(movementDistancePx)}px`
-          : '',
-        resized.length ? `缩放 ${resized.length} 个画布元素` : '',
-        rotated.length ? `旋转 ${rotated.length} 个画布元素` : '',
-        reordered.length ? `调整 ${reordered.length} 个画布元素层级` : '',
-        selectionChanged ? `选中数量变为 ${selectedCount}` : ''
-      ].filter(Boolean)
-    : [
-        created.length ? `Added ${created.length} canvas item(s)` : '',
-        removed.length ? `Removed ${removed.length} canvas item(s)` : '',
-        moved.length
-          ? `Moved ${moved.length} canvas item(s), max distance ${roundProjectTraceCanvasNumber(movementDistancePx)}px`
-          : '',
-        resized.length ? `Resized ${resized.length} canvas item(s)` : '',
-        rotated.length ? `Rotated ${rotated.length} canvas item(s)` : '',
-        reordered.length ? `Changed z-order for ${reordered.length} canvas item(s)` : '',
-        selectionChanged ? `Selection changed to ${selectedCount} item(s)` : ''
-      ].filter(Boolean)
-
-  return {
-    summary:
-      parts.join(isChineseUi ? '；' : '; ') ||
-      (isChineseUi ? '更新画布状态' : 'Updated canvas state'),
-    affectedItemCount:
-      created.length +
-      removed.length +
-      moved.length +
-      resized.length +
-      rotated.length +
-      reordered.length +
-      (selectionChanged ? selectedCount : 0),
-    ...(moved.length > 0
-      ? { movementDistancePx: roundProjectTraceCanvasNumber(movementDistancePx) }
-      : {})
-  }
-}
-
-function measureProjectTraceCanvasRuleMetrics(
-  previous: Record<string, ProjectTraceCanvasItemMetric>,
-  next: Record<string, ProjectTraceCanvasItemMetric>
-): {
-  removedItemCount?: number
-  resizedItemCount?: number
-  rotatedItemCount?: number
-  reorderedItemCount?: number
-  maxScaleChangeRatio?: number
-  maxRotationDeltaDeg?: number
-  maxLayerDelta?: number
-} {
-  const nextIds = new Set(Object.keys(next))
-  const removedItemCount = Object.values(previous).filter((item) => !nextIds.has(item.id)).length
-  const changedPairs = Object.values(next)
-    .map((item) => ({ before: previous[item.id], after: item }))
-    .filter(
-      (
-        entry
-      ): entry is { before: ProjectTraceCanvasItemMetric; after: ProjectTraceCanvasItemMetric } =>
-        Boolean(entry.before)
-    )
-  const resized = changedPairs.filter(
-    ({ before, after }) => before.width !== after.width || before.height !== after.height
-  )
-  const rotated = changedPairs.filter(({ before, after }) => before.rotation !== after.rotation)
-  const reordered = changedPairs.filter(({ before, after }) => before.zIndex !== after.zIndex)
-  const maxScaleChangeRatio = Math.max(
-    0,
-    ...resized.map(({ before, after }) =>
-      Math.max(
-        Math.abs(after.width - before.width) / Math.max(1, Math.abs(before.width)),
-        Math.abs(after.height - before.height) / Math.max(1, Math.abs(before.height))
-      )
-    )
-  )
-  const maxRotationDeltaDeg = Math.max(
-    0,
-    ...rotated.map(({ before, after }) => {
-      const delta = Math.abs(after.rotation - before.rotation) % 360
-      return Math.min(delta, 360 - delta)
-    })
-  )
-  const maxLayerDelta = Math.max(
-    0,
-    ...reordered.map(({ before, after }) => Math.abs(after.zIndex - before.zIndex))
-  )
-
-  return {
-    ...(removedItemCount > 0 ? { removedItemCount } : {}),
-    ...(resized.length > 0 ? { resizedItemCount: resized.length } : {}),
-    ...(rotated.length > 0 ? { rotatedItemCount: rotated.length } : {}),
-    ...(reordered.length > 0 ? { reorderedItemCount: reordered.length } : {}),
-    ...(resized.length > 0
-      ? { maxScaleChangeRatio: roundProjectTraceCanvasNumber(maxScaleChangeRatio) }
-      : {}),
-    ...(rotated.length > 0
-      ? { maxRotationDeltaDeg: roundProjectTraceCanvasNumber(maxRotationDeltaDeg) }
-      : {}),
-    ...(reordered.length > 0 ? { maxLayerDelta: roundProjectTraceCanvasNumber(maxLayerDelta) } : {})
-  }
-}
-
-function summarizeProjectTraceCanvasItemTypes(items: CanvasItem[]): string {
-  const counts = items.reduce<Record<string, number>>((acc, item) => {
-    acc[item.type] = (acc[item.type] || 0) + 1
-    return acc
-  }, {})
-  return Object.entries(counts)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([type, count]) => `${type}:${count}`)
-    .join(', ')
-}
-
 const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) => {
   const theme = useTheme()
   const { t, i18n } = useTranslation()
@@ -464,68 +233,16 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     () => resolveActiveCanvasAgentSessionKey(canvasId),
     [canvasId]
   )
-  const [imageBatchImportProgress, setImageBatchImportProgress] =
-    useState<CanvasImageBatchImportProgress | null>(null)
-  const imageBatchImportClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const projectTraceCanvasSnapshotRef = useRef<ProjectTraceCanvasSnapshot | null>(null)
-  const projectTraceCanvasPendingBaselineRef = useRef<ProjectTraceCanvasSnapshot | null>(null)
-  const projectTraceCanvasEventTimerRef = useRef<number | null>(null)
-  const isImageBatchImportActive =
-    imageBatchImportProgress !== null && imageBatchImportProgress.phase !== 'complete'
-  const handleImageBatchImportProgress = useCallback(
-    (progress: CanvasImageBatchImportProgress | null) => {
-      if (imageBatchImportClearTimerRef.current) {
-        clearTimeout(imageBatchImportClearTimerRef.current)
-        imageBatchImportClearTimerRef.current = null
-      }
-
-      setImageBatchImportProgress(progress)
-
-      if (progress?.phase === 'complete') {
-        imageBatchImportClearTimerRef.current = setTimeout(() => {
-          setImageBatchImportProgress(null)
-          imageBatchImportClearTimerRef.current = null
-        }, 1200)
-      }
-    },
-    []
-  )
-
-  useEffect(() => {
-    return () => {
-      if (imageBatchImportClearTimerRef.current) {
-        clearTimeout(imageBatchImportClearTimerRef.current)
-      }
-    }
-  }, [])
+  const { imageBatchImportProgress, isImageBatchImportActive, handleImageBatchImportProgress } =
+    useCanvasImageBatchImportProgress()
 
   const projectName = useSelector((state: any) => {
     const tab = state.layout.openTabs.find((t: any) => t.id === canvasId)
     return tab?.label || 'Project'
   })
-  const [comfyExecutionActivity, setComfyExecutionActivity] =
-    useState<ComfyExecutionActivitySnapshot>(() => getComfyExecutionActivitySnapshot())
-  const isCanvasPerformanceThrottled = !config.use_remote_comfyui && comfyExecutionActivity.active
-
-  useEffect(() => {
-    const handleComfyExecutionActivityChange = (event: Event) => {
-      const detail = (event as CustomEvent<ComfyExecutionActivitySnapshot>).detail
-      setComfyExecutionActivity(detail ?? getComfyExecutionActivitySnapshot())
-    }
-
-    window.addEventListener(
-      COMFY_EXECUTION_ACTIVITY_CHANGE_EVENT,
-      handleComfyExecutionActivityChange
-    )
-    setComfyExecutionActivity(getComfyExecutionActivitySnapshot())
-
-    return () => {
-      window.removeEventListener(
-        COMFY_EXECUTION_ACTIVITY_CHANGE_EVENT,
-        handleComfyExecutionActivityChange
-      )
-    }
-  }, [])
+  const { isCanvasPerformanceThrottled } = useComfyExecutionActivity({
+    useRemoteComfyui: config.use_remote_comfyui
+  })
 
   const {
     activeOcrHover,
@@ -598,16 +315,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
 
   const { notifySuccess, notifyError, notifyWarning, notifyInfo, closeMessage } = useMessage()
 
-  useEffect(() => {
-    const handleRealtimeAdvice = (event: Event) => {
-      const detail = (event as CustomEvent<ProjectTraceRealtimeAdviceEvent>).detail
-      if (!detail?.advice || detail.projectId !== canvasId) return
-      notifyWarning(detail.advice.advice, 8000)
-    }
-    window.addEventListener(PROJECT_TRACE_REALTIME_ADVICE_EVENT, handleRealtimeAdvice)
-    return () =>
-      window.removeEventListener(PROJECT_TRACE_REALTIME_ADVICE_EVENT, handleRealtimeAdvice)
-  }, [canvasId, notifyWarning])
+  useProjectTraceRealtimeAdvice({ canvasId, notifyWarning })
 
   const {
     activeFileDialogItem,
@@ -631,52 +339,12 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
   const openQuickAppPanel = useCallback(() => {
     dispatch(openSidePanel('quickapp'))
   }, [dispatch])
-  useEffect(() => {
-    const invoke = window.electron?.ipcRenderer?.invoke
-    if (!invoke) return
-    let cancelled = false
-
-    void (async () => {
-      try {
-        const result = await invoke('screenshot:getShortcut')
-        const activeShortcut = toDisplayShortcut(
-          typeof result?.shortcut === 'string' ? result.shortcut : DEFAULT_SCREENSHOT_SHORTCUT
-        )
-
-        if (cancelled) return
-
-        setCurrentShortcut(activeShortcut || DEFAULT_SCREENSHOT_SHORTCUT)
-
-        if (!conflictsWithCanvasShortcut(activeShortcut, toolShortcuts)) {
-          return
-        }
-
-        const resetResult = await invoke(
-          'screenshot:setShortcut',
-          toElectronAccelerator(DEFAULT_SCREENSHOT_SHORTCUT),
-          buildReservedCanvasShortcuts(toolShortcuts)
-        )
-
-        if (cancelled) return
-
-        if (resetResult?.success) {
-          setCurrentShortcut(DEFAULT_SCREENSHOT_SHORTCUT)
-          notifyWarning(
-            `截图快捷键 ${activeShortcut} 与画布快捷键冲突，已恢复为 ${DEFAULT_SCREENSHOT_SHORTCUT}`
-          )
-          return
-        }
-
-        notifyError(resetResult?.error || '截图快捷键与画布快捷键冲突，但自动恢复失败。')
-      } catch (error) {
-        console.error('[Canvas] Failed to sync screenshot shortcut.', error)
-      }
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [notifyError, notifyWarning, setCurrentShortcut, toolShortcuts])
+  useCanvasScreenshotShortcutSync({
+    toolShortcuts,
+    setCurrentShortcut,
+    notifyWarning,
+    notifyError
+  })
 
   const figmaAccessToken = config.figma_config?.personal_access_token?.trim() || ''
   const figmaGlobalAutoCheckEnabled = config.figma_config?.auto_check_updates ?? true
@@ -786,9 +454,6 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
 
   const [selectionRect, setSelectionRect] = useState<SelectionRect>(null)
   const [isViewportInteracting, setIsViewportInteracting] = useState(false)
-  const [suppressSelectionChromeAfterMarquee, setSuppressSelectionChromeAfterMarquee] =
-    useState(false)
-  const selectionChromeSettleFrameRef = useRef<number | null>(null)
 
   const [annotationColor, setAnnotationColor] = useState('#ef4444')
   const [annotationFillOpacity, setAnnotationFillOpacity] = useState(0)
@@ -807,7 +472,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
   const cropOverlayRef = useRef<ProjectCanvasImageCropOverlayHandle | null>(null)
   const canvasActiveRef = useRef(false)
   const isMiddleMouseRef = useRef(false)
-  const lastViewportPointRef = useRef<{ x: number; y: number } | null>(null)
+  const lastViewportPointRef = useCanvasLastViewportPoint()
   const stageSizeRef = useRef(stageSize)
   const nextZIndex = useRef(1)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -825,30 +490,6 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
   useEffect(() => {
     stageSizeRef.current = stageSize
   }, [stageSize])
-
-  useEffect(() => {
-    const updateMousePoint = (event: MouseEvent | PointerEvent) => {
-      lastViewportPointRef.current = { x: event.clientX, y: event.clientY }
-    }
-
-    const updateTouchPoint = (event: TouchEvent) => {
-      const touch = event.touches[0] || event.changedTouches[0]
-      if (!touch) return
-      lastViewportPointRef.current = { x: touch.clientX, y: touch.clientY }
-    }
-
-    window.addEventListener('mousemove', updateMousePoint, true)
-    window.addEventListener('pointermove', updateMousePoint, true)
-    window.addEventListener('touchmove', updateTouchPoint, true)
-    window.addEventListener('touchend', updateTouchPoint, true)
-
-    return () => {
-      window.removeEventListener('mousemove', updateMousePoint, true)
-      window.removeEventListener('pointermove', updateMousePoint, true)
-      window.removeEventListener('touchmove', updateTouchPoint, true)
-      window.removeEventListener('touchend', updateTouchPoint, true)
-    }
-  }, [])
 
   const {
     fitSizeToCanvas: fitImageToCanvasSize,
@@ -966,17 +607,10 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     notifyInfo
   })
 
-  const exportableItems = useMemo(
-    () => items.filter((item): item is CanvasExportableItem => isCanvasExportableItem(item)),
-    [items]
-  )
+  const exportableItems = useMemo(() => getCanvasExportableItems(items), [items])
 
   const selectedExportableItems = useMemo(
-    () =>
-      items.filter(
-        (item): item is CanvasExportableItem =>
-          selectedIds.has(item.id) && isCanvasExportableItem(item)
-      ),
+    () => getSelectedCanvasExportableItems(items, selectedIds),
     [items, selectedIds]
   )
 
@@ -1307,58 +941,29 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
 
   useEffect(() => {
     return installProjectCanvasBenchmarkViewportSetter((viewport) => {
-      const nextScale = clampStageScale(Number(viewport?.scale ?? stageScaleRef.current))
-      let focusedImageId: string | undefined
-      const focusedImage = viewport?.focusLargestImage
-        ? items.reduce<CanvasImageItem | null>((best, item) => {
-            if (item.type !== 'image') return best
-            const itemArea =
-              (typeof item.sourceWidth === 'number' && Number.isFinite(item.sourceWidth)
-                ? item.sourceWidth
-                : item.width) *
-              (typeof item.sourceHeight === 'number' && Number.isFinite(item.sourceHeight)
-                ? item.sourceHeight
-                : item.height)
-            const bestArea = best
-              ? (typeof best.sourceWidth === 'number' && Number.isFinite(best.sourceWidth)
-                  ? best.sourceWidth
-                  : best.width) *
-                (typeof best.sourceHeight === 'number' && Number.isFinite(best.sourceHeight)
-                  ? best.sourceHeight
-                  : best.height)
-              : -1
-            return itemArea > bestArea ? item : best
-          }, null)
-        : null
-      const nextPos = focusedImage
-        ? {
-            x: stageSize.width / 2 - (focusedImage.x + focusedImage.width / 2) * nextScale,
-            y: stageSize.height / 2 - (focusedImage.y + focusedImage.height / 2) * nextScale
-          }
-        : {
-            x: Number.isFinite(Number(viewport?.x)) ? Number(viewport?.x) : stagePosRef.current.x,
-            y: Number.isFinite(Number(viewport?.y)) ? Number(viewport?.y) : stagePosRef.current.y
-          }
-      if (focusedImage && viewport?.selectFocused !== false) {
-        focusedImageId = focusedImage.id
-        setSelectedIds(new Set([focusedImage.id]))
+      const result = resolveProjectCanvasBenchmarkViewport(viewport, {
+        items,
+        stagePos: stagePosRef.current,
+        stageScale: stageScaleRef.current,
+        stageSize,
+        clampStageScale
+      })
+      const nextPos = { x: result.x, y: result.y }
+      if (result.focusedImageId && result.shouldSelectFocusedImage) {
+        setSelectedIds(new Set([result.focusedImageId]))
       }
-      stageScaleRef.current = nextScale
+      stageScaleRef.current = result.scale
       stagePosRef.current = nextPos
-      setStageScale(nextScale)
+      setStageScale(result.scale)
       setStagePos(nextPos)
-      return { scale: nextScale, ...nextPos, ...(focusedImageId ? { focusedImageId } : {}) }
+      return {
+        scale: result.scale,
+        x: result.x,
+        y: result.y,
+        ...(result.focusedImageId ? { focusedImageId: result.focusedImageId } : {})
+      }
     })
-  }, [
-    clampStageScale,
-    items,
-    setSelectedIds,
-    setStagePos,
-    setStageScale,
-    stagePosRef,
-    stageScaleRef,
-    stageSize
-  ])
+  }, [items, setSelectedIds, setStagePos, setStageScale, stagePosRef, stageScaleRef, stageSize])
 
   const inlineTextAreaRef = useRef<HTMLTextAreaElement>(null)
   const itemIdSet = useMemo(() => new Set(items.map((item) => item.id)), [items])
@@ -1388,115 +993,16 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     startPositions: new Map()
   })
 
-  // Cached DOM references for imperative selection rect updates (zero React renders during drag).
-  const selectionRectElementsRef = useRef<{
-    svg: SVGSVGElement
-    rect: SVGRectElement
-  } | null>(null)
-  const handleSelectionRectElementsChange = useCallback(
-    (elements: { svg: SVGSVGElement; rect: SVGRectElement } | null) => {
-      selectionRectElementsRef.current = elements
-    },
-    []
-  )
-  const handleSelectionRectChange = useCallback(
-    (rect: { x: number; y: number; w: number; h: number } | null) => {
-      if (isCanvasInteractionDebugEnabled()) {
-        const traceWindow = window as Window & {
-          __canvasSelectionRectDomTrace?: Array<Record<string, unknown>>
-        }
-        if (!traceWindow.__canvasSelectionRectDomTrace) {
-          traceWindow.__canvasSelectionRectDomTrace = []
-        }
-        traceWindow.__canvasSelectionRectDomTrace.push({
-          phase: rect ? 'apply' : 'clear',
-          width: rect?.w ?? null,
-          height: rect?.h ?? null
-        })
-        if (traceWindow.__canvasSelectionRectDomTrace.length > 80) {
-          traceWindow.__canvasSelectionRectDomTrace.shift()
-        }
-      }
-
-      let els = selectionRectElementsRef.current
-      if (!els || !els.svg.isConnected || !els.rect.isConnected) {
-        const container = canvasContainerRef.current
-        if (!container) return
-        const svg = container.querySelector<SVGSVGElement>('[data-canvas-selection-rect="svg"]')
-        const rectEl = container.querySelector<SVGRectElement>(
-          '[data-canvas-selection-rect="rect"]'
-        )
-        if (!svg || !rectEl) return
-        els = { svg, rect: rectEl }
-        selectionRectElementsRef.current = els
-      }
-
-      if (!rect || rect.w <= 2 || rect.h <= 2) {
-        els.svg.style.display = 'none'
-        return
-      }
-
-      els.svg.style.display = ''
-      els.svg.style.left = rect.x + 'px'
-      els.svg.style.top = rect.y + 'px'
-      els.svg.setAttribute('width', String(rect.w))
-      els.svg.setAttribute('height', String(rect.h))
-      els.rect.setAttribute('width', String(rect.w))
-      els.rect.setAttribute('height', String(rect.h))
-    },
-    [canvasContainerRef]
-  )
-  const cancelSelectionChromeSettleFrame = useCallback(() => {
-    if (selectionChromeSettleFrameRef.current === null) {
-      return
-    }
-
-    window.cancelAnimationFrame(selectionChromeSettleFrameRef.current)
-    selectionChromeSettleFrameRef.current = null
-  }, [])
-
-  useEffect(
-    () => () => {
-      cancelSelectionChromeSettleFrame()
-    },
-    [cancelSelectionChromeSettleFrame]
-  )
-
-  const scheduleSelectionChromeAfterMarquee = useCallback(() => {
-    cancelSelectionChromeSettleFrame()
-    setSuppressSelectionChromeAfterMarquee(true)
-
-    let remainingFrames = 2
-    const settle = () => {
-      remainingFrames -= 1
-      if (remainingFrames <= 0) {
-        selectionChromeSettleFrameRef.current = null
-        setSuppressSelectionChromeAfterMarquee(false)
-        return
-      }
-
-      selectionChromeSettleFrameRef.current = window.requestAnimationFrame(settle)
-    }
-
-    selectionChromeSettleFrameRef.current = window.requestAnimationFrame(settle)
-  }, [cancelSelectionChromeSettleFrame])
-
-  const handleSelectionMarqueeActiveChange = useCallback(
-    (active: boolean) => {
-      const canvasContainer = canvasContainerRef.current
-
-      if (active) {
-        cancelSelectionChromeSettleFrame()
-        setSuppressSelectionChromeAfterMarquee(false)
-        canvasContainer?.setAttribute('data-project-canvas-marquee-active', 'true')
-        return
-      }
-
-      canvasContainer?.removeAttribute('data-project-canvas-marquee-active')
-      scheduleSelectionChromeAfterMarquee()
-    },
-    [cancelSelectionChromeSettleFrame, scheduleSelectionChromeAfterMarquee]
-  )
+  // Imperative selection rect updates avoid React renders during drag.
+  const {
+    suppressSelectionChromeAfterMarquee,
+    handleSelectionRectElementsChange,
+    handleSelectionRectChange,
+    handleSelectionMarqueeActiveChange
+  } = useCanvasSelectionRectDomDriver({
+    canvasContainerRef,
+    isDebugEnabled: isCanvasInteractionDebugEnabled
+  })
 
   // Viewport transform driver: drives DOM directly during pan/zoom (zero React renders).
   // Instantiated here so applyViewportTransform can be passed to the interaction hook.
@@ -1699,165 +1205,24 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
 
   const sortedItems = useMemo(() => [...items].sort((a, b) => a.zIndex - b.zIndex), [items])
 
-  const selectedItems = useMemo(
-    () => items.filter((item) => selectedIds.has(item.id)),
-    [items, selectedIds]
-  )
+  const { selectedItems } = useCanvasDuplicateCheckRuntimeBridge({
+    canvasId,
+    projectName,
+    items,
+    selectedIds,
+    setSelectedIds,
+    focusCanvasStage,
+    focusCanvasBounds
+  })
 
-  useEffect(() => {
-    const itemMetrics = buildProjectTraceCanvasItemMetrics(items)
-    const signature = buildProjectTraceCanvasItemSignature(itemMetrics)
-    const previous = projectTraceCanvasSnapshotRef.current
-    const nextSnapshot = {
-      signature,
-      itemCount: items.length,
-      selectionCount: selectedIds.size,
-      items: itemMetrics
-    }
+  useProjectTraceCanvasEvents({
+    canvasId,
+    projectName,
+    items,
+    selectedIds,
+    isChineseUi
+  })
 
-    if (!previous) {
-      projectTraceCanvasSnapshotRef.current = nextSnapshot
-      return
-    }
-
-    if (
-      previous.signature === signature &&
-      previous.itemCount === items.length &&
-      previous.selectionCount === selectedIds.size
-    ) {
-      return
-    }
-
-    projectTraceCanvasSnapshotRef.current = nextSnapshot
-    if (projectTraceCanvasEventTimerRef.current) {
-      window.clearTimeout(projectTraceCanvasEventTimerRef.current)
-    }
-
-    const baseline = projectTraceCanvasPendingBaselineRef.current || previous
-    projectTraceCanvasPendingBaselineRef.current = baseline
-    const createdItemCount = Math.max(0, items.length - baseline.itemCount)
-    const removedItemCount = Math.max(0, baseline.itemCount - items.length)
-    const selectionChanged = baseline.selectionCount !== selectedIds.size
-    const canvasChange = summarizeProjectTraceCanvasChange(
-      baseline.items,
-      itemMetrics,
-      selectedIds.size,
-      selectionChanged,
-      isChineseUi
-    )
-    const canvasRuleMetrics = measureProjectTraceCanvasRuleMetrics(baseline.items, itemMetrics)
-    const action =
-      createdItemCount > 0
-        ? 'canvas_items_added'
-        : removedItemCount > 0
-          ? 'canvas_items_removed'
-          : canvasChange.movementDistancePx !== undefined
-            ? 'canvas_items_changed'
-            : selectionChanged
-              ? 'canvas_selection_changed'
-              : 'canvas_items_changed'
-    const itemTypeSummary = summarizeProjectTraceCanvasItemTypes(items)
-    const outputKinds = Array.from(new Set(items.map((item) => item.type))).slice(0, 12)
-
-    projectTraceCanvasEventTimerRef.current = window.setTimeout(() => {
-      emitProjectTraceRuntimeEvent({
-        projectId: canvasId,
-        projectName,
-        scope: 'canvas',
-        action,
-        status: 'success',
-        safeSummary: [
-          canvasChange.summary,
-          isChineseUi
-            ? `画布共 ${items.length} 个元素，当前选中 ${selectedIds.size} 个。`
-            : `Canvas has ${items.length} item(s), ${selectedIds.size} selected.`,
-          itemTypeSummary
-            ? isChineseUi
-              ? `元素类型：${itemTypeSummary}。`
-              : `Item types: ${itemTypeSummary}.`
-            : isChineseUi
-              ? '画布为空。'
-              : 'Canvas is empty.'
-        ].join(' '),
-        entityType: 'canvas_item',
-        entityCount: items.length,
-        outputKinds,
-        affectedItemCount: canvasChange.affectedItemCount,
-        createdItemCount,
-        ...(canvasRuleMetrics.removedItemCount !== undefined
-          ? { removedItemCount: canvasRuleMetrics.removedItemCount }
-          : {}),
-        ...(canvasRuleMetrics.resizedItemCount !== undefined
-          ? { resizedItemCount: canvasRuleMetrics.resizedItemCount }
-          : {}),
-        ...(canvasRuleMetrics.rotatedItemCount !== undefined
-          ? { rotatedItemCount: canvasRuleMetrics.rotatedItemCount }
-          : {}),
-        ...(canvasRuleMetrics.reorderedItemCount !== undefined
-          ? { reorderedItemCount: canvasRuleMetrics.reorderedItemCount }
-          : {}),
-        ...(canvasChange.movementDistancePx !== undefined
-          ? { movementDistancePx: canvasChange.movementDistancePx }
-          : {}),
-        ...(canvasRuleMetrics.maxScaleChangeRatio !== undefined
-          ? { maxScaleChangeRatio: canvasRuleMetrics.maxScaleChangeRatio }
-          : {}),
-        ...(canvasRuleMetrics.maxRotationDeltaDeg !== undefined
-          ? { maxRotationDeltaDeg: canvasRuleMetrics.maxRotationDeltaDeg }
-          : {}),
-        ...(canvasRuleMetrics.maxLayerDelta !== undefined
-          ? { maxLayerDelta: canvasRuleMetrics.maxLayerDelta }
-          : {}),
-        canvasMutation: action !== 'canvas_selection_changed',
-        riskSignals: removedItemCount > 0 ? ['destructive_action'] : []
-      })
-      projectTraceCanvasPendingBaselineRef.current = null
-    }, 700)
-
-    return () => {
-      if (projectTraceCanvasEventTimerRef.current) {
-        window.clearTimeout(projectTraceCanvasEventTimerRef.current)
-      }
-    }
-  }, [canvasId, isChineseUi, items, projectName, selectedIds])
-
-  useEffect(() => {
-    publishCanvasDuplicateCheckRuntimeSnapshot({
-      canvasId,
-      projectName,
-      imageItemIds: items.filter((item) => item.type === 'image').map((item) => item.id),
-      selectedItemIds: Array.from(selectedIds),
-      selectedImageItemIds: selectedItems
-        .filter((item): item is CanvasImageItem => item.type === 'image')
-        .map((item) => item.id),
-      updatedAt: new Date().toISOString()
-    })
-  }, [canvasId, items, projectName, selectedIds, selectedItems])
-
-  useEffect(() => {
-    const handleFocusItems = (event: Event) => {
-      const detail = (event as CustomEvent<CanvasDuplicateCheckFocusDetail>).detail
-      if (!detail || detail.canvasId !== canvasId || !Array.isArray(detail.itemIds)) {
-        return
-      }
-
-      const nextSelectedItems = items.filter((item) => detail.itemIds.includes(item.id))
-      if (nextSelectedItems.length === 0) {
-        return
-      }
-
-      setSelectedIds(new Set(nextSelectedItems.map((item) => item.id)))
-      focusCanvasStage()
-      window.requestAnimationFrame(() => {
-        focusCanvasBounds(getCanvasItemsBounds(nextSelectedItems), 120)
-      })
-    }
-
-    window.addEventListener(CANVAS_DUPLICATE_CHECK_FOCUS_EVENT, handleFocusItems)
-    return () => {
-      window.removeEventListener(CANVAS_DUPLICATE_CHECK_FOCUS_EVENT, handleFocusItems)
-    }
-  }, [canvasId, focusCanvasBounds, focusCanvasStage, items, setSelectedIds])
   const {
     activeModel3DItem,
     handleCloseModel3DViewer,
