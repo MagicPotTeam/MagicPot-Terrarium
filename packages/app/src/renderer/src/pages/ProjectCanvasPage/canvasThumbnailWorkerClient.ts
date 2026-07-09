@@ -1,5 +1,7 @@
 import {
   CANVAS_THUMBNAIL_LEVELS,
+  CANVAS_THUMBNAIL_RUNTIME_COUNTER_KEYS,
+  CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_MAPPINGS,
   type CanvasGeneratedThumbnailLevel,
   type CanvasImageSourceIdentity,
   type CanvasImageThumbnailLevel,
@@ -13,8 +15,7 @@ import {
   type CanvasThumbnailManifestLike,
   type CanvasThumbnailNativeResult,
   type CanvasThumbnailRuntimeMetrics,
-  type CanvasThumbnailWorkerGenerateMessage,
-  type CanvasThumbnailWorkerMessage
+  type CanvasThumbnailWorkerGeneratedLevel
 } from './canvasThumbnailTypes'
 import {
   canvasThumbnailManifestFromSet,
@@ -22,17 +23,45 @@ import {
   createCanvasThumbnailSet
 } from './canvasThumbnailCache'
 import { generateCanvasThumbnailLevelsInScope } from './canvasThumbnailGeneration.worker'
+import {
+  CanvasThumbnailWorkerPool,
+  DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_IDLE_TTL_MS,
+  DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_MAX_QUEUE_SIZE,
+  getDefaultCanvasThumbnailWorkerPoolMaxSize,
+  type CanvasThumbnailWorkerPoolMetrics,
+  type CanvasThumbnailWorkerPoolOptions
+} from './canvasThumbnailWorkerPool'
 
 const WORKER_REQUEST_TIMEOUT_MS = 30_000
 
-const canvasThumbnailRuntimeMetrics: CanvasThumbnailRuntimeMetrics = {
-  thumbnailCount: 0,
-  cacheHitCount: 0,
-  generatedCount: 0,
-  sidecarGeneratedCount: 0,
-  nativeGeneratedCount: 0,
-  staleCount: 0,
-  failedCount: 0
+function createCanvasThumbnailRuntimeMetrics(): CanvasThumbnailRuntimeMetrics {
+  return Object.fromEntries(
+    CANVAS_THUMBNAIL_RUNTIME_COUNTER_KEYS.map((key) => [key, 0])
+  ) as CanvasThumbnailRuntimeMetrics
+}
+
+function createDefaultCanvasThumbnailWorkerPoolOptions(): CanvasThumbnailWorkerPoolOptions {
+  return {
+    maxWorkers: getDefaultCanvasThumbnailWorkerPoolMaxSize(),
+    maxQueueSize: DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_MAX_QUEUE_SIZE,
+    requestTimeoutMs: WORKER_REQUEST_TIMEOUT_MS,
+    idleWorkerTtlMs: DEFAULT_CANVAS_THUMBNAIL_WORKER_POOL_IDLE_TTL_MS
+  }
+}
+
+const canvasThumbnailRuntimeMetrics = createCanvasThumbnailRuntimeMetrics()
+
+function mergeCanvasThumbnailWorkerPoolMetrics(
+  metrics: CanvasThumbnailRuntimeMetrics
+): CanvasThumbnailRuntimeMetrics {
+  const workerPoolMetrics = canvasThumbnailWorkerPool.getMetrics()
+  const merged = { ...metrics }
+  CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_MAPPINGS.forEach(
+    ([runtimeMetricKey, workerPoolMetricKey]) => {
+      merged[runtimeMetricKey] = workerPoolMetrics[workerPoolMetricKey]
+    }
+  )
+  return merged
 }
 
 type WarmCanvasThumbnailReadResult = {
@@ -81,17 +110,14 @@ function recordCanvasThumbnailRuntimeStatus(
 }
 
 export function getCanvasThumbnailRuntimeMetrics(): CanvasThumbnailRuntimeMetrics {
-  return { ...canvasThumbnailRuntimeMetrics }
+  return mergeCanvasThumbnailWorkerPoolMetrics(canvasThumbnailRuntimeMetrics)
 }
 
 export function resetCanvasThumbnailRuntimeMetrics(): void {
-  canvasThumbnailRuntimeMetrics.thumbnailCount = 0
-  canvasThumbnailRuntimeMetrics.cacheHitCount = 0
-  canvasThumbnailRuntimeMetrics.generatedCount = 0
-  canvasThumbnailRuntimeMetrics.sidecarGeneratedCount = 0
-  canvasThumbnailRuntimeMetrics.nativeGeneratedCount = 0
-  canvasThumbnailRuntimeMetrics.staleCount = 0
-  canvasThumbnailRuntimeMetrics.failedCount = 0
+  CANVAS_THUMBNAIL_RUNTIME_COUNTER_KEYS.forEach((key) => {
+    canvasThumbnailRuntimeMetrics[key] = 0
+  })
+  canvasThumbnailWorkerPool.resetCounters()
 }
 
 function createObjectUrl(blob: Blob): string {
@@ -178,74 +204,42 @@ function createWorker(): Worker | null {
   }
 }
 
+function finalizeGeneratedThumbnailLevel(
+  level: CanvasThumbnailWorkerGeneratedLevel
+): CanvasGeneratedThumbnailLevel {
+  return {
+    ...level,
+    filename: getLevelFilename(level.maxSide, level.mimeType),
+    src: createObjectUrl(level.blob),
+    sizeBytes: level.blob.size
+  }
+}
+
+const canvasThumbnailWorkerPool = new CanvasThumbnailWorkerPool(
+  createDefaultCanvasThumbnailWorkerPoolOptions(),
+  { createWorker }
+)
+
 async function generateLevelsWithWorker(
   request: CanvasThumbnailGenerationRequest
 ): Promise<CanvasGeneratedThumbnailLevel[] | null> {
-  const worker = createWorker()
-  if (!worker) {
-    return null
-  }
+  const workerLevels = await canvasThumbnailWorkerPool.generate(request)
+  return workerLevels ? workerLevels.map(finalizeGeneratedThumbnailLevel) : null
+}
 
-  const requestId =
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random()}`
-  const levels = normalizeLevelList(request.levels)
+export function getCanvasThumbnailWorkerPoolMetrics(): CanvasThumbnailWorkerPoolMetrics {
+  return canvasThumbnailWorkerPool.getMetrics()
+}
 
-  try {
-    return await new Promise<CanvasGeneratedThumbnailLevel[]>((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        cleanup()
-        reject(new Error('Thumbnail worker timed out.'))
-      }, WORKER_REQUEST_TIMEOUT_MS)
+export function resetCanvasThumbnailWorkerPoolForTest(): void {
+  canvasThumbnailWorkerPool.reset()
+  canvasThumbnailWorkerPool.configure(createDefaultCanvasThumbnailWorkerPoolOptions())
+}
 
-      const cleanup = () => {
-        window.clearTimeout(timeout)
-        worker.removeEventListener('message', onMessage)
-        worker.removeEventListener('error', onError)
-      }
-
-      const onError = () => {
-        cleanup()
-        reject(new Error('Thumbnail worker failed.'))
-      }
-
-      const onMessage = (event: MessageEvent<CanvasThumbnailWorkerMessage>) => {
-        const message = event.data
-        if (!message || message.requestId !== requestId) {
-          return
-        }
-
-        cleanup()
-        if (message.type === 'error') {
-          reject(new Error(message.error))
-          return
-        }
-
-        resolve(
-          message.levels.map((level) => ({
-            ...level,
-            filename: getLevelFilename(level.maxSide, level.mimeType),
-            src: createObjectUrl(level.blob),
-            sizeBytes: level.blob.size
-          }))
-        )
-      }
-
-      worker.addEventListener('message', onMessage)
-      worker.addEventListener('error', onError)
-      const message: CanvasThumbnailWorkerGenerateMessage = {
-        type: 'generate',
-        requestId,
-        source: request.source,
-        levels,
-        preferWebp: request.preferWebp ?? true
-      }
-      worker.postMessage(message)
-    })
-  } finally {
-    worker.terminate()
-  }
+export function configureCanvasThumbnailWorkerPoolForTest(
+  options: Partial<CanvasThumbnailWorkerPoolOptions>
+): void {
+  canvasThumbnailWorkerPool.configure(options)
 }
 
 async function generateLevelsInRenderer(
@@ -257,12 +251,7 @@ async function generateLevelsInRenderer(
     preferWebp: request.preferWebp ?? true
   })
 
-  return levels.map((level) => ({
-    ...level,
-    filename: getLevelFilename(level.maxSide, level.mimeType),
-    src: createObjectUrl(level.blob),
-    sizeBytes: level.blob.size
-  }))
+  return levels.map(finalizeGeneratedThumbnailLevel)
 }
 
 export async function generateCanvasThumbnailLevels(

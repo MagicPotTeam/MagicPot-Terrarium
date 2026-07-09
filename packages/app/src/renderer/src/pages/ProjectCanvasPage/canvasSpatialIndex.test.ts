@@ -1,15 +1,19 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   CANVAS_SPATIAL_INDEX_MAX_INDEXED_CELLS_PER_ENTRY,
   CANVAS_SPATIAL_INDEX_MAX_QUERY_CELLS,
+  attachCanvasSpatialIndexAccelerator,
   buildCanvasSpatialIndex,
+  disposeCanvasSpatialIndex,
   queryCanvasSpatialIndex,
   queryCanvasSpatialIndexUnordered,
   type CanvasSpatialBounds
 } from './canvasSpatialIndex'
 import {
+  getCanvasSpatialIndexAcceleratorStateForTest,
   resetCanvasSpatialIndexAcceleratorForTest,
+  scheduleCanvasSpatialIndexAcceleratorIdleWarmup,
   setCanvasSpatialIndexAcceleratorFactoryForTest,
   type CanvasSpatialIndexAcceleratorOptions
 } from './canvasSpatialIndexAccelerator'
@@ -151,6 +155,7 @@ describe('canvasSpatialIndex', () => {
 
     installMockSpatialIndexAccelerator()
     const acceleratedIndex = buildCanvasSpatialIndex(items, (item) => item.bounds, 128)
+    attachCanvasSpatialIndexAccelerator(acceleratedIndex)
     expect(acceleratedIndex.accelerator?.source).toBe('test')
 
     const acceleratedMatches = queryCanvasSpatialIndex(acceleratedIndex, queryBounds).map(
@@ -161,9 +166,11 @@ describe('canvasSpatialIndex', () => {
     expect(acceleratedMatches).toEqual(['negative', 'wide', 'small'])
   })
 
-  it('falls back to the JS index when the accelerator returns invalid candidates', () => {
+  it('falls back to the JS index and discards the accelerator when it returns invalid candidates', () => {
+    const dispose = vi.fn()
     setCanvasSpatialIndexAcceleratorFactoryForTest(() => ({
       source: 'test',
+      dispose,
       queryIndexes: () => [999]
     }))
     const items = [
@@ -171,6 +178,8 @@ describe('canvasSpatialIndex', () => {
       createItem('outside', { minX: 1000, minY: 1000, maxX: 1100, maxY: 1100 })
     ]
     const index = buildCanvasSpatialIndex(items, (item) => item.bounds, 64)
+    attachCanvasSpatialIndexAccelerator(index)
+    expect(index.accelerator?.source).toBe('test')
 
     const matches = queryCanvasSpatialIndex(index, {
       minX: 0,
@@ -179,8 +188,9 @@ describe('canvasSpatialIndex', () => {
       maxY: 100
     })
 
-    expect(index.accelerator?.source).toBe('test')
     expect(matches.map((item) => item.id)).toEqual(['inside'])
+    expect(index.accelerator).toBeNull()
+    expect(dispose).toHaveBeenCalledTimes(1)
   })
 
   it('falls back to a bounded linear scan for oversized viewport queries', () => {
@@ -199,6 +209,143 @@ describe('canvasSpatialIndex', () => {
     })
 
     expect(matches.map((item) => item.id)).toEqual(['inside'])
+  })
+
+  it('disposes the optional accelerator exactly once while preserving JS fallback queries', () => {
+    const dispose = vi.fn()
+    setCanvasSpatialIndexAcceleratorFactoryForTest(
+      (flattenedBounds: Float64Array, _options: CanvasSpatialIndexAcceleratorOptions) => {
+        const entries = parseMockAcceleratorEntries(flattenedBounds)
+        return {
+          source: 'test',
+          dispose,
+          queryIndexes: (queryBounds) =>
+            entries.flatMap((entry, entryIndex) =>
+              doMockBoundsIntersect(entry.bounds, queryBounds) ? [entryIndex] : []
+            )
+        }
+      }
+    )
+    const items = [
+      createItem('inside', { minX: 10, minY: 10, maxX: 30, maxY: 30 }),
+      createItem('outside', { minX: 1000, minY: 1000, maxX: 1100, maxY: 1100 })
+    ]
+    const index = buildCanvasSpatialIndex(items, (item) => item.bounds, 64)
+    attachCanvasSpatialIndexAccelerator(index)
+
+    disposeCanvasSpatialIndex(index)
+    disposeCanvasSpatialIndex(index)
+
+    expect(dispose).toHaveBeenCalledTimes(1)
+    expect(index.accelerator).toBeNull()
+    expect(
+      queryCanvasSpatialIndex(index, {
+        minX: 0,
+        minY: 0,
+        maxX: 100,
+        maxY: 100
+      }).map((item) => item.id)
+    ).toEqual(['inside'])
+  })
+
+  it('can schedule and cancel idle WASM accelerator warmup without forcing threshold queries', () => {
+    const index = buildCanvasSpatialIndex(
+      Array.from({ length: 1024 }, (_, index) =>
+        createItem(`warmup-item-${index}`, {
+          minX: index,
+          minY: 0,
+          maxX: index + 1,
+          maxY: 1
+        })
+      ),
+      (item) => item.bounds,
+      64
+    )
+    const cancelWarmup = scheduleCanvasSpatialIndexAcceleratorIdleWarmup()
+
+    expect(getCanvasSpatialIndexAcceleratorStateForTest()).toEqual(
+      expect.objectContaining({
+        loadState: 'idle',
+        hasScheduledWarmup: true,
+        readyVersion: 0
+      })
+    )
+
+    cancelWarmup()
+
+    expect(getCanvasSpatialIndexAcceleratorStateForTest()).toEqual(
+      expect.objectContaining({
+        loadState: 'idle',
+        hasScheduledWarmup: false,
+        readyVersion: 0
+      })
+    )
+    disposeCanvasSpatialIndex(index)
+  })
+
+  it('does not schedule WASM warmup for indexes below the accelerator threshold', () => {
+    const smallIndex = buildCanvasSpatialIndex(
+      [createItem('small', { minX: 0, minY: 0, maxX: 1, maxY: 1 })],
+      (item) => item.bounds,
+      64
+    )
+
+    attachCanvasSpatialIndexAccelerator(smallIndex)
+    expect(getCanvasSpatialIndexAcceleratorStateForTest()).toEqual(
+      expect.objectContaining({
+        loadState: 'idle',
+        hasScheduledWarmup: false
+      })
+    )
+
+    disposeCanvasSpatialIndex(smallIndex)
+  })
+
+  it('attaches acceleration lazily after readiness without requiring an index rebuild', () => {
+    const dispose = vi.fn()
+    const items = [createItem('inside', { minX: 10, minY: 10, maxX: 30, maxY: 30 })]
+    const index = buildCanvasSpatialIndex(items, (item) => item.bounds, 64)
+
+    expect(index.accelerator).toBeNull()
+    setCanvasSpatialIndexAcceleratorFactoryForTest(
+      (flattenedBounds: Float64Array, _options: CanvasSpatialIndexAcceleratorOptions) => {
+        const entries = parseMockAcceleratorEntries(flattenedBounds)
+        return {
+          source: 'test',
+          dispose,
+          queryIndexes: (queryBounds) =>
+            entries.flatMap((entry, entryIndex) =>
+              doMockBoundsIntersect(entry.bounds, queryBounds) ? [entryIndex] : []
+            )
+        }
+      }
+    )
+
+    const matches = queryCanvasSpatialIndex(index, {
+      minX: 0,
+      minY: 0,
+      maxX: 100,
+      maxY: 100
+    })
+
+    expect(matches.map((item) => item.id)).toEqual(['inside'])
+    expect(index.accelerator?.source).toBe('test')
+    disposeCanvasSpatialIndex(index)
+    expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry failed accelerator construction on every hot-path query', () => {
+    const createAccelerator = vi.fn(() => null)
+    setCanvasSpatialIndexAcceleratorFactoryForTest(createAccelerator)
+    const items = [createItem('inside', { minX: 10, minY: 10, maxX: 30, maxY: 30 })]
+    const index = buildCanvasSpatialIndex(items, (item) => item.bounds, 64)
+    const queryBounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 }
+
+    expect(queryCanvasSpatialIndex(index, queryBounds).map((item) => item.id)).toEqual(['inside'])
+    expect(queryCanvasSpatialIndex(index, queryBounds).map((item) => item.id)).toEqual(['inside'])
+
+    expect(createAccelerator).toHaveBeenCalledTimes(1)
+    expect(index.accelerator).toBeNull()
   })
 
   it('can skip stable ordering work for visibility-only unordered queries', () => {

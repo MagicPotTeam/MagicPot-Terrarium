@@ -1,6 +1,7 @@
 import type { CanvasItem } from './types'
 import {
   createCanvasSpatialIndexAccelerator,
+  getCanvasSpatialIndexAcceleratorReadyVersion,
   shouldAttemptCanvasSpatialIndexAcceleration,
   type CanvasSpatialIndexAccelerator
 } from './canvasSpatialIndexAccelerator'
@@ -23,6 +24,8 @@ export type CanvasSpatialIndex<T> = {
   cells: Map<string, number[]>
   overflowEntryIndexes: number[]
   accelerator?: CanvasSpatialIndexAccelerator | null
+  acceleratorAttemptVersion?: number
+  disposed?: boolean
 }
 
 export const CANVAS_SPATIAL_INDEX_CELL_SIZE = 512
@@ -165,30 +168,71 @@ export function buildCanvasSpatialIndex<T>(
     })
   })
 
-  let accelerator: CanvasSpatialIndexAccelerator | null = null
-  if (shouldAttemptCanvasSpatialIndexAcceleration(entries.length)) {
-    const flattenedBounds = new Float64Array(entries.length * CANVAS_SPATIAL_INDEX_BOUNDS_STRIDE)
-    entries.forEach((entry, entryIndex) => {
-      const offset = entryIndex * CANVAS_SPATIAL_INDEX_BOUNDS_STRIDE
-      flattenedBounds[offset] = entry.bounds.minX
-      flattenedBounds[offset + 1] = entry.bounds.minY
-      flattenedBounds[offset + 2] = entry.bounds.maxX
-      flattenedBounds[offset + 3] = entry.bounds.maxY
-    })
-    accelerator = createCanvasSpatialIndexAccelerator(flattenedBounds, {
-      cellSize,
-      maxIndexedCellsPerEntry: CANVAS_SPATIAL_INDEX_MAX_INDEXED_CELLS_PER_ENTRY,
-      maxQueryCells: CANVAS_SPATIAL_INDEX_MAX_QUERY_CELLS
-    })
-  }
-
   return {
     cellSize,
     entries,
     cells,
     overflowEntryIndexes,
-    accelerator
+    accelerator: null
   }
+}
+
+export function attachCanvasSpatialIndexAccelerator<T>(
+  index: CanvasSpatialIndex<T> | null | undefined
+): CanvasSpatialIndexAccelerator | null {
+  if (!index || index.disposed) {
+    return null
+  }
+  if (index.accelerator) {
+    return index.accelerator
+  }
+  if (!shouldAttemptCanvasSpatialIndexAcceleration(index.entries.length)) {
+    return null
+  }
+
+  const readyVersion = getCanvasSpatialIndexAcceleratorReadyVersion()
+  if (index.acceleratorAttemptVersion === readyVersion) {
+    return null
+  }
+  index.acceleratorAttemptVersion = readyVersion
+
+  const flattenedBounds = new Float64Array(
+    index.entries.length * CANVAS_SPATIAL_INDEX_BOUNDS_STRIDE
+  )
+  index.entries.forEach((entry, entryIndex) => {
+    const offset = entryIndex * CANVAS_SPATIAL_INDEX_BOUNDS_STRIDE
+    flattenedBounds[offset] = entry.bounds.minX
+    flattenedBounds[offset + 1] = entry.bounds.minY
+    flattenedBounds[offset + 2] = entry.bounds.maxX
+    flattenedBounds[offset + 3] = entry.bounds.maxY
+  })
+
+  index.accelerator = createCanvasSpatialIndexAccelerator(flattenedBounds, {
+    cellSize: index.cellSize,
+    maxIndexedCellsPerEntry: CANVAS_SPATIAL_INDEX_MAX_INDEXED_CELLS_PER_ENTRY,
+    maxQueryCells: CANVAS_SPATIAL_INDEX_MAX_QUERY_CELLS
+  })
+  return index.accelerator ?? null
+}
+
+export function disposeCanvasSpatialIndex<T>(
+  index: CanvasSpatialIndex<T> | null | undefined
+): void {
+  if (!index || index.disposed) {
+    return
+  }
+  index.disposed = true
+  index.accelerator?.dispose?.()
+  index.accelerator = null
+}
+
+function discardCanvasSpatialIndexAccelerator<T>(index: CanvasSpatialIndex<T>): void {
+  const accelerator = index.accelerator
+  if (!accelerator) {
+    return
+  }
+  index.accelerator = null
+  accelerator.dispose?.()
 }
 
 function queryCanvasSpatialIndexAccelerator<T>(
@@ -196,7 +240,7 @@ function queryCanvasSpatialIndexAccelerator<T>(
   normalizedQueryBounds: CanvasSpatialBounds,
   preserveEntryOrder: boolean
 ): T[] | null {
-  if (!index.accelerator) {
+  if (index.disposed || !index.accelerator) {
     return null
   }
 
@@ -219,6 +263,7 @@ function queryCanvasSpatialIndexAccelerator<T>(
 
       const entry = index.entries[entryIndex]
       if (!entry) {
+        discardCanvasSpatialIndexAccelerator(index)
         return null
       }
       if (doCanvasSpatialBoundsIntersect(entry.bounds, normalizedQueryBounds)) {
@@ -227,6 +272,7 @@ function queryCanvasSpatialIndexAccelerator<T>(
     }
     return matches
   } catch {
+    discardCanvasSpatialIndexAccelerator(index)
     return null
   }
 }
@@ -245,6 +291,7 @@ function queryCanvasSpatialIndexInternal<T>(
     return []
   }
 
+  attachCanvasSpatialIndexAccelerator(index)
   const acceleratorMatches = queryCanvasSpatialIndexAccelerator(
     index,
     normalizedQueryBounds,
@@ -340,6 +387,17 @@ export function queryCanvasSpatialIndexUnordered<T>(
   queryBounds: CanvasSpatialBounds
 ): T[] {
   return queryCanvasSpatialIndexInternal(index, queryBounds, { preserveEntryOrder: false })
+}
+
+export function queryOwnedCanvasSpatialIndex<T>(
+  index: CanvasSpatialIndex<T>,
+  queryBounds: CanvasSpatialBounds
+): T[] {
+  try {
+    return queryCanvasSpatialIndex(index, queryBounds)
+  } finally {
+    disposeCanvasSpatialIndex(index)
+  }
 }
 
 export function buildCanvasItemSpatialIndex(
