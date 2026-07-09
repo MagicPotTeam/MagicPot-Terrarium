@@ -157,9 +157,6 @@ const PlaybackVideoFrame: React.FC<{
     const video = videoRef.current
     if (!video) return
     video.currentTime = 0
-    if (!paused) {
-      void video.play().catch(() => {})
-    }
   }, [item.id])
 
   useEffect(() => {
@@ -170,7 +167,7 @@ const PlaybackVideoFrame: React.FC<{
     } else {
       void video.play().catch(() => {})
     }
-  }, [paused])
+  }, [item.id, paused])
 
   return (
     <video

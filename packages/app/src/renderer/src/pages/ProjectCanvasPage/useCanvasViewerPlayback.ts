@@ -12,6 +12,7 @@ import {
 } from 'react'
 
 import { removeCanvasItemsWithAttachedCaptions } from './canvasAttachedCaptionUtils'
+import { useCanvasSpatialIndexLifecycle } from './useCanvasSpatialIndexLifecycle'
 import type { CanvasTool } from './projectCanvasPageShared'
 import type { CanvasHtmlItem, CanvasItem, CanvasModel3DItem, CanvasVideoItem } from './types'
 import {
@@ -156,6 +157,8 @@ export function useCanvasViewerPlayback({
     [groupPlayback?.itemIds, sortedItems]
   )
 
+  useCanvasSpatialIndexLifecycle(playbackVisibilitySpatialIndex)
+
   const { itemById, itemOrderById } = useMemo(() => {
     return {
       itemById: new Map<string, CanvasItem>(sortedItems.map((item) => [item.id, item] as const)),
@@ -180,9 +183,6 @@ export function useCanvasViewerPlayback({
         stageSize: visibleStageSize
       }),
     [
-      deferredStagePos,
-      deferredStageScale,
-      deferredStageSize,
       forceRenderAllItemsForExport,
       groupPlayback?.itemIds,
       itemById,

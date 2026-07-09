@@ -6,26 +6,44 @@ import {
   areProjectCanvasWebGLRuntimeMetricsEqualForReactState,
   buildProjectCanvasMetricsSnapshot,
   createProjectCanvasWebGLPendingRuntimeState,
+  createProjectCanvasWebGLRuntimeMetrics,
   parseProjectCanvasMetricsSnapshot,
   queueProjectCanvasWebGLPendingRuntimeIds,
   queueProjectCanvasWebGLPendingRuntimeMetrics,
   takeProjectCanvasWebGLPendingRuntimeState,
   type ProjectCanvasWebGLRuntimeMetrics
 } from './projectCanvasWebGLRuntimeState'
+import {
+  CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS,
+  type CanvasThumbnailRuntimeMetrics
+} from './canvasThumbnailTypes'
+
+type CanvasThumbnailWorkerPoolRuntimeMetricKey =
+  (typeof CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS)[number]
+type CanvasThumbnailWorkerPoolRuntimeMetrics = Pick<
+  Required<CanvasThumbnailRuntimeMetrics>,
+  CanvasThumbnailWorkerPoolRuntimeMetricKey
+>
+
+function createThumbnailWorkerPoolRuntimeMetrics(
+  values: readonly number[] = [2, 1, 1, 3, 4, 5, 6, 7, 8, 9, 2, 32]
+): CanvasThumbnailWorkerPoolRuntimeMetrics {
+  return Object.fromEntries(
+    CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS.map((key, index) => [key, values[index] ?? 0])
+  ) as CanvasThumbnailWorkerPoolRuntimeMetrics
+}
 
 function createMetrics(
   overrides: Partial<ProjectCanvasWebGLRuntimeMetrics> = {}
 ): ProjectCanvasWebGLRuntimeMetrics {
-  return {
+  return createProjectCanvasWebGLRuntimeMetrics({
     isInitialized: true,
     imageCount: 2,
     loadedImageCount: 2,
-    failedImageCount: 0,
     residentImageCount: 1,
     residentTextureBytes: 24000,
     residentCandidateTextureBytes: 48000,
     residentTextureBudgetBytes: 768 * 1024 * 1024,
-    pendingImageCount: 0,
     spriteCount: 1,
     residentCandidateImageCount: 2,
     viewportCulledImageCount: 1,
@@ -35,36 +53,14 @@ function createMetrics(
     lastSpriteReconcileTargetCount: 1,
     lastSpriteReconcileCreatedCount: 1,
     lastSpriteReconcileReusedCount: 2,
-    lastSpriteReconcileRemovedCount: 0,
-    lastSpriteReconcileDeferredCount: 0,
     usingPreviewImageCount: 1,
     usingSourceImageCount: 1,
     thumbnailPreviewImageCount: 1,
-    placeholderImageCount: 0,
-    sourceUpgradeSuppressedImageCount: 0,
-    sourceUpgradeablePreviewImageCount: 0,
-    sourceUpgradePendingImageCount: 0,
-    sourceUpgradeFailedImageCount: 0,
-    missingImageCount: 0,
-    activeObjectUrlCount: 0,
-    revokedObjectUrlCount: 0,
-    activeImageBitmapCount: 0,
-    closedImageBitmapCount: 0,
-    releaseErrorCount: 0,
-    decodedInFlightBytes: 0,
-    activeSourceUpgradeCount: 0,
-    residentTextureBudgetPressureCount: 0,
-    textureBudgetEvictionCount: 0,
-    sourceImageCacheCount: 0,
-    thumbnailImageCacheCount: 0,
-    sourceUpgradeQueueCount: 0,
-    thumbnailLoadQueueCount: 0,
-    initialLoadQueueCount: 0,
     renderCount: 4,
     lastRenderDurationMs: 5.25,
     lastUpdateReason: 'items',
     ...overrides
-  }
+  })
 }
 
 describe('projectCanvasWebGLRuntimeState', () => {
@@ -220,7 +216,8 @@ describe('projectCanvasWebGLRuntimeState', () => {
         sidecarGeneratedCount: 0,
         nativeGeneratedCount: 0,
         staleCount: 0,
-        failedCount: 0
+        failedCount: 0,
+        ...createThumbnailWorkerPoolRuntimeMetrics()
       },
       webglMetrics: metrics,
       residentLimit: 48,
@@ -249,9 +246,39 @@ describe('projectCanvasWebGLRuntimeState', () => {
         thumbnailCount: 2,
         cacheHitCount: 1,
         cacheGeneratedCount: 1,
-        cacheStaleCount: 0
+        cacheStaleCount: 0,
+        ...createThumbnailWorkerPoolRuntimeMetrics()
       })
     )
     expect(parseProjectCanvasMetricsSnapshot('not-json')).toBeNull()
+  })
+
+  it('leaves thumbnail worker-pool telemetry absent when no runtime metrics are available', () => {
+    const snapshot = buildProjectCanvasMetricsSnapshot({
+      stageScale: 1,
+      stagePos: { x: 0, y: 0 },
+      reactCommits: 0,
+      totalItemCount: 0,
+      totalImageItemCount: 0,
+      visibleItemCount: 0,
+      visibleImageItemCount: 0,
+      renderSurface: {},
+      fallbackImages: {},
+      thumbnailCacheMetrics: null,
+      webglMetrics: null,
+      residentLimit: 0,
+      residentRemainingCapacity: 0,
+      residentTextureRemainingBytes: 0,
+      residentBudgetState: 'uninitialized'
+    })
+
+    expect(snapshot.thumbnailCache).toMatchObject({
+      thumbnailCount: 0,
+      cacheHitCount: 0,
+      cacheGeneratedCount: 0
+    })
+    for (const key of CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS) {
+      expect(snapshot.thumbnailCache).not.toHaveProperty(key)
+    }
   })
 })

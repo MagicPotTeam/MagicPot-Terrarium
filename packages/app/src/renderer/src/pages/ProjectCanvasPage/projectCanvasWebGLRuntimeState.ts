@@ -1,4 +1,7 @@
-import type { CanvasThumbnailRuntimeMetrics } from './canvasThumbnailTypes'
+import {
+  CANVAS_THUMBNAIL_RUNTIME_COUNTER_KEYS,
+  type CanvasThumbnailRuntimeMetrics
+} from './canvasThumbnailTypes'
 
 export type ProjectCanvasWebGLRuntimeMetrics = {
   isInitialized: boolean
@@ -80,20 +83,36 @@ export type ProjectCanvasThumbnailCacheMetrics = CanvasThumbnailRuntimeMetrics &
   cacheFailedCount: number
 }
 
-const fallbackThumbnailCacheMetrics: ProjectCanvasThumbnailCacheMetrics = {
-  thumbnailCount: 0,
-  cacheHitCount: 0,
-  generatedCount: 0,
-  sidecarGeneratedCount: 0,
-  nativeGeneratedCount: 0,
-  staleCount: 0,
-  failedCount: 0,
-  cacheGeneratedCount: 0,
-  cacheSidecarGeneratedCount: 0,
-  cacheNativeGeneratedCount: 0,
-  cacheStaleCount: 0,
-  cacheFailedCount: 0
+const PROJECT_CANVAS_THUMBNAIL_CACHE_METRIC_ALIAS_MAPPINGS = [
+  ['cacheGeneratedCount', 'generatedCount'],
+  ['cacheSidecarGeneratedCount', 'sidecarGeneratedCount'],
+  ['cacheNativeGeneratedCount', 'nativeGeneratedCount'],
+  ['cacheStaleCount', 'staleCount'],
+  ['cacheFailedCount', 'failedCount']
+] as const satisfies readonly (readonly [
+  keyof ProjectCanvasThumbnailCacheMetrics,
+  keyof CanvasThumbnailRuntimeMetrics
+])[]
+
+function createProjectCanvasThumbnailCacheMetrics(
+  metrics: CanvasThumbnailRuntimeMetrics
+): ProjectCanvasThumbnailCacheMetrics {
+  return {
+    ...metrics,
+    ...Object.fromEntries(
+      PROJECT_CANVAS_THUMBNAIL_CACHE_METRIC_ALIAS_MAPPINGS.map(([aliasKey, metricKey]) => [
+        aliasKey,
+        metrics[metricKey] ?? 0
+      ])
+    )
+  } as ProjectCanvasThumbnailCacheMetrics
 }
+
+const fallbackThumbnailCacheMetrics = createProjectCanvasThumbnailCacheMetrics(
+  Object.fromEntries(
+    CANVAS_THUMBNAIL_RUNTIME_COUNTER_KEYS.map((key) => [key, 0])
+  ) as CanvasThumbnailRuntimeMetrics
+)
 
 const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   isInitialized: false,
@@ -142,6 +161,15 @@ const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   renderCount: 0,
   lastRenderDurationMs: null,
   lastUpdateReason: 'cleanup'
+}
+
+export function createProjectCanvasWebGLRuntimeMetrics(
+  overrides: Partial<ProjectCanvasWebGLRuntimeMetrics> = {}
+): ProjectCanvasWebGLRuntimeMetrics {
+  return {
+    ...fallbackWebGLMetrics,
+    ...overrides
+  }
 }
 
 const PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS = [
@@ -287,14 +315,7 @@ export function buildProjectCanvasMetricsSnapshot({
 }): ProjectCanvasMetricsSnapshot {
   const metrics = webglMetrics ?? fallbackWebGLMetrics
   const thumbnailMetrics = thumbnailCacheMetrics
-    ? {
-        ...thumbnailCacheMetrics,
-        cacheGeneratedCount: thumbnailCacheMetrics.generatedCount,
-        cacheSidecarGeneratedCount: thumbnailCacheMetrics.sidecarGeneratedCount,
-        cacheNativeGeneratedCount: thumbnailCacheMetrics.nativeGeneratedCount,
-        cacheStaleCount: thumbnailCacheMetrics.staleCount,
-        cacheFailedCount: thumbnailCacheMetrics.failedCount
-      }
+    ? createProjectCanvasThumbnailCacheMetrics(thumbnailCacheMetrics)
     : fallbackThumbnailCacheMetrics
 
   return {

@@ -1,5 +1,7 @@
 import {
+  attachCanvasSpatialIndexAccelerator,
   buildCanvasItemSpatialIndex,
+  disposeCanvasSpatialIndex,
   doCanvasSpatialBoundsIntersect,
   queryCanvasSpatialIndex,
   queryCanvasSpatialIndexUnordered,
@@ -52,6 +54,8 @@ export type ProjectCanvasRuntimeMetrics = {
 export type ProjectCanvasRuntimeOptions = {
   getItemBounds?: (item: CanvasItem) => CanvasSpatialBounds
 }
+
+export type ProjectCanvasRuntimeCallback<T> = (runtime: ProjectCanvasRuntime) => T
 
 export type ProjectCanvasRuntimeSnapshotOptions = {
   selectedIds?: Iterable<string>
@@ -303,7 +307,10 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
 
   const rebuildIndex = () => {
     const effectiveItems = getEffectiveItems()
+    const previousSpatialIndex = spatialIndex
     spatialIndex = buildCanvasItemSpatialIndex(effectiveItems, getItemBounds)
+    attachCanvasSpatialIndexAccelerator(spatialIndex)
+    disposeCanvasSpatialIndex(previousSpatialIndex)
     orderById = new Map(effectiveItems.map((item, index) => [item.id, index]))
   }
 
@@ -486,6 +493,14 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
       return getMetrics()
     },
 
+    dispose() {
+      disposeCanvasSpatialIndex(spatialIndex)
+      items = []
+      previewItems = new Map()
+      spatialIndex = buildCanvasItemSpatialIndex([], getItemBounds)
+      orderById = new Map()
+    },
+
     createSnapshot(
       options: ProjectCanvasRuntimeSnapshotOptions = {}
     ): ProjectCanvasRuntimeSnapshot {
@@ -526,3 +541,15 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
 }
 
 export type ProjectCanvasRuntime = ReturnType<typeof createProjectCanvasRuntime>
+
+export function withProjectCanvasRuntime<T>(
+  callback: ProjectCanvasRuntimeCallback<T>,
+  options?: ProjectCanvasRuntimeOptions
+): T {
+  const runtime = createProjectCanvasRuntime(options)
+  try {
+    return callback(runtime)
+  } finally {
+    runtime.dispose()
+  }
+}

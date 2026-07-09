@@ -2,6 +2,7 @@ import React from 'react'
 import { act, render, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CanvasImageSourceIdentity, CanvasImageThumbnailSet } from '../canvasThumbnailTypes'
+import type { ProjectCanvasWebGLRuntimeMetrics } from '../projectCanvasWebGLRuntimeState'
 
 type CanvasImageItem = {
   id: string
@@ -45,41 +46,6 @@ type ProjectCanvasWebGLImageLayerHandle = {
   ) => void
   syncViewport: (pos: { x: number; y: number }, scale: number) => void
   setViewportInteracting: (active: boolean) => void
-}
-
-type ProjectCanvasWebGLImageLayerMetrics = {
-  isInitialized: boolean
-  imageCount: number
-  loadedImageCount: number
-  failedImageCount: number
-  residentImageCount: number
-  residentTextureBytes: number
-  residentCandidateTextureBytes: number
-  residentTextureBudgetBytes: number
-  pendingImageCount: number
-  spriteCount: number
-  residentCandidateImageCount: number
-  viewportCulledImageCount: number
-  spriteReconcilePassCount?: number
-  lastSpriteReconcileDurationMs?: number | null
-  lastSpriteReconcileCandidateCount?: number
-  lastSpriteReconcileTargetCount?: number
-  lastSpriteReconcileCreatedCount?: number
-  lastSpriteReconcileReusedCount?: number
-  lastSpriteReconcileRemovedCount?: number
-  lastSpriteReconcileDeferredCount?: number
-  usingPreviewImageCount: number
-  usingSourceImageCount: number
-  thumbnailPreviewImageCount: number
-  placeholderImageCount: number
-  sourceUpgradeSuppressedImageCount: number
-  sourceUpgradeablePreviewImageCount: number
-  sourceUpgradePendingImageCount: number
-  sourceUpgradeFailedImageCount: number
-  missingImageCount: number
-  renderCount: number
-  lastRenderDurationMs: number | null
-  lastUpdateReason: 'initialize' | 'items' | 'preview' | 'cleanup'
 }
 
 type MockPoint = {
@@ -148,6 +114,60 @@ let textureFromAlphaModes: unknown[] = []
 let textureScaleModeReadCount = 0
 let textureScaleModeWriteCount = 0
 const originalDevicePixelRatio = window.devicePixelRatio
+
+type MockImageInstance = {
+  onload: null | (() => void)
+  onerror: null | (() => void)
+  crossOrigin: string | null
+  naturalWidth: number
+  naturalHeight: number
+  width: number
+  height: number
+  src: string
+}
+
+function createMockImageClass({
+  width: imageWidth,
+  height: imageHeight,
+  attemptedSrcs,
+  imageInstances,
+  storeSrc = true,
+  onSetSrc
+}: {
+  width: number
+  height: number
+  attemptedSrcs?: string[]
+  imageInstances?: MockImageInstance[]
+  storeSrc?: boolean
+  onSetSrc?: (image: MockImageInstance, value: string) => void
+}) {
+  return class MockImage implements MockImageInstance {
+    onload: null | (() => void) = null
+    onerror: null | (() => void) = null
+    crossOrigin: string | null = null
+    naturalWidth = imageWidth
+    naturalHeight = imageHeight
+    width = imageWidth
+    height = imageHeight
+    private _src = ''
+
+    constructor() {
+      imageInstances?.push(this)
+    }
+
+    set src(value: string) {
+      if (storeSrc) {
+        this._src = value
+      }
+      attemptedSrcs?.push(value)
+      onSetSrc?.(this, value)
+    }
+
+    get src() {
+      return this._src
+    }
+  }
+}
 
 function setWindowDevicePixelRatio(value: number) {
   Object.defineProperty(window, 'devicePixelRatio', {
@@ -332,6 +352,13 @@ function installPixiMock() {
       Texture: MockTexture
     }
   })
+}
+
+const TEST_STAGE_SIZE_1280_720 = { width: 1280, height: 720 }
+const TEST_STAGE_VIEWPORT_1280_720 = {
+  stagePos: { x: 0, y: 0 },
+  stageScale: 1,
+  stageSize: TEST_STAGE_SIZE_1280_720
 }
 
 function createImage(width: number, height: number) {
@@ -528,11 +555,11 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const initialItems = createItems(3)
     const residentIdsCalls: Set<string>[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
     const handleResidentIdsChange = (residentIds: Set<string>) => {
       residentIdsCalls.push(new Set(residentIds))
     }
-    const handleMetricsChange = (metrics: ProjectCanvasWebGLImageLayerMetrics) => {
+    const handleMetricsChange = (metrics: ProjectCanvasWebGLRuntimeMetrics) => {
       metricsCalls.push(metrics)
     }
     const expectedResidentIds = new Set(initialItems.map((item) => item.id))
@@ -540,9 +567,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { rerender } = render(
       <ProjectCanvasWebGLImageLayer
         items={initialItems}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onResidentIdsChange={handleResidentIdsChange}
         onMetricsChange={handleMetricsChange}
       />
@@ -567,9 +592,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     rerender(
       <ProjectCanvasWebGLImageLayer
         items={updatedItems}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onResidentIdsChange={handleResidentIdsChange}
         onMetricsChange={handleMetricsChange}
       />
@@ -614,9 +637,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         ref={ref}
         items={createItems(3)}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
       />
     )
 
@@ -655,9 +676,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         ref={ref}
         items={[createItem()]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
       />
     )
 
@@ -719,9 +738,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         ref={ref}
         items={[createItem()]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
       />
     )
 
@@ -771,12 +788,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const initialItem = createItem()
     const { rerender } = render(
-      <ProjectCanvasWebGLImageLayer
-        items={[initialItem]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
-      />
+      <ProjectCanvasWebGLImageLayer items={[initialItem]} {...TEST_STAGE_VIEWPORT_1280_720} />
     )
 
     await waitFor(
@@ -796,9 +808,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
             crop: { x: 10, y: 5, width: 40, height: 20 }
           })
         ]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
       />
     )
 
@@ -833,9 +843,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { rerender } = render(
       <ProjectCanvasWebGLImageLayer
         items={[firstItem, secondItem]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
       />
     )
 
@@ -854,9 +862,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     rerender(
       <ProjectCanvasWebGLImageLayer
         items={[{ ...firstItem, zIndex: 3 }, secondItem]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
       />
     )
 
@@ -893,9 +899,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     render(
       <ProjectCanvasWebGLImageLayer
         items={[secondItem, firstItem]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
       />
     )
 
@@ -925,9 +929,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         ref={ref}
         items={oversizedItems}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onResidentIdsChange={handleResidentIdsChange}
       />
     )
@@ -965,9 +967,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         ref={ref}
         items={[deferredItem!]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onResidentIdsChange={handleResidentIdsChange}
       />
     )
@@ -1036,17 +1036,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('emits a compact render-path snapshot for benchmark smoke checks', async () => {
     const { default: ProjectCanvasWebGLImageLayer, PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES } =
       await import('./ProjectCanvasWebGLImageLayer')
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
-    const onMetricsChange = (metrics: ProjectCanvasWebGLImageLayerMetrics) => {
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
+    const onMetricsChange = (metrics: ProjectCanvasWebGLRuntimeMetrics) => {
       metricsCalls.push(metrics)
     }
 
     render(
       <ProjectCanvasWebGLImageLayer
         items={[createItem()]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onMetricsChange={onMetricsChange}
       />
     )
@@ -1058,46 +1056,65 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       { timeout: 15000 }
     )
 
-    expect(metricsCalls[0]).toEqual(
-      expect.objectContaining({
-        isInitialized: true,
-        imageCount: 0,
-        loadedImageCount: 0,
-        failedImageCount: 0,
-        residentImageCount: 0,
-        residentTextureBytes: 0,
-        residentCandidateTextureBytes: 0,
-        residentTextureBudgetBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-        pendingImageCount: 0,
-        spriteCount: 0,
-        residentCandidateImageCount: 0,
-        viewportCulledImageCount: 0,
-        spriteReconcilePassCount: 0,
-        lastSpriteReconcileDurationMs: null,
-        lastSpriteReconcileCandidateCount: 0,
-        lastSpriteReconcileTargetCount: 0,
-        lastSpriteReconcileCreatedCount: 0,
-        lastSpriteReconcileReusedCount: 0,
-        lastSpriteReconcileRemovedCount: 0,
-        lastSpriteReconcileDeferredCount: 0,
-        usingPreviewImageCount: 0,
-        usingSourceImageCount: 0,
-        thumbnailPreviewImageCount: 0,
-        placeholderImageCount: 0,
-        sourceUpgradeSuppressedImageCount: 0,
-        sourceUpgradeablePreviewImageCount: 0,
-        sourceUpgradePendingImageCount: 0,
-        sourceUpgradeFailedImageCount: 0,
-        missingImageCount: 0,
-        lastUpdateReason: 'initialize'
-      })
-    )
+    const firstMetrics = metricsCalls[0]
+    expect(firstMetrics).toEqual({
+      isInitialized: true,
+      imageCount: 0,
+      loadedImageCount: 0,
+      failedImageCount: 0,
+      residentImageCount: 0,
+      residentTextureBytes: 0,
+      residentCandidateTextureBytes: 0,
+      residentTextureBudgetBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
+      pendingImageCount: 0,
+      spriteCount: 0,
+      residentCandidateImageCount: 0,
+      viewportCulledImageCount: 0,
+      spriteReconcilePassCount: 0,
+      lastSpriteReconcileDurationMs: null,
+      lastSpriteReconcileCandidateCount: 0,
+      lastSpriteReconcileTargetCount: 0,
+      lastSpriteReconcileCreatedCount: 0,
+      lastSpriteReconcileReusedCount: 0,
+      lastSpriteReconcileRemovedCount: 0,
+      lastSpriteReconcileDeferredCount: 0,
+      usingPreviewImageCount: 0,
+      usingSourceImageCount: 0,
+      thumbnailPreviewImageCount: 0,
+      placeholderImageCount: 0,
+      sourceUpgradeSuppressedImageCount: 0,
+      sourceUpgradeablePreviewImageCount: 0,
+      sourceUpgradePendingImageCount: 0,
+      sourceUpgradeFailedImageCount: 0,
+      missingImageCount: 0,
+      activeObjectUrlCount: 0,
+      revokedObjectUrlCount: 0,
+      activeImageBitmapCount: 0,
+      closedImageBitmapCount: 0,
+      releaseErrorCount: 0,
+      decodedInFlightBytes: 0,
+      activeSourceUpgradeCount: 0,
+      residentTextureBudgetPressureCount: 0,
+      textureBudgetEvictionCount: 0,
+      sourceImageCacheCount: 0,
+      thumbnailImageCacheCount: 0,
+      sourceUpgradeQueueCount: 0,
+      thumbnailLoadQueueCount: 0,
+      initialLoadQueueCount: 0,
+      renderCount: firstMetrics.renderCount,
+      lastRenderDurationMs: firstMetrics.lastRenderDurationMs,
+      lastUpdateReason: 'initialize'
+    })
+    expect(firstMetrics.renderCount).toBeGreaterThanOrEqual(0)
+    expect(
+      firstMetrics.lastRenderDurationMs === null || firstMetrics.lastRenderDurationMs >= 0
+    ).toBe(true)
   }, 15000)
 
   it('keeps only viewport-adjacent images resident in the GPU layer', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const residentIdsCalls: Set<string>[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
     const visibleItem = createItem({ id: 'image-visible', x: 24, y: 36 })
     const farItem = createItem({
       id: 'image-far',
@@ -1110,9 +1127,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     render(
       <ProjectCanvasWebGLImageLayer
         items={[visibleItem, farItem]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
         onMetricsChange={(metrics) => metricsCalls.push(metrics)}
       />
@@ -1167,9 +1182,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         items={[selectedEdgeItem]}
         selectedIds={new Set([selectedEdgeItem.id])}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
       />
     )
@@ -1197,9 +1210,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         items={stableItems}
         selectedIds={new Set([selectedItem.id])}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
       />
     )
 
@@ -1227,9 +1238,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         items={stableItems}
         selectedIds={new Set([selectedItem.id])}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
       />
     )
 
@@ -1245,7 +1254,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { PROJECT_CANVAS_WEBGL_SELECTED_RESIDENT_LIMIT, default: ProjectCanvasWebGLImageLayer } =
       await import('./ProjectCanvasWebGLImageLayer')
     const residentIdsCalls: Set<string>[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
     const selectedItems = Array.from(
       { length: PROJECT_CANVAS_WEBGL_SELECTED_RESIDENT_LIMIT + 1 },
       (_, index) =>
@@ -1263,9 +1272,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         items={selectedItems}
         selectedIds={new Set(selectedItems.map((item) => item.id))}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
         onMetricsChange={(metrics) => metricsCalls.push(metrics)}
       />
@@ -1297,9 +1304,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     render(
       <ProjectCanvasWebGLImageLayer
         items={[createItem()]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onReadyChange={(ready) => readyCalls.push(ready)}
         onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
       />
@@ -1341,9 +1346,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         <ProjectCanvasWebGLImageLayer
           ref={ref}
           items={[createItem()]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onReadyChange={(ready) => readyCalls.push(ready)}
           onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
         />
@@ -1398,9 +1401,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         <ProjectCanvasWebGLImageLayer
           ref={ref}
           items={[createItem()]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onReadyChange={(ready) => readyCalls.push(ready)}
           onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
         />
@@ -1447,8 +1448,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const requestAnimationFrameMock = vi.fn(() => 1)
     const cancelAnimationFrameMock = vi.fn()
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
-    const handleMetricsChange = (metrics: ProjectCanvasWebGLImageLayerMetrics) => {
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
+    const handleMetricsChange = (metrics: ProjectCanvasWebGLRuntimeMetrics) => {
       metricsCalls.push(metrics)
     }
 
@@ -1460,9 +1461,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={stableItems}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onMetricsChange={handleMetricsChange}
         />
       )
@@ -1515,9 +1514,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         ref={ref}
         items={[createItem()]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
       />
     )
 
@@ -1576,9 +1573,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         ref={ref}
         items={[visibleItem, farItem]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
       />
     )
@@ -1625,9 +1620,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         ref={ref}
         items={[visibleItem, farItem]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         isViewportInteracting
         onResidentIdsChange={handleResidentIdsChange}
       />
@@ -1675,16 +1668,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('defers metrics reports while viewport interaction is active', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
     const stableItems = [createItem({ id: 'image-metrics-interacting' })]
 
     const { rerender } = render(
       <ProjectCanvasWebGLImageLayer
         ref={ref}
         items={stableItems}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         isViewportInteracting
         onMetricsChange={(metrics) => metricsCalls.push(metrics)}
       />
@@ -1713,9 +1704,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       <ProjectCanvasWebGLImageLayer
         ref={ref}
         items={stableItems}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         isViewportInteracting={false}
         onMetricsChange={(metrics) => metricsCalls.push(metrics)}
       />
@@ -1759,9 +1748,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         <ProjectCanvasWebGLImageLayer
           ref={ref}
           items={stableItems}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onResidentIdsChange={handleResidentIdsChange}
         />
       )
@@ -1807,7 +1794,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     } = await import('./ProjectCanvasWebGLImageLayer')
     const residentIdsCalls: Set<string>[] = []
     const resolvedIdsCalls: Set<string>[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
     const largeTextureSide =
       Math.floor(Math.sqrt(PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES / 4)) - 16
     const expectedTextureBytes = largeTextureSide * largeTextureSide * 4
@@ -1828,9 +1815,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     render(
       <ProjectCanvasWebGLImageLayer
         items={largeVisibleItems}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
         onResolvedIdsChange={(resolvedIds) => resolvedIdsCalls.push(new Set(resolvedIds))}
         onMetricsChange={(metrics) => metricsCalls.push(metrics)}
@@ -1863,7 +1848,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('keeps rotated images resident when their rotated bounds still intersect the viewport budget', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const residentIdsCalls: Set<string>[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
     const rotatedEdgeItem = createItem({
       id: 'image-rotated-edge',
       src: 'file:///image-rotated-edge.png',
@@ -1878,9 +1863,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     render(
       <ProjectCanvasWebGLImageLayer
         items={[rotatedEdgeItem]}
-        stagePos={{ x: 0, y: 0 }}
-        stageScale={1}
-        stageSize={{ width: 1280, height: 720 }}
+        {...TEST_STAGE_VIEWPORT_1280_720}
         onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
         onMetricsChange={(metrics) => metricsCalls.push(metrics)}
       />
@@ -1911,33 +1894,16 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       default: ProjectCanvasWebGLImageLayer,
       PROJECT_CANVAS_WEBGL_INITIAL_IMAGE_LOAD_CONCURRENCY
     } = await import('./ProjectCanvasWebGLImageLayer')
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
     const attemptedSrcs: string[] = []
-    const imageInstances: Array<{ onload: null | (() => void) }> = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 100
-      naturalHeight = 60
-      width = 100
-      height = 60
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 100,
+      height: 60,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -1958,9 +1924,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       render(
         <ProjectCanvasWebGLImageLayer
           items={[...srcOnlyItems, offscreenSrcOnlyItem]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
         />
       )
@@ -2000,7 +1964,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
   it('batches same-frame src-only image load commits into one image-version frame', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
     const queuedAnimationFrames = new Map<number, FrameRequestCallback>()
     let nextAnimationFrameId = 1
     const requestAnimationFrameSpy = vi
@@ -2017,26 +1981,12 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         queuedAnimationFrames.delete(id)
       })
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 100
-      naturalHeight = 60
-      width = 100
-      height = 60
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        void value
-      }
-      get src() {
-        return ''
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 100,
+      height: 60,
+      imageInstances,
+      storeSrc: false
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -2047,12 +1997,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       }))
 
       render(
-        <ProjectCanvasWebGLImageLayer
-          items={srcOnlyItems}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
-        />
+        <ProjectCanvasWebGLImageLayer items={srcOnlyItems} {...TEST_STAGE_VIEWPORT_1280_720} />
       )
 
       await waitFor(() => {
@@ -2086,31 +2031,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('loads the latest src when an item changes while an older load is pending', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 100
-      naturalHeight = 60
-      width = 100
-      height = 60
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 100,
+      height: 60,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -2127,12 +2055,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         fileName: 'image-replaced-new.png'
       }
       const { rerender } = render(
-        <ProjectCanvasWebGLImageLayer
-          items={[initialItem]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
-        />
+        <ProjectCanvasWebGLImageLayer items={[initialItem]} {...TEST_STAGE_VIEWPORT_1280_720} />
       )
 
       await waitFor(
@@ -2143,12 +2066,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       )
 
       rerender(
-        <ProjectCanvasWebGLImageLayer
-          items={[replacementItem]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
-        />
+        <ProjectCanvasWebGLImageLayer items={[replacementItem]} {...TEST_STAGE_VIEWPORT_1280_720} />
       )
 
       await waitFor(
@@ -2183,31 +2101,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('upgrades preview textures to source textures when zoom makes the preview too small', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 4096
-      naturalHeight = 4096
-      width = 4096
-      height = 4096
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 4096,
+      height: 4096,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -2226,9 +2127,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
               image: createImage(1024, 1024)
             })
           ]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
         />
       )
 
@@ -2259,25 +2159,11 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 4096
-      naturalHeight = 4096
-      width = 4096
-      height = 4096
-      private _src = ''
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 4096,
+      height: 4096,
+      attemptedSrcs
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -2296,9 +2182,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
               image: createImage(1024, 1024)
             })
           ]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={0.5}
-          stageSize={{ width: 1280, height: 720 }}
         />
       )
 
@@ -2319,31 +2204,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     setWindowDevicePixelRatio(2)
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 4096
-      naturalHeight = 4096
-      width = 4096
-      height = 4096
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 4096,
+      height: 4096,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -2362,9 +2230,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
               image: createImage(1024, 1024)
             })
           ]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={0.5}
-          stageSize={{ width: 1280, height: 720 }}
         />
       )
 
@@ -2395,31 +2262,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('upgrades data URL source textures when zoom makes the preview too small', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 2048
-      naturalHeight = 2048
-      width = 2048
-      height = 2048
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 2048,
+      height: 2048,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -2438,9 +2288,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
               image: createImage(512, 512)
             })
           ]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
         />
       )
 
@@ -2470,31 +2319,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('defers source texture upgrades until viewport interaction settles', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 4096
-      naturalHeight = 4096
-      width = 4096
-      height = 4096
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 4096,
+      height: 4096,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -2512,9 +2344,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
           isViewportInteracting
         />
       )
@@ -2532,9 +2363,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       rerender(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
           isViewportInteracting={false}
         />
       )
@@ -2565,31 +2395,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('applies source textures that finish while viewport interaction is still active', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 4096
-      naturalHeight = 4096
-      width = 4096
-      height = 4096
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 4096,
+      height: 4096,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -2607,9 +2420,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
           isViewportInteracting={false}
         />
       )
@@ -2628,9 +2440,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       rerender(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
           isViewportInteracting
         />
       )
@@ -2656,31 +2467,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('limits source texture upgrade loads without throttling initial visible image loads', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 2048
-      naturalHeight = 2048
-      width = 2048
-      height = 2048
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 2048,
+      height: 2048,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -2700,9 +2494,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       render(
         <ProjectCanvasWebGLImageLayer
           items={hiResItems}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
         />
       )
 
@@ -2755,31 +2548,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('prioritizes selected and near-center source texture upgrades', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 2048
-      naturalHeight = 2048
-      width = 2048
-      height = 2048
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 2048,
+      height: 2048,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -2825,9 +2601,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         <ProjectCanvasWebGLImageLayer
           items={[edgeItem, centerItem, selectedItem]}
           selectedIds={new Set(['image-upgrade-selected'])}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
         />
       )
 
@@ -2863,27 +2638,13 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('keeps selected preview textures at overview zoom', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 4096
-      naturalHeight = 4096
-      width = 4096
-      height = 4096
-      private _src = ''
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 4096,
+      height: 4096,
+      attemptedSrcs
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -2915,9 +2676,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         <ProjectCanvasWebGLImageLayer
           items={[unselectedItem, selectedItem]}
           selectedIds={new Set([selectedItem.id])}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={0.01}
-          stageSize={{ width: 1280, height: 720 }}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
         />
       )
@@ -2951,27 +2711,13 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('keeps dense mid-zoom overviews on preview textures instead of bulk source upgrades', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 4096
-      naturalHeight = 4096
-      width = 4096
-      height = 4096
-      private _src = ''
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 4096,
+      height: 4096,
+      attemptedSrcs
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -3028,31 +2774,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('reprioritizes queued thumbnail upgrades even when resident sprites stay clean', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 1024
-      naturalHeight = 512
-      width = 1024
-      height = 512
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 1024,
+      height: 512,
+      attemptedSrcs,
+      imageInstances
+    })
 
     const createPrioritizedThumbnailItem = (index: number) => {
       const cacheKey = `thumbnail-priority-${index}`
@@ -3103,12 +2832,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         createPrioritizedThumbnailItem(index + 1)
       )
       const { rerender } = render(
-        <ProjectCanvasWebGLImageLayer
-          items={items}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
-        />
+        <ProjectCanvasWebGLImageLayer items={items} {...TEST_STAGE_VIEWPORT_1280_720} />
       )
 
       await waitFor(
@@ -3157,32 +2881,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('upgrades large-batch preview sprites through thumbnail LOD without loading source textures', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const imageInstances: MockImageInstance[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 1024
-      naturalHeight = 512
-      width = 1024
-      height = 512
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 1024,
+      height: 512,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -3204,9 +2911,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={0.15}
-          stageSize={{ width: 1280, height: 720 }}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
         />
       )
@@ -3247,25 +2953,11 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 1024
-      naturalHeight = 512
-      width = 1024
-      height = 512
-      private _src = ''
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 1024,
+      height: 512,
+      attemptedSrcs
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -3289,9 +2981,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={0.5}
-          stageSize={{ width: 1280, height: 720 }}
           isViewportInteracting
         />
       )
@@ -3307,9 +2998,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       rerender(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={0.5}
-          stageSize={{ width: 1280, height: 720 }}
           isViewportInteracting={false}
         />
       )
@@ -3328,37 +3018,22 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('downgrades cached high thumbnails when a dense view needs more resident images', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 2048
-      naturalHeight = 2048
-      width = 2048
-      height = 2048
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
+    const MockImage = createMockImageClass({
+      width: 2048,
+      height: 2048,
+      attemptedSrcs,
+      imageInstances,
+      onSetSrc: (image, value) => {
         const match = value.match(/\/(\d+)\.webp$/)
         const level = match ? Number(match[1]) : 2048
-        this.naturalWidth = level
-        this.naturalHeight = level
-        this.width = level
-        this.height = level
+        image.naturalWidth = level
+        image.naturalHeight = level
+        image.width = level
+        image.height = level
       }
-
-      get src() {
-        return this._src
-      }
-    }
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -3382,9 +3057,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[focusedItem]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={0.15}
-          stageSize={{ width: 1280, height: 720 }}
         />
       )
 
@@ -3424,9 +3098,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       rerender(
         <ProjectCanvasWebGLImageLayer
           items={[focusedItem, ...denseFillers]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={0.15}
-          stageSize={{ width: 1280, height: 720 }}
         />
       )
 
@@ -3458,32 +3131,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('downgrades an already cached source texture back to preview at overview zoom', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const imageInstances: MockImageInstance[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 4096
-      naturalHeight = 4096
-      width = 4096
-      height = 4096
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 4096,
+      height: 4096,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -3502,9 +3158,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
         />
       )
@@ -3530,9 +3184,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       rerender(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={0.01}
-          stageSize={{ width: 1280, height: 720 }}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
         />
       )
@@ -3561,31 +3214,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('drops stale offscreen source upgrade queue entries after the viewport moves', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 2048
-      naturalHeight = 2048
-      width = 2048
-      height = 2048
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 2048,
+      height: 2048,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -3605,9 +3241,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={hiResItems}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
         />
       )
 
@@ -3654,33 +3289,16 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('keeps the preview sprite alive when source image decoding fails', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
     const failedIdsCalls: Set<string>[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 4096
-      naturalHeight = 4096
-      width = 4096
-      height = 4096
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 4096,
+      height: 4096,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -3698,9 +3316,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onFailedIdsChange={(failedIds) => failedIdsCalls.push(new Set(failedIds))}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
         />
@@ -3716,9 +3332,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       rerender(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
           onFailedIdsChange={(failedIds) => failedIdsCalls.push(new Set(failedIds))}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
         />
@@ -3759,33 +3374,16 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('keeps the preview sprite alive when source texture creation fails', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
     const failedIdsCalls: Set<string>[] = []
     const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 4096
-      naturalHeight = 4096
-      width = 4096
-      height = 4096
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 4096,
+      height: 4096,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -3803,9 +3401,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onFailedIdsChange={(failedIds) => failedIdsCalls.push(new Set(failedIds))}
         />
       )
@@ -3821,9 +3417,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       rerender(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
           onFailedIdsChange={(failedIds) => failedIdsCalls.push(new Set(failedIds))}
         />
       )
@@ -3867,25 +3462,11 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       blob: async () => new Blob(['png'], { type: 'image/png' })
     }))
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 19717
-      naturalHeight = 12079
-      width = 19717
-      height = 12079
-      private _src = ''
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 19717,
+      height: 12079,
+      attemptedSrcs
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
     vi.stubGlobal('fetch', fetchMock)
@@ -3906,9 +3487,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
               image: createImage(512, 314)
             })
           ]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
         />
       )
 
@@ -3945,26 +3524,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const createObjectURLMock = vi.fn((_blob: Blob) => 'blob:webgl-local-image')
     const revokeObjectURLMock = vi.fn()
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 640
-      naturalHeight = 360
-      width = 640
-      height = 360
-      private _src = ''
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-        window.setTimeout(() => this.onload?.(), 0)
+    const MockImage = createMockImageClass({
+      width: 640,
+      height: 360,
+      attemptedSrcs,
+      onSetSrc: (image) => {
+        window.setTimeout(() => image.onload?.(), 0)
       }
-
-      get src() {
-        return this._src
-      }
-    }
+    })
 
     URL.createObjectURL = createObjectURLMock as unknown as typeof URL.createObjectURL
     URL.revokeObjectURL = revokeObjectURLMock as unknown as typeof URL.revokeObjectURL
@@ -3990,9 +3557,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
               image: undefined as unknown as HTMLImageElement
             })
           ]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
         />
       )
 
@@ -4032,25 +3597,11 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const createObjectURLMock = vi.fn((_blob: Blob) => 'blob:webgl-pending-local-image')
     const revokeObjectURLMock = vi.fn()
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 640
-      naturalHeight = 360
-      width = 640
-      height = 360
-      private _src = ''
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 640,
+      height: 360,
+      attemptedSrcs
+    })
 
     URL.createObjectURL = createObjectURLMock as unknown as typeof URL.createObjectURL
     URL.revokeObjectURL = revokeObjectURLMock as unknown as typeof URL.revokeObjectURL
@@ -4076,9 +3627,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
               image: undefined as unknown as HTMLImageElement
             })
           ]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
         />
       )
 
@@ -4112,7 +3661,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('falls back to an image element when bounded source fetch fails', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
     const createImageBitmapMock = vi.fn(
       async () => createImage(4096, 2276) as unknown as ImageBitmap
     )
@@ -4120,29 +3669,12 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       throw new Error('custom scheme fetch unavailable')
     })
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 9000
-      naturalHeight = 5000
-      width = 9000
-      height = 5000
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 9000,
+      height: 5000,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
     vi.stubGlobal('fetch', fetchMock)
@@ -4163,9 +3695,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
               image: createImage(512, 314)
             })
           ]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
         />
       )
 
@@ -4205,25 +3735,11 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       throw new Error('custom scheme fetch unavailable')
     })
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 19717
-      naturalHeight = 12079
-      width = 19717
-      height = 12079
-      private _src = ''
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 19717,
+      height: 12079,
+      attemptedSrcs
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
     vi.stubGlobal('fetch', fetchMock)
@@ -4247,9 +3763,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
               image: createImage(512, 314)
             })
           ]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
         />
       )
 
@@ -4275,32 +3789,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('keeps the preview sprite alive when a source texture upgrade exceeds the budget', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const imageInstances: MockImageInstance[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 20000
-      naturalHeight = 20000
-      width = 20000
-      height = 20000
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: 20000,
+      height: 20000,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -4318,9 +3815,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
         />
       )
@@ -4335,9 +3830,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       rerender(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
-          stageSize={{ width: 1280, height: 720 }}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
         />
       )
@@ -4397,34 +3891,17 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES, default: ProjectCanvasWebGLImageLayer } =
       await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
-    const imageInstances: MockImage[] = []
+    const imageInstances: MockImageInstance[] = []
     const failedIdsCalls: Set<string>[] = []
     const oversizedSide =
       Math.ceil(Math.sqrt(PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES / 4)) + 1
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = oversizedSide
-      naturalHeight = oversizedSide
-      width = oversizedSide
-      height = oversizedSide
-      private _src = ''
-
-      constructor() {
-        imageInstances.push(this)
-      }
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
-      }
-
-      get src() {
-        return this._src
-      }
-    }
+    const MockImage = createMockImageClass({
+      width: oversizedSide,
+      height: oversizedSide,
+      attemptedSrcs,
+      imageInstances
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -4439,9 +3916,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onFailedIdsChange={(failedIds) => failedIdsCalls.push(new Set(failedIds))}
         />
       )
@@ -4474,31 +3949,19 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const residentIdsCalls: Set<string>[] = []
     const failedIdsCalls: Set<string>[] = []
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
     const attemptedSrcs: string[] = []
 
-    class MockImage {
-      onload: null | (() => void) = null
-      onerror: null | (() => void) = null
-      crossOrigin: string | null = null
-      naturalWidth = 100
-      naturalHeight = 60
-      width = 100
-      height = 60
-      private _src = ''
-
-      set src(value: string) {
-        this._src = value
-        attemptedSrcs.push(value)
+    const MockImage = createMockImageClass({
+      width: 100,
+      height: 60,
+      attemptedSrcs,
+      onSetSrc: (image) => {
         queueMicrotask(() => {
-          this.onerror?.()
+          image.onerror?.()
         })
       }
-
-      get src() {
-        return this._src
-      }
-    }
+    })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -4512,9 +3975,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[failedItem]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
           onFailedIdsChange={(failedIds) => failedIdsCalls.push(new Set(failedIds))}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
@@ -4549,9 +4010,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       rerender(
         <ProjectCanvasWebGLImageLayer
           items={[failedItem]}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
           onFailedIdsChange={(failedIds) => failedIdsCalls.push(new Set(failedIds))}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
@@ -4611,12 +4070,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
     try {
       render(
-        <ProjectCanvasWebGLImageLayer
-          items={orderedItems}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
-        />
+        <ProjectCanvasWebGLImageLayer items={orderedItems} {...TEST_STAGE_VIEWPORT_1280_720} />
       )
 
       await waitFor(
@@ -4685,16 +4139,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
       expect(liveSpriteCount()).toBe(expectedCount)
     }
-    const metricsCalls: ProjectCanvasWebGLImageLayerMetrics[] = []
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
     const largeItemSet = createItems(PROJECT_CANVAS_WEBGL_SPRITE_RECONCILE_BATCH_SIZE * 3)
 
     try {
       render(
         <ProjectCanvasWebGLImageLayer
           items={largeItemSet}
-          stagePos={{ x: 0, y: 0 }}
-          stageScale={1}
-          stageSize={{ width: 1280, height: 720 }}
+          {...TEST_STAGE_VIEWPORT_1280_720}
           onMetricsChange={(metrics) => metricsCalls.push(metrics)}
         />
       )

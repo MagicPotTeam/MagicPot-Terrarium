@@ -191,19 +191,39 @@ function mockElementRect(
   })
 }
 
+function createCanvasContainer({
+  width = 800,
+  height = 600,
+  marqueeActive = false,
+  mockRect = false
+}: {
+  width?: number
+  height?: number
+  marqueeActive?: boolean
+  mockRect?: boolean
+} = {}) {
+  const canvasContainer = document.createElement('div')
+  Object.defineProperty(canvasContainer, 'clientWidth', {
+    configurable: true,
+    value: width
+  })
+  Object.defineProperty(canvasContainer, 'clientHeight', {
+    configurable: true,
+    value: height
+  })
+  if (marqueeActive) {
+    canvasContainer.setAttribute('data-project-canvas-marquee-active', 'true')
+  }
+  if (mockRect) {
+    mockCanvasContainerRect(canvasContainer)
+  }
+  document.body.appendChild(canvasContainer)
+  return canvasContainer
+}
+
 describe('ProjectCanvasPageSelectionOverlays', () => {
   it('hides selection overlay chrome while the canvas marquee flag is active', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    canvasContainer.setAttribute('data-project-canvas-marquee-active', 'true')
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer({ marqueeActive: true })
 
     const imageItem = createImageItem()
     const stage = {
@@ -278,16 +298,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('does not mount multi-selection action chrome while marquee release is settling', () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const firstImageItem = createImageItem({ id: 'image-1', x: 120, y: 180 })
     const secondImageItem = createImageItem({ id: 'image-2', x: 260, y: 180 })
@@ -352,16 +363,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('renders floating toolbars inside the canvas container portal instead of the page shell', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn(() => ({
@@ -437,16 +439,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('anchors the image toolbar to the image interaction overlay instead of a stale generic node', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const staleOverlay = document.createElement('div')
     staleOverlay.setAttribute('data-canvas-item-id', 'image-1')
@@ -544,16 +537,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
       }
     )
 
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
     mockCanvasContainerRect(canvasContainer)
 
     const imageInteractionOverlay = document.createElement('div')
@@ -680,16 +664,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
       return vi.fn()
     })
 
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
     mockCanvasContainerRect(canvasContainer)
 
     const imageInteractionOverlay = document.createElement('div')
@@ -822,16 +797,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
       .spyOn(window, 'cancelAnimationFrame')
       .mockImplementation(() => {})
 
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
     mockCanvasContainerRect(canvasContainer)
 
     const stage = {
@@ -919,16 +885,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('falls back to item geometry when the live stage node is unavailable', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn(() => null)
@@ -997,16 +954,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('shows readable Chinese tooltip copy for image flip and crop actions', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn(() => ({
@@ -1092,16 +1040,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('shows a play affordance for selected videos downgraded out of active-playing budget', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn(() => ({
@@ -1182,16 +1121,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('mounts into the canvas container after the ref becomes available on a later render', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn(() => null)
@@ -1300,16 +1230,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('uses the image source for image resource drags', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const selectedImage = createImageItem({
       src: 'local-media:///C:/MagicPot/source.png',
@@ -1405,16 +1326,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('prepares and reuses a cached quick drag preview for text selections', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn(() => null)
@@ -1507,16 +1419,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('starts text selection drags even before the preview image is cached', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn(() => null)
@@ -1606,16 +1509,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('positions the text toolbar below the selected text element', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn(() => null)
@@ -1681,16 +1575,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('keeps the image toolbar centered above the image while avoiding protected annotations', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn((selector: string) =>
@@ -1773,17 +1658,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('queries rendered group chip elements once while resolving toolbar avoidance layouts', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    mockCanvasContainerRect(canvasContainer)
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer({ mockRect: true })
 
     const firstItem = createImageItem({ id: 'image-1', x: 120, y: 120 })
     const secondItem = createImageItem({ id: 'image-2', x: 260, y: 120 })
@@ -1895,16 +1770,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('keeps the single-image toolbar centered even when an exact-group chip is present', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn((selector: string) =>
@@ -1994,16 +1860,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('prefers the selected image interaction overlay rect over unrelated nodes with the same item id', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const unrelatedNode = document.createElement('div')
     unrelatedNode.setAttribute('data-canvas-item-id', 'image-1')
@@ -2113,16 +1970,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('re-measures the image toolbar after the interaction overlay mounts on the next frame', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn(() => ({
@@ -2228,16 +2076,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('moves the exact-group chip beside the toolbar when its default anchor would overlap controls', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 1000
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer({ width: 1000 })
 
     const stage = {
       findOne: vi.fn(() => null)
@@ -2330,16 +2169,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('keeps the exact-group chip and toolbar in sync with live multi-selection bounds while moving the group', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 1000
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 700
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer({ width: 1000, height: 700 })
 
     const stageRef = {
       current: {
@@ -2452,17 +2282,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('positions the exact-group chip beside the live selected item toolbar when stored group bounds are stale', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 1000
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 700
-    })
-    document.body.appendChild(canvasContainer)
-    mockCanvasContainerRect(canvasContainer)
+    const canvasContainer = createCanvasContainer({ width: 1000, height: 700, mockRect: true })
 
     const stageRef = {
       current: {
@@ -2557,17 +2377,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('positions the matching group chip beside the current selected toolbar before exactSelectedGroup catches up', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 1000
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 700
-    })
-    document.body.appendChild(canvasContainer)
-    mockCanvasContainerRect(canvasContainer)
+    const canvasContainer = createCanvasContainer({ width: 1000, height: 700, mockRect: true })
 
     const stageRef = {
       current: {
@@ -2670,17 +2480,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
       }
     )
 
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 1000
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 700
-    })
-    document.body.appendChild(canvasContainer)
-    mockCanvasContainerRect(canvasContainer)
+    const canvasContainer = createCanvasContainer({ width: 1000, height: 700, mockRect: true })
 
     const stageRef = {
       current: {
@@ -2797,17 +2597,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
       }
     )
 
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 1000
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 700
-    })
-    document.body.appendChild(canvasContainer)
-    mockCanvasContainerRect(canvasContainer)
+    const canvasContainer = createCanvasContainer({ width: 1000, height: 700, mockRect: true })
 
     const stageRef = {
       current: {
@@ -2940,16 +2730,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('shows an export action for selected file items outside the preview dialog', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn(() => ({
@@ -3032,16 +2813,7 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
   })
 
   it('shows export format choices for document-style file items', async () => {
-    const canvasContainer = document.createElement('div')
-    Object.defineProperty(canvasContainer, 'clientWidth', {
-      configurable: true,
-      value: 800
-    })
-    Object.defineProperty(canvasContainer, 'clientHeight', {
-      configurable: true,
-      value: 600
-    })
-    document.body.appendChild(canvasContainer)
+    const canvasContainer = createCanvasContainer()
 
     const stage = {
       findOne: vi.fn(() => ({

@@ -40,8 +40,10 @@ import {
 import { isCanvasThumbnailSetFresh, pickBestCanvasThumbnailLevel } from '../canvasThumbnailCache'
 import type { CanvasImageThumbnailLevel, CanvasImageThumbnailSet } from '../canvasThumbnailTypes'
 import { PROJECT_CANVAS_MIN_STAGE_SCALE } from '../projectCanvasViewportScale'
+import { useCanvasSpatialIndexLifecycle } from '../useCanvasSpatialIndexLifecycle'
 import {
   areProjectCanvasWebGLRuntimeMetricsEqual,
+  createProjectCanvasWebGLRuntimeMetrics,
   type ProjectCanvasWebGLRuntimeMetrics
 } from '../projectCanvasWebGLRuntimeState'
 import {
@@ -929,54 +931,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const spriteReconcileFrameRef = useRef<number | null>(null)
   const imageVersionFrameRef = useRef<number | null>(null)
   const imageElementLoadTimeoutsRef = useRef<Set<number>>(new Set())
-  const metricsRef = useRef<ProjectCanvasWebGLImageLayerMetrics>({
-    isInitialized: false,
-    imageCount: 0,
-    loadedImageCount: 0,
-    failedImageCount: 0,
-    residentImageCount: 0,
-    residentTextureBytes: 0,
-    residentCandidateTextureBytes: 0,
-    residentTextureBudgetBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-    pendingImageCount: 0,
-    spriteCount: 0,
-    residentCandidateImageCount: 0,
-    viewportCulledImageCount: 0,
-    spriteReconcilePassCount: 0,
-    lastSpriteReconcileDurationMs: null,
-    lastSpriteReconcileCandidateCount: 0,
-    lastSpriteReconcileTargetCount: 0,
-    lastSpriteReconcileCreatedCount: 0,
-    lastSpriteReconcileReusedCount: 0,
-    lastSpriteReconcileRemovedCount: 0,
-    lastSpriteReconcileDeferredCount: 0,
-    usingPreviewImageCount: 0,
-    usingSourceImageCount: 0,
-    thumbnailPreviewImageCount: 0,
-    placeholderImageCount: 0,
-    sourceUpgradeSuppressedImageCount: 0,
-    sourceUpgradeablePreviewImageCount: 0,
-    sourceUpgradePendingImageCount: 0,
-    sourceUpgradeFailedImageCount: 0,
-    missingImageCount: 0,
-    activeObjectUrlCount: 0,
-    revokedObjectUrlCount: 0,
-    activeImageBitmapCount: 0,
-    closedImageBitmapCount: 0,
-    releaseErrorCount: 0,
-    decodedInFlightBytes: 0,
-    activeSourceUpgradeCount: 0,
-    residentTextureBudgetPressureCount: 0,
-    textureBudgetEvictionCount: 0,
-    sourceImageCacheCount: 0,
-    thumbnailImageCacheCount: 0,
-    sourceUpgradeQueueCount: 0,
-    thumbnailLoadQueueCount: 0,
-    initialLoadQueueCount: 0,
-    renderCount: 0,
-    lastRenderDurationMs: null,
-    lastUpdateReason: 'initialize'
-  })
+  const metricsRef = useRef<ProjectCanvasWebGLImageLayerMetrics>(
+    createProjectCanvasWebGLRuntimeMetrics({
+      residentTextureBudgetBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
+      lastUpdateReason: 'initialize'
+    })
+  )
   const [isInitialized, setIsInitialized] = useState(false)
   const [imageVersion, setImageVersion] = useState(0)
   const [viewportVersion, setViewportVersion] = useState(0)
@@ -986,6 +946,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     () => buildCanvasSpatialIndex(items, getCanvasItemBounds),
     [items]
   )
+
+  useCanvasSpatialIndexLifecycle(itemSpatialIndex, { warmup: true })
 
   const queueImageVersionFrame = useCallback(() => {
     if (imageVersionFrameRef.current !== null) {
@@ -2018,50 +1980,16 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       lastAppliedViewportRef.current = null
       previewState.clear()
       renderItems.clear()
+      const releaseMetrics = releaseManagerRef.current.getMetricsSnapshot()
       reportMetrics(
-        {
-          isInitialized: false,
-          imageCount: 0,
-          loadedImageCount: 0,
-          failedImageCount: 0,
-          residentImageCount: 0,
-          residentTextureBytes: 0,
-          residentCandidateTextureBytes: 0,
+        createProjectCanvasWebGLRuntimeMetrics({
           residentTextureBudgetBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-          pendingImageCount: 0,
-          spriteCount: 0,
-          residentCandidateImageCount: 0,
-          viewportCulledImageCount: 0,
-          spriteReconcilePassCount: 0,
-          lastSpriteReconcileDurationMs: null,
-          lastSpriteReconcileCandidateCount: 0,
-          lastSpriteReconcileTargetCount: 0,
-          lastSpriteReconcileCreatedCount: 0,
-          lastSpriteReconcileReusedCount: 0,
-          lastSpriteReconcileRemovedCount: 0,
-          lastSpriteReconcileDeferredCount: 0,
-          usingPreviewImageCount: 0,
-          usingSourceImageCount: 0,
-          thumbnailPreviewImageCount: 0,
-          placeholderImageCount: 0,
-          sourceUpgradeSuppressedImageCount: 0,
-          sourceUpgradeablePreviewImageCount: 0,
-          sourceUpgradePendingImageCount: 0,
-          sourceUpgradeFailedImageCount: 0,
-          missingImageCount: 0,
-          activeObjectUrlCount: 0,
-          revokedObjectUrlCount:
-            releaseManagerRef.current.getMetricsSnapshot().revokedObjectUrlCount,
-          activeImageBitmapCount: 0,
-          closedImageBitmapCount:
-            releaseManagerRef.current.getMetricsSnapshot().closedImageBitmapCount,
-          releaseErrorCount: releaseManagerRef.current.getMetricsSnapshot().releaseErrors.length,
-          decodedInFlightBytes: 0,
-          activeSourceUpgradeCount: 0,
-          residentTextureBudgetPressureCount: 0,
+          revokedObjectUrlCount: releaseMetrics.revokedObjectUrlCount,
+          closedImageBitmapCount: releaseMetrics.closedImageBitmapCount,
+          releaseErrorCount: releaseMetrics.releaseErrors.length,
           textureBudgetEvictionCount: textureBudgetEvictionCountRef.current,
           lastUpdateReason
-        },
+        }),
         { immediate: true }
       )
 

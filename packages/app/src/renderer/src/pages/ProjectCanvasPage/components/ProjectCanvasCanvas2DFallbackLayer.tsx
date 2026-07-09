@@ -18,6 +18,7 @@ import {
   type CanvasSpatialIndex
 } from '../canvasSpatialIndex'
 import { getCanvasItemBounds } from '../projectCanvasPageShared'
+import { useCanvasSpatialIndexLifecycle } from '../useCanvasSpatialIndexLifecycle'
 
 export type ProjectCanvasCanvas2DFallbackLayerHandle = {
   syncItemPreview: (itemId: string, preview: ProjectCanvasImagePreview | null) => void
@@ -261,7 +262,11 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
   const resolvedIdsRef = useRef(new Set<string>())
   const viewportRef = useRef({ pos: stagePos, scale: stageScale })
   const viewportInteractingRef = useRef(isViewportInteracting)
+  const drawNowRef = useRef<(() => void) | null>(null)
   const visibilityIndex = useMemo(() => buildCanvas2DFallbackVisibilityIndex(items), [items])
+
+  useCanvasSpatialIndexLifecycle(visibilityIndex.spatialIndex, { warmup: true })
+
   const propsRef = useRef({
     items,
     visibilityIndex,
@@ -314,7 +319,7 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
       throttleTimerRef.current = null
       rafRef.current = window.requestAnimationFrame(() => {
         rafRef.current = null
-        drawNow()
+        drawNowRef.current?.()
       })
     }
 
@@ -470,6 +475,10 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
   }, [markFailure, reportFailedIds, reportResolvedIds, resolveImageForItem])
 
   useLayoutEffect(() => {
+    drawNowRef.current = drawNow
+  }, [drawNow])
+
+  useLayoutEffect(() => {
     propsRef.current = {
       items,
       visibilityIndex,
@@ -525,6 +534,11 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
   }, [items, reportFailedIds])
 
   useEffect(() => {
+    const imageCache = imageCacheRef.current
+    const previewState = previewStateRef.current
+    const failedIds = failedIdsRef.current
+    const resolvedIds = resolvedIdsRef.current
+
     return () => {
       if (rafRef.current !== null) {
         window.cancelAnimationFrame(rafRef.current)
@@ -534,10 +548,10 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
         window.clearTimeout(throttleTimerRef.current)
         throttleTimerRef.current = null
       }
-      imageCacheRef.current.clear()
-      previewStateRef.current.clear()
-      failedIdsRef.current.clear()
-      resolvedIdsRef.current.clear()
+      imageCache.clear()
+      previewState.clear()
+      failedIds.clear()
+      resolvedIds.clear()
       onReadyChange?.(false)
       onResolvedIdsChange?.(new Set())
       onFailedIdsChange?.(new Set())
