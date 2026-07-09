@@ -69,10 +69,7 @@ const buildExeInputLLMAPI: ExeInputBuilder<'InputLLMAPI'> = (cfg, workflow) => {
 
   const id = `QAppInputLLMAPI-${label}`
   const QAppInputLLMAPI: React.FC<ExeInputProps> = ({ objectInfos, config, ref }) => {
-    const validProfiles = useMemo(
-      () => llmProfiles(config, needVisionModel),
-      [config, needVisionModel]
-    )
+    const validProfiles = useMemo(() => llmProfiles(config, needVisionModel), [config])
     const defaultProfile = validProfiles[0] || null
     const defaultValue = defaultProfile?.model_name || ''
     const [value, setValue] = useQAppInputState<string>(modelNameSlot, defaultValue)

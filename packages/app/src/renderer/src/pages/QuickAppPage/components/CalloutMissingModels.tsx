@@ -136,6 +136,7 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
   const configUtilsRef = useRef(configUtils)
   const requiredModelsRef = useRef(requiredModels)
   const refreshVersionRef = useRef(0)
+  const lastRemoteModeRef = useRef(config.use_remote_comfyui)
   configRef.current = config
   configUtilsRef.current = configUtils
   requiredModelsRef.current = requiredModels
@@ -179,7 +180,7 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
     ) {
       setMissingModels(nextMissingModels)
     }
-  }, [config.use_remote_comfyui, requiredModels])
+  }, [requiredModels])
 
   useEffect(() => {
     return subscribeModelDownloads(() => {
@@ -206,6 +207,14 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
     }
     void refreshMissingModels()
   }, [downloadSnapshot.settledVersion, refreshMissingModels])
+
+  useEffect(() => {
+    if (lastRemoteModeRef.current === config.use_remote_comfyui) {
+      return
+    }
+    lastRemoteModeRef.current = config.use_remote_comfyui
+    void refreshMissingModels()
+  }, [config.use_remote_comfyui, refreshMissingModels])
 
   if (missingModels.length === 0) {
     return null

@@ -1,6 +1,6 @@
 import { lazy, type ComponentType } from 'react'
 
-type LazyModule<T extends ComponentType<any>> = Promise<{ default: T }>
+type LazyModule<P> = Promise<{ default: ComponentType<P> }>
 
 const RETRYABLE_LAZY_IMPORT_ERROR_PATTERNS = [
   'failed to fetch dynamically imported module',
@@ -22,8 +22,8 @@ const shouldRetryLazyImport = (error: unknown): boolean => {
   return RETRYABLE_LAZY_IMPORT_ERROR_PATTERNS.some((pattern) => normalizedMessage.includes(pattern))
 }
 
-export function lazyWithRetry<T extends ComponentType<any>>(
-  importer: () => LazyModule<T>,
+export function lazyWithRetry<P>(
+  importer: () => LazyModule<P>,
   retryCount: number = 4,
   retryDelayMs: number = 250
 ) {

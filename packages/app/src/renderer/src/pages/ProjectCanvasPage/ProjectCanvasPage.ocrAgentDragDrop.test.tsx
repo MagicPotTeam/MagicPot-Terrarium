@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { theme } from '@renderer/theme'
 import { QAPP_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
 import type { ChatSession } from '../ChatPage/chatStorage'
+import type { ProjectCanvasWebGLRuntimeMetrics } from './projectCanvasWebGLRuntimeState'
 
 const {
   notifySuccess,
@@ -261,6 +262,8 @@ vi.mock('./components/ProjectCanvasImageInteractionOverlay', () => ({
 }))
 vi.mock('./components/ProjectCanvasWebGLImageLayer', async () => {
   const ReactModule = await import('react')
+  const { createProjectCanvasWebGLRuntimeMetrics } =
+    await import('./projectCanvasWebGLRuntimeState')
 
   return {
     __esModule: true,
@@ -277,17 +280,7 @@ vi.mock('./components/ProjectCanvasWebGLImageLayer', async () => {
         onReadyChange?: (ready: boolean) => void
         onResidentIdsChange?: (residentIds: Set<string>) => void
         onResolvedIdsChange?: (resolvedIds: Set<string>) => void
-        onMetricsChange?: (metrics: {
-          isInitialized: boolean
-          imageCount: number
-          loadedImageCount: number
-          residentImageCount: number
-          pendingImageCount: number
-          spriteCount: number
-          renderCount: number
-          lastRenderDurationMs: number | null
-          lastUpdateReason: 'initialize' | 'items' | 'preview' | 'cleanup'
-        }) => void
+        onMetricsChange?: (metrics: ProjectCanvasWebGLRuntimeMetrics) => void
       },
       ref: React.ForwardedRef<{ syncItemPreview: () => void }>
     ) {
@@ -299,17 +292,12 @@ vi.mock('./components/ProjectCanvasWebGLImageLayer', async () => {
         onReadyChange?.(true)
         onResidentIdsChange?.(new Set())
         onResolvedIdsChange?.(new Set())
-        onMetricsChange?.({
-          isInitialized: true,
-          imageCount: 0,
-          loadedImageCount: 0,
-          residentImageCount: 0,
-          pendingImageCount: 0,
-          spriteCount: 0,
-          renderCount: 0,
-          lastRenderDurationMs: null,
-          lastUpdateReason: 'initialize'
-        })
+        onMetricsChange?.(
+          createProjectCanvasWebGLRuntimeMetrics({
+            isInitialized: true,
+            lastUpdateReason: 'initialize'
+          })
+        )
       }, [onMetricsChange, onReadyChange, onResolvedIdsChange, onResidentIdsChange])
 
       return <div data-testid="mock-webgl-layer" />

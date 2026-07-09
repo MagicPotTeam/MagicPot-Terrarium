@@ -958,6 +958,15 @@ export default function QAppMenu({
   }, [pinnedKeys])
 
   const { config, buildEnv } = useConfig()
+  const configRef = useRef(config)
+  const remoteComfyEnabled = config?.use_remote_comfyui ?? false
+  const remoteComfyOrigin = config?.remote_comfyui_config?.comfyui_origin ?? ''
+  const remoteLlmOrigin = config?.remote_llm_server_config?.server_origin ?? ''
+  const packageVersion = buildEnv.env.packageVersion || '0.0.0'
+
+  useEffect(() => {
+    configRef.current = config
+  }, [config])
 
   const refreshTabs = useCallback(async () => {
     const requestId = ++refreshRequestIdRef.current
@@ -977,13 +986,11 @@ export default function QAppMenu({
       setIsLoading(false)
 
       // 如果启用了远程 ComfyUI，在后台拉取并合并
-      if (config?.use_remote_comfyui) {
-        const serverOrigin = config.remote_comfyui_config?.comfyui_origin
-        if (serverOrigin) {
+      if (remoteComfyEnabled) {
+        if (remoteComfyOrigin) {
           // 从远程 LLM 服务获取快应用（使用 LLM 服务端口而非 ComfyUI 端口）
-          const remoteOrigin = config.remote_llm_server_config?.server_origin
-          if (remoteOrigin) {
-            fetchRemoteQAppList(remoteOrigin, config)
+          if (remoteLlmOrigin) {
+            fetchRemoteQAppList(remoteLlmOrigin, configRef.current)
               .then((remoteItems) => {
                 if (requestId !== refreshRequestIdRef.current) {
                   return
@@ -1019,11 +1026,7 @@ export default function QAppMenu({
       notifyErrorRef.current(tRef.current('qapp.menu.load_failed'))
       setIsLoading(false)
     }
-  }, [
-    config?.use_remote_comfyui,
-    config?.remote_comfyui_config?.comfyui_origin,
-    config?.remote_llm_server_config?.server_origin
-  ])
+  }, [remoteComfyEnabled, remoteComfyOrigin, remoteLlmOrigin])
 
   useEffect(() => {
     refreshTabs()
@@ -1272,7 +1275,7 @@ export default function QAppMenu({
     async (file: File) => {
       try {
         const text = await file.text()
-        const currentAppVersion = buildEnv.env.packageVersion || '0.0.0'
+        const currentAppVersion = packageVersion
         const parsedPackage = parseQAppPackage(
           JSON.parse(text),
           currentAppVersion,
@@ -1318,7 +1321,7 @@ export default function QAppMenu({
         */
       }
     },
-    [buildEnv.env.packageVersion, notifyError, notifySuccess, refreshTabs, setCurrentQAppKey]
+    [notifyError, notifySuccess, packageVersion, refreshTabs, setCurrentQAppKey]
   )
 
   const handleDrop = useCallback(

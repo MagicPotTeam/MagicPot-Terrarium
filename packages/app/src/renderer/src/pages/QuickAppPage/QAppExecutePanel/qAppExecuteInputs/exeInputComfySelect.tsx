@@ -42,10 +42,7 @@ const buildExeInputComfySelect: ExeInputBuilder<'InputComfySelect'> = (
   const id = `QAppInputComfySelect-${label}`
 
   const QAppInputComfySelect: React.FC<ExeInputProps> = ({ objectInfos, ref }) => {
-    const options = useMemo(
-      () => findFieldOptions(objectInfos, cls, field),
-      [objectInfos, cls, field]
-    )
+    const options = useMemo(() => findFieldOptions(objectInfos, cls, field), [objectInfos])
     const [value, setValue] = useQAppInputState<string>(slot, defaultValue)
 
     // Check if current value is valid (exists in options)
