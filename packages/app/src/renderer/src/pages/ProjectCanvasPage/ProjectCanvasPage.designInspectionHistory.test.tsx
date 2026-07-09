@@ -1312,7 +1312,7 @@ describe('ProjectCanvasPage generation-first entry', () => {
     })
 
     expect(notifyWarning).toHaveBeenCalledWith(
-      expect.stringContaining('截图快捷键 Ctrl+S 与画布快捷键冲突')
+      expect.stringContaining('Screenshot shortcut Ctrl+S conflicts with a canvas shortcut')
     )
   })
 

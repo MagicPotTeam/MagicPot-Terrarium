@@ -372,7 +372,7 @@ describe('DesignInspectionReviewDialog', () => {
 
     expect(screen.getByText('来源上下文')).toBeInTheDocument()
     expect(screen.getByText('Figma 1')).toBeInTheDocument()
-    expect(screen.getByText('导入文件 1')).toBeInTheDocument()
+    expect(screen.getByText('Imported file 1')).toBeInTheDocument()
     expect(
       screen.getByText(
         (content) =>
