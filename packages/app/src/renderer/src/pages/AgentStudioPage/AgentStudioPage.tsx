@@ -5,9 +5,11 @@ import {
   Button,
   Card,
   CardContent,
+  Checkbox,
   Chip,
   CircularProgress,
   Divider,
+  FormControlLabel,
   Grid,
   Stack,
   TextField,
@@ -24,6 +26,8 @@ import type {
   MagicAgentPlatformStatusResp
 } from '@shared/api/svcMagicAgentPlatform'
 import type {
+  MagicAgentGraphDefinition,
+  MagicAgentGraphNodeDefinition,
   MagicAgentGraphRunRecord,
   MagicAgentGraphRunStatus,
   MagicAgentGraphRunStreamEvent
@@ -55,6 +59,32 @@ const graphRunStatusColor: Record<
   cancelled: 'warning'
 }
 
+type RecordLike = Record<string, unknown>
+type GraphListItem = MagicAgentPlatformGraphListResp['graphs'][number]
+type GraphCatalogMetadata = {
+  source?: string
+  runnable?: boolean
+  readOnly?: boolean
+  forkable?: boolean
+  unavailable?: boolean
+  unavailableReason?: string
+  allowedToolNames?: string[] | null
+}
+type GraphSnapshot = {
+  graphId: string
+  name?: string
+  source?: string
+  runnable?: boolean
+  readOnly?: boolean
+  forkable?: boolean
+  unavailable?: boolean
+  unavailableReason?: string
+  nodeCount?: number
+  channelCount?: number
+  outputCount?: number
+  nodes?: MagicAgentGraphNodeDefinition[]
+}
+
 type StudioState = {
   status?: MagicAgentPlatformStatusResp
   agents: MagicAgentPlatformAgentDefinition[]
@@ -72,6 +102,36 @@ const emptyState: StudioState = {
 
 const getErrorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
+
+const isRecord = (value: unknown): value is RecordLike =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const readString = (...values: unknown[]): string | undefined => {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return undefined
+}
+
+const readBoolean = (...values: unknown[]): boolean | undefined => {
+  for (const value of values) {
+    if (typeof value === 'boolean') return value
+  }
+  return undefined
+}
+
+const readStringArray = (...values: unknown[]): string[] | null | undefined => {
+  for (const value of values) {
+    if (value === null) return null
+    if (Array.isArray(value)) {
+      const normalized = value
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter(Boolean)
+      if (normalized.length || value.length === 0) return normalized
+    }
+  }
+  return undefined
+}
 
 const formatTimestamp = (timestamp?: number): string =>
   timestamp === undefined ? '—' : new Date(timestamp).toLocaleString()
@@ -117,12 +177,145 @@ const formatGraphRunText = (run?: MagicAgentGraphRunRecord | null): string => {
   return `Run ${run.runId} is ${run.status}. No output returned yet.`
 }
 
+const getGraphNestedMetadata = (
+  graph?: GraphListItem | MagicAgentGraphDefinition
+): { metadata: RecordLike; catalog: RecordLike; permissions: RecordLike } => {
+  const record = graph as unknown as RecordLike | undefined
+  const metadata = isRecord(record?.metadata) ? record.metadata : {}
+  const catalog = isRecord(metadata.catalog) ? metadata.catalog : {}
+  const permissions = isRecord(metadata.permissions) ? metadata.permissions : {}
+  return { metadata, catalog, permissions }
+}
+
+const getGraphCatalogMetadata = (
+  graph?: GraphListItem | MagicAgentGraphDefinition
+): GraphCatalogMetadata => {
+  if (!graph) return {}
+  const record = graph as unknown as RecordLike
+  const { metadata, catalog, permissions } = getGraphNestedMetadata(graph)
+  const packageInfo = isRecord(metadata.package) ? metadata.package : {}
+  const sourcePackage = readString(
+    record.sourcePackageName,
+    record.sourcePackageId,
+    metadata.sourcePackageName,
+    metadata.sourcePackageId,
+    packageInfo.name,
+    packageInfo.id
+  )
+  const builtIn = readBoolean(record.builtIn, metadata.builtIn) === true
+  const source =
+    readString(record.source, catalog.source, metadata.source) ||
+    (sourcePackage ? `package:${sourcePackage}` : builtIn ? 'built-in' : 'workspace')
+  const explicitRunnable = readBoolean(record.runnable, catalog.runnable, permissions.runnable)
+  const explicitReadOnly = readBoolean(
+    record.readOnly,
+    record.readonly,
+    catalog.readOnly,
+    catalog.readonly,
+    permissions.readOnly,
+    permissions.readonly,
+    metadata.readOnly,
+    metadata.readonly
+  )
+  const readOnly = explicitReadOnly ?? (builtIn || Boolean(sourcePackage))
+  const forkable = readBoolean(record.forkable, catalog.forkable, permissions.forkable) ?? false
+  const unavailableReason = readString(
+    record.unavailableReason,
+    catalog.unavailableReason,
+    metadata.unavailableReason
+  )
+  const runnable = explicitRunnable ?? !unavailableReason
+  const unavailable =
+    readBoolean(record.unavailable, catalog.unavailable, metadata.unavailable) ??
+    (runnable === false || Boolean(unavailableReason))
+  const allowedToolNames = readStringArray(
+    record.allowedToolNames,
+    catalog.allowedToolNames,
+    permissions.allowedToolNames,
+    metadata.allowedToolNames
+  )
+  return {
+    source,
+    runnable,
+    readOnly,
+    forkable,
+    unavailable,
+    ...(unavailableReason ? { unavailableReason } : {}),
+    ...(allowedToolNames !== undefined ? { allowedToolNames } : {})
+  }
+}
+
+const getGraphRequiredToolNames = (graph?: MagicAgentGraphDefinition | null): string[] => {
+  if (!graph) return []
+  return [
+    ...new Set(
+      graph.nodes
+        .filter((node) => node.kind === 'tool')
+        .map((node) =>
+          readString(
+            node.toolName,
+            isRecord(node.config) ? node.config.toolName : undefined,
+            isRecord(node.metadata) ? node.metadata.toolName : undefined
+          )
+        )
+        .filter((toolName): toolName is string => Boolean(toolName))
+    )
+  ].sort((left, right) => left.localeCompare(right))
+}
+
+const areStringArraysEqual = (left: string[], right: string[]): boolean =>
+  left.length === right.length && left.every((value, index) => value === right[index])
+
+const getAvailableToolNames = (
+  tools: MagicAgentPlatformListToolsResp['tools'],
+  names: string[]
+): string[] => {
+  const requested = new Set(names)
+  return tools
+    .filter((tool) => requested.has(tool.name) && tool.status !== 'unavailable')
+    .map((tool) => tool.name)
+    .sort((left, right) => left.localeCompare(right))
+}
+
+const buildGraphSnapshot = (
+  graph?: GraphListItem,
+  graphDetail?: MagicAgentGraphDefinition | null
+): GraphSnapshot | undefined => {
+  if (!graph && !graphDetail) return undefined
+  const source = graph || (graphDetail as unknown as GraphListItem)
+  const catalog = getGraphCatalogMetadata(source)
+  return {
+    graphId: source.graphId,
+    name: source.name,
+    source: catalog.source,
+    runnable: catalog.runnable,
+    readOnly: catalog.readOnly,
+    forkable: catalog.forkable,
+    unavailable: catalog.unavailable,
+    unavailableReason: catalog.unavailableReason,
+    nodeCount: graph?.nodeCount ?? graphDetail?.nodes.length,
+    channelCount: graph?.channelCount ?? graphDetail?.channels.length,
+    outputCount: graph?.outputCount ?? graphDetail?.outputs.length,
+    ...(graphDetail?.nodes ? { nodes: graphDetail.nodes } : {})
+  }
+}
+
+const stringifySnapshot = (value: unknown): string => {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
 const AgentStudioPage: React.FC = () => {
   const [state, setState] = useState<StudioState>(emptyState)
   const [loading, setLoading] = useState(true)
   const [running, setRunning] = useState(false)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [selectedGraphId, setSelectedGraphId] = useState('')
+  const selectedGraphIdRef = useRef(selectedGraphId)
+  selectedGraphIdRef.current = selectedGraphId
   const [prompt, setPrompt] = useState(DEFAULT_GRAPH_PROMPT)
   const [activeRun, setActiveRun] = useState<MagicAgentGraphRunRecord | null>(null)
   const [runHistory, setRunHistory] = useState<MagicAgentGraphRunRecord[]>([])
@@ -136,6 +329,71 @@ const AgentStudioPage: React.FC = () => {
     () => state.graphs.find((graph) => graph.graphId === selectedGraphId),
     [selectedGraphId, state.graphs]
   )
+  const [selectedGraphDetail, setSelectedGraphDetail] = useState<MagicAgentGraphDefinition | null>(
+    null
+  )
+  const [graphDetailLoading, setGraphDetailLoading] = useState(false)
+  const selectedGraphCatalog = useMemo(
+    () => getGraphCatalogMetadata(selectedGraph),
+    [selectedGraph]
+  )
+  const selectedGraphRequiredToolNames = useMemo(
+    () => getGraphRequiredToolNames(selectedGraphDetail),
+    [selectedGraphDetail]
+  )
+  const selectedGraphSuggestedToolNames = useMemo(() => {
+    const catalogAllowed = selectedGraphCatalog.allowedToolNames
+    if (Array.isArray(catalogAllowed) && catalogAllowed.length > 0)
+      return [...catalogAllowed].sort()
+    return getAvailableToolNames(state.tools, selectedGraphRequiredToolNames)
+  }, [selectedGraphCatalog.allowedToolNames, selectedGraphRequiredToolNames, state.tools])
+  const [allowedToolNames, setAllowedToolNames] = useState<string[]>([])
+  const preflightMissingToolNames = useMemo(
+    () =>
+      selectedGraphRequiredToolNames.filter(
+        (toolName) =>
+          !state.tools.some((tool) => tool.name === toolName && tool.status !== 'unavailable')
+      ),
+    [selectedGraphRequiredToolNames, state.tools]
+  )
+  const preflightUnavailableToolNames = useMemo(
+    () =>
+      selectedGraphRequiredToolNames.filter(
+        (toolName) =>
+          !allowedToolNames.includes(toolName) && !preflightMissingToolNames.includes(toolName)
+      ),
+    [allowedToolNames, preflightMissingToolNames, selectedGraphRequiredToolNames]
+  )
+  const runDisabledByToolPermissions =
+    graphDetailLoading ||
+    preflightMissingToolNames.length > 0 ||
+    preflightUnavailableToolNames.length > 0
+  const graphSnapshot = useMemo(
+    () => buildGraphSnapshot(selectedGraph, selectedGraphDetail),
+    [selectedGraph, selectedGraphDetail]
+  )
+  const activeRunGraphSnapshot = isRecord(activeRun?.metadata)
+    ? activeRun.metadata.graphSnapshot
+    : undefined
+  const activeRunPermissionSnapshot = isRecord(activeRun?.metadata)
+    ? activeRun.metadata.permissionSnapshot
+    : undefined
+  const permissionSnapshot = useMemo(
+    () => ({
+      allowedToolNames,
+      requiredToolNames: selectedGraphRequiredToolNames,
+      missingToolNames: preflightMissingToolNames,
+      unavailableToolNames: preflightUnavailableToolNames
+    }),
+    [
+      allowedToolNames,
+      preflightMissingToolNames,
+      preflightUnavailableToolNames,
+      selectedGraphRequiredToolNames
+    ]
+  )
+  const runDisabledByGraph =
+    selectedGraphCatalog.unavailable || selectedGraphCatalog.runnable === false
   const outputFallback = result && !activeRun?.outputs.length ? result : ''
   const activeWatchAbortRef = useRef<(() => void) | null>(null)
 
@@ -149,6 +407,23 @@ const AgentStudioPage: React.FC = () => {
     setSelectedGraphId(run.graphId)
     setResult(formatGraphRunText(run))
     setRunHistory((current) => upsertRunHistory(current, run))
+  }, [])
+
+  const loadGraphDetail = useCallback(async (graphId: string) => {
+    const inspectGraph = api().svcMagicAgentPlatform.inspectGraph
+    if (!graphId || !inspectGraph) {
+      setSelectedGraphDetail(null)
+      return
+    }
+    setGraphDetailLoading(true)
+    try {
+      const response = await inspectGraph({ graphId })
+      setSelectedGraphDetail(response.graph || null)
+    } catch {
+      setSelectedGraphDetail(null)
+    } finally {
+      setGraphDetailLoading(false)
+    }
   }, [])
 
   const startGraphRunWatch = useCallback(
@@ -227,7 +502,7 @@ const AgentStudioPage: React.FC = () => {
     }
   }
 
-  const loadStudio = async () => {
+  const loadStudio = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
@@ -248,9 +523,11 @@ const AgentStudioPage: React.FC = () => {
         api().svcMagicAgentPlatform.listGraphs({}),
         api().svcMagicAgentPlatform.listPackages({})
       ])
+      const currentSelectedGraphId = selectedGraphIdRef.current
       const nextGraphId =
-        selectedGraphId && graphs.graphs.some((graph) => graph.graphId === selectedGraphId)
-          ? selectedGraphId
+        currentSelectedGraphId &&
+        graphs.graphs.some((graph) => graph.graphId === currentSelectedGraphId)
+          ? currentSelectedGraphId
           : graphs.graphs[0]?.graphId || ''
       const nextHistory = nextGraphId
         ? sortRuns(
@@ -282,13 +559,44 @@ const AgentStudioPage: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }
+  }, [stopActiveGraphRunWatch])
 
   useEffect(() => {
     void loadStudio()
-  }, [])
+  }, [loadStudio])
 
   useEffect(() => () => stopActiveGraphRunWatch(), [stopActiveGraphRunWatch])
+
+  useEffect(() => {
+    if (!platformEnabled || !selectedGraphId) {
+      setSelectedGraphDetail(null)
+      setGraphDetailLoading(false)
+      return
+    }
+    void loadGraphDetail(selectedGraphId)
+  }, [loadGraphDetail, platformEnabled, selectedGraphId])
+
+  useEffect(() => {
+    setAllowedToolNames((current) =>
+      areStringArraysEqual(current, selectedGraphSuggestedToolNames)
+        ? current
+        : selectedGraphSuggestedToolNames
+    )
+  }, [selectedGraphSuggestedToolNames])
+
+  const setToolAllowed = (toolName: string, checked: boolean) => {
+    setAllowedToolNames((current) => {
+      const next = new Set(current)
+      if (checked) {
+        next.add(toolName)
+      } else {
+        next.delete(toolName)
+      }
+      return selectedGraphSuggestedToolNames.filter((suggestedToolName) =>
+        next.has(suggestedToolName)
+      )
+    })
+  }
 
   const handleGraphChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
     const graphId = event.target.value
@@ -306,7 +614,7 @@ const AgentStudioPage: React.FC = () => {
       setResult(MAGIC_AGENT_FLAG_HELP)
       return
     }
-    if (!selectedGraphId || !input) return
+    if (!selectedGraphId || !input || runDisabledByGraph || runDisabledByToolPermissions) return
 
     setRunning(true)
     setError(null)
@@ -317,7 +625,12 @@ const AgentStudioPage: React.FC = () => {
         graphId: selectedGraphId,
         input,
         route: AGENT_STUDIO_ROUTE,
-        metadata: { source: 'agent-studio' }
+        ...(allowedToolNames.length ? { allowedToolNames } : {}),
+        metadata: {
+          source: 'agent-studio',
+          graphSnapshot,
+          permissionSnapshot
+        }
       })
       startGraphRunWatch(runId)
       const response = await runPromise
@@ -539,7 +852,13 @@ const AgentStudioPage: React.FC = () => {
                     variant="contained"
                     onClick={() => void runSelectedGraph()}
                     disabled={
-                      running || loading || !platformEnabled || !selectedGraphId || !prompt.trim()
+                      running ||
+                      loading ||
+                      !platformEnabled ||
+                      !selectedGraphId ||
+                      !prompt.trim() ||
+                      runDisabledByGraph ||
+                      runDisabledByToolPermissions
                     }
                   >
                     Run Graph
@@ -576,6 +895,49 @@ const AgentStudioPage: React.FC = () => {
                   {running || historyLoading ? <CircularProgress size={22} /> : null}
                 </Stack>
               </Stack>
+              {selectedGraphRequiredToolNames.length > 0 || graphDetailLoading ? (
+                <Box>
+                  <Typography variant="subtitle2">Tool permissions</Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                    Agent Studio sends an explicit per-run tool allowlist for graphs that invoke
+                    tools.
+                  </Typography>
+                  {graphDetailLoading ? (
+                    <Typography variant="body2" color="text.secondary">
+                      Loading graph permissions...
+                    </Typography>
+                  ) : null}
+                  {preflightMissingToolNames.length > 0 ? (
+                    <Alert severity="warning" sx={{ mb: 1 }}>
+                      Missing platform tools: {preflightMissingToolNames.join(', ')}
+                    </Alert>
+                  ) : null}
+                  {preflightUnavailableToolNames.length > 0 ? (
+                    <Alert severity="warning" sx={{ mb: 1 }}>
+                      Allow required tools before running:{' '}
+                      {preflightUnavailableToolNames.join(', ')}
+                    </Alert>
+                  ) : null}
+                  {selectedGraphSuggestedToolNames.length > 0 ? (
+                    <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap>
+                      {selectedGraphSuggestedToolNames.map((toolName) => (
+                        <FormControlLabel
+                          key={toolName}
+                          control={
+                            <Checkbox
+                              size="small"
+                              checked={allowedToolNames.includes(toolName)}
+                              onChange={(event) => setToolAllowed(toolName, event.target.checked)}
+                              disabled={running || loading || !platformEnabled}
+                            />
+                          }
+                          label={toolName}
+                        />
+                      ))}
+                    </Stack>
+                  ) : null}
+                </Box>
+              ) : null}
               <TextField
                 label="Prompt"
                 value={prompt}

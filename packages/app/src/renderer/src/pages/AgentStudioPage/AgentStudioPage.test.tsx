@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { theme } from '@renderer/theme'
 import type { AgentRouteLike } from '@shared/agent'
-import type { MagicAgentGraphRunRecord } from '@shared/magicAgent'
+import type { MagicAgentGraphDefinition, MagicAgentGraphRunRecord } from '@shared/magicAgent'
 import AgentStudioPage from './AgentStudioPage'
 
 const platformApi = vi.hoisted(() => ({
@@ -15,6 +15,7 @@ const platformApi = vi.hoisted(() => ({
   listGraphs: vi.fn(),
   listPackages: vi.fn(),
   listGraphRuns: vi.fn(),
+  inspectGraph: vi.fn(),
   runGraph: vi.fn(),
   watchGraphRun: vi.fn(),
   getGraphRun: vi.fn(),
@@ -52,6 +53,28 @@ const graphs = [
     builtIn: true
   }
 ]
+
+const makeGraphDetail = (
+  patch: Partial<MagicAgentGraphDefinition> = {}
+): MagicAgentGraphDefinition => ({
+  graphId: 'graph-alpha',
+  name: 'Cozy Graph',
+  description: 'Designs cozy product pitches',
+  version: '1.0.0',
+  tags: ['demo'],
+  nodes: [
+    {
+      nodeId: 'writer',
+      kind: 'agent',
+      name: 'Writer',
+      description: 'Writes the final response'
+    }
+  ],
+  channels: [],
+  outputs: [],
+  entryNodeIds: ['writer'],
+  ...patch
+})
 
 const makeRun = (patch: Partial<MagicAgentGraphRunRecord> = {}): MagicAgentGraphRunRecord => ({
   runId: 'run-alpha',
@@ -124,6 +147,7 @@ const seedEnabled = () => {
     packages: [{ id: 'pkg-demo', name: 'Demo Package', version: '0.1.0' }]
   })
   platformApi.listGraphRuns.mockResolvedValue({ runs: [makeRun()] })
+  platformApi.inspectGraph.mockResolvedValue({ graph: makeGraphDetail() })
   platformApi.runGraph.mockResolvedValue(makeRun())
   platformApi.watchGraphRun.mockResolvedValue(undefined)
   platformApi.getGraphRun.mockResolvedValue({ run: makeRun() })
@@ -292,7 +316,7 @@ describe('AgentStudioPage Graph Run Center', () => {
           graphId: 'graph-alpha',
           input: 'Build a lava level',
           route: ROUTE,
-          metadata: { source: 'agent-studio' }
+          metadata: expect.objectContaining({ source: 'agent-studio' })
         })
       )
     })
@@ -307,6 +331,84 @@ describe('AgentStudioPage Graph Run Center', () => {
       graphId: 'graph-alpha',
       limit: GRAPH_RUN_HISTORY_LIMIT
     })
+  })
+
+  it('defaults tool graph runs to the suggested explicit tool allowlist', async () => {
+    const user = userEvent.setup()
+    platformApi.inspectGraph.mockResolvedValueOnce({
+      graph: makeGraphDetail({
+        nodes: [
+          {
+            nodeId: 'planner',
+            kind: 'agent',
+            name: 'Planner',
+            description: 'Plans the work'
+          },
+          {
+            nodeId: 'tool-create-pitch',
+            kind: 'tool',
+            name: 'Create Pitch',
+            description: 'Creates a pitch',
+            toolName: 'pitch.create'
+          }
+        ]
+      })
+    })
+    platformApi.listGraphRuns.mockResolvedValueOnce({ runs: [] })
+
+    renderPage()
+
+    const toolCheckbox = await screen.findByRole('checkbox', { name: 'pitch.create' })
+    await waitFor(() => expect(toolCheckbox).toBeChecked())
+
+    await user.click(screen.getByRole('button', { name: 'Run Graph' }))
+
+    await waitFor(() => {
+      expect(platformApi.runGraph).toHaveBeenCalledWith(
+        expect.objectContaining({
+          graphId: 'graph-alpha',
+          route: ROUTE,
+          allowedToolNames: ['pitch.create']
+        })
+      )
+    })
+  })
+
+  it('disables tool graph runs when a required tool is not allowed', async () => {
+    const user = userEvent.setup()
+    platformApi.inspectGraph.mockResolvedValueOnce({
+      graph: makeGraphDetail({
+        nodes: [
+          {
+            nodeId: 'planner',
+            kind: 'agent',
+            name: 'Planner',
+            description: 'Plans the work'
+          },
+          {
+            nodeId: 'tool-create-pitch',
+            kind: 'tool',
+            name: 'Create Pitch',
+            description: 'Creates a pitch',
+            toolName: 'pitch.create'
+          }
+        ]
+      })
+    })
+
+    renderPage()
+
+    const runButton = screen.getByRole('button', { name: 'Run Graph' })
+    const toolCheckbox = await screen.findByRole('checkbox', { name: 'pitch.create' })
+    await waitFor(() => expect(toolCheckbox).toBeChecked())
+    await user.click(toolCheckbox)
+
+    expect(toolCheckbox).not.toBeChecked()
+    expect(runButton).toBeDisabled()
+    expect(
+      screen.getByText(/Allow required tools before running: pitch\.create/)
+    ).toBeInTheDocument()
+    expect(platformApi.runGraph).not.toHaveBeenCalled()
   })
 
   it('handles missing route-scoped run lookups', async () => {

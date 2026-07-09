@@ -550,7 +550,7 @@ describe('MagicAgentPackageStore', () => {
     await expect(store.install(packageDir)).rejects.toThrow(/Invalid agent contribution spec/)
   })
 
-  it('loads installed package graphs as read-only data-only definitions', async () => {
+  it('loads installed package graphs as runnable data-only definitions', async () => {
     const packageDir = path.join(ROOT, 'graph-package')
     await writePackage(packageDir, {
       contributions: [
@@ -622,8 +622,7 @@ describe('MagicAgentPackageStore', () => {
       sourcePackageId: 'demo.package',
       contributionId: 'concept-graph',
       contributionTitle: 'Concept Graph',
-      runnable: false,
-      unavailableReason: expect.stringMatching(/read-only/)
+      runnable: true
     })
     expect((globalThis as Record<string, unknown>).__magicPackageExecuted).toBeUndefined()
   })

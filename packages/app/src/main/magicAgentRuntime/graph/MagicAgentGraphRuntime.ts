@@ -8,6 +8,8 @@ import {
   type MagicAgentGraphListItem,
   type MagicAgentGraphNodeDefinition,
   type MagicAgentGraphOutputDefinition,
+  type MagicAgentGraphPermissionSnapshot,
+  type MagicAgentGraphPreflightSnapshot,
   type MagicAgentGraphRunChannelRecord,
   type MagicAgentGraphRunEvent,
   type MagicAgentGraphRunEventType,
@@ -21,6 +23,8 @@ import {
 import { getAgentSessionKey, type AgentRouteLike } from '@shared/agent'
 import { normalizeMagicPotToolName } from '@shared/app/types'
 import { isMagicAgentPlatformDeniedToolName } from '../toolPolicy'
+import type { MagicAgentGraphRunStore } from './graphRunStore'
+import { assertSafeMagicAgentGraphId, assertSafeMagicAgentGraphRunId } from './graphIds'
 import type {
   MagicAgentPlatformRunReq,
   MagicAgentPlatformRunResp,
@@ -45,6 +49,7 @@ export type MagicAgentGraphRuntimePolicy = {
 export type MagicAgentGraphRuntimeDeps = {
   runAgent?: (request: MagicAgentPlatformRunReq) => Promise<MagicAgentPlatformRunResp>
   callTool?: (request: MagicAgentPlatformToolCallReq) => Promise<MagicAgentPlatformToolCallResp>
+  runStore?: MagicAgentGraphRunStore
   policy?: Partial<MagicAgentGraphRuntimePolicy>
 }
 
@@ -279,7 +284,9 @@ export class MagicAgentGraphRuntime {
   private readonly controllers = new Map<string, AbortController>()
   private readonly runSubscribers = new Map<string, Map<number, MagicAgentGraphRunSubscriber>>()
   private readonly runStreamSequences = new Map<string, number>()
+  private readonly runPersistenceQueues = new Map<string, Promise<void>>()
   private nextRunSubscriberId = 1
+  private runStore?: MagicAgentGraphRunStore
   private deps: MagicAgentGraphRuntimeDeps
   private policy: MagicAgentGraphRuntimePolicy
 
@@ -288,6 +295,7 @@ export class MagicAgentGraphRuntime {
     deps: MagicAgentGraphRuntimeDeps = {}
   ) {
     this.deps = deps
+    this.runStore = deps.runStore
     this.policy = normalizePolicy(deps.policy)
     for (const graph of graphs) {
       const normalized = this.normalizeGraph(graph)
@@ -298,6 +306,9 @@ export class MagicAgentGraphRuntime {
 
   setDeps(deps: MagicAgentGraphRuntimeDeps): void {
     this.deps = { ...this.deps, ...deps }
+    if (deps.runStore) {
+      this.runStore = deps.runStore
+    }
     if (deps.policy) {
       this.policy = normalizePolicy({ ...this.policy, ...deps.policy })
     }
@@ -353,10 +364,54 @@ export class MagicAgentGraphRuntime {
     )
   }
 
+  async getRunByRoute(
+    runId: string,
+    route: AgentRouteLike
+  ): Promise<MagicAgentGraphRunRecord | undefined> {
+    const normalizedRunId = assertSafeMagicAgentGraphRunId(runId)
+    const normalizedRoute = assertGraphRoute(route)
+    const sessionKey = getAgentSessionKey(normalizedRoute)
+    const activeRun = this.getRun(normalizedRunId, sessionKey)
+    if (activeRun) return activeRun
+    return this.runStore?.get(normalizedRunId, normalizedRoute)
+  }
+
+  async listRunsForRoute(
+    route: AgentRouteLike,
+    graphId?: string,
+    limit?: number
+  ): Promise<MagicAgentGraphRunRecord[]> {
+    const normalizedRoute = assertGraphRoute(route)
+    const sessionKey = getAgentSessionKey(normalizedRoute)
+    const normalizedGraphId = cleanString(graphId)
+    const normalizedLimit = Number.isInteger(limit) && Number(limit) > 0 ? Number(limit) : undefined
+    const runStore = this.runStore
+    if (!runStore) {
+      return this.listRuns(sessionKey, normalizedGraphId, normalizedLimit)
+    }
+
+    await this.flushRunPersistenceQueues()
+    const persistedRuns = await runStore.list({
+      route: normalizedRoute,
+      ...(normalizedGraphId ? { graphId: normalizedGraphId } : {}),
+      ...(normalizedLimit ? { limit: normalizedLimit } : {})
+    })
+    const mergedRuns = new Map<string, MagicAgentGraphRunRecord>()
+    for (const run of persistedRuns) mergedRuns.set(run.runId, run)
+    for (const run of this.listRuns(sessionKey, normalizedGraphId)) mergedRuns.set(run.runId, run)
+    const sortedRuns = [...mergedRuns.values()].sort(
+      (left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt
+    )
+    return (normalizedLimit === undefined ? sortedRuns : sortedRuns.slice(0, normalizedLimit)).map(
+      clone
+    )
+  }
+
   async run(request: MagicAgentGraphRunRequest): Promise<MagicAgentGraphRunResult> {
     const route = assertGraphRoute(request.route)
     const sessionKey = getAgentSessionKey(route)
-    const graph = this.graphs.get(cleanString(request.graphId))
+    const graphId = assertSafeMagicAgentGraphId(request.graphId)
+    const graph = this.graphs.get(graphId)
     if (!graph) {
       throw new Error(`MagicAgentGraph "${request.graphId}" does not exist.`)
     }
@@ -367,13 +422,23 @@ export class MagicAgentGraphRuntime {
       ? `MagicAgentGraph run input exceeds maximum length of ${this.policy.maxInputChars} characters.`
       : undefined
 
-    const runId = cleanString(request.runId) || createId('magic-agent-graph-run')
-    if (this.runs.has(runId)) {
+    const runId = assertSafeMagicAgentGraphRunId(
+      cleanString(request.runId) || createId('magic-agent-graph-run')
+    )
+    const persistedRun = this.runStore ? await this.runStore.get(runId, route) : undefined
+    if (this.runs.has(runId) || persistedRun) {
       throw new Error(`MagicAgentGraph run "${runId}" already exists.`)
     }
 
     const controller = new AbortController()
     const createdAt = now()
+    const requestMetadata = request.metadata || {}
+    const permissionSnapshot = requestMetadata.permissionSnapshot as
+      | MagicAgentGraphPermissionSnapshot
+      | undefined
+    const preflightSnapshot = requestMetadata.preflightSnapshot as
+      | MagicAgentGraphPreflightSnapshot
+      | undefined
     const runRecord: MagicAgentGraphRunRecord = {
       runId,
       graphId: graph.graphId,
@@ -391,14 +456,14 @@ export class MagicAgentGraphRuntime {
       channels: [],
       outputs: [],
       events: [],
-      metadata: {
-        ...(request.metadata || {}),
-        route,
-        sessionKey
-      }
+      graphSnapshot: clone(graph),
+      ...(permissionSnapshot ? { permissionSnapshot: clone(permissionSnapshot) } : {}),
+      ...(preflightSnapshot ? { preflightSnapshot: clone(preflightSnapshot) } : {}),
+      metadata: { ...requestMetadata, route, sessionKey }
     }
 
     this.runs.set(runId, runRecord)
+    void this.queueRunPersistence(runRecord)
     this.controllers.set(runId, controller)
 
     try {
@@ -433,6 +498,7 @@ export class MagicAgentGraphRuntime {
         runRecord.error = runRecord.error || message
         runRecord.endedAt = runRecord.endedAt || now()
         this.runs.set(runId, runRecord)
+        void this.queueRunPersistence(runRecord)
       } else {
         this.markRun(runRecord, status, { endedAt: now(), error: message })
         this.recordRunEvent(
@@ -447,8 +513,10 @@ export class MagicAgentGraphRuntime {
     } finally {
       this.controllers.delete(runId)
       this.runs.set(runId, runRecord)
+      const persisted = this.queueRunPersistence(runRecord)
       this.notifyRunClosed(runRecord)
-      this.pruneRunsForSession(sessionKey)
+      await persisted
+      await this.pruneRunsForSession(sessionKey)
     }
 
     return clone(runRecord)
@@ -1192,6 +1260,7 @@ export class MagicAgentGraphRuntime {
     record.status = status
     run.updatedAt = now()
     this.runs.set(run.runId, run)
+    void this.queueRunPersistence(run)
   }
 
   private recordRunEvent(
@@ -1217,6 +1286,7 @@ export class MagicAgentGraphRuntime {
     run.events = [...(run.events || []), event].slice(-this.policy.maxEvents)
     run.updatedAt = createdAt
     this.runs.set(run.runId, run)
+    void this.queueRunPersistence(run)
     this.notifyRunEvent(run, event)
   }
 
@@ -1229,6 +1299,7 @@ export class MagicAgentGraphRuntime {
     run.status = status
     run.updatedAt = now()
     this.runs.set(run.runId, run)
+    void this.queueRunPersistence(run)
   }
 
   private limitText(value: string, maxChars: number): { text: string; truncated: boolean } {
@@ -1336,7 +1407,33 @@ export class MagicAgentGraphRuntime {
     this.runSubscribers.delete(run.runId)
   }
 
-  private pruneRunsForSession(sessionKey: string): void {
+  private queueRunPersistence(run: MagicAgentGraphRunRecord): Promise<void> {
+    const runStore = this.runStore
+    if (!runStore) return Promise.resolve()
+    const runId = run.runId
+    const snapshot = clone(run)
+    const previous = this.runPersistenceQueues.get(runId) || Promise.resolve()
+    const savePromise = previous
+      .catch(() => undefined)
+      .then(async () => {
+        await runStore.save(snapshot)
+      })
+    const trackedPromise = savePromise
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.runPersistenceQueues.get(runId) === trackedPromise) {
+          this.runPersistenceQueues.delete(runId)
+        }
+      })
+    this.runPersistenceQueues.set(runId, trackedPromise)
+    return savePromise.catch(() => undefined)
+  }
+
+  private async flushRunPersistenceQueues(): Promise<void> {
+    await Promise.all([...this.runPersistenceQueues.values()])
+  }
+
+  private async pruneRunsForSession(sessionKey: string): Promise<void> {
     const maxRunRecords = this.policy.maxRunRecordsPerSession
     const sessionRuns = [...this.runs.values()]
       .filter((run) => run.sessionKey === sessionKey)
@@ -1349,6 +1446,11 @@ export class MagicAgentGraphRuntime {
         this.runSubscribers.delete(run.runId)
       }
     }
+    await this.runStore?.pruneSession(
+      sessionKey,
+      maxRunRecords,
+      new Set([...this.controllers.keys()])
+    )
   }
 
   private throwIfCancelled(signal: AbortSignal): void {

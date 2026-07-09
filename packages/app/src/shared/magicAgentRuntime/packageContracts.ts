@@ -82,8 +82,10 @@ export type MagicAgentPackageGraphDefinition = MagicAgentGraphDefinition & {
   sourcePackageVersion: string
   contributionId: string
   contributionTitle?: string
-  runnable: false
-  unavailableReason: string
+  runnable?: boolean
+  readOnly?: boolean
+  forkable?: boolean
+  unavailableReason?: string
 }
 
 export type MagicAgentPackageManifest = {

@@ -419,6 +419,9 @@ async function readPackageAgentDefinitions(
   return agents
 }
 
+const graphContainsToolNodes = (graph: { nodes?: Array<{ kind?: string }> }): boolean =>
+  (graph.nodes || []).some((node) => node.kind === 'tool')
+
 async function readPackageGraphDefinitions(
   installed: MagicAgentInstalledPackage
 ): Promise<MagicAgentPackageGraphDefinition[]> {
@@ -451,6 +454,8 @@ async function readPackageGraphDefinitions(
       )
     }
 
+    const runnable =
+      contribution.config?.runnable === true || !graphContainsToolNodes(validation.graph)
     graphs.push({
       ...validation.graph,
       sourcePackageId: installed.id,
@@ -458,9 +463,13 @@ async function readPackageGraphDefinitions(
       sourcePackageVersion: installed.version,
       contributionId: contribution.id,
       ...(contribution.title ? { contributionTitle: contribution.title } : {}),
-      runnable: false,
-      unavailableReason:
-        'Package graph contributions are currently read-only and cannot be executed by MagicAgent GraphRuntime.'
+      runnable,
+      ...(runnable
+        ? {}
+        : {
+            unavailableReason:
+              'Package graph contains tool nodes and requires an explicit safe run decision or fork before execution.'
+          })
     })
   }
 

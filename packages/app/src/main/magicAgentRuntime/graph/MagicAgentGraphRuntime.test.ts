@@ -1,6 +1,8 @@
+import { mkdir, rm } from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MagicAgentGraphDefinition, MagicAgentGraphRunStreamEvent } from '@shared/magicAgent'
 import { MagicAgentGraphRuntime } from './MagicAgentGraphRuntime'
+import { MagicAgentGraphRunStore } from './graphRunStore'
 
 const testRoute = { channel: 'generic', scopeType: 'dm', scopeId: 'graph-test' } as const
 
@@ -1050,6 +1052,66 @@ describe('MagicAgentGraphRuntime', () => {
       'run-budget-2'
     ])
     expect(runtime.getRun('run-budget-1', 'generic:dm:graph-test')).toBeUndefined()
+  })
+
+  it('persists graph runs to the run store and reloads them by route', async () => {
+    const tempDir = `/tmp/magic-agent-run-store-${Date.now()}-${Math.random()
+      .toString(16)
+      .slice(2)}`
+    await mkdir(tempDir, { recursive: true })
+    try {
+      const runStore = new MagicAgentGraphRunStore(tempDir)
+      const runtime = new MagicAgentGraphRuntime([], { runStore })
+      runtime.create({ graph: createTestGraph('test.persisted-run'), route: testRoute })
+
+      const result = await runtime.run({
+        graphId: 'test.persisted-run',
+        input: 'Persist this run.',
+        route: testRoute,
+        runId: 'run-persist-1',
+        metadata: {
+          permissionSnapshot: { allowedToolNames: [], tools: [], issues: [] }
+        }
+      })
+
+      expect(result.status).toBe('completed')
+      expect(result.graphSnapshot?.graphId).toBe('test.persisted-run')
+      expect(result.permissionSnapshot?.allowedToolNames).toEqual([])
+
+      const reloadedRuntime = new MagicAgentGraphRuntime([], { runStore })
+      const reloaded = await reloadedRuntime.getRunByRoute('run-persist-1', testRoute)
+      expect(reloaded).toMatchObject({
+        runId: 'run-persist-1',
+        graphId: 'test.persisted-run',
+        status: 'completed',
+        sessionKey: 'generic:dm:graph-test',
+        graphSnapshot: { graphId: 'test.persisted-run' },
+        permissionSnapshot: { allowedToolNames: [] }
+      })
+      expect(reloaded?.events?.map((event) => event.type)).toEqual(
+        expect.arrayContaining(['graph.started', 'graph.completed'])
+      )
+
+      const listed = await reloadedRuntime.listRunsForRoute(testRoute, 'test.persisted-run')
+      expect(listed.map((run) => run.runId)).toEqual(['run-persist-1'])
+      const otherRoute = { channel: 'generic', scopeType: 'dm', scopeId: 'other-route' } as const
+      await expect(
+        reloadedRuntime.getRunByRoute('run-persist-1', otherRoute)
+      ).resolves.toBeUndefined()
+      await expect(reloadedRuntime.listRunsForRoute(otherRoute)).resolves.toEqual([])
+
+      reloadedRuntime.create({ graph: createTestGraph('test.persisted-run'), route: testRoute })
+      await expect(
+        reloadedRuntime.run({
+          graphId: 'test.persisted-run',
+          input: 'Duplicate run id.',
+          route: testRoute,
+          runId: 'run-persist-1'
+        })
+      ).rejects.toThrow(/already exists/)
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
   })
 
   it('streams graph run snapshots, events, and terminal close frames with deterministic sequences', async () => {

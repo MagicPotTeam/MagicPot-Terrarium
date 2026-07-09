@@ -17,7 +17,7 @@ MagicPot 是一个基于 Electron 的 AI 工作台。它把 AI 对话、ComfyUI 
 
 ## 技术栈
 
-- Electron 37
+- Electron 39
 - electron-vite 4
 - React 19
 - TypeScript 5

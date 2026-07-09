@@ -4,14 +4,21 @@ import type {
   MagicAgentGraphChannelDefinition,
   MagicAgentGraphConditionDefinition,
   MagicAgentGraphCreateRequest,
+  MagicAgentGraphDeleteRequest,
   MagicAgentGraphDefinition,
+  MagicAgentGraphForkRequest,
   MagicAgentGraphListItem,
   MagicAgentGraphNodeDefinition,
   MagicAgentGraphOutputDefinition,
+  MagicAgentGraphPreflightRunRequest,
+  MagicAgentGraphPreflightSnapshot,
+  MagicAgentGraphRunEvent,
+  MagicAgentGraphRunEventListRequest,
   MagicAgentGraphRunRecord,
   MagicAgentGraphRunRequest,
   MagicAgentGraphRunResult,
-  MagicAgentGraphRunStreamEvent
+  MagicAgentGraphRunStreamEvent,
+  MagicAgentGraphValidationResult
 } from '@shared/magicAgent'
 import type {
   MagicAgentInstalledPackage,
@@ -174,8 +181,41 @@ export type MagicAgentPlatformListToolsResp = {
   tools: MagicAgentPlatformToolDefinition[]
 }
 
+export type MagicAgentPlatformGraphCatalogListReq = {
+  route?: AgentRouteLike
+  allowedToolNames?: string[] | null
+}
+
 export type MagicAgentPlatformGraphCreateResp = {
   graph: MagicAgentGraphDefinition
+}
+
+export type MagicAgentPlatformGraphSaveResp = MagicAgentPlatformGraphCreateResp
+
+export type MagicAgentPlatformGraphDeleteReq = MagicAgentGraphDeleteRequest
+
+export type MagicAgentPlatformGraphDeleteResp = {
+  deleted: boolean
+}
+
+export type MagicAgentPlatformGraphForkReq = MagicAgentGraphForkRequest
+
+export type MagicAgentPlatformGraphForkResp = {
+  graph: MagicAgentGraphDefinition
+}
+
+export type MagicAgentPlatformGraphValidateReq = {
+  graph: unknown
+}
+
+export type MagicAgentPlatformGraphValidateResp = {
+  validation: MagicAgentGraphValidationResult
+}
+
+export type MagicAgentPlatformGraphPreflightRunReq = MagicAgentGraphPreflightRunRequest
+
+export type MagicAgentPlatformGraphPreflightRunResp = {
+  preflight: MagicAgentGraphPreflightSnapshot
 }
 
 export type MagicAgentPlatformGraphInspectReq = {
@@ -207,6 +247,12 @@ export type MagicAgentPlatformGraphRunGetReq = {
 
 export type MagicAgentPlatformGraphRunGetResp = {
   run?: MagicAgentGraphRunRecord
+}
+
+export type MagicAgentPlatformGraphRunEventListReq = MagicAgentGraphRunEventListRequest
+
+export type MagicAgentPlatformGraphRunEventListResp = {
+  events: MagicAgentGraphRunEvent[]
 }
 
 export type MagicAgentPlatformGraphRunWatchReq = {
@@ -693,12 +739,61 @@ const validateRunAgentReq = (value: unknown): MagicAgentPlatformRunReq => {
   }
 }
 
+const validateGraphCatalogListReq = (value: unknown): MagicAgentPlatformGraphCatalogListReq => {
+  const req = requireRecord(value, 'listGraphCatalog')
+  return {
+    ...(req.route !== undefined ? { route: validateRoute(req.route) } : {}),
+    ...(req.allowedToolNames !== undefined
+      ? { allowedToolNames: optionalNullableStringArray(req.allowedToolNames, 'allowedToolNames') }
+      : {})
+  }
+}
+
 const validateGraphCreateReq = (value: unknown): MagicAgentGraphCreateRequest => {
   const req = requireRecord(value, 'createGraph')
   return {
     graph: validateGraphDefinition(req.graph),
     route: validateRoute(req.route),
     ...(req.replace === true ? { replace: true } : {})
+  }
+}
+
+const validateGraphDeleteReq = (value: unknown): MagicAgentPlatformGraphDeleteReq => {
+  const req = requireRecord(value, 'deleteGraph')
+  return { graphId: requireString(req.graphId, 'graphId'), route: validateRoute(req.route) }
+}
+
+const validateGraphForkReq = (value: unknown): MagicAgentPlatformGraphForkReq => {
+  const req = requireRecord(value, 'forkGraph')
+  return {
+    graphId: requireString(req.graphId, 'graphId'),
+    route: validateRoute(req.route),
+    ...(optionalCleanString(req.targetGraphId, 'targetGraphId') !== undefined
+      ? { targetGraphId: optionalCleanString(req.targetGraphId, 'targetGraphId') }
+      : {}),
+    ...(optionalCleanString(req.name, 'name') !== undefined
+      ? { name: optionalCleanString(req.name, 'name') }
+      : {}),
+    ...(req.replace === true ? { replace: true } : {})
+  }
+}
+
+const validateGraphValidateReq = (value: unknown): MagicAgentPlatformGraphValidateReq => {
+  const req = requireRecord(value, 'validateGraph')
+  if (!Object.prototype.hasOwnProperty.call(req, 'graph')) {
+    throw issue('graph', 'Expected graph to be provided')
+  }
+  return { graph: req.graph }
+}
+
+const validatePreflightGraphRunReq = (value: unknown): MagicAgentPlatformGraphPreflightRunReq => {
+  const req = requireRecord(value, 'preflightGraphRun')
+  return {
+    graphId: requireString(req.graphId, 'graphId'),
+    route: validateRoute(req.route),
+    ...(req.allowedToolNames !== undefined
+      ? { allowedToolNames: optionalNullableStringArray(req.allowedToolNames, 'allowedToolNames') }
+      : {})
   }
 }
 
@@ -742,6 +837,16 @@ const validateGraphRunListReq = (value: unknown): MagicAgentPlatformGraphRunList
 const validateGraphRunGetReq = (value: unknown): MagicAgentPlatformGraphRunGetReq => {
   const req = requireRecord(value, 'getGraphRun')
   return { runId: requireString(req.runId, 'runId'), route: validateRoute(req.route) }
+}
+
+const validateGraphRunEventListReq = (value: unknown): MagicAgentPlatformGraphRunEventListReq => {
+  const req = requireRecord(value, 'listGraphRunEvents')
+  const limit = optionalPositiveInteger(req.limit, 'limit')
+  return {
+    runId: requireString(req.runId, 'runId'),
+    route: validateRoute(req.route),
+    ...(limit !== undefined ? { limit } : {})
+  }
 }
 
 const validateGraphRunWatchReq = (value: unknown): MagicAgentPlatformGraphRunWatchReq => {
@@ -824,11 +929,26 @@ export type MagicAgentPlatformSvc = {
   listTools(req: MagicAgentPlatformListToolsReq): Promise<MagicAgentPlatformListToolsResp>
   callTool(req: MagicAgentPlatformToolCallReq): Promise<MagicAgentPlatformToolCallResp>
   listGraphs(req: MagicAgentPlatformEmptyReq): Promise<MagicAgentPlatformGraphListResp>
+  listGraphCatalog(
+    req: MagicAgentPlatformGraphCatalogListReq
+  ): Promise<MagicAgentPlatformGraphListResp>
   createGraph(req: MagicAgentGraphCreateRequest): Promise<MagicAgentPlatformGraphCreateResp>
+  saveGraph(req: MagicAgentGraphCreateRequest): Promise<MagicAgentPlatformGraphSaveResp>
+  deleteGraph(req: MagicAgentPlatformGraphDeleteReq): Promise<MagicAgentPlatformGraphDeleteResp>
+  forkGraph(req: MagicAgentPlatformGraphForkReq): Promise<MagicAgentPlatformGraphForkResp>
+  validateGraph(
+    req: MagicAgentPlatformGraphValidateReq
+  ): Promise<MagicAgentPlatformGraphValidateResp>
+  preflightGraphRun(
+    req: MagicAgentPlatformGraphPreflightRunReq
+  ): Promise<MagicAgentPlatformGraphPreflightRunResp>
   inspectGraph(req: MagicAgentPlatformGraphInspectReq): Promise<MagicAgentPlatformGraphInspectResp>
   runGraph(req: MagicAgentGraphRunRequest): Promise<MagicAgentGraphRunResult>
   listGraphRuns(req: MagicAgentPlatformGraphRunListReq): Promise<MagicAgentPlatformGraphRunListResp>
   getGraphRun(req: MagicAgentPlatformGraphRunGetReq): Promise<MagicAgentPlatformGraphRunGetResp>
+  listGraphRunEvents(
+    req: MagicAgentPlatformGraphRunEventListReq
+  ): Promise<MagicAgentPlatformGraphRunEventListResp>
   watchGraphRun(
     req: MagicAgentPlatformGraphRunWatchReq,
     resp: ServerStreaming<MagicAgentGraphRunStreamEvent>
@@ -858,11 +978,18 @@ export const magicAgentPlatformSvcDef: ServiceDefSheet<MagicAgentPlatformSvc> = 
   listTools: { type: 'unary', request: validateListToolsReq },
   callTool: { type: 'unary', request: validateToolCallReq },
   listGraphs: { type: 'unary', request: validateEmptyReq },
+  listGraphCatalog: { type: 'unary', request: validateGraphCatalogListReq },
   createGraph: { type: 'unary', request: validateGraphCreateReq },
+  saveGraph: { type: 'unary', request: validateGraphCreateReq },
+  deleteGraph: { type: 'unary', request: validateGraphDeleteReq },
+  forkGraph: { type: 'unary', request: validateGraphForkReq },
+  validateGraph: { type: 'unary', request: validateGraphValidateReq },
+  preflightGraphRun: { type: 'unary', request: validatePreflightGraphRunReq },
   inspectGraph: { type: 'unary', request: validateGraphIdReq },
   runGraph: { type: 'unary', request: validateRunGraphReq },
   listGraphRuns: { type: 'unary', request: validateGraphRunListReq },
   getGraphRun: { type: 'unary', request: validateGraphRunGetReq },
+  listGraphRunEvents: { type: 'unary', request: validateGraphRunEventListReq },
   watchGraphRun: {
     type: 'serverStreaming',
     request: validateGraphRunWatchReq,
