@@ -21,6 +21,21 @@ import {
   formatProjectCanvasLargeImageResourceMetrics
 } from './largeImageResourceMetrics.mjs'
 
+const CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS = [
+  'workerPoolWorkerCount',
+  'workerPoolIdleWorkerCount',
+  'workerPoolActiveRequestCount',
+  'workerPoolQueuedRequestCount',
+  'workerPoolInFlightKeyCount',
+  'workerPoolDedupedRequestCount',
+  'workerPoolRejectedRequestCount',
+  'workerPoolTimedOutRequestCount',
+  'workerPoolFailedWorkerCount',
+  'workerPoolCompletedRequestCount',
+  'workerPoolMaxWorkers',
+  'workerPoolMaxQueueSize'
+]
+
 function parseNonNegativeIntegerEnv(name, fallback) {
   const parsed = Number.parseInt(process.env[name] || '', 10)
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
@@ -1917,7 +1932,13 @@ function readProjectCanvasRealBoardMetricsFromDomSnapshot(snapshotInput) {
         snapshotThumbnailCache?.staleCount,
         snapshotThumbnailCache?.stale,
         rootDataset.projectCanvasThumbnailCacheStaleCount
-      ])
+      ]),
+      ...Object.fromEntries(
+        CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS.map((key) => [
+          key,
+          readFirstNumber([snapshotThumbnailCache?.[key]])
+        ])
+      )
     },
     largeImageResourceMetrics,
     diagnosticMetrics: {
@@ -3635,6 +3656,7 @@ if (isDirectRun) {
 }
 
 export {
+  CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS,
   buildAcceptance,
   buildAggregateScenarioResult,
   buildPressureVisualFailures,

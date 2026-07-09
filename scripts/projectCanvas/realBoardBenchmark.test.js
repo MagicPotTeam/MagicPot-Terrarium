@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS,
   buildAcceptance,
   buildAggregateScenarioResult,
   buildRealBoardAggregateReport,
@@ -10,6 +11,12 @@ import {
   isRealBoardBenchmarkMetricsReady,
   readProjectCanvasRealBoardMetricsFromDomSnapshot
 } from './realBoardBenchmark.mjs'
+
+function buildWorkerPoolMetrics(values = [2, 1, 1, 4, 5, 6, 7, 8, 9, 10, 2, 32]) {
+  return Object.fromEntries(
+    CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS.map((key, index) => [key, values[index] ?? 0])
+  )
+}
 
 function buildFinalMetrics(overrides = {}) {
   return {
@@ -299,7 +306,8 @@ describe('realBoardBenchmark acceptance gates', () => {
           thumbnailCount: 9000,
           cacheHitCount: 3000,
           cacheGeneratedCount: 0,
-          cacheStaleCount: 0
+          cacheStaleCount: 0,
+          ...buildWorkerPoolMetrics()
         },
         largeImageResourceMetrics: {
           schemaName: 'project-canvas-large-image-resource-diagnostics',
@@ -365,7 +373,8 @@ describe('realBoardBenchmark acceptance gates', () => {
       thumbnailCount: 9000,
       cacheHitCount: 3000,
       cacheGeneratedCount: 0,
-      cacheStaleCount: 0
+      cacheStaleCount: 0,
+      ...buildWorkerPoolMetrics()
     })
     expect(aggregateResult.largeImageResourceMetrics.diagnosticOnly).toBe(true)
     expect(aggregateResult.largeImageResourceMetrics.officialAcceptanceImpact).toBe(false)
@@ -405,7 +414,8 @@ describe('realBoardBenchmark acceptance gates', () => {
             firstThumbnailLatencyMs: 27,
             cacheHitCount: 5,
             nativeGeneratedCount: 2,
-            sidecarGeneratedCount: 3
+            sidecarGeneratedCount: 3,
+            ...buildWorkerPoolMetrics([2, 1, 1, 3, 4, 5, 6, 7, 8, 9, 2, 32])
           },
           webgl: {
             loadedImageCount: 7,
