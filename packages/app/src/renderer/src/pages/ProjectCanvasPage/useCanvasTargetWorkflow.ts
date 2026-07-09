@@ -35,24 +35,23 @@ import {
   emitProjectTraceRuntimeEvent,
   writeProjectTraceTargetReferenceState
 } from '@renderer/features/projectTrace/projectTraceRuntime'
-import { updateScopedExternalLoadingSessionId } from '../ChatPage/chatPageShared'
 import {
   buildCanvasTargetAgentFinalSummaryText,
   buildCanvasTargetAgentMessagePayload,
   materializeCanvasTargetAgentMessagePayload
 } from './canvasTargetAgentArtifacts'
-import {
-  CANVAS_TARGET_CANVAS_ACTIONS,
-  loadCanvasTargetCapabilityCatalog,
-  type CanvasTargetCanvasAction,
-  type CanvasTargetCapabilityAction,
-  type CanvasTargetCapabilityActionPhase,
-  type CanvasTargetCapabilityCatalog,
-  type CanvasTargetFinalPresentation,
-  type CanvasTargetOutputTarget,
-  type CanvasTargetQuickAppAction,
-  type CanvasTargetQAppCapability
-} from './canvasTargetCapabilities'
+import { CANVAS_TARGET_CANVAS_ACTIONS } from './canvasTargetCanvasActionCatalog'
+import type {
+  CanvasTargetCanvasAction,
+  CanvasTargetCapabilityAction,
+  CanvasTargetCapabilityActionPhase,
+  CanvasTargetCapabilityCatalog,
+  CanvasTargetFinalPresentation,
+  CanvasTargetOutputTarget,
+  CanvasTargetQAppCapability,
+  CanvasTargetQuickAppAction
+} from './canvasTargetCapabilityTypes'
+import { loadCanvasTargetCapabilityCatalog } from './canvasTargetCapabilityQApps'
 import { runCanvasTargetQuickAppAction } from './canvasTargetQuickAppRuntime'
 import {
   applyCanvasTargetEvidenceModeToControlPlan,
@@ -93,6 +92,14 @@ import {
   type CanvasTargetLocalVisualAttachmentGroup
 } from './canvasTargetLocalVisualStage'
 import {
+  dispatchCanvasTargetMediaAttachmentToCanvas,
+  isCanvasTargetPlacedItem
+} from './canvasTargetMediaDispatch'
+import {
+  buildCanvasTargetMediaPlacementFailure,
+  validateCanvasTargetMediaSourceUrl
+} from './canvasTargetMediaDispatchSafety'
+import {
   executeCanvasTargetSemanticCanvasAction,
   isCanvasTargetSemanticCanvasActionName,
   resolveCropRectangleForImage,
@@ -127,6 +134,25 @@ import { createCanvasImageItemDraft, createCanvasItemId } from './canvasAssetDra
 import { hydrateCanvasImageItemForCanvas, loadImageFromSrc } from './canvasAssetIntakeHelpers'
 import { createMagicPotNativeProvenance } from './canvasProvenanceUtils'
 import { extractImageRegionLocally } from './localImageExtract'
+import {
+  appendMessageToExternalChat,
+  openExternalAgentPane,
+  openExternalChatSession,
+  requestExternalChatConfirmation,
+  setExternalChatSessionLoading,
+  terminateExternalChatSession,
+  waitForCanvasTargetProgressPaint,
+  type CanvasTargetExternalChatRun
+} from './canvasTargetExternalAgentBridge'
+import {
+  buildCanvasTargetCanvasActionDisplayContent,
+  buildCanvasTargetExecutionPlanPreview,
+  buildCanvasTargetStage,
+  buildCanvasTargetStageOverviewFromPlan,
+  buildCanvasTargetStageSummaryFromResult,
+  dedupeCanvasTargetAttachments,
+  type CanvasTargetCanvasActionResult
+} from './canvasTargetRunPresentation'
 
 type NotifyFn = (message: string) => unknown
 
@@ -281,386 +307,6 @@ type UseCanvasTargetWorkflowOptions = {
   resolveDefaultProfileId?: () => string | null
   resolveActiveAgentScope: () => string
   openTargetManager: () => void
-}
-
-type ExternalChatSeedMessage = {
-  role: 'user' | 'assistant'
-  content: string
-  attachments?: ChatAttachment[]
-  modelName?: string
-}
-
-type CanvasTargetExternalChatRun = {
-  runId: string
-  scope: string
-  sessionId: string | null
-}
-
-function buildCanvasTargetStage(
-  stage: Omit<CanvasTargetReportStage, 'findings'> & {
-    findings: CanvasTargetReport['findings']
-  }
-): CanvasTargetReportStage {
-  return {
-    ...stage,
-    findings: stage.findings.map((finding) => ({
-      ...finding,
-      sourceStageId: stage.id,
-      sourceStageLabel: stage.label,
-      sourceModelId: stage.modelId
-    }))
-  }
-}
-
-function truncateCanvasTargetStagePreview(
-  value: string | undefined,
-  maxLength = 180
-): string | undefined {
-  const normalized = value?.trim()
-  if (!normalized) return undefined
-  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized
-}
-
-function buildCanvasTargetStageSummaryFromResult(
-  result: {
-    content?: string
-    attachments?: ChatAttachment[]
-    ocrResult?: OCRResult
-    fallbackReason?: string
-  },
-  isChineseUi: boolean
-): string {
-  const contentPreview = truncateCanvasTargetStagePreview(result.content)
-  if (contentPreview) return contentPreview
-
-  if (result.ocrResult) {
-    if (result.ocrResult.kind === 'table') {
-      return isChineseUi ? '已返回 OCR 表格数据。' : 'Returned OCR table data.'
-    }
-    if (result.ocrResult.kind === 'document') {
-      return isChineseUi ? '已返回 OCR 文档数据。' : 'Returned OCR document data.'
-    }
-    return isChineseUi ? '已返回 OCR 文本数据。' : 'Returned OCR text data.'
-  }
-
-  if (result.attachments?.length) {
-    return isChineseUi
-      ? `已返回 ${result.attachments.length} 个附件。`
-      : `Returned ${result.attachments.length} attachment(s).`
-  }
-
-  if (result.fallbackReason) {
-    return isChineseUi ? '当前阶段已回退执行。' : 'Stage fell back.'
-  }
-
-  return isChineseUi ? '当前阶段已完成。' : 'Stage completed.'
-}
-
-function buildCanvasTargetStageOverviewFromPlan(options: {
-  isChineseUi: boolean
-  stagePrompt?: string
-  referenceNotes?: string[]
-  upstreamStageLabels?: string[]
-  attachmentCount?: number
-  fallbackReason?: string
-}): string {
-  const lines: string[] = []
-
-  if (options.stagePrompt?.trim()) {
-    lines.push(
-      options.isChineseUi
-        ? `阶段提示：${options.stagePrompt.trim()}`
-        : `Stage prompt: ${options.stagePrompt.trim()}`
-    )
-  }
-
-  if (options.referenceNotes && options.referenceNotes.length > 0) {
-    lines.push(
-      options.isChineseUi
-        ? `规划说明：${options.referenceNotes.join(' | ')}`
-        : `Planner notes: ${options.referenceNotes.join(' | ')}`
-    )
-  }
-
-  if (options.upstreamStageLabels && options.upstreamStageLabels.length > 0) {
-    lines.push(
-      options.isChineseUi
-        ? `上游阶段：${options.upstreamStageLabels.join(' -> ')}`
-        : `Upstream stages: ${options.upstreamStageLabels.join(' -> ')}`
-    )
-  }
-
-  if (typeof options.attachmentCount === 'number') {
-    lines.push(
-      options.isChineseUi
-        ? `输入附件数：${options.attachmentCount}`
-        : `Input attachments: ${options.attachmentCount}`
-    )
-  }
-
-  if (options.fallbackReason) {
-    lines.push(
-      options.isChineseUi
-        ? `失败原因：${options.fallbackReason}`
-        : `Fallback reason: ${options.fallbackReason}`
-    )
-  }
-
-  return lines.join('\n')
-}
-
-function dedupeCanvasTargetAttachments(attachments: ChatAttachment[]): ChatAttachment[] {
-  const seen = new Set<string>()
-  return attachments.filter((attachment) => {
-    const key = `${attachment.type}:${attachment.url}:${attachment.fileName || ''}`
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-}
-
-type CanvasTargetCanvasActionResult = {
-  content: string
-  attachments?: ChatAttachment[]
-  canvasDispatchCount: number
-  placedCanvasItemIds?: string[]
-  placedCanvasItems?: CanvasItem[]
-  affectedCanvasItemIds?: string[]
-  fallbackReason?: string
-}
-
-function buildCanvasTargetCanvasActionDisplayContent(
-  action: CanvasTargetCanvasAction,
-  result: CanvasTargetCanvasActionResult,
-  isChineseUi: boolean
-): string {
-  if (!isChineseUi) return result.content
-
-  if (result.fallbackReason) {
-    return `画布动作 ${action.action} 未完成：${result.fallbackReason}`
-  }
-
-  const placedCount = result.placedCanvasItemIds?.length ?? result.canvasDispatchCount
-  const affectedCount = result.affectedCanvasItemIds?.length ?? result.canvasDispatchCount
-
-  switch (action.action) {
-    case 'duplicate_items':
-      return `已复制 ${placedCount} 个画布元素。`
-    case 'arrange_items':
-      return `已排列 ${affectedCount} 个画布元素。`
-    case 'select_items':
-      return `已选中 ${affectedCount} 个画布元素。`
-    case 'transform_items':
-      return `已调整 ${affectedCount} 个画布元素。`
-    case 'crop_image':
-      return `已裁剪 ${affectedCount} 个图片元素。`
-    case 'extract_image_region':
-      return `已提取 ${placedCount} 个透明图片元素。`
-    case 'add_text':
-      return `已向画布添加文本。${action.text ? `\n\n${action.text}` : ''}`
-    case 'add_annotation':
-      return `\u5df2\u5411\u753b\u5e03\u6dfb\u52a0 ${placedCount} \u4e2a\u6807\u6ce8\u5143\u7d20\u3002`
-    case 'update_text':
-      return `\u5df2\u66f4\u65b0 ${affectedCount} \u4e2a\u6587\u672c\u5143\u7d20\u3002`
-    case 'update_annotation':
-      return `\u5df2\u66f4\u65b0 ${affectedCount} \u4e2a\u6807\u6ce8\u5143\u7d20\u3002`
-    case 'set_z_order':
-      return `\u5df2\u8c03\u6574 ${affectedCount} \u4e2a\u753b\u5e03\u5143\u7d20\u7684\u5c42\u7ea7\u3002`
-    case 'flip_items':
-      return `\u5df2\u7ffb\u8f6c ${affectedCount} \u4e2a\u753b\u5e03\u5143\u7d20\u3002`
-    case 'add_image':
-      return '已向画布添加图片。'
-    case 'add_video':
-      return '已向画布添加视频。'
-    case 'add_model3d':
-      return '已向画布添加 3D 模型。'
-    case 'set_grid_visibility':
-      return action.showGrid ? '已显示画布网格。' : '已隐藏画布网格。'
-    case 'set_canvas_background':
-      return action.bgColor ? `已将画布背景设置为 ${action.bgColor}。` : '已更新画布背景。'
-    case 'set_canvas_tool':
-      return '已更新画布工具状态。'
-    case 'delete_items':
-      return `已删除 ${affectedCount} 个画布元素。`
-    case 'clear_canvas':
-      return '已清空画布。'
-    default:
-      return result.content || `画布动作 ${action.action} 已执行。`
-  }
-}
-
-function describeCanvasTargetCapabilityAction(
-  action: CanvasTargetCapabilityAction,
-  isChineseUi: boolean
-): string {
-  const label = action.label?.trim() || action.id
-  const phase = action.phase || 'after_model_stages'
-  if (action.type === 'quick_app') {
-    return isChineseUi
-      ? `\u5feb\u5e94\u7528 ${action.qAppKey}\uff1a${label}\uff08${phase}\uff09`
-      : `QuickApp ${action.qAppKey}: ${label} (${phase})`
-  }
-
-  return isChineseUi
-    ? `\u753b\u5e03 ${action.action}\uff1a${label}\uff08${phase}\uff09`
-    : `Canvas ${action.action}: ${label} (${phase})`
-}
-
-function buildCanvasTargetExecutionPlanPreview(options: {
-  controlPlan: CanvasTargetControlPlan
-  controlModelLabel: string
-  isChineseUi: boolean
-}): string {
-  const { controlPlan, controlModelLabel, isChineseUi } = options
-  const lines = [
-    isChineseUi ? '\u76ee\u6807\u6267\u884c\u65b9\u6848' : 'Target execution plan',
-    '',
-    isChineseUi
-      ? `1. \u4e3b\u63a7\u6a21\u578b\uff1a${controlModelLabel}\uff0c\u8d1f\u8d23\u8bed\u4e49\u62c6\u89e3\u548c\u8c03\u5ea6\u3002`
-      : `1. Control model: ${controlModelLabel}, responsible for semantic planning and orchestration.`
-  ]
-
-  let stepIndex = 2
-  for (const action of controlPlan.capabilityActions || []) {
-    lines.push(`${stepIndex}. ${describeCanvasTargetCapabilityAction(action, isChineseUi)}`)
-    stepIndex += 1
-  }
-
-  for (const stage of controlPlan.stageInstructions) {
-    lines.push(
-      isChineseUi
-        ? `${stepIndex}. \u9644\u5c5e\u6a21\u578b ${stage.modelId}\uff1a${stage.label}`
-        : `${stepIndex}. Auxiliary model ${stage.modelId}: ${stage.label}`
-    )
-    stepIndex += 1
-  }
-
-  lines.push(
-    isChineseUi
-      ? `${stepIndex}. \u4e3b\u63a7\u6a21\u578b\uff1a\u6839\u636e\u6700\u7ec8\u753b\u5e03\u8bc1\u636e\u548c\u6267\u884c\u65e5\u5fd7\u505a\u6700\u7ec8\u9a8c\u6536\uff1b\u53ea\u5728\u76ee\u6807\u672c\u8eab\u9700\u8981\u6587\u6863\u65f6\u4ea4\u4ed8 Agent \u7ed3\u679c\u6587\u4ef6\u3002`
-      : `${stepIndex}. Control model: inspect the final canvas evidence and execution journal for final acceptance; deliver Agent result files only when the target itself requires a document.`
-  )
-  lines.push('')
-  lines.push(
-    isChineseUi
-      ? '\u8bf7\u786e\u8ba4\u540e\u518d\u6267\u884c\u3002\u8f6f\u4ef6\u5c42\u53ea\u4f1a\u6821\u9a8c\u548c\u6267\u884c\u8fd9\u4e9b\u660e\u786e\u52a8\u4f5c\uff0c\u4e0d\u518d\u81ea\u884c\u731c\u6d4b\u76ee\u6807\u8bed\u4e49\u3002'
-      : 'Please confirm before execution. The software layer will only validate and execute these explicit actions; it will not infer target semantics locally.'
-  )
-
-  return lines.join('\n')
-}
-
-function waitForCanvasTargetPlacementCallbacks(
-  expectedCount: number,
-  placedItems: CanvasItem[],
-  timeoutMs = 5000
-): Promise<void> {
-  if (expectedCount <= 0 || placedItems.length >= expectedCount) return Promise.resolve()
-
-  return new Promise((resolve) => {
-    const startedAt = Date.now()
-    const check = () => {
-      if (placedItems.length >= expectedCount || Date.now() - startedAt >= timeoutMs) {
-        resolve()
-        return
-      }
-      window.setTimeout(check, 25)
-    }
-    check()
-  })
-}
-
-function isCanvasTargetPlacedItem(value: unknown): value is CanvasItem {
-  if (!value || typeof value !== 'object') return false
-  const record = value as Record<string, unknown>
-  return typeof record.id === 'string' && typeof record.type === 'string'
-}
-
-async function dispatchCanvasTargetMediaAttachmentToCanvas(
-  attachment: ChatAttachment,
-  projectId: string,
-  generationSessionId?: string
-): Promise<{ dispatched: boolean; placedCanvasItems: CanvasItem[] }> {
-  if (!attachment.url?.trim()) {
-    return {
-      dispatched: false,
-      placedCanvasItems: []
-    }
-  }
-
-  const placedCanvasItems: CanvasItem[] = []
-  const onAdded = (item: unknown) => {
-    if (isCanvasTargetPlacedItem(item)) {
-      placedCanvasItems.push(item)
-    }
-  }
-
-  if (attachment.type === 'image') {
-    window.dispatchEvent(
-      new CustomEvent('canvas:add-image', {
-        detail: {
-          src: attachment.url,
-          fileName: attachment.fileName,
-          projectId,
-          generationSessionId,
-          select: false,
-          sourceWidth: attachment.sourceWidth,
-          sourceHeight: attachment.sourceHeight,
-          onAdded
-        }
-      })
-    )
-    await waitForCanvasTargetPlacementCallbacks(1, placedCanvasItems)
-    return {
-      dispatched: true,
-      placedCanvasItems
-    }
-  }
-
-  if (attachment.type === 'video') {
-    window.dispatchEvent(
-      new CustomEvent('canvas:add-video', {
-        detail: {
-          src: attachment.url,
-          fileName: attachment.fileName,
-          projectId,
-          generationSessionId,
-          select: false,
-          onAdded
-        }
-      })
-    )
-    await waitForCanvasTargetPlacementCallbacks(1, placedCanvasItems)
-    return {
-      dispatched: true,
-      placedCanvasItems
-    }
-  }
-
-  if (attachment.type === 'model3d') {
-    window.dispatchEvent(
-      new CustomEvent('canvas:add-model3d', {
-        detail: {
-          src: attachment.url,
-          fileName: attachment.fileName,
-          projectId,
-          generationSessionId,
-          select: false,
-          onAdded
-        }
-      })
-    )
-    await waitForCanvasTargetPlacementCallbacks(1, placedCanvasItems)
-    return {
-      dispatched: true,
-      placedCanvasItems
-    }
-  }
-
-  return {
-    dispatched: false,
-    placedCanvasItems: []
-  }
 }
 
 function isCanvasTargetImageItem(item: CanvasItem | undefined): item is CanvasImageItem {
@@ -942,41 +588,45 @@ async function executeCanvasTargetCanvasAction(
     case 'add_image':
     case 'add_video':
     case 'add_model3d': {
-      if (!action.sourceUrl?.trim()) {
+      const mediaUrlSafety = validateCanvasTargetMediaSourceUrl(action.sourceUrl)
+      if (!mediaUrlSafety.safe) {
         return {
-          content: `Canvas ${action.action} action skipped because no sourceUrl was available.`,
+          content: `Canvas ${action.action} action skipped because sourceUrl is not safe for direct canvas placement.`,
           canvasDispatchCount: 0,
-          fallbackReason: `Missing sourceUrl for canvas ${action.action} action.`
+          fallbackReason: mediaUrlSafety.reason
         }
       }
+      const mediaType =
+        action.action === 'add_image'
+          ? 'image'
+          : action.action === 'add_video'
+            ? 'video'
+            : 'model3d'
       const dispatchResult = await dispatchCanvasTargetMediaAttachmentToCanvas(
         {
-          type:
-            action.action === 'add_image'
-              ? 'image'
-              : action.action === 'add_video'
-                ? 'video'
-                : 'model3d',
-          url: action.sourceUrl,
+          type: mediaType,
+          url: mediaUrlSafety.url,
           fileName: action.fileName
         },
         options.projectId,
         options.generationSessionId
       )
+      const placementFailure = buildCanvasTargetMediaPlacementFailure(
+        action.action,
+        dispatchResult.placedCanvasItems
+      )
+      if (placementFailure) {
+        return placementFailure
+      }
       return {
         content: `Placed ${action.action.replace('add_', '')} on the canvas.`,
-        canvasDispatchCount: 1,
+        canvasDispatchCount: dispatchResult.placedCanvasItems.length,
         placedCanvasItemIds: dispatchResult.placedCanvasItems.map((item) => item.id),
         placedCanvasItems: dispatchResult.placedCanvasItems,
         attachments: [
           {
-            type:
-              action.action === 'add_image'
-                ? 'image'
-                : action.action === 'add_video'
-                  ? 'video'
-                  : 'model3d',
-            url: action.sourceUrl,
+            type: mediaType,
+            url: mediaUrlSafety.url,
             fileName: action.fileName
           }
         ]
@@ -1023,10 +673,8 @@ async function presentCanvasTargetFinalResult(options: {
         options.projectId,
         options.generationSessionId
       )
-      if (dispatchResult.dispatched) {
-        canvasDispatchCount += 1
-      }
       placedCanvasItems.push(...dispatchResult.placedCanvasItems)
+      canvasDispatchCount = placedCanvasItems.length
     }
   }
 
@@ -1132,318 +780,6 @@ class CanvasTargetCancelledError extends Error {
 
 function isCanvasTargetCancelledError(error: unknown): error is CanvasTargetCancelledError {
   return error instanceof CanvasTargetCancelledError
-}
-
-function waitForExternalChatScopeReady(options: {
-  scope: string
-  timeoutMs?: number
-}): Promise<void> {
-  const requestId = `chat-scope-ready-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      window.removeEventListener('chat:scope-ready', handleReady as EventListener)
-      window.clearTimeout(timeoutId)
-    }
-
-    const handleReady = (event: Event) => {
-      const detail = (event as CustomEvent<{ scope?: string; requestId?: string }>).detail
-
-      if (detail?.scope !== options.scope || detail.requestId !== requestId) {
-        return
-      }
-
-      cleanup()
-      resolve()
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      cleanup()
-      reject(new Error('Timed out while waiting for the Agent conversation to become ready.'))
-    }, options.timeoutMs ?? 6000)
-
-    window.addEventListener('chat:scope-ready', handleReady as EventListener)
-    window.dispatchEvent(
-      new CustomEvent('chat:ping-scope-ready', {
-        detail: {
-          scope: options.scope,
-          requestId
-        }
-      })
-    )
-  })
-}
-
-async function openExternalChatSession(options: {
-  scope: string
-  title: string
-  profileId?: string | null
-  initialMessages?: ExternalChatSeedMessage[]
-  timeoutMs?: number
-}): Promise<string> {
-  await waitForExternalChatScopeReady({
-    scope: options.scope,
-    timeoutMs: options.timeoutMs
-  })
-
-  const requestId = `chat-session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      window.removeEventListener('chat:session-created', handleCreated as EventListener)
-      window.clearTimeout(timeoutId)
-    }
-
-    const handleCreated = (event: Event) => {
-      const detail = (
-        event as CustomEvent<{
-          scope?: string
-          sessionId?: string
-          requestId?: string
-        }>
-      ).detail
-
-      if (!detail?.sessionId || detail.requestId !== requestId || detail.scope !== options.scope) {
-        return
-      }
-
-      cleanup()
-      resolve(detail.sessionId)
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      cleanup()
-      reject(new Error('Timed out while creating the Agent conversation.'))
-    }, options.timeoutMs ?? 6000)
-
-    window.addEventListener('chat:session-created', handleCreated as EventListener)
-    window.dispatchEvent(
-      new CustomEvent('chat:newSession', {
-        detail: {
-          scope: options.scope,
-          title: options.title,
-          profileId: options.profileId,
-          initialMessages: options.initialMessages,
-          requestId
-        }
-      })
-    )
-  })
-}
-
-function openExternalAgentPane(options: {
-  projectId: string
-  timeoutMs?: number
-}): Promise<{ paneId: string; scope: string }> {
-  const requestId = `agent-pane-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      window.removeEventListener('agent-workspace:pane-created', handleCreated as EventListener)
-      window.clearTimeout(timeoutId)
-    }
-
-    const handleCreated = (event: Event) => {
-      const detail = (
-        event as CustomEvent<{
-          projectId?: string
-          paneId?: string
-          scope?: string
-          requestId?: string
-        }>
-      ).detail
-
-      if (
-        detail?.projectId !== options.projectId ||
-        detail?.requestId !== requestId ||
-        !detail.paneId ||
-        !detail.scope
-      ) {
-        return
-      }
-
-      cleanup()
-      resolve({
-        paneId: detail.paneId,
-        scope: detail.scope
-      })
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      cleanup()
-      reject(new Error('Timed out while creating the Agent thread.'))
-    }, options.timeoutMs ?? 6000)
-
-    window.addEventListener('agent-workspace:pane-created', handleCreated as EventListener)
-    window.dispatchEvent(
-      new CustomEvent('agent-workspace:create-pane', {
-        detail: {
-          projectId: options.projectId,
-          requestId
-        }
-      })
-    )
-  })
-}
-
-function appendMessageToExternalChat(options: {
-  scope: string
-  sessionId?: string | null
-  role: 'user' | 'assistant'
-  content?: string
-  attachments?: ChatAttachment[]
-  ocrResult?: OCRResult
-  modelName?: string
-}) {
-  if (!options.sessionId) return
-
-  window.dispatchEvent(
-    new CustomEvent('chat:append-message', {
-      detail: {
-        scope: options.scope,
-        sessionId: options.sessionId,
-        role: options.role,
-        content: options.content,
-        attachments: options.attachments,
-        ocrResult: options.ocrResult,
-        modelName: options.modelName
-      }
-    })
-  )
-}
-
-function setExternalChatSessionLoading(options: {
-  scope: string
-  sessionId?: string | null
-  loading: boolean
-}) {
-  if (!options.sessionId) return
-
-  updateScopedExternalLoadingSessionId(options.scope, options.sessionId, options.loading)
-
-  window.dispatchEvent(
-    new CustomEvent('chat:set-external-loading', {
-      detail: {
-        scope: options.scope,
-        sessionId: options.sessionId,
-        loading: options.loading
-      }
-    })
-  )
-}
-
-async function waitForCanvasTargetProgressPaint(): Promise<void> {
-  await new Promise<void>((resolve) => {
-    window.setTimeout(resolve, 0)
-  })
-  if (typeof window.requestAnimationFrame !== 'function') return
-  await new Promise<void>((resolve) => {
-    window.requestAnimationFrame(() => resolve())
-  })
-}
-
-function terminateExternalChatSession(options: { scope: string; sessionId?: string | null }) {
-  if (!options.sessionId) return
-
-  window.dispatchEvent(
-    new CustomEvent('chat:terminate-session', {
-      detail: {
-        scope: options.scope,
-        sessionId: options.sessionId
-      }
-    })
-  )
-}
-
-function requestExternalChatConfirmation(options: {
-  scope: string
-  sessionId?: string | null
-  prompt: string
-  confirmLabel: string
-  cancelLabel: string
-  confirmedUserContent: string
-  cancelledUserContent: string
-  timeoutMs?: number
-}): Promise<boolean> {
-  if (!options.sessionId) {
-    return Promise.resolve(false)
-  }
-
-  const requestId = `chat-confirmation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-
-  return new Promise((resolve) => {
-    const cleanup = () => {
-      window.removeEventListener('chat:confirmation-response', handleResponse as EventListener)
-      window.removeEventListener(
-        'chat:session-terminated',
-        handleSessionTerminated as EventListener
-      )
-      window.clearTimeout(timeoutId)
-    }
-
-    const handleResponse = (event: Event) => {
-      const detail = (
-        event as CustomEvent<{
-          scope?: string
-          sessionId?: string
-          requestId?: string
-          confirmed?: boolean
-        }>
-      ).detail
-
-      if (
-        detail?.scope !== options.scope ||
-        detail.sessionId !== options.sessionId ||
-        detail.requestId !== requestId
-      ) {
-        return
-      }
-
-      cleanup()
-      resolve(detail.confirmed === true)
-    }
-
-    const handleSessionTerminated = (event: Event) => {
-      const detail = (
-        event as CustomEvent<{
-          scope?: string
-          sessionId?: string
-        }>
-      ).detail
-
-      if (detail?.scope !== options.scope || detail.sessionId !== options.sessionId) {
-        return
-      }
-
-      cleanup()
-      resolve(false)
-    }
-
-    const timeoutId = window.setTimeout(
-      () => {
-        cleanup()
-        resolve(false)
-      },
-      options.timeoutMs ?? 30 * 60 * 1000
-    )
-
-    window.addEventListener('chat:confirmation-response', handleResponse as EventListener)
-    window.addEventListener('chat:session-terminated', handleSessionTerminated as EventListener)
-    window.dispatchEvent(
-      new CustomEvent('chat:request-confirmation', {
-        detail: {
-          scope: options.scope,
-          sessionId: options.sessionId,
-          requestId,
-          prompt: options.prompt,
-          confirmLabel: options.confirmLabel,
-          cancelLabel: options.cancelLabel,
-          confirmedUserContent: options.confirmedUserContent,
-          cancelledUserContent: options.cancelledUserContent
-        }
-      })
-    )
-  })
 }
 
 function buildCoordinatedCanvasTargetReport(
@@ -2772,10 +2108,8 @@ export function useCanvasTargetWorkflow({
             canvasId,
             `${stageId}-${String(attachmentIndex + 1)}`
           )
-          if (dispatchResult.dispatched) {
-            canvasDispatchCount += 1
-          }
           placedCanvasItems.push(...dispatchResult.placedCanvasItems)
+          canvasDispatchCount = placedCanvasItems.length
         }
 
         const mediaArtifactIds = registerStageAttachmentArtifacts(

@@ -58,7 +58,7 @@ import {
   normalizeCanvasTargetEvidenceMode,
   type CanvasTargetEvidenceMode
 } from '../canvasTargetEvidence'
-import type { CanvasTargetQAppCapability } from '../canvasTargetCapabilities'
+import type { CanvasTargetQAppCapability } from '../canvasTargetCapabilityTypes'
 
 type CanvasTargetProfileOption = {
   id: string

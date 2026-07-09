@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
+import * as canvasTargetCapabilitiesApi from './canvasTargetCapabilities'
 import {
+  CANVAS_TARGET_ACTION_PHASES,
   CANVAS_TARGET_CANVAS_ACTIONS,
   CANVAS_TARGET_CAPABILITY_CATALOG_VERSION,
+  CANVAS_TARGET_OUTPUT_TARGETS,
   formatCanvasTargetCapabilitiesForPrompt,
   normalizeCanvasTargetCapabilityActions,
   type CanvasTargetCapabilityCatalog
@@ -26,6 +29,27 @@ function createSelectedCatalog(): CanvasTargetCapabilityCatalog {
 }
 
 describe('canvasTargetCapabilities', () => {
+  it('keeps the legacy runtime barrel exports available', () => {
+    expect(Object.keys(canvasTargetCapabilitiesApi).sort()).toEqual([
+      'CANVAS_TARGET_ACTION_PHASES',
+      'CANVAS_TARGET_CANVAS_ACTIONS',
+      'CANVAS_TARGET_CAPABILITY_CATALOG_VERSION',
+      'CANVAS_TARGET_OUTPUT_TARGETS',
+      'formatCanvasTargetCapabilitiesForPrompt',
+      'loadCanvasTargetCapabilityCatalog',
+      'normalizeCanvasTargetCapabilityActions',
+      'normalizeCanvasTargetFinalPresentation'
+    ])
+    expect(CANVAS_TARGET_OUTPUT_TARGETS).toEqual(['auto', 'agent', 'canvas', 'both'])
+    expect(CANVAS_TARGET_ACTION_PHASES).toEqual([
+      'before_model_stages',
+      'before_stage',
+      'after_stage',
+      'after_model_stages',
+      'after_summary'
+    ])
+  })
+
   it('describes only the selected QuickApps and preserves user-authored constraints', () => {
     const prompt = formatCanvasTargetCapabilitiesForPrompt(createSelectedCatalog())
 
@@ -107,6 +131,41 @@ describe('canvasTargetCapabilities', () => {
           sourceStageId: 'stage-from-value'
         })
       ]
+    })
+  })
+
+  it('does not preserve untrusted model-provided media source URLs', () => {
+    const actions = normalizeCanvasTargetCapabilityActions(
+      [
+        {
+          type: 'canvas',
+          id: 'unsafe-file-media',
+          action: 'add_image',
+          phase: 'after_summary',
+          outputTarget: 'canvas',
+          sourceUrl: 'file:///Users/demo/secret.png'
+        },
+        {
+          type: 'canvas',
+          id: 'safe-blob-media',
+          action: 'add_image',
+          phase: 'after_summary',
+          outputTarget: 'canvas',
+          sourceUrl: 'blob:generated-image'
+        }
+      ],
+      {
+        quickApps: [],
+        canvasActions: CANVAS_TARGET_CANVAS_ACTIONS
+      }
+    )
+
+    expect(actions).toHaveLength(2)
+    expect(actions[0]).toMatchObject({ id: 'unsafe-file-media' })
+    expect(actions[0]).not.toHaveProperty('sourceUrl')
+    expect(actions[1]).toMatchObject({
+      id: 'safe-blob-media',
+      sourceUrl: 'blob:generated-image'
     })
   })
 
