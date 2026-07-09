@@ -23,7 +23,7 @@ import type {
   CanvasTargetOutputTarget,
   CanvasTargetQuickAppAction,
   CanvasTargetQuickAppInputAssignment
-} from './canvasTargetCapabilities'
+} from './canvasTargetCapabilityTypes'
 import type { CanvasItem } from './types'
 
 type CanvasTargetQuickAppSourceAttachments = {

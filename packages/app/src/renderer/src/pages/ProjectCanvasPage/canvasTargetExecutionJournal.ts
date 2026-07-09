@@ -2,7 +2,7 @@ import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import type {
   CanvasTargetCapabilityAction,
   CanvasTargetCapabilityActionPhase
-} from './canvasTargetCapabilities'
+} from './canvasTargetCapabilityTypes'
 
 export type CanvasTargetExecutionJournalKind =
   | 'control_plan'
