@@ -6,6 +6,33 @@ export const DEFAULT_REMOTE_LLM_SERVER_ORIGIN = 'http://localhost:3721'
 
 const isConfiguredLocalProfile = (profile: LLMAPIProfile): boolean => isRunnableProfile(profile)
 
+const buildDiscoveredModelProfileId = (profileId: string, modelName: string): string =>
+  `${profileId.trim()}::codex-model::${encodeURIComponent(modelName.trim())}`
+
+const expandDiscoveredModelProfile = (
+  profile: LLMAPIProfile,
+  discoveredModelNames: readonly string[] = []
+): LLMAPIProfile[] => {
+  if (discoveredModelNames.length === 0) {
+    return [profile]
+  }
+
+  const seen = new Set<string>()
+  return discoveredModelNames
+    .map((modelName) => modelName.trim())
+    .filter((modelName) => {
+      const key = modelName.toLowerCase()
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .map((modelName) => ({
+      ...profile,
+      id: buildDiscoveredModelProfileId(profile.id, modelName),
+      model_name: modelName
+    }))
+}
+
 export const getRemoteLlmServerOrigin = (config?: Config): string =>
   config?.remote_llm_server_config?.server_origin || DEFAULT_REMOTE_LLM_SERVER_ORIGIN
 
@@ -199,13 +226,16 @@ export const buildRemoteLlmServerErrorMessage = (
 
 export const buildChatAvailableProfiles = (
   config: Config | undefined,
-  remoteProfiles: LLMAPIProfile[]
+  remoteProfiles: LLMAPIProfile[],
+  discoveredModelsByProfileId: Readonly<Record<string, readonly string[]>> = {}
 ): LLMAPIProfile[] => {
   if (config?.use_remote_llm) {
     return remoteProfiles
   }
 
-  return config?.llm_config?.api_profiles?.filter(isConfiguredLocalProfile) || []
+  return (config?.llm_config?.api_profiles?.filter(isConfiguredLocalProfile) || []).flatMap(
+    (profile) => expandDiscoveredModelProfile(profile, discoveredModelsByProfileId[profile.id])
+  )
 }
 
 export const resolveAvailableChatProfileId = (
@@ -225,7 +255,14 @@ export const resolveAvailableChatProfileId = (
     return profileId
   }
 
-  return availableProfiles.some((profile) => profile.id === baseProfileId) ? baseProfileId : null
+  const baseProfile = availableProfiles.find((profile) => profile.id === baseProfileId)
+  if (baseProfile) {
+    return baseProfile.id
+  }
+
+  return (
+    availableProfiles.find((profile) => getBaseProfileId(profile.id) === baseProfileId)?.id || null
+  )
 }
 
 export const getProfileDisplayName = (

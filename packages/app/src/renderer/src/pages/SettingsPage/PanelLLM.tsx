@@ -634,6 +634,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
         apiKeyPlaceholder,
         baseUrlPlaceholder,
         modelNamePlaceholder,
+        showModelNameInput: true,
         showApiKeyInput: baseShowApiKeyInput,
         showBackupKeys: baseShowBackupKeys,
         showBaseUrlInput: baseShowBaseUrlInput,
@@ -646,12 +647,14 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
       apiKeyPlaceholder,
       baseUrlPlaceholder,
       modelNamePlaceholder,
+      showModelNameInput: true,
       showApiKeyInput: baseShowApiKeyInput,
       showBackupKeys: baseShowBackupKeys,
       showBaseUrlInput: baseShowBaseUrlInput,
       showKlingSecretInput: baseShowKlingSecretInput
     })
   )
+  const showModelNameInput = agentProfileUi.showModelNameInput ?? true
   const showApiKeyInput = agentProfileUi.showApiKeyInput ?? baseShowApiKeyInput
   const showKlingSecretInput = agentProfileUi.showKlingSecretInput ?? baseShowKlingSecretInput
   const showBackupKeys = agentProfileUi.showBackupKeys ?? baseShowBackupKeys
@@ -975,13 +978,15 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
             />
           )}
 
-        <InputText
-          label={effectiveModelNameLabel}
-          value={profile.model_name}
-          onChange={commitModelName}
-          placeholder={effectiveModelNamePlaceholder}
-          shrinkLabel
-        />
+        {showModelNameInput && (
+          <InputText
+            label={effectiveModelNameLabel}
+            value={profile.model_name}
+            onChange={commitModelName}
+            placeholder={effectiveModelNamePlaceholder}
+            shrinkLabel
+          />
+        )}
 
         {isLocalCallType && (
           <InputPath

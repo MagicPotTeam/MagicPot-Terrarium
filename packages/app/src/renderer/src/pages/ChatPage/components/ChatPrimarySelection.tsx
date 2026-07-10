@@ -64,7 +64,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   const displayLabel = selectedProfile ? selectedProfile.model_name : 'No model'
   const displayReasoningLabel = selectedReasoningEffort
     ? getReasoningEffortLabel(selectedReasoningEffort)
-    : '\u9ed8\u8ba4'
+    : 'Default'
   const buildSelectorButtonSx = (theme: Theme) =>
     compact
       ? {
@@ -274,7 +274,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
       >
         <Box sx={{ px: 2, py: 1 }}>
           <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600 }}>
-            {'\u63a8\u7406\u5f3a\u5ea6'}
+            Reasoning Effort
           </Typography>
         </Box>
         {availableReasoningEfforts.map((effort) => {
