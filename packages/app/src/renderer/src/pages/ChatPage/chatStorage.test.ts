@@ -13,7 +13,13 @@ class FakeIDBObjectStore {
   constructor(
     private stores: StoreMap,
     private storeName: string,
-    private state: { failGetAllOnce: boolean; getAllCount: number; getCount: number }
+    private state: {
+      failGetAllOnce: boolean
+      getAllCount: number
+      getCount: number
+      putCount: number
+      clearCount: number
+    }
   ) {}
 
   get(key: string): {
@@ -75,14 +81,17 @@ class FakeIDBObjectStore {
   }
 
   put(value: unknown): void {
-    const key = (value as { id?: string }).id
+    const record = value as { storageKey?: string; id?: string }
+    const key = record.storageKey || record.id
     if (!key) {
       throw new Error('Missing fake IndexedDB keyPath value')
     }
+    this.state.putCount += 1
     this.stores.get(this.storeName)?.set(key, cloneValue(value))
   }
 
   clear(): void {
+    this.state.clearCount += 1
     this.stores.get(this.storeName)?.clear()
   }
 
@@ -98,7 +107,13 @@ class FakeIDBTransaction {
 
   constructor(
     private stores: StoreMap,
-    private state: { failGetAllOnce: boolean; getAllCount: number; getCount: number }
+    private state: {
+      failGetAllOnce: boolean
+      getAllCount: number
+      getCount: number
+      putCount: number
+      clearCount: number
+    }
   ) {
     setTimeout(() => {
       this.oncomplete?.()
@@ -116,11 +131,18 @@ class FakeIDBTransaction {
 
 class FakeIDBDatabase {
   onclose: (() => void) | null = null
+  onversionchange: (() => void) | null = null
   objectStoreNames: { contains: (name: string) => boolean }
 
   constructor(
     private stores: StoreMap,
-    private state: { failGetAllOnce: boolean; getAllCount: number; getCount: number }
+    private state: {
+      failGetAllOnce: boolean
+      getAllCount: number
+      getCount: number
+      putCount: number
+      clearCount: number
+    }
   ) {
     this.objectStoreNames = {
       contains: (name: string) => this.stores.has(name)
@@ -144,7 +166,13 @@ class FakeIDBDatabase {
 }
 
 function createFakeIndexedDb() {
-  const state = { failGetAllOnce: true, getAllCount: 0, getCount: 0 }
+  const state = {
+    failGetAllOnce: true,
+    getAllCount: 0,
+    getCount: 0,
+    putCount: 0,
+    clearCount: 0
+  }
   const deletedNames: string[] = []
   let stores: StoreMap = new Map()
   let database: FakeIDBDatabase | null = null
@@ -160,6 +188,7 @@ function createFakeIndexedDb() {
           onupgradeneeded?: (event: { target: { result: FakeIDBDatabase } }) => void
           onsuccess?: () => void
           onerror?: () => void
+          onblocked?: () => void
         } = {}
 
         setTimeout(() => {
@@ -263,6 +292,164 @@ describe('chatStorage', () => {
     await expect(storage.loadSessionFromDB('missing-session', 'workspace-a')).resolves.toBeNull()
     expect(fakeIndexedDb.state.getCount).toBe(2)
     expect(fakeIndexedDb.state.getAllCount).toBe(0)
+  })
+
+  it('persists scoped delete tombstones across remounts', async () => {
+    const storage = await import('./chatStorage')
+
+    storage.setSessionDeleteTombstone('session-a', 'workspace-a')
+    storage.setSessionDeleteTombstone('session-b', 'workspace-b')
+    localStorage.setItem('magicpot-chat-delete-tombstone:%E0%A4%A:broken', '1')
+
+    expect(storage.readSessionDeleteTombstones()).toEqual(
+      expect.arrayContaining([
+        { scope: 'workspace-a', sessionId: 'session-a' },
+        { scope: 'workspace-b', sessionId: 'session-b' }
+      ])
+    )
+
+    storage.setSessionDeleteTombstone('session-a', 'workspace-a', false)
+    expect(storage.readSessionDeleteTombstones()).toEqual([
+      { scope: 'workspace-b', sessionId: 'session-b' }
+    ])
+    storage.setSessionDeleteTombstone('session-b', 'workspace-b', false)
+    localStorage.removeItem('magicpot-chat-delete-tombstone:%E0%A4%A:broken')
+    expect(storage.readSessionDeleteTombstones()).toEqual([])
+  })
+
+  it('debounces targeted session upserts without scanning or clearing the store', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+
+    await storage.saveSessionToDB({ id: 'session-a', title: 'A', messages: [] }, 'workspace-a')
+    await storage.saveSessionToDB({ id: 'session-b', title: 'B', messages: [] }, 'workspace-a')
+    await storage.saveSessionToDB(
+      { id: 'session-other', title: 'Other', messages: [] },
+      'workspace-b'
+    )
+    const baselinePutCount = fakeIndexedDb.state.putCount
+
+    storage.debouncedSaveSessions(
+      [{ id: 'session-a', title: 'A updated', messages: [] }],
+      1,
+      'workspace-a'
+    )
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    expect(fakeIndexedDb.state.getAllCount).toBe(0)
+    expect(fakeIndexedDb.state.clearCount).toBe(0)
+    expect(fakeIndexedDb.state.putCount - baselinePutCount).toBe(1)
+    await expect(storage.loadSessionFromDB('session-a', 'workspace-a')).resolves.toMatchObject({
+      title: 'A updated'
+    })
+    await expect(storage.loadSessionFromDB('session-b', 'workspace-a')).resolves.toMatchObject({
+      title: 'B'
+    })
+    await expect(storage.loadSessionFromDB('session-other', 'workspace-b')).resolves.toMatchObject({
+      title: 'Other'
+    })
+  })
+
+  it('does not resurrect a session deleted before its debounced save fires', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+
+    storage.debouncedSaveSessions(
+      [{ id: 'session-delete', title: 'pending', messages: [] }],
+      10,
+      'workspace-a'
+    )
+    await storage.deleteSessionFromDB('session-delete', 'workspace-a')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    await expect(storage.loadSessionFromDB('session-delete', 'workspace-a')).resolves.toBeNull()
+    expect(fakeIndexedDb.state.putCount).toBe(0)
+  })
+
+  it('lets an immediate save supersede an older debounced snapshot', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+
+    storage.debouncedSaveSessions(
+      [{ id: 'session-order', title: 'stale', messages: [] }],
+      10,
+      'workspace-a'
+    )
+    await storage.saveSessionToDB(
+      { id: 'session-order', title: 'current', messages: [] },
+      'workspace-a'
+    )
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    await expect(storage.loadSessionFromDB('session-order', 'workspace-a')).resolves.toMatchObject({
+      title: 'current'
+    })
+    expect(fakeIndexedDb.state.putCount).toBe(1)
+  })
+
+  it('keeps sessions with the same id isolated by storage scope', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+
+    await storage.saveSessionToDB(
+      { id: 'shared-session', title: 'Workspace A', messages: [] },
+      'workspace-a'
+    )
+    await storage.saveSessionToDB(
+      { id: 'shared-session', title: 'Workspace B', messages: [] },
+      'workspace-b'
+    )
+
+    await expect(storage.loadSessionFromDB('shared-session', 'workspace-a')).resolves.toMatchObject(
+      {
+        title: 'Workspace A'
+      }
+    )
+    await expect(storage.loadSessionFromDB('shared-session', 'workspace-b')).resolves.toMatchObject(
+      {
+        title: 'Workspace B'
+      }
+    )
+
+    await storage.deleteSessionFromDB('shared-session', 'workspace-b')
+    await expect(storage.loadSessionFromDB('shared-session', 'workspace-a')).resolves.toMatchObject(
+      {
+        title: 'Workspace A'
+      }
+    )
+    await expect(storage.loadSessionFromDB('shared-session', 'workspace-b')).resolves.toBeNull()
+  })
+
+  it('coalesces repeated debounced updates for the same session to the latest snapshot', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+
+    storage.debouncedSaveSessions(
+      [{ id: 'session-a', title: 'first', messages: [] }],
+      5,
+      'workspace-a'
+    )
+    storage.debouncedSaveSessions(
+      [{ id: 'session-a', title: 'latest', messages: [] }],
+      5,
+      'workspace-a'
+    )
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(fakeIndexedDb.state.putCount).toBe(1)
+    await expect(storage.loadSessionFromDB('session-a', 'workspace-a')).resolves.toMatchObject({
+      title: 'latest'
+    })
   })
 
   it('preserves context compression metadata and drops legacy compact activity logs when saving and loading sessions', async () => {

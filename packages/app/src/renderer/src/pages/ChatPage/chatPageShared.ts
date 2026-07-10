@@ -298,6 +298,11 @@ export const normalizeChatProfileIdForStorage = (
   const normalizedProfileId = String(profileId || '').trim()
   if (!normalizedProfileId) return undefined
 
+  const segments = normalizedProfileId.split('::')
+  if (segments.length === 3 && segments[0] && segments[1] === 'codex-model' && segments[2]) {
+    return normalizedProfileId
+  }
+
   return getBaseProfileId(normalizedProfileId) ?? undefined
 }
 

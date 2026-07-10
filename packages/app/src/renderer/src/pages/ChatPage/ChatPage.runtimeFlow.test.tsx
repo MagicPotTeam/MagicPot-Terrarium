@@ -261,16 +261,38 @@ vi.mock('./chatStorage', () => ({
     hoisted.draftBackups.value = nextBackups
   }),
   migrateFromLocalStorage: vi.fn(async () => null),
-  debouncedSaveAllSessions: vi.fn((sessions: ChatSession[]) => {
-    const nextSessions = cloneValue(sessions)
-    if (hoisted.debouncedSaveAllSessionsGate.value) {
-      void hoisted.debouncedSaveAllSessionsGate.value.then(() => {
+  readSessionDeleteTombstones: vi.fn(() => []),
+  setSessionDeleteTombstone: vi.fn(),
+  cancelDebouncedSessionSave: vi.fn(),
+  debouncedSaveSessions: vi.fn(
+    (
+      sessions: ChatSession[],
+      _delayMs: number,
+      _scope: string,
+      options?: { onSuccess?: (sessions: ChatSession[]) => void }
+    ) => {
+      const changedSessions = cloneValue(sessions)
+      const persistChangedSessions = () => {
+        const nextSessions = cloneValue(hoisted.storedSessions.value)
+        for (const session of changedSessions) {
+          const existingIndex = nextSessions.findIndex((item) => item.id === session.id)
+          if (existingIndex >= 0) {
+            nextSessions[existingIndex] = session
+          } else {
+            nextSessions.unshift(session)
+          }
+        }
         hoisted.storedSessions.value = nextSessions
-      })
-      return
+        options?.onSuccess?.(sessions)
+      }
+
+      if (hoisted.debouncedSaveAllSessionsGate.value) {
+        void hoisted.debouncedSaveAllSessionsGate.value.then(persistChangedSessions)
+        return
+      }
+      persistChangedSessions()
     }
-    hoisted.storedSessions.value = nextSessions
-  })
+  )
 }))
 
 vi.mock('./chatRequestUtils', () => ({
