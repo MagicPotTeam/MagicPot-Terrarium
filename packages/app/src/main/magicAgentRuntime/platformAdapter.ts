@@ -31,6 +31,17 @@ import {
 } from './tools'
 import { isMagicAgentPlatformDeniedToolName } from './toolPolicy'
 
+export type MagicAgentPlatformExecutionOptions = {
+  signal?: AbortSignal
+}
+
+class MagicAgentPlatformTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`MagicAgent platform run timed out after ${timeoutMs}ms.`)
+    this.name = 'MagicAgentPlatformTimeoutError'
+  }
+}
+
 export type MagicAgentPlatformAdapterDeps = {
   chatService?: Pick<LLMProxySvc, 'chat'>
   assistantRuntime?: Pick<AssistantRuntime, 'listTools' | 'callTool' | 'handleMessage'>
@@ -390,7 +401,10 @@ export class MagicAgentPlatformAdapter {
     return tools
   }
 
-  async callTool(req: MagicAgentPlatformToolCallReq): Promise<MagicAgentPlatformToolCallResp> {
+  async callTool(
+    req: MagicAgentPlatformToolCallReq,
+    options: MagicAgentPlatformExecutionOptions = {}
+  ): Promise<MagicAgentPlatformToolCallResp> {
     const name = normalizeMagicPotToolName(req.name)
     if (!name) {
       return {
@@ -433,7 +447,7 @@ export class MagicAgentPlatformAdapter {
       if (source === 'creative') {
         const route = requirePlatformRoute(req.route, 'creative tool call')
         return creativeResultToPlatformToolResult(
-          await this.invokeCreativeToolViaKernel(name, args, undefined, route, req.metadata)
+          await this.invokeCreativeToolViaKernel(name, args, options.signal, route, req.metadata)
         )
       }
 
@@ -451,7 +465,10 @@ export class MagicAgentPlatformAdapter {
     }
   }
 
-  async runAgent(req: MagicAgentPlatformRunReq): Promise<MagicAgentPlatformRunResp> {
+  async runAgent(
+    req: MagicAgentPlatformRunReq,
+    options: MagicAgentPlatformExecutionOptions = {}
+  ): Promise<MagicAgentPlatformRunResp> {
     this.refreshRuntimeTools()
     const route = requirePlatformRoute(req.route, 'agent run')
     const agentId = normalizeMagicPotToolName(req.agentId) || 'magicpot.default.chat'
@@ -461,6 +478,25 @@ export class MagicAgentPlatformAdapter {
       agentDefinition?.toolNames
     )
     const startedAt = Date.now()
+    const requestedTimeoutMs = Number(req.timeoutMs)
+    const timeoutMs =
+      Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+        ? Math.max(1, Math.floor(requestedTimeoutMs))
+        : undefined
+    const executionController = new AbortController()
+    const forwardExternalAbort = (): void => executionController.abort(options.signal?.reason)
+    if (options.signal?.aborted) {
+      forwardExternalAbort()
+    } else {
+      options.signal?.addEventListener('abort', forwardExternalAbort, { once: true })
+    }
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+    if (timeoutMs) {
+      timeoutHandle = setTimeout(
+        () => executionController.abort(new MagicAgentPlatformTimeoutError(timeoutMs)),
+        timeoutMs
+      )
+    }
     const session = this.agentKernel.registerSession(route, { source: 'kernel' })
     const kernelRun = this.agentKernel.createMasterRun({
       session,
@@ -481,12 +517,13 @@ export class MagicAgentPlatformAdapter {
     })
 
     try {
-      const assistantResult = await this.assistantRuntime.handleMessage({
+      const assistantPromise = this.assistantRuntime.handleMessage({
         route,
         text: req.text,
         ...(req.attachments?.length ? { attachments: req.attachments } : {}),
         ...(req.systemPrompt ? { systemPrompt: req.systemPrompt } : {}),
         ...(req.profileId ? { profileId: req.profileId } : {}),
+        signal: executionController.signal,
         execution: {
           mode: 'inherit',
           allowedToolNames: effectiveAllowedToolNames,
@@ -496,9 +533,28 @@ export class MagicAgentPlatformAdapter {
             `magicagent:${agentId}`
         }
       })
+      const assistantResult = timeoutMs
+        ? await Promise.race([
+            assistantPromise,
+            new Promise<never>((_resolve, reject) => {
+              const rejectOnAbort = (): void => {
+                if (executionController.signal.reason instanceof MagicAgentPlatformTimeoutError) {
+                  reject(executionController.signal.reason)
+                }
+              }
+              if (executionController.signal.aborted) {
+                rejectOnAbort()
+              } else {
+                executionController.signal.addEventListener('abort', rejectOnAbort, { once: true })
+              }
+            })
+          ])
+        : await assistantPromise
       const finishedAt = Date.now()
-      const status =
-        assistantResult.status === 'failed'
+      const timedOut = executionController.signal.reason instanceof MagicAgentPlatformTimeoutError
+      const status = timedOut
+        ? 'timeout'
+        : assistantResult.status === 'failed'
           ? 'failed'
           : assistantResult.status === 'cancelled'
             ? 'aborted'
@@ -569,9 +625,49 @@ export class MagicAgentPlatformAdapter {
           }
         })),
         startedAt,
-        finishedAt
+        finishedAt,
+        ...(timedOut ? { error: executionController.signal.reason.message } : {})
       }
     } catch (error) {
+      if (executionController.signal.reason instanceof MagicAgentPlatformTimeoutError) {
+        const timeoutError = executionController.signal.reason
+        const finishedAt = Date.now()
+        this.agentKernel.updateRun(kernelRun.runId, {
+          status: 'failed',
+          endedAt: finishedAt,
+          metadata: {
+            ...(kernelRun.metadata || {}),
+            error: timeoutError.message,
+            magicAgentStatus: 'timeout',
+            executionBoundary: 'assistantRuntime'
+          }
+        })
+        this.agentKernel.recordEvent({
+          runId: kernelRun.runId,
+          sessionKey: session.sessionKey,
+          type: 'run.failed',
+          message: timeoutError.message,
+          metadata: {
+            source: 'magicAgentPlatform',
+            executionBoundary: 'assistantRuntime',
+            agentId,
+            magicAgentStatus: 'timeout',
+            timeoutMs
+          }
+        })
+        return {
+          runId: kernelRun.runId,
+          agentId,
+          status: 'timeout',
+          content: '',
+          messages: [{ role: 'user', content: req.text }],
+          toolCalls: [],
+          events: [],
+          startedAt,
+          finishedAt,
+          error: timeoutError.message
+        }
+      }
       const message = error instanceof Error ? error.message : String(error)
       this.agentKernel.updateRun(kernelRun.runId, {
         status: 'failed',
@@ -594,6 +690,9 @@ export class MagicAgentPlatformAdapter {
         }
       })
       throw error
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle)
+      options.signal?.removeEventListener('abort', forwardExternalAbort)
     }
   }
 

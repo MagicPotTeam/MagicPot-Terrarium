@@ -765,6 +765,46 @@ describe('AssistantRuntime', () => {
     expect(chat).toHaveBeenCalledTimes(1)
   })
 
+  it('discards a successful late result after an external abort signal', async () => {
+    let resolveChat: ((value: LLMChatResp) => void) | undefined
+    const chat = vi.fn(
+      async (): Promise<LLMChatResp> =>
+        new Promise<LLMChatResp>((resolve) => {
+          resolveChat = resolve
+        })
+    )
+    const runtime = new AssistantRuntime({
+      chatService: { chat },
+      sessionStore: store,
+      configProvider: createConfig
+    })
+    const controller = new AbortController()
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'external-cancel-1' }
+    const resultPromise = runtime.handleMessage({
+      route,
+      text: 'ignore a late reply',
+      signal: controller.signal
+    })
+
+    await flushQueue()
+    controller.abort('External graph cancellation.')
+    resolveChat?.({ content: 'late reply' })
+    const result = await resultPromise
+
+    expect(result.status).toBe('cancelled')
+    expect(result.reply.content).toBe(
+      'The task was cancelled before the final result was delivered.'
+    )
+    const session = await store.getSession(route)
+    expect(session?.runs.at(-1)).toMatchObject({
+      status: 'cancelled',
+      toolCalls: [],
+      artifactIds: []
+    })
+    expect(session?.runs.at(-1)?.responseText).toBeUndefined()
+    expect(session?.messages.some((message) => message.content === 'late reply')).toBe(false)
+  })
+
   it('returns a cancelled result when direct /tool execution is aborted', async () => {
     class SlowToolRegistry extends AssistantToolRegistry {
       override listTools() {

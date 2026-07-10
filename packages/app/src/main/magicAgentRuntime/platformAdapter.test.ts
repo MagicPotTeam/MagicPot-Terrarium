@@ -260,6 +260,109 @@ describe('MagicAgentPlatformAdapter', () => {
     )
   })
 
+  it('forwards graph cancellation signals into AssistantRuntime agent execution', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [creativeAdapter] })
+    })
+    const controller = new AbortController()
+
+    let finishRun: ((value: AssistantRuntimeResult) => void) | undefined
+    assistantRuntime.handleMessage.mockImplementation(
+      async () =>
+        new Promise<AssistantRuntimeResult>((resolve) => {
+          finishRun = resolve
+        })
+    )
+    const runPromise = adapter.runAgent(
+      {
+        agentId: 'magicpot.default.chat',
+        text: 'cancel-aware run',
+        route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+      },
+      { signal: controller.signal }
+    )
+    await Promise.resolve()
+
+    const forwardedSignal = assistantRuntime.handleMessage.mock.calls[0]?.[0].signal
+    expect(forwardedSignal).toBeInstanceOf(AbortSignal)
+    expect(forwardedSignal).not.toBe(controller.signal)
+    controller.abort('graph cancelled')
+    expect(forwardedSignal?.aborted).toBe(true)
+    expect(forwardedSignal?.reason).toBe('graph cancelled')
+    finishRun?.({
+      runId: 'assistant-run-cancelled',
+      sessionKey: 'generic:dm:demo',
+      historySize: 1,
+      status: 'cancelled',
+      reply: { content: 'cancelled' },
+      events: []
+    })
+    await expect(runPromise).resolves.toMatchObject({ status: 'aborted' })
+  })
+
+  it('enforces platform run timeout requests and reports timeout status', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    assistantRuntime.handleMessage.mockImplementation(
+      async () => new Promise<AssistantRuntimeResult>(() => undefined)
+    )
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [creativeAdapter] })
+    })
+
+    await expect(
+      adapter.runAgent({
+        agentId: 'magicpot.default.chat',
+        text: 'time out',
+        timeoutMs: 15,
+        route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+      })
+    ).resolves.toMatchObject({
+      status: 'timeout',
+      error: expect.stringContaining('timed out after 15ms')
+    })
+    expect(assistantRuntime.handleMessage.mock.calls[0]?.[0].signal?.aborted).toBe(true)
+  })
+
+  it('forwards graph cancellation signals into creative tool execution', async () => {
+    let receivedSignal: AbortSignal | undefined
+    const signalAwareAdapter: MagicAgentCreativeToolAdapter = {
+      definitions: creativeAdapter.definitions,
+      callTool: async (name, args, context) => {
+        receivedSignal = context?.signal
+        return {
+          ok: true,
+          toolName: name,
+          category: 'image',
+          status: 'available',
+          data: { args }
+        }
+      }
+    }
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime: createAssistantRuntime(),
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [signalAwareAdapter] })
+    })
+    const controller = new AbortController()
+
+    await adapter.callTool(
+      {
+        source: 'creative',
+        name: 'creative.echo',
+        args: { prompt: 'paint' },
+        route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+      },
+      { signal: controller.signal }
+    )
+
+    expect(receivedSignal).toBe(controller.signal)
+  })
+
   it('defaults route-scoped agent runs to no assistant tools when allowedToolNames is omitted', async () => {
     const assistantRuntime = createAssistantRuntime()
     const adapter = new MagicAgentPlatformAdapter({

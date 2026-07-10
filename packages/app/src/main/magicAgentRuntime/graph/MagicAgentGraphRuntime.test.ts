@@ -7,6 +7,7 @@ import { MagicAgentGraphRunStore } from './graphRunStore'
 const testRoute = { channel: 'generic', scopeType: 'dm', scopeId: 'graph-test' } as const
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -385,9 +386,15 @@ describe('MagicAgentGraphRuntime', () => {
     expect(result.status).toBe('completed')
     expect(result.outputs.map((output) => output.outputId)).toEqual(['output-a-doc'])
     expect(runAgent).toHaveBeenCalledTimes(1)
-    expect(runAgent).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'planner-a' }))
+    expect(runAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'planner-a' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
     expect(callTool).toHaveBeenCalledTimes(1)
-    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({ name: 'graph.formata' }))
+    expect(callTool).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'graph.formata' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
     expect(result.channels.map((channel) => channel.channelId)).toEqual([
       'planner-a-to-tool-a',
       'tool-a-to-output-a'
@@ -543,13 +550,16 @@ describe('MagicAgentGraphRuntime', () => {
         text: 'format this',
         route: testRoute,
         allowedToolNames: ['graph.format'],
+        timeoutMs: expect.any(Number),
         metadata: expect.objectContaining({
           graphId: 'test.executable-tool',
           graphRunId: 'run-tool-allowed',
           nodeId: 'planner',
-          sessionKey: 'generic:dm:graph-test'
+          sessionKey: 'generic:dm:graph-test',
+          runtimeBudget: expect.objectContaining({ timeoutMs: expect.any(Number) })
         })
-      })
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     )
     expect(callTool).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -560,9 +570,11 @@ describe('MagicAgentGraphRuntime', () => {
           graphId: 'test.executable-tool',
           graphRunId: 'run-tool-allowed',
           nodeId: 'formatter',
-          allowedToolNames: ['graph.format']
+          allowedToolNames: ['graph.format'],
+          runtimeBudget: expect.objectContaining({ timeoutMs: expect.any(Number) })
         })
-      })
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     )
     expect(result.nodes?.map((node) => [node.nodeId, node.status])).toEqual([
       ['planner', 'completed'],
@@ -794,6 +806,160 @@ describe('MagicAgentGraphRuntime', () => {
       status: 'cancelled',
       error: 'Stop requested.'
     })
+  })
+
+  it('fails a graph when an agent node exceeds the node duration budget', async () => {
+    let receivedSignal: AbortSignal | undefined
+    const runAgent = vi.fn(
+      async (_request, options) =>
+        new Promise<never>((_resolve, reject) => {
+          receivedSignal = options?.signal
+          options?.signal.addEventListener(
+            'abort',
+            () => reject(options.signal.reason || new Error('aborted')),
+            { once: true }
+          )
+        })
+    )
+    const runtime = new MagicAgentGraphRuntime([], {
+      runAgent,
+      policy: { maxNodeDurationMs: 15, maxRunDurationMs: 1_000 }
+    })
+    runtime.create({ graph: createTestGraph('test.node-timeout'), route: testRoute })
+
+    const result = await runtime.run({
+      graphId: 'test.node-timeout',
+      input: 'Wait forever.',
+      route: testRoute,
+      runId: 'run-node-timeout'
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain('node "planner" timed out')
+    expect(receivedSignal?.aborted).toBe(true)
+    expect(result.nodes?.find((node) => node.nodeId === 'planner')).toMatchObject({
+      status: 'failed',
+      metadata: expect.objectContaining({ timedOut: true, timeoutScope: 'node' })
+    })
+    expect(result.events?.find((event) => event.type === 'graph.failed')?.metadata).toMatchObject({
+      timedOut: true,
+      timeoutScope: 'node'
+    })
+    expect(result.nodes?.filter((node) => node.status === 'pending')).toEqual([])
+    expect(result.nodes?.find((node) => node.nodeId === 'writer')).toMatchObject({
+      status: 'skipped',
+      metadata: expect.objectContaining({ terminationStatus: 'failed', timedOut: true })
+    })
+  })
+
+  it('fails a graph when the total run duration budget is exhausted', async () => {
+    const runAgent = vi.fn(
+      async (_request, options) =>
+        new Promise<never>((_resolve, reject) => {
+          options?.signal.addEventListener(
+            'abort',
+            () => reject(options.signal.reason || new Error('aborted')),
+            { once: true }
+          )
+        })
+    )
+    const runtime = new MagicAgentGraphRuntime([], {
+      runAgent,
+      policy: { maxNodeDurationMs: 1_000, maxRunDurationMs: 15 }
+    })
+    runtime.create({ graph: createTestGraph('test.run-timeout'), route: testRoute })
+
+    const result = await runtime.run({
+      graphId: 'test.run-timeout',
+      input: 'Use the whole run budget.',
+      route: testRoute,
+      runId: 'run-total-timeout'
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain('run timed out')
+    expect(result.events?.find((event) => event.type === 'graph.failed')?.metadata).toMatchObject({
+      timedOut: true,
+      timeoutScope: 'run',
+      runtimeBudget: expect.objectContaining({ maxRunDurationMs: 15 })
+    })
+    expect(runtime.cancel('run-total-timeout', 'generic:dm:graph-test', 'Too late.')).toMatchObject(
+      {
+        runId: 'run-total-timeout',
+        cancelled: false,
+        status: 'failed'
+      }
+    )
+  })
+
+  it('keeps a timed-out run terminal when the underlying agent resolves later', async () => {
+    let resolveAgent:
+      | ((value: {
+          runId: string
+          agentId: string
+          status: 'completed'
+          content: string
+          messages: Array<{ role: 'assistant'; content: string }>
+          toolCalls: []
+          events: []
+          startedAt: number
+          finishedAt: number
+        }) => void)
+      | undefined
+    const runAgent = vi.fn(
+      () =>
+        new Promise<{
+          runId: string
+          agentId: string
+          status: 'completed'
+          content: string
+          messages: Array<{ role: 'assistant'; content: string }>
+          toolCalls: []
+          events: []
+          startedAt: number
+          finishedAt: number
+        }>((resolve) => {
+          resolveAgent = resolve
+        })
+    )
+    const runtime = new MagicAgentGraphRuntime([], {
+      runAgent,
+      policy: { maxNodeDurationMs: 15, maxRunDurationMs: 1_000 }
+    })
+    runtime.create({ graph: createTestGraph('test.late-agent-result'), route: testRoute })
+
+    const result = await runtime.run({
+      graphId: 'test.late-agent-result',
+      input: 'Do not accept a late result.',
+      route: testRoute,
+      runId: 'run-late-agent-result'
+    })
+    expect(result.status).toBe('failed')
+
+    resolveAgent?.({
+      runId: 'late-agent-run',
+      agentId: 'planner',
+      status: 'completed',
+      content: 'late content',
+      messages: [{ role: 'assistant', content: 'late content' }],
+      toolCalls: [],
+      events: [],
+      startedAt: 1,
+      finishedAt: 2
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(runtime.getRun('run-late-agent-result', 'generic:dm:graph-test')).toMatchObject({
+      status: 'failed',
+      outputs: [],
+      channels: []
+    })
+    expect(
+      runtime
+        .getRun('run-late-agent-result', 'generic:dm:graph-test')
+        ?.nodes?.find((node) => node.nodeId === 'planner')
+    ).toMatchObject({ status: 'failed' })
   })
 
   it('rejects invalid node, channel, and output wiring', () => {

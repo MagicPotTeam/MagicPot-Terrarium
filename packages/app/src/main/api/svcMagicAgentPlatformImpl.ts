@@ -277,8 +277,8 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
       } else {
         const adapter = this.getAdapter()
         this.graphRuntimeInstance = getMagicAgentGraphRuntime({
-          runAgent: (request) => adapter.runAgent(request),
-          callTool: (request) => adapter.callTool(request),
+          runAgent: (request, options) => adapter.runAgent(request, options),
+          callTool: (request, options) => adapter.callTool(request, options),
           runStore: this.getRunStore()
         })
       }

@@ -33,6 +33,7 @@ export type AssistantInboundMessage = {
   resumeFromRunId?: string
   resetHistory?: boolean
   taskGroup?: Partial<AssistantTaskGroupState> | null
+  signal?: AbortSignal
   onEvent?: (event: AssistantRunEvent) => void | Promise<void>
 }
 

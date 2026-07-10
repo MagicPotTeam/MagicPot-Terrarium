@@ -44,16 +44,40 @@ export type MagicAgentGraphRuntimePolicy = {
   maxConditionPatternChars: number
   maxSubscribersPerRun: number
   maxSubscribersTotal: number
+  /** Maximum wall-clock duration for an entire graph run. Defaults when omitted. */
+  maxRunDurationMs?: number
+  /** Maximum wall-clock duration for one graph node. Defaults when omitted. */
+  maxNodeDurationMs?: number
+}
+
+type NormalizedMagicAgentGraphRuntimePolicy = Omit<
+  MagicAgentGraphRuntimePolicy,
+  'maxRunDurationMs' | 'maxNodeDurationMs'
+> & {
+  maxRunDurationMs: number
+  maxNodeDurationMs: number
+}
+
+export type MagicAgentGraphRuntimeExecutionOptions = {
+  signal: AbortSignal
 }
 
 export type MagicAgentGraphRuntimeDeps = {
-  runAgent?: (request: MagicAgentPlatformRunReq) => Promise<MagicAgentPlatformRunResp>
-  callTool?: (request: MagicAgentPlatformToolCallReq) => Promise<MagicAgentPlatformToolCallResp>
+  runAgent?: (
+    request: MagicAgentPlatformRunReq,
+    options?: MagicAgentGraphRuntimeExecutionOptions
+  ) => Promise<MagicAgentPlatformRunResp>
+  callTool?: (
+    request: MagicAgentPlatformToolCallReq,
+    options?: MagicAgentGraphRuntimeExecutionOptions
+  ) => Promise<MagicAgentPlatformToolCallResp>
   runStore?: MagicAgentGraphRunStore
   policy?: Partial<MagicAgentGraphRuntimePolicy>
 }
 
-const DEFAULT_GRAPH_RUNTIME_POLICY: MagicAgentGraphRuntimePolicy = {
+const DEFAULT_GRAPH_RUNTIME_POLICY: NormalizedMagicAgentGraphRuntimePolicy = {
+  maxRunDurationMs: 10 * 60_000,
+  maxNodeDurationMs: 2 * 60_000,
   maxNodes: 100,
   maxChannels: 200,
   maxOutputs: 50,
@@ -74,9 +98,17 @@ const normalizePositiveInteger = (value: unknown, fallback: number): number => {
 
 const normalizePolicy = (
   overrides?: Partial<MagicAgentGraphRuntimePolicy>
-): MagicAgentGraphRuntimePolicy => {
+): NormalizedMagicAgentGraphRuntimePolicy => {
   const merged = { ...DEFAULT_GRAPH_RUNTIME_POLICY, ...(overrides || {}) }
   return {
+    maxRunDurationMs: normalizePositiveInteger(
+      merged.maxRunDurationMs,
+      DEFAULT_GRAPH_RUNTIME_POLICY.maxRunDurationMs
+    ),
+    maxNodeDurationMs: normalizePositiveInteger(
+      merged.maxNodeDurationMs,
+      DEFAULT_GRAPH_RUNTIME_POLICY.maxNodeDurationMs
+    ),
     maxNodes: normalizePositiveInteger(merged.maxNodes, DEFAULT_GRAPH_RUNTIME_POLICY.maxNodes),
     maxChannels: normalizePositiveInteger(
       merged.maxChannels,
@@ -174,6 +206,16 @@ const TERMINAL_GRAPH_RUN_STATUSES = new Set<MagicAgentGraphRunRecord['status']>(
   'cancelled'
 ])
 
+class MagicAgentGraphTimeoutError extends Error {
+  constructor(
+    message: string,
+    readonly scope: 'run' | 'node'
+  ) {
+    super(message)
+    this.name = 'MagicAgentGraphTimeoutError'
+  }
+}
+
 type MagicAgentGraphRunSubscriber = {
   sessionKey: string
   handler: (event: MagicAgentGraphRunStreamEvent) => void
@@ -201,6 +243,9 @@ type GraphExecutionContext = {
   request: MagicAgentGraphRunRequest
   route: AgentRouteLike
   run: MagicAgentGraphRunRecord
+  signal: AbortSignal
+  runDeadlineAt: number
+  nodeDeadlineAt?: number
   nodeOutputs: Map<string, string>
   deliveredChannelIds: Set<string>
   allowedToolNames: Set<string>
@@ -288,7 +333,7 @@ export class MagicAgentGraphRuntime {
   private nextRunSubscriberId = 1
   private runStore?: MagicAgentGraphRunStore
   private deps: MagicAgentGraphRuntimeDeps
-  private policy: MagicAgentGraphRuntimePolicy
+  private policy: NormalizedMagicAgentGraphRuntimePolicy
 
   constructor(
     graphs: MagicAgentGraphDefinition[] = builtInMagicAgentGraphs,
@@ -432,6 +477,12 @@ export class MagicAgentGraphRuntime {
 
     const controller = new AbortController()
     const createdAt = now()
+    const runDeadlineAt = createdAt + this.policy.maxRunDurationMs
+    const runtimeBudget = {
+      maxRunDurationMs: this.policy.maxRunDurationMs,
+      maxNodeDurationMs: this.policy.maxNodeDurationMs,
+      runDeadlineAt
+    }
     const requestMetadata = request.metadata || {}
     const permissionSnapshot = requestMetadata.permissionSnapshot as
       | MagicAgentGraphPermissionSnapshot
@@ -459,7 +510,7 @@ export class MagicAgentGraphRuntime {
       graphSnapshot: clone(graph),
       ...(permissionSnapshot ? { permissionSnapshot: clone(permissionSnapshot) } : {}),
       ...(preflightSnapshot ? { preflightSnapshot: clone(preflightSnapshot) } : {}),
-      metadata: { ...requestMetadata, route, sessionKey }
+      metadata: { ...requestMetadata, route, sessionKey, runtimeBudget }
     }
 
     this.runs.set(runId, runRecord)
@@ -474,12 +525,30 @@ export class MagicAgentGraphRuntime {
       this.recordRunEvent(
         runRecord,
         'graph.started',
-        `MagicAgentGraph run started: ${graph.graphId}`
+        `MagicAgentGraph run started: ${graph.graphId}`,
+        { runtimeBudget }
       )
       if (inputLimitError) {
         throw new Error(inputLimitError)
       }
-      await this.executeGraph(graph, effectiveRequest, route, runRecord, controller.signal)
+      const runTimeoutError = new MagicAgentGraphTimeoutError(
+        `MagicAgentGraph run timed out after ${this.policy.maxRunDurationMs}ms.`,
+        'run'
+      )
+      await this.awaitBounded(
+        this.executeGraph(
+          graph,
+          effectiveRequest,
+          route,
+          runRecord,
+          controller.signal,
+          runDeadlineAt
+        ),
+        controller.signal,
+        Math.max(1, runDeadlineAt - now()),
+        runTimeoutError,
+        () => controller.abort(runTimeoutError)
+      )
       this.throwIfCancelled(controller.signal)
       this.markRun(runRecord, 'completed', { endedAt: now() })
       this.recordRunEvent(
@@ -489,11 +558,16 @@ export class MagicAgentGraphRuntime {
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      const status = controller.signal.aborted ? 'cancelled' : 'failed'
+      const timedOut = error instanceof MagicAgentGraphTimeoutError
+      const status = timedOut ? 'failed' : controller.signal.aborted ? 'cancelled' : 'failed'
+      const failureMetadata = timedOut
+        ? { error: message, timedOut: true, timeoutScope: error.scope, runtimeBudget }
+        : { error: message }
       const alreadyCancelled =
         status === 'cancelled' &&
         runRecord.status === 'cancelled' &&
         (runRecord.events || []).some((event) => event.type === 'graph.cancelled')
+      this.skipPendingNodesAfterTermination(runRecord, status, message, failureMetadata)
       if (alreadyCancelled) {
         runRecord.error = runRecord.error || message
         runRecord.endedAt = runRecord.endedAt || now()
@@ -507,7 +581,7 @@ export class MagicAgentGraphRuntime {
           status === 'cancelled'
             ? `MagicAgentGraph run cancelled: ${message}`
             : `MagicAgentGraph run failed: ${message}`,
-          { error: message }
+          failureMetadata
         )
       }
     } finally {
@@ -539,6 +613,17 @@ export class MagicAgentGraphRuntime {
     }
 
     const controller = this.controllers.get(normalizedRunId)
+    if (controller?.signal.aborted) {
+      if (controller.signal.reason instanceof MagicAgentGraphTimeoutError) {
+        return {
+          runId: normalizedRunId,
+          cancelled: false,
+          status: 'failed',
+          error: controller.signal.reason.message
+        }
+      }
+      return { runId: normalizedRunId, cancelled: false, status: 'cancelled' }
+    }
     controller?.abort(reason)
     this.markRun(run, 'cancelled', { endedAt: now(), error: reason })
     this.recordRunEvent(run, 'graph.cancelled', `MagicAgentGraph run cancelled: ${reason}`, {
@@ -770,7 +855,8 @@ export class MagicAgentGraphRuntime {
     request: MagicAgentGraphRunRequest,
     route: AgentRouteLike,
     runRecord: MagicAgentGraphRunRecord,
-    signal: AbortSignal
+    signal: AbortSignal,
+    runDeadlineAt: number
   ): Promise<void> {
     const objectivePlan = this.buildObjectivePlan(graph, request)
     const incomingByNode = new Map<string, MagicAgentGraphChannelDefinition[]>()
@@ -781,6 +867,8 @@ export class MagicAgentGraphRuntime {
       request,
       route,
       run: runRecord,
+      signal,
+      runDeadlineAt,
       nodeOutputs: new Map(),
       deliveredChannelIds: new Set(),
       allowedToolNames: new Set(
@@ -846,15 +934,51 @@ export class MagicAgentGraphRuntime {
         continue
       }
       const input = this.collectNodeInput(node, incoming, context)
+      const nodeController = new AbortController()
+      const forwardRunAbort = (): void => nodeController.abort(signal.reason)
+      signal.addEventListener('abort', forwardRunAbort, { once: true })
+      if (signal.aborted) forwardRunAbort()
       try {
-        this.updateNodeRun(runRecord, node, 'running', { startedAt: now(), input })
+        const nodeStartedAt = now()
+        const nodeBudgetMs = Math.max(
+          1,
+          Math.min(this.policy.maxNodeDurationMs, runDeadlineAt - nodeStartedAt)
+        )
+        const nodeDeadlineAt = nodeStartedAt + nodeBudgetMs
+        const nodeBudget = {
+          maxNodeDurationMs: this.policy.maxNodeDurationMs,
+          effectiveNodeDurationMs: nodeBudgetMs,
+          nodeDeadlineAt,
+          runDeadlineAt
+        }
+        this.updateNodeRun(runRecord, node, 'running', {
+          startedAt: nodeStartedAt,
+          input,
+          metadata: { runtimeBudget: nodeBudget }
+        })
         this.recordRunEvent(
           runRecord,
           'node.started',
           `MagicAgentGraph node started: ${node.nodeId}`,
-          { nodeId: node.nodeId, kind: node.kind }
+          { nodeId: node.nodeId, kind: node.kind, runtimeBudget: nodeBudget }
         )
-        const rawOutput = await this.executeNode(node, input, context)
+        const timeoutError = new MagicAgentGraphTimeoutError(
+          nodeBudgetMs < this.policy.maxNodeDurationMs
+            ? `MagicAgentGraph run timed out after ${this.policy.maxRunDurationMs}ms while executing node "${node.nodeId}".`
+            : `MagicAgentGraph node "${node.nodeId}" timed out after ${nodeBudgetMs}ms.`,
+          nodeBudgetMs < this.policy.maxNodeDurationMs ? 'run' : 'node'
+        )
+        context.nodeDeadlineAt = nodeDeadlineAt
+        context.signal = nodeController.signal
+        const rawOutput = await this.awaitBounded(
+          this.executeNode(node, input, context),
+          nodeController.signal,
+          nodeBudgetMs,
+          timeoutError,
+          () => nodeController.abort(timeoutError)
+        )
+        context.nodeDeadlineAt = undefined
+        context.signal = signal
         this.throwIfCancelled(signal)
         const outputLimit = this.limitText(
           stringifyValue(rawOutput),
@@ -877,15 +1001,53 @@ export class MagicAgentGraphRuntime {
         )
         this.emitOutgoingChannels(node, outputLimit.text, context)
       } catch (error) {
+        context.nodeDeadlineAt = undefined
+        context.signal = signal
+        if (error instanceof MagicAgentGraphTimeoutError && !signal.aborted) {
+          this.controllers.get(runRecord.runId)?.abort(error)
+        }
         const message = error instanceof Error ? error.message : String(error)
-        this.updateNodeRun(runRecord, node, 'failed', { endedAt: now(), error: message })
-        this.recordRunEvent(
-          runRecord,
-          'node.failed',
-          `MagicAgentGraph node failed: ${node.nodeId}: ${message}`,
-          { nodeId: node.nodeId, kind: node.kind, error: message }
-        )
+        const timeoutMetadata =
+          error instanceof MagicAgentGraphTimeoutError
+            ? { timedOut: true, timeoutScope: error.scope }
+            : {}
+        if (signal.aborted && !(error instanceof MagicAgentGraphTimeoutError)) {
+          this.updateNodeRun(runRecord, node, 'skipped', {
+            endedAt: now(),
+            error: message,
+            metadata: {
+              ...(runRecord.nodes?.find((candidate) => candidate.nodeId === node.nodeId)
+                ?.metadata || {}),
+              reason: 'Run cancelled while node was executing.',
+              cancelled: true
+            }
+          })
+          this.recordRunEvent(
+            runRecord,
+            'node.skipped',
+            `MagicAgentGraph node cancelled: ${node.nodeId}`,
+            { nodeId: node.nodeId, kind: node.kind, reason: 'run-cancelled', cancelled: true }
+          )
+        } else {
+          this.updateNodeRun(runRecord, node, 'failed', {
+            endedAt: now(),
+            error: message,
+            metadata: {
+              ...(runRecord.nodes?.find((candidate) => candidate.nodeId === node.nodeId)
+                ?.metadata || {}),
+              ...timeoutMetadata
+            }
+          })
+          this.recordRunEvent(
+            runRecord,
+            'node.failed',
+            `MagicAgentGraph node failed: ${node.nodeId}: ${message}`,
+            { nodeId: node.nodeId, kind: node.kind, error: message, ...timeoutMetadata }
+          )
+        }
         throw error
+      } finally {
+        signal.removeEventListener('abort', forwardRunAbort)
       }
     }
     runRecord.outputs = objectivePlan.outputsToBuild.map((output) =>
@@ -1020,24 +1182,46 @@ export class MagicAgentGraphRuntime {
     context: GraphExecutionContext
   ): Promise<string> {
     if (!this.deps.runAgent) return formatAgentSection(node, input)
-    const result = await this.deps.runAgent({
-      agentId: cleanString(node.agentId) || node.nodeId,
-      text: input,
-      route: context.route,
-      ...(node.modelName ? { profileId: node.modelName } : {}),
-      ...(node.instruction ? { systemPrompt: node.instruction } : {}),
-      ...(context.request.allowedToolNames !== undefined
-        ? { allowedToolNames: [...context.allowedToolNames] }
-        : {}),
-      metadata: {
-        ...(context.request.metadata || {}),
-        graphId: context.graph.graphId,
-        graphRunId: context.run.runId,
-        nodeId: node.nodeId,
+    const timeoutMs = Math.max(
+      1,
+      Math.min(context.nodeDeadlineAt || context.runDeadlineAt, context.runDeadlineAt) - now()
+    )
+    const result = await this.deps.runAgent(
+      {
+        agentId: cleanString(node.agentId) || node.nodeId,
+        text: input,
         route: context.route,
-        sessionKey: context.run.sessionKey
-      }
-    })
+        timeoutMs,
+        ...(node.modelName ? { profileId: node.modelName } : {}),
+        ...(node.instruction ? { systemPrompt: node.instruction } : {}),
+        ...(context.request.allowedToolNames !== undefined
+          ? { allowedToolNames: [...context.allowedToolNames] }
+          : {}),
+        metadata: {
+          ...(context.request.metadata || {}),
+          graphId: context.graph.graphId,
+          graphRunId: context.run.runId,
+          nodeId: node.nodeId,
+          route: context.route,
+          sessionKey: context.run.sessionKey,
+          runtimeBudget: {
+            timeoutMs,
+            runDeadlineAt: context.runDeadlineAt,
+            ...(context.nodeDeadlineAt ? { nodeDeadlineAt: context.nodeDeadlineAt } : {})
+          }
+        }
+      },
+      { signal: context.signal }
+    )
+    if (result.status === 'timeout') {
+      const remainingRunMs = context.runDeadlineAt - now()
+      const runLimitedNode =
+        context.nodeDeadlineAt !== undefined && context.nodeDeadlineAt >= context.runDeadlineAt
+      throw new MagicAgentGraphTimeoutError(
+        result.error || `MagicAgentGraph agent node "${node.nodeId}" timed out.`,
+        runLimitedNode || remainingRunMs <= 0 ? 'run' : 'node'
+      )
+    }
     if (result.status !== 'completed')
       throw new Error(
         result.error || `MagicAgentGraph agent node ended with status: ${result.status}`
@@ -1071,21 +1255,33 @@ export class MagicAgentGraphRuntime {
       nodeId: node.nodeId,
       toolName
     })
-    const result = await this.deps.callTool({
-      name: toolName,
-      args,
-      route: context.route,
-      ...(cleanString(node.agentId) ? { agentId: cleanString(node.agentId) } : {}),
-      metadata: {
-        ...(context.request.metadata || {}),
-        graphId: context.graph.graphId,
-        graphRunId: context.run.runId,
-        nodeId: node.nodeId,
+    const timeoutMs = Math.max(
+      1,
+      Math.min(context.nodeDeadlineAt || context.runDeadlineAt, context.runDeadlineAt) - now()
+    )
+    const result = await this.deps.callTool(
+      {
+        name: toolName,
+        args,
         route: context.route,
-        sessionKey: context.run.sessionKey,
-        allowedToolNames: [...context.allowedToolNames]
-      }
-    })
+        ...(cleanString(node.agentId) ? { agentId: cleanString(node.agentId) } : {}),
+        metadata: {
+          ...(context.request.metadata || {}),
+          graphId: context.graph.graphId,
+          graphRunId: context.run.runId,
+          nodeId: node.nodeId,
+          route: context.route,
+          sessionKey: context.run.sessionKey,
+          allowedToolNames: [...context.allowedToolNames],
+          runtimeBudget: {
+            timeoutMs,
+            runDeadlineAt: context.runDeadlineAt,
+            ...(context.nodeDeadlineAt ? { nodeDeadlineAt: context.nodeDeadlineAt } : {})
+          }
+        }
+      },
+      { signal: context.signal }
+    )
     if (!result.ok)
       throw new Error(
         result.error ||
@@ -1227,6 +1423,33 @@ export class MagicAgentGraphRuntime {
       ...(output.mimeType ? { mimeType: output.mimeType } : {}),
       ...(Object.keys(metadata).length ? { metadata } : {})
     }
+  }
+
+  private skipPendingNodesAfterTermination(
+    run: MagicAgentGraphRunRecord,
+    runStatus: MagicAgentGraphRunRecord['status'],
+    message: string,
+    metadata: Record<string, unknown>
+  ): void {
+    const reason =
+      runStatus === 'cancelled'
+        ? 'Graph run was cancelled before this node executed.'
+        : metadata.timedOut
+          ? 'Graph run timed out before this node executed.'
+          : 'Graph run failed before this node executed.'
+    for (const record of run.nodes || []) {
+      if (record.status !== 'pending') continue
+      record.status = 'skipped'
+      record.endedAt = now()
+      record.metadata = {
+        ...(record.metadata || {}),
+        reason,
+        terminationStatus: runStatus,
+        terminationError: message,
+        ...metadata
+      }
+    }
+    run.updatedAt = now()
   }
 
   private skipNode(
@@ -1453,8 +1676,62 @@ export class MagicAgentGraphRuntime {
     )
   }
 
+  private async awaitBounded<T>(
+    promise: Promise<T>,
+    signal: AbortSignal,
+    timeoutMs: number,
+    timeoutError: MagicAgentGraphTimeoutError,
+    onTimeout?: () => void
+  ): Promise<T> {
+    if (signal.aborted) {
+      this.throwIfCancelled(signal)
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      let settled = false
+      const finish = (callback: () => void): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        signal.removeEventListener('abort', handleAbort)
+        callback()
+      }
+      const handleAbort = (): void => {
+        finish(() => {
+          if (signal.reason instanceof MagicAgentGraphTimeoutError) {
+            reject(signal.reason)
+          } else {
+            try {
+              this.throwIfCancelled(signal)
+            } catch (error) {
+              reject(error)
+            }
+          }
+        })
+      }
+      const timer = setTimeout(
+        () => {
+          finish(() => {
+            onTimeout?.()
+            reject(timeoutError)
+          })
+        },
+        Math.max(1, Math.floor(timeoutMs))
+      )
+
+      signal.addEventListener('abort', handleAbort, { once: true })
+      promise.then(
+        (value) => finish(() => resolve(value)),
+        (error) => finish(() => reject(error))
+      )
+    })
+  }
+
   private throwIfCancelled(signal: AbortSignal): void {
     if (!signal.aborted) return
+    if (signal.reason instanceof MagicAgentGraphTimeoutError) {
+      throw signal.reason
+    }
     const message =
       typeof signal.reason === 'string' ? signal.reason : 'MagicAgentGraph run cancelled.'
     const error = new Error(message)
