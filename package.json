@@ -147,6 +147,7 @@
     "pathe": "^2.0.3",
     "pixi.js": "^8.17.1",
     "playwright": "^1.57.0",
+    "proper-lockfile": "^4.1.2",
     "puppeteer-core": "^24.34.0",
     "react-dnd": "^16.0.1",
     "react-dnd-html5-backend": "^16.0.1",

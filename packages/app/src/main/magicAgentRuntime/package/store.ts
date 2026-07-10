@@ -1,5 +1,6 @@
 import fs from 'fs/promises'
 import path from 'path'
+import { lock as acquireFileLock } from 'proper-lockfile'
 
 import {
   MAGIC_AGENT_PACKAGE_MANIFEST_FILE,
@@ -20,6 +21,11 @@ const METADATA_FILE = 'magicpot-installed-package.json'
 const PACKAGE_CONTENT_DIR = 'package'
 const UTF8_BOM_PATTERN = /^\uFEFF/
 const WINDOWS_DRIVE_ENTRY_PATTERN = /^[A-Za-z]:[\\/]/
+const STORE_LOCK_STALE_MS = 15_000
+const STORE_LOCK_UPDATE_MS = 5_000
+const STORE_LOCK_RETRIES = 600
+const STORE_LOCK_RETRY_MS = 100
+const storeMutationQueues = new Map<string, Promise<void>>()
 
 const DEFAULT_PACKAGE_RESOURCE_LIMITS = {
   maxDepth: 12,
@@ -479,10 +485,100 @@ async function readPackageGraphDefinitions(
 export class MagicAgentPackageStore {
   private readonly packageRoot: string
   private readonly storeDir: string
+  private storeRecoveryPromise: Promise<void> | null = null
 
   constructor(packageRoot: string, storeDir?: string) {
     this.packageRoot = path.resolve(packageRoot)
     this.storeDir = path.resolve(storeDir ?? path.join(this.packageRoot, 'installed'))
+  }
+
+  private async queuePackageMutation<T>(operation: () => Promise<T>): Promise<T> {
+    await fs.mkdir(this.storeDir, { recursive: true })
+    const canonicalStoreDir = await fs.realpath(this.storeDir)
+    const queueKey = path.normalize(canonicalStoreDir)
+    const previous = storeMutationQueues.get(queueKey) ?? Promise.resolve()
+    const result = previous
+      .catch(() => undefined)
+      .then(() =>
+        this.withStoreLock(canonicalStoreDir, async () => {
+          const currentStoreDir = await fs.realpath(this.storeDir)
+          if (path.normalize(currentStoreDir) !== queueKey) {
+            throw new Error('MagicAgent package store path changed while waiting for its lock.')
+          }
+          return operation()
+        })
+      )
+    const settled = result.then(
+      () => undefined,
+      () => undefined
+    )
+    storeMutationQueues.set(queueKey, settled)
+    void settled.finally(() => {
+      if (storeMutationQueues.get(queueKey) === settled) storeMutationQueues.delete(queueKey)
+    })
+    return result
+  }
+
+  private async withStoreLock<T>(
+    canonicalStoreDir: string,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const release = await acquireFileLock(canonicalStoreDir, {
+      realpath: false,
+      stale: STORE_LOCK_STALE_MS,
+      update: STORE_LOCK_UPDATE_MS,
+      retries: {
+        retries: STORE_LOCK_RETRIES,
+        factor: 1,
+        minTimeout: STORE_LOCK_RETRY_MS,
+        maxTimeout: STORE_LOCK_RETRY_MS
+      }
+    })
+    try {
+      return await operation()
+    } finally {
+      await release().catch(() => undefined)
+    }
+  }
+
+  private async recoverInterruptedInstalls(): Promise<void> {
+    if (this.storeRecoveryPromise) return this.storeRecoveryPromise
+    this.storeRecoveryPromise = (async () => {
+      if (!(await pathExists(this.storeDir))) return
+      const entries = await fs.readdir(this.storeDir, { withFileTypes: true })
+      const backupsByPackageId = new Map<string, string[]>()
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue
+        if (entry.name.startsWith('.install-')) {
+          await fs.rm(path.join(this.storeDir, entry.name), { recursive: true, force: true })
+          continue
+        }
+        if (!entry.name.startsWith('.backup-')) continue
+        const suffixIndex = entry.name.lastIndexOf('-')
+        const timestampIndex = entry.name.lastIndexOf('-', suffixIndex - 1)
+        if (timestampIndex <= '.backup-'.length) continue
+        const packageId = entry.name.slice('.backup-'.length, timestampIndex)
+        const paths = backupsByPackageId.get(packageId) ?? []
+        paths.push(path.join(this.storeDir, entry.name))
+        backupsByPackageId.set(packageId, paths)
+      }
+      for (const [packageId, backupPaths] of backupsByPackageId) {
+        const packagePath = path.join(this.storeDir, packageId)
+        const sortedBackupPaths = backupPaths.sort()
+        if (!(await pathExists(packagePath))) {
+          const backupPath = sortedBackupPaths.pop()
+          if (backupPath) await fs.rename(backupPath, packagePath)
+        }
+        await Promise.all(
+          sortedBackupPaths.map((backupPath) =>
+            fs.rm(backupPath, { recursive: true, force: true }).catch(() => undefined)
+          )
+        )
+      }
+    })().finally(() => {
+      this.storeRecoveryPromise = null
+    })
+    return this.storeRecoveryPromise
   }
 
   async validateManifest(packageDir: string): Promise<MagicAgentPackageValidationResult> {
@@ -522,64 +618,100 @@ export class MagicAgentPackageStore {
   }
 
   async install(packageDir: string): Promise<MagicAgentPackageInstallResult> {
-    const inspection = await this.scanLocalDirectory(packageDir)
-    if (!inspection.validation.ok) {
-      const messages = inspection.validation.errors.map(
-        (issue) => `${issue.path}: ${issue.message}`
-      )
-      throw new Error(`Invalid MagicPot package manifest. ${messages.join('; ')}`)
-    }
-
-    await fs.mkdir(this.storeDir, { recursive: true })
-
-    const manifest = inspection.validation.manifest
-    assertSafePackageId(manifest.id)
-    const packagePath = path.join(this.storeDir, manifest.id)
-    assertWithinRoot(this.storeDir, packagePath)
-
-    const replaced = await pathExists(packagePath)
-    const stagePath = path.join(
-      this.storeDir,
-      `.install-${manifest.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`
-    )
-    const stagePackagePath = path.join(stagePath, PACKAGE_CONTENT_DIR)
-
-    await fs.mkdir(stagePath, { recursive: true })
-
-    try {
-      await copyDirectoryContents(inspection.packagePath, stagePackagePath, {
-        ignoreFileNames: new Set([METADATA_FILE]),
-        limits: DEFAULT_PACKAGE_RESOURCE_LIMITS
-      })
-
-      const installedAt = new Date().toISOString()
-      const installed: MagicAgentInstalledPackage = {
-        id: manifest.id,
-        name: manifest.name,
-        version: manifest.version,
-        ...(manifest.description ? { description: manifest.description } : {}),
-        ...(manifest.author ? { author: manifest.author } : {}),
-        installedAt,
-        sourcePath: inspection.packagePath,
-        packagePath,
-        manifest
+    return this.queuePackageMutation(async () => {
+      await this.recoverInterruptedInstalls()
+      const inspection = await this.scanLocalDirectory(packageDir)
+      if (!inspection.validation.ok) {
+        const messages = inspection.validation.errors.map(
+          (issue) => `${issue.path}: ${issue.message}`
+        )
+        throw new Error(`Invalid MagicPot package manifest. ${messages.join('; ')}`)
       }
 
-      await fs.writeFile(path.join(stagePath, METADATA_FILE), JSON.stringify(installed, null, 2))
+      await fs.mkdir(this.storeDir, { recursive: true })
 
-      if (replaced) {
-        await fs.rm(packagePath, { recursive: true, force: true })
+      const manifest = inspection.validation.manifest
+      assertSafePackageId(manifest.id)
+      const packagePath = path.join(this.storeDir, manifest.id)
+      assertWithinRoot(this.storeDir, packagePath)
+
+      const replaced = await pathExists(packagePath)
+      const uniqueSuffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+      const stagePath = path.join(this.storeDir, `.install-${manifest.id}-${uniqueSuffix}`)
+      const backupPath = path.join(this.storeDir, `.backup-${manifest.id}-${uniqueSuffix}`)
+      const stagePackagePath = path.join(stagePath, PACKAGE_CONTENT_DIR)
+      let backupCreated = false
+
+      await fs.mkdir(stagePath, { recursive: true })
+
+      try {
+        await copyDirectoryContents(inspection.packagePath, stagePackagePath, {
+          ignoreFileNames: new Set([METADATA_FILE]),
+          limits: DEFAULT_PACKAGE_RESOURCE_LIMITS
+        })
+
+        const installedAt = new Date().toISOString()
+        const installed: MagicAgentInstalledPackage = {
+          id: manifest.id,
+          name: manifest.name,
+          version: manifest.version,
+          ...(manifest.description ? { description: manifest.description } : {}),
+          ...(manifest.author ? { author: manifest.author } : {}),
+          installedAt,
+          sourcePath: inspection.packagePath,
+          packagePath,
+          manifest
+        }
+
+        const stagedManifest = await readManifestFromDir(stagePackagePath)
+        if (!stagedManifest.validation.ok) {
+          const messages = stagedManifest.validation.errors.map(
+            (issue) => `${issue.path}: ${issue.message}`
+          )
+          throw new Error(`Invalid staged MagicPot package. ${messages.join('; ')}`)
+        }
+        if (JSON.stringify(stagedManifest.validation.manifest) !== JSON.stringify(manifest)) {
+          throw new Error('MagicAgent package changed while it was being installed.')
+        }
+        await inspectDirectoryResources(stagePackagePath)
+        await fs.writeFile(path.join(stagePath, METADATA_FILE), JSON.stringify(installed, null, 2))
+
+        if (replaced) {
+          await fs.rename(packagePath, backupPath)
+          backupCreated = true
+        }
+        await fs.rename(stagePath, packagePath)
+        if (backupCreated) {
+          await fs.rm(backupPath, { recursive: true, force: true }).catch((error) => {
+            console.warn(
+              '[MagicAgentPackageStore] Installed package but failed to remove backup:',
+              error
+            )
+          })
+          backupCreated = false
+        }
+
+        return { installed, replaced }
+      } catch (error) {
+        await fs.rm(stagePath, { recursive: true, force: true }).catch(() => undefined)
+        if (backupCreated && !(await pathExists(packagePath))) {
+          try {
+            await fs.rename(backupPath, packagePath)
+            backupCreated = false
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              `Failed to install package ${manifest.id} and restore its previous version. Backup retained at ${backupPath}.`
+            )
+          }
+        }
+        throw error
       }
-      await fs.rename(stagePath, packagePath)
-
-      return { installed, replaced }
-    } catch (error) {
-      await fs.rm(stagePath, { recursive: true, force: true }).catch(() => undefined)
-      throw error
-    }
+    })
   }
 
-  async list(): Promise<MagicAgentPackageListEntry[]> {
+  private async listUnlocked(): Promise<MagicAgentPackageListEntry[]> {
+    await this.recoverInterruptedInstalls()
     if (!(await pathExists(this.storeDir))) {
       return []
     }
@@ -588,7 +720,12 @@ export class MagicAgentPackageStore {
     const packages: MagicAgentPackageListEntry[] = []
 
     for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith('.install-')) {
+      if (
+        !entry.isDirectory() ||
+        entry.name.startsWith('.install-') ||
+        entry.name.startsWith('.backup-') ||
+        entry.name.startsWith('.store-lock')
+      ) {
         continue
       }
 
@@ -602,62 +739,75 @@ export class MagicAgentPackageStore {
     return packages.sort((left, right) => left.id.localeCompare(right.id))
   }
 
-  async inspect(packageId: string): Promise<MagicAgentPackageInspection> {
-    const installed = await this.findInstalled(packageId).catch(() => undefined)
-    if (installed) {
-      return {
-        manifestPath: path.join(
-          installed.packagePath,
-          PACKAGE_CONTENT_DIR,
-          MAGIC_AGENT_PACKAGE_MANIFEST_FILE
-        ),
-        packagePath: path.join(installed.packagePath, PACKAGE_CONTENT_DIR),
-        validation: { ok: true, manifest: installed.manifest, warnings: [] },
-        installed
-      }
-    }
+  async list(): Promise<MagicAgentPackageListEntry[]> {
+    return this.queuePackageMutation(() => this.listUnlocked())
+  }
 
-    return {
-      manifestPath: '',
-      packagePath: '',
-      validation: {
-        ok: false,
-        errors: [{ path: 'packageId', message: 'MagicAgent package is not installed.' }],
-        warnings: []
+  async inspect(packageId: string): Promise<MagicAgentPackageInspection> {
+    return this.queuePackageMutation(async () => {
+      await this.recoverInterruptedInstalls()
+      const installed = await this.findInstalled(packageId).catch(() => undefined)
+      if (installed) {
+        return {
+          manifestPath: path.join(
+            installed.packagePath,
+            PACKAGE_CONTENT_DIR,
+            MAGIC_AGENT_PACKAGE_MANIFEST_FILE
+          ),
+          packagePath: path.join(installed.packagePath, PACKAGE_CONTENT_DIR),
+          validation: { ok: true, manifest: installed.manifest, warnings: [] },
+          installed
+        }
       }
-    }
+
+      return {
+        manifestPath: '',
+        packagePath: '',
+        validation: {
+          ok: false,
+          errors: [{ path: 'packageId', message: 'MagicAgent package is not installed.' }],
+          warnings: []
+        }
+      }
+    })
   }
 
   async listAgents(): Promise<MagicAgentPackageAgentDefinition[]> {
-    const packages = await this.list()
-    const agentsById = new Map<string, MagicAgentPackageAgentDefinition>()
+    return this.queuePackageMutation(async () => {
+      const packages = await this.listUnlocked()
+      const agentsById = new Map<string, MagicAgentPackageAgentDefinition>()
 
-    for (const installed of packages) {
-      for (const agent of await readPackageAgentDefinitions(installed)) {
-        if (agentsById.has(agent.id)) {
-          throw new Error(`Duplicate package agent id: ${agent.id}`)
+      for (const installed of packages) {
+        for (const agent of await readPackageAgentDefinitions(installed)) {
+          if (agentsById.has(agent.id)) {
+            throw new Error(`Duplicate package agent id: ${agent.id}`)
+          }
+          agentsById.set(agent.id, agent)
         }
-        agentsById.set(agent.id, agent)
       }
-    }
 
-    return [...agentsById.values()].sort((left, right) => left.id.localeCompare(right.id))
+      return [...agentsById.values()].sort((left, right) => left.id.localeCompare(right.id))
+    })
   }
 
   async listGraphs(): Promise<MagicAgentPackageGraphDefinition[]> {
-    const packages = await this.list()
-    const graphsById = new Map<string, MagicAgentPackageGraphDefinition>()
+    return this.queuePackageMutation(async () => {
+      const packages = await this.listUnlocked()
+      const graphsById = new Map<string, MagicAgentPackageGraphDefinition>()
 
-    for (const installed of packages) {
-      for (const graph of await readPackageGraphDefinitions(installed)) {
-        if (graphsById.has(graph.graphId)) {
-          throw new Error(`Duplicate package graph id: ${graph.graphId}`)
+      for (const installed of packages) {
+        for (const graph of await readPackageGraphDefinitions(installed)) {
+          if (graphsById.has(graph.graphId)) {
+            throw new Error(`Duplicate package graph id: ${graph.graphId}`)
+          }
+          graphsById.set(graph.graphId, graph)
         }
-        graphsById.set(graph.graphId, graph)
       }
-    }
 
-    return [...graphsById.values()].sort((left, right) => left.graphId.localeCompare(right.graphId))
+      return [...graphsById.values()].sort((left, right) =>
+        left.graphId.localeCompare(right.graphId)
+      )
+    })
   }
 
   async uninstall(packageId: string): Promise<boolean> {
@@ -665,12 +815,15 @@ export class MagicAgentPackageStore {
     const packagePath = path.join(this.storeDir, packageId)
     assertWithinRoot(this.storeDir, packagePath)
 
-    if (!(await pathExists(packagePath))) {
-      return false
-    }
+    return this.queuePackageMutation(async () => {
+      await this.recoverInterruptedInstalls()
+      if (!(await pathExists(packagePath))) {
+        return false
+      }
 
-    await fs.rm(packagePath, { recursive: true, force: true })
-    return true
+      await fs.rm(packagePath, { recursive: true, force: true })
+      return true
+    })
   }
 
   private async findInstalled(packageId: string): Promise<MagicAgentInstalledPackage | undefined> {
