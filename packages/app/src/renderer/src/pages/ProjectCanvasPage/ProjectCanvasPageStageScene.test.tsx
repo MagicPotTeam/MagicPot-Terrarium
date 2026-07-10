@@ -642,6 +642,36 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(syncItemPreviewSpy).toHaveBeenNthCalledWith(2, item.id, null)
   })
 
+  it('keeps the sorted WebGL item array stable across runtime route updates', async () => {
+    const backItem = createImageItem('image-stable-webgl-back')
+    const frontItem = createImageItem('image-stable-webgl-front')
+    backItem.zIndex = 2
+    frontItem.zIndex = 8
+    setMockWebGLRuntime({ loadedIds: [backItem.id, frontItem.id] })
+
+    render(
+      <ProjectCanvasPageStageScene
+        {...createBaseProps([frontItem, backItem])}
+        items={[frontItem, backItem]}
+        visibleItems={[frontItem, backItem]}
+      />
+    )
+
+    await waitFor(() => {
+      expect(latestWebGLItems.map((item) => item.id)).toEqual([backItem.id, frontItem.id])
+    })
+    const initialItemsReference = latestWebGLItems
+
+    act(() => {
+      latestWebGLLayerProps?.onResidentIdsChange?.(new Set([backItem.id]))
+      latestWebGLLayerProps?.onResolvedIdsChange?.(new Set([backItem.id]))
+    })
+
+    await waitFor(() => {
+      expect(latestWebGLItems).toBe(initialItemsReference)
+    })
+  })
+
   it('keeps full image metadata in WebGL while DOM overlays use the current visible subset', async () => {
     const visibleItem = createImageItem('image-visible-subset')
     const offscreenItem = createImageItem('image-offscreen-subset')

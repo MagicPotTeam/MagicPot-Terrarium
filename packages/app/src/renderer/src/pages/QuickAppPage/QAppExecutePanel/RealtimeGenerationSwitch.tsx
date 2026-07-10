@@ -39,9 +39,14 @@ const RealtimeGenerationSwitch: React.FC<RealtimeGenerationSwitchProps> = ({
 
   // 获取实时绘画状态并处理更新
   useEffect(() => {
+    let disposed = false
+    let statusRequestInFlight = false
     const checkStatus = async () => {
+      if (disposed || statusRequestInFlight) return
+      statusRequestInFlight = true
       try {
         const status = await api().svcPhotoshop.getRealtimeGenerationStatus({})
+        if (disposed) return
         setIsRunning(status.isRunning)
 
         // 处理最新加载的图像（更新输入框）
@@ -79,12 +84,19 @@ const RealtimeGenerationSwitch: React.FC<RealtimeGenerationSwitchProps> = ({
           }
         }
       } catch (error) {
-        console.error('获取实时绘画状态失败:', error)
+        if (!disposed) {
+          console.error('获取实时绘画状态失败:', error)
+        }
+      } finally {
+        statusRequestInFlight = false
       }
     }
-    checkStatus()
-    const interval = setInterval(checkStatus, 2000)
-    return () => clearInterval(interval)
+    void checkStatus()
+    const interval = setInterval(() => void checkStatus(), 2000)
+    return () => {
+      disposed = true
+      clearInterval(interval)
+    }
   }, [appendResults, currentQAppKey, setFormStateValue])
 
   // 查找图像输入节点

@@ -1285,29 +1285,28 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const renderSurfaceSummary = renderBoundaryDerivation.renderSurfaceSummary
   const fallbackImageSummary = renderBoundaryDerivation.fallbackImageSummary
   const webglPrimaryImageCount = renderBoundaryDerivation.webglPrimaryImageCount
-  const webglImageItems = React.useMemo(
+  const sortedAllImageItems = React.useMemo(
     () =>
       allCanvasItems
-        .filter(
-          (item): item is CanvasImageItem =>
-            item.type === 'image' &&
-            item.id !== cropTargetId &&
-            imageRuntimeRouteById.get(item.id) !== 'crop-excluded' &&
-            !generatedCooldownImageIds.has(item.id)
-        )
+        .filter((item): item is CanvasImageItem => item.type === 'image')
         .sort((left, right) => left.zIndex - right.zIndex),
-    [allCanvasItems, cropTargetId, generatedCooldownImageIds, imageRuntimeRouteById]
+    [allCanvasItems]
+  )
+  const webglImageItems = React.useMemo(
+    () =>
+      sortedAllImageItems.filter(
+        (item) => item.id !== cropTargetId && !generatedCooldownImageIds.has(item.id)
+      ),
+    [cropTargetId, generatedCooldownImageIds, sortedAllImageItems]
   )
   const canvas2DFallbackImageItems = React.useMemo(
     () =>
-      visibleItems
-        .filter(
-          (item): item is CanvasImageItem =>
-            item.type === 'image' &&
-            imageRuntimeRouteById.get(item.id) === 'fallback-image-proxy' &&
-            !canvas2DFailedImageIds.has(item.id)
-        )
-        .sort((left, right) => left.zIndex - right.zIndex),
+      visibleItems.filter(
+        (item): item is CanvasImageItem =>
+          item.type === 'image' &&
+          imageRuntimeRouteById.get(item.id) === 'fallback-image-proxy' &&
+          !canvas2DFailedImageIds.has(item.id)
+      ),
     [canvas2DFailedImageIds, imageRuntimeRouteById, visibleItems]
   )
   const canvas2DFallbackImageIdSet = React.useMemo(

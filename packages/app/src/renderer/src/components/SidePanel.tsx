@@ -1452,6 +1452,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
   const nextReconnectAllowedAtRef = useRef(0)
   const isConnectedRef = useRef(isConnected)
   const objectInfosRef = useRef(objectInfos)
+  const silentRefreshInFlightRef = useRef<Promise<boolean> | null>(null)
   const quickAppTitleRef = useRef<HTMLElement | null>(null)
   const quickAppQueueBadgeRef = useRef<HTMLDivElement | null>(null)
   const quickAppActionsRef = useRef<HTMLDivElement | null>(null)
@@ -1529,41 +1530,54 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
     }
   }, [])
 
-  const silentRefresh = useCallback(async () => {
-    const now = Date.now()
-    if (!isConnectedRef.current && now < nextReconnectAllowedAtRef.current) {
-      return false
+  const silentRefresh = useCallback((): Promise<boolean> => {
+    if (silentRefreshInFlightRef.current) {
+      return silentRefreshInFlightRef.current
     }
 
-    try {
-      const objectInfo = await api().svcComfy.getObjectInfo({})
-      const wasDisconnected = !isConnectedRef.current
-
-      if (!isConnectedRef.current) {
-        setIsConnected(true)
-      }
-      isConnectedRef.current = true
-      if (!isEqual(objectInfosRef.current, objectInfo)) {
-        objectInfosRef.current = objectInfo
-        setObjectInfos(objectInfo)
-      }
-      reconnectAttemptsRef.current = 0
-      nextReconnectAllowedAtRef.current = 0
-
-      if (wasDisconnected) {
-        window.dispatchEvent(new CustomEvent('qapp:refresh-list'))
+    const refreshPromise = (async () => {
+      const now = Date.now()
+      if (!isConnectedRef.current && now < nextReconnectAllowedAtRef.current) {
+        return false
       }
 
-      return true
-    } catch {
-      if (isConnectedRef.current) {
-        setIsConnected(false)
+      try {
+        const objectInfo = await api().svcComfy.getObjectInfo({})
+        const wasDisconnected = !isConnectedRef.current
+
+        if (!isConnectedRef.current) {
+          setIsConnected(true)
+        }
+        isConnectedRef.current = true
+        if (!isEqual(objectInfosRef.current, objectInfo)) {
+          objectInfosRef.current = objectInfo
+          setObjectInfos(objectInfo)
+        }
+        reconnectAttemptsRef.current = 0
+        nextReconnectAllowedAtRef.current = 0
+
+        if (wasDisconnected) {
+          window.dispatchEvent(new CustomEvent('qapp:refresh-list'))
+        }
+
+        return true
+      } catch {
+        if (isConnectedRef.current) {
+          setIsConnected(false)
+        }
+        isConnectedRef.current = false
+        const nextAttempt = reconnectAttemptsRef.current + 1
+        nextReconnectAllowedAtRef.current = Date.now() + Math.min(30000, 5000 * nextAttempt)
+        return false
       }
-      isConnectedRef.current = false
-      const nextAttempt = reconnectAttemptsRef.current + 1
-      nextReconnectAllowedAtRef.current = Date.now() + Math.min(30000, 5000 * nextAttempt)
-      return false
-    }
+    })()
+    silentRefreshInFlightRef.current = refreshPromise
+    void refreshPromise.finally(() => {
+      if (silentRefreshInFlightRef.current === refreshPromise) {
+        silentRefreshInFlightRef.current = null
+      }
+    })
+    return refreshPromise
   }, [setIsConnected, setObjectInfos])
 
   const _refreshStatusLegacy = useCallback(async () => {
