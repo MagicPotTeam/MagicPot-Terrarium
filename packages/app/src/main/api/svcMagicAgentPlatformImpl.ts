@@ -591,12 +591,17 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     const route = this.authorizeRoute(req.route, invocation)
     const runtime = this.getGraphRuntime()
     const tools = this.getAdapter().listTools()
-    const entry = await this.getGraphCatalog().inspect(req.graphId, {
-      route,
-      allowedToolNames: req.allowedToolNames,
-      availableTools: tools
-    })
-    const runtimeGraph = entry ? undefined : runtime.inspect?.(req.graphId)
+    const runtimeGraph = runtime.inspect?.(req.graphId)
+    const shouldInspectCatalog =
+      !runtimeGraph &&
+      (!this.deps.graphRuntime || Boolean(this.deps.userGraphStore || this.deps.packageStore))
+    const entry = shouldInspectCatalog
+      ? await this.getGraphCatalog().inspect(req.graphId, {
+          route,
+          allowedToolNames: req.allowedToolNames,
+          availableTools: tools
+        })
+      : undefined
     const preflight =
       entry?.preflight ||
       (runtimeGraph

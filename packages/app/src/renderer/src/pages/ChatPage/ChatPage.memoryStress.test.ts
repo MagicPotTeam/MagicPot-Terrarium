@@ -74,7 +74,8 @@ class FakeIDBObjectStore {
   }
 
   put(value: unknown): void {
-    const key = (value as { id?: string }).id
+    const candidate = value as { storageKey?: string; id?: string }
+    const key = candidate.storageKey || candidate.id
     if (!key) {
       throw new Error('Missing fake IndexedDB keyPath value')
     }
