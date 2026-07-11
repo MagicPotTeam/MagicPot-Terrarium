@@ -1,5 +1,6 @@
 import fs from 'fs/promises'
 import path from 'path'
+import { randomUUID } from 'crypto'
 import { Config, DEFAULT_CONFIG } from '@shared/config/config'
 import { deepMerge, DeepPartial } from '@shared/utils/utilTypes'
 import { getBuildEnv } from './buildEnv'
@@ -18,7 +19,7 @@ function sanitizeConfigText(text: string): string {
 }
 
 async function writeConfigAtomically(configPath: string, contents: string) {
-  const tempPath = `${configPath}.${Date.now()}.tmp`
+  const tempPath = `${configPath}.${randomUUID()}.tmp`
   await fs.writeFile(tempPath, contents, 'utf-8')
   await fs.rename(tempPath, configPath)
 }
@@ -29,6 +30,7 @@ function getConfigPath() {
 }
 
 let configCache: Config | null = null
+let saveQueue: Promise<void> = Promise.resolve()
 const eventCenter: EventCenter<Config> = new EventCenter<Config>()
 
 async function loadConfigFromFile(): Promise<Config> {
@@ -83,14 +85,19 @@ export function getConfig(): Config {
   return configCache
 }
 
-export async function saveConfig(config: DeepPartial<Config>) {
-  const configPath = getConfigPath()
-  const oldConfig = getConfig()
+export function saveConfig(config: DeepPartial<Config>): Promise<void> {
+  const save = saveQueue.then(async () => {
+    const configPath = getConfigPath()
+    const newConfig = deepMerge(getConfig() as never, config as never) as Config
 
-  const newConfig = deepMerge(oldConfig as never, config as never) as Config
-  await writeConfigAtomically(configPath, serializeConfig(newConfig))
-  configCache = newConfig
-  await eventCenter.emit(newConfig)
+    await writeConfigAtomically(configPath, serializeConfig(newConfig))
+    configCache = newConfig
+    await eventCenter.emit(newConfig)
+  })
+
+  // Keep the internal queue fulfilled so one rejected save cannot block later calls.
+  saveQueue = save.catch(() => undefined)
+  return save
 }
 
 export function listenConfig(listener: EventListener<Config>) {

@@ -721,6 +721,11 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     configuredHy3dRegion
   )
   const [isClearingHy3dCosPrefix, setIsClearingHy3dCosPrefix] = React.useState(false)
+  const latestProfileRef = React.useRef(profile)
+
+  React.useEffect(() => {
+    latestProfileRef.current = profile
+  }, [profile])
 
   const updateProfile = React.useCallback(
     (nextProfile: LLMAPIProfile) => {
@@ -736,14 +741,15 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           { profile: nextProfile, callType: nextCallType },
           () => nextProfile
         )
+        latestProfileRef.current = extensionProfile
         onUpdate(profile.id, extensionProfile)
         return
       }
 
       if (nextCallType === 'local') {
-        onUpdate(profile.id, {
+        const localProfile = {
           ...stripVideoSecretProfile(stripHunyuan3DProfile(stripExternalAuthProfile(nextProfile))),
-          call_type: 'local',
+          call_type: 'local' as const,
           base_url: '',
           api_key: '',
           backup_api_keys: undefined,
@@ -751,7 +757,9 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           deployment: undefined,
           is_ollama: false,
           local_model_path: normalizeLocalModelPath(nextProfile.local_model_path)
-        })
+        }
+        latestProfileRef.current = localProfile
+        onUpdate(profile.id, localProfile)
         return
       }
 
@@ -775,7 +783,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
         ? normalizedProfile
         : stripVideoSecretProfile(normalizedProfile)
 
-      onUpdate(profile.id, {
+      const updatedProfile: LLMAPIProfile = {
         ...outputProfile,
         call_type: normalizedNextProfile.call_type,
         provider: shouldKeepVideoProvider
@@ -787,7 +795,9 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           (isOllamaUrl(nextBaseUrl) ||
             Boolean(normalizedProfile.is_ollama) ||
             preserveLegacyOllamaOverride)
-      })
+      }
+      latestProfileRef.current = updatedProfile
+      onUpdate(profile.id, updatedProfile)
     },
     [onUpdate, profile.id, profile.provider]
   )
@@ -1027,9 +1037,10 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           <InputText
             label={copy('API 地址', t('llm.base_url'))}
             value={profile.base_url}
-            onChange={(value) => updateProfile({ ...profile, base_url: value })}
+            onChange={(value) => updateProfile({ ...latestProfileRef.current, base_url: value })}
             placeholder={baseUrlPlaceholder}
             shrinkLabel
+            updateMode="change"
           />
         )}
 
@@ -1039,12 +1050,13 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
             value={profile.api_key}
             onChange={(value) =>
               updateProfile({
-                ...stripExternalAuthProfile(profile),
+                ...stripExternalAuthProfile(latestProfileRef.current),
                 api_key: value
               })
             }
             placeholder={apiKeyPlaceholder}
             shrinkLabel
+            updateMode="change"
           />
         )}
 
