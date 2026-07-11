@@ -50,40 +50,20 @@ export const resolveRendererAssistantImageAutoSaveDir = (
 export const applyRendererAgentApiProfileCallType = (
   options: AgentApiProfileApplyCallTypeOptions,
   fallback: () => LLMAPIProfile
-): LLMAPIProfile => {
-  const extensionValue =
-    rendererHostExtensionApiV1.settings?.applyAgentApiProfileCallType?.(options)
-  if (extensionValue !== undefined) {
-    return extensionValue
-  }
-
-  return fallback()
-}
+): LLMAPIProfile =>
+  rendererHostExtensionApiV1.settings?.applyAgentApiProfileCallType?.(options) ?? fallback()
 
 export const buildRendererAgentApiProfileCallTypeOptions = (
   options: AgentApiProfileCallTypeOptions,
   fallback: () => AgentApiProfileCallTypeOption[]
-): AgentApiProfileCallTypeOption[] => {
-  const extensionValue =
-    rendererHostExtensionApiV1.settings?.buildAgentApiProfileCallTypeOptions?.(options)
-  if (extensionValue !== undefined) {
-    return extensionValue
-  }
-
-  return fallback()
-}
+): AgentApiProfileCallTypeOption[] =>
+  rendererHostExtensionApiV1.settings?.buildAgentApiProfileCallTypeOptions?.(options) ?? fallback()
 
 export const resolveRendererAgentApiProfileUi = (
   options: AgentApiProfileUiOptions,
   fallback: () => AgentApiProfileUi
-): AgentApiProfileUi => {
-  const extensionValue = rendererHostExtensionApiV1.settings?.resolveAgentApiProfileUi?.(options)
-  if (extensionValue !== undefined) {
-    return extensionValue
-  }
-
-  return fallback()
-}
+): AgentApiProfileUi =>
+  rendererHostExtensionApiV1.settings?.resolveAgentApiProfileUi?.(options) ?? fallback()
 
 export const renderRendererAgentApiProfileCardExtra = (
   options: AgentApiProfileCardRenderOptions,
