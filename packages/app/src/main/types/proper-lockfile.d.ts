@@ -1,5 +1,8 @@
 declare module 'proper-lockfile' {
+  import type fs from 'node:fs'
+
   export interface LockOptions {
+    fs?: typeof fs
     stale?: number
     update?: number
     realpath?: boolean

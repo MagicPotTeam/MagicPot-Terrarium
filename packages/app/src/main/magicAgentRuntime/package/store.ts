@@ -1,4 +1,5 @@
-import fs from 'fs/promises'
+import callbackFs from 'node:fs'
+import fs from 'node:fs/promises'
 import path from 'path'
 import { lock as acquireFileLock } from 'proper-lockfile'
 
@@ -524,6 +525,7 @@ export class MagicAgentPackageStore {
     operation: () => Promise<T>
   ): Promise<T> {
     const release = await acquireFileLock(canonicalStoreDir, {
+      fs: callbackFs,
       realpath: false,
       stale: STORE_LOCK_STALE_MS,
       update: STORE_LOCK_UPDATE_MS,

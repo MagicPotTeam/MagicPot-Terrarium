@@ -7,7 +7,12 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const manifestPath = path.join(repoRoot, 'packages', 'lora-trigger-sidecar', 'Cargo.toml')
 const cargo = process.env.CARGO || 'cargo'
 
-const result = spawnSync(cargo, ['build', '--release', '--offline', '--manifest-path', manifestPath], {
+const cargoArgs = ['build', '--release', '--locked', '--manifest-path', manifestPath]
+if (process.env.CARGO_NET_OFFLINE === 'true' || process.env.CARGO_NET_OFFLINE === '1') {
+  cargoArgs.splice(3, 0, '--offline')
+}
+
+const result = spawnSync(cargo, cargoArgs, {
   cwd: repoRoot,
   stdio: 'inherit'
 })
