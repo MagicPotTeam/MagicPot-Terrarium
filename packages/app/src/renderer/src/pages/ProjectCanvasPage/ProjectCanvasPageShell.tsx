@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import React from 'react'
 import {
   Box,
@@ -69,9 +68,21 @@ import type {
   CanvasVideoItem
 } from './types'
 import type { AttachedCaptionAnnotation } from './canvasAttachedCaptionUtils'
+import type {
+  ProjectCanvasPageShellRuntimeProps,
+  ProjectCanvasPageTopToolbarProps
+} from './ProjectCanvasPageShellContract'
 
 const MemoizedProjectCanvasPageStageScene = React.memo(ProjectCanvasPageStageScene)
 const IMAGE_BATCH_IMPORT_PREPARING_DISPLAY_WEIGHT = 0.35
+
+type BrowserEyeDropperConstructor = new () => {
+  open: () => Promise<{ sRGBHex: string }>
+}
+
+type BrowserWindowWithEyeDropper = Window & {
+  EyeDropper?: BrowserEyeDropperConstructor
+}
 
 function clampImageBatchImportRatio(value: number) {
   if (!Number.isFinite(value)) return 0
@@ -108,9 +119,9 @@ function resolveImageBatchImportDisplay(progress: {
   return { percent, displayCount }
 }
 
-export default function ProjectCanvasPageShell(props: any) {
+export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRuntimeProps) {
   const { imageBatchImportProgress: _imageBatchImportProgress, ...stageSceneProps } = props
-  const toolbarProps = React.useMemo(
+  const toolbarProps = React.useMemo<ProjectCanvasPageTopToolbarProps>(
     () =>
       Object.fromEntries(
         Object.entries(props).filter(
@@ -119,7 +130,7 @@ export default function ProjectCanvasPageShell(props: any) {
             key !== 'selectionRect' &&
             key !== 'imageBatchImportProgress'
         )
-      ),
+      ) as ProjectCanvasPageTopToolbarProps,
     [props]
   )
   const {
@@ -937,7 +948,8 @@ export default function ProjectCanvasPageShell(props: any) {
             }
           },
           onUseEyeDropper: async () => {
-            if (!(window as any).EyeDropper) {
+            const EyeDropper = (window as BrowserWindowWithEyeDropper).EyeDropper
+            if (!EyeDropper) {
               notifyError(
                 isChineseUi
                   ? '\u5f53\u524d\u73af\u5883\u4e0d\u652f\u6301\u7cfb\u7edf\u53d6\u8272\u5668\u3002'
@@ -946,7 +958,7 @@ export default function ProjectCanvasPageShell(props: any) {
               return
             }
             try {
-              const eyeDropper = new (window as any).EyeDropper()
+              const eyeDropper = new EyeDropper()
               const result = await eyeDropper.open()
               const color = result.sRGBHex
               setBgCustomColor(color)

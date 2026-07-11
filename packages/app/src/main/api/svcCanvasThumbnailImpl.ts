@@ -32,6 +32,7 @@ const SUPPORTED_THUMBNAIL_MIME_TYPES = new Set(['image/png', 'image/webp'])
 const DEFAULT_GENERATED_THUMBNAIL_LEVELS = [128, 256, 512, 1024, 2048]
 const DEFAULT_SIDECAR_MAX_DECODED_PIXELS = 64 * 1024 * 1024
 const REPO_TEST_CACHE_ROOT_DIRNAMES = ['.magicpot-trash', '.tmp', 'tmp', 'temp', 'test-results']
+const TEST_ARTIFACT_ROOT_DIRNAME = '.magicpot-trash'
 const TEMP_TEST_CACHE_ROOT_PATTERN =
   /^magicpot-(?:canvas-thumbnail|project-canvas-thumbnail|thumbnail-cache|test|benchmark)[a-zA-Z0-9_.-]*$/i
 
@@ -93,14 +94,48 @@ function assertPathInsideRoot(root: string, target: string): void {
   throw new Error(`Canvas thumbnail cache path escaped root: ${target}`)
 }
 
+async function findNearestAncestorDir(startPath: string, dirname: string): Promise<string | null> {
+  let current = path.resolve(startPath)
+  for (;;) {
+    if (path.basename(current).toLowerCase() === dirname.toLowerCase()) {
+      return current
+    }
+
+    const candidate = path.join(current, dirname)
+    if (await realpathIfExists(candidate)) {
+      return candidate
+    }
+
+    const parent = path.dirname(current)
+    if (parent === current) {
+      return null
+    }
+    current = parent
+  }
+}
+
 async function getAllowedExplicitCacheRootBases(defaultCacheRoot: string): Promise<string[]> {
   const roots = [
     defaultCacheRoot,
+    path.dirname(defaultCacheRoot),
     ...REPO_TEST_CACHE_ROOT_DIRNAMES.map((dirname) => path.join(process.cwd(), dirname))
   ]
   const envTestRoot = process.env.MAGICPOT_TEST_TRASH_ROOT?.trim()
   if (envTestRoot) {
     roots.push(envTestRoot)
+  }
+
+  const envArtifactRoot = process.env.MAGICPOT_TEST_ARTIFACT_ROOT?.trim()
+  if (envArtifactRoot) {
+    roots.push(envArtifactRoot)
+  }
+
+  const desktopTrashRoot = await findNearestAncestorDir(
+    defaultCacheRoot,
+    TEST_ARTIFACT_ROOT_DIRNAME
+  )
+  if (desktopTrashRoot) {
+    roots.push(desktopTrashRoot)
   }
 
   return Promise.all(roots.map((root) => canonicalizeExistingOrParent(root)))

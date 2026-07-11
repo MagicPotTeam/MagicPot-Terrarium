@@ -53,6 +53,24 @@ describe('resolveCanvasImageLodDecision', () => {
     expect(decision.usesThumbnailPreview).toBe(true)
   })
 
+  it('allows forced source texture for selected high-zoom images even when preview/source gain is small', () => {
+    const image = createImage(1536, 1536)
+    const item = createItem({ image, sourceWidth: 1536, sourceHeight: 1536 })
+    const decision = resolveCanvasImageLodDecision({
+      item,
+      image,
+      stageScale: 64,
+      selectedIds: new Set([item.id]),
+      forceSource: true,
+      isVisible: true
+    })
+
+    expect(decision.sourceTextureSuppressionReason).toBeNull()
+    expect(decision.usesThumbnailPreview).toBe(true)
+    expect(decision.sourceTextureNeeded).toBe(true)
+    expect(decision.shouldUseSourceTexture).toBe(true)
+  })
+
   it('allows source texture only when high zoom makes the projected preview too small', () => {
     const item = createItem({ image: createImage(1024, 1024) })
 

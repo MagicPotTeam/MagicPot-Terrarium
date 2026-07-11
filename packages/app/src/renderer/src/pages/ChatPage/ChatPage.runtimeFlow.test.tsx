@@ -6,8 +6,12 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config, type SkillReferenceAttachment } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
-import type { ChatAttachment } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
+import type {
+  ChatAttachment,
+  ChatMessage
+} from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import type { ChatSession, ChatSessionDraft } from './chatStorage'
+import type { ChatLoadingStatus } from './chatLoadingStatus'
 import ChatPage from './ChatPage'
 import {
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
@@ -64,6 +68,7 @@ const hoisted = vi.hoisted(() => ({
   fileToBlobUrlMock: vi.fn(() => 'blob:chat-draft'),
   fileToDataUrlMock: vi.fn(async () => 'data:application/octet-stream;base64,QUJD'),
   readTextFileMock: vi.fn(),
+  saveImageToDirMock: vi.fn(),
   chatMessageListMock: vi.fn(),
   notifySuccessMock: vi.fn(),
   notifyErrorMock: vi.fn(),
@@ -157,6 +162,9 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     },
     svcLLMProxy: {
       signHy3DModel: vi.fn()
+    },
+    svcHyper: {
+      saveImageToDir: hoisted.saveImageToDirMock
     }
   })
 }))
@@ -253,16 +261,38 @@ vi.mock('./chatStorage', () => ({
     hoisted.draftBackups.value = nextBackups
   }),
   migrateFromLocalStorage: vi.fn(async () => null),
-  debouncedSaveAllSessions: vi.fn((sessions: ChatSession[]) => {
-    const nextSessions = cloneValue(sessions)
-    if (hoisted.debouncedSaveAllSessionsGate.value) {
-      void hoisted.debouncedSaveAllSessionsGate.value.then(() => {
+  readSessionDeleteTombstones: vi.fn(() => []),
+  setSessionDeleteTombstone: vi.fn(),
+  cancelDebouncedSessionSave: vi.fn(),
+  debouncedSaveSessions: vi.fn(
+    (
+      sessions: ChatSession[],
+      _delayMs: number,
+      _scope: string,
+      options?: { onSuccess?: (sessions: ChatSession[]) => void }
+    ) => {
+      const changedSessions = cloneValue(sessions)
+      const persistChangedSessions = () => {
+        const nextSessions = cloneValue(hoisted.storedSessions.value)
+        for (const session of changedSessions) {
+          const existingIndex = nextSessions.findIndex((item) => item.id === session.id)
+          if (existingIndex >= 0) {
+            nextSessions[existingIndex] = session
+          } else {
+            nextSessions.unshift(session)
+          }
+        }
         hoisted.storedSessions.value = nextSessions
-      })
-      return
+        options?.onSuccess?.(sessions)
+      }
+
+      if (hoisted.debouncedSaveAllSessionsGate.value) {
+        void hoisted.debouncedSaveAllSessionsGate.value.then(persistChangedSessions)
+        return
+      }
+      persistChangedSessions()
     }
-    hoisted.storedSessions.value = nextSessions
-  })
+  )
 }))
 
 vi.mock('./chatRequestUtils', () => ({
@@ -454,6 +484,7 @@ vi.mock('./components/ChatMessageList', () => ({
   default: (props: {
     currentSession?: ChatSession
     isLoading?: boolean
+    loadingStatus?: ChatLoadingStatus
     pendingConfirmation?: {
       requestId: string
       prompt: string
@@ -612,6 +643,19 @@ const readCurrentSessionStateWithin = (container: HTMLElement): ChatSession | nu
   return JSON.parse(serialized) as ChatSession | null
 }
 
+const readLatestMessageListProps = (): {
+  currentSession?: ChatSession
+  isLoading?: boolean
+  loadingStatus?: ChatLoadingStatus
+} => {
+  const calls = hoisted.chatMessageListMock.mock.calls
+  return (calls[calls.length - 1]?.[0] || {}) as {
+    currentSession?: ChatSession
+    isLoading?: boolean
+    loadingStatus?: ChatLoadingStatus
+  }
+}
+
 describe('ChatPage runtime workflow integration', () => {
   beforeEach(() => {
     hoisted.currentConfig.value = createConfig()
@@ -639,6 +683,10 @@ describe('ChatPage runtime workflow integration', () => {
       hoisted.storedSessions.value = cloneValue(sessions)
     })
     hoisted.readTextFileMock.mockReset()
+    hoisted.saveImageToDirMock.mockReset()
+    hoisted.saveImageToDirMock.mockResolvedValue({
+      savedPath: 'C:/MagicPot/AutoSave/Agent/chat_upload.png'
+    })
     hoisted.chatMessageListMock.mockClear()
     hoisted.notifySuccessMock.mockReset()
     hoisted.notifyErrorMock.mockReset()
@@ -712,6 +760,156 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
+  it('keeps the staged model-wait loading status after remounting the same Agent thread', async () => {
+    const scope = 'runtime-flow-a'
+    let resolveCompletion!: (value: { content: string }) => void
+    hoisted.requestChatCompletionMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCompletion = resolve
+        })
+    )
+
+    const view = renderChatPage(scope)
+
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const input = screen.getByTestId('chat-composer-input-mock')
+    await act(async () => {
+      fireEvent.change(input, { target: { value: '12312312' } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    })
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+
+    await waitFor(() => {
+      expect(readLatestMessageListProps().loadingStatus).toEqual(
+        expect.objectContaining({
+          label: '等待模型响应',
+          step: 3,
+          totalSteps: 4
+        })
+      )
+    })
+
+    const currentSessionId = readLatestMessageListProps().currentSession?.id
+    expect(currentSessionId).toBeTruthy()
+    expect(readLatestMessageListProps().isLoading).toBe(true)
+    view.unmount()
+    hoisted.chatMessageListMock.mockClear()
+
+    renderChatPage(scope)
+
+    await waitFor(() => {
+      const latestProps = readLatestMessageListProps()
+      expect(latestProps.currentSession?.id).toBe(currentSessionId)
+      expect(latestProps.isLoading).toBe(true)
+      expect(latestProps.loadingStatus).toEqual(
+        expect.objectContaining({
+          label: '等待模型响应',
+          step: 3,
+          totalSteps: 4
+        })
+      )
+    })
+
+    await act(async () => {
+      resolveCompletion({ content: 'done' })
+    })
+  })
+
+  it('reloads the current Agent thread body when preview refresh reports a storage update', async () => {
+    const session: ChatSession = {
+      id: 'storage-refresh-session',
+      title: 'Storage refresh',
+      messages: [{ role: 'user', content: 'before' }],
+      createdAt: 300
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+
+    renderChatPage()
+
+    await waitFor(() => expect(readCurrentSessionState()?.messages[0]?.content).toBe('before'))
+
+    hoisted.storedSessions.value = [
+      {
+        ...session,
+        messages: [
+          { role: 'user', content: 'before' },
+          { role: 'assistant', content: 'after storage update' }
+        ]
+      }
+    ]
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:preview-refresh', {
+          detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+        })
+      )
+    })
+
+    await waitFor(() => {
+      expect(readCurrentSessionState()?.messages).toEqual([
+        { role: 'user', content: 'before' },
+        { role: 'assistant', content: 'after storage update' }
+      ])
+    })
+  })
+
+  it('does not reload deleted sessions back into the body for preview-only refreshes', async () => {
+    const deletedSession: ChatSession = {
+      id: 'deleted-preview-only-session',
+      title: 'Deleted preview only',
+      messages: [{ role: 'user', content: 'delete me' }],
+      createdAt: 300
+    }
+    const remainingSession: ChatSession = {
+      id: 'remaining-preview-only-session',
+      title: 'Remaining',
+      messages: [{ role: 'user', content: 'keep me' }],
+      createdAt: 200
+    }
+    hoisted.storedSessions.value = [deletedSession, remainingSession]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      deletedSession.id
+    )
+
+    renderChatPage()
+
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(deletedSession.id))
+
+    const deletePromise = act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:deleteSession', {
+          detail: { scope: 'runtime-flow', sessionId: deletedSession.id }
+        })
+      )
+    })
+
+    hoisted.storedSessions.value = [deletedSession, remainingSession]
+    await deletePromise
+
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(remainingSession.id))
+    expect(readCurrentSessionState()?.id).not.toBe(deletedSession.id)
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:preview-refresh', {
+          detail: { scope: 'runtime-flow', reason: 'preview-only' }
+        })
+      )
+    })
+
+    expect(readCurrentSessionState()?.id).toBe(remainingSession.id)
+  })
+
   it('does not rerender the message list synchronously while typing in the composer', async () => {
     renderChatPage()
 
@@ -728,6 +926,76 @@ describe('ChatPage runtime workflow integration', () => {
 
     await waitFor(() => {
       expect(hoisted.chatMessageListMock).toHaveBeenCalled()
+    })
+  })
+
+  it('persists outgoing blob image attachments before storing user messages', async () => {
+    const fetchMock = vi.fn(async () => ({
+      blob: async () =>
+        new Blob([new Uint8Array([1, 2, 3])], {
+          type: 'image/png'
+        })
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    hoisted.storedSessions.value = [
+      {
+        id: 'session-blob-user-image',
+        title: 'Blob user image',
+        profileId: 'vision-model',
+        messages: []
+      }
+    ]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      'session-blob-user-image'
+    )
+
+    renderChatPage()
+
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe('session-blob-user-image'))
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            targetScope: 'runtime-flow',
+            autoSend: true,
+            text: 'describe this',
+            attachments: [
+              {
+                type: 'image',
+                url: 'blob:user-upload-image',
+                fileName: 'upload.png',
+                mimeType: 'image/png'
+              }
+            ]
+          }
+        })
+      )
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+
+    expect(fetchMock).toHaveBeenCalledWith('blob:user-upload-image')
+    expect(hoisted.saveImageToDirMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fileName: expect.stringMatching(/^chat_upload_.*_1\.png$/),
+        dir: undefined,
+        data: expect.any(Uint8Array)
+      })
+    )
+
+    const requestMessages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]?.messages as
+      | ChatMessage[]
+      | undefined
+    const requestAttachment = requestMessages?.at(-1)?.attachments?.[0]
+    expect(requestAttachment?.url).toBe('file://C:/MagicPot/AutoSave/Agent/chat_upload.png')
+
+    await waitFor(() => {
+      const currentSession = readCurrentSessionState()
+      expect(currentSession?.messages[0]?.attachments?.[0]?.url).toBe(
+        'file://C:/MagicPot/AutoSave/Agent/chat_upload.png'
+      )
     })
   })
 
@@ -2095,12 +2363,17 @@ describe('ChatPage runtime workflow integration', () => {
           attachments: [
             expect.objectContaining({
               type: 'image',
-              url: 'https://example.com/generated-armor.png',
               mimeType: 'image/png'
             })
           ]
         })
       )
+      const attachmentUrl = currentSession?.messages[1]?.attachments?.[0]?.url
+      expect(attachmentUrl).toEqual(expect.any(String))
+      expect(
+        attachmentUrl === 'https://example.com/generated-armor.png' ||
+          (attachmentUrl?.startsWith('file://') && attachmentUrl.includes('AutoSave/Agent'))
+      ).toBe(true)
     })
   })
 

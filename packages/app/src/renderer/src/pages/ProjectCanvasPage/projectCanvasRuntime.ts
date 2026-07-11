@@ -1,7 +1,10 @@
 import {
+  attachCanvasSpatialIndexAccelerator,
   buildCanvasItemSpatialIndex,
+  disposeCanvasSpatialIndex,
   doCanvasSpatialBoundsIntersect,
   queryCanvasSpatialIndex,
+  queryCanvasSpatialIndexUnordered,
   type CanvasSpatialBounds,
   type CanvasSpatialIndex
 } from './canvasSpatialIndex'
@@ -51,6 +54,8 @@ export type ProjectCanvasRuntimeMetrics = {
 export type ProjectCanvasRuntimeOptions = {
   getItemBounds?: (item: CanvasItem) => CanvasSpatialBounds
 }
+
+export type ProjectCanvasRuntimeCallback<T> = (runtime: ProjectCanvasRuntime) => T
 
 export type ProjectCanvasRuntimeSnapshotOptions = {
   selectedIds?: Iterable<string>
@@ -302,7 +307,10 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
 
   const rebuildIndex = () => {
     const effectiveItems = getEffectiveItems()
+    const previousSpatialIndex = spatialIndex
     spatialIndex = buildCanvasItemSpatialIndex(effectiveItems, getItemBounds)
+    attachCanvasSpatialIndexAccelerator(spatialIndex)
+    disposeCanvasSpatialIndex(previousSpatialIndex)
     orderById = new Map(effectiveItems.map((item, index) => [item.id, index]))
   }
 
@@ -340,6 +348,11 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
     return queryCanvasSpatialIndex(spatialIndex, canvasBounds)
       .filter((item) => includeHidden || !isCanvasItemHidden(item))
       .sort((left, right) => sortCanvasItemsTopFirst(left, right, orderById))
+  }
+
+  const queryCanvasItemsUnordered = (canvasBounds: CanvasSpatialBounds, includeHidden = false) => {
+    const matchedItems = queryCanvasSpatialIndexUnordered(spatialIndex, canvasBounds)
+    return includeHidden ? matchedItems : matchedItems.filter((item) => !isCanvasItemHidden(item))
   }
 
   const queryItems = (
@@ -406,7 +419,16 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
     },
 
     setViewport(nextViewport: Partial<CanvasViewport>) {
-      viewport = normalizeViewport({ ...viewport, ...nextViewport })
+      const normalizedViewport = normalizeViewport({ ...viewport, ...nextViewport })
+      if (
+        viewport.x === normalizedViewport.x &&
+        viewport.y === normalizedViewport.y &&
+        viewport.scale === normalizedViewport.scale
+      ) {
+        return
+      }
+
+      viewport = normalizedViewport
     },
 
     getViewport() {
@@ -439,11 +461,12 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
       stageSize: CanvasStageSize
       overscanPx?: number
       includeHidden?: boolean
+      preserveOrder?: boolean
     }) {
-      return queryCanvasItems(
-        resolveViewportCanvasBounds(options.stageSize, options.overscanPx),
-        options.includeHidden
-      )
+      const canvasBounds = resolveViewportCanvasBounds(options.stageSize, options.overscanPx)
+      return options.preserveOrder === false
+        ? queryCanvasItemsUnordered(canvasBounds, options.includeHidden)
+        : queryCanvasItems(canvasBounds, options.includeHidden)
     },
 
     getSelectionBounds(ids: Iterable<string>) {
@@ -468,6 +491,14 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
 
     getMetrics(): ProjectCanvasRuntimeMetrics {
       return getMetrics()
+    },
+
+    dispose() {
+      disposeCanvasSpatialIndex(spatialIndex)
+      items = []
+      previewItems = new Map()
+      spatialIndex = buildCanvasItemSpatialIndex([], getItemBounds)
+      orderById = new Map()
     },
 
     createSnapshot(
@@ -510,3 +541,15 @@ export function createProjectCanvasRuntime(options: ProjectCanvasRuntimeOptions 
 }
 
 export type ProjectCanvasRuntime = ReturnType<typeof createProjectCanvasRuntime>
+
+export function withProjectCanvasRuntime<T>(
+  callback: ProjectCanvasRuntimeCallback<T>,
+  options?: ProjectCanvasRuntimeOptions
+): T {
+  const runtime = createProjectCanvasRuntime(options)
+  try {
+    return callback(runtime)
+  } finally {
+    runtime.dispose()
+  }
+}

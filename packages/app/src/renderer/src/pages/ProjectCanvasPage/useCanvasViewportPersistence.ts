@@ -627,38 +627,64 @@ export function useCanvasViewportPersistence({
 
   const handleFileSelect = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
-      const files = event.target.files
+      const input = event.currentTarget
+      const files = input.files
       if (!files) return
-      await handleImportFiles(Array.from(files))
-      event.target.value = ''
+      const selectedFiles = Array.from(files)
+      // Clear the hidden input before the async import pipeline starts. Large Electron/Playwright
+      // selections keep the FileList alive until the value is reset, which can retain thousands of
+      // file payloads throughout cold thumbnail generation.
+      input.value = ''
+      try {
+        await handleImportFiles(selectedFiles)
+      } finally {
+        selectedFiles.length = 0
+        input.value = ''
+      }
     },
     [handleImportFiles]
   )
 
   const handleModelSelect = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
-      const files = event.target.files
+      const input = event.currentTarget
+      const files = input.files
       if (!files) return
+      const selectedFiles = Array.from(files)
+      input.value = ''
 
-      for (const file of Array.from(files)) {
-        await addModel3DToCanvas(file)
+      try {
+        for (let index = 0; index < selectedFiles.length; index += 1) {
+          const file = selectedFiles[index]
+          selectedFiles[index] = undefined as unknown as File
+          await addModel3DToCanvas(file)
+        }
+      } finally {
+        selectedFiles.length = 0
+        input.value = ''
       }
-
-      event.target.value = ''
     },
     [addModel3DToCanvas]
   )
 
   const handleVideoSelect = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
-      const files = event.target.files
+      const input = event.currentTarget
+      const files = input.files
       if (!files) return
+      const selectedFiles = Array.from(files)
+      input.value = ''
 
-      for (const file of Array.from(files)) {
-        await addVideoToCanvas(file)
+      try {
+        for (let index = 0; index < selectedFiles.length; index += 1) {
+          const file = selectedFiles[index]
+          selectedFiles[index] = undefined as unknown as File
+          await addVideoToCanvas(file)
+        }
+      } finally {
+        selectedFiles.length = 0
+        input.value = ''
       }
-
-      event.target.value = ''
     },
     [addVideoToCanvas]
   )

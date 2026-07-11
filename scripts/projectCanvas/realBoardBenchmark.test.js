@@ -1,6 +1,6 @@
-/* eslint-disable @typescript-eslint/explicit-function-return-type */
 import { describe, expect, it } from 'vitest'
 import {
+  CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS,
   buildAcceptance,
   buildAggregateScenarioResult,
   buildRealBoardAggregateReport,
@@ -8,8 +8,15 @@ import {
   buildRepeatWorkloadAssessment,
   resolveRealBoardCachePasses,
   buildSourceTextureVisualFailures,
+  isRealBoardBenchmarkMetricsReady,
   readProjectCanvasRealBoardMetricsFromDomSnapshot
 } from './realBoardBenchmark.mjs'
+
+function buildWorkerPoolMetrics(values = [2, 1, 1, 4, 5, 6, 7, 8, 9, 10, 2, 32]) {
+  return Object.fromEntries(
+    CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS.map((key, index) => [key, values[index] ?? 0])
+  )
+}
 
 function buildFinalMetrics(overrides = {}) {
   return {
@@ -43,6 +50,9 @@ function buildOfficialProfileMetadata(overrides = {}) {
     memoryWatchdogEnabled: true,
     memorySoftLimitFraction: 0.75,
     memoryHardLimitFraction: 0.8,
+    importBatchSize: 128,
+    importBatchSettleMs: 500,
+    importBatchWaitMetrics: true,
     ...overrides
   })
 }
@@ -208,6 +218,24 @@ describe('realBoardBenchmark acceptance gates', () => {
     expect(aggregate.allPassed).toBe(false)
   })
 
+  it('prevents import batching overrides from reporting official aggregate allPassed', () => {
+    const profile = buildOfficialProfileMetadata({
+      importBatchSize: 64,
+      importBatchSettleMs: 0,
+      importBatchWaitMetrics: false
+    })
+    const aggregate = buildAggregateWithProfile({ profileMetadata: profile })
+    const reasons = profile.diagnosticReasons.join(' ')
+
+    expect(profile.officialProfile).toBe(false)
+    expect(reasons).toContain('importBatchSize=64')
+    expect(reasons).toContain('importBatchSettleMs=0')
+    expect(reasons).toContain('importBatchWaitMetrics=false')
+    expect(aggregate.acceptanceAllPassed).toBe(true)
+    expect(aggregate.officialAllPassed).toBe(false)
+    expect(aggregate.allPassed).toBe(false)
+  })
+
   it('prevents single cache pass runs from reporting official aggregate allPassed', () => {
     const profile = buildOfficialProfileMetadata({ cachePasses: ['cold-cache'] })
     const aggregate = buildAggregateWithProfile({
@@ -278,7 +306,8 @@ describe('realBoardBenchmark acceptance gates', () => {
           thumbnailCount: 9000,
           cacheHitCount: 3000,
           cacheGeneratedCount: 0,
-          cacheStaleCount: 0
+          cacheStaleCount: 0,
+          ...buildWorkerPoolMetrics()
         },
         largeImageResourceMetrics: {
           schemaName: 'project-canvas-large-image-resource-diagnostics',
@@ -344,7 +373,8 @@ describe('realBoardBenchmark acceptance gates', () => {
       thumbnailCount: 9000,
       cacheHitCount: 3000,
       cacheGeneratedCount: 0,
-      cacheStaleCount: 0
+      cacheStaleCount: 0,
+      ...buildWorkerPoolMetrics()
     })
     expect(aggregateResult.largeImageResourceMetrics.diagnosticOnly).toBe(true)
     expect(aggregateResult.largeImageResourceMetrics.officialAcceptanceImpact).toBe(false)
@@ -384,9 +414,29 @@ describe('realBoardBenchmark acceptance gates', () => {
             firstThumbnailLatencyMs: 27,
             cacheHitCount: 5,
             nativeGeneratedCount: 2,
-            sidecarGeneratedCount: 3
+            sidecarGeneratedCount: 3,
+            ...buildWorkerPoolMetrics([2, 1, 1, 3, 4, 5, 6, 7, 8, 9, 2, 32])
           },
           webgl: {
+            loadedImageCount: 7,
+            pendingImageCount: 2,
+            residentTextureBytes: 16384,
+            sourceImageCacheCount: 11,
+            thumbnailImageCacheCount: 12,
+            sourceUpgradeQueueCount: 13,
+            thumbnailLoadQueueCount: 14,
+            initialLoadQueueCount: 15,
+            renderCount: 3,
+            lastRenderDurationMs: 4.5,
+            spriteReconcilePassCount: 8,
+            lastSpriteReconcileDurationMs: 1.125,
+            lastSpriteReconcileCandidateCount: 10,
+            lastSpriteReconcileTargetCount: 7,
+            lastSpriteReconcileCreatedCount: 3,
+            lastSpriteReconcileReusedCount: 4,
+            lastSpriteReconcileRemovedCount: 2,
+            lastSpriteReconcileDeferredCount: 1,
+            lastUpdateReason: 'items',
             sourceUpgradeCompletedCount: 4,
             evictionReasons: [{ reason: 'budget', count: 2 }]
           }
@@ -409,14 +459,194 @@ describe('realBoardBenchmark acceptance gates', () => {
       cacheHitCount: 5,
       nativeGeneratedCount: 2,
       sidecarGeneratedCount: 3,
-      residentTextureBytes: 8192,
+      residentTextureBytes: 16384,
       sourceUpgradeCount: 4,
       evictionCount: 2,
       evictionReasons: { budget: 2 },
       objectUrlCount: 6
     })
     expect(metrics.diagnosticMetrics.largeImageResources).toBe(metrics.largeImageResourceMetrics)
-    expect(metrics.webgl.hasWebglContext).toBe(true)
+    expect(metrics.webgl).toMatchObject({
+      hasWebglContext: true,
+      loadedImageCount: 7,
+      pendingImageCount: 2,
+      residentTextureBytes: 16384,
+      sourceImageCacheCount: 11,
+      thumbnailImageCacheCount: 12,
+      sourceUpgradeQueueCount: 13,
+      thumbnailLoadQueueCount: 14,
+      initialLoadQueueCount: 15,
+      renderCount: 3,
+      lastRenderDurationMs: 4.5,
+      spriteReconcilePassCount: 8,
+      lastSpriteReconcileDurationMs: 1.125,
+      lastSpriteReconcileCandidateCount: 10,
+      lastSpriteReconcileTargetCount: 7,
+      lastSpriteReconcileCreatedCount: 3,
+      lastSpriteReconcileReusedCount: 4,
+      lastSpriteReconcileRemovedCount: 2,
+      lastSpriteReconcileDeferredCount: 1,
+      lastUpdateReason: 'items'
+    })
+  })
+
+  it('falls back to real-board dataset fields for WebGL sprite reconcile metrics', () => {
+    const metrics = readProjectCanvasRealBoardMetricsFromDomSnapshot({
+      rootDataset: {
+        projectCanvasRenderSurfaceSummary: JSON.stringify({
+          totalItems: 4,
+          imageItems: 4
+        }),
+        projectCanvasWebglSpriteReconcilePassCount: '3',
+        projectCanvasWebglLastSpriteReconcileDurationMs: '0.75',
+        projectCanvasWebglLastSpriteReconcileCandidateCount: '4',
+        projectCanvasWebglLastSpriteReconcileTargetCount: '4',
+        projectCanvasWebglLastSpriteReconcileCreatedCount: '2',
+        projectCanvasWebglLastSpriteReconcileReusedCount: '2',
+        projectCanvasWebglLastSpriteReconcileRemovedCount: '1',
+        projectCanvasWebglLastSpriteReconcileDeferredCount: '0'
+      }
+    })
+
+    expect(metrics.webgl).toMatchObject({
+      spriteReconcilePassCount: 3,
+      lastSpriteReconcileDurationMs: 0.75,
+      lastSpriteReconcileCandidateCount: 4,
+      lastSpriteReconcileTargetCount: 4,
+      lastSpriteReconcileCreatedCount: 2,
+      lastSpriteReconcileReusedCount: 2,
+      lastSpriteReconcileRemovedCount: 1,
+      lastSpriteReconcileDeferredCount: 0
+    })
+  })
+
+  it('requires real-board readiness to observe post-import render and sprite reconcile metrics', () => {
+    const readyMetrics = {
+      itemCounts: {
+        totalImageItemCount: 4
+      },
+      webgl: {
+        hasWebglContext: true,
+        loadedImageCount: 4,
+        failedImageCount: 0,
+        pendingImageCount: 0,
+        residentCandidateImageCount: 4,
+        viewportCulledImageCount: 0,
+        sourceUpgradeQueueCount: 0,
+        thumbnailLoadQueueCount: 0,
+        initialLoadQueueCount: 0,
+        renderCount: 12,
+        spriteReconcilePassCount: 12,
+        lastSpriteReconcileCandidateCount: 4,
+        lastSpriteReconcileDeferredCount: 0,
+        lastRenderDurationMs: 5.5,
+        lastUpdateReason: 'items'
+      }
+    }
+
+    expect(isRealBoardBenchmarkMetricsReady(readyMetrics, 4, 11, 11)).toBe(true)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, renderCount: 11 } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, spriteReconcilePassCount: 11 } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        {
+          ...readyMetrics,
+          webgl: { ...readyMetrics.webgl, lastSpriteReconcileDeferredCount: 1 }
+        },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        {
+          ...readyMetrics,
+          webgl: { ...readyMetrics.webgl, lastSpriteReconcileCandidateCount: 3 }
+        },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, itemCounts: { totalImageItemCount: 3 } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        {
+          ...readyMetrics,
+          webgl: {
+            ...readyMetrics.webgl,
+            residentCandidateImageCount: 3,
+            viewportCulledImageCount: 0,
+            lastSpriteReconcileCandidateCount: 3
+          }
+        },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, sourceUpgradeQueueCount: 1 } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, thumbnailLoadQueueCount: 1 } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, initialLoadQueueCount: 1 } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, lastRenderDurationMs: 0 } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isRealBoardBenchmarkMetricsReady(
+        { ...readyMetrics, webgl: { ...readyMetrics.webgl, lastUpdateReason: 'cleanup' } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
   })
 
   it('allows bounded deferred React commits for idle source texture upgrades', () => {

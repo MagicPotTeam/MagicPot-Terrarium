@@ -69,6 +69,37 @@ describe('toolBridge', () => {
     expect(refreshMagicPotMcpPlatformRuntime).toHaveBeenCalled()
   })
 
+  it('filters denied terminal tools from kernel sync and direct invocation', async () => {
+    const registry = createToolRegistry(['safe.tool', ' Agent.Terminal.Run '])
+
+    syncAssistantToolsWithAgentKernel(registry)
+
+    expect(
+      getAgentKernel()
+        .listCapabilities()
+        .map((capability) => capability.capabilityId)
+    ).toEqual(['chat.tool.safe.tool'])
+    expect(getAgentKernel().getTool('agent.terminal.run')).toBeUndefined()
+
+    await expect(
+      invokeAssistantToolViaKernel({
+        toolRegistry: registry,
+        toolName: ' Agent.Terminal.Run ',
+        args: { command: 'pwd' },
+        context
+      })
+    ).rejects.toThrow(/not allowed through the MagicAgent platform boundary/)
+
+    expect(authorizeMagicPotMcpToolInvocation).not.toHaveBeenCalled()
+    expect(registry.callTool).not.toHaveBeenCalled()
+    expect(appendMagicPotMcpAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        decision: 'deny',
+        target: 'chat.tool.agent.terminal.run'
+      })
+    )
+  })
+
   it('keeps sync usable when MCP refresh is not initialized', () => {
     vi.mocked(refreshMagicPotMcpPlatformRuntime).mockImplementationOnce(() => {
       throw new Error('not ready')

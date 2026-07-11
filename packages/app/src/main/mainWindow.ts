@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, nativeImage, screen, shell } from 'electron'
 import * as fs from 'fs'
 import { basename, extname, join } from 'path'
+import { pathToFileURL } from 'url'
 import icon from '../../../runtime-assets/resources/icon.png?asset'
 import { isDev } from './config/buildEnv'
 import { resolveTestArtifactPath } from './testUiPolicy'
@@ -13,6 +14,10 @@ import { attachRendererDiagnostics } from './rendererDiagnostics'
 import { winController } from './winControls'
 import { attachWindowStatePersistence, readWindowState, type WindowState } from './windowState'
 import { normalizeAllowedExternalUrl } from './utils/externalUrl'
+import {
+  registerMagicAgentTrustedRouteBinding,
+  unregisterMagicAgentTrustedRouteBinding
+} from './magicAgentRuntime/trustedRouteBinding'
 
 type CanvasStartSystemDragPayload = {
   files: Array<{
@@ -107,13 +112,15 @@ function resolveInitialWindowState(statePath: string): {
   return { state, hasSavedState }
 }
 
-function loadWindowContent(window: BrowserWindow): void {
+function resolveMainWindowRendererUrl(): string {
   if (isDev() && process.env['ELECTRON_RENDERER_URL']) {
-    window.loadURL(process.env['ELECTRON_RENDERER_URL'])
-    return
+    return process.env['ELECTRON_RENDERER_URL']
   }
+  return pathToFileURL(join(__dirname, '../renderer/index.html')).toString()
+}
 
-  window.loadFile(join(__dirname, '../renderer/index.html'))
+function loadWindowContent(window: BrowserWindow, rendererUrl: string): void {
+  window.loadURL(rendererUrl)
 }
 
 export function createMainWindow(): BrowserWindow {
@@ -140,12 +147,24 @@ export function createMainWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: false,
       webviewTag: false,
+      backgroundThrottling: !testUiPolicy.hideWindow,
       devTools: !app.isPackaged
     }
   })
 
+  ;(mainWindow as BrowserWindow & { [key: symbol]: boolean | undefined })[
+    Symbol.for('magicpot.testWindowRuntime.skipTaskbar')
+  ] = testUiPolicy.suppressTaskbar ? true : undefined
+
   attachWindowStatePersistence(mainWindow, statePath)
   winController.registerWindow(mainWindow)
+  const trustedRendererUrl = resolveMainWindowRendererUrl()
+  registerMagicAgentTrustedRouteBinding(mainWindow.webContents.id, undefined, {
+    trustedUrl: trustedRendererUrl
+  })
+  mainWindow.on('closed', () => {
+    unregisterMagicAgentTrustedRouteBinding(mainWindow.webContents.id)
+  })
 
   mainWindow.on('ready-to-show', () => {
     if (!testUiPolicy.suppressTaskbar && hasSavedState && state.isMaximized) {
@@ -166,7 +185,7 @@ export function createMainWindow(): BrowserWindow {
   })
 
   attachRendererDiagnostics(mainWindow)
-  loadWindowContent(mainWindow)
+  loadWindowContent(mainWindow, trustedRendererUrl)
 
   return mainWindow
 }

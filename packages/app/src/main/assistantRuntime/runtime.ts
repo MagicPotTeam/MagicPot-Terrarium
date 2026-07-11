@@ -1114,6 +1114,10 @@ export class AssistantRuntime {
       this.setTaskState(sessionKey, { taskGroup })
     }
 
+    if (req.signal?.aborted) {
+      this.cancelledRuns.add(runId)
+    }
+
     if (this.cancelledRuns.has(runId)) {
       const cancelledAt = Date.now()
       const cancelledRun: AssistantRunRecord = {
@@ -1221,69 +1225,95 @@ export class AssistantRuntime {
     this.broadcastEvents(route, [startEvent])
 
     const abortController = new AbortController()
+    const forwardExternalAbort = (): void => {
+      this.cancelledRuns.add(runId)
+      abortController.abort(req.signal?.reason)
+    }
+    if (req.signal?.aborted) {
+      forwardExternalAbort()
+    } else {
+      req.signal?.addEventListener('abort', forwardExternalAbort, { once: true })
+    }
     this.runAbortControllers.set(runId, abortController)
 
-    const executionResult = await this.executionAdapter.run({
-      runId,
-      route,
-      req,
-      config,
-      messages: executionMessages,
-      profileId,
-      systemPrompt,
-      executionMode,
-      executionHistorySize,
-      executionTraceLabel,
-      sessionStore: this.sessionStore,
-      taskState: startedState,
-      workspaceMemoryFile: workspace.memoryFile,
-      workspaceTaskContextFile: workspace.taskContextFile,
-      workspaceContextFile: workspace.contextFile,
-      workspacePinnedContextFile: workspace.pinnedContextFile,
-      workspaceMetaFile: workspace.workspaceMetaFile,
-      resumeRun: this.resumeRun.bind(this),
-      resumeWorkflow: this.resumeWorkflow.bind(this),
-      signal: abortController.signal,
-      emitEvent: async (event) =>
-        this.appendAndEmitEvent(
-          req,
-          route,
-          createEvent(runId, route, event.type, event.message, {
-            level: event.level,
-            metadata: event.metadata
-          })
-        )
-    })
+    const executionResult = await this.executionAdapter
+      .run({
+        runId,
+        route,
+        req,
+        config,
+        messages: executionMessages,
+        profileId,
+        systemPrompt,
+        executionMode,
+        executionHistorySize,
+        executionTraceLabel,
+        sessionStore: this.sessionStore,
+        taskState: startedState,
+        workspaceMemoryFile: workspace.memoryFile,
+        workspaceTaskContextFile: workspace.taskContextFile,
+        workspaceContextFile: workspace.contextFile,
+        workspacePinnedContextFile: workspace.pinnedContextFile,
+        workspaceMetaFile: workspace.workspaceMetaFile,
+        resumeRun: this.resumeRun.bind(this),
+        resumeWorkflow: this.resumeWorkflow.bind(this),
+        signal: abortController.signal,
+        emitEvent: async (event) =>
+          this.appendAndEmitEvent(
+            req,
+            route,
+            createEvent(runId, route, event.type, event.message, {
+              level: event.level,
+              metadata: event.metadata
+            })
+          )
+      })
+      .catch((error) => {
+        req.signal?.removeEventListener('abort', forwardExternalAbort)
+        throw error
+      })
 
     const reply = executionResult.reply
+    if (req.signal?.aborted) {
+      this.cancelledRuns.add(runId)
+    }
+    // Linearize completion before persistence: cancellation received up to this
+    // point wins; cancellation after this boundary belongs to the next operation.
+    req.signal?.removeEventListener('abort', forwardExternalAbort)
+    const completionStatus = this.cancelledRuns.has(runId) ? 'cancelled' : 'completed'
     const artifactLineage = {
       ...(taskGroup?.taskGroupId ? { taskGroupId: taskGroup.taskGroupId } : {}),
       workspaceRunId: runId,
       workspaceId: queuedRun.workspaceId,
       rootRunId: queuedRun.rootRunId
     }
-    const artifactsWithLineage = executionResult.artifacts.map((artifact) => ({
-      ...artifact,
-      lineage: {
-        ...(artifact.lineage || {}),
-        ...artifactLineage
-      }
-    }))
+    const artifactsWithLineage =
+      completionStatus === 'cancelled'
+        ? []
+        : executionResult.artifacts.map((artifact) => ({
+            ...artifact,
+            lineage: {
+              ...(artifact.lineage || {}),
+              ...artifactLineage
+            }
+          }))
     const assistantMessage = buildAssistantMessage(
       reply.content || '',
       reply.attachments,
       reply.ocrResult
     )
-    const completionStatus = this.cancelledRuns.has(runId) ? 'cancelled' : 'completed'
     const finishedAt = Date.now()
     const finalRun: AssistantRunRecord = {
       ...runningRun,
       status: completionStatus,
       updatedAt: finishedAt,
       finishedAt,
-      responseText: cleanString(reply.content),
-      toolCalls: executionResult.toolCalls,
-      artifactIds: executionResult.artifacts.map((artifact) => artifact.artifactId),
+      ...(completionStatus === 'completed' ? { responseText: cleanString(reply.content) } : {}),
+      toolCalls: completionStatus === 'completed' ? executionResult.toolCalls : [],
+      artifactIds:
+        completionStatus === 'completed'
+          ? executionResult.artifacts.map((artifact) => artifact.artifactId)
+          : [],
       executionMode: executionResult.executionMode || executionMode,
       executionHistorySize: executionResult.executionHistorySize || executionHistorySize,
       ...(executionTraceLabel ? { executionTraceLabel } : {}),
@@ -1307,33 +1337,40 @@ export class AssistantRuntime {
               executionTraceLabel,
               requestText: cleanString(req.text)
             }),
-            artifactCount: executionResult.artifacts.length,
-            toolCallCount: executionResult.toolCalls.length,
+            artifactCount: completionStatus === 'completed' ? executionResult.artifacts.length : 0,
+            toolCallCount: completionStatus === 'completed' ? executionResult.toolCalls.length : 0,
             ...buildRunRelationshipMetadata(finalRun)
           }
         }
       )
     ]
 
-    const stored = await this.sessionStore.appendTurn(
-      route,
-      [userMessage, assistantMessage],
-      clampHistoryMessages(config.chat_config?.max_history_messages),
-      {
-        workspace,
-        contextSnapshot,
-        run: finalRun,
-        artifacts: artifactsWithLineage,
-        events: finalEvents
-      }
-    )
+    const stored =
+      completionStatus === 'completed'
+        ? await this.sessionStore.appendTurn(
+            route,
+            [userMessage, assistantMessage],
+            clampHistoryMessages(config.chat_config?.max_history_messages),
+            {
+              workspace,
+              contextSnapshot,
+              run: finalRun,
+              artifacts: artifactsWithLineage,
+              events: finalEvents
+            }
+          )
+        : await this.sessionStore.upsertRun(route, finalRun, {
+            workspace,
+            contextSnapshot,
+            events: finalEvents
+          })
     await this.emitEvents(req, finalEvents)
     this.broadcastEvents(route, finalEvents)
 
     await appendAssistantMemoryLog(workspace, {
       title: cleanString(req.text) || 'Attachment-only request',
       requestText: cleanString(req.text),
-      responseText: cleanString(reply.content),
+      ...(completionStatus === 'completed' ? { responseText: cleanString(reply.content) } : {}),
       status: finalRun.status,
       profileId
     })
@@ -1351,10 +1388,10 @@ export class AssistantRuntime {
       resumeMode: finalRun.resumeMode,
       profileId,
       requestText: cleanString(req.text),
-      responseText: cleanString(reply.content),
+      ...(completionStatus === 'completed' ? { responseText: cleanString(reply.content) } : {}),
       artifactIds: finalRun.artifactIds,
       artifacts: artifactsWithLineage,
-      toolCalls: executionResult.toolCalls,
+      toolCalls: finalRun.toolCalls,
       taskGroup
     })
 
@@ -1370,7 +1407,7 @@ export class AssistantRuntime {
       status: finalRun.status,
       taskState,
       events: finalEvents,
-      artifacts: artifactsWithLineage,
+      artifacts: completionStatus === 'completed' ? artifactsWithLineage : [],
       reply:
         completionStatus === 'cancelled'
           ? {

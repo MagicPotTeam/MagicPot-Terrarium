@@ -1,7 +1,15 @@
 import type { LLMDeployment, LLMProviderOption } from '@shared/config/config'
 import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 
-export type LLMReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+export type LLMReasoningEffort =
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'ultra'
 
 export type ChatCapabilityProfile = {
   model_name?: string
@@ -118,17 +126,21 @@ const dedupeReasoningEfforts = (efforts: readonly LLMReasoningEffort[]): LLMReas
 export const getReasoningEffortLabel = (effort: LLMReasoningEffort): string => {
   switch (effort) {
     case 'none':
-      return '\u4e0d\u63a8\u7406'
+      return 'None'
     case 'minimal':
-      return '\u6781\u4f4e'
+      return 'Minimal'
     case 'low':
-      return '\u4f4e'
+      return 'Low'
     case 'medium':
-      return '\u4e2d'
+      return 'Medium'
     case 'high':
-      return '\u9ad8'
+      return 'High'
     case 'xhigh':
-      return '\u8d85\u9ad8'
+      return 'X-High'
+    case 'max':
+      return 'Max'
+    case 'ultra':
+      return 'Ultra'
     default:
       return effort
   }
@@ -239,7 +251,9 @@ export const normalizeReasoningEffort = (
     normalized === 'low' ||
     normalized === 'medium' ||
     normalized === 'high' ||
-    normalized === 'xhigh'
+    normalized === 'xhigh' ||
+    normalized === 'max' ||
+    normalized === 'ultra'
       ? (normalized as LLMReasoningEffort)
       : undefined
 

@@ -10,6 +10,7 @@ const updateChannel = process.env.MAGICPOT_UPDATE_CHANNEL || 'latest'
 const runtimeAssetsDir = 'packages/runtime-assets'
 const buildResourcesDir = `${runtimeAssetsDir}/build`
 const appResourcesDir = `${runtimeAssetsDir}/resources`
+const nativeBinDir = `${appResourcesDir}/bin`
 const comfySourceDir = 'vendor/comfyui'
 const packagedComfyDir = 'ComfyUI_windows_portable'
 
@@ -114,7 +115,8 @@ const bundledContentExtraFiles = [
   { from: 'packages/qapps', to: 'qApps' },
   { from: 'packages/skills', to: 'customSkills' },
   { from: 'packages/target-schemes', to: 'targetSchemes' },
-  { from: appResourcesDir, to: appResourcesDir }
+  { from: appResourcesDir, to: appResourcesDir },
+  { from: nativeBinDir, to: 'bin', filter: ['**/*'] }
 ]
 
 const config = {

@@ -31,17 +31,17 @@ import ProjectCanvasWebGLImageLayer, {
   type ProjectCanvasWebGLImageLayerHandle,
   type ProjectCanvasWebGLImageLayerMetrics
 } from './components/ProjectCanvasWebGLImageLayer'
+import ProjectCanvasCanvas2DFallbackLayer, {
+  type ProjectCanvasCanvas2DFallbackLayerHandle
+} from './components/ProjectCanvasCanvas2DFallbackLayer'
 import {
   CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT,
   useCanvasLayoutResizeInteractionActive,
   type CanvasLayoutResizeInteractionDetail
 } from './canvasLayoutResizeInteraction'
 import {
-  buildProjectCanvasRenderableItems,
+  deriveProjectCanvasRenderBoundary,
   resolveProjectCanvasImageInteractionMode,
-  resolveProjectCanvasRenderBoundary,
-  summarizeProjectCanvasImageFallbacks,
-  summarizeProjectCanvasRuntimeSurfaces,
   type ProjectCanvasImagePreview
 } from './projectCanvasRenderBoundary'
 import { materializeCanvasImageAttachmentSource } from './canvasAgentAttachmentUtils'
@@ -967,7 +967,14 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const [webglFailedImageIds, setWebglFailedImageIds] = React.useState<Set<string>>(new Set())
   const [webglMetrics, setWebglMetrics] =
     React.useState<ProjectCanvasWebGLImageLayerMetrics | null>(null)
+  const [canvas2DResolvedImageIds, setCanvas2DResolvedImageIds] = React.useState<Set<string>>(
+    new Set()
+  )
+  const [canvas2DFailedImageIds, setCanvas2DFailedImageIds] = React.useState<Set<string>>(new Set())
   const webglImageLayerRef = React.useRef<ProjectCanvasWebGLImageLayerHandle | null>(null)
+  const canvas2DFallbackLayerRef = React.useRef<ProjectCanvasCanvas2DFallbackLayerHandle | null>(
+    null
+  )
   const isCanvasLayoutResizeInteracting = useCanvasLayoutResizeInteractionActive()
   const isCanvasPerformanceThrottledRef = React.useRef(isCanvasPerformanceThrottled)
   const isCanvasLayoutResizeInteractionActiveRef = React.useRef(isCanvasLayoutResizeInteracting)
@@ -1005,6 +1012,28 @@ export default function ProjectCanvasPageStageScene(props: any) {
         ? previousMetrics
         : { ...metrics }
     )
+  }, [])
+  const handleCanvas2DResolvedIdsChange = React.useCallback((resolvedIds: Set<string>) => {
+    setCanvas2DResolvedImageIds((previousResolvedIds) =>
+      areProjectCanvasSetsEqual(previousResolvedIds, resolvedIds)
+        ? previousResolvedIds
+        : new Set(resolvedIds)
+    )
+  }, [])
+  const handleCanvas2DFailedIdsChange = React.useCallback((failedIds: Set<string>) => {
+    if (failedIds.size === 0) {
+      return
+    }
+
+    setCanvas2DFailedImageIds((previousFailedIds) => {
+      const nextFailedIds = new Set(previousFailedIds)
+      for (const itemId of failedIds) {
+        nextFailedIds.add(itemId)
+      }
+      return areProjectCanvasSetsEqual(previousFailedIds, nextFailedIds)
+        ? previousFailedIds
+        : nextFailedIds
+    })
   }, [])
   const flushPendingWebglRuntimeState = React.useCallback(() => {
     const { pending, next } = takeProjectCanvasWebGLPendingRuntimeState(
@@ -1115,6 +1144,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
           active || isViewportInteractionActiveRef.current
         )
       }
+      canvas2DFallbackLayerRef.current?.setViewportInteracting(
+        active || isViewportInteractionActiveRef.current
+      )
       if (
         !active &&
         !isViewportInteractionActiveRef.current &&
@@ -1145,6 +1177,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
       if (typeof syncViewport === 'function') {
         syncViewport(pos, scale)
       }
+      canvas2DFallbackLayerRef.current?.syncViewport(pos, scale)
     })
   }, [registerViewportCallback])
   React.useEffect(() => {
@@ -1164,6 +1197,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
           active || isCanvasLayoutResizeInteractionActiveRef.current
         )
       }
+      canvas2DFallbackLayerRef.current?.setViewportInteracting(
+        active || isCanvasLayoutResizeInteractionActiveRef.current
+      )
       if (
         !active &&
         !isCanvasPerformanceThrottledRef.current &&
@@ -1176,19 +1212,56 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const regionSelectionTargetId =
     tool === 'crop-select' ? croppingImageId : tool === 'extract-select' ? extractingImageId : null
   const cropTargetId = regionSelectionTargetId
-  const renderableMediaItems = React.useMemo(
-    () => buildProjectCanvasRenderableItems(visibleItems),
-    [visibleItems]
-  )
-  const resolvedRenderBoundaryItems = React.useMemo(
+  const effectiveFailedImageIds = React.useMemo(() => {
+    if (canvas2DFailedImageIds.size === 0) {
+      return webglFailedImageIds
+    }
+    return new Set([...webglFailedImageIds, ...canvas2DFailedImageIds])
+  }, [canvas2DFailedImageIds, webglFailedImageIds])
+  React.useEffect(() => {
+    const itemIds = new Set(allCanvasItems.map((item) => item.id))
+    setCanvas2DFailedImageIds((previousFailedIds) => {
+      if (previousFailedIds.size === 0) {
+        return previousFailedIds
+      }
+
+      const nextFailedIds = new Set<string>()
+      for (const itemId of previousFailedIds) {
+        if (itemIds.has(itemId)) {
+          nextFailedIds.add(itemId)
+        }
+      }
+      return areProjectCanvasSetsEqual(previousFailedIds, nextFailedIds)
+        ? previousFailedIds
+        : nextFailedIds
+    })
+    setCanvas2DResolvedImageIds((previousResolvedIds) => {
+      if (previousResolvedIds.size === 0) {
+        return previousResolvedIds
+      }
+
+      const nextResolvedIds = new Set<string>()
+      for (const itemId of previousResolvedIds) {
+        if (itemIds.has(itemId)) {
+          nextResolvedIds.add(itemId)
+        }
+      }
+      return areProjectCanvasSetsEqual(previousResolvedIds, nextResolvedIds)
+        ? previousResolvedIds
+        : nextResolvedIds
+    })
+  }, [allCanvasItems])
+  const generatedCooldownImageIds = newResultHintIds
+  const renderBoundaryDerivation = React.useMemo(
     () =>
-      resolveProjectCanvasRenderBoundary({
+      deriveProjectCanvasRenderBoundary({
         items: visibleItems,
         cropTargetId,
         webglReady: webglImageLayerReady,
         loadedImageIds: webglResolvedImageIds,
         residentImageIds: webglResidentImageIds,
-        failedImageIds: webglFailedImageIds,
+        failedImageIds: effectiveFailedImageIds,
+        generatedCooldownImageIds,
         selectedIds,
         stagePos: stagePosRef?.current ?? stagePos,
         stageScale: stageScaleRef?.current ?? stageScale,
@@ -1196,62 +1269,51 @@ export default function ProjectCanvasPageStageScene(props: any) {
       }),
     [
       cropTargetId,
+      effectiveFailedImageIds,
+      generatedCooldownImageIds,
       selectedIds,
       visibleItems,
-      webglFailedImageIds,
       webglImageLayerReady,
       webglResolvedImageIds,
       webglResidentImageIds
     ]
   )
-  const imageRuntimeRouteById = React.useMemo(() => {
-    const routes = new Map<
-      string,
-      'webgl-primary' | 'budget-image-proxy' | 'fallback-image-proxy' | 'crop-excluded'
-    >()
-
-    for (const item of resolvedRenderBoundaryItems) {
-      if (item.kind !== 'image' || !item.imageRuntimeRoute) {
-        continue
-      }
-
-      routes.set(item.id, item.imageRuntimeRoute)
-    }
-
-    return routes
-  }, [resolvedRenderBoundaryItems])
-  const imageFallbackReasonById = React.useMemo(() => {
-    const reasons = new Map<string, 'unloaded' | 'failed' | 'unsupported'>()
-
-    for (const item of resolvedRenderBoundaryItems) {
-      if (item.kind === 'image' && item.imageFallbackReason) {
-        reasons.set(item.id, item.imageFallbackReason)
-      }
-    }
-
-    return reasons
-  }, [resolvedRenderBoundaryItems])
-  const webglImageItems = React.useMemo(
+  const resolvedRenderBoundaryItems = renderBoundaryDerivation.resolvedItems
+  const renderableMediaItems = resolvedRenderBoundaryItems
+  const imageRuntimeRouteById = renderBoundaryDerivation.imageRuntimeRouteById
+  const imageFallbackReasonById = renderBoundaryDerivation.imageFallbackReasonById
+  const renderSurfaceSummary = renderBoundaryDerivation.renderSurfaceSummary
+  const fallbackImageSummary = renderBoundaryDerivation.fallbackImageSummary
+  const webglPrimaryImageCount = renderBoundaryDerivation.webglPrimaryImageCount
+  const sortedAllImageItems = React.useMemo(
     () =>
       allCanvasItems
-        .filter(
-          (item): item is CanvasImageItem =>
-            item.type === 'image' &&
-            item.id !== cropTargetId &&
-            imageRuntimeRouteById.get(item.id) !== 'crop-excluded'
-        )
+        .filter((item): item is CanvasImageItem => item.type === 'image')
         .sort((left, right) => left.zIndex - right.zIndex),
-    [allCanvasItems, cropTargetId, imageRuntimeRouteById]
+    [allCanvasItems]
   )
-  const webglPrimaryImageCount = React.useMemo(() => {
-    let count = 0
-    for (const runtimeRoute of imageRuntimeRouteById.values()) {
-      if (runtimeRoute === 'webgl-primary') {
-        count += 1
-      }
-    }
-    return count
-  }, [imageRuntimeRouteById])
+  const webglImageItems = React.useMemo(
+    () =>
+      sortedAllImageItems.filter(
+        (item) => item.id !== cropTargetId && !generatedCooldownImageIds.has(item.id)
+      ),
+    [cropTargetId, generatedCooldownImageIds, sortedAllImageItems]
+  )
+  const canvas2DFallbackImageItems = React.useMemo(
+    () =>
+      visibleItems.filter(
+        (item): item is CanvasImageItem =>
+          item.type === 'image' &&
+          imageRuntimeRouteById.get(item.id) === 'fallback-image-proxy' &&
+          !canvas2DFailedImageIds.has(item.id)
+      ),
+    [canvas2DFailedImageIds, imageRuntimeRouteById, visibleItems]
+  )
+  const canvas2DFallbackImageIdSet = React.useMemo(
+    () => new Set(canvas2DFallbackImageItems.map((item) => item.id)),
+    [canvas2DFallbackImageItems]
+  )
+  const canvas2DVisualOwnerImageIdSet = canvas2DResolvedImageIds
   const highResolutionDomImagePreviewItems = React.useMemo(() => {
     if (isViewportInteracting || isCanvasPerformanceThrottled || isCanvasLayoutResizeInteracting) {
       return []
@@ -1619,34 +1681,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
           : null,
       [selectedSinglePlaceholderItem]
     )
-  const renderSurfaceSummary = React.useMemo(
-    () =>
-      summarizeProjectCanvasRuntimeSurfaces({
-        items: visibleItems,
-        cropTargetId,
-        webglReady: webglImageLayerReady,
-        loadedImageIds: webglResolvedImageIds,
-        residentImageIds: webglResidentImageIds,
-        failedImageIds: webglFailedImageIds,
-        selectedIds,
-        stagePos: stagePosRef?.current ?? stagePos,
-        stageScale: stageScaleRef?.current ?? stageScale,
-        stageSize: stageSizeRef.current
-      }),
-    [
-      cropTargetId,
-      selectedIds,
-      visibleItems,
-      webglFailedImageIds,
-      webglImageLayerReady,
-      webglResolvedImageIds,
-      webglResidentImageIds
-    ]
-  )
-  const fallbackImageSummary = React.useMemo(
-    () => summarizeProjectCanvasImageFallbacks(resolvedRenderBoundaryItems),
-    [resolvedRenderBoundaryItems]
-  )
   const thumbnailCacheMetrics = getCanvasThumbnailRuntimeMetrics()
   const webglResidentImageCount = webglMetrics?.residentImageCount ?? 0
   const webglResidentTextureBytes = webglMetrics?.residentTextureBytes ?? 0
@@ -1771,6 +1805,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const syncWebGLImagePreview = React.useCallback(
     (itemId: string, preview: ProjectCanvasImagePreview | null) => {
       webglImageLayerRef.current?.syncItemPreview(itemId, preview)
+      canvas2DFallbackLayerRef.current?.syncItemPreview(itemId, preview)
       dispatchCanvasLiveVisualBoundsChange([itemId])
     },
     []
@@ -2769,6 +2804,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
             Boolean(imageItem.image) || (tool === 'select' && !!imageItem.src)
           const imageProxyVisualVariant =
             imageRuntimeRoute === 'webgl-primary' ||
+            (canvas2DVisualOwnerImageIdSet.has(item.id) && !isSelected) ||
             (!canRenderImagePreview && imageFallbackReason === 'unloaded')
               ? 'transparent'
               : 'image-fallback'
@@ -2976,6 +3012,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     handlePlaceholderDragStart,
     handleTransformEnd,
     imageFallbackReasonById,
+    canvas2DVisualOwnerImageIdSet,
     itemIdSet,
     openCanvasTextInlineEditor,
     renderableMediaItemMap,
@@ -3025,6 +3062,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
       data-project-canvas-render-surface-summary={JSON.stringify(renderSurfaceSummary)}
       data-project-canvas-webgl-primary-image-count={renderSurfaceSummary.webglImageItems}
       data-project-canvas-high-res-dom-image-count={highResolutionDomImagePreviewItems.length}
+      data-project-canvas-canvas2d-fallback-image-count={canvas2DFallbackImageItems.length}
+      data-project-canvas-canvas2d-resolved-image-count={canvas2DResolvedImageIds.size}
+      data-project-canvas-canvas2d-failed-image-count={canvas2DFailedImageIds.size}
       data-project-canvas-new-result-hint-count={newResultHintItems.length}
       data-project-canvas-budget-downgraded-image-count={
         renderSurfaceSummary.budgetDowngradedImageItems
@@ -3042,6 +3082,12 @@ export default function ProjectCanvasPageStageScene(props: any) {
       data-project-canvas-unsupported-fallback-image-count={
         fallbackImageSummary.unsupportedImageItems
       }
+      data-project-canvas-webgl-unavailable-fallback-image-count={
+        fallbackImageSummary.webglUnavailableImageItems
+      }
+      data-project-canvas-generated-cooldown-fallback-image-count={
+        fallbackImageSummary.generatedCooldownImageItems
+      }
       data-project-canvas-webgl-pending-image-count={webglMetrics?.pendingImageCount ?? 0}
       data-project-canvas-webgl-sprite-count={webglMetrics?.spriteCount ?? 0}
       data-project-canvas-webgl-resident-image-count={webglResidentImageCount}
@@ -3050,6 +3096,32 @@ export default function ProjectCanvasPageStageScene(props: any) {
       }
       data-project-canvas-webgl-viewport-culled-image-count={
         webglMetrics?.viewportCulledImageCount ?? 0
+      }
+      data-project-canvas-webgl-sprite-reconcile-pass-count={
+        webglMetrics?.spriteReconcilePassCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-duration-ms={
+        webglMetrics?.lastSpriteReconcileDurationMs != null
+          ? String(webglMetrics.lastSpriteReconcileDurationMs)
+          : ''
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-candidate-count={
+        webglMetrics?.lastSpriteReconcileCandidateCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-target-count={
+        webglMetrics?.lastSpriteReconcileTargetCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-created-count={
+        webglMetrics?.lastSpriteReconcileCreatedCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-reused-count={
+        webglMetrics?.lastSpriteReconcileReusedCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-removed-count={
+        webglMetrics?.lastSpriteReconcileRemovedCount ?? 0
+      }
+      data-project-canvas-webgl-last-sprite-reconcile-deferred-count={
+        webglMetrics?.lastSpriteReconcileDeferredCount ?? 0
       }
       data-project-canvas-webgl-using-preview-image-count={
         webglMetrics?.usingPreviewImageCount ?? 0
@@ -3169,6 +3241,20 @@ export default function ProjectCanvasPageStageScene(props: any) {
             onFailedIdsChange={handleWebglFailedIdsChange}
             onMetricsChange={handleWebglMetricsChange}
           />
+          {canvas2DFallbackImageItems.length > 0 && (
+            <ProjectCanvasCanvas2DFallbackLayer
+              ref={canvas2DFallbackLayerRef}
+              items={canvas2DFallbackImageItems}
+              selectedIds={selectedIds}
+              stagePos={stagePos}
+              stageScale={stageScale}
+              stageSize={stageSize}
+              isViewportInteracting={isViewportInteracting || isCanvasLayoutResizeInteracting}
+              isPerformanceThrottled={isCanvasPerformanceThrottled}
+              onResolvedIdsChange={handleCanvas2DResolvedIdsChange}
+              onFailedIdsChange={handleCanvas2DFailedIdsChange}
+            />
+          )}
           {highResolutionDomImagePreviewItems.length > 0 && (
             <Box
               data-project-canvas-high-res-image-layer="dom"
@@ -3290,7 +3376,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
               {interactiveImageOverlayItems.map((imageItem) => {
                 const isSelected = selectedIds.has(imageItem.id) && tool === 'select'
                 const imageRuntimeRoute = getImageRuntimeRoute(imageItem)
-                const suppressDomImagePreview = imageRuntimeRoute === 'webgl-primary'
+                const suppressDomImagePreview =
+                  imageRuntimeRoute === 'webgl-primary' ||
+                  (canvas2DVisualOwnerImageIdSet.has(imageItem.id) && !isSelected)
                 const shouldShowSelectionChrome = isSelected && !shouldSuppressSelectionChrome
 
                 return (

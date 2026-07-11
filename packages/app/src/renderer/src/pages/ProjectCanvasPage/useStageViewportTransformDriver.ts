@@ -61,16 +61,23 @@ export function useStageViewportTransformDriver() {
 
   const applyViewportTransform = useCallback(
     (pos: { x: number; y: number }, scale: number) => {
-      currentRef.current = { x: pos.x, y: pos.y, scale }
+      const current = currentRef.current
+      const viewportChanged = current.x !== pos.x || current.y !== pos.y || current.scale !== scale
+      if (viewportChanged) {
+        currentRef.current = { x: pos.x, y: pos.y, scale }
+      }
+
       const transform = formatViewportTransform(pos, scale)
       for (const el of layersRef.current) {
         if (!el.isConnected) {
           layersRef.current.delete(el)
           continue
         }
-        el.style.transform = transform
+        if (el.style.transform !== transform) {
+          el.style.transform = transform
+        }
       }
-      // Fire registered viewport callbacks (grid, etc.)
+      // Fire registered viewport callbacks (grid, etc.) on every imperative transform.
       for (const fn of callbacksRef.current) {
         fn(pos, scale)
       }

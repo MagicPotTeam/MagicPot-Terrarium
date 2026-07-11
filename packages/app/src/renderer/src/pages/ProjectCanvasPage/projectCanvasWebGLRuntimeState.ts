@@ -1,4 +1,7 @@
-import type { CanvasThumbnailRuntimeMetrics } from './canvasThumbnailTypes'
+import {
+  CANVAS_THUMBNAIL_RUNTIME_COUNTER_KEYS,
+  type CanvasThumbnailRuntimeMetrics
+} from './canvasThumbnailTypes'
 
 export type ProjectCanvasWebGLRuntimeMetrics = {
   isInitialized: boolean
@@ -13,6 +16,14 @@ export type ProjectCanvasWebGLRuntimeMetrics = {
   spriteCount: number
   residentCandidateImageCount: number
   viewportCulledImageCount: number
+  spriteReconcilePassCount?: number
+  lastSpriteReconcileDurationMs?: number | null
+  lastSpriteReconcileCandidateCount?: number
+  lastSpriteReconcileTargetCount?: number
+  lastSpriteReconcileCreatedCount?: number
+  lastSpriteReconcileReusedCount?: number
+  lastSpriteReconcileRemovedCount?: number
+  lastSpriteReconcileDeferredCount?: number
   usingPreviewImageCount: number
   usingSourceImageCount: number
   thumbnailPreviewImageCount: number
@@ -31,6 +42,11 @@ export type ProjectCanvasWebGLRuntimeMetrics = {
   activeSourceUpgradeCount: number
   residentTextureBudgetPressureCount: number
   textureBudgetEvictionCount: number
+  sourceImageCacheCount: number
+  thumbnailImageCacheCount: number
+  sourceUpgradeQueueCount: number
+  thumbnailLoadQueueCount: number
+  initialLoadQueueCount: number
   renderCount: number
   lastRenderDurationMs: number | null
   lastUpdateReason: 'initialize' | 'items' | 'preview' | 'cleanup'
@@ -67,20 +83,36 @@ export type ProjectCanvasThumbnailCacheMetrics = CanvasThumbnailRuntimeMetrics &
   cacheFailedCount: number
 }
 
-const fallbackThumbnailCacheMetrics: ProjectCanvasThumbnailCacheMetrics = {
-  thumbnailCount: 0,
-  cacheHitCount: 0,
-  generatedCount: 0,
-  sidecarGeneratedCount: 0,
-  nativeGeneratedCount: 0,
-  staleCount: 0,
-  failedCount: 0,
-  cacheGeneratedCount: 0,
-  cacheSidecarGeneratedCount: 0,
-  cacheNativeGeneratedCount: 0,
-  cacheStaleCount: 0,
-  cacheFailedCount: 0
+const PROJECT_CANVAS_THUMBNAIL_CACHE_METRIC_ALIAS_MAPPINGS = [
+  ['cacheGeneratedCount', 'generatedCount'],
+  ['cacheSidecarGeneratedCount', 'sidecarGeneratedCount'],
+  ['cacheNativeGeneratedCount', 'nativeGeneratedCount'],
+  ['cacheStaleCount', 'staleCount'],
+  ['cacheFailedCount', 'failedCount']
+] as const satisfies readonly (readonly [
+  keyof ProjectCanvasThumbnailCacheMetrics,
+  keyof CanvasThumbnailRuntimeMetrics
+])[]
+
+function createProjectCanvasThumbnailCacheMetrics(
+  metrics: CanvasThumbnailRuntimeMetrics
+): ProjectCanvasThumbnailCacheMetrics {
+  return {
+    ...metrics,
+    ...Object.fromEntries(
+      PROJECT_CANVAS_THUMBNAIL_CACHE_METRIC_ALIAS_MAPPINGS.map(([aliasKey, metricKey]) => [
+        aliasKey,
+        metrics[metricKey] ?? 0
+      ])
+    )
+  } as ProjectCanvasThumbnailCacheMetrics
 }
+
+const fallbackThumbnailCacheMetrics = createProjectCanvasThumbnailCacheMetrics(
+  Object.fromEntries(
+    CANVAS_THUMBNAIL_RUNTIME_COUNTER_KEYS.map((key) => [key, 0])
+  ) as CanvasThumbnailRuntimeMetrics
+)
 
 const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   isInitialized: false,
@@ -95,6 +127,14 @@ const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   spriteCount: 0,
   residentCandidateImageCount: 0,
   viewportCulledImageCount: 0,
+  spriteReconcilePassCount: 0,
+  lastSpriteReconcileDurationMs: null,
+  lastSpriteReconcileCandidateCount: 0,
+  lastSpriteReconcileTargetCount: 0,
+  lastSpriteReconcileCreatedCount: 0,
+  lastSpriteReconcileReusedCount: 0,
+  lastSpriteReconcileRemovedCount: 0,
+  lastSpriteReconcileDeferredCount: 0,
   usingPreviewImageCount: 0,
   usingSourceImageCount: 0,
   thumbnailPreviewImageCount: 0,
@@ -113,9 +153,23 @@ const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   activeSourceUpgradeCount: 0,
   residentTextureBudgetPressureCount: 0,
   textureBudgetEvictionCount: 0,
+  sourceImageCacheCount: 0,
+  thumbnailImageCacheCount: 0,
+  sourceUpgradeQueueCount: 0,
+  thumbnailLoadQueueCount: 0,
+  initialLoadQueueCount: 0,
   renderCount: 0,
   lastRenderDurationMs: null,
   lastUpdateReason: 'cleanup'
+}
+
+export function createProjectCanvasWebGLRuntimeMetrics(
+  overrides: Partial<ProjectCanvasWebGLRuntimeMetrics> = {}
+): ProjectCanvasWebGLRuntimeMetrics {
+  return {
+    ...fallbackWebGLMetrics,
+    ...overrides
+  }
 }
 
 const PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS = [
@@ -131,6 +185,14 @@ const PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS = [
   'spriteCount',
   'residentCandidateImageCount',
   'viewportCulledImageCount',
+  'spriteReconcilePassCount',
+  'lastSpriteReconcileDurationMs',
+  'lastSpriteReconcileCandidateCount',
+  'lastSpriteReconcileTargetCount',
+  'lastSpriteReconcileCreatedCount',
+  'lastSpriteReconcileReusedCount',
+  'lastSpriteReconcileRemovedCount',
+  'lastSpriteReconcileDeferredCount',
   'usingPreviewImageCount',
   'usingSourceImageCount',
   'thumbnailPreviewImageCount',
@@ -149,6 +211,11 @@ const PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS = [
   'activeSourceUpgradeCount',
   'residentTextureBudgetPressureCount',
   'textureBudgetEvictionCount',
+  'sourceImageCacheCount',
+  'thumbnailImageCacheCount',
+  'sourceUpgradeQueueCount',
+  'thumbnailLoadQueueCount',
+  'initialLoadQueueCount',
   'renderCount',
   'lastRenderDurationMs',
   'lastUpdateReason'
@@ -210,6 +277,9 @@ export function areProjectCanvasWebGLRuntimeMetricsEqual(
   )
 }
 
+export const areProjectCanvasWebGLRuntimeMetricsEqualForReactState =
+  areProjectCanvasWebGLRuntimeMetricsEqual
+
 export function buildProjectCanvasMetricsSnapshot({
   stageScale,
   stagePos,
@@ -245,14 +315,7 @@ export function buildProjectCanvasMetricsSnapshot({
 }): ProjectCanvasMetricsSnapshot {
   const metrics = webglMetrics ?? fallbackWebGLMetrics
   const thumbnailMetrics = thumbnailCacheMetrics
-    ? {
-        ...thumbnailCacheMetrics,
-        cacheGeneratedCount: thumbnailCacheMetrics.generatedCount,
-        cacheSidecarGeneratedCount: thumbnailCacheMetrics.sidecarGeneratedCount,
-        cacheNativeGeneratedCount: thumbnailCacheMetrics.nativeGeneratedCount,
-        cacheStaleCount: thumbnailCacheMetrics.staleCount,
-        cacheFailedCount: thumbnailCacheMetrics.failedCount
-      }
+    ? createProjectCanvasThumbnailCacheMetrics(thumbnailCacheMetrics)
     : fallbackThumbnailCacheMetrics
 
   return {

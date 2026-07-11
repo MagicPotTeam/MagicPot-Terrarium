@@ -15,6 +15,56 @@ export type CanvasImageDomPreviewLayout = {
   height: number
 }
 
+const CANVAS_IMAGE_DOM_PREVIEW_LAYOUT_MAX_MULTIPLIER = 32
+const CANVAS_IMAGE_DOM_PREVIEW_SOURCE_ASPECT_TOLERANCE = 0.08
+const CANVAS_IMAGE_CROP_ASPECT_MAX_MULTIPLIER = 32
+
+function isPositiveFinite(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+}
+
+function getAspectRatio(width: number, height: number): number | null {
+  if (!isPositiveFinite(width) || !isPositiveFinite(height)) {
+    return null
+  }
+
+  const aspect = width / height
+  return Number.isFinite(aspect) && aspect > 0 ? aspect : null
+}
+
+function areAspectRatiosClose(left: number, right: number): boolean {
+  return Math.abs(left - right) / right <= CANVAS_IMAGE_DOM_PREVIEW_SOURCE_ASPECT_TOLERANCE
+}
+
+function isCanvasImageCropAspectCompatible(
+  item: Pick<CanvasImageItem, 'width' | 'height'>,
+  crop: CanvasImageDisplayCrop
+): boolean {
+  const itemAspect = getAspectRatio(item.width, item.height)
+  const cropAspect = getAspectRatio(crop.width, crop.height)
+
+  if (!itemAspect || !cropAspect) {
+    return true
+  }
+
+  const aspectRatio = Math.max(cropAspect / itemAspect, itemAspect / cropAspect)
+  return Number.isFinite(aspectRatio) && aspectRatio <= CANVAS_IMAGE_CROP_ASPECT_MAX_MULTIPLIER
+}
+
+function normalizeCanvasImageDisplayCropForItem(
+  item: Pick<CanvasImageItem, 'width' | 'height'>,
+  crop: CanvasImageDisplayCrop | undefined,
+  imageWidth: number,
+  imageHeight: number
+): CanvasImageDisplayCrop | undefined {
+  const normalizedCrop = normalizeCanvasImageDisplayCrop(crop, imageWidth, imageHeight)
+  if (!normalizedCrop || !isCanvasImageCropAspectCompatible(item, normalizedCrop)) {
+    return undefined
+  }
+
+  return normalizedCrop
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value))
 }
@@ -62,24 +112,25 @@ export function resolveCanvasImageDisplayCrop(
   const { width: imageWidth, height: imageHeight } = getCanvasImageAssetSize(image)
 
   if (!item.crop || !image) {
-    return normalizeCanvasImageDisplayCrop(item.crop, imageWidth, imageHeight)
+    return normalizeCanvasImageDisplayCropForItem(item, item.crop, imageWidth, imageHeight)
   }
 
   const sourceWidth = item.sourceWidth || imageWidth
   const sourceHeight = item.sourceHeight || imageHeight
 
   if (!sourceWidth || !sourceHeight) {
-    return normalizeCanvasImageDisplayCrop(item.crop, imageWidth, imageHeight)
+    return normalizeCanvasImageDisplayCropForItem(item, item.crop, imageWidth, imageHeight)
   }
 
   if (sourceWidth === imageWidth && sourceHeight === imageHeight) {
-    return normalizeCanvasImageDisplayCrop(item.crop, imageWidth, imageHeight)
+    return normalizeCanvasImageDisplayCropForItem(item, item.crop, imageWidth, imageHeight)
   }
 
   const scaleX = imageWidth / sourceWidth
   const scaleY = imageHeight / sourceHeight
 
-  return normalizeCanvasImageDisplayCrop(
+  return normalizeCanvasImageDisplayCropForItem(
+    item,
     {
       x: item.crop.x * scaleX,
       y: item.crop.y * scaleY,
@@ -98,20 +149,28 @@ export function resolveCanvasImageDomPreviewLayout(
   >
 ): CanvasImageDomPreviewLayout | null {
   const { width: assetWidth, height: assetHeight } = getCanvasImageAssetSize(item.image)
-  const sourceWidth =
-    typeof item.sourceWidth === 'number' &&
-    Number.isFinite(item.sourceWidth) &&
-    item.sourceWidth > 0
-      ? item.sourceWidth
-      : assetWidth
-  const sourceHeight =
-    typeof item.sourceHeight === 'number' &&
-    Number.isFinite(item.sourceHeight) &&
-    item.sourceHeight > 0
-      ? item.sourceHeight
-      : assetHeight
+  const hasSourceSizeHint =
+    isPositiveFinite(item.sourceWidth) && isPositiveFinite(item.sourceHeight)
+  const sourceWidth = hasSourceSizeHint ? item.sourceWidth! : assetWidth
+  const sourceHeight = hasSourceSizeHint ? item.sourceHeight! : assetHeight
+  const assetAspect = getAspectRatio(assetWidth, assetHeight)
+  const sourceAspect = getAspectRatio(sourceWidth, sourceHeight)
 
-  const displayCrop = normalizeCanvasImageDisplayCrop(item.crop, sourceWidth, sourceHeight)
+  if (
+    hasSourceSizeHint &&
+    assetAspect &&
+    sourceAspect &&
+    !areAspectRatiosClose(assetAspect, sourceAspect)
+  ) {
+    return null
+  }
+
+  const displayCrop = normalizeCanvasImageDisplayCropForItem(
+    item,
+    item.crop,
+    sourceWidth,
+    sourceHeight
+  )
   if (!displayCrop) {
     return null
   }
@@ -119,10 +178,29 @@ export function resolveCanvasImageDomPreviewLayout(
   const widthScale = item.width / displayCrop.width
   const heightScale = item.height / displayCrop.height
 
-  return {
+  const layout = {
     left: -displayCrop.x * widthScale,
     top: -displayCrop.y * heightScale,
     width: sourceWidth * widthScale,
     height: sourceHeight * heightScale
   }
+
+  const maxLayoutWidth = Math.max(item.width, 1) * CANVAS_IMAGE_DOM_PREVIEW_LAYOUT_MAX_MULTIPLIER
+  const maxLayoutHeight = Math.max(item.height, 1) * CANVAS_IMAGE_DOM_PREVIEW_LAYOUT_MAX_MULTIPLIER
+  if (
+    !Number.isFinite(layout.left) ||
+    !Number.isFinite(layout.top) ||
+    !Number.isFinite(layout.width) ||
+    !Number.isFinite(layout.height) ||
+    layout.width <= 0 ||
+    layout.height <= 0 ||
+    Math.abs(layout.left) > maxLayoutWidth ||
+    Math.abs(layout.top) > maxLayoutHeight ||
+    layout.width > maxLayoutWidth ||
+    layout.height > maxLayoutHeight
+  ) {
+    return null
+  }
+
+  return layout
 }

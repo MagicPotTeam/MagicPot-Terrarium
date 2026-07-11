@@ -35,6 +35,7 @@ export type AgentApiProfileUi = {
   baseUrlPlaceholder?: string
   modelNameLabel?: string
   modelNamePlaceholder?: string
+  showModelNameInput?: boolean
   showApiKeyInput?: boolean
   showBackupKeys?: boolean
   showBaseUrlInput?: boolean
@@ -61,6 +62,9 @@ export type AgentApiProfileCardRenderOptions = {
 
 export type RendererHostExtensionApiV1 = {
   chat?: {
+    discoverModelNames?: (
+      profile: LLMAPIProfile
+    ) => Promise<string[] | undefined> | string[] | undefined
     resolveAssistantImageAutoSaveDir?: (options: {
       config: Pick<Config, 'download_dir'>
       storageScope?: string

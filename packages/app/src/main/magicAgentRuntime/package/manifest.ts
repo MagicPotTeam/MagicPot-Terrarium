@@ -1,9 +1,12 @@
 import {
+  MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS,
   MAGIC_AGENT_PACKAGE_DESCRIPTION_MAX_LENGTH,
+  MAGIC_AGENT_PACKAGE_EXECUTABLE_CONTRIBUTION_KINDS,
   MAGIC_AGENT_PACKAGE_ID_PATTERN,
   MAGIC_AGENT_PACKAGE_MANIFEST_VERSION,
   MAGIC_AGENT_PACKAGE_NAME_MAX_LENGTH,
   type MagicAgentPackageContribution,
+  type MagicAgentPackageContributionKind,
   type MagicAgentPackageManifest,
   type MagicAgentPackageValidationIssue,
   type MagicAgentPackageValidationResult
@@ -24,6 +27,11 @@ const MANIFEST_KEYS = new Set([
   'contributions'
 ])
 const CONTRIBUTION_KEYS = new Set(['id', 'kind', 'title', 'description', 'entry', 'config'])
+const CONTRIBUTION_KIND_SET = new Set<string>(MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS)
+const EXECUTABLE_CONTRIBUTION_KIND_SET = new Set<string>(
+  MAGIC_AGENT_PACKAGE_EXECUTABLE_CONTRIBUTION_KINDS
+)
+const WINDOWS_DRIVE_ENTRY_PATTERN = /^[A-Za-z]:[\\/]/
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -166,10 +174,20 @@ function normalizeContribution(
   }
 
   const kind = normalizeOptionalText(value.kind, `${path}.kind`, issues)
-  if (!kind || !MAGIC_AGENT_PACKAGE_ID_PATTERN.test(kind)) {
-    pushIssue(issues, `${path}.kind`, 'Expected contribution kind to match package id rules.')
+  if (!kind || !CONTRIBUTION_KIND_SET.has(kind)) {
+    pushIssue(
+      issues,
+      `${path}.kind`,
+      `Expected contribution kind to be one of: ${MAGIC_AGENT_PACKAGE_CONTRIBUTION_KINDS.join(', ')}.`
+    )
+  } else if (EXECUTABLE_CONTRIBUTION_KIND_SET.has(kind)) {
+    pushIssue(
+      issues,
+      `${path}.kind`,
+      `Executable contribution kind "${kind}" is not supported by MagicAgent packages yet.`
+    )
   } else {
-    contribution.kind = kind
+    contribution.kind = kind as MagicAgentPackageContributionKind
   }
 
   const title = normalizeOptionalText(value.title, `${path}.title`, issues)
@@ -184,10 +202,32 @@ function normalizeContribution(
 
   const entry = normalizeOptionalText(value.entry, `${path}.entry`, issues)
   if (entry) {
-    if (entry.includes('..') || entry.startsWith('/') || entry.startsWith('\\')) {
+    const normalizedEntry = entry.replace(/\\/g, '/')
+    if (
+      normalizedEntry.includes('..') ||
+      normalizedEntry.startsWith('/') ||
+      WINDOWS_DRIVE_ENTRY_PATTERN.test(entry)
+    ) {
       pushIssue(issues, `${path}.entry`, 'Contribution entry must be a relative package path.')
     } else {
       contribution.entry = entry
+    }
+  }
+
+  if (contribution.kind === 'agent' || contribution.kind === 'graph') {
+    const contributionLabel = contribution.kind === 'agent' ? 'Agent' : 'Graph'
+    if (!contribution.entry) {
+      pushIssue(
+        issues,
+        `${path}.entry`,
+        `${contributionLabel} contributions must declare a JSON entry file.`
+      )
+    } else if (!contribution.entry.toLowerCase().endsWith('.json')) {
+      pushIssue(
+        issues,
+        `${path}.entry`,
+        `${contributionLabel} contribution entry must be a JSON file.`
+      )
     }
   }
 
@@ -227,7 +267,7 @@ function normalizeContributions(
     }
 
     if (contributionIds.has(contribution.id)) {
-      pushIssue(warnings, `contributions.${index}.id`, 'Duplicate contribution id ignored.')
+      pushIssue(issues, `contributions.${index}.id`, 'Duplicate contribution id is not allowed.')
       continue
     }
 

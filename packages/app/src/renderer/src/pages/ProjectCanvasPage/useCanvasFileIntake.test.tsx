@@ -766,8 +766,7 @@ describe('useCanvasFileIntake', () => {
         fileName: 'items-only.png',
         sizeBytes: imageFile.size,
         sourceWidthHint: 640,
-        sourceHeightHint: 320,
-        sourceFile: imageFile
+        sourceHeightHint: 320
       })
     )
     expect(addTextToCanvas).not.toHaveBeenCalled()
@@ -807,14 +806,12 @@ describe('useCanvasFileIntake', () => {
       {
         src: 'local-media:///C:/assets/first.png',
         fileName: 'first.png',
-        sizeBytes: firstImage.size,
-        sourceFile: firstImage
+        sizeBytes: firstImage.size
       },
       {
         src: 'local-media:///C:/assets/second.png',
         fileName: 'second.png',
-        sizeBytes: secondImage.size,
-        sourceFile: secondImage
+        sizeBytes: secondImage.size
       }
     ])
   })
@@ -909,8 +906,7 @@ describe('useCanvasFileIntake', () => {
         sizeBytes: imageFile.size,
         hasAlpha: true,
         sourceWidthHint: 19717,
-        sourceHeightHint: 12079,
-        sourceFile: imageFile
+        sourceHeightHint: 12079
       })
     )
   })
@@ -969,7 +965,7 @@ describe('useCanvasFileIntake', () => {
     )
   })
 
-  it('passes the original source file for non-PNG image intake', async () => {
+  it('decodes non-PNG local image metadata without retaining the original source file', async () => {
     const addTextToCanvas = vi.fn()
     const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
     const bitmapClose = vi.fn()
@@ -1011,8 +1007,7 @@ describe('useCanvasFileIntake', () => {
         fileName: 'wide.jpg',
         sizeBytes: imageFile.size,
         sourceWidthHint: 3136,
-        sourceHeightHint: 2624,
-        sourceFile: imageFile
+        sourceHeightHint: 2624
       })
     )
     expect(globalThis.createImageBitmap).toHaveBeenCalledWith(imageFile)
@@ -1054,14 +1049,12 @@ describe('useCanvasFileIntake', () => {
       {
         src: 'local-media:///C:/bridge/first.png',
         fileName: 'first.png',
-        sizeBytes: firstImage.size,
-        sourceFile: firstImage
+        sizeBytes: firstImage.size
       },
       {
         src: 'local-media:///C:/bridge/second.png',
         fileName: 'second.png',
-        sizeBytes: secondImage.size,
-        sourceFile: secondImage
+        sizeBytes: secondImage.size
       }
     ])
   })

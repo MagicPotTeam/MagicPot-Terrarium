@@ -45,6 +45,35 @@ export const sortSessionsByRecencyDesc = (sessions: ChatSession[]): ChatSession[
     })
     .map(({ session }) => session)
 
+const hasPendingAssistantPlaceholder = (session: ChatSession): boolean => {
+  const lastMessage = session.messages[session.messages.length - 1]
+  return (
+    lastMessage?.role === 'assistant' &&
+    !lastMessage.content &&
+    (!lastMessage.attachments || lastMessage.attachments.length === 0)
+  )
+}
+
+const shouldPreserveLocalSessionOverLoaded = (
+  localSession: ChatSession,
+  loadedSession: ChatSession | undefined,
+  preservedIds: Set<string>
+): boolean => {
+  if (!preservedIds.has(localSession.id)) {
+    return false
+  }
+
+  if (!loadedSession) {
+    return localSession.messages.length > 0 || hasPendingAssistantPlaceholder(localSession)
+  }
+
+  if (localSession.messages.length <= loadedSession.messages.length) {
+    return false
+  }
+
+  return hasPendingAssistantPlaceholder(localSession)
+}
+
 export const mergeLoadedSessionsWithLocal = (
   loadedSessions: ChatSession[],
   localSessions: ChatSession[],
@@ -60,7 +89,8 @@ export const mergeLoadedSessionsWithLocal = (
   }
 
   for (const session of localSessions) {
-    if (preservedIds.has(session.id) && !mergedSessions.has(session.id)) {
+    const loadedSession = mergedSessions.get(session.id)
+    if (shouldPreserveLocalSessionOverLoaded(session, loadedSession, preservedIds)) {
       mergedSessions.set(session.id, session)
     }
   }

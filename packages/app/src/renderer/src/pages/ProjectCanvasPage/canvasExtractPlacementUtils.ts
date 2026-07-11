@@ -1,4 +1,4 @@
-import { buildCanvasItemSpatialIndex, queryCanvasSpatialIndex } from './canvasSpatialIndex'
+import { buildCanvasItemSpatialIndex, queryOwnedCanvasSpatialIndex } from './canvasSpatialIndex'
 import { getCanvasItemBounds, translateCanvasItem } from './projectCanvasPageShared'
 import type { CanvasItem } from './types'
 
@@ -165,13 +165,15 @@ export function shiftCanvasItemsToMakeRoom(
   preservedIds: ReadonlySet<string>,
   padding = 32
 ) {
-  const spatialIndex = buildCanvasItemSpatialIndex(items, getCanvasItemBounds)
-  const collisions = queryCanvasSpatialIndex(spatialIndex, {
-    minX: targetRect.minX - padding,
-    minY: targetRect.minY - padding,
-    maxX: targetRect.maxX + padding,
-    maxY: targetRect.maxY + padding
-  }).filter((item) => !preservedIds.has(item.id))
+  const collisions = queryOwnedCanvasSpatialIndex(
+    buildCanvasItemSpatialIndex(items, getCanvasItemBounds),
+    {
+      minX: targetRect.minX - padding,
+      minY: targetRect.minY - padding,
+      maxX: targetRect.maxX + padding,
+      maxY: targetRect.maxY + padding
+    }
+  ).filter((item) => !preservedIds.has(item.id))
 
   if (collisions.length === 0) {
     return items as CanvasItem[]

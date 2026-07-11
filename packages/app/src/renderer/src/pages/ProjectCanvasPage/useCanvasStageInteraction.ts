@@ -205,6 +205,10 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
   )
 
   useEffect(() => {
+    return () => canvasRuntime.dispose()
+  }, [canvasRuntime])
+
+  useEffect(() => {
     canvasRuntime.setItems(items)
   }, [canvasRuntime, items])
 

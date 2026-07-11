@@ -25,7 +25,11 @@ import {
   shouldUseOpenAIImageGeneration
 } from './openaiResponses'
 import { buildOpenAIFileSearchTool, createOpenAIFileSearchSession } from './openaiFileSearch'
-import { normalizeReasoningEffort, resolveChatProfileCapabilities } from './profileCapabilities'
+import {
+  normalizeReasoningEffort,
+  resolveChatProfileCapabilities,
+  type ChatCapabilityProfile
+} from './profileCapabilities'
 import {
   OPENCODE_ZEN_API_BASE_URL,
   resolveOpencodeZenAlias,
@@ -41,6 +45,7 @@ type OpenAIClientOptions = {
   apiMode?: OpenAIClientApiMode
   enableHostedTools?: boolean
   extraHeaders?: Record<string, string>
+  reasoningProfile?: ChatCapabilityProfile
 }
 type GeminiAuthMode = 'query-key' | 'bearer' | 'x-goog-api-key'
 type GeminiClientOptions = {
@@ -406,10 +411,16 @@ export class OpenAIAPICli implements LLMCli {
     if (params.maxOutputTokens) {
       requestBody.max_output_tokens = params.maxOutputTokens
     }
+    const reasoningCapabilities = resolveChatProfileCapabilities(
+      this.options?.reasoningProfile || { model_name: this.modelName }
+    )
     const reasoningEffort = normalizeReasoningEffort(
       params.reasoningEffort,
-      resolveChatProfileCapabilities({ model_name: this.modelName }).reasoningEfforts
+      this.options?.reasoningProfile && reasoningCapabilities.reasoningEfforts.length === 0
+        ? undefined
+        : reasoningCapabilities.reasoningEfforts
     )
+    const wireReasoningEffort = reasoningEffort === 'ultra' ? 'max' : reasoningEffort
 
     const useImageGeneration = shouldUseOpenAIImageGeneration({
       messages: params.messages,
@@ -432,7 +443,8 @@ export class OpenAIAPICli implements LLMCli {
         apiKey: this.apiKey,
         baseUrl: base,
         messages: params.messages,
-        signal: params.signal
+        signal: params.signal,
+        fetchImpl: this.getFetchImpl()
       })
 
       requestBody.tools = [
@@ -446,9 +458,9 @@ export class OpenAIAPICli implements LLMCli {
       })
     }
 
-    if (reasoningEffort) {
+    if (wireReasoningEffort) {
       requestBody.reasoning = {
-        effort: reasoningEffort
+        effort: wireReasoningEffort
       }
     }
 

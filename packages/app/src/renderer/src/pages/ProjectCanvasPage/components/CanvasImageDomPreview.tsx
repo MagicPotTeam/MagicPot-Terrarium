@@ -154,12 +154,16 @@ export default function CanvasImageDomPreview({
   const shouldRenderFallbackImage =
     hasImageAsset && !canvasReady && lodDecision.shouldUseSourceTexture
   const shouldRenderSourceImage = sourceImagePreview || shouldRenderFallbackImage
-  const shouldMaterializeLocalSource =
-    shouldRenderSourceImage && canReadCanvasLocalImageSource(item.src)
   const fallbackLayout = React.useMemo(
     () => (shouldRenderSourceImage ? resolveCanvasImageDomPreviewLayout(item) : null),
     [item, shouldRenderSourceImage]
   )
+  const shouldSkipSourceImageDueToInvalidCropLayout =
+    shouldRenderSourceImage && Boolean(item.crop) && !fallbackLayout
+  const shouldMaterializeLocalSource =
+    shouldRenderSourceImage &&
+    !shouldSkipSourceImageDueToInvalidCropLayout &&
+    canReadCanvasLocalImageSource(item.src)
   const materializedObjectUrl =
     materializedSource?.originalSrc === item.src ? materializedSource.objectUrl : null
   const materializedFailed =
@@ -230,7 +234,9 @@ export default function CanvasImageDomPreview({
           }}
         />
       ) : null}
-      {shouldRenderSourceImage && previewImageSrc ? (
+      {shouldRenderSourceImage &&
+      !shouldSkipSourceImageDueToInvalidCropLayout &&
+      previewImageSrc ? (
         <Box
           component="img"
           src={previewImageSrc}

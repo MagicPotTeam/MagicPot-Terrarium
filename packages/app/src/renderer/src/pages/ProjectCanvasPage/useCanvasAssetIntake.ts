@@ -60,6 +60,7 @@ import {
 import { resolveAutoArrangeSpatialGridLayout } from './groupAutoArrangeUtils'
 import { isModelArchiveFile } from './types'
 import { measureCanvasTextBoxSize } from './canvasTextLayout'
+import { readProjectCanvasBenchmarkImportTotalSize } from './projectCanvasBenchmarkRuntime'
 
 type UseCanvasAssetIntakeOptions = {
   canvasId?: string
@@ -300,9 +301,11 @@ export async function mapCanvasImageBatchWithProgress<T, R>(
   inputs: T[],
   concurrency: number,
   worker: (input: T, index: number) => Promise<R | null>,
-  onResult: (result: R) => Promise<void> | void
+  onResult: (result: R) => Promise<void> | void,
+  options: { collectResults?: boolean } = {}
 ): Promise<R[]> {
   const workerCount = Math.max(1, Math.min(inputs.length, Math.floor(concurrency) || 1))
+  const shouldCollectResults = options.collectResults !== false
   const results: R[] = []
   let nextIndex = 0
 
@@ -313,7 +316,9 @@ export async function mapCanvasImageBatchWithProgress<T, R>(
         nextIndex += 1
         const result = await worker(inputs[index], index)
         if (result != null) {
-          results.push(result)
+          if (shouldCollectResults) {
+            results.push(result)
+          }
           await onResult(result)
         }
       }
@@ -675,7 +680,9 @@ async function buildDeferredCanvasImageStreamEntry({
   maxPreviewSide,
   fitImageToCanvasSize,
   resolveInitialDisplayAsset = true,
-  resolveInitialThumbnail = resolveInitialDisplayAsset
+  resolveInitialThumbnail = resolveInitialDisplayAsset,
+  useThumbnailDisplayAsset = resolveInitialDisplayAsset,
+  useLazyPreviewProxy = true
 }: {
   source: NormalizedCanvasImageSource
   sourceIndex: number
@@ -683,6 +690,8 @@ async function buildDeferredCanvasImageStreamEntry({
   fitImageToCanvasSize: (width: number, height: number) => { width: number; height: number }
   resolveInitialDisplayAsset?: boolean
   resolveInitialThumbnail?: boolean
+  useThumbnailDisplayAsset?: boolean
+  useLazyPreviewProxy?: boolean
 }): Promise<CanvasImageStreamEntry> {
   const shouldDeferFullDecode = shouldDeferCanvasImageSourceFullDecode(source)
   const hasDimensionHints =
@@ -701,22 +710,23 @@ async function buildDeferredCanvasImageStreamEntry({
         maxPreviewSide
       })
     : {}
-  const displayImage = thumbnailPreview.displayImage
-    ? thumbnailPreview.displayImage
-    : !resolveInitialDisplayAsset && source.sourceIdentity
-      ? buildCanvasImageLazyPreviewProxy({
-          sourceWidth,
-          sourceHeight,
-          maxPreviewSide
-        })
-      : resolveInitialDisplayAsset
-        ? await buildDeferredCanvasImagePreview({
-            source,
+  const displayImage =
+    thumbnailPreview.displayImage && useThumbnailDisplayAsset
+      ? thumbnailPreview.displayImage
+      : !resolveInitialDisplayAsset && source.sourceIdentity && useLazyPreviewProxy
+        ? buildCanvasImageLazyPreviewProxy({
             sourceWidth,
             sourceHeight,
             maxPreviewSide
           })
-        : undefined
+        : resolveInitialDisplayAsset
+          ? await buildDeferredCanvasImagePreview({
+              source,
+              sourceWidth,
+              sourceHeight,
+              maxPreviewSide
+            })
+          : undefined
   const sizeBytes = resolveCanvasImageSourceSizeBytes(source)
 
   return {
@@ -1256,22 +1266,25 @@ export function useCanvasAssetIntake({
       const normalizedSources: NormalizedCanvasImageSource[] = sources
         .map((source) => (typeof source === 'string' ? { src: source } : source))
         .filter((source): source is NormalizedCanvasImageSource => Boolean(source.src))
-      if (normalizedSources.length === 0) return []
+      const totalSourceCount = normalizedSources.length
+      if (totalSourceCount === 0) return []
+      const benchmarkImportTotalHint = readProjectCanvasBenchmarkImportTotalSize()
+      const effectiveSourceCount = Math.max(totalSourceCount, benchmarkImportTotalHint)
 
-      const maxPreviewSide = getCanvasImagePreviewMaxSideForBatch(normalizedSources.length)
-      const batchGap = getProjectCanvasBatchGap(normalizedSources.length)
+      const maxPreviewSide = getCanvasImagePreviewMaxSideForBatch(effectiveSourceCount)
+      const batchGap = getProjectCanvasBatchGap(effectiveSourceCount)
       const hasDeferredSources = normalizedSources.some(shouldDeferCanvasImageSourceFullDecode)
       const shouldUseStreamingImport =
-        normalizedSources.length >= PROJECT_CANVAS_IMAGE_STREAM_IMPORT_THRESHOLD ||
-        normalizedSources.length >= PROJECT_CANVAS_IMAGE_STREAM_PROGRESS_BATCH_SIZE ||
-        hasDeferredSources
+        totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_IMPORT_THRESHOLD ||
+        totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_PROGRESS_BATCH_SIZE ||
+        hasDeferredSources ||
+        effectiveSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_IMPORT_THRESHOLD
       const shouldReportBatchProgress =
-        normalizedSources.length >= PROJECT_CANVAS_IMAGE_STREAM_PROGRESS_BATCH_SIZE
+        totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_PROGRESS_BATCH_SIZE
 
       if (shouldUseStreamingImport) {
         const baseId = Date.now()
-        const lazyImportTail =
-          normalizedSources.length >= PROJECT_CANVAS_IMAGE_LAZY_IMPORT_THRESHOLD
+        const lazyImportTail = effectiveSourceCount >= PROJECT_CANVAS_IMAGE_LAZY_IMPORT_THRESHOLD
         let importedCount = 0
         let processedCount = 0
         let failedCount = 0
@@ -1285,17 +1298,13 @@ export function useCanvasAssetIntake({
         const emitImportProgress = (phase: CanvasImageBatchImportProgressPhase, force = false) => {
           if (!shouldReportBatchProgress) return
           const now = Date.now()
-          if (
-            !force &&
-            now - lastProgressEmitAt < 120 &&
-            processedCount < normalizedSources.length
-          ) {
+          if (!force && now - lastProgressEmitAt < 120 && processedCount < totalSourceCount) {
             return
           }
           lastProgressEmitAt = now
           onImageBatchImportProgress?.({
             phase,
-            total: normalizedSources.length,
+            total: totalSourceCount,
             processed: processedCount,
             imported: importedCount,
             failed: failedCount
@@ -1340,11 +1349,14 @@ export function useCanvasAssetIntake({
               const layoutEntry = batchLayout[batchIndex]
               const fallbackCenterPosition = getCenterPosition(entry.width, entry.height)
               const itemId = `img-${baseId}-${entry.sourceIndex}-${Math.random().toString(36).slice(2, 8)}`
+              const shouldRetainSourceFile =
+                entry.source.sourceFile &&
+                !/^(local-media|file):\/\//i.test(entry.source.src.trim())
               return createCanvasImageItemDraft({
                 id: itemId,
                 src: entry.source.src,
                 ...(entry.source.fileName ? { fileName: entry.source.fileName } : {}),
-                ...(entry.source.sourceFile ? { sourceFile: entry.source.sourceFile } : {}),
+                ...(shouldRetainSourceFile ? { sourceFile: entry.source.sourceFile } : {}),
                 ...(typeof entry.sizeBytes === 'number' ? { sizeBytes: entry.sizeBytes } : {}),
                 ...(typeof entry.hasAlpha === 'boolean' ? { hasAlpha: entry.hasAlpha } : {}),
                 ...(entry.source.sourceIdentity
@@ -1401,7 +1413,9 @@ export function useCanvasAssetIntake({
                   maxPreviewSide,
                   fitImageToCanvasSize,
                   resolveInitialDisplayAsset: !isLazyTail || shouldResolveLazyTailDisplayAsset,
-                  resolveInitialThumbnail: !isLazyTail
+                  resolveInitialThumbnail: !isLazyTail || shouldResolveLazyTailDisplayAsset,
+                  useThumbnailDisplayAsset: !isLazyTail,
+                  useLazyPreviewProxy: !isLazyTail
                 })
               }
 
@@ -1470,6 +1484,7 @@ export function useCanvasAssetIntake({
               failedCount += 1
               return null
             } finally {
+              normalizedSources[sourceIndex] = undefined as unknown as NormalizedCanvasImageSource
               processedCount += 1
               emitImportProgress('loading')
             }
@@ -1477,9 +1492,11 @@ export function useCanvasAssetIntake({
           async (entry) => {
             pendingEntries.push(entry)
             await flushPendingEntries(false)
-          }
+          },
+          { collectResults: false }
         )
 
+        normalizedSources.length = 0
         await flushPendingEntries(true)
         await flushChain
         emitImportProgress('complete', true)

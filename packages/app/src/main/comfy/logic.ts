@@ -7,7 +7,7 @@ import { ComfyHistory, ComfyHistoryResp, FileItem } from '@shared/comfy/types'
  */
 
 const HISTORY_POLL_MS = 500 // 500ms
-const HISTORY_TIMEOUT = 30 * 60 * 1000 // 30 minutes
+const HISTORY_TIMEOUT: number | null = null // 默认不超时，直到 ComfyUI 返回结果或任务被取消
 
 // Wrapper for ComfyHttpCli
 // 定义这个类型的目的是用我们内部的 Queue 逻辑接管 ComfyHttpCli 的请求
@@ -21,12 +21,13 @@ export type ComfyCliWrapper = {
 export async function waitPromptId(
   httpCli: ComfyCliWrapper,
   promptId: string,
-  timeout: number = HISTORY_TIMEOUT,
+  timeout: number | null = HISTORY_TIMEOUT,
   poll: number = HISTORY_POLL_MS,
   shouldCancel?: () => boolean
 ): Promise<ComfyHistory> {
   const startTime = Date.now()
-  while (Date.now() - startTime < timeout) {
+  const hasTimeout = typeof timeout === 'number' && Number.isFinite(timeout) && timeout > 0
+  while (!hasTimeout || Date.now() - startTime < timeout) {
     // 检查是否应该取消
     if (shouldCancel && shouldCancel()) {
       throw new Error(`Task ${promptId} was cancelled`)

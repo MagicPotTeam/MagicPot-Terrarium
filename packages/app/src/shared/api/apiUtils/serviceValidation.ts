@@ -1,4 +1,5 @@
 import { isJsonDict, type JsonDict } from '@shared/utils/utilTypes'
+import type { ServiceInvocationContext } from './serviceInvocation'
 import type { ServerStreaming } from './streaming'
 
 export const SERVICE_INTERNAL_ERROR_CODE = 'INTERNAL_ERROR'
@@ -52,11 +53,22 @@ export type UnaryServiceValidation<REQ, RESP> = {
   response?: ServiceValidator<RESP>
 }
 
+export type UnaryServiceHandler<REQ, RESP> = (
+  req: REQ,
+  invocation?: ServiceInvocationContext
+) => Promise<RESP>
+
 export type ServerStreamingServiceValidation<REQ, RESP> = {
   methodName?: string
   request?: ServiceValidator<REQ>
   data?: ServiceValidator<RESP>
 }
+
+export type ServerStreamingServiceHandler<REQ, RESP> = (
+  req: REQ,
+  resp: ServerStreaming<RESP>,
+  invocation?: ServiceInvocationContext
+) => Promise<void>
 
 export class ServiceError extends Error {
   readonly code: ServiceErrorCode
@@ -212,14 +224,14 @@ export function validateServiceValue<T>(
 }
 
 export function withServiceValidation<REQ, RESP>(
-  handler: (req: REQ) => Promise<RESP>,
+  handler: UnaryServiceHandler<REQ, RESP>,
   validation: UnaryServiceValidation<REQ, RESP> = {}
-): (req: REQ) => Promise<RESP> {
-  return async (req: REQ): Promise<RESP> => {
+): UnaryServiceHandler<REQ, RESP> {
+  return async (req: REQ, invocation?: ServiceInvocationContext): Promise<RESP> => {
     const parsedReq = validateServiceValue(req, validation.request, {
       label: formatValidationLabel(validation.methodName, 'request')
     })
-    const resp = await handler(parsedReq)
+    const resp = await handler(parsedReq, invocation)
     return validateServiceValue(resp, validation.response, {
       label: formatValidationLabel(validation.methodName, 'response')
     })
@@ -227,10 +239,14 @@ export function withServiceValidation<REQ, RESP>(
 }
 
 export function withServerStreamingValidation<REQ, RESP>(
-  handler: (req: REQ, resp: ServerStreaming<RESP>) => Promise<void>,
+  handler: ServerStreamingServiceHandler<REQ, RESP>,
   validation: ServerStreamingServiceValidation<REQ, RESP> = {}
-): (req: REQ, resp: ServerStreaming<RESP>) => Promise<void> {
-  return async (req: REQ, resp: ServerStreaming<RESP>): Promise<void> => {
+): ServerStreamingServiceHandler<REQ, RESP> {
+  return async (
+    req: REQ,
+    resp: ServerStreaming<RESP>,
+    invocation?: ServiceInvocationContext
+  ): Promise<void> => {
     const parsedReq = validateServiceValue(req, validation.request, {
       label: formatValidationLabel(validation.methodName, 'request')
     })
@@ -247,7 +263,7 @@ export function withServerStreamingValidation<REQ, RESP>(
         }
       : resp
 
-    await handler(parsedReq, validatedResp)
+    await handler(parsedReq, validatedResp, invocation)
   }
 }
 

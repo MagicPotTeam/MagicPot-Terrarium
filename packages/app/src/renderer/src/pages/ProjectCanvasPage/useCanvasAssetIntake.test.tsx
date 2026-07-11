@@ -285,9 +285,13 @@ describe('useCanvasAssetIntake', () => {
       expect(imageItems.filter((item) => item.image).length).toBe(
         PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT
       )
-      expect(imageItems[PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT].image).toBeUndefined()
-      expect(imageItems[PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT].sourceWidth).toBe(1536)
-      expect(imageItems[PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT].sourceHeight).toBe(1536)
+      const firstLazyItem = imageItems.find(
+        (item) => item.fileName === `image-${PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT}.png`
+      )
+      expect(firstLazyItem).toBeDefined()
+      expect(firstLazyItem?.image).toBeUndefined()
+      expect(firstLazyItem?.sourceWidth).toBe(1536)
+      expect(firstLazyItem?.sourceHeight).toBe(1536)
     } finally {
       window.Image = originalImageCtor
     }
@@ -359,7 +363,12 @@ describe('useCanvasAssetIntake', () => {
       const imageItems = items.filter((item): item is CanvasImageItem => item.type === 'image')
       expect(loadedSources).toHaveLength(PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT)
       expect(createImageBitmapMock).toHaveBeenCalled()
-      expect(imageItems[PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT].image).toBe(tailPreview)
+      const firstLazyFileItem = imageItems.find(
+        (item) => item.fileName === `file-tail-${PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT}.png`
+      )
+      expect(firstLazyFileItem).toBeDefined()
+      expect(firstLazyFileItem?.sourceFile).toBeUndefined()
+      expect(firstLazyFileItem?.image).toBe(tailPreview)
     } finally {
       window.Image = originalImageCtor
       if (originalCreateImageBitmap) {
@@ -462,9 +471,11 @@ describe('useCanvasAssetIntake', () => {
         loadedSourceIndexes.every((index) => index < PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT)
       ).toBe(true)
       expect(hangingManifestRead).not.toHaveBeenCalled()
-      expect(imageItems[PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT].image).toBeInstanceOf(
-        HTMLCanvasElement
+      const firstLazyTailItem = imageItems.find(
+        (item) => item.fileName === `lazy-tail-${PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT}.png`
       )
+      expect(firstLazyTailItem).toBeDefined()
+      expect(firstLazyTailItem?.image).toBeUndefined()
     } finally {
       window.Image = originalImageCtor
       Object.defineProperty(window, 'api', {

@@ -215,7 +215,6 @@ export const useQAppRunner = (projectId?: string) => {
     [
       appendResults,
       currentQAppKey,
-      formState,
       notifyError,
       notifySuccess,
       projectId,

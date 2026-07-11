@@ -36,6 +36,7 @@ import {
   type CanvasImageSourceInput
 } from './canvasAssetIntakeHelpers'
 import type { CanvasImageBatchImportProgress } from './useCanvasAssetIntake'
+import { readProjectCanvasBenchmarkSharedThumbnailCacheRoot } from './projectCanvasBenchmarkRuntime'
 
 type CanvasImageSourceObject = Exclude<CanvasImageSourceInput, string>
 
@@ -133,6 +134,13 @@ const DROP_TEXT_TYPES_TO_SNAPSHOT = [
 ] as const
 
 const CANVAS_IMAGE_FILE_SOURCE_RESOLVE_BATCH_SIZE = 16
+
+function clearFileArrayReferences(files: File[]): void {
+  for (let index = 0; index < files.length; index += 1) {
+    files[index] = undefined as unknown as File
+  }
+  files.length = 0
+}
 
 function arrayFromTransferList<T>(list: ArrayLike<T> | Iterable<T> | null | undefined): T[] {
   if (!list) {
@@ -407,6 +415,11 @@ const CLIPBOARD_FILE_EXTENSION_BY_MIME: Record<string, string> = {
 }
 
 async function resolveCanvasThumbnailCacheRoot(canvasId?: string): Promise<string | undefined> {
+  const benchmarkSharedRoot = readProjectCanvasBenchmarkSharedThumbnailCacheRoot()
+  if (benchmarkSharedRoot) {
+    return benchmarkSharedRoot
+  }
+
   if (!canvasId || !window.path || typeof window.path.join !== 'function') {
     return undefined
   }
@@ -787,11 +800,14 @@ export function useCanvasFileIntake({
       ])
       const thumbnailCacheRoot = await resolveCanvasThumbnailCacheRoot(canvasId)
       const sourceIdentity = await resolveCanvasImageLocalSourceIdentity(file, thumbnailCacheRoot)
+      const shouldRetainSourceFile = !/^(local-media|file):\/\//i.test(src.trim())
       const source: CanvasImageSourceObject = {
         src,
         fileName: file.name,
         sizeBytes: file.size,
-        sourceFile: file,
+        // Durable local-media/file URLs can be reopened through the preload filesystem bridge.
+        // Do not keep every File object in React canvas state for large Electron imports.
+        ...(shouldRetainSourceFile ? { sourceFile: file } : {}),
         ...(sourceIdentity ? { sourceIdentity } : {})
       }
 
@@ -832,8 +848,13 @@ export function useCanvasFileIntake({
         index += CANVAS_IMAGE_FILE_SOURCE_RESOLVE_BATCH_SIZE
       ) {
         const batch = files.slice(index, index + CANVAS_IMAGE_FILE_SOURCE_RESOLVE_BATCH_SIZE)
+        const batchLength = batch.length
         sources.push(...(await Promise.all(batch.map(resolveImageFileSourceInput))))
-        processedCount += batch.length
+        for (let batchIndex = 0; batchIndex < batchLength; batchIndex += 1) {
+          files[index + batchIndex] = undefined as unknown as File
+        }
+        batch.length = 0
+        processedCount += batchLength
         if (shouldReportProgress) {
           onImageBatchImportProgress?.({
             phase: 'preparing',
@@ -981,15 +1002,20 @@ export function useCanvasFileIntake({
           otherFiles.push(file)
         }
       }
+      clearFileArrayReferences(files)
 
       if (imageFiles.length > 0) {
         if (imageFiles.length === 1 && otherFiles.length === 0) {
-          const source = await resolveImageFileSourceInput(imageFiles[0])
+          const imageFile = imageFiles[0]
+          const fileName = imageFile.name
+          const sizeBytes = imageFile.size
+          const source = await resolveImageFileSourceInput(imageFile)
+          clearFileArrayReferences(imageFiles)
           await addImageToCanvas(source.src, {
             clientX,
             clientY,
-            fileName: imageFiles[0].name,
-            sizeBytes: imageFiles[0].size,
+            fileName,
+            sizeBytes,
             hasAlpha: source.hasAlpha,
             sourceWidthHint: source.sourceWidthHint,
             sourceHeightHint: source.sourceHeightHint,
@@ -1001,11 +1027,14 @@ export function useCanvasFileIntake({
           const imageSources = await resolveImageFileSourceInputs(imageFiles, {
             reportProgress: true
           })
+          clearFileArrayReferences(imageFiles)
           await addImagesToCanvas(imageSources)
         }
       }
 
-      for (const file of otherFiles) {
+      for (let index = 0; index < otherFiles.length; index += 1) {
+        const file = otherFiles[index]
+        otherFiles[index] = undefined as unknown as File
         if (isCanvasFile(file.name)) {
           await handleCanvasSceneImport(file)
           continue
@@ -1013,6 +1042,7 @@ export function useCanvasFileIntake({
 
         await handleFile(file, clientX, clientY)
       }
+      otherFiles.length = 0
     },
     [
       addImageToCanvas,
@@ -1039,6 +1069,7 @@ export function useCanvasFileIntake({
     input.onchange = async (event) => {
       const target = event.target as HTMLInputElement
       const files = Array.from(target.files || [])
+      target.value = ''
       await handleFiles(files)
     }
     input.click()

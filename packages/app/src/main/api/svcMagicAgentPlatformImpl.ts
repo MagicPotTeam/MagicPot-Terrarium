@@ -1,13 +1,32 @@
 import path from 'node:path'
 import { app } from 'electron'
+import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
+import type { ServerStreaming } from '@shared/api/apiUtils/streaming'
+import { normalizeMagicPotToolName } from '@shared/app/types'
+import { getAgentSessionKey, type AgentRouteLike } from '@shared/agent'
 import type { AssistantRoute } from '../assistantRuntime/types'
 import { getAgentKernel, type AgentKernel } from '../agentKernel'
 import type {
+  MagicAgentPlatformAgentDefinition,
   MagicAgentPlatformEmptyReq,
   MagicAgentPlatformGraphCancelReq,
+  MagicAgentPlatformGraphCatalogListReq,
+  MagicAgentPlatformGraphDeleteReq,
+  MagicAgentPlatformGraphDeleteResp,
+  MagicAgentPlatformGraphForkReq,
+  MagicAgentPlatformGraphForkResp,
   MagicAgentPlatformGraphInspectReq,
+  MagicAgentPlatformGraphListResp,
+  MagicAgentPlatformGraphPreflightRunReq,
+  MagicAgentPlatformGraphPreflightRunResp,
+  MagicAgentPlatformGraphRunEventListReq,
+  MagicAgentPlatformGraphRunEventListResp,
   MagicAgentPlatformGraphRunGetReq,
   MagicAgentPlatformGraphRunListReq,
+  MagicAgentPlatformGraphRunWatchReq,
+  MagicAgentPlatformGraphSaveResp,
+  MagicAgentPlatformGraphValidateReq,
+  MagicAgentPlatformGraphValidateResp,
   MagicAgentPlatformListAgentsResp,
   MagicAgentPlatformListToolsReq,
   MagicAgentPlatformListToolsResp,
@@ -30,20 +49,32 @@ import type {
   MagicAgentPlatformValidatePackageManifestReq,
   MagicAgentPlatformValidatePackageManifestResp
 } from '@shared/api/svcMagicAgentPlatform'
-import type {
-  MagicAgentGraphCreateRequest,
-  MagicAgentGraphRunRequest,
-  MagicAgentGraphRunResult
+import {
+  MAGIC_AGENT_TRUSTED_AGENT_STUDIO_ROUTE,
+  type MagicAgentGraphCreateRequest,
+  type MagicAgentGraphDefinition,
+  type MagicAgentGraphRunRequest,
+  type MagicAgentGraphRunResult,
+  type MagicAgentGraphRunStreamEvent
 } from '@shared/magicAgent'
 import type {
   MagicAgentInstalledPackage,
+  MagicAgentPackageAgentDefinition,
   MagicAgentPackageInspection
 } from '@shared/magicAgentRuntime'
 import {
   getMagicAgentPlatformAdapter,
   type MagicAgentPlatformAdapter
 } from '../magicAgentRuntime/platformAdapter'
-import { getMagicAgentGraphRuntime, type MagicAgentGraphRuntime } from '../magicAgentRuntime/graph'
+import {
+  createMagicAgentGraphPreflightSnapshot,
+  getMagicAgentGraphRuntime,
+  MagicAgentGraphCatalogService,
+  MagicAgentGraphRunStore,
+  MagicAgentUserGraphStore,
+  validateMagicAgentGraphDefinition,
+  type MagicAgentGraphRuntime
+} from '../magicAgentRuntime/graph'
 import {
   MagicAgentPackageStore,
   validateMagicAgentPackageManifest
@@ -53,18 +84,39 @@ import {
   isMagicAgentPlatformEnabled,
   MAGIC_AGENT_PLATFORM_ENV
 } from '../magicAgentRuntime/featureFlag'
+import { authorizeMagicAgentTrustedRoute } from '../magicAgentRuntime/trustedRouteBinding'
+import { isMagicAgentPlatformDeniedToolName } from '../magicAgentRuntime/toolPolicy'
+
+export type MagicAgentPlatformRouteAuthorizer = (
+  route: AgentRouteLike,
+  invocation?: ServiceInvocationContext
+) => AgentRouteLike
 
 export type MagicAgentPlatformSvcImplDeps = {
   adapter?: MagicAgentPlatformAdapter
   graphRuntime?: MagicAgentGraphRuntime
   packageStore?: MagicAgentPackageStore
+  userGraphStore?: MagicAgentUserGraphStore
+  runStore?: MagicAgentGraphRunStore
   agentKernel?: AgentKernel
+  routeAuthorizer?: MagicAgentPlatformRouteAuthorizer
 }
 
-const resolveDefaultPackageRoot = (): string => {
-  const userData = app?.getPath?.('userData') || process.cwd()
-  return path.join(userData, 'magic-agent-packages')
-}
+const WATCH_GRAPH_RUN_SUBSCRIBE_TIMEOUT_MS = 2_000
+const WATCH_GRAPH_RUN_SUBSCRIBE_RETRY_MS = 25
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+const resolveDefaultUserDataRoot = (): string => app?.getPath?.('userData') || process.cwd()
+
+const resolveDefaultPackageRoot = (): string =>
+  path.join(resolveDefaultUserDataRoot(), 'magic-agent-packages')
+
+const resolveDefaultGraphStoreRoot = (): string =>
+  path.join(resolveDefaultUserDataRoot(), 'magic-agent-platform', 'user-graphs')
+
+const resolveDefaultGraphRunStoreRoot = (): string =>
+  path.join(resolveDefaultUserDataRoot(), 'magic-agent-platform', 'graph-runs')
 
 const redactInstalledPackage = (installed: MagicAgentInstalledPackage) => {
   const { sourcePath: _sourcePath, packagePath: _packagePath, ...safeInstalled } = installed
@@ -114,6 +166,59 @@ const redactPackageInspection = (
   }
 }
 
+const packageAgentToPlatformAgent = (
+  agent: MagicAgentPackageAgentDefinition
+): MagicAgentPlatformAgentDefinition => ({
+  id: agent.id,
+  name: agent.name,
+  ...(agent.description ? { description: agent.description } : {}),
+  ...(agent.systemPrompt ? { systemPrompt: agent.systemPrompt } : {}),
+  ...(agent.toolNames !== undefined ? { toolNames: agent.toolNames } : {}),
+  ...(agent.maxToolIterations !== undefined ? { maxToolIterations: agent.maxToolIterations } : {}),
+  ...(agent.profileId ? { profileId: agent.profileId } : {})
+})
+
+const mergeAgentDefinitions = (
+  runtimeAgents: MagicAgentPlatformAgentDefinition[],
+  packageAgents: MagicAgentPlatformAgentDefinition[]
+): MagicAgentPlatformAgentDefinition[] => {
+  const agentsById = new Map<string, MagicAgentPlatformAgentDefinition>()
+  for (const agent of runtimeAgents) {
+    agentsById.set(agent.id, agent)
+  }
+  for (const agent of packageAgents) {
+    if (agentsById.has(agent.id)) {
+      throw new Error(`Duplicate MagicAgent id from installed package: ${agent.id}`)
+    }
+    agentsById.set(agent.id, agent)
+  }
+  return [...agentsById.values()].sort((left, right) => left.id.localeCompare(right.id))
+}
+
+const resolvePackageAgentAllowedToolNames = (
+  requested: MagicAgentPlatformRunReq['allowedToolNames'],
+  packageToolNames: MagicAgentPlatformAgentDefinition['toolNames']
+): MagicAgentPlatformRunReq['allowedToolNames'] => {
+  if (requested === undefined) {
+    return undefined
+  }
+  if (!Array.isArray(requested)) {
+    return requested
+  }
+  if (!Array.isArray(packageToolNames)) {
+    return requested
+  }
+
+  const packageToolNameSet = new Set(
+    packageToolNames
+      .map((toolName) => normalizeMagicPotToolName(toolName))
+      .filter((toolName) => Boolean(toolName) && !isMagicAgentPlatformDeniedToolName(toolName))
+  )
+  return [
+    ...new Set(requested.map((toolName) => normalizeMagicPotToolName(toolName)).filter(Boolean))
+  ].filter((toolName) => packageToolNameSet.has(toolName))
+}
+
 const normalizePathSeparators = (input: string): string => input.replace(/\\/g, '/')
 
 const isPathLikePackageIdentifier = (value: string): boolean =>
@@ -145,6 +250,8 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   private adapterInstance?: MagicAgentPlatformAdapter
   private graphRuntimeInstance?: MagicAgentGraphRuntime
   private packageStoreInstance?: MagicAgentPackageStore
+  private userGraphStoreInstance?: MagicAgentUserGraphStore
+  private runStoreInstance?: MagicAgentGraphRunStore
   private agentKernelInstance?: AgentKernel
 
   constructor(deps: MagicAgentPlatformSvcImplDeps = {}) {
@@ -162,7 +269,19 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   private getGraphRuntime(): MagicAgentGraphRuntime {
     assertMagicAgentPlatformEnabled()
     if (!this.graphRuntimeInstance) {
-      this.graphRuntimeInstance = this.deps.graphRuntime || getMagicAgentGraphRuntime()
+      if (this.deps.graphRuntime) {
+        this.graphRuntimeInstance = this.deps.graphRuntime
+        if (this.deps.runStore) {
+          this.configureGraphRuntimePersistence(this.graphRuntimeInstance)
+        }
+      } else {
+        const adapter = this.getAdapter()
+        this.graphRuntimeInstance = getMagicAgentGraphRuntime({
+          runAgent: (request, options) => adapter.runAgent(request, options),
+          callTool: (request, options) => adapter.callTool(request, options),
+          runStore: this.getRunStore()
+        })
+      }
     }
     return this.graphRuntimeInstance
   }
@@ -176,6 +295,39 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     return this.packageStoreInstance
   }
 
+  private getUserGraphStore(): MagicAgentUserGraphStore {
+    assertMagicAgentPlatformEnabled()
+    if (!this.userGraphStoreInstance) {
+      this.userGraphStoreInstance =
+        this.deps.userGraphStore || new MagicAgentUserGraphStore(resolveDefaultGraphStoreRoot())
+    }
+    return this.userGraphStoreInstance
+  }
+
+  private getRunStore(): MagicAgentGraphRunStore {
+    assertMagicAgentPlatformEnabled()
+    if (!this.runStoreInstance) {
+      this.runStoreInstance =
+        this.deps.runStore || new MagicAgentGraphRunStore(resolveDefaultGraphRunStoreRoot())
+    }
+    return this.runStoreInstance
+  }
+
+  private configureGraphRuntimePersistence(runtime: MagicAgentGraphRuntime): void {
+    const setDeps = (runtime as { setDeps?: (deps: { runStore: MagicAgentGraphRunStore }) => void })
+      .setDeps
+    if (typeof setDeps === 'function') {
+      setDeps.call(runtime, { runStore: this.getRunStore() })
+    }
+  }
+
+  private getGraphCatalog(): MagicAgentGraphCatalogService {
+    return new MagicAgentGraphCatalogService({
+      userGraphStore: this.getUserGraphStore(),
+      packageStore: this.getPackageStore()
+    })
+  }
+
   private getAgentKernel(): AgentKernel {
     assertMagicAgentPlatformEnabled()
     if (!this.agentKernelInstance) {
@@ -184,7 +336,36 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     return this.agentKernelInstance
   }
 
-  getStatus = async (_req: MagicAgentPlatformEmptyReq): Promise<MagicAgentPlatformStatusResp> => {
+  private authorizeRoute(
+    route: AgentRouteLike,
+    invocation?: ServiceInvocationContext
+  ): AssistantRoute {
+    const authorizer = this.deps.routeAuthorizer || authorizeMagicAgentTrustedRoute
+    return authorizer(route, invocation) as AssistantRoute
+  }
+
+  private authorizeAgentStudioInvocation(invocation?: ServiceInvocationContext): void {
+    this.authorizeRoute(MAGIC_AGENT_TRUSTED_AGENT_STUDIO_ROUTE, invocation)
+  }
+
+  private async listPackageAgents(): Promise<MagicAgentPlatformAgentDefinition[]> {
+    const packageStore = this.getPackageStore()
+    const listAgents = packageStore.listAgents?.bind(packageStore)
+    if (!listAgents) {
+      return []
+    }
+    return (await listAgents()).map(packageAgentToPlatformAgent)
+  }
+
+  private async listAllAgents(): Promise<MagicAgentPlatformAgentDefinition[]> {
+    return mergeAgentDefinitions(this.getAdapter().listAgents(), await this.listPackageAgents())
+  }
+
+  getStatus = async (
+    _req: MagicAgentPlatformEmptyReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformStatusResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     const enabled = isMagicAgentPlatformEnabled()
     if (!enabled) {
       return {
@@ -205,12 +386,16 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     const packageStore = this.getPackageStore()
     const tools = adapter.listTools()
     const packages = await packageStore.list().catch(() => undefined)
+    const runtimeAgents = adapter.listAgents()
+    const agents = await this.listPackageAgents()
+      .then((packageAgents) => mergeAgentDefinitions(runtimeAgents, packageAgents))
+      .catch(() => runtimeAgents)
     return {
       enabled,
       featureFlag: MAGIC_AGENT_PLATFORM_ENV,
       platformVersion: 1,
       assistantRuntimeCompatible: true,
-      agentCount: adapter.listAgents().length,
+      agentCount: agents.length,
       toolCount: tools.length,
       assistantToolCount: tools.filter((tool) => tool.source === 'assistantRuntime').length,
       creativeToolCount: tools.filter((tool) => tool.source === 'creative').length,
@@ -220,48 +405,111 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   }
 
   listAgents = async (
-    _req: MagicAgentPlatformEmptyReq
+    _req: MagicAgentPlatformEmptyReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformListAgentsResp> => {
-    return { agents: this.getAdapter().listAgents() }
+    this.authorizeAgentStudioInvocation(invocation)
+    return { agents: await this.listAllAgents() }
   }
 
   registerAgent = async (
-    req: MagicAgentPlatformRegisterAgentReq
+    req: MagicAgentPlatformRegisterAgentReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformRegisterAgentResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     return { agent: this.getAdapter().registerAgent(req.agent) }
   }
 
-  runAgent = async (req: MagicAgentPlatformRunReq): Promise<MagicAgentPlatformRunResp> => {
-    return this.getAdapter().runAgent(req)
+  runAgent = async (
+    req: MagicAgentPlatformRunReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformRunResp> => {
+    const route = this.authorizeRoute(req.route, invocation)
+    const authorizedReq = { ...req, route }
+    const agentId = normalizeMagicPotToolName(authorizedReq.agentId)
+    if (agentId) {
+      const adapter = this.getAdapter()
+      const packageAgents = await this.listPackageAgents()
+      mergeAgentDefinitions(adapter.listAgents(), packageAgents)
+      const packageAgent = packageAgents.find((agent) => agent.id === agentId)
+      if (packageAgent) {
+        const allowedToolNames = resolvePackageAgentAllowedToolNames(
+          authorizedReq.allowedToolNames,
+          packageAgent.toolNames
+        )
+        return adapter.runAgent({
+          ...authorizedReq,
+          systemPrompt: authorizedReq.systemPrompt ?? packageAgent.systemPrompt,
+          profileId: authorizedReq.profileId ?? packageAgent.profileId,
+          maxToolIterations: authorizedReq.maxToolIterations ?? packageAgent.maxToolIterations,
+          ...(allowedToolNames !== undefined ? { allowedToolNames } : {})
+        })
+      }
+    }
+    return this.getAdapter().runAgent(authorizedReq)
   }
 
   listTools = async (
-    req: MagicAgentPlatformListToolsReq
+    req: MagicAgentPlatformListToolsReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformListToolsResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     return { tools: this.getAdapter().listTools(req) }
   }
 
   callTool = async (
-    req: MagicAgentPlatformToolCallReq
+    req: MagicAgentPlatformToolCallReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformToolCallResp> => {
-    return this.getAdapter().callTool(req)
+    return this.getAdapter().callTool({ ...req, route: this.authorizeRoute(req.route, invocation) })
   }
 
-  listGraphs = async (_req: MagicAgentPlatformEmptyReq) => {
-    return { graphs: this.getGraphRuntime().list() }
+  listGraphs = async (
+    _req: MagicAgentPlatformEmptyReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformGraphListResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
+    return { graphs: await this.getGraphCatalog().list({}) }
   }
 
-  createGraph = async (req: MagicAgentGraphCreateRequest) => {
+  listGraphCatalog = async (
+    req: MagicAgentPlatformGraphCatalogListReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformGraphListResp> => {
+    const route = req.route ? this.authorizeRoute(req.route, invocation) : undefined
+    if (!route) {
+      this.authorizeAgentStudioInvocation(invocation)
+    }
+    return {
+      graphs: await this.getGraphCatalog().list({
+        ...(route ? { route } : {}),
+        ...(req.allowedToolNames !== undefined ? { allowedToolNames: req.allowedToolNames } : {}),
+        availableTools: this.getAdapter().listTools()
+      })
+    }
+  }
+
+  createGraph = async (
+    req: MagicAgentGraphCreateRequest,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformGraphSaveResp> => this.saveGraph(req, invocation)
+
+  saveGraph = async (
+    req: MagicAgentGraphCreateRequest,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformGraphSaveResp> => {
+    const route = this.authorizeRoute(req.route, invocation)
     const kernel = this.getAgentKernel()
-    const session = kernel.registerSession(req.route as AssistantRoute, { source: 'kernel' })
-    const graph = this.getGraphRuntime().create(req)
+    const session = kernel.registerSession(route, { source: 'kernel' })
+    const graph = await this.getUserGraphStore().save({ ...req, route })
+    this.getGraphRuntime().create({ graph, route, replace: true })
     kernel.recordEvent({
       runId: `magic-agent-graph:create:${graph.graphId}`,
       sessionKey: session.sessionKey,
       type: 'run.updated',
-      message: `MagicAgentGraph created: ${graph.graphId}`,
+      message: `MagicAgentGraph saved: ${graph.graphId}`,
       metadata: {
-        graphEventType: 'graph.created',
+        graphEventType: 'graph.saved',
         graphId: graph.graphId,
         source: 'magicAgentPlatform'
       }
@@ -269,14 +517,121 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     return { graph }
   }
 
-  inspectGraph = async (req: MagicAgentPlatformGraphInspectReq) => {
-    const graph = this.getGraphRuntime().inspect(req.graphId)
-    return graph ? { graph } : {}
+  deleteGraph = async (
+    req: MagicAgentPlatformGraphDeleteReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformGraphDeleteResp> => {
+    const route = this.authorizeRoute(req.route, invocation)
+    return { deleted: await this.getUserGraphStore().delete(req.graphId, route) }
   }
 
-  runGraph = async (req: MagicAgentGraphRunRequest): Promise<MagicAgentGraphRunResult> => {
+  forkGraph = async (
+    req: MagicAgentPlatformGraphForkReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformGraphForkResp> => {
+    const route = this.authorizeRoute(req.route, invocation)
+    const entry = await this.getGraphCatalog().inspect(req.graphId, {
+      route,
+      availableTools: this.getAdapter().listTools()
+    })
+    if (!entry) {
+      throw new Error(`MagicAgentGraph "${req.graphId}" does not exist.`)
+    }
+    if (!entry.forkable) {
+      throw new Error(`MagicAgentGraph "${req.graphId}" is not forkable.`)
+    }
+    const graph = await this.getUserGraphStore().forkGraph(entry.graph, route, {
+      ...(req.targetGraphId ? { graphId: req.targetGraphId } : {}),
+      ...(req.name ? { name: req.name } : {}),
+      ...(req.replace ? { replace: true } : {})
+    })
+    this.getGraphRuntime().create({ graph, route, replace: true })
+    return { graph }
+  }
+
+  validateGraph = async (
+    req: MagicAgentPlatformGraphValidateReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformGraphValidateResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
+    return { validation: validateMagicAgentGraphDefinition(req.graph) }
+  }
+
+  preflightGraphRun = async (
+    req: MagicAgentPlatformGraphPreflightRunReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformGraphPreflightRunResp> => {
+    const route = this.authorizeRoute(req.route, invocation)
+    const entry = await this.getGraphCatalog().inspect(req.graphId, {
+      route,
+      allowedToolNames: req.allowedToolNames,
+      availableTools: this.getAdapter().listTools()
+    })
+    if (!entry) {
+      throw new Error(`MagicAgentGraph "${req.graphId}" does not exist.`)
+    }
+    return { preflight: entry.preflight }
+  }
+
+  inspectGraph = async (
+    req: MagicAgentPlatformGraphInspectReq,
+    invocation?: ServiceInvocationContext
+  ) => {
+    this.authorizeAgentStudioInvocation(invocation)
+    const entry = await this.getGraphCatalog().inspect(req.graphId, {
+      availableTools: this.getAdapter().listTools()
+    })
+    return entry ? { graph: entry.graph } : {}
+  }
+
+  runGraph = async (
+    req: MagicAgentGraphRunRequest,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentGraphRunResult> => {
+    const route = this.authorizeRoute(req.route, invocation)
+    const runtime = this.getGraphRuntime()
+    const tools = this.getAdapter().listTools()
+    const runtimeGraph = runtime.inspect?.(req.graphId)
+    const shouldInspectCatalog =
+      !runtimeGraph &&
+      (!this.deps.graphRuntime || Boolean(this.deps.userGraphStore || this.deps.packageStore))
+    const entry = shouldInspectCatalog
+      ? await this.getGraphCatalog().inspect(req.graphId, {
+          route,
+          allowedToolNames: req.allowedToolNames,
+          availableTools: tools
+        })
+      : undefined
+    const preflight =
+      entry?.preflight ||
+      (runtimeGraph
+        ? createMagicAgentGraphPreflightSnapshot(runtimeGraph, {
+            allowedToolNames: req.allowedToolNames,
+            availableTools: tools
+          })
+        : undefined)
+    if (!entry && !runtimeGraph && !this.deps.graphRuntime) {
+      throw new Error(`MagicAgentGraph "${req.graphId}" does not exist.`)
+    }
+    if (entry && !entry.runnable) {
+      throw new Error(
+        entry.unavailableReason || `MagicAgentGraph "${req.graphId}" is not runnable.`
+      )
+    }
+    if (preflight && !preflight.safeToRun) {
+      throw new Error(
+        preflight.issues.find((issue) => issue.severity === 'error')?.message ||
+          `MagicAgentGraph "${req.graphId}" failed preflight.`
+      )
+    }
+
+    const graphForRun: MagicAgentGraphDefinition | undefined = entry?.graph || runtimeGraph
+    if (entry && graphForRun && (!entry.builtIn || !runtime.inspect(graphForRun.graphId))) {
+      runtime.create({ graph: graphForRun, route, replace: true })
+    }
+
     const kernel = this.getAgentKernel()
-    const session = kernel.registerSession(req.route as AssistantRoute, { source: 'kernel' })
+    const session = kernel.registerSession(route, { source: 'kernel' })
     const kernelRun = kernel.createMasterRun({
       session,
       goal: req.input,
@@ -289,21 +644,55 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
         graphId: req.graphId,
         executionBoundary: 'magicAgentGraphRuntime',
         route: session.route,
-        sessionKey: session.sessionKey
+        sessionKey: session.sessionKey,
+        ...(graphForRun ? { graphSnapshot: graphForRun } : {}),
+        ...(preflight
+          ? { permissionSnapshot: preflight.permissions, preflightSnapshot: preflight }
+          : {})
       }
     })
     kernel.updateRun(kernelRun.runId, { status: 'running', startedAt: Date.now() })
 
     try {
-      const result = await this.getGraphRuntime().run({
+      const result = await runtime.run({
         ...req,
+        route,
         metadata: {
           ...(req.metadata || {}),
+          ...(graphForRun ? { graphSnapshot: graphForRun } : {}),
+          ...(preflight
+            ? { permissionSnapshot: preflight.permissions, preflightSnapshot: preflight }
+            : {}),
           kernelRunId: kernelRun.runId,
           route: session.route,
           sessionKey: session.sessionKey
         }
       })
+      for (const graphEvent of result.events || []) {
+        const graphRuntimeEventType =
+          graphEvent.type === 'node.started'
+            ? 'step.started'
+            : graphEvent.type === 'node.completed'
+              ? 'step.completed'
+              : graphEvent.type === 'node.failed'
+                ? 'step.failed'
+                : 'run.updated'
+        kernel.recordEvent({
+          runId: kernelRun.runId,
+          sessionKey: session.sessionKey,
+          type: graphRuntimeEventType,
+          message: graphEvent.message,
+          metadata: {
+            ...(graphEvent.metadata || {}),
+            graphEventType: graphEvent.type,
+            graphId: graphEvent.graphId,
+            graphRunId: graphEvent.runId,
+            graphNodeId: graphEvent.nodeId,
+            graphChannelId: graphEvent.channelId,
+            graphOutputId: graphEvent.outputId
+          }
+        })
+      }
       const kernelStatus =
         result.status === 'completed'
           ? 'completed'
@@ -321,13 +710,25 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
           sessionKey: session.sessionKey
         }
       })
+      const kernelEventType =
+        kernelStatus === 'completed'
+          ? 'run.completed'
+          : kernelStatus === 'cancelled'
+            ? 'run.updated'
+            : 'run.failed'
+      const graphEventType =
+        kernelStatus === 'completed'
+          ? 'graph.completed'
+          : kernelStatus === 'cancelled'
+            ? 'graph.cancelled'
+            : 'graph.failed'
       kernel.recordEvent({
         runId: kernelRun.runId,
         sessionKey: session.sessionKey,
-        type: kernelStatus === 'completed' ? 'run.completed' : 'run.failed',
+        type: kernelEventType,
         message: `MagicAgentGraph run ${result.status}: ${req.graphId}`,
         metadata: {
-          graphEventType: kernelStatus === 'completed' ? 'graph.completed' : 'graph.failed',
+          graphEventType,
           graphId: req.graphId,
           graphRunId: result.runId,
           graphStatus: result.status
@@ -357,24 +758,174 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
     }
   }
 
-  listGraphRuns = async (req: MagicAgentPlatformGraphRunListReq) => {
-    const session = this.getAgentKernel().registerSession(req.route as AssistantRoute, {
+  listGraphRuns = async (
+    req: MagicAgentPlatformGraphRunListReq,
+    invocation?: ServiceInvocationContext
+  ) => {
+    const route = this.authorizeRoute(req.route, invocation)
+    const session = this.getAgentKernel().registerSession(route, {
       source: 'kernel'
     })
-    return { runs: this.getGraphRuntime().listRuns(session.sessionKey, req.graphId) }
+    const runtime = this.getGraphRuntime()
+    const listRunsForRoute = (
+      runtime as {
+        listRunsForRoute?: (
+          route: AgentRouteLike,
+          graphId?: string,
+          limit?: number
+        ) => Promise<MagicAgentGraphRunResult[]>
+      }
+    ).listRunsForRoute
+    if (typeof listRunsForRoute === 'function') {
+      return { runs: await listRunsForRoute.call(runtime, route, req.graphId, req.limit) }
+    }
+    return { runs: runtime.listRuns(session.sessionKey, req.graphId, req.limit) }
   }
 
-  getGraphRun = async (req: MagicAgentPlatformGraphRunGetReq) => {
-    const session = this.getAgentKernel().registerSession(req.route as AssistantRoute, {
+  getGraphRun = async (
+    req: MagicAgentPlatformGraphRunGetReq,
+    invocation?: ServiceInvocationContext
+  ) => {
+    const route = this.authorizeRoute(req.route, invocation)
+    const session = this.getAgentKernel().registerSession(route, {
       source: 'kernel'
     })
-    const run = this.getGraphRuntime().getRun(req.runId, session.sessionKey)
+    const runtime = this.getGraphRuntime()
+    const getRunByRoute = (
+      runtime as {
+        getRunByRoute?: (
+          runId: string,
+          route: AgentRouteLike
+        ) => Promise<MagicAgentGraphRunResult | undefined>
+      }
+    ).getRunByRoute
+    const run =
+      typeof getRunByRoute === 'function'
+        ? await getRunByRoute.call(runtime, req.runId, route)
+        : runtime.getRun(req.runId, session.sessionKey)
     return run ? { run } : {}
   }
 
-  cancelGraphRun = async (req: MagicAgentPlatformGraphCancelReq) => {
+  listGraphRunEvents = async (
+    req: MagicAgentPlatformGraphRunEventListReq,
+    invocation?: ServiceInvocationContext
+  ): Promise<MagicAgentPlatformGraphRunEventListResp> => {
+    const route = this.authorizeRoute(req.route, invocation)
+    const runtime = this.getGraphRuntime()
+    const getRunByRoute = (
+      runtime as {
+        getRunByRoute?: (
+          runId: string,
+          route: AgentRouteLike
+        ) => Promise<MagicAgentGraphRunResult | undefined>
+      }
+    ).getRunByRoute
+    const run =
+      typeof getRunByRoute === 'function'
+        ? await getRunByRoute.call(runtime, req.runId, route)
+        : runtime.getRun(req.runId, getAgentSessionKey(route))
+    if (!run) {
+      return { events: [] }
+    }
+    const limit =
+      Number.isInteger(req.limit) && Number(req.limit) > 0 ? Number(req.limit) : undefined
+    const allEvents = run.events || []
+    const events = limit === undefined ? allEvents : allEvents.slice(-limit)
+    return { events }
+  }
+
+  watchGraphRun = async (
+    req: MagicAgentPlatformGraphRunWatchReq,
+    resp: ServerStreaming<MagicAgentGraphRunStreamEvent>,
+    invocation?: ServiceInvocationContext
+  ): Promise<void> => {
+    assertMagicAgentPlatformEnabled()
+    const route = this.authorizeRoute(req.route, invocation)
     const kernel = this.getAgentKernel()
-    const session = kernel.registerSession(req.route as AssistantRoute, { source: 'kernel' })
+    const session = kernel.registerSession(route, {
+      source: 'kernel'
+    })
+    const runtime = this.getGraphRuntime()
+    let unsubscribe: (() => void) | undefined
+    let settled = false
+
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        const currentUnsubscribe = unsubscribe
+        unsubscribe = undefined
+        currentUnsubscribe?.()
+      }
+      const settle = (error?: unknown): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        if (error) {
+          reject(error)
+        } else {
+          resolve()
+        }
+      }
+      const handleStreamEvent = (event: MagicAgentGraphRunStreamEvent): void => {
+        if (settled) return
+        try {
+          resp.onData(event)
+        } catch (error) {
+          settle(error)
+          return
+        }
+        if (event.type === 'closed') {
+          settle()
+        }
+      }
+
+      resp.abortReceiver?.onAbort(() => settle())
+      if (resp.abortReceiver?.isAborted()) {
+        settle()
+        return
+      }
+
+      const subscribeWithGrace = async (): Promise<void> => {
+        const deadline = Date.now() + WATCH_GRAPH_RUN_SUBSCRIBE_TIMEOUT_MS
+        while (!settled) {
+          try {
+            const nextUnsubscribe = runtime.subscribeToRun(
+              req.runId,
+              session.sessionKey,
+              handleStreamEvent
+            )
+            if (nextUnsubscribe) {
+              if (settled) {
+                nextUnsubscribe()
+              } else {
+                unsubscribe = nextUnsubscribe
+              }
+              return
+            }
+          } catch (error) {
+            settle(error)
+            return
+          }
+
+          if (Date.now() >= deadline) {
+            settle(new Error(`Graph run ${req.runId} was not found for this route.`))
+            return
+          }
+          await delay(WATCH_GRAPH_RUN_SUBSCRIBE_RETRY_MS)
+        }
+      }
+
+      void subscribeWithGrace().catch(settle)
+    })
+  }
+
+  cancelGraphRun = async (
+    req: MagicAgentPlatformGraphCancelReq,
+    invocation?: ServiceInvocationContext
+  ) => {
+    const kernel = this.getAgentKernel()
+    const session = kernel.registerSession(this.authorizeRoute(req.route, invocation), {
+      source: 'kernel'
+    })
     const result = this.getGraphRuntime().cancel(req.runId, session.sessionKey, req.reason)
     kernel.recordEvent({
       runId: req.runId,
@@ -395,15 +946,19 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   }
 
   validatePackageManifest = async (
-    req: MagicAgentPlatformValidatePackageManifestReq
+    req: MagicAgentPlatformValidatePackageManifestReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformValidatePackageManifestResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     assertMagicAgentPlatformEnabled()
     return { validation: validateMagicAgentPackageManifest(req.manifest) }
   }
 
   scanPackage = async (
-    req: MagicAgentPlatformPackagePathReq
+    req: MagicAgentPlatformPackagePathReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformPackageScanResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     const packageStore = this.getPackageStore()
     return redactPackageInspection(
       await packageStore.scanLocalDirectory(assertPackagePathApproved(packageStore, req.packageDir))
@@ -411,8 +966,10 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   }
 
   installPackage = async (
-    req: MagicAgentPlatformPackagePathReq
+    req: MagicAgentPlatformPackagePathReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformPackageInstallResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     const packageStore = this.getPackageStore()
     try {
       const result = await packageStore.install(
@@ -426,14 +983,18 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   }
 
   listPackages = async (
-    _req: MagicAgentPlatformEmptyReq
+    _req: MagicAgentPlatformEmptyReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformPackageListResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     return { packages: (await this.getPackageStore().list()).map(redactInstalledPackage) }
   }
 
   inspectPackage = async (
-    req: MagicAgentPlatformPackageInspectReq
+    req: MagicAgentPlatformPackageInspectReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformPackageInspectResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     const packageStore = this.getPackageStore()
     if (isPathLikePackageIdentifier(req.packageIdOrDir)) {
       return redactPackageInspection(
@@ -446,8 +1007,10 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
   }
 
   uninstallPackage = async (
-    req: MagicAgentPlatformPackageUninstallReq
+    req: MagicAgentPlatformPackageUninstallReq,
+    invocation?: ServiceInvocationContext
   ): Promise<MagicAgentPlatformPackageUninstallResp> => {
+    this.authorizeAgentStudioInvocation(invocation)
     return { uninstalled: await this.getPackageStore().uninstall(req.packageId) }
   }
 }

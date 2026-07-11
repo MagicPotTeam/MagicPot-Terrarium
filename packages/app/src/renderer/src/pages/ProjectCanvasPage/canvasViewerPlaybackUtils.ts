@@ -1,6 +1,7 @@
 import {
   buildCanvasItemSpatialIndex,
   queryCanvasSpatialIndex,
+  queryOwnedCanvasSpatialIndex,
   type CanvasSpatialIndex
 } from './canvasSpatialIndex'
 import { getCanvasItemBounds } from './projectCanvasPageShared'
@@ -90,16 +91,23 @@ export function resolveVisibleCanvasItems({
   const vpTop = -stagePos.y / scale - margin
   const vpRight = (-stagePos.x + viewportWidth) / scale + margin
   const vpBottom = (-stagePos.y + viewportHeight) / scale + margin
-  const queriedItems = queryCanvasSpatialIndex(
-    spatialIndex ??
-      buildCanvasPlaybackVisibilitySpatialIndex({ groupPlaybackItemIds, sortedItems }),
-    {
-      minX: vpLeft,
-      minY: vpTop,
-      maxX: vpRight,
-      maxY: vpBottom
-    }
-  )
+  const ownedSpatialIndex = spatialIndex
+    ? null
+    : buildCanvasPlaybackVisibilitySpatialIndex({ groupPlaybackItemIds, sortedItems })
+  const resolvedSpatialIndex = spatialIndex ?? ownedSpatialIndex
+  if (!resolvedSpatialIndex) {
+    return []
+  }
+
+  const queryBounds = {
+    minX: vpLeft,
+    minY: vpTop,
+    maxX: vpRight,
+    maxY: vpBottom
+  }
+  const queriedItems = ownedSpatialIndex
+    ? queryOwnedCanvasSpatialIndex(ownedSpatialIndex, queryBounds)
+    : queryCanvasSpatialIndex(resolvedSpatialIndex, queryBounds)
   const visibleItems = queriedItems.filter((item) => !playbackItemIdSet.has(item.id))
   const visibleIdSet = new Set(visibleItems.map((item) => item.id))
   const selectedExtraItems: CanvasItem[] = []

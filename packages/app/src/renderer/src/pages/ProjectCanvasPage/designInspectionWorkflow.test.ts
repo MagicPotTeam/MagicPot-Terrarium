@@ -283,7 +283,7 @@ describe('designInspectionWorkflow', () => {
     expect(radiusIssue).toEqual(
       expect.objectContaining({
         itemIds: ['card-2'],
-        title: '矩形注释卡片混用了不同的圆角风格'
+        title: 'Rectangular annotation cards use mixed corner styles'
       })
     )
   })
@@ -319,9 +319,9 @@ describe('designInspectionWorkflow', () => {
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
 
-    expect(proposal.summary).toContain('来源：Figma 1、导入文件 1。')
+    expect(proposal.summary).toContain('Source: Figma 1, Imported file 1.')
     expect(proposal.rationale).toContain(
-      '当前来源上下文：Figma 1、导入文件 1；仍以 MagicPot 画布元素与几何数据为运行时检查真相。'
+      'Current source context: Figma 1, Imported file 1; MagicPot canvas elements and geometry remain the runtime inspection truth.'
     )
     expect(proposal.rationale).toContain('Text title-1')
     expect(proposal.rationale).toContain('Figma')
@@ -366,8 +366,12 @@ describe('designInspectionWorkflow', () => {
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const leftInsetAction = proposal.actions.find((action) => action.type === 'align-left')
     const topInsetAction = proposal.actions.find((action) => action.type === 'align-top')
-    const leftInsetIssue = proposal.issues.find((issue) => issue.title === '卡片标题左内边距不一致')
-    const topInsetIssue = proposal.issues.find((issue) => issue.title === '卡片标题上内边距不一致')
+    const leftInsetIssue = proposal.issues.find(
+      (issue) => issue.title === 'Card title left insets are inconsistent'
+    )
+    const topInsetIssue = proposal.issues.find(
+      (issue) => issue.title === 'Card title top insets are inconsistent'
+    )
 
     expect(proposal.actions).toHaveLength(2)
     expect(leftInsetAction).toEqual(
@@ -439,7 +443,7 @@ describe('designInspectionWorkflow', () => {
       (action) => action.type === 'align-left' && action.targetItemIds.includes('title-2')
     )
     const centerIssue = proposal.issues.find(
-      (issue) => issue.title === '卡片标题未对齐到同一中心线'
+      (issue) => issue.title === 'Card titles are not aligned to a shared centerline'
     )
 
     expect(centerAction).toEqual(
@@ -523,9 +527,11 @@ describe('designInspectionWorkflow', () => {
       (action) => action.type === 'align-right' && action.targetItemIds.includes('meta-2')
     )
     const metaIssue = proposal.issues.find(
-      (issue) => issue.title === '卡片头部右侧文本右内边距不一致'
+      (issue) => issue.title === 'Card header trailing text right inset is inconsistent'
     )
-    const footerIssue = proposal.issues.find((issue) => issue.title === '卡片页脚下内边距不一致')
+    const footerIssue = proposal.issues.find(
+      (issue) => issue.title === 'Card footer bottom inset is inconsistent'
+    )
 
     expect(metaAction).toEqual(
       expect.objectContaining({
@@ -607,8 +613,12 @@ describe('designInspectionWorkflow', () => {
     const bodyAction = proposal.actions.find(
       (action) => action.type === 'align-left' && action.targetItemIds.includes('body-2')
     )
-    const bodyIssue = proposal.issues.find((issue) => issue.title === '卡片正文左内边距不一致')
-    const footerIssue = proposal.issues.find((issue) => issue.title === '卡片页脚下内边距不一致')
+    const bodyIssue = proposal.issues.find(
+      (issue) => issue.title === 'Card body left inset is inconsistent'
+    )
+    const footerIssue = proposal.issues.find(
+      (issue) => issue.title === 'Card footer bottom inset is inconsistent'
+    )
 
     expect(bodyAction).toEqual(
       expect.objectContaining({
@@ -787,12 +797,10 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('value-b-2')
     )
     const metaBlockIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u4fe1\u606f\u5757\u7684\u503c\u5217\u53f3\u5185\u8fb9\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Card info value column right inset is inconsistent'
     )
     const footerRowIssue = proposal.issues.find(
-      (issue) => issue.title === '卡片页脚操作行间距不一致'
+      (issue) => issue.title === 'Card footer action-row spacing is inconsistent'
     )
 
     expect(metaBlockAction).toEqual(
@@ -927,14 +935,10 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('badge-b-2')
     )
     const badgeStackIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u6807\u7b7e\u5806\u53e0\u7684\u5782\u76f4\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Card label stack vertical spacing is inconsistent'
     )
     const tailBadgeIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u5c3e\u90e8\u6807\u7b7e\u5806\u53e0\u7684\u5782\u76f4\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Trailing card label stack vertical spacing is inconsistent'
     )
 
     expect(badgeStackAction).toEqual(
@@ -1096,9 +1100,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('badge-b-2')
     )
     const badgeStackIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u6309\u94ae\u884c\u4e0a\u65b9\u7684\u6807\u7b7e\u5806\u53e0\u5782\u76f4\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Label stack vertical spacing above card buttons is inconsistent'
     )
 
     expect(badgeStackAction).toEqual(
@@ -1211,18 +1213,13 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('badge-b-2')
     )
     const tailBadgeIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u5c3e\u90e8\u6807\u7b7e\u5806\u53e0\u7684\u5782\u76f4\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Trailing card label stack vertical spacing is inconsistent'
     )
     const footerAnchoredBadgeIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u6807\u7b7e\u5806\u53e0\u7684\u5782\u76f4\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Card label stack vertical spacing is inconsistent'
     )
     const footerInsetIssue = proposal.issues.find(
-      (issue) =>
-        issue.title === '\u5361\u7247\u9875\u811a\u4e0b\u5185\u8fb9\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Card footer bottom inset is inconsistent'
     )
 
     expect(badgeStackAction).toEqual(
@@ -1465,9 +1462,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('chip-f-2')
     )
     const chipIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u591a\u5217\u6807\u7b7e\u7ec4\u7684\u6c34\u5e73\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Card multi-column label spacing is inconsistent'
     )
 
     expect(topChipAction).toEqual(
@@ -1743,9 +1738,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('chip-c-2')
     )
     const chipIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u6309\u94ae\u884c\u4e0a\u65b9\u7684\u591a\u5217\u6807\u7b7e\u7ec4\u6c34\u5e73\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Multi-column label spacing above card buttons is inconsistent'
     )
 
     expect(chipAction).toBeUndefined()
@@ -1996,14 +1989,10 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('chip-f-2')
     )
     const chipFooterActionIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u6309\u94ae\u884c\u4e0a\u65b9\u7684\u591a\u5217\u6807\u7b7e\u7ec4\u6c34\u5e73\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Multi-column label spacing above card buttons is inconsistent'
     )
     const chipIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u591a\u5217\u6807\u7b7e\u7ec4\u7684\u6c34\u5e73\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Card multi-column label spacing is inconsistent'
     )
     const footerRowAction = proposal.actions.find(
       (action) =>
@@ -2205,9 +2194,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('value-b-2')
     )
     const bodyMetaIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u6b63\u6587\u540e\u7684\u4fe1\u606f\u503c\u5217\u53f3\u5185\u8fb9\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Post-body info value column right inset is inconsistent'
     )
 
     expect(bodyMetaAction).toEqual(
@@ -2337,10 +2324,10 @@ describe('designInspectionWorkflow', () => {
     const valueColumnAction = proposal.actions.find(
       (action) =>
         action.type === 'align-right' &&
-        action.title === '将卡片底部操作行前的信息值列统一到一致的右内边距'
+        action.title === 'Align pre-action info value column to a consistent right inset'
     )
     const valueColumnIssue = proposal.issues.find(
-      (issue) => issue.title === '卡片底部操作行前的信息值列右内边距不一致'
+      (issue) => issue.title === 'Pre-action info value column right inset is inconsistent'
     )
 
     expect(valueColumnAction).toBeUndefined()
@@ -2531,10 +2518,10 @@ describe('designInspectionWorkflow', () => {
     const valueColumnAction = proposal.actions.find(
       (action) =>
         action.type === 'align-right' &&
-        action.title === '将卡片底部操作行前的信息值列统一到一致的右内边距'
+        action.title === 'Align pre-action info value column to a consistent right inset'
     )
     const valueColumnIssue = proposal.issues.find(
-      (issue) => issue.title === '卡片底部操作行前的信息值列右内边距不一致'
+      (issue) => issue.title === 'Pre-action info value column right inset is inconsistent'
     )
     const footerRowAction = proposal.actions.find(
       (action) =>
@@ -2542,7 +2529,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('button-primary-2')
     )
     const footerInsetIssue = proposal.issues.find(
-      (issue) => issue.title === '卡片页脚下内边距不一致'
+      (issue) => issue.title === 'Card footer bottom inset is inconsistent'
     )
 
     expect(valueColumnAction).toEqual(
@@ -2652,9 +2639,7 @@ describe('designInspectionWorkflow', () => {
         action.type === 'distribute-vertical-spacing' && action.targetItemIds.includes('badge-a-2')
     )
     const badgeStackIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u6807\u7b7e\u5806\u53e0\u7684\u5782\u76f4\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Card label stack vertical spacing is inconsistent'
     )
 
     expect(badgeStackAction).toBeUndefined()
@@ -2775,9 +2760,7 @@ describe('designInspectionWorkflow', () => {
         action.type === 'distribute-vertical-spacing' && action.targetItemIds.includes('badge-a-2')
     )
     const badgeStackIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u6309\u94ae\u884c\u4e0a\u65b9\u7684\u6807\u7b7e\u5806\u53e0\u5782\u76f4\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Label stack vertical spacing above card buttons is inconsistent'
     )
 
     expect(badgeStackAction).toBeUndefined()
@@ -2932,9 +2915,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('badge-b-2')
     )
     const badgeStackIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u6309\u94ae\u884c\u4e0a\u65b9\u7684\u6807\u7b7e\u5806\u53e0\u5782\u76f4\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Label stack vertical spacing above card buttons is inconsistent'
     )
 
     expect(badgeStackAction).toBeUndefined()
@@ -3106,9 +3087,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('chip-c-2')
     )
     const chipIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u591a\u5217\u6807\u7b7e\u7ec4\u7684\u6c34\u5e73\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Card multi-column label spacing is inconsistent'
     )
 
     expect(chipAction).toBeUndefined()
@@ -3256,9 +3235,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('chip-c-2')
     )
     const chipIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u5361\u7247\u591a\u5217\u6807\u7b7e\u7ec4\u7684\u6c34\u5e73\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Card multi-column label spacing is inconsistent'
     )
 
     expect(chipAction).toBeUndefined()
@@ -3308,9 +3285,11 @@ describe('designInspectionWorkflow', () => {
     const topInsetAction = proposal.actions.find(
       (action) => action.type === 'align-top' && action.targetItemIds.includes('body-2')
     )
-    const leftInsetIssue = proposal.issues.find((issue) => issue.title === '卡片正文左内边距不一致')
+    const leftInsetIssue = proposal.issues.find(
+      (issue) => issue.title === 'Card body left inset is inconsistent'
+    )
     const bodyGapIssue = proposal.issues.find(
-      (issue) => issue.title === '卡片正文与标题的垂直间距不一致'
+      (issue) => issue.title === 'Vertical gap between card title and body is inconsistent'
     )
 
     expect(leftInsetAction).toEqual(
@@ -3379,7 +3358,7 @@ describe('designInspectionWorkflow', () => {
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const bodyGapIssue = proposal.issues.find(
-      (issue) => issue.title === '卡片正文与标题的垂直间距不一致'
+      (issue) => issue.title === 'Vertical gap between card title and body is inconsistent'
     )
     const bodyGapAction = proposal.actions.find(
       (action) => action.type === 'align-top' && action.targetItemIds.includes('body-2')
@@ -3453,7 +3432,9 @@ describe('designInspectionWorkflow', () => {
     const footerAction = proposal.actions.find(
       (action) => action.type === 'align-bottom' && action.targetItemIds.includes('footer-2')
     )
-    const footerIssue = proposal.issues.find((issue) => issue.title === '卡片页脚下内边距不一致')
+    const footerIssue = proposal.issues.find(
+      (issue) => issue.title === 'Card footer bottom inset is inconsistent'
+    )
 
     expect(footerAction).toEqual(
       expect.objectContaining({
@@ -3561,7 +3542,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('button-primary-2')
     )
     const rowSpacingIssue = proposal.issues.find(
-      (issue) => issue.title === '卡片页脚操作行间距不一致'
+      (issue) => issue.title === 'Card footer action-row spacing is inconsistent'
     )
 
     expect(rowSpacingAction).toEqual(
@@ -3697,7 +3678,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('button-a-2')
     )
     const rowSpacingIssue = proposal.issues.find(
-      (issue) => issue.title === '卡片页脚操作行间距不一致'
+      (issue) => issue.title === 'Card footer action-row spacing is inconsistent'
     )
 
     expect(rowSpacingAction).toEqual(
@@ -3733,7 +3714,7 @@ describe('designInspectionWorkflow', () => {
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const centerAction = proposal.actions.find((action) => action.type === 'align-center')
     const centerIssue = proposal.issues.find(
-      (issue) => issue.title === '所选纵向堆叠未按中心线对齐'
+      (issue) => issue.title === 'Selected vertical stack is not center-aligned'
     )
 
     expect(proposal.actions).toHaveLength(1)
@@ -3778,7 +3759,7 @@ describe('designInspectionWorkflow', () => {
     expect(widthIssue).toEqual(
       expect.objectContaining({
         itemIds: ['card-2'],
-        title: '所选纵向堆叠中的块宽度不一致'
+        title: 'Block widths in the selected vertical stack are inconsistent'
       })
     )
   })
@@ -3816,7 +3797,7 @@ describe('designInspectionWorkflow', () => {
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const heightAction = proposal.actions.find((action) => action.type === 'normalize-item-height')
     const heightIssue = proposal.issues.find(
-      (issue) => issue.title === '所选纵向堆叠中的块高度不一致'
+      (issue) => issue.title === 'Block heights in the selected vertical stack are inconsistent'
     )
 
     expect(heightAction).toEqual(
@@ -3866,7 +3847,9 @@ describe('designInspectionWorkflow', () => {
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const alignAction = proposal.actions.find((action) => action.type === 'align-right')
-    const alignIssue = proposal.issues.find((issue) => issue.title === '所选纵向堆叠右边缘不一致')
+    const alignIssue = proposal.issues.find(
+      (issue) => issue.title === 'Selected vertical stack right edges are inconsistent'
+    )
 
     expect(alignAction).toEqual(
       expect.objectContaining({
@@ -3905,11 +3888,11 @@ describe('designInspectionWorkflow', () => {
       expect.arrayContaining([
         expect.objectContaining({
           category: 'alignment',
-          title: '所选横向排列上边缘不一致'
+          title: 'Selected horizontal row top edges are inconsistent'
         }),
         expect.objectContaining({
           category: 'spacing',
-          title: '水平间距不一致'
+          title: 'Horizontal spacing is inconsistent'
         })
       ])
     )
@@ -3948,7 +3931,7 @@ describe('designInspectionWorkflow', () => {
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const heightAction = proposal.actions.find((action) => action.type === 'normalize-item-height')
     const heightIssue = proposal.issues.find(
-      (issue) => issue.title === '所选横向排列中的块高度不一致'
+      (issue) => issue.title === 'Block heights in the selected horizontal row are inconsistent'
     )
 
     expect(heightAction).toEqual(
@@ -3998,7 +3981,9 @@ describe('designInspectionWorkflow', () => {
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const alignAction = proposal.actions.find((action) => action.type === 'align-bottom')
-    const alignIssue = proposal.issues.find((issue) => issue.title === '所选横向排列下边缘不一致')
+    const alignIssue = proposal.issues.find(
+      (issue) => issue.title === 'Selected horizontal row bottom edges are inconsistent'
+    )
 
     expect(alignAction).toEqual(
       expect.objectContaining({
@@ -4029,7 +4014,9 @@ describe('designInspectionWorkflow', () => {
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const middleAction = proposal.actions.find((action) => action.type === 'align-middle')
-    const middleIssue = proposal.issues.find((issue) => issue.title === '所选横向排列未按中线对齐')
+    const middleIssue = proposal.issues.find(
+      (issue) => issue.title === 'Selected horizontal row is not middle-aligned'
+    )
 
     expect(proposal.actions).toHaveLength(1)
     expect(middleAction).toEqual(
@@ -4080,7 +4067,7 @@ describe('designInspectionWorkflow', () => {
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const widthAction = proposal.actions.find((action) => action.type === 'normalize-item-width')
     const widthIssue = proposal.issues.find(
-      (issue) => issue.title === '所选横向排列中的块宽度不一致'
+      (issue) => issue.title === 'Block widths in the selected horizontal row are inconsistent'
     )
 
     expect(widthAction).toEqual(
@@ -4137,7 +4124,9 @@ describe('designInspectionWorkflow', () => {
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const sizeAction = proposal.actions.find((action) => action.type === 'normalize-item-size')
-    const sizeIssue = proposal.issues.find((issue) => issue.title === '网格项尺寸不一致')
+    const sizeIssue = proposal.issues.find(
+      (issue) => issue.title === 'Grid item sizes are inconsistent'
+    )
 
     expect(sizeAction).toEqual(
       expect.objectContaining({
@@ -4194,8 +4183,12 @@ describe('designInspectionWorkflow', () => {
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const centerAction = proposal.actions.find((action) => action.type === 'align-center')
     const middleAction = proposal.actions.find((action) => action.type === 'align-middle')
-    const columnIssue = proposal.issues.find((issue) => issue.title === '网格列未按中心线对齐')
-    const rowIssue = proposal.issues.find((issue) => issue.title === '网格行未按中线对齐')
+    const columnIssue = proposal.issues.find(
+      (issue) => issue.title === 'Grid columns are not center-aligned'
+    )
+    const rowIssue = proposal.issues.find(
+      (issue) => issue.title === 'Grid rows are not middle-aligned'
+    )
 
     expect(centerAction).toEqual(
       expect.objectContaining({
@@ -4285,7 +4278,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('card-6')
     )
     const gutterIssue = proposal.issues.find(
-      (issue) => issue.title === '2x3 \u7f51\u683c\u884c\u5185\u5217\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === '2x3 grid row column spacing is inconsistent'
     )
 
     expect(gutterAction).toEqual(
@@ -4352,7 +4345,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('card-3')
     )
     const gutterIssue = proposal.issues.find(
-      (issue) => issue.title === '2x3 \u7f51\u683c\u884c\u5185\u5217\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === '2x3 grid row column spacing is inconsistent'
     )
 
     expect(gutterAction).toBeUndefined()
@@ -4419,7 +4412,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('card-6')
     )
     const gutterIssue = proposal.issues.find(
-      (issue) => issue.title === '2x3 \u7f51\u683c\u884c\u5185\u5217\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === '2x3 grid row column spacing is inconsistent'
     )
 
     expect(gutterAction).toBeUndefined()
@@ -4507,9 +4500,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('card-6')
     )
     const gutterIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u4e09\u5217\u591a\u884c\u77e9\u9635\u7684\u884c\u5185\u5217\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Three-column multi-row matrix row column spacing is inconsistent'
     )
     const centerAction = proposal.actions.find(
       (action) =>
@@ -4619,9 +4610,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('card-6')
     )
     const gutterIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u4e09\u5217\u591a\u884c\u77e9\u9635\u7684\u884c\u5185\u5217\u95f4\u8ddd\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Three-column multi-row matrix row column spacing is inconsistent'
     )
 
     expect(gutterAction).toBeUndefined()
@@ -4730,9 +4719,7 @@ describe('designInspectionWorkflow', () => {
         action.targetItemIds.includes('card-12')
     )
     const rowRhythmIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u4e09\u5217\u591a\u884c\u77e9\u9635\u7684\u7eb5\u5411\u8282\u594f\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Three-column multi-row matrix vertical rhythm is inconsistent'
     )
 
     expect(rowRhythmAction).toEqual(
@@ -4852,9 +4839,7 @@ describe('designInspectionWorkflow', () => {
           action.targetItemIds.includes('card-12'))
     )
     const rowRhythmIssue = proposal.issues.find(
-      (issue) =>
-        issue.title ===
-        '\u4e09\u5217\u591a\u884c\u77e9\u9635\u7684\u7eb5\u5411\u8282\u594f\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Three-column multi-row matrix vertical rhythm is inconsistent'
     )
 
     expect(rowRhythmAction).toBeUndefined()
@@ -4939,12 +4924,10 @@ describe('designInspectionWorkflow', () => {
     )
     const leftTrackIssue = proposal.issues.find(
       (issue) =>
-        issue.title ===
-        '\u53d8\u5bbd\u4e09\u5217\u77e9\u9635\u7684\u5217\u5de6\u8f68\u9053\u4e0d\u4e00\u81f4'
+        issue.title === 'Variable-width three-column matrix left column track is inconsistent'
     )
     const centerIssue = proposal.issues.find(
-      (issue) =>
-        issue.title === '\u4e09\u5217\u77e9\u9635\u7684\u5217\u4e2d\u5fc3\u7ebf\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Three-column matrix column centerlines are inconsistent'
     )
 
     expect(leftTrackAction).toEqual(
@@ -5041,8 +5024,7 @@ describe('designInspectionWorkflow', () => {
     )
     const leftTrackIssue = proposal.issues.find(
       (issue) =>
-        issue.title ===
-        '\u53d8\u5bbd\u4e09\u5217\u77e9\u9635\u7684\u5217\u5de6\u8f68\u9053\u4e0d\u4e00\u81f4'
+        issue.title === 'Variable-width three-column matrix left column track is inconsistent'
     )
 
     expect(leftTrackAction).toBeUndefined()
@@ -5127,13 +5109,11 @@ describe('designInspectionWorkflow', () => {
     )
     const rightTrackIssue = proposal.issues.find(
       (issue) =>
-        issue.title ===
-        '\u53d8\u5bbd\u4e09\u5217\u77e9\u9635\u7684\u5217\u53f3\u8f68\u9053\u4e0d\u4e00\u81f4'
+        issue.title === 'Variable-width three-column matrix right column track is inconsistent'
     )
     const leftTrackIssue = proposal.issues.find(
       (issue) =>
-        issue.title ===
-        '\u53d8\u5bbd\u4e09\u5217\u77e9\u9635\u7684\u5217\u5de6\u8f68\u9053\u4e0d\u4e00\u81f4'
+        issue.title === 'Variable-width three-column matrix left column track is inconsistent'
     )
 
     expect(rightTrackAction).toEqual(
@@ -5230,8 +5210,7 @@ describe('designInspectionWorkflow', () => {
     )
     const rightTrackIssue = proposal.issues.find(
       (issue) =>
-        issue.title ===
-        '\u53d8\u5bbd\u4e09\u5217\u77e9\u9635\u7684\u5217\u53f3\u8f68\u9053\u4e0d\u4e00\u81f4'
+        issue.title === 'Variable-width three-column matrix right column track is inconsistent'
     )
 
     expect(rightTrackAction).toBeUndefined()
@@ -5316,18 +5295,15 @@ describe('designInspectionWorkflow', () => {
     )
     const centerTrackIssue = proposal.issues.find(
       (issue) =>
-        issue.title ===
-        '\u53d8\u5bbd\u4e09\u5217\u77e9\u9635\u7684\u5217\u4e2d\u5fc3\u7ebf\u4e0d\u4e00\u81f4'
+        issue.title === 'Variable-width three-column matrix column centerline is inconsistent'
     )
     const leftTrackIssue = proposal.issues.find(
       (issue) =>
-        issue.title ===
-        '\u53d8\u5bbd\u4e09\u5217\u77e9\u9635\u7684\u5217\u5de6\u8f68\u9053\u4e0d\u4e00\u81f4'
+        issue.title === 'Variable-width three-column matrix left column track is inconsistent'
     )
     const rightTrackIssue = proposal.issues.find(
       (issue) =>
-        issue.title ===
-        '\u53d8\u5bbd\u4e09\u5217\u77e9\u9635\u7684\u5217\u53f3\u8f68\u9053\u4e0d\u4e00\u81f4'
+        issue.title === 'Variable-width three-column matrix right column track is inconsistent'
     )
 
     expect(centerTrackAction).toEqual(
@@ -5425,8 +5401,7 @@ describe('designInspectionWorkflow', () => {
     )
     const centerTrackIssue = proposal.issues.find(
       (issue) =>
-        issue.title ===
-        '\u53d8\u5bbd\u4e09\u5217\u77e9\u9635\u7684\u5217\u4e2d\u5fc3\u7ebf\u4e0d\u4e00\u81f4'
+        issue.title === 'Variable-width three-column matrix column centerline is inconsistent'
     )
 
     expect(centerTrackAction).toBeUndefined()
@@ -5515,8 +5490,7 @@ describe('designInspectionWorkflow', () => {
     )
     const rowDriftIssue = proposal.issues.find(
       (issue) =>
-        issue.title ===
-        '\u53d8\u5bbd\u4e09\u5217\u77e9\u9635\u7684\u6df7\u5408\u951a\u70b9\u6574\u884c\u6a2a\u5411\u6f02\u79fb'
+        issue.title === 'Variable-width three-column matrix row drifts across mixed anchors'
     )
     const leftTrackAction = proposal.actions.find(
       (action) => action.type === 'align-left' && action.targetItemIds.includes('card-4')
@@ -5622,8 +5596,7 @@ describe('designInspectionWorkflow', () => {
     const rowDriftAction = proposal.actions.find((action) => action.type === 'shift-horizontal')
     const rowDriftIssue = proposal.issues.find(
       (issue) =>
-        issue.title ===
-        '\u53d8\u5bbd\u4e09\u5217\u77e9\u9635\u7684\u6df7\u5408\u951a\u70b9\u6574\u884c\u6a2a\u5411\u6f02\u79fb'
+        issue.title === 'Variable-width three-column matrix row drifts across mixed anchors'
     )
     const leftTrackAction = proposal.actions.find(
       (action) => action.type === 'align-left' && action.targetItemIds.includes('card-4')
@@ -5723,8 +5696,7 @@ describe('designInspectionWorkflow', () => {
       (action) => action.type === 'align-center' && action.targetItemIds.includes('card-5')
     )
     const centerIssue = proposal.issues.find(
-      (issue) =>
-        issue.title === '\u4e09\u5217\u77e9\u9635\u7684\u5217\u4e2d\u5fc3\u7ebf\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Three-column matrix column centerlines are inconsistent'
     )
 
     expect(centerAction).toEqual(
@@ -5798,8 +5770,7 @@ describe('designInspectionWorkflow', () => {
       (action) => action.type === 'align-center' && action.targetItemIds.includes('card-5')
     )
     const centerIssue = proposal.issues.find(
-      (issue) =>
-        issue.title === '\u4e09\u5217\u77e9\u9635\u7684\u5217\u4e2d\u5fc3\u7ebf\u4e0d\u4e00\u81f4'
+      (issue) => issue.title === 'Three-column matrix column centerlines are inconsistent'
     )
 
     expect(centerAction).toBeUndefined()
@@ -5901,7 +5872,7 @@ describe('designInspectionWorkflow', () => {
     )
     expect(promptPayload.provenanceOverview).toEqual(
       expect.objectContaining({
-        kindLabels: ['Figma 1', '导入文件 1'],
+        kindLabels: ['Figma 1', 'Imported file 1'],
         detailLines: expect.arrayContaining([
           expect.stringContaining('Text title-1'),
           expect.stringContaining('figma-file-1'),
@@ -6011,7 +5982,7 @@ describe('designInspectionWorkflow', () => {
       expect.arrayContaining([
         expect.objectContaining({
           type: 'update-file-content',
-          title: '更新 brief-1.md 的可编辑文件内容',
+          title: 'Update editable content for brief-1.md',
           targetItemIds: ['brief-1'],
           payload: {
             content: '# Updated brief\n\nUse the latest approved wording.'
@@ -6023,7 +5994,7 @@ describe('designInspectionWorkflow', () => {
       expect.arrayContaining([
         expect.objectContaining({
           category: 'content',
-          title: '应更新 brief-1.md 的可编辑文件内容',
+          title: 'Update editable content for brief-1.md',
           itemIds: ['brief-1']
         })
       ])
@@ -7474,7 +7445,7 @@ describe('designInspectionWorkflow', () => {
       .filter(
         (action) =>
           action.type === 'align-right' &&
-          action.title === '将卡片底部操作行前的信息值列统一到一致的右内边距'
+          action.title === 'Align pre-action info value column to a consistent right inset'
       )
       .map((action) => action.id)
     const approval: DesignInspectionApproval = {

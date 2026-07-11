@@ -188,14 +188,14 @@ describe('DesignInspectionHistoryDialog', () => {
       screen.getByText('轨迹：上下文 -> 方案 -> 审批:已批准 -> 执行:已完成')
     ).toBeInTheDocument()
     expect(screen.getByText('最新：Execution completed.')).toBeInTheDocument()
-    expect(screen.getByText('来源：Figma 1 | 导入文件 1')).toBeInTheDocument()
+    expect(screen.getByText('来源：Figma 1 | Imported file 1')).toBeInTheDocument()
     expect(
       screen.getByText(
         (content) =>
           content.includes('Headline') &&
           content.includes('Figma') &&
           content.includes('brief.md') &&
-          content.includes('导入文件')
+          content.includes('Imported file')
       )
     ).toBeInTheDocument()
     expect(screen.getByText('\u5ba1\u6279\uff1a\u5df2\u6279\u51c6')).toBeInTheDocument()

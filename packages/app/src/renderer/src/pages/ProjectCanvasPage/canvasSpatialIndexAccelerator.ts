@@ -42,6 +42,20 @@ let wasmModule: WasmSpatialIndexModule | null = null
 let wasmLoadState: 'idle' | 'loading' | 'ready' | 'failed' = 'idle'
 let wasmLoadPromise: Promise<void> | null = null
 let testAcceleratorFactory: CanvasSpatialIndexAcceleratorFactory | null = null
+let scheduledWarmupCancel: (() => void) | null = null
+let scheduledWarmupSubscriberCount = 0
+let acceleratorReadyVersion = 0
+
+const resetScheduledWarmupState = (): void => {
+  scheduledWarmupCancel = null
+  scheduledWarmupSubscriberCount = 0
+}
+
+const cancelScheduledWarmup = (): void => {
+  const cancel = scheduledWarmupCancel
+  resetScheduledWarmupState()
+  cancel?.()
+}
 
 const finalizationRegistry: FinalizationRegistry<NativeSpatialIndex> | null =
   typeof FinalizationRegistry === 'function'
@@ -71,6 +85,7 @@ const loadWasmSpatialIndexModule = async (): Promise<void> => {
     }
     wasmModule = module
     wasmLoadState = 'ready'
+    acceleratorReadyVersion += 1
   } catch {
     wasmModule = null
     wasmLoadState = 'failed'
@@ -82,22 +97,89 @@ export const requestCanvasSpatialIndexAcceleratorWarmup = (): void => {
     return
   }
 
+  cancelScheduledWarmup()
   wasmLoadState = 'loading'
   wasmLoadPromise = loadWasmSpatialIndexModule()
   void wasmLoadPromise
 }
 
+export const scheduleCanvasSpatialIndexAcceleratorIdleWarmup = (): (() => void) => {
+  if (testAcceleratorFactory || wasmLoadState !== 'idle') {
+    return () => undefined
+  }
+
+  scheduledWarmupSubscriberCount += 1
+  let released = false
+  const release = () => {
+    if (released) {
+      return
+    }
+    released = true
+    scheduledWarmupSubscriberCount = Math.max(0, scheduledWarmupSubscriberCount - 1)
+    if (scheduledWarmupSubscriberCount === 0) {
+      cancelScheduledWarmup()
+    }
+  }
+
+  if (scheduledWarmupCancel) {
+    return release
+  }
+
+  let cancelled = false
+  const run = () => {
+    resetScheduledWarmupState()
+    if (!cancelled) {
+      requestCanvasSpatialIndexAcceleratorWarmup()
+    }
+  }
+
+  const requestIdleCallback = window.requestIdleCallback
+  const cancelIdleCallback = window.cancelIdleCallback
+  if (typeof requestIdleCallback === 'function' && typeof cancelIdleCallback === 'function') {
+    const handle = requestIdleCallback(run, { timeout: 500 })
+    scheduledWarmupCancel = () => {
+      cancelled = true
+      cancelIdleCallback(handle)
+      resetScheduledWarmupState()
+    }
+    return release
+  }
+
+  const handle = window.setTimeout(run, 100)
+  scheduledWarmupCancel = () => {
+    cancelled = true
+    window.clearTimeout(handle)
+    resetScheduledWarmupState()
+  }
+  return release
+}
+
+export const getCanvasSpatialIndexAcceleratorStateForTest = () => ({
+  loadState: wasmLoadState,
+  hasScheduledWarmup: Boolean(scheduledWarmupCancel),
+  hasWasmModule: Boolean(wasmModule),
+  hasLoadPromise: Boolean(wasmLoadPromise),
+  hasTestFactory: Boolean(testAcceleratorFactory),
+  scheduledWarmupSubscriberCount,
+  readyVersion: getCanvasSpatialIndexAcceleratorReadyVersion()
+})
+
 export const isCanvasSpatialIndexAcceleratorReady = (): boolean =>
   Boolean(testAcceleratorFactory) || wasmLoadState === 'ready'
+
+export const getCanvasSpatialIndexAcceleratorReadyVersion = (): number => acceleratorReadyVersion
+
+export const shouldScheduleCanvasSpatialIndexAcceleratorWarmup = (entryCount: number): boolean =>
+  entryCount >= CANVAS_SPATIAL_INDEX_ACCELERATOR_MIN_ENTRIES
 
 export const shouldAttemptCanvasSpatialIndexAcceleration = (entryCount: number): boolean => {
   if (testAcceleratorFactory) {
     return true
   }
-  if (entryCount >= CANVAS_SPATIAL_INDEX_ACCELERATOR_MIN_ENTRIES) {
+  if (shouldScheduleCanvasSpatialIndexAcceleratorWarmup(entryCount)) {
     requestCanvasSpatialIndexAcceleratorWarmup()
   }
-  return wasmLoadState === 'ready' && entryCount >= CANVAS_SPATIAL_INDEX_ACCELERATOR_MIN_ENTRIES
+  return wasmLoadState === 'ready' && shouldScheduleCanvasSpatialIndexAcceleratorWarmup(entryCount)
 }
 
 const boundsToFloat64Array = (bounds: CanvasSpatialBounds): Float64Array =>
@@ -148,11 +230,14 @@ export const setCanvasSpatialIndexAcceleratorFactoryForTest = (
   factory: CanvasSpatialIndexAcceleratorFactory | null
 ): void => {
   testAcceleratorFactory = factory
+  acceleratorReadyVersion += 1
 }
 
 export const resetCanvasSpatialIndexAcceleratorForTest = (): void => {
+  cancelScheduledWarmup()
   testAcceleratorFactory = null
   wasmModule = null
   wasmLoadState = 'idle'
   wasmLoadPromise = null
+  acceleratorReadyVersion = 0
 }

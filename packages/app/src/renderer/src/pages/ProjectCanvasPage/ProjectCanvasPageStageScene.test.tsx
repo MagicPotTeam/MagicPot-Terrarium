@@ -13,6 +13,21 @@ import type {
   CanvasVideoItem
 } from './types'
 import type { ProjectCanvasImagePreview } from './projectCanvasRenderBoundary'
+import {
+  createProjectCanvasWebGLRuntimeMetrics,
+  type ProjectCanvasWebGLRuntimeMetrics
+} from './projectCanvasWebGLRuntimeState'
+
+const PROJECT_CANVAS_TEST_WEBGL_TEXTURE_BUDGET_BYTES = 768 * 1024 * 1024
+
+function createTestWebGLMetrics(
+  overrides: Partial<ProjectCanvasWebGLRuntimeMetrics> = {}
+): ProjectCanvasWebGLRuntimeMetrics {
+  return createProjectCanvasWebGLRuntimeMetrics({
+    residentTextureBudgetBytes: PROJECT_CANVAS_TEST_WEBGL_TEXTURE_BUDGET_BYTES,
+    ...overrides
+  })
+}
 
 const {
   measureCanvasAnnotationTextHeightMock,
@@ -62,57 +77,7 @@ let webglReady = false
 let webglLoadedIds = new Set<string>()
 let webglResidentIds = new Set<string>()
 let webglFailedIds = new Set<string>()
-let latestWebGLMetrics: {
-  isInitialized: boolean
-  imageCount: number
-  loadedImageCount: number
-  failedImageCount: number
-  residentImageCount: number
-  residentTextureBytes: number
-  residentCandidateTextureBytes: number
-  residentTextureBudgetBytes: number
-  pendingImageCount: number
-  spriteCount: number
-  residentCandidateImageCount: number
-  viewportCulledImageCount: number
-  usingPreviewImageCount: number
-  usingSourceImageCount: number
-  thumbnailPreviewImageCount: number
-  placeholderImageCount: number
-  sourceUpgradeSuppressedImageCount: number
-  sourceUpgradeablePreviewImageCount: number
-  sourceUpgradePendingImageCount: number
-  sourceUpgradeFailedImageCount: number
-  missingImageCount: number
-  renderCount: number
-  lastRenderDurationMs: number | null
-  lastUpdateReason: 'initialize' | 'items' | 'preview' | 'cleanup'
-} = {
-  isInitialized: false,
-  imageCount: 0,
-  loadedImageCount: 0,
-  failedImageCount: 0,
-  residentImageCount: 0,
-  residentTextureBytes: 0,
-  residentCandidateTextureBytes: 0,
-  residentTextureBudgetBytes: 768 * 1024 * 1024,
-  pendingImageCount: 0,
-  spriteCount: 0,
-  residentCandidateImageCount: 0,
-  viewportCulledImageCount: 0,
-  usingPreviewImageCount: 0,
-  usingSourceImageCount: 0,
-  thumbnailPreviewImageCount: 0,
-  placeholderImageCount: 0,
-  sourceUpgradeSuppressedImageCount: 0,
-  sourceUpgradeablePreviewImageCount: 0,
-  sourceUpgradePendingImageCount: 0,
-  sourceUpgradeFailedImageCount: 0,
-  missingImageCount: 0,
-  renderCount: 0,
-  lastRenderDurationMs: null,
-  lastUpdateReason: 'cleanup'
-}
+let latestWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = createTestWebGLMetrics()
 let latestWebGLLayerProps: {
   items: CanvasImageItem[]
   onReadyChange?: (ready: boolean) => void
@@ -288,6 +253,23 @@ vi.mock('./components/ProjectCanvasWebGLImageLayer', async () => {
     )
   }
 })
+
+function setMockWebGLRuntime({
+  ready = true,
+  loadedIds = [],
+  residentIds = loadedIds,
+  failedIds = []
+}: {
+  ready?: boolean
+  loadedIds?: Iterable<string>
+  residentIds?: Iterable<string>
+  failedIds?: Iterable<string>
+} = {}) {
+  webglReady = ready
+  webglLoadedIds = new Set(loadedIds)
+  webglResidentIds = new Set(residentIds)
+  webglFailedIds = new Set(failedIds)
+}
 
 function createImageItem(id: string): CanvasImageItem {
   const image = document.createElement('img')
@@ -503,70 +485,35 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     latestWebGLItems = []
     latestWebGLLayerProps = null
     webglLayerRenderCount = 0
-    webglReady = false
-    webglLoadedIds = new Set()
-    webglResidentIds = new Set()
-    webglFailedIds = new Set()
-    latestWebGLMetrics = {
-      isInitialized: false,
-      imageCount: 0,
-      loadedImageCount: 0,
-      failedImageCount: 0,
-      residentImageCount: 0,
-      residentTextureBytes: 0,
-      residentCandidateTextureBytes: 0,
-      residentTextureBudgetBytes: 768 * 1024 * 1024,
-      pendingImageCount: 0,
-      spriteCount: 0,
-      residentCandidateImageCount: 0,
-      viewportCulledImageCount: 0,
-      usingPreviewImageCount: 0,
-      usingSourceImageCount: 0,
-      thumbnailPreviewImageCount: 0,
-      placeholderImageCount: 0,
-      sourceUpgradeSuppressedImageCount: 0,
-      sourceUpgradeablePreviewImageCount: 0,
-      sourceUpgradePendingImageCount: 0,
-      sourceUpgradeFailedImageCount: 0,
-      missingImageCount: 0,
-      renderCount: 0,
-      lastRenderDurationMs: null,
-      lastUpdateReason: 'cleanup'
-    }
+    setMockWebGLRuntime({ ready: false })
+    latestWebGLMetrics = createTestWebGLMetrics()
     delete (window as typeof window & { event?: Event }).event
   })
 
   it('switches loaded single-select images into the DOM interaction overlay and forwards preview updates to WebGL', async () => {
     const item = createImageItem('image-1')
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
-    latestWebGLMetrics = {
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    latestWebGLMetrics = createTestWebGLMetrics({
       isInitialized: true,
       imageCount: 1,
       loadedImageCount: 1,
-      failedImageCount: 0,
       residentImageCount: 1,
       residentTextureBytes: 24000,
       residentCandidateTextureBytes: 24000,
-      residentTextureBudgetBytes: 768 * 1024 * 1024,
-      pendingImageCount: 0,
       spriteCount: 1,
       residentCandidateImageCount: 1,
-      viewportCulledImageCount: 0,
-      usingPreviewImageCount: 0,
+      spriteReconcilePassCount: 6,
+      lastSpriteReconcileDurationMs: 1.75,
+      lastSpriteReconcileCandidateCount: 3,
+      lastSpriteReconcileTargetCount: 2,
+      lastSpriteReconcileCreatedCount: 1,
+      lastSpriteReconcileReusedCount: 1,
+      lastSpriteReconcileRemovedCount: 1,
       usingSourceImageCount: 1,
-      thumbnailPreviewImageCount: 0,
-      placeholderImageCount: 0,
-      sourceUpgradeSuppressedImageCount: 0,
-      sourceUpgradeablePreviewImageCount: 0,
-      sourceUpgradePendingImageCount: 0,
-      sourceUpgradeFailedImageCount: 0,
-      missingImageCount: 0,
       renderCount: 4,
       lastRenderDurationMs: 5.25,
       lastUpdateReason: 'items'
-    }
+    })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
 
@@ -595,6 +542,35 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(root).toHaveAttribute('data-project-canvas-webgl-resident-image-count', '1')
     expect(root).toHaveAttribute('data-project-canvas-webgl-resident-candidate-image-count', '1')
     expect(root).toHaveAttribute('data-project-canvas-webgl-viewport-culled-image-count', '0')
+    expect(root).toHaveAttribute('data-project-canvas-webgl-sprite-reconcile-pass-count', '6')
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-duration-ms',
+      '1.75'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-candidate-count',
+      '3'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-target-count',
+      '2'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-created-count',
+      '1'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-reused-count',
+      '1'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-removed-count',
+      '1'
+    )
+    expect(root).toHaveAttribute(
+      'data-project-canvas-webgl-last-sprite-reconcile-deferred-count',
+      '0'
+    )
     expect(root).toHaveAttribute('data-project-canvas-webgl-using-preview-image-count', '0')
     expect(root).toHaveAttribute('data-project-canvas-webgl-using-source-image-count', '1')
     expect(root).toHaveAttribute(
@@ -622,6 +598,19 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(root).toHaveAttribute('data-project-canvas-webgl-render-count', '4')
     expect(root).toHaveAttribute('data-project-canvas-webgl-last-render-duration-ms', '5.25')
     expect(root).toHaveAttribute('data-project-canvas-webgl-last-update-reason', 'items')
+    const metricsSnapshot = JSON.parse(
+      root.getAttribute('data-project-canvas-metrics-snapshot') ?? '{}'
+    )
+    expect(metricsSnapshot.webgl).toMatchObject({
+      spriteReconcilePassCount: 6,
+      lastSpriteReconcileDurationMs: 1.75,
+      lastSpriteReconcileCandidateCount: 3,
+      lastSpriteReconcileTargetCount: 2,
+      lastSpriteReconcileCreatedCount: 1,
+      lastSpriteReconcileReusedCount: 1,
+      lastSpriteReconcileRemovedCount: 1,
+      lastSpriteReconcileDeferredCount: 0
+    })
 
     await waitFor(() => {
       expect(imageInteractionOverlayProps.has(item.id)).toBe(true)
@@ -653,6 +642,36 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(syncItemPreviewSpy).toHaveBeenNthCalledWith(2, item.id, null)
   })
 
+  it('keeps the sorted WebGL item array stable across runtime route updates', async () => {
+    const backItem = createImageItem('image-stable-webgl-back')
+    const frontItem = createImageItem('image-stable-webgl-front')
+    backItem.zIndex = 2
+    frontItem.zIndex = 8
+    setMockWebGLRuntime({ loadedIds: [backItem.id, frontItem.id] })
+
+    render(
+      <ProjectCanvasPageStageScene
+        {...createBaseProps([frontItem, backItem])}
+        items={[frontItem, backItem]}
+        visibleItems={[frontItem, backItem]}
+      />
+    )
+
+    await waitFor(() => {
+      expect(latestWebGLItems.map((item) => item.id)).toEqual([backItem.id, frontItem.id])
+    })
+    const initialItemsReference = latestWebGLItems
+
+    act(() => {
+      latestWebGLLayerProps?.onResidentIdsChange?.(new Set([backItem.id]))
+      latestWebGLLayerProps?.onResolvedIdsChange?.(new Set([backItem.id]))
+    })
+
+    await waitFor(() => {
+      expect(latestWebGLItems).toBe(initialItemsReference)
+    })
+  })
+
   it('keeps full image metadata in WebGL while DOM overlays use the current visible subset', async () => {
     const visibleItem = createImageItem('image-visible-subset')
     const offscreenItem = createImageItem('image-offscreen-subset')
@@ -660,9 +679,10 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     offscreenItem.y = 100_000
     offscreenItem.zIndex = visibleItem.zIndex + 1
 
-    webglReady = true
-    webglLoadedIds = new Set([visibleItem.id, offscreenItem.id])
-    webglResidentIds = new Set([visibleItem.id])
+    setMockWebGLRuntime({
+      loadedIds: [visibleItem.id, offscreenItem.id],
+      residentIds: [visibleItem.id]
+    })
 
     render(
       <ProjectCanvasPageStageScene
@@ -689,9 +709,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       sourceHeight: 2_000,
       image: createImageItem('image-jumbo-preview').image
     }
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
 
@@ -728,9 +746,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       zIndex: index + 1,
       image: createImageItem(`image-jumbo-preview-${index + 1}`).image
     }))
-    webglReady = true
-    webglLoadedIds = new Set(items.map((item) => item.id))
-    webglResidentIds = new Set(items.map((item) => item.id))
+    setMockWebGLRuntime({ loadedIds: items.map((item) => item.id) })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps(items)} />)
 
@@ -755,9 +771,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       sourceHeight: 6_000,
       image: createImageItem('image-ultra-jumbo-preview').image
     }
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps([item])} stageScale={4} />)
 
@@ -781,9 +795,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       hasAlpha: true,
       image: previewImage
     }
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps([item])} stageScale={0.82} />)
 
@@ -804,9 +816,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       zIndex: index + 1,
       image: createImageItem(`image-dense-ultra-jumbo-preview-${index + 1}`).image
     }))
-    webglReady = true
-    webglLoadedIds = new Set(items.map((item) => item.id))
-    webglResidentIds = new Set(items.map((item) => item.id))
+    setMockWebGLRuntime({ loadedIds: items.map((item) => item.id) })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps(items)} stageScale={0.27} />)
 
@@ -828,9 +838,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       attachedToId: imageWithAttachment.id,
       attachmentPlacement: 'bottom-center'
     } as CanvasAnnotationItem
-    webglReady = true
-    webglLoadedIds = new Set([imageWithAttachment.id])
-    webglResidentIds = new Set([imageWithAttachment.id])
+    setMockWebGLRuntime({ loadedIds: [imageWithAttachment.id] })
 
     render(
       <ProjectCanvasPageStageScene {...createBaseProps([imageWithAttachment, attachedCaption])} />
@@ -847,9 +855,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
 
   it('falls back to DOM image rendering when WebGL becomes unavailable after mounting', async () => {
     const item = createImageItem('image-webgl-runtime-failure')
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
 
@@ -862,7 +868,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(imageInteractionOverlayProps.get(item.id)?.renderMode).toBe('webgl-primary')
     expect(imageInteractionOverlayProps.get(item.id)?.suppressImagePreview).toBe(true)
 
-    latestWebGLMetrics = {
+    latestWebGLMetrics = createTestWebGLMetrics({
       ...latestWebGLMetrics,
       isInitialized: false,
       loadedImageCount: 0,
@@ -877,7 +883,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       sourceUpgradeSuppressedImageCount: 0,
       lastRenderDurationMs: null,
       lastUpdateReason: 'cleanup'
-    }
+    })
 
     act(() => {
       latestWebGLLayerProps?.onReadyChange?.(false)
@@ -904,9 +910,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       ...createImageItem('image-webgl-alpha-dom-preview'),
       hasAlpha: true
     }
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
 
@@ -928,9 +932,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       ...createImageItem('image-webgl-unknown-alpha-png'),
       hasAlpha: undefined
     }
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
 
@@ -960,9 +962,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       hasAlpha: true,
       image: placeholder
     }
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
 
@@ -979,35 +979,21 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
 
   it('ignores duplicate WebGL runtime reports and does not pass a spatial index prop', async () => {
     const item = createImageItem('image-webgl-duplicate-report')
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
-    latestWebGLMetrics = {
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    latestWebGLMetrics = createTestWebGLMetrics({
       isInitialized: true,
       imageCount: 1,
       loadedImageCount: 1,
-      failedImageCount: 0,
       residentImageCount: 1,
       residentTextureBytes: 24000,
       residentCandidateTextureBytes: 24000,
-      residentTextureBudgetBytes: 768 * 1024 * 1024,
-      pendingImageCount: 0,
       spriteCount: 1,
       residentCandidateImageCount: 1,
-      viewportCulledImageCount: 0,
-      usingPreviewImageCount: 0,
       usingSourceImageCount: 1,
-      thumbnailPreviewImageCount: 0,
-      placeholderImageCount: 0,
-      sourceUpgradeSuppressedImageCount: 0,
-      sourceUpgradeablePreviewImageCount: 0,
-      sourceUpgradePendingImageCount: 0,
-      sourceUpgradeFailedImageCount: 0,
-      missingImageCount: 0,
       renderCount: 4,
       lastRenderDurationMs: 5.25,
       lastUpdateReason: 'items'
-    }
+    })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
 
@@ -1064,9 +1050,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
   it('keeps the active crop target out of the WebGL layer and on the crop overlay path', async () => {
     const cropItem = createImageItem('crop-target')
     const siblingItem = createImageItem('sibling-image')
-    webglReady = true
-    webglLoadedIds = new Set([cropItem.id, siblingItem.id])
-    webglResidentIds = new Set([cropItem.id, siblingItem.id])
+    setMockWebGLRuntime({ loadedIds: [cropItem.id, siblingItem.id] })
 
     render(
       <ProjectCanvasPageStageScene
@@ -1111,9 +1095,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
   it('keeps the active extract target out of the WebGL layer and on the selection overlay path', async () => {
     const extractItem = createImageItem('extract-target')
     const siblingItem = createImageItem('extract-sibling')
-    webglReady = true
-    webglLoadedIds = new Set([extractItem.id, siblingItem.id])
-    webglResidentIds = new Set([extractItem.id, siblingItem.id])
+    setMockWebGLRuntime({ loadedIds: [extractItem.id, siblingItem.id] })
 
     render(
       <ProjectCanvasPageStageScene
@@ -1139,9 +1121,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const setSelectedIds = vi.fn()
     const handleDragEnd = vi.fn()
     const handleTransformEnd = vi.fn()
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(
       <ProjectCanvasPageStageScene
@@ -1203,9 +1183,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
   it('skips redundant selection updates for an already selected DOM overlay image', async () => {
     const item = createImageItem('image-already-selected')
     const setSelectedIds = vi.fn()
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(
       <ProjectCanvasPageStageScene
@@ -1233,9 +1211,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const selectedItem = createImageItem('image-selected')
     const siblingItem = createImageItem('image-sibling')
     siblingItem.x = 420
-    webglReady = true
-    webglLoadedIds = new Set([selectedItem.id, siblingItem.id])
-    webglResidentIds = new Set([selectedItem.id, siblingItem.id])
+    setMockWebGLRuntime({ loadedIds: [selectedItem.id, siblingItem.id] })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps([selectedItem, siblingItem])} />)
 
@@ -1265,9 +1241,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     })
     const imageIds = items.map((item) => item.id)
     const selectedIds = new Set(imageIds)
-    webglReady = true
-    webglLoadedIds = new Set(imageIds)
-    webglResidentIds = new Set(imageIds)
+    setMockWebGLRuntime({ loadedIds: imageIds })
 
     render(<ProjectCanvasPageStageScene {...createBaseProps(items)} selectedIds={selectedIds} />)
 
@@ -1305,9 +1279,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     })
     const imageIds = items.map((item) => item.id)
     const selectedItem = items[0]
-    webglReady = true
-    webglLoadedIds = new Set(imageIds)
-    webglResidentIds = new Set(imageIds)
+    setMockWebGLRuntime({ loadedIds: imageIds })
 
     render(
       <ProjectCanvasPageStageScene
@@ -1348,9 +1320,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       return item
     })
     const setSelectedIds = vi.fn()
-    webglReady = true
-    webglLoadedIds = new Set()
-    webglResidentIds = new Set()
+    setMockWebGLRuntime()
 
     render(
       <ProjectCanvasPageStageScene
@@ -1400,9 +1370,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const selectedItem = createImageItem('image-selected')
     const siblingItem = createImageItem('image-sibling')
     siblingItem.x = 420
-    webglReady = true
-    webglLoadedIds = new Set([selectedItem.id, siblingItem.id])
-    webglResidentIds = new Set([selectedItem.id, siblingItem.id])
+    setMockWebGLRuntime({ loadedIds: [selectedItem.id, siblingItem.id] })
     const selectedIds = new Set([selectedItem.id, siblingItem.id])
     const baseProps = createBaseProps([selectedItem, siblingItem])
 
@@ -1482,9 +1450,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const selectedItem = createImageItem('image-selected')
     const siblingItem = createImageItem('image-sibling')
     siblingItem.x = 420
-    webglReady = true
-    webglLoadedIds = new Set([selectedItem.id, siblingItem.id])
-    webglResidentIds = new Set([selectedItem.id, siblingItem.id])
+    setMockWebGLRuntime({ loadedIds: [selectedItem.id, siblingItem.id] })
 
     render(
       <ProjectCanvasPageStageScene
@@ -1516,9 +1482,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const selectedItem = createImageItem('image-selected-noise')
     const siblingItem = createImageItem('image-sibling-noise')
     siblingItem.x = 420
-    webglReady = true
-    webglLoadedIds = new Set([selectedItem.id, siblingItem.id])
-    webglResidentIds = new Set([selectedItem.id, siblingItem.id])
+    setMockWebGLRuntime({ loadedIds: [selectedItem.id, siblingItem.id] })
 
     render(
       <ProjectCanvasPageStageScene
@@ -1544,9 +1508,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const selectedItem = createImageItem('image-marquee-proxy-selected')
     const siblingItem = createImageItem('image-marquee-proxy-sibling')
     siblingItem.x = 420
-    webglReady = true
-    webglLoadedIds = new Set([selectedItem.id, siblingItem.id])
-    webglResidentIds = new Set([selectedItem.id, siblingItem.id])
+    setMockWebGLRuntime({ loadedIds: [selectedItem.id, siblingItem.id] })
 
     render(
       <ProjectCanvasPageStageScene
@@ -1605,9 +1567,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const selectedItem = createImageItem('image-marquee-selected')
     const siblingItem = createImageItem('image-marquee-sibling')
     siblingItem.x = 420
-    webglReady = true
-    webglLoadedIds = new Set([selectedItem.id, siblingItem.id])
-    webglResidentIds = new Set([selectedItem.id, siblingItem.id])
+    setMockWebGLRuntime({ loadedIds: [selectedItem.id, siblingItem.id] })
 
     const baseProps = createBaseProps([selectedItem, siblingItem])
     const { rerender } = render(<ProjectCanvasPageStageScene {...baseProps} />)
@@ -1642,9 +1602,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     siblingItem.y = 140
 
     const setItemsWithHistory = vi.fn()
-    webglReady = true
-    webglLoadedIds = new Set([targetItem.id, siblingItem.id])
-    webglResidentIds = new Set([targetItem.id, siblingItem.id])
+    setMockWebGLRuntime({ loadedIds: [targetItem.id, siblingItem.id] })
 
     render(
       <ProjectCanvasPageStageScene
@@ -1722,9 +1680,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     siblingItem.x = 420
     siblingItem.y = 140
 
-    webglReady = true
-    webglLoadedIds = new Set([targetItem.id, siblingItem.id])
-    webglResidentIds = new Set([targetItem.id, siblingItem.id])
+    setMockWebGLRuntime({ loadedIds: [targetItem.id, siblingItem.id] })
 
     const { rerender } = render(
       <ProjectCanvasPageStageScene
@@ -2115,9 +2071,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const props = createBaseProps([item])
     props.selectedIds = new Set()
     props.handleDragEnd = handleDragEnd
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     const { rerender } = render(<ProjectCanvasPageStageScene {...props} />)
 
@@ -2682,9 +2636,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
 
   it('keeps loaded annotate images on the placeholder proxy path without obscuring the WebGL image', async () => {
     const item = createImageItem('image-placeholder')
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(
       <ProjectCanvasPageStageScene
@@ -2708,35 +2660,17 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
 
   it('classifies loaded-but-nonresident images as budget proxies instead of fallback', async () => {
     const item = createImageItem('image-budget-proxy')
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set()
-    latestWebGLMetrics = {
+    setMockWebGLRuntime({ loadedIds: [item.id], residentIds: [] })
+    latestWebGLMetrics = createTestWebGLMetrics({
       isInitialized: true,
       imageCount: 1,
       loadedImageCount: 1,
-      failedImageCount: 0,
-      residentImageCount: 0,
-      residentTextureBytes: 0,
       residentCandidateTextureBytes: 24000,
-      residentTextureBudgetBytes: 768 * 1024 * 1024,
-      pendingImageCount: 0,
-      spriteCount: 0,
       residentCandidateImageCount: 1,
-      viewportCulledImageCount: 0,
-      usingPreviewImageCount: 0,
-      usingSourceImageCount: 0,
-      thumbnailPreviewImageCount: 0,
-      placeholderImageCount: 0,
-      sourceUpgradeSuppressedImageCount: 0,
-      sourceUpgradeablePreviewImageCount: 0,
-      sourceUpgradePendingImageCount: 0,
-      sourceUpgradeFailedImageCount: 0,
-      missingImageCount: 0,
       renderCount: 2,
       lastRenderDurationMs: 4,
       lastUpdateReason: 'items'
-    }
+    })
 
     render(
       <ProjectCanvasPageStageScene
@@ -2760,9 +2694,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
   it('keeps unselected fallback images visible through the DOM placeholder proxy', async () => {
     const item = createImageItem('image-fallback-unselected')
     item.image = undefined
-    webglReady = true
-    webglLoadedIds = new Set()
-    webglResidentIds = new Set()
+    setMockWebGLRuntime()
 
     render(
       <ProjectCanvasPageStageScene
@@ -2789,9 +2721,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const imageItem = createImageItem('image-fallback-multi-selected')
     const shapeItem = createAnnotationItem('shape-fallback-multi-selected')
     shapeItem.x = 900
-    webglReady = true
-    webglLoadedIds = new Set()
-    webglResidentIds = new Set()
+    setMockWebGLRuntime()
 
     render(
       <ProjectCanvasPageStageScene
@@ -2821,8 +2751,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
   it('routes a selected fallback image through the DOM image interaction overlay', async () => {
     const item = createImageItem('image-placeholder-dom')
     const handleTransformEnd = vi.fn()
-    webglReady = false
-    webglLoadedIds = new Set()
+    setMockWebGLRuntime({ ready: false })
 
     const view = render(
       <ProjectCanvasPageStageScene
@@ -2968,9 +2897,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
   it('keeps each DOM image interaction wrapper on the image z-index instead of lifting the whole layer', async () => {
     const item = createImageItem('image-selected-z-index')
     item.zIndex = 4
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(
       <ProjectCanvasPageStageScene {...createBaseProps([item])} selectedIds={new Set([item.id])} />
@@ -2990,9 +2917,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
 
   it('routes hand-tool left-drag events from WebGL image placeholder proxies back to the stage handlers', async () => {
     const item = createImageItem('image-hand-pan')
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
     const props = createBaseProps([item])
     props.tool = 'hand'
 
@@ -3320,9 +3245,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
 
   it('routes middle-mouse pan events from the active DOM image overlay back to the stage handlers', async () => {
     const item = createImageItem('image-middle-pan')
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
     const props = createBaseProps([item])
     props.isMiddleMouseRef = { current: false }
 
@@ -3446,9 +3369,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
 
   it('routes wheel zoom events from DOM overlays back to the stage handler', async () => {
     const item = createImageItem('image-wheel-zoom')
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
     const props = createBaseProps([item])
 
     render(<ProjectCanvasPageStageScene {...props} />)
@@ -3475,9 +3396,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     item.y = 140
     item.scaleX = -1.25
     item.scaleY = -0.5
-    webglReady = true
-    webglLoadedIds = new Set([item.id])
-    webglResidentIds = new Set([item.id])
+    setMockWebGLRuntime({ loadedIds: [item.id] })
 
     render(
       <ProjectCanvasPageStageScene
@@ -3550,8 +3469,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
   it('routes unloaded annotate images through the placeholder proxy path while keeping fallback metrics explicit', async () => {
     const item = createImageItem('image-unloaded')
     item.image = undefined
-    webglReady = false
-    webglLoadedIds = new Set()
+    setMockWebGLRuntime({ ready: false })
 
     render(
       <ProjectCanvasPageStageScene
@@ -3584,14 +3502,15 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(root).toHaveAttribute('data-project-canvas-budget-downgraded-image-count', '0')
     expect(root).toHaveAttribute('data-project-canvas-fallback-image-count', '1')
     expect(root).toHaveAttribute('data-project-canvas-proxy-layer-candidate-count', '1')
-    expect(root).toHaveAttribute('data-project-canvas-unloaded-fallback-image-count', '1')
+    expect(root).toHaveAttribute('data-project-canvas-unloaded-fallback-image-count', '0')
     expect(root).toHaveAttribute('data-project-canvas-failed-fallback-image-count', '0')
     expect(root).toHaveAttribute('data-project-canvas-unsupported-fallback-image-count', '0')
+    expect(root).toHaveAttribute('data-project-canvas-webgl-unavailable-fallback-image-count', '1')
     expect(root).toHaveAttribute('data-project-canvas-crop-excluded-image-count', '0')
     expect(imageInteractionOverlayProps.has(item.id)).toBe(false)
     expect(rectInteractionOverlayProps.has(item.id)).toBe(false)
     expect(canvasPlaceholderProps.get(item.id)?.renderMode).toBe('dom-placeholder-proxy')
-    expect(canvasPlaceholderProps.get(item.id)?.visualVariant).toBe('transparent')
+    expect(canvasPlaceholderProps.get(item.id)?.visualVariant).toBe('image-fallback')
   })
 
   it('commits crop confirmation back into history and resets crop mode', async () => {

@@ -279,6 +279,28 @@ describe('CanvasThumbnailSvcImpl', () => {
     expect(fs.existsSync(unsafeRoot)).toBe(false)
   })
 
+  it('allows an explicit app-owned project canvas cache root under userData', async () => {
+    const sourcePath = await createSourceFile()
+    const manifest = createManifest({ sourcePath })
+    const cacheRoot = path.join(
+      electronMock.userDataRoot,
+      'renderer-state',
+      'project-canvas',
+      '.canvas-id__canvas-id',
+      '.cache',
+      'canvas-thumbnails'
+    )
+
+    await writeManifestSet(manifest, cacheRoot)
+    expect(fs.existsSync(path.join(cacheRoot, manifest.cacheKey, 'manifest.json'))).toBe(true)
+
+    const read = await service.readThumbnailManifest({
+      cacheRootDir: cacheRoot,
+      cacheKey: manifest.cacheKey
+    })
+    expect(read.manifest?.cacheKey).toBe(manifest.cacheKey)
+  })
+
   it('allows an explicit cache root under the repo test trash root', async () => {
     const sourcePath = await createSourceFile()
     const manifest = createManifest({ sourcePath })

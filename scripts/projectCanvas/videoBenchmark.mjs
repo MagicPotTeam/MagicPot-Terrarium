@@ -88,6 +88,7 @@ async function launchApp(userDataDir) {
     env: {
       ...process.env,
       MAGICPOT_USER_DATA_DIR: userDataDir,
+      MAGICPOT_PROJECT_CANVAS_REAL_BOARD_BENCHMARK: '1',
       ...NON_INTRUSIVE_TEST_WINDOW_ENV
     },
     timeout: ELECTRON_LAUNCH_TIMEOUT_MS
@@ -219,7 +220,7 @@ async function assertVideoFixtureExists() {
   }
 }
 
-function createVideoBenchmarkItems(total, fixtureUrl, fixtureFileName) {
+export function createVideoBenchmarkItems(total, fixtureUrl, fixtureFileName) {
   const items = []
   const visibleColumns = 4
   const cellWidth = 360
@@ -340,7 +341,51 @@ function createVideoBenchmarkItems(total, fixtureUrl, fixtureFileName) {
       visiblePausedCount: visiblePausedCount + Math.max(0, activeCandidateCount - maxActivePlaying),
       posterFrameCount,
       unmountedCount
+    },
+    zoomAnchor: resolveVideoBenchmarkZoomAnchor(items)
+  }
+}
+
+function getVideoItemBounds(item) {
+  const width = item.width * (item.scaleX || 1)
+  const height = item.height * (item.scaleY || 1)
+  return {
+    x: Math.min(item.x, item.x + width),
+    y: Math.min(item.y, item.y + height),
+    width: Math.abs(width),
+    height: Math.abs(height)
+  }
+}
+
+function resolveVideoBenchmarkZoomAnchor(items) {
+  const anchorItems = items.filter(
+    (item) => item.id.startsWith('video-active-') || item.id.startsWith('video-poster-')
+  )
+  const sourceItems = anchorItems.length > 0 ? anchorItems : items
+  const bounds = sourceItems.reduce(
+    (accumulator, item) => {
+      const itemBounds = getVideoItemBounds(item)
+      accumulator.minX = Math.min(accumulator.minX, itemBounds.x)
+      accumulator.minY = Math.min(accumulator.minY, itemBounds.y)
+      accumulator.maxX = Math.max(accumulator.maxX, itemBounds.x + itemBounds.width)
+      accumulator.maxY = Math.max(accumulator.maxY, itemBounds.y + itemBounds.height)
+      return accumulator
+    },
+    {
+      minX: Number.POSITIVE_INFINITY,
+      minY: Number.POSITIVE_INFINITY,
+      maxX: Number.NEGATIVE_INFINITY,
+      maxY: Number.NEGATIVE_INFINITY
     }
+  )
+
+  if (!Number.isFinite(bounds.minX) || !Number.isFinite(bounds.minY)) {
+    return null
+  }
+
+  return {
+    x: (bounds.minX + bounds.maxX) / 2,
+    y: (bounds.minY + bounds.maxY) / 2
   }
 }
 
@@ -386,11 +431,11 @@ async function seedCanvasItems(page, canvasId, items) {
   )
 }
 
-function getMountedVideoModeCount(metrics) {
+export function getMountedVideoModeCount(metrics) {
   return metrics.activePlayingCount + metrics.visiblePausedCount + metrics.posterFrameCount
 }
 
-function hasConsistentVideoAccounting(metrics, budgetExpectations) {
+export function hasConsistentVideoAccounting(metrics, budgetExpectations) {
   const mountedVideoModeCount = getMountedVideoModeCount(metrics)
   return (
     metrics.totalVideos === budgetExpectations.totalVideos &&
@@ -496,16 +541,35 @@ async function waitForVideoMetrics(page, budgetExpectations) {
   )
 }
 
-async function zoomIntoCanvas(page, steps = 4) {
+async function resolveStageScreenPointForCanvasPoint(page, canvasPoint) {
   const stageRoot = page.locator('[data-testid="project-canvas-stage-root"]').first()
   const bounds = await stageRoot.boundingBox()
   if (!bounds) {
     throw new Error('Unable to determine ProjectCanvas stage bounds for the video benchmark.')
   }
 
-  const centerX = bounds.x + bounds.width / 2
-  const centerY = bounds.y + bounds.height / 2
-  await page.mouse.move(centerX, centerY)
+  if (!canvasPoint) {
+    return {
+      x: bounds.x + bounds.width / 2,
+      y: bounds.y + bounds.height / 2
+    }
+  }
+
+  const metrics = await readVideoMetrics(page)
+  const screenPoint = {
+    x: bounds.x + metrics.stagePosX + canvasPoint.x * metrics.stageScale,
+    y: bounds.y + metrics.stagePosY + canvasPoint.y * metrics.stageScale
+  }
+
+  return {
+    x: Math.min(bounds.x + bounds.width - 1, Math.max(bounds.x + 1, screenPoint.x)),
+    y: Math.min(bounds.y + bounds.height - 1, Math.max(bounds.y + 1, screenPoint.y))
+  }
+}
+
+async function zoomIntoCanvas(page, steps = 4, canvasAnchor = null) {
+  const point = await resolveStageScreenPointForCanvasPoint(page, canvasAnchor)
+  await page.mouse.move(point.x, point.y)
 
   for (let index = 0; index < steps; index += 1) {
     await page.mouse.wheel(0, -120)
@@ -513,7 +577,7 @@ async function zoomIntoCanvas(page, steps = 4) {
   }
 }
 
-function isVideoBudgetConverged(metrics, budgetExpectations, initialMountedCount) {
+export function isVideoBudgetConverged(metrics, budgetExpectations, initialMountedCount) {
   return (
     hasConsistentVideoAccounting(metrics, budgetExpectations) &&
     metrics.activePlayingCount > 0 &&
@@ -543,7 +607,12 @@ function scoreVideoBudgetMetrics(metrics, budgetExpectations, initialMountedCoun
   )
 }
 
-async function zoomUntilVideoBudgetConverges(page, budgetExpectations, initialMountedCount) {
+async function zoomUntilVideoBudgetConverges(
+  page,
+  budgetExpectations,
+  initialMountedCount,
+  canvasAnchor = null
+) {
   let attempts = 0
   let zoomSteps = 0
   let lastMetrics = await readVideoMetrics(page)
@@ -558,7 +627,7 @@ async function zoomUntilVideoBudgetConverges(page, budgetExpectations, initialMo
       }
     }
 
-    await zoomIntoCanvas(page, 1)
+    await zoomIntoCanvas(page, 1, canvasAnchor)
     zoomSteps += 1
     attempts += 1
     await page.waitForTimeout(180)
@@ -582,110 +651,119 @@ async function zoomUntilVideoBudgetConverges(page, budgetExpectations, initialMo
   )
 }
 
-let appHandle = null
-let tempRoot = null
-let artifactRoot = null
+export async function runVideoBenchmark() {
+  let appHandle = null
+  let tempRoot = null
+  let artifactRoot = null
 
-try {
-  artifactRoot = resolveProjectCanvasArtifactRoot(BENCHMARK_RUN_ID)
-  await fs.mkdir(artifactRoot, { recursive: true })
-  tempRoot = await fs.mkdtemp(path.join(artifactRoot, 'magicpot-video-benchmark-'))
-  await assertVideoFixtureExists()
-  const userDataDir = path.join(tempRoot, 'user-data')
-  await writeSmokeConfig(userDataDir)
+  try {
+    artifactRoot = resolveProjectCanvasArtifactRoot(BENCHMARK_RUN_ID)
+    await fs.mkdir(artifactRoot, { recursive: true })
+    tempRoot = await fs.mkdtemp(path.join(artifactRoot, 'magicpot-video-benchmark-'))
+    await assertVideoFixtureExists()
+    const userDataDir = path.join(tempRoot, 'user-data')
+    await writeSmokeConfig(userDataDir)
 
-  appHandle = await launchApp(userDataDir)
-  const { page, fatalErrors } = appHandle
-  await installWindowPointerListenerProbe(page)
-  const canvasId = `video-benchmark-${Date.now().toString(36)}`
-  const { items, budgetExpectations, seededLayout } = createVideoBenchmarkItems(
-    BENCHMARK_VIDEO_COUNT,
-    PROJECT_CANVAS_VIDEO_FIXTURE_URL,
-    path.basename(PROJECT_CANVAS_VIDEO_FIXTURE_PATH)
-  )
-  await seedCanvasItems(page, canvasId, items)
-  await navigateToHash(page, `#/canvas?id=${canvasId}`)
-  await waitForHealthyPage(page, fatalErrors)
-
-  const initialVideoMetrics = await waitForVideoMetrics(page, budgetExpectations)
-  const idleWindowPointerListeners = await readWindowPointerListenerProbe(page)
-  const zoomedVideo = await zoomUntilVideoBudgetConverges(
-    page,
-    budgetExpectations,
-    initialVideoMetrics.mountedVideoOverlayCount
-  )
-  const zoomedWindowPointerListeners = await readWindowPointerListenerProbe(page)
-  const windowPlacement = await readWindowPlacement(appHandle.app)
-  assertNonIntrusiveWindowPlacement(windowPlacement, 'Video benchmark')
-  const payload = {
-    benchmarkVideoCount: BENCHMARK_VIDEO_COUNT,
-    videoFixturePath: PROJECT_CANVAS_VIDEO_FIXTURE_PATH,
-    budgetExpectations,
-    seededLayout,
-    windowPlacement,
-    idleWindowPointerListeners,
-    zoomedWindowPointerListeners,
-    initialVideoMetrics,
-    zoomedVideoMetrics: zoomedVideo.metrics,
-    zoomStepsApplied: zoomedVideo.zoomSteps
-  }
-
-  await fs.writeFile(
-    path.join(artifactRoot, 'video-benchmark-report.json'),
-    JSON.stringify(payload, null, 2),
-    'utf8'
-  )
-  console.log(JSON.stringify(payload, null, 2))
-
-  if (
-    !hasConsistentVideoAccounting(initialVideoMetrics, budgetExpectations) ||
-    initialVideoMetrics.totalVideos !== budgetExpectations.totalVideos ||
-    initialVideoMetrics.mountedVideoOverlayCount + initialVideoMetrics.unmountedCount !==
-      budgetExpectations.totalVideos ||
-    initialVideoMetrics.activePlayingOverlayCount !== initialVideoMetrics.activePlayingCount ||
-    initialVideoMetrics.visiblePausedOverlayCount !== initialVideoMetrics.visiblePausedCount ||
-    initialVideoMetrics.posterFrameOverlayCount !== initialVideoMetrics.posterFrameCount ||
-    initialVideoMetrics.mountedOverlayNodeCount !== initialVideoMetrics.mountedVideoOverlayCount ||
-    !hasConsistentVideoAccounting(zoomedVideo.metrics, budgetExpectations) ||
-    !isVideoBudgetConverged(
-      zoomedVideo.metrics,
-      budgetExpectations,
-      initialVideoMetrics.mountedVideoOverlayCount
+    appHandle = await launchApp(userDataDir)
+    const { page, fatalErrors } = appHandle
+    await installWindowPointerListenerProbe(page)
+    const canvasId = `video-benchmark-${Date.now().toString(36)}`
+    const { items, budgetExpectations, seededLayout, zoomAnchor } = createVideoBenchmarkItems(
+      BENCHMARK_VIDEO_COUNT,
+      PROJECT_CANVAS_VIDEO_FIXTURE_URL,
+      path.basename(PROJECT_CANVAS_VIDEO_FIXTURE_PATH)
     )
-  ) {
-    process.exitCode = 1
-  }
-} catch (error) {
-  if (artifactRoot) {
-    try {
-      await fs.writeFile(
-        path.join(artifactRoot, 'video-benchmark-error.txt'),
-        error instanceof Error ? error.stack || error.message : String(error),
-        'utf8'
+    await seedCanvasItems(page, canvasId, items)
+    await navigateToHash(page, `#/canvas?id=${canvasId}`)
+    await waitForHealthyPage(page, fatalErrors)
+
+    const initialVideoMetrics = await waitForVideoMetrics(page, budgetExpectations)
+    const idleWindowPointerListeners = await readWindowPointerListenerProbe(page)
+    const zoomedVideo = await zoomUntilVideoBudgetConverges(
+      page,
+      budgetExpectations,
+      initialVideoMetrics.mountedVideoOverlayCount,
+      zoomAnchor
+    )
+    const zoomedWindowPointerListeners = await readWindowPointerListenerProbe(page)
+    const windowPlacement = await readWindowPlacement(appHandle.app)
+    assertNonIntrusiveWindowPlacement(windowPlacement, 'Video benchmark')
+    const payload = {
+      benchmarkVideoCount: BENCHMARK_VIDEO_COUNT,
+      videoFixturePath: PROJECT_CANVAS_VIDEO_FIXTURE_PATH,
+      budgetExpectations,
+      seededLayout,
+      zoomAnchor,
+      windowPlacement,
+      idleWindowPointerListeners,
+      zoomedWindowPointerListeners,
+      initialVideoMetrics,
+      zoomedVideoMetrics: zoomedVideo.metrics,
+      zoomStepsApplied: zoomedVideo.zoomSteps
+    }
+
+    await fs.writeFile(
+      path.join(artifactRoot, 'video-benchmark-report.json'),
+      JSON.stringify(payload, null, 2),
+      'utf8'
+    )
+    console.log(JSON.stringify(payload, null, 2))
+
+    if (
+      !hasConsistentVideoAccounting(initialVideoMetrics, budgetExpectations) ||
+      initialVideoMetrics.totalVideos !== budgetExpectations.totalVideos ||
+      initialVideoMetrics.mountedVideoOverlayCount + initialVideoMetrics.unmountedCount !==
+        budgetExpectations.totalVideos ||
+      initialVideoMetrics.activePlayingOverlayCount !== initialVideoMetrics.activePlayingCount ||
+      initialVideoMetrics.visiblePausedOverlayCount !== initialVideoMetrics.visiblePausedCount ||
+      initialVideoMetrics.posterFrameOverlayCount !== initialVideoMetrics.posterFrameCount ||
+      initialVideoMetrics.mountedOverlayNodeCount !==
+        initialVideoMetrics.mountedVideoOverlayCount ||
+      !hasConsistentVideoAccounting(zoomedVideo.metrics, budgetExpectations) ||
+      !isVideoBudgetConverged(
+        zoomedVideo.metrics,
+        budgetExpectations,
+        initialVideoMetrics.mountedVideoOverlayCount
       )
-    } catch {
-      // Ignore artifact persistence failures.
+    ) {
+      process.exitCode = 1
+    }
+  } catch (error) {
+    if (artifactRoot) {
+      try {
+        await fs.writeFile(
+          path.join(artifactRoot, 'video-benchmark-error.txt'),
+          error instanceof Error ? error.stack || error.message : String(error),
+          'utf8'
+        )
+      } catch {
+        // Ignore artifact persistence failures.
+      }
+    }
+    console.error(
+      error instanceof Error
+        ? error.stack || error.message
+        : `Unknown video benchmark error: ${String(error)}`
+    )
+    process.exitCode = 1
+  } finally {
+    if (appHandle?.app) {
+      try {
+        await appHandle.app.close()
+      } catch {
+        // Ignore cleanup failures.
+      }
+    }
+    if (tempRoot) {
+      try {
+        await fs.rm(tempRoot, { recursive: true, force: true })
+      } catch {
+        // Ignore cleanup failures.
+      }
     }
   }
-  console.error(
-    error instanceof Error
-      ? error.stack || error.message
-      : `Unknown video benchmark error: ${String(error)}`
-  )
-  process.exitCode = 1
-} finally {
-  if (appHandle?.app) {
-    try {
-      await appHandle.app.close()
-    } catch {
-      // Ignore cleanup failures.
-    }
-  }
-  if (tempRoot) {
-    try {
-      await fs.rm(tempRoot, { recursive: true, force: true })
-    } catch {
-      // Ignore cleanup failures.
-    }
-  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await runVideoBenchmark()
 }

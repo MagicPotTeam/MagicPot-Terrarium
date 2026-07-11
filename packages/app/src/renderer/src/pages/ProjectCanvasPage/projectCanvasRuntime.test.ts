@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   canvasToScreenPoint,
@@ -9,6 +9,10 @@ import {
   type CanvasViewport,
   type ProjectCanvasRuntimePreviewUpdate
 } from './projectCanvasRuntime'
+import {
+  resetCanvasSpatialIndexAcceleratorForTest,
+  setCanvasSpatialIndexAcceleratorFactoryForTest
+} from './canvasSpatialIndexAccelerator'
 import type { CanvasItem } from './types'
 
 function createCanvasItem(overrides: Partial<CanvasItem> & { id: string }): CanvasItem {
@@ -29,6 +33,10 @@ function createCanvasItem(overrides: Partial<CanvasItem> & { id: string }): Canv
 }
 
 describe('projectCanvasRuntime', () => {
+  afterEach(() => {
+    resetCanvasSpatialIndexAcceleratorForTest()
+  })
+
   it('hit-tests the top zIndex item first', () => {
     const runtime = createProjectCanvasRuntime()
     runtime.setItems([
@@ -184,6 +192,24 @@ describe('projectCanvasRuntime', () => {
     ).toEqual(['overscan', 'visible'])
   })
 
+  it('can return visibility-only viewport matches without top-first sorting', () => {
+    const runtime = createProjectCanvasRuntime()
+    runtime.setViewport({ x: 0, y: 0, scale: 1 })
+    runtime.setItems([
+      createCanvasItem({ id: 'bottom', x: 20, y: 20, width: 20, height: 20, zIndex: 1 }),
+      createCanvasItem({ id: 'top', x: 22, y: 22, width: 20, height: 20, zIndex: 9 })
+    ])
+
+    expect(
+      runtime
+        .getVisibleItems({ stageSize: { width: 100, height: 100 }, preserveOrder: false })
+        .map((item) => item.id)
+    ).toEqual(['bottom', 'top'])
+    expect(
+      runtime.getVisibleItems({ stageSize: { width: 100, height: 100 } }).map((item) => item.id)
+    ).toEqual(['top', 'bottom'])
+  })
+
   it('keeps 3000-item boards spatially indexed while viewport queries stay local', () => {
     const runtime = createProjectCanvasRuntime()
     const items = Array.from({ length: 3000 }, (_, index) => {
@@ -212,6 +238,48 @@ describe('projectCanvasRuntime', () => {
     })
     expect(visibleIds).toHaveLength(4)
     expect(new Set(visibleIds)).toEqual(new Set(['item-0', 'item-1', 'item-60', 'item-61']))
+  })
+
+  it('disposes replaced and final spatial accelerators when rebuilding large runtime indexes', () => {
+    const disposers: ReturnType<typeof vi.fn>[] = []
+    setCanvasSpatialIndexAcceleratorFactoryForTest(() => {
+      const dispose = vi.fn()
+      disposers.push(dispose)
+      return {
+        source: 'test',
+        dispose,
+        queryIndexes: () => null
+      }
+    })
+    const runtime = createProjectCanvasRuntime()
+    const createLargeItems = (prefix: string) =>
+      Array.from({ length: 1024 }, (_, index) =>
+        createCanvasItem({
+          id: `${prefix}-${index}`,
+          x: (index % 64) * 128,
+          y: Math.floor(index / 64) * 128,
+          width: 64,
+          height: 64
+        })
+      )
+
+    runtime.setItems(createLargeItems('first'))
+    expect(disposers).toHaveLength(1)
+    expect(disposers[0]).not.toHaveBeenCalled()
+
+    runtime.setItems(createLargeItems('second'))
+    expect(disposers).toHaveLength(2)
+    expect(disposers[0]).toHaveBeenCalledTimes(1)
+    expect(disposers[1]).not.toHaveBeenCalled()
+
+    runtime.dispose()
+    expect(disposers[1]).toHaveBeenCalledTimes(1)
+    expect(runtime.getMetrics()).toMatchObject({
+      itemCount: 0,
+      visibleItemCount: 0,
+      previewItemCount: 0,
+      indexedItemCount: 0
+    })
   })
 
   it('creates a snapshot with viewport visibility and export bounds', () => {

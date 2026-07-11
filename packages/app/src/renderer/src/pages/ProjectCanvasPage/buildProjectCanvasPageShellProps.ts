@@ -1,4 +1,6 @@
-export type ProjectCanvasPageShellPropsGroup = Record<string, unknown>
+import type { ProjectCanvasPageShellRuntimeProps } from './ProjectCanvasPageShellContract'
+
+export type ProjectCanvasPageShellPropsGroup = ProjectCanvasPageShellRuntimeProps
 
 const SHELL_ACTION_PROP_PATTERN = /^(handle|open|close|pause|resume|start|stop|update)/
 

@@ -103,6 +103,17 @@ export type WriteTextFileResp = {
   fullPath: string
 }
 
+export type ReadLoraTriggerWordsNativeReq = {
+  loraDir: string
+  loraName: string
+}
+
+export type ReadLoraTriggerWordsNativeResp = {
+  triggerWords: string
+  source: string
+  nativeAvailable: boolean
+}
+
 export const MAX_READ_FILE_SLICE_BYTES = 16 * 1024 * 1024
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -178,6 +189,9 @@ export type FsSvc = {
   readFileFromPath(req: ReadFileFromPathReq): Promise<ReadFileFromPathResp>
   readFileSlice(req: ReadFileSliceReq): Promise<ReadFileSliceResp>
   writeTextFile(req: WriteTextFileReq): Promise<WriteTextFileResp>
+  readLoraTriggerWordsNative(
+    req: ReadLoraTriggerWordsNativeReq
+  ): Promise<ReadLoraTriggerWordsNativeResp>
 }
 
 export const fsSvcDef: ServiceDefSheet<FsSvc> = {
@@ -207,6 +221,9 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
     request: validateReadFileSliceReq
   },
   writeTextFile: {
+    type: 'unary'
+  },
+  readLoraTriggerWordsNative: {
     type: 'unary'
   }
 }

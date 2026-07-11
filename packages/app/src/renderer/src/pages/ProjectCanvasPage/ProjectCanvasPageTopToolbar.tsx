@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import React from 'react'
 import {
   Box,
@@ -61,8 +60,7 @@ import type {
   CanvasTextItem,
   CanvasVideoItem
 } from './types'
-
-const noop = () => {}
+import type { ProjectCanvasPageTopToolbarProps } from './ProjectCanvasPageShellContract'
 
 type CanvasViewportPoint = {
   x: number
@@ -140,7 +138,7 @@ function resolveZoomResetAnchor(options: {
   return best?.anchor ?? null
 }
 
-function ProjectCanvasPageTopToolbar(props: any) {
+function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
   const {
     CANVAS_IMPORT_ACCEPT,
     DccExportIcon,
@@ -226,6 +224,7 @@ function ProjectCanvasPageTopToolbar(props: any) {
     groupRenameId,
     groupRenameInputRef,
     groupSummaries,
+    groupBranches,
     handleAutoArrangeGroup,
     handleBgColorChange,
     handleBringForward,
@@ -253,11 +252,13 @@ function ProjectCanvasPageTopToolbar(props: any) {
     handleConfirmLabelDialog,
     handleContinueGenerationTraceRecord,
     handleCopyCanvasImage,
+    handleCreateGroupBranch,
     handleCopyCanvasItemsAsImage,
     handleCreateGroup,
     handleCropImage,
     handleDeleteGenerationTraceHistoryRecord,
     handleDeleteGroup,
+    handleDeleteGroupBranch,
     handleDeleteHtmlItem,
     handleDownloadBlobItem,
     handleDownloadCanvasImage,
@@ -273,6 +274,8 @@ function ProjectCanvasPageTopToolbar(props: any) {
     handleFitAll,
     handleFlipImage,
     handleFocusGroup,
+    handleFocusGroupBranch,
+    handleMoveGroupToBranch,
     handleGenerateCanvasItems,
     handleGroupPlaybackVideoEnded,
     handleImageContextMenu,
@@ -290,6 +293,8 @@ function ProjectCanvasPageTopToolbar(props: any) {
     handleOpenTextureImportInput,
     handleRequestModel3DTextureImport,
     handleResize,
+    handleRenameGroup,
+    handleRenameGroupBranch,
     handleResolveFigmaBinding,
     handleRunCanvasTarget,
     handleSaveCanvas,
@@ -414,19 +419,13 @@ function ProjectCanvasPageTopToolbar(props: any) {
     visibleItems
   } = props
   const groupTreePopoverProps = {
-    groupBranches: Array.isArray(props.groupBranches) ? props.groupBranches : [],
-    handleCreateGroupBranch:
-      typeof props.handleCreateGroupBranch === 'function' ? props.handleCreateGroupBranch : noop,
-    handleDeleteGroupBranch:
-      typeof props.handleDeleteGroupBranch === 'function' ? props.handleDeleteGroupBranch : noop,
-    handleFocusGroupBranch:
-      typeof props.handleFocusGroupBranch === 'function' ? props.handleFocusGroupBranch : noop,
-    handleMoveGroupToBranch:
-      typeof props.handleMoveGroupToBranch === 'function' ? props.handleMoveGroupToBranch : noop,
-    handleRenameGroup:
-      typeof props.handleRenameGroup === 'function' ? props.handleRenameGroup : noop,
-    handleRenameGroupBranch:
-      typeof props.handleRenameGroupBranch === 'function' ? props.handleRenameGroupBranch : noop
+    groupBranches,
+    handleCreateGroupBranch,
+    handleDeleteGroupBranch,
+    handleFocusGroupBranch,
+    handleMoveGroupToBranch,
+    handleRenameGroup,
+    handleRenameGroupBranch
   }
   const groupPlaybackStartLabel = isChineseUi ? '播放' : 'Play'
   const groupPlaybackPauseLabel = isChineseUi ? '暂停' : 'Pause'

@@ -19,10 +19,19 @@ const store = configureStore({
     })
 })
 
-// 自动保存 layout 状态到 localStorage
+// 仅在对应 slice 引用变化时写入 localStorage，避免 Comfy 队列和结果流更新触发无关序列化。
+let previousLayoutState = store.getState().layout
+let previousProjectConfigState = store.getState().projectConfig
 store.subscribe(() => {
-  saveState(store.getState().layout)
-  saveProjectConfigState(store.getState().projectConfig)
+  const state = store.getState()
+  if (state.layout !== previousLayoutState) {
+    previousLayoutState = state.layout
+    saveState(state.layout)
+  }
+  if (state.projectConfig !== previousProjectConfigState) {
+    previousProjectConfigState = state.projectConfig
+    saveProjectConfigState(state.projectConfig)
+  }
 })
 
 export default store

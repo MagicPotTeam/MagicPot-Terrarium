@@ -157,3 +157,162 @@ export const createProjectCanvasWebGLResidentTextureByteTracker = (
 export type ProjectCanvasWebGLResidentTextureByteTracker = ReturnType<
   typeof createProjectCanvasWebGLResidentTextureByteTracker
 >
+
+export type ProjectCanvasWebGLItemReconcileSnapshotInput = {
+  id: string
+  src: string
+  x: number
+  y: number
+  width: number
+  height: number
+  scaleX: number
+  scaleY: number
+  rotation: number
+  zIndex: number
+  imageIdentityKey?: string | number
+  extraKeys?: readonly (string | number | boolean | null | undefined)[]
+  crop?: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }
+  image?: {
+    naturalWidth?: number
+    naturalHeight?: number
+    width?: number
+    height?: number
+  } | null
+  sourceWidth?: number
+  sourceHeight?: number
+  sourceIdentity?: {
+    kind?: string
+    cacheKey?: string
+    canonicalPath?: string
+    sizeBytes?: number
+    lastModifiedMs?: number
+  }
+  thumbnailSet?: {
+    version?: number
+    cacheKey?: string
+    updatedAt?: string
+    sourceIdentity?: {
+      kind?: string
+      cacheKey?: string
+      canonicalPath?: string
+      sizeBytes?: number
+      lastModifiedMs?: number
+    }
+    levels?: readonly {
+      maxSide: number
+      src: string
+      width?: number
+      height?: number
+      sizeBytes?: number
+    }[]
+  } | null
+}
+
+export type ProjectCanvasWebGLItemReconcileSnapshotOptions = {
+  selected?: boolean
+  stageScale?: number
+  deviceScale?: number
+  sourceUpgradeBlocked?: boolean
+  performanceThrottled?: boolean
+  viewportInteracting?: boolean
+}
+
+export type ProjectCanvasWebGLItemReconcileSnapshot = {
+  itemId: string
+  renderKey: string
+}
+
+const normalizeProjectCanvasWebGLSnapshotNumber = (value: number | undefined) =>
+  typeof value === 'number' && Number.isFinite(value) ? value : 0
+
+const getProjectCanvasWebGLSnapshotImageSize = (
+  image: ProjectCanvasWebGLItemReconcileSnapshotInput['image']
+) => ({
+  width: normalizeProjectCanvasWebGLSnapshotNumber(image?.naturalWidth ?? image?.width),
+  height: normalizeProjectCanvasWebGLSnapshotNumber(image?.naturalHeight ?? image?.height)
+})
+
+const getProjectCanvasWebGLSourceIdentitySnapshotKey = (
+  sourceIdentity: ProjectCanvasWebGLItemReconcileSnapshotInput['sourceIdentity']
+) =>
+  [
+    sourceIdentity?.kind ?? '',
+    sourceIdentity?.cacheKey ?? '',
+    sourceIdentity?.canonicalPath ?? '',
+    sourceIdentity?.sizeBytes ?? '',
+    sourceIdentity?.lastModifiedMs ?? ''
+  ].join(':')
+
+const getProjectCanvasWebGLThumbnailSetSnapshotKey = (
+  thumbnailSet: ProjectCanvasWebGLItemReconcileSnapshotInput['thumbnailSet']
+) => {
+  if (!thumbnailSet) {
+    return ''
+  }
+
+  return [
+    thumbnailSet.version ?? '',
+    thumbnailSet.cacheKey ?? '',
+    thumbnailSet.updatedAt ?? '',
+    getProjectCanvasWebGLSourceIdentitySnapshotKey(thumbnailSet.sourceIdentity),
+    ...(thumbnailSet.levels ?? []).map((level) =>
+      [
+        level.maxSide,
+        level.src,
+        normalizeProjectCanvasWebGLSnapshotNumber(level.width),
+        normalizeProjectCanvasWebGLSnapshotNumber(level.height),
+        normalizeProjectCanvasWebGLSnapshotNumber(level.sizeBytes)
+      ].join(':')
+    )
+  ].join('|')
+}
+
+export const buildProjectCanvasWebGLItemReconcileSnapshot = (
+  item: ProjectCanvasWebGLItemReconcileSnapshotInput,
+  options: ProjectCanvasWebGLItemReconcileSnapshotOptions = {}
+): ProjectCanvasWebGLItemReconcileSnapshot => {
+  const imageSize = getProjectCanvasWebGLSnapshotImageSize(item.image)
+  return {
+    itemId: item.id,
+    renderKey: [
+      item.id,
+      item.src,
+      item.x,
+      item.y,
+      item.width,
+      item.height,
+      item.scaleX,
+      item.scaleY,
+      item.rotation,
+      item.zIndex,
+      item.crop?.x ?? '',
+      item.crop?.y ?? '',
+      item.crop?.width ?? '',
+      item.crop?.height ?? '',
+      item.sourceWidth ?? '',
+      item.sourceHeight ?? '',
+      item.imageIdentityKey ?? '',
+      imageSize.width,
+      imageSize.height,
+      getProjectCanvasWebGLSourceIdentitySnapshotKey(item.sourceIdentity),
+      getProjectCanvasWebGLThumbnailSetSnapshotKey(item.thumbnailSet),
+      options.selected === true ? 'selected' : 'unselected',
+      options.stageScale ?? '',
+      options.deviceScale ?? '',
+      options.sourceUpgradeBlocked === true ? 'source-blocked' : 'source-allowed',
+      options.performanceThrottled === true ? 'throttled' : 'unthrottled',
+      options.viewportInteracting === true ? 'interacting' : 'idle',
+      ...(item.extraKeys ?? []).map((value) => value ?? '')
+    ].join('\u001f')
+  }
+}
+
+export const areProjectCanvasWebGLItemReconcileSnapshotsEqual = (
+  left: ProjectCanvasWebGLItemReconcileSnapshot | null | undefined,
+  right: ProjectCanvasWebGLItemReconcileSnapshot | null | undefined
+) => Boolean(left && right && left.itemId === right.itemId && left.renderKey === right.renderKey)

@@ -1,4 +1,11 @@
-import React, { useCallback, useEffect, useImperativeHandle, useMemo, useState } from 'react'
+import React, {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState
+} from 'react'
 import { setJsonPath, getJsonPath } from '@shared/utils/jsonPath'
 import { ExeInputBuilder, ExeInputProps } from './types'
 import InputLoRAChain, { LoRAConfig } from '@renderer/components/inputs/InputLoRAChain'
@@ -38,6 +45,7 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
     const [fallbackOptions, setFallbackOptions] = useState<string[]>([])
     const options = objectInfoOptions.length > 0 ? objectInfoOptions : fallbackOptions
     const [loraInputs, setLoraInputs] = useQAppInputState<LoRAConfig[]>(formKey, [])
+    const autoFillRequestRef = React.useRef(0)
     const { qAppCfg, formState, setFormStateValue } = useQAppContext()
 
     useEffect(() => {
@@ -76,6 +84,53 @@ const buildExeInputLoRAChain: ExeInputBuilder<'InputLoRAChain'> = (cfg, workflow
       },
       [configUtils]
     )
+
+    useEffect(() => {
+      const pendingLoraIndexes = loraInputs
+        .map((lora, index) => ({ lora, index }))
+        .filter(({ lora }) => lora.lora_name.trim() && !lora.trigger_words?.trim())
+      if (pendingLoraIndexes.length === 0) {
+        return
+      }
+
+      const requestId = autoFillRequestRef.current + 1
+      autoFillRequestRef.current = requestId
+      let cancelled = false
+
+      ;(async () => {
+        const resolvedEntries = await Promise.all(
+          pendingLoraIndexes.map(async ({ lora, index }) => {
+            const loraName = lora.lora_name
+            const triggerWords = await loadLoraTriggerWords(loraName, '')
+            return { index, loraName, triggerWords }
+          })
+        )
+        if (cancelled || autoFillRequestRef.current !== requestId) {
+          return
+        }
+
+        setLoraInputs(
+          loraInputs.map((lora, index) => {
+            if (!lora.lora_name.trim() || lora.trigger_words?.trim()) {
+              return lora
+            }
+            const resolvedEntry = resolvedEntries.find(
+              (entry) => entry.index === index && entry.loraName === lora.lora_name
+            )
+            if (!resolvedEntry?.triggerWords) {
+              return lora
+            }
+            return { ...lora, trigger_words: resolvedEntry.triggerWords }
+          })
+        )
+      })().catch((error) => {
+        console.warn('[InputLoRAChain] failed to auto-fill LoRA trigger words:', error)
+      })
+
+      return () => {
+        cancelled = true
+      }
+    }, [loadLoraTriggerWords, loraInputs, setLoraInputs])
 
     const appendLoraTriggerWordsToPrompt = useCallback(
       async (lora: LoRAConfig) => {

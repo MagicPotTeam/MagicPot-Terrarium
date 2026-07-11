@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import type { CanvasImageItem } from './types'
 import {
   normalizeCanvasImageDisplayCrop,
-  resolveCanvasImageDisplayCrop
+  resolveCanvasImageDisplayCrop,
+  resolveCanvasImageDomPreviewLayout
 } from './canvasImageDisplayUtils'
 
 function createImage(width: number, height: number) {
@@ -64,6 +65,64 @@ describe('resolveCanvasImageDisplayCrop', () => {
       y: 6,
       width: 72,
       height: 54
+    })
+  })
+
+  it('ignores extreme strip crops that are incompatible with the displayed image bounds', () => {
+    const item = createItem({
+      width: 19_717,
+      height: 12_079,
+      crop: { x: 0, y: 0, width: 19_717, height: 1 },
+      sourceWidth: 19_717,
+      sourceHeight: 12_079
+    })
+
+    expect(resolveCanvasImageDisplayCrop(item, createImage(512, 314))).toBeUndefined()
+  })
+})
+
+describe('resolveCanvasImageDomPreviewLayout', () => {
+  it('drops source preview layouts when source and asset aspects do not match', () => {
+    const item = createItem({
+      width: 100,
+      height: 80,
+      crop: { x: 0, y: 0, width: 100, height: 40 },
+      image: createImage(400, 20),
+      sourceWidth: 100,
+      sourceHeight: 100
+    })
+
+    expect(resolveCanvasImageDomPreviewLayout(item)).toBeNull()
+  })
+
+  it('drops extreme crop layouts that would cover the canvas with a huge source image strip', () => {
+    const item = createItem({
+      width: 19_717,
+      height: 12_079,
+      crop: { x: 0, y: 0, width: 19_717, height: 1 },
+      image: createImage(512, 314),
+      sourceWidth: 19_717,
+      sourceHeight: 12_079
+    })
+
+    expect(resolveCanvasImageDomPreviewLayout(item)).toBeNull()
+  })
+
+  it('keeps normal crop layouts for matching source previews', () => {
+    const item = createItem({
+      width: 100,
+      height: 50,
+      crop: { x: 0, y: 0, width: 400, height: 100 },
+      image: createImage(400, 200),
+      sourceWidth: 400,
+      sourceHeight: 200
+    })
+
+    expect(resolveCanvasImageDomPreviewLayout(item)).toEqual({
+      left: -0,
+      top: -0,
+      width: 100,
+      height: 100
     })
   })
 })

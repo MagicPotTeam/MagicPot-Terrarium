@@ -34,10 +34,13 @@ import {
   loadAllSessions,
   saveSessionToDB,
   deleteSessionFromDB,
+  cancelDebouncedSessionSave,
   deleteSessionDraftBackup,
   migrateFromLocalStorage,
   readSessionDraftBackup,
-  debouncedSaveAllSessions,
+  readSessionDeleteTombstones,
+  debouncedSaveSessions,
+  setSessionDeleteTombstone,
   writeSessionDraftBackup,
   type ChatSession,
   type ChatSessionDraft
@@ -53,12 +56,15 @@ import {
   resolveLocalMediaPathFromUrl,
   HUNYUAN_3D_PROFILE_ID,
   normalizeChatProfileIdForStorage,
+  readScopedActiveLoadingSessionIds,
   readScopedExternalLoadingSessionIds,
+  readScopedLoadingSessionIds,
   recordAutoSavedChatImageKey,
   scopedStorageKey,
   STORAGE_KEY_CURRENT_SESSION_ID,
   STORAGE_KEY_LOADING_IDS,
   STORAGE_KEY_SELECTED_PROFILE,
+  updateScopedActiveLoadingSessionId,
   updateScopedExternalLoadingSessionId
 } from './chatPageShared'
 import {
@@ -290,6 +296,41 @@ const HY3D_POST_PROCESS_ACTIONS = new Set([
   'Convert3DFormat'
 ])
 
+const chatLoadingStatusByScope = new Map<string, Map<string, ChatLoadingStatus>>()
+
+const readScopedChatLoadingStatuses = (scope: string): Record<string, ChatLoadingStatus> => {
+  const scopedStatuses = chatLoadingStatusByScope.get(scope)
+  if (!scopedStatuses) {
+    return {}
+  }
+
+  return Object.fromEntries(
+    [...scopedStatuses.entries()].map(([sessionId, status]) => [sessionId, { ...status }])
+  )
+}
+
+const updateScopedChatLoadingStatus = (
+  scope: string,
+  sessionId: string,
+  status?: ChatLoadingStatus | null
+): void => {
+  const scopedStatuses = new Map(chatLoadingStatusByScope.get(scope) || [])
+
+  if (status) {
+    scopedStatuses.set(sessionId, { ...status })
+  } else {
+    scopedStatuses.delete(sessionId)
+  }
+
+  if (scopedStatuses.size > 0) {
+    chatLoadingStatusByScope.set(scope, scopedStatuses)
+  } else {
+    chatLoadingStatusByScope.delete(scope)
+  }
+}
+
+type ChatPreviewRefreshReason = 'storage-updated' | 'preview-only'
+
 function resolveTraceProjectIdFromAgentRoute(route?: AgentRouteLike): string | undefined {
   return route?.channel === 'canvas' && route.scopeId ? route.scopeId : undefined
 }
@@ -384,6 +425,76 @@ const resolveChatFailureArchiveDir = (baseDir: string, runId: string): string =>
   })
 
 const CHAT_LOADING_TOTAL_STEPS = 4
+
+const normalizeImageAttachmentExtension = (mimeType?: string, fileName?: string): string => {
+  const fileExtension = fileName?.match(/\.([a-z0-9]{1,8})$/i)?.[1]
+  if (fileExtension) return fileExtension.toLowerCase()
+
+  if (mimeType?.includes('jpeg') || mimeType?.includes('jpg')) return 'jpg'
+  if (mimeType?.includes('webp')) return 'webp'
+  if (mimeType?.includes('gif')) return 'gif'
+  if (mimeType?.includes('bmp')) return 'bmp'
+  if (mimeType?.includes('svg')) return 'svg'
+  return 'png'
+}
+
+const buildChatImageAttachmentAutoSaveFileName = (
+  attachment: ChatAttachment,
+  index: number
+): string => {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  const extension = normalizeImageAttachmentExtension(attachment.mimeType, attachment.fileName)
+  return `chat_upload_${timestamp}_${index + 1}.${extension}`
+}
+
+const readBlobAsUint8Array = (blob: Blob): Promise<Uint8Array> => {
+  if (typeof blob.arrayBuffer === 'function') {
+    return blob.arrayBuffer().then((buffer) => new Uint8Array(buffer))
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) {
+        resolve(new Uint8Array(reader.result))
+        return
+      }
+
+      reject(new Error('Failed to read blob as ArrayBuffer'))
+    }
+    reader.onerror = () => reject(reader.error || new Error('Failed to read blob'))
+    reader.readAsArrayBuffer(blob)
+  })
+}
+
+const saveChatImageAttachmentBlobToDir = async (options: {
+  attachment: ChatAttachment
+  attachmentIndex: number
+  targetDir: string | undefined
+}): Promise<string | null> => {
+  try {
+    const response = await fetch(options.attachment.url)
+    const blob = await response.blob()
+    const data = await readBlobAsUint8Array(blob)
+    const fileName = buildChatImageAttachmentAutoSaveFileName(
+      {
+        ...options.attachment,
+        mimeType: options.attachment.mimeType || blob.type || undefined
+      },
+      options.attachmentIndex
+    )
+    const result = await api().svcHyper.saveImageToDir({
+      data,
+      fileName,
+      dir: options.targetDir
+    })
+
+    return result.savedPath || null
+  } catch (error) {
+    console.warn('[ChatPage] Failed to persist chat image attachment:', error)
+    return null
+  }
+}
 
 const dispatchReasoningEffortSync = (map: Record<string, LLMReasoningEffort>) => {
   window.dispatchEvent(
@@ -514,13 +625,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const navigate = useNavigate()
   const { config, buildEnv, isReady } = useConfig()
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useMessage()
-  const emitPreviewRefresh = useCallback(() => {
-    window.dispatchEvent(
-      new CustomEvent('chat:preview-refresh', {
-        detail: { scope: storageScope }
-      })
-    )
-  }, [storageScope])
+  const emitPreviewRefresh = useCallback(
+    (reason: ChatPreviewRefreshReason = 'storage-updated') => {
+      window.dispatchEvent(
+        new CustomEvent('chat:preview-refresh', {
+          detail: { scope: storageScope, reason }
+        })
+      )
+    },
+    [storageScope]
+  )
   const emitChatActivity = useCallback(
     (type: ChatContextCompactActivityType, detail: Record<string, unknown> = {}) => {
       window.dispatchEvent(
@@ -627,7 +741,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // ==================== Sessions 状态 ====================
   const [sessions, setSessionsState] = useState<ChatSession[]>([])
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
-  const skipSaveRef = useRef(false)
+  const storageScopeRef = useRef(storageScope)
+  const previousStorageScopeRef = useRef(storageScope)
+  const sessionLoadEpochRef = useRef(0)
+  const sessionMutationEpochRef = useRef(0)
+  const deletedSessionKeysRef = useRef<Set<string>>(
+    new Set(
+      readSessionDeleteTombstones().map(({ scope, sessionId }) => `${scope}\u0000${sessionId}`)
+    )
+  )
+  const sessionPersistenceRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const sessionPersistenceRetryCountRef = useRef(0)
+  const pendingDeleteRetryTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const sessionPersistenceGateRef = useRef(true)
+  const persistedSessionsRef = useRef<Map<string, ChatSession>>(new Map())
   const sessionsRef = useRef<ChatSession[]>([])
   const compactingSessionIdsRef = useRef<Set<string>>(new Set())
   const contextCompactAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
@@ -635,12 +762,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const autoSaveScanInitializedRef = useRef(false)
   const autoSaveScanCursorBySessionIdRef = useRef<Map<string, number>>(new Map())
   const setSessions = useCallback<React.Dispatch<React.SetStateAction<ChatSession[]>>>((value) => {
-    const next = typeof value === 'function' ? value(sessionsRef.current) : value
+    const previous = sessionsRef.current
+    const next = typeof value === 'function' ? value(previous) : value
+    if (next !== previous && !sessionPersistenceGateRef.current) {
+      sessionMutationEpochRef.current += 1
+    }
     sessionsRef.current = next
     setSessionsState(next)
   }, [])
   const persistCurrentSessionSnapshot = useCallback(
-    async (sessionId: string, label = ''): Promise<void> => {
+    async (
+      sessionId: string,
+      label = '',
+      refreshReason: ChatPreviewRefreshReason = 'storage-updated'
+    ): Promise<void> => {
       try {
         const session = sessionsRef.current.find((candidate) => candidate.id === sessionId)
         if (!session) {
@@ -648,7 +783,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }
 
         await saveSessionToDB(session, storageScope)
-        emitPreviewRefresh()
+        emitPreviewRefresh(refreshReason)
         console.log(`[ChatPage] persistCurrentSessionSnapshot(${label}): saved`)
       } catch (e) {
         console.warn('[ChatPage] persistCurrentSessionSnapshot failed:', e)
@@ -700,7 +835,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
 
-      skipSaveRef.current = true
       saveSessionToDB(sessionToPersist, storageScope).catch((error) => {
         console.warn('[ChatPage] persistAssistantAttachmentFileReference failed:', error)
       })
@@ -726,38 +860,160 @@ const ChatPage: React.FC<ChatPageProps> = ({
       })
       contextCompactAbortControllersRef.current.clear()
       compactingSessionIdsRef.current.clear()
+      if (sessionPersistenceRetryTimerRef.current) {
+        clearTimeout(sessionPersistenceRetryTimerRef.current)
+        sessionPersistenceRetryTimerRef.current = null
+      }
+      for (const timer of pendingDeleteRetryTimersRef.current.values()) clearTimeout(timer)
+      pendingDeleteRetryTimersRef.current.clear()
     },
     []
   )
 
   // 从 IndexedDB 加载 sessions（含 localStorage 迁移）
   useEffect(() => {
+    const scopeChanged = previousStorageScopeRef.current !== storageScope
+    previousStorageScopeRef.current = storageScope
+    storageScopeRef.current = storageScope
+    const loadEpoch = ++sessionLoadEpochRef.current
+    setSessionsLoaded(false)
+    sessionPersistenceGateRef.current = true
+    persistedSessionsRef.current = new Map()
+    sessionMutationEpochRef.current += 1
+    if (sessionPersistenceRetryTimerRef.current) {
+      clearTimeout(sessionPersistenceRetryTimerRef.current)
+      sessionPersistenceRetryTimerRef.current = null
+    }
+    sessionPersistenceRetryCountRef.current = 0
+    if (scopeChanged) {
+      pendingSessionIdRef.current = null
+      let rememberedSessionId: string | null = null
+      try {
+        rememberedSessionId = localStorage.getItem(currentSessionStorageKey)
+      } catch {
+        rememberedSessionId = null
+      }
+      currentSessionIdRef.current = rememberedSessionId
+      setCurrentSessionId(rememberedSessionId)
+      setSessions([])
+    }
     ;(async () => {
+      let storedSessions: ChatSession[] | null = null
       try {
         const migrated = storageScope === 'default' ? await migrateFromLocalStorage() : null
-        if (migrated) {
-          setSessions((prev) =>
-            mergeLoadedSessionsWithLocal(sortSessionsByRecencyDesc(migrated), prev, [
-              pendingSessionIdRef.current,
-              currentSessionIdRef.current
-            ])
+        storedSessions = migrated || (await loadAllSessions(storageScope))
+        if (loadEpoch !== sessionLoadEpochRef.current) return
+
+        const sortedStoredSessions = sortSessionsByRecencyDesc(
+          storedSessions.filter(
+            (session) => !deletedSessionKeysRef.current.has(`${storageScope}\u0000${session.id}`)
           )
-        } else {
-          const loaded = await loadAllSessions(storageScope)
-          setSessions((prev) =>
-            mergeLoadedSessionsWithLocal(sortSessionsByRecencyDesc(loaded), prev, [
-              pendingSessionIdRef.current,
-              currentSessionIdRef.current
-            ])
-          )
-        }
+        )
+        persistedSessionsRef.current = new Map(
+          sortedStoredSessions.map((session) => [session.id, session])
+        )
+        setSessions((prev) =>
+          mergeLoadedSessionsWithLocal(sortedStoredSessions, prev, [
+            pendingSessionIdRef.current,
+            currentSessionIdRef.current
+          ])
+        )
       } catch (e) {
-        console.error('[ChatPage] 加载会话失败', e)
+        if (loadEpoch === sessionLoadEpochRef.current) {
+          console.error('[ChatPage] 加载会话失败', e)
+        }
       } finally {
-        setSessionsLoaded(true)
+        if (loadEpoch === sessionLoadEpochRef.current) {
+          sessionPersistenceGateRef.current = false
+          setSessionsLoaded(true)
+        }
       }
     })()
+
+    return () => {
+      if (sessionLoadEpochRef.current === loadEpoch) {
+        sessionLoadEpochRef.current += 1
+      }
+    }
   }, [setSessions, storageScope])
+
+  const refreshSessionsFromStorage = useCallback(async (): Promise<void> => {
+    const refreshEpoch = sessionLoadEpochRef.current
+    const mutationEpoch = sessionMutationEpochRef.current
+    try {
+      const stored = sortSessionsByRecencyDesc(await loadAllSessions(storageScope))
+      if (
+        refreshEpoch !== sessionLoadEpochRef.current ||
+        storageScope !== storageScopeRef.current
+      ) {
+        return
+      }
+      const visibleStored = stored.filter(
+        (session) => !deletedSessionKeysRef.current.has(`${storageScope}\u0000${session.id}`)
+      )
+      if (mutationEpoch !== sessionMutationEpochRef.current) {
+        return
+      }
+      persistedSessionsRef.current = new Map(visibleStored.map((session) => [session.id, session]))
+      setSessions((prev) =>
+        mergeLoadedSessionsWithLocal(visibleStored, prev, [
+          pendingSessionIdRef.current,
+          currentSessionIdRef.current
+        ])
+      )
+    } catch (e) {
+      if (
+        refreshEpoch === sessionLoadEpochRef.current &&
+        storageScope === storageScopeRef.current
+      ) {
+        console.warn('[ChatPage] refreshSessionsFromStorage failed:', e)
+      }
+    }
+  }, [setSessions, storageScope])
+
+  useEffect(() => {
+    for (const key of deletedSessionKeysRef.current) {
+      const separatorIndex = key.indexOf('\u0000')
+      if (separatorIndex < 0) continue
+      persistSessionDeletion(key.slice(separatorIndex + 1), key.slice(0, separatorIndex))
+    }
+    // Tombstones are loaded once and retried when this ChatPage instance mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const wasActiveRef = useRef(active)
+  useEffect(() => {
+    const wasActive = wasActiveRef.current
+    wasActiveRef.current = active
+
+    if (!sessionsLoaded || !active || wasActive) {
+      return
+    }
+
+    void refreshSessionsFromStorage()
+  }, [active, refreshSessionsFromStorage, sessionsLoaded])
+
+  useEffect(() => {
+    const handlePreviewRefresh = (event: Event): void => {
+      const detail = (event as CustomEvent<{ scope?: string; reason?: ChatPreviewRefreshReason }>)
+        .detail
+
+      if (detail?.scope) {
+        if (detail.scope !== storageScope) return
+      } else if (!active) {
+        return
+      }
+
+      if (detail?.reason === 'preview-only') {
+        return
+      }
+
+      void refreshSessionsFromStorage()
+    }
+
+    window.addEventListener('chat:preview-refresh', handlePreviewRefresh)
+    return () => window.removeEventListener('chat:preview-refresh', handlePreviewRefresh)
+  }, [active, refreshSessionsFromStorage, storageScope])
 
   const setActiveSessionId = useCallback(
     (sessionId: string | null) => {
@@ -797,7 +1053,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const cancelledSessionsRef = useRef<Set<string>>(new Set())
   const [loadingStatusBySessionId, setLoadingStatusBySessionId] = useState<
     Record<string, ChatLoadingStatus>
-  >({})
+  >(() => readScopedChatLoadingStatuses(storageScope))
   useEffect(() => {
     externalLoadingSessionIdsRef.current = externalLoadingSessionIds
   }, [externalLoadingSessionIds])
@@ -808,12 +1064,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
     ? loadingStatusBySessionId[currentSessionId]
     : undefined
 
+  useEffect(() => {
+    const scopedLoadingIds = new Set(readScopedLoadingSessionIds(storageScope))
+    const scopedExternalLoadingIds = new Set(readScopedExternalLoadingSessionIds(storageScope))
+    loadingSessionIdsRef.current = scopedLoadingIds
+    externalLoadingSessionIdsRef.current = scopedExternalLoadingIds
+    setLoadingSessionIds(scopedLoadingIds)
+    setExternalLoadingSessionIds(scopedExternalLoadingIds)
+    setLoadingStatusBySessionId(readScopedChatLoadingStatuses(storageScope))
+  }, [storageScope])
+
   const setSessionLoadingStatus = useCallback(
     (sessionId: string | null | undefined, status?: ChatLoadingStatus | null) => {
       if (!sessionId) {
         return
       }
 
+      updateScopedChatLoadingStatus(storageScope, sessionId, status)
       setLoadingStatusBySessionId((prev) => {
         if (!status) {
           if (!(sessionId in prev)) {
@@ -836,7 +1103,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }
       })
     },
-    []
+    [storageScope]
   )
 
   const updateExternalLoadingSessionState = useCallback(
@@ -848,13 +1115,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       externalLoadingSessionIdsRef.current = nextLoadingIds
       setExternalLoadingSessionIds(nextLoadingIds)
 
-      window.dispatchEvent(
-        new CustomEvent('chat:preview-refresh', {
-          detail: { scope: storageScope }
-        })
-      )
+      emitPreviewRefresh('preview-only')
     },
-    [storageScope]
+    [emitPreviewRefresh, storageScope]
   )
 
   const clearLoadingSessionTracking = useCallback(
@@ -864,6 +1127,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       loadingSessionIdsRef.current = nextLoadingIds
       setLoadingSessionIds(nextLoadingIds)
       setSessionLoadingStatus(sessionId, null)
+      updateScopedActiveLoadingSessionId(storageScope, sessionId, false)
 
       try {
         const stored = JSON.parse(localStorage.getItem(loadingIdsStorageKey) || '[]') as string[]
@@ -877,7 +1141,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       updateExternalLoadingSessionState(sessionId, false)
     },
-    [loadingIdsStorageKey, setSessionLoadingStatus, updateExternalLoadingSessionState]
+    [loadingIdsStorageKey, setSessionLoadingStatus, storageScope, updateExternalLoadingSessionState]
   )
 
   const terminateSession = useCallback(
@@ -892,11 +1156,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       compactingSessionIdsRef.current.delete(sessionId)
       clearLoadingSessionTracking(sessionId)
       setSessions((prev) => removeTrailingEmptyAssistantMessage(prev, sessionId))
-      window.dispatchEvent(
-        new CustomEvent('chat:preview-refresh', {
-          detail: { scope: storageScope }
-        })
-      )
+      emitPreviewRefresh('preview-only')
       window.dispatchEvent(
         new CustomEvent('chat:session-terminated', {
           detail: {
@@ -906,7 +1166,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         })
       )
     },
-    [clearLoadingSessionTracking, setSessions, storageScope]
+    [clearLoadingSessionTracking, emitPreviewRefresh, setSessions, storageScope]
   )
 
   // 后台恢复：轮询 localStorage 检测 loading 是否完成
@@ -919,15 +1179,33 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (pendingIds.length > 0) {
         console.log('[ChatPage] 检测到后台生成任务:', pendingIds)
         intervalId = setInterval(async () => {
+          const pollingScope = storageScope
+          const pollingEpoch = sessionLoadEpochRef.current
+          const pollingMutationEpoch = sessionMutationEpochRef.current
           const currentLoadingIds = JSON.parse(
             localStorage.getItem(loadingIdsStorageKey) || '[]'
           ) as string[]
           if (currentLoadingIds.length === 0) {
             console.log('[ChatPage] 后台任务完成，重新加载 sessions')
-            const stored = await loadAllSessions(storageScope)
-            skipSaveRef.current = true
+            const stored = await loadAllSessions(pollingScope)
+            if (
+              pollingEpoch !== sessionLoadEpochRef.current ||
+              pollingMutationEpoch !== sessionMutationEpochRef.current ||
+              pollingScope !== storageScopeRef.current
+            ) {
+              return
+            }
+            const visibleStored = sortSessionsByRecencyDesc(
+              stored.filter(
+                (session) =>
+                  !deletedSessionKeysRef.current.has(`${pollingScope}\u0000${session.id}`)
+              )
+            )
+            persistedSessionsRef.current = new Map(
+              visibleStored.map((session) => [session.id, session])
+            )
             setSessions((prev) =>
-              mergeLoadedSessionsWithLocal(sortSessionsByRecencyDesc(stored), prev, [
+              mergeLoadedSessionsWithLocal(visibleStored, prev, [
                 pendingSessionIdRef.current,
                 currentSessionIdRef.current
               ])
@@ -936,10 +1214,25 @@ const ChatPage: React.FC<ChatPageProps> = ({
             if (intervalId) clearInterval(intervalId)
             intervalId = null
           } else {
-            const stored = await loadAllSessions(storageScope)
-            skipSaveRef.current = true
+            const stored = await loadAllSessions(pollingScope)
+            if (
+              pollingEpoch !== sessionLoadEpochRef.current ||
+              pollingMutationEpoch !== sessionMutationEpochRef.current ||
+              pollingScope !== storageScopeRef.current
+            ) {
+              return
+            }
+            const visibleStored = sortSessionsByRecencyDesc(
+              stored.filter(
+                (session) =>
+                  !deletedSessionKeysRef.current.has(`${pollingScope}\u0000${session.id}`)
+              )
+            )
+            persistedSessionsRef.current = new Map(
+              visibleStored.map((session) => [session.id, session])
+            )
             setSessions((prev) =>
-              mergeLoadedSessionsWithLocal(sortSessionsByRecencyDesc(stored), prev, [
+              mergeLoadedSessionsWithLocal(visibleStored, prev, [
                 pendingSessionIdRef.current,
                 currentSessionIdRef.current
               ])
@@ -969,6 +1262,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const session = sessions.find((item) => item.id === sessionId)
       const hasLiveRequest =
         sessionAbortControllersRef.current.has(sessionId) ||
+        readScopedActiveLoadingSessionIds(storageScope).includes(sessionId) ||
         externalLoadingSessionIdsRef.current.has(sessionId)
       if (!session || session.messages.length === 0 || !hasLiveRequest) {
         removedLoadingIds.push(sessionId)
@@ -1000,15 +1294,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
     } catch (e) {
       console.warn('[ChatPage] Failed to sanitize loading session ids:', e)
     }
-    window.dispatchEvent(
-      new CustomEvent('chat:preview-refresh', {
-        detail: { scope: storageScope }
-      })
-    )
+    emitPreviewRefresh('preview-only')
   }, [
     sessionsLoaded,
     sessions,
     loadingSessionIds,
+    emitPreviewRefresh,
     loadingIdsStorageKey,
     setSessionLoadingStatus,
     storageScope
@@ -1056,6 +1347,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const pendingAttachmentsRef = useRef<ChatAttachment[]>(pendingAttachments)
   const pendingHiddenContextRef = useRef(pendingHiddenContext)
   const pendingExternalSendToAgentRef = useRef<ExternalSendToAgentDetail[]>([])
+  const [pendingExternalSendToAgentVersion, setPendingExternalSendToAgentVersion] = useState(0)
+  const queueExternalSendToAgentInput = useCallback((detail: ExternalSendToAgentDetail) => {
+    pendingExternalSendToAgentRef.current.push(detail)
+    setPendingExternalSendToAgentVersion((version) => version + 1)
+  }, [])
   const isApplyingDraftRef = useRef(false)
   const inputValueCommitTimerRef = useRef<number | null>(null)
   const composerDraftSessionIdRef = useRef<string | null>(currentSessionIdRef.current)
@@ -1161,7 +1457,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const applyExternalSendToAgentInput = useCallback(
-    ({ image, text, hiddenText, attachment, attachments, autoSend }: ExternalSendToAgentDetail) => {
+    (detail: ExternalSendToAgentDetail) => {
+      const { image, text, hiddenText, attachment, attachments, autoSend } = detail
+      if (autoSend && !sendMessageRef.current) {
+        queueExternalSendToAgentInput(detail)
+        return
+      }
+
       if (autoSend && sendMessageRef.current) {
         const sendAttachments = [...(attachments || [])]
         if (attachment?.url && !sendAttachments.some((item) => item.url === attachment.url)) {
@@ -1238,7 +1540,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
         setPendingHiddenContext((prev) => mergeHiddenContext(prev, hiddenText))
       }
     },
-    [mergeHiddenContext, setInputValue, setPendingAttachments, setPendingHiddenContext]
+    [
+      mergeHiddenContext,
+      queueExternalSendToAgentInput,
+      setInputValue,
+      setPendingAttachments,
+      setPendingHiddenContext
+    ]
   )
 
   // ==================== Profile 选择 ====================
@@ -1396,6 +1704,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       )
 
       sessionsRef.current = nextSessions
+      if (!sessionPersistenceGateRef.current) {
+        sessionMutationEpochRef.current += 1
+      }
       if (isMountedRef.current) {
         setSessionsState(nextSessions)
       }
@@ -1792,9 +2103,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         })
       )
-      window.dispatchEvent(new CustomEvent('chat:preview-refresh'))
+      emitPreviewRefresh('preview-only')
     },
-    [pendingExternalConfirmations, setSessions, storageScope]
+    [emitPreviewRefresh, pendingExternalConfirmations, setSessions, storageScope]
   )
   useEffect(() => {
     const handleSessionTerminated = (event: Event) => {
@@ -1833,7 +2144,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         })
       )
-      emitPreviewRefresh()
+      emitPreviewRefresh('preview-only')
     }
 
     window.addEventListener('chat:session-terminated', handleSessionTerminated)
@@ -1866,7 +2177,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const queuedInputs = [...pendingExternalSendToAgentRef.current]
     pendingExternalSendToAgentRef.current = []
     queuedInputs.forEach((detail) => applyExternalSendToAgentInput(detail))
-  }, [applyExternalSendToAgentInput, currentSessionId, sessionsLoaded])
+  }, [
+    applyExternalSendToAgentInput,
+    currentSessionId,
+    pendingExternalSendToAgentVersion,
+    sessionsLoaded
+  ])
   const selectedCapabilityProfile = useMemo<ChatCapabilityProfile | null>(() => {
     if (isAgentSkillSelected) {
       return null
@@ -2228,7 +2544,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
           })
 
           if (updatedSessionToPersist) {
-            skipSaveRef.current = true
             await saveSessionToDB(updatedSessionToPersist, storageScope)
             emitPreviewRefresh()
             emitChatActivity('compact_complete', compactCompleteActivity)
@@ -2628,7 +2943,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
       if (!sessionsLoaded) {
-        pendingExternalSendToAgentRef.current.push(detail)
+        queueExternalSendToAgentInput(detail)
         return
       }
 
@@ -2637,7 +2952,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
     window.addEventListener('send-to-agent', handleSendToAgent)
     return () => window.removeEventListener('send-to-agent', handleSendToAgent)
-  }, [acceptExternalInput, active, applyExternalSendToAgentInput, sessionsLoaded, storageScope])
+  }, [
+    acceptExternalInput,
+    active,
+    applyExternalSendToAgentInput,
+    queueExternalSendToAgentInput,
+    sessionsLoaded,
+    storageScope
+  ])
 
   useEffect(() => {
     const handleFocusComposer = (event: Event) => {
@@ -2703,8 +3025,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   const fileName = `agent_auto_${timestamp}.png`
                   const response = await fetch(attachment.url)
                   const blob = await response.blob()
-                  const arrayBuffer = await blob.arrayBuffer()
-                  const data = new Uint8Array(arrayBuffer)
+                  const data = await readBlobAsUint8Array(blob)
                   const res = await api().svcHyper.saveImageToDir({
                     data,
                     fileName,
@@ -2740,12 +3061,42 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   // ==================== 持久化 sessions 到 IndexedDB ====================
   useEffect(() => {
-    if (!sessionsLoaded) return
-    if (skipSaveRef.current) {
-      skipSaveRef.current = false
-      return
-    }
-    debouncedSaveAllSessions(sessions, 500, storageScope)
+    if (!sessionsLoaded || sessionPersistenceGateRef.current) return
+
+    const previousSessions = persistedSessionsRef.current
+    const changedSessions = sessions.filter(
+      (session) => previousSessions.get(session.id) !== session
+    )
+    debouncedSaveSessions(changedSessions, 500, storageScope, {
+      onSuccess: (savedSessions) => {
+        sessionPersistenceRetryCountRef.current = 0
+        if (sessionPersistenceRetryTimerRef.current) {
+          clearTimeout(sessionPersistenceRetryTimerRef.current)
+          sessionPersistenceRetryTimerRef.current = null
+        }
+        for (const session of savedSessions) {
+          if (sessionsRef.current.find((candidate) => candidate.id === session.id) === session) {
+            persistedSessionsRef.current.set(session.id, session)
+          }
+        }
+      },
+      onError: () => {
+        if (storageScope !== storageScopeRef.current || sessionPersistenceRetryTimerRef.current) {
+          return
+        }
+        const retryDelayMs = Math.min(
+          30_000,
+          1_000 * 2 ** Math.min(sessionPersistenceRetryCountRef.current, 5)
+        )
+        sessionPersistenceRetryCountRef.current += 1
+        sessionPersistenceRetryTimerRef.current = setTimeout(() => {
+          sessionPersistenceRetryTimerRef.current = null
+          if (storageScope === storageScopeRef.current) {
+            setSessionsState([...sessionsRef.current])
+          }
+        }, retryDelayMs)
+      }
+    })
   }, [sessions, sessionsLoaded, storageScope])
 
   // ==================== 同步 currentSessionId 与 profile ====================
@@ -3599,7 +3950,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             : session
         )
       )
-      emitPreviewRefresh()
+      emitPreviewRefresh('preview-only')
     }
 
     window.addEventListener('chat:append-message', handleAppendMessage)
@@ -3661,7 +4012,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             })
         }
       }))
-      emitPreviewRefresh()
+      emitPreviewRefresh('preview-only')
     }
 
     window.addEventListener('chat:request-confirmation', handleConfirmationRequest)
@@ -3705,9 +4056,41 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   }, [acceptExternalInput, active, storageScope])
 
+  const persistSessionDeletion = (sessionId: string, scope: string, attempt = 0): void => {
+    void deleteSessionFromDB(sessionId, scope).then(
+      () => {
+        const retryKey = `${scope}\u0000${sessionId}`
+        const timer = pendingDeleteRetryTimersRef.current.get(retryKey)
+        if (timer) clearTimeout(timer)
+        pendingDeleteRetryTimersRef.current.delete(retryKey)
+        deletedSessionKeysRef.current.delete(`${scope}\u0000${sessionId}`)
+        setSessionDeleteTombstone(sessionId, scope, false)
+      },
+      (error) => {
+        console.error('[ChatPage] deleteSessionFromDB failed:', error)
+        if (attempt >= 5) return
+        const retryKey = `${scope}\u0000${sessionId}`
+        if (pendingDeleteRetryTimersRef.current.has(retryKey)) return
+        const timer = setTimeout(
+          () => {
+            pendingDeleteRetryTimersRef.current.delete(retryKey)
+            persistSessionDeletion(sessionId, scope, attempt + 1)
+          },
+          Math.min(30_000, 1_000 * 2 ** attempt)
+        )
+        pendingDeleteRetryTimersRef.current.set(retryKey, timer)
+      }
+    )
+  }
+
   const deleteSession = (sessionId: string) => {
     terminateSession(sessionId)
     deleteSessionDraftBackup(sessionId, storageScope)
+    cancelDebouncedSessionSave(sessionId, storageScope)
+    deletedSessionKeysRef.current.add(`${storageScope}\u0000${sessionId}`)
+    setSessionDeleteTombstone(sessionId, storageScope)
+    sessionMutationEpochRef.current += 1
+    persistedSessionsRef.current.delete(sessionId)
 
     setSessions((prev) => {
       const newSessions = prev.filter((s) => s.id !== sessionId)
@@ -3754,9 +4137,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       return newSessions
     })
-    deleteSessionFromDB(sessionId).catch((e) =>
-      console.error('[ChatPage] deleteSessionFromDB failed:', e)
-    )
+    persistSessionDeletion(sessionId, storageScope)
+    emitPreviewRefresh('preview-only')
   }
   deleteSessionRef.current = deleteSession
 
@@ -3937,12 +4319,49 @@ const ChatPage: React.FC<ChatPageProps> = ({
     ]
   )
   // ==================== 发送消息 ====================
+  const persistUserImageAttachments = useCallback(
+    async (attachments: ChatAttachment[] | undefined): Promise<ChatAttachment[] | undefined> => {
+      if (!attachments?.length) return attachments
+
+      const targetDir = resolveAssistantImageAutoSaveDir({
+        config: { download_dir: config.download_dir },
+        storageScope
+      })
+      const persistedAttachments = await Promise.all(
+        attachments.map(async (attachment, attachmentIndex): Promise<ChatAttachment> => {
+          if (attachment.type !== 'image' || !attachment.url.startsWith('blob:')) {
+            return attachment
+          }
+
+          const savedPath = await saveChatImageAttachmentBlobToDir({
+            attachment,
+            attachmentIndex,
+            targetDir
+          })
+
+          if (!savedPath) {
+            return attachment
+          }
+
+          return {
+            ...attachment,
+            url: `file://${savedPath}`
+          }
+        })
+      )
+
+      return persistedAttachments
+    },
+    [config.download_dir, storageScope]
+  )
+
   const prepareOutgoingUserMessage = useCallback(
     async (content: string, attachments?: ChatAttachment[]): Promise<ChatMessage> => {
+      const persistedAttachments = await persistUserImageAttachments(attachments)
       const preparedMessage: ChatMessage = {
         role: 'user',
         content: content || '',
-        attachments
+        attachments: persistedAttachments
       }
 
       const augmentedMessage = await augmentAttachmentsWithVideoBoundaryFrames(
@@ -3954,7 +4373,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       return preparedMessage
     },
-    []
+    [persistUserImageAttachments]
   )
 
   const sendMessage = useCallback(
@@ -4174,6 +4593,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       if (targetSessionId) {
         loadingSessionIdsRef.current = new Set(loadingSessionIdsRef.current).add(targetSessionId)
+        updateScopedActiveLoadingSessionId(storageScope, targetSessionId, true)
         setLoadingSessionIds((prev) => new Set(prev).add(targetSessionId as string))
         try {
           const existing = JSON.parse(
@@ -4188,7 +4608,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         } catch (_e) {
           /* ignore */
         }
-        emitPreviewRefresh()
+        emitPreviewRefresh('preview-only')
       }
 
       const placeholderUpdater = withLatestContextCompression((prev: ChatSession[]) =>
@@ -4210,14 +4630,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       )
 
       // 同步保存到 IndexedDB
-      skipSaveRef.current = true
       void persistCurrentSessionSnapshot(targetSessionId, 'request-placeholder')
 
       const persistSessionsToStorage = async (
         _updater: (prev: ChatSession[]) => ChatSession[],
         label = ''
       ): Promise<void> => {
-        skipSaveRef.current = true
         await persistCurrentSessionSnapshot(targetSessionId, label)
       }
 
@@ -4900,18 +5318,35 @@ const ChatPage: React.FC<ChatPageProps> = ({
             sessionAbortControllersRef.current.delete(targetSessionId)
           }
           clearLoadingSessionTracking(targetSessionId)
-          emitPreviewRefresh()
+          emitPreviewRefresh('preview-only')
 
           if (!wasCancelled) {
             try {
-              const latestStored = await loadAllSessions(storageScope)
-              skipSaveRef.current = true
-              setSessions((prev) =>
-                mergeLoadedSessionsWithLocal(sortSessionsByRecencyDesc(latestStored), prev, [
-                  pendingSessionIdRef.current,
-                  currentSessionIdRef.current
-                ])
-              )
+              const requestScope = storageScope
+              const requestEpoch = sessionLoadEpochRef.current
+              const requestMutationEpoch = sessionMutationEpochRef.current
+              const latestStored = await loadAllSessions(requestScope)
+              const requestIsCurrent =
+                requestEpoch === sessionLoadEpochRef.current &&
+                requestMutationEpoch === sessionMutationEpochRef.current &&
+                requestScope === storageScopeRef.current
+              if (requestIsCurrent) {
+                const visibleStored = sortSessionsByRecencyDesc(
+                  latestStored.filter(
+                    (session) =>
+                      !deletedSessionKeysRef.current.has(`${requestScope}\u0000${session.id}`)
+                  )
+                )
+                persistedSessionsRef.current = new Map(
+                  visibleStored.map((session) => [session.id, session])
+                )
+                setSessions((prev) =>
+                  mergeLoadedSessionsWithLocal(visibleStored, prev, [
+                    pendingSessionIdRef.current,
+                    currentSessionIdRef.current
+                  ])
+                )
+              }
             } catch (e) {
               console.warn('[ChatPage] finally: 从 IndexedDB 重新加载失败:', e)
             }

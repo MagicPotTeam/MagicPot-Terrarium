@@ -71,8 +71,8 @@ export function buildNonIntrusiveTestWindowEnv(runId) {
   const safeRunId = sanitizeProjectCanvasRunId(runId)
   const artifactRootOverride = resolveProjectCanvasArtifactRootOverride(safeRunId)
   return {
-    MAGICPOT_TEST_UI_MODE: 'secondary-or-offscreen',
-    MAGICPOT_TEST_WINDOW_MODE: 'secondary-or-offscreen',
+    MAGICPOT_TEST_UI_MODE: 'hidden',
+    MAGICPOT_TEST_WINDOW_MODE: 'hidden',
     MAGICPOT_TEST_NO_FOCUS: '1',
     MAGICPOT_TEST_AUTOMATED_RUN: '1',
     MAGICPOT_TEST_RUN_ID: safeRunId,

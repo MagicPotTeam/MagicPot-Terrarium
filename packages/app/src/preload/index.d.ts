@@ -7,6 +7,12 @@ export type ElectronFileBridge = {
   getPathForFile(file: File): string
 }
 
+export type ProjectCanvasBenchmarkRuntimeBridge = Readonly<{
+  enabled: boolean
+  canvasImportTotalSize?: number
+  sharedThumbnailCacheRoot?: string
+}>
+
 declare global {
   interface Window {
     electron: ElectronAPI
@@ -14,6 +20,7 @@ declare global {
     api: Api
     path: BuiltInPath
     win: WinBridge
+    magicpotProjectCanvasBenchmarkRuntime?: ProjectCanvasBenchmarkRuntimeBridge
   }
 }
 export {}

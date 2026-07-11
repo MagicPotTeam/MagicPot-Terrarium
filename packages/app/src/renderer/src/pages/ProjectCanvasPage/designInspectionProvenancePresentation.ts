@@ -30,7 +30,7 @@ export function formatDesignInspectionProvenanceKind(
 ): string {
   switch (kind) {
     case 'magicpot-native':
-      return 'MagicPot 原生'
+      return 'MagicPot native'
     case 'figma':
       return 'Figma'
     case 'psd':
@@ -40,9 +40,9 @@ export function formatDesignInspectionProvenanceKind(
     case 'svg':
       return 'SVG'
     case 'imported-file':
-      return '导入文件'
+      return 'Imported file'
     case 'external':
-      return '外部入口'
+      return 'External entry'
     default:
       return kind
   }
@@ -73,10 +73,10 @@ export function formatDesignInspectionProvenanceDetail(
   const itemLabel = getSelectionItemLabel(item)
 
   if (target) {
-    return `来源明细：元素“${itemLabel}”当前以 ${kindLabel} 元素参与检查（来源标识：${truncateLabel(target)}）`
+    return `Source detail: element "${itemLabel}" participates in the inspection as a ${kindLabel} element (source id: ${truncateLabel(target)})`
   }
 
-  return `来源明细：元素“${itemLabel}”当前以 ${kindLabel} 元素参与检查`
+  return `Source detail: element "${itemLabel}" participates in the inspection as a ${kindLabel} element`
 }
 
 export function summarizeDesignInspectionSelectionProvenance(

@@ -116,6 +116,58 @@ describe('chatSessionUtils collections', () => {
     ).toEqual(['pending', 'older'])
   })
 
+  it('keeps a preserved in-flight local session when storage still has the older same session', () => {
+    const loadedSessions: ChatSession[] = [
+      {
+        id: 'active',
+        title: 'Active',
+        messages: [{ role: 'user', content: 'first prompt' }],
+        createdAt: 300
+      }
+    ]
+    const localSessions: ChatSession[] = [
+      {
+        id: 'active',
+        title: 'Active',
+        messages: [
+          { role: 'user', content: 'first prompt' },
+          { role: 'assistant', content: '' }
+        ],
+        createdAt: 300
+      }
+    ]
+
+    expect(
+      mergeLoadedSessionsWithLocal(loadedSessions, localSessions, ['active'])[0].messages
+    ).toEqual(localSessions[0].messages)
+  })
+
+  it('does not let a preserved but older local session overwrite loaded storage history', () => {
+    const loadedSessions: ChatSession[] = [
+      {
+        id: 'active',
+        title: 'Active',
+        messages: [
+          { role: 'user', content: 'first prompt' },
+          { role: 'assistant', content: 'done' }
+        ],
+        createdAt: 300
+      }
+    ]
+    const localSessions: ChatSession[] = [
+      {
+        id: 'active',
+        title: 'Active',
+        messages: [{ role: 'user', content: 'first prompt' }],
+        createdAt: 300
+      }
+    ]
+
+    expect(
+      mergeLoadedSessionsWithLocal(loadedSessions, localSessions, ['active'])[0].messages
+    ).toEqual(loadedSessions[0].messages)
+  })
+
   it('does not resurrect unrelated missing local sessions during reloads', () => {
     const loadedSessions: ChatSession[] = [
       { id: 'older', title: 'Older', messages: [], createdAt: 100 }

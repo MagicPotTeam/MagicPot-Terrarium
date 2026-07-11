@@ -166,6 +166,7 @@ export default function CanvasMultiSelectionOverlay({
         selectionActionStackPosition={selectionActionStackPosition}
         stagePos={stagePos}
         stageScale={stageScale}
+        groupCreateLabel={groupCreateLabel}
         onDragSelectedItems={onDragSelectedItems}
         onCopySelectedItems={onCopySelectedItems}
         onDownloadSelectedItems={onDownloadSelectedItems}

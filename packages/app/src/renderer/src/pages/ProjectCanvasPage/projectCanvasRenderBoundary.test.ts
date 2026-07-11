@@ -4,13 +4,16 @@ import {
   buildProjectCanvasRenderableItem,
   buildProjectCanvasRenderableItems,
   buildProjectCanvasRenderableImage,
+  deriveProjectCanvasRenderBoundary,
   resolveProjectCanvasBudgetedVideoItems,
   resolveProjectCanvasImageInteractionMode,
   getProjectCanvasRenderTextureKey,
   getProjectCanvasRenderTransformKey,
   resolveProjectCanvasImageRuntimeRoute,
   summarizeProjectCanvasVideoBudget,
-  summarizeProjectCanvasRuntimeSurfaces
+  summarizeProjectCanvasImageFallbacks,
+  summarizeProjectCanvasRuntimeSurfaces,
+  resolveProjectCanvasRenderBoundary
 } from './projectCanvasRenderBoundary'
 
 function createImage(width: number, height: number) {
@@ -249,6 +252,61 @@ describe('projectCanvasRenderBoundary', () => {
     ).toBe('crop-excluded')
   })
 
+  it('routes images to fallback while WebGL is unavailable or generated cooldown is active', () => {
+    const item = createItem()
+
+    expect(
+      resolveProjectCanvasImageRuntimeRoute({
+        item,
+        isCropTarget: false,
+        webglReady: false,
+        loadedImageIds: new Set([item.id]),
+        residentImageIds: new Set([item.id])
+      })
+    ).toBe('fallback-image-proxy')
+
+    expect(
+      resolveProjectCanvasImageRuntimeRoute({
+        item,
+        isCropTarget: false,
+        webglReady: true,
+        loadedImageIds: new Set([item.id]),
+        residentImageIds: new Set([item.id]),
+        generatedCooldownImageIds: new Set([item.id])
+      })
+    ).toBe('fallback-image-proxy')
+  })
+
+  it('reports explicit WebGL and generated cooldown fallback reasons', () => {
+    const item = createItem()
+    const [webglUnavailable] = resolveProjectCanvasRenderBoundary({
+      items: [item],
+      webglReady: false,
+      loadedImageIds: new Set([item.id]),
+      residentImageIds: new Set([item.id])
+    })
+    const [generatedCooldown] = resolveProjectCanvasRenderBoundary({
+      items: [item],
+      webglReady: true,
+      loadedImageIds: new Set([item.id]),
+      residentImageIds: new Set([item.id]),
+      generatedCooldownImageIds: new Set([item.id])
+    })
+
+    expect(webglUnavailable.imageRuntimeRoute).toBe('fallback-image-proxy')
+    expect(webglUnavailable.imageFallbackReason).toBe('webgl-unavailable')
+    expect(generatedCooldown.imageRuntimeRoute).toBe('fallback-image-proxy')
+    expect(generatedCooldown.imageFallbackReason).toBe('generated-cooldown')
+    expect(summarizeProjectCanvasImageFallbacks([webglUnavailable, generatedCooldown])).toEqual({
+      fallbackImageItems: 2,
+      unloadedImageItems: 0,
+      failedImageItems: 0,
+      unsupportedImageItems: 0,
+      webglUnavailableImageItems: 1,
+      generatedCooldownImageItems: 1
+    })
+  })
+
   it('resolves image interaction modes from runtime route, selection, and tool state', () => {
     const item = createItem()
 
@@ -374,6 +432,44 @@ describe('projectCanvasRenderBoundary', () => {
       videoOverlayItems: 1,
       htmlOverlayItems: 1
     })
+  })
+
+  it('derives boundary maps and summaries from one resolved boundary pass', () => {
+    const loadedItem = createItem({ id: 'loaded-image' })
+    const failedItem = createItem({ id: 'failed-image' })
+    const cropItem = createItem({ id: 'crop-image' })
+    const params = {
+      items: [
+        loadedItem,
+        failedItem,
+        cropItem,
+        createVideoItem(),
+        createModel3DItem(),
+        createHtmlItem()
+      ],
+      cropTargetId: cropItem.id,
+      webglReady: true,
+      loadedImageIds: new Set([loadedItem.id]),
+      residentImageIds: new Set([loadedItem.id]),
+      failedImageIds: new Set([failedItem.id]),
+      stagePos: { x: 0, y: 0 },
+      stageScale: 1,
+      stageSize: { width: 800, height: 600 }
+    }
+
+    const derivation = deriveProjectCanvasRenderBoundary(params)
+    const resolvedItems = resolveProjectCanvasRenderBoundary(params)
+
+    expect(derivation.resolvedItems).toEqual(resolvedItems)
+    expect(derivation.renderSurfaceSummary).toEqual(summarizeProjectCanvasRuntimeSurfaces(params))
+    expect(derivation.fallbackImageSummary).toEqual(
+      summarizeProjectCanvasImageFallbacks(resolvedItems)
+    )
+    expect(derivation.imageRuntimeRouteById.get(loadedItem.id)).toBe('webgl-primary')
+    expect(derivation.imageRuntimeRouteById.get(failedItem.id)).toBe('fallback-image-proxy')
+    expect(derivation.imageRuntimeRouteById.get(cropItem.id)).toBe('crop-excluded')
+    expect(derivation.imageFallbackReasonById.get(failedItem.id)).toBe('failed')
+    expect(derivation.webglPrimaryImageCount).toBe(1)
   })
 
   it('budgets videos into active, paused, poster, and unmounted modes from viewport state', () => {

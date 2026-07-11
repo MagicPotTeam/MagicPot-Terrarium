@@ -193,7 +193,7 @@ const Hunyuan3DPanel: React.FC<Hunyuan3DPanelProps> = ({
           }
       }
     },
-    [mediaState, params, primaryTextureRefImage, provider, workflowSteps]
+    [mediaState, params, primaryTextureRefImage, provider, resolveWorkflowStepId, workflowSteps]
   )
 
   const renderPanelForStep = React.useCallback(

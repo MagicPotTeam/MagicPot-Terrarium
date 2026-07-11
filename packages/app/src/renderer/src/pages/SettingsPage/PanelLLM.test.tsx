@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
+import { rendererHostExtensionApiV1 } from '@renderer/extensions/generatedRegistry'
 import { createEmptyCustomSkill, getCustomSkillValidationIssues } from './PanelLLM'
 import PanelLLM from './PanelLLM'
 
@@ -99,6 +100,8 @@ beforeEach(() => {
     'llm.backup_key': 'Backup Key',
     'llm.add_api_profile': 'Add API Profile'
   }
+  delete rendererHostExtensionApiV1.chat
+  delete rendererHostExtensionApiV1.settings
   vi.clearAllMocks()
 })
 
@@ -148,6 +151,228 @@ describe('PanelLLM Agent API settings', () => {
     expect(screen.getByLabelText('Model Name')).toBeInTheDocument()
     expect(screen.queryByText('Protocol')).toBeNull()
     expect(screen.queryByText('Cloud / Local')).toBeNull()
+  })
+
+  it('routes Agent API settings through renderer extension seams', () => {
+    const saveSettings = vi.fn()
+    rendererHostExtensionApiV1.settings = {
+      applyAgentApiProfileCallType: ({ callType, profile }) =>
+        callType === 'codex'
+          ? {
+              ...profile,
+              call_type: 'codex',
+              base_url: 'https://api.openai.com/v1',
+              api_key: ''
+            }
+          : undefined,
+      buildAgentApiProfileCallTypeOptions: ({ baseOptions }) => [
+        ...baseOptions,
+        { label: 'Codex', value: 'codex' }
+      ],
+      renderAgentApiProfileCardExtra: () => <div>Extension settings loaded</div>,
+      resolveAgentApiProfileUi: ({ baseUi }) => ({
+        ...baseUi,
+        modelNamePlaceholder: 'extension-model',
+        showBaseUrlInput: false
+      })
+    }
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({})}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    expect(screen.queryByLabelText('Base URL')).toBeNull()
+    expect(screen.getByText('Extension settings loaded')).toBeInTheDocument()
+
+    fireEvent.mouseDown(screen.getByLabelText('Call Type'))
+    fireEvent.click(screen.getByRole('option', { name: 'Codex' }))
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'profile-1',
+            call_type: 'codex',
+            base_url: 'https://api.openai.com/v1',
+            api_key: ''
+          })
+        ]
+      }
+    })
+  })
+
+  it('lets renderer extensions clean Codex private state when changing call type from the dropdown', () => {
+    const saveSettings = vi.fn()
+    rendererHostExtensionApiV1.settings = {
+      applyAgentApiProfileCallType: ({ callType, profile }) => {
+        if (callType !== 'api' || profile.call_type !== 'codex') {
+          return undefined
+        }
+
+        const {
+          auth_mode: _authMode,
+          auth_account_email: _authAccountEmail,
+          auth_connected_at: _authConnectedAt,
+          call_type: _callType,
+          codex_fast_mode: _codexFastMode,
+          api_secret: _apiSecret,
+          backup_api_keys: _backupApiKeys,
+          tencent_secret_id: _tencentSecretId,
+          tencent_secret_key: _tencentSecretKey,
+          api_region: _apiRegion,
+          cos_bucket: _cosBucket,
+          cos_region: _cosRegion,
+          cos_key_prefix: _CosKeyPrefix,
+          ...cleanedProfile
+        } = profile
+
+        return {
+          ...cleanedProfile,
+          api_key: '',
+          base_url: 'https://api.openai.com/v1',
+          provider: 'default',
+          deployment: undefined,
+          is_ollama: false
+        }
+      },
+      buildAgentApiProfileCallTypeOptions: ({ baseOptions }) => [
+        ...baseOptions,
+        { label: 'Codex', value: 'codex' }
+      ]
+    }
+
+    render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: 'Codex OAuth',
+          base_url: 'https://api.openai.com/v1',
+          api_key: 'codex-token',
+          backup_api_keys: ['backup-token'],
+          api_secret: 'video-secret',
+          auth_mode: 'codex_oauth',
+          auth_account_email: 'agent@example.com',
+          auth_connected_at: '2025-01-01T00:00:00.000Z',
+          call_type: 'codex',
+          codex_fast_mode: false,
+          tencent_secret_id: 'hy3d-id',
+          tencent_secret_key: 'hy3d-secret',
+          api_region: 'ap-guangzhou',
+          cos_bucket: 'bucket',
+          cos_region: 'ap-guangzhou',
+          cos_key_prefix: 'prefix'
+        })}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    fireEvent.mouseDown(screen.getByLabelText('Call Type'))
+    fireEvent.click(screen.getByRole('option', { name: 'API Model' }))
+
+    const savedProfile = saveSettings.mock.calls.at(-1)?.[0]?.llm_config?.api_profiles?.[0]
+    expect(savedProfile).toMatchObject({
+      id: 'profile-1',
+      model_name: 'Codex OAuth',
+      api_key: '',
+      base_url: 'https://api.openai.com/v1',
+      provider: 'default',
+      is_ollama: false
+    })
+    expect(savedProfile).not.toHaveProperty('auth_mode')
+    expect(savedProfile).not.toHaveProperty('auth_account_email')
+    expect(savedProfile).not.toHaveProperty('auth_connected_at')
+    expect(savedProfile).not.toHaveProperty('call_type')
+    expect(savedProfile).not.toHaveProperty('codex_fast_mode')
+    expect(savedProfile).not.toHaveProperty('backup_api_keys')
+    expect(savedProfile).not.toHaveProperty('api_secret')
+    expect(savedProfile).not.toHaveProperty('tencent_secret_id')
+    expect(savedProfile).not.toHaveProperty('tencent_secret_key')
+    expect(savedProfile).not.toHaveProperty('api_region')
+    expect(savedProfile).not.toHaveProperty('cos_bucket')
+    expect(savedProfile).not.toHaveProperty('cos_region')
+    expect(savedProfile).not.toHaveProperty('cos_key_prefix')
+  })
+
+  it('lets renderer extension extras replace the full Agent API profile list', () => {
+    const saveSettings = vi.fn()
+    rendererHostExtensionApiV1.settings = {
+      buildAgentApiProfileCallTypeOptions: ({ baseOptions }) => [
+        ...baseOptions,
+        { label: 'Codex', value: 'codex' }
+      ],
+      renderAgentApiProfileCardExtra: ({ onReplaceProfiles, profiles }) => (
+        <button
+          type="button"
+          onClick={() =>
+            onReplaceProfiles(
+              profiles.map((profile) => ({
+                ...profile,
+                api_key: '',
+                auth_mode: undefined,
+                call_type: undefined
+              }))
+            )
+          }
+        >
+          Extension disconnect all
+        </button>
+      )
+    }
+
+    render(
+      <PanelLLM
+        settingsValue={{
+          ...DEFAULT_CONFIG,
+          llm_config: {
+            ...DEFAULT_CONFIG.llm_config,
+            api_profiles: [
+              {
+                id: 'codex-oauth',
+                model_name: 'Codex OAuth',
+                base_url: 'https://api.openai.com/v1',
+                api_key: '',
+                auth_mode: 'codex_oauth',
+                call_type: 'codex'
+              },
+              {
+                id: 'codex-call-type',
+                model_name: 'Codex Call Type',
+                base_url: 'https://api.openai.com/v1',
+                api_key: 'codex-token',
+                call_type: 'codex'
+              }
+            ]
+          }
+        }}
+        saveSettings={saveSettings}
+        onSelectTab={vi.fn()}
+      />
+    )
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Extension disconnect all' })[0])
+
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'codex-oauth',
+            api_key: '',
+            auth_mode: undefined,
+            call_type: undefined
+          }),
+          expect.objectContaining({
+            id: 'codex-call-type',
+            api_key: '',
+            auth_mode: undefined,
+            call_type: undefined
+          })
+        ]
+      }
+    })
   })
 
   it('creates new profiles with the explicit default provider and capability options', () => {

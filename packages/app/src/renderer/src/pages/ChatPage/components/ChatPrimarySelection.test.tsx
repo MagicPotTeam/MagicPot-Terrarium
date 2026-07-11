@@ -56,8 +56,8 @@ describe('ChatPrimarySelection', () => {
       />
     )
 
-    fireEvent.click(screen.getByRole('button', { name: '\u9ad8' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: '\u4e2d' }))
+    fireEvent.click(screen.getByRole('button', { name: 'High' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Medium' }))
 
     expect(onSelectReasoningEffort).toHaveBeenCalledWith('medium')
   })

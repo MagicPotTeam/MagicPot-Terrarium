@@ -810,6 +810,37 @@ describe('ProjectCanvasPageVisualOverlays selection chrome routing', () => {
     ])
   })
 
+  it('keeps equal-zIndex DOM overlays in deterministic bucket and input order', () => {
+    const firstVideoItem = createVideoItem('video-equal-first')
+    const secondVideoItem = createVideoItem('video-equal-second')
+    const htmlItem = createHtmlItem('html-equal')
+    const fileItem = createFileItem('file-equal')
+    const textItem = createTextItem('text-equal')
+    const annotationItem = createAnnotationItem('annotation-equal')
+    ;[firstVideoItem, secondVideoItem, htmlItem, fileItem, textItem, annotationItem].forEach(
+      (item) => {
+        item.zIndex = 10
+      }
+    )
+
+    renderVisualOverlays({
+      videoItems: [secondVideoItem, firstVideoItem],
+      htmlItems: [htmlItem],
+      fileItems: [fileItem],
+      textItems: [textItem],
+      annotationItems: [annotationItem]
+    })
+
+    expect(renderedOverlayOrder).toEqual([
+      'video:video-equal-second',
+      'video:video-equal-first',
+      'html:html-equal',
+      'file:file-equal',
+      'text:text-equal',
+      'annotation:annotation-equal'
+    ])
+  })
+
   it('exposes truthful overlay mount counts for the current viewport slice', () => {
     const modelItem = createModel3DItem('model-1')
     const visibleVideo = createVideoItem('video-visible')

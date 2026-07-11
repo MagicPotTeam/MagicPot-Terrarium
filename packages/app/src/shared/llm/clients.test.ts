@@ -41,6 +41,30 @@ describe('shared llm endpoint normalization', () => {
     expect(requestBody.include).toEqual(['web_search_call.action.sources'])
   })
 
+  it('rewrites CLIProxy GPT-5.6 Ultra reasoning to the max wire value', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }]
+      })
+    })
+
+    const client = new OpenAIAPICli('sk-test', 'https://example.test/v1', 'gpt-5.6-sol', {
+      apiMode: 'responses',
+      enableHostedTools: false,
+      reasoningProfile: { model_name: 'gpt-5.6-sol', call_type: 'cliproxyapi' },
+      fetchImpl: fetchMock
+    })
+
+    await client.chat({
+      messages: [{ role: 'user', content: 'hello' }],
+      reasoningEffort: 'ultra'
+    })
+
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(requestBody.reasoning).toEqual({ effort: 'max' })
+  })
+
   it('keeps local OpenAI-compatible gateways on /chat/completions', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

@@ -434,6 +434,16 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
   const mountedDomOverlayItemsRef = React.useRef<MountedDomOverlayItems | null>(null)
   const domOverlayVisibilityRuntimeRef = React.useRef<ProjectCanvasRuntime | null>(null)
   const domOverlayVisibilityItemsRef = React.useRef<CanvasItem[] | null>(null)
+
+  React.useEffect(
+    () => () => {
+      domOverlayVisibilityRuntimeRef.current?.dispose()
+      domOverlayVisibilityRuntimeRef.current = null
+      domOverlayVisibilityItemsRef.current = null
+    },
+    []
+  )
+
   const domCanvasItems = React.useMemo<CanvasItem[]>(
     () => [...renderableHtmlCanvasItems, ...fileItems, ...textItems, ...annotationItems],
     [annotationItems, fileItems, renderableHtmlCanvasItems, textItems]
@@ -469,7 +479,8 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
       runtime.setViewport({ x: stagePos.x, y: stagePos.y, scale: safeScale })
       const queriedItems = runtime.getVisibleItems({
         stageSize,
-        overscanPx: PROJECT_CANVAS_DOM_OVERLAY_VISIBLE_OVERSCAN_PX
+        overscanPx: PROJECT_CANVAS_DOM_OVERLAY_VISIBLE_OVERSCAN_PX,
+        preserveOrder: false
       })
       mountedIds = new Set<string>(queriedItems.map((item) => item.id))
       selectedIds.forEach((itemId) => mountedIds?.add(itemId))

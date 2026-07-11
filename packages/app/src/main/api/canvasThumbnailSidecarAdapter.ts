@@ -67,6 +67,8 @@ type EventCallback = (...args: unknown[]) => void
 
 type EventSourceLike = {
   on(event: string, listener: EventCallback): unknown
+  off?(event: string, listener: EventCallback): unknown
+  removeListener?(event: string, listener: EventCallback): unknown
 }
 
 export type CanvasThumbnailSidecarWritable = {
@@ -519,31 +521,15 @@ export async function runCanvasThumbnailSidecarJson<TResponse = unknown>(
 
   return new Promise((resolve) => {
     let settled = false
-
-    const settle = (result: CanvasThumbnailSidecarResult<TResponse>): void => {
-      if (settled) {
-        return
-      }
-
-      settled = true
-      clearTimeout(timeout)
-      resolve(result)
+    const removeListener = (
+      source: EventSourceLike | null | undefined,
+      event: string,
+      listener: EventCallback
+    ): void => {
+      if (source?.off) source.off(event, listener)
+      else source?.removeListener?.(event, listener)
     }
-
-    const timeout = setTimeout(() => {
-      child.kill?.('SIGKILL')
-      settle(
-        createFallback('timeout', `Canvas thumbnail sidecar timed out after ${timeoutMs}ms.`, {
-          binaryPath,
-          args,
-          stderr: stderr.text,
-          stderrTruncated: stderr.truncated,
-          timedOut: true
-        })
-      )
-    }, timeoutMs)
-
-    child.stdout?.on('data', (...eventArgs) => {
+    const onStdoutData: EventCallback = (...eventArgs) => {
       const appended = appendCapturedChunk(stdout, eventArgs[0])
       if (!appended) {
         child.kill?.('SIGKILL')
@@ -560,13 +546,42 @@ export async function runCanvasThumbnailSidecarJson<TResponse = unknown>(
           )
         )
       }
-    })
+    }
+    const onStderrData: EventCallback = (...eventArgs) => {
+      appendCapturedChunk(stderr, eventArgs[0])
+    }
+    const cleanupListeners = (): void => {
+      removeListener(child.stdout, 'data', onStdoutData)
+      removeListener(child.stderr, 'data', onStderrData)
+      removeListener(child, 'error', onError)
+      removeListener(child, 'close', onClose)
+    }
 
-    child.stderr?.on('data', (...args) => {
-      appendCapturedChunk(stderr, args[0])
-    })
+    const settle = (result: CanvasThumbnailSidecarResult<TResponse>): void => {
+      if (settled) {
+        return
+      }
 
-    child.on('error', (...eventArgs) => {
+      settled = true
+      clearTimeout(timeout)
+      cleanupListeners()
+      resolve(result)
+    }
+
+    const timeout = setTimeout(() => {
+      child.kill?.('SIGKILL')
+      settle(
+        createFallback('timeout', `Canvas thumbnail sidecar timed out after ${timeoutMs}ms.`, {
+          binaryPath,
+          args,
+          stderr: stderr.text,
+          stderrTruncated: stderr.truncated,
+          timedOut: true
+        })
+      )
+    }, timeoutMs)
+
+    const onError: EventCallback = (...eventArgs) => {
       settle(
         createFallback(
           'spawn-error',
@@ -579,9 +594,9 @@ export async function runCanvasThumbnailSidecarJson<TResponse = unknown>(
           }
         )
       )
-    })
+    }
 
-    child.on('close', (...eventArgs) => {
+    const onClose: EventCallback = (...eventArgs) => {
       const exitCode = typeof eventArgs[0] === 'number' ? eventArgs[0] : null
       const signal = typeof eventArgs[1] === 'string' ? eventArgs[1] : null
       if (exitCode !== 0 || signal) {
@@ -622,7 +637,12 @@ export async function runCanvasThumbnailSidecarJson<TResponse = unknown>(
           )
         )
       }
-    })
+    }
+
+    child.stdout?.on('data', onStdoutData)
+    child.stderr?.on('data', onStderrData)
+    child.on('error', onError)
+    child.on('close', onClose)
 
     if (!child.stdin) {
       child.kill?.('SIGKILL')

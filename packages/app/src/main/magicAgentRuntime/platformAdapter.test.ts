@@ -12,6 +12,7 @@ vi.mock('electron', () => ({
 
 import { AgentKernel } from '../agentKernel'
 import { MagicAgentPlatformAdapter } from './platformAdapter'
+import { MagicAgentToolRegistry } from './toolRegistry'
 import { MagicAgentCreativeToolRegistry } from './tools'
 import type { MagicAgentCreativeToolAdapter } from './tools'
 
@@ -115,7 +116,83 @@ describe('MagicAgentPlatformAdapter', () => {
     )
   })
 
-  it('rejects direct AssistantRuntime tool calls at the platform boundary', async () => {
+  it('filters terminal creative tools from platform listing, direct calls, and kernel surface', async () => {
+    const terminalCall = vi.fn(async (name: string, args: Record<string, unknown>) => ({
+      ok: true,
+      toolName: name,
+      category: 'terminal' as const,
+      status: 'available' as const,
+      data: { args }
+    }))
+    const terminalAdapter: MagicAgentCreativeToolAdapter = {
+      definitions: () => [
+        {
+          name: 'terminal.run',
+          category: 'terminal',
+          description: 'Terminal run.',
+          inputSchema: { type: 'object' },
+          status: 'available',
+          permissionLevel: 'destructive',
+          requiresConfirmation: false,
+          disabledByDefault: false
+        }
+      ],
+      callTool: terminalCall
+    }
+    const assistantRuntime = createAssistantRuntime()
+    assistantRuntime.listTools.mockReturnValue([
+      {
+        name: 'assistant.echo',
+        description: 'Assistant echo.',
+        inputSchema: { type: 'object' }
+      },
+      {
+        name: ' Agent.Terminal.Run ',
+        description: 'Assistant terminal.',
+        inputSchema: { type: 'object' }
+      }
+    ])
+    const agentKernel = new AgentKernel()
+    const toolRegistry = new MagicAgentToolRegistry()
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({
+        adapters: [creativeAdapter, terminalAdapter]
+      }),
+      agentKernel,
+      toolRegistry
+    })
+
+    const listedTools = adapter
+      .listTools()
+      .map((tool) => `${tool.source}:${tool.name.trim().toLowerCase()}`)
+    expect(listedTools).not.toContain('assistantRuntime:agent.terminal.run')
+    expect(listedTools).not.toContain('creative:terminal.run')
+    expect(
+      agentKernel.listCapabilities().map((capability) => capability.capabilityId)
+    ).not.toContain('magicagent.platform.tool.creative.terminal.run')
+    expect(agentKernel.getTool('magicagent.creative.terminal.run')).toBeUndefined()
+    expect(toolRegistry.get('agent.terminal.run')).toBeUndefined()
+    expect(toolRegistry.get('terminal.run')).toBeUndefined()
+
+    await expect(
+      adapter.callTool({
+        source: 'creative',
+        name: ' Terminal.Run ',
+        args: { command: 'pwd' },
+        route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      toolName: 'terminal.run',
+      source: 'creative',
+      status: 'permission-denied'
+    })
+    expect(terminalCall).not.toHaveBeenCalled()
+  })
+
+  it('rejects mixed-case direct AssistantRuntime tool calls at the platform boundary', async () => {
     const assistantRuntime = createAssistantRuntime()
     const adapter = new MagicAgentPlatformAdapter({
       chatService: createChatService(),
@@ -125,7 +202,7 @@ describe('MagicAgentPlatformAdapter', () => {
 
     await expect(
       adapter.callTool({
-        name: 'assistant.echo',
+        name: ' Assistant.Echo ',
         args: { text: 'hi' },
         route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
       })
@@ -183,6 +260,109 @@ describe('MagicAgentPlatformAdapter', () => {
     )
   })
 
+  it('forwards graph cancellation signals into AssistantRuntime agent execution', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [creativeAdapter] })
+    })
+    const controller = new AbortController()
+
+    let finishRun: ((value: AssistantRuntimeResult) => void) | undefined
+    assistantRuntime.handleMessage.mockImplementation(
+      async () =>
+        new Promise<AssistantRuntimeResult>((resolve) => {
+          finishRun = resolve
+        })
+    )
+    const runPromise = adapter.runAgent(
+      {
+        agentId: 'magicpot.default.chat',
+        text: 'cancel-aware run',
+        route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+      },
+      { signal: controller.signal }
+    )
+    await Promise.resolve()
+
+    const forwardedSignal = assistantRuntime.handleMessage.mock.calls[0]?.[0].signal
+    expect(forwardedSignal).toBeInstanceOf(AbortSignal)
+    expect(forwardedSignal).not.toBe(controller.signal)
+    controller.abort('graph cancelled')
+    expect(forwardedSignal?.aborted).toBe(true)
+    expect(forwardedSignal?.reason).toBe('graph cancelled')
+    finishRun?.({
+      runId: 'assistant-run-cancelled',
+      sessionKey: 'generic:dm:demo',
+      historySize: 1,
+      status: 'cancelled',
+      reply: { content: 'cancelled' },
+      events: []
+    })
+    await expect(runPromise).resolves.toMatchObject({ status: 'aborted' })
+  })
+
+  it('enforces platform run timeout requests and reports timeout status', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    assistantRuntime.handleMessage.mockImplementation(
+      async () => new Promise<AssistantRuntimeResult>(() => undefined)
+    )
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [creativeAdapter] })
+    })
+
+    await expect(
+      adapter.runAgent({
+        agentId: 'magicpot.default.chat',
+        text: 'time out',
+        timeoutMs: 15,
+        route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+      })
+    ).resolves.toMatchObject({
+      status: 'timeout',
+      error: expect.stringContaining('timed out after 15ms')
+    })
+    expect(assistantRuntime.handleMessage.mock.calls[0]?.[0].signal?.aborted).toBe(true)
+  })
+
+  it('forwards graph cancellation signals into creative tool execution', async () => {
+    let receivedSignal: AbortSignal | undefined
+    const signalAwareAdapter: MagicAgentCreativeToolAdapter = {
+      definitions: creativeAdapter.definitions,
+      callTool: async (name, args, context) => {
+        receivedSignal = context?.signal
+        return {
+          ok: true,
+          toolName: name,
+          category: 'image',
+          status: 'available',
+          data: { args }
+        }
+      }
+    }
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime: createAssistantRuntime(),
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [signalAwareAdapter] })
+    })
+    const controller = new AbortController()
+
+    await adapter.callTool(
+      {
+        source: 'creative',
+        name: 'creative.echo',
+        args: { prompt: 'paint' },
+        route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+      },
+      { signal: controller.signal }
+    )
+
+    expect(receivedSignal).toBe(controller.signal)
+  })
+
   it('defaults route-scoped agent runs to no assistant tools when allowedToolNames is omitted', async () => {
     const assistantRuntime = createAssistantRuntime()
     const adapter = new MagicAgentPlatformAdapter({
@@ -216,7 +396,7 @@ describe('MagicAgentPlatformAdapter', () => {
       agentId: 'magicpot.default.chat',
       text: 'try terminal',
       route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' },
-      allowedToolNames: ['assistant.echo', 'agent.terminal.run']
+      allowedToolNames: ['assistant.echo', ' Agent.Terminal.Run ']
     })
 
     expect(assistantRuntime.handleMessage).toHaveBeenCalledWith(

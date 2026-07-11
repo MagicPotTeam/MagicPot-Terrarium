@@ -18,7 +18,9 @@ import {
 } from './projectCanvas/benchmarkPolicy.mjs'
 
 const repoRoot = process.cwd()
-const trashRoot = path.resolve(path.join(resolveProjectCanvasBenchmarkDesktopPath(), '.magicpot-trash'))
+const trashRoot = path.resolve(
+  path.join(resolveProjectCanvasBenchmarkDesktopPath(), '.magicpot-trash')
+)
 const execFileAsync = promisify(execFile)
 const ROOT_RUNTIME_TRASH_DIR_PATTERNS = [
   /^\.magicpot-trash$/i,
@@ -437,8 +439,8 @@ async function runBehaviorChecks(lines) {
     },
     { now: 123, pid: 456 }
   )
-  assert.equal(benchmarkWindowPolicy.windowMode, 'secondary-or-offscreen')
-  assert.equal(benchmarkWindowPolicy.showBehavior, 'show-inactive')
+  assert.equal(benchmarkWindowPolicy.windowMode, 'hidden')
+  assert.equal(benchmarkWindowPolicy.showBehavior, 'hidden')
   assert.equal(benchmarkWindowPolicy.runId, 'evil-benchmark')
 
   const automatedArtifactRoot = testUiPolicy.resolveTestArtifactRoot({
@@ -500,8 +502,8 @@ async function runBehaviorChecks(lines) {
   assert.equal(overlapAssessment.shouldHideWindow, true)
   lines.push('[PASS] behavioral testUiPolicy checks')
 
-  assert.equal(benchmarkEnv.MAGICPOT_TEST_UI_MODE, 'secondary-or-offscreen')
-  assert.equal(benchmarkEnv.MAGICPOT_TEST_WINDOW_MODE, 'secondary-or-offscreen')
+  assert.equal(benchmarkEnv.MAGICPOT_TEST_UI_MODE, 'hidden')
+  assert.equal(benchmarkEnv.MAGICPOT_TEST_WINDOW_MODE, 'hidden')
   assert.equal(benchmarkEnv.MAGICPOT_TEST_RUN_ID, 'evil-benchmark')
   assert.equal(sanitizeProjectCanvasRunId('../../evil benchmark'), 'evil-benchmark')
   assert.equal(staysWithinTrashRoot(resolveProjectCanvasArtifactRoot('../../evil benchmark')), true)

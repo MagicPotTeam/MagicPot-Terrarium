@@ -60,7 +60,52 @@ export type CanvasThumbnailRuntimeMetrics = {
   nativeGeneratedCount: number
   staleCount: number
   failedCount: number
+  workerPoolWorkerCount?: number
+  workerPoolIdleWorkerCount?: number
+  workerPoolActiveRequestCount?: number
+  workerPoolQueuedRequestCount?: number
+  workerPoolInFlightKeyCount?: number
+  workerPoolDedupedRequestCount?: number
+  workerPoolRejectedRequestCount?: number
+  workerPoolTimedOutRequestCount?: number
+  workerPoolFailedWorkerCount?: number
+  workerPoolCompletedRequestCount?: number
+  workerPoolMaxWorkers?: number
+  workerPoolMaxQueueSize?: number
 }
+
+export const CANVAS_THUMBNAIL_RUNTIME_COUNTER_KEYS = [
+  'thumbnailCount',
+  'cacheHitCount',
+  'generatedCount',
+  'sidecarGeneratedCount',
+  'nativeGeneratedCount',
+  'staleCount',
+  'failedCount'
+] as const satisfies readonly (keyof CanvasThumbnailRuntimeMetrics)[]
+
+export const CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_MAPPINGS = [
+  ['workerPoolWorkerCount', 'workerCount'],
+  ['workerPoolIdleWorkerCount', 'idleWorkerCount'],
+  ['workerPoolActiveRequestCount', 'activeRequestCount'],
+  ['workerPoolQueuedRequestCount', 'queuedRequestCount'],
+  ['workerPoolInFlightKeyCount', 'inFlightKeyCount'],
+  ['workerPoolDedupedRequestCount', 'dedupedRequestCount'],
+  ['workerPoolRejectedRequestCount', 'rejectedRequestCount'],
+  ['workerPoolTimedOutRequestCount', 'timedOutRequestCount'],
+  ['workerPoolFailedWorkerCount', 'failedWorkerCount'],
+  ['workerPoolCompletedRequestCount', 'completedRequestCount'],
+  ['workerPoolMaxWorkers', 'maxWorkers'],
+  ['workerPoolMaxQueueSize', 'maxQueueSize']
+] as const
+
+export const CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS =
+  CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_MAPPINGS.map(([runtimeMetricKey]) => runtimeMetricKey)
+
+export const CANVAS_THUMBNAIL_RUNTIME_METRIC_KEYS = [
+  ...CANVAS_THUMBNAIL_RUNTIME_COUNTER_KEYS,
+  ...CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS
+] as const satisfies readonly (keyof CanvasThumbnailRuntimeMetrics)[]
 
 export type CanvasThumbnailManifestLike = CanvasThumbnailManifest
 

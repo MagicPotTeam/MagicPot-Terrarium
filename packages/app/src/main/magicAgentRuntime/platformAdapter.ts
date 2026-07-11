@@ -9,6 +9,7 @@ import type {
   MagicAgentPlatformToolSource
 } from '@shared/api/svcMagicAgentPlatform'
 import type { LLMProxySvc } from '@shared/api/svcLLMProxy'
+import { normalizeMagicPotToolName } from '@shared/app/types'
 import { normalizeAgentRoute } from '@shared/agent'
 import { getAssistantRuntime } from '../assistantRuntime/runtime'
 import type { AssistantRuntime } from '../assistantRuntime/runtime'
@@ -28,6 +29,18 @@ import {
   type MagicAgentCreativeToolDefinition,
   type MagicAgentCreativeToolResult
 } from './tools'
+import { isMagicAgentPlatformDeniedToolName } from './toolPolicy'
+
+export type MagicAgentPlatformExecutionOptions = {
+  signal?: AbortSignal
+}
+
+class MagicAgentPlatformTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`MagicAgent platform run timed out after ${timeoutMs}ms.`)
+    this.name = 'MagicAgentPlatformTimeoutError'
+  }
+}
 
 export type MagicAgentPlatformAdapterDeps = {
   chatService?: Pick<LLMProxySvc, 'chat'>
@@ -61,8 +74,6 @@ const toKernelCreativeCapabilityId = (toolName: string): string =>
 const toKernelCreativeToolName = (toolName: string): string =>
   `magicagent.creative.${toKernelSafeSegment(toolName)}`
 
-const PLATFORM_RUN_DENIED_ASSISTANT_TOOLS = new Set(['agent.terminal.run'])
-
 const requirePlatformRoute = (
   route: AgentRouteLike | undefined,
   operation: string
@@ -80,9 +91,13 @@ const resolveRunAllowedToolNames = (
   // Platform v1 is no-tools by default. A renderer-facing run must opt into a
   // concrete allowlist; agent.toolNames can only further narrow that list.
   const requestedNames = Array.isArray(requested)
-    ? requested
-        .map(cleanString)
-        .filter((name) => Boolean(name) && !PLATFORM_RUN_DENIED_ASSISTANT_TOOLS.has(name))
+    ? [
+        ...new Set(
+          requested
+            .map((name) => normalizeMagicPotToolName(name))
+            .filter((name) => Boolean(name) && !isMagicAgentPlatformDeniedToolName(name))
+        )
+      ]
     : []
   if (!requestedNames.length) {
     return []
@@ -92,7 +107,9 @@ const resolveRunAllowedToolNames = (
     return requestedNames
   }
 
-  const agentSet = new Set(agentToolNames.map(cleanString).filter(Boolean))
+  const agentSet = new Set(
+    agentToolNames.map((name) => normalizeMagicPotToolName(name)).filter(Boolean)
+  )
   return requestedNames.filter((name) => agentSet.has(name))
 }
 
@@ -126,7 +143,7 @@ const formatJsonContent = (value: unknown): string => {
 const normalizeAgentDefinition = (
   agent: MagicAgentPlatformAgentDefinition
 ): MagicAgentPlatformAgentDefinition => ({
-  id: cleanString(agent.id),
+  id: normalizeMagicPotToolName(agent.id),
   name: cleanString(agent.name) || cleanString(agent.id),
   ...(cleanString(agent.description) ? { description: cleanString(agent.description) } : {}),
   ...(cleanString(agent.systemPrompt) ? { systemPrompt: cleanString(agent.systemPrompt) } : {}),
@@ -291,29 +308,35 @@ export class MagicAgentPlatformAdapter {
 
   refreshRuntimeTools(): void {
     const registrations: MagicAgentToolRegistration[] = [
-      ...this.assistantRuntime.listTools().map((tool) =>
-        platformToolToRuntimeRegistration(
-          assistantToolToPlatformDefinition(tool),
-          async (args, context) => {
-            const result = await this.assistantRuntime.callTool(
-              requirePlatformRoute(
-                context.metadata?.route as AgentRouteLike | undefined,
-                'runtime tool dispatch'
-              ),
-              tool.name,
-              args,
-              {
-                allowedToolNames: context.metadata?.allowedToolNames as string[] | null | undefined
+      ...this.assistantRuntime
+        .listTools()
+        .filter((tool) => !isMagicAgentPlatformDeniedToolName(tool.name))
+        .map((tool) =>
+          platformToolToRuntimeRegistration(
+            assistantToolToPlatformDefinition(tool),
+            async (args, context) => {
+              const result = await this.assistantRuntime.callTool(
+                requirePlatformRoute(
+                  context.metadata?.route as AgentRouteLike | undefined,
+                  'runtime tool dispatch'
+                ),
+                normalizeMagicPotToolName(tool.name),
+                args,
+                {
+                  allowedToolNames: context.metadata?.allowedToolNames as
+                    | string[]
+                    | null
+                    | undefined
+                }
+              )
+              return {
+                content: String(result?.content || ''),
+                ...(result?.metadata ? { metadata: result.metadata } : {})
               }
-            )
-            return {
-              content: String(result?.content || ''),
-              ...(result?.metadata ? { metadata: result.metadata } : {})
             }
-          }
-        )
-      ),
-      ...this.creativeToolRegistry.listTools().map((tool) =>
+          )
+        ),
+      ...this.listPlatformCreativeTools().map((tool) =>
         platformToolToRuntimeRegistration(
           creativeToolToPlatformDefinition(tool),
           async (args, context) =>
@@ -360,11 +383,16 @@ export class MagicAgentPlatformAdapter {
     const tools: MagicAgentPlatformToolDefinition[] = []
 
     if (!source || source === 'assistantRuntime') {
-      tools.push(...this.assistantRuntime.listTools().map(assistantToolToPlatformDefinition))
+      tools.push(
+        ...this.assistantRuntime
+          .listTools()
+          .filter((tool) => !isMagicAgentPlatformDeniedToolName(tool.name))
+          .map(assistantToolToPlatformDefinition)
+      )
     }
 
     if (!source || source === 'creative') {
-      tools.push(...this.creativeToolRegistry.listTools().map(creativeToolToPlatformDefinition))
+      tools.push(...this.listPlatformCreativeTools().map(creativeToolToPlatformDefinition))
     }
 
     // v1 deliberately does not expose MagicAgentRuntime's internal registry as a
@@ -373,8 +401,11 @@ export class MagicAgentPlatformAdapter {
     return tools
   }
 
-  async callTool(req: MagicAgentPlatformToolCallReq): Promise<MagicAgentPlatformToolCallResp> {
-    const name = cleanString(req.name)
+  async callTool(
+    req: MagicAgentPlatformToolCallReq,
+    options: MagicAgentPlatformExecutionOptions = {}
+  ): Promise<MagicAgentPlatformToolCallResp> {
+    const name = normalizeMagicPotToolName(req.name)
     if (!name) {
       return {
         ok: false,
@@ -388,6 +419,17 @@ export class MagicAgentPlatformAdapter {
 
     const source = req.source || this.resolveToolSource(name)
     const args = req.args || {}
+
+    if (isMagicAgentPlatformDeniedToolName(name)) {
+      return {
+        ok: false,
+        toolName: name,
+        source,
+        status: 'permission-denied',
+        content: `Tool "${name}" is not allowed through the MagicAgent platform boundary.`,
+        error: `Tool "${name}" is not allowed through the MagicAgent platform boundary.`
+      }
+    }
 
     try {
       if (source === 'assistantRuntime') {
@@ -405,7 +447,7 @@ export class MagicAgentPlatformAdapter {
       if (source === 'creative') {
         const route = requirePlatformRoute(req.route, 'creative tool call')
         return creativeResultToPlatformToolResult(
-          await this.invokeCreativeToolViaKernel(name, args, undefined, route, req.metadata)
+          await this.invokeCreativeToolViaKernel(name, args, options.signal, route, req.metadata)
         )
       }
 
@@ -423,16 +465,38 @@ export class MagicAgentPlatformAdapter {
     }
   }
 
-  async runAgent(req: MagicAgentPlatformRunReq): Promise<MagicAgentPlatformRunResp> {
+  async runAgent(
+    req: MagicAgentPlatformRunReq,
+    options: MagicAgentPlatformExecutionOptions = {}
+  ): Promise<MagicAgentPlatformRunResp> {
     this.refreshRuntimeTools()
     const route = requirePlatformRoute(req.route, 'agent run')
-    const agentId = cleanString(req.agentId) || 'magicpot.default.chat'
+    const agentId = normalizeMagicPotToolName(req.agentId) || 'magicpot.default.chat'
     const agentDefinition = this.listAgents().find((agent) => agent.id === agentId)
     const effectiveAllowedToolNames = resolveRunAllowedToolNames(
       req.allowedToolNames,
       agentDefinition?.toolNames
     )
     const startedAt = Date.now()
+    const requestedTimeoutMs = Number(req.timeoutMs)
+    const timeoutMs =
+      Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+        ? Math.max(1, Math.floor(requestedTimeoutMs))
+        : undefined
+    const executionController = new AbortController()
+    const forwardExternalAbort = (): void => executionController.abort(options.signal?.reason)
+    if (options.signal?.aborted) {
+      forwardExternalAbort()
+    } else {
+      options.signal?.addEventListener('abort', forwardExternalAbort, { once: true })
+    }
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+    if (timeoutMs) {
+      timeoutHandle = setTimeout(
+        () => executionController.abort(new MagicAgentPlatformTimeoutError(timeoutMs)),
+        timeoutMs
+      )
+    }
     const session = this.agentKernel.registerSession(route, { source: 'kernel' })
     const kernelRun = this.agentKernel.createMasterRun({
       session,
@@ -453,12 +517,13 @@ export class MagicAgentPlatformAdapter {
     })
 
     try {
-      const assistantResult = await this.assistantRuntime.handleMessage({
+      const assistantPromise = this.assistantRuntime.handleMessage({
         route,
         text: req.text,
         ...(req.attachments?.length ? { attachments: req.attachments } : {}),
         ...(req.systemPrompt ? { systemPrompt: req.systemPrompt } : {}),
         ...(req.profileId ? { profileId: req.profileId } : {}),
+        signal: executionController.signal,
         execution: {
           mode: 'inherit',
           allowedToolNames: effectiveAllowedToolNames,
@@ -468,9 +533,28 @@ export class MagicAgentPlatformAdapter {
             `magicagent:${agentId}`
         }
       })
+      const assistantResult = timeoutMs
+        ? await Promise.race([
+            assistantPromise,
+            new Promise<never>((_resolve, reject) => {
+              const rejectOnAbort = (): void => {
+                if (executionController.signal.reason instanceof MagicAgentPlatformTimeoutError) {
+                  reject(executionController.signal.reason)
+                }
+              }
+              if (executionController.signal.aborted) {
+                rejectOnAbort()
+              } else {
+                executionController.signal.addEventListener('abort', rejectOnAbort, { once: true })
+              }
+            })
+          ])
+        : await assistantPromise
       const finishedAt = Date.now()
-      const status =
-        assistantResult.status === 'failed'
+      const timedOut = executionController.signal.reason instanceof MagicAgentPlatformTimeoutError
+      const status = timedOut
+        ? 'timeout'
+        : assistantResult.status === 'failed'
           ? 'failed'
           : assistantResult.status === 'cancelled'
             ? 'aborted'
@@ -541,9 +625,49 @@ export class MagicAgentPlatformAdapter {
           }
         })),
         startedAt,
-        finishedAt
+        finishedAt,
+        ...(timedOut ? { error: executionController.signal.reason.message } : {})
       }
     } catch (error) {
+      if (executionController.signal.reason instanceof MagicAgentPlatformTimeoutError) {
+        const timeoutError = executionController.signal.reason
+        const finishedAt = Date.now()
+        this.agentKernel.updateRun(kernelRun.runId, {
+          status: 'failed',
+          endedAt: finishedAt,
+          metadata: {
+            ...(kernelRun.metadata || {}),
+            error: timeoutError.message,
+            magicAgentStatus: 'timeout',
+            executionBoundary: 'assistantRuntime'
+          }
+        })
+        this.agentKernel.recordEvent({
+          runId: kernelRun.runId,
+          sessionKey: session.sessionKey,
+          type: 'run.failed',
+          message: timeoutError.message,
+          metadata: {
+            source: 'magicAgentPlatform',
+            executionBoundary: 'assistantRuntime',
+            agentId,
+            magicAgentStatus: 'timeout',
+            timeoutMs
+          }
+        })
+        return {
+          runId: kernelRun.runId,
+          agentId,
+          status: 'timeout',
+          content: '',
+          messages: [{ role: 'user', content: req.text }],
+          toolCalls: [],
+          events: [],
+          startedAt,
+          finishedAt,
+          error: timeoutError.message
+        }
+      }
       const message = error instanceof Error ? error.message : String(error)
       this.agentKernel.updateRun(kernelRun.runId, {
         status: 'failed',
@@ -566,14 +690,23 @@ export class MagicAgentPlatformAdapter {
         }
       })
       throw error
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle)
+      options.signal?.removeEventListener('abort', forwardExternalAbort)
     }
   }
 
   private resolveToolSource(name: string): MagicAgentPlatformToolSource {
-    if (this.assistantRuntime.listTools().some((tool) => tool.name === name)) {
+    if (
+      this.assistantRuntime
+        .listTools()
+        .some((tool) => normalizeMagicPotToolName(tool.name) === name)
+    ) {
       return 'assistantRuntime'
     }
-    if (this.creativeToolRegistry.listTools().some((tool) => tool.name === name)) {
+    if (
+      this.listPlatformCreativeTools().some((tool) => normalizeMagicPotToolName(tool.name) === name)
+    ) {
       return 'creative'
     }
     return 'magicAgentRuntime'
@@ -581,7 +714,7 @@ export class MagicAgentPlatformAdapter {
 
   private syncKernelPlatformSurface(force = false): void {
     const agents = this.runtime.listAgents().map(normalizeAgentDefinition)
-    const creativeTools = this.creativeToolRegistry.listTools()
+    const creativeTools = this.listPlatformCreativeTools()
     const activeCapabilityIds = new Set([
       ...agents.map((agent) => toKernelAgentCapabilityId(agent.id)),
       ...creativeTools.map((tool) => toKernelCreativeCapabilityId(tool.name))
@@ -714,6 +847,17 @@ export class MagicAgentPlatformAdapter {
     this.kernelSurfaceSignature = signature
   }
 
+  private listPlatformCreativeTools(): MagicAgentCreativeToolDefinition[] {
+    return this.creativeToolRegistry
+      .listTools()
+      .filter(
+        (tool) =>
+          !isMagicAgentPlatformDeniedToolName(tool.name) &&
+          !isMagicAgentPlatformDeniedToolName(toKernelCreativeToolName(tool.name)) &&
+          !isMagicAgentPlatformDeniedToolName(toKernelCreativeCapabilityId(tool.name))
+      )
+  }
+
   private async invokeCreativeToolViaKernel(
     name: string,
     args: Record<string, unknown>,
@@ -722,9 +866,27 @@ export class MagicAgentPlatformAdapter {
     metadata?: Record<string, unknown>
   ): Promise<MagicAgentCreativeToolResult> {
     this.syncKernelPlatformSurface()
-    const definition = this.creativeToolRegistry.listTools().find((tool) => tool.name === name)
+    if (isMagicAgentPlatformDeniedToolName(name)) {
+      return {
+        ok: false,
+        toolName: name,
+        category: 'terminal',
+        status: 'unavailable',
+        permissionDenied: true,
+        error: `Tool "${name}" is not allowed through the MagicAgent platform boundary.`
+      }
+    }
+    const definition = this.listPlatformCreativeTools().find(
+      (tool) => normalizeMagicPotToolName(tool.name) === name
+    )
     if (!definition) {
-      return this.creativeToolRegistry.dispatch(name, args, this.createCreativeContext(signal))
+      return {
+        ok: false,
+        toolName: name,
+        category: 'asset',
+        status: 'unavailable',
+        unavailableReason: `Unknown MagicAgent creative tool: ${name}`
+      }
     }
     const session = this.agentKernel.registerSession(
       requirePlatformRoute(route, 'creative tool invocation'),

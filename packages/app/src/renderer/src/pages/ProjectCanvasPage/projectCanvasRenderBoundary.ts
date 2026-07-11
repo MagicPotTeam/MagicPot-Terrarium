@@ -52,7 +52,12 @@ export type ProjectCanvasVideoBudgetSummary = {
 
 export type ProjectCanvasResolvedRenderSurface = ProjectCanvasRenderableSurface | 'fallback-image'
 
-export type ProjectCanvasImageFallbackReason = 'unloaded' | 'failed' | 'unsupported'
+export type ProjectCanvasImageFallbackReason =
+  | 'unloaded'
+  | 'failed'
+  | 'unsupported'
+  | 'webgl-unavailable'
+  | 'generated-cooldown'
 
 export type ProjectCanvasResolvedRenderItem = ProjectCanvasRenderableItem & {
   runtimeSurface: ProjectCanvasResolvedRenderSurface
@@ -67,6 +72,8 @@ export type ProjectCanvasImageFallbackSummary = {
   unloadedImageItems: number
   failedImageItems: number
   unsupportedImageItems: number
+  webglUnavailableImageItems: number
+  generatedCooldownImageItems: number
 }
 
 export const PROJECT_CANVAS_RENDERABLE_MEDIA_KINDS = ['image', 'video', 'model3d', 'html'] as const
@@ -201,6 +208,15 @@ export type ProjectCanvasRuntimeSurfaceSummary = ProjectCanvasRenderSurfaceSumma
   cropExcludedImageItems: number
 }
 
+export type ProjectCanvasRenderBoundaryDerivation = {
+  resolvedItems: ProjectCanvasResolvedRenderItem[]
+  imageRuntimeRouteById: Map<string, ProjectCanvasImageRuntimeRoute>
+  imageFallbackReasonById: Map<string, ProjectCanvasImageFallbackReason>
+  renderSurfaceSummary: ProjectCanvasRuntimeSurfaceSummary
+  fallbackImageSummary: ProjectCanvasImageFallbackSummary
+  webglPrimaryImageCount: number
+}
+
 export type ResolveProjectCanvasRenderBoundaryParams = {
   items: CanvasItem[]
   cropTargetId?: string | null
@@ -209,6 +225,7 @@ export type ResolveProjectCanvasRenderBoundaryParams = {
   residentImageIds?: ReadonlySet<string>
   failedImageIds?: ReadonlySet<string>
   unsupportedImageIds?: ReadonlySet<string>
+  generatedCooldownImageIds?: ReadonlySet<string>
   selectedIds?: ReadonlySet<string>
   stagePos?: { x: number; y: number }
   stageScale?: number
@@ -400,24 +417,30 @@ export function resolveProjectCanvasImageRuntimeRoute({
   isCropTarget,
   webglReady,
   loadedImageIds,
-  residentImageIds
+  residentImageIds,
+  generatedCooldownImageIds
 }: {
   item: Pick<CanvasImageItem, 'id'>
   isCropTarget: boolean
   webglReady: boolean
   loadedImageIds: ReadonlySet<string>
   residentImageIds?: ReadonlySet<string>
+  generatedCooldownImageIds?: ReadonlySet<string>
 }): ProjectCanvasImageRuntimeRoute {
   if (isCropTarget) {
     return 'crop-excluded'
   }
 
+  if (!webglReady || generatedCooldownImageIds?.has(item.id)) {
+    return 'fallback-image-proxy'
+  }
+
   const activeResidentImageIds = residentImageIds ?? loadedImageIds
-  if (webglReady && activeResidentImageIds.has(item.id)) {
+  if (activeResidentImageIds.has(item.id)) {
     return 'webgl-primary'
   }
 
-  if (webglReady && loadedImageIds.has(item.id)) {
+  if (loadedImageIds.has(item.id)) {
     return 'budget-image-proxy'
   }
 
@@ -450,12 +473,16 @@ export function resolveProjectCanvasImageFallbackReason({
   item,
   runtimeRoute,
   failedImageIds,
-  unsupportedImageIds
+  unsupportedImageIds,
+  generatedCooldownImageIds,
+  webglReady
 }: {
   item: Pick<CanvasImageItem, 'id'>
   runtimeRoute: ProjectCanvasImageRuntimeRoute
   failedImageIds?: ReadonlySet<string>
   unsupportedImageIds?: ReadonlySet<string>
+  generatedCooldownImageIds?: ReadonlySet<string>
+  webglReady?: boolean
 }): ProjectCanvasImageFallbackReason | null {
   if (runtimeRoute !== 'fallback-image-proxy') {
     return null
@@ -467,6 +494,14 @@ export function resolveProjectCanvasImageFallbackReason({
 
   if (failedImageIds?.has(item.id)) {
     return 'failed'
+  }
+
+  if (generatedCooldownImageIds?.has(item.id)) {
+    return 'generated-cooldown'
+  }
+
+  if (webglReady === false) {
+    return 'webgl-unavailable'
   }
 
   return 'unloaded'
@@ -486,6 +521,10 @@ export function summarizeProjectCanvasImageFallbacks(
         summary.failedImageItems += 1
       } else if (item.imageFallbackReason === 'unsupported') {
         summary.unsupportedImageItems += 1
+      } else if (item.imageFallbackReason === 'webgl-unavailable') {
+        summary.webglUnavailableImageItems += 1
+      } else if (item.imageFallbackReason === 'generated-cooldown') {
+        summary.generatedCooldownImageItems += 1
       } else {
         summary.unloadedImageItems += 1
       }
@@ -496,7 +535,9 @@ export function summarizeProjectCanvasImageFallbacks(
       fallbackImageItems: 0,
       unloadedImageItems: 0,
       failedImageItems: 0,
-      unsupportedImageItems: 0
+      unsupportedImageItems: 0,
+      webglUnavailableImageItems: 0,
+      generatedCooldownImageItems: 0
     }
   )
 }
@@ -509,6 +550,7 @@ export function resolveProjectCanvasRenderBoundary({
   residentImageIds,
   failedImageIds,
   unsupportedImageIds,
+  generatedCooldownImageIds,
   selectedIds = new Set<string>(),
   stagePos,
   stageScale,
@@ -541,13 +583,16 @@ export function resolveProjectCanvasRenderBoundary({
         isCropTarget: cropTargetId === item.id,
         webglReady,
         loadedImageIds,
-        residentImageIds
+        residentImageIds,
+        generatedCooldownImageIds
       })
       const imageFallbackReason = resolveProjectCanvasImageFallbackReason({
         item: item.item,
         runtimeRoute: imageRuntimeRoute,
         failedImageIds,
-        unsupportedImageIds
+        unsupportedImageIds,
+        generatedCooldownImageIds,
+        webglReady
       })
 
       return {
@@ -578,79 +623,142 @@ export function resolveProjectCanvasRenderBoundary({
   })
 }
 
-export function summarizeProjectCanvasRuntimeSurfaces({
-  items,
-  cropTargetId,
-  webglReady,
-  loadedImageIds,
-  residentImageIds,
-  failedImageIds,
-  unsupportedImageIds,
-  selectedIds,
-  stagePos,
-  stageScale,
-  stageSize,
-  forceRenderAllItemsForExport
-}: ResolveProjectCanvasRenderBoundaryParams): ProjectCanvasRuntimeSurfaceSummary {
-  const renderables = resolveProjectCanvasRenderBoundary({
-    items,
-    cropTargetId,
-    webglReady,
-    loadedImageIds,
-    residentImageIds,
-    failedImageIds,
-    unsupportedImageIds,
-    selectedIds,
-    stagePos,
-    stageScale,
-    stageSize,
-    forceRenderAllItemsForExport
-  })
+function createEmptyProjectCanvasRuntimeSurfaceSummary(): ProjectCanvasRuntimeSurfaceSummary {
+  return {
+    totalItems: 0,
+    imageItems: 0,
+    webglImageItems: 0,
+    webglModel3DItems: 0,
+    budgetDowngradedImageItems: 0,
+    fallbackImageItems: 0,
+    cropExcludedImageItems: 0,
+    videoOverlayItems: 0,
+    htmlOverlayItems: 0
+  }
+}
 
-  return renderables.reduce<ProjectCanvasRuntimeSurfaceSummary>(
-    (summary, item) => {
-      summary.totalItems += 1
+function createEmptyProjectCanvasImageFallbackSummary(): ProjectCanvasImageFallbackSummary {
+  return {
+    fallbackImageItems: 0,
+    unloadedImageItems: 0,
+    failedImageItems: 0,
+    unsupportedImageItems: 0,
+    webglUnavailableImageItems: 0,
+    generatedCooldownImageItems: 0
+  }
+}
 
-      if (item.kind === 'image') {
-        summary.imageItems += 1
+export function summarizeProjectCanvasResolvedRuntimeSurfaces(
+  resolvedItems: ProjectCanvasResolvedRenderItem[]
+): ProjectCanvasRuntimeSurfaceSummary {
+  return resolvedItems.reduce<ProjectCanvasRuntimeSurfaceSummary>((summary, item) => {
+    summary.totalItems += 1
 
-        if (item.imageRuntimeRoute === 'webgl-primary') {
-          summary.webglImageItems += 1
-        } else if (item.imageRuntimeRoute === 'budget-image-proxy') {
-          summary.budgetDowngradedImageItems += 1
-        } else if (item.imageRuntimeRoute === 'crop-excluded') {
-          summary.cropExcludedImageItems += 1
-        } else if (item.runtimeSurface === 'fallback-image') {
-          summary.fallbackImageItems += 1
-        }
-        return summary
+    if (item.kind === 'image') {
+      summary.imageItems += 1
+
+      if (item.imageRuntimeRoute === 'webgl-primary') {
+        summary.webglImageItems += 1
+      } else if (item.imageRuntimeRoute === 'budget-image-proxy') {
+        summary.budgetDowngradedImageItems += 1
+      } else if (item.imageRuntimeRoute === 'crop-excluded') {
+        summary.cropExcludedImageItems += 1
+      } else if (item.runtimeSurface === 'fallback-image') {
+        summary.fallbackImageItems += 1
       }
-
-      if (item.kind === 'video') {
-        summary.videoOverlayItems += 1
-        return summary
-      }
-
-      if (item.kind === 'model3d') {
-        summary.webglModel3DItems += 1
-        return summary
-      }
-
-      summary.htmlOverlayItems += 1
       return summary
-    },
-    {
-      totalItems: 0,
-      imageItems: 0,
-      webglImageItems: 0,
-      webglModel3DItems: 0,
-      budgetDowngradedImageItems: 0,
-      fallbackImageItems: 0,
-      cropExcludedImageItems: 0,
-      videoOverlayItems: 0,
-      htmlOverlayItems: 0
     }
-  )
+
+    if (item.kind === 'video') {
+      summary.videoOverlayItems += 1
+      return summary
+    }
+
+    if (item.kind === 'model3d') {
+      summary.webglModel3DItems += 1
+      return summary
+    }
+
+    summary.htmlOverlayItems += 1
+    return summary
+  }, createEmptyProjectCanvasRuntimeSurfaceSummary())
+}
+
+export function deriveProjectCanvasRenderBoundary(
+  params: ResolveProjectCanvasRenderBoundaryParams
+): ProjectCanvasRenderBoundaryDerivation {
+  const resolvedItems = resolveProjectCanvasRenderBoundary(params)
+  const imageRuntimeRouteById = new Map<string, ProjectCanvasImageRuntimeRoute>()
+  const imageFallbackReasonById = new Map<string, ProjectCanvasImageFallbackReason>()
+  const renderSurfaceSummary = createEmptyProjectCanvasRuntimeSurfaceSummary()
+  const fallbackImageSummary = createEmptyProjectCanvasImageFallbackSummary()
+  let webglPrimaryImageCount = 0
+
+  for (const item of resolvedItems) {
+    renderSurfaceSummary.totalItems += 1
+
+    if (item.kind === 'image') {
+      renderSurfaceSummary.imageItems += 1
+
+      if (item.imageRuntimeRoute) {
+        imageRuntimeRouteById.set(item.id, item.imageRuntimeRoute)
+      }
+      if (item.imageFallbackReason) {
+        imageFallbackReasonById.set(item.id, item.imageFallbackReason)
+      }
+
+      if (item.imageRuntimeRoute === 'webgl-primary') {
+        renderSurfaceSummary.webglImageItems += 1
+        webglPrimaryImageCount += 1
+      } else if (item.imageRuntimeRoute === 'budget-image-proxy') {
+        renderSurfaceSummary.budgetDowngradedImageItems += 1
+      } else if (item.imageRuntimeRoute === 'crop-excluded') {
+        renderSurfaceSummary.cropExcludedImageItems += 1
+      } else if (item.runtimeSurface === 'fallback-image') {
+        renderSurfaceSummary.fallbackImageItems += 1
+        fallbackImageSummary.fallbackImageItems += 1
+        if (item.imageFallbackReason === 'failed') {
+          fallbackImageSummary.failedImageItems += 1
+        } else if (item.imageFallbackReason === 'unsupported') {
+          fallbackImageSummary.unsupportedImageItems += 1
+        } else if (item.imageFallbackReason === 'webgl-unavailable') {
+          fallbackImageSummary.webglUnavailableImageItems += 1
+        } else if (item.imageFallbackReason === 'generated-cooldown') {
+          fallbackImageSummary.generatedCooldownImageItems += 1
+        } else {
+          fallbackImageSummary.unloadedImageItems += 1
+        }
+      }
+      continue
+    }
+
+    if (item.kind === 'video') {
+      renderSurfaceSummary.videoOverlayItems += 1
+      continue
+    }
+
+    if (item.kind === 'model3d') {
+      renderSurfaceSummary.webglModel3DItems += 1
+      continue
+    }
+
+    renderSurfaceSummary.htmlOverlayItems += 1
+  }
+
+  return {
+    resolvedItems,
+    imageRuntimeRouteById,
+    imageFallbackReasonById,
+    renderSurfaceSummary,
+    fallbackImageSummary,
+    webglPrimaryImageCount
+  }
+}
+
+export function summarizeProjectCanvasRuntimeSurfaces(
+  params: ResolveProjectCanvasRenderBoundaryParams
+): ProjectCanvasRuntimeSurfaceSummary {
+  return deriveProjectCanvasRenderBoundary(params).renderSurfaceSummary
 }
 
 export function resolveProjectCanvasBudgetedVideoItems({

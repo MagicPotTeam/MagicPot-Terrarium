@@ -1,62 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { CanvasAnnotationItem, CanvasItem, CanvasTextItem } from './types'
 
-vi.mock('react-konva', () => ({
-  Stage: () => null,
-  Layer: () => null,
-  Rect: () => null,
-  Image: () => null,
-  Transformer: () => null,
-  Line: () => null,
-  Text: () => null,
-  Ellipse: () => null,
-  Arrow: () => null,
-  Shape: () => null,
-  Group: () => null
-}))
-
-vi.mock('konva/lib/Stage', () => ({
-  Stage: class {}
-}))
-
-vi.mock('konva', () => ({
-  default: {}
-}))
-
-vi.mock('../../components/MaxSizeLayout', () => ({
-  default: () => null
-}))
-vi.mock('./components/Model3DOverlay', () => ({ default: () => null }))
-vi.mock('./components/VideoOverlay', () => ({ default: () => null }))
-vi.mock('./components/CanvasItemPlaceholder', () => ({ default: () => null }))
-vi.mock('./components/HtmlOverlay', () => ({ default: () => null }))
-vi.mock('./components/Model3DViewerDialog', () => ({ default: () => null }))
-vi.mock('./components/ProjectCanvasImageCropOverlay', () => ({
-  default: () => null
-}))
-vi.mock('./components/CanvasTextNode', () => ({ default: () => null }))
-vi.mock('./components/CanvasImageNode', () => ({ default: () => null }))
-vi.mock('./components/CanvasFileNode', () => ({ default: () => null }))
-vi.mock('./components/CanvasSelectionActionToolbar', () => ({ default: () => null }))
-vi.mock('./components/GroupPlaybackOverlay', () => ({ default: () => null }))
-vi.mock('./Dialogs/LabelEditorDialog', () => ({ LabelEditorDialog: () => null }))
-vi.mock('./Dialogs/ClearConfirmDialog', () => ({ ClearConfirmDialog: () => null }))
-vi.mock('./Dialogs/TextureImportDialog', () => ({ TextureImportDialog: () => null }))
-vi.mock('./components/CanvasAnnotationNode', () => ({ default: () => null }))
-vi.mock('./components/ColorWheelSquarePicker', () => ({
-  default: () => null
-}))
 vi.mock('@renderer/utils/droppedImageUtils', () => ({
-  AGENT_IMAGE_DRAG_MIME: 'application/x-ai-image',
-  getDroppedImageFile: vi.fn(
-    async (dataTransfer: Pick<DataTransfer, 'files'>) =>
-      Array.from(dataTransfer.files ?? []).find((file) => (file.type || '').startsWith('image/')) ??
-      null
-  ),
-  parseInternalImageDragPayload: vi.fn(() => null)
+  AGENT_IMAGE_DRAG_MIME: 'application/x-ai-image'
 }))
 
-import { applySelectedTextSizeChange, resolveDroppedAgentImageDataUrl } from './ProjectCanvasPage'
+import {
+  applySelectedTextSizeChange,
+  resolveDroppedAgentImageDataUrl
+} from './projectCanvasPageShared'
 const emptyFileList = {
   length: 0,
   item: () => null

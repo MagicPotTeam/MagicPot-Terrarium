@@ -2,11 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Config, LLMAPIProfile } from '@shared/config/config'
 import { rendererHostExtensionApiV1 } from './generatedRegistry'
 import {
+  applyRendererAgentApiProfileCallType,
+  buildRendererAgentApiProfileCallTypeOptions,
   buildRendererClearedQuickAppLegacyHunyuanConfig,
   buildRendererQuickAppLegacyHunyuanProfile,
   getRendererQuickAppApiProfilesSectionAction,
   isRendererQuickAppLegacyHunyuanProfile,
   prepareRendererClonedQuickAppProfile,
+  renderRendererAgentApiProfileCardExtra,
+  resolveRendererAgentApiProfileUi,
   resolveRendererAssistantImageAutoSaveDir,
   resolveRendererChatReasoningPreferenceKey,
   resolveRendererQuickAppApiProfileLists
@@ -83,6 +87,99 @@ describe('renderer HostExtensionApi helper fallbacks', () => {
       'C:/extension/.AutoSave/Agent'
     )
     expect(fallback).not.toHaveBeenCalled()
+  })
+
+  it('uses settings fallback semantics for agent profile hooks', () => {
+    const profile = createProfile('agent-profile')
+    const extensionProfile = { ...profile, call_type: 'extension' }
+    const baseOptions = [{ label: 'API Model', value: 'api' }]
+    const extensionOptions = [...baseOptions, { label: 'Extension', value: 'extension' }]
+    const baseUi = {
+      showApiKeyInput: true,
+      showBackupKeys: true,
+      showBaseUrlInput: true,
+      showKlingSecretInput: false
+    }
+    const extensionUi = { ...baseUi, showApiKeyInput: false }
+    const fallbackProfile = vi.fn(() => profile)
+    const optionsFallback = vi.fn(() => baseOptions)
+    const uiFallback = vi.fn(() => baseUi)
+    const extraFallback = vi.fn(() => 'fallback-extra')
+
+    expect(
+      applyRendererAgentApiProfileCallType({ callType: 'api', profile }, fallbackProfile)
+    ).toBe(profile)
+    expect(
+      buildRendererAgentApiProfileCallTypeOptions(
+        { baseOptions, isChineseUi: false, profile },
+        optionsFallback
+      )
+    ).toBe(baseOptions)
+    expect(
+      resolveRendererAgentApiProfileUi({ baseUi, isChineseUi: false, profile }, uiFallback)
+    ).toBe(baseUi)
+    expect(
+      renderRendererAgentApiProfileCardExtra(
+        {
+          callTypeOptions: baseOptions,
+          isChineseUi: false,
+          onChangeCallType: vi.fn(),
+          onClone: vi.fn(),
+          onDelete: vi.fn(),
+          onReplaceProfiles: vi.fn(),
+          onUpdate: vi.fn(),
+          profile,
+          profiles: [profile]
+        },
+        extraFallback
+      )
+    ).toBe('fallback-extra')
+
+    rendererHostExtensionApiV1.settings = {
+      applyAgentApiProfileCallType: () => extensionProfile,
+      buildAgentApiProfileCallTypeOptions: () => extensionOptions,
+      resolveAgentApiProfileUi: () => extensionUi,
+      renderAgentApiProfileCardExtra: () => 'extension-extra'
+    }
+
+    fallbackProfile.mockClear()
+    optionsFallback.mockClear()
+    uiFallback.mockClear()
+    extraFallback.mockClear()
+
+    expect(
+      applyRendererAgentApiProfileCallType({ callType: 'extension', profile }, fallbackProfile)
+    ).toBe(extensionProfile)
+    expect(
+      buildRendererAgentApiProfileCallTypeOptions(
+        { baseOptions, isChineseUi: false, profile },
+        optionsFallback
+      )
+    ).toBe(extensionOptions)
+    expect(
+      resolveRendererAgentApiProfileUi({ baseUi, isChineseUi: false, profile }, uiFallback)
+    ).toBe(extensionUi)
+    expect(
+      renderRendererAgentApiProfileCardExtra(
+        {
+          callTypeOptions: extensionOptions,
+          isChineseUi: false,
+          onChangeCallType: vi.fn(),
+          onClone: vi.fn(),
+          onDelete: vi.fn(),
+          onReplaceProfiles: vi.fn(),
+          onUpdate: vi.fn(),
+          profile,
+          profiles: [profile]
+        },
+        extraFallback
+      )
+    ).toBe('extension-extra')
+
+    expect(fallbackProfile).not.toHaveBeenCalled()
+    expect(optionsFallback).not.toHaveBeenCalled()
+    expect(uiFallback).not.toHaveBeenCalled()
+    expect(extraFallback).not.toHaveBeenCalled()
   })
 
   it('uses settings fallback semantics for profile creation and clearing hooks', () => {

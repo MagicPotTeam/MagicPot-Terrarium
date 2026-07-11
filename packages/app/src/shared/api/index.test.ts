@@ -34,10 +34,12 @@ describe('apiDef', () => {
     expect(apiDef.svcMagicAgentPlatform.runAgent.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.listGraphs.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.runGraph.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.watchGraphRun.type).toBe('serverStreaming')
     expect(apiDef.svcMagicAgentPlatform.validatePackageManifest.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.installPackage.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.callTool.request).toBeDefined()
     expect(apiDef.svcMagicAgentPlatform.runAgent.request).toBeDefined()
+    expect(apiDef.svcMagicAgentPlatform.watchGraphRun.request).toBeDefined()
     expect(apiDef.svcMagicAgentPlatform.installPackage.request).toBeDefined()
   })
 
@@ -109,10 +111,38 @@ describe('apiDef', () => {
       description: 'Demo graph.',
       version: '1.0.0',
       tags: [],
-      nodes: [],
-      channels: [],
-      outputs: [],
-      entryNodeIds: []
+      nodes: [
+        {
+          nodeId: 'input',
+          kind: 'input',
+          name: 'Input',
+          description: 'Receives the graph input.'
+        },
+        {
+          nodeId: 'final',
+          kind: 'output',
+          name: 'Final',
+          description: 'Produces the final output.'
+        }
+      ],
+      channels: [
+        {
+          channelId: 'input-to-final',
+          from: 'input',
+          to: 'final',
+          kind: 'artifact'
+        }
+      ],
+      outputs: [
+        {
+          outputId: 'final-doc',
+          name: 'Final Document',
+          description: 'Final document output.',
+          sourceNodeId: 'final',
+          channelId: 'input-to-final'
+        }
+      ],
+      entryNodeIds: ['input']
     }
 
     const routeRequiredCases: Array<[unknown, ServiceValidator<unknown> | undefined]> = [
@@ -131,6 +161,10 @@ describe('apiDef', () => {
       ],
       [
         { runId: 'run-1' },
+        apiDef.svcMagicAgentPlatform.watchGraphRun.request as ServiceValidator<unknown>
+      ],
+      [
+        { runId: 'run-1' },
         apiDef.svcMagicAgentPlatform.cancelGraphRun.request as ServiceValidator<unknown>
       ]
     ]
@@ -138,6 +172,37 @@ describe('apiDef', () => {
     for (const [request, validator] of routeRequiredCases) {
       expect(() => validateServiceValue(request, validator)).toThrow(ServiceValidationError)
     }
+
+    expect(() =>
+      validateServiceValue(
+        { graph: { ...graph, nodes: [] }, route },
+        apiDef.svcMagicAgentPlatform.createGraph.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        {
+          graph: {
+            ...graph,
+            nodes: [{ ...graph.nodes[0], kind: 'unsupported' }]
+          },
+          route
+        },
+        apiDef.svcMagicAgentPlatform.createGraph.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        {
+          graph: {
+            ...graph,
+            outputs: [{ ...graph.outputs[0], channelId: 'missing-channel' }]
+          },
+          route
+        },
+        apiDef.svcMagicAgentPlatform.createGraph.request
+      )
+    ).toThrow(ServiceValidationError)
 
     expect(
       validateServiceValue(
@@ -153,14 +218,32 @@ describe('apiDef', () => {
     ).toMatchObject({ graphId: 'graph.demo', input: 'hello', route })
     expect(
       validateServiceValue(
-        { graphId: 'graph.demo', route },
+        { graphId: 'graph.demo', route, limit: 50 },
         apiDef.svcMagicAgentPlatform.listGraphRuns.request
       )
-    ).toMatchObject({ graphId: 'graph.demo', route })
+    ).toMatchObject({ graphId: 'graph.demo', route, limit: 50 })
+    expect(() =>
+      validateServiceValue(
+        { graphId: 'graph.demo', route, limit: 0 },
+        apiDef.svcMagicAgentPlatform.listGraphRuns.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        { graphId: 'graph.demo', route, limit: 1.5 },
+        apiDef.svcMagicAgentPlatform.listGraphRuns.request
+      )
+    ).toThrow(ServiceValidationError)
     expect(
       validateServiceValue(
         { runId: 'run-1', route },
         apiDef.svcMagicAgentPlatform.getGraphRun.request
+      )
+    ).toMatchObject({ runId: 'run-1', route })
+    expect(
+      validateServiceValue(
+        { runId: 'run-1', route },
+        apiDef.svcMagicAgentPlatform.watchGraphRun.request
       )
     ).toMatchObject({ runId: 'run-1', route })
     expect(

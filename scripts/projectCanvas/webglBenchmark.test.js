@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { readProjectCanvasBenchmarkMetricsFromDomSnapshot } from './webglBenchmark.mjs'
+import {
+  isWebglBenchmarkMetricsReady,
+  readProjectCanvasBenchmarkMetricsFromDomSnapshot
+} from './webglBenchmark.mjs'
 
 describe('webglBenchmark metrics reader', () => {
   it('prefers the metrics snapshot over legacy dataset fields', () => {
@@ -21,7 +24,20 @@ describe('webglBenchmark metrics reader', () => {
             residentBudgetState: 'full',
             renderCount: 11,
             lastRenderDurationMs: 4.5,
-            lastUpdateReason: 'snapshot'
+            spriteReconcilePassCount: 5,
+            lastSpriteReconcileDurationMs: 1.25,
+            lastSpriteReconcileCandidateCount: 9,
+            lastSpriteReconcileTargetCount: 7,
+            lastSpriteReconcileCreatedCount: 2,
+            lastSpriteReconcileReusedCount: 5,
+            lastSpriteReconcileRemovedCount: 1,
+            lastSpriteReconcileDeferredCount: 3,
+            lastUpdateReason: 'snapshot',
+            sourceImageCacheCount: 7,
+            thumbnailImageCacheCount: 6,
+            sourceUpgradeQueueCount: 0,
+            thumbnailLoadQueueCount: 0,
+            initialLoadQueueCount: 0
           },
           viewport: {
             scale: 2,
@@ -44,6 +60,14 @@ describe('webglBenchmark metrics reader', () => {
         projectCanvasWebglResidentBudgetState: 'legacy',
         projectCanvasWebglRenderCount: '99',
         projectCanvasWebglLastRenderDurationMs: '99',
+        projectCanvasWebglSpriteReconcilePassCount: '99',
+        projectCanvasWebglLastSpriteReconcileDurationMs: '99',
+        projectCanvasWebglLastSpriteReconcileCandidateCount: '99',
+        projectCanvasWebglLastSpriteReconcileTargetCount: '99',
+        projectCanvasWebglLastSpriteReconcileCreatedCount: '99',
+        projectCanvasWebglLastSpriteReconcileReusedCount: '99',
+        projectCanvasWebglLastSpriteReconcileRemovedCount: '99',
+        projectCanvasWebglLastSpriteReconcileDeferredCount: '99',
         projectCanvasWebglLastUpdateReason: 'legacy',
         projectCanvasReactCommitCount: '99',
         stageScale: '99',
@@ -63,7 +87,20 @@ describe('webglBenchmark metrics reader', () => {
     expect(metrics.residentBudgetState).toBe('full')
     expect(metrics.renderCount).toBe(11)
     expect(metrics.lastRenderDurationMs).toBe(4.5)
+    expect(metrics.spriteReconcilePassCount).toBe(5)
+    expect(metrics.lastSpriteReconcileDurationMs).toBe(1.25)
+    expect(metrics.lastSpriteReconcileCandidateCount).toBe(9)
+    expect(metrics.lastSpriteReconcileTargetCount).toBe(7)
+    expect(metrics.lastSpriteReconcileCreatedCount).toBe(2)
+    expect(metrics.lastSpriteReconcileReusedCount).toBe(5)
+    expect(metrics.lastSpriteReconcileRemovedCount).toBe(1)
+    expect(metrics.lastSpriteReconcileDeferredCount).toBe(3)
     expect(metrics.lastUpdateReason).toBe('snapshot')
+    expect(metrics.sourceImageCacheCount).toBe(7)
+    expect(metrics.thumbnailImageCacheCount).toBe(6)
+    expect(metrics.sourceUpgradeQueueCount).toBe(0)
+    expect(metrics.thumbnailLoadQueueCount).toBe(0)
+    expect(metrics.initialLoadQueueCount).toBe(0)
     expect(metrics.reactCommits).toBe(12)
     expect(metrics.stageScale).toBe(2)
     expect(metrics.stagePosX).toBe(33)
@@ -92,6 +129,14 @@ describe('webglBenchmark metrics reader', () => {
         projectCanvasWebglResidentBudgetState: 'available',
         projectCanvasWebglRenderCount: '2',
         projectCanvasWebglLastRenderDurationMs: '6.25',
+        projectCanvasWebglSpriteReconcilePassCount: '3',
+        projectCanvasWebglLastSpriteReconcileDurationMs: '0.75',
+        projectCanvasWebglLastSpriteReconcileCandidateCount: '4',
+        projectCanvasWebglLastSpriteReconcileTargetCount: '4',
+        projectCanvasWebglLastSpriteReconcileCreatedCount: '2',
+        projectCanvasWebglLastSpriteReconcileReusedCount: '2',
+        projectCanvasWebglLastSpriteReconcileRemovedCount: '1',
+        projectCanvasWebglLastSpriteReconcileDeferredCount: '0',
         stageScale: '1.5',
         stagePosX: '12',
         stagePosY: '24'
@@ -104,10 +149,96 @@ describe('webglBenchmark metrics reader', () => {
     expect(metrics.residentBudgetState).toBe('available')
     expect(metrics.renderCount).toBe(2)
     expect(metrics.lastRenderDurationMs).toBe(6.25)
+    expect(metrics.spriteReconcilePassCount).toBe(3)
+    expect(metrics.lastSpriteReconcileDurationMs).toBe(0.75)
+    expect(metrics.lastSpriteReconcileCandidateCount).toBe(4)
+    expect(metrics.lastSpriteReconcileTargetCount).toBe(4)
+    expect(metrics.lastSpriteReconcileCreatedCount).toBe(2)
+    expect(metrics.lastSpriteReconcileReusedCount).toBe(2)
+    expect(metrics.lastSpriteReconcileRemovedCount).toBe(1)
+    expect(metrics.lastSpriteReconcileDeferredCount).toBe(0)
     expect(metrics.stageScale).toBe(1.5)
     expect(metrics.stagePosX).toBe(12)
     expect(metrics.stagePosY).toBe(24)
     expect(metrics.largeImageResourceMetrics.values.residentTextureBytes).toBeNull()
+  })
+
+  it('checks initial WebGL readiness against post-import render and sprite reconcile baselines', () => {
+    const readyMetrics = {
+      summary: {
+        imageItems: 4,
+        webglImageItems: 4,
+        fallbackImageItems: 0,
+        budgetDowngradedImageItems: 0
+      },
+      hasWebglContext: true,
+      loadedImageCount: 4,
+      pendingImageCount: 0,
+      residentCandidateImageCount: 4,
+      viewportCulledImageCount: 0,
+      residentLimit: 8,
+      residentBudgetState: 'available',
+      sourceUpgradeQueueCount: 0,
+      thumbnailLoadQueueCount: 0,
+      initialLoadQueueCount: 0,
+      renderCount: 12,
+      spriteReconcilePassCount: 12,
+      lastSpriteReconcileCandidateCount: 4,
+      lastSpriteReconcileDeferredCount: 0,
+      lastRenderDurationMs: 5.5,
+      lastUpdateReason: 'items'
+    }
+
+    expect(isWebglBenchmarkMetricsReady(readyMetrics, 4, 11, 11)).toBe(true)
+    expect(isWebglBenchmarkMetricsReady({ ...readyMetrics, renderCount: 11 }, 4, 11, 11)).toBe(
+      false
+    )
+    expect(
+      isWebglBenchmarkMetricsReady({ ...readyMetrics, spriteReconcilePassCount: 11 }, 4, 11, 11)
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady(
+        { ...readyMetrics, lastSpriteReconcileDeferredCount: 1 },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady(
+        { ...readyMetrics, lastSpriteReconcileCandidateCount: 3 },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady(
+        { ...readyMetrics, summary: { ...readyMetrics.summary, imageItems: 3 } },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady(
+        {
+          ...readyMetrics,
+          residentCandidateImageCount: 3,
+          viewportCulledImageCount: 0,
+          lastSpriteReconcileCandidateCount: 3
+        },
+        4,
+        11,
+        11
+      )
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady({ ...readyMetrics, sourceUpgradeQueueCount: 1 }, 4, 11, 11)
+    ).toBe(false)
+    expect(
+      isWebglBenchmarkMetricsReady({ ...readyMetrics, lastUpdateReason: 'cleanup' }, 4, 11, 11)
+    ).toBe(false)
   })
 
   it('attaches optional large image resource diagnostics from snapshot and dataset fields', () => {

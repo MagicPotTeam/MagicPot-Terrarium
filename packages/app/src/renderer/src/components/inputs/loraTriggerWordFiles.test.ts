@@ -1,14 +1,27 @@
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  extractFrequentTriggerWordsFromMetadataObject,
   extractTriggerWordsFromMetadataObject,
   extractTriggerWordsFromSafetensorsMetadata,
   readLoraTriggerWordsAuto,
   readLoraTriggerWordsComfyUIMetadata,
+  resolveLoraComfyUIMetadataFilenames,
   resolveLoraModelFile,
   resolveLoraTriggerWordsFile,
   toLoraOptionName
 } from './loraTriggerWordFiles'
+
+const encodeSafetensorsHeader = (headerObject: unknown) => {
+  const header = new TextEncoder().encode(JSON.stringify(headerObject))
+  const prefix = new Uint8Array(8)
+  let length = header.length
+  for (let index = 0; index < prefix.length; index += 1) {
+    prefix[index] = length % 256
+    length = Math.floor(length / 256)
+  }
+  return { prefix, header }
+}
 
 describe('loraTriggerWordFiles', () => {
   afterEach(() => {
@@ -82,7 +95,28 @@ describe('loraTriggerWordFiles', () => {
     ).toBe('alpha, beta')
   })
 
-  it('extracts trigger words from safetensors metadata explicit fields only', () => {
+  it('extracts the most frequent training tag from LoRA metadata', () => {
+    expect(
+      extractFrequentTriggerWordsFromMetadataObject({
+        __metadata__: {
+          ss_tag_frequency: JSON.stringify({
+            '12_character': { real_trigger: 12, background: 3 },
+            '8_character': { real_trigger: 8, secondary_token: 16 }
+          })
+        }
+      })
+    ).toBe('real_trigger')
+    expect(
+      extractFrequentTriggerWordsFromMetadataObject({
+        __metadata__: {
+          ss_output_name: 'qwen_image_lora_task01_kv',
+          'modelspec.title': '20260402\\qwen_image_lora_task01_kv.safetensors'
+        }
+      })
+    ).toBe('')
+  })
+
+  it('extracts trigger words from safetensors metadata explicit fields or tag frequency', () => {
     expect(
       extractTriggerWordsFromSafetensorsMetadata({
         __metadata__: {
@@ -97,7 +131,7 @@ describe('loraTriggerWordFiles', () => {
           ss_tag_frequency: JSON.stringify({ char_style: 20 })
         }
       })
-    ).toBe('')
+    ).toBe('char_style')
     expect(
       extractTriggerWordsFromSafetensorsMetadata({
         __metadata__: {
@@ -105,6 +139,42 @@ describe('loraTriggerWordFiles', () => {
         }
       })
     ).toBe('')
+  })
+
+  it('uses the native Rust reader before ComfyUI and JS file fallbacks', async () => {
+    const fetchMock = vi.fn()
+    const readTextFileMock = vi.fn()
+    const readFileSliceMock = vi.fn()
+    const readLoraTriggerWordsNativeMock = vi.fn().mockResolvedValue({
+      triggerWords: 'native style\nnative token',
+      source: 'safetensors:C:\\ComfyUI\\models\\loras\\anime\\style.safetensors',
+      nativeAvailable: true
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('path', path.win32)
+    window.path = path.win32 as typeof window.path
+    window.api = {
+      svcFs: {
+        readLoraTriggerWordsNative: readLoraTriggerWordsNativeMock,
+        readTextFile: readTextFileMock,
+        readFileSlice: readFileSliceMock
+      }
+    } as unknown as typeof window.api
+
+    await expect(
+      readLoraTriggerWordsAuto('anime/style.safetensors', {
+        getComfyUIOrigin: () => 'http://remote-comfyui:8188',
+        getLoraDir: () => 'C:\\ComfyUI\\models\\loras'
+      } as never)
+    ).resolves.toBe('native style, native token')
+
+    expect(readLoraTriggerWordsNativeMock).toHaveBeenCalledWith({
+      loraDir: 'C:\\ComfyUI\\models\\loras',
+      loraName: 'anime/style.safetensors'
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(readTextFileMock).not.toHaveBeenCalled()
+    expect(readFileSliceMock).not.toHaveBeenCalled()
   })
 
   it('reads trigger words from ComfyUI /view_metadata/loras before local txt sidecars', async () => {
@@ -135,6 +205,150 @@ describe('loraTriggerWordFiles', () => {
     )
   })
 
+  it('normalizes Windows-style extensionless LoRA names before querying ComfyUI metadata', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ trainedWords: ['hhct_style', 'restaurant_token'] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const selectedLoraName = '马上用\\20260615\\Qwen\\HHCT_qwen_image_lora_complete-000022'
+    expect(resolveLoraComfyUIMetadataFilenames(selectedLoraName)).toEqual([
+      '马上用/20260615/Qwen/HHCT_qwen_image_lora_complete-000022.safetensors'
+    ])
+
+    await expect(
+      readLoraTriggerWordsComfyUIMetadata(selectedLoraName, {
+        getComfyUIOrigin: () => 'http://remote-comfyui:8188'
+      } as never)
+    ).resolves.toBe('hhct_style, restaurant_token')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://remote-comfyui:8188/view_metadata/loras?filename=%E9%A9%AC%E4%B8%8A%E7%94%A8%2F20260615%2FQwen%2FHHCT_qwen_image_lora_complete-000022.safetensors'
+    )
+  })
+
+  it('uses ComfyUI tag-frequency metadata when no explicit trigger words exist', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ss_output_name: 'qwen_image_lora_task01_kv',
+        'modelspec.title': 'qwen_image_lora_task01_kv',
+        ss_tag_frequency: JSON.stringify({
+          dataset_a: { qwen_image_lora_task01_kv: 1, real_trigger: 30 },
+          dataset_b: { secondary_token: 7 }
+        })
+      })
+    })
+    const readTextFileMock = vi.fn().mockRejectedValue(new Error('no sidecar'))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('path', path.win32)
+    window.path = path.win32 as typeof window.path
+    window.api = { svcFs: { readTextFile: readTextFileMock } } as unknown as typeof window.api
+
+    await expect(
+      readLoraTriggerWordsAuto('20260402\\qwen_image_lora_task01_kv.safetensors', {
+        getComfyUIOrigin: () => 'http://remote-comfyui:8188',
+        getLoraDir: () => 'C:\\ComfyUI\\models\\loras'
+      } as never)
+    ).resolves.toBe('real_trigger')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads local safetensors tag-frequency metadata when ComfyUI metadata and sidecars are unavailable', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('ComfyUI is not ready'))
+    const readTextFileMock = vi.fn().mockRejectedValue(new Error('no sidecar'))
+    const { prefix, header } = encodeSafetensorsHeader({
+      __metadata__: {
+        ss_output_name: 'qwen_image_lora_task01_kv',
+        'modelspec.title': 'qwen_image_lora_task01_kv',
+        ss_tag_frequency: JSON.stringify({
+          dataset_a: { qwen_image_lora_task01_kv: 1, real_trigger: 30 },
+          dataset_b: { secondary_token: 7 }
+        })
+      }
+    })
+    const readFileSliceMock = vi.fn(async ({ offset }: { offset?: number }) => ({
+      data: offset === 8 ? header : prefix,
+      filename: 'qwen_image_lora_task01_kv.safetensors',
+      fileSizeBytes: prefix.length + header.length
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('path', path.win32)
+    window.path = path.win32 as typeof window.path
+    window.api = {
+      svcFs: { readTextFile: readTextFileMock, readFileSlice: readFileSliceMock }
+    } as unknown as typeof window.api
+
+    await expect(
+      readLoraTriggerWordsAuto('20260402\\qwen_image_lora_task01_kv.safetensors', {
+        getComfyUIOrigin: () => 'http://remote-comfyui:8188',
+        getLoraDir: () => 'C:\\ComfyUI\\models\\loras'
+      } as never)
+    ).resolves.toBe('real_trigger')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(readTextFileMock).toHaveBeenCalled()
+    expect(readFileSliceMock).toHaveBeenCalledWith({
+      fullPath: 'C:\\ComfyUI\\models\\loras\\20260402\\qwen_image_lora_task01_kv.safetensors',
+      offset: 0,
+      length: 8
+    })
+    expect(readFileSliceMock).toHaveBeenCalledWith({
+      fullPath: 'C:\\ComfyUI\\models\\loras\\20260402\\qwen_image_lora_task01_kv.safetensors',
+      offset: 8,
+      length: header.length
+    })
+  })
+
+  it('does not use the selected LoRA filename stem when metadata and sidecars are unavailable', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('ComfyUI is not ready'))
+    const readTextFileMock = vi.fn().mockRejectedValue(new Error('no sidecar'))
+    const readFileSliceMock = vi.fn().mockRejectedValue(new Error('cannot read safetensors'))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('path', path.win32)
+    window.path = path.win32 as typeof window.path
+    window.api = {
+      svcFs: { readTextFile: readTextFileMock, readFileSlice: readFileSliceMock }
+    } as unknown as typeof window.api
+
+    await expect(
+      readLoraTriggerWordsAuto('20260402\\qwen_image_lora_task01_kv.safetensors', {
+        getComfyUIOrigin: () => 'http://remote-comfyui:8188',
+        getLoraDir: () => 'C:\\ComfyUI\\models\\loras'
+      } as never)
+    ).resolves.toBe('')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(readTextFileMock).toHaveBeenCalled()
+    expect(readFileSliceMock).toHaveBeenCalled()
+  })
+
+  it('prefers local sidecar trigger words over local safetensors tag-frequency metadata', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ss_output_name: 'fallback_model_name' })
+    })
+    const readTextFileMock = vi.fn().mockResolvedValue({ content: 'sidecar real token' })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('path', path.win32)
+    window.path = path.win32 as typeof window.path
+    window.api = { svcFs: { readTextFile: readTextFileMock } } as unknown as typeof window.api
+
+    await expect(
+      readLoraTriggerWordsAuto('anime/style.safetensors', {
+        getComfyUIOrigin: () => 'http://remote-comfyui:8188',
+        getLoraDir: () => 'C:\\ComfyUI\\models\\loras'
+      } as never)
+    ).resolves.toBe('sidecar real token')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(readTextFileMock).toHaveBeenCalledWith({
+      fullPath: 'C:\\ComfyUI\\models\\loras\\anime\\style.txt'
+    })
+  })
+
   it('falls back to a same-name local txt sidecar when ComfyUI metadata has no triggers', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -155,6 +369,39 @@ describe('loraTriggerWordFiles', () => {
 
     expect(readTextFileMock).toHaveBeenCalledWith({
       fullPath: 'C:\\ComfyUI\\models\\loras\\anime\\style.txt'
+    })
+  })
+
+  it('reads local civitai metadata sidecars for Windows-style extensionless LoRA names', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false })
+    const fileExistsBatchMock = vi.fn(async (paths: string[]) =>
+      paths.map((candidatePath) =>
+        candidatePath.endsWith('HHCT_qwen_image_lora_complete-000022.civitai.info')
+      )
+    )
+    const readTextFileMock = vi.fn().mockResolvedValue({
+      content: JSON.stringify({ modelVersions: [{ trainedWords: ['hhct_style', 'dining_room'] }] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('path', path.win32)
+    window.path = path.win32 as typeof window.path
+    window.api = {
+      svcFs: { readTextFile: readTextFileMock },
+      svcShell: { fileExistsBatch: fileExistsBatchMock }
+    } as unknown as typeof window.api
+
+    await expect(
+      readLoraTriggerWordsAuto('马上用\\20260615\\Qwen\\HHCT_qwen_image_lora_complete-000022', {
+        getComfyUIOrigin: () => 'http://remote-comfyui:8188',
+        getLoraDir: () => 'C:\\ComfyUI\\models\\loras'
+      } as never)
+    ).resolves.toBe('hhct_style, dining_room')
+
+    expect(fileExistsBatchMock).toHaveBeenCalled()
+    expect(readTextFileMock).toHaveBeenCalledTimes(1)
+    expect(readTextFileMock).toHaveBeenCalledWith({
+      fullPath:
+        'C:\\ComfyUI\\models\\loras\\马上用\\20260615\\Qwen\\HHCT_qwen_image_lora_complete-000022.civitai.info'
     })
   })
 

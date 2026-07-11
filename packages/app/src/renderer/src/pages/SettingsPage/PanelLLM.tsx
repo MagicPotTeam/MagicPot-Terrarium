@@ -64,7 +64,7 @@ const DEFAULT_HY3D_COS_PREFIX = 'magicpot/hunyuan3d'
 const DEFAULT_HY3D_API_REGION = 'ap-guangzhou'
 const LOCAL_DUPLICATE_CHECK_MODEL_ID_PREFIX = 'agent-local:'
 type TripoApiEndpointPreset = 'international' | 'mainland'
-type ProfileCallTypeSelectValue = LLMProfileCallType | 'tripo' | 'hunyuan3d'
+type ProfileCallTypeSelectValue = LLMProfileCallType | 'tripo' | 'hunyuan3d' | (string & {})
 
 export const createEmptyProfile = (): LLMAPIProfile => ({
   id: crypto.randomUUID(),
@@ -419,17 +419,6 @@ const syncDuplicateCheckVisualModelsFromProfiles = (
   return [...preservedManualModels, ...syncedLocalModels]
 }
 
-const isCodexProfile = (profile: Pick<LLMAPIProfile, 'auth_mode' | 'call_type'>): boolean =>
-  profile.auth_mode === 'codex_oauth' || profile.call_type === 'codex'
-
-const withProfileDefaults = (profile: LLMAPIProfile): LLMAPIProfile =>
-  isCodexProfile(profile)
-    ? {
-        ...profile,
-        codex_fast_mode: profile.codex_fast_mode !== false
-      }
-    : profile
-
 const useApiProfiles = (
   profiles: LLMAPIProfile[],
   duplicateCheckVisualModels: DuplicateCheckVisualModelConfig[],
@@ -572,6 +561,10 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     [t]
   )
   const resolvedProfileCallType = resolveProfileCallType(profile)
+  const explicitCustomProfileCallType =
+    profile.call_type && profile.call_type !== 'api' && profile.call_type !== 'local'
+      ? profile.call_type
+      : undefined
   const isTripo3DCallType =
     resolvedProfileCallType !== 'local' && isTripo3DCompatibleProfile(profile)
   const isHunyuan3DCallType =
@@ -582,7 +575,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
     ? 'tripo'
     : isHunyuan3DCallType
       ? 'hunyuan3d'
-      : resolvedProfileCallType
+      : (explicitCustomProfileCallType ?? resolvedProfileCallType)
   const effectiveDeployment = resolveProfileDeployment(profile)
   const effectiveProvider =
     resolveProfileProvider(profile) || getDefaultProviderForDeployment(effectiveDeployment)
@@ -597,6 +590,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   const isLocalCallType = profileCallType === 'local'
   const isVideoProvider = effectiveProvider === 'kling' || effectiveProvider === 'volcengine'
   const baseUi = {
+    showModelNameInput: true,
     showApiKeyInput: !isLocalCallType && effectiveProvider !== 'ollama',
     showKlingSecretInput: !isLocalCallType && effectiveProvider === 'kling',
     showBackupKeys:
@@ -657,10 +651,8 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
                   ? copy('例如：gpt-5.4', 'e.g. gpt-5.4')
                   : t('llm.model_name_placeholder')
   }
-  const profileUi = resolveRendererAgentApiProfileUi(
-    { baseUi, isChineseUi, profile },
-    () => baseUi
-  )
+  const profileUi = resolveRendererAgentApiProfileUi({ baseUi, isChineseUi, profile }, () => baseUi)
+  const showModelNameInput = profileUi.showModelNameInput ?? baseUi.showModelNameInput
   const showApiKeyInput = profileUi.showApiKeyInput ?? baseUi.showApiKeyInput
   const showKlingSecretInput = profileUi.showKlingSecretInput ?? baseUi.showKlingSecretInput
   const showBackupKeys = profileUi.showBackupKeys ?? baseUi.showBackupKeys
@@ -732,16 +724,20 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
 
   const updateProfile = React.useCallback(
     (nextProfile: LLMAPIProfile) => {
-      const nextCallType = resolveProfileCallType(nextProfile)
+      const explicitNextCustomCallType =
+        nextProfile.call_type &&
+        nextProfile.call_type !== 'api' &&
+        nextProfile.call_type !== 'local'
+          ? nextProfile.call_type
+          : undefined
+      const nextCallType = explicitNextCustomCallType ?? resolveProfileCallType(nextProfile)
       if (nextCallType !== 'api' && nextCallType !== 'local') {
         const extensionProfile = applyRendererAgentApiProfileCallType(
           { profile: nextProfile, callType: nextCallType },
           () => nextProfile
         )
-        if (extensionProfile !== nextProfile) {
-          onUpdate(profile.id, extensionProfile)
-          return
-        }
+        onUpdate(profile.id, extensionProfile)
+        return
       }
 
       if (nextCallType === 'local') {
@@ -978,13 +974,15 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
             />
           )}
 
-        <InputText
-          label={modelNameLabel}
-          value={profile.model_name}
-          onChange={commitModelName}
-          placeholder={modelNamePlaceholder}
-          shrinkLabel
-        />
+        {showModelNameInput && (
+          <InputText
+            label={modelNameLabel}
+            value={profile.model_name}
+            onChange={commitModelName}
+            placeholder={modelNamePlaceholder}
+            shrinkLabel
+          />
+        )}
 
         {isLocalCallType && (
           <InputPath
@@ -1545,10 +1543,6 @@ const PanelLLM: React.FC<PanelProps> = ({ settingsValue, saveSettings }) => {
   const { t, i18n } = useTranslation()
   const isChineseUi = i18n.language?.toLowerCase().startsWith('zh')
   const apiProfiles = settingsValue.llm_config.api_profiles
-  const apiProfilesForView = React.useMemo(
-    () => apiProfiles.map(withProfileDefaults),
-    [apiProfiles]
-  )
   const {
     handleSetApiProfile,
     handleDeleteApiProfile,
@@ -1571,7 +1565,7 @@ const PanelLLM: React.FC<PanelProps> = ({ settingsValue, saveSettings }) => {
           onReplaceProfiles={handleReplaceApiProfiles}
           onUpdate={handleSetApiProfile}
           isChineseUi={isChineseUi}
-          profiles={apiProfilesForView}
+          profiles={apiProfiles}
           t={t}
         />
       )}

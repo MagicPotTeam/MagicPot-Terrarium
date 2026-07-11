@@ -11,12 +11,14 @@ import type {
 } from '../assistantRuntime/types'
 import type { Config } from '@shared/config/config'
 import { throwIfAborted } from '@shared/agent'
+import { normalizeMagicPotToolName } from '@shared/app/types'
 import { getAgentKernel } from './agentKernel'
 import {
   appendMagicPotMcpAudit,
   authorizeMagicPotMcpToolInvocation,
   refreshMagicPotMcpPlatformRuntime
 } from '../mcp/platform/runtime'
+import { isMagicAgentPlatformDeniedToolName } from '../magicAgentRuntime/toolPolicy'
 
 type KernelBackedToolContext = {
   config: Config
@@ -93,7 +95,8 @@ type KernelBackedToolContext = {
 
 const TOOL_CAPABILITY_PREFIX = 'chat.tool.'
 
-const toToolCapabilityId = (toolName: string): string => `${TOOL_CAPABILITY_PREFIX}${toolName}`
+const toToolCapabilityId = (toolName: string): string =>
+  `${TOOL_CAPABILITY_PREFIX}${normalizeMagicPotToolName(toolName)}`
 
 const cloneToolMetadata = (context: KernelBackedToolContext) => ({
   toolContext: context
@@ -101,7 +104,13 @@ const cloneToolMetadata = (context: KernelBackedToolContext) => ({
 
 export const syncAssistantToolsWithAgentKernel = (toolRegistry: AssistantToolRegistry): void => {
   const kernel = getAgentKernel()
-  const toolCatalog = toolRegistry.listTools()
+  const toolCatalog = toolRegistry
+    .listTools()
+    .filter(
+      (tool) =>
+        !isMagicAgentPlatformDeniedToolName(tool.name) &&
+        !isMagicAgentPlatformDeniedToolName(toToolCapabilityId(tool.name))
+    )
   const activeCapabilityIds = new Set(toolCatalog.map((tool) => toToolCapabilityId(tool.name)))
 
   try {
@@ -126,6 +135,7 @@ export const syncAssistantToolsWithAgentKernel = (toolRegistry: AssistantToolReg
       tool: {
         capabilityId: toToolCapabilityId(tool.name),
         name: tool.name,
+        toolName: normalizeMagicPotToolName(tool.name),
         kind: 'tool',
         description: tool.description,
         version: '1.0.0',
@@ -168,11 +178,31 @@ export const invokeAssistantToolViaKernel = async (options: {
   syncAssistantToolsWithAgentKernel(options.toolRegistry)
 
   const kernel = getAgentKernel()
+  const normalizedToolName = normalizeMagicPotToolName(options.toolName)
   const session = kernel.registerSession(options.context.route, {
     source: 'assistant'
   })
   const actor = `assistant:${session.sessionKey}`
-  const target = toToolCapabilityId(options.toolName)
+  const target = toToolCapabilityId(normalizedToolName)
+
+  if (
+    isMagicAgentPlatformDeniedToolName(normalizedToolName) ||
+    isMagicAgentPlatformDeniedToolName(target)
+  ) {
+    const reason = `Tool "${normalizedToolName}" is not allowed through the MagicAgent platform boundary.`
+    appendMagicPotMcpAudit({
+      actor,
+      action: 'tool.invoke',
+      target,
+      decision: 'deny',
+      reason,
+      metadata: {
+        route: session.route
+      }
+    })
+    throw new Error(reason)
+  }
+
   const permission = authorizeMagicPotMcpToolInvocation({
     actor,
     action: 'tool.invoke',
@@ -201,7 +231,7 @@ export const invokeAssistantToolViaKernel = async (options: {
   try {
     throwIfAborted(options.signal)
     const result = await kernel.invokeTool({
-      toolName: options.toolName,
+      toolName: normalizedToolName,
       args: options.args,
       session,
       signal: options.signal,
