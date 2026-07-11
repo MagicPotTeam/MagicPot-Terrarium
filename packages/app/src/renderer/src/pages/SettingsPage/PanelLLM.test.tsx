@@ -396,6 +396,71 @@ describe('PanelLLM Agent API settings', () => {
     })
   })
 
+  it('persists API address and key changes immediately without waiting for blur', () => {
+    const saveSettings = vi.fn()
+    rendererHostExtensionApiV1.settings = {
+      buildAgentApiProfileCallTypeOptions: ({ baseOptions }) => [
+        ...baseOptions,
+        { label: 'CLIProxyAPI/Codex', value: 'cliproxyapi' }
+      ],
+      resolveAgentApiProfileUi: ({ baseUi, profile }) =>
+        profile.call_type === 'cliproxyapi'
+          ? {
+              ...baseUi,
+              apiKeyLabel: 'CLIProxyAPI API Key',
+              showModelNameInput: false,
+              showApiKeyInput: true,
+              showBaseUrlInput: true
+            }
+          : undefined
+    }
+
+    const { unmount } = render(
+      <PanelLLM
+        settingsValue={buildSettingsWithProfile({
+          model_name: '',
+          base_url: '',
+          api_key: '',
+          call_type: 'cliproxyapi'
+        })}
+        saveSettings={saveSettings}
+      />
+    )
+
+    fireEvent.change(screen.getByLabelText('Base URL'), {
+      target: { value: 'https://proxy.example.test/v1' }
+    })
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'profile-1',
+            base_url: 'https://proxy.example.test/v1',
+            api_key: ''
+          })
+        ]
+      }
+    })
+
+    fireEvent.change(screen.getByLabelText('CLIProxyAPI API Key'), {
+      target: { value: 'proxy-secret' }
+    })
+    expect(saveSettings).toHaveBeenLastCalledWith({
+      llm_config: {
+        api_profiles: [
+          expect.objectContaining({
+            id: 'profile-1',
+            base_url: 'https://proxy.example.test/v1',
+            api_key: 'proxy-secret'
+          })
+        ]
+      }
+    })
+
+    unmount()
+    expect(saveSettings).toHaveBeenCalledTimes(2)
+  })
+
   it('clears old protocol overrides when the API address is edited', () => {
     const saveSettings = vi.fn()
 

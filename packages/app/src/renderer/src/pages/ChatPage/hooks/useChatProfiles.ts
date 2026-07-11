@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Config, LLMAPIProfile } from '@shared/config/config'
+import { isRunnableProfile } from '@shared/llm'
 import { rendererHostExtensionApiV1 } from '@renderer/extensions/generatedRegistry'
 import {
   buildChatAvailableProfiles,
@@ -16,7 +17,7 @@ import {
  */
 export function useChatProfiles(config: Config, isReady: boolean, enabled: boolean = true) {
   const [remoteProfiles, setRemoteProfiles] = useState<LLMAPIProfile[]>([])
-  const [cliProxyModelsByProfileId, setCliProxyModelsByProfileId] = useState<
+  const [discoveredModelsByProfileId, setDiscoveredModelsByProfileId] = useState<
     Record<string, string[]>
   >({})
   const remoteLlmServerOrigin = useMemo(
@@ -70,17 +71,13 @@ export function useChatProfiles(config: Config, isReady: boolean, enabled: boole
 
   useEffect(() => {
     if (!enabled || !isReady || useRemoteLlm) {
-      setCliProxyModelsByProfileId({})
+      setDiscoveredModelsByProfileId({})
       return
     }
 
-    const profiles = (config?.llm_config?.api_profiles || []).filter(
-      (profile) =>
-        profile.call_type === 'cliproxyapi' &&
-        Boolean(profile.base_url?.trim() && profile.api_key?.trim())
-    )
+    const profiles = (config?.llm_config?.api_profiles || []).filter(isRunnableProfile)
     if (profiles.length === 0) {
-      setCliProxyModelsByProfileId({})
+      setDiscoveredModelsByProfileId({})
       return
     }
 
@@ -99,7 +96,7 @@ export function useChatProfiles(config: Config, isReady: boolean, enabled: boole
       })
     ).then((entries) => {
       if (!cancelled) {
-        setCliProxyModelsByProfileId(Object.fromEntries(entries))
+        setDiscoveredModelsByProfileId(Object.fromEntries(entries))
       }
     })
 
@@ -110,8 +107,8 @@ export function useChatProfiles(config: Config, isReady: boolean, enabled: boole
   }, [config?.llm_config?.api_profiles, enabled, isReady, useRemoteLlm])
 
   const availableProfiles = useMemo(
-    () => buildChatAvailableProfiles(config, remoteProfiles, cliProxyModelsByProfileId),
-    [cliProxyModelsByProfileId, config, remoteProfiles]
+    () => buildChatAvailableProfiles(config, remoteProfiles, discoveredModelsByProfileId),
+    [config, discoveredModelsByProfileId, remoteProfiles]
   )
 
   return { availableProfiles, remoteProfiles }

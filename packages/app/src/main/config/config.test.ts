@@ -166,7 +166,6 @@ describe('config', () => {
     const configModule = await loadConfigModule()
     await configModule.initConfig()
 
-    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1234567890)
     const writeFileSpy = vi.spyOn(fs, 'writeFile')
     const renameSpy = vi.spyOn(fs, 'rename')
 
@@ -175,21 +174,106 @@ describe('config', () => {
         use_remote_llm: !DEFAULT_CONFIG.use_remote_llm
       })
 
-      const tempPath = `${configPath}.1234567890.tmp`
       expect(writeFileSpy).toHaveBeenCalledTimes(1)
       expect(writeFileSpy).toHaveBeenCalledWith(
-        tempPath,
+        expect.stringMatching(/^.*config\.json\.[0-9a-f-]+\.tmp$/),
         expect.stringContaining('"use_remote_llm"'),
         'utf-8'
       )
       expect(renameSpy).toHaveBeenCalledTimes(1)
+      const tempPath = writeFileSpy.mock.calls[0][0]
       expect(renameSpy).toHaveBeenCalledWith(tempPath, configPath)
 
       const savedConfig = JSON.parse(await fs.readFile(configPath, 'utf8'))
       expect(savedConfig.use_remote_llm).toBe(!DEFAULT_CONFIG.use_remote_llm)
     } finally {
-      nowSpy.mockRestore()
       writeFileSpy.mockRestore()
+      renameSpy.mockRestore()
+    }
+  })
+
+  it('serializes concurrent saves and merges them in call order', async () => {
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+
+    const originalRename = fs.rename.bind(fs)
+    const renameGate = Promise.withResolvers<void>()
+    let firstRename = true
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation(async (oldPath, newPath) => {
+      if (firstRename) {
+        firstRename = false
+        await renameGate.promise
+      }
+      await originalRename(oldPath, newPath)
+    })
+
+    try {
+      const firstSave = configModule.saveConfig({
+        remote_llm_server_config: { server_origin: 'https://first.example' }
+      })
+      const secondSave = configModule.saveConfig({
+        remote_llm_server_config: { access_token: 'second-token' }
+      })
+      const thirdSave = configModule.saveConfig({
+        remote_llm_server_config: { server_origin: 'https://latest.example' }
+      })
+
+      await vi.waitFor(() => expect(renameSpy).toHaveBeenCalledTimes(1))
+      expect(configModule.getConfig().remote_llm_server_config).toEqual(
+        DEFAULT_CONFIG.remote_llm_server_config
+      )
+
+      renameGate.resolve()
+      await Promise.all([firstSave, secondSave, thirdSave])
+
+      const expectedRemoteConfig = {
+        server_origin: 'https://latest.example',
+        access_token: 'second-token'
+      }
+      expect(configModule.getConfig().remote_llm_server_config).toEqual(expectedRemoteConfig)
+      expect(renameSpy).toHaveBeenCalledTimes(3)
+      expect(new Set(renameSpy.mock.calls.map(([tempPath]) => tempPath)).size).toBe(3)
+      const savedConfig = JSON.parse(await fs.readFile(path.join(tempDir, 'config.json'), 'utf8'))
+      expect(savedConfig.remote_llm_server_config).toEqual(expectedRemoteConfig)
+    } finally {
+      renameGate.resolve()
+      renameSpy.mockRestore()
+    }
+  })
+
+  it('continues processing queued saves after a save fails', async () => {
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+
+    const originalRename = fs.rename.bind(fs)
+    let shouldFail = true
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation(async (oldPath, newPath) => {
+      if (shouldFail) {
+        shouldFail = false
+        throw new Error('simulated rename failure')
+      }
+      await originalRename(oldPath, newPath)
+    })
+
+    try {
+      const failedSave = configModule.saveConfig({
+        remote_llm_server_config: { server_origin: 'https://failed.example' }
+      })
+      const nextSave = configModule.saveConfig({
+        remote_llm_server_config: { access_token: 'survived-token' }
+      })
+
+      await expect(failedSave).rejects.toThrow('simulated rename failure')
+      await expect(nextSave).resolves.toBeUndefined()
+
+      const expectedRemoteConfig = {
+        ...DEFAULT_CONFIG.remote_llm_server_config,
+        access_token: 'survived-token'
+      }
+      expect(configModule.getConfig().remote_llm_server_config).toEqual(expectedRemoteConfig)
+      const savedConfig = JSON.parse(await fs.readFile(path.join(tempDir, 'config.json'), 'utf8'))
+      expect(savedConfig.remote_llm_server_config).toEqual(expectedRemoteConfig)
+    } finally {
       renameSpy.mockRestore()
     }
   })
