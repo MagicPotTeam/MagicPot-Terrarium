@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { InputProps } from './InputProps'
 import { api } from '@renderer/utils/windowUtils'
 import { FileItem } from '@shared/comfy/types'
@@ -52,7 +52,17 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
   const [internalValue, setInternalValue] = useState(value)
   const [isLoading, setIsLoading] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const previewUrlRef = useRef<string | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
+
+  const replacePreviewUrl = useCallback((nextUrl: string | null) => {
+    const previousUrl = previewUrlRef.current
+    previewUrlRef.current = nextUrl
+    setPreviewUrl(nextUrl)
+    if (previousUrl && previousUrl !== nextUrl) {
+      URL.revokeObjectURL(previousUrl)
+    }
+  }, [])
 
   // 同步外部 value 变化到 internalValue
   useEffect(() => {
@@ -90,20 +100,14 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
     setModalOpen(false)
     setInternalValue('')
     onChange('')
-    setPreviewUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev)
-      return null
-    })
-  }, [onChange])
+    replacePreviewUrl(null)
+  }, [onChange, replacePreviewUrl])
 
   useEffect(() => {
     let active = true
     ;(async () => {
       if (!internalValue) {
-        setPreviewUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev)
-          return null
-        })
+        replacePreviewUrl(null)
         return
       }
       try {
@@ -112,24 +116,31 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
         const image: Uint8Array = res.result
         const blob = new Blob([image as BlobPart], { type: 'image/*' })
         const url = URL.createObjectURL(blob)
-        setPreviewUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev)
-          return url
-        })
+        if (!active) {
+          URL.revokeObjectURL(url)
+          return
+        }
+        replacePreviewUrl(url)
       } catch (error) {
         console.warn('[InputComfyImageMask] Failed to load image preview:', internalValue, error)
         if (active) {
-          setPreviewUrl((prev) => {
-            if (prev) URL.revokeObjectURL(prev)
-            return null
-          })
+          replacePreviewUrl(null)
         }
       }
     })()
     return () => {
       active = false
     }
-  }, [internalValue])
+  }, [internalValue, replacePreviewUrl])
+
+  useEffect(
+    () => () => {
+      const url = previewUrlRef.current
+      previewUrlRef.current = null
+      if (url) URL.revokeObjectURL(url)
+    },
+    []
+  )
 
   const doUploadMask = async (maskCanvas: HTMLCanvasElement) => {
     console.log('doUploadMask', maskCanvas)
