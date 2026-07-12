@@ -9,6 +9,7 @@ import type {
   SyncFigmaFileResp
 } from '@shared/api/svcFigma'
 import type { FigmaBindingPage } from '@shared/figma'
+import { safeRemoteDownload } from './safeRemoteDownload'
 
 type FigmaApiBoundingBox = {
   x: number
@@ -41,6 +42,8 @@ type FigmaApiImagesResponse = {
 const FIGMA_API_ORIGIN = 'https://api.figma.com/v1'
 const FIGMA_IMAGE_BATCH_SIZE = 20
 const FIGMA_HOSTNAME = 'figma.com'
+const FIGMA_JSON_MAX_BYTES = 10 * 1024 * 1024
+const FIGMA_IMAGE_MAX_BYTES = 25 * 1024 * 1024
 
 function ensureAccessToken(accessToken: string): string {
   const normalized = accessToken.trim()
@@ -94,16 +97,14 @@ function buildFigmaHeaders(accessToken: string): HeadersInit {
 }
 
 async function fetchFigmaJson<T>(path: string, accessToken: string): Promise<T> {
-  const response = await fetch(`${FIGMA_API_ORIGIN}${path}`, {
-    headers: buildFigmaHeaders(accessToken)
+  const download = await safeRemoteDownload(`${FIGMA_API_ORIGIN}${path}`, {
+    allowedContentTypes: ['application/json'],
+    headers: buildFigmaHeaders(accessToken) as Record<string, string>,
+    maxBytes: FIGMA_JSON_MAX_BYTES,
+    errorLabel: 'Figma API response'
   })
 
-  if (!response.ok) {
-    const errorText = (await response.text()).trim()
-    throw new Error(errorText || `Figma API request failed with status ${response.status}.`)
-  }
-
-  return (await response.json()) as T
+  return JSON.parse(download.buffer.toString('utf8')) as T
 }
 
 function getFigmaPages(file: FigmaApiFileResponse): FigmaBindingPage[] {
@@ -155,15 +156,12 @@ function sanitizeFileStem(value: string): string {
 }
 
 async function fetchImageDataUrl(imageUrl: string): Promise<string> {
-  const response = await fetch(imageUrl)
-  if (!response.ok) {
-    throw new Error(`Failed to download rendered Figma node image (${response.status}).`)
-  }
-
-  const contentType = response.headers.get('content-type')?.split(';')[0]?.trim() || 'image/png'
-  const arrayBuffer = await response.arrayBuffer()
-  const base64 = Buffer.from(arrayBuffer).toString('base64')
-  return `data:${contentType};base64,${base64}`
+  const download = await safeRemoteDownload(imageUrl, {
+    allowedContentTypes: ['image/'],
+    maxBytes: FIGMA_IMAGE_MAX_BYTES,
+    errorLabel: 'rendered Figma node image'
+  })
+  return `data:${download.contentType};base64,${download.buffer.toString('base64')}`
 }
 
 async function fetchNodeImageUrls(

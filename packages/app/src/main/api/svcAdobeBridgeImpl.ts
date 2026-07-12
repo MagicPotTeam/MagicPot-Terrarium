@@ -17,6 +17,7 @@ import type { BridgeSourceContextSummary } from '@shared/api/bridgeSourceContext
 import type { BridgeTaskContext } from '@shared/api/bridgeTaskContext'
 import { getConfig } from '../config/config'
 import { isLocalFileSource, normalizeLocalFilePath } from '../utils/localFileUrl'
+import { safeRemoteDownload } from './safeRemoteDownload'
 
 const MAGICPOT_IMPORTS_DIR = 'MagicPotImports'
 const DEFAULT_IMAGE_FILENAME = 'asset.png'
@@ -580,16 +581,15 @@ const resolveAssetSource = async (req: ExportAssetToAdobeReq): Promise<ResolvedA
   }
 
   if (isHttpUrl(sourceUrl)) {
-    const response = await fetch(sourceUrl)
-    if (!response.ok) {
-      throw new Error(`Failed to download asset: ${response.status} ${response.statusText}`.trim())
-    }
-    const arrayBuffer = await response.arrayBuffer()
+    const download = await safeRemoteDownload(sourceUrl, {
+      allowedContentTypes: ['image/', 'video/'],
+      errorLabel: 'asset'
+    })
     return {
-      buffer: Buffer.from(arrayBuffer),
+      buffer: download.buffer,
       fileName: ensureFileExtension(
-        requestedFileName || getDownloadFileNameFromUrl(sourceUrl),
-        req.mimeType
+        requestedFileName || getDownloadFileNameFromUrl(download.finalUrl.toString()),
+        req.mimeType || download.contentType
       ),
       sourceKind: 'http-download'
     }
