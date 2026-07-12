@@ -48,6 +48,12 @@ const testUiPolicy = resolveTestUiPolicy(readTestUiEnv())
 const CANVAS_SYNC_REMOVED_ERROR =
   'Canvas mirroring has been removed. Remote agents can only access content explicitly attached to the current request.'
 const LEGACY_CHAT_ENDPOINTS = new Set(['/api/bot/message', '/api/bot/chat', '/api/message'])
+const DEFAULT_LLM_PROXY_BIND_HOST = '127.0.0.1'
+const DEFAULT_HTTP_BODY_LIMIT_BYTES = 16 * 1024 * 1024
+const HTTP_HEADERS_TIMEOUT_MS = 15_000
+const HTTP_REQUEST_TIMEOUT_MS = 120_000
+const HTTP_INACTIVITY_TIMEOUT_MS = 120_000
+const HTTP_KEEP_ALIVE_TIMEOUT_MS = 5_000
 
 const getAllConfiguredLlmProfiles = (config: Config): LLMAPIProfile[] => [
   ...(config.llm_config?.api_profiles || []),
@@ -948,6 +954,14 @@ const hasValidProxyMediaSignature = (
   return timingSafeEqual(expectedBuffer, providedBuffer)
 }
 
+const normalizeBindHost = (value?: string | null): string =>
+  cleanString(value) || DEFAULT_LLM_PROXY_BIND_HOST
+
+const isLoopbackBindHost = (host: string): boolean => {
+  const normalized = host.toLowerCase().replace(/^\[|\]$/g, '')
+  return normalized === 'localhost' || normalized === '::1' || normalized.startsWith('127.')
+}
+
 const getMcpServerPath = () => cleanString(getConfig().mcp_config?.server?.path) || '/api/mcp'
 
 const getLocalMcpAuthToken = () =>
@@ -990,12 +1004,72 @@ type ProxyChatRequestData = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
-const readRequestBody = async (req: http.IncomingMessage): Promise<string> => {
-  let body = ''
-  for await (const chunk of req) {
-    body += chunk
+class HttpRequestError extends Error {
+  constructor(
+    readonly statusCode: 400 | 413,
+    message: string
+  ) {
+    super(message)
+    this.name = 'HttpRequestError'
   }
-  return body
+}
+
+const parseRequestContentLength = (req: http.IncomingMessage): number | undefined => {
+  const rawContentLength = req.headers['content-length']
+  if (Array.isArray(rawContentLength) || rawContentLength === undefined) {
+    return undefined
+  }
+  if (!/^\d+$/.test(rawContentLength)) {
+    throw new HttpRequestError(400, 'Invalid Content-Length header.')
+  }
+
+  const contentLength = Number(rawContentLength)
+  if (!Number.isSafeInteger(contentLength)) {
+    throw new HttpRequestError(400, 'Invalid Content-Length header.')
+  }
+  return contentLength
+}
+
+const readRequestBody = async (
+  req: http.IncomingMessage,
+  maxBytes = DEFAULT_HTTP_BODY_LIMIT_BYTES
+): Promise<string> => {
+  const contentLength = parseRequestContentLength(req)
+  if (contentLength !== undefined && contentLength > maxBytes) {
+    throw new HttpRequestError(413, 'Request body is too large.')
+  }
+
+  const chunks: Buffer[] = []
+  let totalBytes = 0
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    totalBytes += buffer.byteLength
+    if (totalBytes > maxBytes) {
+      throw new HttpRequestError(413, 'Request body is too large.')
+    }
+    chunks.push(buffer)
+  }
+
+  if (contentLength !== undefined && contentLength !== totalBytes) {
+    throw new HttpRequestError(400, 'Content-Length does not match the request body.')
+  }
+  return Buffer.concat(chunks, totalBytes).toString('utf8')
+}
+
+const readJsonRequestBody = async <T>(
+  req: http.IncomingMessage,
+  options: { maxBytes?: number; allowEmpty?: boolean } = {}
+): Promise<T> => {
+  const body = await readRequestBody(req, options.maxBytes)
+  if (!body && options.allowEmpty) {
+    return undefined as T
+  }
+
+  try {
+    return JSON.parse(body) as T
+  } catch {
+    throw new HttpRequestError(400, 'Malformed JSON request body.')
+  }
 }
 
 const normalizeLegacyMessageContent = (value: unknown): string | undefined => {
@@ -1259,6 +1333,14 @@ export function startLLMProxyServer(): void {
   }
 
   const port = config.local_llm_server_config.port ?? 3721
+  const bindHost = normalizeBindHost(config.local_llm_server_config.bind_host)
+
+  if (!isLoopbackBindHost(bindHost) && getConfiguredLlmProxyAccessTokens().length === 0) {
+    console.error(
+      `[LLMProxyServer] Refusing non-loopback bind on ${bindHost}: configure at least one valid proxy access token.`
+    )
+    return
+  }
 
   if (server) {
     console.log('[LLMProxyServer] Server is already running.')
@@ -1266,7 +1348,6 @@ export function startLLMProxyServer(): void {
   }
 
   server = http.createServer(async (req, res) => {
-    // CORS support.
     res.setHeader('Access-Control-Allow-Origin', '*')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     res.setHeader(
@@ -1502,12 +1583,7 @@ export function startLLMProxyServer(): void {
           return
         }
 
-        let body = ''
-        for await (const chunk of req) {
-          body += chunk
-        }
-
-        const reqData = JSON.parse(body) as {
+        const reqData = await readJsonRequestBody<{
           channel?: string
           scopeType?: AssistantScopeType
           scopeId?: string
@@ -1515,7 +1591,7 @@ export function startLLMProxyServer(): void {
           toolName?: string
           args?: Record<string, unknown>
           allowedToolNames?: string[]
-        }
+        }>(req)
 
         if (!cleanString(reqData.scopeId) || !cleanString(reqData.toolName)) {
           res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -1553,8 +1629,7 @@ export function startLLMProxyServer(): void {
           writeUnauthorizedLlmProxyResponse(res)
           return
         }
-        const body = await readRequestBody(req)
-        const reqData = JSON.parse(body) as {
+        const reqData = await readJsonRequestBody<{
           messages: ChatMessage[]
           route?: AssistantRouteInput
           systemPrompt?: string
@@ -1563,7 +1638,7 @@ export function startLLMProxyServer(): void {
           profileScope?: LLMProfileScope
           sessionUrl?: string
           conversationId?: string
-        }
+        }>(req)
         await handleProxyChatRequest({ req, res, port, accessIdentity, reqData })
         return
       }
@@ -1574,8 +1649,7 @@ export function startLLMProxyServer(): void {
           writeUnauthorizedLlmProxyResponse(res)
           return
         }
-        const body = await readRequestBody(req)
-        const parsedBody = (body ? JSON.parse(body) : {}) as unknown
+        const parsedBody = await readJsonRequestBody<unknown>(req, { allowEmpty: true })
         const reqData = normalizeLegacyChatRequest(isRecord(parsedBody) ? parsedBody : {})
         if (reqData.messages.length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -1599,18 +1673,14 @@ export function startLLMProxyServer(): void {
           writeUnauthorizedLlmProxyResponse(res)
           return
         }
-        let body = ''
-        for await (const chunk of req) {
-          body += chunk
-        }
-        const reqData = JSON.parse(body) as {
+        const reqData = await readJsonRequestBody<{
           model?: string
           messages: Array<{
             role: 'system' | 'user' | 'assistant'
             content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
           }>
           stream?: boolean
-        }
+        }>(req)
         // Convert OpenAI chat-completions messages into MagicPot chat messages.
         const messages: ChatMessage[] = []
         let systemPrompt: string | undefined
@@ -1793,15 +1863,12 @@ export function startLLMProxyServer(): void {
           return
         }
 
-        let body = ''
-        for await (const chunk of req) {
-          body += chunk
-        }
+        const parsedBody = await readJsonRequestBody<unknown>(req, { allowEmpty: true })
 
         await handleMagicPotMcpLegacySseMessageRequest({
           req,
           res,
-          parsedBody: body ? JSON.parse(body) : undefined
+          parsedBody
         })
         return
       }
@@ -1820,18 +1887,16 @@ export function startLLMProxyServer(): void {
           return
         }
 
-        let body = ''
-        if (req.method === 'POST') {
-          for await (const chunk of req) {
-            body += chunk
-          }
-        }
+        const parsedBody =
+          req.method === 'POST'
+            ? await readJsonRequestBody<unknown>(req, { allowEmpty: true })
+            : undefined
 
         normalizeMcpAcceptHeader(req)
         await handleMagicPotMcpHttpBridgeRequest({
           req,
           res,
-          parsedBody: body ? JSON.parse(body) : undefined
+          parsedBody
         })
         return
       }
@@ -1841,29 +1906,35 @@ export function startLLMProxyServer(): void {
       res.end(JSON.stringify({ error: 'Not Found', path: pathname }))
     } catch (error) {
       console.error('[LLMProxyServer] Error:', error)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
+      if (res.headersSent || res.destroyed) return
+      const statusCode = error instanceof HttpRequestError ? error.statusCode : 500
+      res.writeHead(statusCode, { 'Content-Type': 'application/json' })
       res.end(
         JSON.stringify({
-          error: 'Internal server error.'
+          error: error instanceof HttpRequestError ? error.message : 'Internal server error.'
         })
       )
     }
   })
+
+  server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS
+  server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS
+  server.timeout = HTTP_INACTIVITY_TIMEOUT_MS
+  server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS
 
   server.on('error', (error) => {
     console.error('[LLMProxyServer] Server error:', error)
     server = null
   })
 
-  server.listen(port, '0.0.0.0', () => {
+  server.listen(port, bindHost, () => {
     const address = server?.address()
     const listeningPort = address && typeof address === 'object' ? address.port : port
-    const localIP = getLocalIPAddress()
+    const displayHost = bindHost.includes(':') ? `[${bindHost}]` : bindHost
     console.log('[LLMProxyServer] LLM proxy server started.')
-    console.log(`[LLMProxyServer] Local URL: http://localhost:${listeningPort}`)
-    console.log(`[LLMProxyServer] LAN URL: http://${localIP}:${listeningPort}`)
+    console.log(`[LLMProxyServer] URL: http://${displayHost}:${listeningPort}`)
     console.log(
-      `[LLMProxyServer] OpenAI-compatible URL: http://${localIP}:${listeningPort}/v1/chat/completions`
+      `[LLMProxyServer] OpenAI-compatible URL: http://${displayHost}:${listeningPort}/v1/chat/completions`
     )
   })
 }
@@ -1882,19 +1953,22 @@ export function stopLLMProxyServer(): void {
 /**
  * Get the current server status.
  */
-export function getLLMProxyServerStatus(): { running: boolean; port?: number } {
+export function getLLMProxyServerStatus(): { running: boolean; port?: number; host?: string } {
   if (server) {
     const address = server.address()
     const listeningPort = address && typeof address === 'object' ? address.port : undefined
+    const listeningHost = address && typeof address === 'object' ? address.address : undefined
     return {
       running: true,
-      port: listeningPort
+      port: listeningPort,
+      host: listeningHost
     }
   }
 
   const config = getConfig()
   return {
     running: false,
-    port: config.local_llm_server_config?.port
+    port: config.local_llm_server_config?.port,
+    host: normalizeBindHost(config.local_llm_server_config?.bind_host)
   }
 }

@@ -44,10 +44,9 @@ async function refreshRuntimeServices(
 }
 
 function syncLlmProxyServer(config: Config): void {
+  stopLLMProxyServer()
   if (config.local_llm_server_config?.enable_server) {
     startLLMProxyServer()
-  } else {
-    stopLLMProxyServer()
   }
 }
 
