@@ -260,6 +260,79 @@ describe('MagicAgentPlatformAdapter', () => {
     )
   })
 
+  it('includes the default registered agent system prompt in AssistantRuntime execution', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [creativeAdapter] })
+    })
+    const defaultAgent = adapter.listAgents().find((agent) => agent.id === 'magicpot.default.chat')
+
+    await adapter.runAgent({
+      agentId: 'magicpot.default.chat',
+      text: 'use the default agent',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+    })
+
+    expect(defaultAgent?.systemPrompt).toBeTruthy()
+    expect(assistantRuntime.handleMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ systemPrompt: defaultAgent?.systemPrompt })
+    )
+  })
+
+  it('composes a dynamically registered agent prompt before the request addendum', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [creativeAdapter] })
+    })
+    adapter.registerAgent({
+      id: 'test.dynamic',
+      name: 'Dynamic agent',
+      systemPrompt: 'Follow the registered agent instructions.'
+    })
+
+    await adapter.runAgent({
+      agentId: 'test.dynamic',
+      text: 'use the dynamic agent',
+      systemPrompt: 'Also format the answer as JSON.',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+    })
+
+    expect(assistantRuntime.handleMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemPrompt: 'Follow the registered agent instructions.\n\nAlso format the answer as JSON.'
+      })
+    )
+  })
+
+  it('does not duplicate identical agent and request prompts after trimming', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [creativeAdapter] })
+    })
+    adapter.registerAgent({
+      id: 'test.no-duplicate',
+      name: 'No duplicate agent',
+      systemPrompt: 'Use one copy of this prompt.'
+    })
+
+    await adapter.runAgent({
+      agentId: 'test.no-duplicate',
+      text: 'avoid duplication',
+      systemPrompt: '  Use one copy of this prompt.  ',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+    })
+
+    expect(assistantRuntime.handleMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ systemPrompt: 'Use one copy of this prompt.' })
+    )
+  })
+
   it('forwards graph cancellation signals into AssistantRuntime agent execution', async () => {
     const assistantRuntime = createAssistantRuntime()
     const adapter = new MagicAgentPlatformAdapter({

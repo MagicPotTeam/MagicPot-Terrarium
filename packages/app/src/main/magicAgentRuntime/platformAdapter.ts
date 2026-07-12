@@ -56,6 +56,21 @@ const MAGIC_AGENT_KERNEL_PREFIX = 'magicagent.platform'
 
 const cleanString = (value: unknown): string => String(value || '').trim()
 
+const composeSystemPrompt = (
+  agentSystemPrompt: string | null | undefined,
+  requestSystemPrompt: string | null | undefined
+): string | undefined => {
+  const agentPrompt = cleanString(agentSystemPrompt)
+  const requestPrompt = cleanString(requestSystemPrompt)
+  if (!agentPrompt) {
+    return requestPrompt || undefined
+  }
+  if (!requestPrompt || requestPrompt === agentPrompt) {
+    return agentPrompt
+  }
+  return `${agentPrompt}\n\n${requestPrompt}`
+}
+
 const cloneRecord = (value?: Record<string, unknown>): Record<string, unknown> | undefined =>
   value ? { ...value } : undefined
 
@@ -473,6 +488,7 @@ export class MagicAgentPlatformAdapter {
     const route = requirePlatformRoute(req.route, 'agent run')
     const agentId = normalizeMagicPotToolName(req.agentId) || 'magicpot.default.chat'
     const agentDefinition = this.listAgents().find((agent) => agent.id === agentId)
+    const systemPrompt = composeSystemPrompt(agentDefinition?.systemPrompt, req.systemPrompt)
     const effectiveAllowedToolNames = resolveRunAllowedToolNames(
       req.allowedToolNames,
       agentDefinition?.toolNames
@@ -521,7 +537,7 @@ export class MagicAgentPlatformAdapter {
         route,
         text: req.text,
         ...(req.attachments?.length ? { attachments: req.attachments } : {}),
-        ...(req.systemPrompt ? { systemPrompt: req.systemPrompt } : {}),
+        ...(systemPrompt ? { systemPrompt } : {}),
         ...(req.profileId ? { profileId: req.profileId } : {}),
         signal: executionController.signal,
         execution: {
