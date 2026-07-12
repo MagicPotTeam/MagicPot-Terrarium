@@ -32,18 +32,40 @@ const SlideShow = ({
   const [animDirection, setAnimDirection] = useState<'left' | 'right'>(slideDirection)
 
   const timerRef = useRef<number | null>(null)
+  const animationTimerRef = useRef<number | null>(null)
+  const currentImageIndexRef = useRef(currentImageIndex)
+  const isAnimatingRef = useRef(isAnimating)
+
+  useEffect(() => {
+    currentImageIndexRef.current = currentImageIndex
+  }, [currentImageIndex])
+
+  useEffect(() => {
+    isAnimatingRef.current = isAnimating
+  }, [isAnimating])
+
+  const completeTransition = useCallback((targetIndex: number) => {
+    if (animationTimerRef.current !== null) {
+      window.clearTimeout(animationTimerRef.current)
+    }
+    animationTimerRef.current = window.setTimeout(() => {
+      currentImageIndexRef.current = targetIndex
+      isAnimatingRef.current = false
+      setCurrentImageIndex(targetIndex)
+      setIsAnimating(false)
+      animationTimerRef.current = null
+    }, ANIM_MS)
+  }, [])
 
   const showNextSlide = useCallback(() => {
-    if (isAnimating || images.length === 0) return
+    if (isAnimatingRef.current || images.length < 2) return
+    const nextIndex = (currentImageIndexRef.current + 1) % images.length
+    isAnimatingRef.current = true
     setIsAnimating(true)
     setAnimDirection('left')
-    const nextIndex = (currentImageIndex + 1) % images.length
     setNextImageIndex(nextIndex)
-    setTimeout(() => {
-      setCurrentImageIndex(nextIndex)
-      setIsAnimating(false)
-    }, ANIM_MS)
-  }, [currentImageIndex, images, isAnimating])
+    completeTransition(nextIndex)
+  }, [completeTransition, images.length])
 
   const stopTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -54,30 +76,57 @@ const SlideShow = ({
 
   const startTimer = useCallback(() => {
     stopTimer()
-    timerRef.current = window.setInterval(() => {
-      showNextSlide()
-    }, interval)
-  }, [interval, showNextSlide, stopTimer])
+    if (images.length < 2) return
+    timerRef.current = window.setInterval(showNextSlide, interval)
+  }, [images.length, interval, showNextSlide, stopTimer])
+
+  useEffect(() => {
+    if (images.length === 0) {
+      currentImageIndexRef.current = 0
+      setCurrentImageIndex(0)
+      setNextImageIndex(0)
+    } else if (currentImageIndexRef.current >= images.length) {
+      currentImageIndexRef.current = 0
+      setCurrentImageIndex(0)
+      setNextImageIndex(images.length > 1 ? 1 : 0)
+    }
+  }, [images.length])
 
   useEffect(() => {
     startTimer()
     return stopTimer
-  }, [startTimer, stopTimer, images])
+  }, [startTimer, stopTimer])
+
+  useEffect(
+    () => () => {
+      stopTimer()
+      if (animationTimerRef.current !== null) {
+        window.clearTimeout(animationTimerRef.current)
+        animationTimerRef.current = null
+      }
+    },
+    [stopTimer]
+  )
 
   const goToSlide = (targetIndex: number) => {
-    if (isAnimating || targetIndex === currentImageIndex || images.length === 0) return
+    if (
+      isAnimatingRef.current ||
+      targetIndex === currentImageIndexRef.current ||
+      targetIndex < 0 ||
+      targetIndex >= images.length
+    ) {
+      return
+    }
     const total = images.length
-    const forwardSteps = (targetIndex - currentImageIndex + total) % total
-    const backwardSteps = (currentImageIndex - targetIndex + total) % total
+    const forwardSteps = (targetIndex - currentImageIndexRef.current + total) % total
+    const backwardSteps = (currentImageIndexRef.current - targetIndex + total) % total
     const dir: 'left' | 'right' = forwardSteps <= backwardSteps ? 'left' : 'right'
+    isAnimatingRef.current = true
     setIsAnimating(true)
     setAnimDirection(dir)
     setNextImageIndex(targetIndex)
     startTimer()
-    setTimeout(() => {
-      setCurrentImageIndex(targetIndex)
-      setIsAnimating(false)
-    }, ANIM_MS)
+    completeTransition(targetIndex)
   }
 
   // 基础样式：把阴影/裁切放在 Paper 自己上，去掉边框
@@ -100,30 +149,32 @@ const SlideShow = ({
   return (
     <Paper sx={mergedSx}>
       {/* 当前图片 */}
-      <Box
-        component="img"
-        src={images[currentImageIndex]}
-        alt={alt}
-        sx={{
-          width: '100%',
-          height: '100%',
-          objectFit: 'cover',
-          opacity: 1,
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          transform: isAnimating
-            ? animDirection === 'left'
-              ? 'translateX(-100%)'
-              : 'translateX(100%)'
-            : 'translateX(0)',
-          transition: isAnimating ? `transform ${ANIM_MS}ms ease-in-out` : 'none',
-          willChange: 'transform' // 减少动画中出现的细微缝隙
-        }}
-      />
+      {images.length > 0 && (
+        <Box
+          component="img"
+          src={images[currentImageIndex]}
+          alt={alt}
+          sx={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            opacity: 1,
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            transform: isAnimating
+              ? animDirection === 'left'
+                ? 'translateX(-100%)'
+                : 'translateX(100%)'
+              : 'translateX(0)',
+            transition: isAnimating ? `transform ${ANIM_MS}ms ease-in-out` : 'none',
+            willChange: 'transform' // 减少动画中出现的细微缝隙
+          }}
+        />
+      )}
 
       {/* 下一张（动画时显示） */}
-      {isAnimating && (
+      {isAnimating && images[nextImageIndex] && (
         <Box
           component="img"
           src={images[nextImageIndex]}
