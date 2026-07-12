@@ -700,6 +700,25 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(imageInteractionOverlayProps.has(offscreenItem.id)).toBe(false)
   })
 
+  it('routes GIF images to the animated DOM layer instead of the static WebGL path', async () => {
+    const gifItem = {
+      ...createImageItem('image-animated-gif'),
+      src: 'file:///image-animated-gif.gif',
+      fileName: 'image-animated-gif.gif'
+    }
+    setMockWebGLRuntime({ loadedIds: [gifItem.id] })
+
+    render(<ProjectCanvasPageStageScene {...createBaseProps([gifItem])} />)
+
+    await waitFor(() => {
+      expect(latestWebGLItems).toEqual([])
+    })
+    const animatedImage = document.querySelector(
+      '[data-project-canvas-animated-image-layer="dom"] img[data-canvas-source-image-preview="true"]'
+    )
+    expect(animatedImage?.getAttribute('src')).toBe('file:///image-animated-gif.gif')
+  })
+
   it('adds a high-resolution source overlay for jumbo resident WebGL images at close zoom', async () => {
     const item = {
       ...createImageItem('image-jumbo-webgl-source'),

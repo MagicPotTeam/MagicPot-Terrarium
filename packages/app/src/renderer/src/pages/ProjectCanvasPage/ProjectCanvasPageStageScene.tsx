@@ -8,6 +8,7 @@ import { Box } from '@mui/material'
 import MaxSizeLayout from '../../components/MaxSizeLayout'
 import CanvasItemPlaceholder from './components/CanvasItemPlaceholder'
 import CanvasImageDomPreview from './components/CanvasImageDomPreview'
+import CanvasAnimatedImageDomLayer from './components/CanvasAnimatedImageDomLayer'
 import { CanvasTextOverlayContent, CanvasTextOverlayFrame } from './components/CanvasTextOverlay'
 import ProjectCanvasImageCropOverlay from './components/ProjectCanvasImageCropOverlay'
 import ProjectCanvasImageInteractionOverlay from './components/ProjectCanvasImageInteractionOverlay'
@@ -57,6 +58,7 @@ import {
   takeProjectCanvasWebGLPendingRuntimeState
 } from './projectCanvasWebGLRuntimeState'
 import { resolveCanvasImageLodDecision } from './canvasImageLodPolicy'
+import { isAnimatedGifCanvasImage } from './canvasAnimatedImageUtils'
 import type {
   CanvasAnnotationItem,
   CanvasFileItem,
@@ -1292,12 +1294,23 @@ export default function ProjectCanvasPageStageScene(props: any) {
         .sort((left, right) => left.zIndex - right.zIndex),
     [allCanvasItems]
   )
+  const animatedGifImageItems = React.useMemo(
+    () => sortedAllImageItems.filter(isAnimatedGifCanvasImage),
+    [sortedAllImageItems]
+  )
+  const animatedGifImageIdSet = React.useMemo(
+    () => new Set(animatedGifImageItems.map((item) => item.id)),
+    [animatedGifImageItems]
+  )
   const webglImageItems = React.useMemo(
     () =>
       sortedAllImageItems.filter(
-        (item) => item.id !== cropTargetId && !generatedCooldownImageIds.has(item.id)
+        (item) =>
+          item.id !== cropTargetId &&
+          !generatedCooldownImageIds.has(item.id) &&
+          !animatedGifImageIdSet.has(item.id)
       ),
-    [cropTargetId, generatedCooldownImageIds, sortedAllImageItems]
+    [animatedGifImageIdSet, cropTargetId, generatedCooldownImageIds, sortedAllImageItems]
   )
   const canvas2DFallbackImageItems = React.useMemo(
     () =>
@@ -1305,9 +1318,10 @@ export default function ProjectCanvasPageStageScene(props: any) {
         (item): item is CanvasImageItem =>
           item.type === 'image' &&
           imageRuntimeRouteById.get(item.id) === 'fallback-image-proxy' &&
+          !animatedGifImageIdSet.has(item.id) &&
           !canvas2DFailedImageIds.has(item.id)
       ),
-    [canvas2DFailedImageIds, imageRuntimeRouteById, visibleItems]
+    [animatedGifImageIdSet, canvas2DFailedImageIds, imageRuntimeRouteById, visibleItems]
   )
   const canvas2DFallbackImageIdSet = React.useMemo(
     () => new Set(canvas2DFallbackImageItems.map((item) => item.id)),
@@ -2803,6 +2817,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
           const canRenderImagePreview =
             Boolean(imageItem.image) || (tool === 'select' && !!imageItem.src)
           const imageProxyVisualVariant =
+            animatedGifImageIdSet.has(item.id) ||
             imageRuntimeRoute === 'webgl-primary' ||
             (canvas2DVisualOwnerImageIdSet.has(item.id) && !isSelected) ||
             (!canRenderImagePreview && imageFallbackReason === 'unloaded')
@@ -3255,6 +3270,11 @@ export default function ProjectCanvasPageStageScene(props: any) {
               onFailedIdsChange={handleCanvas2DFailedIdsChange}
             />
           )}
+          <CanvasAnimatedImageDomLayer
+            items={animatedGifImageItems}
+            stageScale={stageScale}
+            registerViewportLayer={registerViewportLayer}
+          />
           {highResolutionDomImagePreviewItems.length > 0 && (
             <Box
               data-project-canvas-high-res-image-layer="dom"
@@ -3377,6 +3397,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
                 const isSelected = selectedIds.has(imageItem.id) && tool === 'select'
                 const imageRuntimeRoute = getImageRuntimeRoute(imageItem)
                 const suppressDomImagePreview =
+                  animatedGifImageIdSet.has(imageItem.id) ||
                   imageRuntimeRoute === 'webgl-primary' ||
                   (canvas2DVisualOwnerImageIdSet.has(imageItem.id) && !isSelected)
                 const shouldShowSelectionChrome = isSelected && !shouldSuppressSelectionChrome

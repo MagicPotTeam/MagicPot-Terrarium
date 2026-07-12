@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { cliFromProfile } from '@shared/llm'
 import * as configModule from '../config/config'
@@ -10,7 +11,7 @@ import {
   clearTrustedLocalFileSelectionsForTest,
   rememberTrustedLocalFileSelections
 } from './trustedFileSelection'
-import { LLMProxySvcImpl } from './svcLLMProxyImpl'
+import { LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE, LLMProxySvcImpl } from './svcLLMProxyImpl'
 
 const {
   generateFromMessagesMock,
@@ -542,10 +543,276 @@ describe('LLMProxySvcImpl', () => {
       }
     )
 
-    expect(agentChat).toHaveBeenCalledWith({
-      messages: [{ role: 'user', content: 'hello' }],
-      systemPrompt: undefined,
-      signal: controller.signal
+    expect(agentChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [{ role: 'user', content: 'hello' }],
+        systemPrompt: undefined,
+        signal: expect.any(AbortSignal)
+      })
+    )
+    expect(agentChat.mock.calls[0]?.[0]?.signal).not.toBe(controller.signal)
+    expect(agentChat.mock.calls[0]?.[0]?.signal?.aborted).toBe(false)
+  })
+
+  it('rejects a duplicate conversation request without replacing or cancelling the original', async () => {
+    let resolveOriginal!: (value: string) => void
+    let originalSignal: AbortSignal | undefined
+    const originalResult = new Promise<string>((resolve) => {
+      resolveOriginal = resolve
+    })
+    const agentChat = vi.fn(({ signal }: { signal?: AbortSignal }) => {
+      originalSignal = signal
+      return originalResult
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'agent-profile',
+            model_name: 'Agent Model',
+            base_url: 'https://agent.example/v1',
+            api_key: 'agent-key'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const original = svc.chat({
+      conversationId: 'conversation-duplicate',
+      profileId: 'agent-profile',
+      messages: [{ role: 'user', content: 'first' }]
+    })
+    await vi.waitFor(() => expect(agentChat).toHaveBeenCalledTimes(1))
+
+    await expect(
+      svc.chat({
+        conversationId: 'conversation-duplicate',
+        profileId: 'agent-profile',
+        messages: [{ role: 'user', content: 'second' }]
+      })
+    ).rejects.toMatchObject({
+      code: LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE,
+      message: 'A request is already active for conversation "conversation-duplicate".'
+    })
+
+    expect(agentChat).toHaveBeenCalledTimes(1)
+    expect(originalSignal?.aborted).toBe(false)
+
+    resolveOriginal('first response')
+    await expect(original).resolves.toEqual({ content: 'first response' })
+  })
+
+  it('keeps the original duplicate-guarded request cancellable', async () => {
+    let originalSignal: AbortSignal | undefined
+    const agentChat = vi.fn(
+      ({ signal }: { signal?: AbortSignal }) =>
+        new Promise<string>((_resolve, reject) => {
+          originalSignal = signal
+          signal?.addEventListener(
+            'abort',
+            () => reject(signal.reason instanceof Error ? signal.reason : new Error('aborted')),
+            { once: true }
+          )
+        })
+    )
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'agent-profile',
+            model_name: 'Agent Model',
+            base_url: 'https://agent.example/v1',
+            api_key: 'agent-key'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const original = svc.chat({
+      conversationId: 'conversation-cancellable',
+      profileId: 'agent-profile',
+      messages: [{ role: 'user', content: 'first' }]
+    })
+    await vi.waitFor(() => expect(agentChat).toHaveBeenCalledTimes(1))
+
+    await expect(
+      svc.chat({
+        conversationId: 'conversation-cancellable',
+        profileId: 'agent-profile',
+        messages: [{ role: 'user', content: 'second' }]
+      })
+    ).rejects.toMatchObject({ code: LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE })
+
+    await expect(
+      svc.cancelConversation({ conversationId: 'conversation-cancellable' })
+    ).resolves.toEqual({ cancelled: true })
+    await expect(original).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'Conversation cancelled by the user.'
+    })
+    expect(originalSignal?.aborted).toBe(true)
+  })
+
+  it('allows a conversationId to be reused after the active request completes', async () => {
+    const agentChat = vi
+      .fn()
+      .mockResolvedValueOnce('first response')
+      .mockResolvedValueOnce('second response')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'agent-profile',
+            model_name: 'Agent Model',
+            base_url: 'https://agent.example/v1',
+            api_key: 'agent-key'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const request = {
+      conversationId: 'conversation-reusable',
+      profileId: 'agent-profile',
+      messages: [{ role: 'user' as const, content: 'hello' }]
+    }
+
+    await expect(svc.chat(request)).resolves.toEqual({ content: 'first response' })
+    await expect(svc.chat(request)).resolves.toEqual({ content: 'second response' })
+    expect(agentChat).toHaveBeenCalledTimes(2)
+  })
+
+  it('aborts an upstream streaming request without a conversationId when the renderer closes the stream', async () => {
+    let upstreamSignal: AbortSignal | undefined
+    const agentChat = vi.fn(
+      ({ signal }: { signal?: AbortSignal }) =>
+        new Promise<string>((_resolve, reject) => {
+          upstreamSignal = signal
+          signal?.addEventListener(
+            'abort',
+            () => reject(signal.reason instanceof Error ? signal.reason : new Error('aborted')),
+            { once: true }
+          )
+        })
+    )
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'agent-profile',
+            model_name: 'Agent Model',
+            base_url: 'https://agent.example/v1',
+            api_key: 'agent-key'
+          }
+        ]
+      }
+    })
+
+    const [abortSender, abortReceiver] = newAbortHandler()
+    const onData = vi.fn()
+    const svc = new LLMProxySvcImpl()
+    const streaming = svc.chatStream(
+      {
+        profileId: 'agent-profile',
+        messages: [{ role: 'user', content: 'stream' }]
+      },
+      { onData, abortReceiver }
+    )
+    await vi.waitFor(() => expect(agentChat).toHaveBeenCalledTimes(1))
+
+    abortSender.abort()
+    await streaming
+
+    expect(upstreamSignal?.aborted).toBe(true)
+    expect(upstreamSignal?.reason).toMatchObject({
+      name: 'AbortError',
+      message: 'Streaming request aborted by the renderer.'
+    })
+    expect(onData).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'done',
+        done: true,
+        error: 'Streaming request aborted by the renderer.'
+      })
+    )
+  })
+
+  it('aborts an upstream streaming request when the renderer closes the stream', async () => {
+    let upstreamSignal: AbortSignal | undefined
+    const agentChat = vi.fn(
+      ({ signal }: { signal?: AbortSignal }) =>
+        new Promise<string>((_resolve, reject) => {
+          upstreamSignal = signal
+          signal?.addEventListener(
+            'abort',
+            () => reject(signal.reason instanceof Error ? signal.reason : new Error('aborted')),
+            { once: true }
+          )
+        })
+    )
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'agent-profile',
+            model_name: 'Agent Model',
+            base_url: 'https://agent.example/v1',
+            api_key: 'agent-key'
+          }
+        ]
+      }
+    })
+
+    const [abortSender, abortReceiver] = newAbortHandler()
+    const onData = vi.fn()
+    const svc = new LLMProxySvcImpl()
+    const streaming = svc.chatStream(
+      {
+        conversationId: 'conversation-stream',
+        profileId: 'agent-profile',
+        messages: [{ role: 'user', content: 'stream' }]
+      },
+      { onData, abortReceiver }
+    )
+    await vi.waitFor(() => expect(agentChat).toHaveBeenCalledTimes(1))
+
+    abortSender.abort()
+    await streaming
+
+    expect(upstreamSignal?.aborted).toBe(true)
+    expect(upstreamSignal?.reason).toMatchObject({
+      name: 'AbortError',
+      message: 'Streaming request aborted by the renderer.'
+    })
+    expect(onData).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'done',
+        done: true,
+        error: 'Streaming request aborted by the renderer.'
+      })
+    )
+    await expect(
+      svc.cancelConversation({ conversationId: 'conversation-stream' })
+    ).resolves.toEqual({
+      cancelled: false
     })
   })
 

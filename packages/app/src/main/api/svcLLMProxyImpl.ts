@@ -27,6 +27,7 @@ import {
   ChatAttachment
 } from '@shared/api/svcLLMProxy'
 import { ServerStreaming } from '@shared/api/apiUtils/streaming'
+import { ServiceError } from '@shared/api/apiUtils/serviceValidation'
 import { getConfig } from '../config/config'
 import { Config, LLMAPIProfile, resolveCustomSkillContextMessageLimit } from '@shared/config/config'
 import {
@@ -344,6 +345,13 @@ const createAbortError = (message: string): Error => {
   error.name = 'AbortError'
   return error
 }
+
+export const LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE = 'LLM_CONVERSATION_REQUEST_ACTIVE'
+
+const createConversationRequestActiveError = (conversationId: string): ServiceError =>
+  new ServiceError(`A request is already active for conversation "${conversationId}".`, {
+    code: LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE
+  })
 
 type ExplicitToolCommand =
   | {
@@ -918,32 +926,43 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     signal?: AbortSignal
   ): {
     signal?: AbortSignal
+    abort: (reason?: unknown) => void
     cleanup: () => void
   } {
-    if (!conversationId) {
+    const normalizedConversationId = String(conversationId || '').trim()
+    if (
+      normalizedConversationId &&
+      this.conversationAbortControllers.has(normalizedConversationId)
+    ) {
+      throw createConversationRequestActiveError(normalizedConversationId)
+    }
+
+    if (!normalizedConversationId && !signal) {
       return {
         signal,
+        abort: () => undefined,
         cleanup: () => undefined
       }
     }
 
     const controller = new AbortController()
-    this.conversationAbortControllers.set(conversationId, controller)
+    if (normalizedConversationId) {
+      this.conversationAbortControllers.set(normalizedConversationId, controller)
+    }
 
-    const handleAbort = () => {
+    const abort = (reason?: unknown) => {
       if (controller.signal.aborted) return
 
-      if (signal?.reason instanceof Error) {
-        controller.abort(signal.reason)
+      if (reason instanceof Error) {
+        controller.abort(reason)
         return
       }
 
       controller.abort(
-        createAbortError(
-          typeof signal?.reason === 'string' ? signal.reason : 'The request was aborted.'
-        )
+        createAbortError(typeof reason === 'string' ? reason : 'The request was aborted.')
       )
     }
+    const handleAbort = () => abort(signal?.reason)
 
     if (signal?.aborted) {
       handleAbort()
@@ -953,13 +972,14 @@ export class LLMProxySvcImpl implements LLMProxySvc {
 
     return {
       signal: controller.signal,
+      abort,
       cleanup: () => {
         if (signal) {
           signal.removeEventListener('abort', handleAbort)
         }
-        const current = this.conversationAbortControllers.get(conversationId)
+        const current = this.conversationAbortControllers.get(normalizedConversationId)
         if (current === controller) {
-          this.conversationAbortControllers.delete(conversationId)
+          this.conversationAbortControllers.delete(normalizedConversationId)
         }
       }
     }
@@ -1714,7 +1734,14 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     req: LLMChatStreamReq,
     resp: ServerStreaming<LLMChatStreamResp>
   ): Promise<void> => {
-    const abortContext = this.createConversationAbortContext(req.conversationId)
+    const streamAbortController = new AbortController()
+    const abortContext = this.createConversationAbortContext(
+      req.conversationId,
+      streamAbortController.signal
+    )
+    resp.abortReceiver?.onAbort(() => {
+      abortContext.abort(createAbortError('Streaming request aborted by the renderer.'))
+    })
     let streamedText = ''
     let lastSessionUrl = req.sessionUrl?.trim() || undefined
     const seenAttachmentKeys = new Set<string>()
