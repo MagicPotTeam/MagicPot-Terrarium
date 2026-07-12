@@ -69,7 +69,7 @@ describe('ProjectCanvasCanvas2DFallbackLayer', () => {
     Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 3 })
     context = createMockContext()
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(((contextId: string) =>
-      contextId === '2d' ? context : null) as any)
+      contextId === '2d' ? context : null) as typeof HTMLCanvasElement.prototype.getContext)
   })
 
   afterEach(() => {
