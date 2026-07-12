@@ -25,6 +25,7 @@ class ComfyStateManager {
   private connected: boolean = false // 是否成功连接到 ComfyUI
 
   private ws: WebSocket | null = null
+  private wsGeneration: number = 0
   private wsErrorLogged: boolean = false
 
   private comfyState: ComfyState = {
@@ -47,10 +48,20 @@ class ComfyStateManager {
   }
 
   connect: () => void = () => {
-    this.ws = new ComfyHttpCli(undefined, undefined, {
+    if (!this.isWatching || this.ws) {
+      return
+    }
+
+    const generation = ++this.wsGeneration
+    const ws = new ComfyHttpCli(undefined, undefined, {
       clientId: COMFY_PROCESS_TRANSPORT_CLIENT_ID
     }).connect()
-    this.ws.onmessage = (evt) => {
+    this.ws = ws
+
+    ws.onmessage = (evt) => {
+      if (generation !== this.wsGeneration || ws !== this.ws) {
+        return
+      }
       try {
         const data = JSON.parse(evt.data as string) as JsonDict
         if (data.type === 'crystools.monitor') {
@@ -73,13 +84,20 @@ class ComfyStateManager {
       }
     }
 
-    this.ws.onopen = () => {
+    ws.onopen = () => {
+      if (generation !== this.wsGeneration || ws !== this.ws || !this.isWatching) {
+        return
+      }
       this.connected = true
       this.reconnectAttempts = 0 // 连接成功后重置重连次数
       console.log('[ComfyUI State] connected')
     }
 
-    this.ws.onclose = () => {
+    ws.onclose = () => {
+      if (generation !== this.wsGeneration || ws !== this.ws) {
+        return
+      }
+      this.ws = null
       this.connected = false
       console.log('[ComfyUI State] disconnected')
 
@@ -89,7 +107,10 @@ class ComfyStateManager {
       }
     }
 
-    this.ws.onerror = () => {
+    ws.onerror = () => {
+      if (generation !== this.wsGeneration || ws !== this.ws) {
+        return
+      }
       if (!this.wsErrorLogged) {
         console.warn('[ComfyUI State] WebSocket 错误（ComfyUI 可能未启动），后续不再重复提示')
         this.wsErrorLogged = true
@@ -98,9 +119,18 @@ class ComfyStateManager {
   }
 
   private scheduleReconnect: () => void = () => {
+    if (!this.isWatching) {
+      return
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+    }
+
+    const generation = this.wsGeneration
     const delay = this.getReconnectDelay()
     this.reconnectTimer = setTimeout(() => {
-      if (!this.isWatching) {
+      this.reconnectTimer = null
+      if (!this.isWatching || generation !== this.wsGeneration) {
         return
       }
       if (eventCenter.isEmpty()) {
@@ -120,18 +150,25 @@ class ComfyStateManager {
   }
 
   disconnect: () => void = () => {
-    // 清除重连定时器
+    // 先让当前 socket 的所有回调失效，close() 即使同步触发 onclose 也不会安排重连。
+    this.wsGeneration++
+
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
 
-    this.ws?.close()
+    const ws = this.ws
+    this.ws = null
+    ws?.close()
     this.connected = false
     this.reconnectAttempts = 0
   }
 
   start: () => void = () => {
+    if (this.isWatching) {
+      return
+    }
     this.isWatching = true
     this.connect()
   }
