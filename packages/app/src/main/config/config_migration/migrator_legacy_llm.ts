@@ -33,6 +33,7 @@ type LegacyConfigWithLLM = {
   local_llm_server_config?: {
     enable_server?: unknown
     port?: unknown
+    bind_host?: unknown
     access_token?: unknown
     access_tokens?: unknown
   } | null
@@ -212,6 +213,10 @@ export const migratorLegacyLLM: Migrator<DeepPartial<Config>> = {
         port: toNumber(
           nextConfig.local_llm_server_config?.port,
           DEFAULT_CONFIG.local_llm_server_config.port
+        ),
+        bind_host: toStringValue(
+          nextConfig.local_llm_server_config?.bind_host,
+          DEFAULT_CONFIG.local_llm_server_config.bind_host
         ),
         access_token: migratedLegacyAccessToken,
         access_tokens: localAccessTokens

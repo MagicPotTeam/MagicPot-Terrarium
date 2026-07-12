@@ -381,6 +381,7 @@ type ConfigShape = {
   local_llm_server_config: {
     enable_server: boolean
     port: number
+    bind_host: string
     access_token: string
     access_tokens: LLMProxyAccessTokenEntry[]
   }
@@ -524,6 +525,7 @@ export const DEFAULT_CONFIG: Config = {
   local_llm_server_config: {
     enable_server: false,
     port: 3721,
+    bind_host: '127.0.0.1',
     access_token: '',
     access_tokens: []
   },
