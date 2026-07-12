@@ -1872,44 +1872,54 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     }
   }
 
-  listProfiles = async (req: LLMListProfilesReq): Promise<LLMListProfilesResp> => {
+  listProfiles = async (_req: LLMListProfilesReq): Promise<LLMListProfilesResp> => {
     const config = getConfig()
     const validProfiles = config.llm_config.api_profiles.filter(isRunnableProfile)
 
-    return {
-      profiles: validProfiles.map((p) => {
-        const modelUse = resolveProfileModelUse(p)
-        const isVisionModel =
-          modelUse === 'agent' ||
-          modelUse === 'multimodal' ||
-          modelUse === 'vision' ||
-          modelUse === 'ocr' ||
-          Boolean(p.is_vision_model)
-        const isOcrModel = modelUse === 'ocr' || Boolean(p.is_ocr_model)
-        const taggerDescriptor = resolveTaggerRuntimeDescriptor(p)
+    let profiles: LLMListProfilesResp['profiles'] = validProfiles.map((p) => {
+      const modelUse = resolveProfileModelUse(p)
+      const isVisionModel =
+        modelUse === 'agent' ||
+        modelUse === 'multimodal' ||
+        modelUse === 'vision' ||
+        modelUse === 'ocr' ||
+        Boolean(p.is_vision_model)
+      const isOcrModel = modelUse === 'ocr' || Boolean(p.is_ocr_model)
+      const taggerDescriptor = resolveTaggerRuntimeDescriptor(p)
 
-        return {
-          id: p.id,
-          model_name: p.model_name,
-          deployment: resolveProfileDeployment(p),
-          model_use: modelUse,
-          is_vision_model: isVisionModel,
-          is_ocr_model: isOcrModel,
-          ...(p.tagger_provider ? { tagger_provider: p.tagger_provider } : {}),
-          ...(p.tagger_endpoint?.trim() ? { tagger_endpoint: p.tagger_endpoint.trim() } : {}),
-          ...(p.tagger_runtime_cache_scope
-            ? { tagger_runtime_cache_scope: p.tagger_runtime_cache_scope }
-            : {}),
-          ...(typeof p.context_window_tokens === 'number'
-            ? { context_window_tokens: p.context_window_tokens }
-            : {}),
-          ...(typeof p.context_budget_tokens === 'number'
-            ? { context_budget_tokens: p.context_budget_tokens }
-            : {}),
-          ...(taggerDescriptor ? { tagger_runtime_key: taggerDescriptor.cacheKey } : {})
-        }
-      })
+      return {
+        id: p.id,
+        model_name: p.model_name,
+        deployment: resolveProfileDeployment(p),
+        model_use: modelUse,
+        is_vision_model: isVisionModel,
+        is_ocr_model: isOcrModel,
+        ...(p.tagger_provider ? { tagger_provider: p.tagger_provider } : {}),
+        ...(p.tagger_endpoint?.trim() ? { tagger_endpoint: p.tagger_endpoint.trim() } : {}),
+        ...(p.tagger_runtime_cache_scope
+          ? { tagger_runtime_cache_scope: p.tagger_runtime_cache_scope }
+          : {}),
+        ...(typeof p.context_window_tokens === 'number'
+          ? { context_window_tokens: p.context_window_tokens }
+          : {}),
+        ...(typeof p.context_budget_tokens === 'number'
+          ? { context_budget_tokens: p.context_budget_tokens }
+          : {}),
+        ...(taggerDescriptor ? { tagger_runtime_key: taggerDescriptor.cacheKey } : {})
+      }
+    })
+
+    const extensionContext = {
+      config,
+      fetchImpl: this.getFetchImpl()
     }
+    for (const extension of mainHostExtensionApiV1.llmProxy) {
+      if (extension.transformListedProfiles) {
+        profiles = await extension.transformListedProfiles(profiles, extensionContext)
+      }
+    }
+
+    return { profiles }
   }
 
   serverStatus = async (req: LLMServerStatusReq): Promise<LLMServerStatusResp> => {

@@ -1,3 +1,5 @@
+import type { LLMReasoningEffort } from './llm'
+
 export type TargetHistoryStage = {
   profileId: string
   responsibilityType?: string
@@ -18,6 +20,7 @@ export type TargetHistoryEntry = {
   name: string
   schemeId: string
   controlProfileId: string
+  controlReasoningEffort?: LLMReasoningEffort
   evidenceMode?: 'structured_only' | 'selection_region' | 'selected_sources'
   userIntent: string
   stageProfiles: TargetHistoryStage[]

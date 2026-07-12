@@ -1,5 +1,5 @@
 import type { BaseApi } from '@shared/api'
-import type { LLMChatReq, LLMChatResp } from '@shared/api/svcLLMProxy'
+import type { LLMChatReq, LLMChatResp, LLMListProfilesResp } from '@shared/api/svcLLMProxy'
 import type { Config, LLMAPIProfile } from '@shared/config/config'
 import type { ApiExtensionServices } from '@shared/api/extensionServices'
 import type { LLMCli } from '@shared/llm'
@@ -29,6 +29,10 @@ export type MainLlmProxyExtensionV1 = Readonly<{
     options: MainLlmProxyExtensionContextV1
   ) => Promise<LLMChatResp | undefined> | LLMChatResp | undefined
   normalizeRequestedProfileId?: (profileId: string | undefined) => string | undefined
+  transformListedProfiles?: (
+    profiles: LLMListProfilesResp['profiles'],
+    options: MainLlmProxyExtensionContextV1
+  ) => Promise<LLMListProfilesResp['profiles']> | LLMListProfilesResp['profiles']
 }>
 
 export type MainApiExtensionServicesFactoryV1 = (

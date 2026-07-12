@@ -240,6 +240,26 @@ describe('CanvasTargetDialog', () => {
     expect(screen.queryByLabelText('Must follow 1')).not.toBeInTheDocument()
   })
 
+  it('shows and changes the control model reasoning effort when supported', async () => {
+    const onControlReasoningEffortChange = vi.fn()
+    renderDialog({
+      controlReasoningEffort: 'high',
+      availableControlReasoningEfforts: ['low', 'high'],
+      onControlReasoningEffortChange
+    })
+
+    const selector = screen.getByLabelText('Reasoning effort')
+    expect(selector).toBeInTheDocument()
+    await userEvent.click(selector)
+    await userEvent.click(screen.getByRole('option', { name: 'Low' }))
+    expect(onControlReasoningEffortChange).toHaveBeenCalledWith('low')
+  })
+
+  it('hides the reasoning effort selector for models without reasoning support', () => {
+    renderDialog({ availableControlReasoningEfforts: [] })
+    expect(screen.queryByLabelText('Reasoning effort')).not.toBeInTheDocument()
+  })
+
   it('starts without auxiliary models until the user explicitly adds one', async () => {
     const user = userEvent.setup()
     const onStageProfilesChange = vi.fn()

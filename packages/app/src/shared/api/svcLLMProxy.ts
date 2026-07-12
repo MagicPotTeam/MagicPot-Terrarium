@@ -199,6 +199,8 @@ export type LLMListProfilesReq = {}
 export type LLMListProfilesResp = {
   profiles: Array<{
     id: string
+    /** Base config profile ID when `id` represents a model-specific composite selection. */
+    base_profile_id?: string
     model_name: string
     deployment?: LLMDeployment
     model_use?: LLMModelUse

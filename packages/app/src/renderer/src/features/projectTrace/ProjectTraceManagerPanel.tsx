@@ -756,6 +756,11 @@ export default function ProjectTraceManagerPanel({
       ])
       setTraces(traceResponse.traces)
       setProfiles(profileResponse.profiles)
+      setEnhanceProfileId((current) =>
+        !current || profileResponse.profiles.some((profile) => profile.id === current)
+          ? current
+          : ''
+      )
       setSelectedRecordTraceIds((current) =>
         current.filter((traceId) =>
           traceResponse.traces.some(
@@ -802,10 +807,16 @@ export default function ProjectTraceManagerPanel({
       setDraftName(trace?.manifest.name || '')
       setDraftMarkdown(trace?.markdown || '')
       setTraceIntent(trace?.manifest.description || '')
+      const persistedProfileId = trace?.manifest.redaction.llmProfileId || ''
+      setEnhanceProfileId(
+        !persistedProfileId || profiles.some((profile) => profile.id === persistedProfileId)
+          ? persistedProfileId
+          : ''
+      )
     } catch (readError) {
       notifyError(readError instanceof Error ? readError.message : 'Failed to read trace.')
     }
-  }, [notifyError, projectRef, selectedTraceId])
+  }, [notifyError, profiles, projectRef, selectedTraceId])
 
   useEffect(() => {
     loadProjects()
