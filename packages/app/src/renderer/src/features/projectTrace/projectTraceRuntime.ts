@@ -24,6 +24,8 @@ export const PROJECT_TRACE_TARGET_REFERENCE_EVENT = 'project-trace:target-refere
 export const PROJECT_TRACE_REALTIME_ADVICE_EVENT = 'project-trace:realtime-advice'
 const RECENT_EVENT_LIMIT = 120
 const REALTIME_ADVICE_COOLDOWN_MS = 5000
+const REALTIME_ADVICE_TRACKER_MAX_SIZE = 2000
+const REALTIME_ADVICE_RETENTION_MS = REALTIME_ADVICE_COOLDOWN_MS * 12
 const STORAGE_KEY_PREFIX = 'projectTrace.recentEvents.'
 const ACTIVE_CAPTURE_KEY_PREFIX = 'projectTrace.activeCapture.'
 const ACTIVE_REALTIME_KEY_PREFIX = 'projectTrace.activeRealtime.'
@@ -112,7 +114,19 @@ function shouldDispatchRealtimeAdvice(projectId: string, traceId: string, kind: 
   if (now - previous < REALTIME_ADVICE_COOLDOWN_MS) {
     return false
   }
+
+  for (const [trackedKey, dispatchedAt] of realtimeAdviceLastDispatchedAt) {
+    if (now - dispatchedAt > REALTIME_ADVICE_RETENTION_MS) {
+      realtimeAdviceLastDispatchedAt.delete(trackedKey)
+    }
+  }
+  realtimeAdviceLastDispatchedAt.delete(key)
   realtimeAdviceLastDispatchedAt.set(key, now)
+  while (realtimeAdviceLastDispatchedAt.size > REALTIME_ADVICE_TRACKER_MAX_SIZE) {
+    const oldestKey = realtimeAdviceLastDispatchedAt.keys().next().value
+    if (oldestKey === undefined) break
+    realtimeAdviceLastDispatchedAt.delete(oldestKey)
+  }
   return true
 }
 
