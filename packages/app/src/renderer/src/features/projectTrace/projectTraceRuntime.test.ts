@@ -95,7 +95,8 @@ describe('projectTraceRuntime', () => {
       projectId: 'project-1',
       projectName: 'Project',
       referenceTraceIds: ['trace-1', 'trace-2'],
-      modelProfileId: 'gpt-5.5'
+      modelProfileId: 'gpt-5.5',
+      modelReasoningEffort: 'high'
     })
 
     expect(readActiveProjectTraceRealtime('project-1')).toEqual({
@@ -103,11 +104,31 @@ describe('projectTraceRuntime', () => {
       projectName: 'Project',
       referenceTraceIds: ['trace-1', 'trace-2'],
       referenceTraceId: 'trace-1',
-      modelProfileId: 'gpt-5.5'
+      modelProfileId: 'gpt-5.5',
+      modelReasoningEffort: 'high'
     })
 
     clearActiveProjectTraceRealtime('project-1')
     expect(readActiveProjectTraceRealtime('project-1')).toBeNull()
+  })
+
+  it('drops invalid realtime reasoning effort values', () => {
+    localStorage.setItem(
+      'projectTrace.activeRealtime.project-invalid-effort',
+      JSON.stringify({
+        projectId: 'project-invalid-effort',
+        referenceTraceIds: ['trace-1'],
+        modelProfileId: 'gpt-5.5',
+        modelReasoningEffort: 'impossible'
+      })
+    )
+
+    expect(readActiveProjectTraceRealtime('project-invalid-effort')).toEqual({
+      projectId: 'project-invalid-effort',
+      referenceTraceIds: ['trace-1'],
+      referenceTraceId: 'trace-1',
+      modelProfileId: 'gpt-5.5'
+    })
   })
 
   it('keeps compatibility with legacy single realtime trace storage', () => {

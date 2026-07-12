@@ -1,3 +1,5 @@
+import type { LLMReasoningEffort } from '@shared/llm'
+import { normalizeReasoningEffort } from '@shared/llm'
 import type {
   ProjectTraceDocument,
   ProjectTraceExecutableRule,
@@ -55,6 +57,7 @@ export type ProjectTraceActiveRealtimeTarget = {
   referenceTraceIds: string[]
   referenceTraceId?: string
   modelProfileId?: string
+  modelReasoningEffort?: LLMReasoningEffort
 }
 
 export type ProjectTraceTargetReferenceState = {
@@ -131,6 +134,7 @@ function parseRealtimeModelReview(content: string): ProjectTraceRealtimeModelRev
 
 async function reviewRealtimeAdviceWithModel(options: {
   modelProfileId: string
+  modelReasoningEffort?: LLMReasoningEffort
   trace: ProjectTraceDocument
   event: ProjectTraceEventSummary
   rule: ProjectTraceExecutableRule
@@ -144,6 +148,7 @@ async function reviewRealtimeAdviceWithModel(options: {
     const response = await api().svcLLMProxy.chat(
       {
         profileId: options.modelProfileId,
+        reasoningEffort: options.modelReasoningEffort,
         messages: [
           {
             role: 'system',
@@ -197,6 +202,7 @@ async function reviewRealtimeAdviceWithModel(options: {
 
 async function reviewRealtimeSemanticRuleWithModel(options: {
   modelProfileId: string
+  modelReasoningEffort?: LLMReasoningEffort
   trace: ProjectTraceDocument
   event: ProjectTraceEventSummary
   semanticRule: ProjectTraceSemanticRule
@@ -208,6 +214,7 @@ async function reviewRealtimeSemanticRuleWithModel(options: {
     const response = await api().svcLLMProxy.chat(
       {
         profileId: options.modelProfileId,
+        reasoningEffort: options.modelReasoningEffort,
         messages: [
           {
             role: 'system',
@@ -508,7 +515,10 @@ export function readActiveProjectTraceRealtime(
       ...(parsed.projectName ? { projectName: parsed.projectName } : {}),
       referenceTraceIds,
       referenceTraceId: referenceTraceIds[0],
-      ...(parsed.modelProfileId ? { modelProfileId: parsed.modelProfileId } : {})
+      ...(parsed.modelProfileId ? { modelProfileId: parsed.modelProfileId } : {}),
+      ...(normalizeReasoningEffort(parsed.modelReasoningEffort)
+        ? { modelReasoningEffort: normalizeReasoningEffort(parsed.modelReasoningEffort) }
+        : {})
     }
   } catch {
     return null
@@ -533,7 +543,10 @@ export function writeActiveProjectTraceRealtime(target: ProjectTraceActiveRealti
       ...(target.projectName ? { projectName: target.projectName } : {}),
       referenceTraceIds,
       referenceTraceId: referenceTraceIds[0],
-      ...(target.modelProfileId ? { modelProfileId: target.modelProfileId } : {})
+      ...(target.modelProfileId ? { modelProfileId: target.modelProfileId } : {}),
+      ...(normalizeReasoningEffort(target.modelReasoningEffort)
+        ? { modelReasoningEffort: normalizeReasoningEffort(target.modelReasoningEffort) }
+        : {})
     } satisfies ProjectTraceActiveRealtimeTarget)
   )
   dispatchCaptureStateChange({
@@ -728,6 +741,7 @@ async function evaluateActiveProjectTraceRealtimeEvent(
           }
           const modelReview = await reviewRealtimeSemanticRuleWithModel({
             modelProfileId: realtime.modelProfileId!,
+            modelReasoningEffort: realtime.modelReasoningEffort,
             trace,
             event,
             semanticRule
@@ -770,6 +784,7 @@ async function evaluateActiveProjectTraceRealtimeEvent(
       const modelReview = canUseModelReview
         ? await reviewRealtimeAdviceWithModel({
             modelProfileId: realtime.modelProfileId!,
+            modelReasoningEffort: realtime.modelReasoningEffort,
             trace,
             event,
             rule: ruleMatch.rule,

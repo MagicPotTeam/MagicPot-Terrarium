@@ -38,8 +38,16 @@ import {
   type ProjectTraceProjectRef
 } from '@shared/projectTrace'
 import type { LLMListProfilesResp } from '@shared/api/svcLLMProxy'
+import {
+  getReasoningEffortLabel,
+  normalizeReasoningEffort,
+  resolveChatProfileCapabilities,
+  type LLMReasoningEffort
+} from '@shared/llm'
 import { api } from '@renderer/utils/windowUtils'
 import { useMessage } from '@renderer/hooks/useMessage'
+import { useConfig } from '@renderer/hooks/useConfig'
+import { resolveCompositeLlmProfile } from '@renderer/utils/llmProfileUtils'
 import { listProjects } from '../../pages/MainPage/projectStore'
 import { resolveCanvasProjectTraceProjectRef } from './projectTraceProjectRef'
 import {
@@ -366,6 +374,7 @@ function normalizeModelTraceMemory(
 
 async function enhanceTraceMemoryWithModel(options: {
   profileId: string
+  reasoningEffort?: LLMReasoningEffort
   name: string
   intent: string
   markdown: string
@@ -375,6 +384,7 @@ async function enhanceTraceMemoryWithModel(options: {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const response = await api().svcLLMProxy.chat({
       profileId: options.profileId,
+      reasoningEffort: options.reasoningEffort,
       messages: [
         {
           role: 'system',
@@ -471,6 +481,7 @@ export default function ProjectTraceManagerPanel({
   onClose
 }: ProjectTraceManagerPanelProps): React.JSX.Element {
   const isChineseUi = isChineseLanguage()
+  const { config } = useConfig()
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useMessage()
   const [activeTab, setActiveTab] = useState<ProjectTraceTab>('create')
   const [projects, setProjects] = useState<TraceProjectOption[]>([])
@@ -486,6 +497,9 @@ export default function ProjectTraceManagerPanel({
   const [draftMarkdown, setDraftMarkdown] = useState('')
   const [profiles, setProfiles] = useState<LLMListProfilesResp['profiles']>([])
   const [enhanceProfileId, setEnhanceProfileId] = useState('')
+  const [enhanceReasoningEffort, setEnhanceReasoningEffort] = useState<
+    LLMReasoningEffort | undefined
+  >()
   const [recentEvents, setRecentEvents] = useState<ProjectTraceEventSummary[]>([])
   const [activeCaptureTraceId, setActiveCaptureTraceId] = useState('')
   const [activeRealtimeTraceIds, setActiveRealtimeTraceIds] = useState<string[]>([])
@@ -546,6 +560,24 @@ export default function ProjectTraceManagerPanel({
     Boolean(activeCaptureTraceId && selectedTraceId === activeCaptureTraceId) ||
     Boolean((activeTrace?.manifest.tags || selectedTrace?.tags)?.includes(ACTIVE_CAPTURE_TRACE_TAG))
   const selectedTraceIsPendingSave = selectedTraceIsDraft && !selectedTraceIsActive
+  const enhanceProfileCapabilities = useMemo(() => {
+    const listedProfile = profiles.find((profile) => profile.id === enhanceProfileId)
+    return resolveChatProfileCapabilities(
+      listedProfile
+        ? resolveCompositeLlmProfile(listedProfile, config.llm_config.api_profiles)
+        : undefined
+    )
+  }, [config.llm_config.api_profiles, enhanceProfileId, profiles])
+  const availableEnhanceReasoningEfforts = enhanceProfileCapabilities.reasoningEfforts
+
+  useEffect(() => {
+    setEnhanceReasoningEffort(
+      (current) =>
+        normalizeReasoningEffort(current, availableEnhanceReasoningEfforts) ||
+        enhanceProfileCapabilities.defaultReasoningEffort
+    )
+  }, [availableEnhanceReasoningEfforts, enhanceProfileCapabilities.defaultReasoningEffort])
+
   const copy = isChineseUi
     ? {
         title: '追踪',
@@ -577,6 +609,7 @@ export default function ProjectTraceManagerPanel({
         active: '正在追踪',
         inactive: '未追踪',
         enhanceModel: '增强模型',
+        reasoningEffort: 'Reasoning effort',
         recentEvents: '近期操作',
         noRecentEvents: '暂无近期操作。',
         close: '关闭',
@@ -657,6 +690,7 @@ export default function ProjectTraceManagerPanel({
         active: 'Capturing',
         inactive: 'Not capturing',
         enhanceModel: 'Enhancement model',
+        reasoningEffort: 'Reasoning effort',
         recentEvents: 'Recent events',
         noRecentEvents: 'No recent events.',
         close: 'Close',
@@ -735,6 +769,10 @@ export default function ProjectTraceManagerPanel({
     const activeRealtime = readActiveProjectTraceRealtime(selectedProject.id)
     const nextActiveRealtimeTraceIds = activeRealtime?.referenceTraceIds || []
     setActiveRealtimeTraceIds(nextActiveRealtimeTraceIds)
+    if (activeRealtime?.modelProfileId) {
+      setEnhanceProfileId(activeRealtime.modelProfileId)
+      setEnhanceReasoningEffort(activeRealtime.modelReasoningEffort)
+    }
     if (nextActiveRealtimeTraceIds.length > 0) {
       setSelectedRealtimeTraceIds(nextActiveRealtimeTraceIds)
     }
@@ -808,15 +846,27 @@ export default function ProjectTraceManagerPanel({
       setDraftMarkdown(trace?.markdown || '')
       setTraceIntent(trace?.manifest.description || '')
       const persistedProfileId = trace?.manifest.redaction.llmProfileId || ''
-      setEnhanceProfileId(
+      const profileIsAvailable =
         !persistedProfileId || profiles.some((profile) => profile.id === persistedProfileId)
-          ? persistedProfileId
-          : ''
-      )
+      setEnhanceProfileId(profileIsAvailable ? persistedProfileId : '')
+      if (!profileIsAvailable || !persistedProfileId) {
+        setEnhanceReasoningEffort(undefined)
+      } else {
+        const listedProfile = profiles.find((profile) => profile.id === persistedProfileId)!
+        const capabilities = resolveChatProfileCapabilities(
+          resolveCompositeLlmProfile(listedProfile, config.llm_config.api_profiles)
+        )
+        setEnhanceReasoningEffort(
+          normalizeReasoningEffort(
+            trace?.manifest.redaction.llmReasoningEffort,
+            capabilities.reasoningEfforts
+          ) || capabilities.defaultReasoningEffort
+        )
+      }
     } catch (readError) {
       notifyError(readError instanceof Error ? readError.message : 'Failed to read trace.')
     }
-  }, [notifyError, profiles, projectRef, selectedTraceId])
+  }, [config.llm_config.api_profiles, notifyError, profiles, projectRef, selectedTraceId])
 
   useEffect(() => {
     loadProjects()
@@ -906,6 +956,7 @@ export default function ProjectTraceManagerPanel({
         try {
           modelMemory = await enhanceTraceMemoryWithModel({
             profileId: selectedEnhanceProfileId,
+            reasoningEffort: enhanceReasoningEffort,
             name: draftName || selectedTrace?.name || 'Project trace',
             intent: traceIntent,
             markdown: draftMarkdown,
@@ -942,7 +993,8 @@ export default function ProjectTraceManagerPanel({
           ...(modelMemory?.executableRules ? { executableRules: modelMemory.executableRules } : {}),
           eventSummaries: activeTrace?.eventSummaries,
           llmEnhanced: Boolean(modelMemory) || activeTrace?.manifest.redaction.llmEnhanced,
-          llmProfileId: selectedEnhanceProfileId || activeTrace?.manifest.redaction.llmProfileId
+          llmProfileId: selectedEnhanceProfileId || activeTrace?.manifest.redaction.llmProfileId,
+          llmReasoningEffort: enhanceReasoningEffort
         }
       })
       setSelectedTraceId(response.trace.manifest.id)
@@ -963,6 +1015,7 @@ export default function ProjectTraceManagerPanel({
     draftMarkdown,
     draftName,
     enhanceProfileId,
+    enhanceReasoningEffort,
     isChineseUi,
     loadTraces,
     notifyError,
@@ -994,7 +1047,8 @@ export default function ProjectTraceManagerPanel({
           projectName: projectRef.projectName,
           tags: ['manual', ACTIVE_CAPTURE_TRACE_TAG, DRAFT_TRACE_TAG],
           markdown: buildInitialTraceMarkdown(name, intent, isChineseUi),
-          llmProfileId: enhanceProfileId || undefined
+          llmProfileId: enhanceProfileId || undefined,
+          llmReasoningEffort: enhanceReasoningEffort
         }
       })
       const traceId = response.trace.manifest.id
@@ -1035,6 +1089,7 @@ export default function ProjectTraceManagerPanel({
     }
   }, [
     enhanceProfileId,
+    enhanceReasoningEffort,
     isChineseUi,
     loadTraces,
     newTraceIntent,
@@ -1089,7 +1144,8 @@ export default function ProjectTraceManagerPanel({
       projectId: selectedProjectId,
       ...(selectedProject?.name ? { projectName: selectedProject.name } : {}),
       referenceTraceIds,
-      ...(enhanceProfileId ? { modelProfileId: enhanceProfileId } : {})
+      ...(enhanceProfileId ? { modelProfileId: enhanceProfileId } : {}),
+      ...(enhanceReasoningEffort ? { modelReasoningEffort: enhanceReasoningEffort } : {})
     })
     setActiveRealtimeTraceIds(referenceTraceIds)
     notifyInfo(
@@ -1110,7 +1166,8 @@ export default function ProjectTraceManagerPanel({
     selectedProject,
     selectedProjectId,
     selectedReferenceTraces,
-    targetReferenceTraceIds
+    targetReferenceTraceIds,
+    enhanceReasoningEffort
   ])
 
   const stopRealtimeTrace = useCallback(() => {
@@ -1311,21 +1368,41 @@ export default function ProjectTraceManagerPanel({
   )
 
   const renderProfileSelect = () => (
-    <TextField
-      select
-      size="small"
-      label={copy.enhanceModel}
-      value={enhanceProfileId}
-      onChange={(event) => setEnhanceProfileId(event.target.value)}
-      sx={{ minWidth: 240 }}
-    >
-      <MenuItem value="">{copy.notEnhanced}</MenuItem>
-      {profiles.map((profile) => (
-        <MenuItem key={profile.id} value={profile.id}>
-          {profile.model_name || profile.id}
-        </MenuItem>
-      ))}
-    </TextField>
+    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ minWidth: 240 }}>
+      <TextField
+        select
+        size="small"
+        label={copy.enhanceModel}
+        value={enhanceProfileId}
+        onChange={(event) => setEnhanceProfileId(event.target.value)}
+        disabled={hasActiveRealtimeTrace}
+        sx={{ minWidth: 240 }}
+      >
+        <MenuItem value="">{copy.notEnhanced}</MenuItem>
+        {profiles.map((profile) => (
+          <MenuItem key={profile.id} value={profile.id}>
+            {profile.model_name || profile.id}
+          </MenuItem>
+        ))}
+      </TextField>
+      {availableEnhanceReasoningEfforts.length > 0 ? (
+        <TextField
+          select
+          size="small"
+          label={copy.reasoningEffort}
+          value={enhanceReasoningEffort || availableEnhanceReasoningEfforts[0]}
+          onChange={(event) => setEnhanceReasoningEffort(event.target.value as LLMReasoningEffort)}
+          disabled={hasActiveRealtimeTrace}
+          sx={{ minWidth: 180 }}
+        >
+          {availableEnhanceReasoningEfforts.map((effort) => (
+            <MenuItem key={effort} value={effort}>
+              {getReasoningEffortLabel(effort)}
+            </MenuItem>
+          ))}
+        </TextField>
+      ) : null}
+    </Stack>
   )
 
   const renderSaveDeleteControls = () => (

@@ -9,6 +9,8 @@ export const PROJECT_TRACE_REDACTION_REPORT_FILENAME = 'redaction-report.json'
 export const PROJECT_TRACE_EVENTS_SUMMARY_FILENAME = 'events.summary.jsonl'
 export const PROJECT_TRACE_INTEGRITY_FILENAME = 'integrity.json'
 
+import type { LLMReasoningEffort } from './llm'
+
 export type ProjectTraceSourceKind =
   | 'manual'
   | 'canvas'
@@ -114,6 +116,7 @@ export type ProjectTraceManifest = {
     containsSensitiveData: false
     llmEnhanced: boolean
     llmProfileId?: string
+    llmReasoningEffort?: LLMReasoningEffort
   }
 }
 
@@ -231,6 +234,7 @@ export type ProjectTraceDocumentDraft = {
   eventSummaries?: ProjectTraceEventSummary[]
   llmEnhanced?: boolean
   llmProfileId?: string
+  llmReasoningEffort?: LLMReasoningEffort
   trust?: ProjectTraceTrust
   runtimePolicy?: ProjectTraceRuntimePolicy
 }

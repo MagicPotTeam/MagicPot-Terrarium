@@ -2,6 +2,22 @@ import type { Config, LLMAPIProfile } from '@shared/config/config'
 import { getBaseProfileId, HUNYUAN_3D_PROFILE_ID } from '@renderer/pages/ChatPage/chatPageShared'
 import { isRunnableProfile } from '@shared/llm'
 
+export function resolveCompositeLlmProfile<
+  TListed extends { id: string; base_profile_id?: string; model_name?: string },
+  TConfigured extends { id: string }
+>(
+  listedProfile: TListed,
+  configuredProfiles: readonly TConfigured[]
+): TListed & Partial<TConfigured> {
+  const baseId = listedProfile.base_profile_id || listedProfile.id
+  const baseProfile = configuredProfiles.find((profile) => profile.id === baseId)
+  return {
+    ...(baseProfile || {}),
+    ...listedProfile,
+    model_name: listedProfile.model_name
+  } as TListed & Partial<TConfigured>
+}
+
 export const DEFAULT_REMOTE_LLM_SERVER_ORIGIN = 'http://localhost:3721'
 
 const isConfiguredLocalProfile = (profile: LLMAPIProfile): boolean => isRunnableProfile(profile)
