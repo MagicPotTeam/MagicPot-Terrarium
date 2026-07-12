@@ -70,13 +70,15 @@ const RealtimeGenerationSwitch: React.FC<RealtimeGenerationSwitchProps> = ({
         // 处理最新生成的结果（添加到结果列表）
         if (status.latestGeneratedResult) {
           try {
+            const qAppKeyForRequest = currentQAppKey || ''
             const { promptId, history, outputNodeIds } = status.latestGeneratedResult
             const resultItems = await transformResults(promptId, history, outputNodeIds)
+            if (disposed) return
             appendResults(resultItems)
             dispatchQAppResultsToCanvas(
               resultItems,
               undefined,
-              readPendingQAppGenerationSessionId(currentQAppKey || '') ?? undefined
+              readPendingQAppGenerationSessionId(qAppKeyForRequest) ?? undefined
             )
             console.log('[实时绘画] 已添加生成结果到结果列表:', resultItems.length, '项')
           } catch (error) {
