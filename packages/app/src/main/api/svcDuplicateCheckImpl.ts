@@ -74,6 +74,270 @@ type PythonWorkerOutput = {
   }>
 }
 
+export type DuplicateCheckWorkerHandle = {
+  process: ChildProcessWithoutNullStreams
+  terminate: (reason?: Error) => Promise<void>
+}
+
+export type DuplicateCheckWorkerProcessOptions = {
+  cwd: string
+  env: NodeJS.ProcessEnv
+  deadlineMs?: number
+  terminationGraceMs?: number
+  forceKillWaitMs?: number
+  maxStderrBytes?: number
+  setActiveWorker?: (worker: DuplicateCheckWorkerHandle | null) => void
+}
+
+const DEFAULT_WORKER_DEADLINE_MS = 15 * 60 * 1000
+const DEFAULT_WORKER_TERMINATION_GRACE_MS = 3 * 1000
+const DEFAULT_WORKER_FORCE_KILL_WAIT_MS = 5 * 1000
+const DEFAULT_WORKER_MAX_STDERR_BYTES = 64 * 1024
+const TASKKILL_WAIT_MS = 2 * 1000
+
+const delay = (durationMs: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, Math.max(0, durationMs)))
+
+const runWindowsTaskkill = async (pid: number, force: boolean): Promise<boolean> => {
+  const args = ['/PID', String(pid), '/T']
+  if (force) {
+    args.push('/F')
+  }
+
+  return new Promise((resolve) => {
+    let settled = false
+    const taskkill = spawn('taskkill.exe', args, {
+      stdio: 'ignore',
+      windowsHide: true
+    })
+    const timeout = setTimeout(() => {
+      taskkill.kill('SIGKILL')
+      finish(false)
+    }, TASKKILL_WAIT_MS)
+    function finish(success: boolean) {
+      if (settled) {
+        return
+      }
+      settled = true
+      clearTimeout(timeout)
+      resolve(success)
+    }
+
+    taskkill.once('error', () => finish(false))
+    taskkill.once('close', (code) => finish(code === 0))
+  })
+}
+
+const signalWorkerTree = async (
+  child: ChildProcessWithoutNullStreams,
+  signal: 'SIGTERM' | 'SIGKILL'
+): Promise<void> => {
+  if (!child.pid) {
+    return
+  }
+
+  if (process.platform === 'win32') {
+    const taskkillSucceeded = await runWindowsTaskkill(child.pid, signal === 'SIGKILL')
+    if (taskkillSucceeded) {
+      return
+    }
+  } else {
+    try {
+      process.kill(-child.pid, signal)
+      return
+    } catch {
+      // The process group may already be gone or unavailable; fall back to the direct child.
+    }
+  }
+
+  try {
+    child.kill(signal)
+  } catch {
+    // The worker may have exited between the liveness check and the signal.
+  }
+}
+
+/** Runs the worker process boundary without loading an ONNX model in the host process. */
+export const runDuplicateCheckWorkerProcess = async (
+  command: string,
+  args: string[],
+  options: DuplicateCheckWorkerProcessOptions
+): Promise<void> => {
+  const deadlineMs = Math.max(1, options.deadlineMs ?? DEFAULT_WORKER_DEADLINE_MS)
+  const terminationGraceMs = Math.max(
+    0,
+    options.terminationGraceMs ?? DEFAULT_WORKER_TERMINATION_GRACE_MS
+  )
+  const forceKillWaitMs = Math.max(0, options.forceKillWaitMs ?? DEFAULT_WORKER_FORCE_KILL_WAIT_MS)
+  const maxStderrBytes = Math.max(0, options.maxStderrBytes ?? DEFAULT_WORKER_MAX_STDERR_BYTES)
+  const child = spawn(command, args, {
+    cwd: options.cwd,
+    env: options.env,
+    detached: process.platform !== 'win32',
+    windowsHide: true
+  })
+
+  let closed = false
+  let processGroupGone = false
+  let settled = false
+  let stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0)
+  let stderrTruncated = false
+  let terminalError: Error | null = null
+  let terminatePromise: Promise<void> | null = null
+  let resolveClosed: () => void = () => undefined
+  const closedPromise = new Promise<void>((resolve) => {
+    resolveClosed = resolve
+  })
+
+  const appendStderr = (chunk: Buffer | string) => {
+    if (maxStderrBytes === 0) {
+      stderrTruncated = true
+      return
+    }
+    const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    if (incoming.length >= maxStderrBytes) {
+      stderrTruncated = stderr.length > 0 || incoming.length > maxStderrBytes
+      stderr = incoming.subarray(incoming.length - maxStderrBytes)
+      return
+    }
+    const retainedBytes = Math.min(stderr.length, maxStderrBytes - incoming.length)
+    if (retainedBytes < stderr.length) {
+      stderrTruncated = true
+    }
+    stderr = Buffer.concat([stderr.subarray(stderr.length - retainedBytes), incoming])
+  }
+
+  const formatStderr = (): string => {
+    const captured = stderr.toString('utf8').trim()
+    return stderrTruncated
+      ? `[stderr truncated to last ${maxStderrBytes} bytes]\n${captured}`
+      : captured
+  }
+
+  let resolveRun: () => void = () => undefined
+  let rejectRun: (error: Error) => void = () => undefined
+  const runPromise = new Promise<void>((resolve, reject) => {
+    resolveRun = resolve
+    rejectRun = reject
+  })
+  const finish = (error?: Error) => {
+    if (settled) {
+      return
+    }
+    settled = true
+    clearTimeout(deadline)
+    options.setActiveWorker?.(null)
+    if (error) {
+      rejectRun(error)
+    } else {
+      resolveRun()
+    }
+  }
+
+  const isWorkerTreeAlive = (): boolean => {
+    if (process.platform === 'win32' || !child.pid) {
+      return !closed
+    }
+    if (processGroupGone) {
+      return false
+    }
+    try {
+      process.kill(-child.pid, 0)
+      return true
+    } catch {
+      processGroupGone = true
+      return false
+    }
+  }
+
+  const waitForWorkerTreeExit = async (durationMs: number): Promise<boolean> => {
+    const expiresAt = Date.now() + durationMs
+    while (isWorkerTreeAlive()) {
+      const remainingMs = expiresAt - Date.now()
+      if (remainingMs <= 0) {
+        return false
+      }
+      await Promise.race([closedPromise, delay(Math.min(25, remainingMs))])
+      if (closed && process.platform === 'win32') {
+        return true
+      }
+    }
+    return true
+  }
+
+  const waitForChildClose = async (durationMs: number): Promise<boolean> => {
+    if (!closed) {
+      await Promise.race([closedPromise, delay(durationMs)])
+    }
+    return closed
+  }
+
+  const handle: DuplicateCheckWorkerHandle = {
+    process: child,
+    terminate: (reason = new Error('Visual model worker was cancelled')) => {
+      terminalError ||= reason
+      if (!terminatePromise) {
+        terminatePromise = (async () => {
+          await signalWorkerTree(child, 'SIGTERM')
+          if (await waitForWorkerTreeExit(terminationGraceMs)) {
+            if (await waitForChildClose(forceKillWaitMs)) {
+              return
+            }
+          }
+
+          await signalWorkerTree(child, 'SIGKILL')
+          if (await waitForWorkerTreeExit(forceKillWaitMs)) {
+            if (await waitForChildClose(forceKillWaitMs)) {
+              return
+            }
+          }
+
+          child.stdin.destroy()
+          child.stdout.destroy()
+          child.stderr.destroy()
+          child.unref()
+          finish(terminalError || reason)
+        })()
+      }
+      return terminatePromise
+    }
+  }
+
+  child.stderr.on('data', appendStderr)
+  child.once('error', (error) => {
+    closed = true
+    resolveClosed()
+    finish(terminalError || error)
+  })
+  child.once('close', (code, signal) => {
+    closed = true
+    resolveClosed()
+    if (terminalError) {
+      finish(terminalError)
+      return
+    }
+    if (code === 0) {
+      finish()
+      return
+    }
+
+    const capturedStderr = formatStderr()
+    finish(
+      new Error(
+        capturedStderr ||
+          `Visual model worker exited with ${code === null ? `signal ${signal || 'unknown'}` : `code ${code}`}`
+      )
+    )
+  })
+
+  options.setActiveWorker?.(handle)
+  const deadline = setTimeout(() => {
+    void handle.terminate(new Error(`Visual model worker exceeded its ${deadlineMs} ms deadline`))
+  }, deadlineMs)
+
+  return runPromise
+}
+
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg', '.ico'])
 
 const stripComparableData = (
@@ -397,7 +661,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
     const duplicateCheckTempRoot = resolveDuplicateCheckTempRoot()
     await fs.mkdir(duplicateCheckTempRoot, { recursive: true })
     const tempDir = await fs.mkdtemp(path.join(duplicateCheckTempRoot, 'magicpot-visual-analysis-'))
-    let currentPythonWorker: ChildProcessWithoutNullStreams | null = null
+    let currentPythonWorker: DuplicateCheckWorkerHandle | null = null
 
     try {
       const preparedImages = await mapWithConcurrency(
@@ -452,14 +716,19 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
         }
 
         if (cache) {
-          cache.upsertBlob(
-            mergeBlobCacheEntry(cache.getBlob(image.sha256), image, {
+          await cache.upsertBlob(
+            mergeBlobCacheEntry(await cache.getBlob(image.sha256), image, {
               [selectedModel.id]: provider
             })
           )
           if (image.descriptor.sourcePath) {
             const stats = await fs.stat(image.descriptor.sourcePath)
-            cache.upsertFile(image.descriptor.sourcePath, stats.size, stats.mtimeMs, image.sha256)
+            await cache.upsertFile(
+              image.descriptor.sourcePath,
+              stats.size,
+              stats.mtimeMs,
+              image.sha256
+            )
           }
         }
       }
@@ -517,7 +786,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
         return rightScore - leftScore
       })
 
-      cache?.save()
+      await cache?.save()
 
       return {
         modelId: selectedModel.id,
@@ -550,6 +819,9 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
         pairResults
       }
     } finally {
+      if (currentPythonWorker) {
+        await currentPythonWorker.terminate()
+      }
       try {
         await fs.rm(tempDir, { recursive: true, force: true })
       } catch {
@@ -581,7 +853,8 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
       const stats = await fs.stat(normalizedDescriptor.sourcePath)
       size = stats.size
       mtimeMs = stats.mtimeMs
-      cached = context.cache?.getFile(normalizedDescriptor.sourcePath, size, mtimeMs) || null
+      cached =
+        (await context.cache?.getFile(normalizedDescriptor.sourcePath, size, mtimeMs)) || null
       if (cached) {
         context.cacheHitCount += 1
       }
@@ -615,7 +888,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
 
       if (!cached) {
         const sha256 = computeSha256(workingBuffer)
-        cached = context.cache?.getBlob(sha256) || null
+        cached = (await context.cache?.getBlob(sha256)) || null
 
         if (!cached) {
           let hashes: ReturnType<typeof computeBasicImageHashes>
@@ -644,9 +917,14 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
         }
 
         if (context.cache) {
-          context.cache.upsertBlob(cached)
+          await context.cache.upsertBlob(cached)
           if (hasPath && normalizedDescriptor.sourcePath) {
-            context.cache.upsertFile(normalizedDescriptor.sourcePath, size, mtimeMs, cached.sha256)
+            await context.cache.upsertFile(
+              normalizedDescriptor.sourcePath,
+              size,
+              mtimeMs,
+              cached.sha256
+            )
           }
         }
       }
@@ -716,7 +994,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
     batchSize: number,
     enableRobustness: boolean,
     tempDir: string,
-    setActiveWorker: (worker: ChildProcessWithoutNullStreams | null) => void
+    setActiveWorker: (worker: DuplicateCheckWorkerHandle | null) => void
   ): Promise<PythonWorkerOutput> {
     await ensureDir(tempDir)
 
@@ -739,38 +1017,15 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
 
     await fs.writeFile(inputPath, JSON.stringify(payload), 'utf8')
 
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(
-        pythonCmd,
-        [workerScriptPath, '--input', inputPath, '--output', outputPath],
-        {
-          cwd: path.dirname(workerScriptPath),
-          env: createPortablePythonEnv(getBuildEnv().pathMap.data)
-        }
-      )
-
-      setActiveWorker(child)
-      let stderr = ''
-
-      child.stderr.on('data', (chunk) => {
-        stderr += chunk.toString()
-      })
-
-      child.on('error', (error) => {
-        setActiveWorker(null)
-        reject(error)
-      })
-
-      child.on('close', (code) => {
-        setActiveWorker(null)
-        if (code === 0) {
-          resolve()
-          return
-        }
-
-        reject(new Error(stderr.trim() || `Visual model worker exited with code ${code}`))
-      })
-    })
+    await runDuplicateCheckWorkerProcess(
+      pythonCmd,
+      [workerScriptPath, '--input', inputPath, '--output', outputPath],
+      {
+        cwd: path.dirname(workerScriptPath),
+        env: createPortablePythonEnv(getBuildEnv().pathMap.data),
+        setActiveWorker
+      }
+    )
 
     if (!(await pathExists(outputPath))) {
       throw new Error(`Visual model worker did not produce output for ${model.name}`)
@@ -976,11 +1231,11 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
     const providerByModel: Record<string, string> = {}
     const warnings: string[] = []
     const skippedScopeImages: DuplicateCheckSkippedImage[] = []
-    let currentPythonWorker: ChildProcessWithoutNullStreams | null = null
+    let currentPythonWorker: DuplicateCheckWorkerHandle | null = null
 
     resp.abortReceiver?.onAbort(() => {
-      if (currentPythonWorker && !currentPythonWorker.killed) {
-        currentPythonWorker.kill()
+      if (currentPythonWorker) {
+        void currentPythonWorker.terminate()
       }
     })
 
@@ -1144,12 +1399,12 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
             }
 
             if (cache) {
-              cache.upsertBlob(
-                mergeBlobCacheEntry(cache.getBlob(image.sha256), image, providerByModel)
+              await cache.upsertBlob(
+                mergeBlobCacheEntry(await cache.getBlob(image.sha256), image, providerByModel)
               )
               if (image.descriptor.sourcePath) {
                 const stats = await fs.stat(image.descriptor.sourcePath)
-                cache.upsertFile(
+                await cache.upsertFile(
                   image.descriptor.sourcePath,
                   stats.size,
                   stats.mtimeMs,
@@ -1243,7 +1498,7 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
         queryResults
       }
 
-      cache?.save()
+      await cache?.save()
       resp.onData({
         type: 'status',
         phase: 'done',
@@ -1257,6 +1512,9 @@ export class DuplicateCheckSvcImpl implements DuplicateCheckSvc {
         result
       })
     } finally {
+      if (currentPythonWorker) {
+        await currentPythonWorker.terminate()
+      }
       try {
         await fs.rm(tempDir, { recursive: true, force: true })
       } catch {
