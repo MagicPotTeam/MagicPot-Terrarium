@@ -13,6 +13,8 @@ import { parseDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
 import { fileItemToValue } from '@shared/comfy/funcs'
 import { readTestUiEnv, resolveTestArtifactPath, resolveTestUiPolicy } from '../testUiPolicy'
 
+const MAX_RETAINED_TASKS_PER_STATUS = 200
+
 export type Task = {
   id: string
   type: 'comfy_prompt'
@@ -274,6 +276,17 @@ class TaskMemorySource implements QueueSource<Task> {
   private cancelledTasks: Task[] = []
   private errorTasks: Task[] = []
 
+  private retainRecent(tasks: Task[]): void {
+    if (tasks.length > MAX_RETAINED_TASKS_PER_STATUS) {
+      tasks.splice(0, tasks.length - MAX_RETAINED_TASKS_PER_STATUS)
+    }
+  }
+
+  private retainTerminalTask(tasks: Task[], item: Task): void {
+    tasks.push(item)
+    this.retainRecent(tasks)
+  }
+
   add(item: Task): string {
     const id = 'task-' + crypto.randomUUID().replace(/-/g, '')
     this.pendingTasks.push({ ...item, id })
@@ -293,7 +306,7 @@ class TaskMemorySource implements QueueSource<Task> {
     if (this.runningTask && this.runningTask.id === item.id) {
       this.runningTask = null
     }
-    this.completedTasks.push(item)
+    this.retainTerminalTask(this.completedTasks, item)
   }
   error(item: Task, error: unknown) {
     if (this.runningTask && this.runningTask.id === item.id) {
@@ -301,7 +314,7 @@ class TaskMemorySource implements QueueSource<Task> {
     }
 
     if (isTaskCancelledError(error)) {
-      this.cancelledTasks.push(item)
+      this.retainTerminalTask(this.cancelledTasks, item)
       return
     }
 
@@ -322,7 +335,7 @@ class TaskMemorySource implements QueueSource<Task> {
     void persistComfyTaskFailureArchive(item, error).catch((archiveError) => {
       console.warn(`[TaskQueue] Failed to archive ComfyUI failure for ${item.id}:`, archiveError)
     })
-    this.errorTasks.push(item)
+    this.retainTerminalTask(this.errorTasks, item)
   }
   queueLength() {
     return this.pendingTasks.length
@@ -417,7 +430,7 @@ class TaskMemorySource implements QueueSource<Task> {
     if (pendingIndex !== -1) {
       const [task] = this.pendingTasks.splice(pendingIndex, 1)
       if (task) {
-        this.cancelledTasks.push(task)
+        this.retainTerminalTask(this.cancelledTasks, task)
       }
       return true
     }
@@ -426,13 +439,13 @@ class TaskMemorySource implements QueueSource<Task> {
     if (errorIndex !== -1) {
       const [task] = this.errorTasks.splice(errorIndex, 1)
       if (task) {
-        this.cancelledTasks.push(task)
+        this.retainTerminalTask(this.cancelledTasks, task)
       }
       return true
     }
 
     if (this.runningTask && this.runningTask.id === id) {
-      this.cancelledTasks.push(this.runningTask)
+      this.retainTerminalTask(this.cancelledTasks, this.runningTask)
       this.runningTask = null
       return true
     }
@@ -445,7 +458,7 @@ class TaskMemorySource implements QueueSource<Task> {
     if (pendingIndex !== -1) {
       const [task] = this.pendingTasks.splice(pendingIndex, 1)
       if (task) {
-        this.cancelledTasks.push(task)
+        this.retainTerminalTask(this.cancelledTasks, task)
       }
       return true
     }
@@ -454,13 +467,13 @@ class TaskMemorySource implements QueueSource<Task> {
     if (errorIndex !== -1) {
       const [task] = this.errorTasks.splice(errorIndex, 1)
       if (task) {
-        this.cancelledTasks.push(task)
+        this.retainTerminalTask(this.cancelledTasks, task)
       }
       return true
     }
 
     if (this.runningTask && this.runningTask.prompt_id === promptId) {
-      this.cancelledTasks.push(this.runningTask)
+      this.retainTerminalTask(this.cancelledTasks, this.runningTask)
       this.runningTask = null
       return true
     }
