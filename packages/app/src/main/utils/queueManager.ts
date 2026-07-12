@@ -127,7 +127,6 @@ export class QueueManager<T> {
     }
 
     this.isRunning = false
-    this.isExecuting = false
     if (this.intervalId) {
       clearInterval(this.intervalId)
       this.intervalId = null
