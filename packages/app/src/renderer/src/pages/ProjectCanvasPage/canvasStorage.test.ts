@@ -1169,6 +1169,102 @@ describe('canvasStorage provenance metadata', () => {
     })
   })
 
+  it('restores an imported local image from IndexedDB after its original file is deleted', async () => {
+    const userDataDir = 'C:\\mock-user-data-local-import'
+    const originalFilePath = 'C:\\external\\imported-photo.png'
+    const originalBytes = new TextEncoder().encode('imported-photo-binary')
+    const binaryFiles = new Map<string, Uint8Array>([[originalFilePath, originalBytes]])
+    const textFiles = new Map<string, string>()
+
+    Object.defineProperty(window, 'path', {
+      configurable: true,
+      writable: true,
+      value: {
+        join: (...segments: string[]) => path.win32.join(...segments),
+        basename: (targetPath: string) => path.win32.basename(targetPath),
+        dirname: (targetPath: string) => path.win32.dirname(targetPath)
+      } as unknown as Window['path']
+    })
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcState: {
+          getUserDataDirectoryState: vi.fn(async () => ({
+            state: {
+              currentPath: userDataDir,
+              defaultPath: userDataDir,
+              isCustom: false,
+              source: 'default'
+            }
+          }))
+        },
+        svcFs: {
+          readFileFromPath: vi.fn(async ({ fullPath }) => {
+            const normalizedFullPath = path.win32.normalize(fullPath.replaceAll('/', '\\'))
+            const data = binaryFiles.get(normalizedFullPath)
+            if (!data) throw new Error(`File not found: ${fullPath}`)
+            return { data, filename: path.win32.basename(fullPath) }
+          }),
+          saveImageToPath: vi.fn(async ({ image, outputPath, filename }) => {
+            const fullPath = path.win32.join(outputPath, filename)
+            binaryFiles.set(fullPath, new Uint8Array(image))
+            return { success: true, fullPath }
+          }),
+          writeTextFile: vi.fn(async ({ outputPath, filename, content }) => {
+            const fullPath = path.win32.join(outputPath, filename)
+            textFiles.set(fullPath, content)
+            return { success: true, fullPath }
+          })
+        }
+      } as unknown as Window['api']
+    })
+
+    await saveCanvasItems(
+      [
+        {
+          id: 'local-import-image-1',
+          type: 'image',
+          x: 24,
+          y: 48,
+          width: 320,
+          height: 240,
+          rotation: 0,
+          scaleX: 1,
+          scaleY: 1,
+          zIndex: 1,
+          locked: false,
+          src: 'local-media:///C:/external/imported-photo.png',
+          fileName: 'imported-photo.png'
+        } as CanvasItem
+      ],
+      'local-import-persistence-test'
+    )
+
+    const mirroredAssetPath = path.win32.join(
+      userDataDir,
+      'renderer-state',
+      'project-canvas',
+      '.local-import-persistence-test__local-import-persistence-test',
+      'assets',
+      'images',
+      'local-import-image-1__imported-photo.png'
+    )
+    expect(Array.from(binaryFiles.get(mirroredAssetPath) || [])).toEqual(Array.from(originalBytes))
+
+    binaryFiles.delete(originalFilePath)
+    URL.createObjectURL = vi.fn(() => 'blob:restored-local-import') as typeof URL.createObjectURL
+
+    const restored = await loadCanvasItems('local-import-persistence-test')
+
+    expect(restored.items).toHaveLength(1)
+    expect(restored.items[0]).toMatchObject({
+      id: 'local-import-image-1',
+      src: 'blob:restored-local-import',
+      fileName: 'imported-photo.png'
+    })
+  })
+
   it('does not rewrite project canvas items to missing asset refs when binary staging fails', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const fetchMock = vi.fn(async () => {

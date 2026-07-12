@@ -241,6 +241,15 @@ function hasBlobLikeCanvasSrc(
   return typeof item.src === 'string' && item.src.startsWith('blob:')
 }
 
+function hasLocallyPersistableCanvasSrc(
+  item: BlobPersistableCanvasItem | SerializableBlobPersistableCanvasItem
+): boolean {
+  return (
+    typeof item.src === 'string' &&
+    (item.src.startsWith('blob:') || resolveLocalFilePathFromSource(item.src) !== null)
+  )
+}
+
 function getScopedCanvasBlobKey(storeKey: string, itemKey: string): string {
   return `${storeKey}${BLOB_STORE_KEY_SEPARATOR}${itemKey}`
 }
@@ -1214,7 +1223,7 @@ export async function saveCanvasItems(
     // 1. Persist blob-backed binary data (image / model3d / video / file).
     const blobItems = items.filter(
       (item): item is BlobPersistableCanvasItem =>
-        isBlobPersistableCanvasItem(item) && hasBlobLikeCanvasSrc(item)
+        isBlobPersistableCanvasItem(item) && hasLocallyPersistableCanvasSrc(item)
     )
     const persistedBlobEntries = (
       await Promise.all(
@@ -1300,8 +1309,21 @@ export async function saveCanvasItems(
     // 3. Save canvas metadata.
     const tx = db.transaction(STORE_NAME, 'readwrite')
     const store = tx.objectStore(STORE_NAME)
+    const locallyPersistedItemIds = new Set(
+      persistedBlobEntries.map((entry) => entry.key).filter((key) => !key.includes('::tex::'))
+    )
+    const persistedItems = serializeItems(items).map((item) => {
+      if (
+        isBlobPersistableCanvasItem(item) &&
+        locallyPersistedItemIds.has(item.id) &&
+        hasLocallyPersistableCanvasSrc(item)
+      ) {
+        return { ...item, src: '' } as SerializableCanvasItem
+      }
+      return item
+    })
     const payload: CanvasPersistedData = {
-      items: serializeItems(items),
+      items: persistedItems,
       groups,
       groupBranches,
       figmaBinding
@@ -1384,7 +1406,7 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
     // Restore image / model3d / video / file blob URLs.
     const restorableBlobBackedItems = resolvedIndexedDbItems.filter(
       (item): item is SerializableBlobPersistableCanvasItem =>
-        isBlobPersistableCanvasItem(item) && (!item.src || hasBlobLikeCanvasSrc(item))
+        isBlobPersistableCanvasItem(item) && (!item.src || hasLocallyPersistableCanvasSrc(item))
     )
     const restoredItemBlobUrls = await loadBlobUrlMap(
       db,
