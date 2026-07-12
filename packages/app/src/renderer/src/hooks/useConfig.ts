@@ -1,5 +1,15 @@
-import { useState, useEffect, createContext, useContext, createElement, useCallback } from 'react'
+import {
+  useState,
+  useEffect,
+  createContext,
+  useContext,
+  createElement,
+  useCallback,
+  useRef
+} from 'react'
 import { api } from '@renderer/utils/windowUtils'
+import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
+import { isServerStreamingError } from '@shared/api/apiUtils/streaming'
 import { Config, DEFAULT_CONFIG } from '@shared/config/config'
 import { BuildEnv, DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { ConfigUtils } from '@shared/config/configUtils'
@@ -24,29 +34,51 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     isReady: false
   })
 
-  useEffect(() => {
-    const initialize = async () => {
-      const [configResp, buildEnvResp] = await Promise.all([
-        api().svcState.getConfig({}),
-        api().svcState.getBuildEnv({})
-      ])
-      setState({ config: configResp.config, buildEnv: buildEnvResp.buildEnv, isReady: true })
-    }
+  const generationRef = useRef(0)
 
-    initialize().then(async () => {
-      await api()
-        .svcState.watchConfig(
+  useEffect(() => {
+    const generation = ++generationRef.current
+    const [abortSender, abortReceiver] = newAbortHandler()
+    let mounted = true
+    const isCurrent = () => mounted && generationRef.current === generation
+
+    const initializeAndWatch = async () => {
+      const initialize = () =>
+        Promise.all([api().svcState.getConfig({}), api().svcState.getBuildEnv({})])
+      let initialized: Awaited<ReturnType<typeof initialize>>
+      try {
+        initialized = await initialize()
+      } catch (err) {
+        if (isCurrent()) console.error('useConfig initialize', err)
+        return
+      }
+      if (!isCurrent()) return
+
+      const [configResp, buildEnvResp] = initialized
+      setState({ config: configResp.config, buildEnv: buildEnvResp.buildEnv, isReady: true })
+      try {
+        await api().svcState.watchConfig(
           {},
           {
             onData: (res) => {
+              if (!isCurrent()) return
               setState((prev) => ({ ...prev, config: res.config }))
-            }
+            },
+            abortReceiver
           }
         )
-        .catch((err) => {
-          console.error('useConfig watchConfig', err)
-        })
-    })
+      } catch (err) {
+        if (!isCurrent() || abortReceiver.isAborted() || isServerStreamingError(err)) return
+        console.error('useConfig watchConfig', err)
+      }
+    }
+
+    void initializeAndWatch()
+
+    return () => {
+      mounted = false
+      abortSender.abort()
+    }
   }, [])
 
   return createElement(ConfigContext.Provider, { value: state }, children)
