@@ -56,16 +56,35 @@ export default function ImageViewer({ imageUrl, onDelete }: ImageViewerProps) {
   }
 
   useEffect(() => {
-    if (!imageUrl) {
-      return
-    }
-    setIsLoading(true)
+    let cancelled = false
+
+    setPaint(null)
     setLoadError(null)
 
+    if (!imageUrl) {
+      setIsLoading(false)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setIsLoading(true)
     loadImage(imageUrl)
-      .then((img) => setPaint(img))
-      .catch((err) => setLoadError(err instanceof Error ? err.message : 'Image failed to load'))
-      .finally(() => setIsLoading(false))
+      .then((img) => {
+        if (!cancelled) setPaint(img)
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setLoadError(err instanceof Error ? err.message : 'Image failed to load')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [imageUrl])
 
   const infoLayout = (children: React.ReactNode) => {
