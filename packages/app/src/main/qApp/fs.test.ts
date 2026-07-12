@@ -111,7 +111,7 @@ describe('QAppFSCli with memfs', () => {
   })
 
   afterEach(() => {
-    vi.clearAllMocks()
+    vi.restoreAllMocks()
   })
 
   describe('listQAppKeys', () => {
@@ -368,6 +368,133 @@ describe('QAppFSCli with memfs', () => {
   })
 
   describe('saveQApp', () => {
+    it.each(['../outside', 'nested/../../outside', '/absolute', 'C:\\absolute'])(
+      'rejects unsafe storage key %j',
+      async (key) => {
+        const cli = new QAppFSCli()
+        await expect(cli.saveQApp(key, minimalQAppCfg(), minimalWorkflow())).rejects.toThrow(
+          /Invalid QApp key/
+        )
+      }
+    )
+
+    it('preserves an existing bundle when staging fails', async () => {
+      const fsp = await import('node:fs/promises')
+      const key = 'atomic-stage'
+      const oldCfg = { ...minimalQAppCfg(), icon: 'old.png' }
+      const oldWorkflow = minimalWorkflow()
+      const oldManifest = JSON.stringify(
+        { name: key, version: '1.0.0', source: 'local', description: 'old' },
+        null,
+        2
+      )
+      await writeBundle(USER_QAPPS_DIR, key, oldCfg, oldWorkflow, oldManifest)
+      let stagedWrites = 0
+      const fileSystem = {
+        ...fsp,
+        writeFile: async (...args: Parameters<typeof fsp.writeFile>) => {
+          if (String(args[0]).endsWith('.tmp') && ++stagedWrites === 2) {
+            throw new Error('injected staging failure')
+          }
+          return fsp.writeFile(...args)
+        }
+      }
+
+      const cli = new QAppFSCli(undefined, undefined, fileSystem)
+      await expect(
+        cli.saveQApp(
+          key,
+          { ...minimalQAppCfg(), icon: 'new.png' },
+          { newer: { class_type: 'NewNode', inputs: {} } }
+        )
+      ).rejects.toThrow('injected staging failure')
+
+      expect(await fsp.readFile(path.join(USER_QAPPS_DIR, `${key}.qacfg.json`), 'utf8')).toBe(
+        JSON.stringify(oldCfg, null, 2)
+      )
+      expect(await fsp.readFile(path.join(USER_QAPPS_DIR, `${key}.prompt.json`), 'utf8')).toBe(
+        JSON.stringify(oldWorkflow, null, 2)
+      )
+      expect(await fsp.readFile(path.join(USER_QAPPS_DIR, `${key}.manifest.json`), 'utf8')).toBe(
+        oldManifest
+      )
+      expect((await fsp.readdir(USER_QAPPS_DIR)).some((name) => name.includes('.magicpot-'))).toBe(
+        false
+      )
+    })
+
+    it('does not leave a partial new bundle when commit fails', async () => {
+      const fsp = await import('node:fs/promises')
+      const key = 'atomic-new'
+      let stagedCommits = 0
+      const fileSystem = {
+        ...fsp,
+        rename: async (...args: Parameters<typeof fsp.rename>) => {
+          if (String(args[0]).endsWith('.tmp') && ++stagedCommits === 2) {
+            throw new Error('injected new-bundle commit failure')
+          }
+          return fsp.rename(...args)
+        }
+      }
+
+      const cli = new QAppFSCli(undefined, undefined, fileSystem)
+      await expect(cli.saveQApp(key, minimalQAppCfg(), minimalWorkflow())).rejects.toThrow(
+        'injected new-bundle commit failure'
+      )
+
+      for (const suffix of ['qacfg.json', 'prompt.json', 'manifest.json']) {
+        expect(fs.existsSync(path.join(USER_QAPPS_DIR, `${key}.${suffix}`))).toBe(false)
+      }
+      expect((await fsp.readdir(USER_QAPPS_DIR)).some((name) => name.includes('.magicpot-'))).toBe(
+        false
+      )
+    })
+
+    it('rolls back the complete existing bundle when commit fails', async () => {
+      const fsp = await import('node:fs/promises')
+      const key = 'atomic-commit'
+      const oldCfg = { ...minimalQAppCfg(), icon: 'old.png' }
+      const oldWorkflow = minimalWorkflow()
+      const oldManifest = JSON.stringify(
+        { name: key, version: '1.0.0', source: 'local', description: 'old' },
+        null,
+        2
+      )
+      await writeBundle(USER_QAPPS_DIR, key, oldCfg, oldWorkflow, oldManifest)
+      let stagedCommits = 0
+      const fileSystem = {
+        ...fsp,
+        rename: async (...args: Parameters<typeof fsp.rename>) => {
+          if (String(args[0]).endsWith('.tmp') && ++stagedCommits === 2) {
+            throw new Error('injected commit failure')
+          }
+          return fsp.rename(...args)
+        }
+      }
+
+      const cli = new QAppFSCli(undefined, undefined, fileSystem)
+      await expect(
+        cli.saveQApp(
+          key,
+          { ...minimalQAppCfg(), icon: 'new.png' },
+          { newer: { class_type: 'NewNode', inputs: {} } }
+        )
+      ).rejects.toThrow('injected commit failure')
+
+      expect(await fsp.readFile(path.join(USER_QAPPS_DIR, `${key}.qacfg.json`), 'utf8')).toBe(
+        JSON.stringify(oldCfg, null, 2)
+      )
+      expect(await fsp.readFile(path.join(USER_QAPPS_DIR, `${key}.prompt.json`), 'utf8')).toBe(
+        JSON.stringify(oldWorkflow, null, 2)
+      )
+      expect(await fsp.readFile(path.join(USER_QAPPS_DIR, `${key}.manifest.json`), 'utf8')).toBe(
+        oldManifest
+      )
+      expect((await fsp.readdir(USER_QAPPS_DIR)).some((name) => name.includes('.magicpot-'))).toBe(
+        false
+      )
+    })
+
     it('writes only to userData', async () => {
       const cli = new QAppFSCli()
       const key = 'nested/child/app'
@@ -392,6 +519,11 @@ describe('QAppFSCli with memfs', () => {
   })
 
   describe('deleteQApp', () => {
+    it('rejects path traversal before deleting files', async () => {
+      const cli = new QAppFSCli()
+      await expect(cli.deleteQApp('../outside')).rejects.toThrow(/Invalid QApp key/)
+    })
+
     it('deletes userData bundles without touching bundled qApps', async () => {
       const fsp = await import('node:fs/promises')
       await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
@@ -447,6 +579,13 @@ describe('QAppFSCli with memfs', () => {
   })
 
   describe('renameQApp', () => {
+    it('rejects traversal keys and multi-segment names', async () => {
+      const cli = new QAppFSCli()
+      await expect(cli.renameQApp('../outside', 'safe')).rejects.toThrow(/Invalid QApp key/)
+      await expect(cli.renameQApp('safe', '../outside')).rejects.toThrow(/Invalid QApp name/)
+      await expect(cli.renameQApp('safe', 'nested/name')).rejects.toThrow(/Invalid QApp name/)
+    })
+
     it.each([
       { key: 'folder', name: 'folder2' },
       { key: path.join('a', 'b'), name: 'b2' }
@@ -487,6 +626,39 @@ describe('QAppFSCli with memfs', () => {
       expect(fs.existsSync(`${baseOld}.prompt.json`)).toBe(false)
       expect(fs.existsSync(`${baseNew}.qacfg.json`)).toBe(true)
       expect(fs.existsSync(`${baseNew}.prompt.json`)).toBe(true)
+    })
+
+    it('restores every original flat-bundle name when a later rename fails', async () => {
+      const fsp = await import('node:fs/promises')
+      const key = 'rename-old'
+      const name = 'rename-new'
+      const cfg = { ...minimalQAppCfg(), icon: 'original.png' }
+      const workflow = minimalWorkflow()
+      const manifest = legacyManifest()
+      await writeBundle(USER_QAPPS_DIR, key, cfg, workflow, manifest)
+      const fileSystem = {
+        ...fsp,
+        rename: async (...args: Parameters<typeof fsp.rename>) => {
+          if (String(args[0]).endsWith(`${key}.prompt.json`)) {
+            throw new Error('injected rename failure')
+          }
+          return fsp.rename(...args)
+        }
+      }
+
+      const cli = new QAppFSCli(undefined, undefined, fileSystem)
+      await expect(cli.renameQApp(key, name)).rejects.toThrow('injected rename failure')
+
+      for (const suffix of ['qacfg.json', 'prompt.json', 'manifest.json']) {
+        expect(fs.existsSync(path.join(USER_QAPPS_DIR, `${key}.${suffix}`))).toBe(true)
+        expect(fs.existsSync(path.join(USER_QAPPS_DIR, `${name}.${suffix}`))).toBe(false)
+      }
+      expect(await fsp.readFile(path.join(USER_QAPPS_DIR, `${key}.qacfg.json`), 'utf8')).toBe(
+        JSON.stringify(cfg, null, 2)
+      )
+      expect(await fsp.readFile(path.join(USER_QAPPS_DIR, `${key}.manifest.json`), 'utf8')).toBe(
+        manifest
+      )
     })
 
     it('rejects renaming bundled-only qApps', async () => {
