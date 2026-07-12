@@ -12,11 +12,13 @@ import { ServerStreaming } from '@shared/api/apiUtils/streaming'
 import { spawn } from 'child_process'
 import { shell } from 'electron'
 import fs from 'fs'
+import https from 'node:https'
 import os from 'os'
 import path from 'path'
-import { Readable, Transform } from 'stream'
+import { Transform } from 'stream'
 import { pipeline } from 'stream/promises'
 import { normalizeAllowedExternalUrl } from '../utils/externalUrl'
+import { resolveRemoteFetchAddress } from './remoteFetchPolicy'
 
 function isLocallyAvailable(filePath: string): boolean {
   try {
@@ -37,8 +39,26 @@ function sanitizePathSegment(value: string): string {
     .slice(0, 160)
 }
 
-function requireHttpUrl(value: string): string {
+export const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024 * 1024
+const DOWNLOAD_TOTAL_TIMEOUT_MS = 24 * 60 * 60 * 1000
+const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000
+const MAX_DOWNLOAD_REDIRECTS = 5
+const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308])
+
+function requireHttpsUrl(value: string): URL {
   const parsed = new URL(value)
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Download URL must use https.')
+  }
+  if (parsed.username || parsed.password || parsed.hash) {
+    throw new Error('Download URL must not include credentials or a fragment.')
+  }
+  return parsed
+}
+
+function requireGitUrl(value: string): string {
+  const parsed = new URL(value)
+  // Git's HTTP transport may be required by explicitly configured local mirrors.
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Unsupported URL protocol: ${parsed.protocol}`)
   }
@@ -53,14 +73,100 @@ function trimErrorOutput(value: string): string {
   return `${trimmed.slice(0, 1000)}...`
 }
 
-function getContentLength(headers: Headers): number | undefined {
-  const value = headers.get('content-length')
-  if (!value) {
-    return undefined
-  }
-
+function getContentLength(value: string | undefined): number | undefined {
+  if (!value) return undefined
   const parsed = Number(value)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error('Download failed: invalid Content-Length header.')
+  }
+  return parsed
+}
+
+export function createDownloadByteLimitTransform(
+  maxBytes: number,
+  onChunk: (receivedBytes: number) => void
+): Transform {
+  let receivedBytes = 0
+  return new Transform({
+    transform(
+      chunk: Buffer,
+      _encoding: BufferEncoding,
+      callback: (error?: Error | null, data?: Buffer) => void
+    ) {
+      receivedBytes += chunk.length
+      if (receivedBytes > maxBytes) {
+        callback(new Error('Download failed: response is too large.'))
+        return
+      }
+      onChunk(receivedBytes)
+      callback(null, chunk)
+    }
+  })
+}
+
+type DownloadResponse = {
+  response: import('node:http').IncomingMessage
+  finalUrl: URL
+}
+
+async function requestDownload(
+  initialUrl: URL,
+  signal: AbortSignal,
+  redirects = 0
+): Promise<DownloadResponse> {
+  const resolvedAddress = await resolveRemoteFetchAddress(initialUrl.hostname)
+  if (signal.aborted) throw signal.reason
+
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      {
+        hostname: initialUrl.hostname,
+        port: initialUrl.port || 443,
+        path: `${initialUrl.pathname}${initialUrl.search}`,
+        method: 'GET',
+        servername: initialUrl.hostname,
+        signal,
+        lookup: (_hostname, _options, callback) => {
+          callback(null, resolvedAddress.address, resolvedAddress.family)
+        }
+      },
+      (response) => {
+        const status = response.statusCode ?? 500
+        if (REDIRECT_STATUS_CODES.has(status)) {
+          const location = response.headers.location
+          response.resume()
+          if (!location) {
+            reject(new Error('Download failed: redirect has no location.'))
+            return
+          }
+          if (redirects >= MAX_DOWNLOAD_REDIRECTS) {
+            reject(new Error('Download failed: too many redirects.'))
+            return
+          }
+          let redirectUrl: URL
+          try {
+            redirectUrl = requireHttpsUrl(new URL(location, initialUrl).toString())
+          } catch (error) {
+            reject(error)
+            return
+          }
+          void requestDownload(redirectUrl, signal, redirects + 1).then(resolve, reject)
+          return
+        }
+        if (status < 200 || status >= 300) {
+          response.resume()
+          reject(new Error(`Download failed: ${status} ${response.statusMessage || ''}`.trim()))
+          return
+        }
+        resolve({ response, finalUrl: initialUrl })
+      }
+    )
+    request.setTimeout(DOWNLOAD_IDLE_TIMEOUT_MS, () => {
+      request.destroy(new Error('Download failed: request was idle for too long.'))
+    })
+    request.on('error', reject)
+    request.end()
+  })
 }
 
 function runGitClone(url: string, targetDir: string): Promise<void> {
@@ -116,7 +222,7 @@ export class ShellSvcImpl implements ShellSvc {
     req: DownloadFileReq,
     onProgress?: (event: Extract<DownloadFileProgressEvent, { type: 'progress' }>) => void
   ): Promise<DownloadFileResp> => {
-    const url = requireHttpUrl(req.url)
+    const url = requireHttpsUrl(req.url)
     const filename = sanitizePathSegment(req.filename)
     if (!filename) {
       throw new Error('Download filename is required')
@@ -130,15 +236,26 @@ export class ShellSvcImpl implements ShellSvc {
       return { fullPath, alreadyExists: true }
     }
 
-    const response = await fetch(url)
-    if (!response.ok) {
-      throw new Error(`Download failed: ${response.status} ${response.statusText}`.trim())
+    const timeout = new AbortController()
+    const totalTimeout = setTimeout(
+      () => timeout.abort(new Error('Download failed: total timeout exceeded.')),
+      DOWNLOAD_TOTAL_TIMEOUT_MS
+    )
+    const { response } = await requestDownload(url, timeout.signal).catch((error) => {
+      clearTimeout(totalTimeout)
+      throw error
+    })
+    let totalBytes: number | undefined
+    try {
+      totalBytes = getContentLength(response.headers['content-length'])
+      if (totalBytes != null && totalBytes > MAX_DOWNLOAD_BYTES) {
+        throw new Error('Download failed: response is too large.')
+      }
+    } catch (error) {
+      response.destroy()
+      clearTimeout(totalTimeout)
+      throw error
     }
-    if (!response.body) {
-      throw new Error('Download failed: empty response body')
-    }
-
-    const totalBytes = getContentLength(response.headers)
     let downloadedBytes = 0
     const startTime = Date.now()
     let lastProgressAt = 0
@@ -176,25 +293,23 @@ export class ShellSvcImpl implements ShellSvc {
     try {
       emitProgress(true)
       await pipeline(
-        Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
-        new Transform({
-          transform(
-            chunk: Buffer,
-            _encoding: BufferEncoding,
-            callback: (error?: Error | null, data?: Buffer) => void
-          ) {
-            downloadedBytes += chunk.length
-            emitProgress()
-            callback(null, chunk)
-          }
+        response,
+        createDownloadByteLimitTransform(MAX_DOWNLOAD_BYTES, (receivedBytes) => {
+          downloadedBytes = receivedBytes
+          emitProgress()
         }),
         fs.createWriteStream(tempPath)
       )
+      if (totalBytes != null && downloadedBytes !== totalBytes) {
+        throw new Error('Download failed: response size did not match Content-Length.')
+      }
       emitProgress(true)
       await fs.promises.rename(tempPath, fullPath)
     } catch (error) {
       await fs.promises.rm(tempPath, { force: true }).catch(() => undefined)
       throw error
+    } finally {
+      clearTimeout(totalTimeout)
     }
 
     return { fullPath, alreadyExists: false }
@@ -216,7 +331,7 @@ export class ShellSvcImpl implements ShellSvc {
   installGitRepository = async (
     req: InstallGitRepositoryReq
   ): Promise<InstallGitRepositoryResp> => {
-    const url = requireHttpUrl(req.url)
+    const url = requireGitUrl(req.url)
     const directoryName = sanitizePathSegment(req.directoryName)
     if (!directoryName) {
       throw new Error('Repository directory name is required')
