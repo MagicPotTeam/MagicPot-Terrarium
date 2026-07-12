@@ -1,4 +1,4 @@
-import React, { RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, { RefObject, useEffect, useRef, useState } from 'react'
 import InputSlider from './InputSlider'
 import { Box, Card, CardActions, CardContent, IconButton, Stack, Typography } from '@mui/material'
 import { Add, Delete } from '@mui/icons-material'
@@ -41,29 +41,54 @@ const InputControlNet: React.FC<InputControlNetProps> = ({
   const [gridTemplateColumns, setGridTemplateColumns] = useState<string>('1fr')
 
   useEffect(() => {
+    let cancelled = false
+    let ownedObjectUrl: string | null = null
+
     ;(async () => {
       try {
         const imageName = controlNetName2ImageName[currentControlNet.control_net_name]
         if (imageName) {
           const res = await comfyUtilsRef.current.viewImage({ name: imageName })
-          setImageObjUrl(bytesToObjectUrl(res.image, 'image/png'))
+          ownedObjectUrl = bytesToObjectUrl(res.image, 'image/png')
+          if (cancelled) {
+            URL.revokeObjectURL(ownedObjectUrl)
+            return
+          }
+          setImageObjUrl(ownedObjectUrl)
           setGridTemplateColumns(`1fr 3fr`)
           return
         }
       } catch (error) {
-        console.info('failed to view image', currentControlNet.control_net_name, error)
+        if (!cancelled) {
+          console.info('failed to view image', currentControlNet.control_net_name, error)
+        }
       }
-      setImageObjUrl(null)
-      setGridTemplateColumns(`1fr`)
+      if (!cancelled) {
+        setImageObjUrl(null)
+        setGridTemplateColumns(`1fr`)
+      }
     })()
+
+    return () => {
+      cancelled = true
+      if (ownedObjectUrl) {
+        URL.revokeObjectURL(ownedObjectUrl)
+      }
+    }
   }, [currentControlNet.control_net_name, controlNetName2ImageName, comfyUtilsRef])
 
-  useLayoutEffect(() => {
-    if (boxRef.current) {
-      const rect = boxRef.current.getBoundingClientRect()
-      setImageHeight(rect.height)
-    }
-  }, [boxRef])
+  useEffect(() => {
+    const box = boxRef.current
+    if (!box) return
+
+    const updateImageHeight = () => setImageHeight(box.getBoundingClientRect().height)
+    updateImageHeight()
+
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(updateImageHeight)
+    observer.observe(box)
+    return () => observer.disconnect()
+  }, [])
 
   return (
     <>
