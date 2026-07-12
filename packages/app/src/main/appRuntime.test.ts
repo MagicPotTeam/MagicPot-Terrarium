@@ -7,9 +7,13 @@ vi.mock('electron', () => ({
     },
     isPackaged: false,
     on: vi.fn(),
-    quit: vi.fn()
+    quit: vi.fn(),
+    getPath: vi.fn((name: string) => `C:/${name}`)
   },
   BrowserWindow: vi.fn(),
+  ipcMain: {
+    on: vi.fn()
+  },
   Menu: {
     setApplicationMenu: vi.fn()
   },

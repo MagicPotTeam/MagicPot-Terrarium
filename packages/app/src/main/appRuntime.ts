@@ -4,6 +4,7 @@ import { getTestWindowPolicy } from './testWindowRuntime'
 import path from 'node:path'
 import { type TestUiPolicy } from './testUiPolicy'
 import { normalizeLocalFilePath, toFileUrl } from './utils/localFileUrl'
+import { hasLocalMediaTraversal, resolveAuthorizedLocalMediaPath } from './localMediaAccess'
 
 const silentErrorCodes = [
   'ECONNRESET',
@@ -15,7 +16,6 @@ const silentErrorCodes = [
 ]
 const blockedDomains = ['*://*.xgoi.cc/*', '*://xgoi.cc/*']
 const allowedLocalMediaMethods = new Set(['GET', 'HEAD', 'OPTIONS'])
-const windowsAbsolutePathPattern = /^[A-Za-z]:[\\/]/
 
 export function getAppStartupTestWindowPolicy(): TestUiPolicy {
   return getTestWindowPolicy()
@@ -153,12 +153,8 @@ export function withLocalMediaCorsHeaders(response: Response, request?: Request)
   })
 }
 
-function isAllowedLocalMediaPath(filePath: string): boolean {
-  const trimmed = filePath.trim()
-  if (!trimmed || trimmed.startsWith('\\\\') || trimmed.startsWith('//')) {
-    return false
-  }
-  return path.isAbsolute(trimmed) || windowsAbsolutePathPattern.test(trimmed)
+function getLocalMediaAllowedRoots(): string[] {
+  return [app.getPath('userData'), app.getPath('temp')].map((root) => path.resolve(root))
 }
 
 async function handleLocalMediaRequest(request: Request): Promise<Response> {
@@ -170,8 +166,15 @@ async function handleLocalMediaRequest(request: Request): Promise<Response> {
       return withLocalMediaCorsHeaders(new Response(null, { status: 204 }), request)
     }
 
-    const localPath = normalizeLocalFilePath(request.url)
-    if (!isAllowedLocalMediaPath(localPath)) {
+    if (hasLocalMediaTraversal(request.url)) {
+      return withLocalMediaCorsHeaders(new Response('Forbidden', { status: 403 }), request)
+    }
+
+    const localPath = resolveAuthorizedLocalMediaPath(
+      normalizeLocalFilePath(request.url),
+      getLocalMediaAllowedRoots()
+    )
+    if (!localPath) {
       return withLocalMediaCorsHeaders(new Response('Forbidden', { status: 403 }), request)
     }
 
