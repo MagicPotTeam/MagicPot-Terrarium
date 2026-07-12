@@ -17,9 +17,15 @@ interface CallbackWrapper {
 }
 
 interface ComfyEventConnection {
-  abortSender: AbortSender
-  abortReceiver: AbortReceiver
+  abortSender?: AbortSender
+  abortReceiver?: AbortReceiver
+  retryTimer?: ReturnType<typeof setTimeout>
+  retryAttempt: number
+  cancelled: boolean
 }
+
+const COMFY_EVENT_RECONNECT_BASE_DELAY_MS = 1_000
+const COMFY_EVENT_RECONNECT_MAX_DELAY_MS = 30_000
 
 interface ComfyEventContextType {
   registerCallback: (callback: ComfyEventCallback, options?: ComfyEventCallbackOptions) => string
@@ -89,11 +95,13 @@ export function ComfyEventProvider({ children }: { children: React.ReactNode }) 
     const connection = connectionsRef.current.get(clientId)
     if (!connection) return
 
-    try {
-      connection.abortSender.abort()
-    } finally {
-      connectionsRef.current.delete(clientId)
+    connection.cancelled = true
+    if (connection.retryTimer) {
+      clearTimeout(connection.retryTimer)
+      connection.retryTimer = undefined
     }
+    connection.abortSender?.abort()
+    connectionsRef.current.delete(clientId)
   }
 
   const connectClient = (clientId: string) => {
@@ -101,38 +109,68 @@ export function ComfyEventProvider({ children }: { children: React.ReactNode }) 
       return
     }
 
-    const [abortSender, abortReceiver] = newAbortHandler()
-    connectionsRef.current.set(clientId, {
-      abortSender,
-      abortReceiver
-    })
+    const connection: ComfyEventConnection = {
+      retryAttempt: 0,
+      cancelled: false
+    }
+    connectionsRef.current.set(clientId, connection)
 
-    api()
-      .svcComfy.connectWs(
-        { client_id: clientId },
-        {
-          abortReceiver,
-          onData: (event) => {
-            if (isComfyEvent(event)) {
-              handleComfyEvent(clientId, event)
+    const connect = () => {
+      if (
+        connection.cancelled ||
+        connectionsRef.current.get(clientId) !== connection ||
+        !hasCallbacksForClientId(clientId)
+      ) {
+        return
+      }
+
+      const [abortSender, abortReceiver] = newAbortHandler()
+      connection.abortSender = abortSender
+      connection.abortReceiver = abortReceiver
+
+      api()
+        .svcComfy.connectWs(
+          { client_id: clientId },
+          {
+            abortReceiver,
+            onData: (event) => {
+              if (isComfyEvent(event)) {
+                connection.retryAttempt = 0
+                handleComfyEvent(clientId, event)
+              }
             }
           }
-        }
-      )
-      .catch((error) => {
-        console.error('Error in ComfyEvent stream:', error)
-      })
-      .finally(() => {
-        const activeConnection = connectionsRef.current.get(clientId)
-        if (activeConnection?.abortSender !== abortSender) {
-          return
-        }
+        )
+        .catch((error) => {
+          if (!connection.cancelled) {
+            console.error('Error in ComfyEvent stream:', error)
+          }
+        })
+        .finally(() => {
+          if (
+            connection.cancelled ||
+            connectionsRef.current.get(clientId) !== connection ||
+            connection.abortSender !== abortSender ||
+            !hasCallbacksForClientId(clientId)
+          ) {
+            return
+          }
 
-        connectionsRef.current.delete(clientId)
-        if (hasCallbacksForClientId(clientId)) {
-          connectClient(clientId)
-        }
-      })
+          connection.abortSender = undefined
+          connection.abortReceiver = undefined
+          const delay = Math.min(
+            COMFY_EVENT_RECONNECT_BASE_DELAY_MS * 2 ** connection.retryAttempt,
+            COMFY_EVENT_RECONNECT_MAX_DELAY_MS
+          )
+          connection.retryAttempt += 1
+          connection.retryTimer = setTimeout(() => {
+            connection.retryTimer = undefined
+            connect()
+          }, delay)
+        })
+    }
+
+    connect()
   }
 
   const syncConnections = () => {
@@ -174,6 +212,7 @@ export function ComfyEventProvider({ children }: { children: React.ReactNode }) 
   useEffect(() => {
     const connections = connectionsRef.current
     return () => {
+      callbacksRef.current = []
       Array.from(connections.keys()).forEach((clientId) => {
         disconnectClient(clientId)
       })
