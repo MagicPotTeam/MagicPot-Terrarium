@@ -1,6 +1,9 @@
 import {
   FsSvc,
+  MAX_FILENAME_LENGTH,
+  MAX_FULL_FILE_BYTES,
   MAX_READ_FILE_SLICE_BYTES,
+  MAX_TEXT_FILE_BYTES,
   ListFilesInFolderReq,
   ListFilesInFolderResp,
   ListImagesInFolderReq,
@@ -136,14 +139,50 @@ const resolveLoraTriggerSidecarPath = async (): Promise<string | null> => {
   return null
 }
 
-const sanitizeFileName = (value: string): string => {
-  const normalized = path.basename(String(value || '').trim())
-  const withoutReservedChars = normalized.replace(/[<>:"/\\|?*]+/g, '_')
-  const withoutControlChars = Array.from(withoutReservedChars)
-    .map((char) => (char.charCodeAt(0) < 32 ? '_' : char))
-    .join('')
-    .trim()
-  return withoutControlChars || 'qapp-input-image.png'
+const requireBasename = (filename: string): string => {
+  if (
+    typeof filename !== 'string' ||
+    !filename.trim() ||
+    filename.length > MAX_FILENAME_LENGTH ||
+    filename === '.' ||
+    filename === '..' ||
+    filename.includes('/') ||
+    filename.includes('\\') ||
+    filename.includes('\0')
+  ) {
+    throw new Error('Invalid filename: expected a basename-only filename')
+  }
+  return filename
+}
+
+const resolveContainedFile = (directory: string, filename: string): string => {
+  const root = path.resolve(directory)
+  const fullPath = path.resolve(root, requireBasename(filename))
+  const relative = path.relative(root, fullPath)
+  if (
+    !relative ||
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error('Invalid filename: resolved path is outside the output directory')
+  }
+  return fullPath
+}
+
+const requireBoundedPayload = (value: Uint8Array, limit: number, label: string): void => {
+  if (!(value instanceof Uint8Array) || value.byteLength > limit) {
+    throw new Error(`${label} exceeds the ${limit}-byte IPC limit`)
+  }
+}
+
+const assertReadableFileWithinLimit = async (fullPath: string, limit: number): Promise<number> => {
+  const stats = await runBoundedFsOp(() => fs.stat(fullPath))
+  if (!stats.isFile()) throw new Error(`Path is not a file: ${fullPath}`)
+  if (stats.size > limit) {
+    throw new Error(`File exceeds the ${limit}-byte full-file IPC limit; use readFileSlice instead`)
+  }
+  return stats.size
 }
 
 function normalizeExtension(value: string): string {
@@ -231,13 +270,13 @@ export class FsSvcImpl implements FsSvc {
 
   saveImageToPath = async (req: SaveImageToPathReq): Promise<SaveImageToPathResp> => {
     const { image, outputPath, filename } = req
+    requireBoundedPayload(image, MAX_FULL_FILE_BYTES, 'Image')
+    const fullPath = resolveContainedFile(outputPath, filename)
 
-    // Ensure output directory exists
     if (!(await pathExists(outputPath))) {
       await runBoundedFsOp(() => fs.mkdir(outputPath, { recursive: true }))
     }
 
-    const fullPath = path.join(outputPath, filename)
     await runBoundedFsOp(() => fs.writeFile(fullPath, Buffer.from(image)))
 
     return { success: true, fullPath }
@@ -247,11 +286,12 @@ export class FsSvcImpl implements FsSvc {
     const outputPath = path.join(app.getPath('userData'), QAPP_INPUT_IMAGE_DIR)
     await runBoundedFsOp(() => fs.mkdir(outputPath, { recursive: true }))
 
-    const safeName = sanitizeFileName(req.filename)
+    requireBoundedPayload(req.image, MAX_FULL_FILE_BYTES, 'Image')
+    const safeName = requireBasename(req.filename)
     const extension = path.extname(safeName)
     const baseName = extension ? safeName.slice(0, -extension.length) : safeName
     const filename = `${baseName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${extension || '.png'}`
-    const fullPath = path.join(outputPath, filename)
+    const fullPath = resolveContainedFile(outputPath, filename)
     await runBoundedFsOp(() => fs.writeFile(fullPath, Buffer.from(req.image)))
 
     return { success: true, fullPath, filename }
@@ -264,6 +304,7 @@ export class FsSvcImpl implements FsSvc {
       throw new Error(`File not found: ${fullPath}`)
     }
 
+    await assertReadableFileWithinLimit(fullPath, MAX_FULL_FILE_BYTES)
     const buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
     const filename = path.basename(fullPath)
 
@@ -280,6 +321,7 @@ export class FsSvcImpl implements FsSvc {
       throw new Error(`File not found: ${fullPath}`)
     }
 
+    await assertReadableFileWithinLimit(fullPath, MAX_TEXT_FILE_BYTES)
     return {
       content: await runBoundedFsOp(() => fs.readFile(fullPath, 'utf8')),
       filename: path.basename(fullPath)
@@ -293,6 +335,7 @@ export class FsSvcImpl implements FsSvc {
       throw new Error(`File not found: ${fullPath}`)
     }
 
+    await assertReadableFileWithinLimit(fullPath, MAX_FULL_FILE_BYTES)
     const buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
     return {
       data: new Uint8Array(buffer),
@@ -349,12 +392,16 @@ export class FsSvcImpl implements FsSvc {
 
   writeTextFile = async (req: WriteTextFileReq): Promise<WriteTextFileResp> => {
     const { outputPath, filename, content } = req
+    const contentBytes = Buffer.byteLength(content, 'utf8')
+    if (contentBytes > MAX_TEXT_FILE_BYTES) {
+      throw new Error(`Text exceeds the ${MAX_TEXT_FILE_BYTES}-byte IPC limit`)
+    }
+    const fullPath = resolveContainedFile(outputPath, filename)
 
     if (!(await pathExists(outputPath))) {
       await runBoundedFsOp(() => fs.mkdir(outputPath, { recursive: true }))
     }
 
-    const fullPath = path.join(outputPath, filename)
     await runBoundedFsOp(() => fs.writeFile(fullPath, content, 'utf8'))
 
     return {

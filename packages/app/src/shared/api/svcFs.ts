@@ -115,67 +115,122 @@ export type ReadLoraTriggerWordsNativeResp = {
 }
 
 export const MAX_READ_FILE_SLICE_BYTES = 16 * 1024 * 1024
+export const MAX_FULL_FILE_BYTES = 64 * 1024 * 1024
+export const MAX_TEXT_FILE_BYTES = 8 * 1024 * 1024
+export const MAX_FILENAME_LENGTH = 255
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
-const requireNonEmptyString = (value: unknown, field: string): string => {
-  if (typeof value === 'string' && value.trim()) {
-    return value
-  }
-  throw new ServiceValidationError(`svcFs.readFileSlice ${field}`, [
-    {
-      path: [field],
-      message: 'Expected a non-empty string',
-      code: 'invalid_type'
-    }
+const validationError = (method: string, field: string, message: string): never => {
+  throw new ServiceValidationError(`svcFs.${method} ${field}`, [
+    { path: [field], message, code: 'invalid_type' }
   ])
 }
 
-const requireBoundedInteger = ({
-  value,
-  field,
-  min,
-  max
-}: {
-  value: unknown
-  field: string
-  min: number
-  max: number
-}): number => {
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max) {
+const requireRecord = (value: unknown, method: string): Record<string, unknown> => {
+  if (isRecord(value)) return value
+  throw new ServiceValidationError(`svcFs.${method} request`)
+}
+
+const requireNonEmptyString = (value: unknown, method: string, field: string): string => {
+  if (typeof value === 'string' && value.trim()) return value
+  return validationError(method, field, 'Expected a non-empty string')
+}
+
+const requireBasename = (value: unknown, method: string): string => {
+  const filename = requireNonEmptyString(value, method, 'filename')
+  if (
+    filename.length > MAX_FILENAME_LENGTH ||
+    filename === '.' ||
+    filename === '..' ||
+    filename.includes('/') ||
+    filename.includes('\\') ||
+    filename.includes('\0')
+  ) {
+    return validationError(
+      method,
+      'filename',
+      `Expected a basename no longer than ${MAX_FILENAME_LENGTH} characters`
+    )
+  }
+  return filename
+}
+
+const requireUint8Array = (value: unknown, method: string, field: string): Uint8Array => {
+  if (value instanceof Uint8Array && value.byteLength <= MAX_FULL_FILE_BYTES) return value
+  return validationError(
+    method,
+    field,
+    `Expected Uint8Array no larger than ${MAX_FULL_FILE_BYTES} bytes`
+  )
+}
+
+const requireText = (value: unknown, method: string): string => {
+  if (
+    typeof value === 'string' &&
+    new TextEncoder().encode(value).byteLength <= MAX_TEXT_FILE_BYTES
+  ) {
     return value
   }
-  throw new ServiceValidationError(`svcFs.readFileSlice ${field}`, [
-    {
-      path: [field],
-      message: `Expected an integer between ${min} and ${max}`,
-      code: 'invalid_type'
+  return validationError(
+    method,
+    'content',
+    `Expected UTF-8 text no larger than ${MAX_TEXT_FILE_BYTES} bytes`
+  )
+}
+
+const validatePathReq =
+  <T extends { fullPath: string }>(method: string) =>
+  (value: unknown): T => {
+    const req = requireRecord(value, method)
+    return { fullPath: requireNonEmptyString(req.fullPath, method, 'fullPath') } as T
+  }
+
+const validateImageWriteReq =
+  (method: string) =>
+  (value: unknown): SaveImageToPathReq => {
+    const req = requireRecord(value, method)
+    return {
+      image: requireUint8Array(req.image, method, 'image'),
+      outputPath: requireNonEmptyString(req.outputPath, method, 'outputPath'),
+      filename: requireBasename(req.filename, method)
     }
-  ])
+  }
+
+const validateSaveQAppInputImageReq = (value: unknown): SaveQAppInputImageReq => {
+  const method = 'saveQAppInputImage'
+  const req = requireRecord(value, method)
+  return {
+    image: requireUint8Array(req.image, method, 'image'),
+    filename: requireBasename(req.filename, method)
+  }
+}
+
+const validateWriteTextFileReq = (value: unknown): WriteTextFileReq => {
+  const method = 'writeTextFile'
+  const req = requireRecord(value, method)
+  return {
+    outputPath: requireNonEmptyString(req.outputPath, method, 'outputPath'),
+    filename: requireBasename(req.filename, method),
+    content: requireText(req.content, method)
+  }
 }
 
 const validateReadFileSliceReq = (value: unknown): ReadFileSliceReq => {
-  if (!isRecord(value)) {
-    throw new ServiceValidationError('svcFs.readFileSlice request')
+  const method = 'readFileSlice'
+  const req = requireRecord(value, method)
+  const requireInteger = (field: 'offset' | 'length', min: number, max: number): number => {
+    const input = req[field]
+    if (typeof input === 'number' && Number.isSafeInteger(input) && input >= min && input <= max) {
+      return input
+    }
+    return validationError(method, field, `Expected an integer between ${min} and ${max}`)
   }
   return {
-    fullPath: requireNonEmptyString(value.fullPath, 'fullPath'),
-    offset:
-      value.offset === undefined
-        ? 0
-        : requireBoundedInteger({
-            value: value.offset,
-            field: 'offset',
-            min: 0,
-            max: Number.MAX_SAFE_INTEGER
-          }),
-    length: requireBoundedInteger({
-      value: value.length,
-      field: 'length',
-      min: 1,
-      max: MAX_READ_FILE_SLICE_BYTES
-    })
+    fullPath: requireNonEmptyString(req.fullPath, method, 'fullPath'),
+    offset: req.offset === undefined ? 0 : requireInteger('offset', 0, Number.MAX_SAFE_INTEGER),
+    length: requireInteger('length', 1, MAX_READ_FILE_SLICE_BYTES)
   }
 }
 
@@ -202,26 +257,32 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
     type: 'unary'
   },
   saveImageToPath: {
-    type: 'unary'
+    type: 'unary',
+    request: validateImageWriteReq('saveImageToPath')
   },
   saveQAppInputImage: {
-    type: 'unary'
+    type: 'unary',
+    request: validateSaveQAppInputImageReq
   },
   readImageFromPath: {
-    type: 'unary'
+    type: 'unary',
+    request: validatePathReq<ReadImageFromPathReq>('readImageFromPath')
   },
   readTextFile: {
-    type: 'unary'
+    type: 'unary',
+    request: validatePathReq<ReadTextFileReq>('readTextFile')
   },
   readFileFromPath: {
-    type: 'unary'
+    type: 'unary',
+    request: validatePathReq<ReadFileFromPathReq>('readFileFromPath')
   },
   readFileSlice: {
     type: 'unary',
     request: validateReadFileSliceReq
   },
   writeTextFile: {
-    type: 'unary'
+    type: 'unary',
+    request: validateWriteTextFileReq
   },
   readLoraTriggerWordsNative: {
     type: 'unary'
