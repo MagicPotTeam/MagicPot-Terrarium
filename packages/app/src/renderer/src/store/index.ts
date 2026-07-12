@@ -4,6 +4,7 @@ import { useDispatch, useSelector, TypedUseSelectorHook } from 'react-redux'
 import comfyStatusSlice from './slices/comfyStatus'
 import layoutSlice, { saveState } from './slices/layoutSlice'
 import projectConfigSlice, { saveProjectConfigState } from './slices/projectConfigSlice'
+import { comfyResultListenerMiddleware, teardownComfyResultResources } from './comfyResultResources'
 
 const store = configureStore({
   reducer: {
@@ -16,13 +17,13 @@ const store = configureStore({
     getDefaultMiddleware({
       serializableCheck: false,
       immutableCheck: false
-    })
+    }).prepend(comfyResultListenerMiddleware.middleware)
 })
 
 // 仅在对应 slice 引用变化时写入 localStorage，避免 Comfy 队列和结果流更新触发无关序列化。
 let previousLayoutState = store.getState().layout
 let previousProjectConfigState = store.getState().projectConfig
-store.subscribe(() => {
+const unsubscribePersistence = store.subscribe(() => {
   const state = store.getState()
   if (state.layout !== previousLayoutState) {
     previousLayoutState = state.layout
@@ -33,6 +34,12 @@ store.subscribe(() => {
     saveProjectConfigState(state.projectConfig)
   }
 })
+
+export const teardownStore = () => {
+  unsubscribePersistence()
+  comfyResultListenerMiddleware.clearListeners()
+  teardownComfyResultResources()
+}
 
 export default store
 

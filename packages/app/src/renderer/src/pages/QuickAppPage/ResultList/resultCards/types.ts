@@ -7,6 +7,7 @@ export type ResultCardProps<ItemType extends ResultItemType> = {
   index: number
   config: Config
   buildEnv: BuildEnv
+  autoSave?: boolean
   resultListMethods?: {
     deleteResult: (id: string) => void
     setInfoPromptId: (promptId: string) => void

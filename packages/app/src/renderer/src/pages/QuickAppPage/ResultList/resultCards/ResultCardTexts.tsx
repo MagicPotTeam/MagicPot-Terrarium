@@ -8,24 +8,23 @@ import ModalLayout from '@renderer/components/ModalLayout'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { api } from '@renderer/utils/windowUtils'
 import { resolveProjectResourceDir } from '@renderer/utils/projectResourcePaths'
-
-// 记录已经自动保存过的多文本结果，防止组件重新挂载时重复保存
-const autoSavedTextsTracker = new Set<string>()
+import { createAutoSaveFileName } from './autoSaveTracker'
+import { comfyResultAutoSaveClaims } from '@renderer/store/comfyResultResources'
 
 const ResultCardTexts: ResultCardComponent<'texts'> = ({
   result,
   index,
   config,
   buildEnv,
+  autoSave = true,
   resultListMethods
 }: ResultCardProps<'texts'>) => {
   const [previewOpen, setPreviewOpen] = useState(false)
   const { notifySuccess } = useMessage()
 
   useEffect(() => {
-    const textKey = result.resultItems.map((item) => `${item.nodeId}:${item.text}`).join('|')
-    if (!textKey || autoSavedTextsTracker.has(textKey)) return
-    autoSavedTextsTracker.add(textKey)
+    if (!autoSave || result.resultItems.length === 0 || !comfyResultAutoSaveClaims.claim(result.id))
+      return
 
     const autoSaveTexts = async () => {
       try {
@@ -33,8 +32,7 @@ const ResultCardTexts: ResultCardComponent<'texts'> = ({
           .map((item) => `[${item.nodeTitle} (${item.nodeId})]\n${item.text}`)
           .join('\n\n---\n\n')
 
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-        const fileName = `qapp_auto_${timestamp}.txt`
+        const fileName = createAutoSaveFileName('.txt')
 
         const data = new TextEncoder().encode(combinedText)
         const targetDir = resolveProjectResourceDir({
@@ -50,12 +48,13 @@ const ResultCardTexts: ResultCardComponent<'texts'> = ({
         })
         console.log(`[自动保存] 快应用多文本已保存到 ${res.savedPath}`)
       } catch (error) {
+        comfyResultAutoSaveClaims.release(result.id)
         console.error('[自动保存] 快应用多文本保存失败:', error)
       }
     }
 
     autoSaveTexts()
-  }, [result.resultItems, result.projectId, config.download_dir])
+  }, [autoSave, result.id, result.resultItems, result.projectId, config.download_dir])
 
   let thumbnailResult = result.resultItems
   if (thumbnailResult.length > 5) {

@@ -5,7 +5,8 @@ import {
   setObjectInfos,
   setIsRunning,
   setErrorPromptStatus,
-  deleteResult
+  deleteResult,
+  clearResults
 } from '../slices/comfyStatus'
 import { useCallback } from 'react'
 import { ComfyHistory, ObjectInfoMap } from '@shared/comfy/types'
@@ -34,6 +35,7 @@ export const useComfyStatus = () => {
       [dispatch]
     ),
     deleteResult: useCallback((id: string) => dispatch(deleteResult(id)), [dispatch]),
+    clearResults: useCallback(() => dispatch(clearResults()), [dispatch]),
     setErrorPromptStatus: useCallback(
       (promptId: string, status: ComfyHistory['status']) =>
         dispatch(setErrorPromptStatus([promptId, status])),
