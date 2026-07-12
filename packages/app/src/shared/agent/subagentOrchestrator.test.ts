@@ -223,49 +223,6 @@ describe('subagentOrchestrator', () => {
 
     expect(emptyOutputRun.outcome?.status).toBe('ok')
     expect(systemPrompts.at(-1)).not.toContain('Dependency outputs:')
-
-    const staleRunId = 'stale-dependency-run'
-    const originalGetRunnableTasks = subagentRegistry.getRunnableTasks.bind(subagentRegistry)
-    const spy = vi
-      .spyOn(subagentRegistry, 'getRunnableTasks')
-      .mockImplementation((candidateRunId) => {
-        const runnable = originalGetRunnableTasks(candidateRunId)
-        const run = subagentRegistry.getRun(candidateRunId)
-        const staleTask = run?.tasks.find((task) => task.id === 'stale-dependent')
-        if (
-          candidateRunId === staleRunId &&
-          runnable.length === 0 &&
-          staleTask?.status === 'pending'
-        ) {
-          return [staleTask]
-        }
-        return runnable
-      })
-
-    const stalePrompts: string[] = []
-    const staleRun = await runOrchestratedSubagents(
-      async ({ systemPrompt }) => {
-        stalePrompts.push(systemPrompt || '')
-        return 'recovered'
-      },
-      {
-        runId: staleRunId,
-        requesterSessionId: 'session-1',
-        goal: 'Recover stale dependency metadata',
-        modelName: 'test-model',
-        tasks: [
-          {
-            id: 'stale-dependent',
-            task: 'Run despite stale dependency metadata',
-            dependsOn: ['missing-dependency']
-          }
-        ]
-      }
-    )
-
-    expect(staleRun.outcome?.status).toBe('ok')
-    expect(stalePrompts[0]).not.toContain('Dependency outputs:')
-    spy.mockRestore()
   })
 
   it('retries a task when the quality gate fails and then succeeds', async () => {
@@ -447,14 +404,24 @@ describe('subagentOrchestrator', () => {
     spy.mockRestore()
   })
 
-  it('times out a stalled task attempt and retries within the configured watchdog window', async () => {
+  it('times out and aborts a stalled task attempt before retrying', async () => {
     let attempt = 0
+    let firstAttemptAborted = false
 
     const run = await runOrchestratedSubagents(
-      async () => {
+      async ({ signal }) => {
         attempt += 1
         if (attempt === 1) {
-          await new Promise((resolve) => setTimeout(resolve, 30))
+          await new Promise<void>((resolve) => {
+            signal?.addEventListener(
+              'abort',
+              () => {
+                firstAttemptAborted = true
+                resolve()
+              },
+              { once: true }
+            )
+          })
           return 'late first attempt'
         }
         return 'fast second attempt'
@@ -475,8 +442,70 @@ describe('subagentOrchestrator', () => {
     )
 
     expect(run.outcome?.status).toBe('ok')
+    expect(firstAttemptAborted).toBe(true)
     expect(run.tasks[0].attempts).toBe(2)
     expect(run.tasks[0].resultText).toBe('fast second attempt')
+    expect(run.tasks[0].failureKind).toBeUndefined()
+  })
+
+  it('returns a timeout outcome when chat timeout retries are exhausted', async () => {
+    const run = await runOrchestratedSubagents(
+      async ({ signal }) => {
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        return 'late response'
+      },
+      {
+        requesterSessionId: 'session-1',
+        goal: 'Exhaust a stalled task',
+        modelName: 'test-model',
+        runTimeoutSeconds: 0.005,
+        tasks: [{ id: 'stalled-task', task: 'Never respond in time', maxAttempts: 1 }]
+      }
+    )
+
+    expect(run.outcome).toEqual({
+      status: 'timeout',
+      error: 'Task stalled-task timed out waiting for a subagent response.'
+    })
+    expect(run.tasks[0]).toMatchObject({
+      status: 'failed',
+      failureKind: 'timeout'
+    })
+  })
+
+  it('returns a timeout outcome when quality-gate timeout retries are exhausted', async () => {
+    const run = await runOrchestratedSubagents(async () => 'candidate response', {
+      requesterSessionId: 'session-1',
+      goal: 'Exhaust a stalled quality gate',
+      modelName: 'test-model',
+      runTimeoutSeconds: 0.005,
+      tasks: [
+        {
+          id: 'gated-task',
+          task: 'Wait for validation',
+          maxAttempts: 1,
+          qualityGate: {
+            validate: async (_response, _task, _run, signal) => {
+              await new Promise<void>((resolve) => {
+                signal?.addEventListener('abort', () => resolve(), { once: true })
+              })
+              return true
+            }
+          }
+        }
+      ]
+    })
+
+    expect(run.outcome).toEqual({
+      status: 'timeout',
+      error: 'Task gated-task timed out during quality-gate validation.'
+    })
+    expect(run.tasks[0]).toMatchObject({
+      status: 'failed',
+      failureKind: 'timeout'
+    })
   })
 
   it('resumes an interrupted run without rerunning completed tasks', async () => {
@@ -539,9 +568,78 @@ describe('subagentOrchestrator', () => {
       }
     )
 
+    const failedTask = firstRun.tasks[0]
     await expect(
       resumeOrchestratedSubagents(async () => 'unused', firstRun.runId, [])
-    ).rejects.toThrow('Task definition failed-task is missing.')
+    ).rejects.toThrow('An orchestrated subagent run must contain at least one task.')
+
+    expect(firstRun.outcome?.status).toBe('error')
+    expect(failedTask.status).toBe('failed')
+    expect(failedTask.attempts).toBe(1)
+  })
+
+  it('validates all resume definitions before resetting failed task state', async () => {
+    const tasks: OrchestratedSubagentTask[] = [
+      { id: 'first', task: 'First task' },
+      { id: 'second', task: 'Second task' }
+    ]
+    const firstRun = await runOrchestratedSubagents(
+      async () => {
+        throw new Error('initial failure')
+      },
+      {
+        requesterSessionId: 'session-1',
+        goal: 'Validate resume atomically',
+        modelName: 'test-model',
+        parallelism: 2,
+        tasks
+      }
+    )
+    const before = firstRun.tasks.map((task) => ({
+      status: task.status,
+      error: task.error,
+      maxAttempts: task.maxAttempts
+    }))
+
+    await expect(
+      resumeOrchestratedSubagents(async () => 'unused', firstRun.runId, [
+        tasks[0],
+        { ...tasks[1], task: 'Changed definition' }
+      ])
+    ).rejects.toThrow('Task definition second does not match the registered run.')
+
+    expect(
+      firstRun.tasks.map((task) => ({
+        status: task.status,
+        error: task.error,
+        maxAttempts: task.maxAttempts
+      }))
+    ).toEqual(before)
+    expect(firstRun.outcome?.status).toBe('error')
+  })
+
+  it('returns an error when incomplete tasks have no runnable work', async () => {
+    const runId = 'stalled-scheduler-run'
+    const originalGetRunnableTasks = subagentRegistry.getRunnableTasks.bind(subagentRegistry)
+    const spy = vi
+      .spyOn(subagentRegistry, 'getRunnableTasks')
+      .mockImplementation((candidateRunId) =>
+        candidateRunId === runId ? [] : originalGetRunnableTasks(candidateRunId)
+      )
+
+    const run = await runOrchestratedSubagents(async () => 'unused', {
+      runId,
+      requesterSessionId: 'session-1',
+      goal: 'Detect a stalled scheduler',
+      modelName: 'test-model',
+      tasks: [{ id: 'pending-task', task: 'Never selected' }]
+    })
+
+    expect(run.outcome).toEqual({
+      status: 'error',
+      error: 'Task pending-task could not be scheduled to completion.'
+    })
+    spy.mockRestore()
   })
 
   it('fails when a runnable task disappears from the registry before execution', async () => {
@@ -561,7 +659,10 @@ describe('subagentOrchestrator', () => {
       tasks: [{ id: 'task-1', task: 'Task disappears' }]
     })
 
-    expect(run.outcome).toEqual({ status: 'ok', resultText: '' })
+    expect(run.outcome).toEqual({
+      status: 'error',
+      error: 'Task task-1 could not be scheduled to completion.'
+    })
 
     spy.mockRestore()
   })
@@ -661,6 +762,58 @@ describe('subagentOrchestrator', () => {
     expect(startedLabels.some((label) => label.includes('dependent second task'))).toBe(false)
   })
 
+  it('resumes and completes an in-flight run cancelled on its final attempt', async () => {
+    const abortController = new AbortController()
+    const tasks: OrchestratedSubagentTask[] = [
+      { id: 'cancelled-task', task: 'Resume cancelled work', maxAttempts: 1 }
+    ]
+
+    const cancelledRun = await runOrchestratedSubagents(
+      async ({ signal }) => {
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            const error = new Error('pause for resume')
+            error.name = 'AbortError'
+            reject(error)
+          }
+          if (signal?.aborted) onAbort()
+          else signal?.addEventListener('abort', onAbort, { once: true })
+          setTimeout(() => abortController.abort('pause for resume'), 0)
+        })
+        return 'unreachable'
+      },
+      {
+        runId: 'cancel-and-resume',
+        requesterSessionId: 'session-1',
+        goal: 'Resume cancelled task',
+        modelName: 'test-model',
+        signal: abortController.signal,
+        tasks
+      }
+    )
+
+    expect(cancelledRun.outcome?.status).toBe('cancelled')
+    expect(cancelledRun.tasks[0]).toMatchObject({
+      status: 'pending',
+      attempts: 1,
+      maxAttempts: 1
+    })
+
+    const resumedRun = await resumeOrchestratedSubagents(
+      async () => 'resumed result',
+      cancelledRun.runId,
+      tasks
+    )
+
+    expect(resumedRun.outcome?.status).toBe('ok')
+    expect(resumedRun.tasks[0]).toMatchObject({
+      status: 'completed',
+      attempts: 2,
+      maxAttempts: 2,
+      resultText: 'resumed result'
+    })
+  })
+
   it('cancels before work starts when the signal is already aborted', async () => {
     const abortController = new AbortController()
     abortController.abort('already cancelled')
@@ -749,16 +902,69 @@ describe('subagentOrchestrator', () => {
     expect(run.tasks[0].attempts).toBe(1)
   })
 
-  it('finishes with an error when dependencies can never become runnable', async () => {
-    const run = await runOrchestratedSubagents(async () => 'unused', {
+  it('rejects empty, duplicate, invalid, self-dependent, and cyclic task graphs', async () => {
+    const baseParams = {
       requesterSessionId: 'session-1',
-      goal: 'Blocked dependency',
+      goal: 'Validate task graph',
+      modelName: 'test-model'
+    }
+
+    await expect(
+      runOrchestratedSubagents(async () => 'unused', { ...baseParams, tasks: [] })
+    ).rejects.toThrow('An orchestrated subagent run must contain at least one task.')
+    await expect(
+      runOrchestratedSubagents(async () => 'unused', {
+        ...baseParams,
+        tasks: [
+          { id: 'duplicate', task: 'First' },
+          { id: 'duplicate', task: 'Second' }
+        ]
+      })
+    ).rejects.toThrow('Duplicate subagent task id: duplicate.')
+    await expect(
+      runOrchestratedSubagents(async () => 'unused', {
+        ...baseParams,
+        tasks: [{ id: 'blocked', task: 'Blocked forever', dependsOn: ['missing-dependency'] }]
+      })
+    ).rejects.toThrow('Subagent task blocked depends on unknown task missing-dependency.')
+    await expect(
+      runOrchestratedSubagents(async () => 'unused', {
+        ...baseParams,
+        tasks: [{ id: 'self', task: 'Self dependent', dependsOn: ['self'] }]
+      })
+    ).rejects.toThrow('Subagent task self cannot depend on itself.')
+    await expect(
+      runOrchestratedSubagents(async () => 'unused', {
+        ...baseParams,
+        tasks: [
+          { id: 'a', task: 'A', dependsOn: ['b'] },
+          { id: 'b', task: 'B', dependsOn: ['a'] }
+        ]
+      })
+    ).rejects.toThrow('Subagent task dependencies must form a DAG.')
+  })
+
+  it('rejects duplicate run ids without overwriting the registered run', async () => {
+    const runId = 'stable-run-id'
+    const firstRun = await runOrchestratedSubagents(async () => 'first result', {
+      runId,
+      requesterSessionId: 'session-1',
+      goal: 'Original run',
       modelName: 'test-model',
-      tasks: [{ id: 'blocked', task: 'Blocked forever', dependsOn: ['missing-dependency'] }]
+      tasks: [{ id: 'original', task: 'Original task' }]
     })
 
-    expect(run.outcome).toEqual({ status: 'ok', resultText: '' })
-    expect(run.tasks[0].status).toBe('pending')
+    await expect(
+      runOrchestratedSubagents(async () => 'replacement', {
+        runId,
+        requesterSessionId: 'session-2',
+        goal: 'Replacement run',
+        modelName: 'test-model',
+        tasks: [{ id: 'replacement', task: 'Replacement task' }]
+      })
+    ).rejects.toThrow(`Subagent run ${runId} already exists.`)
+    expect(subagentRegistry.getRun(runId)).toBe(firstRun)
+    expect(firstRun.goal).toBe('Original run')
   })
 
   it('throws from spawnSubagent when the default task produces no result text', async () => {
@@ -771,20 +977,27 @@ describe('subagentOrchestrator', () => {
     ).rejects.toThrow('Subagent failed without a result.')
   })
 
-  it('surfaces non-abort observer failures to the caller', async () => {
-    await expect(
-      runOrchestratedSubagents(async () => 'done', {
-        requesterSessionId: 'session-1',
-        goal: 'Observer failure',
-        modelName: 'test-model',
-        tasks: [{ id: 'task-1', task: 'Complete then observer fails' }],
-        observer: {
-          onRunFinished: () => {
-            throw new Error('observer failed')
-          }
+  it('isolates observer failures from task and run state', async () => {
+    const run = await runOrchestratedSubagents(async () => 'done', {
+      requesterSessionId: 'session-1',
+      goal: 'Observer failure',
+      modelName: 'test-model',
+      tasks: [{ id: 'task-1', task: 'Complete despite observer failures' }],
+      observer: {
+        onTaskStarted: () => {
+          throw new Error('start observer failed')
+        },
+        onTaskCompleted: () => {
+          throw new Error('complete observer failed')
+        },
+        onRunFinished: () => {
+          throw new Error('finish observer failed')
         }
-      })
-    ).rejects.toThrow('observer failed')
+      }
+    })
+
+    expect(run.outcome?.status).toBe('ok')
+    expect(run.tasks[0]).toMatchObject({ status: 'completed', resultText: 'done' })
   })
 
   it('surfaces a missing run at the start of the orchestrated loop', async () => {
@@ -828,7 +1041,7 @@ describe('subagentOrchestrator', () => {
         requesterSessionId: 'session-1',
         goal: 'Remove before finalize',
         modelName: 'test-model',
-        tasks: []
+        tasks: [{ id: 'task-1', task: 'Removed before finalization' }]
       })
     ).rejects.toThrow('Subagent run missing-finalize-run no longer exists.')
 
@@ -837,10 +1050,14 @@ describe('subagentOrchestrator', () => {
 
   it('propagates abort errors when the run record disappears during cancellation', async () => {
     const runId = 'disappearing-run'
+    let removed = false
     await expect(
       runOrchestratedSubagents(
         async () => {
-          subagentRegistry.cleanupRun(runId)
+          if (!removed) {
+            removed = true
+            subagentRegistry.cleanupRun(runId)
+          }
           const error = new Error('lost run cancelled')
           error.name = 'AbortError'
           throw error
