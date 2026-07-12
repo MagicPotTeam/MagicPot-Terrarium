@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getAgentKernel } from './index'
+import { AgentKernel, getAgentKernel } from './index'
 
 describe('agentKernel', () => {
   beforeEach(() => {
@@ -567,5 +567,131 @@ describe('agentKernel', () => {
     ).toMatchObject({
       session: unregistered
     })
+  })
+
+  it('retains only the newest events across all event producers', async () => {
+    const kernel = new AgentKernel({ maxEvents: 2 })
+    const session = kernel.registerSession({
+      channel: 'generic',
+      scopeType: 'dm',
+      scopeId: 'bounded-events'
+    })
+
+    kernel.registerCapability({
+      capabilityId: 'bounded.capability',
+      name: 'Bounded capability',
+      kind: 'resource',
+      description: 'Emits a capability event.',
+      version: '1.0.0',
+      scope: 'global',
+      transport: ['internal']
+    })
+    kernel.recordEvent({
+      runId: 'manual-1',
+      sessionKey: session.sessionKey,
+      type: 'run.updated',
+      message: 'first retained event'
+    })
+    await kernel.invokeTool(
+      {
+        toolName: 'bounded.tool',
+        args: {},
+        session,
+        source: 'kernel'
+      },
+      async () => ({ ok: true })
+    )
+
+    expect(kernel.listEvents().map((event) => event.type)).toEqual(['run.updated', 'tool.invoked'])
+  })
+
+  it('bounds terminal runs while preserving active runs', () => {
+    const kernel = new AgentKernel({ maxTerminalRuns: 1, maxInactiveSessions: 10 })
+    const session = kernel.registerSession({
+      channel: 'generic',
+      scopeType: 'dm',
+      scopeId: 'bounded-runs'
+    })
+    const oldestTerminal = kernel.createMasterRun({ session, goal: 'old terminal' })
+    const active = kernel.createMasterRun({ session, goal: 'active' })
+    const newestTerminal = kernel.createMasterRun({ session, goal: 'new terminal' })
+
+    kernel.updateRun(oldestTerminal.runId, { status: 'completed' })
+    kernel.updateRun(active.runId, { status: 'running' })
+    kernel.updateRun(newestTerminal.runId, { status: 'failed' })
+
+    expect(kernel.getRun(oldestTerminal.runId)).toBeUndefined()
+    expect(kernel.getRun(active.runId)?.status).toBe('running')
+    expect(kernel.getRun(newestTerminal.runId)?.status).toBe('failed')
+    expect(kernel.listRuns()).toHaveLength(2)
+  })
+
+  it('preserves zero-retention sessions through run creation and while runs are active', () => {
+    const kernel = new AgentKernel({ maxInactiveSessions: 0, maxTerminalRuns: 10 })
+    const masterSession = kernel.registerSession({
+      channel: 'generic',
+      scopeType: 'dm',
+      scopeId: 'zero-retention-master'
+    })
+
+    expect(kernel.getSession(masterSession.sessionKey)).toBeDefined()
+
+    const masterRun = kernel.createMasterRun({
+      session: masterSession,
+      goal: 'stay pending'
+    })
+    const subagentSession = kernel.registerSession({
+      channel: 'generic',
+      scopeType: 'dm',
+      scopeId: 'zero-retention-subagent'
+    })
+    const subagentRun = kernel.createSubagentRun({
+      session: subagentSession,
+      masterRunId: masterRun.runId,
+      goal: 'stay running'
+    })
+    kernel.updateRun(subagentRun.runId, { status: 'running' })
+
+    const terminalSession = kernel.registerSession({
+      channel: 'generic',
+      scopeType: 'dm',
+      scopeId: 'zero-retention-terminal'
+    })
+    const terminalRun = kernel.createMasterRun({
+      session: terminalSession,
+      goal: 'trigger inactive pruning'
+    })
+    kernel.updateRun(terminalRun.runId, { status: 'completed' })
+
+    expect(kernel.getSession(masterSession.sessionKey)).toBeDefined()
+    expect(kernel.getSession(subagentSession.sessionKey)).toBeDefined()
+    expect(kernel.getSession(terminalSession.sessionKey)).toBeUndefined()
+  })
+
+  it('bounds inactive sessions without evicting a session with an active run', () => {
+    const kernel = new AgentKernel({ maxInactiveSessions: 1, maxTerminalRuns: 10 })
+    const activeSession = kernel.registerSession({
+      channel: 'generic',
+      scopeType: 'dm',
+      scopeId: 'active-session'
+    })
+    const activeRun = kernel.createMasterRun({ session: activeSession, goal: 'stay active' })
+    kernel.updateRun(activeRun.runId, { status: 'running' })
+
+    const oldInactive = kernel.registerSession({
+      channel: 'generic',
+      scopeType: 'dm',
+      scopeId: 'old-inactive'
+    })
+    const newestInactive = kernel.registerSession({
+      channel: 'generic',
+      scopeType: 'dm',
+      scopeId: 'new-inactive'
+    })
+
+    expect(kernel.getSession(activeSession.sessionKey)).toBeDefined()
+    expect(kernel.getRun(activeRun.runId)).toBeDefined()
+    expect(kernel.getSession(oldInactive.sessionKey)).toBeUndefined()
+    expect(kernel.getSession(newestInactive.sessionKey)).toBeDefined()
   })
 })
