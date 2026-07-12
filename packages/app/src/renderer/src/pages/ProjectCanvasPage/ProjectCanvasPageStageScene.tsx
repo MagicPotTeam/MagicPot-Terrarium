@@ -1274,6 +1274,10 @@ export default function ProjectCanvasPageStageScene(props: any) {
       effectiveFailedImageIds,
       generatedCooldownImageIds,
       selectedIds,
+      stagePos,
+      stagePosRef,
+      stageScale,
+      stageScaleRef,
       visibleItems,
       webglImageLayerReady,
       webglResolvedImageIds,
@@ -3019,7 +3023,11 @@ export default function ProjectCanvasPageStageScene(props: any) {
       return null
     })
   }, [
+    animatedGifImageIdSet,
     canvasContainerRef,
+    getImageRuntimeRoute,
+    handleAnnotationPlaceholderDragEnd,
+    handleAnnotationPlaceholderPreviewChange,
     handleImageContextMenu,
     handleOpenFileDialog,
     handleOpenModel3DViewer,
@@ -3046,7 +3054,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
     setLabelDialogOpen,
     setLabelDialogText,
     setSelectedIds,
+    stagePos,
     stagePosRef,
+    stageScale,
     stageScaleRef,
     tool
   ])
