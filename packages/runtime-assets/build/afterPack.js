@@ -1,6 +1,7 @@
 /* eslint-disable */
 const fs = require('fs')
 const path = require('path')
+const { pathToFileURL } = require('url')
 
 function ensureDir(dirPath) {
   if (!fs.existsSync(dirPath)) {
@@ -43,6 +44,12 @@ function pruneElectronLocales(unpackDir) {
 }
 
 exports.default = async function (context) {
+  const verifierUrl = pathToFileURL(
+    path.resolve(__dirname, '..', '..', '..', 'scripts', 'verify-packaged-runtime-dependencies.mjs')
+  ).href
+  const { verifyPackagedRuntimeDependencies } = await import(verifierUrl)
+  verifyPackagedRuntimeDependencies(context.appOutDir, context.packager)
+
   // 只在 embedded 模式下运行
   if (process.env.PACKAGE_MODE !== 'embedded') return
 
