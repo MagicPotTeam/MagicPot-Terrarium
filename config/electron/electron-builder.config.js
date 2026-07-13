@@ -181,7 +181,7 @@ const config = {
     mirror: 'https://npmmirror.com/mirrors/electron/'
   },
   publish: modeConfig.publish,
-  afterPack: modeConfig.afterPack || undefined
+  afterPack: modeConfig.afterPack || `${buildResourcesDir}/afterPack.js`
 }
 
 module.exports = config
