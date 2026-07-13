@@ -9,7 +9,7 @@ import {
 
 const tempRoots = []
 
-function createTempApp(includedFiles) {
+function createTempApp(includedFiles, packageJsonByRoot = {}) {
   const trashRoot = path.join(process.cwd(), '.magicpot-trash')
   fs.mkdirSync(trashRoot, { recursive: true })
   const root = fs.mkdtempSync(path.join(trashRoot, 'packaged-runtime-dependencies-test-'))
@@ -21,7 +21,14 @@ function createTempApp(includedFiles) {
   for (const relativePath of includedFiles) {
     const filePath = path.join(sourceDir, ...relativePath.split('/'))
     fs.mkdirSync(path.dirname(filePath), { recursive: true })
-    fs.writeFileSync(filePath, '{}\n')
+    const packageRoot = path.posix.dirname(relativePath)
+    const packageJson = packageJsonByRoot[packageRoot]
+    fs.writeFileSync(
+      filePath,
+      relativePath.endsWith('/package.json') && packageJson
+        ? `${JSON.stringify(packageJson)}\n`
+        : '{}\n'
+    )
   }
 
   return createPackage(sourceDir, path.join(appOutDir, 'resources', 'app.asar')).then(
@@ -36,24 +43,44 @@ afterEach(() => {
 })
 
 describe('verify-packaged-runtime-dependencies', () => {
-  it('accepts an app.asar containing all required MCP runtime files', async () => {
-    const appOutDir = await createTempApp(requiredRuntimeFiles)
+  it('accepts an app.asar containing the required MCP runtime closure', async () => {
+    const appOutDir = await createTempApp(requiredRuntimeFiles, {
+      'node_modules/@modelcontextprotocol/sdk': {
+        name: '@modelcontextprotocol/sdk',
+        dependencies: {
+          '@hono/node-server': '1.19.13',
+          hono: '4.12.26',
+          'zod-to-json-schema': '3.25.2'
+        }
+      },
+      'node_modules/@hono/node-server': { name: '@hono/node-server' },
+      'node_modules/hono': { name: 'hono' },
+      'node_modules/zod-to-json-schema': { name: 'zod-to-json-schema' }
+    })
     expect(() => verifyPackagedRuntimeDependencies(appOutDir)).not.toThrow()
   })
 
-  it('reports missing runtime entrypoints', async () => {
-    const appOutDir = await createTempApp([
-      'node_modules/@modelcontextprotocol/sdk/package.json',
-      'node_modules/@hono/node-server/package.json',
-      'node_modules/hono/package.json'
-    ])
+  it('reports missing transitive MCP runtime dependencies', async () => {
+    const appOutDir = await createTempApp(
+      requiredRuntimeFiles.filter(
+        (relativePath) => relativePath !== 'node_modules/zod-to-json-schema/package.json'
+      ),
+      {
+        'node_modules/@modelcontextprotocol/sdk': {
+          name: '@modelcontextprotocol/sdk',
+          dependencies: { 'zod-to-json-schema': '3.25.2' }
+        }
+      }
+    )
     expect(() => verifyPackagedRuntimeDependencies(appOutDir)).toThrow(
-      'node_modules/@hono/node-server/dist/index.js'
+      '@modelcontextprotocol/sdk -> zod-to-json-schema'
     )
   })
 
   it('uses the packager resources path for platform-specific layouts', async () => {
-    const appOutDir = await createTempApp(requiredRuntimeFiles)
+    const appOutDir = await createTempApp(requiredRuntimeFiles, {
+      'node_modules/@modelcontextprotocol/sdk': { name: '@modelcontextprotocol/sdk' }
+    })
     const resourcesDir = path.join(appOutDir, 'resources')
     const platformAppOutDir = path.join(path.dirname(appOutDir), 'MagicPot.app')
     const packager = { getResourcesDir: () => resourcesDir }
