@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { materializeGitFileSymlinks } from './embedded-staging-symlinks.mjs'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
@@ -60,6 +61,7 @@ function cloneFreshComfySource() {
   console.log(`[prepare-embedded-staging] Cloning clean ComfyUI source from ${localComfyRepo}`)
   runGit(['clone', '--no-hardlinks', localComfyRepo, comfyDst], { inherit: true })
   runGit(['checkout', '--detach', commit], { cwd: comfyDst, inherit: true })
+  materializeGitFileSymlinks(comfyDst)
 
   removeDir(path.join(comfyDst, '.git'))
   removeRepositoryMetadata(comfyDst)
@@ -111,7 +113,9 @@ function removeRepositoryMetadata(root) {
 
     if (
       entry.isFile() &&
-      (entry.name === '.gitmodules' || entry.name === '.gitattributes' || entry.name === '.gitignore')
+      (entry.name === '.gitmodules' ||
+        entry.name === '.gitattributes' ||
+        entry.name === '.gitignore')
     ) {
       fs.rmSync(entryPath, { force: true })
     }

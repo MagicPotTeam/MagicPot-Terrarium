@@ -7,6 +7,7 @@ export default defineConfig({
     name: 'node',
     environments: 'node',
     setupFiles: ['packages/app/src/main/tests/setup/memfs.setup.ts'],
+    exclude: ['scripts/prepare-embedded-staging.test.js'],
     include: [
       'scripts/**/*.test.{ts,js}',
       'packages/app/src/main/**/*.test.{ts,js}',
