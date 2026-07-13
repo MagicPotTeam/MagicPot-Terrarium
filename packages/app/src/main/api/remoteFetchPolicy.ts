@@ -23,7 +23,7 @@ const FORBIDDEN_REMOTE_FETCH_HEADERS = new Set([
 ])
 const IPV4_ADDRESS_PATTERN = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
 
-type RemoteFetchResolvedAddress = {
+export type RemoteFetchResolvedAddress = {
   address: string
   family: 4 | 6
 }
@@ -198,7 +198,9 @@ const assertRemoteFetchUrlIsConfigured = (parsedUrl: URL, config: Config): void 
   }
 }
 
-const resolveRemoteFetchAddress = async (hostname: string): Promise<RemoteFetchResolvedAddress> => {
+export const resolveRemoteFetchAddress = async (
+  hostname: string
+): Promise<RemoteFetchResolvedAddress> => {
   const normalizedHostname = normalizeRemoteFetchHostname(hostname)
   if (isPrivateOrLocalRemoteFetchHost(normalizedHostname)) {
     throw new Error('Remote fetch URL must target a public host.')

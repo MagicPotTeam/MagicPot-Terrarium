@@ -9,7 +9,7 @@ import { CacheProvider } from '@emotion/react'
 import createCache from '@emotion/cache'
 import App from './App'
 import { MessageProvider } from './hooks/useMessage'
-import store from './store'
+import store, { teardownStore } from './store'
 import { Provider as ReduxProvider } from 'react-redux'
 import { ConfigProvider } from './hooks/useConfig'
 import { ComfyEventProvider } from './hooks/useComfyEvent'
@@ -127,6 +127,8 @@ window.addEventListener('unhandledrejection', (event) => {
   console.error('[renderer] unhandled rejection', event.reason)
   scheduleDevReload(event.reason)
 })
+
+window.addEventListener('pagehide', teardownStore, { once: true })
 
 root.render(
   <RootMode>

@@ -18,9 +18,8 @@ import { compareWorkflows } from '@renderer/utils/qappUtils'
 import { resolveImportedWorkflow } from '@renderer/utils/resolveImportedWorkflow'
 import { INTERNAL_IMAGE_DRAG_PREFIX, QAPP_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
 import { resolveProjectResourceDir } from '@renderer/utils/projectResourcePaths'
-
-// 记录已经自动保存过的图片，防止组件重新挂载时重复保存
-const autoSavedImageTracker = new Set<string>()
+import { createAutoSaveFileName } from './autoSaveTracker'
+import { comfyResultAutoSaveClaims } from '@renderer/store/comfyResultResources'
 
 const getPositiveImageDimension = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
@@ -30,6 +29,7 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
   index,
   config,
   buildEnv,
+  autoSave = true,
   resultListMethods
 }: ResultCardProps<'image'>) => {
   const { t } = useTranslation()
@@ -51,13 +51,11 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
 
   useEffect(() => {
     // 自动保存逻辑
-    if (!result.objectUrl || autoSavedImageTracker.has(result.objectUrl)) return
-    autoSavedImageTracker.add(result.objectUrl)
+    if (!autoSave || !result.objectUrl || !comfyResultAutoSaveClaims.claim(result.id)) return
 
     const autoSaveImage = async () => {
       try {
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-        const fileName = `qapp_auto_${timestamp}.png`
+        const fileName = createAutoSaveFileName('.png')
 
         const response = await fetch(result.objectUrl)
         const blob = await response.blob()
@@ -77,12 +75,13 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
         })
         console.log(`[自动保存] 快应用图片已保存到 ${res.savedPath}`)
       } catch (error) {
+        comfyResultAutoSaveClaims.release(result.id)
         console.error('[自动保存] 快应用图片保存失败:', error)
       }
     }
 
     autoSaveImage()
-  }, [result.objectUrl, result.projectId, config.download_dir])
+  }, [autoSave, result.id, result.objectUrl, result.projectId, config.download_dir])
 
   const handleCopyImage = async () => {
     try {

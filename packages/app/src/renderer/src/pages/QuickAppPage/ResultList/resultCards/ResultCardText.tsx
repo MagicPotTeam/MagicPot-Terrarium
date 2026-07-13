@@ -5,27 +5,25 @@ import { useMessage } from '@renderer/hooks/useMessage'
 import { useEffect } from 'react'
 import { api } from '@renderer/utils/windowUtils'
 import { resolveProjectResourceDir } from '@renderer/utils/projectResourcePaths'
-
-// 记录已经自动保存过的文本，防止组件重新挂载时重复保存
-const autoSavedTextTracker = new Set<string>()
+import { createAutoSaveFileName } from './autoSaveTracker'
+import { comfyResultAutoSaveClaims } from '@renderer/store/comfyResultResources'
 
 const ResultCardText: ResultCardComponent<'text'> = ({
   result,
   index,
   config,
   buildEnv,
+  autoSave = true,
   resultListMethods
 }: ResultCardProps<'text'>) => {
   const { notifySuccess } = useMessage()
 
   useEffect(() => {
-    if (!result.text || autoSavedTextTracker.has(result.text)) return
-    autoSavedTextTracker.add(result.text)
+    if (!autoSave || !result.text || !comfyResultAutoSaveClaims.claim(result.id)) return
 
     const autoSaveText = async () => {
       try {
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-        const fileName = `qapp_auto_${timestamp}.txt`
+        const fileName = createAutoSaveFileName('.txt')
 
         const data = new TextEncoder().encode(result.text)
         const targetDir = resolveProjectResourceDir({
@@ -42,12 +40,13 @@ const ResultCardText: ResultCardComponent<'text'> = ({
         })
         console.log(`[自动保存] 快应用文本已保存到 ${res.savedPath}`)
       } catch (error) {
+        comfyResultAutoSaveClaims.release(result.id)
         console.error('[自动保存] 快应用文本保存失败:', error)
       }
     }
 
     autoSaveText()
-  }, [result.text, result.projectId, config.download_dir])
+  }, [autoSave, result.id, result.text, result.projectId, config.download_dir])
 
   return (
     <ResultCardLayout

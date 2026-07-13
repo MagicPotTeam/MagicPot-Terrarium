@@ -62,37 +62,51 @@ export default function MaskEditor({ imageUrl, doSave, doCancel }: MaskEditorPro
 
   // 加载并分离图像通道
   useEffect(() => {
+    let cancelled = false
+
+    setPaint(null)
+    setMask(null)
+    setLoadError(null)
+
+    if (!imageUrl) {
+      setIsLoading(false)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setIsLoading(true)
     const loadImageAndMask = async () => {
       try {
-        setIsLoading(true)
-        setLoadError(null)
-
         // 检查图像是否有 alpha 通道
         const hasAlpha = await hasAlphaChannel(imageUrl)
+        if (cancelled) return
 
         if (hasAlpha) {
           // 如果有 alpha 通道，分离 RGB 和 Alpha 通道
           const { rgbImage, alphaImage } = await separateImageChannels(imageUrl, MASK_COLOR)
+          if (cancelled) return
           setPaint(rgbImage)
           setMask(alphaImage)
-          // resizeImageView(width, height, rgbImage.width, rgbImage.height)
         } else {
           // 如果没有 alpha 通道，直接使用原图像作为 paint，mask 为空
           const img = await loadImage(imageUrl)
+          if (cancelled) return
           setPaint(img)
           setMask(null)
-          // resizeImageView(width, height, img.width, img.height)
         }
       } catch (error) {
+        if (cancelled) return
         console.error('图像处理失败:', error)
         setLoadError(error instanceof Error ? error.message : '图像处理失败')
       } finally {
-        setIsLoading(false)
+        if (!cancelled) setIsLoading(false)
       }
     }
 
-    if (imageUrl) {
-      loadImageAndMask()
+    void loadImageAndMask()
+    return () => {
+      cancelled = true
     }
   }, [imageUrl])
 

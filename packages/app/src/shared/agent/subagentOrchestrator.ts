@@ -129,7 +129,11 @@ const notifyObserver = async (
   callback: ((observer: OrchestratedSubagentObserver) => void | Promise<void>) | undefined
 ): Promise<void> => {
   if (!observer || !callback) return
-  await callback(observer)
+  try {
+    await callback(observer)
+  } catch {
+    // Observer callbacks are best-effort telemetry and must not affect execution state.
+  }
 }
 
 const createAbortError = (reason?: unknown): Error => {
@@ -145,6 +149,18 @@ const isAbortError = (error: unknown): error is Error => {
   return error.name === 'AbortError' || /aborted|cancelled/i.test(error.message)
 }
 
+class SubagentTimeoutError extends Error {
+  public readonly kind = 'timeout' as const
+
+  public constructor(message: string) {
+    super(message)
+    this.name = 'SubagentTimeoutError'
+  }
+}
+
+const isTimeoutError = (error: unknown): error is SubagentTimeoutError =>
+  error instanceof SubagentTimeoutError
+
 const throwIfAborted = (signal?: AbortSignal): void => {
   if (signal?.aborted) {
     throw createAbortError(signal.reason)
@@ -155,7 +171,8 @@ const withTimeout = async <T>(
   work: Promise<T>,
   timeoutMs: number | undefined,
   message: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onTimeout?: () => void
 ): Promise<T> => {
   if ((!Number.isFinite(timeoutMs) || !timeoutMs || timeoutMs <= 0) && !signal) {
     return work
@@ -189,7 +206,10 @@ const withTimeout = async <T>(
 
     if (Number.isFinite(timeoutMs) && timeoutMs && timeoutMs > 0) {
       timeoutHandle = setTimeout(() => {
-        finalize(() => reject(new Error(message)))
+        finalize(() => {
+          onTimeout?.()
+          reject(new SubagentTimeoutError(message))
+        })
       }, timeoutMs)
     }
 
@@ -198,6 +218,24 @@ const withTimeout = async <T>(
       (error) => finalize(() => reject(error))
     )
   })
+}
+
+const createAttemptController = (
+  parentSignal?: AbortSignal
+): { controller: AbortController; cleanup: () => void } => {
+  const controller = new AbortController()
+  const forwardAbort = () => controller.abort(parentSignal?.reason)
+
+  if (parentSignal?.aborted) {
+    forwardAbort()
+  } else {
+    parentSignal?.addEventListener('abort', forwardAbort, { once: true })
+  }
+
+  return {
+    controller,
+    cleanup: () => parentSignal?.removeEventListener('abort', forwardAbort)
+  }
 }
 
 const buildDependencyContext = (task: OrchestratedSubagentTask, run: SubagentRunRecord): string => {
@@ -298,16 +336,18 @@ ${contextParts.length > 0 ? `\nContext provided:\n${contextParts.join('\n\n')}` 
     subagentRegistry.appendTaskMessage(runId, task.id, message)
     subagentRegistry.appendMessage(runId, message)
 
+    const attempt = createAttemptController(signal)
     try {
       const response = await withTimeout(
         chatFn({
           messages: [message],
           systemPrompt,
-          signal
+          signal: attempt.controller.signal
         }),
         taskTimeoutMs,
         `Task ${task.label || task.id} timed out waiting for a subagent response.`,
-        signal
+        signal,
+        () => attempt.controller.abort('Subagent task attempt timed out.')
       )
 
       const aiMessage: ChatMessage = { role: 'assistant', content: response }
@@ -320,10 +360,13 @@ ${contextParts.length > 0 ? `\nContext provided:\n${contextParts.join('\n\n')}` 
 
       if (task.qualityGate) {
         const gateResult = await withTimeout(
-          Promise.resolve(task.qualityGate.validate(response, taskRecord, run, signal)),
+          Promise.resolve(
+            task.qualityGate.validate(response, taskRecord, run, attempt.controller.signal)
+          ),
           taskTimeoutMs,
           `Task ${task.label || task.id} timed out during quality-gate validation.`,
-          signal
+          signal,
+          () => attempt.controller.abort('Subagent quality-gate validation timed out.')
         )
         const normalized =
           typeof gateResult === 'boolean'
@@ -358,13 +401,21 @@ ${contextParts.length > 0 ? `\nContext provided:\n${contextParts.join('\n\n')}` 
       }
       const messageText = error instanceof Error ? error.message : String(error)
       const exhausted = taskRecord.attempts >= taskRecord.maxAttempts
-      subagentRegistry.failTask(runId, task.id, messageText, exhausted)
+      subagentRegistry.failTask(
+        runId,
+        task.id,
+        messageText,
+        exhausted,
+        isTimeoutError(error) ? 'timeout' : 'error'
+      )
       await notifyObserver(observer, (callbacks) =>
         callbacks.onTaskFailed?.(taskRecord, run, messageText, exhausted)
       )
       if (exhausted) {
         throw new Error(messageText)
       }
+    } finally {
+      attempt.cleanup()
     }
   }
 }
@@ -376,14 +427,25 @@ const finalizeRunOutcome = (runId: string): SubagentRunRecord => {
   }
 
   const failedTask = run.tasks.find((task) => task.status === 'failed')
+  const incompleteTask = run.tasks.find((task) => task.status !== 'completed')
   if (failedTask) {
     subagentRegistry.finishRun(runId, {
-      status: 'error',
+      status: failedTask.failureKind === 'timeout' ? 'timeout' : 'error',
       error: failedTask.error || `Task ${failedTask.id} failed`
+    })
+  } else if (run.tasks.length === 0) {
+    subagentRegistry.finishRun(runId, {
+      status: 'error',
+      error: 'Subagent run has no tasks to execute.'
+    })
+  } else if (incompleteTask) {
+    subagentRegistry.finishRun(runId, {
+      status: 'error',
+      error: `Task ${incompleteTask.id} could not be scheduled to completion.`
     })
   } else {
     const resultText = run.tasks
-      .filter((task) => task.status === 'completed' && task.resultText)
+      .filter((task) => task.resultText)
       .map((task) => `${task.label || task.id}: ${task.resultText}`)
       .join('\n\n')
 
@@ -506,21 +568,7 @@ export async function resumeOrchestratedSubagents(
   observer?: OrchestratedSubagentObserver,
   signal?: AbortSignal
 ): Promise<SubagentRunRecord> {
-  const run = subagentRegistry.getRun(runId)
-  if (!run) {
-    throw new Error(`Subagent run ${runId} does not exist.`)
-  }
-
-  for (const taskRecord of run.tasks) {
-    if (taskRecord.status === 'failed') {
-      taskRecord.status = 'pending'
-      taskRecord.error = undefined
-      taskRecord.maxAttempts = Math.max(taskRecord.maxAttempts, taskRecord.attempts + 1)
-    }
-  }
-  run.outcome = undefined
-  run.endedAt = undefined
-
+  subagentRegistry.resumeRun(runId, tasks)
   const taskMap = new Map(tasks.map((task) => [task.id, task]))
   return runOrchestratedLoop(chatFn, runId, taskMap, observer, signal)
 }

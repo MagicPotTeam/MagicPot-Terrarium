@@ -4,6 +4,7 @@ import { createHash } from 'crypto'
 import JSZip from 'jszip'
 import type { BuildEnv } from '@shared/config/buildEnv'
 import type { Config } from '@shared/config/config'
+import { normalizeReasoningEffort } from '@shared/llm'
 import { buildProjectStorageDirName, normalizeGeneratedRootDirName } from '@shared/projectStorage'
 import {
   PROJECT_TRACE_DIR_NAME,
@@ -872,6 +873,7 @@ function normalizeTraceDraft(draft: ProjectTraceDocumentDraft): ProjectTraceDocu
     new Set((draft.tags || []).map(sanitizeTag).filter((tag): tag is string => Boolean(tag)))
   ).slice(0, 20)
   const llmProfileId = redactText(draft.llmProfileId, state, 160)
+  const llmReasoningEffort = normalizeReasoningEffort(draft.llmReasoningEffort)
   const trust = normalizeTraceTrust(draft.trust, sourceKind, now)
   const runtimePolicy = normalizeTraceRuntimePolicy(draft.runtimePolicy, sourceKind)
   const redactionReport: ProjectTraceRedactionReport = {
@@ -912,7 +914,8 @@ function normalizeTraceDraft(draft: ProjectTraceDocumentDraft): ProjectTraceDocu
       policyVersion: 1,
       containsSensitiveData: false,
       llmEnhanced: Boolean(draft.llmEnhanced),
-      ...(llmProfileId ? { llmProfileId } : {})
+      ...(llmProfileId ? { llmProfileId } : {}),
+      ...(llmReasoningEffort ? { llmReasoningEffort } : {})
     }
   }
   const referencePack = buildProjectTraceReferencePack({
@@ -949,6 +952,7 @@ function validateManifest(value: unknown): ProjectTraceManifest {
     throw new Error('Project trace import was rejected because it is not marked as redacted.')
   }
   const sourceKind = normalizeSourceKind(raw.sourceKind)
+  const llmReasoningEffort = normalizeReasoningEffort(raw.redaction?.llmReasoningEffort)
   const now = new Date().toISOString()
 
   return {
@@ -987,7 +991,8 @@ function validateManifest(value: unknown): ProjectTraceManifest {
       llmEnhanced: Boolean(raw.redaction?.llmEnhanced),
       ...(raw.redaction?.llmProfileId
         ? { llmProfileId: cleanText(raw.redaction.llmProfileId, 160) }
-        : {})
+        : {}),
+      ...(llmReasoningEffort ? { llmReasoningEffort } : {})
     }
   }
 }

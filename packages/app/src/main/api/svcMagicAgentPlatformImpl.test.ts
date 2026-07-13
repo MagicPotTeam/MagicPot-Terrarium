@@ -304,6 +304,30 @@ describe('MagicAgentPlatformSvcImpl', () => {
 
     await service.runAgent({
       agentId: 'package.demo.package.assistant',
+      text: 'hello with an addendum',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'agent-test' },
+      systemPrompt: '  Request addendum.  '
+    })
+    expect(runAgent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        systemPrompt: 'Package prompt.\n\nRequest addendum.',
+        profileId: 'package-profile',
+        maxToolIterations: 1
+      })
+    )
+
+    await service.runAgent({
+      agentId: 'package.demo.package.assistant',
+      text: 'hello with the same prompt',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'agent-test' },
+      systemPrompt: '  Package prompt.  '
+    })
+    expect(runAgent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ systemPrompt: 'Package prompt.' })
+    )
+
+    await service.runAgent({
+      agentId: 'package.demo.package.assistant',
       text: 'hello with tools',
       route: { channel: 'generic', scopeType: 'dm', scopeId: 'agent-test' },
       allowedToolNames: [' Session.Status ', 'artifact.create', ' Agent.Terminal.Run ']

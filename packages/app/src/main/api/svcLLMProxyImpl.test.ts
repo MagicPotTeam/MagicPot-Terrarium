@@ -175,6 +175,50 @@ describe('LLMProxySvcImpl', () => {
     expect(resp).toEqual({ content: 'extension response' })
   })
 
+  it('allows main-process LLM extensions to transform runtime profile listings', async () => {
+    const transformListedProfiles = vi.fn((profiles) => [
+      ...profiles,
+      {
+        id: 'agent-profile::variant',
+        base_profile_id: 'agent-profile',
+        model_name: 'Agent Variant',
+        deployment: 'cloud' as const,
+        model_use: 'chat' as const
+      }
+    ])
+    mainHostExtensionApiV1.llmProxy.push({
+      id: 'test-profile-list',
+      transformListedProfiles
+    })
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'agent-profile',
+            model_name: 'Agent Model',
+            base_url: 'https://agent.example/v1',
+            api_key: 'agent-key'
+          }
+        ]
+      }
+    })
+
+    const profiles = await new LLMProxySvcImpl().listProfiles({})
+
+    expect(transformListedProfiles).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: 'agent-profile', model_name: 'Agent Model' })],
+      expect.objectContaining({ config: expect.any(Object), fetchImpl: expect.any(Function) })
+    )
+    expect(profiles.profiles).toContainEqual(
+      expect.objectContaining({
+        id: 'agent-profile::variant',
+        base_profile_id: 'agent-profile',
+        model_name: 'Agent Variant'
+      })
+    )
+  })
+
   it('allows main-process LLM extensions to short-circuit chat requests', async () => {
     const handleChatRequest = vi.fn().mockReturnValue({ content: 'handled by extension' })
     mainHostExtensionApiV1.llmProxy.push({

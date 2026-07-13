@@ -1,10 +1,14 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { shellOpenExternalMock } = vi.hoisted(() => ({
-  shellOpenExternalMock: vi.fn<(url: string) => Promise<void>>(() => Promise.resolve())
+const { shellOpenExternalMock, lookupMock, requestMock } = vi.hoisted(() => ({
+  shellOpenExternalMock: vi.fn<(url: string) => Promise<void>>(() => Promise.resolve()),
+  lookupMock: vi.fn(),
+  requestMock: vi.fn()
 }))
 
 vi.mock('electron', () => ({
@@ -13,8 +17,48 @@ vi.mock('electron', () => ({
   }
 }))
 
+vi.mock('node:dns/promises', () => ({
+  default: { lookup: lookupMock },
+  lookup: lookupMock
+}))
+
+vi.mock('node:https', () => ({
+  default: { request: requestMock },
+  request: requestMock
+}))
+
 import { DownloadFileProgressEvent } from '@shared/api/svcShell'
-import { ShellSvcImpl } from './svcShellImpl'
+import { createDownloadByteLimitTransform, MAX_DOWNLOAD_BYTES, ShellSvcImpl } from './svcShellImpl'
+
+function mockDownloadResponse(
+  statusCode: number,
+  headers: Record<string, string>,
+  chunks: Buffer[] = []
+): void {
+  requestMock.mockImplementationOnce((_options, callback) => {
+    const request = new EventEmitter() as EventEmitter & {
+      setTimeout: ReturnType<typeof vi.fn>
+      destroy: (error: Error) => void
+      end: ReturnType<typeof vi.fn>
+    }
+    request.setTimeout = vi.fn()
+    request.destroy = (error) => request.emit('error', error)
+    request.end = vi.fn(() => {
+      const response = new PassThrough() as PassThrough & {
+        statusCode: number
+        statusMessage: string
+        headers: Record<string, string>
+      }
+      response.statusCode = statusCode
+      response.statusMessage = statusCode === 200 ? 'OK' : 'Found'
+      response.headers = headers
+      callback(response)
+      chunks.forEach((chunk) => response.write(chunk))
+      response.end()
+    })
+    return request
+  })
+}
 
 function makeStats({
   size = 1,
@@ -32,6 +76,9 @@ function makeStats({
 describe('ShellSvcImpl', () => {
   beforeEach(() => {
     shellOpenExternalMock.mockResolvedValue(undefined)
+    lookupMock.mockReset()
+    requestMock.mockReset()
+    lookupMock.mockResolvedValue([{ address: '93.184.216.34', family: 4 }])
   })
 
   afterEach(() => {
@@ -123,13 +170,90 @@ describe('ShellSvcImpl', () => {
     await fs.promises.rm(tempDir, { recursive: true, force: true })
   })
 
+  it('rejects non-HTTPS and private download targets before connecting', async () => {
+    const svc = new ShellSvcImpl()
+    const request = { outputDir: '/tmp', filename: 'model.bin' }
+
+    await expect(
+      svc.downloadFile({ ...request, url: 'http://example.com/model.bin' })
+    ).rejects.toThrow('must use https')
+    await expect(
+      svc.downloadFile({ ...request, url: 'https://127.0.0.1/model.bin' })
+    ).rejects.toThrow('public host')
+    expect(requestMock).not.toHaveBeenCalled()
+  })
+
+  it('pins DNS and validates redirect targets', async () => {
+    const tempDir = await makeTempDir('magicpot-shell-redirect')
+    mockDownloadResponse(302, { location: 'https://127.0.0.1/secret' })
+    const svc = new ShellSvcImpl()
+
+    await expect(
+      svc.downloadFile({
+        url: 'https://public.example/model.bin',
+        outputDir: tempDir,
+        filename: 'model.bin'
+      })
+    ).rejects.toThrow('public host')
+    expect(requestMock.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ hostname: 'public.example', lookup: expect.any(Function) })
+    )
+    await fs.promises.rm(tempDir, { recursive: true, force: true })
+  })
+
+  it('enforces the actual streamed byte limit without buffering', async () => {
+    const transform = createDownloadByteLimitTransform(MAX_DOWNLOAD_BYTES, vi.fn())
+    const errors: Error[] = []
+    transform.on('error', (error) => errors.push(error))
+
+    transform.write(Buffer.alloc(1))
+    transform.write(Buffer.alloc(1), () => undefined)
+    transform.destroy()
+
+    const tinyLimitTransform = createDownloadByteLimitTransform(1, vi.fn())
+    const error = new Promise<Error>((resolve) => tinyLimitTransform.once('error', resolve))
+    tinyLimitTransform.write(Buffer.alloc(2))
+    await expect(error).resolves.toMatchObject({
+      message: expect.stringContaining('response is too large')
+    })
+    expect(errors).toEqual([])
+  })
+
+  it('rejects oversized Content-Length and removes partial temp files', async () => {
+    const tempDir = await makeTempDir('magicpot-shell-oversize')
+    mockDownloadResponse(200, { 'content-length': String(MAX_DOWNLOAD_BYTES + 1) })
+    const svc = new ShellSvcImpl()
+
+    await expect(
+      svc.downloadFile({
+        url: 'https://public.example/model.bin',
+        outputDir: tempDir,
+        filename: 'model.bin'
+      })
+    ).rejects.toThrow('response is too large')
+    expect(await fs.promises.readdir(tempDir)).toEqual([])
+    await fs.promises.rm(tempDir, { recursive: true, force: true })
+  })
+
+  it('configures an idle timeout on every HTTPS request', async () => {
+    const tempDir = await makeTempDir('magicpot-shell-timeout')
+    mockDownloadResponse(200, {}, [Buffer.from('ok')])
+    const svc = new ShellSvcImpl()
+    await svc.downloadFile({
+      url: 'https://public.example/model.bin',
+      outputDir: tempDir,
+      filename: 'model.bin'
+    })
+
+    const request = requestMock.mock.results[0]?.value
+    expect(request.setTimeout).toHaveBeenCalledWith(30_000, expect.any(Function))
+    await fs.promises.rm(tempDir, { recursive: true, force: true })
+  })
+
   it('streams downloads to the requested filename', async () => {
     const tempDir = await makeTempDir('magicpot-shell-download')
     const bytes = new Uint8Array([1, 2, 3, 4])
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(bytes, { status: 200, statusText: 'OK' }))
-    )
+    mockDownloadResponse(200, {}, [Buffer.from(bytes)])
 
     const svc = new ShellSvcImpl()
     const result = await svc.downloadFile({
@@ -147,17 +271,7 @@ describe('ShellSvcImpl', () => {
   it('emits download progress while streaming files', async () => {
     const tempDir = await makeTempDir('magicpot-shell-download-progress')
     const bytes = new Uint8Array([1, 2, 3, 4, 5])
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(
-        async () =>
-          new Response(bytes, {
-            status: 200,
-            statusText: 'OK',
-            headers: { 'content-length': String(bytes.byteLength) }
-          })
-      )
-    )
+    mockDownloadResponse(200, { 'content-length': String(bytes.byteLength) }, [Buffer.from(bytes)])
 
     const events: DownloadFileProgressEvent[] = []
     const svc = new ShellSvcImpl()
@@ -193,17 +307,7 @@ describe('ShellSvcImpl', () => {
   it('continues downloading when the progress listener disconnects', async () => {
     const tempDir = await makeTempDir('magicpot-shell-download-progress-disconnect')
     const bytes = new Uint8Array([1, 2, 3, 4, 5, 6])
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(
-        async () =>
-          new Response(bytes, {
-            status: 200,
-            statusText: 'OK',
-            headers: { 'content-length': String(bytes.byteLength) }
-          })
-      )
-    )
+    mockDownloadResponse(200, { 'content-length': String(bytes.byteLength) }, [Buffer.from(bytes)])
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
     const events: DownloadFileProgressEvent[] = []

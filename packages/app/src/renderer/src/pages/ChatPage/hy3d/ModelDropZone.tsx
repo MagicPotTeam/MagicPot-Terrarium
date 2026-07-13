@@ -457,8 +457,36 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
   const [previewLoadError, setPreviewLoadError] = React.useState('')
   const [previewBounds, setPreviewBounds] = React.useState<ModelBounds | null>(null)
   const urlInputRef = React.useRef<HTMLInputElement | null>(null)
+  const ownedBlobUrlRef = React.useRef<string | null>(null)
 
   const localUploadEnabled = urlOnly && enableLocalUpload
+
+  const releaseOwnedBlobUrl = React.useCallback((replacementUrl = '') => {
+    const ownedBlobUrl = ownedBlobUrlRef.current
+    if (ownedBlobUrl && ownedBlobUrl !== replacementUrl) {
+      URL.revokeObjectURL(ownedBlobUrl)
+      ownedBlobUrlRef.current = null
+    }
+  }, [])
+
+  const changeModelValue = React.useCallback(
+    (nextValue: string) => {
+      releaseOwnedBlobUrl(nextValue)
+      onChange(nextValue)
+    },
+    [onChange, releaseOwnedBlobUrl]
+  )
+
+  React.useEffect(() => {
+    releaseOwnedBlobUrl(value)
+  }, [releaseOwnedBlobUrl, value])
+
+  React.useEffect(
+    () => () => {
+      releaseOwnedBlobUrl()
+    },
+    [releaseOwnedBlobUrl]
+  )
 
   React.useEffect(() => {
     setLocalFileName(fileNameProp || '')
@@ -522,9 +550,9 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
         ...EMPTY_MODEL_META,
         sourceFileName: resolvedFileName
       })
-      onChange(normalizedUrl)
+      changeModelValue(normalizedUrl)
     },
-    [onChange, onMetaChange]
+    [changeModelValue, onMetaChange]
   )
 
   const refreshSignedRemoteModelUrl = React.useCallback(
@@ -549,7 +577,7 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
           storageRegion: meta.storageRegion,
           signedUrlExpiresAt: signed.expiresAt
         })
-        onChange(signed.url)
+        changeModelValue(signed.url)
         return true
       } catch (error) {
         console.error('[Hy3D] 刷新模型签名链接失败:', error)
@@ -559,7 +587,7 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
         setIsRefreshingSignedUrl(false)
       }
     },
-    [onChange, onMetaChange]
+    [changeModelValue, onMetaChange]
   )
 
   React.useEffect(() => {
@@ -599,12 +627,21 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
       if (!acceptExtensions.includes(ext)) return
 
       const blobUrl = URL.createObjectURL(file)
+      releaseOwnedBlobUrl(blobUrl)
+      ownedBlobUrlRef.current = blobUrl
       setLocalFileName(file.name)
       clearStoredModelMeta()
-      onChange(blobUrl)
+      changeModelValue(blobUrl)
       onFileLoad?.(file, blobUrl)
     },
-    [acceptExtensions, clearStoredModelMeta, onChange, onFileLoad, urlOnly]
+    [
+      acceptExtensions,
+      changeModelValue,
+      clearStoredModelMeta,
+      onFileLoad,
+      releaseOwnedBlobUrl,
+      urlOnly
+    ]
   )
 
   const uploadResolvedModel = React.useCallback(
@@ -627,7 +664,7 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
               fileDataBase64: await getBase64Payload(file)
             })
         setLocalFileName(result.fileName)
-        onChange(result.url)
+        changeModelValue(result.url)
         onMetaChange?.({
           sourceFileName: result.fileName,
           storageKey: result.key,
@@ -649,11 +686,11 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
     [
       acceptExtensions,
       allowedFormatsLabel,
+      changeModelValue,
       closeMessage,
       notifyInfo,
       notifySuccess,
       notifyWarning,
-      onChange,
       onMetaChange
     ]
   )
@@ -886,8 +923,7 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
   ])
 
   const handleClear = () => {
-    if (value.startsWith('blob:')) URL.revokeObjectURL(value)
-    onChange('')
+    changeModelValue('')
     setLocalFileName('')
     setPreviewLoadError('')
     clearStoredModelMeta()
@@ -1164,6 +1200,7 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
 
           <IconButton
             size="small"
+            aria-label="Remove 3D model"
             onClick={handleClear}
             sx={{
               position: 'absolute',
@@ -1212,6 +1249,10 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
         </Box>
       ) : (
         <Box
+          component="button"
+          type="button"
+          aria-label={`${emptyTitle}。${emptySubtitle}`}
+          disabled={isUploading}
           data-testid="hy3d-model-drop-zone"
           onDrop={handleDrop}
           onDragOver={handleDragOver}
@@ -1219,6 +1260,10 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
           onClick={handlePickFile}
           sx={{
             flex: 1,
+            width: '100%',
+            padding: 0,
+            font: 'inherit',
+            color: 'inherit',
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
@@ -1231,6 +1276,10 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
             cursor: isUploading ? 'progress' : localUploadEnabled || !urlOnly ? 'pointer' : 'text',
             transition: 'all 0.25s ease',
             minHeight: 120,
+            '&:focus-visible': {
+              outline: `2px solid ${hyColors.primary}`,
+              outlineOffset: 2
+            },
             '&:hover':
               isUploading || (!localUploadEnabled && urlOnly)
                 ? {}
@@ -1277,28 +1326,44 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
           flexShrink: 0
         }}
       >
-        <Typography
+        <Box
+          component="button"
+          type="button"
+          aria-expanded={showUrlInput}
+          aria-controls="hy3d-model-url-input"
+          disabled={isUploading}
           data-testid="hy3d-model-url-toggle"
           onClick={toggleUrlInput}
           sx={{
+            border: 0,
+            padding: 0,
+            background: 'transparent',
+            font: 'inherit',
             fontSize: 12.5,
             color: hyColors.primaryHover,
             cursor: isUploading ? 'default' : 'pointer',
             display: 'flex',
             alignItems: 'center',
             gap: 0.3,
-            '&:hover': { opacity: isUploading ? 1 : 0.8 }
+            '&:hover': { opacity: isUploading ? 1 : 0.8 },
+            '&:focus-visible': {
+              outline: `2px solid ${hyColors.primary}`,
+              outlineOffset: 2,
+              borderRadius: '2px'
+            }
           }}
         >
           <LinkIcon sx={{ fontSize: 15 }} />
           {showUrlInput ? '收起 URL' : '粘贴 URL'}
-        </Typography>
+        </Box>
       </Box>
 
       {showUrlInput && (
         <TextField
+          id="hy3d-model-url-input"
           fullWidth
           inputRef={urlInputRef}
+          inputProps={{ 'aria-label': '3D model URL' }}
           placeholder={`https://example.com/model${acceptExtensions[0] || '.glb'}`}
           value={value.startsWith('blob:') ? '' : value}
           onChange={(event) => {
@@ -1308,7 +1373,7 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
               ...EMPTY_MODEL_META,
               sourceFileName: parsedInput.modelSourceFileName
             })
-            onChange(parsedInput.modelUrl)
+            changeModelValue(parsedInput.modelUrl)
           }}
           disabled={isUploading}
           size="small"

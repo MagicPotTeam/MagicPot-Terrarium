@@ -8,7 +8,8 @@ import {
   getRemoteLlmServerAccessToken,
   getRemoteLlmServerOrigin,
   normalizeRemoteLlmProfiles,
-  resolveAvailableChatProfileId
+  resolveAvailableChatProfileId,
+  resolveCompositeLlmProfile
 } from './llmProfileUtils'
 
 const createConfig = (): Config => ({
@@ -26,6 +27,34 @@ const createConfig = (): Config => ({
   aigc3d_config: {
     ...DEFAULT_CONFIG.aigc3d_config!
   }
+})
+
+describe('resolveCompositeLlmProfile', () => {
+  it('uses base profile capabilities while preserving the selected model variant', () => {
+    const resolved = resolveCompositeLlmProfile(
+      {
+        id: 'codex-base::codex-model::gpt-5.6-sol',
+        base_profile_id: 'codex-base',
+        model_name: 'gpt-5.6-sol'
+      },
+      [
+        {
+          id: 'codex-base',
+          model_name: 'gpt-5.5',
+          auth_mode: 'codex_oauth',
+          call_type: 'codex'
+        }
+      ]
+    )
+
+    expect(resolved).toMatchObject({
+      id: 'codex-base::codex-model::gpt-5.6-sol',
+      base_profile_id: 'codex-base',
+      model_name: 'gpt-5.6-sol',
+      auth_mode: 'codex_oauth',
+      call_type: 'codex'
+    })
+  })
 })
 
 describe('buildChatAvailableProfiles', () => {

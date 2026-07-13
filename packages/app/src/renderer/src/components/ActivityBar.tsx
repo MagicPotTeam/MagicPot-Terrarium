@@ -55,6 +55,10 @@ const ActivityBar: React.FC = () => {
     placeItems: 'center',
     cursor: 'pointer',
     position: 'relative' as const,
+    border: 0,
+    padding: 0,
+    background: 'transparent',
+    font: 'inherit',
     color: active
       ? theme.palette.mode === 'dark'
         ? DARK_ACTIVE_ICON_COLOR
@@ -65,6 +69,10 @@ const ActivityBar: React.FC = () => {
     transition: 'color 0.15s ease',
     '&:hover': {
       color: theme.palette.mode === 'dark' ? DARK_HOVER_ICON_COLOR : theme.palette.primary.main
+    },
+    '&:focus-visible': {
+      outline: `2px solid ${theme.palette.primary.main}`,
+      outlineOffset: -2
     }
   })
   const iconGraphicSx = {
@@ -114,6 +122,8 @@ const ActivityBar: React.FC = () => {
 
   return (
     <Box
+      component="nav"
+      aria-label={t('menu.navigation', { defaultValue: 'Main navigation' })}
       sx={(theme) => ({
         width: ACTIVITY_BAR_WIDTH,
         minWidth: ACTIVITY_BAR_WIDTH,
@@ -129,7 +139,8 @@ const ActivityBar: React.FC = () => {
       <Box sx={{ display: 'flex', flexDirection: 'column' }}>
         <Tooltip title={t('menu.project')} placement="right" arrow>
           <Box
-            role="button"
+            component="button"
+            type="button"
             aria-label={t('menu.project')}
             aria-pressed={projectEntryActive}
             data-testid="activity-bar-project"
@@ -158,6 +169,10 @@ const ActivityBar: React.FC = () => {
           <>
             <Tooltip title={t('menu.quick_app')} placement="right" arrow>
               <Box
+                component="button"
+                type="button"
+                aria-label={t('menu.quick_app')}
+                aria-pressed={effectSidePanel === 'quickapp'}
                 data-testid="activity-bar-quickapp"
                 onClick={() => {
                   if (isProjectCanvasActive) {
@@ -179,6 +194,10 @@ const ActivityBar: React.FC = () => {
 
             <Tooltip title="Agent" placement="right" arrow>
               <Box
+                component="button"
+                type="button"
+                aria-label="Agent"
+                aria-pressed={effectRightPanelVisible}
                 data-testid="activity-bar-agent"
                 onClick={() => {
                   if (isProjectCanvasActive) {
@@ -202,6 +221,10 @@ const ActivityBar: React.FC = () => {
 
         <Tooltip title={t('menu.custom_workshop')} placement="right" arrow>
           <Box
+            component="button"
+            type="button"
+            aria-label={t('menu.custom_workshop')}
+            aria-pressed={activeTabId === 'tab-design'}
             onClick={() => toggleTab('tab-design', t('menu.custom_workshop'), '/qappdesign')}
             sx={iconSx(activeTabId === 'tab-design')}
           >
@@ -211,6 +234,10 @@ const ActivityBar: React.FC = () => {
 
         <Tooltip title={t('menu.models')} placement="right" arrow>
           <Box
+            component="button"
+            type="button"
+            aria-label={t('menu.models')}
+            aria-pressed={activeTabId === 'tab-model'}
             onClick={() => toggleTab('tab-model', t('menu.models'), '/model')}
             sx={iconSx(activeTabId === 'tab-model')}
           >
@@ -221,13 +248,24 @@ const ActivityBar: React.FC = () => {
 
       <Box sx={{ display: 'flex', flexDirection: 'column', pb: 0.5 }}>
         <Tooltip title={t('menu.terminal')} placement="right" arrow>
-          <Box onClick={() => dispatch(toggleBottomPanel())} sx={iconSx(bottomPanelVisible)}>
+          <Box
+            component="button"
+            type="button"
+            aria-label={t('menu.terminal')}
+            aria-pressed={bottomPanelVisible}
+            onClick={() => dispatch(toggleBottomPanel())}
+            sx={iconSx(bottomPanelVisible)}
+          >
             <TerminalIcon sx={iconGraphicSx} />
           </Box>
         </Tooltip>
 
         <Tooltip title={t('menu.settings')} placement="right" arrow>
           <Box
+            component="button"
+            type="button"
+            aria-label={t('menu.settings')}
+            aria-pressed={activeTabId === 'tab-settings'}
             onClick={() => toggleTab('tab-settings', t('menu.settings'), '/settings')}
             sx={iconSx(activeTabId === 'tab-settings')}
           >

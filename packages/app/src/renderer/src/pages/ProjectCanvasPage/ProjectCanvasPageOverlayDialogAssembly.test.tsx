@@ -40,16 +40,18 @@ vi.mock('./ProjectCanvasPageColorPopovers', () => ({
   default: () => <div data-testid="color-popovers" />
 }))
 
+type AssemblyProps = React.ComponentProps<typeof ProjectCanvasPageOverlayDialogAssembly>
+
 const baseProps = {
-  selectionOverlaysProps: {} as React.ComponentProps<any>,
-  visualOverlaysProps: { itemsLength: 1 } as React.ComponentProps<any>,
-  inlineTextEditorProps: {} as React.ComponentProps<any>,
-  hiddenInputsProps: {} as React.ComponentProps<any>,
-  shortcutDialogProps: {} as React.ComponentProps<any>,
-  canvasTargetDialogProps: {} as React.ComponentProps<any>,
-  figmaBindingDialogProps: {} as React.ComponentProps<any>,
-  dialogsProps: {} as React.ComponentProps<any>,
-  colorPopoversProps: {} as React.ComponentProps<any>
+  selectionOverlaysProps: {} as AssemblyProps['selectionOverlaysProps'],
+  visualOverlaysProps: { itemsLength: 1 } as AssemblyProps['visualOverlaysProps'],
+  inlineTextEditorProps: {} as AssemblyProps['inlineTextEditorProps'],
+  hiddenInputsProps: {} as AssemblyProps['hiddenInputsProps'],
+  shortcutDialogProps: {} as AssemblyProps['shortcutDialogProps'],
+  canvasTargetDialogProps: {} as AssemblyProps['canvasTargetDialogProps'],
+  figmaBindingDialogProps: {} as AssemblyProps['figmaBindingDialogProps'],
+  dialogsProps: {} as AssemblyProps['dialogsProps'],
+  colorPopoversProps: {} as AssemblyProps['colorPopoversProps']
 }
 
 describe('ProjectCanvasPageOverlayDialogAssembly', () => {
@@ -62,7 +64,7 @@ describe('ProjectCanvasPageOverlayDialogAssembly', () => {
       <ProjectCanvasPageOverlayDialogAssembly
         {...baseProps}
         suspendViewportChrome
-        visualOverlaysProps={{ itemsLength: 0 } as React.ComponentProps<any>}
+        visualOverlaysProps={{ itemsLength: 0 } as AssemblyProps['visualOverlaysProps']}
       />
     )
 

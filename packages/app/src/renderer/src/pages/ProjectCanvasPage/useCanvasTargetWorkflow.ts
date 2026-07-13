@@ -27,6 +27,11 @@ import type {
   CanvasTargetReportStage
 } from '@shared/canvasTarget'
 import type { TargetHistoryEntry } from '@shared/targetHistory'
+import {
+  normalizeReasoningEffort,
+  resolveChatProfileCapabilities,
+  type LLMReasoningEffort
+} from '@shared/llm'
 import type { TargetScheme } from '@shared/targetScheme'
 import { openRightPanel } from '../../store/slices/layoutSlice'
 import { api } from '../../utils/windowUtils'
@@ -72,6 +77,8 @@ import {
   normalizeCanvasTargetQuickAppDraft,
   normalizeCanvasTargetStageDraft,
   resolveCanvasTargetSupportedOutputFormats,
+  resolveCanvasTargetBaseProfile,
+  resolveCanvasTargetCompositeProfile,
   sanitizeCanvasTargetStageOutputFormats,
   type CanvasTargetQuickAppDraft,
   type CanvasTargetStageDraft
@@ -955,6 +962,8 @@ export function useCanvasTargetWorkflow({
     LLMListProfilesResp['profiles']
   >([])
   const [canvasTargetControlProfileId, setCanvasTargetControlProfileId] = useState('')
+  const [canvasTargetControlReasoningEffort, setCanvasTargetControlReasoningEffort] =
+    useState<LLMReasoningEffort>()
   const [canvasTargetStageProfiles, setCanvasTargetStageProfiles] = useState<
     CanvasTargetStageDraft[]
   >([])
@@ -1008,7 +1017,7 @@ export function useCanvasTargetWorkflow({
         isOcrModel: profile.is_ocr_model,
         sourceType:
           resolveCanvasTargetProfileSourceType(
-            config.llm_config.api_profiles.find((entry) => entry.id === profile.id) || {}
+            resolveCanvasTargetBaseProfile(profile, config.llm_config.api_profiles) || {}
           ) || 'api',
         executionBackend: 'llm'
       })),
@@ -1027,6 +1036,30 @@ export function useCanvasTargetWorkflow({
     () => [...canvasTargetProfileSelectOptions, ...canvasTargetLocalVisualOptions],
     [canvasTargetLocalVisualOptions, canvasTargetProfileSelectOptions]
   )
+
+  const canvasTargetControlCapabilities = useMemo(() => {
+    const listedProfile = canvasTargetProfileOptions.find(
+      (profile) => profile.id === canvasTargetControlProfileId
+    )
+    if (!listedProfile) return resolveChatProfileCapabilities()
+    return resolveChatProfileCapabilities(
+      resolveCanvasTargetCompositeProfile(listedProfile, config.llm_config.api_profiles)
+    )
+  }, [canvasTargetControlProfileId, canvasTargetProfileOptions, config.llm_config.api_profiles])
+
+  const canvasTargetAvailableControlReasoningEfforts =
+    canvasTargetControlCapabilities.reasoningEfforts
+
+  useEffect(() => {
+    setCanvasTargetControlReasoningEffort(
+      (current) =>
+        normalizeReasoningEffort(current, canvasTargetAvailableControlReasoningEfforts) ||
+        canvasTargetControlCapabilities.defaultReasoningEffort
+    )
+  }, [
+    canvasTargetAvailableControlReasoningEfforts,
+    canvasTargetControlCapabilities.defaultReasoningEffort
+  ])
 
   const canvasTargetTargetItemCount = useMemo(
     () => items.filter((item) => canvasTargetTargetItemIds.includes(item.id)).length,
@@ -1093,8 +1126,9 @@ export function useCanvasTargetWorkflow({
         const traceDocuments = (traceResponse.traces || []).filter(isUsableProjectTraceReference)
         const quickAppOptions = capabilityResponse.quickApps || []
         const controlOptions = profiles.map((profile) => {
-          const savedProfile = config.llm_config.api_profiles.find(
-            (entry) => entry.id === profile.id
+          const savedProfile = resolveCanvasTargetBaseProfile(
+            profile,
+            config.llm_config.api_profiles
           )
           return {
             id: profile.id,
@@ -1290,6 +1324,7 @@ export function useCanvasTargetWorkflow({
       setCanvasTargetTargetName(resolvedDraft.targetName)
       setCanvasTargetSelectedSchemeId(resolvedDraft.selectedSchemeId)
       setCanvasTargetControlProfileId(resolvedDraft.controlProfileId)
+      setCanvasTargetControlReasoningEffort(resolvedDraft.controlReasoningEffort)
       setCanvasTargetEvidenceMode(normalizeCanvasTargetEvidenceMode(resolvedDraft.evidenceMode))
       setCanvasTargetUserIntent(resolvedDraft.userIntent)
       setCanvasTargetStageProfiles(resolvedDraft.stageProfiles)
@@ -1441,6 +1476,7 @@ export function useCanvasTargetWorkflow({
       schemeId: selectedScheme.id,
       schemeName: selectedScheme.name,
       controlProfileId: canvasTargetControlProfileId,
+      controlReasoningEffort: canvasTargetControlReasoningEffort,
       evidenceMode: canvasTargetEvidenceMode,
       userIntent: canvasTargetUserIntent,
       stageProfiles,
@@ -1862,6 +1898,7 @@ export function useCanvasTargetWorkflow({
         attachments: initialAgentAttachments,
         userIntent: canvasTargetUserIntent,
         profileId: canvasTargetControlProfileId,
+        reasoningEffort: canvasTargetControlReasoningEffort,
         preferExactProfile: true,
         stageProfiles: stageCandidates,
         preferredLanguage: isChineseUi ? 'zh-CN' : 'en-US',
@@ -3092,6 +3129,7 @@ export function useCanvasTargetWorkflow({
           attachments: summaryAttachments.length > 0 ? summaryAttachments : undefined,
           userIntent: canvasTargetUserIntent,
           profileId: canvasTargetControlProfileId,
+          reasoningEffort: canvasTargetControlReasoningEffort,
           preferExactProfile: true,
           preferredLanguage: isChineseUi ? 'zh-CN' : 'en-US',
           controlPlan,
@@ -3269,6 +3307,7 @@ export function useCanvasTargetWorkflow({
     buildEnv.pathMap.data,
     buildCanvasAssetMetadata,
     canvasTargetControlProfileId,
+    canvasTargetControlReasoningEffort,
     canvasTargetEvidenceMode,
     canvasTargetHistoryTargets,
     canvasTargetQuickAppOptions,
@@ -3389,6 +3428,9 @@ export function useCanvasTargetWorkflow({
     setCanvasTargetUserIntent,
     canvasTargetControlProfileId,
     setCanvasTargetControlProfileId,
+    canvasTargetControlReasoningEffort,
+    setCanvasTargetControlReasoningEffort,
+    canvasTargetAvailableControlReasoningEfforts,
     canvasTargetStageProfiles,
     setCanvasTargetStageProfiles,
     canvasTargetQuickAppOptions,

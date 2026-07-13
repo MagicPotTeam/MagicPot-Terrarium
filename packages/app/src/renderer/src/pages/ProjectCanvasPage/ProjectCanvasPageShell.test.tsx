@@ -10,10 +10,35 @@ import type {
   CanvasTextItem
 } from './types'
 
-let latestOverlayAssemblyProps: Record<string, any> | null = null
+type StageSceneProps = {
+  onLiveMultiSelectionBoundsChange: (bounds: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }) => void
+}
+
+type OverlayAssemblyProps = {
+  suspendViewportChrome: boolean
+  selectionOverlaysProps: {
+    registerViewportCallback?: unknown
+    liveMultiSelectionBounds?: { x: number; y: number; width: number; height: number } | null
+  }
+  visualOverlaysProps: {
+    annotationItems: CanvasAnnotationItem[]
+    textItems: CanvasTextItem[]
+    fileItems: CanvasFileItem[]
+    renderedModel3DItems: CanvasModel3DItem[]
+    registerViewportLayer?: unknown
+    isViewportInteracting?: boolean
+  }
+}
+
+let latestOverlayAssemblyProps: OverlayAssemblyProps | null = null
 
 const { latestStageSceneProps, stageSceneRenderMock } = vi.hoisted(() => ({
-  latestStageSceneProps: { current: null as Record<string, any> | null },
+  latestStageSceneProps: { current: null as StageSceneProps | null },
   stageSceneRenderMock: vi.fn()
 }))
 
@@ -22,7 +47,7 @@ vi.mock('./ProjectCanvasPageTopToolbar', () => ({
 }))
 
 vi.mock('./ProjectCanvasPageStageScene', () => ({
-  default: (props: Record<string, any>) => {
+  default: (props: StageSceneProps) => {
     latestStageSceneProps.current = props
     stageSceneRenderMock(props)
     return <div data-testid="stage-scene" />
@@ -30,7 +55,7 @@ vi.mock('./ProjectCanvasPageStageScene', () => ({
 }))
 
 vi.mock('./ProjectCanvasPageOverlayDialogAssembly', () => ({
-  default: (props: Record<string, any>) => {
+  default: (props: OverlayAssemblyProps) => {
     latestOverlayAssemblyProps = props
     return <div data-testid="overlay-assembly" />
   }

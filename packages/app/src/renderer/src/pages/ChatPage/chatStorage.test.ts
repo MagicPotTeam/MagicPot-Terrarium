@@ -428,25 +428,31 @@ describe('chatStorage', () => {
     await expect(storage.loadSessionFromDB('shared-session', 'workspace-b')).resolves.toBeNull()
   })
 
-  it('coalesces repeated debounced updates for the same session to the latest snapshot', async () => {
+  it('coalesces repeated debounced updates and keeps only the latest callback', async () => {
     const fakeIndexedDb = createFakeIndexedDb()
     fakeIndexedDb.state.failGetAllOnce = false
     vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
+    const firstCallback = vi.fn()
+    const latestCallback = vi.fn()
 
     storage.debouncedSaveSessions(
       [{ id: 'session-a', title: 'first', messages: [] }],
       5,
-      'workspace-a'
+      'workspace-a',
+      { onSuccess: firstCallback }
     )
     storage.debouncedSaveSessions(
       [{ id: 'session-a', title: 'latest', messages: [] }],
       5,
-      'workspace-a'
+      'workspace-a',
+      { onSuccess: latestCallback }
     )
     await new Promise((resolve) => setTimeout(resolve, 50))
 
     expect(fakeIndexedDb.state.putCount).toBe(1)
+    expect(firstCallback).not.toHaveBeenCalled()
+    expect(latestCallback).toHaveBeenCalledTimes(1)
     await expect(storage.loadSessionFromDB('session-a', 'workspace-a')).resolves.toMatchObject({
       title: 'latest'
     })

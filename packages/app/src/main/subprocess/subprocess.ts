@@ -1,5 +1,4 @@
-import { sleep } from '@shared/utils/utilFuncs'
-import { spawn, ChildProcess } from 'child_process'
+import { spawn, type ChildProcess } from 'child_process'
 import { exec } from 'child_process'
 import { promisify } from 'util'
 import * as os from 'os'
@@ -9,6 +8,40 @@ const execAsync = promisify(exec)
 type ProcessInfo = {
   name: string
   process: ChildProcess
+}
+
+const FORCE_KILL_WAIT_MS = 1000
+
+function hasProcessExited(process: ChildProcess): boolean {
+  return process.exitCode !== null || process.signalCode !== null
+}
+
+function waitForProcessExit(process: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (hasProcessExited(process)) {
+    return Promise.resolve(true)
+  }
+
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (exited: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      process.off('exit', onExit)
+      process.off('close', onExit)
+      resolve(exited)
+    }
+    const onExit = (): void => finish(true)
+    const timeout = setTimeout(() => finish(hasProcessExited(process)), timeoutMs)
+
+    process.once('exit', onExit)
+    process.once('close', onExit)
+
+    // Avoid missing an event emitted between the first check and listener registration.
+    if (hasProcessExited(process)) {
+      finish(true)
+    }
+  })
 }
 
 type SubProcessHooks = {
@@ -54,71 +87,31 @@ class SubProcessManager {
   // 终止所有子进程
   async killAllProcesses(): Promise<void> {
     const processes = Array.from(this.processes.entries())
+    const managedPids = processes.map(([pid]) => pid)
 
     if (processes.length === 0) {
       console.log('[SubProcessManager] 没有活跃的子进程需要终止')
-      // 即使管理器中没有了，也尝试清理可能的 Python 残留进程
-      await this.killPythonProcesses()
       return
     }
 
     console.log(`[SubProcessManager] 开始终止 ${processes.length} 个子进程...`)
 
-    const killPromises = processes.map(async ([pid, info]) => {
-      const { process, name } = info
-      if (process.killed) {
-        return
-      }
-
-      try {
-        console.log(`[SubProcessManager] 终止子进程: ${name} (PID: ${pid})`)
-
-        const isWindows = os.platform() === 'win32'
-
-        if (isWindows) {
-          // Windows 上使用 taskkill 来终止进程及其所有子进程
+    try {
+      // Preserve and use the PID snapshot while parents still exist; close handlers may mutate the map.
+      await this.killPythonProcesses(managedPids)
+      await Promise.all(
+        processes.map(async ([pid, info]) => {
           try {
-            await execAsync(`taskkill /F /T /PID ${pid}`)
-            console.log(`[SubProcessManager] 使用 taskkill 终止进程: ${name} (PID: ${pid})`)
-          } catch (error: unknown) {
-            // taskkill 可能失败（进程已退出等），尝试使用 process.kill()
-            const errorMessage = error instanceof Error ? error.message : String(error)
-            if (!errorMessage.includes('not found') && !errorMessage.includes('不存在')) {
-              console.warn(`[SubProcessManager] taskkill 失败，尝试其他方法:`, errorMessage)
-            }
-            // 在 Windows 上，不带参数的 kill() 会发送 SIGTERM（如果支持）或直接终止
-            process.kill()
+            await terminateProcess(pid, info, 3000)
+          } catch (error) {
+            console.error(`[SubProcessManager] 终止子进程失败 (PID: ${pid}):`, error)
           }
-        } else {
-          // Unix 系统使用信号
-          process.kill('SIGTERM')
-        }
-
-        // 等待一段时间，如果进程还在运行则强制终止
-        await sleep(3000)
-        if (!process.killed) {
-          console.log(`[SubProcessManager] 强制终止子进程: ${name} (PID: ${pid})`)
-          if (isWindows) {
-            // Windows 上再次尝试 taskkill
-            try {
-              await execAsync(`taskkill /F /T /PID ${pid}`)
-            } catch (error) {
-              // 忽略错误，进程可能已经退出
-            }
-          } else {
-            process.kill('SIGKILL')
-          }
-        }
-      } catch (error) {
-        console.error(`[SubProcessManager] 终止子进程失败 (PID: ${pid}):`, error)
-      }
-    })
-
-    await Promise.all(killPromises)
-    this.processes.clear()
-
-    // 额外清理可能的 Python 残留进程
-    await this.killPythonProcesses()
+        })
+      )
+    } finally {
+      // Never discard the only process references until all cleanup attempts have completed.
+      this.processes.clear()
+    }
 
     console.log('[SubProcessManager] 所有子进程已终止')
   }
@@ -129,11 +122,8 @@ class SubProcessManager {
    * 重要安全说明：此方法只清理由本应用启动的 Python 子进程（通过追踪子进程树）
    * 不会影响用户系统上其他 Python 应用程序
    */
-  private async killPythonProcesses(): Promise<void> {
+  private async killPythonProcesses(managedPids: number[]): Promise<void> {
     const isWindows = os.platform() === 'win32'
-
-    // 获取我们管理的所有进程 PID
-    const managedPids = Array.from(this.processes.keys())
 
     if (managedPids.length === 0) {
       console.log('[SubProcessManager] 没有需要清理的 Python 子进程')
@@ -189,6 +179,52 @@ class SubProcessManager {
   }
 }
 
+async function terminateProcess(
+  pid: number,
+  info: ProcessInfo,
+  gracePeriod: number
+): Promise<void> {
+  const { process, name } = info
+  if (hasProcessExited(process)) {
+    return
+  }
+
+  const isWindows = os.platform() === 'win32'
+  console.log(`[SubProcessManager] 终止子进程: ${name} (PID: ${pid})`)
+
+  try {
+    if (isWindows) {
+      await execAsync(`taskkill /T /PID ${pid}`)
+    } else {
+      process.kill('SIGTERM')
+    }
+  } catch (error) {
+    console.warn(`[SubProcessManager] 优雅终止进程失败 (PID: ${pid})，将尝试强制终止:`, error)
+  }
+
+  if (await waitForProcessExit(process, gracePeriod)) {
+    return
+  }
+
+  console.log(`[SubProcessManager] 强制终止子进程: ${name} (PID: ${pid})`)
+  try {
+    if (isWindows) {
+      await execAsync(`taskkill /F /T /PID ${pid}`)
+    } else {
+      process.kill('SIGKILL')
+    }
+  } catch (error) {
+    // The process may have exited between the timeout and the force-kill attempt.
+    if (!hasProcessExited(process)) {
+      console.warn(`[SubProcessManager] 强制终止进程失败 (PID: ${pid}):`, error)
+    }
+  }
+
+  if (!(await waitForProcessExit(process, FORCE_KILL_WAIT_MS))) {
+    console.warn(`[SubProcessManager] 未收到子进程退出事件 (PID: ${pid})，停止等待`)
+  }
+}
+
 // 创建全局子进程管理器实例
 const subProcessManager = new SubProcessManager()
 
@@ -229,8 +265,8 @@ export type ConnectSubProcessArgs = {
 
 export async function connectSubProcess(args: ConnectSubProcessArgs): Promise<void> {
   const proc = subProcessManager.getProcess(args.pid)
-  if (!proc || !proc.process || proc.process.killed) {
-    // 子进程已推出
+  if (!proc || !proc.process || hasProcessExited(proc.process)) {
+    // 子进程已退出
     return
   }
 
@@ -295,63 +331,17 @@ export async function spawnSubProcess(name: string, args: SubProcessArgs): Promi
  * @returns 终止子进程的 Promise
  */
 export async function killSubProcess(pid: number, gracePeriod: number = 3000): Promise<void> {
-  const proc = subProcessManager.removeProcess(pid)
-  if (!proc || proc.process.killed) {
+  const proc = subProcessManager.getProcess(pid)
+  if (!proc) {
     console.log(`[SubProcessManager] 子进程 ${pid} 已关闭或不存在`)
     return
   }
 
-  return new Promise((resolve, reject) => {
-    proc.process.on('close', (code, signal) => {
-      resolve()
-    })
-
-    proc.process.on('error', (error) => {
-      reject(error)
-    })
-
-    console.log(`[SubProcessManager] 终止子进程: ${proc.name} (PID: ${pid})`)
-
-    const isWindows = os.platform() === 'win32'
-
-    if (isWindows) {
-      // Windows 上使用 taskkill 来终止进程及其所有子进程
-      execAsync(`taskkill /F /T /PID ${pid}`)
-        .then(() => {
-          console.log(`[SubProcessManager] 使用 taskkill 终止进程: ${proc.name} (PID: ${pid})`)
-          resolve()
-        })
-        .catch((error) => {
-          // taskkill 失败时尝试使用 process.kill()
-          proc.process.kill()
-          sleep(gracePeriod).then(() => {
-            if (!proc.process.killed) {
-              console.log(`[SubProcessManager] 强制终止子进程: ${proc.name} (PID: ${pid})`)
-              // 再次尝试 taskkill
-              execAsync(`taskkill /F /T /PID ${pid}`)
-                .catch(() => {})
-                .finally(() => resolve())
-            } else {
-              resolve()
-            }
-          })
-        })
-    } else {
-      proc.process.kill('SIGTERM')
-      if (proc.process.killed) {
-        resolve()
-        return
-      }
-
-      sleep(gracePeriod).then(() => {
-        if (!proc.process.killed) {
-          console.log(`[SubProcessManager] 强制终止子进程: ${proc.name} (PID: ${pid})`)
-          proc.process.kill('SIGKILL')
-        }
-        resolve()
-      })
-    }
-  })
+  try {
+    await terminateProcess(pid, proc, gracePeriod)
+  } finally {
+    subProcessManager.removeProcess(pid)
+  }
 }
 
 // 导出清理函数，供 App 关闭时调用

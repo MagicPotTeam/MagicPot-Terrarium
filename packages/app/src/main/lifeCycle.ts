@@ -9,6 +9,7 @@ import {
   syncMagicPotMcpPlatformDesktopTransports,
   stopMagicPotMcpPlatformRuntime
 } from './mcp/platform/runtime'
+import { closeMagicPotMcpLegacySseSessions } from './mcp/platform/httpBridge'
 import { stopMcpClientManager, syncMcpClientManager } from './mcp/runtime'
 import { initTaskQueue, stopTaskQueue } from './queue/taskQueue'
 import { cleanupSubProcesses } from './subprocess/subprocess'
@@ -43,10 +44,9 @@ async function refreshRuntimeServices(
 }
 
 function syncLlmProxyServer(config: Config): void {
+  stopLLMProxyServer()
   if (config.local_llm_server_config?.enable_server) {
     startLLMProxyServer()
-  } else {
-    stopLLMProxyServer()
   }
 }
 
@@ -98,6 +98,9 @@ export async function beforeShow() {
 
 export async function beforeQuit() {
   await runLifecycleStep('LLM server stopped', () => stopLLMProxyServer())
+  await runLifecycleStep('MCP legacy SSE sessions stopped', () =>
+    closeMagicPotMcpLegacySseSessions()
+  )
   await runLifecycleStep('MCP clients stopped', () => stopMcpClientManager())
   await runLifecycleStep('MCP platform stopped', () => stopMagicPotMcpPlatformRuntime())
   await runLifecycleStep('Comfy listener stopped', () => stopComfyStateListener())

@@ -22,6 +22,7 @@ import type { BridgeSourceContextSummary } from '@shared/api/bridgeSourceContext
 import type { BridgeTaskContext } from '@shared/api/bridgeTaskContext'
 import { getConfig } from '../config/config'
 import { isLocalFileSource, normalizeLocalFilePath } from '../utils/localFileUrl'
+import { safeRemoteDownload } from './safeRemoteDownload'
 
 const DEFAULT_MODEL_FILENAME = 'model.glb'
 
@@ -420,14 +421,20 @@ const resolveModelSource = async (req: ExportModelToDccReq): Promise<ResolvedMod
   }
 
   if (isHttpUrl(sourceUrl)) {
-    const response = await fetch(sourceUrl)
-    if (!response.ok) {
-      throw new Error(`Failed to download model: ${response.status} ${response.statusText}`.trim())
-    }
-    const arrayBuffer = await response.arrayBuffer()
+    const download = await safeRemoteDownload(sourceUrl, {
+      allowedContentTypes: [
+        'model/',
+        'application/octet-stream',
+        'application/gltf-buffer',
+        'application/gltf+json'
+      ],
+      errorLabel: 'model'
+    })
     return {
-      buffer: Buffer.from(arrayBuffer),
-      fileName: ensureFileExtension(requestedFileName || getDownloadFileNameFromUrl(sourceUrl)),
+      buffer: download.buffer,
+      fileName: ensureFileExtension(
+        requestedFileName || getDownloadFileNameFromUrl(download.finalUrl.toString())
+      ),
       resolutionKind: 'http-url'
     }
   }

@@ -1447,10 +1447,8 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
 
     render(
       <ProjectCanvasPageStageScene
-        {...({
-          ...createBaseProps([item]),
-          registerViewportCallback
-        } as any)}
+        {...createBaseProps([item])}
+        registerViewportCallback={registerViewportCallback}
       />
     )
 

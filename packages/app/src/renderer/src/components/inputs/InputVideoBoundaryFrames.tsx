@@ -77,64 +77,98 @@ const InputVideoBoundaryFrames: React.FC<InputVideoBoundaryFramesProps> = ({
   const [firstFramePreviewUrl, setFirstFramePreviewUrl] = useState<string | null>(null)
   const [lastFramePreviewUrl, setLastFramePreviewUrl] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const firstFramePreviewUrlRef = useRef<string | null>(null)
+  const lastFramePreviewUrlRef = useRef<string | null>(null)
+  const mountedRef = useRef(false)
+  const videoOperationRef = useRef(0)
   const { notifyError, notifySuccess } = useMessage()
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      videoOperationRef.current += 1
+    }
+  }, [])
 
   const updatePreviewUrl = useCallback(
     async (
       imageValue: string,
-      setPreviewUrl: React.Dispatch<React.SetStateAction<string | null>>
+      previewUrlRef: React.MutableRefObject<string | null>,
+      setPreviewUrl: React.Dispatch<React.SetStateAction<string | null>>,
+      isCurrent: () => boolean
     ) => {
+      const replacePreviewUrl = (nextPreviewUrl: string | null) => {
+        if (previewUrlRef.current) {
+          URL.revokeObjectURL(previewUrlRef.current)
+        }
+        previewUrlRef.current = nextPreviewUrl
+        setPreviewUrl(nextPreviewUrl)
+      }
+
       if (!imageValue) {
-        setPreviewUrl((prev) => {
-          if (prev) {
-            URL.revokeObjectURL(prev)
-          }
-          return null
-        })
+        if (isCurrent()) replacePreviewUrl(null)
         return
       }
 
       try {
         const response = await api().svcComfy.getView(valueToFileItem(imageValue))
+        if (!isCurrent()) return
         const previewBlob = new Blob([response.result as BlobPart], { type: 'image/png' })
         const nextPreviewUrl = URL.createObjectURL(previewBlob)
-        setPreviewUrl((prev) => {
-          if (prev) {
-            URL.revokeObjectURL(prev)
-          }
-          return nextPreviewUrl
-        })
+        if (!isCurrent()) {
+          URL.revokeObjectURL(nextPreviewUrl)
+          return
+        }
+        replacePreviewUrl(nextPreviewUrl)
       } catch (error) {
+        if (!isCurrent()) return
         console.warn('[InputVideoBoundaryFrames] Failed to load frame preview:', imageValue, error)
-        setPreviewUrl((prev) => {
-          if (prev) {
-            URL.revokeObjectURL(prev)
-          }
-          return null
-        })
+        replacePreviewUrl(null)
       }
     },
     []
   )
 
   useEffect(() => {
-    void updatePreviewUrl(value.firstFrameValue, setFirstFramePreviewUrl)
+    let cancelled = false
+    void updatePreviewUrl(
+      value.firstFrameValue,
+      firstFramePreviewUrlRef,
+      setFirstFramePreviewUrl,
+      () => !cancelled
+    )
+    return () => {
+      cancelled = true
+    }
   }, [updatePreviewUrl, value.firstFrameValue])
 
   useEffect(() => {
-    void updatePreviewUrl(value.lastFrameValue, setLastFramePreviewUrl)
+    let cancelled = false
+    void updatePreviewUrl(
+      value.lastFrameValue,
+      lastFramePreviewUrlRef,
+      setLastFramePreviewUrl,
+      () => !cancelled
+    )
+    return () => {
+      cancelled = true
+    }
   }, [updatePreviewUrl, value.lastFrameValue])
 
-  useEffect(() => {
-    return () => {
-      if (firstFramePreviewUrl) {
-        URL.revokeObjectURL(firstFramePreviewUrl)
+  useEffect(
+    () => () => {
+      if (firstFramePreviewUrlRef.current) {
+        URL.revokeObjectURL(firstFramePreviewUrlRef.current)
+        firstFramePreviewUrlRef.current = null
       }
-      if (lastFramePreviewUrl) {
-        URL.revokeObjectURL(lastFramePreviewUrl)
+      if (lastFramePreviewUrlRef.current) {
+        URL.revokeObjectURL(lastFramePreviewUrlRef.current)
+        lastFramePreviewUrlRef.current = null
       }
-    }
-  }, [firstFramePreviewUrl, lastFramePreviewUrl])
+    },
+    []
+  )
 
   const uploadFrameImage = useCallback(async (file: File): Promise<FileItem> => {
     const image = new Uint8Array(await file.arrayBuffer())
@@ -155,9 +189,12 @@ const InputVideoBoundaryFrames: React.FC<InputVideoBoundaryFramesProps> = ({
         return
       }
 
+      const operationId = ++videoOperationRef.current
+      const isCurrent = () => mountedRef.current && videoOperationRef.current === operationId
       setIsLoading(true)
       try {
         const { firstFrameFile, lastFrameFile } = await createVideoBoundaryFrameFiles(file)
+        if (!isCurrent()) return
         if (!firstFrameFile || !lastFrameFile) {
           throw new Error('failed to extract both first and last frames from the video')
         }
@@ -166,6 +203,7 @@ const InputVideoBoundaryFrames: React.FC<InputVideoBoundaryFramesProps> = ({
           uploadFrameImage(firstFrameFile),
           uploadFrameImage(lastFrameFile)
         ])
+        if (!isCurrent()) return
 
         onChange({
           videoFileName: file.name,
@@ -174,10 +212,11 @@ const InputVideoBoundaryFrames: React.FC<InputVideoBoundaryFramesProps> = ({
         })
         notifySuccess('已提取视频首尾帧')
       } catch (error) {
+        if (!isCurrent()) return
         console.error('[InputVideoBoundaryFrames] Failed to process video file:', error)
         notifyError(`视频处理失败: ${formatQAppErrorMessage(error)}`)
       } finally {
-        setIsLoading(false)
+        if (isCurrent()) setIsLoading(false)
       }
     },
     [notifyError, notifySuccess, onChange, uploadFrameImage]

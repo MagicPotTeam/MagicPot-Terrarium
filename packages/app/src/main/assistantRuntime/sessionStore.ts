@@ -2,6 +2,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { ChatMessage } from '@shared/api/svcLLMProxy'
 import { getBuildEnv } from '../config/buildEnv'
+import { writeJsonFileAtomic } from '../magicAgentRuntime/graph/jsonPersistence'
 import {
   AssistantArtifactRef,
   AssistantContextSnapshot,
@@ -992,10 +993,7 @@ export class AssistantSessionStore {
 
     this.persistPromise = this.persistPromise
       .catch(() => undefined)
-      .then(async () => {
-        await fs.mkdir(path.dirname(this.filePath), { recursive: true })
-        await fs.writeFile(this.filePath, JSON.stringify(payload, null, 2), 'utf8')
-      })
+      .then(() => writeJsonFileAtomic(this.filePath, payload))
 
     return this.persistPromise
   }

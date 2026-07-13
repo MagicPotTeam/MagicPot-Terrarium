@@ -1,3 +1,4 @@
+import type { LLMReasoningEffort } from '@shared/llm'
 import type {
   TargetHistoryEntry,
   TargetHistoryQuickApp,
@@ -223,6 +224,7 @@ export function resolveCanvasTargetHistoryTargetDraft(options: {
   targetName: string
   selectedSchemeId: string | null
   controlProfileId: string
+  controlReasoningEffort?: LLMReasoningEffort
   evidenceMode: CanvasTargetEvidenceMode
   userIntent: string
   stageProfiles: CanvasTargetStageDraft[]
@@ -250,6 +252,9 @@ export function resolveCanvasTargetHistoryTargetDraft(options: {
     targetName: options.target.name,
     selectedSchemeId: resolvedSchemeId,
     controlProfileId: resolvedControlProfileId,
+    ...(options.target.controlReasoningEffort
+      ? { controlReasoningEffort: options.target.controlReasoningEffort }
+      : {}),
     evidenceMode: normalizeCanvasTargetEvidenceMode(options.target.evidenceMode),
     userIntent: options.target.userIntent,
     stageProfiles: materializeCanvasTargetStageProfilesForOptions(
@@ -272,6 +277,7 @@ export function buildCanvasTargetHistoryTargetRecord(options: {
   schemeId: string
   schemeName?: string | null
   controlProfileId: string
+  controlReasoningEffort?: LLMReasoningEffort
   evidenceMode?: CanvasTargetEvidenceMode
   userIntent: string
   stageProfiles: CanvasTargetStageDraft[]
@@ -304,6 +310,9 @@ export function buildCanvasTargetHistoryTargetRecord(options: {
     name: resolvedName,
     schemeId: options.schemeId,
     controlProfileId: options.controlProfileId,
+    ...(options.controlReasoningEffort
+      ? { controlReasoningEffort: options.controlReasoningEffort }
+      : {}),
     evidenceMode: normalizeCanvasTargetEvidenceMode(
       options.evidenceMode || matchedExisting?.evidenceMode || DEFAULT_CANVAS_TARGET_EVIDENCE_MODE
     ),

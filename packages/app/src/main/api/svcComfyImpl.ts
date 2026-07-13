@@ -51,7 +51,18 @@ import { processWorkflowLoras } from '../comfy/loraBypass'
 import { normalizeExecutableWorkflow } from '@shared/comfy/funcs'
 
 // Map to store qAppKey by task ID (for later retrieval when loading quick app)
+const MAX_TASK_QAPP_KEYS = 200
 const taskQAppKeyMap = new Map<string, string>()
+
+function storeTaskQAppKey(taskId: string, qAppKey: string): void {
+  taskQAppKeyMap.delete(taskId)
+  taskQAppKeyMap.set(taskId, qAppKey)
+  while (taskQAppKeyMap.size > MAX_TASK_QAPP_KEYS) {
+    const oldestTaskId = taskQAppKeyMap.keys().next().value
+    if (!oldestTaskId) break
+    taskQAppKeyMap.delete(oldestTaskId)
+  }
+}
 
 function normalizeComfyEventClientId(clientId: string | null | undefined): string {
   const normalized = String(clientId || '').trim()
@@ -234,7 +245,7 @@ export class ComfySvcImpl implements ComfySvc {
     })
     // Store qAppKey separately (not in workflow) for later retrieval
     if (req.qAppKey) {
-      taskQAppKeyMap.set(res.prompt_id, req.qAppKey)
+      storeTaskQAppKey(res.prompt_id, req.qAppKey)
     }
     return { prompt_id: res.prompt_id }
   }

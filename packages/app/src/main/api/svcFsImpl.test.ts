@@ -1,7 +1,13 @@
 import fs from 'fs'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { MAX_READ_FILE_SLICE_BYTES } from '@shared/api/svcFs'
+import {
+  fsSvcDef,
+  MAX_FULL_FILE_BYTES,
+  MAX_READ_FILE_SLICE_BYTES,
+  MAX_TEXT_FILE_BYTES
+} from '@shared/api/svcFs'
+import { validateServiceValue } from '@shared/api/apiUtils/serviceValidation'
 import { FsSvcImpl } from './svcFsImpl'
 
 const getTestRoot = (): string =>
@@ -43,6 +49,81 @@ describe('FsSvcImpl', () => {
       await expect(service.readFileFromPath({ fullPath })).rejects.toThrow(
         `File not found: ${fullPath}`
       )
+    })
+  })
+
+  describe('bounded reads and writes', () => {
+    it('rejects full-file reads over the limit while the slice API remains usable', async () => {
+      const fullPath = path.join(testRoot, 'large.bin')
+      fs.writeFileSync(fullPath, Buffer.alloc(1))
+      fs.truncateSync(fullPath, MAX_FULL_FILE_BYTES + 1)
+
+      await expect(service.readFileFromPath({ fullPath })).rejects.toThrow(/readFileSlice/)
+      await expect(service.readFileSlice({ fullPath, length: 1 })).resolves.toMatchObject({
+        data: new Uint8Array([0]),
+        fileSizeBytes: MAX_FULL_FILE_BYTES + 1
+      })
+    })
+
+    it('rejects oversized text reads and writes', async () => {
+      const fullPath = path.join(testRoot, 'large.txt')
+      fs.writeFileSync(fullPath, Buffer.alloc(1))
+      fs.truncateSync(fullPath, MAX_TEXT_FILE_BYTES + 1)
+
+      await expect(service.readTextFile({ fullPath })).rejects.toThrow(/full-file IPC limit/)
+      await expect(
+        service.writeTextFile({
+          outputPath: testRoot,
+          filename: 'large.txt',
+          content: 'x'.repeat(MAX_TEXT_FILE_BYTES + 1)
+        })
+      ).rejects.toThrow(/IPC limit/)
+    })
+  })
+
+  describe('safe directory-based writes', () => {
+    it.each(['../escape.png', '..\\escape.png', '/absolute.png', 'nested/file.png'])(
+      'rejects traversal filename %s',
+      async (filename) => {
+        await expect(
+          service.saveImageToPath({ image: new Uint8Array([1]), outputPath: testRoot, filename })
+        ).rejects.toThrow(/basename-only/)
+      }
+    )
+
+    it('preserves normal basename writes', async () => {
+      const response = await service.writeTextFile({
+        outputPath: path.join(testRoot, 'new-dir'),
+        filename: 'notes.json',
+        content: '{}'
+      })
+      expect(response.fullPath).toBe(path.join(testRoot, 'new-dir', 'notes.json'))
+      expect(fs.readFileSync(response.fullPath, 'utf8')).toBe('{}')
+    })
+  })
+
+  describe('shared validators', () => {
+    it('rejects traversal and oversized payloads before dispatch', () => {
+      expect(() =>
+        validateServiceValue(
+          {
+            image: new Uint8Array([1]),
+            outputPath: testRoot,
+            filename: '../escape.png'
+          },
+          fsSvcDef.saveImageToPath.request
+        )
+      ).toThrow(/filename/)
+      expect(() =>
+        validateServiceValue(
+          {
+            image: new Uint8Array(MAX_FULL_FILE_BYTES + 1),
+            outputPath: testRoot,
+            filename: 'large.png'
+          },
+          fsSvcDef.saveImageToPath.request
+        )
+      ).toThrow(/image/)
     })
   })
 

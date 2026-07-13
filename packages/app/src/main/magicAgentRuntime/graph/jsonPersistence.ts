@@ -29,7 +29,19 @@ export async function writeJsonFileAtomic(filePath: string, value: unknown): Pro
   )
   const data = `${JSON.stringify(value, null, 2)}\n`
   try {
-    await fs.writeFile(tempPath, data, 'utf8')
+    if (process.platform === 'win32') {
+      await fs.writeFile(tempPath, data, 'utf8')
+    } else {
+      const mode = await fs
+        .stat(filePath)
+        .then((stat) => stat.mode & 0o777)
+        .catch((error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return 0o600
+          throw error
+        })
+      await fs.writeFile(tempPath, data, { encoding: 'utf8', mode: 0o600 })
+      await fs.chmod(tempPath, mode)
+    }
     await fs.rename(tempPath, filePath)
   } catch (error) {
     await fs.rm(tempPath, { force: true }).catch(() => undefined)

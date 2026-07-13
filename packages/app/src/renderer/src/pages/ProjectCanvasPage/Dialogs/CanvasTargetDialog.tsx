@@ -35,6 +35,7 @@ import {
   type ReactNode
 } from 'react'
 import type { CanvasTargetReport, CanvasTargetReportStage } from '@shared/canvasTarget'
+import { getReasoningEffortLabel, type LLMReasoningEffort } from '@shared/llm'
 import type { ProjectTraceDocumentSummary } from '@shared/projectTrace'
 import type { TargetHistoryEntry } from '@shared/targetHistory'
 import type { TargetScheme } from '@shared/targetScheme'
@@ -83,6 +84,8 @@ type CanvasTargetDialogProps = {
   targetName: string
   userIntent: string
   controlProfileId: string
+  controlReasoningEffort?: LLMReasoningEffort
+  availableControlReasoningEfforts?: LLMReasoningEffort[]
   stageProfiles: CanvasTargetStageDraft[]
   quickApps?: CanvasTargetQuickAppDraft[]
   profileOptions: CanvasTargetProfileOption[]
@@ -98,6 +101,7 @@ type CanvasTargetDialogProps = {
   onSelectedSchemeIdChange: (value: string) => void
   onUserIntentChange: (value: string) => void
   onControlProfileIdChange: (value: string) => void
+  onControlReasoningEffortChange?: (value: LLMReasoningEffort) => void
   onStageProfilesChange: (value: CanvasTargetStageDraft[]) => void
   onQuickAppsChange?: (value: CanvasTargetQuickAppDraft[]) => void
   onApplyHistoryTarget: (targetId: string) => void
@@ -444,6 +448,8 @@ export default function CanvasTargetDialog({
   targetName,
   userIntent,
   controlProfileId,
+  controlReasoningEffort,
+  availableControlReasoningEfforts,
   stageProfiles,
   quickApps,
   profileOptions,
@@ -459,6 +465,7 @@ export default function CanvasTargetDialog({
   onSelectedSchemeIdChange,
   onUserIntentChange,
   onControlProfileIdChange,
+  onControlReasoningEffortChange,
   onStageProfilesChange,
   onQuickAppsChange,
   onApplyHistoryTarget,
@@ -555,6 +562,7 @@ export default function CanvasTargetDialog({
           '\u5f53\u524d\u9879\u76ee\u8fd8\u6ca1\u6709\u5df2\u4fdd\u5b58\u4e14\u53ef\u5f15\u7528\u7684\u8ffd\u8e2a\u8bb0\u5f55\u3002\u8bf7\u5728\u8ffd\u8e2a\u9762\u677f\u4e3b\u52a8\u521b\u5efa\u5e76\u4fdd\u5b58\u3002',
         traceEvents: '\u4e2a\u4e8b\u4ef6',
         controlModelLabel: '\u4e3b\u63a7\u6a21\u578b',
+        reasoningEffortLabel: 'Reasoning effort',
         controlModelSource: '\u6a21\u578b\u6765\u6e90',
         stageOrder: '\u9644\u5c5e\u6a21\u578b',
         stageModel: '\u9644\u5c5e\u6a21\u578b',
@@ -674,6 +682,7 @@ export default function CanvasTargetDialog({
           'No saved reference-ready trace records exist in this project yet. Create and save one from the Trace panel first.',
         traceEvents: 'events',
         controlModelLabel: 'Control model',
+        reasoningEffortLabel: 'Reasoning effort',
         controlModelSource: 'Model source',
         stageOrder: 'Auxiliary models',
         stageModel: 'Auxiliary model',
@@ -1164,6 +1173,25 @@ export default function CanvasTargetDialog({
               ))}
             </TextField>
           </Stack>
+
+          {availableControlReasoningEfforts && availableControlReasoningEfforts.length > 0 ? (
+            <TextField
+              select
+              label={copy.reasoningEffortLabel}
+              value={controlReasoningEffort || availableControlReasoningEfforts[0]}
+              onChange={(event) =>
+                onControlReasoningEffortChange?.(event.target.value as LLMReasoningEffort)
+              }
+              disabled={loading}
+              fullWidth
+            >
+              {availableControlReasoningEfforts.map((effort) => (
+                <MenuItem key={effort} value={effort}>
+                  {getReasoningEffortLabel(effort)}
+                </MenuItem>
+              ))}
+            </TextField>
+          ) : null}
 
           <TextField
             label={copy.userIntent}

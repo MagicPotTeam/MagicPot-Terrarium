@@ -1,3 +1,5 @@
+import type { LLMReasoningEffort } from '@shared/llm'
+import { normalizeReasoningEffort } from '@shared/llm'
 import type {
   ProjectTraceDocument,
   ProjectTraceExecutableRule,
@@ -22,6 +24,8 @@ export const PROJECT_TRACE_TARGET_REFERENCE_EVENT = 'project-trace:target-refere
 export const PROJECT_TRACE_REALTIME_ADVICE_EVENT = 'project-trace:realtime-advice'
 const RECENT_EVENT_LIMIT = 120
 const REALTIME_ADVICE_COOLDOWN_MS = 5000
+const REALTIME_ADVICE_TRACKER_MAX_SIZE = 2000
+const REALTIME_ADVICE_RETENTION_MS = REALTIME_ADVICE_COOLDOWN_MS * 12
 const STORAGE_KEY_PREFIX = 'projectTrace.recentEvents.'
 const ACTIVE_CAPTURE_KEY_PREFIX = 'projectTrace.activeCapture.'
 const ACTIVE_REALTIME_KEY_PREFIX = 'projectTrace.activeRealtime.'
@@ -55,6 +59,7 @@ export type ProjectTraceActiveRealtimeTarget = {
   referenceTraceIds: string[]
   referenceTraceId?: string
   modelProfileId?: string
+  modelReasoningEffort?: LLMReasoningEffort
 }
 
 export type ProjectTraceTargetReferenceState = {
@@ -109,7 +114,19 @@ function shouldDispatchRealtimeAdvice(projectId: string, traceId: string, kind: 
   if (now - previous < REALTIME_ADVICE_COOLDOWN_MS) {
     return false
   }
+
+  for (const [trackedKey, dispatchedAt] of realtimeAdviceLastDispatchedAt) {
+    if (now - dispatchedAt > REALTIME_ADVICE_RETENTION_MS) {
+      realtimeAdviceLastDispatchedAt.delete(trackedKey)
+    }
+  }
+  realtimeAdviceLastDispatchedAt.delete(key)
   realtimeAdviceLastDispatchedAt.set(key, now)
+  while (realtimeAdviceLastDispatchedAt.size > REALTIME_ADVICE_TRACKER_MAX_SIZE) {
+    const oldestKey = realtimeAdviceLastDispatchedAt.keys().next().value
+    if (oldestKey === undefined) break
+    realtimeAdviceLastDispatchedAt.delete(oldestKey)
+  }
   return true
 }
 
@@ -131,6 +148,7 @@ function parseRealtimeModelReview(content: string): ProjectTraceRealtimeModelRev
 
 async function reviewRealtimeAdviceWithModel(options: {
   modelProfileId: string
+  modelReasoningEffort?: LLMReasoningEffort
   trace: ProjectTraceDocument
   event: ProjectTraceEventSummary
   rule: ProjectTraceExecutableRule
@@ -144,6 +162,7 @@ async function reviewRealtimeAdviceWithModel(options: {
     const response = await api().svcLLMProxy.chat(
       {
         profileId: options.modelProfileId,
+        reasoningEffort: options.modelReasoningEffort,
         messages: [
           {
             role: 'system',
@@ -197,6 +216,7 @@ async function reviewRealtimeAdviceWithModel(options: {
 
 async function reviewRealtimeSemanticRuleWithModel(options: {
   modelProfileId: string
+  modelReasoningEffort?: LLMReasoningEffort
   trace: ProjectTraceDocument
   event: ProjectTraceEventSummary
   semanticRule: ProjectTraceSemanticRule
@@ -208,6 +228,7 @@ async function reviewRealtimeSemanticRuleWithModel(options: {
     const response = await api().svcLLMProxy.chat(
       {
         profileId: options.modelProfileId,
+        reasoningEffort: options.modelReasoningEffort,
         messages: [
           {
             role: 'system',
@@ -508,7 +529,10 @@ export function readActiveProjectTraceRealtime(
       ...(parsed.projectName ? { projectName: parsed.projectName } : {}),
       referenceTraceIds,
       referenceTraceId: referenceTraceIds[0],
-      ...(parsed.modelProfileId ? { modelProfileId: parsed.modelProfileId } : {})
+      ...(parsed.modelProfileId ? { modelProfileId: parsed.modelProfileId } : {}),
+      ...(normalizeReasoningEffort(parsed.modelReasoningEffort)
+        ? { modelReasoningEffort: normalizeReasoningEffort(parsed.modelReasoningEffort) }
+        : {})
     }
   } catch {
     return null
@@ -533,7 +557,10 @@ export function writeActiveProjectTraceRealtime(target: ProjectTraceActiveRealti
       ...(target.projectName ? { projectName: target.projectName } : {}),
       referenceTraceIds,
       referenceTraceId: referenceTraceIds[0],
-      ...(target.modelProfileId ? { modelProfileId: target.modelProfileId } : {})
+      ...(target.modelProfileId ? { modelProfileId: target.modelProfileId } : {}),
+      ...(normalizeReasoningEffort(target.modelReasoningEffort)
+        ? { modelReasoningEffort: normalizeReasoningEffort(target.modelReasoningEffort) }
+        : {})
     } satisfies ProjectTraceActiveRealtimeTarget)
   )
   dispatchCaptureStateChange({
@@ -728,6 +755,7 @@ async function evaluateActiveProjectTraceRealtimeEvent(
           }
           const modelReview = await reviewRealtimeSemanticRuleWithModel({
             modelProfileId: realtime.modelProfileId!,
+            modelReasoningEffort: realtime.modelReasoningEffort,
             trace,
             event,
             semanticRule
@@ -770,6 +798,7 @@ async function evaluateActiveProjectTraceRealtimeEvent(
       const modelReview = canUseModelReview
         ? await reviewRealtimeAdviceWithModel({
             modelProfileId: realtime.modelProfileId!,
+            modelReasoningEffort: realtime.modelReasoningEffort,
             trace,
             event,
             rule: ruleMatch.rule,

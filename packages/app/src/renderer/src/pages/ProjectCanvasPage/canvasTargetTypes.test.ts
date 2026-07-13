@@ -3,10 +3,29 @@ import { describe, expect, it } from 'vitest'
 import {
   applyCanvasTargetStageDraftProfileConstraints,
   createCanvasTargetStageDraft,
+  resolveCanvasTargetBaseProfile,
   resolveCanvasTargetSupportedOutputFormats
 } from './canvasTargetTypes'
 
 describe('canvasTargetTypes auxiliary model constraints', () => {
+  it('resolves composite listed profiles through their base profile ID', () => {
+    const configured = [
+      { id: 'codex-base', deployment: 'local' },
+      { id: 'other', deployment: 'cloud' }
+    ]
+
+    expect(
+      resolveCanvasTargetBaseProfile(
+        { id: 'codex-model:composite', base_profile_id: 'codex-base' },
+        configured
+      )
+    ).toEqual({ id: 'codex-base', deployment: 'local' })
+    expect(resolveCanvasTargetBaseProfile({ id: 'other' }, configured)).toEqual({
+      id: 'other',
+      deployment: 'cloud'
+    })
+  })
+
   it('leaves new llm stages without a preset responsibility', () => {
     expect(createCanvasTargetStageDraft().responsibilityType).toBeUndefined()
     expect(createCanvasTargetStageDraft().outputFormats).toEqual([])

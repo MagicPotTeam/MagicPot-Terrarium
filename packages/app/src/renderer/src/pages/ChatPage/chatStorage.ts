@@ -762,7 +762,7 @@ export interface DebouncedSessionSaveOptions {
   onError?: (error: unknown, sessions: ChatSession[]) => void
 }
 
-const pendingSaveCallbacks = new Map<string, DebouncedSessionSaveOptions[]>()
+const pendingSaveCallbacks = new Map<string, DebouncedSessionSaveOptions>()
 
 /**
  * Debounced session upserts. Only sessions changed by the caller are written;
@@ -795,24 +795,22 @@ export function debouncedSaveSessions(
     pending.set(session.id, session)
   }
   pendingSessionSaves.set(targetScope, pending)
-  const callbacks = pendingSaveCallbacks.get(targetScope) || []
-  callbacks.push(options)
-  pendingSaveCallbacks.set(targetScope, callbacks)
+  pendingSaveCallbacks.set(targetScope, options)
 
   const existingTimer = saveTimers.get(targetScope)
   if (existingTimer) clearTimeout(existingTimer)
   const timer = setTimeout(() => {
     const sessionsToSave = [...(pendingSessionSaves.get(targetScope)?.values() || [])]
-    const callbacks = pendingSaveCallbacks.get(targetScope) || []
+    const callbacks = pendingSaveCallbacks.get(targetScope)
     pendingSessionSaves.delete(targetScope)
     pendingSaveCallbacks.delete(targetScope)
     saveTimers.delete(targetScope)
     Promise.all(sessionsToSave.map((session) => saveSessionToDB(session, targetScope))).then(
       () => {
-        for (const callback of callbacks) callback.onSuccess?.(sessionsToSave)
+        callbacks?.onSuccess?.(sessionsToSave)
       },
       (error) => {
-        for (const callback of callbacks) callback.onError?.(error, sessionsToSave)
+        callbacks?.onError?.(error, sessionsToSave)
         console.error(
           `[ChatStorage] debouncedSave failed: ${describeStorageError(createStorageError(error, 'IndexedDB debounced save failed.'))}`
         )

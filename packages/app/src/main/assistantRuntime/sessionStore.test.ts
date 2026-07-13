@@ -96,6 +96,34 @@ describe('AssistantSessionStore', () => {
     expect(session?.eventLog).toEqual([])
   })
 
+  it('preserves the previous file and cleans up the temp file when an atomic persist fails', async () => {
+    const store = new AssistantSessionStore(filePath)
+    const route = {
+      channel: 'generic',
+      scopeType: 'dm' as const,
+      scopeId: 'atomic-write'
+    }
+
+    await store.appendTurn(route, [{ role: 'user', content: 'committed' }], 10)
+    const committedFile = await fs.readFile(filePath, 'utf8')
+    const renameSpy = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('rename failed'))
+
+    await expect(
+      store.appendTurn(route, [{ role: 'assistant', content: 'not committed yet' }], 10)
+    ).rejects.toThrow('rename failed')
+
+    expect(await fs.readFile(filePath, 'utf8')).toBe(committedFile)
+    expect((await fs.readdir(tempDir)).filter((name) => name.endsWith('.tmp'))).toEqual([])
+
+    renameSpy.mockRestore()
+    await store.appendTurn(route, [{ role: 'user', content: 'retry' }], 10)
+
+    const persisted = JSON.parse(await fs.readFile(filePath, 'utf8'))
+    expect(
+      persisted.sessions[0].messages.map((message: { content: string }) => message.content)
+    ).toEqual(['committed', 'not committed yet', 'retry'])
+  })
+
   it('persists runs, events, artifacts, and summaries in the v2 store', async () => {
     const store = new AssistantSessionStore(filePath)
     const route = {

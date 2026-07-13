@@ -4,6 +4,7 @@ import type { Dirent } from 'fs'
 import path from 'path'
 import { Config } from '@shared/config/config'
 import { getBuildEnv } from '../config/buildEnv'
+import { writeJsonFileAtomic } from '../magicAgentRuntime/graph/jsonPersistence'
 import {
   AssistantWorkspaceAccessMode,
   AssistantWorkspaceGovernanceAction,
@@ -43,6 +44,30 @@ const QUALITY_GATE_STATUSES = new Set<AssistantQualityGateState['status']>([
   'warning',
   'failed'
 ])
+
+const workspaceMetaMutationQueues = new Map<string, Promise<void>>()
+
+const serializeWorkspaceMetaMutation = async <T>(
+  workspaceMetaFile: string,
+  mutation: () => Promise<T>
+): Promise<T> => {
+  const key = path.resolve(workspaceMetaFile)
+  const previous = workspaceMetaMutationQueues.get(key) || Promise.resolve()
+  const operation = previous.catch(() => undefined).then(mutation)
+  const tail = operation.then(
+    () => undefined,
+    () => undefined
+  )
+  workspaceMetaMutationQueues.set(key, tail)
+
+  try {
+    return await operation
+  } finally {
+    if (workspaceMetaMutationQueues.get(key) === tail) {
+      workspaceMetaMutationQueues.delete(key)
+    }
+  }
+}
 
 const sanitizePathSegment = (value: string): string =>
   String(value || '')
@@ -268,166 +293,166 @@ export const ensureAssistantWorkspaceBinding = async (
   options?: {
     accessMode?: AssistantWorkspaceAccessMode
   }
-): Promise<AssistantWorkspaceMeta> => {
-  const existing = await readAssistantWorkspaceMeta(workspace)
-  const now = Date.now()
-  const sessionKey = getAssistantSessionKey(route)
-  const accessMode: AssistantWorkspaceAccessMode =
-    options?.accessMode ||
-    existing?.accessMode ||
-    (isDefaultAssistantWorkspaceId(route, workspace.workspaceId) ? 'private' : 'shared')
-  const ownerSessionKey = cleanString(existing?.ownerSessionKey, 200) || sessionKey
-  const ownerRoute = existing?.ownerRoute || route
-  const foreignAttachedSessionKeys = (existing?.attachedSessionKeys || []).filter(
-    (key) => key !== ownerSessionKey
-  )
-  if (accessMode === 'private' && ownerSessionKey !== sessionKey) {
-    throw new Error(
-      `Workspace ${workspace.workspaceId} is private to ${ownerSessionKey}. Reattach its owner route with accessMode "shared" before attaching a different route.`
+): Promise<AssistantWorkspaceMeta> =>
+  serializeWorkspaceMetaMutation(workspace.workspaceMetaFile, async () => {
+    const existing = await readAssistantWorkspaceMeta(workspace)
+    const now = Date.now()
+    const sessionKey = getAssistantSessionKey(route)
+    const accessMode: AssistantWorkspaceAccessMode =
+      options?.accessMode ||
+      existing?.accessMode ||
+      (isDefaultAssistantWorkspaceId(route, workspace.workspaceId) ? 'private' : 'shared')
+    const ownerSessionKey = cleanString(existing?.ownerSessionKey, 200) || sessionKey
+    const ownerRoute = existing?.ownerRoute || route
+    const foreignAttachedSessionKeys = (existing?.attachedSessionKeys || []).filter(
+      (key) => key !== ownerSessionKey
     )
-  }
-  if (accessMode === 'private' && foreignAttachedSessionKeys.length > 0) {
-    throw new Error(
-      `Workspace ${workspace.workspaceId} cannot become private while other routes remain attached. Detach the other routes first.`
+    if (accessMode === 'private' && ownerSessionKey !== sessionKey) {
+      throw new Error(
+        `Workspace ${workspace.workspaceId} is private to ${ownerSessionKey}. Reattach its owner route with accessMode "shared" before attaching a different route.`
+      )
+    }
+    if (accessMode === 'private' && foreignAttachedSessionKeys.length > 0) {
+      throw new Error(
+        `Workspace ${workspace.workspaceId} cannot become private while other routes remain attached. Detach the other routes first.`
+      )
+    }
+    const attachedSessionKeys = Array.from(
+      new Set(
+        accessMode === 'private'
+          ? [ownerSessionKey]
+          : [...(existing?.attachedSessionKeys || []), sessionKey]
+      )
     )
-  }
-  const attachedSessionKeys = Array.from(
-    new Set(
+    const routeKeys = new Set<string>()
+    const attachedRoutes =
       accessMode === 'private'
-        ? [ownerSessionKey]
-        : [...(existing?.attachedSessionKeys || []), sessionKey]
-    )
-  )
-  const routeKeys = new Set<string>()
-  const attachedRoutes =
-    accessMode === 'private'
-      ? [ownerRoute]
-      : [...(existing?.attachedRoutes || []), route].filter((candidate) => {
-          const key = getAssistantSessionKey(candidate)
-          if (routeKeys.has(key)) return false
-          routeKeys.add(key)
-          return true
-        })
-  const next: AssistantWorkspaceMeta = {
-    workspaceId: workspace.workspaceId,
-    createdAt: existing?.createdAt || now,
-    updatedAt: now,
-    status: 'active',
-    accessMode,
-    attachedSessionKeys,
-    attachedRoutes,
-    ownerSessionKey,
-    ownerRoute,
-    ...(cleanString(existing?.title, 160) ? { title: cleanString(existing?.title, 160) } : {}),
-    ...(cleanString(existing?.description, 600)
-      ? { description: cleanString(existing?.description, 600) }
-      : {}),
-    ...(Array.isArray(existing?.sharedNotes) && existing?.sharedNotes.length
-      ? {
-          sharedNotes: dedupeStrings(
-            existing.sharedNotes.map((note) => cleanString(note, MAX_PROMPT_TEXT_CHARS)),
-            MAX_WORKSPACE_SHARED_NOTES
-          )
-        }
-      : {})
-  }
+        ? [ownerRoute]
+        : [...(existing?.attachedRoutes || []), route].filter((candidate) => {
+            const key = getAssistantSessionKey(candidate)
+            if (routeKeys.has(key)) return false
+            routeKeys.add(key)
+            return true
+          })
+    const next: AssistantWorkspaceMeta = {
+      workspaceId: workspace.workspaceId,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+      status: 'active',
+      accessMode,
+      attachedSessionKeys,
+      attachedRoutes,
+      ownerSessionKey,
+      ownerRoute,
+      ...(cleanString(existing?.title, 160) ? { title: cleanString(existing?.title, 160) } : {}),
+      ...(cleanString(existing?.description, 600)
+        ? { description: cleanString(existing?.description, 600) }
+        : {}),
+      ...(Array.isArray(existing?.sharedNotes) && existing?.sharedNotes.length
+        ? {
+            sharedNotes: dedupeStrings(
+              existing.sharedNotes.map((note) => cleanString(note, MAX_PROMPT_TEXT_CHARS)),
+              MAX_WORKSPACE_SHARED_NOTES
+            )
+          }
+        : {})
+    }
 
-  await fs.mkdir(path.dirname(workspace.workspaceMetaFile), { recursive: true })
-  await fs.writeFile(workspace.workspaceMetaFile, JSON.stringify(next, null, 2), 'utf8')
-  return next
-}
+    await writeJsonFileAtomic(workspace.workspaceMetaFile, next)
+    return next
+  })
 
 export const manageAssistantWorkspaceGovernance = async (
   workspace: Pick<AssistantWorkspaceState, 'workspaceId' | 'workspaceMetaFile'>,
   route: AssistantRoute,
   action: AssistantWorkspaceGovernanceAction
-): Promise<AssistantWorkspaceMeta> => {
-  const existing = await readAssistantWorkspaceMetaById(workspace.workspaceId)
-  if (!existing) {
-    throw new Error(
-      `Workspace ${workspace.workspaceId} has no recorded governance metadata yet. Attach it before managing policy.`
-    )
-  }
+): Promise<AssistantWorkspaceMeta> =>
+  serializeWorkspaceMetaMutation(workspace.workspaceMetaFile, async () => {
+    const existing = await readAssistantWorkspaceMetaById(workspace.workspaceId)
+    if (!existing) {
+      throw new Error(
+        `Workspace ${workspace.workspaceId} has no recorded governance metadata yet. Attach it before managing policy.`
+      )
+    }
 
-  const sessionKey = getAssistantSessionKey(route)
-  const ownerSessionKey = cleanString(existing.ownerSessionKey, 200) || sessionKey
-  const ownerRoute = existing.ownerRoute || route
+    const sessionKey = getAssistantSessionKey(route)
+    const ownerSessionKey = cleanString(existing.ownerSessionKey, 200) || sessionKey
+    const ownerRoute = existing.ownerRoute || route
 
-  if (ownerSessionKey !== sessionKey) {
-    throw new Error(
-      `Only the workspace owner (${ownerSessionKey}) can ${action} workspace ${workspace.workspaceId}.`
-    )
-  }
+    if (ownerSessionKey !== sessionKey) {
+      throw new Error(
+        `Only the workspace owner (${ownerSessionKey}) can ${action} workspace ${workspace.workspaceId}.`
+      )
+    }
 
-  const attachedSessionKeys = Array.from(new Set(existing.attachedSessionKeys || []))
-  const attachedRoutes = (existing.attachedRoutes || []).filter(Boolean)
-  const foreignAttachedSessionKeys = attachedSessionKeys.filter((key) => key !== ownerSessionKey)
+    const attachedSessionKeys = Array.from(new Set(existing.attachedSessionKeys || []))
+    const attachedRoutes = (existing.attachedRoutes || []).filter(Boolean)
+    const foreignAttachedSessionKeys = attachedSessionKeys.filter((key) => key !== ownerSessionKey)
 
-  const next: AssistantWorkspaceMeta = {
-    workspaceId: workspace.workspaceId,
-    createdAt: existing.createdAt || Date.now(),
-    updatedAt: Date.now(),
-    status: existing.status || (attachedSessionKeys.length > 0 ? 'active' : 'archived'),
-    accessMode: existing.accessMode || 'shared',
-    attachedSessionKeys,
-    attachedRoutes,
-    ownerSessionKey,
-    ownerRoute,
-    ...(existing.archivedAt !== undefined ? { archivedAt: existing.archivedAt } : {}),
-    ...(cleanString(existing.title, 160) ? { title: cleanString(existing.title, 160) } : {}),
-    ...(cleanString(existing.description, 600)
-      ? { description: cleanString(existing.description, 600) }
-      : {}),
-    ...(Array.isArray(existing.sharedNotes) && existing.sharedNotes.length
-      ? {
-          sharedNotes: dedupeStrings(
-            existing.sharedNotes.map((note) => cleanString(note, MAX_PROMPT_TEXT_CHARS)),
-            MAX_WORKSPACE_SHARED_NOTES
+    const next: AssistantWorkspaceMeta = {
+      workspaceId: workspace.workspaceId,
+      createdAt: existing.createdAt || Date.now(),
+      updatedAt: Date.now(),
+      status: existing.status || (attachedSessionKeys.length > 0 ? 'active' : 'archived'),
+      accessMode: existing.accessMode || 'shared',
+      attachedSessionKeys,
+      attachedRoutes,
+      ownerSessionKey,
+      ownerRoute,
+      ...(existing.archivedAt !== undefined ? { archivedAt: existing.archivedAt } : {}),
+      ...(cleanString(existing.title, 160) ? { title: cleanString(existing.title, 160) } : {}),
+      ...(cleanString(existing.description, 600)
+        ? { description: cleanString(existing.description, 600) }
+        : {}),
+      ...(Array.isArray(existing.sharedNotes) && existing.sharedNotes.length
+        ? {
+            sharedNotes: dedupeStrings(
+              existing.sharedNotes.map((note) => cleanString(note, MAX_PROMPT_TEXT_CHARS)),
+              MAX_WORKSPACE_SHARED_NOTES
+            )
+          }
+        : {})
+    }
+
+    switch (action) {
+      case 'share':
+        next.accessMode = 'shared'
+        break
+      case 'privatize':
+        if (foreignAttachedSessionKeys.length > 0) {
+          throw new Error(
+            `Workspace ${workspace.workspaceId} cannot become private while other routes remain attached. Detach the other routes first.`
           )
         }
-      : {})
-  }
-
-  switch (action) {
-    case 'share':
-      next.accessMode = 'shared'
-      break
-    case 'privatize':
-      if (foreignAttachedSessionKeys.length > 0) {
-        throw new Error(
-          `Workspace ${workspace.workspaceId} cannot become private while other routes remain attached. Detach the other routes first.`
+        next.accessMode = 'private'
+        next.attachedSessionKeys = attachedSessionKeys.includes(ownerSessionKey)
+          ? [ownerSessionKey]
+          : []
+        next.attachedRoutes = attachedRoutes.filter(
+          (candidate) => getAssistantSessionKey(candidate) === ownerSessionKey
         )
-      }
-      next.accessMode = 'private'
-      next.attachedSessionKeys = attachedSessionKeys.includes(ownerSessionKey)
-        ? [ownerSessionKey]
-        : []
-      next.attachedRoutes = attachedRoutes.filter(
-        (candidate) => getAssistantSessionKey(candidate) === ownerSessionKey
-      )
-      if (next.attachedSessionKeys.length > 0 && next.attachedRoutes.length === 0) {
-        next.attachedRoutes = [ownerRoute]
-      }
-      break
-    case 'archive':
-      if (attachedSessionKeys.length > 0) {
-        throw new Error(
-          `Workspace ${workspace.workspaceId} cannot be archived while routes remain attached. Detach the routes first.`
-        )
-      }
-      next.status = 'archived'
-      next.archivedAt = Date.now()
-      break
-    case 'revive':
-      next.status = 'active'
-      delete next.archivedAt
-      break
-  }
+        if (next.attachedSessionKeys.length > 0 && next.attachedRoutes.length === 0) {
+          next.attachedRoutes = [ownerRoute]
+        }
+        break
+      case 'archive':
+        if (attachedSessionKeys.length > 0) {
+          throw new Error(
+            `Workspace ${workspace.workspaceId} cannot be archived while routes remain attached. Detach the routes first.`
+          )
+        }
+        next.status = 'archived'
+        next.archivedAt = Date.now()
+        break
+      case 'revive':
+        next.status = 'active'
+        delete next.archivedAt
+        break
+    }
 
-  await fs.mkdir(path.dirname(workspace.workspaceMetaFile), { recursive: true })
-  await fs.writeFile(workspace.workspaceMetaFile, JSON.stringify(next, null, 2), 'utf8')
-  return next
-}
+    await writeJsonFileAtomic(workspace.workspaceMetaFile, next)
+    return next
+  })
 
 export const detachAssistantWorkspaceBinding = async (
   workspaceId: string,
@@ -437,47 +462,48 @@ export const detachAssistantWorkspaceBinding = async (
   if (!normalizedWorkspaceId) return undefined
 
   const workspace = getAssistantWorkspaceIdentityState(normalizedWorkspaceId)
-  const existing = await readAssistantWorkspaceMetaById(normalizedWorkspaceId)
-  if (!existing) return undefined
+  return serializeWorkspaceMetaMutation(workspace.workspaceMetaFile, async () => {
+    const existing = await readAssistantWorkspaceMetaById(normalizedWorkspaceId)
+    if (!existing) return undefined
 
-  const sessionKey = getAssistantSessionKey(route)
-  const attachedSessionKeys = (existing.attachedSessionKeys || []).filter(
-    (key) => key !== sessionKey
-  )
-  const attachedRoutes = (existing.attachedRoutes || []).filter(
-    (candidate) => getAssistantSessionKey(candidate) !== sessionKey
-  )
-  const archivedAt = attachedSessionKeys.length === 0 ? Date.now() : undefined
-  const next: AssistantWorkspaceMeta = {
-    workspaceId: normalizedWorkspaceId,
-    createdAt: existing.createdAt || Date.now(),
-    updatedAt: Date.now(),
-    status: attachedSessionKeys.length === 0 ? 'archived' : 'active',
-    accessMode: existing.accessMode || 'shared',
-    attachedSessionKeys,
-    attachedRoutes,
-    ...(cleanString(existing.ownerSessionKey, 200)
-      ? { ownerSessionKey: cleanString(existing.ownerSessionKey, 200) }
-      : {}),
-    ...(existing.ownerRoute ? { ownerRoute: existing.ownerRoute } : {}),
-    ...(archivedAt !== undefined ? { archivedAt } : {}),
-    ...(cleanString(existing.title, 160) ? { title: cleanString(existing.title, 160) } : {}),
-    ...(cleanString(existing.description, 600)
-      ? { description: cleanString(existing.description, 600) }
-      : {}),
-    ...(Array.isArray(existing.sharedNotes) && existing.sharedNotes.length
-      ? {
-          sharedNotes: dedupeStrings(
-            existing.sharedNotes.map((note) => cleanString(note, MAX_PROMPT_TEXT_CHARS)),
-            MAX_WORKSPACE_SHARED_NOTES
-          )
-        }
-      : {})
-  }
+    const sessionKey = getAssistantSessionKey(route)
+    const attachedSessionKeys = (existing.attachedSessionKeys || []).filter(
+      (key) => key !== sessionKey
+    )
+    const attachedRoutes = (existing.attachedRoutes || []).filter(
+      (candidate) => getAssistantSessionKey(candidate) !== sessionKey
+    )
+    const archivedAt = attachedSessionKeys.length === 0 ? Date.now() : undefined
+    const next: AssistantWorkspaceMeta = {
+      workspaceId: normalizedWorkspaceId,
+      createdAt: existing.createdAt || Date.now(),
+      updatedAt: Date.now(),
+      status: attachedSessionKeys.length === 0 ? 'archived' : 'active',
+      accessMode: existing.accessMode || 'shared',
+      attachedSessionKeys,
+      attachedRoutes,
+      ...(cleanString(existing.ownerSessionKey, 200)
+        ? { ownerSessionKey: cleanString(existing.ownerSessionKey, 200) }
+        : {}),
+      ...(existing.ownerRoute ? { ownerRoute: existing.ownerRoute } : {}),
+      ...(archivedAt !== undefined ? { archivedAt } : {}),
+      ...(cleanString(existing.title, 160) ? { title: cleanString(existing.title, 160) } : {}),
+      ...(cleanString(existing.description, 600)
+        ? { description: cleanString(existing.description, 600) }
+        : {}),
+      ...(Array.isArray(existing.sharedNotes) && existing.sharedNotes.length
+        ? {
+            sharedNotes: dedupeStrings(
+              existing.sharedNotes.map((note) => cleanString(note, MAX_PROMPT_TEXT_CHARS)),
+              MAX_WORKSPACE_SHARED_NOTES
+            )
+          }
+        : {})
+    }
 
-  await fs.mkdir(path.dirname(workspace.workspaceMetaFile), { recursive: true })
-  await fs.writeFile(workspace.workspaceMetaFile, JSON.stringify(next, null, 2), 'utf8')
-  return next
+    await writeJsonFileAtomic(workspace.workspaceMetaFile, next)
+    return next
+  })
 }
 
 export const updateAssistantWorkspaceMeta = async (
@@ -489,62 +515,62 @@ export const updateAssistantWorkspaceMeta = async (
     appendSharedNote?: string
     accessMode?: AssistantWorkspaceAccessMode
   }
-): Promise<AssistantWorkspaceMeta> => {
-  const existing = await readAssistantWorkspaceMetaById(workspace.workspaceId)
-  if (updates.accessMode === 'private' && new Set(existing?.attachedSessionKeys || []).size > 1) {
-    throw new Error(
-      `Workspace ${workspace.workspaceId} cannot become private while other routes remain attached. Detach the other routes first.`
+): Promise<AssistantWorkspaceMeta> =>
+  serializeWorkspaceMetaMutation(workspace.workspaceMetaFile, async () => {
+    const existing = await readAssistantWorkspaceMetaById(workspace.workspaceId)
+    if (updates.accessMode === 'private' && new Set(existing?.attachedSessionKeys || []).size > 1) {
+      throw new Error(
+        `Workspace ${workspace.workspaceId} cannot become private while other routes remain attached. Detach the other routes first.`
+      )
+    }
+    const nextSharedNotes = dedupeStrings(
+      [
+        ...(updates.setSharedNotes || existing?.sharedNotes || []).map((note) =>
+          cleanString(note, MAX_PROMPT_TEXT_CHARS)
+        ),
+        cleanString(updates.appendSharedNote, MAX_PROMPT_TEXT_CHARS)
+      ],
+      MAX_WORKSPACE_SHARED_NOTES
     )
-  }
-  const nextSharedNotes = dedupeStrings(
-    [
-      ...(updates.setSharedNotes || existing?.sharedNotes || []).map((note) =>
-        cleanString(note, MAX_PROMPT_TEXT_CHARS)
-      ),
-      cleanString(updates.appendSharedNote, MAX_PROMPT_TEXT_CHARS)
-    ],
-    MAX_WORKSPACE_SHARED_NOTES
-  )
 
-  const next: AssistantWorkspaceMeta = {
-    workspaceId: workspace.workspaceId,
-    createdAt: existing?.createdAt || Date.now(),
-    updatedAt: Date.now(),
-    status:
-      (existing?.attachedSessionKeys?.length || 0) > 0
-        ? 'active'
-        : existing?.status === 'archived'
-          ? 'archived'
-          : 'active',
-    accessMode:
-      updates.accessMode ||
-      existing?.accessMode ||
-      (existing?.attachedSessionKeys?.length === 1 ? 'private' : 'shared'),
-    attachedSessionKeys: existing?.attachedSessionKeys || [],
-    attachedRoutes: existing?.attachedRoutes || [],
-    ...(cleanString(existing?.ownerSessionKey, 200)
-      ? { ownerSessionKey: cleanString(existing?.ownerSessionKey, 200) }
-      : {}),
-    ...(existing?.ownerRoute ? { ownerRoute: existing.ownerRoute } : {}),
-    ...(existing?.status === 'archived' && existing?.archivedAt !== undefined
-      ? { archivedAt: existing.archivedAt }
-      : {}),
-    ...(cleanString(updates.title, 160) || cleanString(existing?.title, 160)
-      ? { title: cleanString(updates.title, 160) || cleanString(existing?.title, 160) }
-      : {}),
-    ...(cleanString(updates.description, 600) || cleanString(existing?.description, 600)
-      ? {
-          description:
-            cleanString(updates.description, 600) || cleanString(existing?.description, 600)
-        }
-      : {}),
-    ...(nextSharedNotes.length ? { sharedNotes: nextSharedNotes } : {})
-  }
+    const next: AssistantWorkspaceMeta = {
+      workspaceId: workspace.workspaceId,
+      createdAt: existing?.createdAt || Date.now(),
+      updatedAt: Date.now(),
+      status:
+        (existing?.attachedSessionKeys?.length || 0) > 0
+          ? 'active'
+          : existing?.status === 'archived'
+            ? 'archived'
+            : 'active',
+      accessMode:
+        updates.accessMode ||
+        existing?.accessMode ||
+        (existing?.attachedSessionKeys?.length === 1 ? 'private' : 'shared'),
+      attachedSessionKeys: existing?.attachedSessionKeys || [],
+      attachedRoutes: existing?.attachedRoutes || [],
+      ...(cleanString(existing?.ownerSessionKey, 200)
+        ? { ownerSessionKey: cleanString(existing?.ownerSessionKey, 200) }
+        : {}),
+      ...(existing?.ownerRoute ? { ownerRoute: existing.ownerRoute } : {}),
+      ...(existing?.status === 'archived' && existing?.archivedAt !== undefined
+        ? { archivedAt: existing.archivedAt }
+        : {}),
+      ...(cleanString(updates.title, 160) || cleanString(existing?.title, 160)
+        ? { title: cleanString(updates.title, 160) || cleanString(existing?.title, 160) }
+        : {}),
+      ...(cleanString(updates.description, 600) || cleanString(existing?.description, 600)
+        ? {
+            description:
+              cleanString(updates.description, 600) || cleanString(existing?.description, 600)
+          }
+        : {}),
+      ...(nextSharedNotes.length ? { sharedNotes: nextSharedNotes } : {})
+    }
 
-  await fs.mkdir(path.dirname(workspace.workspaceMetaFile), { recursive: true })
-  await fs.writeFile(workspace.workspaceMetaFile, JSON.stringify(next, null, 2), 'utf8')
-  return next
-}
+    await writeJsonFileAtomic(workspace.workspaceMetaFile, next)
+    return next
+  })
 
 export const appendAssistantMemoryLog = async (
   workspace: AssistantWorkspaceState,

@@ -839,7 +839,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         console.warn('[ChatPage] persistAssistantAttachmentFileReference failed:', error)
       })
     },
-    [storageScope]
+    [setSessions, storageScope]
   )
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(() => {
     try {
@@ -935,7 +935,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         sessionLoadEpochRef.current += 1
       }
     }
-  }, [setSessions, storageScope])
+  }, [currentSessionStorageKey, setSessions, storageScope])
 
   const refreshSessionsFromStorage = useCallback(async (): Promise<void> => {
     const refreshEpoch = sessionLoadEpochRef.current
@@ -4172,16 +4172,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }
   selectSessionRef.current = selectSession
 
-  const selectProfile = (profileId: string | null) => {
-    const nextProfileId = resolveAvailableProfileId(profileId)
-    setSelectedProfileId(nextProfileId)
-    if (currentSession) {
-      const updated = sessions.map((s) =>
-        s.id === currentSessionId ? { ...s, profileId: nextProfileId ?? undefined } : s
-      )
-      setSessions(updated)
-    }
-  }
+  const selectProfile = useCallback(
+    (profileId: string | null) => {
+      const nextProfileId = resolveAvailableProfileId(profileId)
+      setSelectedProfileId(nextProfileId)
+      if (currentSession) {
+        const updated = sessions.map((s) =>
+          s.id === currentSessionId ? { ...s, profileId: nextProfileId ?? undefined } : s
+        )
+        setSessions(updated)
+      }
+    },
+    [currentSession, currentSessionId, resolveAvailableProfileId, sessions, setSessions]
+  )
   const selectReasoningEffort = useCallback(
     (effort: LLMReasoningEffort) => {
       if (!selectedReasoningProfileKey) {
@@ -5376,12 +5379,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
       selectedProfileId,
       selectedSkillId,
       imageGenerationOptions,
+      isImageGenerationSelected,
+      persistCurrentSessionSnapshot,
+      route,
       setInputValue,
       setPendingAttachments,
       setPendingHiddenContext,
       setSessionLoadingStatus,
       setSessions,
-      sessions,
       storageScope,
       t,
       notifyWarning,

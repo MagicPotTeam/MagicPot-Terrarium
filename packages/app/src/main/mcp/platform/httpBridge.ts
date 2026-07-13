@@ -20,9 +20,15 @@ export const getConfiguredMcpLegacySsePath = (): string =>
 export const getConfiguredMcpLegacySseMessagePath = (): string =>
   `${trimTrailingSlash(getConfiguredMcpPath())}/messages`
 
+export const LEGACY_SSE_MAX_SESSIONS = 100
+export const LEGACY_SSE_IDLE_TIMEOUT_MS = 30 * 60 * 1000
+
 type LegacySseSessionRecord = {
   transport: SSEServerTransport
   server: ReturnType<typeof createMagicPotMcpServer>
+  lastActivityAt: number
+  idleTimer: ReturnType<typeof setTimeout>
+  removeLifecycleListeners: () => void
 }
 
 const legacySseSessions = new Map<string, LegacySseSessionRecord>()
@@ -42,7 +48,27 @@ const cleanupLegacySseSession = async (sessionId: string): Promise<void> => {
   }
 
   legacySseSessions.delete(sessionId)
+  clearTimeout(existing.idleTimer)
+  existing.removeLifecycleListeners()
   await existing.server.close().catch(() => undefined)
+}
+
+const refreshLegacySseSessionIdleTimer = (sessionId: string): void => {
+  const existing = legacySseSessions.get(sessionId)
+  if (!existing) {
+    return
+  }
+
+  existing.lastActivityAt = Date.now()
+  clearTimeout(existing.idleTimer)
+  existing.idleTimer = setTimeout(() => {
+    void cleanupLegacySseSession(sessionId)
+  }, LEGACY_SSE_IDLE_TIMEOUT_MS)
+  existing.idleTimer.unref?.()
+}
+
+export const closeMagicPotMcpLegacySseSessions = async (): Promise<void> => {
+  await Promise.all([...legacySseSessions.keys()].map(cleanupLegacySseSession))
 }
 
 export const handleMagicPotMcpLegacySseOpenRequest = async (options: {
@@ -68,24 +94,55 @@ export const handleMagicPotMcpLegacySseOpenRequest = async (options: {
     }
   })
 
+  if (legacySseSessions.size >= LEGACY_SSE_MAX_SESSIONS) {
+    options.res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '1' })
+    options.res.end(JSON.stringify({ error: 'Legacy SSE session capacity reached.' }))
+    return
+  }
+
   const transport = new SSEServerTransport(getConfiguredMcpLegacySseMessagePath(), options.res)
   const server = createMagicPotMcpServer({
     configProvider: () => getConfig()
   })
-
-  legacySseSessions.set(transport.sessionId, {
-    transport,
-    server
-  })
-  transport.onclose = () => {
-    void cleanupLegacySseSession(transport.sessionId)
+  const sessionId = transport.sessionId
+  const cleanup = (): void => {
+    void cleanupLegacySseSession(sessionId)
   }
+  const cleanupOnRequestClose = (): void => {
+    if (!options.req.complete || options.res.destroyed) {
+      cleanup()
+    }
+  }
+  const lifecycleEvents = [
+    [options.req, 'aborted'],
+    [options.req, 'error'],
+    [options.res, 'close'],
+    [options.res, 'error']
+  ] as const
+  for (const [emitter, event] of lifecycleEvents) {
+    emitter.once(event, cleanup)
+  }
+  options.req.once('close', cleanupOnRequestClose)
+
+  legacySseSessions.set(sessionId, {
+    transport,
+    server,
+    lastActivityAt: Date.now(),
+    idleTimer: setTimeout(cleanup, LEGACY_SSE_IDLE_TIMEOUT_MS),
+    removeLifecycleListeners: () => {
+      for (const [emitter, event] of lifecycleEvents) {
+        emitter.removeListener(event, cleanup)
+      }
+      options.req.removeListener('close', cleanupOnRequestClose)
+    }
+  })
+  legacySseSessions.get(sessionId)?.idleTimer.unref?.()
+  transport.onclose = cleanup
 
   try {
     await server.connect(transport)
   } catch (error) {
-    legacySseSessions.delete(transport.sessionId)
-    await server.close().catch(() => undefined)
+    await cleanupLegacySseSession(sessionId)
     throw error
   }
 }
@@ -145,7 +202,23 @@ export const handleMagicPotMcpLegacySseMessageRequest = async (options: {
     return
   }
 
-  await existing.transport.handlePostMessage(options.req, options.res, options.parsedBody)
+  refreshLegacySseSessionIdleTimer(sessionId)
+
+  const cleanupOnAborted = (): void => {
+    void cleanupLegacySseSession(sessionId)
+  }
+  options.req.once('aborted', cleanupOnAborted)
+  options.req.once('error', cleanupOnAborted)
+  options.res.once('error', cleanupOnAborted)
+
+  try {
+    await existing.transport.handlePostMessage(options.req, options.res, options.parsedBody)
+    refreshLegacySseSessionIdleTimer(sessionId)
+  } finally {
+    options.req.removeListener('aborted', cleanupOnAborted)
+    options.req.removeListener('error', cleanupOnAborted)
+    options.res.removeListener('error', cleanupOnAborted)
+  }
 }
 
 export const handleMagicPotMcpHttpBridgeRequest = async (options: {

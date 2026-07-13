@@ -36,6 +36,30 @@ export type CanvasTargetAuxiliaryOutputFormat =
 
 export type CanvasTargetExecutionBackend = 'llm' | 'local_model'
 
+export function resolveCanvasTargetBaseProfile<T extends { id: string }>(
+  listedProfile: { id: string; base_profile_id?: string },
+  configuredProfiles: readonly T[]
+): T | undefined {
+  return configuredProfiles.find(
+    (profile) => profile.id === (listedProfile.base_profile_id || listedProfile.id)
+  )
+}
+
+export function resolveCanvasTargetCompositeProfile<
+  TListed extends { id: string; base_profile_id?: string; model_name?: string },
+  TConfigured extends { id: string }
+>(
+  listedProfile: TListed,
+  configuredProfiles: readonly TConfigured[]
+): TListed & Partial<TConfigured> {
+  const baseProfile = resolveCanvasTargetBaseProfile(listedProfile, configuredProfiles)
+  return {
+    ...(baseProfile || {}),
+    ...listedProfile,
+    model_name: listedProfile.model_name
+  } as TListed & Partial<TConfigured>
+}
+
 export type CanvasTargetStageDraft = {
   profileId: string
   responsibilityType?: CanvasTargetAuxiliaryResponsibilityType

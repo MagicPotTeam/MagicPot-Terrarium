@@ -8,6 +8,7 @@ import { buildProjectStorageDirName } from '@shared/projectStorage'
 import {
   PROJECT_TRACE_DIR_NAME,
   PROJECT_TRACE_DOCUMENT_FILENAME,
+  PROJECT_TRACE_MANIFEST_FILENAME,
   PROJECT_TRACE_REFERENCE_PACK_FILENAME
 } from '@shared/projectTrace'
 import { ProjectTraceFSCli } from './fs'
@@ -171,6 +172,35 @@ describe('ProjectTraceFSCli', () => {
     await expect(cli.readTrace(project, saved.manifest.id)).rejects.toThrow(
       /Project trace file escaped the trace directory/
     )
+  })
+
+  it('persists valid reasoning effort and drops invalid manifest values', async () => {
+    const { cli, project } = await createCli()
+    const saved = await cli.saveTrace(project, {
+      name: 'Reasoning trace',
+      sourceKind: 'manual',
+      markdown: 'Safe trace content.',
+      llmProfileId: 'codex-profile::codex-model::gpt-5.6-sol',
+      llmReasoningEffort: 'xhigh'
+    })
+
+    expect(saved.manifest.redaction).toMatchObject({
+      llmProfileId: 'codex-profile::codex-model::gpt-5.6-sol',
+      llmReasoningEffort: 'xhigh'
+    })
+
+    const manifestPath = path.join(
+      project.projectRootDir,
+      PROJECT_TRACE_DIR_NAME,
+      saved.manifest.id,
+      PROJECT_TRACE_MANIFEST_FILENAME
+    )
+    const rawManifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'))
+    rawManifest.redaction.llmReasoningEffort = 'impossible'
+    await fs.writeFile(manifestPath, JSON.stringify(rawManifest), 'utf8')
+
+    const read = await cli.readTrace(project, saved.manifest.id)
+    expect(read?.manifest.redaction.llmReasoningEffort).toBeUndefined()
   })
 
   it('stores redacted project trace documents under the project trace directory', async () => {

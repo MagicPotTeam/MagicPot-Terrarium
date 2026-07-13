@@ -4,6 +4,7 @@ import { Terminal as TerminalIcon } from '@mui/icons-material'
 import { useTheme } from '@mui/material/styles'
 import { api } from '@renderer/utils/windowUtils'
 import { useTranslation } from 'react-i18next'
+import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import { isServerStreamingError } from '@shared/api/apiUtils/streaming'
 
 const SCROLL_TO_BOTTOM_THRESHOLD = 20
@@ -56,17 +57,17 @@ const AppLogPage: React.FC = () => {
 
   // 监听日志
   useEffect(() => {
-    const abortController: AbortController | null = null
+    const [abortSender, abortReceiver] = newAbortHandler()
+    let mounted = true
 
     const startWatching = async () => {
-      // 避免重复连接（React StrictMode 会导致两次 mount）
-      if (abortController) return
-
       try {
         await api().svcLog.watchAppLogs(
           {},
           {
             onData: (data) => {
+              if (!mounted) return
+
               const timeStr = new Date(data.timestamp).toLocaleTimeString()
               const levelPrefix = data.level === 'info' ? '' : `[${data.level.toUpperCase()}] `
               const newLine = {
@@ -82,20 +83,22 @@ const AppLogPage: React.FC = () => {
                 }
                 return next
               })
-            }
+            },
+            abortReceiver
           }
         )
       } catch (error) {
-        if (!isServerStreamingError(error)) {
+        if (mounted && !abortReceiver.isAborted() && !isServerStreamingError(error)) {
           console.error('Watch logs failed:', error)
         }
       }
     }
 
-    startWatching()
+    void startWatching()
 
     return () => {
-      // Cleanup
+      mounted = false
+      abortSender.abort()
     }
   }, [])
 

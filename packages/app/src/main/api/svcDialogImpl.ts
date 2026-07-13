@@ -10,6 +10,7 @@ import {
   dialog
 } from 'electron'
 import { rememberTrustedLocalFileSelections } from './trustedFileSelection'
+import { authorizeScopedLocalMediaPath } from '../localMediaAccess'
 
 export class DialogSvcImpl implements DialogSvc {
   private getDialogParentWindow(): BrowserWindow | null {
@@ -22,6 +23,7 @@ export class DialogSvcImpl implements DialogSvc {
     const selectedFiles = properties.includes('openFile') && !properties.includes('openDirectory')
     if (selectedFiles && !result.canceled && result.filePaths?.length) {
       rememberTrustedLocalFileSelections(result.filePaths)
+      result.filePaths.forEach(authorizeScopedLocalMediaPath)
     }
     return result
   }

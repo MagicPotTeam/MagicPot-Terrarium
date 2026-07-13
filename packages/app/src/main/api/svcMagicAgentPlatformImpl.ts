@@ -195,6 +195,23 @@ const mergeAgentDefinitions = (
   return [...agentsById.values()].sort((left, right) => left.id.localeCompare(right.id))
 }
 
+const cleanSystemPrompt = (value: string | null | undefined): string => String(value || '').trim()
+
+const composeSystemPrompt = (
+  agentSystemPrompt: string | null | undefined,
+  requestSystemPrompt: string | null | undefined
+): string | undefined => {
+  const agentPrompt = cleanSystemPrompt(agentSystemPrompt)
+  const requestPrompt = cleanSystemPrompt(requestSystemPrompt)
+  if (!agentPrompt) {
+    return requestPrompt || undefined
+  }
+  if (!requestPrompt || requestPrompt === agentPrompt) {
+    return agentPrompt
+  }
+  return `${agentPrompt}\n\n${requestPrompt}`
+}
+
 const resolvePackageAgentAllowedToolNames = (
   requested: MagicAgentPlatformRunReq['allowedToolNames'],
   packageToolNames: MagicAgentPlatformAgentDefinition['toolNames']
@@ -439,7 +456,7 @@ export class MagicAgentPlatformSvcImpl implements MagicAgentPlatformSvc {
         )
         return adapter.runAgent({
           ...authorizedReq,
-          systemPrompt: authorizedReq.systemPrompt ?? packageAgent.systemPrompt,
+          systemPrompt: composeSystemPrompt(packageAgent.systemPrompt, authorizedReq.systemPrompt),
           profileId: authorizedReq.profileId ?? packageAgent.profileId,
           maxToolIterations: authorizedReq.maxToolIterations ?? packageAgent.maxToolIterations,
           ...(allowedToolNames !== undefined ? { allowedToolNames } : {})

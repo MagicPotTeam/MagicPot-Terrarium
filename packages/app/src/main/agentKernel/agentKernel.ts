@@ -24,9 +24,29 @@ type SessionRegistration = {
   source: 'assistant' | 'mcp' | 'bot' | 'kernel'
 }
 
+export type AgentKernelRetentionPolicy = {
+  maxEvents?: number
+  maxTerminalRuns?: number
+  maxInactiveSessions?: number
+}
+
+type ResolvedAgentKernelRetentionPolicy = Required<AgentKernelRetentionPolicy>
+
+export const DEFAULT_AGENT_KERNEL_RETENTION_POLICY: Readonly<ResolvedAgentKernelRetentionPolicy> = {
+  maxEvents: 10_000,
+  maxTerminalRuns: 1_000,
+  maxInactiveSessions: 1_000
+}
+
 const now = (): number => Date.now()
 
 const normalizeRunStatus = (status?: AgentRunStatus): AgentRunStatus => status || 'pending'
+
+const isTerminalRunStatus = (status: AgentRunStatus): boolean =>
+  status === 'completed' || status === 'failed' || status === 'cancelled'
+
+const normalizeRetentionLimit = (value: number | undefined, fallback: number): number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : fallback
 
 const mergeSessionIdentity = (
   current: AgentSessionIdentity,
@@ -65,6 +85,24 @@ export class AgentKernel {
   private readonly sessions = new Map<string, SessionRegistration>()
   private readonly runs = new Map<string, AgentOrchestrationRun>()
   private readonly events: AgentOrchestrationEvent[] = []
+  private readonly retention: ResolvedAgentKernelRetentionPolicy
+
+  constructor(retention: AgentKernelRetentionPolicy = {}) {
+    this.retention = {
+      maxEvents: normalizeRetentionLimit(
+        retention.maxEvents,
+        DEFAULT_AGENT_KERNEL_RETENTION_POLICY.maxEvents
+      ),
+      maxTerminalRuns: normalizeRetentionLimit(
+        retention.maxTerminalRuns,
+        DEFAULT_AGENT_KERNEL_RETENTION_POLICY.maxTerminalRuns
+      ),
+      maxInactiveSessions: normalizeRetentionLimit(
+        retention.maxInactiveSessions,
+        DEFAULT_AGENT_KERNEL_RETENTION_POLICY.maxInactiveSessions
+      )
+    }
+  }
 
   registerSession(
     route: AssistantRoute,
@@ -87,6 +125,7 @@ export class AgentKernel {
       identity: mergedIdentity,
       source: options?.source || existing?.source || 'assistant'
     })
+    this.pruneInactiveSessions(new Set([mergedIdentity.sessionKey]))
 
     return mergedIdentity
   }
@@ -101,7 +140,7 @@ export class AgentKernel {
 
   registerCapability(descriptor: AgentCapabilityDescriptor): AgentCapabilityDescriptor {
     const registered = this.capabilities.register(descriptor)
-    this.events.push({
+    this.appendEvent({
       eventId: crypto.randomUUID(),
       runId: 'kernel',
       sessionKey: registered.capabilityId,
@@ -218,7 +257,7 @@ export class AgentKernel {
     normalized.startedAt = startedAt
     normalized.finishedAt = finishedAt
     normalized.durationMs = Math.max(0, finishedAt - startedAt)
-    this.events.push({
+    this.appendEvent({
       eventId: crypto.randomUUID(),
       runId: request.traceLabel || invocationId,
       sessionKey: session.sessionKey,
@@ -262,7 +301,7 @@ export class AgentKernel {
       eventId: crypto.randomUUID(),
       createdAt: now()
     }
-    this.events.push(recorded)
+    this.appendEvent(recorded)
     return recorded
   }
 
@@ -283,6 +322,10 @@ export class AgentKernel {
       status: normalizeRunStatus(updates.status || run.status)
     }
     this.runs.set(run.runId, next)
+    if (isTerminalRunStatus(next.status)) {
+      this.pruneTerminalRuns()
+      this.pruneInactiveSessions()
+    }
     return next
   }
 
@@ -294,11 +337,53 @@ export class AgentKernel {
     this.events.length = 0
   }
 
+  private appendEvent(event: AgentOrchestrationEvent): void {
+    this.events.push(event)
+    const overflow = this.events.length - this.retention.maxEvents
+    if (overflow > 0) this.events.splice(0, overflow)
+  }
+
+  private pruneTerminalRuns(): void {
+    const terminalRuns = [...this.runs.values()]
+      .filter((run) => isTerminalRunStatus(run.status))
+      .sort((left, right) => left.updatedAt - right.updatedAt)
+    const overflow = terminalRuns.length - this.retention.maxTerminalRuns
+
+    for (let index = 0; index < overflow; index += 1) {
+      this.runs.delete(terminalRuns[index].runId)
+    }
+  }
+
+  private pruneInactiveSessions(preservedSessionKeys: ReadonlySet<string> = new Set()): void {
+    const activeSessionKeys = new Set(
+      [...this.runs.values()]
+        .filter((run) => !isTerminalRunStatus(run.status))
+        .map((run) => run.session.sessionKey)
+    )
+    const inactiveSessions = [...this.sessions.values()].filter(
+      (record) => !activeSessionKeys.has(record.identity.sessionKey)
+    )
+    const removableSessions = inactiveSessions
+      .filter((record) => !preservedSessionKeys.has(record.identity.sessionKey))
+      .sort((left, right) => left.identity.updatedAt - right.identity.updatedAt)
+    const overflow = inactiveSessions.length - this.retention.maxInactiveSessions
+
+    for (let index = 0; index < Math.min(overflow, removableSessions.length); index += 1) {
+      this.sessions.delete(removableSessions[index].identity.sessionKey)
+    }
+  }
+
   private createRun(
     kind: AgentOrchestrationRun['kind'],
     spec: AgentMasterRunSpec & Partial<AgentSubagentRunSpec>
   ): AgentOrchestrationRun {
-    const session = this.sessions.get(spec.session.sessionKey)?.identity || spec.session
+    const existingSession = this.sessions.get(spec.session.sessionKey)
+    const session = existingSession?.identity || spec.session
+    this.sessions.set(session.sessionKey, {
+      identity: session,
+      source: existingSession?.source || 'kernel'
+    })
+
     const run: AgentOrchestrationRun = {
       runId: crypto.randomUUID(),
       kind,
@@ -318,6 +403,7 @@ export class AgentKernel {
     }
 
     this.runs.set(run.runId, run)
+    this.pruneInactiveSessions()
     this.recordEvent({
       runId: run.runId,
       sessionKey: run.session.sessionKey,

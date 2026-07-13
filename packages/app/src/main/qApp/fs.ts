@@ -41,12 +41,86 @@ type QAppBundleData = {
   manifest: QAppManifest
 }
 
+type ResolvedQAppPath = {
+  key: string
+  basePath: string
+}
+
+type QAppPaths = {
+  basePath: string
+  qAppPath: string
+  workflowPath: string
+  manifestPath: string
+}
+
+type AtomicFile = {
+  targetPath: string
+  contents: string
+  stagedPath: string
+  backupPath: string
+  backedUp: boolean
+  committed: boolean
+}
+
+type QAppFS = Pick<typeof fs, 'writeFile' | 'rename' | 'unlink'>
+
+let transactionSequence = 0
+
+function transactionSuffix(): string {
+  transactionSequence += 1
+  return `.magicpot-${process.pid}-${Date.now()}-${transactionSequence}`
+}
+
+export function resolveQAppStoragePath(
+  baseDir: string,
+  value: string,
+  kind: 'key' | 'name' = 'key'
+): ResolvedQAppPath {
+  const normalized = value.split(String.fromCharCode(92)).join('/')
+  const segments = normalized.split('/')
+  const label = kind === 'name' ? 'name' : 'key'
+  const invalidSegment = (segment: string): boolean =>
+    !segment ||
+    segment === '.' ||
+    segment === '..' ||
+    /[<>:"|?*]/.test(segment) ||
+    Array.from(segment).some((char) => char.charCodeAt(0) < 32) ||
+    segment.endsWith('.') ||
+    segment.endsWith(' ')
+
+  if (
+    value !== value.trim() ||
+    !normalized ||
+    path.posix.isAbsolute(normalized) ||
+    path.win32.isAbsolute(value) ||
+    (kind === 'name' && segments.length !== 1) ||
+    segments.some(invalidSegment)
+  ) {
+    throw new Error(`Invalid QApp ${label}`)
+  }
+
+  const key = segments.join('/')
+  const root = path.resolve(baseDir)
+  const basePath = path.resolve(root, ...segments)
+  const relative = path.relative(root, basePath)
+  if (
+    !relative ||
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error(`Invalid QApp ${label}`)
+  }
+  return { key, basePath }
+}
+
 export class QAppFSCli {
   private configUtils: ConfigUtils
 
   constructor(
     private config: Config = getConfig(),
-    private buildEnv: BuildEnv = getBuildEnv()
+    private buildEnv: BuildEnv = getBuildEnv(),
+    private fileSystem: QAppFS = fs
   ) {
     this.configUtils = new ConfigUtils(this.config, this.buildEnv, path)
   }
@@ -75,7 +149,7 @@ export class QAppFSCli {
   }
 
   private getManifestPath(baseDir: string, key: string): string {
-    return path.join(baseDir, `${key}.manifest.json`)
+    return this.getQAppPaths(baseDir, key).manifestPath
   }
 
   private async getBuiltinQAppDir(): Promise<string> {
@@ -108,16 +182,8 @@ export class QAppFSCli {
     return directories
   }
 
-  private getQAppPaths(
-    baseDir: string,
-    key: string
-  ): {
-    basePath: string
-    qAppPath: string
-    workflowPath: string
-    manifestPath: string
-  } {
-    const basePath = path.join(baseDir, key)
+  private getQAppPaths(baseDir: string, key: string): QAppPaths {
+    const { basePath } = resolveQAppStoragePath(baseDir, key)
     return {
       basePath,
       qAppPath: `${basePath}.qacfg.json`,
@@ -128,6 +194,92 @@ export class QAppFSCli {
 
   private getCurrentAppVersion(): string {
     return this.buildEnv.env.packageVersion || '0.0.0'
+  }
+
+  private async removeFilesBestEffort(paths: string[]): Promise<void> {
+    await Promise.all(
+      paths.map(async (filePath) => {
+        try {
+          await this.fileSystem.unlink(filePath)
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code
+          if (code !== 'ENOENT') {
+            console.warn(`[QAppFSCli] Failed to clean up temporary file ${filePath}:`, error)
+          }
+        }
+      })
+    )
+  }
+
+  private async rollbackAtomicFiles(files: AtomicFile[]): Promise<void> {
+    let rollbackError: unknown
+
+    for (const file of [...files].reverse()) {
+      try {
+        if (file.committed) {
+          await this.fileSystem.unlink(file.targetPath)
+        }
+        if (file.backedUp) {
+          await this.fileSystem.rename(file.backupPath, file.targetPath)
+          file.backedUp = false
+        }
+      } catch (error) {
+        rollbackError ||= error
+      }
+    }
+
+    if (rollbackError) {
+      throw rollbackError
+    }
+  }
+
+  private async replaceFilesAtomically(
+    entries: Array<{ targetPath: string; contents: string }>
+  ): Promise<void> {
+    const suffix = transactionSuffix()
+    const files: AtomicFile[] = entries.map(({ targetPath, contents }) => ({
+      targetPath,
+      contents,
+      stagedPath: `${targetPath}${suffix}.tmp`,
+      backupPath: `${targetPath}${suffix}.bak`,
+      backedUp: false,
+      committed: false
+    }))
+
+    try {
+      for (const file of files) {
+        await this.fileSystem.writeFile(file.stagedPath, file.contents, { flag: 'wx' })
+      }
+
+      for (const file of files) {
+        try {
+          await this.fileSystem.rename(file.targetPath, file.backupPath)
+          file.backedUp = true
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw error
+          }
+        }
+      }
+
+      for (const file of files) {
+        await this.fileSystem.rename(file.stagedPath, file.targetPath)
+        file.committed = true
+      }
+    } catch (error) {
+      try {
+        await this.rollbackAtomicFiles(files)
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], 'QApp transaction and rollback failed')
+      } finally {
+        await this.removeFilesBestEffort(
+          files.flatMap((file) => [file.stagedPath, file.backupPath])
+        )
+      }
+      throw error
+    }
+
+    await this.removeFilesBestEffort(files.map((file) => file.backupPath))
   }
 
   private createDefaultManifest(
@@ -376,8 +528,7 @@ export class QAppFSCli {
     // User directory should override bundled resources when keys collide.
     for (let i = sources.length - 1; i >= 0; i -= 1) {
       const qAppDir = sources[i].dir
-      const workflowPath = path.join(qAppDir, `${key}.prompt.json`)
-      const qAppPath = path.join(qAppDir, `${key}.qacfg.json`)
+      const { workflowPath, qAppPath } = this.getQAppPaths(qAppDir, key)
 
       if (!(await exists(workflowPath)) || !(await exists(qAppPath))) {
         continue
@@ -411,27 +562,26 @@ export class QAppFSCli {
   ): Promise<void> {
     await this.prepareQAppStorage()
     const qAppDir = await this.getWritableQAppDir()
-    const targetDir = path.dirname(path.join(qAppDir, key))
+    const { qAppPath, workflowPath, manifestPath } = this.getQAppPaths(qAppDir, key)
+    const targetDir = path.dirname(qAppPath)
     await fs.mkdir(targetDir, { recursive: true })
-
-    const workflowPath = path.join(qAppDir, `${key}.prompt.json`)
-    const qAppPath = path.join(qAppDir, `${key}.qacfg.json`)
-    const manifestPath = this.getManifestPath(qAppDir, key)
     const existingManifest = await this.readManifest(qAppDir, key).catch(() => null)
 
-    await fs.writeFile(qAppPath, JSON.stringify(cfg, null, 2))
-    await fs.writeFile(workflowPath, JSON.stringify(workflow, null, 2))
-    await fs.writeFile(
-      manifestPath,
-      JSON.stringify(
-        this.createDefaultManifest(key, {
-          ...(existingManifest || {}),
-          ...(manifest || {})
-        }),
-        null,
-        2
-      )
-    )
+    await this.replaceFilesAtomically([
+      { targetPath: qAppPath, contents: JSON.stringify(cfg, null, 2) },
+      { targetPath: workflowPath, contents: JSON.stringify(workflow, null, 2) },
+      {
+        targetPath: manifestPath,
+        contents: JSON.stringify(
+          this.createDefaultManifest(key, {
+            ...(existingManifest || {}),
+            ...(manifest || {})
+          }),
+          null,
+          2
+        )
+      }
+    ])
   }
 
   async deleteQApp(key: string): Promise<void> {
@@ -470,14 +620,17 @@ export class QAppFSCli {
   }
 
   async renameQApp(key: string, name: string): Promise<void> {
-    if (key.startsWith('~') || name.startsWith('~')) {
+    const qAppDir = await this.getWritableQAppDir()
+    const { key: safeKey } = resolveQAppStoragePath(qAppDir, key)
+    const { key: safeName } = resolveQAppStoragePath(qAppDir, name, 'name')
+    if (safeKey.startsWith('~') || safeName.startsWith('~')) {
       throw new Error('Names starting with ~ are reserved for built-in apps')
     }
 
     await this.prepareQAppStorage()
-    const qAppDir = await this.getWritableQAppDir()
-    const newKey = key.replace(path.basename(key), name)
-    const { basePath, qAppPath, workflowPath, manifestPath } = this.getQAppPaths(qAppDir, key)
+    const parentKey = path.posix.dirname(safeKey)
+    const newKey = parentKey === '.' ? safeName : `${parentKey}/${safeName}`
+    const { basePath, qAppPath, workflowPath, manifestPath } = this.getQAppPaths(qAppDir, safeKey)
     const isDirectory = await fs
       .stat(basePath)
       .then((stat) => stat.isDirectory())
@@ -488,7 +641,7 @@ export class QAppFSCli {
       throw new Error(`QApp ${key} is read-only`)
     }
 
-    const newBasePath = path.join(qAppDir, newKey)
+    const { basePath: newBasePath } = resolveQAppStoragePath(qAppDir, newKey)
     const newQAppPath = `${newBasePath}.qacfg.json`
     const newPromptPath = `${newBasePath}.prompt.json`
     const newManifestPath = `${newBasePath}.manifest.json`
@@ -505,10 +658,33 @@ export class QAppFSCli {
       return
     }
 
-    await fs.rename(qAppPath, newQAppPath)
-    await fs.rename(workflowPath, newPromptPath)
+    const renames = [
+      { sourcePath: qAppPath, targetPath: newQAppPath },
+      { sourcePath: workflowPath, targetPath: newPromptPath }
+    ]
     if (await exists(manifestPath)) {
-      await fs.rename(manifestPath, newManifestPath)
+      renames.push({ sourcePath: manifestPath, targetPath: newManifestPath })
+    }
+
+    const completed: typeof renames = []
+    try {
+      for (const rename of renames) {
+        await this.fileSystem.rename(rename.sourcePath, rename.targetPath)
+        completed.push(rename)
+      }
+    } catch (error) {
+      let rollbackError: unknown
+      for (const rename of [...completed].reverse()) {
+        try {
+          await this.fileSystem.rename(rename.targetPath, rename.sourcePath)
+        } catch (rollbackFailure) {
+          rollbackError ||= rollbackFailure
+        }
+      }
+      if (rollbackError) {
+        throw new AggregateError([error, rollbackError], 'QApp rename and rollback failed')
+      }
+      throw error
     }
   }
 }

@@ -1,4 +1,5 @@
 import type { ChatAttachment, LLMProxySvc, OCRResult } from '@shared/api/svcLLMProxy'
+import type { LLMReasoningEffort } from '@shared/llm'
 import type { OpenAIImageGenerationOptions } from '@shared/llm/types'
 import type {
   CanvasTargetAssetMetadata,
@@ -124,6 +125,7 @@ type RequestCanvasTargetControlPlanOptions = {
   attachments?: ChatAttachment[]
   userIntent: string
   profileId?: string | null
+  reasoningEffort?: LLMReasoningEffort
   preferExactProfile?: boolean
   preferredLanguage?: 'zh-CN' | 'en-US'
   stageProfiles: CanvasTargetControlStageCandidate[]
@@ -137,6 +139,7 @@ type RequestCanvasTargetSummaryOptions = {
   attachments?: ChatAttachment[]
   userIntent: string
   profileId?: string | null
+  reasoningEffort?: LLMReasoningEffort
   preferExactProfile?: boolean
   preferredLanguage?: 'zh-CN' | 'en-US'
   controlPlan: CanvasTargetControlPlan
@@ -163,6 +166,7 @@ type RequestCanvasTargetAcceptanceFixOptions = {
   attachments?: ChatAttachment[]
   userIntent: string
   profileId?: string | null
+  reasoningEffort?: LLMReasoningEffort
   preferExactProfile?: boolean
   preferredLanguage?: 'zh-CN' | 'en-US'
   controlPlan: CanvasTargetControlPlan
@@ -283,6 +287,7 @@ async function requestCanvasTargetRawOutput(options: {
   llmProxy?: Pick<LLMProxySvc, 'chat' | 'listProfiles'> | null
   attachments?: ChatAttachment[]
   profileId?: string | null
+  reasoningEffort?: LLMReasoningEffort
   preferExactProfile?: boolean
   prompt: string
   fallbackContent?: string
@@ -319,6 +324,7 @@ async function requestCanvasTargetRawOutput(options: {
 
     const response = await options.llmProxy.chat({
       profileId: selectedProfile.id,
+      reasoningEffort: options.reasoningEffort,
       imageGenerationOptions: options.imageGenerationOptions,
       messages: [
         {
@@ -416,6 +422,7 @@ export async function requestCanvasTargetSummaryExecution({
   attachments,
   userIntent,
   profileId,
+  reasoningEffort,
   preferExactProfile = false,
   preferredLanguage,
   controlPlan,
@@ -464,6 +471,7 @@ export async function requestCanvasTargetSummaryExecution({
     llmProxy,
     attachments,
     profileId: selectedProfile.id,
+    reasoningEffort,
     preferExactProfile: true,
     prompt: buildCanvasTargetSummaryExecutionPrompt(
       scheme,
@@ -552,6 +560,7 @@ export async function requestCanvasTargetAcceptanceFixActions({
   attachments,
   userIntent,
   profileId,
+  reasoningEffort,
   preferExactProfile = false,
   preferredLanguage,
   controlPlan,
@@ -601,6 +610,7 @@ export async function requestCanvasTargetAcceptanceFixActions({
     )
     const response = await llmProxy.chat({
       profileId: selectedProfile.id,
+      reasoningEffort,
       messages: [
         {
           role: 'user',
@@ -1033,6 +1043,7 @@ export async function requestCanvasTargetControlPlan({
   attachments,
   userIntent,
   profileId,
+  reasoningEffort,
   preferExactProfile = false,
   preferredLanguage,
   stageProfiles,
@@ -1078,6 +1089,7 @@ export async function requestCanvasTargetControlPlan({
 
     const response = await llmProxy.chat({
       profileId: selectedProfile.id,
+      reasoningEffort,
       messages: [
         {
           role: 'user',

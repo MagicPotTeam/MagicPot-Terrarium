@@ -122,6 +122,7 @@ export default function ResultModalInfo({ promptId }: ResultModalInfoProps) {
                   index={index}
                   config={config}
                   buildEnv={buildEnv}
+                  autoSave={false}
                 />
               )
             })}

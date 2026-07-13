@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   type Dispatch,
   type MutableRefObject,
@@ -57,6 +58,7 @@ export function useCanvasFigmaBinding({
   notifyInfo
 }: UseCanvasFigmaBindingOptions) {
   const [figmaBinding, setFigmaBinding] = useState<CanvasFigmaBinding | null>(null)
+  const figmaBindingRef = useRef<CanvasFigmaBinding | null>(null)
   const [figmaBindingDialogOpen, setFigmaBindingDialogOpen] = useState(false)
   const [figmaBindingDraft, setFigmaBindingDraft] = useState<CanvasFigmaBinding | null>(null)
   const [figmaFileKeyOrUrlInput, setFigmaFileKeyOrUrlInput] = useState('')
@@ -64,6 +66,10 @@ export function useCanvasFigmaBinding({
     'resolve' | 'bind' | 'sync' | 'check' | null
   >(null)
   const [figmaBindingError, setFigmaBindingError] = useState<string | null>(null)
+
+  useEffect(() => {
+    figmaBindingRef.current = figmaBinding
+  }, [figmaBinding])
 
   const buildNextFigmaBindingDraft = useCallback(
     ({
@@ -457,20 +463,39 @@ export function useCanvasFigmaBinding({
     if (!figmaGlobalAutoCheckEnabled) return
     if (!figmaBinding.autoCheckUpdates) return
 
-    void runFigmaUpdateCheck(figmaBinding, true)
+    let disposed = false
+    let checkInFlight = false
+    const checkForUpdates = async () => {
+      if (disposed || checkInFlight) return
+      const currentBinding = figmaBindingRef.current
+      if (!currentBinding?.fileKey || !currentBinding.autoCheckUpdates) return
+      const candidate: CanvasFigmaBinding = {
+        ...currentBinding,
+        pages: [...currentBinding.pages]
+      }
+      checkInFlight = true
+      try {
+        await runFigmaUpdateCheck(candidate, true)
+      } finally {
+        checkInFlight = false
+      }
+    }
 
+    void checkForUpdates()
     const timer = window.setInterval(
-      () => {
-        void runFigmaUpdateCheck(figmaBinding, true)
-      },
+      () => void checkForUpdates(),
       figmaAutoCheckIntervalMinutes * 60 * 1000
     )
 
-    return () => window.clearInterval(timer)
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+    }
   }, [
     figmaAccessToken,
     figmaAutoCheckIntervalMinutes,
-    figmaBinding,
+    figmaBinding?.autoCheckUpdates,
+    figmaBinding?.fileKey,
     figmaGlobalAutoCheckEnabled,
     runFigmaUpdateCheck
   ])

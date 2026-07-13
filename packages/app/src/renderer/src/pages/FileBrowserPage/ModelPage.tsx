@@ -306,24 +306,48 @@ const TreeNode: React.FC<{ entry: DirEntry; depth: number }> = ({ entry, depth }
 }
 
 // ─── 文件树根节点（compact 模式用） ───
-const FileTreeRoot: React.FC<{ rootDir: string; rootLabel: string }> = ({ rootDir, rootLabel }) => {
+export const FileTreeRoot: React.FC<{ rootDir: string; rootLabel: string }> = ({
+  rootDir,
+  rootLabel
+}) => {
   const [expanded, setExpanded] = useState(true)
   const [children, setChildren] = useState<DirEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
 
   useEffect(() => {
-    if (!rootDir || loaded || loading) return
+    let cancelled = false
+
+    setChildren([])
+    setLoaded(false)
+
+    if (!rootDir) {
+      setLoading(false)
+      return () => {
+        cancelled = true
+      }
+    }
+
     setLoading(true)
     api()
       .svcHyper.listDirShallow({ dir: rootDir })
-      .then((result) => setChildren(result.entries))
-      .catch((err) => console.error('[Explorer] listDirShallow root error:', err))
-      .finally(() => {
-        setLoading(false)
-        setLoaded(true)
+      .then((result) => {
+        if (!cancelled) setChildren(result.entries)
       })
-  }, [rootDir]) // eslint-disable-line react-hooks/exhaustive-deps
+      .catch((err) => {
+        if (!cancelled) console.error('[Explorer] listDirShallow root error:', err)
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false)
+          setLoaded(true)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [rootDir])
 
   return (
     <Box>

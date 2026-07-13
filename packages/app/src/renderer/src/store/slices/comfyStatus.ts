@@ -42,6 +42,9 @@ const comfyStatusSlice = createSlice({
     deleteResult: (state, action: PayloadAction<string>) => {
       state.results = state.results.filter((result) => result.id !== action.payload)
     },
+    clearResults: (state) => {
+      state.results = []
+    },
     setErrorPromptStatus: (state, action: PayloadAction<[string, ComfyHistory['status']]>) => {
       state.errorPromptStatus[action.payload[0]] = action.payload[1]
     }
@@ -54,6 +57,7 @@ export const {
   setIsRunning,
   appendResults,
   deleteResult,
+  clearResults,
   setErrorPromptStatus
 } = comfyStatusSlice.actions
 export default comfyStatusSlice

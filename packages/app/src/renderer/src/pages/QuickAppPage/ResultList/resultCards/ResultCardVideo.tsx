@@ -19,14 +19,15 @@ import ResultCardLayout from './components/ResultCardLayout'
 import ResultIconButtonBase from './components/ResultIconButtonBase'
 import { ResultCardComponent, ResultCardProps } from './types'
 import { resolveProjectResourceDir } from '@renderer/utils/projectResourcePaths'
-
-const autoSavedVideoTracker = new Set<string>()
+import { createAutoSaveFileName } from './autoSaveTracker'
+import { comfyResultAutoSaveClaims } from '@renderer/store/comfyResultResources'
 
 const ResultCardVideo: ResultCardComponent<'video'> = ({
   result,
   index,
   config,
   buildEnv,
+  autoSave = true,
   resultListMethods
 }: ResultCardProps<'video'>) => {
   const [previewOpen, setPreviewOpen] = useState(false)
@@ -38,14 +39,12 @@ const ResultCardVideo: ResultCardComponent<'video'> = ({
   const isDraggableResult = Boolean(result.objectUrl && result.objectUrl.trim())
 
   useEffect(() => {
-    if (!result.objectUrl.trim() || autoSavedVideoTracker.has(result.objectUrl)) return
-    autoSavedVideoTracker.add(result.objectUrl)
+    if (!autoSave || !result.objectUrl.trim() || !comfyResultAutoSaveClaims.claim(result.id)) return
 
     const autoSaveVideo = async () => {
       try {
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
         const extension = fileName.match(/\.[^.]+$/)?.[0] || '.mp4'
-        const autoFileName = `qapp_auto_${timestamp}${extension}`
+        const autoFileName = createAutoSaveFileName(extension)
         const response = await fetch(result.objectUrl)
         const blob = await response.blob()
         const arrayBuffer = await blob.arrayBuffer()
@@ -61,12 +60,13 @@ const ResultCardVideo: ResultCardComponent<'video'> = ({
           dir: targetDir
         })
       } catch (error) {
+        comfyResultAutoSaveClaims.release(result.id)
         console.error('[.AutoSave] Failed to save quick app video:', error)
       }
     }
 
     autoSaveVideo()
-  }, [config.download_dir, fileName, result.objectUrl, result.projectId])
+  }, [autoSave, config.download_dir, fileName, result.id, result.objectUrl, result.projectId])
 
   const handleLoadQApp = async () => {
     try {
