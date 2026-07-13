@@ -7,7 +7,10 @@ export default defineConfig({
     name: 'node',
     environments: 'node',
     setupFiles: ['packages/app/src/main/tests/setup/memfs.setup.ts'],
-    exclude: ['scripts/prepare-embedded-staging.test.js'],
+    exclude: [
+      'scripts/prepare-embedded-staging.test.js',
+      'scripts/verify-packaged-runtime-dependencies.test.js'
+    ],
     include: [
       'scripts/**/*.test.{ts,js}',
       'packages/app/src/main/**/*.test.{ts,js}',

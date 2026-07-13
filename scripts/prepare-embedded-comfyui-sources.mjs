@@ -35,10 +35,15 @@ function runGit(args, options = {}) {
   })
 }
 
+function canonicalPath(targetPath) {
+  const realPath = fs.realpathSync.native(targetPath)
+  return process.platform === 'win32' ? realPath.toLowerCase() : realPath
+}
+
 function isGitWorktree(targetPath) {
   try {
-    runGit(['-C', targetPath, 'rev-parse', '--is-inside-work-tree'])
-    return true
+    const worktreeRoot = runGit(['-C', targetPath, 'rev-parse', '--show-toplevel']).trim()
+    return canonicalPath(targetPath) === canonicalPath(worktreeRoot)
   } catch {
     return false
   }
