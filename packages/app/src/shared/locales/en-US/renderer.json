@@ -52,6 +52,7 @@
     "comfy_mode_title": "ComfyUI Mode",
     "comfy_mode_info_title": "ComfyUI Mode",
     "comfy_mode_info_desc": "Using remote ComfyUI mode means that Magic Pot only calls the API of ComfyUI through HTTP requests, without managing the startup and shutdown of ComfyUI.\nUsing local ComfyUI mode can manage the startup and shutdown of ComfyUI, but requires Magic Pot and ComfyUI to be on the same device.",
+    "storage_root_title": "Global Storage Root",
     "monitor_title": "Environment Check",
     "detect_title": "System Environment",
     "action_detect": "Detect Environment",

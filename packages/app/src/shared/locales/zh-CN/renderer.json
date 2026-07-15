@@ -52,6 +52,7 @@
     "comfy_mode_title": "ComfyUI 模式",
     "comfy_mode_info_title": "ComfyUI 模式",
     "comfy_mode_info_desc": "使用远程 ComfyUI 模式，代表魔壶仅通过 HTTP 请求调用 ComfyUI 的 API ，不负责管理 ComfyUI 的启动与关闭。\n使用本地 ComfyUI 模式，可以管理 ComfyUI 的启动与关闭，但需要魔壶与 ComfyUI 在同一台设备上。",
+    "storage_root_title": "全局存储根目录",
     "monitor_title": "环境监测",
     "detect_title": "系统环境信息",
     "action_detect": "检测环境",
