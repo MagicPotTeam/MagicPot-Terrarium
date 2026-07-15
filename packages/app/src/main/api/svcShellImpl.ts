@@ -10,15 +10,14 @@ import {
 } from '@shared/api/svcShell'
 import { ServerStreaming } from '@shared/api/apiUtils/streaming'
 import { spawn } from 'child_process'
-import { shell } from 'electron'
+import { net, shell } from 'electron'
 import fs from 'fs'
-import https from 'node:https'
 import os from 'os'
 import path from 'path'
-import { Transform } from 'stream'
+import { Readable, Transform } from 'stream'
 import { pipeline } from 'stream/promises'
 import { normalizeAllowedExternalUrl } from '../utils/externalUrl'
-import { resolveRemoteFetchAddress } from './remoteFetchPolicy'
+import { assertRemoteFetchHostnameIsNotExplicitlyLocal } from './remoteFetchPolicy'
 
 function isLocallyAvailable(filePath: string): boolean {
   try {
@@ -105,7 +104,7 @@ export function createDownloadByteLimitTransform(
 }
 
 type DownloadResponse = {
-  response: import('node:http').IncomingMessage
+  response: Response
   finalUrl: URL
 }
 
@@ -114,59 +113,50 @@ async function requestDownload(
   signal: AbortSignal,
   redirects = 0
 ): Promise<DownloadResponse> {
-  const resolvedAddress = await resolveRemoteFetchAddress(initialUrl.hostname)
+  assertRemoteFetchHostnameIsNotExplicitlyLocal(initialUrl.hostname)
   if (signal.aborted) throw signal.reason
 
-  return new Promise((resolve, reject) => {
-    const request = https.request(
-      {
-        hostname: initialUrl.hostname,
-        port: initialUrl.port || 443,
-        path: `${initialUrl.pathname}${initialUrl.search}`,
-        method: 'GET',
-        servername: initialUrl.hostname,
-        signal,
-        lookup: (_hostname, _options, callback) => {
-          callback(null, resolvedAddress.address, resolvedAddress.family)
-        }
-      },
-      (response) => {
-        const status = response.statusCode ?? 500
-        if (REDIRECT_STATUS_CODES.has(status)) {
-          const location = response.headers.location
-          response.resume()
-          if (!location) {
-            reject(new Error('Download failed: redirect has no location.'))
-            return
-          }
-          if (redirects >= MAX_DOWNLOAD_REDIRECTS) {
-            reject(new Error('Download failed: too many redirects.'))
-            return
-          }
-          let redirectUrl: URL
-          try {
-            redirectUrl = requireHttpsUrl(new URL(location, initialUrl).toString())
-          } catch (error) {
-            reject(error)
-            return
-          }
-          void requestDownload(redirectUrl, signal, redirects + 1).then(resolve, reject)
-          return
-        }
-        if (status < 200 || status >= 300) {
-          response.resume()
-          reject(new Error(`Download failed: ${status} ${response.statusMessage || ''}`.trim()))
-          return
-        }
-        resolve({ response, finalUrl: initialUrl })
-      }
-    )
-    request.setTimeout(DOWNLOAD_IDLE_TIMEOUT_MS, () => {
-      request.destroy(new Error('Download failed: request was idle for too long.'))
+  const idleTimeout = new AbortController()
+  const abortForCaller = () => idleTimeout.abort(signal.reason)
+  signal.addEventListener('abort', abortForCaller, { once: true })
+  const idleTimer = setTimeout(
+    () => idleTimeout.abort(new Error('Download failed: request was idle for too long.')),
+    DOWNLOAD_IDLE_TIMEOUT_MS
+  )
+
+  let response: Response
+  try {
+    response = await net.fetch(initialUrl.toString(), {
+      method: 'GET',
+      redirect: 'manual',
+      signal: idleTimeout.signal
     })
-    request.on('error', reject)
-    request.end()
-  })
+  } finally {
+    clearTimeout(idleTimer)
+    signal.removeEventListener('abort', abortForCaller)
+  }
+
+  const status = response.status
+  if (REDIRECT_STATUS_CODES.has(status)) {
+    await response.body?.cancel().catch(() => undefined)
+    const location = response.headers.get('location')
+    if (!location) {
+      throw new Error('Download failed: redirect has no location.')
+    }
+    if (redirects >= MAX_DOWNLOAD_REDIRECTS) {
+      throw new Error('Download failed: too many redirects.')
+    }
+    const redirectUrl = requireHttpsUrl(new URL(location, initialUrl).toString())
+    return requestDownload(redirectUrl, signal, redirects + 1)
+  }
+  if (status < 200 || status >= 300) {
+    await response.body?.cancel().catch(() => undefined)
+    throw new Error(`Download failed: ${status} ${response.statusText || ''}`.trim())
+  }
+  if (!response.body) {
+    throw new Error('Download failed: response body is empty.')
+  }
+  return { response, finalUrl: initialUrl }
 }
 
 function runGitClone(url: string, targetDir: string): Promise<void> {
@@ -247,12 +237,12 @@ export class ShellSvcImpl implements ShellSvc {
     })
     let totalBytes: number | undefined
     try {
-      totalBytes = getContentLength(response.headers['content-length'])
+      totalBytes = getContentLength(response.headers.get('content-length') ?? undefined)
       if (totalBytes != null && totalBytes > MAX_DOWNLOAD_BYTES) {
         throw new Error('Download failed: response is too large.')
       }
     } catch (error) {
-      response.destroy()
+      await response.body?.cancel().catch(() => undefined)
       clearTimeout(totalTimeout)
       throw error
     }
@@ -290,14 +280,32 @@ export class ShellSvcImpl implements ShellSvc {
     }
 
     const tempPath = `${fullPath}.download-${process.pid}-${Date.now()}`
+    let bodyIdleTimer: ReturnType<typeof setTimeout> | undefined
+    const byteLimitTransform = createDownloadByteLimitTransform(
+      MAX_DOWNLOAD_BYTES,
+      (receivedBytes) => {
+        downloadedBytes = receivedBytes
+        emitProgress()
+        if (bodyIdleTimer) clearTimeout(bodyIdleTimer)
+        bodyIdleTimer = setTimeout(
+          () =>
+            byteLimitTransform.destroy(
+              new Error('Download failed: request was idle for too long.')
+            ),
+          DOWNLOAD_IDLE_TIMEOUT_MS
+        )
+      }
+    )
     try {
       emitProgress(true)
+      bodyIdleTimer = setTimeout(
+        () =>
+          byteLimitTransform.destroy(new Error('Download failed: request was idle for too long.')),
+        DOWNLOAD_IDLE_TIMEOUT_MS
+      )
       await pipeline(
-        response,
-        createDownloadByteLimitTransform(MAX_DOWNLOAD_BYTES, (receivedBytes) => {
-          downloadedBytes = receivedBytes
-          emitProgress()
-        }),
+        Readable.fromWeb(response.body as import('node:stream/web').ReadableStream),
+        byteLimitTransform,
         fs.createWriteStream(tempPath)
       )
       if (totalBytes != null && downloadedBytes !== totalBytes) {
@@ -309,6 +317,7 @@ export class ShellSvcImpl implements ShellSvc {
       await fs.promises.rm(tempPath, { force: true }).catch(() => undefined)
       throw error
     } finally {
+      if (bodyIdleTimer) clearTimeout(bodyIdleTimer)
       clearTimeout(totalTimeout)
     }
 

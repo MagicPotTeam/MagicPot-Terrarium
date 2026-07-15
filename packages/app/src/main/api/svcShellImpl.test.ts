@@ -1,30 +1,20 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { EventEmitter } from 'node:events'
-import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { shellOpenExternalMock, lookupMock, requestMock } = vi.hoisted(() => ({
+const { shellOpenExternalMock, netFetchMock } = vi.hoisted(() => ({
   shellOpenExternalMock: vi.fn<(url: string) => Promise<void>>(() => Promise.resolve()),
-  lookupMock: vi.fn(),
-  requestMock: vi.fn()
+  netFetchMock: vi.fn()
 }))
 
 vi.mock('electron', () => ({
+  net: {
+    fetch: netFetchMock
+  },
   shell: {
     openExternal: shellOpenExternalMock
   }
-}))
-
-vi.mock('node:dns/promises', () => ({
-  default: { lookup: lookupMock },
-  lookup: lookupMock
-}))
-
-vi.mock('node:https', () => ({
-  default: { request: requestMock },
-  request: requestMock
 }))
 
 import { DownloadFileProgressEvent } from '@shared/api/svcShell'
@@ -35,29 +25,19 @@ function mockDownloadResponse(
   headers: Record<string, string>,
   chunks: Buffer[] = []
 ): void {
-  requestMock.mockImplementationOnce((_options, callback) => {
-    const request = new EventEmitter() as EventEmitter & {
-      setTimeout: ReturnType<typeof vi.fn>
-      destroy: (error: Error) => void
-      end: ReturnType<typeof vi.fn>
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      chunks.forEach((chunk) => controller.enqueue(chunk))
+      controller.close()
     }
-    request.setTimeout = vi.fn()
-    request.destroy = (error) => request.emit('error', error)
-    request.end = vi.fn(() => {
-      const response = new PassThrough() as PassThrough & {
-        statusCode: number
-        statusMessage: string
-        headers: Record<string, string>
-      }
-      response.statusCode = statusCode
-      response.statusMessage = statusCode === 200 ? 'OK' : 'Found'
-      response.headers = headers
-      callback(response)
-      chunks.forEach((chunk) => response.write(chunk))
-      response.end()
-    })
-    return request
   })
+  netFetchMock.mockResolvedValueOnce(
+    new Response(body, {
+      status: statusCode,
+      statusText: statusCode === 200 ? 'OK' : 'Found',
+      headers
+    })
+  )
 }
 
 function makeStats({
@@ -76,9 +56,7 @@ function makeStats({
 describe('ShellSvcImpl', () => {
   beforeEach(() => {
     shellOpenExternalMock.mockResolvedValue(undefined)
-    lookupMock.mockReset()
-    requestMock.mockReset()
-    lookupMock.mockResolvedValue([{ address: '93.184.216.34', family: 4 }])
+    netFetchMock.mockReset()
   })
 
   afterEach(() => {
@@ -180,10 +158,10 @@ describe('ShellSvcImpl', () => {
     await expect(
       svc.downloadFile({ ...request, url: 'https://127.0.0.1/model.bin' })
     ).rejects.toThrow('public host')
-    expect(requestMock).not.toHaveBeenCalled()
+    expect(netFetchMock).not.toHaveBeenCalled()
   })
 
-  it('pins DNS and validates redirect targets', async () => {
+  it('uses Electron networking and validates every redirect target', async () => {
     const tempDir = await makeTempDir('magicpot-shell-redirect')
     mockDownloadResponse(302, { location: 'https://127.0.0.1/secret' })
     const svc = new ShellSvcImpl()
@@ -195,8 +173,9 @@ describe('ShellSvcImpl', () => {
         filename: 'model.bin'
       })
     ).rejects.toThrow('public host')
-    expect(requestMock.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({ hostname: 'public.example', lookup: expect.any(Function) })
+    expect(netFetchMock).toHaveBeenCalledWith(
+      'https://public.example/model.bin',
+      expect.objectContaining({ method: 'GET', redirect: 'manual' })
     )
     await fs.promises.rm(tempDir, { recursive: true, force: true })
   })
@@ -235,7 +214,7 @@ describe('ShellSvcImpl', () => {
     await fs.promises.rm(tempDir, { recursive: true, force: true })
   })
 
-  it('configures an idle timeout on every HTTPS request', async () => {
+  it('routes downloads through Electron net.fetch with an abort signal', async () => {
     const tempDir = await makeTempDir('magicpot-shell-timeout')
     mockDownloadResponse(200, {}, [Buffer.from('ok')])
     const svc = new ShellSvcImpl()
@@ -245,8 +224,10 @@ describe('ShellSvcImpl', () => {
       filename: 'model.bin'
     })
 
-    const request = requestMock.mock.results[0]?.value
-    expect(request.setTimeout).toHaveBeenCalledWith(30_000, expect.any(Function))
+    expect(netFetchMock).toHaveBeenCalledWith(
+      'https://public.example/model.bin',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
     await fs.promises.rm(tempDir, { recursive: true, force: true })
   })
 
