@@ -76,22 +76,11 @@ export const readChatFailureArchiveRootDir = (options: {
   configDownloadDir?: string | null
   buildDataDir?: string | null
   storage?: Pick<Storage, 'getItem'>
-}): string | null => {
-  const downloadDirKey = 'qapp.downloadDir'
-  const localOverride = (() => {
-    try {
-      return (options.storage || localStorage).getItem(downloadDirKey)
-    } catch {
-      return null
-    }
-  })()
-
-  return resolveChatFailureArchiveRootDir({
+}): string | null =>
+  resolveChatFailureArchiveRootDir({
     configDownloadDir: options.configDownloadDir,
-    buildDataDir: options.buildDataDir,
-    localStorageOverride: localOverride
+    buildDataDir: options.buildDataDir
   })
-}
 
 export const resolveChatFailureArchiveDir = (options: {
   baseDir: string

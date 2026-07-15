@@ -26,7 +26,9 @@ const {
   showItemInFolderMock: vi.fn(),
   listQAppCfgsMock: vi.fn().mockResolvedValue({ qApps: [] }),
   getQAppCfgMock: vi.fn(),
-  saveImageToDirMock: vi.fn().mockResolvedValue({ savedPath: 'C:/downloads/.AutoSave/qapp.png' }),
+  saveImageToDirMock: vi
+    .fn()
+    .mockResolvedValue({ savedPath: 'C:/MagicPot/AutoSave/QuickApp/Images/qapp.png' }),
   writeImageToClipboardMock: vi.fn().mockResolvedValue({ success: true }),
   sendImageToPhotoshopMock: vi.fn().mockResolvedValue({ success: true }),
   showOpenDialogMock: vi.fn(),
@@ -174,6 +176,39 @@ describe('ResultCardImage', () => {
     global.fetch = originalFetch
   })
 
+  it('auto-saves image results to the sibling AutoSave directory', async () => {
+    render(
+      <ResultCardImage
+        result={
+          {
+            type: 'image',
+            id: 'image-auto-save',
+            promptId: 'prompt-auto-save',
+            objectUrl: 'blob:image-auto-save',
+            fileItem: {
+              filename: 'image-auto-save.png',
+              subfolder: 'outputs',
+              type: 'output'
+            }
+          } as any
+        }
+        index={0}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
+        buildEnv={{} as any}
+      />
+    )
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith('blob:image-auto-save')
+      expect(saveImageToDirMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: new Uint8Array([1, 2, 3]),
+          dir: 'C:/MagicPot/AutoSave/QuickApp/Images'
+        })
+      )
+    })
+  })
+
   it('restores imported quick app cfg when an embedded image workflow has app-mode metadata', async () => {
     const dispatchSpy = vi.spyOn(window, 'dispatchEvent')
     const importedCfg = { icon: 'image', inputs: [{ id: 'api' }], autoInputs: [] }
@@ -206,7 +241,7 @@ describe('ResultCardImage', () => {
           } as any
         }
         index={0}
-        config={{ download_dir: 'C:/downloads' } as any}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
         buildEnv={{} as any}
       />
     )
@@ -272,7 +307,7 @@ describe('ResultCardImage', () => {
           } as any
         }
         index={1}
-        config={{ download_dir: 'C:/downloads' } as any}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
         buildEnv={{} as any}
       />
     )
@@ -323,7 +358,7 @@ describe('ResultCardImage', () => {
           } as any
         }
         index={2}
-        config={{ download_dir: 'C:/downloads' } as any}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
         buildEnv={{} as any}
       />
     )
@@ -376,7 +411,7 @@ describe('ResultCardImage', () => {
           } as any
         }
         index={3}
-        config={{ download_dir: 'C:/downloads' } as any}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
         buildEnv={{} as any}
       />
     )

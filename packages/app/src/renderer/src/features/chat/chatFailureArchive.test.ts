@@ -21,7 +21,7 @@ describe('chatFailureArchive', () => {
     expect(sanitizeChatFailureArchiveRunId('   ')).toBe('unknown-run')
   })
 
-  it('resolves archive roots with local override precedence', () => {
+  it('resolves archive roots with explicit input precedence', () => {
     expect(
       resolveChatFailureArchiveRootDir({
         localStorageOverride: ' D:/Downloads ',
@@ -41,7 +41,7 @@ describe('chatFailureArchive', () => {
         configDownloadDir: 'C:/Config',
         storage: { getItem: () => 'E:/Override' }
       })
-    ).toBe('E:/Override')
+    ).toBe('C:/Config')
     expect(
       readChatFailureArchiveRootDir({
         configDownloadDir: 'C:/Config',

@@ -27,8 +27,8 @@ export default function ImageViewer({ imageUrl, onDelete }: ImageViewerProps) {
 
   const handleDownloadImage = async () => {
     try {
-      const DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
-      let downloadDir = localStorage.getItem(DOWNLOAD_DIR_KEY)
+      const { config } = await api().svcState.getConfig({})
+      let downloadDir = config.download_dir?.trim()
 
       if (!downloadDir) {
         const result2 = await api().svcDialog.showOpenDialog({
@@ -37,8 +37,6 @@ export default function ImageViewer({ imageUrl, onDelete }: ImageViewerProps) {
         })
         if (result2.canceled || !result2.filePaths?.length) return
         downloadDir = result2.filePaths[0]
-        localStorage.setItem(DOWNLOAD_DIR_KEY, downloadDir)
-        api().svcState.saveConfig({ config: { download_dir: downloadDir } })
       }
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)

@@ -84,37 +84,21 @@ export function useCanvasMediaActions({
   const { t } = useTranslation()
 
   const chooseDownloadDir = useCallback(async (title: string) => {
-    const DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
-    let downloadDir = localStorage.getItem(DOWNLOAD_DIR_KEY)?.trim()
-
-    if (!downloadDir) {
-      try {
-        const { config } = await api().svcState.getConfig({})
-        downloadDir = config.download_dir?.trim()
-        if (downloadDir) {
-          localStorage.setItem(DOWNLOAD_DIR_KEY, downloadDir)
-        }
-      } catch (error) {
-        console.warn('[download] failed to read default download dir from config:', error)
-      }
+    let defaultPath: string | undefined
+    try {
+      const { config } = await api().svcState.getConfig({})
+      defaultPath = config.download_dir?.trim() || undefined
+    } catch (error) {
+      console.warn('[download] failed to read project root from config:', error)
     }
 
     const result = await api().svcDialog.showOpenDialog({
       title,
       properties: ['openDirectory'],
-      defaultPath: downloadDir || undefined
+      defaultPath
     })
     if (result.canceled || !result.filePaths?.length) return null
-
-    downloadDir = result.filePaths[0]
-    localStorage.setItem(DOWNLOAD_DIR_KEY, downloadDir)
-    void api()
-      .svcState.saveConfig({ config: { download_dir: downloadDir } })
-      .catch((error) => {
-        console.warn('[download] failed to persist download dir:', error)
-      })
-
-    return downloadDir
+    return result.filePaths[0]
   }, [])
 
   const chooseImageDownloadTarget = useCallback(async (defaultBaseName: string) => {

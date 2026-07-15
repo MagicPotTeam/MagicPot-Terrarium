@@ -10,8 +10,6 @@ import {
   resolveLocalMediaPathFromUrl
 } from '../chatPageShared'
 
-const CHAT_DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
-
 const bytesToBase64 = (data: Uint8Array): string => {
   let binary = ''
   const chunkSize = 0x8000
@@ -120,7 +118,7 @@ const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
         onClick={async () => {
           if (imageContextMenu) {
             try {
-              let downloadDir = localStorage.getItem(CHAT_DOWNLOAD_DIR_KEY) || config.download_dir
+              let downloadDir = config.download_dir
 
               if (!downloadDir) {
                 const result = await api().svcDialog.showOpenDialog({
@@ -132,8 +130,6 @@ const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
                   return
                 }
                 downloadDir = result.filePaths[0]
-                localStorage.setItem(CHAT_DOWNLOAD_DIR_KEY, downloadDir)
-                api().svcState.saveConfig({ config: { download_dir: downloadDir } })
               }
 
               const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)

@@ -50,7 +50,6 @@ const ResultCardVideo: ResultCardComponent<'video'> = ({
         const arrayBuffer = await blob.arrayBuffer()
         const targetDir = resolveProjectResourceDir({
           config: { download_dir: config.download_dir },
-          projectId: result.projectId,
           segments: ['.AutoSave', 'QuickApp', 'Videos']
         })
 
@@ -61,7 +60,7 @@ const ResultCardVideo: ResultCardComponent<'video'> = ({
         })
       } catch (error) {
         comfyResultAutoSaveClaims.release(result.id)
-        console.error('[.AutoSave] Failed to save quick app video:', error)
+        console.error('[AutoSave] Failed to save quick app video:', error)
       }
     }
 

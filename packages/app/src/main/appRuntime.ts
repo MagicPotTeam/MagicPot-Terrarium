@@ -5,6 +5,7 @@ import path from 'node:path'
 import { type TestUiPolicy } from './testUiPolicy'
 import { normalizeLocalFilePath, toFileUrl } from './utils/localFileUrl'
 import { hasLocalMediaTraversal, resolveAuthorizedLocalMediaPath } from './localMediaAccess'
+import { getCurrentUserDataDirectoryState } from './config/userDataDirectory'
 
 const silentErrorCodes = [
   'ECONNRESET',
@@ -154,7 +155,13 @@ export function withLocalMediaCorsHeaders(response: Response, request?: Request)
 }
 
 function getLocalMediaAllowedRoots(): string[] {
-  return [app.getPath('userData'), app.getPath('temp')].map((root) => path.resolve(root))
+  const storageState = getCurrentUserDataDirectoryState()
+  return [
+    app.getPath('userData'),
+    app.getPath('temp'),
+    storageState.projectRoot,
+    storageState.autoSaveRoot
+  ].map((root) => path.resolve(root))
 }
 
 async function handleLocalMediaRequest(request: Request): Promise<Response> {

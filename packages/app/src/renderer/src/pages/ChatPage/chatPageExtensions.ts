@@ -1,9 +1,6 @@
 import type { Config } from '@shared/config/config'
 import type { ChatCapabilityProfile } from '@shared/llm'
-import {
-  resolveProjectIdFromStorageScope,
-  resolveProjectResourceDir
-} from '@renderer/utils/projectResourcePaths'
+import { resolveProjectResourceDir } from '@renderer/utils/projectResourcePaths'
 import {
   resolveRendererAssistantImageAutoSaveDir,
   resolveRendererChatReasoningPreferenceKey
@@ -33,7 +30,6 @@ export const resolveAssistantImageAutoSaveDir = (options: {
   resolveRendererAssistantImageAutoSaveDir(options, () =>
     resolveProjectResourceDir({
       config: { download_dir: options.config.download_dir },
-      projectId: resolveProjectIdFromStorageScope(options.storageScope),
       segments: ['.AutoSave', 'Agent']
     })
   )

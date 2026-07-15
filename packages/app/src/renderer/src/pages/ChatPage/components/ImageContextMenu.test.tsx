@@ -44,8 +44,6 @@ describe('ImageContextMenu', () => {
       data: new Uint8Array([4, 5, 6]),
       filename: 'render.png'
     })
-    localStorage.removeItem('qapp.downloadDir')
-
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
