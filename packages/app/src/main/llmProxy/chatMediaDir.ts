@@ -5,15 +5,13 @@
  * (images and videos downloaded from chat responses).
  *
  * Priority:
- * 1. Configured download directory: <download_dir>/.chat_media/
- * 2. Automated test artifact directory
- * 3. Fallback: <userData>/.chat_media/
+ * 1. Automated test artifact directory
+ * 2. App-owned user data: <userData>/.chat_media/
  */
 
 import path from 'path'
 import fs from 'fs'
 import { app } from 'electron'
-import { getConfig } from '../config/config'
 import { readTestUiEnv, resolveTestArtifactPath, resolveTestUiPolicy } from '../testUiPolicy'
 
 let cachedBaseMediaDir: string | null = null
@@ -54,15 +52,6 @@ export const resolveBaseChatMediaDir = (): string => {
   }
 
   cachedBaseMediaDir = resolveAutomatedChatMediaDir()
-
-  try {
-    const config = getConfig()
-    if (!cachedBaseMediaDir && config.download_dir && fs.existsSync(config.download_dir)) {
-      cachedBaseMediaDir = path.join(config.download_dir, CHAT_MEDIA_ROOT_DIR)
-    }
-  } catch {
-    // Config may not be initialized yet, fallback to default
-  }
 
   if (!cachedBaseMediaDir) {
     cachedBaseMediaDir = path.join(app.getPath('userData'), CHAT_MEDIA_ROOT_DIR)

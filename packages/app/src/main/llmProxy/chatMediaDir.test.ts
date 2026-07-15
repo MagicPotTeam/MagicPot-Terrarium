@@ -9,14 +9,8 @@ const appMock = {
   isPackaged: false
 }
 
-let currentConfig: { download_dir?: string } = {}
-
 vi.mock('electron', () => ({
   app: appMock
-}))
-
-vi.mock('../config/config', () => ({
-  getConfig: () => currentConfig
 }))
 
 async function loadModule() {
@@ -29,11 +23,6 @@ describe('chatMediaDir', () => {
 
   beforeEach(async () => {
     tempRoot = await createNodeTestArtifactDir('chat-media-dir')
-    const downloadDir = path.join(tempRoot, 'downloads')
-    currentConfig = {
-      download_dir: downloadDir
-    }
-    await fs.mkdir(downloadDir, { recursive: true })
     appMock.isPackaged = false
     appMock.getAppPath.mockReturnValue(path.join(tempRoot, 'app'))
     appMock.getPath.mockImplementation((name: string) => {
@@ -67,11 +56,11 @@ describe('chatMediaDir', () => {
     vi.clearAllMocks()
   })
 
-  it('prefers the configured download directory outside automated runs', async () => {
+  it('keeps chat media inside app-owned user data outside automated runs', async () => {
     const module = await loadModule()
     const mediaDir = module.getChatMediaDir('Alice Team')
 
-    expect(mediaDir).toBe(path.join(tempRoot, 'downloads', '.chat_media', 'alice-team'))
+    expect(mediaDir).toBe(path.join(tempRoot, 'userData', '.chat_media', 'alice-team'))
     await expect(fs.access(mediaDir)).resolves.toBeUndefined()
   })
 
@@ -98,8 +87,6 @@ describe('chatMediaDir', () => {
   })
 
   it('falls back to userData instead of the app directory', async () => {
-    currentConfig = {}
-
     const module = await loadModule()
     const mediaDir = module.getChatMediaDir('Alice Team')
 

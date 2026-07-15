@@ -11,6 +11,8 @@ import {
   getDownloadFileNameFromUrl,
   hasAutoSavedChatImageKey,
   isModel3DUrl,
+  migrateLegacyChatMediaMessages,
+  migrateLegacyChatMediaUrl,
   normalizeChatProfileIdForStorage,
   normalizeLocalMediaUrl,
   readScopedActiveLoadingSessionIds,
@@ -110,6 +112,101 @@ describe('local media file path helpers', () => {
     )
     expect(resolveLocalMediaPathFromUrl('file:///tmp/magicpot/render%201.png')).toBe(
       '/tmp/magicpot/render 1.png'
+    )
+  })
+})
+
+describe('legacy chat media URL migration', () => {
+  const windowsDataDir = 'D:\\Magic Pot\\Data 用户'
+  const expectedWindowsUrl =
+    'local-media:///D:/Magic%20Pot/Data%20%E7%94%A8%E6%88%B7/.chat_media/folder%20one/%E5%9B%BE%E5%83%8F.png'
+
+  it('re-roots Windows and POSIX URLs with spaces and Unicode as canonical local-media URLs', () => {
+    expect(
+      migrateLegacyChatMediaUrl(
+        'file:///C:/old/Data/.chat_media/folder%20one/%E5%9B%BE%E5%83%8F.png',
+        windowsDataDir
+      )
+    ).toBe(expectedWindowsUrl)
+    expect(
+      migrateLegacyChatMediaUrl(
+        'local-media:///Users/old/Data/.chat_media/%E4%B8%AD%E6%96%87/image%201.png',
+        '/Users/new/Data Root'
+      )
+    ).toBe('local-media:///Users/new/Data%20Root/.chat_media/%E4%B8%AD%E6%96%87/image%201.png')
+  })
+
+  it('requires a complete .chat_media segment and leaves unrelated URLs unchanged', () => {
+    const values = [
+      'https://example.com/.chat_media/image.png',
+      'file:///C:/old/.chat_media_backup/image.png',
+      'file:///C:/old/chat_media/image.png',
+      'file:///C:/old/.chat_media'
+    ]
+
+    for (const value of values) {
+      expect(migrateLegacyChatMediaUrl(value, windowsDataDir)).toBe(value)
+    }
+  })
+
+  it.each([
+    'file:///C:/old/.chat_media/../secret.png',
+    'file:///C:/old/.chat_media/%2e%2e/secret.png',
+    'file:///C:/old/.chat_media/%252e%252e/secret.png',
+    'file:///C:/old/.chat_media/%25252e%25252e/secret.png',
+    'file:///C:/old/.chat_media/%2Fetc/passwd',
+    'file:///C:/old/.chat_media/%255c%255cserver%255cshare.png',
+    'file:///C:/old/.chat_media/C%3A/secret.png',
+    'file:///C:/old/.chat_media/image%00.png',
+    'file:///C:/old/.chat_media/folder//image.png'
+  ])('rejects unsafe or encoded relative paths: %s', (value) => {
+    expect(migrateLegacyChatMediaUrl(value, windowsDataDir)).toBe(value)
+  })
+
+  it('is idempotent after migration', () => {
+    const migrated = migrateLegacyChatMediaUrl(
+      'file:///C:/old/Data/.chat_media/folder%20one/%E5%9B%BE%E5%83%8F.png',
+      windowsDataDir
+    )
+    expect(migrateLegacyChatMediaUrl(migrated, windowsDataDir)).toBe(migrated)
+  })
+
+  it('migrates attachment and OCR URL fields without replacing markdown content', () => {
+    const markdownUrl = 'file:///C:/old/Data/.chat_media/markdown.png'
+    const result = migrateLegacyChatMediaMessages(
+      [
+        {
+          role: 'user',
+          content: `![kept](${markdownUrl})`,
+          attachments: [
+            {
+              type: 'image',
+              url: 'file:///C:/old/Data/.chat_media/attachments/image.png',
+              ocrResult: {
+                kind: 'text',
+                sourceImageUrl: 'file:///C:/old/Data/.chat_media/ocr/attachment.png'
+              }
+            }
+          ],
+          ocrResult: {
+            kind: 'text',
+            sourceImageUrl: 'local-media:///C:/old/Data/.chat_media/ocr/message.png'
+          }
+        }
+      ],
+      'D:/current/Data'
+    )
+
+    expect(result.changed).toBe(true)
+    expect(result.value[0].content).toBe(`![kept](${markdownUrl})`)
+    expect(result.value[0].attachments?.[0].url).toBe(
+      'local-media:///D:/current/Data/.chat_media/attachments/image.png'
+    )
+    expect(result.value[0].attachments?.[0].ocrResult?.sourceImageUrl).toBe(
+      'local-media:///D:/current/Data/.chat_media/ocr/attachment.png'
+    )
+    expect(result.value[0].ocrResult?.sourceImageUrl).toBe(
+      'local-media:///D:/current/Data/.chat_media/ocr/message.png'
     )
   })
 })

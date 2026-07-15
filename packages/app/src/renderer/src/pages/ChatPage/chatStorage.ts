@@ -163,6 +163,14 @@ export interface ChatSessionDeleteTombstone {
 const getDeleteTombstoneStorageKey = (sessionId: string, scope?: string): string =>
   `${DELETE_TOMBSTONE_STORAGE_KEY_PREFIX}${encodeURIComponent(normalizeScope(scope))}:${encodeURIComponent(sessionId)}`
 
+export function hasSessionDeleteTombstone(sessionId: string, scope = 'default'): boolean {
+  try {
+    return localStorage.getItem(getDeleteTombstoneStorageKey(sessionId, scope)) !== null
+  } catch {
+    return false
+  }
+}
+
 export function readSessionDeleteTombstones(): ChatSessionDeleteTombstone[] {
   const tombstones: ChatSessionDeleteTombstone[] = []
   try {
@@ -493,7 +501,9 @@ function openDB(): Promise<IDBDatabase> {
         const legacyRequest = tx.objectStore(LEGACY_STORE_NAME).getAll()
         legacyRequest.onsuccess = () => {
           for (const session of (legacyRequest.result || []) as LegacyChatSession[]) {
-            targetStore.put(createStoredSession(session))
+            if (!hasSessionDeleteTombstone(session.id, 'default')) {
+              targetStore.put(createStoredSession(session))
+            }
           }
         }
       }
@@ -605,10 +615,73 @@ export async function loadSessionFromDB(
   }
 }
 
+export interface CompareAndUpdateSessionOptions {
+  expectedSession: ChatSession
+  shouldUpdate?: (currentSession: ChatSession) => boolean
+  update: (currentSession: ChatSession) => ChatSession
+}
+
+/**
+ * Atomically updates a session only while its stored value still matches the caller's snapshot.
+ * The read/compare/write shares the per-session mutation queue with ordinary saves and deletes.
+ */
+export async function compareAndUpdateSessionInDB(
+  sessionId: string,
+  scope: string,
+  options: CompareAndUpdateSessionOptions
+): Promise<ChatSession | null> {
+  return queueSessionMutation(sessionId, scope, async () => {
+    if (!(await ensureStorageAvailable())) {
+      throw fatalStorageError || new Error('Chat storage is unavailable.')
+    }
+
+    try {
+      const db = await openDB()
+      return await new Promise<ChatSession | null>((resolve, reject) => {
+        const targetScope = normalizeScope(scope)
+        const tx = db.transaction(STORE_NAME, 'readwrite')
+        const store = tx.objectStore(STORE_NAME)
+        const request = store.get(createSessionStorageKey(sessionId, targetScope))
+        let updatedSession: ChatSession | null = null
+        request.onsuccess = () => {
+          const stored = request.result as StoredChatSession | undefined
+          if (!stored || normalizeScope(stored.storageScope) !== targetScope) return
+
+          const currentSession = normalizeSession(stored, targetScope)
+          if (
+            JSON.stringify(currentSession) !== JSON.stringify(options.expectedSession) ||
+            (options.shouldUpdate && !options.shouldUpdate(currentSession))
+          ) {
+            return
+          }
+
+          updatedSession = options.update(currentSession)
+          store.put(createStoredSession(updatedSession, targetScope))
+        }
+        request.onerror = () =>
+          reject(createStorageError(request.error, 'IndexedDB failed to compare the chat session.'))
+        tx.oncomplete = () => resolve(updatedSession)
+        tx.onerror = () =>
+          reject(createStorageError(tx.error, 'IndexedDB failed to update the chat session.'))
+      })
+    } catch (error) {
+      const storageError = createStorageError(
+        error,
+        'IndexedDB failed to compare and update the chat session.'
+      )
+      await handleStorageFailure(storageError, 'compareAndUpdateSession failed')
+      throw storageError
+    }
+  })
+}
+
 /** Save a single session (upsert) - efficient for single-session updates. */
 export async function saveSessionToDB(session: ChatSession, scope = 'default'): Promise<void> {
   cancelDebouncedSessionSave(session.id, scope)
   return queueSessionMutation(session.id, scope, async () => {
+    if (hasSessionDeleteTombstone(session.id, scope)) {
+      return
+    }
     if (!(await ensureStorageAvailable())) {
       throw fatalStorageError || new Error('Chat storage is unavailable.')
     }
@@ -721,6 +794,7 @@ export async function migrateFromLocalStorage(): Promise<ChatSession[] | null> {
         const tx = db.transaction(STORE_NAME, 'readwrite')
         const store = tx.objectStore(STORE_NAME)
         for (const session of normalized) {
+          if (hasSessionDeleteTombstone(session.id, 'default')) continue
           const storageKey = createSessionStorageKey(session.id, 'default')
           const request = store.get(storageKey)
           request.onsuccess = () => {
@@ -792,8 +866,11 @@ export function debouncedSaveSessions(
   const targetScope = normalizeScope(scope)
   const pending = pendingSessionSaves.get(targetScope) || new Map<string, ChatSession>()
   for (const session of sessions) {
-    pending.set(session.id, session)
+    if (!hasSessionDeleteTombstone(session.id, targetScope)) {
+      pending.set(session.id, session)
+    }
   }
+  if (pending.size === 0) return
   pendingSessionSaves.set(targetScope, pending)
   pendingSaveCallbacks.set(targetScope, options)
 

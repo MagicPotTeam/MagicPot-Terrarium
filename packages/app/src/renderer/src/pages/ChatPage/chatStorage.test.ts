@@ -370,6 +370,43 @@ describe('chatStorage', () => {
     expect(fakeIndexedDb.state.putCount).toBe(0)
   })
 
+  it('does not resurrect tombstoned sessions during localStorage migration', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+
+    storage.setSessionDeleteTombstone('legacy-deleted', 'default')
+    localStorage.setItem(
+      'chat.sessions',
+      JSON.stringify([{ id: 'legacy-deleted', title: 'Legacy deleted', messages: [] }])
+    )
+
+    await storage.migrateFromLocalStorage()
+
+    await expect(storage.loadSessionFromDB('legacy-deleted', 'default')).resolves.toBeNull()
+    expect(fakeIndexedDb.state.putCount).toBe(0)
+  })
+
+  it('does not resurrect a deleted session through a later immediate save', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+
+    storage.setSessionDeleteTombstone('session-delete-immediate', 'workspace-a')
+    await storage.deleteSessionFromDB('session-delete-immediate', 'workspace-a')
+    await storage.saveSessionToDB(
+      { id: 'session-delete-immediate', title: 'stale writer', messages: [] },
+      'workspace-a'
+    )
+
+    await expect(
+      storage.loadSessionFromDB('session-delete-immediate', 'workspace-a')
+    ).resolves.toBeNull()
+    expect(fakeIndexedDb.state.putCount).toBe(0)
+  })
+
   it('lets an immediate save supersede an older debounced snapshot', async () => {
     const fakeIndexedDb = createFakeIndexedDb()
     fakeIndexedDb.state.failGetAllOnce = false

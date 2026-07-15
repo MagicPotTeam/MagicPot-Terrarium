@@ -32,12 +32,14 @@ import {
 } from '@renderer/utils/fileUtils'
 import {
   loadAllSessions,
+  compareAndUpdateSessionInDB,
   saveSessionToDB,
   deleteSessionFromDB,
   cancelDebouncedSessionSave,
   deleteSessionDraftBackup,
   migrateFromLocalStorage,
   readSessionDraftBackup,
+  hasSessionDeleteTombstone,
   readSessionDeleteTombstones,
   debouncedSaveSessions,
   setSessionDeleteTombstone,
@@ -52,6 +54,7 @@ import {
   getBaseProfileId,
   getDownloadFileNameFromUrl,
   hasAutoSavedChatImageKey,
+  migrateLegacyChatMediaMessages,
   normalizeLocalMediaUrl,
   resolveLocalMediaPathFromUrl,
   HUNYUAN_3D_PROFILE_ID,
@@ -791,55 +794,129 @@ const ChatPage: React.FC<ChatPageProps> = ({
     },
     [emitPreviewRefresh, storageScope]
   )
-  const persistAssistantAttachmentFileReference = useCallback(
-    (sessionId: string, messageIndex: number, attachmentIndex: number, savedPath: string) => {
-      const savedUrl = `file://${savedPath}`
-      let sessionToPersist: ChatSession | null = null
+  const migrateLoadedChatMediaSessions = useCallback(
+    async (
+      loadedSessions: ChatSession[],
+      loadEpoch: number,
+      mutationEpoch: number
+    ): Promise<ChatSession[]> => {
+      const dataDir = buildEnv.pathMap.data.trim()
+      if (!dataDir) return loadedSessions
 
-      setSessions((prev) => {
-        let changed = false
-        const next = prev.map((session) => {
-          if (session.id !== sessionId) return session
+      const migratedSessions = await Promise.all(
+        loadedSessions.map(async (loadedSession) => {
+          const migrated = migrateLegacyChatMediaMessages(loadedSession.messages, dataDir)
+          if (!migrated.changed) return loadedSession
 
-          const message = session.messages[messageIndex]
-          const attachment = message?.attachments?.[attachmentIndex]
-          if (!message || !attachment || attachment.url === savedUrl) {
-            return session
+          const sessionKey = `${storageScope}\u0000${loadedSession.id}`
+          try {
+            const committed = await compareAndUpdateSessionInDB(loadedSession.id, storageScope, {
+              expectedSession: loadedSession,
+              shouldUpdate: () =>
+                storageScopeRef.current === storageScope &&
+                sessionLoadEpochRef.current === loadEpoch &&
+                sessionMutationEpochRef.current === mutationEpoch &&
+                !deletedSessionKeysRef.current.has(sessionKey) &&
+                !hasSessionDeleteTombstone(loadedSession.id, storageScope) &&
+                (() => {
+                  const currentSession = sessionsRef.current.find(
+                    (candidate) => candidate.id === loadedSession.id
+                  )
+                  if (!currentSession) return true
+                  const persistedSession = persistedSessionsRef.current.get(loadedSession.id)
+                  return currentSession === loadedSession || currentSession === persistedSession
+                })(),
+              update: (currentSession) => ({ ...currentSession, messages: migrated.value })
+            })
+            return committed || loadedSession
+          } catch (error) {
+            console.warn('[ChatPage] Failed to persist legacy .chat_media URL migration:', error)
+            return loadedSession
           }
-
-          const attachments = [...(message.attachments || [])]
-          attachments[attachmentIndex] = {
-            ...attachment,
-            url: savedUrl
-          }
-
-          const messages = [...session.messages]
-          messages[messageIndex] = {
-            ...message,
-            attachments
-          }
-
-          const updatedSession = {
-            ...session,
-            messages
-          }
-          sessionToPersist = updatedSession
-          changed = true
-          return updatedSession
         })
+      )
 
-        return changed ? next : prev
-      })
-
-      if (!sessionToPersist) {
-        return
+      return migratedSessions
+    },
+    [buildEnv.pathMap.data, storageScope]
+  )
+  const persistAssistantAttachmentFileReference = useCallback(
+    async (
+      sessionId: string,
+      messageIndex: number,
+      attachmentIndex: number,
+      expectedAttachmentUrl: string,
+      savedPath: string,
+      expectedScope = storageScope
+    ): Promise<boolean> => {
+      const savedUrl = `file://${savedPath}`
+      const sessionKey = `${expectedScope}\u0000${sessionId}`
+      const expectedSession = sessionsRef.current.find((candidate) => candidate.id === sessionId)
+      if (
+        !expectedSession ||
+        expectedSession.messages[messageIndex]?.attachments?.[attachmentIndex]?.url !==
+          expectedAttachmentUrl ||
+        storageScopeRef.current !== expectedScope ||
+        deletedSessionKeysRef.current.has(sessionKey) ||
+        hasSessionDeleteTombstone(sessionId, expectedScope)
+      ) {
+        return false
       }
 
-      saveSessionToDB(sessionToPersist, storageScope).catch((error) => {
+      try {
+        const committed = await compareAndUpdateSessionInDB(sessionId, expectedScope, {
+          expectedSession,
+          shouldUpdate: () =>
+            storageScopeRef.current === expectedScope &&
+            !deletedSessionKeysRef.current.has(sessionKey) &&
+            !hasSessionDeleteTombstone(sessionId, expectedScope) &&
+            sessionsRef.current.find((candidate) => candidate.id === sessionId)?.messages[
+              messageIndex
+            ]?.attachments?.[attachmentIndex]?.url === expectedAttachmentUrl,
+          update: (currentSession) => {
+            const message = currentSession.messages[messageIndex]
+            const attachment = message?.attachments?.[attachmentIndex]
+            if (!message || !attachment || attachment.url !== expectedAttachmentUrl) {
+              return currentSession
+            }
+            const attachments = [...(message.attachments || [])]
+            attachments[attachmentIndex] = { ...attachment, url: savedUrl }
+            const messages = [...currentSession.messages]
+            messages[messageIndex] = { ...message, attachments }
+            return { ...currentSession, messages }
+          }
+        })
+        if (!committed) return false
+
+        if (
+          storageScopeRef.current !== expectedScope ||
+          deletedSessionKeysRef.current.has(sessionKey) ||
+          hasSessionDeleteTombstone(sessionId, expectedScope)
+        ) {
+          return true
+        }
+        setSessions((prev) =>
+          prev.map((session) => {
+            if (session.id !== sessionId) return session
+            const message = session.messages[messageIndex]
+            const attachment = message?.attachments?.[attachmentIndex]
+            if (!message || !attachment || attachment.url !== expectedAttachmentUrl) {
+              return session
+            }
+            const attachments = [...(message.attachments || [])]
+            attachments[attachmentIndex] = { ...attachment, url: savedUrl }
+            const messages = [...session.messages]
+            messages[messageIndex] = { ...message, attachments }
+            return { ...session, messages }
+          })
+        )
+        return true
+      } catch (error) {
         console.warn('[ChatPage] persistAssistantAttachmentFileReference failed:', error)
-      })
+        return false
+      }
     },
-    [setSessions, storageScope]
+    [storageScope]
   )
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(() => {
     try {
@@ -904,8 +981,21 @@ const ChatPage: React.FC<ChatPageProps> = ({
         storedSessions = migrated || (await loadAllSessions(storageScope))
         if (loadEpoch !== sessionLoadEpochRef.current) return
 
+        const loadMutationEpoch = sessionMutationEpochRef.current
+        const migratedSessions = await migrateLoadedChatMediaSessions(
+          storedSessions,
+          loadEpoch,
+          loadMutationEpoch
+        )
+        if (
+          loadEpoch !== sessionLoadEpochRef.current ||
+          loadMutationEpoch !== sessionMutationEpochRef.current ||
+          storageScope !== storageScopeRef.current
+        ) {
+          return
+        }
         const sortedStoredSessions = sortSessionsByRecencyDesc(
-          storedSessions.filter(
+          migratedSessions.filter(
             (session) => !deletedSessionKeysRef.current.has(`${storageScope}\u0000${session.id}`)
           )
         )
@@ -935,19 +1025,32 @@ const ChatPage: React.FC<ChatPageProps> = ({
         sessionLoadEpochRef.current += 1
       }
     }
-  }, [currentSessionStorageKey, setSessions, storageScope])
+  }, [currentSessionStorageKey, migrateLoadedChatMediaSessions, setSessions, storageScope])
 
   const refreshSessionsFromStorage = useCallback(async (): Promise<void> => {
     const refreshEpoch = sessionLoadEpochRef.current
     const mutationEpoch = sessionMutationEpochRef.current
     try {
-      const stored = sortSessionsByRecencyDesc(await loadAllSessions(storageScope))
+      const loadedSessions = await loadAllSessions(storageScope)
       if (
         refreshEpoch !== sessionLoadEpochRef.current ||
         storageScope !== storageScopeRef.current
       ) {
         return
       }
+      const migratedSessions = await migrateLoadedChatMediaSessions(
+        loadedSessions,
+        refreshEpoch,
+        mutationEpoch
+      )
+      if (
+        refreshEpoch !== sessionLoadEpochRef.current ||
+        mutationEpoch !== sessionMutationEpochRef.current ||
+        storageScope !== storageScopeRef.current
+      ) {
+        return
+      }
+      const stored = sortSessionsByRecencyDesc(migratedSessions)
       const visibleStored = stored.filter(
         (session) => !deletedSessionKeysRef.current.has(`${storageScope}\u0000${session.id}`)
       )
@@ -969,7 +1072,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         console.warn('[ChatPage] refreshSessionsFromStorage failed:', e)
       }
     }
-  }, [setSessions, storageScope])
+  }, [migrateLoadedChatMediaSessions, setSessions, storageScope])
 
   useEffect(() => {
     for (const key of deletedSessionKeysRef.current) {
@@ -3032,11 +3135,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     dir: targetDir
                   })
                   if (res.savedPath) {
-                    persistAssistantAttachmentFileReference(
+                    await persistAssistantAttachmentFileReference(
                       session.id,
                       messageIndex,
                       attachmentIndex,
-                      res.savedPath
+                      attachment.url,
+                      res.savedPath,
+                      storageScope
                     )
                   }
                   console.log(`[自动保存] Agent 图片已保存到 ${res.savedPath}`)
@@ -4064,7 +4169,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (timer) clearTimeout(timer)
         pendingDeleteRetryTimersRef.current.delete(retryKey)
         deletedSessionKeysRef.current.delete(`${scope}\u0000${sessionId}`)
-        setSessionDeleteTombstone(sessionId, scope, false)
       },
       (error) => {
         console.error('[ChatPage] deleteSessionFromDB failed:', error)
@@ -5704,13 +5808,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const normalizedUrl = normalizeLocalMediaUrl(attachment.url)
       const resolvedFileName =
         attachment.fileName || getDownloadFileNameFromUrl(normalizedUrl, fallbackFileName)
-      const downloadDir = (() => {
-        try {
-          return localStorage.getItem('qapp.downloadDir') || config.download_dir
-        } catch {
-          return config.download_dir
-        }
-      })()
+      const downloadDir = config.download_dir
 
       try {
         const localPath = resolveLocalMediaPathFromUrl(normalizedUrl)
