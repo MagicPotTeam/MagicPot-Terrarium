@@ -13,6 +13,13 @@ import {
 } from '@shared/config/config'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
 
+vi.mock('electron', () => ({
+  app: {
+    isPackaged: false,
+    getPath: vi.fn()
+  }
+}))
+
 vi.mock(import('./buildEnv'), () => ({
   getBuildEnv: vi.fn()
 }))
@@ -37,14 +44,97 @@ const loadConfigModule = async () => {
 describe('config', () => {
   beforeEach(async () => {
     tempDir = await createNodeTestArtifactDir('config')
+    delete process.env['MAGICPOT_USER_DATA_DIR']
+    delete process.env['MAGICPOT_STORAGE_ROOT']
     const buildEnvModule = await import('./buildEnv')
     vi.mocked(buildEnvModule.getBuildEnv).mockReturnValue(createBuildEnv())
   })
 
   afterEach(async () => {
+    delete process.env['MAGICPOT_USER_DATA_DIR']
+    delete process.env['MAGICPOT_STORAGE_ROOT']
     await fs.rm(tempDir, { recursive: true, force: true })
     tempDir = ''
     vi.clearAllMocks()
+  })
+
+  it('derives the project root for a fresh explicitly unified Data directory', async () => {
+    const storageRoot = tempDir
+    tempDir = path.join(storageRoot, 'Data')
+    process.env['MAGICPOT_STORAGE_ROOT'] = storageRoot
+    await fs.mkdir(tempDir, { recursive: true })
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+
+    expect(configModule.getConfig().download_dir).toBe(path.join(path.dirname(tempDir), 'Projects'))
+  })
+
+  it('repairs a stale non-empty project root in an explicitly unified target config', async () => {
+    const storageRoot = tempDir
+    tempDir = path.join(storageRoot, 'Data')
+    process.env['MAGICPOT_STORAGE_ROOT'] = storageRoot
+    await fs.mkdir(tempDir, { recursive: true })
+    await fs.writeFile(
+      path.join(tempDir, 'config.json'),
+      JSON.stringify({ ...DEFAULT_CONFIG, download_dir: path.join(tempDir, 'old-projects') }),
+      'utf8'
+    )
+
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+
+    const expected = path.join(path.dirname(tempDir), 'Projects')
+    expect(configModule.getConfig().download_dir).toBe(expected)
+    expect(
+      JSON.parse(await fs.readFile(path.join(tempDir, 'config.json'), 'utf8')).download_dir
+    ).toBe(expected)
+  })
+
+  it('preserves download_dir for a legacy user-data layout', async () => {
+    const legacyProjects = path.join(tempDir, 'legacy-projects')
+    await fs.writeFile(
+      path.join(tempDir, 'config.json'),
+      JSON.stringify({ ...DEFAULT_CONFIG, download_dir: legacyProjects }),
+      'utf8'
+    )
+
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+
+    expect(configModule.getConfig().download_dir).toBe(legacyProjects)
+  })
+
+  it('does not infer a unified layout from an otherwise unknown Data basename', async () => {
+    tempDir = path.join(tempDir, 'Data')
+    const legacyProjects = path.join(tempDir, 'legacy-projects')
+    await fs.mkdir(tempDir, { recursive: true })
+    await fs.writeFile(
+      path.join(tempDir, 'config.json'),
+      JSON.stringify({ ...DEFAULT_CONFIG, download_dir: legacyProjects }),
+      'utf8'
+    )
+
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+
+    expect(configModule.getConfig().download_dir).toBe(legacyProjects)
+  })
+
+  it('preserves download_dir when the legacy exact user-data override is named Data', async () => {
+    tempDir = path.join(tempDir, 'Data')
+    const legacyProjects = path.join(tempDir, 'legacy-projects')
+    process.env['MAGICPOT_USER_DATA_DIR'] = tempDir
+    await fs.mkdir(tempDir, { recursive: true })
+    await fs.writeFile(
+      path.join(tempDir, 'config.json'),
+      JSON.stringify({ ...DEFAULT_CONFIG, download_dir: legacyProjects }),
+      'utf8'
+    )
+
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+
+    expect(configModule.getConfig().download_dir).toBe(legacyProjects)
   })
 
   it('creates new configs with the local LLM proxy and MCP server disabled', async () => {

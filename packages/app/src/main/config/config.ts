@@ -7,6 +7,7 @@ import { getBuildEnv } from './buildEnv'
 import { exists } from '../utils/fileUtils'
 import { EventCenter, EventListener } from '../utils/eventCenter'
 import { migrateConfig } from './config_migration'
+import { resolvePortableStorageRootForUserDataSync } from './portablePaths'
 
 const CONFIG_FILENAME = 'config.json'
 
@@ -61,7 +62,11 @@ async function loadConfigFromFile(): Promise<Config> {
   const migratedConfig = migrateConfig(rawConfig)
   // Config stays JSON-serializable, but DeepPartial with record-like MCP fields is wider than JsonValue.
   configCache = deepMerge(DEFAULT_CONFIG as never, migratedConfig as never) as Config
-
+  const userDataDir = getBuildEnv().pathMap.data
+  const storageRoot = resolvePortableStorageRootForUserDataSync(userDataDir)
+  if (storageRoot) {
+    configCache = { ...configCache, download_dir: path.join(storageRoot, 'Projects') }
+  }
   // Persist the normalized structure once so later launches do not depend on migration.
   if (
     shouldPersistNormalizedConfig &&

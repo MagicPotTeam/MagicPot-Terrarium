@@ -24,13 +24,15 @@ import { getBuildEnv } from '../config/buildEnv'
 import { getConfig, listenConfig, saveConfig } from '../config/config'
 import { getStorageLocations } from '../config/storageLocations'
 import {
-  getCurrentUserDataDirectoryState,
-  prepareUserDataDirectoryChange
+  beginUserDataDirectoryChange,
+  getCurrentUserDataDirectoryState
 } from '../config/userDataDirectory'
 import { getMcpRuntimeStatus } from '../mcp/status'
 import { getLlmProxyAccessUsageSnapshot } from '../llmProxy/accessUsage'
 import { getLLMProxyServerStatus } from '../llmProxy/server'
 import { app } from 'electron'
+import fs from 'node:fs'
+import path from 'node:path'
 
 export class StateSvcImpl implements StateSvc {
   async getConfig(_req: GetConfigReq): Promise<GetConfigResp> {
@@ -69,14 +71,42 @@ export class StateSvcImpl implements StateSvc {
   }
 
   async setUserDataDirectory(req: SetUserDataDirectoryReq): Promise<SetUserDataDirectoryResp> {
-    const restartRequired = await prepareUserDataDirectoryChange(req.path, app.getPath('userData'))
-    if (restartRequired) {
-      setTimeout(() => {
-        app.relaunch()
-        app.quit()
-      }, 100)
+    const currentConfig = getConfig()
+    const currentDirectoryState = getCurrentUserDataDirectoryState()
+    const configuredProjectRoot = currentConfig.download_dir?.trim()
+    const projectsFrom = configuredProjectRoot || currentDirectoryState.projectRoot
+    const autoSaveCandidates = [
+      path.join(projectsFrom, '.AutoSave'),
+      path.join(projectsFrom, 'AutoSave'),
+      path.join(currentDirectoryState.storageRoot, '.AutoSave'),
+      path.join(currentDirectoryState.storageRoot, 'AutoSave')
+    ].filter((candidate) => fs.existsSync(candidate))
+    const prepared = await beginUserDataDirectoryChange(
+      req.path,
+      currentDirectoryState.currentPath,
+      {
+        projectsFrom,
+        autoSaveFromCandidates: autoSaveCandidates
+      }
+    )
+    if (!prepared.changed) return { restartRequired: false }
+
+    try {
+      // Publish the storage-root bootstrap as the only switch transaction. On the next launch,
+      // the unified Data config is normalized to the sibling Projects directory. Writing the old
+      // root's config here would create an unrecoverable split-root window if the process crashed
+      // before the bootstrap commit.
+      await prepared.commit()
+    } catch (error) {
+      await prepared.rollback()
+      throw error
     }
-    return { restartRequired }
+
+    setTimeout(() => {
+      app.relaunch()
+      app.quit()
+    }, 500)
+    return { restartRequired: true }
   }
 
   async getStorageLocations(_req: GetStorageLocationsReq): Promise<GetStorageLocationsResp> {

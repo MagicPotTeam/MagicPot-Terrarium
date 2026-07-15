@@ -60,7 +60,7 @@ function buildDefaultLocation(buildEnv: BuildEnv): StorageLocationSeed {
       id: 'default-development',
       kind: 'default-development',
       isCurrent: false,
-      userDataDir: path.join(process.cwd(), DEV_USER_DATA_DIRNAME),
+      userDataDir: path.join(process.cwd(), DEV_USER_DATA_DIRNAME, 'Data'),
       fileRootDir: process.cwd()
     }
   }
