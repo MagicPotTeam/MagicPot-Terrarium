@@ -1207,7 +1207,7 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
             </Box>
 
             <Box key="data_storage">
-              <SettingSection title={text('数据根目录', 'Data directory')}>
+              <SettingSection title={t('environment.storage_root_title')}>
                 <DataStorageInfo />
               </SettingSection>
             </Box>

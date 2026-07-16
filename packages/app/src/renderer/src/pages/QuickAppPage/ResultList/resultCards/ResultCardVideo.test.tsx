@@ -11,6 +11,7 @@ const {
   showItemInFolderMock,
   listQAppCfgsMock,
   getQAppCfgMock,
+  saveImageToDirMock,
   setWorkflowMock,
   setQAppCfgMock,
   resolveImportedWorkflowMock,
@@ -22,6 +23,9 @@ const {
   showItemInFolderMock: vi.fn(),
   listQAppCfgsMock: vi.fn().mockResolvedValue({ qApps: [] }),
   getQAppCfgMock: vi.fn(),
+  saveImageToDirMock: vi
+    .fn()
+    .mockResolvedValue({ savedPath: 'C:/MagicPot/AutoSave/QuickApp/Videos/qapp.mp4' }),
   setWorkflowMock: vi.fn(),
   setQAppCfgMock: vi.fn(),
   resolveImportedWorkflowMock: vi.fn(async (workflow: Record<string, unknown>) => ({ workflow })),
@@ -42,6 +46,9 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     svcQApp: {
       listQAppCfgs: listQAppCfgsMock,
       getQAppCfg: getQAppCfgMock
+    },
+    svcHyper: {
+      saveImageToDir: saveImageToDirMock
     }
   })
 }))
@@ -95,6 +102,7 @@ vi.mock('./components/ResultIconButtonBase', () => ({
 
 describe('ResultCardVideo', () => {
   const originalWindowPath = window.path
+  const originalFetch = global.fetch
 
   beforeEach(() => {
     downloadFileMock.mockReset()
@@ -102,6 +110,7 @@ describe('ResultCardVideo', () => {
     showItemInFolderMock.mockReset()
     listQAppCfgsMock.mockClear()
     getQAppCfgMock.mockClear()
+    saveImageToDirMock.mockClear()
     setWorkflowMock.mockClear()
     setQAppCfgMock.mockClear()
     resolveImportedWorkflowMock.mockReset()
@@ -110,6 +119,50 @@ describe('ResultCardVideo', () => {
     window.path = {
       join: (...parts: string[]) => parts.join('/')
     } as any
+    global.fetch = vi.fn(async () => ({
+      blob: async () => {
+        const blob = new Blob([new Uint8Array([4, 5, 6])], { type: 'video/mp4' }) as Blob & {
+          arrayBuffer?: () => Promise<ArrayBuffer>
+        }
+        if (typeof blob.arrayBuffer !== 'function') {
+          blob.arrayBuffer = async () => new Uint8Array([4, 5, 6]).buffer
+        }
+        return blob
+      }
+    })) as any
+  })
+
+  it('auto-saves video results to the sibling AutoSave directory', async () => {
+    render(
+      <ResultCardVideo
+        result={
+          {
+            type: 'video',
+            id: 'video-auto-save',
+            promptId: 'prompt-auto-save',
+            objectUrl: 'blob:video-auto-save',
+            fileItem: {
+              filename: 'video-auto-save.mp4',
+              subfolder: 'outputs',
+              type: 'output'
+            }
+          } as any
+        }
+        index={0}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
+        buildEnv={{} as any}
+      />
+    )
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith('blob:video-auto-save')
+      expect(saveImageToDirMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: new Uint8Array([4, 5, 6]),
+          dir: 'C:/MagicPot/AutoSave/QuickApp/Videos'
+        })
+      )
+    })
   })
 
   it('supports preview, download, and open-folder actions for a video result', () => {
@@ -129,7 +182,7 @@ describe('ResultCardVideo', () => {
           } as any
         }
         index={0}
-        config={{ download_dir: 'C:/downloads' } as any}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
         buildEnv={{} as any}
       />
     )
@@ -165,7 +218,7 @@ describe('ResultCardVideo', () => {
           } as any
         }
         index={1}
-        config={{ download_dir: 'C:/downloads' } as any}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
         buildEnv={{} as any}
       />
     )
@@ -192,7 +245,7 @@ describe('ResultCardVideo', () => {
           } as any
         }
         index={2}
-        config={{ download_dir: 'C:/downloads' } as any}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
         buildEnv={{} as any}
       />
     )
@@ -242,7 +295,7 @@ describe('ResultCardVideo', () => {
           } as any
         }
         index={2}
-        config={{ download_dir: 'C:/downloads' } as any}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
         buildEnv={{} as any}
       />
     )
@@ -285,7 +338,7 @@ describe('ResultCardVideo', () => {
           } as any
         }
         index={3}
-        config={{ download_dir: 'C:/downloads' } as any}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
         buildEnv={{} as any}
       />
     )
@@ -336,7 +389,7 @@ describe('ResultCardVideo', () => {
           } as any
         }
         index={4}
-        config={{ download_dir: 'C:/downloads' } as any}
+        config={{ download_dir: 'C:/MagicPot/Projects' } as any}
         buildEnv={{} as any}
       />
     )
@@ -351,5 +404,6 @@ describe('ResultCardVideo', () => {
 
   afterEach(() => {
     window.path = originalWindowPath
+    global.fetch = originalFetch
   })
 })

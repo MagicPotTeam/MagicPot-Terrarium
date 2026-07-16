@@ -44,7 +44,11 @@ vi.mock('../config/fastSettingTemplates', () => ({
   listFastSettingTemplates: vi.fn()
 }))
 
-import { HyperSvcImpl, sanitizeSaveImageFileName } from './svcHyperImpl'
+import {
+  HyperSvcImpl,
+  migrateLegacyAssistantImageFile,
+  sanitizeSaveImageFileName
+} from './svcHyperImpl'
 
 const baseConfig = {
   use_remote_comfyui: false,
@@ -182,5 +186,56 @@ describe('HyperSvcImpl.saveImageToDir', () => {
     expect(response.savedPath).toBe(path.resolve(targetDir, 'image_1.png'))
     expect(fs.readFileSync(path.join(targetDir, 'image.png'))).toEqual(Buffer.from([9]))
     expect(fs.readFileSync(response.savedPath)).toEqual(Buffer.from([1, 2, 3]))
+  })
+})
+
+describe('migrateLegacyAssistantImageFile', () => {
+  let testRoot: string
+  let legacyRoot: string
+  let userDataRoot: string
+
+  beforeEach(() => {
+    testRoot = getTestRoot()
+    legacyRoot = path.join(testRoot, 'home', 'Desktop', '魔壶图片保存')
+    userDataRoot = path.join(testRoot, 'user-data')
+    fs.mkdirSync(legacyRoot, { recursive: true })
+    fs.mkdirSync(userDataRoot, { recursive: true })
+  })
+
+  afterEach(() => {
+    if (testRoot) {
+      fs.rmSync(testRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('copies a validated legacy PNG into the app-owned media directory idempotently', async () => {
+    const fileName = 'agent_auto_2026-07-14T02-44-00.png'
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])
+    fs.writeFileSync(path.join(legacyRoot, fileName), png)
+
+    const first = await migrateLegacyAssistantImageFile({ fileName, legacyRoot, userDataRoot })
+    const second = await migrateLegacyAssistantImageFile({ fileName, legacyRoot, userDataRoot })
+
+    expect(first.savedPath).toBe(second.savedPath)
+    expect(path.relative(userDataRoot, first.savedPath)).toMatch(
+      /^\.chat_media[\\/]assistant-images[\\/]legacy[\\/]legacy-[a-f0-9]{64}\.png$/
+    )
+    expect(fs.readFileSync(first.savedPath)).toEqual(png)
+  })
+
+  it('rejects unrecognized names and files without a PNG signature', async () => {
+    await expect(
+      migrateLegacyAssistantImageFile({
+        fileName: '../agent_auto_2026-07-14T02-44-00.png',
+        legacyRoot,
+        userDataRoot
+      })
+    ).rejects.toThrow(/file name/i)
+
+    const fileName = 'agent_auto_2026-07-14T02-44-00_1.png'
+    fs.writeFileSync(path.join(legacyRoot, fileName), Buffer.from('not-a-png'))
+    await expect(
+      migrateLegacyAssistantImageFile({ fileName, legacyRoot, userDataRoot })
+    ).rejects.toThrow(/valid PNG/i)
   })
 })

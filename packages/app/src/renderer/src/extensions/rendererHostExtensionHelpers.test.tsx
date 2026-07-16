@@ -29,7 +29,7 @@ const createProfile = (id: string, modelName = id): LLMAPIProfile =>
     is_ocr_model: false
   }) as LLMAPIProfile
 
-const config = { download_dir: 'C:/Downloads' } as Config
+const config = { download_dir: 'C:/MagicPot/Projects' } as Config
 
 afterEach(() => {
   delete rendererHostExtensionApiV1.chat
@@ -71,20 +71,20 @@ describe('renderer HostExtensionApi helper fallbacks', () => {
   })
 
   it('uses assistant image auto-save fallback only when the chat extension returns undefined', () => {
-    const fallback = vi.fn(() => 'C:/fallback/.AutoSave/Agent')
+    const fallback = vi.fn(() => 'C:/MagicPot/AutoSave/Agent')
     const options = { config, storageScope: 'project-1.chat' }
 
     expect(resolveRendererAssistantImageAutoSaveDir(options, fallback)).toBe(
-      'C:/fallback/.AutoSave/Agent'
+      'C:/MagicPot/AutoSave/Agent'
     )
     expect(fallback).toHaveBeenCalledTimes(1)
 
     fallback.mockClear()
     rendererHostExtensionApiV1.chat = {
-      resolveAssistantImageAutoSaveDir: () => 'C:/extension/.AutoSave/Agent'
+      resolveAssistantImageAutoSaveDir: () => 'C:/ExtensionRoot/AutoSave/Agent'
     }
     expect(resolveRendererAssistantImageAutoSaveDir(options, fallback)).toBe(
-      'C:/extension/.AutoSave/Agent'
+      'C:/ExtensionRoot/AutoSave/Agent'
     )
     expect(fallback).not.toHaveBeenCalled()
   })

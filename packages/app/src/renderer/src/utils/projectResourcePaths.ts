@@ -4,7 +4,6 @@ import { buildProjectStorageDirName, getProjectById } from '@renderer/pages/Main
 
 const DEFAULT_PROJECT_ID = 'default'
 const DEFAULT_PROJECT_NAME = 'default-project'
-const DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
 
 type ProjectResourceOptions = {
   config: Pick<Config, 'download_dir'>
@@ -17,24 +16,12 @@ const normalizeText = (value: unknown): string => String(value ?? '').trim()
 
 export function resolveProjectIdFromStorageScope(storageScope?: string | null): string | undefined {
   const scope = normalizeText(storageScope)
-  if (!scope || scope === DEFAULT_PROJECT_ID) {
-    return undefined
-  }
-
+  if (!scope || scope === DEFAULT_PROJECT_ID) return undefined
   const firstPart = scope.split('.')[0]?.trim()
   return firstPart || undefined
 }
 
 export function resolveConfiguredProjectRoot(config: Pick<Config, 'download_dir'>): string {
-  try {
-    const cachedDir = localStorage.getItem(DOWNLOAD_DIR_KEY)?.trim()
-    if (cachedDir) {
-      return cachedDir
-    }
-  } catch {
-    // Ignore localStorage failures and fall back to config.
-  }
-
   return normalizeText(config.download_dir)
 }
 
@@ -47,9 +34,7 @@ export function resolveProjectStorageDirName(
   const normalizedStoredDirName = project?.storageDirName
     ? normalizeGeneratedRootDirName(project.storageDirName)
     : ''
-  if (normalizedStoredDirName) {
-    return normalizedStoredDirName
-  }
+  if (normalizedStoredDirName) return normalizedStoredDirName
 
   const normalizedProjectName = normalizeText(projectName) || project?.name || DEFAULT_PROJECT_NAME
   return buildProjectStorageDirName(normalizedProjectName, normalizedProjectId)
@@ -62,9 +47,22 @@ export function resolveProjectResourceDir({
   segments = []
 }: ProjectResourceOptions): string | undefined {
   const root = resolveConfiguredProjectRoot(config)
-  if (!root || !window.path || typeof window.path.join !== 'function') {
-    return undefined
+  if (!root || !window.path || typeof window.path.join !== 'function') return undefined
+
+  const normalizedSegments = [...segments]
+  const firstSegment = normalizeText(normalizedSegments[0])
+  if (firstSegment.toLowerCase() === '.autosave') {
+    normalizedSegments.shift()
+    const parentRoot =
+      typeof window.path.dirname === 'function'
+        ? window.path.dirname(root)
+        : root.replace(/[\\/][^\\/]+[\\/]?$/g, '')
+    return window.path.join(parentRoot, 'AutoSave', ...normalizedSegments)
   }
 
-  return window.path.join(root, resolveProjectStorageDirName(projectId, projectName), ...segments)
+  return window.path.join(
+    root,
+    resolveProjectStorageDirName(projectId, projectName),
+    ...normalizedSegments
+  )
 }

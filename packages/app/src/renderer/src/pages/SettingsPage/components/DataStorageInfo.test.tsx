@@ -10,35 +10,39 @@ const showOpenDialogMock = vi.fn()
 const showMessageBoxMock = vi.fn()
 
 const translations: Record<string, string> = {
-  'environment.data_directory.loading': 'Loading data directory...',
-  'environment.data_directory.load_failed': 'Failed to load the data directory state.',
-  'environment.data_directory.unavailable': 'No data directory information is available.',
+  'environment.data_directory.loading': 'Loading global storage root...',
+  'environment.data_directory.load_failed': 'Failed to load the global storage root.',
+  'environment.data_directory.unavailable': 'No global storage root information is available.',
   'environment.data_directory.info':
-    'The data directory stores local config, QApps, skills, checks, chat workspaces, and other runtime data. Only empty directories or existing Magic Pot data directories are allowed to avoid mixing unrelated files into app data.',
+    'Choose one global storage root. Magic Pot keeps internal app data in Data, project canvases and source assets in Projects, and automatic exports in AutoSave.',
   'environment.data_directory.env_override':
-    'The current directory is forced by the `MAGICPOT_USER_DATA_DIR` environment variable. Remove that environment variable before changing it here.',
-  'environment.data_directory.card_title': 'Data directory',
+    'The current storage location is forced by MAGICPOT_STORAGE_ROOT or the legacy MAGICPOT_USER_DATA_DIR environment variable. Remove the override before changing it here.',
+  'environment.data_directory.card_title': 'Global storage root',
   'environment.data_directory.status_default': 'Default',
   'environment.data_directory.status_custom': 'Custom',
   'environment.data_directory.status_env_override': 'Environment override',
   'environment.data_directory.status_applying': 'Applying',
-  'environment.data_directory.current_directory': 'Current directory',
-  'environment.data_directory.default_directory': 'Default directory',
+  'environment.data_directory.current_directory': 'Current storage root',
+  'environment.data_directory.default_directory': 'Default storage root',
+  'environment.data_directory.data_subdirectory': 'App data',
+  'environment.data_directory.projects_subdirectory': 'Projects',
+  'environment.data_directory.autosave_subdirectory': 'Automatic exports',
+  'environment.data_directory.legacy_layout': 'Legacy layout',
   'environment.data_directory.restart_hint':
-    'The app restarts after you switch directories. If the target directory is empty, the next launch migrates the current data. If the target already contains Magic Pot data, the app switches directly to it.',
-  'environment.data_directory.choose': 'Choose directory',
-  'environment.data_directory.open_current': 'Open current directory',
-  'environment.data_directory.use_default': 'Use default',
-  'environment.data_directory.update_failed': 'Failed to update the data directory.',
-  'environment.data_directory.dialog_title': 'Change data directory',
+    'Changing the root restarts the app. Magic Pot derives Data, Projects, and AutoSave automatically and migrates app data into an empty target.',
+  'environment.data_directory.choose': 'Choose storage root',
+  'environment.data_directory.open_current': 'Open storage root',
+  'environment.data_directory.use_default': 'Use default root',
+  'environment.data_directory.update_failed': 'Failed to update the global storage root.',
+  'environment.data_directory.dialog_title': 'Change global storage root',
   'environment.data_directory.dialog_message': 'This change requires an app restart.',
   'environment.data_directory.dialog_confirm': 'Restart now',
   'environment.data_directory.dialog_cancel': 'Cancel',
-  'environment.data_directory.dialog_choose_title': 'Choose a data directory',
+  'environment.data_directory.dialog_choose_title': 'Choose a global storage root',
   'environment.data_directory.dialog_detail_custom':
-    'New data directory:\n{{targetPath}}\n\nIf the directory is empty, Magic Pot will migrate the current data after restart. If it already contains Magic Pot data, the app will switch to it directly.',
+    'New global storage root:\n{{targetPath}}\n\nMagic Pot will use Data, Projects, and AutoSave below this directory. Existing app data is copied when the target Data directory is empty.',
   'environment.data_directory.dialog_detail_default':
-    'Magic Pot will return to the default data directory:\n{{targetPath}}\n\nIf the default directory is empty, the app will migrate the current data after restart.'
+    'Magic Pot will return to the default global storage root:\n{{targetPath}}\n\nData, Projects, and AutoSave are derived automatically.'
 }
 
 vi.mock('react-i18next', () => ({
@@ -82,10 +86,15 @@ describe('DataStorageInfo', () => {
 
     getUserDataDirectoryStateMock.mockResolvedValue({
       state: {
-        currentPath: 'C:/MagicPot/data',
-        defaultPath: 'C:/MagicPot/default-data',
+        currentPath: 'C:/MagicPot/Data',
+        defaultPath: 'C:/DefaultMagicPot/Data',
+        storageRoot: 'C:/MagicPot',
+        defaultStorageRoot: 'C:/DefaultMagicPot',
+        projectRoot: 'C:/MagicPot/Projects',
+        autoSaveRoot: 'C:/MagicPot/AutoSave',
         isCustom: true,
-        source: 'persisted'
+        source: 'persisted',
+        legacyLayout: false
       }
     })
   })
@@ -93,20 +102,23 @@ describe('DataStorageInfo', () => {
   it('renders the current and default data directories', async () => {
     render(<DataStorageInfo />)
 
-    expect(await screen.findByText('Data directory')).toBeTruthy()
-    expect(screen.getByText('Current directory')).toBeTruthy()
-    expect(screen.getByText('C:/MagicPot/data')).toBeTruthy()
-    expect(screen.getByText('Default directory')).toBeTruthy()
-    expect(screen.getByText('C:/MagicPot/default-data')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Choose directory' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Use default' })).toBeTruthy()
+    expect(await screen.findByText('Global storage root')).toBeTruthy()
+    expect(screen.getByText('Current storage root')).toBeTruthy()
+    expect(screen.getByText('C:/MagicPot')).toBeTruthy()
+    expect(screen.getByText('C:/MagicPot/Data')).toBeTruthy()
+    expect(screen.getByText('C:/MagicPot/Projects')).toBeTruthy()
+    expect(screen.getByText('C:/MagicPot/AutoSave')).toBeTruthy()
+    expect(screen.getByText('Default storage root')).toBeTruthy()
+    expect(screen.getByText('C:/DefaultMagicPot')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Choose storage root' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Use default root' })).toBeTruthy()
   })
 
   it('opens the current directory', async () => {
     render(<DataStorageInfo />)
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Open current directory' }))
-    expect(openPathMock).toHaveBeenCalledWith('C:/MagicPot/data')
+    await userEvent.click(await screen.findByRole('button', { name: 'Open storage root' }))
+    expect(openPathMock).toHaveBeenCalledWith('C:/MagicPot')
   })
 
   it('switches to a user-selected directory after confirmation', async () => {
@@ -119,7 +131,7 @@ describe('DataStorageInfo', () => {
 
     render(<DataStorageInfo />)
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Choose directory' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose storage root' }))
 
     await waitFor(() => {
       expect(showOpenDialogMock).toHaveBeenCalledTimes(1)

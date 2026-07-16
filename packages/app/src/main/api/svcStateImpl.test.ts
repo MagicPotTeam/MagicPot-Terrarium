@@ -17,7 +17,9 @@ import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
 
 vi.mock(import('../config/config'), () => {
   return {
-    getConfig: vi.fn()
+    getConfig: vi.fn(),
+    saveConfig: vi.fn(),
+    listenConfig: vi.fn()
   }
 })
 
@@ -36,6 +38,7 @@ vi.mock(import('../mcp/runtime'), () => {
 
 vi.mock(import('../config/userDataDirectory'), () => {
   return {
+    beginUserDataDirectoryChange: vi.fn(),
     getCurrentUserDataDirectoryState: vi.fn(),
     getDefaultUserDataDirectory: vi.fn(),
     prepareUserDataDirectoryChange: vi.fn()
@@ -82,6 +85,7 @@ function mockBuildEnv(v: DeepPartial<BuildEnv>): void {
 describe('svcStateImpl', () => {
   afterEach(() => {
     vi.clearAllMocks()
+    vi.useRealTimers()
   })
 
   const mockMcpClientManager = {
@@ -120,8 +124,13 @@ describe('svcStateImpl', () => {
 
   it('should get the user data directory state', async () => {
     vi.mocked(userDataDirectory.getCurrentUserDataDirectoryState).mockReturnValue({
-      currentPath: 'C:/MagicPot/data',
-      defaultPath: 'C:/MagicPot/default-data',
+      currentPath: 'C:/MagicPot/Data',
+      defaultPath: 'C:/DefaultMagicPot/Data',
+      storageRoot: 'C:/MagicPot',
+      defaultStorageRoot: 'C:/DefaultMagicPot',
+      projectRoot: 'C:/MagicPot/Projects',
+      autoSaveRoot: 'C:/MagicPot/AutoSave',
+      legacyLayout: false,
       isCustom: true,
       source: 'persisted'
     })
@@ -131,12 +140,108 @@ describe('svcStateImpl', () => {
 
     expect(response).toEqual({
       state: {
-        currentPath: 'C:/MagicPot/data',
-        defaultPath: 'C:/MagicPot/default-data',
+        currentPath: 'C:/MagicPot/Data',
+        defaultPath: 'C:/DefaultMagicPot/Data',
+        storageRoot: 'C:/MagicPot',
+        defaultStorageRoot: 'C:/DefaultMagicPot',
+        projectRoot: 'C:/MagicPot/Projects',
+        autoSaveRoot: 'C:/MagicPot/AutoSave',
+        legacyLayout: false,
         isCustom: true,
         source: 'persisted'
       }
     })
+  })
+
+  it('uses the reported current user-data path when preparing a root change', async () => {
+    mockConfig({ download_dir: 'C:/Old/Projects' })
+    vi.mocked(userDataDirectory.getCurrentUserDataDirectoryState).mockReturnValue({
+      currentPath: 'C:/Old/Data',
+      defaultPath: 'C:/Default/Data',
+      storageRoot: 'C:/Old',
+      defaultStorageRoot: 'C:/Default',
+      projectRoot: 'C:/Old/Projects',
+      autoSaveRoot: 'C:/Old/AutoSave',
+      legacyLayout: false,
+      isCustom: true,
+      source: 'persisted'
+    })
+    vi.mocked(userDataDirectory.beginUserDataDirectoryChange).mockResolvedValue({
+      changed: false,
+      commit: vi.fn(),
+      rollback: vi.fn()
+    })
+
+    const svcStateImpl = new StateSvcImpl()
+    await expect(svcStateImpl.setUserDataDirectory({ path: 'C:/Next' })).resolves.toEqual({
+      restartRequired: false
+    })
+
+    expect(userDataDirectory.beginUserDataDirectoryChange).toHaveBeenCalledWith(
+      'C:/Next',
+      'C:/Old/Data',
+      expect.objectContaining({ projectsFrom: 'C:/Old/Projects' })
+    )
+  })
+
+  it('publishes only the prepared bootstrap and leaves the old-root config untouched', async () => {
+    mockConfig({ download_dir: 'C:/Old/Projects' })
+    vi.mocked(userDataDirectory.getCurrentUserDataDirectoryState).mockReturnValue({
+      currentPath: 'C:/Old/Data',
+      defaultPath: 'C:/Default/Data',
+      storageRoot: 'C:/Old',
+      defaultStorageRoot: 'C:/Default',
+      projectRoot: 'C:/Old/Projects',
+      autoSaveRoot: 'C:/Old/AutoSave',
+      legacyLayout: false,
+      isCustom: true,
+      source: 'persisted'
+    })
+    const commit = vi.fn().mockResolvedValue(undefined)
+    const rollback = vi.fn()
+    vi.mocked(userDataDirectory.beginUserDataDirectoryChange).mockResolvedValue({
+      changed: true,
+      commit,
+      rollback
+    })
+
+    const svcStateImpl = new StateSvcImpl()
+    await expect(svcStateImpl.setUserDataDirectory({ path: 'C:/Next' })).resolves.toEqual({
+      restartRequired: true
+    })
+
+    expect(commit).toHaveBeenCalledTimes(1)
+    expect(rollback).not.toHaveBeenCalled()
+    expect(config.saveConfig).not.toHaveBeenCalled()
+  })
+
+  it('restores the bootstrap snapshot when publishing the prepared change fails', async () => {
+    mockConfig({ download_dir: 'C:/Old/Projects' })
+    vi.mocked(userDataDirectory.getCurrentUserDataDirectoryState).mockReturnValue({
+      currentPath: 'C:/Old/Data',
+      defaultPath: 'C:/Default/Data',
+      storageRoot: 'C:/Old',
+      defaultStorageRoot: 'C:/Default',
+      projectRoot: 'C:/Old/Projects',
+      autoSaveRoot: 'C:/Old/AutoSave',
+      legacyLayout: false,
+      isCustom: true,
+      source: 'persisted'
+    })
+    const rollback = vi.fn()
+    vi.mocked(userDataDirectory.beginUserDataDirectoryChange).mockResolvedValue({
+      changed: true,
+      commit: vi.fn().mockRejectedValue(new Error('prepare failed')),
+      rollback
+    })
+
+    const svcStateImpl = new StateSvcImpl()
+    await expect(svcStateImpl.setUserDataDirectory({ path: 'C:/Next' })).rejects.toThrow(
+      'prepare failed'
+    )
+
+    expect(rollback).toHaveBeenCalledTimes(1)
+    expect(config.saveConfig).not.toHaveBeenCalled()
   })
 
   it('should get MCP runtime status', async () => {

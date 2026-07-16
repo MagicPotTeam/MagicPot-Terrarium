@@ -2,15 +2,37 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { app } from 'electron'
+import { resolveStorageLayout } from '@shared/storageLayout'
+import {
+  readTestUiEnv,
+  resolveConfiguredDesktopPath,
+  resolveTestArtifactPath,
+  resolveTestUiPolicy
+} from '../testUiPolicy'
 
 export const USER_DATA_OVERRIDE_ENV = 'MAGICPOT_USER_DATA_DIR'
+export const STORAGE_ROOT_OVERRIDE_ENV = 'MAGICPOT_STORAGE_ROOT'
 export const USER_DATA_DIRNAME = 'aiengineelectron'
 export const USER_DATA_PARENT_DIRNAME = 'MagicPot'
 export const DEV_USER_DATA_DIRNAME = '.aiengineelectron-dev'
 export const USER_DATA_BOOTSTRAP_FILENAME = 'user-data-bootstrap.json'
+export const LEGACY_BOOTSTRAPS_RETIRED_FIELD = 'legacyBootstrapsRetired'
 
 type BootstrapLike = {
+  customStorageRoot?: unknown
   customUserDataDir?: unknown
+  pendingMigrationFrom?: unknown
+  pendingProjectsFrom?: unknown
+  pendingAutoSaveFrom?: unknown
+  pendingAutoSaveFromSecondary?: unknown
+  pendingAutoSaveMigrations?: unknown
+  legacyBootstrapsRetired?: unknown
+}
+
+type PortableBootstrapStorageOverride = {
+  storageRoot: string | null
+  userDataDir: string | null
+  blocked: boolean
 }
 
 export type PortableRuntimePaths = {
@@ -67,7 +89,7 @@ function dedupePaths(paths: Array<string | null>): string[] {
   return deduped
 }
 
-export function getDefaultPortableUserDataDirectory(): string {
+export function getDefaultPortableStorageRoot(): string {
   if (!app.isPackaged) {
     return path.join(process.cwd(), DEV_USER_DATA_DIRNAME)
   }
@@ -85,6 +107,10 @@ export function getDefaultPortableUserDataDirectory(): string {
   return path.join(appDataRoot, USER_DATA_PARENT_DIRNAME, USER_DATA_DIRNAME)
 }
 
+export function getDefaultPortableUserDataDirectory(): string {
+  return resolveStorageLayout(getDefaultPortableStorageRoot(), path).data
+}
+
 export function getLegacyPortableUserDataDirectory(): string | null {
   if (!app.isPackaged || !process.resourcesPath) {
     return null
@@ -96,7 +122,7 @@ export function getLegacyPortableUserDataDirectory(): string | null {
 }
 
 export function getPortableUserDataBootstrapPath(): string {
-  return path.join(getDefaultPortableUserDataDirectory(), USER_DATA_BOOTSTRAP_FILENAME)
+  return path.join(getDefaultPortableStorageRoot(), USER_DATA_BOOTSTRAP_FILENAME)
 }
 
 export function getLegacyPortableUserDataBootstrapPath(): string | null {
@@ -105,36 +131,219 @@ export function getLegacyPortableUserDataBootstrapPath(): string | null {
 }
 
 export function getPortableUserDataBootstrapPaths(): string[] {
-  return dedupePaths([getPortableUserDataBootstrapPath(), getLegacyPortableUserDataBootstrapPath()])
+  const defaultRoot = getDefaultPortableStorageRoot()
+  return dedupePaths([
+    getPortableUserDataBootstrapPath(),
+    path.join(defaultRoot, 'Data', USER_DATA_BOOTSTRAP_FILENAME),
+    getLegacyPortableUserDataBootstrapPath()
+  ])
 }
 
-export function readPortableBootstrapCustomUserDataDirSync(): string | null {
-  for (const bootstrapPath of getPortableUserDataBootstrapPaths()) {
+function hasPendingMigration(raw: BootstrapLike): boolean {
+  return Boolean(
+    cleanPath(raw.pendingMigrationFrom) ||
+    cleanPath(raw.pendingProjectsFrom) ||
+    cleanPath(raw.pendingAutoSaveFrom) ||
+    cleanPath(raw.pendingAutoSaveFromSecondary) ||
+    (Array.isArray(raw.pendingAutoSaveMigrations) &&
+      raw.pendingAutoSaveMigrations.some(
+        (migration) =>
+          migration !== null &&
+          typeof migration === 'object' &&
+          (migration as { completed?: unknown }).completed !== true
+      ))
+  )
+}
+
+function hasActiveBootstrapState(raw: BootstrapLike): boolean {
+  return Boolean(
+    cleanPath(raw.customStorageRoot) || cleanPath(raw.customUserDataDir) || hasPendingMigration(raw)
+  )
+}
+
+function resolveBootstrapStorageOverride(
+  raw: BootstrapLike
+): PortableBootstrapStorageOverride | null {
+  if (hasPendingMigration(raw)) {
+    const recoverableUserDataDir = cleanPath(raw.pendingMigrationFrom)
+    let recoverableSourceIsAccessible = false
+    if (recoverableUserDataDir) {
+      try {
+        recoverableSourceIsAccessible = fs.statSync(recoverableUserDataDir).isDirectory()
+      } catch {
+        recoverableSourceIsAccessible = false
+      }
+    }
+    return {
+      storageRoot: null,
+      userDataDir: recoverableSourceIsAccessible ? recoverableUserDataDir : null,
+      blocked: !recoverableSourceIsAccessible
+    }
+  }
+
+  const storageRoot = cleanPath(raw.customStorageRoot)
+  if (storageRoot) {
+    return {
+      storageRoot,
+      userDataDir: resolveStorageLayout(storageRoot, path).data,
+      blocked: false
+    }
+  }
+  const userDataDir = cleanPath(raw.customUserDataDir)
+  return userDataDir ? { storageRoot: null, userDataDir, blocked: false } : null
+}
+
+function readPortableBootstrapStorageOverrideSync(): PortableBootstrapStorageOverride {
+  const bootstrapPaths = getPortableUserDataBootstrapPaths()
+  const primaryBootstrapPath = bootstrapPaths[0]
+  let legacyBootstrapsRetired = false
+
+  if (primaryBootstrapPath && fs.existsSync(primaryBootstrapPath)) {
+    try {
+      const raw = JSON.parse(
+        sanitizeText(fs.readFileSync(primaryBootstrapPath, 'utf8'))
+      ) as BootstrapLike
+      legacyBootstrapsRetired = raw[LEGACY_BOOTSTRAPS_RETIRED_FIELD] === true
+      if (hasActiveBootstrapState(raw)) {
+        return (
+          resolveBootstrapStorageOverride(raw) ?? {
+            storageRoot: null,
+            userDataDir: null,
+            blocked: false
+          }
+        )
+      }
+    } catch {
+      // Keep scanning fallbacks so an unreadable primary bootstrap does not block startup.
+    }
+  }
+
+  if (legacyBootstrapsRetired) {
+    return { storageRoot: null, userDataDir: null, blocked: false }
+  }
+
+  for (const bootstrapPath of bootstrapPaths.slice(1)) {
     if (!fs.existsSync(bootstrapPath)) {
       continue
     }
 
     try {
       const raw = JSON.parse(sanitizeText(fs.readFileSync(bootstrapPath, 'utf8'))) as BootstrapLike
-      const customUserDataDir = cleanPath(raw.customUserDataDir)
-      if (customUserDataDir) {
-        return customUserDataDir
+      if (!hasActiveBootstrapState(raw)) {
+        continue
       }
+      return (
+        resolveBootstrapStorageOverride(raw) ?? {
+          storageRoot: null,
+          userDataDir: null,
+          blocked: false
+        }
+      )
     } catch {
       // Keep scanning fallbacks so an unreadable legacy bootstrap does not block startup.
     }
   }
 
-  return null
+  return { storageRoot: null, userDataDir: null, blocked: false }
+}
+
+export function readPortableBootstrapCustomUserDataDirSync(): string | null {
+  return readPortableBootstrapStorageOverrideSync().userDataDir
+}
+
+/**
+ * Returns the unified storage root only when the current userData directory is identified by an
+ * explicit storage-root source (environment/bootstrap) or by the known default layout. Unknown
+ * directories and legacy exact-userData overrides deliberately return null instead of relying on
+ * a basename such as `Data`.
+ */
+export function resolvePortableStorageRootForUserDataSync(userDataDir: string): string | null {
+  const currentUserDataDir = cleanPath(userDataDir)
+  if (!currentUserDataDir) return null
+
+  const legacyUserDataOverride = cleanPath(process.env[USER_DATA_OVERRIDE_ENV])
+  if (
+    legacyUserDataOverride &&
+    normalizePathKey(legacyUserDataOverride) === normalizePathKey(currentUserDataDir)
+  ) {
+    return null
+  }
+
+  const storageRootOverride = cleanPath(process.env[STORAGE_ROOT_OVERRIDE_ENV])
+  if (storageRootOverride) {
+    const layout = resolveStorageLayout(storageRootOverride, path)
+    if (normalizePathKey(layout.data) === normalizePathKey(currentUserDataDir)) {
+      return layout.root
+    }
+  }
+
+  const bootstrapOverride = readPortableBootstrapStorageOverrideSync()
+  if (bootstrapOverride.blocked) return null
+  if (
+    bootstrapOverride.userDataDir &&
+    normalizePathKey(bootstrapOverride.userDataDir) === normalizePathKey(currentUserDataDir)
+  ) {
+    return bootstrapOverride.storageRoot
+  }
+
+  const defaultStorageRoot = getDefaultPortableStorageRoot()
+  const defaultLayout = resolveStorageLayout(defaultStorageRoot, path)
+  return normalizePathKey(defaultLayout.data) === normalizePathKey(currentUserDataDir)
+    ? defaultLayout.root
+    : null
+}
+
+function resolveAutomatedPortableUserDataDirectory(): string | null {
+  const policy = resolveTestUiPolicy(readTestUiEnv())
+  if (!policy.automatedRun) return null
+
+  const automatedRoot = resolveTestArtifactPath({
+    desktopPath: resolveConfiguredDesktopPath(app.getPath('desktop')),
+    tempPath: app.getPath('temp'),
+    policy,
+    segments: []
+  })
+  const resolveAutomatedOverride = (value: unknown): string | null => {
+    if (typeof value !== 'string' || !value.trim()) return null
+    const trimmed = value.trim()
+    const candidate = path.isAbsolute(trimmed)
+      ? path.resolve(trimmed)
+      : path.resolve(automatedRoot, trimmed)
+    const relative = path.relative(automatedRoot, candidate)
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+      ? candidate
+      : null
+  }
+
+  const storageRootOverride = resolveAutomatedOverride(process.env[STORAGE_ROOT_OVERRIDE_ENV])
+  if (storageRootOverride) return resolveStorageLayout(storageRootOverride, path).data
+  return (
+    resolveAutomatedOverride(process.env[USER_DATA_OVERRIDE_ENV]) ??
+    resolveStorageLayout(automatedRoot, path).data
+  )
 }
 
 export function resolveEarlyPortableUserDataDirectory(): string {
-  const envOverride = cleanPath(process.env[USER_DATA_OVERRIDE_ENV])
-  if (envOverride) {
-    return envOverride
+  const automatedUserDataDir = resolveAutomatedPortableUserDataDirectory()
+  if (automatedUserDataDir) return automatedUserDataDir
+
+  const storageRootOverride = cleanPath(process.env[STORAGE_ROOT_OVERRIDE_ENV])
+  if (storageRootOverride) {
+    return resolveStorageLayout(storageRootOverride, path).data
   }
 
-  return readPortableBootstrapCustomUserDataDirSync() ?? getDefaultPortableUserDataDirectory()
+  const legacyUserDataOverride = cleanPath(process.env[USER_DATA_OVERRIDE_ENV])
+  if (legacyUserDataOverride) {
+    return legacyUserDataOverride
+  }
+
+  const bootstrapOverride = readPortableBootstrapStorageOverrideSync()
+  if (bootstrapOverride.blocked) {
+    throw new Error(
+      'Storage migration is still pending, but its legacy Data source is unavailable. Restore the source and restart Magic Pot.'
+    )
+  }
+  return bootstrapOverride.userDataDir ?? getDefaultPortableUserDataDirectory()
 }
 
 export function getPortableRuntimePaths(userDataDir: string): PortableRuntimePaths {

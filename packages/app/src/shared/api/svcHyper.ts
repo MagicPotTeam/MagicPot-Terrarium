@@ -1,4 +1,5 @@
 import { ServiceDefSheet } from './apiUtils/serviceDefSheet'
+import { ServiceValidationError } from './apiUtils/serviceValidation'
 import { ServerStreaming } from './apiUtils/streaming'
 
 export type ListFastSettingTemplatesReq = {}
@@ -131,6 +132,34 @@ export type SaveImageToDirResp = {
   savedPath: string // 保存后的完整路径
 }
 
+export type MigrateLegacyAssistantImageReq = {
+  fileName: string
+}
+export type MigrateLegacyAssistantImageResp = {
+  savedPath: string
+}
+
+const validateMigrateLegacyAssistantImageReq = (value: unknown): MigrateLegacyAssistantImageReq => {
+  const fileName =
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    typeof (value as Record<string, unknown>).fileName === 'string'
+      ? ((value as Record<string, unknown>).fileName as string)
+      : ''
+  if (/^agent_auto_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:_\d+)?\.png$/.test(fileName)) {
+    return { fileName }
+  }
+
+  throw new ServiceValidationError('svcHyper.migrateLegacyAssistantImage fileName', [
+    {
+      path: ['fileName'],
+      message: 'Expected a legacy assistant image basename',
+      code: 'invalid_string'
+    }
+  ])
+}
+
 export type WriteImageToClipboardReq = {
   data: Uint8Array // 图片二进制数据
 }
@@ -247,6 +276,13 @@ export type HyperSvc = {
    */
   saveImageToDir(req: SaveImageToDirReq): Promise<SaveImageToDirResp>
   /**
+   * Copies a narrowly validated legacy assistant PNG from the historical desktop export folder
+   * into the app-owned media library.
+   */
+  migrateLegacyAssistantImage(
+    req: MigrateLegacyAssistantImageReq
+  ): Promise<MigrateLegacyAssistantImageResp>
+  /**
    * 将图片写入系统剪贴板
    */
   writeImageToClipboard(req: WriteImageToClipboardReq): Promise<WriteImageToClipboardResp>
@@ -298,6 +334,10 @@ export const hyperSvcDef: ServiceDefSheet<HyperSvc> = {
   },
   saveImageToDir: {
     type: 'unary'
+  },
+  migrateLegacyAssistantImage: {
+    type: 'unary',
+    request: validateMigrateLegacyAssistantImageReq
   },
   writeImageToClipboard: {
     type: 'unary'

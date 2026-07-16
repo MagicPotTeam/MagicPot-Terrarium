@@ -28,6 +28,7 @@ import {
 const hoisted = vi.hoisted(() => ({
   currentConfig: { value: null as Config | null },
   runtimeMcpStatus: { value: null as Record<string, unknown> | null },
+  buildDataDir: { value: 'C:/MagicPot/Data' },
   availableProfiles: {
     value: [
       { id: 'base-model', model_name: 'GPT-4o', model_use: 'chat' as const },
@@ -57,6 +58,9 @@ const hoisted = vi.hoisted(() => ({
     value: {} as Record<string, { updatedAt: number; draft?: ChatSessionDraft }>
   },
   saveSessionToDBGate: { value: null as Promise<void> | null },
+  migrationCommitGate: { value: null as Promise<void> | null },
+  migrationStarted: { value: false },
+  deleteTombstones: { value: new Set<string>() },
   debouncedSaveAllSessionsGate: { value: null as Promise<void> | null },
   loadAllSessionsMock: vi.fn(),
   saveAllSessionsMock: vi.fn(),
@@ -134,7 +138,13 @@ vi.mock('@renderer/hooks/useConfig', () => ({
   useConfig: () => ({
     config: hoisted.currentConfig.value,
     isReady: true,
-    buildEnv: cloneValue(DEFAULT_BUILD_ENV),
+    buildEnv: {
+      ...cloneValue(DEFAULT_BUILD_ENV),
+      pathMap: {
+        ...cloneValue(DEFAULT_BUILD_ENV.pathMap),
+        data: hoisted.buildDataDir.value
+      }
+    },
     configUtils: {},
     updateConfig: vi.fn()
   })
@@ -213,6 +223,38 @@ vi.mock('./hooks/useSpeechRecognition', () => ({
 vi.mock('./chatStorage', () => ({
   loadAllSessions: (...args: unknown[]) => hoisted.loadAllSessionsMock(...args),
   saveAllSessions: (...args: unknown[]) => hoisted.saveAllSessionsMock(...args),
+  compareAndUpdateSessionInDB: vi.fn(
+    async (
+      sessionId: string,
+      scope: string,
+      options: {
+        expectedSession: ChatSession
+        shouldUpdate?: (currentSession: ChatSession) => boolean
+        update: (currentSession: ChatSession) => ChatSession
+      }
+    ) => {
+      hoisted.migrationStarted.value = true
+      const gate = hoisted.migrationCommitGate.value
+      if (gate) {
+        await gate
+      }
+      const existingIndex = hoisted.storedSessions.value.findIndex((item) => item.id === sessionId)
+      if (existingIndex < 0 || hoisted.deleteTombstones.value.has(`${scope}:${sessionId}`))
+        return null
+      const currentSession = cloneValue(hoisted.storedSessions.value[existingIndex])
+      if (
+        JSON.stringify(currentSession) !== JSON.stringify(options.expectedSession) ||
+        (options.shouldUpdate && !options.shouldUpdate(currentSession))
+      ) {
+        return null
+      }
+      const updatedSession = cloneValue(options.update(currentSession))
+      const nextSessions = cloneValue(hoisted.storedSessions.value)
+      nextSessions[existingIndex] = updatedSession
+      hoisted.storedSessions.value = nextSessions
+      return updatedSession
+    }
+  ),
   saveSessionToDB: vi.fn(async (session: ChatSession) => {
     if (hoisted.saveSessionToDBGate.value) {
       await hoisted.saveSessionToDBGate.value
@@ -261,8 +303,22 @@ vi.mock('./chatStorage', () => ({
     hoisted.draftBackups.value = nextBackups
   }),
   migrateFromLocalStorage: vi.fn(async () => null),
-  readSessionDeleteTombstones: vi.fn(() => []),
-  setSessionDeleteTombstone: vi.fn(),
+  hasSessionDeleteTombstone: vi.fn((sessionId: string, scope = 'default') =>
+    hoisted.deleteTombstones.value.has(`${scope}:${sessionId}`)
+  ),
+  readSessionDeleteTombstones: vi.fn(() =>
+    [...hoisted.deleteTombstones.value].map((key) => {
+      const separatorIndex = key.indexOf(':')
+      return { scope: key.slice(0, separatorIndex), sessionId: key.slice(separatorIndex + 1) }
+    })
+  ),
+  setSessionDeleteTombstone: vi.fn((sessionId: string, scope = 'default', deleted = true) => {
+    const next = new Set(hoisted.deleteTombstones.value)
+    const key = `${scope}:${sessionId}`
+    if (deleted) next.add(key)
+    else next.delete(key)
+    hoisted.deleteTombstones.value = next
+  }),
   cancelDebouncedSessionSave: vi.fn(),
   debouncedSaveSessions: vi.fn(
     (
@@ -660,6 +716,7 @@ describe('ChatPage runtime workflow integration', () => {
   beforeEach(() => {
     hoisted.currentConfig.value = createConfig()
     hoisted.runtimeMcpStatus.value = null
+    hoisted.buildDataDir.value = 'C:/MagicPot/Data'
     hoisted.availableProfiles.value = [
       { id: 'base-model', model_name: 'GPT-4o', model_use: 'chat' as const },
       {
@@ -673,6 +730,9 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.storedSessions.value = []
     hoisted.draftBackups.value = {}
     hoisted.saveSessionToDBGate.value = null
+    hoisted.migrationCommitGate.value = null
+    hoisted.migrationStarted.value = false
+    hoisted.deleteTombstones.value = new Set()
     hoisted.debouncedSaveAllSessionsGate.value = null
     hoisted.loadAllSessionsMock.mockReset()
     hoisted.loadAllSessionsMock.mockImplementation(async () =>
@@ -758,6 +818,187 @@ describe('ChatPage runtime workflow integration', () => {
       const currentSession = readCurrentSessionState()
       expect(currentSession?.profileId).toBe('vision-model')
     })
+  })
+
+  it('re-roots legacy chat media URLs on load and persists the migrated session', async () => {
+    const session: ChatSession = {
+      id: 'legacy-chat-media-session',
+      title: 'Legacy chat media',
+      messages: [
+        {
+          role: 'user',
+          content: '',
+          attachments: [
+            {
+              type: 'image',
+              url: 'file:///C:/OldMagicPot/Data/.chat_media/assistant-images/old%20image.png'
+            }
+          ]
+        }
+      ],
+      createdAt: 300
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+
+    renderChatPage()
+
+    const expectedUrl =
+      'local-media:///C:/MagicPot/Data/.chat_media/assistant-images/old%20image.png'
+    await waitFor(() => {
+      expect(readCurrentSessionState()?.messages[0]?.attachments?.[0]?.url).toBe(expectedUrl)
+    })
+    await waitFor(() => {
+      expect(hoisted.storedSessions.value[0]?.messages[0]?.attachments?.[0]?.url).toBe(expectedUrl)
+    })
+  })
+
+  it('does not overwrite a local session edit when legacy media migration persistence is delayed', async () => {
+    const session: ChatSession = {
+      id: 'legacy-chat-media-edit-race',
+      title: 'Legacy media edit race',
+      messages: [{ role: 'user', content: 'before edit' }],
+      createdAt: 300
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+
+    const legacyStoredSession: ChatSession = {
+      ...session,
+      messages: [
+        {
+          ...session.messages[0],
+          attachments: [
+            {
+              type: 'image',
+              url: 'file:///C:/OldMagicPot/Data/.chat_media/assistant-images/old%20image.png'
+            }
+          ]
+        }
+      ]
+    }
+    hoisted.storedSessions.value = [legacyStoredSession]
+    let releaseMigration!: () => void
+    hoisted.migrationStarted.value = false
+    hoisted.migrationCommitGate.value = new Promise<void>((resolve) => {
+      releaseMigration = resolve
+    })
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:preview-refresh', {
+          detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+        })
+      )
+    })
+    await waitFor(() => expect(hoisted.migrationStarted.value).toBe(true))
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:append-message', {
+          detail: {
+            scope: 'runtime-flow',
+            sessionId: session.id,
+            role: 'assistant',
+            content: 'new local edit'
+          }
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('new local edit')
+    )
+
+    await act(async () => {
+      releaseMigration()
+      hoisted.migrationCommitGate.value = null
+    })
+
+    await waitFor(() =>
+      expect(hoisted.storedSessions.value[0]?.messages.at(-1)?.content).toBe('new local edit')
+    )
+    expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('new local edit')
+  })
+
+  it('does not resurrect a session deleted while legacy media migration persistence is delayed', async () => {
+    const deletedSession: ChatSession = {
+      id: 'legacy-chat-media-delete-race',
+      title: 'Legacy media delete race',
+      messages: [{ role: 'user', content: 'delete me' }],
+      createdAt: 300
+    }
+    const remainingSession: ChatSession = {
+      id: 'legacy-chat-media-remaining',
+      title: 'Remaining',
+      messages: [{ role: 'user', content: 'keep me' }],
+      createdAt: 200
+    }
+    hoisted.storedSessions.value = [deletedSession, remainingSession]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      deletedSession.id
+    )
+
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(deletedSession.id))
+
+    hoisted.storedSessions.value = [
+      {
+        ...deletedSession,
+        messages: [
+          {
+            ...deletedSession.messages[0],
+            attachments: [
+              {
+                type: 'image',
+                url: 'file:///C:/OldMagicPot/Data/.chat_media/assistant-images/old%20image.png'
+              }
+            ]
+          }
+        ]
+      },
+      remainingSession
+    ]
+    let releaseMigration!: () => void
+    hoisted.migrationStarted.value = false
+    hoisted.migrationCommitGate.value = new Promise<void>((resolve) => {
+      releaseMigration = resolve
+    })
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:preview-refresh', {
+          detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+        })
+      )
+    })
+    await waitFor(() => expect(hoisted.migrationStarted.value).toBe(true))
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:deleteSession', {
+          detail: { scope: 'runtime-flow', sessionId: deletedSession.id }
+        })
+      )
+    })
+    await waitFor(() => expect(readCurrentSessionState()?.id).not.toBe(deletedSession.id))
+
+    await act(async () => {
+      releaseMigration()
+      hoisted.migrationCommitGate.value = null
+    })
+
+    await waitFor(() =>
+      expect(hoisted.storedSessions.value.some((item) => item.id === deletedSession.id)).toBe(false)
+    )
+    expect(readCurrentSessionState()?.id).not.toBe(deletedSession.id)
   })
 
   it('keeps the staged model-wait loading status after remounting the same Agent thread', async () => {
@@ -2375,6 +2616,103 @@ describe('ChatPage runtime workflow integration', () => {
           (attachmentUrl?.startsWith('file://') && attachmentUrl.includes('AutoSave/Agent'))
       ).toBe(true)
     })
+  })
+
+  it('does not overwrite a replaced assistant attachment after a delayed auto-save', async () => {
+    const sourceUrl = 'https://example.com/stale-generated.png'
+    const savedPath = 'C:/MagicPot/AutoSave/Agent/stale.png'
+    const originalFetch = globalThis.fetch
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        blob: async () =>
+          new Blob([new Uint8Array([137, 80, 78, 71])], {
+            type: 'image/png'
+          })
+      }))
+    )
+    let releaseSave!: (value: { savedPath: string }) => void
+    hoisted.saveImageToDirMock.mockReset()
+    hoisted.saveImageToDirMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseSave = resolve
+        })
+    )
+
+    try {
+      renderChatPage()
+      await dispatchNewSession({
+        skillId: BUILT_IN_PROMPT_TRANSLATION_SKILL_ID
+      })
+      let currentSession = readCurrentSessionState()
+      expect(currentSession?.id).toBeTruthy()
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('chat:append-message', {
+            detail: {
+              scope: 'runtime-flow',
+              sessionId: currentSession?.id,
+              role: 'assistant',
+              content: '',
+              attachments: [
+                {
+                  type: 'image',
+                  url: sourceUrl,
+                  mimeType: 'image/png'
+                }
+              ]
+            }
+          })
+        )
+      })
+      await waitFor(() => expect(hoisted.saveImageToDirMock).toHaveBeenCalledTimes(1))
+
+      currentSession = readCurrentSessionState()
+      expect(currentSession?.id).toBeTruthy()
+      const replacementSession = cloneValue(currentSession!)
+      replacementSession.messages = replacementSession.messages.map((message, messageIndex) =>
+        messageIndex === replacementSession.messages.length - 1
+          ? {
+              ...message,
+              attachments: [
+                {
+                  type: 'image' as const,
+                  url: 'file:///replacement.png',
+                  mimeType: 'image/png',
+                  fileName: 'replacement.png'
+                }
+              ]
+            }
+          : message
+      )
+      hoisted.storedSessions.value = [replacementSession]
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('chat:preview-refresh', {
+            detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+          })
+        )
+      })
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)?.attachments?.[0]?.url).toBe(
+          'file:///replacement.png'
+        )
+      )
+
+      await act(async () => {
+        releaseSave({ savedPath })
+      })
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(readCurrentSessionState()?.messages.at(-1)?.attachments?.[0]?.url).toBe(
+        'file:///replacement.png'
+      )
+      expect(hoisted.storedSessions.value[0]?.messages.at(-1)?.attachments?.[0]?.url).toBe(
+        'file:///replacement.png'
+      )
+    } finally {
+      vi.stubGlobal('fetch', originalFetch)
+    }
   })
 
   it('keeps multiple image references together for image generation requests', async () => {

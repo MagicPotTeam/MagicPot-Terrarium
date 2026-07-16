@@ -1,5 +1,7 @@
 import fs from 'fs/promises'
 import path from 'path'
+import { createHash, randomUUID } from 'node:crypto'
+import nodeOs from 'node:os'
 import { dialog } from 'electron'
 import { sleep } from '@shared/utils/utilFuncs'
 import { ConfigUtils } from '@shared/config/configUtils'
@@ -34,6 +36,8 @@ import {
   GetFastSettingValueResp,
   ListFastSettingTemplatesReq,
   ListFastSettingTemplatesResp,
+  MigrateLegacyAssistantImageReq,
+  MigrateLegacyAssistantImageResp,
   GetExtraModelPathsReq,
   GetExtraModelPathsResp,
   ReadClipboardHtmlReq,
@@ -114,6 +118,114 @@ export const sanitizeSaveImageFileName = (fileName: string): string => {
   }
 
   return sanitized
+}
+
+const LEGACY_ASSISTANT_IMAGE_FILE_NAME_PATTERN =
+  /^agent_auto_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:_\d+)?\.png$/
+const LEGACY_ASSISTANT_IMAGE_MAX_BYTES = 64 * 1024 * 1024
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+type LegacyAssistantImageMigrationOptions = {
+  fileName: string
+  legacyRoot: string
+  userDataRoot: string
+}
+
+const assertDirectoryWithoutSymlink = async (
+  directoryPath: string,
+  label: string
+): Promise<void> => {
+  const stats = await fs.lstat(directoryPath)
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error(`${label} must be a real directory.`)
+  }
+}
+
+const isContainedRelativePath = (relativePath: string): boolean =>
+  Boolean(relativePath) &&
+  relativePath !== '..' &&
+  !relativePath.startsWith(`..${path.sep}`) &&
+  !path.isAbsolute(relativePath)
+
+export const migrateLegacyAssistantImageFile = async (
+  options: LegacyAssistantImageMigrationOptions
+): Promise<MigrateLegacyAssistantImageResp> => {
+  const fileName = String(options.fileName || '').trim()
+  if (!LEGACY_ASSISTANT_IMAGE_FILE_NAME_PATTERN.test(fileName)) {
+    throw new Error('Invalid legacy assistant image file name.')
+  }
+  if (!options.legacyRoot || !options.userDataRoot) {
+    throw new Error('Legacy assistant image migration roots are unavailable.')
+  }
+
+  const legacyRoot = path.resolve(options.legacyRoot)
+  const userDataRoot = path.resolve(options.userDataRoot)
+  await assertDirectoryWithoutSymlink(legacyRoot, 'Legacy assistant image root')
+  await assertDirectoryWithoutSymlink(userDataRoot, 'User data root')
+
+  const canonicalLegacyRoot = await fs.realpath(legacyRoot)
+  const sourcePath = path.join(legacyRoot, fileName)
+  const sourceStats = await fs.lstat(sourcePath)
+  if (!sourceStats.isFile() || sourceStats.isSymbolicLink()) {
+    throw new Error('Legacy assistant image source must be a regular file.')
+  }
+  if (sourceStats.size <= 0 || sourceStats.size > LEGACY_ASSISTANT_IMAGE_MAX_BYTES) {
+    throw new Error('Legacy assistant image size is outside the allowed range.')
+  }
+
+  const canonicalSourcePath = await fs.realpath(sourcePath)
+  const sourceRelativePath = path.relative(canonicalLegacyRoot, canonicalSourcePath)
+  if (!isContainedRelativePath(sourceRelativePath) || path.dirname(sourceRelativePath) !== '.') {
+    throw new Error('Legacy assistant image source escapes the historical export directory.')
+  }
+
+  const data = await fs.readFile(canonicalSourcePath)
+  if (
+    data.length !== sourceStats.size ||
+    !data.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
+  ) {
+    throw new Error('Legacy assistant image is not a valid PNG payload.')
+  }
+
+  const canonicalUserDataRoot = await fs.realpath(userDataRoot)
+  let canonicalTargetRoot = canonicalUserDataRoot
+  for (const segment of ['.chat_media', 'assistant-images', 'legacy']) {
+    const nextTargetRoot = path.join(canonicalTargetRoot, segment)
+    try {
+      await fs.mkdir(nextTargetRoot)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') throw error
+    }
+    await assertDirectoryWithoutSymlink(nextTargetRoot, 'Legacy assistant image target')
+    canonicalTargetRoot = await fs.realpath(nextTargetRoot)
+    const targetRelativePath = path.relative(canonicalUserDataRoot, canonicalTargetRoot)
+    if (!isContainedRelativePath(targetRelativePath)) {
+      throw new Error('Legacy assistant image target escapes the user data directory.')
+    }
+  }
+
+  const digest = createHash('sha256').update(data).digest('hex')
+  const savedPath = path.join(canonicalTargetRoot, `legacy-${digest}.png`)
+  const temporaryPath = path.join(canonicalTargetRoot, `.${digest}-${randomUUID()}.tmp`)
+  try {
+    await fs.writeFile(temporaryPath, data, { flag: 'wx' })
+    await fs.link(temporaryPath, savedPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') throw error
+
+    const existingStats = await fs.lstat(savedPath)
+    if (!existingStats.isFile() || existingStats.isSymbolicLink()) {
+      throw new Error('Legacy assistant image destination is not a regular file.')
+    }
+    const existingData = await fs.readFile(savedPath)
+    if (!existingData.equals(data)) {
+      throw new Error('Legacy assistant image destination failed integrity verification.')
+    }
+  } finally {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined)
+  }
+
+  return { savedPath }
 }
 
 const checkLocalComfyHttp = async (port: string): Promise<boolean> => {
@@ -882,6 +994,16 @@ export class HyperSvcImpl implements HyperSvc {
         counter += 1
       }
     }
+  }
+
+  async migrateLegacyAssistantImage(
+    req: MigrateLegacyAssistantImageReq
+  ): Promise<MigrateLegacyAssistantImageResp> {
+    return migrateLegacyAssistantImageFile({
+      fileName: req.fileName,
+      legacyRoot: path.join(nodeOs.homedir(), 'Desktop', '魔壶图片保存'),
+      userDataRoot: getBuildEnv().pathMap.data
+    })
   }
 
   async writeImageToClipboard(req: WriteImageToClipboardReq): Promise<WriteImageToClipboardResp> {

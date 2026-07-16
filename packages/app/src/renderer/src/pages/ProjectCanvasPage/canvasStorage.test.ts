@@ -531,8 +531,6 @@ describe('canvasStorage provenance metadata', () => {
       } as unknown as Window['api']
     })
 
-    localStorage.setItem('qapp.downloadDir', 'C:\\mock-project-root')
-
     const items = [createCanvasItem()]
     await exportCanvasFile(items, 'hero.mpcanvas', 'photoshop-save-test', true)
     await exportCanvasFile(items, 'hero.mpcanvas', 'photoshop-save-test', false)
@@ -589,8 +587,6 @@ describe('canvasStorage provenance metadata', () => {
         }
       } as unknown as Window['api']
     })
-
-    localStorage.setItem('qapp.downloadDir', 'C:\\mock-project-root')
 
     const items = [createCanvasItem()]
     await exportCanvasFile(items, 'hero.mpcanvas', 'photoshop-first-save', false)
@@ -1066,6 +1062,11 @@ describe('canvasStorage provenance metadata', () => {
             state: {
               currentPath: userDataDir,
               defaultPath: userDataDir,
+              storageRoot: path.win32.dirname(userDataDir),
+              defaultStorageRoot: path.win32.dirname(userDataDir),
+              projectRoot: path.win32.join(userDataDir, 'renderer-state', 'project-canvas'),
+              autoSaveRoot: path.win32.join(userDataDir, 'AutoSave'),
+              legacyLayout: true,
               isCustom: false,
               source: 'default'
             }
@@ -1194,6 +1195,11 @@ describe('canvasStorage provenance metadata', () => {
             state: {
               currentPath: userDataDir,
               defaultPath: userDataDir,
+              storageRoot: path.win32.dirname(userDataDir),
+              defaultStorageRoot: path.win32.dirname(userDataDir),
+              projectRoot: path.win32.join(userDataDir, 'renderer-state', 'project-canvas'),
+              autoSaveRoot: path.win32.join(userDataDir, 'AutoSave'),
+              legacyLayout: true,
               isCustom: false,
               source: 'default'
             }
@@ -1303,6 +1309,11 @@ describe('canvasStorage provenance metadata', () => {
             state: {
               currentPath: userDataDir,
               defaultPath: userDataDir,
+              storageRoot: path.win32.dirname(userDataDir),
+              defaultStorageRoot: path.win32.dirname(userDataDir),
+              projectRoot: path.win32.join(userDataDir, 'renderer-state', 'project-canvas'),
+              autoSaveRoot: path.win32.join(userDataDir, 'AutoSave'),
+              legacyLayout: true,
               isCustom: false,
               source: 'default'
             }
@@ -1378,6 +1389,11 @@ describe('canvasStorage provenance metadata', () => {
             state: {
               currentPath: userDataDir,
               defaultPath: userDataDir,
+              storageRoot: path.win32.dirname(userDataDir),
+              defaultStorageRoot: path.win32.dirname(userDataDir),
+              projectRoot: path.win32.join(userDataDir, 'renderer-state', 'project-canvas'),
+              autoSaveRoot: path.win32.join(userDataDir, 'AutoSave'),
+              legacyLayout: true,
               isCustom: false,
               source: 'default'
             }
@@ -1474,6 +1490,11 @@ describe('canvasStorage provenance metadata', () => {
             state: {
               currentPath: userDataDir,
               defaultPath: userDataDir,
+              storageRoot: path.win32.dirname(userDataDir),
+              defaultStorageRoot: path.win32.dirname(userDataDir),
+              projectRoot: path.win32.join(userDataDir, 'renderer-state', 'project-canvas'),
+              autoSaveRoot: path.win32.join(userDataDir, 'AutoSave'),
+              legacyLayout: true,
               isCustom: false,
               source: 'default'
             }
@@ -1586,6 +1607,11 @@ describe('canvasStorage provenance metadata', () => {
             state: {
               currentPath: userDataDir,
               defaultPath: userDataDir,
+              storageRoot: path.win32.dirname(userDataDir),
+              defaultStorageRoot: path.win32.dirname(userDataDir),
+              projectRoot: path.win32.join(userDataDir, 'renderer-state', 'project-canvas'),
+              autoSaveRoot: path.win32.join(userDataDir, 'AutoSave'),
+              legacyLayout: true,
               isCustom: false,
               source: 'default'
             }
@@ -1766,6 +1792,11 @@ describe('canvasStorage provenance metadata', () => {
             state: {
               currentPath: userDataDir,
               defaultPath: userDataDir,
+              storageRoot: path.win32.dirname(userDataDir),
+              defaultStorageRoot: path.win32.dirname(userDataDir),
+              projectRoot: path.win32.join(userDataDir, 'renderer-state', 'project-canvas'),
+              autoSaveRoot: path.win32.join(userDataDir, 'AutoSave'),
+              legacyLayout: true,
               isCustom: false,
               source: 'default'
             }
@@ -1917,6 +1948,11 @@ describe('canvasStorage provenance metadata', () => {
             state: {
               currentPath: userDataDir,
               defaultPath: userDataDir,
+              storageRoot: path.win32.dirname(userDataDir),
+              defaultStorageRoot: path.win32.dirname(userDataDir),
+              projectRoot: path.win32.join(userDataDir, 'renderer-state', 'project-canvas'),
+              autoSaveRoot: path.win32.join(userDataDir, 'AutoSave'),
+              legacyLayout: true,
               isCustom: false,
               source: 'default'
             }

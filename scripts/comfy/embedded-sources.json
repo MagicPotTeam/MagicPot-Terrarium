@@ -3,7 +3,7 @@
     {
       "name": "ComfyUI",
       "url": "https://github.com/Comfy-Org/ComfyUI.git",
-      "commit": "985fb9d6adc974df9783d3d355cf86b992956212",
+      "commit": "0aecac867d7840b56ad790aa76c5e76e33c74c3d",
       "relativePath": "vendor/comfyui/ComfyUI"
     },
     {
@@ -46,13 +46,13 @@
     {
       "name": "ComfyUI-Manager",
       "url": "https://github.com/Comfy-Org/ComfyUI-Manager.git",
-      "commit": "16a212aa706588331be163e7dbe4a0775f00282d",
+      "commit": "351d9c62c419bf49c0fdb6a5a378e94dc3481193",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager"
     },
     {
       "name": "ComfyUI-qwenmultiangle",
       "url": "https://github.com/jtydhr88/ComfyUI-qwenmultiangle.git",
-      "commit": "6f93d9b15a50c07c13411734723fe5cae287e7aa",
+      "commit": "93efd354a002f9c6add7e948663cf459528242da",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-qwenmultiangle"
     },
     {

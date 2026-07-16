@@ -144,7 +144,7 @@ const normalizeRemoteFetchHostname = (hostname: string): string =>
     .replace(/^\[|\]$/g, '')
     .replace(/\.$/, '')
 
-const isPrivateOrLocalRemoteFetchHost = (hostname: string): boolean => {
+export const isPrivateOrLocalRemoteFetchHost = (hostname: string): boolean => {
   const normalized = normalizeRemoteFetchHostname(hostname)
   if (
     !normalized ||
@@ -198,13 +198,18 @@ const assertRemoteFetchUrlIsConfigured = (parsedUrl: URL, config: Config): void 
   }
 }
 
-export const resolveRemoteFetchAddress = async (
-  hostname: string
-): Promise<RemoteFetchResolvedAddress> => {
+export const assertRemoteFetchHostnameIsNotExplicitlyLocal = (hostname: string): void => {
   const normalizedHostname = normalizeRemoteFetchHostname(hostname)
   if (isPrivateOrLocalRemoteFetchHost(normalizedHostname)) {
     throw new Error('Remote fetch URL must target a public host.')
   }
+}
+
+export const resolveRemoteFetchAddress = async (
+  hostname: string
+): Promise<RemoteFetchResolvedAddress> => {
+  const normalizedHostname = normalizeRemoteFetchHostname(hostname)
+  assertRemoteFetchHostnameIsNotExplicitlyLocal(normalizedHostname)
 
   const directIpv4Octets = getIpv4Octets(normalizedHostname)
   if (directIpv4Octets) {

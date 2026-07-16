@@ -1177,7 +1177,7 @@ export class ProjectTraceFSCli {
   }
 
   private getFallbackProjectStorageRoot(): string {
-    return path.join(this.buildEnv.pathMap.data, 'renderer-state', 'project-canvas')
+    return path.join(path.dirname(this.buildEnv.pathMap.data), 'Projects')
   }
 
   private getAllowedProjectStorageRoots(): string[] {

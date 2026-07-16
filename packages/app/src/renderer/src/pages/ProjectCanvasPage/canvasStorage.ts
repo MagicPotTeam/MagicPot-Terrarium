@@ -24,8 +24,6 @@ const STORE_NAME = 'canvas-items'
 const BLOB_STORE_NAME = 'canvas-blobs' // Stores binary payloads such as 3D models and videos.
 const BLOB_STORE_KEY_SEPARATOR = '::canvas::'
 const KEY = 'default' // Single-canvas scene; use a fixed key.
-const PROJECT_STORAGE_FALLBACK_ROOT_DIR = 'renderer-state'
-const PROJECT_STORAGE_FALLBACK_NAMESPACE = 'project-canvas'
 const PROJECT_CANVAS_FILENAME = 'project.mpcanvas'
 const PROJECT_ASSET_DIRNAME = 'assets'
 const PROJECT_CROPPABLE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
@@ -739,15 +737,6 @@ async function resolveProjectStorageRootPath(): Promise<string | null> {
   }
 
   try {
-    const localStorageDir = localStorage.getItem('qapp.downloadDir')?.trim()
-    if (localStorageDir) {
-      return localStorageDir
-    }
-  } catch {
-    // Ignore localStorage read failures and continue with config lookup.
-  }
-
-  try {
     if (typeof window.api.svcState.getConfig === 'function') {
       const { config } = await window.api.svcState.getConfig({})
       const configuredDir = config.download_dir?.trim()
@@ -761,11 +750,7 @@ async function resolveProjectStorageRootPath(): Promise<string | null> {
 
   try {
     const { state } = await window.api.svcState.getUserDataDirectoryState({})
-    return window.path.join(
-      state.currentPath,
-      PROJECT_STORAGE_FALLBACK_ROOT_DIR,
-      PROJECT_STORAGE_FALLBACK_NAMESPACE
-    )
+    return state.projectRoot
   } catch (error) {
     console.warn('[Canvas Storage] Unable to resolve fallback project root path:', error)
     return null

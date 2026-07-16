@@ -64,7 +64,6 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
 
         const targetDir = resolveProjectResourceDir({
           config: { download_dir: config.download_dir },
-          projectId: result.projectId,
           segments: ['.AutoSave', 'QuickApp', 'Images']
         })
 
@@ -260,8 +259,7 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
           tooltip={t('quickapp.results.download_image')}
           onClick={async () => {
             try {
-              const DOWNLOAD_DIR_KEY = 'qapp.downloadDir'
-              let downloadDir = localStorage.getItem(DOWNLOAD_DIR_KEY) || config.download_dir
+              let downloadDir = config.download_dir
 
               // 如果没有设置过下载目录，弹出文件夹选择器
               if (!downloadDir) {
@@ -271,9 +269,6 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
                 })
                 if (result2.canceled || !result2.filePaths?.length) return
                 downloadDir = result2.filePaths[0]
-                localStorage.setItem(DOWNLOAD_DIR_KEY, downloadDir)
-                // 同步保存到 config
-                api().svcState.saveConfig({ config: { download_dir: downloadDir } })
               }
 
               const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)

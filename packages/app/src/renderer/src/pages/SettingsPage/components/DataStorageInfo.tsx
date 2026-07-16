@@ -15,37 +15,23 @@ import { useTranslation } from 'react-i18next'
 import { api } from '@renderer/utils/windowUtils'
 import type { UserDataDirectoryState as UserDataDirectorySnapshot } from '@shared/api/svcState'
 
-type LoadState = {
-  loading: boolean
-  error: string | null
-  directoryState: UserDataDirectorySnapshot | null
-}
-
 export default function DataStorageInfo() {
   const { t } = useTranslation()
-  const [state, setState] = useState<LoadState>({
-    loading: true,
-    error: null,
-    directoryState: null
-  })
+  const [loading, setLoading] = useState(true)
+  const [directoryState, setDirectoryState] = useState<UserDataDirectorySnapshot | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [actionError, setActionError] = useState<string | null>(null)
 
   const loadState = useCallback(async () => {
     try {
       const resp = await api().svcState.getUserDataDirectoryState({})
-      setState({
-        loading: false,
-        error: null,
-        directoryState: resp.state
-      })
-    } catch (error) {
-      console.error('[Settings] Failed to load data directory state:', error)
-      setState({
-        loading: false,
-        error: t('environment.data_directory.load_failed'),
-        directoryState: null
-      })
+      setDirectoryState(resp.state)
+      setError(null)
+    } catch (loadError) {
+      console.error('[Settings] Failed to load storage root state:', loadError)
+      setError(t('environment.data_directory.load_failed'))
+    } finally {
+      setLoading(false)
     }
   }, [t])
 
@@ -53,18 +39,10 @@ export default function DataStorageInfo() {
     void loadState()
   }, [loadState])
 
-  const openPath = useCallback((targetPath: string) => {
-    void api().svcShell.openPath(targetPath)
-  }, [])
-
   const confirmAndApply = useCallback(
     async (nextPath: string | null) => {
-      const directoryState = state.directoryState
-      if (!directoryState) {
-        return
-      }
-
-      const targetPath = nextPath ?? directoryState.defaultPath
+      if (!directoryState) return
+      const targetPath = nextPath ?? directoryState.defaultStorageRoot
       const dialogResp = await api().svcDialog.showMessageBox({
         type: 'question',
         buttons: [
@@ -79,56 +57,47 @@ export default function DataStorageInfo() {
           ? t('environment.data_directory.dialog_detail_custom', { targetPath })
           : t('environment.data_directory.dialog_detail_default', { targetPath })
       })
-
-      if (dialogResp.response !== 0) {
-        return
-      }
+      if (dialogResp.response !== 0) return
 
       setBusy(true)
-      setActionError(null)
-
+      setError(null)
       try {
         const resp = await api().svcState.setUserDataDirectory({ path: nextPath })
+        try {
+          localStorage.removeItem('qapp.downloadDir')
+        } catch {
+          // The storage-root service remains authoritative when localStorage is unavailable.
+        }
         if (!resp.restartRequired) {
           setBusy(false)
           await loadState()
         }
-      } catch (error) {
-        console.error('[Settings] Failed to update data directory:', error)
+      } catch (updateError) {
+        console.error('[Settings] Failed to update storage root:', updateError)
         setBusy(false)
-        setActionError(
-          error instanceof Error ? error.message : t('environment.data_directory.update_failed')
+        setError(
+          updateError instanceof Error
+            ? updateError.message
+            : t('environment.data_directory.update_failed')
         )
       }
     },
-    [loadState, state.directoryState, t]
+    [directoryState, loadState, t]
   )
 
   const handleChooseDirectory = useCallback(async () => {
-    const directoryState = state.directoryState
-    if (!directoryState) {
-      return
-    }
-
+    if (!directoryState) return
     const dialogResp = await api().svcDialog.showOpenDialog({
       title: t('environment.data_directory.dialog_choose_title'),
-      defaultPath: directoryState.currentPath,
+      defaultPath: directoryState.storageRoot,
       properties: ['openDirectory', 'createDirectory', 'promptToCreate']
     })
-
-    if (dialogResp.canceled) {
-      return
+    if (!dialogResp.canceled && dialogResp.filePaths[0]) {
+      await confirmAndApply(dialogResp.filePaths[0])
     }
+  }, [confirmAndApply, directoryState, t])
 
-    const selectedPath = dialogResp.filePaths[0]
-    if (!selectedPath) {
-      return
-    }
-
-    await confirmAndApply(selectedPath)
-  }, [confirmAndApply, state.directoryState, t])
-
-  if (state.loading) {
+  if (loading) {
     return (
       <Stack direction="row" spacing={1.5} alignItems="center">
         <CircularProgress size={18} />
@@ -139,11 +108,8 @@ export default function DataStorageInfo() {
     )
   }
 
-  const directoryState = state.directoryState
   if (!directoryState) {
-    return (
-      <Alert severity="warning">{state.error || t('environment.data_directory.unavailable')}</Alert>
-    )
+    return <Alert severity="warning">{error || t('environment.data_directory.unavailable')}</Alert>
   }
 
   const controlsLocked = busy || directoryState.source === 'env'
@@ -154,16 +120,23 @@ export default function DataStorageInfo() {
         ? t('environment.data_directory.status_custom')
         : t('environment.data_directory.status_default')
 
+  const locations = [
+    [t('environment.data_directory.current_directory'), directoryState.storageRoot],
+    [t('environment.data_directory.data_subdirectory'), directoryState.currentPath],
+    [t('environment.data_directory.projects_subdirectory'), directoryState.projectRoot],
+    [t('environment.data_directory.autosave_subdirectory'), directoryState.autoSaveRoot]
+  ] as const
+
   return (
     <Stack spacing={2}>
       <Alert severity="info">{t('environment.data_directory.info')}</Alert>
-
       {directoryState.source === 'env' ? (
         <Alert severity="warning">{t('environment.data_directory.env_override')}</Alert>
       ) : null}
-
-      {state.error ? <Alert severity="warning">{state.error}</Alert> : null}
-      {actionError ? <Alert severity="error">{actionError}</Alert> : null}
+      {directoryState.legacyLayout ? (
+        <Alert severity="warning">{t('environment.data_directory.legacy_layout')}</Alert>
+      ) : null}
+      {error ? <Alert severity="error">{error}</Alert> : null}
 
       <Card variant="outlined">
         <CardContent>
@@ -173,16 +146,10 @@ export default function DataStorageInfo() {
                 {t('environment.data_directory.card_title')}
               </Typography>
               <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 1 }}>
-                <Chip
-                  size="small"
-                  color={directoryState.source === 'env' ? 'warning' : 'primary'}
-                  variant="filled"
-                  label={statusLabel}
-                />
+                <Chip size="small" color="primary" label={statusLabel} />
                 {busy ? (
                   <Chip
                     size="small"
-                    color="default"
                     variant="outlined"
                     label={t('environment.data_directory.status_applying')}
                   />
@@ -190,14 +157,20 @@ export default function DataStorageInfo() {
               </Stack>
             </Box>
 
-            <Box>
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {t('environment.data_directory.current_directory')}
-              </Typography>
-              <Typography variant="caption" color="text.secondary" sx={{ wordBreak: 'break-all' }}>
-                {directoryState.currentPath}
-              </Typography>
-            </Box>
+            {locations.map(([label, value]) => (
+              <Box key={label}>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {label}
+                </Typography>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ wordBreak: 'break-all' }}
+                >
+                  {value}
+                </Typography>
+              </Box>
+            ))}
 
             {directoryState.isCustom || directoryState.source === 'env' ? (
               <Box>
@@ -209,7 +182,7 @@ export default function DataStorageInfo() {
                   color="text.secondary"
                   sx={{ wordBreak: 'break-all' }}
                 >
-                  {directoryState.defaultPath}
+                  {directoryState.defaultStorageRoot}
                 </Typography>
               </Box>
             ) : null}
@@ -230,7 +203,7 @@ export default function DataStorageInfo() {
               <Button
                 variant="outlined"
                 startIcon={<FolderIcon />}
-                onClick={() => openPath(directoryState.currentPath)}
+                onClick={() => void api().svcShell.openPath(directoryState.storageRoot)}
                 disabled={busy}
               >
                 {t('environment.data_directory.open_current')}

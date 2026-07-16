@@ -1,4 +1,5 @@
 import type { Hy3dParams } from './hy3d/types'
+import type { ChatMessage } from '@shared/api/svcLLMProxy'
 import { getFileNameHintFromUrl } from '@shared/utils/urlFileHints'
 
 export interface SpeechRecognition extends EventTarget {
@@ -458,6 +459,176 @@ export const resolveLocalMediaPathFromUrl = (url: string): string | null => {
   }
 
   return null
+}
+
+const decodeChatMediaPathSegment = (value: string): string | null => {
+  let decoded = value
+
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (decoded.includes('\0')) return null
+
+    let next: string
+    try {
+      next = decodeURIComponent(decoded)
+    } catch {
+      return null
+    }
+
+    if (next === decoded) return decoded
+    decoded = next
+  }
+
+  try {
+    return decodeURIComponent(decoded) === decoded ? decoded : null
+  } catch {
+    return null
+  }
+}
+
+const encodeAbsoluteLocalMediaUrl = (absolutePath: string): string | null => {
+  const normalized = absolutePath.replace(/\\/g, '/')
+
+  if (/^[a-zA-Z]:\//.test(normalized)) {
+    const [drive, ...segments] = normalized.split('/')
+    return `local-media:///${drive}/${segments.map((segment) => encodeURIComponent(segment)).join('/')}`
+  }
+  if (normalized.startsWith('//')) {
+    const [host, ...segments] = normalized.slice(2).split('/')
+    if (!host) return null
+    return `local-media://${encodeURIComponent(host)}/${segments
+      .map((segment) => encodeURIComponent(segment))
+      .join('/')}`
+  }
+  if (normalized.startsWith('/')) {
+    return `local-media:///${normalized
+      .slice(1)
+      .split('/')
+      .map((segment) => encodeURIComponent(segment))
+      .join('/')}`
+  }
+
+  return null
+}
+
+/**
+ * Re-roots a legacy absolute .chat_media URL under the current data directory.
+ * Only URL fields are handled here; arbitrary message/markdown text is intentionally untouched.
+ */
+export const migrateLegacyChatMediaUrl = (url: string, dataDir: string): string => {
+  if (!/^(?:file|local-media):\/\//i.test(url) || !dataDir.trim()) return url
+
+  const sourcePath = resolveLocalMediaPathFromUrl(url)
+  if (!sourcePath) return url
+
+  const rawUrlPath = url.replace(/^(?:file|local-media):\/\//i, '').split(/[?#]/, 1)[0]
+  const rawSourceSegments = rawUrlPath.replace(/\\/g, '/').split('/')
+  for (const rawSegment of rawSourceSegments) {
+    if (!rawSegment) continue
+    const decodedSegment = decodeChatMediaPathSegment(rawSegment)
+    if (
+      decodedSegment == null ||
+      decodedSegment === '.' ||
+      decodedSegment === '..' ||
+      decodedSegment.includes('/') ||
+      decodedSegment.includes('\\') ||
+      decodedSegment.includes('\0')
+    ) {
+      return url
+    }
+  }
+
+  const sourceSegments = sourcePath.replace(/\\/g, '/').split('/')
+  const markerIndex = sourceSegments.indexOf('.chat_media')
+  if (markerIndex < 0 || markerIndex === sourceSegments.length - 1) return url
+
+  const relativeSegments: string[] = []
+  for (const rawSegment of sourceSegments.slice(markerIndex + 1)) {
+    if (!rawSegment) return url
+    const decodedSegment = decodeChatMediaPathSegment(rawSegment)
+    if (
+      decodedSegment == null ||
+      decodedSegment === '.' ||
+      decodedSegment === '..' ||
+      decodedSegment.includes('/') ||
+      decodedSegment.includes('\\') ||
+      decodedSegment.includes('\0') ||
+      /^[a-zA-Z]:/.test(decodedSegment) ||
+      /^\\\\/.test(decodedSegment)
+    ) {
+      return url
+    }
+    relativeSegments.push(decodedSegment)
+  }
+
+  const normalizedDataDir = dataDir.trim().replace(/[\\/]+$/, '')
+  if (
+    !normalizedDataDir ||
+    (!/^[a-zA-Z]:[\\/]/.test(normalizedDataDir) && !/^[/\\]/.test(normalizedDataDir))
+  ) {
+    return url
+  }
+
+  return (
+    encodeAbsoluteLocalMediaUrl(
+      [normalizedDataDir, '.chat_media', ...relativeSegments].join('/')
+    ) || url
+  )
+}
+
+export interface ChatMediaMigrationResult<T> {
+  value: T
+  changed: boolean
+}
+
+export const migrateLegacyChatMediaMessages = (
+  messages: ChatMessage[],
+  dataDir: string
+): ChatMediaMigrationResult<ChatMessage[]> => {
+  let changed = false
+  const nextMessages = messages.map((message) => {
+    let nextMessage = message
+
+    if (message.attachments) {
+      let attachmentsChanged = false
+      const attachments = message.attachments.map((attachment) => {
+        const url = migrateLegacyChatMediaUrl(attachment.url, dataDir)
+        let nextAttachment = url === attachment.url ? attachment : { ...attachment, url }
+
+        if (attachment.ocrResult?.sourceImageUrl) {
+          const sourceImageUrl = migrateLegacyChatMediaUrl(
+            attachment.ocrResult.sourceImageUrl,
+            dataDir
+          )
+          if (sourceImageUrl !== attachment.ocrResult.sourceImageUrl) {
+            nextAttachment = {
+              ...nextAttachment,
+              ocrResult: { ...attachment.ocrResult, sourceImageUrl }
+            }
+          }
+        }
+
+        if (nextAttachment !== attachment) attachmentsChanged = true
+        return nextAttachment
+      })
+
+      if (attachmentsChanged) nextMessage = { ...nextMessage, attachments }
+    }
+
+    if (message.ocrResult?.sourceImageUrl) {
+      const sourceImageUrl = migrateLegacyChatMediaUrl(message.ocrResult.sourceImageUrl, dataDir)
+      if (sourceImageUrl !== message.ocrResult.sourceImageUrl) {
+        nextMessage = {
+          ...nextMessage,
+          ocrResult: { ...message.ocrResult, sourceImageUrl }
+        }
+      }
+    }
+
+    if (nextMessage !== message) changed = true
+    return nextMessage
+  })
+
+  return { value: changed ? nextMessages : messages, changed }
 }
 
 export const getDownloadFileNameFromUrl = (url: string, fallback: string): string => {

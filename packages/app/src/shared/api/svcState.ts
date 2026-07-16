@@ -28,10 +28,17 @@ export type GetBuildEnvResp = {
 export type UserDataDirectorySource = 'default' | 'persisted' | 'env'
 
 export type UserDataDirectoryState = {
+  /** Internal app data directory. Kept for API compatibility. */
   currentPath: string
+  /** Default internal app data directory. Kept for API compatibility. */
   defaultPath: string
   isCustom: boolean
   source: UserDataDirectorySource
+  storageRoot: string
+  defaultStorageRoot: string
+  projectRoot: string
+  autoSaveRoot: string
+  legacyLayout: boolean
 }
 
 export type GetUserDataDirectoryStateReq = {}
@@ -40,6 +47,7 @@ export type GetUserDataDirectoryStateResp = {
 }
 
 export type SetUserDataDirectoryReq = {
+  /** Global storage root. The app derives Data, Projects, and AutoSave beneath it. */
   path: string | null
 }
 export type SetUserDataDirectoryResp = {

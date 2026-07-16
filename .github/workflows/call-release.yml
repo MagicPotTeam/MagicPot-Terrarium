@@ -67,7 +67,29 @@ jobs:
           npm run build:embedded
           npm run prepare:embedded
           npm run build:image-worker
-          npx cross-env PACKAGE_MODE=embedded npm run package:win -- --publish never
+          $env:PACKAGE_MODE = 'embedded'
+          npm run package:win -- --publish=never
+
+          $portableRoot = Join-Path $PWD 'dist\embedded\win-unpacked\ComfyUI_windows_portable'
+          $requiredPortableFiles = @(
+            'advanced\run_nvidia_gpu_disable_api_nodes.bat',
+            'update\current_requirements.txt',
+            'update\update.py',
+            'update\update_comfyui.bat',
+            'update\update_comfyui_and_python_dependencies.bat',
+            'update\update_comfyui_stable.bat',
+            'run_cpu.bat',
+            'run_nvidia_gpu.bat',
+            'run_nvidia_gpu_fast_fp16_accumulation.bat'
+          )
+          $missingPortableFiles = @(
+            $requiredPortableFiles | Where-Object {
+              -not (Test-Path -LiteralPath (Join-Path $portableRoot $_) -PathType Leaf)
+            }
+          )
+          if ($missingPortableFiles.Count -gt 0) {
+            throw "Embedded package is missing required ComfyUI portable files: $($missingPortableFiles -join ', ')"
+          }
 
       - name: Build pure package
         run: |
@@ -76,7 +98,8 @@ jobs:
 
           npm run build:pure
           npm run build:image-worker
-          npx cross-env PACKAGE_MODE=pure npm run package:win -- --publish never
+          $env:PACKAGE_MODE = 'pure'
+          npm run package:win -- --publish=never
 
       - name: Prepare release assets
         shell: pwsh
