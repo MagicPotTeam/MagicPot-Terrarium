@@ -68,6 +68,9 @@ jobs:
           npm run prepare:embedded
           npm run build:image-worker
           $env:PACKAGE_MODE = 'embedded'
+          # Keep electron-builder in package-only mode even when Actions exposes repository tokens.
+          Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
+          Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
           npm run package:win -- --publish=never
 
           $portableRoot = Join-Path $PWD 'dist\embedded\win-unpacked\ComfyUI_windows_portable'
@@ -99,6 +102,9 @@ jobs:
           npm run build:pure
           npm run build:image-worker
           $env:PACKAGE_MODE = 'pure'
+          # Keep electron-builder in package-only mode even when Actions exposes repository tokens.
+          Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
+          Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
           npm run package:win -- --publish=never
 
       - name: Prepare release assets
