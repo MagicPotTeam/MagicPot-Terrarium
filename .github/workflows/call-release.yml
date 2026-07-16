@@ -71,7 +71,7 @@ jobs:
           # Keep electron-builder in package-only mode even when Actions exposes repository tokens.
           Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
           Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
-          npm run package:win -- --publish=never
+          npx electron-builder --config config/electron/electron-builder.config.js --win --x64 --publish never
 
           $portableRoot = Join-Path $PWD 'dist\embedded\win-unpacked\ComfyUI_windows_portable'
           $requiredPortableFiles = @(
@@ -105,7 +105,7 @@ jobs:
           # Keep electron-builder in package-only mode even when Actions exposes repository tokens.
           Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
           Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
-          npm run package:win -- --publish=never
+          npx electron-builder --config config/electron/electron-builder.config.js --win --x64 --publish never
 
       - name: Prepare release assets
         shell: pwsh
