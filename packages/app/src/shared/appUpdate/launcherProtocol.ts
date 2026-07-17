@@ -1,4 +1,7 @@
 export const LAUNCHER_PROTOCOL_SCHEMA = 1 as const
+export const MAX_RETAIN_APP_VERSIONS = 100
+export const MAX_LAUNCH_ATTEMPT = 10_000
+export const MAX_UNPACKED_SIZE = 1024 ** 4
 
 export type UpdateMode = 'manual' | 'notify-on-launch' | 'auto-on-launch'
 export type UpdateChannel = 'stable' | 'beta' | 'nightly'
@@ -44,10 +47,7 @@ export interface InstalledRuntimeManifestV1 {
   platform: LauncherPlatform
   arch: LauncherArch
   createdAt: string
-  entrypoints: {
-    python: string
-    comfyui: string
-  }
+  entrypoints: { python: string; comfyui: string }
   unpackedSize: number
 }
 
@@ -68,10 +68,13 @@ export class LauncherProtocolError extends Error {
 
 type Validator<T> = (value: unknown) => value is T
 
-const BUILD_ID_PATTERN = /^\d{8}-\d{6}-[0-9a-f]{7,40}$/
+const BUILD_ID_PATTERN = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-[0-9a-f]{7}$/
+const ISO_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/
 const RUNTIME_ID_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,126}[a-z0-9])?$/
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/
 const VERSION_PATTERN = /^[0-9A-Za-z](?:[0-9A-Za-z.+-]{0,126}[0-9A-Za-z])?$/
+const WINDOWS_RESERVED_NAME =
+  /^(?:con|prn|aux|nul|conin\$|conout\$|com(?:[1-9]|[¹²³])|lpt(?:[1-9]|[¹²³]))(?:\..*)?$/i
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -89,24 +92,35 @@ function hasOnlyKeys(
   )
 }
 
-function isSchema1(value: Record<string, unknown>): boolean {
-  return value.schema === LAUNCHER_PROTOCOL_SCHEMA
-}
-
-function isIsoTimestamp(value: unknown): value is string {
+function isActualUtcDateTime(parts: readonly string[]): boolean {
+  const [year, month, day, hour, minute, second] = parts.map(Number)
+  if (year < 1000 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59)
+    return false
+  const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second))
   return (
-    typeof value === 'string' &&
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) &&
-    !Number.isNaN(Date.parse(value))
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day &&
+    date.getUTCHours() === hour &&
+    date.getUTCMinutes() === minute &&
+    date.getUTCSeconds() === second
   )
 }
 
-function isPositiveSafeInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) > 0
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const match = ISO_TIMESTAMP_PATTERN.exec(value)
+  return match !== null && isActualUtcDateTime(match.slice(1, 7))
+}
+
+function isIntegerInRange(value: unknown, maximum: number): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0 && (value as number) <= maximum
 }
 
 export function isValidBuildId(value: unknown): value is string {
-  return typeof value === 'string' && BUILD_ID_PATTERN.test(value)
+  if (typeof value !== 'string') return false
+  const match = BUILD_ID_PATTERN.exec(value)
+  return match !== null && isActualUtcDateTime(match.slice(1, 7))
 }
 
 export function isValidRuntimeId(value: unknown): value is string {
@@ -114,11 +128,18 @@ export function isValidRuntimeId(value: unknown): value is string {
 }
 
 export function isSafeRelativePath(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 260 || value.includes('\0'))
-    return false
+  if (typeof value !== 'string' || value.length === 0 || value.length > 260) return false
   if (/^(?:[A-Za-z]:|[\\/])/.test(value)) return false
-  const segments = value.replace(/\\/g, '/').split('/')
-  return segments.every((segment) => segment.length > 0 && segment !== '.' && segment !== '..')
+  if ([...value].some((character) => character.charCodeAt(0) <= 0x1f)) return false
+  if (/[:<>"|?*]/.test(value)) return false
+
+  return value.split(/[\\/]/).every((segment) => {
+    if (segment.length === 0 || segment === '.' || segment === '..' || /[ .]$/.test(segment))
+      return false
+    return (
+      !WINDOWS_RESERVED_NAME.test(segment) && !WINDOWS_RESERVED_NAME.test(segment.split('.')[0])
+    )
+  })
 }
 
 export function isLauncherSettingsV1(value: unknown): value is LauncherSettingsV1 {
@@ -128,10 +149,10 @@ export function isLauncherSettingsV1(value: unknown): value is LauncherSettingsV
   )
     return false
   return (
-    isSchema1(value) &&
+    value.schema === LAUNCHER_PROTOCOL_SCHEMA &&
     ['manual', 'notify-on-launch', 'auto-on-launch'].includes(value.updateMode as string) &&
     ['stable', 'beta', 'nightly'].includes(value.channel as string) &&
-    isPositiveSafeInteger(value.retainAppVersions) &&
+    isIntegerInRange(value.retainAppVersions, MAX_RETAIN_APP_VERSIONS) &&
     typeof value.allowPrerelease === 'boolean'
   )
 }
@@ -150,7 +171,7 @@ export function isActivePointerV1(value: unknown): value is ActivePointerV1 {
     (value.previousBuildId === undefined && value.previousRuntimeId === undefined) ||
     (isValidBuildId(value.previousBuildId) && isValidRuntimeId(value.previousRuntimeId))
   return (
-    isSchema1(value) &&
+    value.schema === LAUNCHER_PROTOCOL_SCHEMA &&
     isValidBuildId(value.activeBuildId) &&
     isValidRuntimeId(value.activeRuntimeId) &&
     previousPairIsComplete &&
@@ -177,20 +198,21 @@ export function isInstalledAppManifestV1(value: unknown): value is InstalledAppM
   )
     return false
   return (
-    isSchema1(value) &&
+    value.schema === LAUNCHER_PROTOCOL_SCHEMA &&
     value.kind === 'magicpot-app' &&
     typeof value.version === 'string' &&
     VERSION_PATTERN.test(value.version) &&
     isValidBuildId(value.buildId) &&
     typeof value.commitSha === 'string' &&
     COMMIT_SHA_PATTERN.test(value.commitSha) &&
+    value.buildId.slice(-7) === value.commitSha.slice(0, 7) &&
     value.platform === 'win32' &&
     value.arch === 'x64' &&
     isValidRuntimeId(value.runtimeId) &&
     isSafeRelativePath(value.entrypoint) &&
     /\.exe$/i.test(value.entrypoint) &&
     isIsoTimestamp(value.createdAt) &&
-    isPositiveSafeInteger(value.unpackedSize)
+    isIntegerInRange(value.unpackedSize, MAX_UNPACKED_SIZE)
   )
 }
 
@@ -206,13 +228,13 @@ export function isInstalledRuntimeManifestV1(value: unknown): value is Installed
       'createdAt',
       'entrypoints',
       'unpackedSize'
-    ])
+    ]) ||
+    !isRecord(value.entrypoints) ||
+    !hasOnlyKeys(value.entrypoints, ['python', 'comfyui'])
   )
     return false
-  if (!isRecord(value.entrypoints) || !hasOnlyKeys(value.entrypoints, ['python', 'comfyui']))
-    return false
   return (
-    isSchema1(value) &&
+    value.schema === LAUNCHER_PROTOCOL_SCHEMA &&
     value.kind === 'magicpot-runtime' &&
     isValidRuntimeId(value.runtimeId) &&
     value.platform === 'win32' &&
@@ -222,7 +244,7 @@ export function isInstalledRuntimeManifestV1(value: unknown): value is Installed
     /\.exe$/i.test(value.entrypoints.python) &&
     isSafeRelativePath(value.entrypoints.comfyui) &&
     /\.py$/i.test(value.entrypoints.comfyui) &&
-    isPositiveSafeInteger(value.unpackedSize)
+    isIntegerInRange(value.unpackedSize, MAX_UNPACKED_SIZE)
   )
 }
 
@@ -233,10 +255,10 @@ export function isLaunchStateV1(value: unknown): value is LaunchStateV1 {
   )
     return false
   return (
-    isSchema1(value) &&
+    value.schema === LAUNCHER_PROTOCOL_SCHEMA &&
     isValidBuildId(value.buildId) &&
     ['pending', 'healthy', 'failed'].includes(value.state as string) &&
-    isPositiveSafeInteger(value.attempt) &&
+    isIntegerInRange(value.attempt, MAX_LAUNCH_ATTEMPT) &&
     isIsoTimestamp(value.startedAt)
   )
 }

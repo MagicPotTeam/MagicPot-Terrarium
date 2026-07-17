@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -6,6 +7,7 @@ export interface LauncherStateFileSystem {
   readFile(path: string, encoding: 'utf8'): Promise<string>
   writeFile(path: string, data: string, encoding: 'utf8'): Promise<void>
   rename(oldPath: string, newPath: string): Promise<void>
+  unlink(path: string): Promise<void>
 }
 
 export interface LauncherStateStoreOptions<T> {
@@ -14,11 +16,16 @@ export interface LauncherStateStoreOptions<T> {
   serialize: (value: T) => string
   fileSystem?: LauncherStateFileSystem
   now?: () => Date
+  uniqueId?: () => string
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === code
 }
+
+// This only coordinates Store instances in this process. The launcher lock will provide
+// inter-process exclusion when the launcher owns these files.
+const operationQueues = new Map<string, Promise<void>>()
 
 export class LauncherStateStore<T> {
   readonly filePath: string
@@ -26,7 +33,7 @@ export class LauncherStateStore<T> {
   private readonly serializeValue: (value: T) => string
   private readonly fileSystem: LauncherStateFileSystem
   private readonly now: () => Date
-  private saveQueue: Promise<void> = Promise.resolve()
+  private readonly uniqueId: () => string
 
   constructor(options: LauncherStateStoreOptions<T>) {
     if (!path.isAbsolute(options.filePath))
@@ -36,9 +43,32 @@ export class LauncherStateStore<T> {
     this.serializeValue = options.serialize
     this.fileSystem = options.fileSystem ?? fs
     this.now = options.now ?? (() => new Date())
+    this.uniqueId = options.uniqueId ?? randomUUID
   }
 
-  async load(defaultValue: T): Promise<T> {
+  load(defaultValue: T): Promise<T> {
+    return this.enqueue(() => this.loadSerialized(defaultValue))
+  }
+
+  save(value: T): Promise<void> {
+    return this.enqueue(() => this.saveAtomic(value))
+  }
+
+  private enqueue<R>(operation: () => Promise<R>): Promise<R> {
+    const previous = operationQueues.get(this.filePath) ?? Promise.resolve()
+    const result = previous.then(operation)
+    const next = result.then(
+      () => undefined,
+      () => undefined
+    )
+    operationQueues.set(this.filePath, next)
+    void next.finally(() => {
+      if (operationQueues.get(this.filePath) === next) operationQueues.delete(this.filePath)
+    })
+    return result
+  }
+
+  private async loadSerialized(defaultValue: T): Promise<T> {
     let text: string
     try {
       text = await this.fileSystem.readFile(this.filePath, 'utf8')
@@ -62,26 +92,22 @@ export class LauncherStateStore<T> {
     }
   }
 
-  save(value: T): Promise<void> {
-    const operation = this.saveQueue.then(() => this.saveAtomic(value))
-    this.saveQueue = operation.catch(() => undefined)
-    return operation
-  }
-
   private async saveAtomic(value: T): Promise<void> {
     const serialized = this.serializeValue(value)
-    const directory = path.dirname(this.filePath)
-    const temporaryPath = `${this.filePath}.tmp`
-    await this.fileSystem.mkdir(directory, { recursive: true })
-    await this.fileSystem.writeFile(temporaryPath, serialized, 'utf8')
-    await this.fileSystem.rename(temporaryPath, this.filePath)
+    const temporaryPath = `${this.filePath}.${this.uniqueId()}.tmp`
+    await this.fileSystem.mkdir(path.dirname(this.filePath), { recursive: true })
+    try {
+      await this.fileSystem.writeFile(temporaryPath, serialized, 'utf8')
+      await this.fileSystem.rename(temporaryPath, this.filePath)
+    } finally {
+      await this.removeIfPresentBestEffort(temporaryPath)
+    }
   }
 
   private async backUpCorruptFile(): Promise<void> {
     const timestamp = this.now().toISOString().replace(/[:.]/g, '-')
-    for (let sequence = 0; ; sequence += 1) {
-      const suffix = sequence === 0 ? '' : `-${sequence}`
-      const backupPath = `${this.filePath}.${timestamp}${suffix}.corrupt`
+    for (;;) {
+      const backupPath = `${this.filePath}.${timestamp}-${this.uniqueId()}.corrupt`
       try {
         await this.fileSystem.readFile(backupPath, 'utf8')
         continue
@@ -93,8 +119,17 @@ export class LauncherStateStore<T> {
         return
       } catch (error) {
         if (hasErrorCode(error, 'EEXIST')) continue
+        if (hasErrorCode(error, 'ENOENT')) return
         throw error
       }
+    }
+  }
+
+  private async removeIfPresentBestEffort(target: string): Promise<void> {
+    try {
+      await this.fileSystem.unlink(target)
+    } catch {
+      // Cleanup must not hide the write or rename result.
     }
   }
 }
