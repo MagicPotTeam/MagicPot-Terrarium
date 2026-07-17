@@ -37,7 +37,7 @@ import type { AppUpdateStatus, AppUpdateSvc, AppUpdateState } from '@shared/api/
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import { useTranslation } from 'react-i18next'
 
-const SOURCE_CODE_URL = 'https://github.com/MagicPotTeam/magicpot-open'
+const SOURCE_CODE_URL = 'https://github.com/MagicPotTeam/MagicPot-Terrarium'
 const LICENSE_URL = `${SOURCE_CODE_URL}/blob/master/LICENSE`
 
 type ChipColor = 'default' | 'primary' | 'secondary' | 'error' | 'info' | 'success' | 'warning'

@@ -184,7 +184,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
 
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <Typography sx={{ fontSize: 12, fontWeight: 500, color: settingsMetaColor }}>
-              Magic Pot {PACKAGE_VERSION}
+              MagicPot-Terrarium {PACKAGE_VERSION}
             </Typography>
             {onClose && (
               <Tooltip title={t('general.close')} arrow>

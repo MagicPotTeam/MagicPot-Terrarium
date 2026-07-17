@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 const translations: Record<string, string> = {
-  'about.title_app': 'Magic Pot AI Launcher',
+  'about.title_app': 'MagicPot-Terrarium',
   'about.description_app': 'Description',
   'about.version_label': 'Version',
   'about.developer_label': 'Developer',
