@@ -14,6 +14,7 @@ import { createMainWindow } from './mainWindow'
 import { startQAppWatcher, stopQAppWatcher } from './qApp/watcher'
 import { cleanupScreenshotManager, initScreenshotManager } from './screenshot/screenshotManager'
 import { initializeAppUpdateManager, isAppUpdateInstallInProgress } from './appUpdate/updateManager'
+import { winController } from './winControls'
 
 const startupUserData = resolveStartupUserDataDirectory()
 fs.mkdirSync(startupUserData.path, { recursive: true })
@@ -118,6 +119,7 @@ app.on('before-quit', async (event) => {
   }
 
   event.preventDefault()
+  if (!(await winController.confirmAppQuit())) return
   cleanupScreenshotManager()
   stopQAppWatcher()
   await beforeQuit()

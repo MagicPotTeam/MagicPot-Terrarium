@@ -915,6 +915,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
   } = useCanvasViewportPersistence({
     config,
     canvasId,
+    documentTitle: projectName,
     items,
     groups,
     groupBranches,

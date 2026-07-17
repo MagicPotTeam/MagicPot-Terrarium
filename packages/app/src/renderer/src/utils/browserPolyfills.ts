@@ -98,6 +98,9 @@ const browserWinBridge: WinBridge = {
   close: async () => {
     console.warn('[browserPolyfills] close() not available in browser context')
   },
+  setUnsavedDocumentState: async () => {},
+  reportUnsavedSaveResult: async () => {},
+  onRequestUnsavedSave: () => () => {},
   onMaximizeChanged: () => () => {}
 }
 

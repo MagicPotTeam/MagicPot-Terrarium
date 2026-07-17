@@ -41,6 +41,7 @@ type HydrateCanvasImageItemFn = (item: CanvasImageItem) => Promise<CanvasImageIt
 type UseCanvasViewportPersistenceOptions = {
   config: Config
   canvasId: string
+  documentTitle?: string
   items: CanvasItem[]
   groups: CanvasGroup[]
   groupBranches: CanvasGroupBranch[]
@@ -108,38 +109,22 @@ function areArrayItemsSame<T>(left: readonly T[], right: readonly T[]): boolean 
   )
 }
 
-function buildCanvasPersistenceStructuralSignature(
+function buildCanvasPersistenceSignature(
   items: CanvasItem[],
   groups: CanvasGroup[],
   groupBranches: CanvasGroupBranch[],
   figmaBinding: CanvasFigmaBinding | null
 ): string {
-  const itemSignature = items
-    .map((item) => {
-      const src = 'src' in item && typeof item.src === 'string' ? item.src : ''
-      const textureSignature =
-        item.type === 'model3d' && item.textures
-          ? Object.entries(item.textures)
-              .sort(([left], [right]) => left.localeCompare(right))
-              .map(([name, textureSrc]) => `${name}:${textureSrc}`)
-              .join('|')
-          : ''
-
-      return `${item.id}:${item.type}:${src}:${textureSignature}`
-    })
-    .join('||')
-
-  const groupSignature = groups
-    .map((group) => `${group.id}:${group.name}:${group.branchId ?? ''}:${group.itemIds.join(',')}`)
-    .join('||')
-  const branchSignature = groupBranches.map((branch) => `${branch.id}:${branch.name}`).join('||')
-
-  return `${itemSignature}__${groupSignature}__${branchSignature}__${JSON.stringify(figmaBinding ?? null)}`
+  return JSON.stringify({ items, groups, groupBranches, figmaBinding }, (key, value) => {
+    if (key === 'image' || key === 'sourceFile' || key === 'deferRender') return undefined
+    return value
+  })
 }
 
 export function useCanvasViewportPersistence({
   config,
   canvasId,
+  documentTitle,
   items,
   groups,
   groupBranches,
@@ -178,16 +163,27 @@ export function useCanvasViewportPersistence({
   const canvasSaveInFlightRef = useRef<{ canvasId: string; promise: Promise<void> } | null>(null)
   const saveAgainAfterInFlightRef = useRef(false)
   const lastCanvasSaveErrorRef = useRef<unknown>(null)
-  const lastStructuralCanvasSignatureRef = useRef<string | null>(null)
-  const isRestoringRef = useRef(false)
+  const lastPersistedCanvasSignatureRef = useRef<string | null>(null)
+  const isRestoringRef = useRef(true)
   const activeCanvasIdRef = useRef(canvasId)
   const restoreGenerationRef = useRef(0)
   const shouldClearCanvasBeforeRestoreRef = useRef(false)
   const suspendAutoSaveRef = useRef(suspendAutoSave)
   const latestHydrateCanvasImageItemForCanvasRef = useRef(hydrateCanvasImageItemForCanvas)
   const latestNextZIndexRefRef = useRef(nextZIndexRef)
+  const documentTitleRef = useRef(documentTitle)
+  documentTitleRef.current = documentTitle
   const [fitTrigger, setFitTrigger] = useState(0)
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false)
+  const publishUnsavedState = useCallback(() => {
+    return window.win.setUnsavedDocumentState({
+      dirty:
+        hasPendingCanvasChangesRef.current ||
+        canvasSaveInFlightRef.current !== null ||
+        lastCanvasSaveErrorRef.current !== null,
+      title: documentTitleRef.current?.trim() || '未命名画布'
+    })
+  }, [])
 
   if (activeCanvasIdRef.current !== canvasId) {
     activeCanvasIdRef.current = canvasId
@@ -197,7 +193,7 @@ export function useCanvasViewportPersistence({
     hasPendingCanvasChangesRef.current = false
     saveAgainAfterInFlightRef.current = false
     lastCanvasSaveErrorRef.current = null
-    lastStructuralCanvasSignatureRef.current = null
+    lastPersistedCanvasSignatureRef.current = null
   }
 
   useEffect(() => {
@@ -341,10 +337,18 @@ export function useCanvasViewportPersistence({
     }
 
     if (!isRestoringRef.current) {
-      hasPendingCanvasChangesRef.current = true
-      lastCanvasSaveErrorRef.current = null
+      const currentSignature = buildCanvasPersistenceSignature(
+        items,
+        groups,
+        groupBranches,
+        figmaBinding
+      )
+      hasPendingCanvasChangesRef.current =
+        currentSignature !== lastPersistedCanvasSignatureRef.current
+      if (hasPendingCanvasChangesRef.current) lastCanvasSaveErrorRef.current = null
+      void publishUnsavedState()
     }
-  }, [canvasId, figmaBinding, groupBranches, groups, items])
+  }, [canvasId, figmaBinding, groupBranches, groups, items, publishUnsavedState])
 
   const clearPendingCanvasSave = useCallback(() => {
     if (pendingCanvasSaveTimerRef.current !== null) {
@@ -360,9 +364,12 @@ export function useCanvasViewportPersistence({
 
     const saveInFlight = canvasSaveInFlightRef.current
     if (saveInFlight?.canvasId === canvasId) {
-      saveAgainAfterInFlightRef.current = true
-      hasPendingCanvasChangesRef.current = false
+      if (hasPendingCanvasChangesRef.current) saveAgainAfterInFlightRef.current = true
       return saveInFlight.promise
+    }
+
+    if (!hasPendingCanvasChangesRef.current && lastCanvasSaveErrorRef.current === null) {
+      return Promise.resolve()
     }
 
     const saveCanvasId = canvasId
@@ -383,6 +390,12 @@ export function useCanvasViewportPersistence({
             snapshot.groupBranches,
             snapshot.figmaBinding
           )
+          lastPersistedCanvasSignatureRef.current = buildCanvasPersistenceSignature(
+            snapshot.items,
+            snapshot.groups,
+            snapshot.groupBranches,
+            snapshot.figmaBinding
+          )
           lastCanvasSaveErrorRef.current = null
         } while (saveAgainAfterInFlightRef.current || hasPendingCanvasChangesRef.current)
       } catch (error) {
@@ -393,6 +406,7 @@ export function useCanvasViewportPersistence({
         if (savePromise && canvasSaveInFlightRef.current?.promise === savePromise) {
           canvasSaveInFlightRef.current = null
         }
+        void publishUnsavedState()
       }
     }
 
@@ -400,7 +414,7 @@ export function useCanvasViewportPersistence({
     canvasSaveInFlightRef.current = { canvasId: saveCanvasId, promise: savePromise }
     rememberPendingCanvasSave(saveCanvasId, savePromise)
     return savePromise
-  }, [canvasId, clearPendingCanvasSave])
+  }, [canvasId, clearPendingCanvasSave, publishUnsavedState])
 
   useEffect(() => {
     let cancelled = false
@@ -412,7 +426,7 @@ export function useCanvasViewportPersistence({
         clearPendingCanvasSave()
         hasPendingCanvasChangesRef.current = false
         saveAgainAfterInFlightRef.current = false
-        lastStructuralCanvasSignatureRef.current = null
+        lastPersistedCanvasSignatureRef.current = null
         if (shouldClearCanvasBeforeRestoreRef.current) {
           shouldClearCanvasBeforeRestoreRef.current = false
           setItems((currentItems) => (currentItems.length === 0 ? currentItems : []))
@@ -456,6 +470,12 @@ export function useCanvasViewportPersistence({
         })
         setFigmaBinding((currentBinding) =>
           Object.is(currentBinding, saved.figmaBinding) ? currentBinding : saved.figmaBinding
+        )
+        lastPersistedCanvasSignatureRef.current = buildCanvasPersistenceSignature(
+          restored,
+          saved.groups,
+          saved.groupBranches || [],
+          saved.figmaBinding
         )
         latestNextZIndexRefRef.current.current = maxZ + 1
         if (restored.length > 0) {
@@ -534,28 +554,6 @@ export function useCanvasViewportPersistence({
   ])
 
   useEffect(() => {
-    if (isRestoringRef.current) return
-
-    const nextStructuralSignature = buildCanvasPersistenceStructuralSignature(
-      items,
-      groups,
-      groupBranches,
-      figmaBinding
-    )
-
-    if (lastStructuralCanvasSignatureRef.current === null) {
-      lastStructuralCanvasSignatureRef.current = nextStructuralSignature
-      return
-    }
-
-    if (lastStructuralCanvasSignatureRef.current === nextStructuralSignature) {
-      return
-    }
-
-    lastStructuralCanvasSignatureRef.current = nextStructuralSignature
-  }, [figmaBinding, groupBranches, groups, items])
-
-  useEffect(() => {
     if (!hasPendingCanvasChangesRef.current) return
 
     clearPendingCanvasSave()
@@ -585,47 +583,60 @@ export function useCanvasViewportPersistence({
       if (!hasPendingCanvasChangesRef.current) return
       if (!force && suspendAutoSaveRef.current) return
       void persistLatestCanvasState().catch(() => {
-        // The dirty/error refs keep unload protection active until a later save succeeds.
+        // The native close flow reports the error and keeps the window open.
       })
     }
 
     const handleVisibilityChange = () => {
-      if (document.hidden) {
-        flushPendingCanvasSave()
-      }
+      if (document.hidden) flushPendingCanvasSave()
     }
-
-    const handleWindowBlur = () => {
-      flushPendingCanvasSave()
-    }
-    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      flushPendingCanvasSave(true)
-      const saveIsPending = canvasSaveInFlightRef.current !== null
-      if (
-        !hasPendingCanvasChangesRef.current &&
-        !saveIsPending &&
-        lastCanvasSaveErrorRef.current === null
-      ) {
-        return
-      }
-
-      event.preventDefault()
-      event.returnValue = ''
-    }
-    const handlePageHide = () => {
-      flushPendingCanvasSave(true)
-    }
+    const handleWindowBlur = () => flushPendingCanvasSave()
+    const handlePageHide = () => flushPendingCanvasSave(true)
 
     document.addEventListener('visibilitychange', handleVisibilityChange)
     window.addEventListener('blur', handleWindowBlur)
-    window.addEventListener('beforeunload', handleBeforeUnload)
     window.addEventListener('pagehide', handlePageHide)
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('blur', handleWindowBlur)
-      window.removeEventListener('beforeunload', handleBeforeUnload)
       window.removeEventListener('pagehide', handlePageHide)
+    }
+  }, [persistLatestCanvasState])
+
+  useEffect(() => {
+    void publishUnsavedState()
+  }, [documentTitle, publishUnsavedState])
+
+  useEffect(() => {
+    const removeSaveListener = window.win.onRequestUnsavedSave((requestId) => {
+      void persistLatestCanvasState()
+        .then(() => {
+          const success =
+            !hasPendingCanvasChangesRef.current &&
+            canvasSaveInFlightRef.current === null &&
+            lastCanvasSaveErrorRef.current === null
+          return window.win.reportUnsavedSaveResult({
+            requestId,
+            success,
+            ...(!success && { error: '画布在保存过程中发生了新的更改，请重试。' })
+          })
+        })
+        .catch((error: unknown) =>
+          window.win.reportUnsavedSaveResult({
+            requestId,
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+          })
+        )
+    })
+
+    return () => {
+      removeSaveListener()
+      void window.win.setUnsavedDocumentState({
+        dirty: false,
+        title: documentTitleRef.current || ''
+      })
     }
   }, [persistLatestCanvasState])
 

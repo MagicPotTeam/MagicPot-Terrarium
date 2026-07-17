@@ -11,6 +11,10 @@ import { useCanvasViewportPersistence } from './useCanvasViewportPersistence'
 const mockClearCanvasItems = vi.fn()
 const mockLoadCanvasItems = vi.fn()
 const mockSaveCanvasItems = vi.fn()
+const mockSetUnsavedDocumentState = vi.fn()
+const mockReportUnsavedSaveResult = vi.fn()
+let requestUnsavedSave: ((requestId: string) => void) | null = null
+let removeUnsavedSaveListener: ReturnType<typeof vi.fn<() => void>>
 
 vi.mock('./canvasStorage', () => ({
   clearCanvasItems: (...args: unknown[]) => mockClearCanvasItems(...args),
@@ -96,6 +100,23 @@ describe('useCanvasViewportPersistence', () => {
     mockLoadCanvasItems.mockReset()
     mockSaveCanvasItems.mockReset()
     mockSaveCanvasItems.mockResolvedValue(undefined)
+    mockSetUnsavedDocumentState.mockReset().mockResolvedValue(undefined)
+    mockReportUnsavedSaveResult.mockReset().mockResolvedValue(undefined)
+    requestUnsavedSave = null
+    removeUnsavedSaveListener = vi.fn()
+    window.win = {
+      minimize: vi.fn(),
+      toggleMaximize: vi.fn(),
+      isMaximized: vi.fn(async () => false),
+      close: vi.fn(),
+      setUnsavedDocumentState: mockSetUnsavedDocumentState,
+      reportUnsavedSaveResult: mockReportUnsavedSaveResult,
+      onRequestUnsavedSave: vi.fn((callback: (requestId: string) => void) => {
+        requestUnsavedSave = callback
+        return removeUnsavedSaveListener
+      }),
+      onMaximizeChanged: vi.fn(() => vi.fn())
+    }
   })
 
   afterEach(() => {
@@ -643,105 +664,93 @@ describe('useCanvasViewportPersistence', () => {
     secondMount.unmount()
   })
 
-  it('blocks unload while an exit-triggered save is pending, then stops blocking after success', async () => {
+  it('reports dirty state and immediately saves the latest canvas on a native save request', async () => {
     mockLoadCanvasItems.mockResolvedValue({
       items: [],
       groups: [],
       groupBranches: [],
       figmaBinding: null
     })
-    const pendingSave = createDeferred<void>()
-    mockSaveCanvasItems.mockReturnValueOnce(pendingSave.promise)
-    const { result } = renderPersistenceForExitTest('canvas-exit-pending-test')
+    const { result, unmount } = renderPersistenceForExitTest('canvas-native-save-test')
 
     await waitFor(() => {
-      expect(mockLoadCanvasItems).toHaveBeenCalledWith('canvas-exit-pending-test')
+      expect(mockLoadCanvasItems).toHaveBeenCalledWith('canvas-native-save-test')
+      expect(requestUnsavedSave).not.toBeNull()
     })
     mockSaveCanvasItems.mockClear()
+    mockSetUnsavedDocumentState.mockClear()
 
     act(() => {
-      result.current.setItems([createImageItem({ id: 'exit-pending-image' })])
+      result.current.setItems([createImageItem({ id: 'native-save-image' })])
     })
 
-    const pendingEvent = new Event('beforeunload', { cancelable: true })
-    act(() => {
-      window.dispatchEvent(pendingEvent)
+    await waitFor(() => {
+      expect(mockSetUnsavedDocumentState).toHaveBeenCalledWith({
+        dirty: true,
+        title: '未命名画布'
+      })
     })
-
-    expect(pendingEvent.defaultPrevented).toBe(true)
-    expect(mockSaveCanvasItems).toHaveBeenCalledWith(
-      [expect.objectContaining({ id: 'exit-pending-image' })],
-      'canvas-exit-pending-test',
-      [],
-      [],
-      null
-    )
 
     await act(async () => {
-      pendingSave.resolve()
-      await pendingSave.promise
+      requestUnsavedSave?.('save-request-1')
       await Promise.resolve()
     })
 
-    const savedEvent = new Event('beforeunload', { cancelable: true })
-    act(() => {
-      window.dispatchEvent(savedEvent)
+    await waitFor(() => {
+      expect(mockSaveCanvasItems).toHaveBeenCalledWith(
+        [expect.objectContaining({ id: 'native-save-image' })],
+        'canvas-native-save-test',
+        [],
+        [],
+        null
+      )
+      expect(mockReportUnsavedSaveResult).toHaveBeenCalledWith({
+        requestId: 'save-request-1',
+        success: true
+      })
+      expect(mockSetUnsavedDocumentState).toHaveBeenCalledWith({
+        dirty: false,
+        title: '未命名画布'
+      })
     })
-    expect(savedEvent.defaultPrevented).toBe(false)
+
+    unmount()
+    expect(removeUnsavedSaveListener).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps blocking unload after a failed save and retries on the next exit attempt', async () => {
+  it('reports native save failures and remains dirty', async () => {
     mockLoadCanvasItems.mockResolvedValue({
       items: [],
       groups: [],
       groupBranches: [],
       figmaBinding: null
     })
-    mockSaveCanvasItems.mockRejectedValueOnce(new Error('disk full')).mockResolvedValue(undefined)
-    const { result } = renderPersistenceForExitTest('canvas-exit-failure-test')
+    mockSaveCanvasItems.mockRejectedValueOnce(new Error('disk full'))
+    const { result } = renderPersistenceForExitTest('canvas-native-save-failure-test')
 
-    await waitFor(() => {
-      expect(mockLoadCanvasItems).toHaveBeenCalledWith('canvas-exit-failure-test')
-    })
+    await waitFor(() => expect(requestUnsavedSave).not.toBeNull())
     mockSaveCanvasItems.mockClear()
-
     act(() => {
-      result.current.setItems([createImageItem({ id: 'exit-failure-image' })])
+      result.current.setItems([createImageItem({ id: 'failed-native-save-image' })])
     })
 
-    const failedEvent = new Event('beforeunload', { cancelable: true })
-    act(() => {
-      window.dispatchEvent(failedEvent)
+    await act(async () => {
+      requestUnsavedSave?.('save-request-failure')
+      await Promise.resolve()
+      await Promise.resolve()
     })
-    expect(failedEvent.defaultPrevented).toBe(true)
 
     await waitFor(() => {
-      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+      expect(mockReportUnsavedSaveResult).toHaveBeenCalledWith({
+        requestId: 'save-request-failure',
+        success: false,
+        error: 'disk full'
+      })
+      expect(mockSetUnsavedDocumentState).toHaveBeenCalledWith({
+        dirty: true,
+        title: '未命名画布'
+      })
     })
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-
-    const retryEvent = new Event('beforeunload', { cancelable: true })
-    act(() => {
-      window.dispatchEvent(retryEvent)
-    })
-    expect(retryEvent.defaultPrevented).toBe(true)
-
-    await waitFor(() => {
-      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
-    })
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-
-    const recoveredEvent = new Event('beforeunload', { cancelable: true })
-    act(() => {
-      window.dispatchEvent(recoveredEvent)
-    })
-    expect(recoveredEvent.defaultPrevented).toBe(false)
   })
 
   it('defers automatic canvas saves while large image import is active', async () => {
