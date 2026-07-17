@@ -177,6 +177,7 @@ export function useCanvasViewportPersistence({
   const hasPendingCanvasChangesRef = useRef(false)
   const canvasSaveInFlightRef = useRef<{ canvasId: string; promise: Promise<void> } | null>(null)
   const saveAgainAfterInFlightRef = useRef(false)
+  const lastCanvasSaveErrorRef = useRef<unknown>(null)
   const lastStructuralCanvasSignatureRef = useRef<string | null>(null)
   const isRestoringRef = useRef(false)
   const activeCanvasIdRef = useRef(canvasId)
@@ -195,6 +196,7 @@ export function useCanvasViewportPersistence({
     shouldClearCanvasBeforeRestoreRef.current = true
     hasPendingCanvasChangesRef.current = false
     saveAgainAfterInFlightRef.current = false
+    lastCanvasSaveErrorRef.current = null
     lastStructuralCanvasSignatureRef.current = null
   }
 
@@ -340,6 +342,7 @@ export function useCanvasViewportPersistence({
 
     if (!isRestoringRef.current) {
       hasPendingCanvasChangesRef.current = true
+      lastCanvasSaveErrorRef.current = null
     }
   }, [canvasId, figmaBinding, groupBranches, groups, items])
 
@@ -380,7 +383,12 @@ export function useCanvasViewportPersistence({
             snapshot.groupBranches,
             snapshot.figmaBinding
           )
+          lastCanvasSaveErrorRef.current = null
         } while (saveAgainAfterInFlightRef.current || hasPendingCanvasChangesRef.current)
+      } catch (error) {
+        hasPendingCanvasChangesRef.current = true
+        lastCanvasSaveErrorRef.current = error
+        throw error
       } finally {
         if (savePromise && canvasSaveInFlightRef.current?.promise === savePromise) {
           canvasSaveInFlightRef.current = null
@@ -556,7 +564,9 @@ export function useCanvasViewportPersistence({
     }
 
     pendingCanvasSaveTimerRef.current = window.setTimeout(() => {
-      void persistLatestCanvasState()
+      void persistLatestCanvasState().catch(() => {
+        // The dirty/error refs keep unload protection active until a later save succeeds.
+      })
     }, 250)
 
     return clearPendingCanvasSave
@@ -574,7 +584,9 @@ export function useCanvasViewportPersistence({
     const flushPendingCanvasSave = (force = false) => {
       if (!hasPendingCanvasChangesRef.current) return
       if (!force && suspendAutoSaveRef.current) return
-      void persistLatestCanvasState()
+      void persistLatestCanvasState().catch(() => {
+        // The dirty/error refs keep unload protection active until a later save succeeds.
+      })
     }
 
     const handleVisibilityChange = () => {
@@ -586,20 +598,34 @@ export function useCanvasViewportPersistence({
     const handleWindowBlur = () => {
       flushPendingCanvasSave()
     }
-    const handlePageExit = () => {
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      flushPendingCanvasSave(true)
+      const saveIsPending = canvasSaveInFlightRef.current !== null
+      if (
+        !hasPendingCanvasChangesRef.current &&
+        !saveIsPending &&
+        lastCanvasSaveErrorRef.current === null
+      ) {
+        return
+      }
+
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    const handlePageHide = () => {
       flushPendingCanvasSave(true)
     }
 
     document.addEventListener('visibilitychange', handleVisibilityChange)
     window.addEventListener('blur', handleWindowBlur)
-    window.addEventListener('beforeunload', handlePageExit)
-    window.addEventListener('pagehide', handlePageExit)
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    window.addEventListener('pagehide', handlePageHide)
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('blur', handleWindowBlur)
-      window.removeEventListener('beforeunload', handlePageExit)
-      window.removeEventListener('pagehide', handlePageExit)
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+      window.removeEventListener('pagehide', handlePageHide)
     }
   }, [persistLatestCanvasState])
 
@@ -608,12 +634,16 @@ export function useCanvasViewportPersistence({
       if (isRestoringRef.current) return
 
       if (hasPendingCanvasChangesRef.current) {
-        void persistLatestCanvasState()
+        void persistLatestCanvasState().catch(() => {
+          // The dirty/error refs keep unload protection active until a later save succeeds.
+        })
         return
       }
 
       clearPendingCanvasSave()
-      void persistLatestCanvasState()
+      void persistLatestCanvasState().catch(() => {
+        // The dirty/error refs keep unload protection active until a later save succeeds.
+      })
     },
     [canvasId, clearPendingCanvasSave, persistLatestCanvasState]
   )

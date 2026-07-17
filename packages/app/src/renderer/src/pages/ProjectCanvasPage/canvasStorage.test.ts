@@ -920,7 +920,9 @@ describe('canvasStorage provenance metadata', () => {
       fileName: 'missing.png',
       sourceFile: undefined
     } as CanvasItem
-    await saveCanvasItems([brokenItem], 'failed-save-consistency-test')
+    await expect(saveCanvasItems([brokenItem], 'failed-save-consistency-test')).rejects.toThrow(
+      'binary data could not be persisted'
+    )
     const restored = await loadCanvasItems('failed-save-consistency-test')
 
     expect(errorSpy).toHaveBeenCalled()
@@ -1352,7 +1354,9 @@ describe('canvasStorage provenance metadata', () => {
       } as CanvasItem
     ]
 
-    await saveCanvasItems(items, 'unresolved-project-asset-test')
+    await expect(saveCanvasItems(items, 'unresolved-project-asset-test')).rejects.toThrow(
+      'binary data could not be persisted'
+    )
 
     const projectCanvasPath = path.win32.join(
       userDataDir,

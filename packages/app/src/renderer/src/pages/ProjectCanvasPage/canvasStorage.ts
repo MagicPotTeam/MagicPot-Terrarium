@@ -1335,10 +1335,9 @@ export async function saveCanvasItems(
       allBlobEntries
     )
   } catch (err) {
-    console.error(
-      '[Canvas Storage] 保存失败:',
-      normalizeCanvasStorageError(err, '[Canvas Storage] Save failed.')
-    )
+    const normalizedError = normalizeCanvasStorageError(err, '[Canvas Storage] Save failed.')
+    console.error('[Canvas Storage] 保存失败:', normalizedError)
+    throw normalizedError
   }
 }
 
