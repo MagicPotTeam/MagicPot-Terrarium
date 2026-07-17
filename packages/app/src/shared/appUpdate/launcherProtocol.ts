@@ -1,0 +1,281 @@
+export const LAUNCHER_PROTOCOL_SCHEMA = 1 as const
+
+export type UpdateMode = 'manual' | 'notify-on-launch' | 'auto-on-launch'
+export type UpdateChannel = 'stable' | 'beta' | 'nightly'
+export type LaunchStatus = 'pending' | 'healthy' | 'failed'
+export type LauncherPlatform = 'win32'
+export type LauncherArch = 'x64'
+
+export interface LauncherSettingsV1 {
+  schema: 1
+  updateMode: UpdateMode
+  channel: UpdateChannel
+  retainAppVersions: number
+  allowPrerelease: boolean
+}
+
+export interface ActivePointerV1 {
+  schema: 1
+  activeBuildId: string
+  activeRuntimeId: string
+  previousBuildId?: string
+  previousRuntimeId?: string
+  activatedAt: string
+}
+
+export interface InstalledAppManifestV1 {
+  schema: 1
+  kind: 'magicpot-app'
+  version: string
+  buildId: string
+  commitSha: string
+  platform: LauncherPlatform
+  arch: LauncherArch
+  runtimeId: string
+  entrypoint: string
+  createdAt: string
+  unpackedSize: number
+}
+
+export interface InstalledRuntimeManifestV1 {
+  schema: 1
+  kind: 'magicpot-runtime'
+  runtimeId: string
+  platform: LauncherPlatform
+  arch: LauncherArch
+  createdAt: string
+  entrypoints: {
+    python: string
+    comfyui: string
+  }
+  unpackedSize: number
+}
+
+export interface LaunchStateV1 {
+  schema: 1
+  buildId: string
+  state: LaunchStatus
+  attempt: number
+  startedAt: string
+}
+
+export class LauncherProtocolError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'LauncherProtocolError'
+  }
+}
+
+type Validator<T> = (value: unknown) => value is T
+
+const BUILD_ID_PATTERN = /^\d{8}-\d{6}-[0-9a-f]{7,40}$/
+const RUNTIME_ID_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,126}[a-z0-9])?$/
+const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/
+const VERSION_PATTERN = /^[0-9A-Za-z](?:[0-9A-Za-z.+-]{0,126}[0-9A-Za-z])?$/
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  required: string[],
+  optional: string[] = []
+): boolean {
+  const allowed = new Set([...required, ...optional])
+  return (
+    required.every((key) => Object.prototype.hasOwnProperty.call(value, key)) &&
+    Object.keys(value).every((key) => allowed.has(key))
+  )
+}
+
+function isSchema1(value: Record<string, unknown>): boolean {
+  return value.schema === LAUNCHER_PROTOCOL_SCHEMA
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) &&
+    !Number.isNaN(Date.parse(value))
+  )
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0
+}
+
+export function isValidBuildId(value: unknown): value is string {
+  return typeof value === 'string' && BUILD_ID_PATTERN.test(value)
+}
+
+export function isValidRuntimeId(value: unknown): value is string {
+  return typeof value === 'string' && RUNTIME_ID_PATTERN.test(value) && !value.includes('..')
+}
+
+export function isSafeRelativePath(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 260 || value.includes('\0'))
+    return false
+  if (/^(?:[A-Za-z]:|[\\/])/.test(value)) return false
+  const segments = value.replace(/\\/g, '/').split('/')
+  return segments.every((segment) => segment.length > 0 && segment !== '.' && segment !== '..')
+}
+
+export function isLauncherSettingsV1(value: unknown): value is LauncherSettingsV1 {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ['schema', 'updateMode', 'channel', 'retainAppVersions', 'allowPrerelease'])
+  )
+    return false
+  return (
+    isSchema1(value) &&
+    ['manual', 'notify-on-launch', 'auto-on-launch'].includes(value.updateMode as string) &&
+    ['stable', 'beta', 'nightly'].includes(value.channel as string) &&
+    isPositiveSafeInteger(value.retainAppVersions) &&
+    typeof value.allowPrerelease === 'boolean'
+  )
+}
+
+export function isActivePointerV1(value: unknown): value is ActivePointerV1 {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(
+      value,
+      ['schema', 'activeBuildId', 'activeRuntimeId', 'activatedAt'],
+      ['previousBuildId', 'previousRuntimeId']
+    )
+  )
+    return false
+  const previousPairIsComplete =
+    (value.previousBuildId === undefined && value.previousRuntimeId === undefined) ||
+    (isValidBuildId(value.previousBuildId) && isValidRuntimeId(value.previousRuntimeId))
+  return (
+    isSchema1(value) &&
+    isValidBuildId(value.activeBuildId) &&
+    isValidRuntimeId(value.activeRuntimeId) &&
+    previousPairIsComplete &&
+    isIsoTimestamp(value.activatedAt)
+  )
+}
+
+export function isInstalledAppManifestV1(value: unknown): value is InstalledAppManifestV1 {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      'schema',
+      'kind',
+      'version',
+      'buildId',
+      'commitSha',
+      'platform',
+      'arch',
+      'runtimeId',
+      'entrypoint',
+      'createdAt',
+      'unpackedSize'
+    ])
+  )
+    return false
+  return (
+    isSchema1(value) &&
+    value.kind === 'magicpot-app' &&
+    typeof value.version === 'string' &&
+    VERSION_PATTERN.test(value.version) &&
+    isValidBuildId(value.buildId) &&
+    typeof value.commitSha === 'string' &&
+    COMMIT_SHA_PATTERN.test(value.commitSha) &&
+    value.platform === 'win32' &&
+    value.arch === 'x64' &&
+    isValidRuntimeId(value.runtimeId) &&
+    isSafeRelativePath(value.entrypoint) &&
+    /\.exe$/i.test(value.entrypoint) &&
+    isIsoTimestamp(value.createdAt) &&
+    isPositiveSafeInteger(value.unpackedSize)
+  )
+}
+
+export function isInstalledRuntimeManifestV1(value: unknown): value is InstalledRuntimeManifestV1 {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      'schema',
+      'kind',
+      'runtimeId',
+      'platform',
+      'arch',
+      'createdAt',
+      'entrypoints',
+      'unpackedSize'
+    ])
+  )
+    return false
+  if (!isRecord(value.entrypoints) || !hasOnlyKeys(value.entrypoints, ['python', 'comfyui']))
+    return false
+  return (
+    isSchema1(value) &&
+    value.kind === 'magicpot-runtime' &&
+    isValidRuntimeId(value.runtimeId) &&
+    value.platform === 'win32' &&
+    value.arch === 'x64' &&
+    isIsoTimestamp(value.createdAt) &&
+    isSafeRelativePath(value.entrypoints.python) &&
+    /\.exe$/i.test(value.entrypoints.python) &&
+    isSafeRelativePath(value.entrypoints.comfyui) &&
+    /\.py$/i.test(value.entrypoints.comfyui) &&
+    isPositiveSafeInteger(value.unpackedSize)
+  )
+}
+
+export function isLaunchStateV1(value: unknown): value is LaunchStateV1 {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ['schema', 'buildId', 'state', 'attempt', 'startedAt'])
+  )
+    return false
+  return (
+    isSchema1(value) &&
+    isValidBuildId(value.buildId) &&
+    ['pending', 'healthy', 'failed'].includes(value.state as string) &&
+    isPositiveSafeInteger(value.attempt) &&
+    isIsoTimestamp(value.startedAt)
+  )
+}
+
+function parseWith<T>(text: string, validator: Validator<T>, label: string): T {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch (error) {
+    throw new LauncherProtocolError(
+      `${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`
+    )
+  }
+  if (!validator(value)) throw new LauncherProtocolError(`${label} does not match schema 1`)
+  return value
+}
+
+function serializeWith<T>(value: T, validator: Validator<T>, label: string): string {
+  if (!validator(value)) throw new LauncherProtocolError(`${label} does not match schema 1`)
+  return `${JSON.stringify(value, null, 2)}\n`
+}
+
+export const parseLauncherSettings = (text: string): LauncherSettingsV1 =>
+  parseWith(text, isLauncherSettingsV1, 'launcher settings')
+export const serializeLauncherSettings = (value: LauncherSettingsV1): string =>
+  serializeWith(value, isLauncherSettingsV1, 'launcher settings')
+export const parseActivePointer = (text: string): ActivePointerV1 =>
+  parseWith(text, isActivePointerV1, 'active pointer')
+export const serializeActivePointer = (value: ActivePointerV1): string =>
+  serializeWith(value, isActivePointerV1, 'active pointer')
+export const parseInstalledAppManifest = (text: string): InstalledAppManifestV1 =>
+  parseWith(text, isInstalledAppManifestV1, 'installed app manifest')
+export const serializeInstalledAppManifest = (value: InstalledAppManifestV1): string =>
+  serializeWith(value, isInstalledAppManifestV1, 'installed app manifest')
+export const parseInstalledRuntimeManifest = (text: string): InstalledRuntimeManifestV1 =>
+  parseWith(text, isInstalledRuntimeManifestV1, 'installed runtime manifest')
+export const serializeInstalledRuntimeManifest = (value: InstalledRuntimeManifestV1): string =>
+  serializeWith(value, isInstalledRuntimeManifestV1, 'installed runtime manifest')
+export const parseLaunchState = (text: string): LaunchStateV1 =>
+  parseWith(text, isLaunchStateV1, 'launch state')
+export const serializeLaunchState = (value: LaunchStateV1): string =>
+  serializeWith(value, isLaunchStateV1, 'launch state')
