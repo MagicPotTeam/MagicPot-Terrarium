@@ -6,6 +6,7 @@ type ElectronCanvasFile = File & {
 
 type ElectronFileBridge = {
   getPathForFile?: (file: File) => string
+  authorizeLocalMediaFile?: (file: File) => Promise<string>
 }
 
 export function getElectronCanvasFilePath(file: File): string {
@@ -34,6 +35,18 @@ export function getCanvasLocalMediaSourceUrl(file: File): string | null {
   }
 
   return normalizeLocalMediaUrl(`file://${filePath}`)
+}
+
+export async function authorizeCanvasLocalMediaSourceUrl(file: File): Promise<string | null> {
+  if (typeof window === 'undefined') return null
+
+  try {
+    const filePath = await window.electronFile?.authorizeLocalMediaFile?.(file)
+    if (!filePath) return null
+    return normalizeLocalMediaUrl(`file://${filePath.replace(/\\/g, '/')}`)
+  } catch {
+    return null
+  }
 }
 
 export async function resolveCanvasImageFileSource(

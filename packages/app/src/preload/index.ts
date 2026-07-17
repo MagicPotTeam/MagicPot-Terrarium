@@ -1,5 +1,5 @@
 // packages/app/src/preload/index.ts
-import { contextBridge, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { newApiIpc } from './apiIpc'
 import pkgPath from 'path'
@@ -14,6 +14,15 @@ const electronFile = {
   getPathForFile(file: unknown): string {
     try {
       return (webUtils.getPathForFile as (target: unknown) => string)(file) || ''
+    } catch {
+      return ''
+    }
+  },
+  async authorizeLocalMediaFile(file: unknown): Promise<string> {
+    try {
+      const filePath = (webUtils.getPathForFile as (target: unknown) => string)(file) || ''
+      if (!filePath) return ''
+      return (await ipcRenderer.invoke('local-media:authorize-scoped-path', filePath)) || ''
     } catch {
       return ''
     }

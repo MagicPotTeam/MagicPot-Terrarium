@@ -5,6 +5,7 @@ import type { BuiltInPath, WinBridge } from '@shared/utils/utilWindow'
 
 export type ElectronFileBridge = {
   getPathForFile(file: File): string
+  authorizeLocalMediaFile(file: File): Promise<string>
 }
 
 export type ProjectCanvasBenchmarkRuntimeBridge = Readonly<{

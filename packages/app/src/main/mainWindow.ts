@@ -14,6 +14,7 @@ import { attachRendererDiagnostics } from './rendererDiagnostics'
 import { winController } from './winControls'
 import { attachWindowStatePersistence, readWindowState, type WindowState } from './windowState'
 import { normalizeAllowedExternalUrl } from './utils/externalUrl'
+import { authorizeScopedLocalMediaPath } from './localMediaAccess'
 import {
   registerMagicAgentTrustedRouteBinding,
   unregisterMagicAgentTrustedRouteBinding
@@ -52,6 +53,10 @@ function registerCanvasStartSystemDrag(): void {
   if (canvasStartSystemDragRegistered) {
     return
   }
+
+  ipcMain.handle('local-media:authorize-scoped-path', (_event, filePath: string): string => {
+    return authorizeScopedLocalMediaPath(filePath) ? filePath : ''
+  })
 
   ipcMain.handle(
     'canvas:start-system-drag',

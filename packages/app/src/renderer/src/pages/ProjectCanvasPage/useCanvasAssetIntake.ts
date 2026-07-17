@@ -5,7 +5,11 @@ import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/
 import { FILE_NODE_DEFAULT_HEIGHT, FILE_NODE_DEFAULT_WIDTH } from './projectCanvasPageShared'
 import { importCanvasFile, rememberCanvasSaveTargetPath } from './canvasStorage'
 import { resolveCanvas3DRenderActivationDelay } from './canvas3DRenderActivation'
-import { getCanvasLocalMediaSourceUrl, getElectronCanvasFilePath } from './canvasLocalFileSource'
+import {
+  authorizeCanvasLocalMediaSourceUrl,
+  getCanvasLocalMediaSourceUrl,
+  getElectronCanvasFilePath
+} from './canvasLocalFileSource'
 import { readCanvasLocalImageBlobFromSource } from './canvasLocalImageSource'
 import {
   createCanvasFileItemDraft,
@@ -2167,14 +2171,16 @@ export function useCanvasAssetIntake({
       } = {}
     ) => {
       const probeObjectUrl = URL.createObjectURL(file)
-      const persistentSrc = getCanvasLocalMediaSourceUrl(file) || probeObjectUrl
-      const releaseProbeObjectUrl = () => {
-        if (persistentSrc !== probeObjectUrl) {
-          URL.revokeObjectURL(probeObjectUrl)
-        }
-      }
+      const releaseProbeObjectUrl = () => URL.revokeObjectURL(probeObjectUrl)
 
-      const createVideoItem = (width: number, height: number) => {
+      const createVideoItem = async (width: number, height: number) => {
+        const persistentSrc = await authorizeCanvasLocalMediaSourceUrl(file)
+        if (!persistentSrc) {
+          releaseProbeObjectUrl()
+          console.error('[Canvas] Failed to authorize local video:', file.name)
+          return undefined
+        }
+        releaseProbeObjectUrl()
         const pos = resolvePlacement({
           width,
           height,
@@ -2210,7 +2216,6 @@ export function useCanvasAssetIntake({
       const video = document.createElement('video')
       video.preload = 'metadata'
       video.onloadedmetadata = () => {
-        releaseProbeObjectUrl()
         const rawWidth = Math.max(1, video.videoWidth || 480)
         const rawHeight = Math.max(1, video.videoHeight || 270)
         const maxSide = Math.max(rawWidth, rawHeight)
@@ -2222,7 +2227,6 @@ export function useCanvasAssetIntake({
       }
       video.onerror = () => {
         console.error('[Canvas] Failed to load video metadata:', file.name)
-        releaseProbeObjectUrl()
         createVideoItem(480, 270)
       }
       video.src = probeObjectUrl

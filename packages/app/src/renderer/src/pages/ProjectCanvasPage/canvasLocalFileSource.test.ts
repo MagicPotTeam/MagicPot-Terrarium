@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  authorizeCanvasLocalMediaSourceUrl,
   getCanvasLocalMediaSourceUrl,
   getElectronCanvasFilePath,
   resolveCanvasImageFileSource
@@ -8,7 +9,7 @@ import {
 const originalElectronFile = window.electronFile
 const originalCreateObjectUrlDescriptor = Object.getOwnPropertyDescriptor(URL, 'createObjectURL')
 
-function setElectronFileBridge(value: typeof window.electronFile): void {
+function setElectronFileBridge(value: typeof window.electronFile | undefined): void {
   Object.defineProperty(window, 'electronFile', {
     configurable: true,
     value
@@ -45,13 +46,38 @@ describe('canvasLocalFileSource', () => {
 
   it('uses the preload electronFile bridge when File.path is unavailable', () => {
     const getPathForFile = vi.fn(() => 'D:\\bridge\\image.png')
-    setElectronFileBridge({ getPathForFile })
+    setElectronFileBridge({
+      getPathForFile,
+      authorizeLocalMediaFile: vi.fn()
+    })
 
     const file = new File(['png'], 'image.png', { type: 'image/png' })
 
     expect(getElectronCanvasFilePath(file)).toBe('D:\\bridge\\image.png')
     expect(getCanvasLocalMediaSourceUrl(file)).toBe('local-media:///D:/bridge/image.png')
     expect(getPathForFile).toHaveBeenCalledWith(file)
+  })
+
+  it('returns a local-media URL only after the preload bridge authorizes the file', async () => {
+    const authorizeLocalMediaFile = vi.fn(async () => 'D:\\bridge\\video.mp4')
+    setElectronFileBridge({ getPathForFile: vi.fn(() => ''), authorizeLocalMediaFile })
+    const file = new File(['video'], 'video.mp4', { type: 'video/mp4' })
+
+    await expect(authorizeCanvasLocalMediaSourceUrl(file)).resolves.toBe(
+      'local-media:///D:/bridge/video.mp4'
+    )
+    expect(authorizeLocalMediaFile).toHaveBeenCalledWith(file)
+  })
+
+  it('does not create a persistent local-media URL when authorization fails', async () => {
+    setElectronFileBridge({
+      getPathForFile: vi.fn(() => 'D:\\bridge\\video.mp4'),
+      authorizeLocalMediaFile: vi.fn(async () => '')
+    })
+
+    await expect(
+      authorizeCanvasLocalMediaSourceUrl(new File(['video'], 'video.mp4', { type: 'video/mp4' }))
+    ).resolves.toBeNull()
   })
 
   it('falls back to object URLs for browser-only image files', async () => {
