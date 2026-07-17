@@ -352,6 +352,10 @@ embedded 包包含大量 Python 文件，NSIS 对大体积和大量文件的安�
 
 按 `packages/app/src/shared/api/README.md` 的步骤新增接口类型、`ServiceDefSheet`、main 侧实现和 server 注册。UI 侧通过 `window.api.<service>.<method>()` 调用。
 
+## 致谢
+
+感谢 [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium)，本项目的部分设计思路受其启发。
+
 ## 许可证
 
 本项目使用 AGPL-3.0-only。详见 [`LICENSE`](LICENSE)。
