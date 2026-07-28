@@ -128,7 +128,7 @@ function loadWindowContent(window: BrowserWindow, rendererUrl: string): void {
   window.loadURL(rendererUrl)
 }
 
-export function createMainWindow(): BrowserWindow {
+export function createMainWindow(onCreated?: (window: BrowserWindow) => void): BrowserWindow {
   registerCanvasStartSystemDrag()
 
   const statePath = join(app.getPath('userData'), 'window-state.json')
@@ -157,6 +157,7 @@ export function createMainWindow(): BrowserWindow {
     }
   })
 
+  onCreated?.(mainWindow)
   ;(mainWindow as BrowserWindow & { [key: symbol]: boolean | undefined })[
     Symbol.for('magicpot.testWindowRuntime.skipTaskbar')
   ] = testUiPolicy.suppressTaskbar ? true : undefined

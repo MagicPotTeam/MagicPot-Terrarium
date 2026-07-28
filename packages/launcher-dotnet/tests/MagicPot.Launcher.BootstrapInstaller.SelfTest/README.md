@@ -1,0 +1,11 @@
+# Bootstrap installer security self-test
+
+Windows x64 source-linked self-test for the internal bootstrap transaction. Production builds compile `CompiledBootstrapTrustConfiguration.Create()` fail-closed (`Disabled`) and expose no runtime trust-configuration parameter. This self-test defines `BOOTSTRAP_TEST_TRUST`, compiling fixed descriptor and channel-manifest Ed25519 public keys; the real descriptor/manifest verification flow therefore uses the same no-injection production entry point. Bundles carry the compiled trust identity, and `BootstrapInstallerCore` rejects a bundle from any other trust identity.
+
+The transaction pins the canonical install ancestor chain and the `Launcher` directory with no delete sharing for its full lifetime. Launcher publication retains verified source/output handles, uses `CREATE_NEW`, flushes and hashes the partial, and publishes via handle-based `FileRenameInfo`; an existing target must match exactly.
+
+Journal recovery is strict. If final ownership and a journal coexist after the `after-ownership-write` crash boundary, recovery accepts only exact ownership, operation/install/descriptor identity, the `integration-applied` stage, applied-and-verified integration, and matching launcher, artifact directories, and active selection. It then deletes only the validated journal. Every mismatch fails closed.
+
+`UninstallCapability` records and retains handles for the exact fixed owned tree, including the install root. `Execute`/`ExecuteDeleteOwnedTree` first revalidates every file hash/identity and every directory fingerprint. Unexpected children reject the operation before deletion. Files are marked delete-pending by held handle, directories follow deepest-first, and the root is last; no recursive path deletion is used. Incomplete cleanup exposes `CleanupFailures` and keeps remaining handles for `RetryDelete`. External user data is never included.
+
+The self-test covers compiled trust, wrong signatures, install/idempotence, all journal boundaries including ownership-write recovery, integration conflicts, launcher and directory pinning, exact-tree uninstall rejection, held-object replacement resistance, successful root deletion, and preserved external user data. Nullable analysis and warnings-as-errors are enabled, with at least 120 effective assertions.

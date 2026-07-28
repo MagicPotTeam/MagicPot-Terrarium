@@ -1,0 +1,8 @@
+{
+  "runtimeId": "example.invalid-runtime-test",
+  "platform": "win32",
+  "arch": "x64",
+  "pythonEntrypoint": "python.exe",
+  "comfyuiEntrypoint": "ComfyUI/main.py",
+  "createdAt": "2026-01-02T03:04:06Z"
+}

@@ -119,3 +119,8 @@ record.json
 # Locally built native sidecar binaries
 /packages/runtime-assets/resources/bin/image-worker/
 /packages/runtime-assets/resources/bin/lora-trigger-sidecar/
+
+# .NET launcher build products and local release trust configuration
+packages/launcher-dotnet/**/bin/
+packages/launcher-dotnet/**/obj/
+packages/launcher-dotnet/launcher-update-config.local.json

@@ -65,6 +65,12 @@ npm config set registry https://registry.npmmirror.com/
 git submodule update --init --recursive
 ```
 
+## Launcher 更新密钥
+
+Launcher 的生成配置将两类 Ed25519 公钥分开管理：`publicKeys` 仅验证 channel manifest，`bootstrapPublicKeys` 仅验证 bootstrap descriptor。两组密钥不得复用私钥；私钥、seed、token 或 secret 不得写入配置或生成源码。轮换时先发布同时包含旧、新公钥的 Launcher，待新签名覆盖并完成升级窗口后，再移除旧公钥。生成器会递归拒绝疑似私密字段，并要求两组公钥均为非空、规范 Base64 编码的 32 字节值。
+
+维护者 CI 的完整可复用工作流输入、secret 名称、签名命令和最终产物见 [`UPDATER_PROTOCOL.md`](UPDATER_PROTOCOL.md)。启用后的最终同目录 bootstrap bundle 恰好包含 `MagicPot.Bootstrap.exe`、`MagicPot.Launcher.exe`、`MagicPot.Uninstall.exe`、`MagicPot.Bootstrap.json` 与 `MagicPot.Bootstrap.sig`；app/runtime ZIP、channel manifests 与 release index 作为同一 Release 的独立资产上传。未显式启用并完整配置时，编译配置保持 `Disabled`，现有 NSIS 发布流程不受影响。
+
 ## 本地运行
 
 默认开发模式为 `pure`：
@@ -359,3 +365,11 @@ embedded 包包含大量 Python 文件，NSIS 对大体积和大量文件的安�
 ## 许可证
 
 本项目使用 AGPL-3.0-only。详见 [`LICENSE`](LICENSE)。
+
+## Launcher 发布制品链
+
+`scripts/launcher-dotnet/examples/` 提供严格匹配 CLI schema 的 identity、descriptor 和 source 配置样例及分步 PowerShell 命令，覆盖 app/runtime 打包、unsigned manifest 构建、离线签名以及 launcher public-key 配置。**这些样例含 `example.invalid`、test ID、占位 URL 和 `C:\ABSOLUTE\...` 绝对路径，不可直接运行；必须复制后逐项替换。** CI 不执行 examples。
+
+使用 `npm run launcher:artifact:pack -- --kind app|runtime --input-dir <绝对目录> --output <绝对ZIP> --identity <绝对JSON>` 生成制品；输出必须不存在。工具通过文件描述符稳定读取 strict JSON identity，并为完整目录树记录目录 inode/元数据及排序后的精确 entry 名称+类型集合；扫描后、每个文件打包前后和发布前都会复验，任何 nested add/delete/rename、symlink、hardlink 或 inode 替换均拒绝。生成根 `manifest.json` 后，归档检查器只从已固定的 fd/snapshot 复验。发布采用 temp inode 硬链接 no-replace，流式复核 size/SHA-256 和 ZIP 内容，解除 temp link 后再次验证最终 output inode、link count 和 hash；流水线仍必须检查命令 exit code，失败绝不报告成功。工具会删除能够通过仍打开的 source fd 证明属于自身且未通过验证的 output；若 output 已被替换或无法证明归属则保留供人工处置，不会误删攻击者替换的路径。
+
+ZIP 使用确定性 ZIP32 store 模式、UTF-8 路径、`createdAt` DOS 时间和固定顺序。每个 entry、压缩/未压缩长度及 offset 必须严格小于 4 GiB (`0xffffffff`)；输入总量不超过 8 GiB，条目不超过 100,000。命令不上传、不签名；之后运行 `launcher:manifest:build` 构建 unsigned manifest，再在离线机器单独运行 `launcher:manifest:sign`。发布 URL 必须匹配 `--release-source-config` 中的 trusted source。验证：`launcher:manifest:build:test` 只测 builder，`launcher:manifest:sign:test` 只测 signer，`launcher:manifest:test` 聚合两者，`launcher:release-tools:test` 聚合 artifact 与 manifest 测试且不重复；另运行 `launcher:tools:typecheck`。

@@ -1,5 +1,13 @@
 import type { ServerStreaming } from '@shared/api/apiUtils/streaming'
-import type { AppUpdateReq, AppUpdateStatus, AppUpdateSvc } from '@shared/api/svcAppUpdate'
+import type {
+  AppUpdateReq,
+  AppUpdateStatus,
+  AppUpdateSvc,
+  LauncherCommandResultReq,
+  LauncherManagedState,
+  LauncherVersionRemovalReq,
+  SaveLauncherSettingsReq
+} from '@shared/api/svcAppUpdate'
 import {
   addAppUpdateStatusListener,
   checkForAppUpdates,
@@ -7,9 +15,29 @@ import {
   getAppUpdateStatus,
   installAppUpdate
 } from '../appUpdate/updateManager'
+import {
+  getLauncherManagedState,
+  saveLauncherManagedSettings
+} from '../appUpdate/launcherManagedState'
+import { readLauncherCommandResult, writeLauncherCommand } from '../appUpdate/launcherCommand'
 
 export class AppUpdateSvcImpl implements AppUpdateSvc {
   getStatus = async (_req: AppUpdateReq): Promise<AppUpdateStatus> => getAppUpdateStatus()
+
+  getLauncherState = async (_req: AppUpdateReq): Promise<LauncherManagedState> =>
+    getLauncherManagedState()
+
+  getLauncherCommandResult = async (req: LauncherCommandResultReq) =>
+    readLauncherCommandResult(req.requestId)
+
+  saveLauncherSettings = async (req: SaveLauncherSettingsReq): Promise<LauncherManagedState> =>
+    saveLauncherManagedSettings(req)
+
+  checkLauncherNow = async (_req: AppUpdateReq) => writeLauncherCommand('check-now')
+  requestLauncherUpdate = async (_req: AppUpdateReq) => writeLauncherCommand('install-latest')
+  requestLauncherRollback = async (_req: AppUpdateReq) => writeLauncherCommand('rollback')
+  requestLauncherVersionRemoval = async (req: LauncherVersionRemovalReq) =>
+    writeLauncherCommand('remove-version', {}, req.buildId)
 
   checkForUpdates = async (_req: AppUpdateReq): Promise<AppUpdateStatus> => checkForAppUpdates()
 

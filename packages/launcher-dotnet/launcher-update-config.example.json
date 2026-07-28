@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "launcherVersion": "0.0.0",
+  "channels": {
+    "stable": "https://example.invalid/example/repository/releases/download/stable/channel.json",
+    "beta": "https://example.invalid/example/repository/releases/download/beta/channel.json",
+    "nightly": "https://example.invalid/example/repository/releases/download/nightly/channel.json"
+  },
+  "trustedSources": [
+    {
+      "origin": "https://example.invalid",
+      "repoPathPrefix": "/example/repository"
+    }
+  ],
+  "publicKeys": {
+    "DO-NOT-USE-test-zero-key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  }
+}

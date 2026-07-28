@@ -47,11 +47,25 @@ export class LauncherStateStore<T> {
   }
 
   load(defaultValue: T): Promise<T> {
-    return this.enqueue(() => this.loadSerialized(defaultValue))
+    return this.enqueue(() => this.loadSerialized(defaultValue, true))
+  }
+
+  loadStrict(defaultValue: T): Promise<T> {
+    return this.enqueue(() => this.loadSerialized(defaultValue, false))
   }
 
   save(value: T): Promise<void> {
     return this.enqueue(() => this.saveAtomic(value))
+  }
+
+  remove(): Promise<void> {
+    return this.enqueue(async () => {
+      try {
+        await this.fileSystem.unlink(this.filePath)
+      } catch (error) {
+        if (!hasErrorCode(error, 'ENOENT')) throw error
+      }
+    })
   }
 
   private enqueue<R>(operation: () => Promise<R>): Promise<R> {
@@ -68,7 +82,7 @@ export class LauncherStateStore<T> {
     return result
   }
 
-  private async loadSerialized(defaultValue: T): Promise<T> {
+  private async loadSerialized(defaultValue: T, recoverCorrupt: boolean): Promise<T> {
     let text: string
     try {
       text = await this.fileSystem.readFile(this.filePath, 'utf8')
@@ -80,6 +94,7 @@ export class LauncherStateStore<T> {
     try {
       return this.parseValue(text)
     } catch (error) {
+      if (!recoverCorrupt) throw error
       try {
         await this.backUpCorruptFile()
       } catch (backupError) {

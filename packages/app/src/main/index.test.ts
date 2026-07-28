@@ -21,7 +21,9 @@ const {
   cleanupScreenshotManagerMock,
   resolveStartupUserDataDirectoryMock,
   initializeAppUpdateManagerMock,
-  isAppUpdateInstallInProgressMock
+  isAppUpdateInstallInProgressMock,
+  startLauncherSmokeTestMock,
+  confirmLauncherHealthMock
 } = vi.hoisted(() => {
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
   const appMock = {
@@ -59,7 +61,9 @@ const {
       source: 'default' as const
     })),
     initializeAppUpdateManagerMock: vi.fn(() => Promise.resolve()),
-    isAppUpdateInstallInProgressMock: vi.fn(() => false)
+    isAppUpdateInstallInProgressMock: vi.fn(() => false),
+    startLauncherSmokeTestMock: vi.fn(() => false),
+    confirmLauncherHealthMock: vi.fn(() => Promise.resolve(false))
   }
 })
 
@@ -97,12 +101,43 @@ vi.mock('./screenshot/screenshotManager', () => ({
   cleanupScreenshotManager: cleanupScreenshotManagerMock
 }))
 
+vi.mock('./appUpdate/appLauncherBridge', () => ({
+  startLauncherSmokeTest: startLauncherSmokeTestMock,
+  confirmLauncherHealth: confirmLauncherHealthMock
+}))
+
 vi.mock('./appUpdate/updateManager', () => ({
   initializeAppUpdateManager: initializeAppUpdateManagerMock,
   isAppUpdateInstallInProgress: isAppUpdateInstallInProgressMock
 }))
 
 vi.mock('./utils/loggingOverride', () => ({}))
+
+function createWindow(id: string) {
+  const windowListeners = new Map<string, (...args: unknown[]) => void>()
+  const webListeners = new Map<string, (...args: unknown[]) => void>()
+  return {
+    id,
+    once: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+      windowListeners.set(event, handler)
+    }),
+    removeListener: vi.fn(),
+    isDestroyed: vi.fn(() => false),
+    webContents: {
+      once: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+        webListeners.set(event, handler)
+      }),
+      removeListener: vi.fn()
+    },
+    emitWindow: (event: string, ...args: unknown[]) => windowListeners.get(event)?.(...args),
+    emitWeb: (event: string, ...args: unknown[]) => webListeners.get(event)?.(...args)
+  }
+}
+
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve))
+  await Promise.resolve()
+}
 
 async function loadModule() {
   vi.resetModules()
@@ -112,7 +147,8 @@ async function loadModule() {
 }
 
 describe('main process startup window opening', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await settle()
     createMainWindowMock.mockReset()
     createMainWindowMock
       .mockReturnValueOnce({ id: 'fallback-window' })
@@ -129,6 +165,8 @@ describe('main process startup window opening', () => {
     cleanupScreenshotManagerMock.mockClear()
     initializeAppUpdateManagerMock.mockClear()
     isAppUpdateInstallInProgressMock.mockReset().mockReturnValue(false)
+    startLauncherSmokeTestMock.mockReset().mockReturnValue(false)
+    confirmLauncherHealthMock.mockReset().mockResolvedValue(false)
     appMock.setPath.mockClear()
     appMock.whenReady.mockClear()
     appMock.on.mockClear()
@@ -240,6 +278,78 @@ describe('main process startup window opening', () => {
     expect(createMainWindowMock).toHaveBeenCalledTimes(1)
     expect(initScreenshotManagerMock).toHaveBeenCalledWith(automatedWindow)
     expect(startQAppWatcherMock).toHaveBeenCalledWith(automatedWindow)
+  })
+
+  it('confirms launcher health only after renderer readiness, services, and a stable event turn', async () => {
+    const window = createWindow('healthy-window')
+    let finishUpdateInitialization = (): void => undefined
+    initializeAppUpdateManagerMock.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finishUpdateInitialization = resolve
+      })
+    )
+    createMainWindowMock.mockReset().mockReturnValue(window)
+
+    await loadModule()
+    expect(confirmLauncherHealthMock).not.toHaveBeenCalled()
+
+    window.emitWeb('did-finish-load')
+    await Promise.resolve()
+    expect(confirmLauncherHealthMock).not.toHaveBeenCalled()
+
+    finishUpdateInitialization()
+    await Promise.resolve()
+    expect(confirmLauncherHealthMock).not.toHaveBeenCalled()
+
+    await settle()
+    await settle()
+    expect(confirmLauncherHealthMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('confirms health when readiness fires before createMainWindow returns', async () => {
+    const window = createWindow('synchronously-ready-window')
+    createMainWindowMock
+      .mockReset()
+      .mockImplementation((onCreated?: (created: unknown) => void) => {
+        onCreated?.(window)
+        window.emitWeb('did-finish-load')
+        return window
+      })
+
+    await loadModule()
+    await settle()
+    await settle()
+
+    expect(confirmLauncherHealthMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not confirm launcher health when failure fires before createMainWindow returns', async () => {
+    const window = createWindow('synchronously-failed-window')
+    createMainWindowMock
+      .mockReset()
+      .mockImplementation((onCreated?: (created: unknown) => void) => {
+        onCreated?.(window)
+        window.emitWeb('did-fail-load', {}, -1, 'failed', 'file:///index.html', true)
+        window.emitWeb('did-finish-load')
+        return window
+      })
+
+    await loadModule()
+    await settle()
+
+    expect(confirmLauncherHealthMock).not.toHaveBeenCalled()
+  })
+
+  it('does not confirm launcher health when the renderer crashes during startup', async () => {
+    const window = createWindow('crashed-window')
+    createMainWindowMock.mockReset().mockReturnValue(window)
+
+    await loadModule()
+    window.emitWeb('render-process-gone')
+    window.emitWindow('ready-to-show')
+    await settle()
+
+    expect(confirmLauncherHealthMock).not.toHaveBeenCalled()
   })
 
   it('does not intercept quit when an update install is in progress', async () => {

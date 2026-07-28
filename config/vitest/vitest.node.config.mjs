@@ -9,13 +9,16 @@ export default defineConfig({
     setupFiles: ['packages/app/src/main/tests/setup/memfs.setup.ts'],
     exclude: [
       'scripts/prepare-embedded-staging.test.js',
-      'scripts/verify-packaged-runtime-dependencies.test.js'
+      'scripts/verify-packaged-runtime-dependencies.test.js',
+      'packages/app/src/main/appUpdate/safeZipExtractor.test.ts',
+      'packages/app/src/main/appUpdate/artifactPreparer.test.ts'
     ],
     include: [
       'scripts/**/*.test.{ts,js}',
       'packages/app/src/main/**/*.test.{ts,js}',
       'packages/app/src/preload/**/*.test.{ts,js}',
-      'packages/app/src/shared/**/*.test.{ts,js}'
+      'packages/app/src/shared/**/*.test.{ts,js}',
+      'packages/launcher/src/**/*.test.{ts,js}'
     ],
     server: {
       deps: {

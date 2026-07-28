@@ -2,6 +2,35 @@ export const LAUNCHER_PROTOCOL_SCHEMA = 1 as const
 export const MAX_RETAIN_APP_VERSIONS = 100
 export const MAX_LAUNCH_ATTEMPT = 10_000
 export const MAX_UNPACKED_SIZE = 1024 ** 4
+export const LAUNCHER_COMMAND_FILE = 'launcher-command.json'
+export const LAUNCHER_COMMAND_RESULT_FILE = 'launcher-command-result.json'
+export const MAX_LAUNCHER_COMMAND_AGE_MS = 24 * 60 * 60 * 1_000
+export const DEFAULT_RETAIN_NIGHTLY_VERSIONS = 3
+
+export type LauncherCommand = 'check-now' | 'install-latest' | 'rollback' | 'remove-version'
+export interface LauncherCommandRequestV1 {
+  schema: 1
+  requestId: string
+  command: LauncherCommand
+  requestedAt: string
+  buildId?: string
+}
+export interface LauncherCommandReceipt {
+  accepted: boolean
+  command: LauncherCommand
+  requestId?: string
+  requestedAt?: string
+  error?: string
+}
+export type LauncherCommandResultStatus = 'completed' | 'failed' | 'rejected'
+export interface LauncherCommandResultV1 {
+  schema: 1
+  requestId: string
+  command: LauncherCommand
+  status: LauncherCommandResultStatus
+  completedAt: string
+  error?: string
+}
 
 export type UpdateMode = 'manual' | 'notify-on-launch' | 'auto-on-launch'
 export type UpdateChannel = 'stable' | 'beta' | 'nightly'
@@ -14,7 +43,12 @@ export interface LauncherSettingsV1 {
   updateMode: UpdateMode
   channel: UpdateChannel
   retainAppVersions: number
+  retainNightlyVersions?: number
   allowPrerelease: boolean
+}
+
+export type NormalizedLauncherSettingsV1 = LauncherSettingsV1 & {
+  retainNightlyVersions: number
 }
 
 export interface ActivePointerV1 {
@@ -24,6 +58,12 @@ export interface ActivePointerV1 {
   previousBuildId?: string
   previousRuntimeId?: string
   activatedAt: string
+}
+
+export interface InstalledFileV1 {
+  path: string
+  size: number
+  sha256: string
 }
 
 export interface InstalledAppManifestV1 {
@@ -38,6 +78,7 @@ export interface InstalledAppManifestV1 {
   entrypoint: string
   createdAt: string
   unpackedSize: number
+  files?: InstalledFileV1[]
 }
 
 export interface InstalledRuntimeManifestV1 {
@@ -49,6 +90,7 @@ export interface InstalledRuntimeManifestV1 {
   createdAt: string
   entrypoints: { python: string; comfyui: string }
   unpackedSize: number
+  files?: InstalledFileV1[]
 }
 
 export interface LaunchStateV1 {
@@ -73,6 +115,8 @@ const ISO_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(
 const RUNTIME_ID_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,126}[a-z0-9])?$/
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/
 const VERSION_PATTERN = /^[0-9A-Za-z](?:[0-9A-Za-z.+-]{0,126}[0-9A-Za-z])?$/
+const SHA256_PATTERN = /^[0-9a-f]{64}$/
+const REQUEST_ID_PATTERN = /^[0-9a-f]{32}$/
 const WINDOWS_RESERVED_NAME =
   /^(?:con|prn|aux|nul|conin\$|conout\$|com(?:[1-9]|[¹²³])|lpt(?:[1-9]|[¹²³]))(?:\..*)?$/i
 
@@ -142,10 +186,51 @@ export function isSafeRelativePath(value: unknown): value is string {
   })
 }
 
+export function isLauncherCommandRequestV1(value: unknown): value is LauncherCommandRequestV1 {
+  if (!isRecord(value)) return false
+  const removal = value.command === 'remove-version'
+  return (
+    hasOnlyKeys(
+      value,
+      removal
+        ? ['schema', 'requestId', 'command', 'requestedAt', 'buildId']
+        : ['schema', 'requestId', 'command', 'requestedAt']
+    ) &&
+    value.schema === LAUNCHER_PROTOCOL_SCHEMA &&
+    typeof value.requestId === 'string' &&
+    REQUEST_ID_PATTERN.test(value.requestId) &&
+    ['check-now', 'install-latest', 'rollback', 'remove-version'].includes(
+      value.command as string
+    ) &&
+    isIsoTimestamp(value.requestedAt) &&
+    (!removal || isValidBuildId(value.buildId))
+  )
+}
+
+export function isLauncherCommandResultV1(value: unknown): value is LauncherCommandResultV1 {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['schema', 'requestId', 'command', 'status', 'completedAt'], ['error']) &&
+    value.schema === LAUNCHER_PROTOCOL_SCHEMA &&
+    typeof value.requestId === 'string' &&
+    REQUEST_ID_PATTERN.test(value.requestId) &&
+    ['check-now', 'install-latest', 'rollback', 'remove-version'].includes(
+      value.command as string
+    ) &&
+    ['completed', 'failed', 'rejected'].includes(value.status as string) &&
+    isIsoTimestamp(value.completedAt) &&
+    (value.error === undefined || (typeof value.error === 'string' && value.error.length > 0))
+  )
+}
+
 export function isLauncherSettingsV1(value: unknown): value is LauncherSettingsV1 {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ['schema', 'updateMode', 'channel', 'retainAppVersions', 'allowPrerelease'])
+    !hasOnlyKeys(
+      value,
+      ['schema', 'updateMode', 'channel', 'retainAppVersions', 'allowPrerelease'],
+      ['retainNightlyVersions']
+    )
   )
     return false
   return (
@@ -153,6 +238,8 @@ export function isLauncherSettingsV1(value: unknown): value is LauncherSettingsV
     ['manual', 'notify-on-launch', 'auto-on-launch'].includes(value.updateMode as string) &&
     ['stable', 'beta', 'nightly'].includes(value.channel as string) &&
     isIntegerInRange(value.retainAppVersions, MAX_RETAIN_APP_VERSIONS) &&
+    (value.retainNightlyVersions === undefined ||
+      isIntegerInRange(value.retainNightlyVersions, MAX_RETAIN_APP_VERSIONS)) &&
     typeof value.allowPrerelease === 'boolean'
   )
 }
@@ -179,24 +266,53 @@ export function isActivePointerV1(value: unknown): value is ActivePointerV1 {
   )
 }
 
+function isInstalledFiles(value: unknown): value is InstalledFileV1[] {
+  if (!Array.isArray(value) || value.length === 0) return false
+  const paths = new Set<string>()
+  for (const file of value) {
+    if (
+      !isRecord(file) ||
+      !hasOnlyKeys(file, ['path', 'size', 'sha256']) ||
+      !isSafeRelativePath(file.path) ||
+      file.path === 'manifest.json' ||
+      !Number.isSafeInteger(file.size) ||
+      (file.size as number) < 0 ||
+      (file.size as number) > MAX_UNPACKED_SIZE ||
+      typeof file.sha256 !== 'string' ||
+      !SHA256_PATTERN.test(file.sha256)
+    )
+      return false
+    const normalized = file.path.replaceAll('\\', '/').toLowerCase()
+    if (paths.has(normalized)) return false
+    paths.add(normalized)
+  }
+  return true
+}
+
 export function isInstalledAppManifestV1(value: unknown): value is InstalledAppManifestV1 {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, [
-      'schema',
-      'kind',
-      'version',
-      'buildId',
-      'commitSha',
-      'platform',
-      'arch',
-      'runtimeId',
-      'entrypoint',
-      'createdAt',
-      'unpackedSize'
-    ])
+    !hasOnlyKeys(
+      value,
+      [
+        'schema',
+        'kind',
+        'version',
+        'buildId',
+        'commitSha',
+        'platform',
+        'arch',
+        'runtimeId',
+        'entrypoint',
+        'createdAt',
+        'unpackedSize'
+      ],
+      ['files']
+    )
   )
     return false
+  const entrypoint = value.entrypoint as string
+  const files = value.files
   return (
     value.schema === LAUNCHER_PROTOCOL_SCHEMA &&
     value.kind === 'magicpot-app' &&
@@ -209,30 +325,40 @@ export function isInstalledAppManifestV1(value: unknown): value is InstalledAppM
     value.platform === 'win32' &&
     value.arch === 'x64' &&
     isValidRuntimeId(value.runtimeId) &&
-    isSafeRelativePath(value.entrypoint) &&
-    /\.exe$/i.test(value.entrypoint) &&
+    isSafeRelativePath(entrypoint) &&
+    /\.exe$/i.test(entrypoint) &&
     isIsoTimestamp(value.createdAt) &&
-    isIntegerInRange(value.unpackedSize, MAX_UNPACKED_SIZE)
+    isIntegerInRange(value.unpackedSize, MAX_UNPACKED_SIZE) &&
+    (files === undefined ||
+      (isInstalledFiles(files) &&
+        files.reduce((total, file) => total + file.size, 0) === value.unpackedSize &&
+        files.some((file) => file.path.replaceAll('\\', '/') === entrypoint.replaceAll('\\', '/'))))
   )
 }
 
 export function isInstalledRuntimeManifestV1(value: unknown): value is InstalledRuntimeManifestV1 {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, [
-      'schema',
-      'kind',
-      'runtimeId',
-      'platform',
-      'arch',
-      'createdAt',
-      'entrypoints',
-      'unpackedSize'
-    ]) ||
+    !hasOnlyKeys(
+      value,
+      [
+        'schema',
+        'kind',
+        'runtimeId',
+        'platform',
+        'arch',
+        'createdAt',
+        'entrypoints',
+        'unpackedSize'
+      ],
+      ['files']
+    ) ||
     !isRecord(value.entrypoints) ||
     !hasOnlyKeys(value.entrypoints, ['python', 'comfyui'])
   )
     return false
+  const entrypoints = value.entrypoints as InstalledRuntimeManifestV1['entrypoints']
+  const files = value.files
   return (
     value.schema === LAUNCHER_PROTOCOL_SCHEMA &&
     value.kind === 'magicpot-runtime' &&
@@ -240,11 +366,17 @@ export function isInstalledRuntimeManifestV1(value: unknown): value is Installed
     value.platform === 'win32' &&
     value.arch === 'x64' &&
     isIsoTimestamp(value.createdAt) &&
-    isSafeRelativePath(value.entrypoints.python) &&
-    /\.exe$/i.test(value.entrypoints.python) &&
-    isSafeRelativePath(value.entrypoints.comfyui) &&
-    /\.py$/i.test(value.entrypoints.comfyui) &&
-    isIntegerInRange(value.unpackedSize, MAX_UNPACKED_SIZE)
+    isSafeRelativePath(entrypoints.python) &&
+    /\.exe$/i.test(entrypoints.python) &&
+    isSafeRelativePath(entrypoints.comfyui) &&
+    /\.py$/i.test(entrypoints.comfyui) &&
+    isIntegerInRange(value.unpackedSize, MAX_UNPACKED_SIZE) &&
+    (files === undefined ||
+      (isInstalledFiles(files) &&
+        files.reduce((total, file) => total + file.size, 0) === value.unpackedSize &&
+        Object.values(entrypoints).every((entrypoint) =>
+          files.some((file) => file.path.replaceAll('\\', '/') === entrypoint.replaceAll('\\', '/'))
+        )))
   )
 }
 
@@ -281,8 +413,21 @@ function serializeWith<T>(value: T, validator: Validator<T>, label: string): str
   return `${JSON.stringify(value, null, 2)}\n`
 }
 
-export const parseLauncherSettings = (text: string): LauncherSettingsV1 =>
-  parseWith(text, isLauncherSettingsV1, 'launcher settings')
+export const parseLauncherCommandRequest = (text: string): LauncherCommandRequestV1 =>
+  parseWith(text, isLauncherCommandRequestV1, 'launcher command request')
+export const serializeLauncherCommandRequest = (value: LauncherCommandRequestV1): string =>
+  serializeWith(value, isLauncherCommandRequestV1, 'launcher command request')
+export const parseLauncherCommandResult = (text: string): LauncherCommandResultV1 =>
+  parseWith(text, isLauncherCommandResultV1, 'launcher command result')
+export const serializeLauncherCommandResult = (value: LauncherCommandResultV1): string =>
+  serializeWith(value, isLauncherCommandResultV1, 'launcher command result')
+export const parseLauncherSettings = (text: string): NormalizedLauncherSettingsV1 => {
+  const parsed = parseWith(text, isLauncherSettingsV1, 'launcher settings')
+  return {
+    ...parsed,
+    retainNightlyVersions: parsed.retainNightlyVersions ?? DEFAULT_RETAIN_NIGHTLY_VERSIONS
+  }
+}
 export const serializeLauncherSettings = (value: LauncherSettingsV1): string =>
   serializeWith(value, isLauncherSettingsV1, 'launcher settings')
 export const parseActivePointer = (text: string): ActivePointerV1 =>

@@ -6,6 +6,7 @@ import {
   isActivePointerV1,
   isInstalledAppManifestV1,
   isInstalledRuntimeManifestV1,
+  isLauncherCommandResultV1,
   isLauncherSettingsV1,
   isLaunchStateV1,
   isSafeRelativePath,
@@ -13,6 +14,7 @@ import {
   parseActivePointer,
   parseInstalledAppManifest,
   parseInstalledRuntimeManifest,
+  parseLauncherCommandResult,
   parseLauncherSettings,
   parseLaunchState,
   serializeActivePointer,
@@ -27,7 +29,15 @@ const settings = {
   updateMode: 'notify-on-launch' as const,
   channel: 'stable' as const,
   retainAppVersions: 3,
+  retainNightlyVersions: 3,
   allowPrerelease: false
+}
+const commandResult = {
+  schema: 1 as const,
+  requestId: '0123456789abcdef0123456789abcdef',
+  command: 'install-latest' as const,
+  status: 'completed' as const,
+  completedAt: '2026-07-17T05:31:38.123Z'
 }
 const activePointer = {
   schema: 1 as const,
@@ -67,8 +77,36 @@ const launchState = {
 }
 
 describe('launcher protocol', () => {
+  it('defaults the optional schema 1 nightly retention field without resetting other settings', () => {
+    expect(
+      parseLauncherSettings(
+        JSON.stringify({
+          schema: 1,
+          updateMode: 'auto-on-launch',
+          channel: 'beta',
+          retainAppVersions: 9,
+          allowPrerelease: true
+        })
+      )
+    ).toEqual({
+      schema: 1,
+      updateMode: 'auto-on-launch',
+      channel: 'beta',
+      retainAppVersions: 9,
+      retainNightlyVersions: 3,
+      allowPrerelease: true
+    })
+  })
+
+  it('rejects malformed launcher command results', () => {
+    expect(() =>
+      parseLauncherCommandResult(JSON.stringify({ ...commandResult, requestId: 'wrong' }))
+    ).toThrow(/launcher command result/)
+  })
+
   it.each([
     [settings, isLauncherSettingsV1, serializeLauncherSettings, parseLauncherSettings],
+    [commandResult, isLauncherCommandResultV1, JSON.stringify, parseLauncherCommandResult],
     [activePointer, isActivePointerV1, serializeActivePointer, parseActivePointer],
     [
       appManifest,

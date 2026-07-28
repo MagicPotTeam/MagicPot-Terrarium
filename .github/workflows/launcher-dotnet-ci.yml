@@ -1,0 +1,136 @@
+name: Windows Launcher (.NET) CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - packages/launcher-dotnet/**
+      - scripts/launcher-dotnet/**
+      - package.json
+      - package-lock.json
+      - .node-version
+      - .github/workflows/launcher-dotnet-ci.yml
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - packages/launcher-dotnet/**
+      - scripts/launcher-dotnet/**
+      - package.json
+      - package-lock.json
+      - .node-version
+      - .github/workflows/launcher-dotnet-ci.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: 1
+
+jobs:
+  launcher-dotnet-ci:
+    name: Build and test Windows launcher
+    runs-on: windows-latest
+    env:
+      MAGICPOT_SAFE_FILE_OPS: ${{ github.workspace }}\dist\launcher-tools\win-x64\MagicPot.SafeFileOps.exe
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: windows-nuget-${{ hashFiles('packages/launcher-dotnet/**/*.csproj') }}
+          restore-keys: |
+            windows-nuget-
+
+      - name: Test launcher configuration generator
+        run: npm run launcher:config:test
+
+      - name: Check default disabled launcher update configuration
+        run: npm run launcher:config:check
+
+      - name: Publish SafeFileOps release helper
+        run: npm run launcher:tools:publish
+
+      - name: Test SafeFileOps release helper
+        run: npm run launcher:safe-file-ops:test
+
+      - name: Typecheck launcher tools
+        run: npm run launcher:tools:typecheck
+
+      - name: Test launcher release tools
+        run: npm run launcher:release-tools:test
+
+      - name: Test launcher
+        run: npm run launcher:test
+
+      - name: Build launcher
+        run: npm run launcher:build
+
+      - name: Publish launcher
+        run: npm run launcher:publish
+
+      - name: Verify published launcher
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publishDir = Join-Path $env:GITHUB_WORKSPACE 'dist/launcher-dotnet/win-x64'
+          $launcherExe = Join-Path $publishDir 'MagicPot.Launcher.exe'
+
+          if (-not (Test-Path -LiteralPath $launcherExe -PathType Leaf)) {
+            throw "Missing launcher executable: $launcherExe"
+          }
+          if ((Get-Item -LiteralPath $launcherExe).Length -le 0) {
+            throw "Launcher executable is empty: $launcherExe"
+          }
+
+          $files = @(Get-ChildItem -LiteralPath $publishDir -File -Recurse)
+          $forbidden = @($files | Where-Object {
+            $relativePath = [IO.Path]::GetRelativePath($publishDir, $_.FullName)
+            $_.Name -like 'launcher-update-config*.json' -or
+            $_.Extension -in @('.pfx', '.snk') -or
+            $relativePath -like '*private*' -or
+            $relativePath -like '*secret*'
+          })
+          if ($forbidden.Count -gt 0) {
+            $forbiddenPaths = $forbidden.FullName -join [Environment]::NewLine
+            throw "Forbidden files found in launcher artifact:$([Environment]::NewLine)$forbiddenPaths"
+          }
+
+          $files |
+            Sort-Object FullName |
+            ForEach-Object {
+              $relativePath = [IO.Path]::GetRelativePath($publishDir, $_.FullName)
+              $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+              "{0}  {1} bytes  SHA256:{2}" -f $relativePath, $_.Length, $hash
+            }
+
+      - name: Upload Windows launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MagicPot.Launcher-win-x64-ci
+          path: dist/launcher-dotnet/win-x64/**
+          retention-days: 14
+          if-no-files-found: error
