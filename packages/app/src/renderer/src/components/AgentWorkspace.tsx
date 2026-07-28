@@ -329,9 +329,11 @@ type PaneListItemProps = {
   onSelect: (paneId: string) => void
   onDragStart: (paneId: string) => void
   onDragEnd: () => void
-  onDragOver: (paneId: string) => void
-  onDrop: (paneId: string) => void
+  onDragOver: (event: React.DragEvent<HTMLElement>, paneId: string) => void
+  onDrop: (event: React.DragEvent<HTMLElement>, paneId: string) => void
 }
+
+const AGENT_THREAD_REORDER_DRAG_MIME = 'application/x-magicpot-agent-thread-reorder'
 
 const PaneListItem: React.FC<PaneListItemProps> = ({
   index,
@@ -366,18 +368,15 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     }}
     onDragStart={(event) => {
       event.dataTransfer.effectAllowed = 'move'
-      event.dataTransfer.setData('text/plain', pane.id)
+      event.dataTransfer.setData(AGENT_THREAD_REORDER_DRAG_MIME, pane.id)
       onDragStart(pane.id)
     }}
     onDragEnd={onDragEnd}
     onDragOver={(event) => {
-      event.preventDefault()
-      event.dataTransfer.dropEffect = 'move'
-      onDragOver(pane.id)
+      onDragOver(event, pane.id)
     }}
     onDrop={(event) => {
-      event.preventDefault()
-      onDrop(pane.id)
+      onDrop(event, pane.id)
     }}
     sx={(theme) => ({
       width: '100%',
@@ -962,10 +961,31 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
                 setDraggingPaneId(null)
                 setDragOverPaneId(null)
               }}
-              onDragOver={setDragOverPaneId}
-              onDrop={(paneId) => {
-                handleReorderPane(paneId)
-                setDraggingPaneId(null)
+              onDragOver={(event, paneId) => {
+                const dragTypes = Array.from(event.dataTransfer.types ?? [])
+                const isThreadReorderDrag = dragTypes.includes(AGENT_THREAD_REORDER_DRAG_MIME)
+                if (!isThreadReorderDrag) {
+                  return
+                }
+
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+                if (draggingPaneId) {
+                  setDragOverPaneId(paneId)
+                }
+              }}
+              onDrop={(event, paneId) => {
+                const dragTypes = Array.from(event.dataTransfer.types ?? [])
+                const isThreadReorderDrag = dragTypes.includes(AGENT_THREAD_REORDER_DRAG_MIME)
+                if (!isThreadReorderDrag) {
+                  return
+                }
+
+                event.preventDefault()
+                if (draggingPaneId) {
+                  handleReorderPane(paneId)
+                  setDraggingPaneId(null)
+                }
               }}
             />
           ))}

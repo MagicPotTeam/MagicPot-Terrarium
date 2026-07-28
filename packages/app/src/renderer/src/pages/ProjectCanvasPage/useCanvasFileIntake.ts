@@ -336,6 +336,13 @@ const CANVAS_DOCUMENT_DROP_BYPASS_SELECTOR = [
   '[contenteditable="true"]'
 ].join(',')
 
+const CANVAS_DOCUMENT_COPY_FEEDBACK_SELECTOR = [
+  '[data-agent-workspace-root]',
+  '[data-agent-workspace-scope]',
+  '[data-chat-page-root]'
+].join(',')
+const CANVAS_DROP_SETTLE_DELAY_MS = 120
+
 function getDragEventTargetElement(event: DragEvent): Element | null {
   const path = typeof event.composedPath === 'function' ? event.composedPath() : []
   for (const target of path) {
@@ -369,6 +376,16 @@ function getDragEventPointElements(event: DragEvent): Element[] {
     .filter((node): node is Element => {
       return node instanceof Element
     })
+}
+
+function isAgentDragBoundary(event: DragEvent): boolean {
+  if (getDragEventTargetElement(event)?.closest(CANVAS_DOCUMENT_COPY_FEEDBACK_SELECTOR)) {
+    return true
+  }
+
+  return getDragEventPointElements(event).some((element) =>
+    Boolean(element.closest(CANVAS_DOCUMENT_COPY_FEEDBACK_SELECTOR))
+  )
 }
 
 function shouldBypassCanvasDocumentDrop(event: DragEvent): boolean {
@@ -1235,21 +1252,26 @@ export function useCanvasFileIntake({
     ]
   )
 
+  const scheduleDropWork = useCallback((work: () => void | Promise<void>) => {
+    window.setTimeout(() => {
+      void work()
+    }, CANVAS_DROP_SETTLE_DELAY_MS)
+  }, [])
+
   const handleDrop = useCallback(
     async (event: ReactDragEvent) => {
       if (shouldBypassCanvasDocumentDrop(event.nativeEvent)) {
         return
       }
 
+      const dropSnapshot = snapshotDropDataTransfer(event.dataTransfer)
+      const clientX = event.clientX
+      const clientY = event.clientY
       event.preventDefault()
       event.stopPropagation()
-      await handleDropDataTransfer(
-        snapshotDropDataTransfer(event.dataTransfer),
-        event.clientX,
-        event.clientY
-      )
+      scheduleDropWork(() => handleDropDataTransfer(dropSnapshot, clientX, clientY))
     },
-    [handleDropDataTransfer]
+    [handleDropDataTransfer, scheduleDropWork]
   )
 
   const handleDragOver = useCallback((event: ReactDragEvent) => {
@@ -1270,6 +1292,15 @@ export function useCanvasFileIntake({
     }
 
     if (shouldBypassCanvasDocumentDrop(event)) {
+      if (isAgentDragBoundary(event)) {
+        // Keep the Agent surface as the event owner while still marking the current
+        // drag position as a valid copy target. Without cancelling dragover, Chromium
+        // can briefly render the native no-drop cursor at the panel/canvas boundary.
+        event.preventDefault()
+        if (event.dataTransfer) {
+          event.dataTransfer.dropEffect = 'copy'
+        }
+      }
       return
     }
 
@@ -1290,15 +1321,14 @@ export function useCanvasFileIntake({
         return
       }
 
+      const dropSnapshot = snapshotDropDataTransfer(event.dataTransfer!)
+      const clientX = event.clientX
+      const clientY = event.clientY
       event.preventDefault()
       event.stopImmediatePropagation()
-      void handleDropDataTransfer(
-        snapshotDropDataTransfer(event.dataTransfer!),
-        event.clientX,
-        event.clientY
-      )
+      scheduleDropWork(() => handleDropDataTransfer(dropSnapshot, clientX, clientY))
     },
-    [handleDropDataTransfer]
+    [handleDropDataTransfer, scheduleDropWork]
   )
 
   useEffect(() => {

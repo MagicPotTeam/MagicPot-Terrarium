@@ -550,6 +550,7 @@ const ModelAttachmentCard: React.FC<{
       onDragStart={(event) => {
         if (!sourceUrl) return
         event.stopPropagation()
+        event.dataTransfer.effectAllowed = 'copy'
         setAgentModel3DDragPayload(event.dataTransfer, sourceUrl)
       }}
       sx={{
@@ -643,6 +644,7 @@ const FileAttachmentCard: React.FC<{
       onDragStart={(event) => {
         if (!attachment.url) return
         event.stopPropagation()
+        event.dataTransfer.effectAllowed = 'copy'
         setAgentAttachmentDragPayload(event.dataTransfer, attachment, { ocrResult })
       }}
       sx={{
@@ -1030,6 +1032,7 @@ const UserMessageBubble: React.FC<{
                     draggable
                     onDragStart={(e) => {
                       e.stopPropagation()
+                      e.dataTransfer.effectAllowed = 'copy'
                       setAgentImageDragPayload(e.dataTransfer, attachment.url)
                     }}
                     onClick={() => onPreviewImage(attachment.url)}
@@ -1156,6 +1159,7 @@ const AssistantMessageBubble: React.FC<{
                     draggable
                     onDragStart={(e) => {
                       e.stopPropagation()
+                      e.dataTransfer.effectAllowed = 'copy'
                       setAgentImageDragPayload(e.dataTransfer, attachment.url)
                     }}
                     onClick={() => onPreviewImage(attachment.url)}
@@ -1295,6 +1299,7 @@ const AssistantVideoPlayer: React.FC<{ url: string; fileName?: string }> = ({ ur
       draggable
       onDragStart={(event) => {
         event.stopPropagation()
+        event.dataTransfer.effectAllowed = 'copy'
         setAgentVideoDragPayload(event.dataTransfer, url, fileName)
       }}
       sx={{
@@ -1654,6 +1659,7 @@ const AssistantMarkdownContent: React.FC<{
                 onDragStart={(e) => {
                   e.stopPropagation()
                   if (src) {
+                    e.dataTransfer.effectAllowed = 'copy'
                     setAgentImageDragPayload(e.dataTransfer, src)
                   }
                 }}
@@ -1750,6 +1756,7 @@ const AssistantMarkdownContent: React.FC<{
           draggable
           onDragStart={(event) => {
             event.stopPropagation()
+            event.dataTransfer.effectAllowed = 'copy'
             setAgentVideoDragPayload(event.dataTransfer, url)
           }}
           style={{

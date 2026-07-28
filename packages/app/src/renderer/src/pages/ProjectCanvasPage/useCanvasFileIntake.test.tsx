@@ -128,6 +128,40 @@ function buildTypeOnlyFileDragEvent(types: string[]): DragEvent {
   return event
 }
 
+function buildAgentAttachmentDropEvent(path: string, clientX = 120, clientY = 160): DragEvent {
+  const event = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+  const data = new Map<string, string>([
+    [
+      'application/x-qapp-image',
+      JSON.stringify({
+        itemTypes: ['image'],
+        attachments: [
+          {
+            type: 'image',
+            url: path,
+            name: path.split(/[\\/]/).pop() ?? 'attachment',
+            mimeType: 'image/png'
+          }
+        ]
+      })
+    ],
+    ['text/plain', path]
+  ])
+  Object.defineProperty(event, 'dataTransfer', {
+    configurable: true,
+    value: {
+      files: [] as unknown as FileList,
+      items: [] as unknown as DataTransferItemList,
+      types: ['application/x-qapp-image', 'text/plain'],
+      dropEffect: 'none',
+      getData: (type: string) => data.get(type) ?? ''
+    }
+  })
+  Object.defineProperty(event, 'clientX', { configurable: true, value: clientX })
+  Object.defineProperty(event, 'clientY', { configurable: true, value: clientY })
+  return event
+}
+
 function buildTypelessDragEvent(): DragEvent {
   const event = new Event('dragover', { bubbles: true, cancelable: true }) as DragEvent
   Object.defineProperty(event, 'dataTransfer', {
@@ -245,6 +279,7 @@ afterEach(() => {
     Reflect.deleteProperty(globalThis, 'createImageBitmap')
   }
   resetQuickAppImagePasteTargetsForTest()
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -613,7 +648,8 @@ describe('useCanvasFileIntake', () => {
 
       expect(agentDragOverListener).toHaveBeenCalledTimes(1)
       expect(agentDropListener).toHaveBeenCalledTimes(1)
-      expect(dragOverEvent.defaultPrevented).toBe(false)
+      expect(dragOverEvent.defaultPrevented).toBe(true)
+      expect(dragOverEvent.dataTransfer?.dropEffect).toBe('copy')
       expect(dropEvent.defaultPrevented).toBe(false)
       expect(addImageToCanvas).not.toHaveBeenCalled()
     } finally {
@@ -654,6 +690,41 @@ describe('useCanvasFileIntake', () => {
         value: originalElementsFromPoint
       })
       agentRoot.remove()
+    }
+  })
+
+  it('waits briefly after mouse-up before importing an agent attachment', async () => {
+    vi.useFakeTimers()
+    const addTextToCanvas = vi.fn()
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
+
+    render(
+      <FileIntakeHarness addTextToCanvas={addTextToCanvas} addImageToCanvas={addImageToCanvas} />
+    )
+
+    try {
+      const dropEvent = buildAgentAttachmentDropEvent('/tmp/agent-reference.png', 320, 240)
+      screen.getByTestId('canvas-paste-surface').dispatchEvent(dropEvent)
+
+      expect(dropEvent.defaultPrevented).toBe(true)
+      expect(addImageToCanvas).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(119)
+      expect(addImageToCanvas).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(1)
+      await Promise.resolve()
+      expect(addImageToCanvas).toHaveBeenCalledTimes(1)
+      expect(addImageToCanvas).toHaveBeenCalledWith(
+        '/tmp/agent-reference.png',
+        expect.objectContaining({
+          clientX: 320,
+          clientY: 240,
+          fileName: 'agent-reference.png'
+        })
+      )
+    } finally {
+      vi.useRealTimers()
     }
   })
 

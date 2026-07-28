@@ -1,5 +1,5 @@
 import React from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -256,6 +256,62 @@ describe('AgentWorkspace', () => {
     expect(
       container.querySelector('[data-agent-workspace-scope="project-1.agent-1"]')
     ).toBeInTheDocument()
+  })
+
+  it('does not treat attachment drags as pane reordering', async () => {
+    renderWorkspace()
+
+    const workspaceRoot = await waitFor(() => {
+      const root = document.querySelector('[data-agent-workspace-root="project-1"]')
+      expect(root).not.toBeNull()
+      return root as HTMLElement
+    })
+    const firstPaneRow = workspaceRoot.querySelector('[draggable="true"]')
+    expect(firstPaneRow).not.toBeNull()
+
+    const attachmentDataTransfer = {
+      types: ['application/x-ai-image'],
+      effectAllowed: 'copy',
+      dropEffect: 'none',
+      setData: vi.fn(),
+      getData: vi.fn(() => '')
+    }
+
+    const dragOverEvent = createEvent.dragOver(firstPaneRow as HTMLElement, {
+      dataTransfer: attachmentDataTransfer
+    })
+    fireEvent(firstPaneRow as HTMLElement, dragOverEvent)
+
+    expect(dragOverEvent.defaultPrevented).toBe(false)
+    expect(attachmentDataTransfer.dropEffect).toBe('none')
+  })
+
+  it('keeps pane reordering active for its dedicated drag payload', async () => {
+    renderWorkspace()
+
+    const workspaceRoot = await waitFor(() => {
+      const root = document.querySelector('[data-agent-workspace-root="project-1"]')
+      expect(root).not.toBeNull()
+      return root as HTMLElement
+    })
+    const firstPaneRow = workspaceRoot.querySelector('[draggable="true"]')
+    expect(firstPaneRow).not.toBeNull()
+
+    const reorderDataTransfer = {
+      types: ['application/x-magicpot-agent-thread-reorder'],
+      effectAllowed: 'move',
+      dropEffect: 'none',
+      setData: vi.fn(),
+      getData: vi.fn(() => '')
+    }
+
+    const dragOverEvent = createEvent.dragOver(firstPaneRow as HTMLElement, {
+      dataTransfer: reorderDataTransfer
+    })
+    fireEvent(firstPaneRow as HTMLElement, dragOverEvent)
+
+    expect(dragOverEvent.defaultPrevented).toBe(true)
+    expect(reorderDataTransfer.dropEffect).toBe('move')
   })
 
   it('passes the current canvas route into ChatPage', async () => {

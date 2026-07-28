@@ -752,6 +752,7 @@ describe('ChatMessageList text selection and reply actions', () => {
     })
 
     expect(data.get(QAPP_IMAGE_DRAG_MIME)).toBeTruthy()
+    expect(dataTransfer.effectAllowed).toBe('copy')
   })
 
   it('uses the dragged attachment OCR bundle instead of the whole message fallback', () => {
