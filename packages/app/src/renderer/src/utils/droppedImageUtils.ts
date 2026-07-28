@@ -1,4 +1,5 @@
-import type { ChatAttachment, OCRResult } from '@shared/api/svcLLMProxy'
+import type { ChatAttachment } from '@shared/llm'
+import type { OCRResult } from '@shared/api/svcLLMProxy'
 import type { FileItem } from '@shared/comfy/types'
 import {
   DEFAULT_PARAMS,
@@ -660,6 +661,69 @@ const cropImageAttachmentFromSource = async (
   }
 }
 
+const blobToDataURL = (blob: Blob, fallbackMimeType: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error('Failed to encode image blob as data URL'))
+        return
+      }
+      if (reader.result.startsWith('data:application/octet-stream;')) {
+        resolve(
+          reader.result.replace('data:application/octet-stream;', `data:${fallbackMimeType};`)
+        )
+        return
+      }
+      resolve(reader.result)
+    }
+    reader.onerror = () => reject(reader.error || new Error('Failed to read image blob'))
+    reader.readAsDataURL(blob)
+  })
+
+const copyAttachmentMetadata = (
+  source: ChatAttachment,
+  target: ChatAttachment
+): ChatAttachment => ({
+  ...source,
+  ...target,
+  sourceWidth: target.sourceWidth ?? source.sourceWidth,
+  sourceHeight: target.sourceHeight ?? source.sourceHeight,
+  metadata: target.metadata ?? source.metadata
+})
+
+const materializeBlobImageAttachment = async (
+  attachment: ChatAttachment
+): Promise<ChatAttachment | null> => {
+  const sourceUrl = attachment.url.trim()
+  if (attachment.type !== 'image' || !sourceUrl.startsWith('blob:')) return attachment
+
+  try {
+    const response = await fetch(sourceUrl)
+    if (!response.ok) return null
+    const blob = await response.blob()
+    if (blob.size <= 0) return null
+
+    const mimeType =
+      attachment.mimeType ||
+      blob.type ||
+      getImageMimeTypeFromFileName(attachment.fileName || '') ||
+      'image/png'
+    const fileName = attachment.fileName || inferFileNameFromUrl(sourceUrl, 'image.png')
+    const stableDataUrl = await blobToDataURL(blob, mimeType)
+    return copyAttachmentMetadata(attachment, {
+      type: 'image',
+      url: stableDataUrl,
+      fileName,
+      mimeType,
+      sizeBytes: blob.size
+    })
+  } catch (error) {
+    console.warn('[droppedImageUtils] Failed to materialize blob image attachment:', error)
+    return null
+  }
+}
+
 export const materializeInternalImageDragAttachment = async (
   attachment: ChatAttachment
 ): Promise<ChatAttachment | null> => {
@@ -668,7 +732,7 @@ export const materializeInternalImageDragAttachment = async (
   const cropSource = parseCanvasImageCropSourceMetadata(
     attachment.metadata?.[CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY]
   )
-  if (!cropSource) return attachment
+  if (!cropSource) return materializeBlobImageAttachment(attachment)
 
   try {
     const croppedAttachment = await cropImageAttachmentFromSource(

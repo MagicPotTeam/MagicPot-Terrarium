@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { api } from '../../utils/windowUtils'
 import { openRightPanel } from '../../store/slices/layoutSlice'
 import { extractVideoBoundaryFrameDataUrls } from '../ChatPage/chatVideoAttachmentUtils'
+import { materializeInternalImageDragAttachment } from '../../utils/droppedImageUtils'
 import {
   buildCanvasAgentAttachments,
   buildCanvasAgentAttachmentManifest,
@@ -213,9 +214,22 @@ export function useCanvasBridgeActions({
       dispatch(openRightPanel())
 
       const allAttachments: ChatAttachment[] = [...baseAttachments, ...supplementalImageAttachments]
+      const materializedAttachments = (
+        await Promise.all(
+          allAttachments.map((attachment) => materializeInternalImageDragAttachment(attachment))
+        )
+      ).filter(
+        (
+          attachment
+        ): attachment is Awaited<ReturnType<typeof materializeInternalImageDragAttachment>> &
+          ChatAttachment => attachment !== null
+      ) as ChatAttachment[]
+      if (materializedAttachments.length < allAttachments.length) {
+        notifyError(t('canvas.send_to_agent_failed', '部分图片无法读取，请重新导入后重试。'))
+      }
 
       window.setTimeout(() => {
-        for (const attachment of allAttachments) {
+        for (const attachment of materializedAttachments) {
           window.dispatchEvent(
             new CustomEvent('send-to-agent', {
               detail: { attachment, text: '', targetScope: resolvedScope }
