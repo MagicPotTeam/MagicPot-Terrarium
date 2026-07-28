@@ -135,10 +135,17 @@ const blobToDataUrl = (blob: Blob): Promise<string> =>
     reader.readAsDataURL(blob)
   })
 
+const isOpenAICompatibleImageUrl = (value: string): boolean =>
+  /^https?:\/\//i.test(value) || /^data:image\/[^;,]+;base64,/i.test(value)
+
 const normalizeImageAttachmentForRequest = async (
   attachment: ChatAttachment
 ): Promise<ChatAttachment> => {
-  if (attachment.type !== 'image' || !attachment.url || attachment.url.startsWith('data:')) {
+  if (
+    attachment.type !== 'image' ||
+    !attachment.url ||
+    isOpenAICompatibleImageUrl(attachment.url)
+  ) {
     return attachment
   }
 
@@ -161,12 +168,10 @@ const normalizeImageAttachmentForRequest = async (
           : blob.size
     }
   } catch (error) {
-    console.warn(
-      '[ChatPage] Failed to normalize image attachment for request:',
-      attachment.fileName || attachment.url,
-      error
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `Unable to prepare image attachment "${attachment.fileName || 'image'}" for the model: ${reason}`
     )
-    return attachment
   }
 }
 

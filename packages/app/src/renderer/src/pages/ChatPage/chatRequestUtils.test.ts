@@ -100,6 +100,44 @@ describe('normalizeChatAttachmentsForRequest', () => {
       })
     ])
   })
+
+  it('preserves externally reachable HTTP image URLs without fetching them', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const attachments: ChatAttachment[] = [
+      {
+        type: 'image',
+        url: 'https://cdn.example.com/reference.png',
+        fileName: 'reference.png',
+        mimeType: 'image/png'
+      }
+    ]
+
+    await expect(normalizeChatAttachmentsForRequest(attachments)).resolves.toEqual(attachments)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects local image URLs when they cannot be converted for the model', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404
+      })
+    )
+
+    await expect(
+      normalizeChatAttachmentsForRequest([
+        {
+          type: 'image',
+          url: 'file:///C:/magicpot/missing.png',
+          fileName: 'missing.png',
+          mimeType: 'image/png'
+        }
+      ])
+    ).rejects.toThrow('Unable to prepare image attachment "missing.png" for the model')
+  })
 })
 
 describe('requestChatCompletion', () => {

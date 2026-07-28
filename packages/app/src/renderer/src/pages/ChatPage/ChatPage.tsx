@@ -136,6 +136,7 @@ import {
 import { mergeChatAttachmentsWithSkillReferenceAttachments } from '@renderer/utils/customSkillReferenceAttachments'
 import {
   isImageOnlyInternalDragPayload,
+  materializeInternalImageDragAttachment,
   parseInternalImageDragPayload
 } from '@renderer/utils/droppedImageUtils'
 import { collectDroppedDirectoryFiles } from '../ProjectCanvasPage/dropDirectory'
@@ -552,6 +553,45 @@ const revokeBlobUrl = (url?: string): void => {
   if (!url?.startsWith('blob:')) return
   if (typeof URL === 'undefined' || typeof URL.revokeObjectURL !== 'function') return
   URL.revokeObjectURL(url)
+}
+
+const hasDuplicateAttachment = (
+  attachments: ChatAttachment[],
+  candidate: ChatAttachment
+): boolean =>
+  attachments.some(
+    (attachment) =>
+      attachment.url === candidate.url ||
+      (Boolean(attachment.fileName) &&
+        attachment.fileName === candidate.fileName &&
+        attachment.sizeBytes === candidate.sizeBytes)
+  )
+
+const convertInlineImageToAttachment = async (
+  imageUrl: string,
+  fileName = 'pasted-image.png'
+): Promise<ChatAttachment | null> => {
+  const normalizedUrl = imageUrl.trim()
+  if (!normalizedUrl) return null
+  if (normalizedUrl.startsWith('blob:')) {
+    return materializeInternalImageDragAttachment({
+      type: 'image',
+      url: normalizedUrl,
+      fileName
+    })
+  }
+
+  const dimensions = await readImageDimensionsFromUrl(normalizedUrl)
+  return {
+    type: 'image',
+    url: normalizedUrl,
+    fileName,
+    mimeType: normalizedUrl.startsWith('data:')
+      ? normalizedUrl.slice(5, normalizedUrl.indexOf(';')) || 'image/png'
+      : undefined,
+    sourceWidth: dimensions.sourceWidth,
+    sourceHeight: dimensions.sourceHeight
+  }
 }
 
 const buildImageChatAttachmentFromFile = async (
@@ -1567,76 +1607,77 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
 
-      if (autoSend && sendMessageRef.current) {
-        const sendAttachments = [...(attachments || [])]
-        if (attachment?.url && !sendAttachments.some((item) => item.url === attachment.url)) {
-          sendAttachments.push(attachment)
-        }
+      const rawAttachments = [...(attachments ?? []), ...(attachment ? [attachment] : [])]
+      const resolveAttachments = async (): Promise<ChatAttachment[]> =>
+        (
+          await Promise.all(
+            rawAttachments.map((item) => materializeInternalImageDragAttachment(item))
+          )
+        ).filter(
+          (
+            item
+          ): item is Awaited<ReturnType<typeof materializeInternalImageDragAttachment>> &
+            ChatAttachment => item !== null
+        ) as ChatAttachment[]
 
+      if (autoSend && sendMessageRef.current) {
         const sendExternalMessage = (resolvedAttachments: ChatAttachment[]) => {
-          void sendMessageRef.current?.({
-            content: text || '',
-            attachments: resolvedAttachments.length > 0 ? resolvedAttachments : undefined,
-            hiddenContext: hiddenText
+          const normalizedText = text || ''
+          if (!normalizedText.trim() && resolvedAttachments.length === 0) return
+          const sendMessage = sendMessageRef.current
+          if (!sendMessage) return
+          void sendMessage({
+            content: normalizedText,
+            attachments: resolvedAttachments,
+            hiddenContext: hiddenText || ''
           })
         }
 
-        if (image) {
-          fetch(image)
-            .then((res) => res.blob())
-            .then(async (blob) => {
-              const nextAttachment = await buildImageChatAttachmentFromFile(
-                new File([blob], getDownloadFileNameFromUrl(image, 'image.png'), {
-                  type: blob.type || 'image/png'
-                }),
-                image
-              )
-              if (!sendAttachments.some((item) => item.url === nextAttachment.url)) {
-                sendAttachments.push(nextAttachment)
-              }
-              sendExternalMessage(sendAttachments)
-            })
-            .catch((err) => {
-              console.error('[ChatPage] Failed to parse canvas image:', err)
-              sendExternalMessage(sendAttachments)
-            })
-          return
-        }
-
-        sendExternalMessage(sendAttachments)
+        void resolveAttachments()
+          .then(async (resolvedAttachments) => {
+            if (!image) return resolvedAttachments
+            const imageAttachment = await convertInlineImageToAttachment(image, 'pasted-image.png')
+            return imageAttachment ? [...resolvedAttachments, imageAttachment] : resolvedAttachments
+          })
+          .then(sendExternalMessage)
+          .catch((err) => {
+            console.error('[ChatPage] Failed to materialize external attachments:', err)
+            sendExternalMessage([])
+          })
         return
       }
 
-      if (attachment?.url) {
-        setPendingAttachments((prev) => {
-          if (prev.some((item) => item.url === attachment.url)) return prev
-          return [...prev, attachment]
+      void resolveAttachments()
+        .then((resolvedAttachments) => {
+          if (resolvedAttachments.length === 0) return
+          setPendingAttachments((prev) => {
+            let next = prev
+            for (const item of resolvedAttachments) {
+              if (!item.url || hasDuplicateAttachment(next, item)) continue
+              if (next === prev) next = [...prev]
+              next.push(item)
+            }
+            return next
+          })
         })
-      }
+        .catch((err) => {
+          console.error('[ChatPage] Failed to materialize external attachments:', err)
+        })
 
       if (image) {
-        fetch(image)
-          .then((res) => res.blob())
-          .then(async (blob) => {
-            const nextAttachment = await buildImageChatAttachmentFromFile(
-              new File([blob], getDownloadFileNameFromUrl(image, 'image.png'), {
-                type: blob.type || 'image/png'
-              }),
-              image
-            )
+        void convertInlineImageToAttachment(image, 'pasted-image.png')
+          .then((imageAttachment) => {
+            if (!imageAttachment) return
             setPendingAttachments((prev) => {
-              if (prev.some((item) => item.url === image)) return prev
-              return [...prev, nextAttachment]
+              if (hasDuplicateAttachment(prev, imageAttachment)) return prev
+              return [...prev, imageAttachment]
             })
           })
           .catch((err) => console.error('[ChatPage] Failed to parse canvas image:', err))
       }
 
       if (text) {
-        setInputValue((prev) => {
-          const base = prev.trim()
-          return base ? `${base}\n\n${text}` : text
-        })
+        setInputValue((prev) => (prev ? `${prev}\n${text}` : text))
       }
 
       if (hiddenText) {
@@ -3514,7 +3555,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
             })
           }
 
-          if (nextAttachments.length > 0) {
+          const materializedAttachments = (
+            await Promise.all(
+              nextAttachments.map((attachment) =>
+                materializeInternalImageDragAttachment(attachment)
+              )
+            )
+          ).filter(
+            (
+              attachment
+            ): attachment is Awaited<ReturnType<typeof materializeInternalImageDragAttachment>> &
+              ChatAttachment => attachment !== null
+          ) as ChatAttachment[]
+
+          if (materializedAttachments.length > 0) {
             setPendingAttachments((prev) => {
               const seen = new Set(
                 prev.map(
@@ -3524,7 +3578,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               )
               const merged = [...prev]
 
-              for (const attachment of nextAttachments) {
+              for (const attachment of materializedAttachments) {
                 const key = `${attachment.type}:${attachment.url}:${attachment.fileName || ''}`
                 if (seen.has(key)) continue
                 seen.add(key)
@@ -3546,7 +3600,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             setPendingHiddenContext((prev) => mergeHiddenContext(prev, droppedHiddenText))
           }
 
-          if (nextAttachments.length > 0 || droppedText || droppedHiddenText) {
+          if (materializedAttachments.length > 0 || droppedText || droppedHiddenText) {
             return
           }
         } catch (err) {

@@ -623,6 +623,23 @@ const collectOutputTextAndImages = (
   }
 }
 
+const OPENAI_RESPONSES_IMAGE_URL_ERROR =
+  'OpenAI Responses image attachments must use an HTTP(S) URL or a base64 data:image URL.'
+
+const assertOpenAIResponsesImageUrl = (value: string): string => {
+  const normalized = value.trim()
+  if (/^https?:\/\/[^\s]+$/i.test(normalized)) {
+    return normalized
+  }
+
+  const dataUrlMatch = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/]+={0,2})$/i.exec(normalized)
+  if (dataUrlMatch && dataUrlMatch[2].length % 4 === 0) {
+    return normalized
+  }
+
+  throw new Error(OPENAI_RESPONSES_IMAGE_URL_ERROR)
+}
+
 export function buildOpenAIResponsesInput(messages: ChatMessage[]): OpenAIResponsesInputMessage[] {
   const input: OpenAIResponsesInputMessage[] = []
 
@@ -665,7 +682,7 @@ export function buildOpenAIResponsesInput(messages: ChatMessage[]): OpenAIRespon
       for (const attachment of imageAttachments) {
         content.push({
           type: 'input_image',
-          image_url: attachment.url
+          image_url: assertOpenAIResponsesImageUrl(attachment.url)
         })
       }
 

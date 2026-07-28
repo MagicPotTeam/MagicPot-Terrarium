@@ -1776,6 +1776,68 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
+  it('materializes blob attachments received from send-to-agent before previewing them', async () => {
+    const originalFileReader = globalThis.FileReader
+    const originalFetch = globalThis.fetch
+    vi.stubGlobal(
+      'FileReader',
+      class MockFileReader {
+        result: string | ArrayBuffer | null = null
+        error: DOMException | null = null
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+
+        readAsDataURL(blob: Blob) {
+          void blob.arrayBuffer().then((buffer) => {
+            const bytes = new Uint8Array(buffer)
+            let binary = ''
+            for (const byte of bytes) binary += String.fromCharCode(byte)
+            this.result = `data:${blob.type};base64,${btoa(binary)}`
+            this.onload?.()
+          })
+        }
+      }
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(new Uint8Array([99, 97, 110, 118, 97, 115]), {
+            status: 200,
+            headers: { 'Content-Type': 'image/png' }
+          })
+      )
+    )
+
+    renderChatPage('blob-materialization-test')
+
+    try {
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              scope: 'blob-materialization-test',
+              attachment: {
+                type: 'image',
+                url: 'blob:canvas-source',
+                fileName: 'canvas.png',
+                mimeType: 'image/png'
+              }
+            }
+          })
+        )
+      })
+
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+        expect(globalThis.fetch).toHaveBeenCalledWith('blob:canvas-source')
+      })
+    } finally {
+      vi.stubGlobal('FileReader', originalFileReader)
+      vi.stubGlobal('fetch', originalFetch)
+    }
+  })
+
   it('auto-sends singular send-to-agent attachments instead of dropping them', async () => {
     renderChatPage()
 
