@@ -91,6 +91,27 @@ describe('buildHy3dProfileId', () => {
 })
 
 describe('local media file path helpers', () => {
+  it('normalizes bare filesystem paths for renderer previews', () => {
+    expect(normalizeLocalMediaUrl('C:\\Users\\tester\\render 1.png')).toBe(
+      'local-media:///C:/Users/tester/render 1.png'
+    )
+    expect(normalizeLocalMediaUrl('/Users/tester/render 1.png')).toBe(
+      'local-media:///Users/tester/render 1.png'
+    )
+    expect(normalizeLocalMediaUrl('\\\\server\\share\\render 1.png')).toBe(
+      'local-media://server/share/render 1.png'
+    )
+  })
+
+  it('preserves renderer-safe and non-file resource URLs', () => {
+    expect(normalizeLocalMediaUrl('blob:preview')).toBe('blob:preview')
+    expect(normalizeLocalMediaUrl('data:image/png;base64,AA==')).toBe('data:image/png;base64,AA==')
+    expect(normalizeLocalMediaUrl('https://example.com/render.png')).toBe(
+      'https://example.com/render.png'
+    )
+    expect(normalizeLocalMediaUrl('magicpot://resource/image')).toBe('magicpot://resource/image')
+  })
+
   it('preserves file URL hosts as UNC-style local-media URLs', () => {
     expect(normalizeLocalMediaUrl('file://server/share/folder/render%201.png')).toBe(
       'local-media://server/share/folder/render%201.png'

@@ -359,10 +359,27 @@ export const buildHy3dProfileId = (
 
 export const normalizeLocalMediaUrl = (url: string): string => {
   if (!url) return url
-  if (url.startsWith('local-media://')) return url
-  if (url.startsWith('file://')) {
+  const trimmed = url.trim()
+  if (!trimmed) return url
+  if (trimmed.startsWith('local-media://')) return trimmed
+
+  if (/^[a-zA-Z]:[\\/]/.test(trimmed)) {
+    const normalizedPath = trimmed.replace(/\\/g, '/')
+    return `local-media:///${normalizedPath}`
+  }
+
+  if (/^\\\\[^\\]+\\[^\\]+/.test(trimmed)) {
+    const normalizedPath = trimmed.replace(/\\/g, '/').replace(/^\/+/, '')
+    return `local-media://${normalizedPath}`
+  }
+
+  if (trimmed.startsWith('/')) {
+    return `local-media://${trimmed}`
+  }
+
+  if (trimmed.startsWith('file://')) {
     try {
-      const parsed = new URL(url)
+      const parsed = new URL(trimmed)
       if (parsed.protocol === 'file:') {
         if (parsed.hostname) {
           return `local-media://${parsed.hostname}${parsed.pathname}`
@@ -373,13 +390,13 @@ export const normalizeLocalMediaUrl = (url: string): string => {
       // Fall through to legacy string normalization for partially escaped file URLs.
     }
 
-    const rest = url.slice('file://'.length)
+    const rest = trimmed.slice('file://'.length)
     if (/^[a-zA-Z]:($|[\\/])/.test(rest)) {
       return `local-media:///${rest}`
     }
     return `local-media://${rest.replace(/^\/+/, '')}`
   }
-  return url
+  return trimmed
 }
 
 const decodeLocalMediaPathPart = (value: string): string => {
