@@ -780,6 +780,53 @@ describe('ChatComposer', () => {
     restoreParentRect.mockRestore()
   })
 
+  it('shares the panel height budget between long input and image previews', async () => {
+    render(
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          inputValue={Array.from({ length: 80 }, (_, index) => `line ${index + 1}`).join('\n')}
+          onInputChange={vi.fn()}
+          onSend={vi.fn()}
+          onUploadFile={vi.fn()}
+          pendingAttachments={[
+            {
+              type: 'image',
+              url: 'data:image/png;base64,attachment',
+              fileName: 'attachment.png'
+            }
+          ]}
+          uploadProgress={{}}
+          onRemoveAttachment={vi.fn()}
+          isLoading={false}
+          onStopGenerating={vi.fn()}
+          disabled={false}
+          composerInputRef={{ current: null }}
+          onPreviewImage={vi.fn()}
+        />
+      </ThemeProvider>
+    )
+
+    const composerRoot = screen.getByTestId('chat-composer-root')
+    const composerParent = composerRoot.parentElement as HTMLElement
+    const restoreParentRect = vi
+      .spyOn(composerParent, 'getBoundingClientRect')
+      .mockReturnValue(createRect(0, 400))
+
+    fireEvent(window, new Event('resize'))
+
+    const textarea = screen.getByTestId('chat-composer-input')
+    const attachmentTray = screen.getByTestId('chat-composer-attachments')
+
+    await waitFor(() => {
+      expect(textarea).toHaveStyle({ maxHeight: '120px' })
+      expect(attachmentTray).toHaveStyle({ maxHeight: '128px' })
+    })
+
+    expect(120 + 128 + 140 + 12).toBeLessThanOrEqual(400)
+
+    restoreParentRect.mockRestore()
+  })
+
   it('keeps large attachment batches in a scrollable preview tray', async () => {
     render(
       <ThemeProvider theme={theme}>
