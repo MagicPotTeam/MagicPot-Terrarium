@@ -388,6 +388,16 @@ function isAgentDragBoundary(event: DragEvent): boolean {
   )
 }
 
+function isCanvasSceneFileDropOutsideCanvas(event: DragEvent): boolean {
+  const files = Array.from(event.dataTransfer?.files || [])
+  if (!files.some((file) => /\.mpcanvas$/i.test(file.name))) return false
+  const selector = '[data-project-canvas-drop-surface="true"]'
+  if (event.target instanceof Element && event.target.closest(selector)) return false
+  return !document
+    .elementsFromPoint(event.clientX, event.clientY)
+    .some((element) => element.closest(selector))
+}
+
 function shouldBypassCanvasDocumentDrop(event: DragEvent): boolean {
   if (getDragEventTargetElement(event)?.closest(CANVAS_DOCUMENT_DROP_BYPASS_SELECTOR)) {
     return true
@@ -1317,7 +1327,7 @@ export function useCanvasFileIntake({
         return
       }
 
-      if (shouldBypassCanvasDocumentDrop(event)) {
+      if (isCanvasSceneFileDropOutsideCanvas(event) || shouldBypassCanvasDocumentDrop(event)) {
         return
       }
 

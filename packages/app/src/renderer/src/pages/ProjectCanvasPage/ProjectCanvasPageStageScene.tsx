@@ -3067,6 +3067,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
       ref={handleCanvasContainerRef}
       tabIndex={0}
       data-testid="project-canvas-stage-root"
+      data-project-canvas-drop-surface="true"
       data-stage-scale={stageScale}
       data-stage-pos-x={stagePos.x}
       data-stage-pos-y={stagePos.y}

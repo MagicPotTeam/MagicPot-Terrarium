@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from 'react'
 import { HashRouter } from 'react-router-dom'
 import Layout from './components/Layout'
+import CanvasProjectDropBridge from './components/CanvasProjectDropBridge'
 import { useConfig } from './hooks/useConfig'
 import { useComfyProcess } from './store/hooks/comfyProcess'
 import { api } from './utils/windowUtils'
@@ -250,6 +251,7 @@ function App(): React.JSX.Element {
     <DndProvider manager={appDndManager}>
       <HashRouter>
         <DeferredComfyStartupBridges />
+        <CanvasProjectDropBridge />
         <Layout />
       </HashRouter>
     </DndProvider>
