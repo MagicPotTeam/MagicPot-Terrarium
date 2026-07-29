@@ -147,17 +147,150 @@ const getElectronNetFetch = (): typeof net.fetch | null => {
   return typeof candidate === 'function' ? candidate : null
 }
 
+export type ElectronIncomingMessageLike = {
+  headers: Record<string, string[] | undefined>
+  on: (event: 'data', listener: (chunk: Buffer | string) => void) => unknown
+  pause?: () => void
+  resume?: () => void
+  once: {
+    (event: 'aborted' | 'end', listener: () => void): unknown
+    (event: 'error', listener: (error: unknown) => void): unknown
+  }
+  statusCode: number
+  statusMessage: string
+}
+
+export type ElectronClientRequestLike = {
+  abort: () => void
+  end: (chunk?: string | Buffer) => unknown
+  once: {
+    (event: 'response', listener: (response: ElectronIncomingMessageLike) => void): unknown
+    (event: 'abort', listener: () => void): unknown
+    (event: 'error', listener: (error: unknown) => void): unknown
+  }
+  setHeader: (name: string, value: string) => void
+}
+
+export type ElectronRequestFactory = (options: {
+  method: string
+  url: string
+  redirect: 'follow'
+}) => ElectronClientRequestLike
+
+export const createElectronRequestFetch = (electronRequest: ElectronRequestFactory): FetchImpl =>
+  (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    if (init?.signal?.aborted) {
+      throw init.signal.reason || new DOMException('The operation was aborted.', 'AbortError')
+    }
+
+    const request = new Request(input, init)
+    const body = request.body ? Buffer.from(await request.arrayBuffer()) : null
+
+    if (request.signal.aborted) {
+      throw request.signal.reason || new DOMException('The operation was aborted.', 'AbortError')
+    }
+
+    return await new Promise<Response>((resolve, reject) => {
+      const clientRequest = electronRequest({
+        method: request.method,
+        url: request.url,
+        redirect: 'follow'
+      })
+      let settled = false
+
+      const cleanup = (): void => request.signal.removeEventListener('abort', handleAbort)
+      const fail = (error: unknown): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
+      const handleAbort = (): void => {
+        clientRequest.abort()
+        fail(request.signal.reason || new DOMException('The operation was aborted.', 'AbortError'))
+      }
+
+      request.headers.forEach((value, name) => clientRequest.setHeader(name, value))
+      if (body && !request.headers.has('content-length')) {
+        clientRequest.setHeader('content-length', String(body.byteLength))
+      }
+
+      clientRequest.once('error', fail)
+      clientRequest.once('abort', () =>
+        fail(new DOMException('The operation was aborted.', 'AbortError'))
+      )
+      clientRequest.once('response', (incoming) => {
+        const responseBody = new ReadableStream<Uint8Array>({
+          start(controller) {
+            incoming.on('data', (chunk: Buffer | string) => {
+              controller.enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+              if (controller.desiredSize != null && controller.desiredSize <= 0) incoming.pause?.()
+            })
+            incoming.once('error', (error) => controller.error(error))
+            incoming.once('aborted', () =>
+              controller.error(new Error('Electron network response was aborted.'))
+            )
+            incoming.once('end', () => controller.close())
+          },
+          pull() {
+            incoming.resume?.()
+          },
+          cancel() {
+            clientRequest.abort()
+          }
+        })
+
+        if (settled) return
+        settled = true
+        cleanup()
+
+        const headers = new Headers()
+        for (const [name, values] of Object.entries(incoming.headers)) {
+          for (const value of values ?? []) headers.append(name, value)
+        }
+        const response = new Response(responseBody, {
+          status: incoming.statusCode,
+          statusText: incoming.statusMessage,
+          headers
+        })
+        Object.defineProperty(response, 'url', { configurable: true, value: request.url })
+        resolve(response)
+      })
+
+      request.signal.addEventListener('abort', handleAbort, { once: true })
+      clientRequest.end(body || undefined)
+    })
+  }) as FetchImpl
+
+const createMainProcessElectronRequestFetch = (): FetchImpl | null => {
+  const electronRequest = (net as unknown as { request?: typeof net.request } | undefined)?.request
+  if (typeof electronRequest !== 'function') return null
+
+  return createElectronRequestFetch(
+    (options) => electronRequest.call(net, options) as unknown as ElectronClientRequestLike
+  )
+}
 const createMainProcessElectronFetch = (): FetchImpl | null => {
   const electronFetch = getElectronNetFetch()
-  if (!electronFetch) {
-    return null
-  }
+  const electronRequestFetch = createMainProcessElectronRequestFetch()
+  if (!electronFetch && !electronRequestFetch) return null
 
-  return ((input: RequestInfo | URL, init?: RequestInit) =>
-    electronFetch(
-      input instanceof URL ? input.toString() : (input as unknown as string | Request),
-      init as Parameters<typeof electronFetch>[1]
-    )) as FetchImpl
+  return ((input: RequestInfo | URL, init?: RequestInit) => {
+    const method = String(
+      init?.method || (input instanceof Request ? input.method : 'GET')
+    ).toUpperCase()
+    const hasBody = init?.body != null || (input instanceof Request && input.body != null)
+    if (hasBody && method !== 'GET' && method !== 'HEAD' && electronRequestFetch) {
+      return electronRequestFetch(input, init)
+    }
+    if (electronFetch) {
+      return electronFetch(
+        input instanceof URL ? input.toString() : (input as unknown as string | Request),
+        init as Parameters<typeof electronFetch>[1]
+      )
+    }
+    return electronRequestFetch!(input, init)
+  }) as FetchImpl
 }
 
 // ==================== Chat execution helpers ====================
@@ -914,11 +1047,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       return electronFetch
     }
 
-    if (typeof globalThis.fetch === 'function') {
+    if (process.env.NODE_ENV === 'test' && typeof globalThis.fetch === 'function') {
       return globalThis.fetch.bind(globalThis) as FetchImpl
     }
 
-    throw new Error('Fetch API is unavailable in the main process runtime.')
+    throw new Error('Electron network APIs are unavailable in the main process runtime.')
   }
 
   private createConversationAbortContext(

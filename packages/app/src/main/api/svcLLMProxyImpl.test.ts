@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
@@ -11,7 +12,12 @@ import {
   clearTrustedLocalFileSelectionsForTest,
   rememberTrustedLocalFileSelections
 } from './trustedFileSelection'
-import { LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE, LLMProxySvcImpl } from './svcLLMProxyImpl'
+import {
+  createElectronRequestFetch,
+  type ElectronClientRequestLike,
+  LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE,
+  LLMProxySvcImpl
+} from './svcLLMProxyImpl'
 
 const {
   generateFromMessagesMock,
@@ -117,6 +123,80 @@ const mockConfig = (overrides: Partial<Config>): void => {
     }
   } as Config)
 }
+
+describe('createElectronRequestFetch', () => {
+  it('writes large JSON bodies through Electron ClientRequest and maps the response', async () => {
+    const requestEvents = new EventEmitter()
+    const responseEvents = new EventEmitter() as EventEmitter & {
+      headers: Record<string, string[]>
+      statusCode: number
+      statusMessage: string
+    }
+    responseEvents.headers = { 'content-type': ['application/json'], 'x-test': ['ok'] }
+    responseEvents.statusCode = 200
+    responseEvents.statusMessage = 'OK'
+
+    const headers = new Map<string, string>()
+    let writtenBody: Buffer | undefined
+    const clientRequest = Object.assign(requestEvents, {
+      abort: vi.fn(),
+      end: vi.fn((chunk?: string | Buffer) => {
+        writtenBody = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
+      }),
+      setHeader: vi.fn((name: string, value: string) => headers.set(name, value))
+    }) as unknown as ElectronClientRequestLike
+    const requestFactory = vi.fn(() => clientRequest)
+    const fetchImpl = createElectronRequestFetch(requestFactory)
+    const payload = JSON.stringify({ image: 'x'.repeat(1_000_000) })
+
+    const responsePromise = fetchImpl('https://example.com/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer token' },
+      body: payload
+    })
+    await vi.waitFor(() => expect(clientRequest.end).toHaveBeenCalledOnce())
+    requestEvents.emit('response', responseEvents)
+    responseEvents.emit('data', Buffer.from('{"ok":'))
+    const response = await responsePromise
+    responseEvents.emit('data', Buffer.from('true}'))
+    responseEvents.emit('end')
+
+    expect(requestFactory).toHaveBeenCalledWith({
+      method: 'POST',
+      url: 'https://example.com/responses',
+      redirect: 'follow'
+    })
+    expect(writtenBody?.toString()).toBe(payload)
+    expect(headers.get('content-type')).toBe('application/json')
+    expect(headers.get('authorization')).toBe('Bearer token')
+    expect(headers.get('content-length')).toBe(String(Buffer.byteLength(payload)))
+    expect(response.status).toBe(200)
+    expect(response.headers.get('x-test')).toBe('ok')
+    await expect(response.json()).resolves.toEqual({ ok: true })
+  })
+
+  it('aborts Electron ClientRequest when the Fetch signal is aborted', async () => {
+    const requestEvents = new EventEmitter()
+    const clientRequest = Object.assign(requestEvents, {
+      abort: vi.fn(),
+      end: vi.fn(),
+      setHeader: vi.fn()
+    }) as unknown as ElectronClientRequestLike
+    const fetchImpl = createElectronRequestFetch(() => clientRequest)
+    const controller = new AbortController()
+    const responsePromise = fetchImpl('https://example.com/responses', {
+      method: 'POST',
+      body: '{}',
+      signal: controller.signal
+    })
+
+    await vi.waitFor(() => expect(clientRequest.end).toHaveBeenCalledOnce())
+    controller.abort()
+
+    await expect(responsePromise).rejects.toMatchObject({ name: 'AbortError' })
+    expect(clientRequest.abort).toHaveBeenCalledOnce()
+  })
+})
 
 describe('LLMProxySvcImpl', () => {
   it('allows main-process LLM extensions to normalize requests and provide clients', async () => {
