@@ -1486,6 +1486,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const [searchKeyword, setSearchKeyword] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const chatContainerRef = useRef<HTMLDivElement>(null)
+  const shouldFollowMessagesRef = useRef(false)
   const inputValueRef = useRef(inputValue)
   const pendingAttachmentsRef = useRef<ChatAttachment[]>(pendingAttachments)
   const pendingHiddenContextRef = useRef(pendingHiddenContext)
@@ -3413,29 +3414,38 @@ const ChatPage: React.FC<ChatPageProps> = ({
     return container.scrollHeight - container.scrollTop - container.clientHeight < 150
   }, [])
 
+  useEffect(() => {
+    const container = chatContainerRef.current
+    if (!container) return
+
+    const handleUserScrollIntent = () => {
+      window.requestAnimationFrame(() => {
+        shouldFollowMessagesRef.current = isNearBottom()
+      })
+    }
+
+    shouldFollowMessagesRef.current = isNearBottom()
+    container.addEventListener('wheel', handleUserScrollIntent, { passive: true })
+    container.addEventListener('touchmove', handleUserScrollIntent, { passive: true })
+    return () => {
+      container.removeEventListener('wheel', handleUserScrollIntent)
+      container.removeEventListener('touchmove', handleUserScrollIntent)
+    }
+  }, [currentSessionId, isNearBottom])
+
   const prevMessageCountRef = useRef(0)
-  const prevIsLoadingRef = useRef(false)
   useEffect(() => {
     if (!active) return
     const currentMessages = sessions.find((s) => s.id === currentSessionId)?.messages || []
     const messageCount = currentMessages.length
     if (messageCount > prevMessageCountRef.current || messageCount === 0) {
-      scrollToBottom()
-      setTimeout(() => scrollToBottom(), 200)
+      if (shouldFollowMessagesRef.current) {
+        scrollToBottom()
+        setTimeout(() => scrollToBottom(), 200)
+      }
     }
     prevMessageCountRef.current = messageCount
   }, [active, sessions, currentSessionId, scrollToBottom])
-
-  useEffect(() => {
-    if (!active) return
-    if (prevIsLoadingRef.current && !isLoading) {
-      setTimeout(() => scrollToBottom(), 100)
-    }
-    prevIsLoadingRef.current = isLoading
-    if (isLoading && isNearBottom()) {
-      scrollToBottom()
-    }
-  }, [active, isLoading, scrollToBottom, isNearBottom])
 
   // ==================== 粘贴处理 ====================
   useEffect(() => {

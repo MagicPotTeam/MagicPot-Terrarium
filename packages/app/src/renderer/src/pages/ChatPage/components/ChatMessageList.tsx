@@ -199,7 +199,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
       ? (sidecarExportEntries[sidecarExportEntries.length - 1]?.assistantMessageIndex ?? null)
       : null
   const editScrollPositionRef = React.useRef<{
-    scrollTop: number
+    bottomOffset: number
     scrollLeft: number
   } | null>(null)
 
@@ -208,7 +208,10 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
       const scrollContainer = chatContainerRef.current
       editScrollPositionRef.current = scrollContainer
         ? {
-            scrollTop: scrollContainer.scrollTop,
+            bottomOffset:
+              scrollContainer.scrollHeight -
+              scrollContainer.clientHeight -
+              scrollContainer.scrollTop,
             scrollLeft: scrollContainer.scrollLeft
           }
         : null
@@ -225,7 +228,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     const savedPosition = editScrollPositionRef.current
     if (!scrollContainer || !savedPosition) return
 
-    scrollContainer.scrollTop = savedPosition.scrollTop
+    scrollContainer.scrollTop =
+      scrollContainer.scrollHeight - scrollContainer.clientHeight - savedPosition.bottomOffset
     scrollContainer.scrollLeft = savedPosition.scrollLeft
   }, [chatContainerRef, editingMessageIndex])
 
@@ -239,6 +243,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         minHeight: 0,
         overflow: 'auto',
         overflowX: 'hidden',
+        overflowAnchor: 'none',
         display: 'flex',
         flexDirection: 'column',
         maxWidth: '900px',
@@ -880,7 +885,7 @@ const UserMessageEditForm: React.FC<{
   onCancel: () => void
   onSubmit: (content: string) => void
   savedChatScrollPositionRef: React.MutableRefObject<{
-    scrollTop: number
+    bottomOffset: number
     scrollLeft: number
   } | null>
   isLight: boolean
@@ -918,7 +923,10 @@ const UserMessageEditForm: React.FC<{
     const savedChatScrollPosition = savedChatScrollPositionRef.current
     const restoreSavedChatScrollPosition = () => {
       if (!chatScrollContainer || !savedChatScrollPosition) return
-      chatScrollContainer.scrollTop = savedChatScrollPosition.scrollTop
+      chatScrollContainer.scrollTop =
+        chatScrollContainer.scrollHeight -
+        chatScrollContainer.clientHeight -
+        savedChatScrollPosition.bottomOffset
       chatScrollContainer.scrollLeft = savedChatScrollPosition.scrollLeft
     }
     const pendingSelection = pendingSelectionRef.current

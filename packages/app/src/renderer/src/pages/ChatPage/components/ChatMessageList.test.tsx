@@ -301,14 +301,22 @@ describe('ChatMessageList text selection and reply actions', () => {
     try {
       render(<Harness />)
       const scrollContainer = screen.getByTestId('chat-message-list')
+      Object.defineProperties(scrollContainer, {
+        scrollHeight: { configurable: true, value: 1200 },
+        clientHeight: { configurable: true, value: 400 }
+      })
       scrollContainer.scrollTop = 720
       scrollContainer.scrollLeft = 9
+      const initialBottomOffset =
+        scrollContainer.scrollHeight - scrollContainer.clientHeight - scrollContainer.scrollTop
 
       fireEvent.click(screen.getByRole('button', { name: 'chat.edit_message' }))
 
       expect(screen.getByRole('textbox')).toBeInTheDocument()
       expect(focusSpy).toHaveBeenCalled()
-      expect(scrollContainer.scrollTop).toBe(720)
+      expect(
+        scrollContainer.scrollHeight - scrollContainer.clientHeight - scrollContainer.scrollTop
+      ).toBe(initialBottomOffset)
       expect(scrollContainer.scrollLeft).toBe(9)
     } finally {
       focusSpy.mockRestore()
