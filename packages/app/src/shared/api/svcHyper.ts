@@ -126,10 +126,11 @@ export type EnvironmentDetectResp = {
 export type SaveImageToDirReq = {
   data: Uint8Array // 图片二进制数据
   fileName: string // 文件名
-  dir?: string // 目标目录，默认为桌面/AIEngine_Downloads
+  dir?: string // 目标目录；省略时弹出系统“保存图片”对话框
 }
 export type SaveImageToDirResp = {
-  savedPath: string // 保存后的完整路径
+  savedPath: string // 保存后的完整路径；取消时为空字符串
+  canceled?: boolean
 }
 
 export type MigrateLegacyAssistantImageReq = {
