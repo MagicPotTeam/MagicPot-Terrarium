@@ -48,7 +48,7 @@ const testUiPolicy = resolveTestUiPolicy(readTestUiEnv())
 const CANVAS_SYNC_REMOVED_ERROR =
   'Canvas mirroring has been removed. Remote agents can only access content explicitly attached to the current request.'
 const LEGACY_CHAT_ENDPOINTS = new Set(['/api/bot/message', '/api/bot/chat', '/api/message'])
-const DEFAULT_LLM_PROXY_BIND_HOST = '127.0.0.1'
+const DEFAULT_LLM_PROXY_BIND_HOST = '0.0.0.0'
 const DEFAULT_HTTP_BODY_LIMIT_BYTES = 16 * 1024 * 1024
 const HTTP_HEADERS_TIMEOUT_MS = 15_000
 const HTTP_REQUEST_TIMEOUT_MS = 120_000

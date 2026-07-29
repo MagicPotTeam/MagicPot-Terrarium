@@ -525,7 +525,7 @@ export const DEFAULT_CONFIG: Config = {
   local_llm_server_config: {
     enable_server: false,
     port: 3721,
-    bind_host: '127.0.0.1',
+    bind_host: '0.0.0.0',
     access_token: '',
     access_tokens: []
   },
