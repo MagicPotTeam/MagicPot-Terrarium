@@ -21,6 +21,15 @@ import type { CanvasImageSourceInput } from './canvasAssetIntakeHelpers'
 import type { CanvasGroup, CanvasImageItem, CanvasItem } from './types'
 
 const importCanvasFileMock = vi.fn()
+const authorizeCanvasLocalMediaSourceUrlMock = vi.fn<(file: File) => Promise<string | null>>()
+
+vi.mock('./canvasLocalFileSource', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./canvasLocalFileSource')>()
+  return {
+    ...actual,
+    authorizeCanvasLocalMediaSourceUrl: (file: File) => authorizeCanvasLocalMediaSourceUrlMock(file)
+  }
+})
 
 vi.mock('./canvasStorage', () => ({
   importCanvasFile: (...args: unknown[]) => importCanvasFileMock(...args),
@@ -183,6 +192,7 @@ afterEach(() => {
 })
 
 beforeEach(() => {
+  authorizeCanvasLocalMediaSourceUrlMock.mockResolvedValue(null)
   importCanvasFileMock.mockResolvedValue({
     items: [
       {
@@ -1287,6 +1297,245 @@ describe('useCanvasAssetIntake', () => {
     }
   })
 
+  it('takes ownership of a source-file-backed blob URL before storing it on canvas', async () => {
+    const originalImageCtor = window.Image
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const sourceFile = new File([new Uint8Array([1, 2, 3, 4])], 'qapp-result.png', {
+      type: 'image/png'
+    })
+    const createObjectURL = vi.fn(() => 'blob:canvas-owned-result')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL
+    })
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'width', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'height', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set() {
+          queueMicrotask(() => image.onload?.(new Event('load')))
+        }
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const onComplete = vi.fn()
+      render(
+        <SingleImageHarness
+          src="blob:qapp-result-owned-elsewhere"
+          options={{ sourceFile, fileName: sourceFile.name }}
+          onComplete={onComplete}
+        />
+      )
+
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem | null]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(createObjectURL).toHaveBeenCalledWith(sourceFile)
+      expect(imageItem?.src).toBe('blob:canvas-owned-result')
+      expect(imageItem?.sourceFile).toBe(sourceFile)
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+    } finally {
+      window.Image = originalImageCtor
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        value: originalCreateObjectURL
+      })
+      Object.defineProperty(URL, 'revokeObjectURL', {
+        configurable: true,
+        value: originalRevokeObjectURL
+      })
+    }
+  })
+
+  it('uses an authorized local-media URL for file-backed QuickApp results', async () => {
+    const originalImageCtor = window.Image
+    const sourceFile = new File([new Uint8Array([9, 10, 11, 12])], 'stable-result.png', {
+      type: 'image/png'
+    })
+    authorizeCanvasLocalMediaSourceUrlMock.mockResolvedValue(
+      'local-media:///C:/outputs/stable-result.png'
+    )
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'width', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'height', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set() {
+          queueMicrotask(() => image.onload?.(new Event('load')))
+        }
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const onComplete = vi.fn()
+      render(
+        <SingleImageHarness
+          src="blob:qapp-result-owned-elsewhere"
+          options={{ sourceFile, fileName: sourceFile.name }}
+          onComplete={onComplete}
+        />
+      )
+
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem | null]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+
+      expect(authorizeCanvasLocalMediaSourceUrlMock).toHaveBeenCalledWith(sourceFile)
+      expect(imageItem?.src).toBe('local-media:///C:/outputs/stable-result.png')
+      expect(imageItem?.sourceFile).toBe(sourceFile)
+    } finally {
+      window.Image = originalImageCtor
+    }
+  })
+
+  it('falls back to a canvas-owned object URL when local-media authorization fails', async () => {
+    const originalImageCtor = window.Image
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const sourceFile = new File([new Uint8Array([13, 14, 15, 16])], 'fallback-result.png', {
+      type: 'image/png'
+    })
+    authorizeCanvasLocalMediaSourceUrlMock.mockRejectedValue(new Error('authorization failed'))
+    const createObjectURL = vi.fn(() => 'blob:canvas-fallback-result')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL
+    })
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'width', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'height', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set() {
+          queueMicrotask(() => image.onload?.(new Event('load')))
+        }
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const onComplete = vi.fn()
+      render(
+        <SingleImageHarness
+          src="blob:qapp-result-owned-elsewhere"
+          options={{ sourceFile, fileName: sourceFile.name }}
+          onComplete={onComplete}
+        />
+      )
+
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem | null]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+
+      expect(createObjectURL).toHaveBeenCalledWith(sourceFile)
+      expect(imageItem?.src).toBe('blob:canvas-fallback-result')
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+    } finally {
+      window.Image = originalImageCtor
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        value: originalCreateObjectURL
+      })
+      Object.defineProperty(URL, 'revokeObjectURL', {
+        configurable: true,
+        value: originalRevokeObjectURL
+      })
+    }
+  })
+
+  it('takes ownership of source-file-backed blob URLs during batch intake', async () => {
+    const originalImageCtor = window.Image
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const sourceFile = new File([new Uint8Array([5, 6, 7, 8])], 'batch-result.png', {
+      type: 'image/png'
+    })
+    const createObjectURL = vi.fn(() => 'blob:canvas-owned-batch-result')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL
+    })
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'width', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'height', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set() {
+          queueMicrotask(() => image.onload?.(new Event('load')))
+        }
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const onComplete = vi.fn()
+      const sources: CanvasImageSourceInput[] = [
+        {
+          src: 'blob:qapp-batch-result-owned-elsewhere',
+          sourceFile,
+          fileName: sourceFile.name,
+          sourceWidthHint: 320,
+          sourceHeightHint: 180
+        }
+      ]
+      render(<LargeImageBatchHarness sources={sources} onComplete={onComplete} />)
+
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem[]]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(createObjectURL).toHaveBeenCalledWith(sourceFile)
+      expect(imageItem?.src).toBe('blob:canvas-owned-batch-result')
+      expect(imageItem?.sourceFile).toBe(sourceFile)
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+    } finally {
+      window.Image = originalImageCtor
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        value: originalCreateObjectURL
+      })
+      Object.defineProperty(URL, 'revokeObjectURL', {
+        configurable: true,
+        value: originalRevokeObjectURL
+      })
+    }
+  })
+
   it('preserves the original source File blob on the canvas image item', async () => {
     const originalImageCtor = window.Image
     window.Image = function MockImage() {
@@ -1366,7 +1615,7 @@ describe('useCanvasAssetIntake', () => {
     render(<AssetIntakeHarness file={file} resolveCurrentItemCount={() => 3} />)
 
     await waitFor(() => {
-      expect(importCanvasFileMock).toHaveBeenCalledWith(file)
+      expect(importCanvasFileMock).toHaveBeenCalledWith(file, 'canvas-1')
     })
 
     expect(canvasStorage.rememberCanvasSaveTargetPath).not.toHaveBeenCalled()

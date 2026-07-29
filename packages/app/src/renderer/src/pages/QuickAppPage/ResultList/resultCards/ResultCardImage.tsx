@@ -338,6 +338,16 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
             resultSourceWidth ?? getPositiveImageDimension(e.currentTarget.naturalWidth)
           const sourceHeight =
             resultSourceHeight ?? getPositiveImageDimension(e.currentTarget.naturalHeight)
+          if (result.sourceBlob && typeof File !== 'undefined') {
+            const dragFileName = result.fileItem.filename || 'quickapp-image.png'
+            const dragSourceFile =
+              result.sourceBlob instanceof File && result.sourceBlob.name === dragFileName
+                ? result.sourceBlob
+                : new File([result.sourceBlob], dragFileName, {
+                    type: result.sourceBlob.type || 'image/png'
+                  })
+            e.dataTransfer.items?.add?.(dragSourceFile)
+          }
           const payload = JSON.stringify({
             objectUrl: result.objectUrl,
             promptId: result.promptId,

@@ -597,8 +597,8 @@ Return shape:
         }
       })
       const singleDragImageItem =
-        dragManifestItems.length === 1 && dragManifestItems[0]?.type === 'image'
-          ? (dragManifestItems[0] as CanvasImageItem)
+        attachmentSourceItems.length === 1 && attachmentSourceItems[0]?.type === 'image'
+          ? (attachmentSourceItems[0] as CanvasImageItem)
           : null
       const hy3dSourceItem =
         targetItems.length === 1 && targetItems[0]?.type === 'model3d'
@@ -621,11 +621,17 @@ Return shape:
             )
           : undefined
 
+      const singleDragAttachment =
+        singleDragImageItem && attachments.length === 1 && attachments[0]?.type === 'image'
+          ? attachments[0]
+          : null
+      const singleDragImageUrl = singleDragAttachment?.url || singleDragImageItem?.src
+
       return {
         objectUrl:
-          singleDragImageItem?.src || (options?.objectUrl?.trim() ? options.objectUrl : undefined),
+          singleDragImageUrl || (options?.objectUrl?.trim() ? options.objectUrl : undefined),
         previewImageUrl:
-          singleDragImageItem?.src ||
+          singleDragImageUrl ||
           (options?.previewImageUrl?.trim() ? options.previewImageUrl : undefined),
         promptId: options?.promptId?.trim() ? options.promptId : undefined,
         sourceCanvasId: canvasId,

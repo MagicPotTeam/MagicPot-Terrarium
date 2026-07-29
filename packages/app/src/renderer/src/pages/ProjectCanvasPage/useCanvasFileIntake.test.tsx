@@ -716,7 +716,7 @@ describe('useCanvasFileIntake', () => {
       await Promise.resolve()
       expect(addImageToCanvas).toHaveBeenCalledTimes(1)
       expect(addImageToCanvas).toHaveBeenCalledWith(
-        '/tmp/agent-reference.png',
+        'local-media:///tmp/agent-reference.png',
         expect.objectContaining({
           clientX: 320,
           clientY: 240,
@@ -724,8 +724,47 @@ describe('useCanvasFileIntake', () => {
         })
       )
     } finally {
+      await vi.runOnlyPendingTimersAsync()
       vi.useRealTimers()
     }
+  })
+
+  it('uses the matching QuickApp drag file as the stable canvas source', async () => {
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
+    const sourceFile = new File(['generated-image'], 'generated.png', { type: 'image/png' })
+    render(<FileIntakeHarness addTextToCanvas={vi.fn()} addImageToCanvas={addImageToCanvas} />)
+
+    const quickAppPayload = JSON.stringify({
+      objectUrl: 'blob:quickapp-result-owned-elsewhere',
+      fileItem: { filename: sourceFile.name },
+      sourceWidth: 1024,
+      sourceHeight: 768
+    })
+    const dropEvent = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+    Object.defineProperty(dropEvent, 'clientX', { configurable: true, value: 320 })
+    Object.defineProperty(dropEvent, 'clientY', { configurable: true, value: 240 })
+    Object.defineProperty(dropEvent, 'dataTransfer', {
+      configurable: true,
+      value: {
+        files: [sourceFile],
+        items: [],
+        getData: vi.fn((type: string) =>
+          type === 'application/x-qapp-image' ? quickAppPayload : ''
+        )
+      }
+    })
+    screen.getByTestId('canvas-paste-surface').dispatchEvent(dropEvent)
+
+    await waitFor(() => expect(addImageToCanvas).toHaveBeenCalledTimes(1))
+    expect(addImageToCanvas.mock.calls[0]?.[0]).toBe('blob:quickapp-result-owned-elsewhere')
+    expect(addImageToCanvas.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        sourceFile,
+        fileName: sourceFile.name,
+        sourceWidthHint: 1024,
+        sourceHeightHint: 768
+      })
+    )
   })
 
   it('prefers the internal quick-app image payload over placeholder drop files', async () => {

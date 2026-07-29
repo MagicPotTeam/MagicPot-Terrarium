@@ -9,7 +9,7 @@ type ElectronFileBridge = {
   authorizeLocalMediaFile?: (file: File) => Promise<string>
 }
 
-export function getElectronCanvasFilePath(file: File): string {
+export function getElectronCanvasFilePath(file: Blob): string {
   const legacyPath = (file as ElectronCanvasFile).path
   if (typeof legacyPath === 'string' && legacyPath.trim()) {
     return legacyPath
@@ -20,15 +20,19 @@ export function getElectronCanvasFilePath(file: File): string {
   }
 
   try {
-    const bridge = (window as Window & { electronFile?: ElectronFileBridge }).electronFile
-    const bridgedPath = bridge?.getPathForFile?.(file)
+    const bridgeWindow = window as Window & {
+      electronFile?: ElectronFileBridge
+      electronAPI?: ElectronFileBridge
+    }
+    const bridge = bridgeWindow.electronFile || bridgeWindow.electronAPI
+    const bridgedPath = file instanceof File ? bridge?.getPathForFile?.(file) : ''
     return typeof bridgedPath === 'string' ? bridgedPath : ''
   } catch {
     return ''
   }
 }
 
-export function getCanvasLocalMediaSourceUrl(file: File): string | null {
+export function getCanvasLocalMediaSourceUrl(file: Blob): string | null {
   const filePath = getElectronCanvasFilePath(file).replace(/\\/g, '/')
   if (!filePath) {
     return null

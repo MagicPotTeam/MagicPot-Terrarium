@@ -1,4 +1,4 @@
-﻿// packages/app/src/renderer/src/pages/ProjectCanvasPage/canvasStorage.ts
+// packages/app/src/renderer/src/pages/ProjectCanvasPage/canvasStorage.ts
 // Canvas persistence (IndexedDB) plus export/import helpers.
 import type {
   CanvasFileItem,
@@ -17,6 +17,7 @@ import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
 import { sanitizeFilePart } from './canvasExportNamingUtils'
 import { extractMimeTypeFromSourceUrl } from './canvasImageMetadata'
+import { getElectronCanvasFilePath } from './canvasLocalFileSource'
 
 const DB_NAME = 'magicpot-canvas'
 const DB_VERSION = 2 // bumped for new blob store
@@ -207,6 +208,7 @@ type CanvasFileRestoreOptions = {
   restoreQAppState?: boolean
   persistEmbeddedAssetsToIndexedDb?: boolean
   canvasBaseDir?: string
+  storeKey?: string
 }
 
 type BlobPersistableCanvasItem =
@@ -1264,32 +1266,8 @@ export async function saveCanvasItems(
 
     await saveBlobEntries(db, storeKey, allBlobEntries)
 
-    // 2. Remove blob entries that are no longer referenced.
-    const currentBlobIds = new Set<string>([
-      ...blobItems.map((item) => item.id),
-      ...persistedTextureEntries.map((entry) => entry.key)
-    ])
-    try {
-      const allBlobKeys = await new Promise<IDBValidKey[]>((resolve, reject) => {
-        const tx = db.transaction(BLOB_STORE_NAME, 'readonly')
-        const store = tx.objectStore(BLOB_STORE_NAME)
-        const req = store.getAllKeys()
-        req.onsuccess = () => resolve(req.result)
-        req.onerror = () =>
-          rejectCanvasStorageError(reject, 'blob key enumeration request', req.error)
-      })
-      for (const key of allBlobKeys) {
-        const k = key as string
-        const logicalKey = getLogicalCanvasBlobKey(storeKey, k)
-        if (logicalKey === null) {
-          continue
-        }
-        if (currentBlobIds.has(logicalKey)) continue
-        await deleteBlobData(db, k)
-      }
-    } catch {
-      // getAllKeys may not be available in very old environments, ignore
-    }
+    // Keep stale entries until a later successful snapshot/explicit clear. Deleting them before
+    // metadata commits creates a crash window where the previous snapshot references missing blobs.
 
     // 3. Save canvas metadata.
     const tx = db.transaction(STORE_NAME, 'readwrite')
@@ -2105,7 +2083,8 @@ async function validateProjectCanvasAssetRefs(
 }
 
 async function persistCanvasFileEmbeddedAssets(
-  blobs: Record<string, EmbeddedBlob> | undefined
+  blobs: Record<string, EmbeddedBlob> | undefined,
+  storeKey: string = KEY
 ): Promise<void> {
   if (!blobs || Object.keys(blobs).length === 0) {
     return
@@ -2118,7 +2097,7 @@ async function persistCanvasFileEmbeddedAssets(
       data: base64ToArrayBuffer(embedded.base64),
       mimeType: embedded.mimeType
     }))
-    await saveBlobEntries(db, KEY, entries)
+    await saveBlobEntries(db, storeKey, entries)
     db.close()
     console.log(`[Canvas Import] Persisted ${entries.length} embedded assets to IndexedDB`)
   } catch (error) {
@@ -2137,7 +2116,8 @@ async function restoreCanvasFileData(
   const {
     restoreQAppState = true,
     persistEmbeddedAssetsToIndexedDb = true,
-    canvasBaseDir
+    canvasBaseDir,
+    storeKey = KEY
   } = options
   const storageMode = resolveCanvasFileStorageMode(data)
 
@@ -2164,7 +2144,7 @@ async function restoreCanvasFileData(
   )
 
   if (persistEmbeddedAssetsToIndexedDb) {
-    await persistCanvasFileEmbeddedAssets(data.blobs)
+    await persistCanvasFileEmbeddedAssets(data.blobs, storeKey)
   }
 
   if (storageMode === 'project' && !canvasBaseDir) {
@@ -2309,7 +2289,10 @@ export async function exportCanvasFileAsStandalone(
   )
 }
 
-export async function importCanvasFile(file: File): Promise<{
+export async function importCanvasFile(
+  file: File,
+  targetStoreKey: string = KEY
+): Promise<{
   items: CanvasItem[]
   groups: CanvasGroup[]
   groupBranches: CanvasGroupBranch[]
@@ -2318,7 +2301,7 @@ export async function importCanvasFile(file: File): Promise<{
 }> {
   const text = await file.text()
   const data = JSON.parse(text) as CanvasFileData
-  const canvasFilePath = (file as File & { path?: string }).path
+  const canvasFilePath = getElectronCanvasFilePath(file)
   const canvasBaseDir =
     canvasFilePath && window.path && typeof window.path.dirname === 'function'
       ? window.path.dirname(canvasFilePath)
@@ -2326,6 +2309,7 @@ export async function importCanvasFile(file: File): Promise<{
   return await restoreCanvasFileData(data, {
     restoreQAppState: false,
     persistEmbeddedAssetsToIndexedDb: true,
+    storeKey: targetStoreKey,
     canvasBaseDir
   })
 }

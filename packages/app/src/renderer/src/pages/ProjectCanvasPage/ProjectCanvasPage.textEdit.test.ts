@@ -151,17 +151,14 @@ describe('resolveDroppedAgentImageDataUrl', () => {
         type === 'application/x-ai-image' ? 'local-media:///C:/demo/image.png' : '',
       files: createFileList(file)
     } as unknown as Pick<DataTransfer, 'getData' | 'files'>
-    const createObjectURLSpy = vi
-      .spyOn(URL, 'createObjectURL')
-      .mockReturnValueOnce('blob:image-file')
-
     await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
-      src: 'blob:image-file',
+      src: 'local-media:///C:/demo/image.png',
       fileName: 'image.png',
       sizeBytes: 11,
+      sourceWidthHint: undefined,
+      sourceHeightHint: undefined,
       sourceFile: file
     })
-    expect(createObjectURLSpy).toHaveBeenCalledWith(file)
   })
 
   it('uses the normalized Agent URL when no image file is present', async () => {
@@ -193,16 +190,13 @@ describe('resolveDroppedAgentImageDataUrl', () => {
           : '',
       files: createFileList(file)
     } as unknown as Pick<DataTransfer, 'getData' | 'files'>
-    const createObjectURLSpy = vi
-      .spyOn(URL, 'createObjectURL')
-      .mockReturnValueOnce('blob:qapp-file')
-
     await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
-      src: 'blob:qapp-file',
+      src: 'blob:qapp-image',
       fileName: 'result.png',
       sizeBytes: 10,
+      sourceWidthHint: undefined,
+      sourceHeightHint: undefined,
       sourceFile: file
     })
-    expect(createObjectURLSpy).toHaveBeenCalledWith(file)
   })
 })

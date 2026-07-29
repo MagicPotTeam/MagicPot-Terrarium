@@ -4,6 +4,7 @@ import SvgIcon from '@mui/material/SvgIcon'
 import type { SvgIconProps } from '@mui/material/SvgIcon'
 import type { AdobeBridgeTarget } from '@shared/api/svcAdobeBridge'
 import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
+import { getCanvasLocalMediaSourceUrl } from './canvasLocalFileSource'
 import { AGENT_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
 import type { OfficeFileNodeData } from './officePreviewUtils'
 export {
@@ -317,11 +318,20 @@ type QuickAppImageDragPayload = {
 const getPositiveFiniteImageHint = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
 
-const resolveDroppedImageFile = (dataTransfer: Pick<DataTransfer, 'files'>): File | undefined =>
-  Array.from(dataTransfer.files ?? []).find((file) => {
+const resolveDroppedImageFile = (
+  dataTransfer: Pick<DataTransfer, 'files'>,
+  expectedFileName?: string
+): File | undefined => {
+  const imageFiles = Array.from(dataTransfer.files ?? []).filter((file) => {
     const type = (file.type || '').toLowerCase()
     return type.startsWith('image/') || IMAGE_DROP_FILE_NAME_PATTERN.test(file.name || '')
   })
+  const normalizedExpectedFileName = expectedFileName?.trim()
+  if (normalizedExpectedFileName) {
+    return imageFiles.find((file) => file.name.trim() === normalizedExpectedFileName)
+  }
+  return imageFiles[0]
+}
 
 const resolveQuickAppImageDragData = (rawPayload: string): ResolvedDroppedAgentImageData | null => {
   if (!rawPayload.trim()) return null
@@ -395,26 +405,23 @@ export async function resolveDroppedAgentImageDataUrl(
   const quickAppImagePayload = dataTransfer.getData(QAPP_IMAGE_DRAG_MIME).trim()
   if (!agentImageUrl && !quickAppImagePayload) return null
 
-  const droppedImageFile = resolveDroppedImageFile(dataTransfer)
   const quickAppImageData = resolveQuickAppImageDragData(quickAppImagePayload)
-  if (droppedImageFile && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
-    const droppedFileName = droppedImageFile.name?.trim()
-    if (
-      quickAppImageData &&
-      (!droppedFileName ||
-        !quickAppImageData.fileName ||
-        quickAppImageData.fileName.trim() !== droppedFileName)
-    ) {
-      return quickAppImageData
-    }
-
+  const droppedImageFile = resolveDroppedImageFile(dataTransfer, quickAppImageData?.fileName)
+  if (droppedImageFile) {
+    const normalizedAgentUrl = normalizeLocalMediaUrl(agentImageUrl)
     return {
-      src: URL.createObjectURL(droppedImageFile),
-      fileName: droppedImageFile.name || undefined,
+      src:
+        quickAppImageData?.src ||
+        normalizedAgentUrl ||
+        getCanvasLocalMediaSourceUrl(droppedImageFile) ||
+        '',
+      fileName: droppedImageFile.name || quickAppImageData?.fileName,
       sizeBytes:
         Number.isFinite(droppedImageFile.size) && droppedImageFile.size >= 0
           ? droppedImageFile.size
           : undefined,
+      sourceWidthHint: quickAppImageData?.sourceWidthHint,
+      sourceHeightHint: quickAppImageData?.sourceHeightHint,
       sourceFile: droppedImageFile
     }
   }

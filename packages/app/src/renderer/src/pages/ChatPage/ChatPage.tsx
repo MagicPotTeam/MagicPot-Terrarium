@@ -3524,13 +3524,43 @@ const ChatPage: React.FC<ChatPageProps> = ({
             sourceWidth,
             sourceHeight
           } = internalPayload
+          const draggedImageFiles = Array.from(e.dataTransfer.files || []).filter((file) =>
+            file.type.startsWith('image/')
+          )
+          const expectedDraggedFileName = internalPayload.fileItem?.filename?.trim()
+          const draggedImageFile = expectedDraggedFileName
+            ? draggedImageFiles.find((file) => file.name.trim() === expectedDraggedFileName)
+            : draggedImageFiles[0]
           const nextAttachments: ChatAttachment[] = [...attachments]
           const hasImageAttachment = nextAttachments.some(
             (attachment) => attachment.type === 'image'
           )
           const droppedText = textContent?.trim()
           const droppedHiddenText = hiddenTextContent?.trim()
-          if (!hasImageAttachment && previewImageUrl) {
+          if (!hasImageAttachment && draggedImageFile) {
+            const draggedFileAttachment = await buildChatAttachmentFromDroppedFile(
+              draggedImageFile,
+              {
+                relativePath: draggedImageFile.name
+              }
+            )
+            const materializedDraggedFileAttachment =
+              (await materializeInternalImageDragAttachment(draggedFileAttachment)) ||
+              draggedFileAttachment
+            if (materializedDraggedFileAttachment.url !== draggedFileAttachment.url) {
+              revokeBlobUrl(draggedFileAttachment.url)
+            }
+            nextAttachments.push({
+              ...materializedDraggedFileAttachment,
+              metadata: {
+                ...(materializedDraggedFileAttachment.metadata || {}),
+                ...(promptId ? { promptId } : {}),
+                ...(internalPayload.fileItem ? { fileItem: internalPayload.fileItem } : {})
+              },
+              sourceWidth: sourceWidth ?? materializedDraggedFileAttachment.sourceWidth,
+              sourceHeight: sourceHeight ?? materializedDraggedFileAttachment.sourceHeight
+            })
+          } else if (!hasImageAttachment && previewImageUrl) {
             nextAttachments.push({
               type: 'image',
               url: previewImageUrl,
