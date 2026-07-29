@@ -210,10 +210,10 @@ export const createElectronRequestFetch = (electronRequest: ElectronRequestFacto
         fail(request.signal.reason || new DOMException('The operation was aborted.', 'AbortError'))
       }
 
-      request.headers.forEach((value, name) => clientRequest.setHeader(name, value))
-      if (body && !request.headers.has('content-length')) {
-        clientRequest.setHeader('content-length', String(body.byteLength))
-      }
+      request.headers.forEach((value, name) => {
+        if (name.toLowerCase() === 'content-length') return
+        clientRequest.setHeader(name, value)
+      })
 
       clientRequest.once('error', fail)
       clientRequest.once('abort', () =>

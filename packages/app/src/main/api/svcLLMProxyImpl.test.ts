@@ -169,7 +169,7 @@ describe('createElectronRequestFetch', () => {
     expect(writtenBody?.toString()).toBe(payload)
     expect(headers.get('content-type')).toBe('application/json')
     expect(headers.get('authorization')).toBe('Bearer token')
-    expect(headers.get('content-length')).toBe(String(Buffer.byteLength(payload)))
+    expect(headers.has('content-length')).toBe(false)
     expect(response.status).toBe(200)
     expect(response.headers.get('x-test')).toBe('ok')
     await expect(response.json()).resolves.toEqual({ ok: true })
