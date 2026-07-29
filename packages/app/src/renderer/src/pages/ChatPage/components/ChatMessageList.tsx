@@ -198,9 +198,41 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     sidecarExportEntries.length > 1
       ? (sidecarExportEntries[sidecarExportEntries.length - 1]?.assistantMessageIndex ?? null)
       : null
+  const editScrollPositionRef = React.useRef<{
+    scrollTop: number
+    scrollLeft: number
+  } | null>(null)
+
+  const handleStartEditing = React.useCallback(
+    (index: number, content: string) => {
+      const scrollContainer = chatContainerRef.current
+      editScrollPositionRef.current = scrollContainer
+        ? {
+            scrollTop: scrollContainer.scrollTop,
+            scrollLeft: scrollContainer.scrollLeft
+          }
+        : null
+      onSetEditingIndex(index)
+      onSetEditingContent(content)
+    },
+    [chatContainerRef, onSetEditingContent, onSetEditingIndex]
+  )
+
+  React.useLayoutEffect(() => {
+    if (editingMessageIndex === null) return
+
+    const scrollContainer = chatContainerRef.current
+    const savedPosition = editScrollPositionRef.current
+    if (!scrollContainer || !savedPosition) return
+
+    scrollContainer.scrollTop = savedPosition.scrollTop
+    scrollContainer.scrollLeft = savedPosition.scrollLeft
+  }, [chatContainerRef, editingMessageIndex])
+
   return (
     <Box
       ref={chatContainerRef}
+      data-chat-scroll-container="true"
       data-testid="chat-message-list"
       sx={{
         flex: 1,
@@ -271,6 +303,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     truncatedMessages
                   )
                 }}
+                savedChatScrollPositionRef={editScrollPositionRef}
                 isLight={isLight}
               />
             ) : (
@@ -279,8 +312,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                 index={index}
                 isLight={isLight}
                 onEdit={() => {
-                  onSetEditingIndex(index)
-                  onSetEditingContent(message.content || '')
+                  handleStartEditing(index, message.content || '')
                 }}
                 onPreviewImage={onPreviewImage}
                 onImageContextMenu={onImageContextMenu}
@@ -847,10 +879,99 @@ const UserMessageEditForm: React.FC<{
   onSetEditingContent: (content: string) => void
   onCancel: () => void
   onSubmit: (content: string) => void
+  savedChatScrollPositionRef: React.MutableRefObject<{
+    scrollTop: number
+    scrollLeft: number
+  } | null>
   isLight: boolean
-}> = ({ message, editingContent, onSetEditingContent, onCancel, onSubmit, isLight }) => {
+}> = ({
+  message,
+  editingContent,
+  onSetEditingContent,
+  onCancel,
+  onSubmit,
+  savedChatScrollPositionRef,
+  isLight
+}) => {
+  const editorRef = React.useRef<HTMLTextAreaElement | null>(null)
+  const initialCaretPositionRef = React.useRef(editingContent.length)
+  const hasPositionedInitialCaretRef = React.useRef(false)
+  const pendingSelectionRef = React.useRef<{
+    start: number
+    end: number
+    scrollTop: number
+    scrollLeft: number
+    chatScrollTop: number | null
+    chatScrollLeft: number | null
+    value: string
+  } | null>(null)
   const userBubbleBg = isLight ? '#eee7ff' : '#6f5bd6'
   const userBubbleText = isLight ? '#2f235f' : '#ffffff'
+
+  React.useLayoutEffect(() => {
+    const editor = editorRef.current
+    if (!editor) return
+
+    const chatScrollContainer = editor.closest(
+      '[data-chat-scroll-container="true"]'
+    ) as HTMLElement | null
+    const savedChatScrollPosition = savedChatScrollPositionRef.current
+    const restoreSavedChatScrollPosition = () => {
+      if (!chatScrollContainer || !savedChatScrollPosition) return
+      chatScrollContainer.scrollTop = savedChatScrollPosition.scrollTop
+      chatScrollContainer.scrollLeft = savedChatScrollPosition.scrollLeft
+    }
+    const pendingSelection = pendingSelectionRef.current
+    if (pendingSelection) {
+      pendingSelectionRef.current = null
+      editor.setSelectionRange(pendingSelection.start, pendingSelection.end)
+      editor.scrollTop = pendingSelection.scrollTop
+      editor.scrollLeft = pendingSelection.scrollLeft
+      if (
+        chatScrollContainer &&
+        pendingSelection.chatScrollTop !== null &&
+        pendingSelection.chatScrollLeft !== null
+      ) {
+        chatScrollContainer.scrollTop = pendingSelection.chatScrollTop
+        chatScrollContainer.scrollLeft = pendingSelection.chatScrollLeft
+      }
+      return
+    }
+
+    if (!hasPositionedInitialCaretRef.current) {
+      hasPositionedInitialCaretRef.current = true
+      const caretPosition = initialCaretPositionRef.current
+      restoreSavedChatScrollPosition()
+      editor.focus({ preventScroll: true })
+      editor.setSelectionRange(caretPosition, caretPosition)
+      editor.scrollTop = editor.scrollHeight
+      restoreSavedChatScrollPosition()
+      const frame = window.requestAnimationFrame(restoreSavedChatScrollPosition)
+      return () => window.cancelAnimationFrame(frame)
+    }
+
+    return undefined
+  }, [editingContent, savedChatScrollPositionRef])
+
+  const handleEditorChange = React.useCallback(
+    (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+      const editor = event.currentTarget
+      const chatScrollContainer = editor.closest(
+        '[data-chat-scroll-container="true"]'
+      ) as HTMLElement | null
+      pendingSelectionRef.current = {
+        start: editor.selectionStart,
+        end: editor.selectionEnd,
+        scrollTop: editor.scrollTop,
+        scrollLeft: editor.scrollLeft,
+        chatScrollTop: chatScrollContainer?.scrollTop ?? null,
+        chatScrollLeft: chatScrollContainer?.scrollLeft ?? null,
+        value: editor.value
+      }
+      onSetEditingContent(editor.value)
+    },
+    [onSetEditingContent]
+  )
 
   return (
     <Box sx={{ px: 2, mb: 2, display: 'flex', justifyContent: 'flex-end' }}>
@@ -858,9 +979,9 @@ const UserMessageEditForm: React.FC<{
         <TextField
           fullWidth
           multiline
-          autoFocus
+          inputRef={editorRef}
           value={editingContent}
-          onChange={(e) => onSetEditingContent(e.target.value)}
+          onChange={handleEditorChange}
           onKeyDown={(e) => {
             if (e.key === 'Escape') onCancel()
           }}

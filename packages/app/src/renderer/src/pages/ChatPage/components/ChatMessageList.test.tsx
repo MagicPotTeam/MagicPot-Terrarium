@@ -1,5 +1,6 @@
 import React from 'react'
 import { fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ChatMessageList from './ChatMessageList'
@@ -42,6 +43,10 @@ const buildChatMessageList = (
     editingContent?: string
     onSendEditedMessage?: OnSendEditedMessage
     onDownloadAttachment?: OnDownloadAttachment
+    onSetEditingIndex?: (index: number | null) => void
+    onSetEditingContent?: (content: string) => void
+    chatContainerRef?: React.RefObject<HTMLDivElement | null>
+    messagesEndRef?: React.RefObject<HTMLDivElement | null>
   }
 ) => (
   <ThemeProvider theme={createTheme()}>
@@ -51,15 +56,15 @@ const buildChatMessageList = (
       isLoading={options?.isLoading ?? false}
       editingMessageIndex={options?.editingMessageIndex ?? null}
       editingContent={options?.editingContent ?? ''}
-      onSetEditingIndex={vi.fn()}
-      onSetEditingContent={vi.fn()}
+      onSetEditingIndex={options?.onSetEditingIndex ?? vi.fn()}
+      onSetEditingContent={options?.onSetEditingContent ?? vi.fn()}
       onSendEditedMessage={options?.onSendEditedMessage ?? vi.fn<OnSendEditedMessage>()}
       onPreviewImage={vi.fn()}
       onImageContextMenu={vi.fn()}
       onDownloadAttachment={options?.onDownloadAttachment ?? vi.fn<OnDownloadAttachment>()}
       onSendModelToDcc={vi.fn()}
-      chatContainerRef={React.createRef<HTMLDivElement>()}
-      messagesEndRef={React.createRef<HTMLDivElement>()}
+      chatContainerRef={options?.chatContainerRef ?? React.createRef<HTMLDivElement>()}
+      messagesEndRef={options?.messagesEndRef ?? React.createRef<HTMLDivElement>()}
     />
   </ThemeProvider>
 )
@@ -73,6 +78,10 @@ const renderChatMessageList = (
     editingContent?: string
     onSendEditedMessage?: OnSendEditedMessage
     onDownloadAttachment?: OnDownloadAttachment
+    onSetEditingIndex?: (index: number | null) => void
+    onSetEditingContent?: (content: string) => void
+    chatContainerRef?: React.RefObject<HTMLDivElement | null>
+    messagesEndRef?: React.RefObject<HTMLDivElement | null>
   }
 ) => render(buildChatMessageList(currentSession, options))
 
@@ -249,6 +258,112 @@ describe('ChatMessageList text selection and reply actions', () => {
     expect(notifySuccessMock).toHaveBeenCalledWith('Reply copied')
     expect(screen.getByLabelText('Reply copied')).toBeInTheDocument()
     expect(screen.getByTestId('copy-done-icon')).toBeInTheDocument()
+  })
+
+  it('keeps the Agent thread scrollbar fixed when clicking edit on a long prompt', () => {
+    const content = Array.from({ length: 80 }, (_, index) => `Line ${index + 1}`).join(
+      String.fromCharCode(10)
+    )
+    const session: ChatSession = {
+      id: 'agent-thread-edit-scroll',
+      title: 'Agent thread edit scroll',
+      messages: [{ role: 'user', content }]
+    }
+    const chatContainerRef = React.createRef<HTMLDivElement>()
+    const messagesEndRef = React.createRef<HTMLDivElement>()
+
+    const Harness = () => {
+      const [editingMessageIndex, setEditingMessageIndex] = React.useState<number | null>(null)
+      const [editingContent, setEditingContent] = React.useState('')
+
+      return buildChatMessageList(session, {
+        active: true,
+        editingMessageIndex,
+        editingContent,
+        onSetEditingIndex: setEditingMessageIndex,
+        onSetEditingContent: setEditingContent,
+        chatContainerRef,
+        messagesEndRef
+      })
+    }
+
+    const focusSpy = vi.spyOn(window.HTMLElement.prototype, 'focus').mockImplementation(function (
+      this: HTMLElement
+    ) {
+      const scrollContainer = this.closest(
+        '[data-chat-scroll-container="true"]'
+      ) as HTMLElement | null
+      if (!scrollContainer) return
+      scrollContainer.scrollTop = 0
+      scrollContainer.scrollLeft = 0
+    })
+
+    try {
+      render(<Harness />)
+      const scrollContainer = screen.getByTestId('chat-message-list')
+      scrollContainer.scrollTop = 720
+      scrollContainer.scrollLeft = 9
+
+      fireEvent.click(screen.getByRole('button', { name: 'chat.edit_message' }))
+
+      expect(screen.getByRole('textbox')).toBeInTheDocument()
+      expect(focusSpy).toHaveBeenCalled()
+      expect(scrollContainer.scrollTop).toBe(720)
+      expect(scrollContainer.scrollLeft).toBe(9)
+    } finally {
+      focusSpy.mockRestore()
+    }
+  })
+
+  it('keeps a manually moved caret and scroll position while typing near the start', async () => {
+    const user = userEvent.setup()
+    const content = Array.from({ length: 50 }, (_, index) => `Line ${index + 1}`).join(
+      String.fromCharCode(10)
+    )
+    const session: ChatSession = {
+      id: 'session-edit-caret',
+      title: 'Edit caret',
+      messages: [{ role: 'user', content }]
+    }
+    const chatContainerRef = React.createRef<HTMLDivElement>()
+    const messagesEndRef = React.createRef<HTMLDivElement>()
+    const onSetEditingContent = vi.fn()
+
+    const { rerender } = renderChatMessageList(session, {
+      editingMessageIndex: 0,
+      editingContent: content,
+      onSetEditingContent,
+      chatContainerRef,
+      messagesEndRef
+    })
+
+    const editor = screen.getByRole('textbox') as HTMLTextAreaElement
+    const scrollContainer = editor.closest('[data-chat-scroll-container="true"]') as HTMLDivElement
+    expect(editor.selectionStart).toBe(content.length)
+    expect(editor.selectionEnd).toBe(content.length)
+
+    editor.setSelectionRange(0, 0)
+    editor.scrollTop = 0
+    scrollContainer.scrollTop = 320
+
+    await user.type(editor, 'X', { skipClick: true })
+    expect(onSetEditingContent).toHaveBeenLastCalledWith(`X${content}`)
+
+    rerender(
+      buildChatMessageList(session, {
+        editingMessageIndex: 0,
+        editingContent: `X${content}`,
+        onSetEditingContent,
+        chatContainerRef,
+        messagesEndRef
+      })
+    )
+
+    expect(editor.value).toBe(`X${content}`)
+    expect(editor.selectionStart).toBe(1)
+    expect(editor.selectionEnd).toBe(1)
+    expect(editor.scrollTop).toBe(0)
+    expect(scrollContainer.scrollTop).toBe(320)
   })
 
   it('allows resubmitting an edited user message without changing its text', () => {
