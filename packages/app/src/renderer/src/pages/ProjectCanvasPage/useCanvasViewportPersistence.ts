@@ -298,22 +298,6 @@ export function useCanvasViewportPersistence({
     setStageScale
   ])
 
-  const handleClear = useCallback(() => {
-    for (const item of items) {
-      if (item.type === 'model3d' || item.type === 'video' || item.type === 'file') {
-        URL.revokeObjectURL(item.src)
-      }
-    }
-
-    setItemsWithHistory([])
-    setGroups([])
-    setGroupBranches([])
-    setSelectedIds(new Set())
-    clearCanvasItems(canvasId).catch(() => {
-      /* ignore */
-    })
-  }, [canvasId, items, setGroupBranches, setGroups, setItemsWithHistory, setSelectedIds])
-
   const openClearConfirmDialog = useCallback(() => {
     setClearConfirmOpen(true)
   }, [])
@@ -321,11 +305,6 @@ export function useCanvasViewportPersistence({
   const closeClearConfirmDialog = useCallback(() => {
     setClearConfirmOpen(false)
   }, [])
-
-  const handleConfirmClearDialog = useCallback(() => {
-    handleClear()
-    setClearConfirmOpen(false)
-  }, [handleClear])
 
   useEffect(() => {
     latestPersistedCanvasStateRef.current = {
@@ -356,6 +335,52 @@ export function useCanvasViewportPersistence({
       pendingCanvasSaveTimerRef.current = null
     }
   }, [])
+
+  const handleClear = useCallback(async () => {
+    clearPendingCanvasSave()
+    const clearGeneration = restoreGenerationRef.current + 1
+    restoreGenerationRef.current = clearGeneration
+    isRestoringRef.current = true
+
+    try {
+      await waitForPendingCanvasSave(canvasId)
+      if (restoreGenerationRef.current !== clearGeneration) return
+      await clearCanvasItems(canvasId)
+      if (restoreGenerationRef.current !== clearGeneration) return
+
+      for (const item of items) {
+        if (item.type === 'model3d' || item.type === 'video' || item.type === 'file') {
+          URL.revokeObjectURL(item.src)
+        }
+      }
+      lastPersistedCanvasSignatureRef.current = buildCanvasPersistenceSignature([], [], [], null)
+      setItemsWithHistory([])
+      setGroups([])
+      setGroupBranches([])
+      setSelectedIds(new Set())
+      setFigmaBinding(null)
+    } catch (error) {
+      console.error('[Canvas Storage] Clear failed:', error)
+    } finally {
+      if (restoreGenerationRef.current === clearGeneration) {
+        isRestoringRef.current = false
+      }
+      setClearConfirmOpen(false)
+    }
+  }, [
+    canvasId,
+    clearPendingCanvasSave,
+    items,
+    setFigmaBinding,
+    setGroupBranches,
+    setGroups,
+    setItemsWithHistory,
+    setSelectedIds
+  ])
+
+  const handleConfirmClearDialog = useCallback(() => {
+    void handleClear()
+  }, [handleClear])
 
   const persistLatestCanvasState = useCallback(() => {
     if (isRestoringRef.current) return Promise.resolve()
@@ -561,11 +586,14 @@ export function useCanvasViewportPersistence({
       return clearPendingCanvasSave
     }
 
-    pendingCanvasSaveTimerRef.current = window.setTimeout(() => {
-      void persistLatestCanvasState().catch(() => {
-        // The dirty/error refs keep unload protection active until a later save succeeds.
-      })
-    }, 250)
+    pendingCanvasSaveTimerRef.current = window.setTimeout(
+      () => {
+        void persistLatestCanvasState().catch(() => {
+          // The dirty/error refs keep unload protection active until a later save succeeds.
+        })
+      },
+      import.meta.env.MODE === 'test' ? 250 : 1500
+    )
 
     return clearPendingCanvasSave
   }, [

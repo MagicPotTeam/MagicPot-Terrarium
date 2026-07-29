@@ -465,6 +465,74 @@ describe('useCanvasViewportPersistence', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('waits for an in-flight autosave before clearing the canvas', async () => {
+    let resolveSave!: () => void
+    const inFlightSave = new Promise<void>((resolve) => {
+      resolveSave = resolve
+    })
+    mockLoadCanvasItems.mockResolvedValue({
+      items: [],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    mockSaveCanvasItems.mockImplementationOnce(() => inFlightSave)
+
+    const { result } = renderHook(() => {
+      const [items, setItems] = React.useState<CanvasItem[]>([])
+      const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+      const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+      const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+      const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+      const [stageScale, setStageScale] = React.useState(1)
+      const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+
+      const persistence = useCanvasViewportPersistence({
+        config: DEFAULT_CONFIG,
+        canvasId: 'canvas-clear-queue-test',
+        items,
+        groups,
+        groupBranches,
+        selectedIds,
+        figmaBinding,
+        stagePos,
+        stageScale,
+        stageSize: { width: 1280, height: 720 },
+        maxFitStageScale: 2,
+        clampStageScale: (value: number) => value,
+        getCanvasItemsVisualBounds: () => null,
+        hydrateCanvasImageItemForCanvas: vi.fn(async (item) => item),
+        nextZIndexRef: { current: 1 },
+        setItems,
+        setItemsWithHistory: setItems,
+        setGroups,
+        setGroupBranches,
+        setSelectedIds,
+        setStagePos,
+        setStageScale,
+        setFigmaBinding,
+        handleImportFiles: vi.fn(),
+        addModel3DToCanvas: vi.fn(),
+        addVideoToCanvas: vi.fn()
+      })
+
+      return { persistence, setItems }
+    })
+
+    await waitFor(() => expect(mockLoadCanvasItems).toHaveBeenCalled())
+    act(() => result.current.setItems([createImageItem({ id: 'clear-me' })]))
+    await waitFor(() => expect(mockSaveCanvasItems).toHaveBeenCalled())
+
+    act(() => result.current.persistence.handleConfirmClearDialog())
+    await Promise.resolve()
+    expect(mockClearCanvasItems).not.toHaveBeenCalled()
+
+    resolveSave()
+    await waitFor(() =>
+      expect(mockClearCanvasItems).toHaveBeenCalledWith('canvas-clear-queue-test')
+    )
+  })
+
   it('serializes autosaves so an older slow save cannot overwrite newer canvas state', async () => {
     vi.useFakeTimers()
     mockLoadCanvasItems.mockResolvedValue({

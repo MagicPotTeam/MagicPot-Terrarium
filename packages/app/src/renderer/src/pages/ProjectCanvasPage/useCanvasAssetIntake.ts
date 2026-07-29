@@ -10,7 +10,7 @@ import type { ChatAttachment, OCRResult } from '@shared/api/svcLLMProxy'
 import type { FileItem } from '@shared/comfy/types'
 import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
 import { FILE_NODE_DEFAULT_HEIGHT, FILE_NODE_DEFAULT_WIDTH } from './projectCanvasPageShared'
-import { importCanvasFile, rememberCanvasSaveTargetPath } from './canvasStorage'
+import { importCanvasFile } from './canvasStorage'
 import { resolveCanvas3DRenderActivationDelay } from './canvas3DRenderActivation'
 import {
   authorizeCanvasLocalMediaSourceUrl,
@@ -970,14 +970,9 @@ export function useCanvasAssetIntake({
         groupBranches: importedGroupBranches
       })
 
-      const importedFilePath = getElectronCanvasFilePath(file)
-      if (canvasId && importedFilePath && (resolveCurrentItemCount?.() ?? 0) === 0) {
-        rememberCanvasSaveTargetPath(canvasId, importedFilePath)
-      }
-
       return restored
     },
-    [appendImportedCanvasPayload, canvasId, openQuickAppPanel, resolveCurrentItemCount]
+    [appendImportedCanvasPayload, canvasId, openQuickAppPanel]
   )
 
   const handleImportPsdFile = useCallback(

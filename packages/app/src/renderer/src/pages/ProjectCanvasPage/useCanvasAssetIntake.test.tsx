@@ -1586,7 +1586,7 @@ describe('useCanvasAssetIntake', () => {
     }
   })
 
-  it('binds the imported .mpcanvas path as the current save target when opening into an empty canvas', async () => {
+  it('does not bind an imported .mpcanvas as the autosave target for an empty canvas', async () => {
     const file = new File(['{}'], 'opened-file.mpcanvas', {
       type: 'application/json'
     }) as File & { path?: string }
@@ -1597,11 +1597,9 @@ describe('useCanvasAssetIntake', () => {
     render(<AssetIntakeHarness file={file} />)
 
     await waitFor(() => {
-      expect(canvasStorage.rememberCanvasSaveTargetPath).toHaveBeenCalledWith(
-        'canvas-1',
-        'C:\\projects\\opened-file.mpcanvas'
-      )
+      expect(importCanvasFileMock).toHaveBeenCalledWith(file, 'canvas-1')
     })
+    expect(canvasStorage.rememberCanvasSaveTargetPath).not.toHaveBeenCalled()
   })
 
   it('does not replace the current save target when .mpcanvas content is merged into a non-empty canvas', async () => {

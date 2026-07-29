@@ -1134,8 +1134,7 @@ describe('canvasStorage provenance metadata', () => {
 
     const projectCanvasPath = path.win32.join(
       userDataDir,
-      'renderer-state',
-      'project-canvas',
+      'AutoSave',
       '.mirror-fallback-test__mirror-fallback-test',
       'project.mpcanvas'
     )
@@ -1168,7 +1167,7 @@ describe('canvasStorage provenance metadata', () => {
       id: 'image-blob-mirror-1',
       type: 'image',
       fileName: 'generated-image.png',
-      src: 'local-media:///C:/mock-user-data/renderer-state/project-canvas/.mirror-fallback-test__mirror-fallback-test/assets/images/image-blob-mirror-1__generated-image.png'
+      src: 'local-media:///C:/mock-user-data/AutoSave/.mirror-fallback-test__mirror-fallback-test/assets/images/image-blob-mirror-1__generated-image.png'
     })
   })
 
@@ -1251,8 +1250,7 @@ describe('canvasStorage provenance metadata', () => {
 
     const mirroredAssetPath = path.win32.join(
       userDataDir,
-      'renderer-state',
-      'project-canvas',
+      'AutoSave',
       '.local-import-persistence-test__local-import-persistence-test',
       'assets',
       'images',
@@ -1360,8 +1358,7 @@ describe('canvasStorage provenance metadata', () => {
 
     const projectCanvasPath = path.win32.join(
       userDataDir,
-      'renderer-state',
-      'project-canvas',
+      'AutoSave',
       '.unresolved-project-asset-test__unresolved-project-asset-test',
       'project.mpcanvas'
     )
@@ -1695,13 +1692,16 @@ describe('canvasStorage provenance metadata', () => {
     )
 
     const projectCanvasPath = path.win32.join(
-      userDataDir,
-      'renderer-state',
-      'project-canvas',
+      'C:/mock-storage',
+      'AutoSave',
       '.project-crop-cache-test__project-crop-cache-test',
       'project.mpcanvas'
     )
-    const projectCanvasJson = JSON.parse(textFiles.get(projectCanvasPath) || '{}') as {
+    const projectCanvasContent =
+      textFiles.get(projectCanvasPath) ||
+      [...textFiles.entries()].find(([fullPath]) => fullPath.endsWith('project.mpcanvas'))?.[1] ||
+      '{}'
+    const projectCanvasJson = JSON.parse(projectCanvasContent) as {
       items?: Array<{
         src?: string
         crop?: unknown
@@ -1720,17 +1720,7 @@ describe('canvasStorage provenance metadata', () => {
     })
     expect(projectCanvasJson.items?.[0]?.crop).toBeUndefined()
     expect(
-      binaryFiles.has(
-        path.win32.join(
-          userDataDir,
-          'renderer-state',
-          'project-canvas',
-          '.project-crop-cache-test__project-crop-cache-test',
-          'assets',
-          'images',
-          'image-crop-1__photo.jpg'
-        )
-      )
+      [...binaryFiles.keys()].some((fullPath) => fullPath.endsWith('image-crop-1__photo.jpg'))
     ).toBe(true)
 
     Object.defineProperty(globalThis, 'indexedDB', {
@@ -1744,7 +1734,7 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.items[0]).toMatchObject({
       id: 'image-crop-1',
       type: 'image',
-      src: 'local-media:///C:/mock-user-data-crop/renderer-state/project-canvas/.project-crop-cache-test__project-crop-cache-test/assets/images/image-crop-1__photo.jpg',
+      src: 'local-media:///C:/mock-user-data-crop/AutoSave/.project-crop-cache-test__project-crop-cache-test/assets/images/image-crop-1__photo.jpg',
       sourceWidth: 320,
       sourceHeight: 180
     })
@@ -1884,7 +1874,7 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.items).toHaveLength(1)
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       '[Canvas Storage] Project asset missing:',
-      'c:/mock-user-data-missing/renderer-state/project-canvas/.project-missing-test__project-missing-test/assets/images/image-project-missing-1__missing-image.png'
+      'c:/mock-user-data-missing/autosave/.project-missing-test__project-missing-test/assets/images/image-project-missing-1__missing-image.png'
     )
   })
 

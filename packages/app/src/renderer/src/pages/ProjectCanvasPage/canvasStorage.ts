@@ -26,6 +26,8 @@ const BLOB_STORE_NAME = 'canvas-blobs' // Stores binary payloads such as 3D mode
 const BLOB_STORE_KEY_SEPARATOR = '::canvas::'
 const KEY = 'default' // Single-canvas scene; use a fixed key.
 const PROJECT_CANVAS_FILENAME = 'project.mpcanvas'
+const AUTOSAVE_CANVAS_FILENAME = PROJECT_CANVAS_FILENAME
+const AUTOSAVE_PROJECT_LIMIT = 8
 const PROJECT_ASSET_DIRNAME = 'assets'
 const PROJECT_CROPPABLE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
@@ -759,6 +761,17 @@ async function resolveProjectStorageRootPath(): Promise<string | null> {
   }
 }
 
+async function resolveAutoSaveRootPath(): Promise<string | null> {
+  if (!window.api?.svcState) return null
+  try {
+    const response = await window.api.svcState.getUserDataDirectoryState({})
+    return response.state?.autoSaveRoot || null
+  } catch (error) {
+    console.warn('[Canvas Storage] Failed to resolve autosave root:', error)
+    return null
+  }
+}
+
 function resolveProjectStorageDirName(storeKey: string): string {
   const project = getProjectById(storeKey)
   const normalizedStoredDirName = project?.storageDirName
@@ -950,6 +963,49 @@ async function writeProjectAssetFiles(
       })
     })
   )
+}
+
+async function saveAutoSaveCanvasFile(
+  storeKey: string,
+  items: CanvasItem[],
+  groups: CanvasGroup[],
+  groupBranches: CanvasGroupBranch[],
+  figmaBinding: CanvasFigmaBinding | null,
+  blobEntries: readonly ResolvedCanvasBinaryAsset[]
+): Promise<boolean> {
+  if (!window.api?.svcFs || !window.path) return false
+  const autoSaveRoot = await resolveAutoSaveRootPath()
+  if (!autoSaveRoot) return false
+  const projectDir = window.path.join(autoSaveRoot, resolveProjectStorageDirName(storeKey))
+  const assetDir = window.path.join(projectDir, PROJECT_ASSET_DIRNAME)
+  try {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
+    const { canvasFileData, assetEntries } = await buildProjectCanvasFileData(
+      items,
+      projectDir,
+      groups,
+      groupBranches,
+      figmaBinding,
+      blobEntries,
+      storeKey
+    )
+    await writeProjectAssetFiles(assetDir, assetEntries)
+    await window.api.svcFs.writeTextFile({
+      outputPath: projectDir,
+      filename: AUTOSAVE_CANVAS_FILENAME,
+      content: JSON.stringify(canvasFileData)
+    })
+    if (typeof window.api.svcFs.pruneAutoSaveProjects === 'function') {
+      void window.api.svcFs.pruneAutoSaveProjects({
+        currentProjectDirName: resolveProjectStorageDirName(storeKey),
+        maxProjects: AUTOSAVE_PROJECT_LIMIT
+      })
+    }
+    return true
+  } catch (error) {
+    console.warn('[Canvas Storage] Failed to write autosave:', error)
+    return false
+  }
 }
 
 async function saveProjectCanvasFile(
@@ -1148,6 +1204,20 @@ function isMissingMirrorFileError(error: unknown): boolean {
   return error instanceof Error && /file not found/i.test(error.message)
 }
 
+async function loadCanvasItemsFromAutoSaveFile(storeKey: string): Promise<CanvasSnapshot | null> {
+  if (!window.path) return null
+  const autoSaveRoot = await resolveAutoSaveRootPath()
+  if (!autoSaveRoot) return null
+  const projectDir = window.path.join(autoSaveRoot, resolveProjectStorageDirName(storeKey))
+  return readCanvasItemsFromProjectFile(window.path.join(projectDir, AUTOSAVE_CANVAS_FILENAME))
+}
+
+async function loadCanvasFallback(storeKey: string): Promise<CanvasSnapshot | null> {
+  return (
+    (await loadCanvasItemsFromAutoSaveFile(storeKey)) || loadCanvasItemsFromProjectFile(storeKey)
+  )
+}
+
 async function loadCanvasItemsFromProjectFile(storeKey: string): Promise<CanvasSnapshot | null> {
   const location = await getProjectCanvasLocation(storeKey)
   if (!location) {
@@ -1304,7 +1374,7 @@ export async function saveCanvasItems(
       }
     })
 
-    await saveProjectCanvasFile(
+    await saveAutoSaveCanvasFile(
       storeKey,
       items,
       groups,
@@ -1347,7 +1417,7 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
 
     if (persisted === undefined) {
       db.close()
-      const projectSnapshot = await loadCanvasItemsFromProjectFile(storeKey)
+      const projectSnapshot = await loadCanvasFallback(storeKey)
       return projectSnapshot ?? { items: [], groups: [], groupBranches: [], figmaBinding: null }
     }
 
@@ -1361,7 +1431,7 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
 
     if (resolvedIndexedDbItems.length === 0) {
       db.close()
-      const projectSnapshot = await loadCanvasItemsFromProjectFile(storeKey)
+      const projectSnapshot = await loadCanvasFallback(storeKey)
       return projectSnapshot ?? { items: [], groups, groupBranches, figmaBinding }
     }
 
@@ -1395,7 +1465,7 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
 
     db.close()
     if (restoredItems.length === 0 && resolvedIndexedDbItems.length > 0) {
-      const projectSnapshot = await loadCanvasItemsFromProjectFile(storeKey)
+      const projectSnapshot = await loadCanvasFallback(storeKey)
       return projectSnapshot ?? { items: [], groups, groupBranches, figmaBinding }
     }
     return { items: restoredItems, groups, groupBranches, figmaBinding }
@@ -1404,7 +1474,7 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
       '[Canvas Storage] 加载失败:',
       normalizeCanvasStorageError(err, '[Canvas Storage] Load failed.')
     )
-    const projectSnapshot = await loadCanvasItemsFromProjectFile(storeKey)
+    const projectSnapshot = await loadCanvasFallback(storeKey)
     return projectSnapshot ?? { items: [], groups: [], groupBranches: [], figmaBinding: null }
   }
 }
@@ -1450,7 +1520,7 @@ export async function clearCanvasItems(storeKey: string = KEY): Promise<void> {
     }
     db.close()
 
-    await saveProjectCanvasFile(storeKey, [], [], [], null)
+    await saveAutoSaveCanvasFile(storeKey, [], [], [], null, [])
   } catch (err) {
     console.error(
       '[Canvas Storage] 清空失败:',
