@@ -45,7 +45,7 @@ import type {
   CanvasTextItem
 } from './types'
 
-type NotifyFn = (message: string) => unknown
+type NotifyFn = (message: string) => import('notistack').SnackbarKey
 type CanvasRenderedImageFormat = 'png' | 'jpeg' | 'svg'
 const QUICK_CANVAS_IMAGE_URL_CACHE_LIMIT = 12
 type CanvasExportClipBounds = CanvasExportBounds
@@ -70,6 +70,8 @@ type UseCanvasExportWorkflowOptions = {
   getCanvasItemVisualBounds: (item: CanvasItem) => CanvasExportBounds | null
   notifySuccess: NotifyFn
   notifyError: NotifyFn
+  notifyInfo?: (message: string, duration?: number | null) => import('notistack').SnackbarKey
+  closeMessage?: (key?: import('notistack').SnackbarKey) => void
 }
 
 function buildCanvasExportBounds(
@@ -563,10 +565,59 @@ export function useCanvasExportWorkflow({
   loadImageFromSrc,
   getCanvasItemVisualBounds,
   notifySuccess,
-  notifyError
+  notifyError,
+  notifyInfo,
+  closeMessage
 }: UseCanvasExportWorkflowOptions) {
   const { t } = useTranslation()
   const [exportMenuAnchor, setExportMenuAnchor] = useState<HTMLElement | null>(null)
+  const saveProgressMessageKeyRef = useRef<import('notistack').SnackbarKey | null>(null)
+  const saveProgressTimerRef = useRef<number | null>(null)
+  const saveProgressValueRef = useRef(0)
+  const renderCanvasFileSaveProgress = useCallback(
+    (progress: number) => {
+      if (!notifyInfo) return
+      if (saveProgressMessageKeyRef.current !== null) {
+        closeMessage?.(saveProgressMessageKeyRef.current)
+      }
+      saveProgressMessageKeyRef.current = notifyInfo(
+        `Saving .mpcanvas… ${Math.max(0, Math.min(100, Math.round(progress)))}%`,
+        null
+      )
+    },
+    [closeMessage, notifyInfo]
+  )
+  const beginCanvasFileSaveProgress = useCallback(() => {
+    if (saveProgressTimerRef.current !== null) window.clearInterval(saveProgressTimerRef.current)
+    saveProgressValueRef.current = 5
+    renderCanvasFileSaveProgress(saveProgressValueRef.current)
+    saveProgressTimerRef.current = window.setInterval(() => {
+      saveProgressValueRef.current = Math.min(92, saveProgressValueRef.current + 3)
+      renderCanvasFileSaveProgress(saveProgressValueRef.current)
+    }, 180)
+  }, [renderCanvasFileSaveProgress])
+  const closeCanvasFileSaveProgress = useCallback(() => {
+    if (saveProgressTimerRef.current !== null) {
+      window.clearInterval(saveProgressTimerRef.current)
+      saveProgressTimerRef.current = null
+    }
+    if (saveProgressMessageKeyRef.current !== null) {
+      closeMessage?.(saveProgressMessageKeyRef.current)
+      saveProgressMessageKeyRef.current = null
+    }
+  }, [closeMessage])
+  const completeCanvasFileSaveProgress = useCallback(() => {
+    if (saveProgressTimerRef.current !== null) {
+      window.clearInterval(saveProgressTimerRef.current)
+      saveProgressTimerRef.current = null
+    }
+    renderCanvasFileSaveProgress(100)
+    window.setTimeout(() => {
+      closeCanvasFileSaveProgress()
+      notifySuccess('Saved .mpcanvas')
+    }, 250)
+  }, [closeCanvasFileSaveProgress, notifySuccess, renderCanvasFileSaveProgress])
+  useEffect(() => () => closeCanvasFileSaveProgress(), [closeCanvasFileSaveProgress])
   const [exportSubmenuAnchor, setExportSubmenuAnchor] = useState<HTMLElement | null>(null)
   const [exportSubmenuPlacement, setExportSubmenuPlacement] =
     useState<ExportSubmenuPlacement>('right')
@@ -1416,30 +1467,66 @@ export function useCanvasExportWorkflow({
   )
 
   const handleSaveCanvas = useCallback(async () => {
+    beginCanvasFileSaveProgress()
     closeExportMenus()
-    await exportCanvasFile(
-      items,
-      buildCanvasFileName(),
-      canvasId,
-      false,
-      groups,
-      figmaBinding,
-      groupBranches
-    )
-  }, [buildCanvasFileName, canvasId, closeExportMenus, figmaBinding, groupBranches, groups, items])
+    try {
+      await exportCanvasFile(
+        items,
+        buildCanvasFileName(),
+        canvasId,
+        false,
+        groups,
+        figmaBinding,
+        groupBranches
+      )
+      completeCanvasFileSaveProgress()
+    } catch (error) {
+      closeCanvasFileSaveProgress()
+      throw error
+    }
+  }, [
+    beginCanvasFileSaveProgress,
+    buildCanvasFileName,
+    canvasId,
+    closeCanvasFileSaveProgress,
+    closeExportMenus,
+    completeCanvasFileSaveProgress,
+    figmaBinding,
+    groupBranches,
+    groups,
+    items
+  ])
 
   const handleSaveCanvasAs = useCallback(async () => {
+    beginCanvasFileSaveProgress()
     closeExportMenus()
-    await exportCanvasFile(
-      items,
-      buildCanvasFileName(),
-      canvasId,
-      true,
-      groups,
-      figmaBinding,
-      groupBranches
-    )
-  }, [buildCanvasFileName, canvasId, closeExportMenus, figmaBinding, groupBranches, groups, items])
+    try {
+      await exportCanvasFile(
+        items,
+        buildCanvasFileName(),
+        canvasId,
+        true,
+        groups,
+        figmaBinding,
+        groupBranches
+      )
+      completeCanvasFileSaveProgress()
+    } catch (error) {
+      closeCanvasFileSaveProgress()
+      throw error
+    }
+  }, [
+    beginCanvasFileSaveProgress,
+    buildCanvasFileName,
+    canvasId,
+    closeCanvasFileSaveProgress,
+    closeExportMenus,
+    completeCanvasFileSaveProgress,
+    figmaBinding,
+    groupBranches,
+    groups,
+    items
+  ])
 
   const handleSaveCanvasAsFromContextMenu = useCallback(async () => {
     setExportCtxMenuPos(null)
@@ -1447,16 +1534,34 @@ export function useCanvasExportWorkflow({
   }, [handleSaveCanvasAs])
 
   const handleExportCanvasProjectFile = useCallback(async () => {
+    beginCanvasFileSaveProgress()
     closeExportMenus()
-    await exportCanvasFileAsStandalone(
-      items,
-      buildCanvasFileName(),
-      canvasId,
-      groups,
-      figmaBinding,
-      groupBranches
-    )
-  }, [buildCanvasFileName, canvasId, closeExportMenus, figmaBinding, groupBranches, groups, items])
+    try {
+      await exportCanvasFileAsStandalone(
+        items,
+        buildCanvasFileName(),
+        canvasId,
+        groups,
+        figmaBinding,
+        groupBranches
+      )
+      completeCanvasFileSaveProgress()
+    } catch (error) {
+      closeCanvasFileSaveProgress()
+      throw error
+    }
+  }, [
+    beginCanvasFileSaveProgress,
+    buildCanvasFileName,
+    canvasId,
+    closeCanvasFileSaveProgress,
+    closeExportMenus,
+    completeCanvasFileSaveProgress,
+    figmaBinding,
+    groupBranches,
+    groups,
+    items
+  ])
 
   const exportCanvasSceneAsImage = useCallback(
     async (

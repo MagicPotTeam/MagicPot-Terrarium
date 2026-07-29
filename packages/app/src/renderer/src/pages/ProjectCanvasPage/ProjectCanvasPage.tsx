@@ -669,7 +669,9 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     loadImageFromSrc,
     getCanvasItemVisualBounds,
     notifySuccess,
-    notifyError
+    notifyError,
+    notifyInfo,
+    closeMessage
   })
 
   const handleOpenTargetSchemeManager = useCallback(() => {
