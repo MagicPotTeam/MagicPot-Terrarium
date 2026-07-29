@@ -274,6 +274,11 @@ const normalizeOpenAIImageMimeType = (value: unknown): string => {
 const extensionFromOpenAIImageMimeType = (mimeType: string): string =>
   mimeType === 'image/jpeg' ? 'jpg' : mimeType.replace(/^image\//, '') || 'png'
 
+const buildGeneratedImageFileName = (mimeType: string, imageIndex: number): string => {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  return `openai-image_${timestamp}_${imageIndex + 1}.${extensionFromOpenAIImageMimeType(mimeType)}`
+}
+
 const normalizeOpenAIImageDataUrl = (value: string, mimeType: string): string => {
   const trimmed = value.trim()
   return trimmed.startsWith('data:') ? trimmed : `data:${mimeType};base64,${trimmed}`
@@ -308,7 +313,7 @@ const extractOpenAIImagesGenerationResult = (
   const attachments: NonNullable<LLMChatResult['attachments']> = []
   const textParts: string[] = []
 
-  for (const item of data) {
+  for (const [imageIndex, item] of data.entries()) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       continue
     }
@@ -338,7 +343,7 @@ const extractOpenAIImagesGenerationResult = (
       type: 'image',
       url: imageUrl,
       mimeType,
-      fileName: `openai-image.${extensionFromOpenAIImageMimeType(mimeType)}`
+      fileName: buildGeneratedImageFileName(mimeType, imageIndex)
     })
   }
 

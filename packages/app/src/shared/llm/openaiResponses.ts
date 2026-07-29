@@ -743,14 +743,23 @@ export function serializeOpenAIResponsesOutput(payload: unknown): string | null 
     return formattedText || null
   }
 
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   return JSON.stringify({
     content: formattedText,
-    attachments: images.map((image) => ({
-      type: 'image',
-      url: image.url,
-      ...(image.mimeType ? { mimeType: image.mimeType } : {}),
-      ...(image.fileName ? { fileName: image.fileName } : {})
-    }))
+    attachments: images.map((image, imageIndex) => {
+      const extension =
+        image.mimeType === 'image/jpeg'
+          ? 'jpg'
+          : image.mimeType?.replace(/^image\//, '') ||
+            image.fileName?.match(/\.([^.]+)$/)?.[1] ||
+            'png'
+      return {
+        type: 'image',
+        url: image.url,
+        ...(image.mimeType ? { mimeType: image.mimeType } : {}),
+        fileName: `openai-image_${timestamp}_${imageIndex + 1}.${extension}`
+      }
+    })
   })
 }
 

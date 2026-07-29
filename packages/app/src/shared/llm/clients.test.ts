@@ -3,6 +3,7 @@ import { ClaudeAPICli, GeminiAPICli, OpencodeZenAPICli, OpenAIAPICli } from './c
 
 describe('shared llm endpoint normalization', () => {
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
@@ -113,10 +114,12 @@ describe('shared llm endpoint normalization', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('uses the configured OpenAI images endpoint with a prompt body', async () => {
+  it('uses the configured OpenAI images endpoint with timestamped, indexed filenames', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-29T09:30:45.000Z'))
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ data: [{ b64_json: 'aW1hZ2U=' }] })
+      json: async () => ({ data: [{ b64_json: 'aW1hZ2U=' }, { b64_json: 'aW1hZ2Uy' }] })
     })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -130,7 +133,16 @@ describe('shared llm endpoint normalization', () => {
       client.chat({ messages: [{ role: 'user', content: 'draw an image' }] })
     ).resolves.toMatchObject({
       content: '',
-      attachments: [expect.objectContaining({ type: 'image' })]
+      attachments: [
+        expect.objectContaining({
+          type: 'image',
+          fileName: 'openai-image_2026-07-29T09-30-45_1.png'
+        }),
+        expect.objectContaining({
+          type: 'image',
+          fileName: 'openai-image_2026-07-29T09-30-45_2.png'
+        })
+      ]
     })
     expect(fetchMock).toHaveBeenCalledWith(
       'https://codexapis.com/v1/images/generations',
