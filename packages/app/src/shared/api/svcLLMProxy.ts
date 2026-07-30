@@ -12,6 +12,7 @@ import {
 } from '@shared/config/config'
 import type { OpenAIImageGenerationOptions, VideoGenerationOptions } from '@shared/llm/types'
 import type { LLMReasoningEffort } from '@shared/llm/profileCapabilities'
+import type { MediaReference } from '@shared/mediaReference'
 import type { ReportBundleRole } from '@shared/reportBundle'
 
 // ==================== 聊天相关类型 ====================
@@ -22,6 +23,7 @@ export type ChatAttachment = {
   mimeType?: string
   fileName?: string
   relativePath?: string
+  media?: MediaReference
   hiddenFromChatView?: boolean
   sizeBytes?: number
   sourceWidth?: number

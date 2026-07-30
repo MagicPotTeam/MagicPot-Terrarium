@@ -1,4 +1,5 @@
 import type { OCRResult } from '@shared/api/svcLLMProxy'
+import type { MediaReference } from '@shared/mediaReference'
 import type { ReportBundleRole } from '@shared/reportBundle'
 import type { LLMReasoningEffort } from './profileCapabilities'
 
@@ -13,6 +14,7 @@ export interface ChatAttachment {
   mimeType?: string
   fileName?: string
   relativePath?: string
+  media?: MediaReference
   hiddenFromChatView?: boolean
   metadata?: Record<string, unknown>
   sizeBytes?: number
