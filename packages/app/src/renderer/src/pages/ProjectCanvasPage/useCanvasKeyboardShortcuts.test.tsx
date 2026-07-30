@@ -63,7 +63,15 @@ function createSvgImageItem(): CanvasItem {
   }
 }
 
-function KeyboardShortcutHarness({ handleUndo }: { handleUndo: () => void }) {
+function KeyboardShortcutHarness({
+  handleUndo,
+  handleSaveCanvas = vi.fn(),
+  handleSaveCanvasAs = vi.fn()
+}: {
+  handleUndo: () => void
+  handleSaveCanvas?: (options?: { suppressNotifications?: boolean }) => void
+  handleSaveCanvasAs?: () => void
+}) {
   const canvasActiveRef = useRef(true)
   const [items, setItems] = useState<CanvasItem[]>([createFileItem(40)])
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set(['file-1']))
@@ -76,8 +84,8 @@ function KeyboardShortcutHarness({ handleUndo }: { handleUndo: () => void }) {
   useCanvasKeyboardShortcuts({
     canvasActiveRef,
     toolShortcuts: TOOL_SHORTCUTS,
-    handleSaveCanvas: vi.fn(),
-    handleSaveCanvasAs: vi.fn(),
+    handleSaveCanvas,
+    handleSaveCanvasAs,
     handleExportScopeWithFormat: vi.fn(),
     handleUndo,
     handleRedo: vi.fn(),
@@ -175,6 +183,25 @@ beforeEach(() => {
 })
 
 describe('useCanvasKeyboardShortcuts', () => {
+  it('suppresses save notifications only for Ctrl/Cmd+S', () => {
+    const handleSaveCanvas = vi.fn()
+    const handleSaveCanvasAs = vi.fn()
+
+    render(
+      <KeyboardShortcutHarness
+        handleUndo={vi.fn()}
+        handleSaveCanvas={handleSaveCanvas}
+        handleSaveCanvasAs={handleSaveCanvasAs}
+      />
+    )
+
+    fireEvent.keyDown(window, { key: 's', code: 'KeyS', ctrlKey: true })
+    fireEvent.keyDown(window, { key: 's', code: 'KeyS', metaKey: true, shiftKey: true })
+
+    expect(handleSaveCanvas).toHaveBeenCalledWith({ suppressNotifications: true })
+    expect(handleSaveCanvasAs).toHaveBeenCalledWith()
+  })
+
   it('keeps the key listeners mounted when items change after a drag-like update', () => {
     const addEventListenerSpy = vi.spyOn(window, 'addEventListener')
     const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener')

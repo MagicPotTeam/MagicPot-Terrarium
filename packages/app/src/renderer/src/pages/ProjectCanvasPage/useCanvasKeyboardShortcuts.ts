@@ -1,7 +1,12 @@
 import { useEffect, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
 import { api } from '../../utils/windowUtils'
 import { removeCanvasItemsWithAttachedCaptions } from './canvasAttachedCaptionUtils'
-import type { CanvasTool, ExportImageFormat, ExportMenuScope } from './projectCanvasPageShared'
+import type {
+  CanvasSaveOptions,
+  CanvasTool,
+  ExportImageFormat,
+  ExportMenuScope
+} from './projectCanvasPageShared'
 import type { SelectionRect } from './useCanvasTargetWorkflow'
 import type {
   AnnotationShape,
@@ -14,7 +19,7 @@ import type {
 type UseCanvasKeyboardShortcutsOptions = {
   canvasActiveRef: MutableRefObject<boolean>
   toolShortcuts: Record<string, string>
-  handleSaveCanvas: () => Promise<void> | void
+  handleSaveCanvas: (options?: CanvasSaveOptions) => Promise<void> | void
   handleSaveCanvasAs: () => Promise<void> | void
   handleExportScopeWithFormat: (scope: ExportMenuScope, format: ExportImageFormat) => void
   handleUndo: () => void
@@ -261,7 +266,8 @@ export function useCanvasKeyboardShortcuts({
       if (matchesShortcut(event, latestToolShortcuts.export)) {
         if (isInInput) return
         event.preventDefault()
-        void latestHandleSaveCanvas()
+        if (event.repeat) return
+        void latestHandleSaveCanvas({ suppressNotifications: true })
         return
       }
 
@@ -272,6 +278,7 @@ export function useCanvasKeyboardShortcuts({
       ) {
         if (isInInput) return
         event.preventDefault()
+        if (event.repeat) return
         void latestHandleSaveCanvasAs()
         return
       }

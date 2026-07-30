@@ -444,6 +444,7 @@ describe('ProjectCanvasPageTopToolbar', () => {
 
     fireEvent.click(saveButton as HTMLElement)
     expect(handleSaveCanvas).toHaveBeenCalledTimes(1)
+    expect(handleSaveCanvas).toHaveBeenCalledWith()
     expect(handleOpenExportMenu).not.toHaveBeenCalled()
 
     fireEvent.click(menuButton as HTMLElement)

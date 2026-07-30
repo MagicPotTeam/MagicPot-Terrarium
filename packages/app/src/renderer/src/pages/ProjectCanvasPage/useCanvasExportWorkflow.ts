@@ -31,6 +31,7 @@ import {
   isCanvasExportableItem,
   resolveCanvasExportRasterConfig,
   type CanvasExportableItem,
+  type CanvasSaveOptions,
   type ExportImageFormat,
   type ExportMenuScope,
   type RasterExportImageFormat
@@ -574,6 +575,7 @@ export function useCanvasExportWorkflow({
   const saveProgressMessageKeyRef = useRef<import('notistack').SnackbarKey | null>(null)
   const saveProgressTimerRef = useRef<number | null>(null)
   const saveProgressValueRef = useRef(0)
+  const canvasFileSaveInProgressRef = useRef(false)
   const renderCanvasFileSaveProgress = useCallback(
     (progress: number) => {
       if (!notifyInfo) return
@@ -1466,8 +1468,11 @@ export function useCanvasExportWorkflow({
     []
   )
 
-  const handleSaveCanvas = useCallback(async () => {
-    beginCanvasFileSaveProgress()
+  const handleSaveCanvas = useCallback(async (options: CanvasSaveOptions = {}) => {
+    if (canvasFileSaveInProgressRef.current) return
+    canvasFileSaveInProgressRef.current = true
+    const shouldNotify = !options.suppressNotifications
+    if (shouldNotify) beginCanvasFileSaveProgress()
     closeExportMenus()
     try {
       await exportCanvasFile(
@@ -1479,10 +1484,12 @@ export function useCanvasExportWorkflow({
         figmaBinding,
         groupBranches
       )
-      completeCanvasFileSaveProgress()
+      if (shouldNotify) completeCanvasFileSaveProgress()
     } catch (error) {
-      closeCanvasFileSaveProgress()
+      if (shouldNotify) closeCanvasFileSaveProgress()
       throw error
+    } finally {
+      canvasFileSaveInProgressRef.current = false
     }
   }, [
     beginCanvasFileSaveProgress,
@@ -1498,6 +1505,8 @@ export function useCanvasExportWorkflow({
   ])
 
   const handleSaveCanvasAs = useCallback(async () => {
+    if (canvasFileSaveInProgressRef.current) return
+    canvasFileSaveInProgressRef.current = true
     beginCanvasFileSaveProgress()
     closeExportMenus()
     try {
@@ -1514,6 +1523,8 @@ export function useCanvasExportWorkflow({
     } catch (error) {
       closeCanvasFileSaveProgress()
       throw error
+    } finally {
+      canvasFileSaveInProgressRef.current = false
     }
   }, [
     beginCanvasFileSaveProgress,
