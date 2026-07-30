@@ -13,10 +13,21 @@ import type { ChatSession } from '../chatStorage'
 
 const notifySuccessMock = vi.fn()
 
+const chatImageTranslations: Record<string, string> = {
+  'chat.attachment_image_alt': 'Attachment image {{index}}',
+  'chat.image_alt': 'Image',
+  'chat.image_load_failed': 'Image failed to load',
+  'chat.image_load_failed_label': '{{name}} failed to load'
+}
+
+const translate = (key: string, options?: Record<string, unknown>) => {
+  const template =
+    chatImageTranslations[key] ?? (options?.defaultValue as string | undefined) ?? key
+  return template.replace(/{{(\w+)}}/g, (_match, name: string) => String(options?.[name] ?? ''))
+}
+
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? key
-  })
+  useTranslation: () => ({ t: translate })
 }))
 
 vi.mock('@renderer/hooks/useMessage', () => ({
@@ -404,7 +415,7 @@ describe('ChatMessageList text selection and reply actions', () => {
       onSendEditedMessage
     })
 
-    const submitButton = screen.getByRole('button', { name: '提交' })
+    const submitButton = screen.getByRole('button', { name: 'Save & Rerun' })
     expect(submitButton).not.toBeDisabled()
 
     fireEvent.click(submitButton)
@@ -800,9 +811,19 @@ describe('ChatMessageList text selection and reply actions', () => {
       ]
     })
 
-    const image = screen.getByRole('img', { name: 'Attachment 1' })
+    const image = screen.getByRole('img', { name: 'Attachment image 1' })
 
     expect(image).toHaveAttribute('src', 'local-media:///C:/demo/reference.png')
+    expect(image).toHaveAttribute('loading', 'lazy')
+    expect(image).toHaveAttribute('decoding', 'async')
+    expect(image).toHaveAttribute('width', '320')
+    expect(image).toHaveAttribute('height', '240')
+
+    fireEvent.error(image)
+    expect(
+      screen.getByRole('img', { name: 'Attachment image 1 failed to load' })
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('img', { name: 'Attachment image 1' })).not.toBeInTheDocument()
   })
 
   it('keeps generation feedback inside the assistant placeholder instead of the latest user bubble', () => {
@@ -834,6 +855,81 @@ describe('ChatMessageList text selection and reply actions', () => {
 
     expect(screen.queryByTestId('user-message-running-indicator')).toBeNull()
     expect(screen.getByRole('progressbar')).toBeInTheDocument()
+  })
+
+  it('lets users remove an existing image before rerunning an edited message', async () => {
+    const onSendEditedMessage = vi.fn<OnSendEditedMessage>()
+    const keptAttachment: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,kept',
+      fileName: 'kept.png'
+    }
+    const removedAttachment: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,removed',
+      fileName: 'removed.png'
+    }
+
+    renderChatMessageList(
+      {
+        id: 'session-edit-attachments',
+        title: 'Edit attachments',
+        messages: [
+          {
+            role: 'user',
+            content: 'Describe these images',
+            attachments: [keptAttachment, removedAttachment]
+          }
+        ]
+      },
+      {
+        editingMessageIndex: 0,
+        editingContent: 'Describe the remaining image',
+        onSendEditedMessage
+      }
+    )
+
+    expect(screen.getByText('kept.png')).toBeInTheDocument()
+    expect(screen.getByText('removed.png')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove removed.png' }))
+    expect(screen.queryByText('removed.png')).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+
+    expect(onSendEditedMessage).toHaveBeenCalledWith(
+      'Describe the remaining image',
+      [keptAttachment],
+      undefined,
+      []
+    )
+  })
+
+  it('submits no attachments after removing every image from an edited message', async () => {
+    const onSendEditedMessage = vi.fn<OnSendEditedMessage>()
+    const attachment: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,only',
+      fileName: 'only.png'
+    }
+
+    renderChatMessageList(
+      {
+        id: 'session-edit-remove-all',
+        title: 'Remove all attachments',
+        messages: [{ role: 'user', content: 'Describe it', attachments: [attachment] }]
+      },
+      {
+        editingMessageIndex: 0,
+        editingContent: 'Text only now',
+        onSendEditedMessage
+      }
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove only.png' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Save & Rerun' }))
+
+    expect(onSendEditedMessage).toHaveBeenCalledWith('Text only now', undefined, undefined, [])
   })
 
   it('makes assistant file attachments draggable for canvas drops', () => {

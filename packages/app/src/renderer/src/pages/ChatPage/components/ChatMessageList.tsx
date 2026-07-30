@@ -26,7 +26,9 @@ import {
   InsertDriveFile as FileIcon,
   SlideshowOutlined as PowerPointFileIcon,
   KeyboardArrowDown as CollapseIcon,
-  KeyboardArrowRight as ExpandIcon
+  KeyboardArrowRight as ExpandIcon,
+  Close as CloseIcon,
+  Image as ImageIcon
 } from '@mui/icons-material'
 import {
   CheckCircleOutline as CopyDoneIcon,
@@ -101,6 +103,100 @@ export type ChatPendingConfirmation = {
 }
 
 const COPIED_FEEDBACK_DURATION_MS = 1800
+
+const CHAT_IMAGE_FALLBACK_WIDTH = 320
+const CHAT_IMAGE_FALLBACK_HEIGHT = 240
+
+const ChatImage: React.FC<{
+  src: string
+  alt: string
+  sourceWidth?: number
+  sourceHeight?: number
+  maxHeight: number
+  margin?: string
+  onPreview: () => void
+  onContextMenu: (event: React.MouseEvent<HTMLImageElement>) => void
+}> = ({ src, alt, sourceWidth, sourceHeight, maxHeight, margin, onPreview, onContextMenu }) => {
+  const { t } = useTranslation()
+  const [failed, setFailed] = React.useState(false)
+
+  React.useEffect(() => {
+    setFailed(false)
+  }, [src])
+
+  const hasValidSourceDimensions =
+    Number.isFinite(sourceWidth) &&
+    Number.isFinite(sourceHeight) &&
+    (sourceWidth ?? 0) > 0 &&
+    (sourceHeight ?? 0) > 0
+  const width = hasValidSourceDimensions ? (sourceWidth as number) : CHAT_IMAGE_FALLBACK_WIDTH
+  const height = hasValidSourceDimensions ? (sourceHeight as number) : CHAT_IMAGE_FALLBACK_HEIGHT
+  const displayScale = Math.min(1, 900 / width, maxHeight / height)
+  const boundedWidth = width * displayScale
+  const boundedHeight = height * displayScale
+  const failureLabel = t('chat.image_load_failed_label', {
+    name: alt,
+    defaultValue: '{{name}} failed to load'
+  })
+
+  if (failed) {
+    return (
+      <Box
+        role="img"
+        aria-label={failureLabel}
+        sx={{
+          width: `min(100%, ${boundedWidth}px)`,
+          height: boundedHeight,
+          maxHeight,
+          borderRadius: '12px',
+          border: 1,
+          borderColor: 'divider',
+          bgcolor: 'action.hover',
+          color: 'text.secondary',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          px: 2,
+          textAlign: 'center',
+          ...(margin ? { my: margin } : {})
+        }}
+      >
+        <Typography variant="body2">{failureLabel}</Typography>
+      </Box>
+    )
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      width={width}
+      height={height}
+      loading="lazy"
+      decoding="async"
+      style={{
+        width: 'auto',
+        height: 'auto',
+        maxWidth: '100%',
+        maxHeight: `${maxHeight}px`,
+        borderRadius: '12px',
+        objectFit: 'contain',
+        display: 'block',
+        margin,
+        cursor: 'pointer'
+      }}
+      draggable
+      onError={() => setFailed(true)}
+      onDragStart={(event) => {
+        event.stopPropagation()
+        event.dataTransfer.effectAllowed = 'copy'
+        setAgentImageDragPayload(event.dataTransfer, src)
+      }}
+      onClick={onPreview}
+      onContextMenu={onContextMenu}
+    />
+  )
+}
 
 const CopiableIconButton: React.FC<{
   copyLabel: string
@@ -283,12 +379,15 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
             width: '100%',
             display: 'flex',
             flexDirection: 'column',
+            contentVisibility: 'auto',
+            containIntrinsicSize: 'auto 240px',
             mb: message.role === 'user' ? 0 : 2
           }}
         >
           {message.role === 'user' ? (
             editingMessageIndex === index ? (
               <UserMessageEditForm
+                key={index}
                 message={message}
                 index={index}
                 editingContent={editingContent}
@@ -297,13 +396,13 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   onSetEditingIndex(null)
                   onSetEditingContent('')
                 }}
-                onSubmit={(content) => {
+                onSubmit={(content, attachments) => {
                   const truncatedMessages = currentSession?.messages.slice(0, index) || []
                   onSetEditingIndex(null)
                   onSetEditingContent('')
                   onSendEditedMessage(
                     content,
-                    message.attachments,
+                    attachments,
                     message.hiddenContext,
                     truncatedMessages
                   )
@@ -883,7 +982,7 @@ const UserMessageEditForm: React.FC<{
   editingContent: string
   onSetEditingContent: (content: string) => void
   onCancel: () => void
-  onSubmit: (content: string) => void
+  onSubmit: (content: string, attachments?: ChatAttachment[]) => void
   savedChatScrollPositionRef: React.MutableRefObject<{
     bottomOffset: number
     scrollLeft: number
@@ -898,6 +997,14 @@ const UserMessageEditForm: React.FC<{
   savedChatScrollPositionRef,
   isLight
 }) => {
+  const { t } = useTranslation()
+  const [editingAttachments, setEditingAttachments] = React.useState<ChatAttachment[]>(
+    () => message.attachments ?? []
+  )
+  const visibleAttachments = getVisibleChatAttachments(editingAttachments)
+  const removeAttachment = (attachment: ChatAttachment): void => {
+    setEditingAttachments((current) => current.filter((item) => item !== attachment))
+  }
   const editorRef = React.useRef<HTMLTextAreaElement | null>(null)
   const initialCaretPositionRef = React.useRef(editingContent.length)
   const hasPositionedInitialCaretRef = React.useRef(false)
@@ -984,6 +1091,42 @@ const UserMessageEditForm: React.FC<{
   return (
     <Box sx={{ px: 2, mb: 2, display: 'flex', justifyContent: 'flex-end' }}>
       <Box sx={{ maxWidth: '85%', width: '100%' }}>
+        {visibleAttachments.length > 0 && (
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
+            {visibleAttachments.map((attachment, attachmentIndex) => (
+              <Box
+                key={`${attachment.fileName || attachment.url || 'attachment'}-${attachmentIndex}`}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 0.75,
+                  maxWidth: 300,
+                  pl: 1.25,
+                  pr: 0.25,
+                  py: 0.25,
+                  borderRadius: 1,
+                  bgcolor: 'action.selected'
+                }}
+              >
+                <ImageIcon sx={{ fontSize: 16, color: 'text.secondary', flexShrink: 0 }} />
+                <Typography
+                  variant="body2"
+                  sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                >
+                  {attachment.fileName || 'Image'}
+                </Typography>
+                <IconButton
+                  size="small"
+                  aria-label={`Remove ${attachment.fileName || 'image'}`}
+                  onClick={() => removeAttachment(attachment)}
+                  sx={{ flexShrink: 0 }}
+                >
+                  <CloseIcon sx={{ fontSize: 16 }} />
+                </IconButton>
+              </Box>
+            ))}
+          </Box>
+        )}
         <TextField
           fullWidth
           multiline
@@ -1011,7 +1154,7 @@ const UserMessageEditForm: React.FC<{
             onClick={onCancel}
             sx={{ borderRadius: '18px', textTransform: 'none' }}
           >
-            取消
+            {t('common.cancel', { defaultValue: 'Cancel' })}
           </Button>
           <Button
             variant="contained"
@@ -1020,11 +1163,11 @@ const UserMessageEditForm: React.FC<{
             onClick={() => {
               const newContent = editingContent.trim()
               if (!newContent) return
-              onSubmit(newContent)
+              onSubmit(newContent, editingAttachments.length > 0 ? editingAttachments : undefined)
             }}
             sx={{ borderRadius: '18px', textTransform: 'none' }}
           >
-            提交
+            {t('chat.save_and_rerun', { defaultValue: 'Save & Rerun' })}
           </Button>
         </Box>
       </Box>
@@ -1147,25 +1290,17 @@ const UserMessageBubble: React.FC<{
             {visibleAttachments.map((attachment, attIdx) => (
               <Box key={attIdx} sx={{ mb: 1 }}>
                 {attachment.type === 'image' ? (
-                  <img
+                  <ChatImage
                     src={normalizeLocalMediaUrl(attachment.url)}
-                    alt={`Attachment ${attIdx + 1}`}
-                    style={{
-                      maxWidth: '100%',
-                      maxHeight: '200px',
-                      borderRadius: '12px',
-                      objectFit: 'contain',
-                      display: 'block',
-                      cursor: 'pointer'
-                    }}
-                    draggable
-                    onDragStart={(e) => {
-                      e.stopPropagation()
-                      e.dataTransfer.effectAllowed = 'copy'
-                      setAgentImageDragPayload(e.dataTransfer, attachment.url)
-                    }}
-                    onClick={() => onPreviewImage(attachment.url)}
-                    onContextMenu={(e) => onImageContextMenu(e, attachment.url)}
+                    alt={t('chat.attachment_image_alt', {
+                      index: attIdx + 1,
+                      defaultValue: 'Attachment image {{index}}'
+                    })}
+                    sourceWidth={attachment.sourceWidth}
+                    sourceHeight={attachment.sourceHeight}
+                    maxHeight={200}
+                    onPreview={() => onPreviewImage(attachment.url)}
+                    onContextMenu={(event) => onImageContextMenu(event, attachment.url)}
                   />
                 ) : attachment.type === 'video' ? (
                   <video
@@ -1274,25 +1409,17 @@ const AssistantMessageBubble: React.FC<{
             {visibleAttachments.map((attachment, attIdx) => (
               <Box key={attIdx} sx={{ mb: 1 }}>
                 {attachment.type === 'image' ? (
-                  <img
+                  <ChatImage
                     src={normalizeLocalMediaUrl(attachment.url)}
-                    alt={`Attachment ${attIdx + 1}`}
-                    style={{
-                      maxWidth: '100%',
-                      maxHeight: '600px',
-                      borderRadius: '12px',
-                      objectFit: 'contain',
-                      display: 'block',
-                      cursor: 'pointer'
-                    }}
-                    draggable
-                    onDragStart={(e) => {
-                      e.stopPropagation()
-                      e.dataTransfer.effectAllowed = 'copy'
-                      setAgentImageDragPayload(e.dataTransfer, attachment.url)
-                    }}
-                    onClick={() => onPreviewImage(attachment.url)}
-                    onContextMenu={(e) => onImageContextMenu(e, attachment.url)}
+                    alt={t('chat.attachment_image_alt', {
+                      index: attIdx + 1,
+                      defaultValue: 'Attachment image {{index}}'
+                    })}
+                    sourceWidth={attachment.sourceWidth}
+                    sourceHeight={attachment.sourceHeight}
+                    maxHeight={600}
+                    onPreview={() => onPreviewImage(attachment.url)}
+                    onContextMenu={(event) => onImageContextMenu(event, attachment.url)}
                   />
                 ) : attachment.type === 'video' ? (
                   <AssistantVideoPlayer url={attachment.url} fileName={attachment.fileName} />
@@ -1771,31 +1898,17 @@ const AssistantMarkdownContent: React.FC<{
           }}
           components={{
             p: ({ children }) => <div style={{ margin: '0.8em 0' }}>{children}</div>,
-            img: ({ src, alt }) => (
-              <img
-                src={src}
-                alt={alt || ''}
-                style={{
-                  maxWidth: '100%',
-                  maxHeight: '600px',
-                  borderRadius: '12px',
-                  objectFit: 'contain',
-                  display: 'block',
-                  margin: '8px 0',
-                  cursor: 'pointer'
-                }}
-                draggable
-                onDragStart={(e) => {
-                  e.stopPropagation()
-                  if (src) {
-                    e.dataTransfer.effectAllowed = 'copy'
-                    setAgentImageDragPayload(e.dataTransfer, src)
-                  }
-                }}
-                onClick={() => src && onPreviewImage(src)}
-                onContextMenu={(e) => src && onImageContextMenu(e, src)}
-              />
-            ),
+            img: ({ src, alt }) =>
+              src ? (
+                <ChatImage
+                  src={src}
+                  alt={alt || t('chat.image_alt', { defaultValue: 'Image' })}
+                  maxHeight={600}
+                  margin="8px 0"
+                  onPreview={() => onPreviewImage(src)}
+                  onContextMenu={(event) => onImageContextMenu(event, src)}
+                />
+              ) : null,
             a: ({ href, children }) => (
               <a
                 href={href}

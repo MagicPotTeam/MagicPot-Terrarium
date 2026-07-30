@@ -6,10 +6,20 @@ import ChatComposer from './ChatComposer'
 import { useRef, useState } from 'react'
 import { QAPP_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
 
+const chatImageTranslations: Record<string, string> = {
+  'chat.preview_alt_index': 'Preview {{index}}',
+  'chat.image_load_failed_label': '{{name}} failed to load',
+  'chat.image_unavailable': 'Image unavailable'
+}
+
+const translate = (key: string, options?: Record<string, unknown>) => {
+  const template =
+    chatImageTranslations[key] ?? (options?.defaultValue as string | undefined) ?? key
+  return template.replace(/{{(\w+)}}/g, (_match, name: string) => String(options?.[name] ?? ''))
+}
+
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => key
-  })
+  useTranslation: () => ({ t: translate })
 }))
 
 function ControlledChatComposer({
@@ -70,6 +80,41 @@ describe('ChatComposer', () => {
       left: 0,
       toJSON: () => ({})
     }) as DOMRect
+
+  it('renders an async composer image thumbnail and replaces failures in its fixed slot', () => {
+    const onPreviewImage = vi.fn()
+    const onRemoveAttachment = vi.fn()
+    render(
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          inputValue=""
+          onInputChange={vi.fn()}
+          onSend={vi.fn()}
+          onUploadFile={vi.fn()}
+          pendingAttachments={[{ type: 'image', url: 'blob:thumbnail' }]}
+          uploadProgress={{}}
+          onRemoveAttachment={onRemoveAttachment}
+          isLoading={false}
+          onStopGenerating={vi.fn()}
+          disabled={false}
+          composerInputRef={{ current: null }}
+          onPreviewImage={onPreviewImage}
+        />
+      </ThemeProvider>
+    )
+
+    const image = screen.getByRole('img', { name: 'Preview 1' })
+    expect(image).toHaveAttribute('loading', 'lazy')
+    expect(image).toHaveAttribute('decoding', 'async')
+    expect(image).toHaveAttribute('width', '80')
+    expect(image).toHaveAttribute('height', '80')
+    fireEvent.click(image)
+    expect(onPreviewImage).toHaveBeenCalledWith('blob:thumbnail')
+
+    fireEvent.error(image)
+    expect(screen.getByRole('img', { name: 'Preview 1 failed to load' })).toBeInTheDocument()
+    expect(screen.getByTestId('chat-composer-attachments')).toBeInTheDocument()
+  })
 
   it('renders the toolbar slot inside the bottom action bar', () => {
     render(

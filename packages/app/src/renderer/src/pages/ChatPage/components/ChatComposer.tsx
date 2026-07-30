@@ -108,6 +108,62 @@ const TEXTAREA_BOTTOM_VISIBILITY_PADDING = 28
 const COMPOSER_VERTICAL_OVERHEAD = 140
 const ATTACHMENT_TRAY_GAP = 12
 const ATTACHMENT_PREVIEW_ITEM_HEIGHT = 80
+
+const ComposerImageThumbnail: React.FC<{
+  src: string
+  alt: string
+  onPreview: () => void
+}> = ({ src, alt, onPreview }) => {
+  const { t } = useTranslation()
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    setFailed(false)
+  }, [src])
+
+  const failureLabel = t('chat.image_load_failed_label', {
+    name: alt,
+    defaultValue: '{{name}} failed to load'
+  })
+
+  if (failed) {
+    return (
+      <Box
+        role="img"
+        aria-label={failureLabel}
+        sx={{
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          bgcolor: 'action.hover',
+          color: 'text.secondary',
+          px: 1,
+          textAlign: 'center'
+        }}
+      >
+        <Typography variant="caption">
+          {t('chat.image_unavailable', { defaultValue: 'Image unavailable' })}
+        </Typography>
+      </Box>
+    )
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      width={80}
+      height={ATTACHMENT_PREVIEW_ITEM_HEIGHT}
+      loading="lazy"
+      decoding="async"
+      style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
+      onError={() => setFailed(true)}
+      onClick={onPreview}
+    />
+  )
+}
 const ATTACHMENT_PREVIEW_SCROLLBAR_GUTTER = 12
 const MIN_ATTACHMENT_PREVIEW_HEIGHT = 88
 const MAX_ATTACHMENT_PREVIEW_HEIGHT = 240
@@ -764,17 +820,10 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                     }}
                   >
                     {attachment.type === 'image' ? (
-                      <img
+                      <ComposerImageThumbnail
                         src={normalizeLocalMediaUrl(attachment.url)}
                         alt={t('chat.preview_alt_index', { index: idx + 1 })}
-                        style={{
-                          width: '100%',
-                          height: '100%',
-                          objectFit: 'cover',
-                          cursor: 'pointer'
-                        }}
-                        loading="lazy"
-                        onClick={() => onPreviewImage(attachment.url)}
+                        onPreview={() => onPreviewImage(attachment.url)}
                       />
                     ) : attachment.type === 'video' ? (
                       <Box
