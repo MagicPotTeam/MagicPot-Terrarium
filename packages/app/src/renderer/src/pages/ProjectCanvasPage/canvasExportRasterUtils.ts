@@ -1,7 +1,7 @@
 export const EXPORT_IMAGE_PIXEL_RATIO = 1
 export const EXPORT_IMAGE_PADDING = 0
 export const EXPORT_IMAGE_MAX_SIDE = 16384
-export const EXPORT_IMAGE_MAX_AREA = 134_217_728
+export const EXPORT_IMAGE_MAX_AREA = 33_554_432
 
 export type CanvasExportRasterConfig = {
   pixelRatio: number
