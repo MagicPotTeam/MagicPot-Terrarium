@@ -12,6 +12,8 @@ import { useCanvasFileIntake } from './useCanvasFileIntake'
 type TestAddImageToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addImageToCanvas']
 type TestAddImagesToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addImagesToCanvas']
 type TestAddFileToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addFileToCanvas']
+type TestAddModel3DToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addModel3DToCanvas']
+type TestAddVideoToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addVideoToCanvas']
 type TestAddTextToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addTextToCanvas']
 type TestNotifyWarning = NonNullable<Parameters<typeof useCanvasFileIntake>[0]['notifyWarning']>
 type TestImageBatchImportProgress = NonNullable<
@@ -183,35 +185,43 @@ function FileIntakeHarness({
   addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined),
   addImagesToCanvas = vi.fn<TestAddImagesToCanvas>().mockResolvedValue(undefined),
   addFileToCanvas = vi.fn<TestAddFileToCanvas>().mockResolvedValue(undefined),
+  addModel3DToCanvas = vi.fn<TestAddModel3DToCanvas>().mockResolvedValue(undefined),
+  addVideoToCanvas = vi.fn<TestAddVideoToCanvas>().mockResolvedValue(undefined),
   notifyWarning = vi.fn<TestNotifyWarning>(),
   onImageBatchImportProgress = vi.fn<TestImageBatchImportProgress>(),
   quickAppTargetActive = false,
   withExternalInput = false,
-  initialCanvasActive = true
+  initialCanvasActive = true,
+  lastViewportPoint = null
 }: {
   addTextToCanvas: TestAddTextToCanvas
   addImageToCanvas?: TestAddImageToCanvas
   addImagesToCanvas?: TestAddImagesToCanvas
   addFileToCanvas?: TestAddFileToCanvas
+  addModel3DToCanvas?: TestAddModel3DToCanvas
+  addVideoToCanvas?: TestAddVideoToCanvas
   notifyWarning?: TestNotifyWarning
   onImageBatchImportProgress?: TestImageBatchImportProgress
   quickAppTargetActive?: boolean
   withExternalInput?: boolean
   initialCanvasActive?: boolean
+  lastViewportPoint?: { x: number; y: number } | null
 }) {
   const canvasContainerRef = useRef<HTMLDivElement>(null)
   const canvasActiveRef = useRef(initialCanvasActive)
+  const lastViewportPointRef = useRef<{ x: number; y: number } | null>(lastViewportPoint)
 
   const { handleDrop, handleDragOver } = useCanvasFileIntake({
     canvasId: 'canvas-1',
     canvasContainerRef,
     canvasActiveRef,
+    lastViewportPointRef,
     notifyWarning,
     addImageToCanvas,
     addImagesToCanvas,
-    addModel3DToCanvas: vi.fn().mockResolvedValue(undefined),
+    addModel3DToCanvas,
     addModel3DUrlToCanvas: vi.fn(),
-    addVideoToCanvas: vi.fn().mockResolvedValue(undefined),
+    addVideoToCanvas,
     addFileToCanvas,
     addOcrResultToCanvas: vi.fn().mockResolvedValue(undefined),
     addTextToCanvas,
@@ -252,6 +262,9 @@ function FileIntakeHarness({
         }}
         onDrop={handleDrop}
         onDragOver={handleDragOver}
+        onPointerMove={(event) => {
+          lastViewportPointRef.current = { x: event.clientX, y: event.clientY }
+        }}
       >
         canvas
       </div>
@@ -322,6 +335,170 @@ describe('useCanvasFileIntake', () => {
 
     await waitFor(() => {
       expect(addTextToCanvas).toHaveBeenCalledWith('Pasted via shortcut')
+    })
+  })
+
+  it('pastes clipboard text at the last pointer position inside the canvas', async () => {
+    const addTextToCanvas = vi.fn<TestAddTextToCanvas>()
+    render(<FileIntakeHarness addTextToCanvas={addTextToCanvas} />)
+
+    const canvas = screen.getByTestId('canvas-paste-surface')
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 10,
+      top: 20,
+      right: 510,
+      bottom: 420,
+      width: 500,
+      height: 400,
+      x: 10,
+      y: 20,
+      toJSON: () => ({})
+    })
+    fireEvent.pointerMove(canvas, { clientX: 210, clientY: 160 })
+    window.dispatchEvent(buildClipboardPasteEvent({ text: 'Pointer text', includeItems: false }))
+
+    await waitFor(() => {
+      expect(addTextToCanvas).toHaveBeenCalledWith('Pointer text', 210, 160)
+    })
+  })
+
+  it('pastes clipboard images and image batches at the last in-canvas pointer position', async () => {
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
+    const addImagesToCanvas = vi.fn<TestAddImagesToCanvas>().mockResolvedValue(undefined)
+    const { unmount } = render(
+      <FileIntakeHarness
+        addTextToCanvas={vi.fn()}
+        addImageToCanvas={addImageToCanvas}
+        addImagesToCanvas={addImagesToCanvas}
+      />
+    )
+
+    let canvas = screen.getByTestId('canvas-paste-surface')
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 400,
+      width: 600,
+      height: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    })
+    fireEvent.pointerMove(canvas, { clientX: 240, clientY: 180 })
+    window.dispatchEvent(
+      buildClipboardPasteEvent({
+        includeItems: false,
+        files: [new File(['one'], 'one.png', { type: 'image/png' })]
+      })
+    )
+    await waitFor(() => expect(addImageToCanvas).toHaveBeenCalledTimes(1))
+    expect(addImageToCanvas.mock.calls[0]?.[1]).toMatchObject({ clientX: 240, clientY: 180 })
+
+    unmount()
+    render(
+      <FileIntakeHarness
+        addTextToCanvas={vi.fn()}
+        addImageToCanvas={addImageToCanvas}
+        addImagesToCanvas={addImagesToCanvas}
+      />
+    )
+    canvas = screen.getByTestId('canvas-paste-surface')
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 400,
+      width: 600,
+      height: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    })
+    fireEvent.pointerMove(canvas, { clientX: 300, clientY: 200 })
+    window.dispatchEvent(
+      buildClipboardPasteEvent({
+        includeItems: false,
+        files: [
+          new File(['one'], 'one.png', { type: 'image/png' }),
+          new File(['two'], 'two.png', { type: 'image/png' })
+        ]
+      })
+    )
+
+    await waitFor(() => expect(addImagesToCanvas).toHaveBeenCalledTimes(1))
+    expect(addImagesToCanvas.mock.calls[0]?.[1]).toEqual({ clientX: 300, clientY: 200 })
+  })
+
+  it('preserves fallback placement when the last pointer position is outside the canvas', async () => {
+    const addTextToCanvas = vi.fn<TestAddTextToCanvas>()
+    render(<FileIntakeHarness addTextToCanvas={addTextToCanvas} />)
+
+    const canvas = screen.getByTestId('canvas-paste-surface')
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      top: 100,
+      right: 500,
+      bottom: 400,
+      width: 400,
+      height: 300,
+      x: 100,
+      y: 100,
+      toJSON: () => ({})
+    })
+    fireEvent.pointerMove(canvas, { clientX: 50, clientY: 50 })
+    window.dispatchEvent(buildClipboardPasteEvent({ text: 'Fallback text', includeItems: false }))
+
+    await waitFor(() => expect(addTextToCanvas).toHaveBeenCalledWith('Fallback text'))
+  })
+
+  it('routes pasted 3D, video, and ordinary files with pointer coordinates', async () => {
+    const addModel3DToCanvas = vi.fn<TestAddModel3DToCanvas>().mockResolvedValue(undefined)
+    const addVideoToCanvas = vi.fn<TestAddVideoToCanvas>().mockResolvedValue(undefined)
+    const addFileToCanvas = vi.fn<TestAddFileToCanvas>().mockResolvedValue(undefined)
+    render(
+      <FileIntakeHarness
+        addTextToCanvas={vi.fn()}
+        addModel3DToCanvas={addModel3DToCanvas}
+        addVideoToCanvas={addVideoToCanvas}
+        addFileToCanvas={addFileToCanvas}
+      />
+    )
+
+    const canvas = screen.getByTestId('canvas-paste-surface')
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 400,
+      width: 600,
+      height: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    })
+    fireEvent.pointerMove(canvas, { clientX: 320, clientY: 220 })
+    window.dispatchEvent(
+      buildClipboardPasteEvent({
+        includeItems: false,
+        files: [
+          new File(['model'], 'mesh.glb', { type: 'model/gltf-binary' }),
+          new File(['video'], 'clip.mp4', { type: 'video/mp4' }),
+          new File(['data'], 'notes.csv', { type: 'text/csv' })
+        ]
+      })
+    )
+
+    await waitFor(() => {
+      expect(addModel3DToCanvas).toHaveBeenCalledWith(expect.any(File), {
+        clientX: 320,
+        clientY: 220
+      })
+      expect(addVideoToCanvas).toHaveBeenCalledWith(expect.any(File), {
+        clientX: 320,
+        clientY: 220
+      })
+      expect(addFileToCanvas).toHaveBeenCalledWith(expect.any(File), 320, 220)
     })
   })
 

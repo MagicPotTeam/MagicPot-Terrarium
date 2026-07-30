@@ -62,13 +62,18 @@ type AddImageToCanvasFn = (
   }
 ) => Promise<unknown>
 
-type AddImagesToCanvasFn = (sources: CanvasImageSourceInput[]) => Promise<unknown>
+type AddImagesToCanvasFn = (
+  sources: CanvasImageSourceInput[],
+  options?: { clientX?: number; clientY?: number }
+) => Promise<unknown>
 
 type AddModel3DToCanvasFn = (
   file: File,
   options?: {
     linkedAssets?: Record<string, string>
     skipTexturePrompt?: boolean
+    clientX?: number
+    clientY?: number
   }
 ) => Promise<unknown>
 
@@ -412,6 +417,7 @@ type UseCanvasFileIntakeOptions = {
   canvasId: string
   canvasContainerRef: RefObject<HTMLElement | null>
   canvasActiveRef: MutableRefObject<boolean>
+  lastViewportPointRef: MutableRefObject<{ x: number; y: number } | null>
   notifyWarning?: (message: string) => unknown
   addImageToCanvas: AddImageToCanvasFn
   addImagesToCanvas: AddImagesToCanvasFn
@@ -748,6 +754,7 @@ export function useCanvasFileIntake({
   canvasId,
   canvasContainerRef,
   canvasActiveRef,
+  lastViewportPointRef,
   notifyWarning,
   addImageToCanvas,
   addImagesToCanvas,
@@ -766,6 +773,35 @@ export function useCanvasFileIntake({
   const handledPasteCounterRef = useRef(0)
   const awaitingKeyboardPasteEventRef = useRef(false)
   const manualPasteFallbackInFlightRef = useRef(false)
+
+  const getCanvasPasteClientPoint = useCallback(() => {
+    const point = lastViewportPointRef.current
+    const canvasContainer = canvasContainerRef.current
+    if (!point || !canvasContainer) return null
+
+    const rect = canvasContainer.getBoundingClientRect()
+    if (
+      point.x < rect.left ||
+      point.x > rect.right ||
+      point.y < rect.top ||
+      point.y > rect.bottom
+    ) {
+      return null
+    }
+
+    return { clientX: point.x, clientY: point.y }
+  }, [canvasContainerRef, lastViewportPointRef])
+
+  const addPastedTextToCanvas = useCallback(
+    (text: string, pastePoint: { clientX: number; clientY: number } | null) => {
+      if (pastePoint) {
+        addTextToCanvas(text, pastePoint.clientX, pastePoint.clientY)
+      } else {
+        addTextToCanvas(text)
+      }
+    },
+    [addTextToCanvas]
+  )
 
   useEffect(() => {
     const canvasContainer = canvasContainerRef.current
@@ -973,12 +1009,12 @@ export function useCanvasFileIntake({
       }
 
       if (fileType === 'model3d' || isModelArchiveFile(file.name)) {
-        await addModel3DToCanvas(file)
+        await addModel3DToCanvas(file, { clientX, clientY })
         return
       }
 
       if (fileType === 'video' || file.type.startsWith('video/')) {
-        await addVideoToCanvas(file)
+        await addVideoToCanvas(file, { clientX, clientY })
         return
       }
 
@@ -1055,7 +1091,7 @@ export function useCanvasFileIntake({
             reportProgress: true
           })
           clearFileArrayReferences(imageFiles)
-          await addImagesToCanvas(imageSources)
+          await addImagesToCanvas(imageSources, { clientX, clientY })
         }
       }
 
@@ -1211,7 +1247,9 @@ export function useCanvasFileIntake({
         if (extractedPackage) {
           await addModel3DToCanvas(extractedPackage.file, {
             linkedAssets: extractedPackage.linkedAssets,
-            skipTexturePrompt: Object.keys(extractedPackage.linkedAssets).length > 0
+            skipTexturePrompt: Object.keys(extractedPackage.linkedAssets).length > 0,
+            clientX,
+            clientY
           })
           return
         }
@@ -1354,6 +1392,7 @@ export function useCanvasFileIntake({
 
   const handleClipboardData = useCallback(
     async (clipboardData?: DataTransfer | null) => {
+      const pastePoint = getCanvasPasteClientPoint()
       const pastedFiles = clipboardData?.files
         ? Array.from(clipboardData.files).map((file, index) =>
             normalizeClipboardFile(file, file.type, index + 1)
@@ -1362,9 +1401,7 @@ export function useCanvasFileIntake({
       const supportedPastedFiles = pastedFiles.filter((file) => isSupportedClipboardFile(file))
 
       if (supportedPastedFiles.length > 0) {
-        for (const file of supportedPastedFiles) {
-          await handleFile(file)
-        }
+        await handleFiles(supportedPastedFiles, pastePoint?.clientX, pastePoint?.clientY)
         return true
       }
 
@@ -1380,9 +1417,7 @@ export function useCanvasFileIntake({
         : []
 
       if (pastedItemFiles.length > 0) {
-        for (const file of pastedItemFiles) {
-          await handleFile(file)
-        }
+        await handleFiles(pastedItemFiles, pastePoint?.clientX, pastePoint?.clientY)
         return true
       }
 
@@ -1410,7 +1445,7 @@ export function useCanvasFileIntake({
 
               if (isSupportedClipboardFile(file)) {
                 handledUriCount += 1
-                await handleFile(file)
+                await handleFile(file, pastePoint?.clientX, pastePoint?.clientY)
               }
             } catch {
               // Ignore invalid or inaccessible clipboard URIs.
@@ -1426,7 +1461,7 @@ export function useCanvasFileIntake({
       if (!clipboardItems || clipboardItems.length === 0) {
         const directClipboardText = getClipboardPlainText(clipboardData)
         if (directClipboardText) {
-          addTextToCanvas(directClipboardText)
+          addPastedTextToCanvas(directClipboardText, pastePoint)
           return true
         }
 
@@ -1449,10 +1484,11 @@ export function useCanvasFileIntake({
         if (pastedImageSources.length === 1) {
           await addImageToCanvas(pastedImageSources[0].src, {
             fileName: pastedImageSources[0].fileName,
-            sizeBytes: pastedImageSources[0].sizeBytes
+            sizeBytes: pastedImageSources[0].sizeBytes,
+            ...pastePoint
           })
         } else {
-          await addImagesToCanvas(pastedImageSources)
+          await addImagesToCanvas(pastedImageSources, pastePoint ?? undefined)
         }
         return true
       }
@@ -1462,14 +1498,14 @@ export function useCanvasFileIntake({
 
         const text = await readClipboardTextItem(item)
         if (text.trim()) {
-          addTextToCanvas(text.trim())
+          addPastedTextToCanvas(text.trim(), pastePoint)
           return true
         }
       }
 
       const directClipboardText = getClipboardPlainText(clipboardData)
       if (directClipboardText) {
-        addTextToCanvas(directClipboardText)
+        addPastedTextToCanvas(directClipboardText, pastePoint)
         return true
       }
 
@@ -1478,14 +1514,17 @@ export function useCanvasFileIntake({
     [
       addImageToCanvas,
       addImagesToCanvas,
-      addTextToCanvas,
+      addPastedTextToCanvas,
+      getCanvasPasteClientPoint,
       handleFile,
+      handleFiles,
       readClipboardTextItem,
       readFileAsDataURL
     ]
   )
 
   const handleNavigatorClipboardPaste = useCallback(async () => {
+    const pastePoint = getCanvasPasteClientPoint()
     if (typeof navigator === 'undefined' || !navigator.clipboard) {
       return false
     }
@@ -1514,10 +1553,11 @@ export function useCanvasFileIntake({
           if (imageSources.length === 1) {
             await addImageToCanvas(imageSources[0].src, {
               fileName: imageSources[0].fileName,
-              sizeBytes: imageSources[0].sizeBytes
+              sizeBytes: imageSources[0].sizeBytes,
+              ...pastePoint
             })
           } else if (imageSources.length > 1) {
-            await addImagesToCanvas(imageSources)
+            await addImagesToCanvas(imageSources, pastePoint ?? undefined)
           }
           return true
         }
@@ -1543,9 +1583,7 @@ export function useCanvasFileIntake({
         }
 
         if (navigatorClipboardFiles.length > 0) {
-          for (const file of navigatorClipboardFiles) {
-            await handleFile(file)
-          }
+          await handleFiles(navigatorClipboardFiles, pastePoint?.clientX, pastePoint?.clientY)
           return true
         }
 
@@ -1555,7 +1593,7 @@ export function useCanvasFileIntake({
             : ''
 
           if (plainText.trim()) {
-            addTextToCanvas(plainText.trim())
+            addPastedTextToCanvas(plainText.trim(), pastePoint)
             return true
           }
 
@@ -1564,7 +1602,7 @@ export function useCanvasFileIntake({
               await (await clipItem.getType('text/html')).text()
             )
             if (htmlText.trim()) {
-              addTextToCanvas(htmlText.trim())
+              addPastedTextToCanvas(htmlText.trim(), pastePoint)
               return true
             }
           }
@@ -1578,7 +1616,7 @@ export function useCanvasFileIntake({
       if (typeof navigator.clipboard.readText === 'function') {
         const text = await navigator.clipboard.readText()
         if (text.trim()) {
-          addTextToCanvas(text.trim())
+          addPastedTextToCanvas(text.trim(), pastePoint)
           return true
         }
       }
@@ -1587,9 +1625,17 @@ export function useCanvasFileIntake({
     }
 
     return false
-  }, [addImageToCanvas, addImagesToCanvas, addTextToCanvas, handleFile, readFileAsDataURL])
+  }, [
+    addImageToCanvas,
+    addImagesToCanvas,
+    addPastedTextToCanvas,
+    getCanvasPasteClientPoint,
+    handleFiles,
+    readFileAsDataURL
+  ])
 
   const handleNativeClipboardPaste = useCallback(async () => {
+    const pastePoint = getCanvasPasteClientPoint()
     try {
       const hyperSvc = api().svcHyper
       const nativeClipboardImage = await hyperSvc.readClipboardImage({})
@@ -1603,14 +1649,15 @@ export function useCanvasFileIntake({
 
         await addImageToCanvas(await readFileAsDataURL(file), {
           fileName: file.name,
-          sizeBytes: file.size
+          sizeBytes: file.size,
+          ...pastePoint
         })
         return true
       }
 
       const nativeClipboardText = await hyperSvc.readClipboardText({})
       if (nativeClipboardText.text.trim()) {
-        addTextToCanvas(nativeClipboardText.text.trim())
+        addPastedTextToCanvas(nativeClipboardText.text.trim(), pastePoint)
         return true
       }
 
@@ -1618,7 +1665,7 @@ export function useCanvasFileIntake({
         const nativeClipboardHtml = await hyperSvc.readClipboardHtml({})
         const htmlText = normalizeClipboardHtmlText(nativeClipboardHtml.html)
         if (htmlText.trim()) {
-          addTextToCanvas(htmlText.trim())
+          addPastedTextToCanvas(htmlText.trim(), pastePoint)
           return true
         }
       }
@@ -1627,7 +1674,7 @@ export function useCanvasFileIntake({
     }
 
     return false
-  }, [addImageToCanvas, addTextToCanvas, readFileAsDataURL])
+  }, [addImageToCanvas, addPastedTextToCanvas, getCanvasPasteClientPoint, readFileAsDataURL])
 
   const handlePasteFromClipboard = useCallback(
     async (event?: ClipboardEvent) => {

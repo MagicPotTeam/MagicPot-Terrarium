@@ -149,6 +149,8 @@ type AddModel3DUrlOptions = {
 type AddModel3DOptions = {
   linkedAssets?: Record<string, string>
   skipTexturePrompt?: boolean
+  clientX?: number
+  clientY?: number
 }
 
 type AddOcrResultToCanvasOptions = {
@@ -1310,7 +1312,8 @@ export function useCanvasAssetIntake({
   )
 
   const addImagesToCanvas = useCallback(
-    async (sources: CanvasImageInput[]) => {
+    async (sources: CanvasImageInput[], options?: { clientX?: number; clientY?: number }) => {
+      const pasteAnchor = getCanvasPointFromClient(options?.clientX, options?.clientY)
       const canvasOwnedBatchObjectUrls = new Set<string>()
       const normalizedSources: NormalizedCanvasImageSource[] = await Promise.all(
         sources
@@ -1355,10 +1358,11 @@ export function useCanvasAssetIntake({
       const batchGap = getProjectCanvasBatchGap(effectiveSourceCount)
       const hasDeferredSources = normalizedSources.some(shouldDeferCanvasImageSourceFullDecode)
       const shouldUseStreamingImport =
-        totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_IMPORT_THRESHOLD ||
-        totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_PROGRESS_BATCH_SIZE ||
-        hasDeferredSources ||
-        effectiveSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_IMPORT_THRESHOLD
+        !pasteAnchor &&
+        (totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_IMPORT_THRESHOLD ||
+          totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_PROGRESS_BATCH_SIZE ||
+          hasDeferredSources ||
+          effectiveSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_IMPORT_THRESHOLD)
       const shouldReportBatchProgress =
         totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_PROGRESS_BATCH_SIZE
 
@@ -1714,6 +1718,18 @@ export function useCanvasAssetIntake({
           allowUpscale: false
         }
       )
+      if (pasteAnchor && layout.length > 0) {
+        const minX = Math.min(...layout.map((entry) => entry.x))
+        const minY = Math.min(...layout.map((entry) => entry.y))
+        const maxX = Math.max(...layout.map((entry) => entry.x + entry.width))
+        const maxY = Math.max(...layout.map((entry) => entry.y + entry.height))
+        const offsetX = pasteAnchor.x - (minX + maxX) / 2
+        const offsetY = pasteAnchor.y - (minY + maxY) / 2
+        for (const entry of layout) {
+          entry.x += offsetX
+          entry.y += offsetY
+        }
+      }
       markAutoPlacementBatch(loadedImages.length)
 
       const baseId = Date.now()
@@ -1754,6 +1770,7 @@ export function useCanvasAssetIntake({
     [
       fitImageToCanvasSize,
       getBatchGridLayout,
+      getCanvasPointFromClient,
       getCenterPosition,
       markAutoPlacementBatch,
       nextZIndexRef,
@@ -2089,7 +2106,12 @@ export function useCanvasAssetIntake({
 
         const src = getCanvasLocalMediaSourceUrl(sourceFile) || URL.createObjectURL(sourceFile)
         const defaultSize = 400
-        const pos = getCenterPosition(defaultSize, defaultSize)
+        const pos = resolvePlacement({
+          width: defaultSize,
+          height: defaultSize,
+          clientX: options?.clientX,
+          clientY: options?.clientY
+        })
         const assetCount = linkedAssets ? Object.keys(linkedAssets).length : 0
 
         const newItem = createCanvasModel3DItemDraft({
@@ -2147,10 +2169,10 @@ export function useCanvasAssetIntake({
     },
     [
       activateModel3DRender,
-      getCenterPosition,
       isChineseUi,
       nextZIndexRef,
       notifyError,
+      resolvePlacement,
       setItemsWithHistory,
       setPendingTextureModelId,
       setSelectedIds,

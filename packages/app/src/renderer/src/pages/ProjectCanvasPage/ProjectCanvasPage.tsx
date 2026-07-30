@@ -859,6 +859,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
       canvasId,
       canvasContainerRef,
       canvasActiveRef,
+      lastViewportPointRef,
       notifyWarning,
       addImageToCanvas,
       addImagesToCanvas,
