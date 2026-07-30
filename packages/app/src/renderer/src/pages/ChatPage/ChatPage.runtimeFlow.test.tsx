@@ -1244,30 +1244,30 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
-  it('persists outgoing blob image attachments before storing user messages', async () => {
+  it('persists duplicate blob image URLs once and uses durable URLs for history and batched requests', async () => {
     const fetchMock = vi.fn(async () => ({
-      blob: async () =>
-        new Blob([new Uint8Array([1, 2, 3])], {
-          type: 'image/png'
-        })
+      blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
     }))
     vi.stubGlobal('fetch', fetchMock)
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, revokeObjectURL })
     hoisted.storedSessions.value = [
       {
-        id: 'session-blob-user-image',
-        title: 'Blob user image',
+        id: 'session-duplicate-blob-user-image',
+        title: 'Duplicate blob user image',
         profileId: 'vision-model',
         messages: []
       }
     ]
     localStorage.setItem(
       scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
-      'session-blob-user-image'
+      'session-duplicate-blob-user-image'
     )
 
     renderChatPage()
-
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe('session-blob-user-image'))
+    await waitFor(() =>
+      expect(readCurrentSessionState()?.id).toBe('session-duplicate-blob-user-image')
+    )
 
     await act(async () => {
       window.dispatchEvent(
@@ -1275,12 +1275,18 @@ describe('ChatPage runtime workflow integration', () => {
           detail: {
             targetScope: 'runtime-flow',
             autoSend: true,
-            text: 'describe this',
+            text: 'describe both',
             attachments: [
               {
                 type: 'image',
-                url: 'blob:user-upload-image',
-                fileName: 'upload.png',
+                url: 'blob:duplicate-user-upload',
+                fileName: 'first.png',
+                mimeType: 'image/png'
+              },
+              {
+                type: 'image',
+                url: 'blob:duplicate-user-upload',
+                fileName: 'second.png',
                 mimeType: 'image/png'
               }
             ]

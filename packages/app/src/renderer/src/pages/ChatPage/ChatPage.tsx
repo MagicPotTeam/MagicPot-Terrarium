@@ -4564,17 +4564,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
         config: { download_dir: config.download_dir },
         storageScope
       })
+      const persistenceByBlobUrl = new Map<string, Promise<string | null>>()
       const persistedAttachments = await Promise.all(
         attachments.map(async (attachment, attachmentIndex): Promise<ChatAttachment> => {
           if (attachment.type !== 'image' || !attachment.url.startsWith('blob:')) {
             return attachment
           }
 
-          const savedPath = await saveChatImageAttachmentBlobToDir({
-            attachment,
-            attachmentIndex,
-            targetDir
-          })
+          let persistence = persistenceByBlobUrl.get(attachment.url)
+          if (!persistence) {
+            persistence = saveChatImageAttachmentBlobToDir({
+              attachment,
+              attachmentIndex,
+              targetDir
+            })
+            persistenceByBlobUrl.set(attachment.url, persistence)
+          }
+          const savedPath = await persistence
 
           if (!savedPath) {
             return attachment
@@ -5288,7 +5294,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           await persistSessionsToStorage(responseUpdater, 'tool-response')
           traceOutputKinds = ['tool_response']
           traceResponseCount = 1
-        } else if (useAttachmentBatching && rawAttachments) {
+        } else if (useAttachmentBatching && userMessage.attachments) {
           const maxAttachmentsPerRequest = await resolveAttachmentBatchCapability({
             config,
             profileId,
