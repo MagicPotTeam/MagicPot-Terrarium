@@ -69,7 +69,11 @@ interface ImageContextMenuProps {
   config: any
 }
 
-const saveImageToFile = async (imageUrl: string, fileName: string) => {
+// Keep this helper exported: ChatPage consumers may use the same native-save
+// path without rendering the context menu. A missing named export prevents
+// Vite/Electron from linking the renderer module and crashes startup.
+// eslint-disable-next-line react-refresh/only-export-components
+export const saveImageToFile = async (imageUrl: string, fileName: string) => {
   const { data } = await resolveImageBytes(imageUrl, fileName)
   return api().svcHyper.saveImageToDir({ data, fileName })
 }

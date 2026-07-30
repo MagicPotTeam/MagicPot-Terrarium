@@ -2,7 +2,7 @@ import React from 'react'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import ImageContextMenu from './ImageContextMenu'
+import ImageContextMenu, { saveImageToFile } from './ImageContextMenu'
 
 const notifySuccessMock = vi.fn()
 const notifyErrorMock = vi.fn()
@@ -78,6 +78,10 @@ describe('ImageContextMenu', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('exports the shared image-save helper', () => {
+    expect(saveImageToFile).toBeTypeOf('function')
   })
 
   it('saves an image without showing a success toast', async () => {
