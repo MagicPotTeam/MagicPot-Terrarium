@@ -7,6 +7,7 @@ import {
   Divider,
   Chip,
   Button,
+  CircularProgress,
   TextField,
   Menu,
   MenuItem,
@@ -298,6 +299,7 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
     handleResolveFigmaBinding,
     handleRunCanvasTarget,
     handleSaveCanvas,
+    isSavingCanvasFile,
     handleSaveCanvasAs,
     handleSaveCanvasAsFromContextMenu,
     handleSaveFigmaBinding,
@@ -1355,9 +1357,13 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
               if (items.length === 0) return
               handleOpenExportContextMenu({ x: e.clientX, y: e.clientY })
             }}
-            disabled={items.length === 0}
+            disabled={items.length === 0 || isSavingCanvasFile}
           >
-            <ExportIcon fontSize="small" />
+            {isSavingCanvasFile ? (
+              <CircularProgress size={20} color="inherit" aria-label="saving-canvas" />
+            ) : (
+              <ExportIcon fontSize="small" />
+            )}
           </IconButton>
         </span>
       </Tooltip>

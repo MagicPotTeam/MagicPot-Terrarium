@@ -202,6 +202,31 @@ describe('useCanvasKeyboardShortcuts', () => {
     expect(handleSaveCanvasAs).toHaveBeenCalledWith()
   })
 
+  it('ignores repeated Ctrl/Cmd+S keydown events', () => {
+    const handleSaveCanvas = vi.fn()
+    const handleSaveCanvasAs = vi.fn()
+
+    render(
+      <KeyboardShortcutHarness
+        handleUndo={vi.fn()}
+        handleSaveCanvas={handleSaveCanvas}
+        handleSaveCanvasAs={handleSaveCanvasAs}
+      />
+    )
+
+    fireEvent.keyDown(window, { key: 's', code: 'KeyS', ctrlKey: true, repeat: true })
+    fireEvent.keyDown(window, {
+      key: 's',
+      code: 'KeyS',
+      metaKey: true,
+      shiftKey: true,
+      repeat: true
+    })
+
+    expect(handleSaveCanvas).not.toHaveBeenCalled()
+    expect(handleSaveCanvasAs).not.toHaveBeenCalled()
+  })
+
   it('keeps the key listeners mounted when items change after a drag-like update', () => {
     const addEventListenerSpy = vi.spyOn(window, 'addEventListener')
     const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener')

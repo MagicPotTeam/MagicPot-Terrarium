@@ -18,6 +18,7 @@ import {
   sanitizeFilePart
 } from './canvasExportNamingUtils'
 import { buildRasterBackedSvgMarkup, SVG_EXPORT_MIME_TYPE } from './canvasExportSvgUtils'
+import { runWithCanvasRasterWorkLimit } from './canvasRasterWorkLimiter'
 import { type ExportSubmenuPlacement, resolveExportSubmenuPlacement } from './exportMenuPlacement'
 import type { CanvasExportBounds } from './groupPlaybackUtils'
 import {
@@ -576,6 +577,7 @@ export function useCanvasExportWorkflow({
   const saveProgressTimerRef = useRef<number | null>(null)
   const saveProgressValueRef = useRef(0)
   const canvasFileSaveInProgressRef = useRef(false)
+  const [isSavingCanvasFile, setIsSavingCanvasFile] = useState(false)
   const renderCanvasFileSaveProgress = useCallback(
     (progress: number) => {
       if (!notifyInfo) return
@@ -1062,7 +1064,7 @@ export function useCanvasExportWorkflow({
     [bgColor, createCanvasExportEntries, drawCanvasItemForExport]
   )
 
-  const renderCanvasItemsImageDataUrl = useCallback(
+  const renderCanvasItemsImageDataUrlUnlocked = useCallback(
     async (
       targetItems: CanvasItem[],
       includeBackground = false,
@@ -1085,7 +1087,13 @@ export function useCanvasExportWorkflow({
     [prepareExportRender, renderCanvasDataUri, renderCanvasItemsToCanvas, restoreExportRender]
   )
 
-  const renderCanvasItemsImageBytes = useCallback(
+  const renderCanvasItemsImageDataUrl = useCallback(
+    (...args: Parameters<typeof renderCanvasItemsImageDataUrlUnlocked>) =>
+      runWithCanvasRasterWorkLimit(() => renderCanvasItemsImageDataUrlUnlocked(...args)),
+    [renderCanvasItemsImageDataUrlUnlocked]
+  )
+
+  const renderCanvasItemsImageBytesUnlocked = useCallback(
     async (
       targetItems: CanvasItem[],
       format: CanvasRenderedImageFormat,
@@ -1126,7 +1134,13 @@ export function useCanvasExportWorkflow({
     ]
   )
 
-  const renderCanvasItemsSvgMarkup = useCallback(
+  const renderCanvasItemsImageBytes = useCallback(
+    (...args: Parameters<typeof renderCanvasItemsImageBytesUnlocked>) =>
+      runWithCanvasRasterWorkLimit(() => renderCanvasItemsImageBytesUnlocked(...args)),
+    [renderCanvasItemsImageBytesUnlocked]
+  )
+
+  const renderCanvasItemsSvgMarkupUnlocked = useCallback(
     async (targetItems: CanvasItem[], includeBackground = false): Promise<string> => {
       const selectionSnapshot = await prepareExportRender()
 
@@ -1152,6 +1166,12 @@ export function useCanvasExportWorkflow({
       renderCanvasItemsToCanvas,
       restoreExportRender
     ]
+  )
+
+  const renderCanvasItemsSvgMarkup = useCallback(
+    (...args: Parameters<typeof renderCanvasItemsSvgMarkupUnlocked>) =>
+      runWithCanvasRasterWorkLimit(() => renderCanvasItemsSvgMarkupUnlocked(...args)),
+    [renderCanvasItemsSvgMarkupUnlocked]
   )
 
   const buildQuickCanvasItemsImageUrlKey = useCallback(
@@ -1362,7 +1382,7 @@ export function useCanvasExportWorkflow({
         return await pendingImageUrl
       }
 
-      const nextImageUrlPromise = (async () => {
+      const nextImageUrlPromise = runWithCanvasRasterWorkLimit(async () => {
         const canvas = renderQuickCanvasItemsToCanvas(targetItems)
         if (!canvas) {
           return null
@@ -1375,7 +1395,7 @@ export function useCanvasExportWorkflow({
             : ensureExportImageDataUrl(await blobToDataUri(blob))
         rememberQuickCanvasItemsImageUrl(cacheKey, imageUrl)
         return imageUrl
-      })()
+      })
 
       quickCanvasImageUrlPendingRef.current.set(cacheKey, nextImageUrlPromise)
 
@@ -1468,41 +1488,48 @@ export function useCanvasExportWorkflow({
     []
   )
 
-  const handleSaveCanvas = useCallback(async (options: CanvasSaveOptions = {}) => {
-    if (canvasFileSaveInProgressRef.current) return
-    canvasFileSaveInProgressRef.current = true
-    const shouldNotify = !options.suppressNotifications
-    if (shouldNotify) beginCanvasFileSaveProgress()
-    closeExportMenus()
-    try {
-      await exportCanvasFile(
-        items,
-        buildCanvasFileName(),
-        canvasId,
-        false,
-        groups,
-        figmaBinding,
-        groupBranches
-      )
-      if (shouldNotify) completeCanvasFileSaveProgress()
-    } catch (error) {
-      if (shouldNotify) closeCanvasFileSaveProgress()
-      throw error
-    } finally {
-      canvasFileSaveInProgressRef.current = false
-    }
-  }, [
-    beginCanvasFileSaveProgress,
-    buildCanvasFileName,
-    canvasId,
-    closeCanvasFileSaveProgress,
-    closeExportMenus,
-    completeCanvasFileSaveProgress,
-    figmaBinding,
-    groupBranches,
-    groups,
-    items
-  ])
+  const handleSaveCanvas = useCallback(
+    async (options: CanvasSaveOptions = {}) => {
+      if (canvasFileSaveInProgressRef.current) return
+      canvasFileSaveInProgressRef.current = true
+      setIsSavingCanvasFile(true)
+      const shouldNotify = !options.suppressNotifications
+      if (shouldNotify) beginCanvasFileSaveProgress()
+      closeExportMenus()
+      try {
+        await exportCanvasFile(
+          items,
+          buildCanvasFileName(),
+          canvasId,
+          false,
+          groups,
+          figmaBinding,
+          groupBranches,
+          true,
+          () => setIsSavingCanvasFile(false)
+        )
+        if (shouldNotify) completeCanvasFileSaveProgress()
+      } catch (error) {
+        if (shouldNotify) closeCanvasFileSaveProgress()
+        throw error
+      } finally {
+        canvasFileSaveInProgressRef.current = false
+        setIsSavingCanvasFile(false)
+      }
+    },
+    [
+      beginCanvasFileSaveProgress,
+      buildCanvasFileName,
+      canvasId,
+      closeCanvasFileSaveProgress,
+      closeExportMenus,
+      completeCanvasFileSaveProgress,
+      figmaBinding,
+      groupBranches,
+      groups,
+      items
+    ]
+  )
 
   const handleSaveCanvasAs = useCallback(async () => {
     if (canvasFileSaveInProgressRef.current) return
@@ -1591,20 +1618,22 @@ export function useCanvasExportWorkflow({
       const outputPath = await chooseExportPath(buildExportImageFileName(scope, format), format)
       if (!outputPath) return
 
-      const selectionSnapshot = await prepareExportRender()
+      await runWithCanvasRasterWorkLimit(async () => {
+        const selectionSnapshot = await prepareExportRender()
 
-      try {
-        const canvas = await renderCanvasItemsToCanvas(targetItems, format, true)
-        await saveCanvasToPath(canvas, outputPath, format)
-        notifySuccess(t('canvas.export_scene_success'))
-      } catch (err) {
-        console.error('Failed to export canvas scene:', err)
-        notifyError(
-          `${t('canvas.export_failed')} ${err instanceof Error ? err.message : String(err)}`
-        )
-      } finally {
-        restoreExportRender(selectionSnapshot)
-      }
+        try {
+          const canvas = await renderCanvasItemsToCanvas(targetItems, format, true)
+          await saveCanvasToPath(canvas, outputPath, format)
+          notifySuccess(t('canvas.export_scene_success'))
+        } catch (err) {
+          console.error('Failed to export canvas scene:', err)
+          notifyError(
+            `${t('canvas.export_failed')} ${err instanceof Error ? err.message : String(err)}`
+          )
+        } finally {
+          restoreExportRender(selectionSnapshot)
+        }
+      })
     },
     [
       buildExportImageFileName,
@@ -1636,16 +1665,18 @@ export function useCanvasExportWorkflow({
       const outputPath = await chooseExportPath(buildExportImageFileName(scope, 'svg'), 'svg')
       if (!outputPath) return
 
-      try {
-        const svgMarkup = await renderCanvasItemsSvgMarkup(targetItems, true)
-        await saveSvgToPath(svgMarkup, outputPath)
-        notifySuccess(t('canvas.export_scene_success'))
-      } catch (err) {
-        console.error('Failed to export canvas scene as SVG:', err)
-        notifyError(
-          `${t('canvas.export_failed')} ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
+      await runWithCanvasRasterWorkLimit(async () => {
+        try {
+          const svgMarkup = await renderCanvasItemsSvgMarkupUnlocked(targetItems, true)
+          await saveSvgToPath(svgMarkup, outputPath)
+          notifySuccess(t('canvas.export_scene_success'))
+        } catch (err) {
+          console.error('Failed to export canvas scene as SVG:', err)
+          notifyError(
+            `${t('canvas.export_failed')} ${err instanceof Error ? err.message : String(err)}`
+          )
+        }
+      })
     },
     [
       buildExportImageFileName,
@@ -1653,7 +1684,7 @@ export function useCanvasExportWorkflow({
       closeExportMenus,
       notifyError,
       notifySuccess,
-      renderCanvasItemsSvgMarkup,
+      renderCanvasItemsSvgMarkupUnlocked,
       saveSvgToPath,
       t
     ]
@@ -1679,22 +1710,24 @@ export function useCanvasExportWorkflow({
       if (result.canceled || !result.filePaths?.length) return
 
       const outputDir = result.filePaths[0]
-      const selectionSnapshot = await prepareExportRender()
+      await runWithCanvasRasterWorkLimit(async () => {
+        const selectionSnapshot = await prepareExportRender()
 
-      try {
-        for (const [index, item] of targetItems.entries()) {
-          const canvas = await renderCanvasItemsToCanvas([item], format, false)
-          const fileName = buildElementExportFileName(item, index, format)
-          await saveCanvasToDirectory(canvas, outputDir, fileName, format)
+        try {
+          for (const [index, item] of targetItems.entries()) {
+            const canvas = await renderCanvasItemsToCanvas([item], format, false)
+            const fileName = buildElementExportFileName(item, index, format)
+            await saveCanvasToDirectory(canvas, outputDir, fileName, format)
+          }
+        } catch (err) {
+          console.error('Failed to export canvas elements as images:', err)
+          notifyError(
+            `${t('canvas.export_failed')} ${err instanceof Error ? err.message : String(err)}`
+          )
+        } finally {
+          restoreExportRender(selectionSnapshot)
         }
-      } catch (err) {
-        console.error('Failed to export canvas elements as images:', err)
-        notifyError(
-          `${t('canvas.export_failed')} ${err instanceof Error ? err.message : String(err)}`
-        )
-      } finally {
-        restoreExportRender(selectionSnapshot)
-      }
+      })
     },
     [
       buildElementExportFileName,
@@ -1725,24 +1758,26 @@ export function useCanvasExportWorkflow({
 
       const outputDir = result.filePaths[0]
 
-      try {
-        for (const [index, item] of targetItems.entries()) {
-          const svgMarkup = await renderCanvasItemsSvgMarkup([item], false)
-          const fileName = buildElementExportFileName(item, index, 'svg')
-          await saveSvgToDirectory(svgMarkup, outputDir, fileName)
+      await runWithCanvasRasterWorkLimit(async () => {
+        try {
+          for (const [index, item] of targetItems.entries()) {
+            const svgMarkup = await renderCanvasItemsSvgMarkupUnlocked([item], false)
+            const fileName = buildElementExportFileName(item, index, 'svg')
+            await saveSvgToDirectory(svgMarkup, outputDir, fileName)
+          }
+        } catch (err) {
+          console.error('Failed to export canvas elements as SVG:', err)
+          notifyError(
+            `${t('canvas.export_failed')} ${err instanceof Error ? err.message : String(err)}`
+          )
         }
-      } catch (err) {
-        console.error('Failed to export canvas elements as SVG:', err)
-        notifyError(
-          `${t('canvas.export_failed')} ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
+      })
     },
     [
       buildElementExportFileName,
       closeExportMenus,
       notifyError,
-      renderCanvasItemsSvgMarkup,
+      renderCanvasItemsSvgMarkupUnlocked,
       saveSvgToDirectory,
       t
     ]
@@ -1826,6 +1861,7 @@ export function useCanvasExportWorkflow({
     handleCloseExportSubmenu,
     openExportSubmenu,
     handleSaveCanvas,
+    isSavingCanvasFile,
     handleSaveCanvasAs,
     handleSaveCanvasAsFromContextMenu,
     handleExportCanvasProjectFile,

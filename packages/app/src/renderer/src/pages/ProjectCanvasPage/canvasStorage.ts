@@ -2251,7 +2251,8 @@ export async function exportCanvasFile(
   groups: CanvasGroup[] = [],
   figmaBinding: CanvasFigmaBinding | null = null,
   groupBranches: CanvasGroupBranch[] = [],
-  updateCurrentDocumentPath: boolean = true
+  updateCurrentDocumentPath: boolean = true,
+  onSaveDialogOpened?: () => void
 ): Promise<void> {
   const name =
     fileName ||
@@ -2289,11 +2290,13 @@ export async function exportCanvasFile(
 
     if (!targetPath) {
       const projectCanvasLocation = canvasId ? await getProjectCanvasLocation(canvasId) : null
-      const res = await window.api.svcDialog.showSaveDialog({
+      const saveDialogPromise = window.api.svcDialog.showSaveDialog({
         title: forceSaveAs ? 'Save Canvas As' : 'Save Canvas',
         defaultPath: cachedTargetPath || projectCanvasLocation?.canvasFullPath || name,
         filters: [{ name: 'MPCANVAS File', extensions: ['mpcanvas'] }]
       })
+      onSaveDialogOpened?.()
+      const res = await saveDialogPromise
       if (res.canceled || !res.filePath) {
         return // User canceled.
       }
