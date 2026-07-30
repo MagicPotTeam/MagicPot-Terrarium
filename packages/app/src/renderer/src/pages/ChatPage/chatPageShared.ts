@@ -226,10 +226,39 @@ export const readScopedActiveLoadingSessionIds = (scope: string): string[] => [
   ...(activeLoadingSessionIdsByScope.get(scope) || new Set<string>())
 ]
 
+export const CHAT_SESSION_LOADING_STATE_EVENT = 'chat:session-loading-state'
+
+export type ChatSessionLoadingStateEvent = {
+  scope: string
+  sessionId: string
+  running: boolean
+  completed?: boolean
+}
+
+const emitScopedLoadingState = (scope: string, sessionId: string, completed?: boolean): void => {
+  if (typeof window === 'undefined') return
+
+  const running =
+    (activeLoadingSessionIdsByScope.get(scope)?.size || 0) > 0 ||
+    (externalLoadingSessionIdsByScope.get(scope)?.size || 0) > 0
+
+  window.dispatchEvent(
+    new CustomEvent(CHAT_SESSION_LOADING_STATE_EVENT, {
+      detail: {
+        scope,
+        sessionId,
+        running,
+        ...(!running && completed !== undefined ? { completed } : {})
+      }
+    })
+  )
+}
+
 export const updateScopedActiveLoadingSessionId = (
   scope: string,
   sessionId: string,
-  loading: boolean
+  loading: boolean,
+  completed = !loading
 ): string[] => {
   const nextIds = new Set(activeLoadingSessionIdsByScope.get(scope) || [])
 
@@ -244,6 +273,8 @@ export const updateScopedActiveLoadingSessionId = (
   } else {
     activeLoadingSessionIdsByScope.delete(scope)
   }
+
+  emitScopedLoadingState(scope, sessionId, completed)
 
   return [...nextIds]
 }
@@ -265,7 +296,8 @@ export const readScopedLoadingSessionIds = (scope: string): string[] =>
 export const updateScopedExternalLoadingSessionId = (
   scope: string,
   sessionId: string,
-  loading: boolean
+  loading: boolean,
+  completed = !loading
 ): string[] => {
   const nextIds = new Set(externalLoadingSessionIdsByScope.get(scope) || [])
 
@@ -282,6 +314,7 @@ export const updateScopedExternalLoadingSessionId = (
   }
 
   clearLegacyExternalLoadingSessionIds(scope)
+  emitScopedLoadingState(scope, sessionId, completed)
 
   return [...nextIds]
 }

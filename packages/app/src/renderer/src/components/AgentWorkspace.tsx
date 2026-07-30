@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box,
   Button,
@@ -23,8 +23,10 @@ import ChatPage from '@renderer/pages/ChatPage/ChatPage'
 import { loadAllSessions, type ChatSession } from '@renderer/pages/ChatPage/chatStorage'
 import { getLocalizedConversationTitle } from '@renderer/pages/ChatPage/chatLocaleUtils'
 import {
+  CHAT_SESSION_LOADING_STATE_EVENT,
   readScopedActiveLoadingSessionIds,
-  readScopedExternalLoadingSessionIds
+  readScopedExternalLoadingSessionIds,
+  type ChatSessionLoadingStateEvent
 } from '@renderer/pages/ChatPage/chatPageShared'
 import {
   buildAgentPaneScope,
@@ -344,7 +346,6 @@ type PaneListItemProps = {
   dragOver: boolean
   onRemove: (paneId: string) => void
   onSelect: (paneId: string) => void
-  onViewed: (paneId: string) => void
   onDragStart: (paneId: string) => void
   onDragEnd: () => void
   onDragOver: (event: React.DragEvent<HTMLElement>, paneId: string) => void
@@ -367,7 +368,6 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
   dragOver,
   onRemove,
   onSelect,
-  onViewed,
   onDragStart,
   onDragEnd,
   onDragOver,
@@ -379,15 +379,12 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     tabIndex={0}
     data-agent-workspace-scope={paneScope}
     draggable
-    onMouseEnter={() => onViewed(pane.id)}
     onClick={() => {
-      onViewed(pane.id)
       onSelect(pane.id)
     }}
     onKeyDown={(event) => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault()
-        onViewed(pane.id)
         onSelect(pane.id)
       }
     }}
@@ -530,6 +527,14 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   )
   const [panePreviews, setPanePreviews] = useState<Record<string, PanePreview>>({})
   const [unreadPaneIds, setUnreadPaneIds] = useState<Set<string>>(new Set())
+  const clearPaneUnread = useCallback((paneId: string) => {
+    setUnreadPaneIds((prev) => {
+      if (!prev.has(paneId)) return prev
+      const next = new Set(prev)
+      next.delete(paneId)
+      return next
+    })
+  }, [])
   const [draggingPaneId, setDraggingPaneId] = useState<string | null>(null)
   const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null)
   const [tracePanelOpen, setTracePanelOpen] = useState(false)
@@ -547,40 +552,81 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   })
   const pendingExternalPaneRequestsRef = useRef<Array<{ requestId?: string; paneId: string }>>([])
   const previewRefreshSequenceRef = useRef(0)
-  const previousPreviewStatusesRef = useRef<Record<string, PanePreviewStatus>>({})
+  const previewsInitializedRef = useRef(false)
+  const panesObservedRunningRef = useRef<Set<string>>(new Set())
   const openPanes = useMemo(() => getOpenPanes(panes), [panes])
   const workspaceStrings = useMemo(() => createAgentWorkspaceStrings(t), [t])
   const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? openPanes[0] ?? null
 
   useEffect(() => {
-    const previousStatuses = previousPreviewStatusesRef.current
-    const nextStatuses = Object.fromEntries(
-      Object.entries(panePreviews).map(([paneId, preview]) => [paneId, preview.status])
-    ) as Record<string, PanePreviewStatus>
-
-    setUnreadPaneIds((prev) => {
-      const next = new Set(prev)
+    if (!previewsInitializedRef.current) {
+      if (Object.keys(panePreviews).length === 0) return
+      previewsInitializedRef.current = true
       for (const [paneId, preview] of Object.entries(panePreviews)) {
-        if (preview.status === 'done' && previousStatuses[paneId] !== 'done') {
-          next.add(paneId)
-        } else if (preview.status !== 'done') {
-          next.delete(paneId)
-        }
+        if (preview.status === 'running') panesObservedRunningRef.current.add(paneId)
       }
-      return next
-    })
-    previousPreviewStatusesRef.current = nextStatuses
+      return
+    }
+
+    for (const [paneId, preview] of Object.entries(panePreviews)) {
+      if (preview.status === 'running') panesObservedRunningRef.current.add(paneId)
+    }
   }, [panePreviews])
 
   useEffect(() => {
-    if (!activePaneId || panePreviews[activePaneId]?.status !== 'done') return
-    setUnreadPaneIds((prev) => {
-      if (!prev.has(activePaneId)) return prev
-      const next = new Set(prev)
-      next.delete(activePaneId)
-      return next
-    })
-  }, [activePaneId, panePreviews])
+    previewsInitializedRef.current = false
+    panesObservedRunningRef.current.clear()
+    setUnreadPaneIds(new Set())
+  }, [projectId])
+
+  useEffect(() => {
+    const paneIdByScope = new Map(
+      openPanes.map((pane) => [buildAgentPaneScope(projectId, pane.id), pane.id])
+    )
+    const handleLoadingState = (event: Event) => {
+      const detail = (event as CustomEvent<Partial<ChatSessionLoadingStateEvent>>).detail
+      const paneId = detail?.scope ? paneIdByScope.get(detail.scope) : undefined
+      if (!paneId) return
+
+      setPanePreviews((prev) => {
+        const current = prev[paneId]
+        const status: PanePreviewStatus = detail.running
+          ? 'running'
+          : detail.completed === true
+            ? 'done'
+            : 'idle'
+        if (current?.status === status) return prev
+
+        const paneIndex = openPanes.findIndex((pane) => pane.id === paneId)
+        return {
+          ...prev,
+          [paneId]: {
+            title: current?.title || getPaneLabel(paneId, paneIndex, workspaceStrings.paneLabel),
+            subtitle: current?.subtitle || workspaceStrings.emptyConversation,
+            status
+          }
+        }
+      })
+
+      if (detail.running) {
+        panesObservedRunningRef.current.add(paneId)
+        setUnreadPaneIds((prev) => {
+          if (!prev.has(paneId)) return prev
+          const next = new Set(prev)
+          next.delete(paneId)
+          return next
+        })
+        return
+      }
+
+      if (!panesObservedRunningRef.current.delete(paneId)) return
+      if (detail.completed !== true) return
+      setUnreadPaneIds((prev) => new Set(prev).add(paneId))
+    }
+
+    window.addEventListener(CHAT_SESSION_LOADING_STATE_EVENT, handleLoadingState)
+    return () => window.removeEventListener(CHAT_SESSION_LOADING_STATE_EVENT, handleLoadingState)
+  }, [openPanes, projectId, workspaceStrings])
 
   useEffect(() => {
     const nextPanes = readStoredPanes(storageKey)
@@ -1013,14 +1059,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
               dragOver={pane.id === dragOverPaneId && pane.id !== draggingPaneId}
               onRemove={handleRemovePane}
               onSelect={setActivePaneId}
-              onViewed={(paneId) => {
-                setUnreadPaneIds((prev) => {
-                  if (!prev.has(paneId)) return prev
-                  const next = new Set(prev)
-                  next.delete(paneId)
-                  return next
-                })
-              }}
               onDragStart={(paneId) => {
                 setDraggingPaneId(paneId)
                 setDragOverPaneId(null)
@@ -1076,6 +1114,16 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
               aria-hidden={!isActivePane}
               data-agent-workspace-pane={pane.id}
               data-agent-workspace-scope={scope}
+              onPointerDownCapture={(event) => {
+                const target = event.target as Element
+                if (!target.closest('[data-chat-scroll-container="true"]')) return
+                clearPaneUnread(pane.id)
+              }}
+              onScrollCapture={(event) => {
+                const target = event.target as Element
+                if (!target.matches('[data-chat-scroll-container="true"]')) return
+                clearPaneUnread(pane.id)
+              }}
               sx={{
                 position: 'absolute',
                 inset: 0,

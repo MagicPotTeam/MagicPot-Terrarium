@@ -19,6 +19,8 @@ import {
 } from './builtInSkills'
 import {
   buildChatWorkspaceControlsPortalId,
+  CHAT_SESSION_LOADING_STATE_EVENT,
+  readScopedActiveLoadingSessionIds,
   scopedStorageKey,
   STORAGE_KEY_CURRENT_SESSION_ID,
   STORAGE_KEY_LOADING_IDS,
@@ -469,6 +471,8 @@ vi.mock('./components/ChatComposer', () => ({
     selectedSkillName,
     modelSelectorSlot,
     inputSyncKey,
+    isLoading,
+    onStopGenerating,
     onCompressContext,
     onClearContext,
     disableCompressContext,
@@ -482,6 +486,8 @@ vi.mock('./components/ChatComposer', () => ({
     selectedSkillName?: string
     modelSelectorSlot?: React.ReactNode
     inputSyncKey?: string
+    isLoading: boolean
+    onStopGenerating: () => void
     onCompressContext?: () => void
     onClearContext?: () => void
     disableCompressContext?: boolean
@@ -502,6 +508,12 @@ vi.mock('./components/ChatComposer', () => ({
           onChange={(event) => {
             setDraftValue(event.target.value)
             onInputChange(event.target.value)
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault()
+              onSend()
+            }
           }}
         />
         <button type="button" data-testid="chat-composer-upload-mock" onClick={onUploadFile}>
@@ -526,6 +538,11 @@ vi.mock('./components/ChatComposer', () => ({
         <button type="button" data-testid="chat-composer-send-mock" onClick={onSend}>
           send
         </button>
+        {isLoading ? (
+          <button type="button" data-testid="chat-composer-stop-mock" onClick={onStopGenerating}>
+            stop
+          </button>
+        ) : null}
         <div data-testid="chat-composer-attachment-count">{pendingAttachments.length}</div>
         <div data-testid="chat-composer-attachment-names">
           {pendingAttachments.map((attachment) => attachment.fileName || attachment.url).join('|')}
@@ -1893,6 +1910,204 @@ describe('ChatPage runtime workflow integration', () => {
       })
     } finally {
       vi.stubGlobal('FileReader', originalFileReader)
+      vi.stubGlobal('fetch', originalFetch)
+    }
+  })
+
+  it('clears normal-response loading before deferred persistence completes', async () => {
+    const scope = 'deferred-response-persistence'
+    let releasePersistence: (() => void) | undefined
+    let resolveResponse: ((value: { content: string }) => void) | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveResponse = resolve
+        })
+    )
+    const loadingEvents: Array<{ running?: boolean; completed?: boolean }> = []
+    const handleLoadingState = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ scope?: string; running?: boolean; completed?: boolean }>
+      ).detail
+      if (detail.scope === scope) loadingEvents.push(detail)
+    }
+    window.addEventListener(CHAT_SESSION_LOADING_STATE_EVENT, handleLoadingState)
+
+    try {
+      renderChatPage(scope)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'finish before persistence' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        releasePersistence = resolve
+      })
+      await act(async () => resolveResponse?.({ content: 'assistant response' }))
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('assistant response')
+      )
+
+      expect(readScopedActiveLoadingSessionIds(scope)).toEqual([])
+      expect(loadingEvents.at(-1)).toMatchObject({ running: false, completed: true })
+    } finally {
+      releasePersistence?.()
+      hoisted.saveSessionToDBGate.value = null
+      window.removeEventListener(CHAT_SESSION_LOADING_STATE_EVENT, handleLoadingState)
+    }
+  })
+
+  it('queues Enter while loading, preserves attachments lazily, and continues after stop', async () => {
+    let firstSignal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock
+      .mockImplementationOnce(
+        (request: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            firstSignal = request.signal
+            request.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+              once: true
+            })
+          })
+      )
+      .mockResolvedValueOnce({ content: 'queued done' })
+
+    renderChatPage('queued-enter-stop')
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'active request' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+
+    const queuedAttachment = createImageAttachment('queued.png')
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            text: 'queued text',
+            attachment: queuedAttachment,
+            targetScope: 'queued-enter-stop'
+          }
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('queued text')
+    )
+    expect(screen.getByTestId('chat-composer-attachment-names')).toHaveTextContent('queued.png')
+
+    fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+    await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(''))
+    expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+    expect(firstSignal?.aborted).toBe(true)
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    const queuedRequest = hoisted.requestChatCompletionMock.mock.calls[1]?.[0] as {
+      messages: ChatMessage[]
+    }
+    expect(queuedRequest.messages.findLast((message) => message.role === 'user')).toEqual(
+      expect.objectContaining({
+        content: 'queued text',
+        attachments: [expect.objectContaining({ fileName: 'queued.png' })]
+      })
+    )
+  })
+
+  it('does not clear the draft when a busy enqueue has no sendable content', async () => {
+    let resolveFirstRequest: ((value: { content: string }) => void) | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirstRequest = resolve
+        })
+    )
+
+    renderChatPage('empty-busy-enqueue')
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'active request' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '   ' } })
+    fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('   ')
+
+    await act(async () => resolveFirstRequest?.({ content: 'done' }))
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('queues concurrent auto-sends without early materialization and drains them FIFO after errors', async () => {
+    let rejectFirstRequest: ((error: Error) => void) | undefined
+    hoisted.requestChatCompletionMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectFirstRequest = reject
+          })
+      )
+      .mockResolvedValueOnce({ content: 'second done' })
+      .mockResolvedValueOnce({ content: 'third done' })
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.fn(
+      async (url: string) => new Response(new Blob([url], { type: 'image/png' }))
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      renderChatPage('concurrent-auto-send')
+      await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+      for (const detail of [
+        { text: 'first', requestId: 'first' },
+        {
+          text: 'second',
+          requestId: 'second',
+          attachment: { type: 'image', url: 'blob:second-canvas', mimeType: 'image/png' }
+        },
+        {
+          text: 'third',
+          requestId: 'third',
+          attachment: { type: 'image', url: 'blob:third-canvas', mimeType: 'image/png' }
+        }
+      ]) {
+        await act(async () => {
+          window.dispatchEvent(
+            new CustomEvent('send-to-agent', {
+              detail: { ...detail, autoSend: true, targetScope: 'concurrent-auto-send' }
+            })
+          )
+        })
+      }
+
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+
+      await act(async () => rejectFirstRequest?.(new Error('first failed')))
+
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+        'blob:second-canvas',
+        'blob:third-canvas'
+      ])
+      expect(
+        hoisted.requestChatCompletionMock.mock.calls.map(
+          ([request]) =>
+            request.messages.findLast((message: { role: string }) => message.role === 'user')
+              ?.content
+        )
+      ).toEqual(['first', 'second', 'third'])
+    } finally {
       vi.stubGlobal('fetch', originalFetch)
     }
   })

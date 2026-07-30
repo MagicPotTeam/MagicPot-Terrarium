@@ -240,6 +240,27 @@ type ExternalSendToAgentDetail = {
   scope?: string
   targetScope?: string
   autoSend?: boolean
+  requestId?: string
+  eventId?: string
+  runId?: string
+}
+
+type SendMessageOverrides = {
+  content: string
+  attachments?: ChatAttachment[]
+  resolveAttachments?: () => Promise<ChatAttachment[]>
+  hiddenContext?: string
+  baseMessages?: ChatMessage[]
+  targetSessionId?: string
+  forcedSkillId?: string | null
+  forcedProfileId?: string | null
+  hy3dParams?: ReturnType<typeof getHy3dParams>
+  queueKey?: string
+}
+
+type QueuedSessionSend = {
+  overrides?: SendMessageOverrides
+  queueKey?: string
 }
 
 type ExternalInitialChatMessage = {
@@ -1185,6 +1206,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
     return new Set(readScopedActiveLoadingSessionIds(storageScope))
   })
   const loadingSessionIdsRef = useRef<Set<string>>(loadingSessionIds)
+  const sendingSessionIdsRef = useRef<Set<string>>(new Set())
+  const queuedSessionSendsRef = useRef<Map<string, QueuedSessionSend[]>>(new Map())
+  const pendingSessionSendKeysRef = useRef<Set<string>>(new Set())
+  const drainQueuedSessionRef = useRef<(sessionId: string) => void>(() => undefined)
+  const [composerClearVersion, setComposerClearVersion] = useState(0)
   useEffect(() => {
     loadingSessionIdsRef.current = loadingSessionIds
   }, [loadingSessionIds])
@@ -1250,9 +1276,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const updateExternalLoadingSessionState = useCallback(
-    (sessionId: string, loading: boolean) => {
+    (sessionId: string, loading: boolean, completed = !loading) => {
       const nextLoadingIds = new Set(
-        updateScopedExternalLoadingSessionId(storageScope, sessionId, loading)
+        updateScopedExternalLoadingSessionId(storageScope, sessionId, loading, completed)
       )
 
       externalLoadingSessionIdsRef.current = nextLoadingIds
@@ -1264,13 +1290,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const clearLoadingSessionTracking = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, completed = true) => {
       const nextLoadingIds = new Set(loadingSessionIdsRef.current)
       nextLoadingIds.delete(sessionId)
       loadingSessionIdsRef.current = nextLoadingIds
       setLoadingSessionIds(nextLoadingIds)
       setSessionLoadingStatus(sessionId, null)
-      updateScopedActiveLoadingSessionId(storageScope, sessionId, false)
+      updateScopedActiveLoadingSessionId(storageScope, sessionId, false, completed)
 
       try {
         const stored = JSON.parse(localStorage.getItem(loadingIdsStorageKey) || '[]') as string[]
@@ -1282,7 +1308,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         /* ignore storage failures */
       }
 
-      updateExternalLoadingSessionState(sessionId, false)
+      updateExternalLoadingSessionState(sessionId, false, completed)
+      queueMicrotask(() => drainQueuedSessionRef.current(sessionId))
     },
     [loadingIdsStorageKey, setSessionLoadingStatus, storageScope, updateExternalLoadingSessionState]
   )
@@ -1297,7 +1324,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ?.abort('Chat context compression cancelled.')
       contextCompactAbortControllersRef.current.delete(sessionId)
       compactingSessionIdsRef.current.delete(sessionId)
-      clearLoadingSessionTracking(sessionId)
+      clearLoadingSessionTracking(sessionId, false)
       setSessions((prev) => removeTrailingEmptyAssistantMessage(prev, sessionId))
       emitPreviewRefresh('preview-only')
       window.dispatchEvent(
@@ -1396,7 +1423,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   }, [active, loadingIdsStorageKey, setSessions, storageScope])
 
-  // 校验 loading IDs：移除无效的（已有 content 或无空 assistant 占位符的）
+  // 校验 loading IDs：实时请求可以已经写入流式内容，controller/external run 才是权威状态。
   useEffect(() => {
     if (!sessionsLoaded) return
 
@@ -1420,22 +1447,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const session = sessions.find((item) => item.id === sessionId)
       const hasLiveRequest =
         sessionAbortControllersRef.current.has(sessionId) ||
-        readScopedActiveLoadingSessionIds(storageScope).includes(sessionId) ||
         externalLoadingSessionIdsRef.current.has(sessionId)
       if (!session || session.messages.length === 0 || !hasLiveRequest) {
         removedLoadingIds.push(sessionId)
         return false
       }
-
-      const lastMessage = session.messages[session.messages.length - 1]
-      const hasPendingAssistantPlaceholder =
-        lastMessage?.role === 'assistant' &&
-        !lastMessage.content &&
-        (!lastMessage.attachments || lastMessage.attachments.length === 0)
-      if (!hasPendingAssistantPlaceholder) {
-        removedLoadingIds.push(sessionId)
-      }
-      return hasPendingAssistantPlaceholder
+      return true
     })
 
     const validLoadingIdSet = new Set(validLoadingIds)
@@ -1451,7 +1468,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     loadingSessionIdsRef.current = nextLoadingIds
     setLoadingSessionIds(nextLoadingIds)
     for (const sessionId of removedLoadingIds) {
-      updateScopedActiveLoadingSessionId(storageScope, sessionId, false)
+      updateScopedActiveLoadingSessionId(storageScope, sessionId, false, false)
       setSessionLoadingStatus(sessionId, null)
     }
 
@@ -1477,6 +1494,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         scope?: string
         sessionId?: string
         loading?: boolean
+        completed?: boolean
       }>
 
       if (customEvent.detail?.scope) {
@@ -1488,7 +1506,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const sessionId = customEvent.detail?.sessionId
       if (!sessionId) return
 
-      updateExternalLoadingSessionState(sessionId, customEvent.detail.loading !== false)
+      const loading = customEvent.detail.loading !== false
+      updateExternalLoadingSessionState(
+        sessionId,
+        loading,
+        customEvent.detail.completed ?? !loading
+      )
     }
 
     window.addEventListener('chat:set-external-loading', handleExternalLoading)
@@ -1649,29 +1672,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ) as ChatAttachment[]
 
       if (autoSend && sendMessageRef.current) {
-        const sendExternalMessage = (resolvedAttachments: ChatAttachment[]) => {
-          const normalizedText = text || ''
-          if (!normalizedText.trim() && resolvedAttachments.length === 0) return
-          const sendMessage = sendMessageRef.current
-          if (!sendMessage) return
-          void sendMessage({
-            content: normalizedText,
-            attachments: resolvedAttachments,
-            hiddenContext: hiddenText || ''
-          })
-        }
-
-        void resolveAttachments(false)
-          .then(async (resolvedAttachments) => {
+        const normalizedText = text || ''
+        const sendMessage = sendMessageRef.current
+        if (!normalizedText.trim() && rawAttachments.length === 0 && !image) return
+        void sendMessage({
+          content: normalizedText,
+          hiddenContext: hiddenText || '',
+          queueKey: detail.requestId ?? detail.eventId ?? detail.runId,
+          resolveAttachments: async () => {
+            const resolvedAttachments = await resolveAttachments(false)
             if (!image) return resolvedAttachments
             const imageAttachment = await convertInlineImageToAttachment(image, 'pasted-image.png')
             return imageAttachment ? [...resolvedAttachments, imageAttachment] : resolvedAttachments
-          })
-          .then(sendExternalMessage)
-          .catch((err) => {
-            console.error('[ChatPage] Failed to materialize external attachments:', err)
-            sendExternalMessage([])
-          })
+          }
+        }).catch((err) => {
+          console.error('[ChatPage] Failed to send external attachments:', err)
+        })
         return
       }
 
@@ -3082,17 +3098,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   // ==================== 外部事件：send-to-agent ====================
   // sendMessage 定义在后面，通过 ref 在 event handler 中引用
-  const sendMessageRef = useRef<
-    | ((overrides?: {
-        content: string
-        attachments?: ChatAttachment[]
-        hiddenContext?: string
-        targetSessionId?: string
-        forcedSkillId?: string | null
-        forcedProfileId?: string | null
-      }) => Promise<void>)
-    | null
-  >(null)
+  const sendMessageRef = useRef<((overrides?: SendMessageOverrides) => Promise<void>) | null>(null)
 
   useEffect(() => {
     const handleSendToAgent = (e: Event) => {
@@ -3106,6 +3112,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         scope?: string
         targetScope?: string
         autoSend?: boolean
+        requestId?: string
+        eventId?: string
+        runId?: string
       }>
       const detail = customEvent.detail
       const targetScope = detail.targetScope ?? detail.scope
@@ -4604,36 +4613,25 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [persistUserImageAttachments]
   )
 
-  const sendMessage = useCallback(
-    async (overrides?: {
-      content: string
-      attachments?: ChatAttachment[]
-      hiddenContext?: string
-      baseMessages?: ChatMessage[]
-      targetSessionId?: string
-      forcedSkillId?: string | null
-      forcedProfileId?: string | null
-      hy3dParams?: ReturnType<typeof getHy3dParams>
-    }) => {
+  const executeSendMessage = useCallback(
+    async (overrides?: SendMessageOverrides) => {
       const targetSessionId = overrides?.targetSessionId ?? currentSessionIdRef.current
       const cs = sessionsRef.current.find((s) => s.id === targetSessionId)
 
       const msgContent = overrides ? overrides.content : inputValueRef.current.trim()
-      const msgAttachments = overrides
+      let msgAttachments = overrides
         ? overrides.attachments
         : pendingAttachmentsRef.current.length > 0
           ? [...pendingAttachmentsRef.current]
           : undefined
+      if (overrides?.resolveAttachments) {
+        msgAttachments = await overrides.resolveAttachments()
+      }
       const msgHiddenContext = (
         overrides ? overrides.hiddenContext : pendingHiddenContextRef.current
       )?.trim()
 
       if (!cs || !targetSessionId) return
-
-      if (targetSessionId && loadingSessionIdsRef.current.has(targetSessionId)) {
-        console.log('[ChatPage] Target session is still generating, skip duplicate send')
-        return
-      }
 
       const activeSkillId = resolveAvailableSkillId(
         overrides?.forcedSkillId ?? cs.skillId ?? selectedSkillId
@@ -5431,6 +5429,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           )
 
           setSessions(responseUpdater)
+          clearLoadingSessionTracking(targetSessionId, true)
           await persistSessionsToStorage(responseUpdater, 'response')
           traceOutputKinds = summarizeChatAttachmentKindsForTrace(result.attachments)
           traceResponseCount = 1
@@ -5545,7 +5544,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (sessionAbortControllersRef.current.get(targetSessionId) === sessionAbortController) {
             sessionAbortControllersRef.current.delete(targetSessionId)
           }
-          clearLoadingSessionTracking(targetSessionId)
+          clearLoadingSessionTracking(targetSessionId, !wasCancelled)
           emitPreviewRefresh('preview-only')
 
           if (!wasCancelled) {
@@ -5622,6 +5621,83 @@ const ChatPage: React.FC<ChatPageProps> = ({
       startContextCompactJob
     ]
   )
+
+  const sendMessage = useCallback(
+    async (overrides?: SendMessageOverrides): Promise<void> => {
+      const targetSessionId = overrides?.targetSessionId ?? currentSessionIdRef.current
+      if (!targetSessionId) return
+
+      const queueKey = overrides?.queueKey
+        ? `${targetSessionId}\u0000${overrides.queueKey}`
+        : undefined
+      if (queueKey && pendingSessionSendKeysRef.current.has(queueKey)) return
+
+      let queuedOverrides = overrides
+      const isBusy =
+        sendingSessionIdsRef.current.has(targetSessionId) ||
+        loadingSessionIdsRef.current.has(targetSessionId)
+      if (isBusy && !queuedOverrides) {
+        queuedOverrides = {
+          content: inputValueRef.current.trim(),
+          attachments:
+            pendingAttachmentsRef.current.length > 0
+              ? [...pendingAttachmentsRef.current]
+              : undefined,
+          hiddenContext: pendingHiddenContextRef.current,
+          targetSessionId
+        }
+        if (!queuedOverrides.content && !queuedOverrides.attachments?.length) return
+      }
+
+      if (isBusy) {
+        if (queueKey) pendingSessionSendKeysRef.current.add(queueKey)
+        const queue = queuedSessionSendsRef.current.get(targetSessionId) ?? []
+        queue.push({ overrides: queuedOverrides, queueKey })
+        queuedSessionSendsRef.current.set(targetSessionId, queue)
+        if (!overrides) {
+          inputValueRef.current = ''
+          setInputValue('')
+          pendingAttachmentsRef.current = []
+          setPendingAttachments([])
+          pendingHiddenContextRef.current = ''
+          setPendingHiddenContext('')
+          // inputValueState may still contain the previous debounced value. Force the
+          // composer's local draft to observe the accepted queue clear immediately.
+          setComposerClearVersion((version) => version + 1)
+        }
+        return
+      }
+
+      if (queueKey) pendingSessionSendKeysRef.current.add(queueKey)
+      sendingSessionIdsRef.current.add(targetSessionId)
+      try {
+        await executeSendMessage(queuedOverrides)
+      } finally {
+        sendingSessionIdsRef.current.delete(targetSessionId)
+        if (queueKey) pendingSessionSendKeysRef.current.delete(queueKey)
+        drainQueuedSessionRef.current(targetSessionId)
+      }
+    },
+    [executeSendMessage, setInputValue, setPendingAttachments, setPendingHiddenContext]
+  )
+
+  drainQueuedSessionRef.current = (sessionId: string) => {
+    if (
+      sendingSessionIdsRef.current.has(sessionId) ||
+      loadingSessionIdsRef.current.has(sessionId)
+    ) {
+      return
+    }
+    const queue = queuedSessionSendsRef.current.get(sessionId)
+    const next = queue?.shift()
+    if (!next) {
+      queuedSessionSendsRef.current.delete(sessionId)
+      return
+    }
+    if (queue?.length === 0) queuedSessionSendsRef.current.delete(sessionId)
+    if (next.queueKey) pendingSessionSendKeysRef.current.delete(next.queueKey)
+    void sendMessage(next.overrides)
+  }
 
   // 保持 sendMessageRef 与最新 sendMessage 同步，供 send-to-agent autoSend 使用
   sendMessageRef.current = sendMessage
@@ -6225,7 +6301,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 disabled={!currentSession}
                 composerInputRef={composerInputRef}
                 onPreviewImage={imagePreview.setPreviewImage}
-                inputSyncKey={currentSessionId || 'no-session'}
+                inputSyncKey={`${currentSessionId || 'no-session'}:${composerClearVersion}`}
                 selectedSkillName={
                   selectedCustomSkill ? getCustomSkillName(selectedCustomSkill) : undefined
                 }
