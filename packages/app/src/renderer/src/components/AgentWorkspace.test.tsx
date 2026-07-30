@@ -5,11 +5,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AgentWorkspace from './AgentWorkspace'
 import {
+  clearScopedActiveLoadingSessionIds,
   clearScopedExternalLoadingSessionIds,
   scopedStorageKey,
-  STORAGE_KEY_EXTERNAL_LOADING_IDS
+  STORAGE_KEY_EXTERNAL_LOADING_IDS,
+  updateScopedExternalLoadingSessionId
 } from '@renderer/pages/ChatPage/chatPageShared'
-import { updateScopedExternalLoadingSessionId } from '@renderer/pages/ChatPage/chatPageShared'
 
 const chatPageUnmountMock = vi.fn()
 const chatPageMock = vi.fn((props?: unknown) => {
@@ -101,6 +102,7 @@ describe('AgentWorkspace', () => {
   beforeEach(() => {
     vi.useRealTimers()
     localStorage.clear()
+    clearScopedActiveLoadingSessionIds()
     clearScopedExternalLoadingSessionIds()
     chatPageMock.mockClear()
     chatPageUnmountMock.mockClear()
@@ -143,6 +145,85 @@ describe('AgentWorkspace', () => {
     await waitFor(() => {
       expect(screen.getByRole('progressbar')).toBeInTheDocument()
     })
+  })
+
+  it('clears the spinner when the scoped external run completes', async () => {
+    updateScopedExternalLoadingSessionId('project-1.agent-1', 'session-1', true)
+    renderWorkspace()
+
+    await waitFor(() => expect(screen.getByRole('progressbar')).toBeInTheDocument())
+
+    updateScopedExternalLoadingSessionId('project-1.agent-1', 'session-1', false)
+    window.dispatchEvent(
+      new CustomEvent('chat:preview-refresh', {
+        detail: { scope: 'project-1.agent-1' }
+      })
+    )
+
+    await waitFor(() => {
+      expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+      expect(screen.getByTestId('agent-thread-status')).toHaveAttribute('data-status', 'read')
+    })
+  })
+
+  it('marks a completed unread thread read on hover', async () => {
+    localStorage.setItem(
+      'agent.workspace.project-1',
+      JSON.stringify([
+        { id: 'agent-1', enabled: true },
+        { id: 'agent-2', enabled: true }
+      ])
+    )
+    loadAllSessionsMock.mockImplementation((scope: string) =>
+      Promise.resolve([
+        {
+          id: `${scope}-session`,
+          title: scope,
+          messages: [{ role: 'assistant', content: scope }]
+        }
+      ])
+    )
+
+    const { container } = renderWorkspace()
+    const secondRow = await waitFor(() => {
+      const row = container.querySelector('[data-agent-workspace-scope="project-1.agent-2"]')
+      expect(row).not.toBeNull()
+      expect(row?.querySelector('[data-status="unread"]')).not.toBeNull()
+      return row as HTMLElement
+    })
+
+    fireEvent.mouseEnter(secondRow)
+    expect(secondRow.querySelector('[data-status="read"]')).not.toBeNull()
+  })
+
+  it('marks a completed unread thread read on click and activates it', async () => {
+    localStorage.setItem(
+      'agent.workspace.project-1',
+      JSON.stringify([
+        { id: 'agent-1', enabled: true },
+        { id: 'agent-2', enabled: true }
+      ])
+    )
+    loadAllSessionsMock.mockImplementation((scope: string) =>
+      Promise.resolve([
+        {
+          id: `${scope}-session`,
+          title: scope,
+          messages: [{ role: 'assistant', content: scope }]
+        }
+      ])
+    )
+
+    const { container } = renderWorkspace()
+    const secondRow = await waitFor(() => {
+      const row = container.querySelector('[data-agent-workspace-scope="project-1.agent-2"]')
+      expect(row?.querySelector('[data-status="unread"]')).not.toBeNull()
+      return row as HTMLElement
+    })
+
+    fireEvent.click(secondRow)
+    expect(secondRow.querySelector('[data-status="read"]')).not.toBeNull()
+    expect(localStorage.getItem('agent.workspace.active.project-1')).toBe('agent-2')
   })
 
   it('ignores legacy persisted external loading ids after a refresh', async () => {
@@ -395,6 +476,16 @@ describe('AgentWorkspace', () => {
   })
 
   it('refreshes only the pane matching a scoped preview event', async () => {
+    loadAllSessionsMock.mockImplementation((scope: string) =>
+      Promise.resolve([
+        {
+          id: `${scope}-session`,
+          title: scope,
+          messages: [{ role: 'assistant', content: `${scope} preview` }]
+        }
+      ])
+    )
+
     const { container } = renderWorkspace()
 
     await waitFor(() => {
@@ -415,8 +506,8 @@ describe('AgentWorkspace', () => {
     })
 
     await waitFor(() => {
-      expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-1')
-      expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-2')
+      expect(screen.getByText('project-1.agent-1 preview')).toBeInTheDocument()
+      expect(screen.getByText('project-1.agent-2 preview')).toBeInTheDocument()
     })
     loadAllSessionsMock.mockClear()
 

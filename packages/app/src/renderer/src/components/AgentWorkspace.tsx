@@ -22,7 +22,10 @@ import { useTranslation } from 'react-i18next'
 import ChatPage from '@renderer/pages/ChatPage/ChatPage'
 import { loadAllSessions, type ChatSession } from '@renderer/pages/ChatPage/chatStorage'
 import { getLocalizedConversationTitle } from '@renderer/pages/ChatPage/chatLocaleUtils'
-import { readScopedLoadingSessionIds } from '@renderer/pages/ChatPage/chatPageShared'
+import {
+  readScopedActiveLoadingSessionIds,
+  readScopedExternalLoadingSessionIds
+} from '@renderer/pages/ChatPage/chatPageShared'
 import {
   buildAgentPaneScope,
   buildCanvasAgentRoute
@@ -206,7 +209,10 @@ const arePanePreviewsEqual = (
 }
 
 const isPaneRunning = (scope: string): boolean => {
-  return readScopedLoadingSessionIds(scope).length > 0
+  return (
+    readScopedActiveLoadingSessionIds(scope).length > 0 ||
+    readScopedExternalLoadingSessionIds(scope).length > 0
+  )
 }
 
 const buildPanePreview = (
@@ -279,13 +285,21 @@ const loadPanePreview = async (
 const PaneStatusIndicator: React.FC<{ status?: PanePreviewStatus }> = ({ status = 'idle' }) => {
   if (status === 'running') {
     return (
-      <CircularProgress size={12} thickness={6} sx={{ color: 'primary.main', flexShrink: 0 }} />
+      <CircularProgress
+        data-testid="agent-thread-status"
+        data-status="running"
+        size={12}
+        thickness={6}
+        sx={{ color: 'primary.main', flexShrink: 0 }}
+      />
     )
   }
 
   if (status === 'done') {
     return (
       <Box
+        data-testid="agent-thread-status"
+        data-status="unread"
         sx={(theme) => ({
           width: 9,
           height: 9,
@@ -302,6 +316,8 @@ const PaneStatusIndicator: React.FC<{ status?: PanePreviewStatus }> = ({ status 
 
   return (
     <Box
+      data-testid="agent-thread-status"
+      data-status="read"
       sx={(theme) => ({
         width: 8,
         height: 8,
@@ -323,10 +339,12 @@ type PaneListItemProps = {
   defaultTitle: string
   defaultSubtitle: string
   selected: boolean
+  unread: boolean
   dragging: boolean
   dragOver: boolean
   onRemove: (paneId: string) => void
   onSelect: (paneId: string) => void
+  onViewed: (paneId: string) => void
   onDragStart: (paneId: string) => void
   onDragEnd: () => void
   onDragOver: (event: React.DragEvent<HTMLElement>, paneId: string) => void
@@ -344,10 +362,12 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
   defaultTitle,
   defaultSubtitle,
   selected,
+  unread,
   dragging,
   dragOver,
   onRemove,
   onSelect,
+  onViewed,
   onDragStart,
   onDragEnd,
   onDragOver,
@@ -359,10 +379,15 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     tabIndex={0}
     data-agent-workspace-scope={paneScope}
     draggable
-    onClick={() => onSelect(pane.id)}
+    onMouseEnter={() => onViewed(pane.id)}
+    onClick={() => {
+      onViewed(pane.id)
+      onSelect(pane.id)
+    }}
     onKeyDown={(event) => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault()
+        onViewed(pane.id)
         onSelect(pane.id)
       }
     }}
@@ -405,7 +430,9 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     })}
   >
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0, flex: 1 }}>
-      <PaneStatusIndicator status={preview?.status} />
+      <PaneStatusIndicator
+        status={preview?.status === 'done' && !unread ? 'idle' : preview?.status}
+      />
 
       <Box sx={{ minWidth: 0, flex: 1 }}>
         <Typography
@@ -502,6 +529,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
     () => readLocalStorage(collapsedStorageKey) === '1'
   )
   const [panePreviews, setPanePreviews] = useState<Record<string, PanePreview>>({})
+  const [unreadPaneIds, setUnreadPaneIds] = useState<Set<string>>(new Set())
   const [draggingPaneId, setDraggingPaneId] = useState<string | null>(null)
   const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null)
   const [tracePanelOpen, setTracePanelOpen] = useState(false)
@@ -519,9 +547,40 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   })
   const pendingExternalPaneRequestsRef = useRef<Array<{ requestId?: string; paneId: string }>>([])
   const previewRefreshSequenceRef = useRef(0)
+  const previousPreviewStatusesRef = useRef<Record<string, PanePreviewStatus>>({})
   const openPanes = useMemo(() => getOpenPanes(panes), [panes])
   const workspaceStrings = useMemo(() => createAgentWorkspaceStrings(t), [t])
   const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? openPanes[0] ?? null
+
+  useEffect(() => {
+    const previousStatuses = previousPreviewStatusesRef.current
+    const nextStatuses = Object.fromEntries(
+      Object.entries(panePreviews).map(([paneId, preview]) => [paneId, preview.status])
+    ) as Record<string, PanePreviewStatus>
+
+    setUnreadPaneIds((prev) => {
+      const next = new Set(prev)
+      for (const [paneId, preview] of Object.entries(panePreviews)) {
+        if (preview.status === 'done' && previousStatuses[paneId] !== 'done') {
+          next.add(paneId)
+        } else if (preview.status !== 'done') {
+          next.delete(paneId)
+        }
+      }
+      return next
+    })
+    previousPreviewStatusesRef.current = nextStatuses
+  }, [panePreviews])
+
+  useEffect(() => {
+    if (!activePaneId || panePreviews[activePaneId]?.status !== 'done') return
+    setUnreadPaneIds((prev) => {
+      if (!prev.has(activePaneId)) return prev
+      const next = new Set(prev)
+      next.delete(activePaneId)
+      return next
+    })
+  }, [activePaneId, panePreviews])
 
   useEffect(() => {
     const nextPanes = readStoredPanes(storageKey)
@@ -949,10 +1008,19 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
               defaultTitle={getPaneLabel(pane.id, index, workspaceStrings.paneLabel)}
               defaultSubtitle={workspaceStrings.emptyConversation}
               selected={pane.id === activePaneId}
+              unread={unreadPaneIds.has(pane.id)}
               dragging={pane.id === draggingPaneId}
               dragOver={pane.id === dragOverPaneId && pane.id !== draggingPaneId}
               onRemove={handleRemovePane}
               onSelect={setActivePaneId}
+              onViewed={(paneId) => {
+                setUnreadPaneIds((prev) => {
+                  if (!prev.has(paneId)) return prev
+                  const next = new Set(prev)
+                  next.delete(paneId)
+                  return next
+                })
+              }}
               onDragStart={(paneId) => {
                 setDraggingPaneId(paneId)
                 setDragOverPaneId(null)

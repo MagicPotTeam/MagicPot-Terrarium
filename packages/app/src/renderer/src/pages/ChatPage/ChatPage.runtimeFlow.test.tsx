@@ -820,6 +820,63 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
+  it('does not let a delayed storage refresh overwrite a newer in-memory response', async () => {
+    const session: ChatSession = {
+      id: 'storage-load-race',
+      title: 'Storage load race',
+      messages: [
+        { role: 'user', content: 'run graph' },
+        { role: 'assistant', content: '' }
+      ],
+      createdAt: 300
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+
+    let releaseRefresh!: (sessions: ChatSession[]) => void
+    hoisted.loadAllSessionsMock.mockImplementationOnce(
+      () =>
+        new Promise<ChatSession[]>((resolve) => {
+          releaseRefresh = resolve
+        })
+    )
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:preview-refresh', {
+          detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+        })
+      )
+    })
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:append-message', {
+          detail: {
+            scope: 'runtime-flow',
+            sessionId: session.id,
+            role: 'assistant',
+            content: 'new graph output'
+          }
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('new graph output')
+    )
+
+    await act(async () => {
+      releaseRefresh([session])
+    })
+
+    expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('new graph output')
+  })
+
   it('re-roots legacy chat media URLs on load and persists the migrated session', async () => {
     const session: ChatSession = {
       id: 'legacy-chat-media-session',
@@ -1627,8 +1684,10 @@ describe('ChatPage runtime workflow integration', () => {
       expect(latestProps?.currentSession?.id).toBe(staleSession.id)
       expect(latestProps?.isLoading).toBe(false)
     })
-    expect(localStorage.getItem(scopedStorageKey(STORAGE_KEY_LOADING_IDS, 'runtime-flow'))).toBe(
-      '[]'
+    await waitFor(() =>
+      expect(localStorage.getItem(scopedStorageKey(STORAGE_KEY_LOADING_IDS, 'runtime-flow'))).toBe(
+        '[]'
+      )
     )
   })
 

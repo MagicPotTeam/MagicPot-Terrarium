@@ -61,7 +61,6 @@ import {
   normalizeChatProfileIdForStorage,
   readScopedActiveLoadingSessionIds,
   readScopedExternalLoadingSessionIds,
-  readScopedLoadingSessionIds,
   recordAutoSavedChatImageKey,
   scopedStorageKey,
   STORAGE_KEY_CURRENT_SESSION_ID,
@@ -997,6 +996,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
     sessionPersistenceGateRef.current = true
     persistedSessionsRef.current = new Map()
     sessionMutationEpochRef.current += 1
+    const loadMutationEpoch = sessionMutationEpochRef.current
+    const sessionsAtLoadStart = new Map(sessionsRef.current.map((session) => [session.id, session]))
     if (sessionPersistenceRetryTimerRef.current) {
       clearTimeout(sessionPersistenceRetryTimerRef.current)
       sessionPersistenceRetryTimerRef.current = null
@@ -1021,17 +1022,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
         storedSessions = migrated || (await loadAllSessions(storageScope))
         if (loadEpoch !== sessionLoadEpochRef.current) return
 
-        const loadMutationEpoch = sessionMutationEpochRef.current
+        const migrationMutationEpoch = sessionMutationEpochRef.current
         const migratedSessions = await migrateLoadedChatMediaSessions(
           storedSessions,
           loadEpoch,
-          loadMutationEpoch
+          migrationMutationEpoch
         )
-        if (
-          loadEpoch !== sessionLoadEpochRef.current ||
-          loadMutationEpoch !== sessionMutationEpochRef.current ||
-          storageScope !== storageScopeRef.current
-        ) {
+        if (loadEpoch !== sessionLoadEpochRef.current || storageScope !== storageScopeRef.current) {
           return
         }
         const sortedStoredSessions = sortSessionsByRecencyDesc(
@@ -1042,11 +1039,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
         persistedSessionsRef.current = new Map(
           sortedStoredSessions.map((session) => [session.id, session])
         )
+        const locallyMutatedSessionIds =
+          loadMutationEpoch === sessionMutationEpochRef.current
+            ? []
+            : sessionsRef.current
+                .filter((session) => sessionsAtLoadStart.get(session.id) !== session)
+                .map((session) => session.id)
         setSessions((prev) =>
-          mergeLoadedSessionsWithLocal(sortedStoredSessions, prev, [
-            pendingSessionIdRef.current,
-            currentSessionIdRef.current
-          ])
+          mergeLoadedSessionsWithLocal(
+            sortedStoredSessions,
+            prev,
+            [pendingSessionIdRef.current, currentSessionIdRef.current],
+            locallyMutatedSessionIds
+          )
         )
       } catch (e) {
         if (loadEpoch === sessionLoadEpochRef.current) {
@@ -1177,12 +1182,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   // ==================== Loading 状态 ====================
   const [loadingSessionIds, setLoadingSessionIds] = useState<Set<string>>(() => {
-    try {
-      const saved = localStorage.getItem(loadingIdsStorageKey)
-      return saved ? new Set(JSON.parse(saved) as string[]) : new Set()
-    } catch {
-      return new Set()
-    }
+    return new Set(readScopedActiveLoadingSessionIds(storageScope))
   })
   const loadingSessionIdsRef = useRef<Set<string>>(loadingSessionIds)
   useEffect(() => {
@@ -1208,11 +1208,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
     : undefined
 
   useEffect(() => {
-    const scopedLoadingIds = new Set(readScopedLoadingSessionIds(storageScope))
+    const scopedActiveLoadingIds = new Set(readScopedActiveLoadingSessionIds(storageScope))
     const scopedExternalLoadingIds = new Set(readScopedExternalLoadingSessionIds(storageScope))
-    loadingSessionIdsRef.current = scopedLoadingIds
+    loadingSessionIdsRef.current = scopedActiveLoadingIds
     externalLoadingSessionIdsRef.current = scopedExternalLoadingIds
-    setLoadingSessionIds(scopedLoadingIds)
+    setLoadingSessionIds(scopedActiveLoadingIds)
     setExternalLoadingSessionIds(scopedExternalLoadingIds)
     setLoadingStatusBySessionId(readScopedChatLoadingStatuses(storageScope))
   }, [storageScope])
@@ -1400,8 +1400,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
   useEffect(() => {
     if (!sessionsLoaded) return
 
+    let persistedLoadingIds: string[] = []
+    try {
+      const savedLoadingIds = JSON.parse(
+        localStorage.getItem(loadingIdsStorageKey) || '[]'
+      ) as unknown
+      if (Array.isArray(savedLoadingIds)) {
+        persistedLoadingIds = savedLoadingIds.filter(
+          (sessionId): sessionId is string => typeof sessionId === 'string'
+        )
+      }
+    } catch {
+      /* sanitize malformed persisted loading state below */
+    }
+
     const removedLoadingIds: string[] = []
-    const validLoadingIds = [...loadingSessionIds].filter((sessionId) => {
+    const trackedLoadingIds = Array.from(new Set([...loadingSessionIds, ...persistedLoadingIds]))
+    const validLoadingIds = trackedLoadingIds.filter((sessionId) => {
       const session = sessions.find((item) => item.id === sessionId)
       const hasLiveRequest =
         sessionAbortControllersRef.current.has(sessionId) ||
@@ -1423,12 +1438,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return hasPendingAssistantPlaceholder
     })
 
-    if (validLoadingIds.length === loadingSessionIds.size) return
+    const validLoadingIdSet = new Set(validLoadingIds)
+    const stateIsCurrent =
+      validLoadingIdSet.size === loadingSessionIds.size &&
+      [...validLoadingIdSet].every((sessionId) => loadingSessionIds.has(sessionId))
+    const storageIsCurrent =
+      validLoadingIdSet.size === persistedLoadingIds.length &&
+      persistedLoadingIds.every((sessionId) => validLoadingIdSet.has(sessionId))
+    if (stateIsCurrent && storageIsCurrent) return
 
     const nextLoadingIds = new Set(validLoadingIds)
     loadingSessionIdsRef.current = nextLoadingIds
     setLoadingSessionIds(nextLoadingIds)
     for (const sessionId of removedLoadingIds) {
+      updateScopedActiveLoadingSessionId(storageScope, sessionId, false)
       setSessionLoadingStatus(sessionId, null)
     }
 
@@ -1609,10 +1632,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
 
       const rawAttachments = [...(attachments ?? []), ...(attachment ? [attachment] : [])]
-      const resolveAttachments = async (): Promise<ChatAttachment[]> =>
+      const resolveAttachments = async (materializeBlobImages = true): Promise<ChatAttachment[]> =>
         (
           await Promise.all(
-            rawAttachments.map((item) => materializeInternalImageDragAttachment(item))
+            rawAttachments.map((item) =>
+              materializeBlobImages || !item.url.startsWith('blob:')
+                ? materializeInternalImageDragAttachment(item)
+                : Promise.resolve(item)
+            )
           )
         ).filter(
           (
@@ -1634,7 +1661,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           })
         }
 
-        void resolveAttachments()
+        void resolveAttachments(false)
           .then(async (resolvedAttachments) => {
             if (!image) return resolvedAttachments
             const imageAttachment = await convertInlineImageToAttachment(image, 'pasted-image.png')

@@ -77,11 +77,15 @@ const shouldPreserveLocalSessionOverLoaded = (
 export const mergeLoadedSessionsWithLocal = (
   loadedSessions: ChatSession[],
   localSessions: ChatSession[],
-  preserveSessionIds: Array<string | null | undefined> = []
+  preserveSessionIds: Array<string | null | undefined> = [],
+  preferLocalSessionIds: Array<string | null | undefined> = []
 ): ChatSession[] => {
   const mergedSessions = new Map<string, ChatSession>()
   const preservedIds = new Set(
     preserveSessionIds.filter((sessionId): sessionId is string => Boolean(sessionId))
+  )
+  const preferredLocalIds = new Set(
+    preferLocalSessionIds.filter((sessionId): sessionId is string => Boolean(sessionId))
   )
 
   for (const session of loadedSessions) {
@@ -90,7 +94,10 @@ export const mergeLoadedSessionsWithLocal = (
 
   for (const session of localSessions) {
     const loadedSession = mergedSessions.get(session.id)
-    if (shouldPreserveLocalSessionOverLoaded(session, loadedSession, preservedIds)) {
+    if (
+      preferredLocalIds.has(session.id) ||
+      shouldPreserveLocalSessionOverLoaded(session, loadedSession, preservedIds)
+    ) {
       mergedSessions.set(session.id, session)
     }
   }
