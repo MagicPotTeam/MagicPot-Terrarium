@@ -72,6 +72,7 @@ import { resolveAutoArrangeSpatialGridLayout } from './groupAutoArrangeUtils'
 import { isModelArchiveFile } from './types'
 import { measureCanvasTextBoxSize } from './canvasTextLayout'
 import { readProjectCanvasBenchmarkImportTotalSize } from './projectCanvasBenchmarkRuntime'
+import { hideCanvasItemsTransiently, showCanvasItemsTransiently } from './canvasTransientVisibility'
 
 type UseCanvasAssetIntakeOptions = {
   canvasId?: string
@@ -803,16 +804,21 @@ export function useCanvasAssetIntake({
   )
 
   const ownedCanvasImageObjectUrlsRef = useRef(new Set<string>())
+  const transientHiddenCanvasItemIdsRef = useRef(new Set<string>())
+  const isMountedRef = useRef(true)
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+      showCanvasItemsTransiently(transientHiddenCanvasItemIdsRef.current)
+      transientHiddenCanvasItemIdsRef.current.clear()
       for (const objectUrl of ownedCanvasImageObjectUrlsRef.current) {
         URL.revokeObjectURL(objectUrl)
       }
       ownedCanvasImageObjectUrlsRef.current.clear()
-    },
-    []
-  )
+    }
+  }, [])
 
   const fitImageToCanvasSize = useCallback(
     (width: number, height: number) =>
@@ -1358,11 +1364,10 @@ export function useCanvasAssetIntake({
       const batchGap = getProjectCanvasBatchGap(effectiveSourceCount)
       const hasDeferredSources = normalizedSources.some(shouldDeferCanvasImageSourceFullDecode)
       const shouldUseStreamingImport =
-        !pasteAnchor &&
-        (totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_IMPORT_THRESHOLD ||
-          totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_PROGRESS_BATCH_SIZE ||
-          hasDeferredSources ||
-          effectiveSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_IMPORT_THRESHOLD)
+        totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_IMPORT_THRESHOLD ||
+        totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_PROGRESS_BATCH_SIZE ||
+        hasDeferredSources ||
+        effectiveSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_IMPORT_THRESHOLD
       const shouldReportBatchProgress =
         totalSourceCount >= PROJECT_CANVAS_IMAGE_STREAM_PROGRESS_BATCH_SIZE
 
@@ -1376,8 +1381,26 @@ export function useCanvasAssetIntake({
         let nextBatchTop: number | null = null
         const pendingEntries: CanvasImageStreamEntry[] = []
         const importedItems: CanvasImageItem[] = []
+        const transientHiddenItemIds = new Set<string>()
         let flushChain = Promise.resolve()
         let hasCommittedStreamHistory = false
+
+        const hideImportedItems = (itemIds: Iterable<string>) => {
+          if (!isMountedRef.current) return
+          const ids = Array.from(itemIds)
+          hideCanvasItemsTransiently(ids)
+          for (const itemId of ids) {
+            transientHiddenItemIds.add(itemId)
+            transientHiddenCanvasItemIdsRef.current.add(itemId)
+          }
+        }
+        const revealImportedItems = () => {
+          showCanvasItemsTransiently(transientHiddenItemIds)
+          for (const itemId of transientHiddenItemIds) {
+            transientHiddenCanvasItemIdsRef.current.delete(itemId)
+          }
+          transientHiddenItemIds.clear()
+        }
 
         const emitImportProgress = (phase: CanvasImageBatchImportProgressPhase, force = false) => {
           if (!shouldReportBatchProgress) return
@@ -1466,6 +1489,9 @@ export function useCanvasAssetIntake({
             if (batchItems.length > 0) {
               importedCount += batchItems.length
               importedItems.push(...batchItems)
+              if (pasteAnchor) {
+                hideImportedItems(batchItems.map((item) => item.id))
+              }
               const commitItems =
                 hasCommittedStreamHistory && setItemsWithoutHistory
                   ? setItemsWithoutHistory
@@ -1480,141 +1506,164 @@ export function useCanvasAssetIntake({
           return flushChain
         }
 
-        emitImportProgress('loading', true)
+        try {
+          emitImportProgress('loading', true)
 
-        await mapCanvasImageBatchWithProgress(
-          normalizedSources,
-          PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY,
-          async (source, sourceIndex) => {
-            try {
-              const isLazyTail =
-                lazyImportTail && sourceIndex >= PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT
-              const shouldResolveLazyTailDisplayAsset = isLazyTail && Boolean(source.sourceFile)
-              if (shouldDeferCanvasImageSourceFullDecode(source) || isLazyTail) {
-                return buildDeferredCanvasImageStreamEntry({
+          await mapCanvasImageBatchWithProgress(
+            normalizedSources,
+            PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY,
+            async (source, sourceIndex) => {
+              try {
+                const isLazyTail =
+                  lazyImportTail && sourceIndex >= PROJECT_CANVAS_IMAGE_LAZY_IMPORT_EAGER_COUNT
+                const shouldResolveLazyTailDisplayAsset = isLazyTail && Boolean(source.sourceFile)
+                if (shouldDeferCanvasImageSourceFullDecode(source) || isLazyTail) {
+                  return buildDeferredCanvasImageStreamEntry({
+                    source,
+                    sourceIndex,
+                    maxPreviewSide,
+                    fitImageToCanvasSize,
+                    resolveInitialDisplayAsset: !isLazyTail || shouldResolveLazyTailDisplayAsset,
+                    resolveInitialThumbnail: !isLazyTail || shouldResolveLazyTailDisplayAsset,
+                    useThumbnailDisplayAsset: !isLazyTail,
+                    useLazyPreviewProxy: !isLazyTail
+                  })
+                }
+
+                const thumbnailFirstEntry = await buildThumbnailFirstCanvasImageStreamEntry({
                   source,
                   sourceIndex,
                   maxPreviewSide,
-                  fitImageToCanvasSize,
-                  resolveInitialDisplayAsset: !isLazyTail || shouldResolveLazyTailDisplayAsset,
-                  resolveInitialThumbnail: !isLazyTail || shouldResolveLazyTailDisplayAsset,
-                  useThumbnailDisplayAsset: !isLazyTail,
-                  useLazyPreviewProxy: !isLazyTail
+                  fitImageToCanvasSize
                 })
-              }
+                if (thumbnailFirstEntry) {
+                  return thumbnailFirstEntry
+                }
 
-              const thumbnailFirstEntry = await buildThumbnailFirstCanvasImageStreamEntry({
-                source,
-                sourceIndex,
-                maxPreviewSide,
-                fitImageToCanvasSize
-              })
-              if (thumbnailFirstEntry) {
-                return thumbnailFirstEntry
-              }
-
-              const { img, width, height } = await withCanvasImageIntakeTimeout(
-                loadImageFromSrc(source.src),
-                PROJECT_CANVAS_IMAGE_STREAM_LOAD_TIMEOUT_MS,
-                'Timed out loading image for streamed canvas intake.'
-              )
-              let displayImage: Awaited<ReturnType<typeof buildCanvasImageDisplayAsset>> = img
-              try {
-                displayImage = await withCanvasImageIntakeTimeout(
-                  buildCanvasImageDisplayAsset({
-                    src: source.src,
-                    fileName: source.fileName,
-                    originalImage: img,
-                    sourceWidth: width,
-                    sourceHeight: height,
-                    maxPreviewSide
-                  }),
-                  PROJECT_CANVAS_IMAGE_STREAM_PREVIEW_TIMEOUT_MS,
-                  'Timed out building preview image for streamed canvas intake.'
+                const { img, width, height } = await withCanvasImageIntakeTimeout(
+                  loadImageFromSrc(source.src),
+                  PROJECT_CANVAS_IMAGE_STREAM_LOAD_TIMEOUT_MS,
+                  'Timed out loading image for streamed canvas intake.'
                 )
+                let displayImage: Awaited<ReturnType<typeof buildCanvasImageDisplayAsset>> = img
+                try {
+                  displayImage = await withCanvasImageIntakeTimeout(
+                    buildCanvasImageDisplayAsset({
+                      src: source.src,
+                      fileName: source.fileName,
+                      originalImage: img,
+                      sourceWidth: width,
+                      sourceHeight: height,
+                      maxPreviewSide
+                    }),
+                    PROJECT_CANVAS_IMAGE_STREAM_PREVIEW_TIMEOUT_MS,
+                    'Timed out building preview image for streamed canvas intake.'
+                  )
+                } catch (error) {
+                  console.warn(
+                    '[Canvas] Streamed batch preview timed out or failed, using original source:',
+                    source.src,
+                    error
+                  )
+                }
+                const thumbnailPreview = await resolveCanvasImageIntakeThumbnail({
+                  source,
+                  maxPreviewSide
+                })
+
+                const resolvedHasAlpha = resolveCanvasImageSourceHasAlpha(source)
+                const fittedSize = fitImageToCanvasSize(width, height)
+                const resolvedSizeBytes = resolveCanvasImageSourceSizeBytes(source)
+                return {
+                  source,
+                  sourceIndex,
+                  displayImage: thumbnailPreview.displayImage ?? displayImage,
+                  thumbnailSet: thumbnailPreview.thumbnailSet,
+                  sizeBytes: resolvedSizeBytes,
+                  hasAlpha: resolvedHasAlpha,
+                  sourceWidth: width,
+                  sourceHeight: height,
+                  width: fittedSize.width,
+                  height: fittedSize.height
+                }
               } catch (error) {
-                console.warn(
-                  '[Canvas] Streamed batch preview timed out or failed, using original source:',
+                if (canvasOwnedBatchObjectUrls.delete(source.src)) {
+                  URL.revokeObjectURL(source.src)
+                  ownedCanvasImageObjectUrlsRef.current.delete(source.src)
+                }
+                console.error(
+                  '[Canvas] Failed to load image for streamed batch intake:',
                   source.src,
                   error
                 )
+                failedCount += 1
+                return null
+              } finally {
+                normalizedSources[sourceIndex] = undefined as unknown as NormalizedCanvasImageSource
+                processedCount += 1
+                emitImportProgress('loading')
               }
-              const thumbnailPreview = await resolveCanvasImageIntakeThumbnail({
-                source,
-                maxPreviewSide
-              })
+            },
+            async (entry) => {
+              pendingEntries.push(entry)
+              await flushPendingEntries(false)
+            },
+            { collectResults: false }
+          )
 
-              const resolvedHasAlpha = resolveCanvasImageSourceHasAlpha(source)
-              const fittedSize = fitImageToCanvasSize(width, height)
-              const resolvedSizeBytes = resolveCanvasImageSourceSizeBytes(source)
-              return {
-                source,
-                sourceIndex,
-                displayImage: thumbnailPreview.displayImage ?? displayImage,
-                thumbnailSet: thumbnailPreview.thumbnailSet,
-                sizeBytes: resolvedSizeBytes,
-                hasAlpha: resolvedHasAlpha,
-                sourceWidth: width,
-                sourceHeight: height,
-                width: fittedSize.width,
-                height: fittedSize.height
-              }
-            } catch (error) {
-              if (canvasOwnedBatchObjectUrls.delete(source.src)) {
-                URL.revokeObjectURL(source.src)
-                ownedCanvasImageObjectUrlsRef.current.delete(source.src)
-              }
-              console.error(
-                '[Canvas] Failed to load image for streamed batch intake:',
-                source.src,
-                error
-              )
-              failedCount += 1
-              return null
-            } finally {
-              normalizedSources[sourceIndex] = undefined as unknown as NormalizedCanvasImageSource
-              processedCount += 1
-              emitImportProgress('loading')
+          normalizedSources.length = 0
+          await flushPendingEntries(true)
+          await flushChain
+          emitImportProgress('complete', true)
+
+          for (const objectUrl of canvasOwnedBatchObjectUrls) {
+            const wasCommitted = importedItems.some((item) => item.src === objectUrl)
+            if (wasCommitted) {
+              ownedCanvasImageObjectUrlsRef.current.add(objectUrl)
+            } else {
+              URL.revokeObjectURL(objectUrl)
+              ownedCanvasImageObjectUrlsRef.current.delete(objectUrl)
             }
-          },
-          async (entry) => {
-            pendingEntries.push(entry)
-            await flushPendingEntries(false)
-          },
-          { collectResults: false }
-        )
-
-        normalizedSources.length = 0
-        await flushPendingEntries(true)
-        await flushChain
-        emitImportProgress('complete', true)
-
-        for (const objectUrl of canvasOwnedBatchObjectUrls) {
-          const wasCommitted = importedItems.some((item) => item.src === objectUrl)
-          if (wasCommitted) {
-            ownedCanvasImageObjectUrlsRef.current.add(objectUrl)
-          } else {
-            URL.revokeObjectURL(objectUrl)
-            ownedCanvasImageObjectUrlsRef.current.delete(objectUrl)
           }
-        }
 
-        const compactedImportedItems = compactStreamedImageItems(importedItems, batchGap)
-        if (compactedImportedItems !== importedItems) {
-          importedItems.splice(0, importedItems.length, ...compactedImportedItems)
-          const compactedItemsById = new Map(importedItems.map((item) => [item.id, item]))
-          const commitItems = setItemsWithoutHistory ?? setItemsWithHistory
-          commitItems((prev) => prev.map((item) => compactedItemsById.get(item.id) ?? item))
-          await new Promise((resolve) => setTimeout(resolve, 0))
-        }
+          const compactedImportedItems = compactStreamedImageItems(importedItems, batchGap)
+          let finalizedImportedItems = compactedImportedItems
 
-        if (importedCount > 0) {
-          markAutoPlacementBatch(importedCount)
-          applyImportedImageBatchSelection(importedItems, setSelectedIds, setTool)
-        }
+          if (pasteAnchor && compactedImportedItems.length > 0) {
+            const minX = Math.min(...compactedImportedItems.map((item) => item.x))
+            const minY = Math.min(...compactedImportedItems.map((item) => item.y))
+            const maxX = Math.max(...compactedImportedItems.map((item) => item.x + item.width))
+            const maxY = Math.max(...compactedImportedItems.map((item) => item.y + item.height))
+            const offsetX = pasteAnchor.x - (minX + maxX) / 2
+            const offsetY = pasteAnchor.y - (minY + maxY) / 2
+            finalizedImportedItems = compactedImportedItems.map((item) => ({
+              ...item,
+              x: item.x + offsetX,
+              y: item.y + offsetY
+            }))
+          }
 
-        canvasOwnedBatchObjectUrls.clear()
-        return importedItems
+          if (finalizedImportedItems !== importedItems) {
+            importedItems.splice(0, importedItems.length, ...finalizedImportedItems)
+            const finalizedItemsById = new Map(importedItems.map((item) => [item.id, item]))
+            const commitItems = setItemsWithoutHistory ?? setItemsWithHistory
+            if (pasteAnchor) {
+              revealImportedItems()
+            }
+            commitItems((prev) => prev.map((item) => finalizedItemsById.get(item.id) ?? item))
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+
+          if (importedCount > 0) {
+            markAutoPlacementBatch(importedCount)
+            applyImportedImageBatchSelection(importedItems, setSelectedIds, setTool)
+          }
+
+          canvasOwnedBatchObjectUrls.clear()
+          return importedItems
+        } finally {
+          revealImportedItems()
+        }
       }
 
       const loadedImages = await mapCanvasImageBatchWithConcurrency(

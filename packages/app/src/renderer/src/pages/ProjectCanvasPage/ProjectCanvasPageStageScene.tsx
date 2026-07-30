@@ -59,6 +59,7 @@ import {
 } from './projectCanvasWebGLRuntimeState'
 import { resolveCanvasImageLodDecision } from './canvasImageLodPolicy'
 import { isAnimatedGifCanvasImage } from './canvasAnimatedImageUtils'
+import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 import type {
   CanvasAnnotationItem,
   CanvasFileItem,
@@ -1294,7 +1295,10 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const sortedAllImageItems = React.useMemo(
     () =>
       allCanvasItems
-        .filter((item): item is CanvasImageItem => item.type === 'image')
+        .filter(
+          (item): item is CanvasImageItem =>
+            item.type === 'image' && !isCanvasItemTransientlyHidden(item.id)
+        )
         .sort((left, right) => left.zIndex - right.zIndex),
     [allCanvasItems]
   )

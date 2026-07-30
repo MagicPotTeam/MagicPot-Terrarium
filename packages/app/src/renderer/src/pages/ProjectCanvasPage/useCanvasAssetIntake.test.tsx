@@ -18,6 +18,8 @@ import {
   createCanvasThumbnailSet
 } from './canvasThumbnailCache'
 import type { CanvasImageSourceInput } from './canvasAssetIntakeHelpers'
+import { buildProjectCanvasRenderableItems } from './projectCanvasRenderBoundary'
+import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 import type { CanvasGroup, CanvasImageItem, CanvasItem } from './types'
 
 const importCanvasFileMock = vi.fn()
@@ -75,7 +77,10 @@ function LargeImageBatchHarness({
   onComplete,
   onProgress,
   onSelectionChange,
+  onItemsUpdate,
+  onHistoryCommit,
   sources,
+  pasteOptions,
   getBatchGridLayout = (sizes) =>
     sizes.map((size, index) => ({
       x: index * 10,
@@ -87,7 +92,10 @@ function LargeImageBatchHarness({
   onComplete: (items: CanvasItem[], result: unknown) => void
   onProgress?: (progress: CanvasImageBatchImportProgress | null) => void
   onSelectionChange?: (selectedIds: Set<string>) => void
+  onItemsUpdate?: (items: CanvasItem[]) => void
+  onHistoryCommit?: (items: CanvasItem[]) => void
   sources: CanvasImageSourceInput[]
+  pasteOptions?: { clientX?: number; clientY?: number }
   getBatchGridLayout?: (
     sizes: Array<{ width: number; height: number }>,
     options?: { gap?: number; minColumns?: number; maxColumns?: number; allowUpscale?: boolean }
@@ -96,9 +104,20 @@ function LargeImageBatchHarness({
   const nextZIndexRef = React.useRef(1)
   const itemsRef = React.useRef<CanvasItem[]>([])
 
-  const applyItemsUpdate = React.useCallback((update: React.SetStateAction<CanvasItem[]>) => {
-    itemsRef.current = typeof update === 'function' ? update(itemsRef.current) : update
-  }, [])
+  const applyItemsUpdate = React.useCallback(
+    (update: React.SetStateAction<CanvasItem[]>) => {
+      itemsRef.current = typeof update === 'function' ? update(itemsRef.current) : update
+      onItemsUpdate?.([...itemsRef.current])
+    },
+    [onItemsUpdate]
+  )
+  const applyItemsUpdateWithHistory = React.useCallback(
+    (update: React.SetStateAction<CanvasItem[]>) => {
+      applyItemsUpdate(update)
+      onHistoryCommit?.([...itemsRef.current])
+    },
+    [applyItemsUpdate, onHistoryCommit]
+  )
   const setSelectedIds = React.useCallback(
     (update: React.SetStateAction<Set<string>>) => {
       const selectedIds = typeof update === 'function' ? update(new Set<string>()) : update
@@ -112,8 +131,12 @@ function LargeImageBatchHarness({
     fitImageToCanvasSize: (width, height) => ({ width, height }),
     getBatchGridLayout,
     getCenterPosition: () => ({ x: 0, y: 0 }),
+    getCanvasPointFromClient: (clientX, clientY) =>
+      typeof clientX === 'number' && typeof clientY === 'number'
+        ? { x: clientX, y: clientY }
+        : null,
     nextZIndexRef,
-    setItemsWithHistory: applyItemsUpdate,
+    setItemsWithHistory: applyItemsUpdateWithHistory,
     setItemsWithoutHistory: applyItemsUpdate,
     setGroups: vi.fn(),
     setGroupBranches: vi.fn(),
@@ -127,7 +150,7 @@ function LargeImageBatchHarness({
 
   useEffect(() => {
     let cancelled = false
-    void addImagesToCanvas(sources).then((result) => {
+    void addImagesToCanvas(sources, pasteOptions).then((result) => {
       if (!cancelled) {
         onComplete(itemsRef.current, result)
       }
@@ -135,7 +158,7 @@ function LargeImageBatchHarness({
     return () => {
       cancelled = true
     }
-  }, [addImagesToCanvas, onComplete, sources])
+  }, [addImagesToCanvas, onComplete, pasteOptions, sources])
 
   return null
 }
@@ -1171,6 +1194,99 @@ describe('useCanvasAssetIntake', () => {
     expect(uniqueColumns).toBeLessThan(24)
     expect(uniqueRows).toBeGreaterThan(2)
     expect((maxBottom - minY) / (maxRight - minX)).toBeLessThan(1.2)
+  })
+
+  it('streams an anchored large image paste and centers the final arranged group at the anchor', async () => {
+    const sources: CanvasImageSourceInput[] = Array.from({ length: 48 }, (_, index) => ({
+      src: `https://example.invalid/anchored-large-paste-${index}.png`,
+      fileName: `anchored-large-paste-${index}.png`,
+      sizeBytes: 9 * 1024 * 1024,
+      sourceWidthHint: 120,
+      sourceHeightHint: 90
+    }))
+    const onComplete = vi.fn()
+    const onProgress = vi.fn()
+    const itemUpdates: CanvasItem[][] = []
+    const renderableCounts: number[] = []
+    const hiddenImageCounts: number[] = []
+    const historyCommits: CanvasItem[][] = []
+    const pasteOptions = { clientX: 640, clientY: 360 }
+
+    render(
+      <LargeImageBatchHarness
+        sources={sources}
+        pasteOptions={pasteOptions}
+        onComplete={onComplete}
+        onProgress={onProgress}
+        onItemsUpdate={(items) => {
+          itemUpdates.push(items)
+          renderableCounts.push(buildProjectCanvasRenderableItems(items).length)
+          hiddenImageCounts.push(
+            items.filter((item) => item.type === 'image' && isCanvasItemTransientlyHidden(item.id))
+              .length
+          )
+        }}
+        onHistoryCommit={(items) => historyCommits.push(items)}
+      />
+    )
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1), { timeout: 5000 })
+
+    const [items, result] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem[]]
+    const imageItems = items.filter((item): item is CanvasImageItem => item.type === 'image')
+    const minX = Math.min(...imageItems.map((item) => item.x))
+    const minY = Math.min(...imageItems.map((item) => item.y))
+    const maxX = Math.max(...imageItems.map((item) => item.x + item.width))
+    const maxY = Math.max(...imageItems.map((item) => item.y + item.height))
+    const progressEvents = onProgress.mock.calls.map(
+      ([progress]) => progress as CanvasImageBatchImportProgress
+    )
+
+    expect(result).toHaveLength(sources.length)
+    expect(imageItems).toHaveLength(sources.length)
+    expect(progressEvents.some((event) => event.phase === 'committing')).toBe(true)
+    expect(itemUpdates.length).toBeGreaterThan(1)
+    expect(hiddenImageCounts.slice(0, -1).every((count) => count > 0)).toBe(true)
+    expect(renderableCounts.slice(0, -1).every((count) => count === 0)).toBe(true)
+    expect(imageItems.every((item) => !isCanvasItemTransientlyHidden(item.id))).toBe(true)
+    expect(buildProjectCanvasRenderableItems(items)).toHaveLength(sources.length)
+    expect(historyCommits).toHaveLength(1)
+    expect(historyCommits[0].every((item) => !isCanvasItemTransientlyHidden(item.id))).toBe(true)
+    expect((minX + maxX) / 2).toBe(pasteOptions.clientX)
+    expect((minY + maxY) / 2).toBe(pasteOptions.clientY)
+  })
+
+  it('reveals transiently hidden anchored items when the intake owner unmounts', async () => {
+    const sources: CanvasImageSourceInput[] = Array.from({ length: 48 }, (_, index) => ({
+      src: `https://example.invalid/unmounted-anchor-${index}.png`,
+      fileName: `unmounted-anchor-${index}.png`,
+      sizeBytes: 9 * 1024 * 1024,
+      sourceWidthHint: 120,
+      sourceHeightHint: 90
+    }))
+    const hiddenItemIds: string[] = []
+    let unmountHarness: () => void = () => undefined
+
+    const rendered = render(
+      <LargeImageBatchHarness
+        sources={sources}
+        pasteOptions={{ clientX: 640, clientY: 360 }}
+        onComplete={vi.fn()}
+        onItemsUpdate={(items) => {
+          const hiddenItems = items.filter(
+            (item) => item.type === 'image' && isCanvasItemTransientlyHidden(item.id)
+          )
+          if (hiddenItems.length > 0 && hiddenItemIds.length === 0) {
+            hiddenItemIds.push(...hiddenItems.map((item) => item.id))
+            queueMicrotask(() => unmountHarness())
+          }
+        }}
+      />
+    )
+    unmountHarness = rendered.unmount
+
+    await waitFor(() => expect(hiddenItemIds.length).toBeGreaterThan(0), { timeout: 5000 })
+    expect(hiddenItemIds.every((itemId) => !isCanvasItemTransientlyHidden(itemId))).toBe(true)
   })
 
   it('reports progress while streaming large image batches into the canvas', async () => {
