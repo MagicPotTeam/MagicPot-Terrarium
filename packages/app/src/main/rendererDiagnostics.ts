@@ -55,6 +55,8 @@ export function attachRendererDiagnostics(
   window: BrowserWindow,
   options: RendererDiagnosticsOptions = {}
 ): void {
+  let hasAttemptedRendererRecovery = false
+
   window.webContents.on('did-start-loading', () => {
     console.info('[App] Renderer started loading')
   })
@@ -76,6 +78,16 @@ export function attachRendererDiagnostics(
   )
 
   window.webContents.on('render-process-gone', (_event, details) => {
+    if (shouldRecoverRendererProcess(details)) {
+      if (hasAttemptedRendererRecovery) {
+        console.error(
+          '[App] Renderer recovery skipped because an automatic recovery was already attempted',
+          details
+        )
+        return
+      }
+      hasAttemptedRendererRecovery = true
+    }
     handleRendererProcessGone(window, details, options)
   })
 
