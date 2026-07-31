@@ -8,6 +8,7 @@ import {
   FileItem,
   Workflow
 } from '@shared/comfy/types'
+import type { MediaReference } from '../mediaReference'
 import { ServiceDefSheet } from './apiUtils/serviceDefSheet'
 
 export type GetInstalledReq = {}
@@ -61,6 +62,15 @@ export type GetViewReq = FileItem
 
 export type GetViewResp = {
   result: Uint8Array
+}
+
+export type ImportOutputImageReq = { filename: string; subfolder?: string; type: 'output' }
+export type ImportOutputImageResp = {
+  reference: MediaReference
+  localMediaUrl: string
+  mimeType: string
+  sizeBytes: number
+  fileName: string
 }
 
 export type ConnectWsReq = {
@@ -176,6 +186,7 @@ export type ComfySvc = {
    * @param req
    */
   getView(req: GetViewReq): Promise<GetViewResp>
+  importOutputImage(req: ImportOutputImageReq): Promise<ImportOutputImageResp>
   /**
    * 获取 ComfyUI WebSocket 连接
    */
@@ -237,6 +248,9 @@ export const comfySvcDef: ServiceDefSheet<ComfySvc> = {
     type: 'unary'
   },
   getView: {
+    type: 'unary'
+  },
+  importOutputImage: {
     type: 'unary'
   },
   connectWs: {

@@ -57,7 +57,44 @@ import { COMFY_PROCESS_TRANSPORT_CLIENT_ID, ComfyHttpCli } from './http'
 describe('ComfyHttpCli', () => {
   beforeEach(() => {
     webSocketCtor.mockClear()
+    vi.restoreAllMocks()
   })
+
+  it('builds canonical view params and disables redirect following', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response())
+    const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never)
+
+    await cli.viewResponse(
+      { filename: 'result #1.png', subfolder: 'batch/nested dir', type: 'output' },
+      undefined
+    )
+
+    const [url, options] = fetchMock.mock.calls[0]
+    const parsed = new URL(String(url))
+    expect(parsed.pathname).toBe('/view')
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      filename: 'result #1.png',
+      subfolder: 'batch/nested dir',
+      type: 'output'
+    })
+    expect(options).toEqual({ signal: undefined, redirect: 'manual' })
+  })
+
+  it.each(['file:///tmp/comfy', 'ftp://example.test', 'http://user:secret@example.test'])(
+    'rejects an unsafe ComfyUI base URL %s',
+    async (origin) => {
+      const config = structuredClone(testConfig)
+      config.use_remote_comfyui = true
+      config.remote_comfyui_config.comfyui_origin = origin
+      const cli = new ComfyHttpCli(config as never, testBuildEnv as never)
+      const fetchMock = vi.spyOn(globalThis, 'fetch')
+
+      await expect(
+        cli.viewResponse({ filename: 'x.png', subfolder: '', type: 'output' })
+      ).rejects.toThrow('Invalid ComfyUI base URL')
+      expect(fetchMock).not.toHaveBeenCalled()
+    }
+  )
 
   it('uses a process-scoped websocket client id by default', () => {
     const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never)

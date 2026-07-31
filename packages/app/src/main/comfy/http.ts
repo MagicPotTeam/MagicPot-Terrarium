@@ -37,7 +37,21 @@ export class ComfyHttpCli {
   }
 
   private host(): string {
-    return this.configUtils.getComfyUIOrigin()
+    const configuredOrigin = this.configUtils.getComfyUIOrigin()
+    let origin: URL
+    try {
+      origin = new URL(configuredOrigin)
+    } catch {
+      throw new Error('Invalid ComfyUI base URL')
+    }
+    if (
+      (origin.protocol !== 'http:' && origin.protocol !== 'https:') ||
+      origin.username ||
+      origin.password
+    ) {
+      throw new Error('Invalid ComfyUI base URL')
+    }
+    return origin.href
   }
 
   isRemoteComfyUI(): boolean {
@@ -203,6 +217,18 @@ export class ComfyHttpCli {
       type: meta.type ?? ''
     })
     return await this.getBinary(`/view?${params.toString()}`)
+  }
+
+  async viewResponse(meta: FileItem, signal?: AbortSignal): Promise<Response> {
+    const params = new URLSearchParams({
+      filename: meta.filename ?? '',
+      subfolder: meta.subfolder ?? '',
+      type: meta.type ?? ''
+    })
+    return fetch(new URL(`/view?${params.toString()}`, this.host()).href, {
+      signal,
+      redirect: 'manual'
+    })
   }
 
   connect(): WebSocket {

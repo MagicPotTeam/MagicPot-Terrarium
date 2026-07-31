@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Workflow } from '@shared/comfy/types'
 import { COMFY_EVENT_CLIENT_ID_ALL } from '@shared/api/svcComfy'
 
@@ -10,6 +10,7 @@ const {
   getTaskMock,
   getTaskByPromptIdMock,
   listenComfyEventMock,
+  importManagedMediaStreamMock,
   emitComfyEvent,
   resetComfyTestState,
   setTaskPromptOwner
@@ -41,6 +42,7 @@ const {
         activeListener = listener
       }
     ),
+    importManagedMediaStreamMock: vi.fn(),
     emitComfyEvent: (event: unknown) => {
       activeListener?.onEvent(event)
     },
@@ -100,12 +102,283 @@ vi.mock('../comfy/state', () => ({
   listenComfyEvent: listenComfyEventMock
 }))
 
+vi.mock('../llmProxy/chatMediaDir', () => ({
+  getChatMediaDir: vi.fn(() => 'C:/media')
+}))
+
+vi.mock('../llmProxy/managedMediaStore', () => ({
+  DEFAULT_MANAGED_MEDIA_MAX_BYTES: 1024,
+  importManagedMediaStream: importManagedMediaStreamMock,
+  ManagedMediaImportError: class ManagedMediaImportError extends Error {
+    name = 'ManagedMediaImportError'
+    constructor(
+      public readonly code: string,
+      message: string
+    ) {
+      super(message)
+    }
+  }
+}))
+
 import { ComfySvcImpl } from './svcComfyImpl'
 
 describe('ComfySvcImpl', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     resetComfyTestState()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  describe('importOutputImage', () => {
+    it('validates the descriptor and imports the Comfy response stream', async () => {
+      const svc = new ComfySvcImpl()
+      const viewResponse = vi.fn().mockResolvedValue(
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { 'content-type': 'image/png; charset=binary' }
+        })
+      )
+      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
+        viewResponse
+      })
+      const reference = {
+        version: 1,
+        kind: 'managed',
+        relativePath: 'ab/hash.png',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 3,
+        mimeType: 'image/png',
+        originalFileName: 'result 1.png'
+      }
+      importManagedMediaStreamMock.mockResolvedValue({
+        reference,
+        localMediaUrl: 'local-media:/managed',
+        absolutePath: 'hidden',
+        metadataPath: 'hidden'
+      })
+
+      await expect(
+        svc.importOutputImage({
+          filename: 'result 1.png',
+          subfolder: 'batch 1/nested',
+          type: 'output'
+        })
+      ).resolves.toEqual({
+        reference,
+        localMediaUrl: 'local-media:/managed',
+        mimeType: 'image/png',
+        sizeBytes: 3,
+        fileName: 'result 1.png'
+      })
+      expect(viewResponse).toHaveBeenCalledWith(
+        { filename: 'result 1.png', subfolder: 'batch 1/nested', type: 'output' },
+        expect.any(AbortSignal)
+      )
+      expect(importManagedMediaStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatMediaRoot: expect.stringMatching(/comfy-outputs[\\/]global$/),
+          mimeType: 'image/png',
+          originalFileName: 'result 1.png',
+          provenance: {
+            source: 'comfy-output',
+            filename: 'result 1.png',
+            subfolder: 'batch 1/nested',
+            type: 'output'
+          }
+        }),
+        { authorizedRoot: 'C:/media' }
+      )
+    })
+
+    it.each([
+      '../x.png',
+      'x/y.png',
+      'x%20y.png',
+      '%2e%2e%2fx.png',
+      '%252e%252e%255cx.png',
+      'C:%5cx.png',
+      'x.png?raw',
+      'x.png#fragment'
+    ])('rejects unsafe filename %s before fetching', async (filename) => {
+      const svc = new ComfySvcImpl()
+      const viewResponse = vi.fn()
+      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
+        viewResponse
+      })
+      await expect(svc.importOutputImage({ filename, type: 'output' })).rejects.toThrow(
+        'Invalid ComfyUI output filename'
+      )
+      expect(viewResponse).not.toHaveBeenCalled()
+    })
+
+    it.each(['a//b', 'a/./b', 'a/../b', '/absolute', 'C:/drive', '\\\\unc', 'a%2fb'])(
+      'rejects unsafe subfolder %s before fetching',
+      async (subfolder) => {
+        const svc = new ComfySvcImpl()
+        const viewResponse = vi.fn()
+        ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
+          viewResponse
+        })
+        await expect(
+          svc.importOutputImage({ filename: 'x.png', subfolder, type: 'output' })
+        ).rejects.toThrow('Invalid ComfyUI output subfolder')
+        expect(viewResponse).not.toHaveBeenCalled()
+      }
+    )
+
+    it('rejects redirects without importing their body', async () => {
+      const svc = new ComfySvcImpl()
+      const viewResponse = vi
+        .fn()
+        .mockResolvedValue(
+          new Response(null, { status: 302, headers: { location: 'https://other.test/x.png' } })
+        )
+      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
+        viewResponse
+      })
+
+      await expect(svc.importOutputImage({ filename: 'x.png', type: 'output' })).rejects.toThrow(
+        'redirect rejected'
+      )
+      expect(importManagedMediaStreamMock).not.toHaveBeenCalled()
+    })
+
+    it('rejects non-output descriptors and failed or unsupported responses', async () => {
+      const svc = new ComfySvcImpl()
+      await expect(
+        svc.importOutputImage({ filename: 'x.png', type: 'input' } as never)
+      ).rejects.toThrow('must be output')
+      const viewResponse = vi
+        .fn()
+        .mockResolvedValueOnce(new Response('no', { status: 502 }))
+        .mockResolvedValueOnce(new Response('html', { headers: { 'content-type': 'text/html' } }))
+      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
+        viewResponse
+      })
+      await expect(svc.importOutputImage({ filename: 'x.png', type: 'output' })).rejects.toThrow(
+        'HTTP 502'
+      )
+      await expect(svc.importOutputImage({ filename: 'x.png', type: 'output' })).rejects.toThrow(
+        'unsupported image type'
+      )
+    })
+
+    it('rejects declared oversize responses before importing', async () => {
+      const svc = new ComfySvcImpl()
+      const viewResponse = vi.fn().mockResolvedValue(
+        new Response(new Uint8Array([1]), {
+          headers: { 'content-type': 'image/png', 'content-length': '1025' }
+        })
+      )
+      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
+        viewResponse
+      })
+      await expect(svc.importOutputImage({ filename: 'x.png', type: 'output' })).rejects.toThrow(
+        'byte limit'
+      )
+      expect(importManagedMediaStreamMock).not.toHaveBeenCalled()
+    })
+    it('rejects chunked oversize responses and aborts stalled bodies', async () => {
+      const svc = new ComfySvcImpl()
+      const oversizedBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(1025))
+          controller.close()
+        }
+      })
+      const stalledBody = new ReadableStream<Uint8Array>({
+        start() {
+          // Intentionally never resolves; the service timeout must abort this body.
+        }
+      })
+      const viewResponse = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(oversizedBody, { headers: { 'content-type': 'image/png' } })
+        )
+        .mockResolvedValueOnce(
+          new Response(stalledBody, { headers: { 'content-type': 'image/png' } })
+        )
+      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
+        viewResponse
+      })
+      importManagedMediaStreamMock
+        .mockRejectedValueOnce(
+          Object.assign(new Error('Managed media exceeds byte limit'), {
+            name: 'ManagedMediaImportError',
+            code: 'MANAGED_MEDIA_TOO_LARGE'
+          })
+        )
+        .mockImplementationOnce(async ({ signal }: { signal?: AbortSignal }) => {
+          await new Promise<void>((_resolve, reject) => {
+            signal?.addEventListener(
+              'abort',
+              () =>
+                reject(
+                  Object.assign(new Error('aborted'), {
+                    name: 'ManagedMediaImportError',
+                    code: 'MANAGED_MEDIA_ABORTED'
+                  })
+                ),
+              { once: true }
+            )
+          })
+          throw new Error('unreachable')
+        })
+
+      await expect(
+        svc.importOutputImage({ filename: 'x.png', type: 'output' })
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_TOO_LARGE' })
+
+      vi.useFakeTimers()
+      const stalled = svc.importOutputImage({ filename: 'x.png', type: 'output' })
+      const stalledExpectation = expect(stalled).rejects.toMatchObject({
+        code: 'MANAGED_MEDIA_ABORTED'
+      })
+      await vi.advanceTimersByTimeAsync(30_001)
+      await stalledExpectation
+    })
+
+    it('rejects malformed content length and missing imported metadata with typed errors', async () => {
+      const svc = new ComfySvcImpl()
+      const viewResponse = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(new Uint8Array([1]), {
+            headers: { 'content-type': 'image/png', 'content-length': '1x' }
+          })
+        )
+        .mockResolvedValueOnce(
+          new Response(new Uint8Array([1]), { headers: { 'content-type': 'image/png' } })
+        )
+      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
+        viewResponse
+      })
+      importManagedMediaStreamMock.mockResolvedValueOnce({
+        reference: { version: 1, kind: 'managed', relativePath: 'x', sha256: 'a'.repeat(64) },
+        localMediaUrl: 'local-media:/managed'
+      })
+
+      const malformed = await svc
+        .importOutputImage({ filename: 'x.png', type: 'output' })
+        .catch((error) => error)
+      expect(malformed).toMatchObject({
+        name: 'ManagedMediaImportError',
+        code: 'MANAGED_MEDIA_INVALID',
+        message: 'ComfyUI view returned an invalid content length'
+      })
+      const invalidReference = await svc
+        .importOutputImage({ filename: 'x.png', type: 'output' })
+        .catch((error) => error)
+      expect(invalidReference).toMatchObject({
+        name: 'ManagedMediaImportError',
+        code: 'MANAGED_MEDIA_INVALID',
+        message: 'Imported ComfyUI output metadata is invalid'
+      })
+      expect(String(invalidReference)).not.toContain('relativePath')
+    })
   })
 
   describe('submitWorkflow', () => {
