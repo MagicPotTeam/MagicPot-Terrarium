@@ -72,6 +72,51 @@ describe('dispatchQAppResultsToCanvas', () => {
     })
   })
 
+  it('preserves managed media only for URL-backed image events', async () => {
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent')
+    const media = {
+      version: 1 as const,
+      kind: 'managed' as const,
+      relativePath: 'comfy-outputs/global/ab/image.png',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 123
+    }
+
+    dispatchQAppResultsToCanvas([
+      {
+        id: 'managed',
+        type: 'image',
+        objectUrl: 'local-media:///managed/image.png',
+        promptId: 'prompt',
+        fileItem: { filename: 'image.png', type: 'output' },
+        media
+      },
+      {
+        id: 'data',
+        type: 'image',
+        objectUrl: 'data:image/png;base64,AA==',
+        promptId: 'prompt',
+        fileItem: { filename: 'data.png', type: 'output' },
+        media
+      },
+      {
+        id: 'blob',
+        type: 'image',
+        objectUrl: 'blob:image',
+        promptId: 'prompt',
+        fileItem: { filename: 'blob.png', type: 'output' },
+        sourceBlob: new Blob(['image']),
+        media
+      }
+    ])
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const details = dispatchSpy.mock.calls.map(([event]) => (event as CustomEvent).detail)
+    expect(details[0]).toMatchObject({ src: 'local-media:///managed/image.png', media })
+    expect(details[1]).not.toHaveProperty('media')
+    expect(details[2]).not.toHaveProperty('media')
+  })
+
   it('skips canvas dispatch for empty object urls and non-canvas result types', async () => {
     const dispatchSpy = vi.spyOn(window, 'dispatchEvent')
 

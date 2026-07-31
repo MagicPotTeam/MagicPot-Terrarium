@@ -64,6 +64,9 @@ export const dispatchQAppResultsToCanvas = (
             promptId: item.promptId,
             fileItem: item.fileItem,
             sourceFile: item.sourceBlob,
+            ...(item.media && !item.sourceBlob && !item.objectUrl.trim().startsWith('data:')
+              ? { media: item.media }
+              : {}),
             onAdded: options?.onCanvasItemAdded,
             ...(getPositiveDimension(item.sourceWidth) != null
               ? { sourceWidth: getPositiveDimension(item.sourceWidth) }

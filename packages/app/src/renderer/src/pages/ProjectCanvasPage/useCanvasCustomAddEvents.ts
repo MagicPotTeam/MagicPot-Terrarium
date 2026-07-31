@@ -8,6 +8,7 @@ type AddImageToCanvasFn = (
     fileName?: string
     promptId?: CanvasImageItem['promptId']
     fileItem?: CanvasImageItem['fileItem']
+    media?: CanvasImageItem['media']
     sourceFile?: Blob
     sourceWidthHint?: number
     sourceHeightHint?: number
@@ -110,6 +111,7 @@ export function useCanvasCustomAddEvents({
           select?: boolean
           promptId?: CanvasImageItem['promptId']
           fileItem?: CanvasImageItem['fileItem']
+          media?: CanvasImageItem['media']
           sourceFile?: Blob
           sourceWidth?: number
           sourceHeight?: number
@@ -140,6 +142,7 @@ export function useCanvasCustomAddEvents({
           fileName: detail.fileName || detail.fileItem?.filename,
           promptId: detail.promptId,
           fileItem: detail.fileItem,
+          media: detail.media,
           sourceFile: detail.sourceFile,
           sourceWidthHint,
           sourceHeightHint,

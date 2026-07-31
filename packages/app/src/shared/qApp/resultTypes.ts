@@ -1,4 +1,5 @@
 import { FileItem } from '@shared/comfy/types'
+import type { MediaReference } from '@shared/mediaReference'
 
 export type ResultItemBase<ItemType extends string> = {
   id: string
@@ -11,6 +12,9 @@ export type ResultItemImage = ResultItemBase<'image'> & {
   objectUrl: string
   fileItem: FileItem
   sourceBlob?: Blob
+  media?: MediaReference
+  mimeType?: string
+  sizeBytes?: number
   sourceWidth?: number
   sourceHeight?: number
 }
