@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ServerStreaming } from '../apiUtils/streaming'
 import { registerIpcServer } from './registerIpcServer'
 
-const { handleMock, onMock } = vi.hoisted(() => ({
+const { handleMock, onMock, consoleErrorMock } = vi.hoisted(() => ({
   handleMock: vi.fn(),
-  onMock: vi.fn()
+  onMock: vi.fn(),
+  consoleErrorMock: vi.fn()
 }))
 
 vi.mock('electron', () => ({
@@ -33,6 +34,12 @@ describe('registerIpcServer', () => {
   beforeEach(() => {
     handleMock.mockReset()
     onMock.mockReset()
+    consoleErrorMock.mockReset()
+    vi.spyOn(console, 'error').mockImplementation(consoleErrorMock)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it('registers unary handlers and delegates requests to the service implementation', async () => {
@@ -191,6 +198,11 @@ describe('registerIpcServer', () => {
         code: 'E_STREAM',
         payload: { message: 'stream failed', code: 'E_STREAM' }
       }
+    })
+    expect(consoleErrorMock).toHaveBeenCalledWith('cleanupPort error', {
+      message: 'stream failed',
+      code: 'E_STREAM',
+      payload: { message: 'stream failed', code: 'E_STREAM' }
     })
     expect(port.close).toHaveBeenCalledTimes(1)
   })

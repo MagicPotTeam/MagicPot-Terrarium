@@ -1,4 +1,38 @@
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
+import type { MediaReference } from '@shared/mediaReference'
+
+export type ResolveChatAttachmentSourceOptions = {
+  mediaLookup?: (media: MediaReference) => string | null | undefined
+}
+
+export type ResolvedChatAttachmentSource =
+  | { status: 'resolved'; url: string; source: 'url' | 'media' }
+  | {
+      status: 'unavailable'
+      reason: 'missing-source' | 'media-lookup-unavailable' | 'media-not-found'
+    }
+
+export const resolveChatAttachmentSource = (
+  attachment: ChatAttachment,
+  options: ResolveChatAttachmentSourceOptions = {}
+): ResolvedChatAttachmentSource => {
+  if (typeof attachment.url === 'string' && attachment.url.trim()) {
+    return { status: 'resolved', url: attachment.url, source: 'url' }
+  }
+
+  if (!attachment.media) {
+    return { status: 'unavailable', reason: 'missing-source' }
+  }
+  if (!options.mediaLookup) {
+    return { status: 'unavailable', reason: 'media-lookup-unavailable' }
+  }
+
+  const managedSource = options.mediaLookup(attachment.media)
+  if (typeof managedSource === 'string' && managedSource.trim()) {
+    return { status: 'resolved', url: managedSource, source: 'media' }
+  }
+  return { status: 'unavailable', reason: 'media-not-found' }
+}
 
 export const CHAT_MODEL3D_EXTENSIONS = [
   '.glb',

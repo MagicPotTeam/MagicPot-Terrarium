@@ -23,9 +23,10 @@ function portToStreamingResp<T>(port: MessagePortMain): ServerStreaming<T> {
 function cleanupPort(port: MessagePortMain, handleResult: Promise<void>): Promise<void> {
   return handleResult
     .catch((error) => {
-      console.error('cleanupPort error', error)
+      const serializedError = serializeServiceError(error)
+      console.error('cleanupPort error', serializedError)
       const transport: ServerStreamingTransport<void> = {
-        error: serializeServiceError(error)
+        error: serializedError
       }
       port.postMessage(transport)
     })

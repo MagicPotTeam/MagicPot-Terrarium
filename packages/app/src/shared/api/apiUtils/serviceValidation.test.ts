@@ -6,6 +6,7 @@ import {
   SERVICE_VALIDATION_ERROR_CODE,
   ServiceError,
   ServiceValidationError,
+  getServiceErrorMessage,
   isServiceErrorTransport,
   serializeServiceError,
   validateServiceValue,
@@ -138,6 +139,12 @@ describe('serviceValidation', () => {
       message: 'Unknown error',
       code: SERVICE_INTERNAL_ERROR_CODE
     })
+  })
+
+  it('formats transported errors without object string coercion', () => {
+    expect(getServiceErrorMessage({ message: 'model download failed', code: 'E_DOWNLOAD' })).toBe(
+      'model download failed'
+    )
   })
 
   it('guards service error transport payload shape', () => {

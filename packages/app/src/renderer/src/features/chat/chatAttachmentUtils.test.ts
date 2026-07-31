@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   getChatAttachmentMaxSizeMB,
   getChatAttachmentTypeForFile,
   getLocalFilePath,
+  resolveChatAttachmentSource,
   summarizeChatAttachmentsForLog
 } from './chatAttachmentUtils'
 
@@ -38,5 +39,37 @@ describe('chatAttachmentUtils', () => {
         url: '[data-url length=54]'
       })
     ])
+  })
+
+  it('resolves direct and managed attachment sources', () => {
+    expect(resolveChatAttachmentSource({ type: 'image', url: 'file:///preview.png' })).toEqual({
+      status: 'resolved',
+      url: 'file:///preview.png',
+      source: 'url'
+    })
+
+    const media = {
+      id: 'media-1',
+      kind: 'image' as const,
+      mimeType: 'image/png',
+      originalFileName: 'preview.png',
+      relativePath: 'images/preview.png',
+      createdAt: '2026-01-01T00:00:00.000Z'
+    }
+    const mediaLookup = vi.fn().mockReturnValue('file:///managed/preview.png')
+
+    expect(resolveChatAttachmentSource({ type: 'image', media }, { mediaLookup })).toEqual({
+      status: 'resolved',
+      url: 'file:///managed/preview.png',
+      source: 'media'
+    })
+    expect(mediaLookup).toHaveBeenCalledWith(media)
+  })
+
+  it('reports a missing attachment source', () => {
+    expect(resolveChatAttachmentSource({ type: 'file' })).toEqual({
+      status: 'unavailable',
+      reason: 'missing-source'
+    })
   })
 })

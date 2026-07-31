@@ -1,16 +1,18 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { EventEmitter } from 'events'
+import { PassThrough } from 'stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { shellOpenExternalMock, netFetchMock } = vi.hoisted(() => ({
+const { shellOpenExternalMock, netRequestMock } = vi.hoisted(() => ({
   shellOpenExternalMock: vi.fn<(url: string) => Promise<void>>(() => Promise.resolve()),
-  netFetchMock: vi.fn()
+  netRequestMock: vi.fn()
 }))
 
 vi.mock('electron', () => ({
   net: {
-    fetch: netFetchMock
+    request: netRequestMock
   },
   shell: {
     openExternal: shellOpenExternalMock
@@ -20,24 +22,43 @@ vi.mock('electron', () => ({
 import { DownloadFileProgressEvent } from '@shared/api/svcShell'
 import { createDownloadByteLimitTransform, MAX_DOWNLOAD_BYTES, ShellSvcImpl } from './svcShellImpl'
 
+type MockRedirect = { statusCode: number; url: string }
+
 function mockDownloadResponse(
   statusCode: number,
   headers: Record<string, string>,
-  chunks: Buffer[] = []
+  chunks: Buffer[] = [],
+  redirects: MockRedirect[] = []
 ): void {
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      chunks.forEach((chunk) => controller.enqueue(chunk))
-      controller.close()
+  netRequestMock.mockImplementationOnce(() => {
+    const request = new EventEmitter() as EventEmitter & {
+      abort: ReturnType<typeof vi.fn>
+      end: () => void
+      followRedirect: ReturnType<typeof vi.fn>
     }
+    request.abort = vi.fn()
+    request.followRedirect = vi.fn()
+    request.end = () => {
+      queueMicrotask(() => {
+        redirects.forEach((redirect) =>
+          request.emit('redirect', redirect.statusCode, 'GET', redirect.url, {})
+        )
+        if (request.abort.mock.calls.length > 0) return
+        const response = new PassThrough() as PassThrough & {
+          headers: Record<string, string>
+          statusCode: number
+          statusMessage: string
+        }
+        response.statusCode = statusCode
+        response.statusMessage = statusCode === 200 ? 'OK' : 'Error'
+        response.headers = headers
+        request.emit('response', response)
+        chunks.forEach((chunk) => response.write(chunk))
+        response.end()
+      })
+    }
+    return request
   })
-  netFetchMock.mockResolvedValueOnce(
-    new Response(body, {
-      status: statusCode,
-      statusText: statusCode === 200 ? 'OK' : 'Found',
-      headers
-    })
-  )
 }
 
 function makeStats({
@@ -56,7 +77,7 @@ function makeStats({
 describe('ShellSvcImpl', () => {
   beforeEach(() => {
     shellOpenExternalMock.mockResolvedValue(undefined)
-    netFetchMock.mockReset()
+    netRequestMock.mockReset()
   })
 
   afterEach(() => {
@@ -158,12 +179,44 @@ describe('ShellSvcImpl', () => {
     await expect(
       svc.downloadFile({ ...request, url: 'https://127.0.0.1/model.bin' })
     ).rejects.toThrow('public host')
-    expect(netFetchMock).not.toHaveBeenCalled()
+    expect(netRequestMock).not.toHaveBeenCalled()
   })
 
-  it('uses Electron networking and validates every redirect target', async () => {
-    const tempDir = await makeTempDir('magicpot-shell-redirect')
-    mockDownloadResponse(302, { location: 'https://127.0.0.1/secret' })
+  it.each([302, 307])(
+    'safely follows a ModelScope-style %s redirect to a public CDN',
+    async (statusCode) => {
+      const tempDir = await makeTempDir(`magicpot-shell-public-redirect-${statusCode}`)
+      const bytes = Buffer.from('model-data')
+      mockDownloadResponse(
+        200,
+        { 'content-length': String(bytes.length) },
+        [bytes],
+        [{ statusCode, url: 'https://cdn.modelscope.example/models/model.bin' }]
+      )
+      const svc = new ShellSvcImpl()
+
+      await expect(
+        svc.downloadFile({
+          url: 'https://modelscope.example/api/v1/models/model.bin',
+          outputDir: tempDir,
+          filename: 'model.bin'
+        })
+      ).resolves.toMatchObject({ alreadyExists: false })
+      expect(fs.readFileSync(path.join(tempDir, 'model.bin'))).toEqual(bytes)
+      const request = netRequestMock.mock.results[0]?.value
+      expect(request.followRedirect).toHaveBeenCalledOnce()
+      expect(netRequestMock).toHaveBeenCalledWith({
+        method: 'GET',
+        url: 'https://modelscope.example/api/v1/models/model.bin',
+        redirect: 'manual'
+      })
+      await fs.promises.rm(tempDir, { recursive: true, force: true })
+    }
+  )
+
+  it('rejects a redirect to a private host without following it', async () => {
+    const tempDir = await makeTempDir('magicpot-shell-private-redirect')
+    mockDownloadResponse(200, {}, [], [{ statusCode: 302, url: 'https://127.0.0.1/secret' }])
     const svc = new ShellSvcImpl()
 
     await expect(
@@ -173,10 +226,9 @@ describe('ShellSvcImpl', () => {
         filename: 'model.bin'
       })
     ).rejects.toThrow('public host')
-    expect(netFetchMock).toHaveBeenCalledWith(
-      'https://public.example/model.bin',
-      expect.objectContaining({ method: 'GET', redirect: 'manual' })
-    )
+    const request = netRequestMock.mock.results[0]?.value
+    expect(request.followRedirect).not.toHaveBeenCalled()
+    expect(request.abort).toHaveBeenCalledOnce()
     await fs.promises.rm(tempDir, { recursive: true, force: true })
   })
 
@@ -214,7 +266,7 @@ describe('ShellSvcImpl', () => {
     await fs.promises.rm(tempDir, { recursive: true, force: true })
   })
 
-  it('routes downloads through Electron net.fetch with an abort signal', async () => {
+  it('routes downloads through Electron net.request', async () => {
     const tempDir = await makeTempDir('magicpot-shell-timeout')
     mockDownloadResponse(200, {}, [Buffer.from('ok')])
     const svc = new ShellSvcImpl()
@@ -224,10 +276,11 @@ describe('ShellSvcImpl', () => {
       filename: 'model.bin'
     })
 
-    expect(netFetchMock).toHaveBeenCalledWith(
-      'https://public.example/model.bin',
-      expect.objectContaining({ signal: expect.any(AbortSignal) })
-    )
+    expect(netRequestMock).toHaveBeenCalledWith({
+      method: 'GET',
+      url: 'https://public.example/model.bin',
+      redirect: 'manual'
+    })
     await fs.promises.rm(tempDir, { recursive: true, force: true })
   })
 
