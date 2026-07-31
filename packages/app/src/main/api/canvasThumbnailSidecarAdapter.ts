@@ -137,6 +137,9 @@ export type CanvasThumbnailSidecarBatchThumbnailRequest = {
   thumbnail?: CanvasThumbnailSidecarThumbnailOptions
   maxConcurrency?: number
   maxDecodedPixels?: number
+  maxSourceBytes?: number
+  maxOutputPixels?: number
+  maxGeneratedBytes?: number
   hash?: CanvasThumbnailSidecarHashAlgorithm
 }
 
@@ -164,6 +167,13 @@ export type CanvasThumbnailSidecarSourceMetadata = {
   lastModifiedMs?: number
   width: number
   height: number
+  rawWidth?: number
+  rawHeight?: number
+  orientedWidth?: number
+  orientedHeight?: number
+  orientationApplied?: boolean
+  postOrientationWidth?: number
+  postOrientationHeight?: number
   colorType: string
   format: string
 }
@@ -748,6 +758,9 @@ export function createCanvasThumbnailSidecarBatchRequest(
   const thumbnail = sanitizeCanvasThumbnailSidecarThumbnailOptions(request.thumbnail)
   const maxConcurrency = sanitizeOptionalPositiveInteger(request.maxConcurrency)
   const maxDecodedPixels = sanitizeOptionalPositiveInteger(request.maxDecodedPixels)
+  const maxSourceBytes = sanitizeOptionalPositiveInteger(request.maxSourceBytes)
+  const maxOutputPixels = sanitizeOptionalPositiveInteger(request.maxOutputPixels)
+  const maxGeneratedBytes = sanitizeOptionalPositiveInteger(request.maxGeneratedBytes)
 
   return {
     cacheRoot: path.resolve(request.cacheRoot),
@@ -758,6 +771,9 @@ export function createCanvasThumbnailSidecarBatchRequest(
     ...(thumbnail ? { thumbnail } : {}),
     ...(maxConcurrency ? { maxConcurrency } : {}),
     ...(maxDecodedPixels ? { maxDecodedPixels } : {}),
+    ...(maxSourceBytes ? { maxSourceBytes } : {}),
+    ...(maxOutputPixels ? { maxOutputPixels } : {}),
+    ...(maxGeneratedBytes ? { maxGeneratedBytes } : {}),
     ...(request.hash ? { hash: request.hash } : {})
   }
 }
