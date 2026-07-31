@@ -379,8 +379,6 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
             width: '100%',
             display: 'flex',
             flexDirection: 'column',
-            contentVisibility: 'auto',
-            containIntrinsicSize: 'auto 240px',
             mb: message.role === 'user' ? 0 : 2
           }}
         >
