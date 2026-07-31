@@ -1,9 +1,14 @@
 import React from 'react'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import ChatMessageList from './ChatMessageList'
+import ChatMessageList, {
+  ensureCachedChatImageDerivative,
+  getChatImageDerivativeCacheSizeForTests,
+  getChatImageDerivativeMaxEdge,
+  resetChatImageDerivativeCacheForTests
+} from './ChatMessageList'
 import { QAPP_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
 import type {
   ChatAttachment,
@@ -56,6 +61,8 @@ const buildChatMessageList = (
     onDownloadAttachment?: OnDownloadAttachment
     onSetEditingIndex?: (index: number | null) => void
     onSetEditingContent?: (content: string) => void
+    onPreviewImage?: (url: string) => void
+    onImageContextMenu?: (event: React.MouseEvent, imageUrl: string) => void
     chatContainerRef?: React.RefObject<HTMLDivElement | null>
     messagesEndRef?: React.RefObject<HTMLDivElement | null>
   }
@@ -70,8 +77,8 @@ const buildChatMessageList = (
       onSetEditingIndex={options?.onSetEditingIndex ?? vi.fn()}
       onSetEditingContent={options?.onSetEditingContent ?? vi.fn()}
       onSendEditedMessage={options?.onSendEditedMessage ?? vi.fn<OnSendEditedMessage>()}
-      onPreviewImage={vi.fn()}
-      onImageContextMenu={vi.fn()}
+      onPreviewImage={options?.onPreviewImage ?? vi.fn()}
+      onImageContextMenu={options?.onImageContextMenu ?? vi.fn()}
       onDownloadAttachment={options?.onDownloadAttachment ?? vi.fn<OnDownloadAttachment>()}
       onSendModelToDcc={vi.fn()}
       chatContainerRef={options?.chatContainerRef ?? React.createRef<HTMLDivElement>()}
@@ -91,6 +98,8 @@ const renderChatMessageList = (
     onDownloadAttachment?: OnDownloadAttachment
     onSetEditingIndex?: (index: number | null) => void
     onSetEditingContent?: (content: string) => void
+    onPreviewImage?: (url: string) => void
+    onImageContextMenu?: (event: React.MouseEvent, imageUrl: string) => void
     chatContainerRef?: React.RefObject<HTMLDivElement | null>
     messagesEndRef?: React.RefObject<HTMLDivElement | null>
   }
@@ -1038,6 +1047,467 @@ describe('ChatMessageList text selection and reply actions', () => {
       kind: 'table',
       text: 'Beta'
     })
+  })
+})
+
+describe('ChatMessageList managed image derivatives', () => {
+  const reference = {
+    version: 1 as const,
+    kind: 'managed' as const,
+    relativePath: 'assets/original.png',
+    sha256: 'a'.repeat(64),
+    sizeBytes: 4096,
+    mimeType: 'image/png',
+    originalFileName: 'original.png'
+  }
+  let intersectionCallbacks: IntersectionObserverCallback[]
+  let intersectionOptions: IntersectionObserverInit[]
+  let resizeCallback: ResizeObserverCallback
+  const ensureDerivative = vi.fn()
+
+  beforeEach(() => {
+    ensureDerivative.mockReset()
+    resetChatImageDerivativeCacheForTests()
+    intersectionCallbacks = []
+    intersectionOptions = []
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: { svcManagedMedia: { ensureDerivative } }
+    })
+    Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 })
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        callback: IntersectionObserverCallback
+        readonly root: Element | Document | null
+        readonly rootMargin: string
+        readonly thresholds: readonly number[]
+        constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+          this.callback = callback
+          this.root = options?.root ?? null
+          this.rootMargin = options?.rootMargin ?? '0px'
+          this.thresholds = Array.isArray(options?.threshold)
+            ? options.threshold
+            : [options?.threshold ?? 0]
+          intersectionCallbacks.push(callback)
+          intersectionOptions.push(options ?? {})
+        }
+        observe(target: Element) {
+          void target
+        }
+        disconnect() {
+          intersectionCallbacks = intersectionCallbacks.filter(
+            (callback) => callback !== this.callback
+          )
+        }
+        unobserve(target: Element) {
+          void target
+        }
+        takeRecords(): IntersectionObserverEntry[] {
+          return []
+        }
+      }
+    )
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        readonly callback: ResizeObserverCallback
+        constructor(callback: ResizeObserverCallback) {
+          this.callback = callback
+          resizeCallback = callback
+        }
+        observe(target: Element) {
+          void target
+        }
+        disconnect() {
+          resizeCallback = null
+        }
+        unobserve(target: Element) {
+          void target
+        }
+      }
+    )
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  const session = (attachments: ChatAttachment[]): ChatSession => ({
+    id: 'managed-images',
+    title: 'Managed images',
+    messages: [{ role: 'assistant', content: '', attachments }]
+  })
+
+  const managedAttachment = (url = 'C:/demo/original.png'): ChatAttachment => ({
+    type: 'image',
+    url,
+    media: reference,
+    sourceWidth: 400,
+    sourceHeight: 200
+  })
+
+  const markIntersection = (isIntersecting: boolean) =>
+    intersectionCallbacks.forEach((callback) =>
+      callback([{ isIntersecting } as unknown as IntersectionObserverEntry], {} as never)
+    )
+  const markNear = () => markIntersection(true)
+
+  it('maps CSS dimensions and clamped DPR to derivative buckets', () => {
+    expect(getChatImageDerivativeMaxEdge(100, 0.5)).toBe(256)
+    expect(getChatImageDerivativeMaxEdge(200, 2)).toBe(512)
+    expect(getChatImageDerivativeMaxEdge(400, 3)).toBe(2048)
+  })
+
+  it('renders an unmanaged legacy image with its normalized original source on first commit', () => {
+    renderChatMessageList(
+      session([
+        {
+          type: 'image',
+          url: 'C:/demo/legacy.png',
+          sourceWidth: 400,
+          sourceHeight: 200
+        }
+      ])
+    )
+
+    expect(screen.getByRole('img', { name: 'Attachment image 1' })).toHaveAttribute(
+      'src',
+      'local-media:///C:/demo/legacy.png'
+    )
+    expect(intersectionCallbacks).toHaveLength(0)
+    expect(ensureDerivative).not.toHaveBeenCalled()
+  })
+
+  it('keeps a stable placeholder and performs no image IO without IntersectionObserver', () => {
+    vi.stubGlobal('IntersectionObserver', undefined)
+    renderChatMessageList(session([managedAttachment()]))
+
+    expect(screen.getByTestId('chat-image-frame')).toBeInTheDocument()
+    expect(screen.queryByRole('img', { name: 'Attachment image 1' })).not.toBeInTheDocument()
+    expect(ensureDerivative).not.toHaveBeenCalled()
+  })
+
+  it('uses the nearest chat scroller as the observer root', () => {
+    renderChatMessageList(session([managedAttachment()]))
+
+    const scroller = screen.getByTestId('chat-message-list')
+    expect(scroller).toHaveAttribute('data-chat-scroll-root')
+    expect(intersectionOptions[0]?.root).toBe(scroller)
+    expect(intersectionOptions[0]?.rootMargin).toBe('800px 0px')
+  })
+
+  it('bounds resolved cache entries and expires them after 30 minutes', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2025-01-01T00:00:00Z'))
+    ensureDerivative.mockImplementation(({ reference: requestReference }) =>
+      Promise.resolve({
+        status: 'fallbackOriginal',
+        reason: 'animated-gif',
+        localMediaUrl: `local-media:///${requestReference.relativePath}`
+      })
+    )
+
+    for (let index = 0; index < 257; index += 1) {
+      await ensureCachedChatImageDerivative(
+        { ensureDerivative } as never,
+        {
+          ...reference,
+          relativePath: `assets/${index}.png`,
+          sha256: index.toString(16).padStart(64, '0')
+        },
+        512
+      )
+    }
+    expect(getChatImageDerivativeCacheSizeForTests()).toBe(256)
+
+    const newestReference = {
+      ...reference,
+      relativePath: 'assets/256.png',
+      sha256: (256).toString(16).padStart(64, '0')
+    }
+    await ensureCachedChatImageDerivative({ ensureDerivative } as never, newestReference, 512)
+    expect(ensureDerivative).toHaveBeenCalledTimes(257)
+
+    vi.advanceTimersByTime(30 * 60 * 1000 + 1)
+    await ensureCachedChatImageDerivative({ ensureDerivative } as never, newestReference, 512)
+    expect(ensureDerivative).toHaveBeenCalledTimes(258)
+    vi.useRealTimers()
+  })
+
+  it('bounds pending cache entries at 64 and times them out after 30 seconds', async () => {
+    vi.useFakeTimers()
+    const neverSettles = vi.fn(() => new Promise(() => undefined))
+    const observedPromises: Promise<{ status: 'rejected'; error: unknown }>[] = []
+
+    for (let index = 0; index < 65; index += 1) {
+      const pending = ensureCachedChatImageDerivative(
+        { ensureDerivative: neverSettles } as never,
+        {
+          ...reference,
+          relativePath: `assets/pending-${index}.png`,
+          sha256: index.toString(16).padStart(64, '0')
+        },
+        512
+      )
+      observedPromises.push(
+        pending.then(
+          () => {
+            throw new Error('Expected pending derivative request to reject')
+          },
+          (error) => ({ status: 'rejected' as const, error })
+        )
+      )
+    }
+
+    await expect(observedPromises[0]).resolves.toMatchObject({
+      status: 'rejected',
+      error: new Error('Managed media derivative request evicted')
+    })
+    expect(getChatImageDerivativeCacheSizeForTests()).toBeLessThanOrEqual(64)
+
+    vi.advanceTimersByTime(29_999)
+    expect(getChatImageDerivativeCacheSizeForTests()).toBe(64)
+    vi.advanceTimersByTime(1)
+
+    const timedOut = await Promise.all(observedPromises.slice(1))
+    expect(timedOut).toHaveLength(64)
+    expect(timedOut.every(({ error }) => String(error).includes('timed out'))).toBe(true)
+    expect(getChatImageDerivativeCacheSizeForTests()).toBe(0)
+  })
+
+  it('waits until near viewport, then displays ready derivative while callbacks keep original', async () => {
+    ensureDerivative.mockResolvedValue({
+      status: 'ready',
+      descriptor: {
+        maxEdge: 512,
+        relativePath: 'derivatives/preview.webp',
+        mimeType: 'image/webp',
+        sizeBytes: 1024,
+        width: 400,
+        height: 200,
+        sha256: 'b'.repeat(64),
+        localMediaUrl: 'local-media:///derivatives/preview.webp'
+      }
+    })
+    const onPreviewImage = vi.fn()
+    const onImageContextMenu = vi.fn()
+    renderChatMessageList(session([managedAttachment()]), { onPreviewImage, onImageContextMenu })
+    expect(screen.queryByRole('img', { name: 'Attachment image 1' })).not.toBeInTheDocument()
+    const frame = screen.getByTestId('chat-image-frame')
+    vi.spyOn(frame, 'getBoundingClientRect').mockReturnValue({
+      width: 200,
+      height: 100
+    } as DOMRect)
+
+    expect(ensureDerivative).not.toHaveBeenCalled()
+    markNear()
+    await waitFor(() => expect(ensureDerivative).toHaveBeenCalledWith({ reference, maxEdge: 512 }))
+    const image = await screen.findByRole('img', { name: 'Attachment image 1' })
+    expect(image).toHaveAttribute('src', 'local-media:///derivatives/preview.webp')
+
+    markIntersection(false)
+    await waitFor(() =>
+      expect(screen.queryByRole('img', { name: 'Attachment image 1' })).not.toBeInTheDocument()
+    )
+    markNear()
+    const cachedImage = await screen.findByRole('img', { name: 'Attachment image 1' })
+    expect(ensureDerivative).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(cachedImage)
+    fireEvent.contextMenu(cachedImage)
+    expect(onPreviewImage).toHaveBeenCalledWith('C:/demo/original.png')
+    expect(onImageContextMenu).toHaveBeenCalledWith(expect.anything(), 'C:/demo/original.png')
+  })
+
+  it('keeps original on fallback/failure and reverts a broken derivative before final error', async () => {
+    ensureDerivative
+      .mockResolvedValueOnce({
+        status: 'fallbackOriginal',
+        reason: 'animated-gif',
+        localMediaUrl: 'local-media:///assets/original.png'
+      })
+      .mockResolvedValueOnce({
+        status: 'ready',
+        descriptor: {
+          maxEdge: 512,
+          relativePath: 'derivatives/broken.webp',
+          mimeType: 'image/webp',
+          sizeBytes: 1024,
+          width: 400,
+          height: 200,
+          sha256: 'c'.repeat(64),
+          localMediaUrl: 'local-media:///derivatives/broken.webp'
+        }
+      })
+    const first = renderChatMessageList(session([managedAttachment()]))
+    markNear()
+    let image = await screen.findByRole('img', { name: 'Attachment image 1' })
+    await waitFor(() => expect(ensureDerivative).toHaveBeenCalledTimes(1))
+    expect(image).toHaveAttribute('src', 'local-media:///assets/original.png')
+    first.unmount()
+
+    renderChatMessageList(
+      session([
+        {
+          ...managedAttachment('C:/demo/second.png'),
+          media: {
+            ...reference,
+            relativePath: 'assets/second.png',
+            sha256: 'd'.repeat(64),
+            originalFileName: 'second.png'
+          }
+        }
+      ])
+    )
+    markNear()
+    await waitFor(() => expect(ensureDerivative).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(screen.getByRole('img', { name: 'Attachment image 1' })).toHaveAttribute(
+        'src',
+        'local-media:///derivatives/broken.webp'
+      )
+    )
+    image = screen.getByRole('img', { name: 'Attachment image 1' })
+    fireEvent.error(image)
+    await waitFor(() => expect(image).toHaveAttribute('src', 'local-media:///C:/demo/second.png'))
+    fireEvent.error(image)
+    expect(
+      screen.getByRole('img', { name: 'Attachment image 1 failed to load' })
+    ).toBeInTheDocument()
+  })
+
+  it('keeps original when the service is missing or rejects', async () => {
+    Object.defineProperty(window, 'api', { configurable: true, value: {} })
+    const missing = renderChatMessageList(session([managedAttachment()]))
+    markNear()
+    expect(await screen.findByRole('img', { name: 'Attachment image 1' })).toHaveAttribute(
+      'src',
+      'local-media:///C:/demo/original.png'
+    )
+    missing.unmount()
+
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: { svcManagedMedia: { ensureDerivative } }
+    })
+    ensureDerivative.mockRejectedValue(new Error('serialized service failure'))
+    renderChatMessageList(session([managedAttachment()]))
+    markNear()
+    await waitFor(() => expect(ensureDerivative).toHaveBeenCalledTimes(1))
+    expect(screen.getByRole('img', { name: 'Attachment image 1' })).toHaveAttribute(
+      'src',
+      'local-media:///C:/demo/original.png'
+    )
+  })
+
+  it('ignores markdown/project assets and handles image requests independently', async () => {
+    ensureDerivative.mockResolvedValue({
+      status: 'fallbackOriginal',
+      reason: 'animated-gif',
+      localMediaUrl: 'local-media:///assets/original.png'
+    })
+    renderChatMessageList({
+      id: 'mixed',
+      title: 'Mixed',
+      messages: [
+        { role: 'assistant', content: '![markdown](https://example.com/a.png)' },
+        {
+          role: 'assistant',
+          content: '',
+          attachments: [
+            managedAttachment('C:/demo/one.png'),
+            managedAttachment('C:/demo/two.png'),
+            {
+              type: 'image',
+              url: 'C:/demo/project.png',
+              media: { version: 1, kind: 'project-asset', relativePath: 'project.png' }
+            }
+          ]
+        }
+      ]
+    })
+    markNear()
+    await waitFor(() => expect(ensureDerivative).toHaveBeenCalledTimes(1))
+    expect(
+      ensureDerivative.mock.calls.every(([request]) => request.reference.kind === 'managed')
+    ).toBe(true)
+  })
+
+  it('requests a larger bucket after resize and ignores stale/unmounted responses', async () => {
+    let resolveFirst!: (value: unknown) => void
+    ensureDerivative
+      .mockImplementationOnce(() => new Promise((resolve) => (resolveFirst = resolve)))
+      .mockResolvedValueOnce({
+        status: 'fallbackOriginal',
+        reason: 'animated-gif',
+        localMediaUrl: 'local-media:///assets/original.png'
+      })
+    const rendered = renderChatMessageList(session([managedAttachment()]))
+    const frame = screen.getByTestId('chat-image-frame')
+    vi.spyOn(frame, 'getBoundingClientRect')
+      .mockReturnValueOnce({ width: 200, height: 100 } as DOMRect)
+      .mockReturnValue({ width: 600, height: 300 } as DOMRect)
+    markNear()
+    await waitFor(() => expect(ensureDerivative).toHaveBeenCalledWith({ reference, maxEdge: 512 }))
+    resizeCallback([], {} as never)
+    await waitFor(() => expect(ensureDerivative).toHaveBeenCalledWith({ reference, maxEdge: 512 }))
+    rendered.unmount()
+    resolveFirst({
+      status: 'ready',
+      descriptor: { localMediaUrl: 'local-media:///derivatives/stale.webp' }
+    })
+    await Promise.resolve()
+  })
+
+  it('does not let a stale 512 response overwrite a newer 1024 display', async () => {
+    let resolve512!: (value: unknown) => void
+    let resolve1024!: (value: unknown) => void
+    ensureDerivative.mockImplementation(({ maxEdge }) => {
+      return new Promise((resolve) => {
+        if (maxEdge === 512) resolve512 = resolve
+        if (maxEdge === 1024) resolve1024 = resolve
+      })
+    })
+    renderChatMessageList(
+      session([
+        {
+          ...managedAttachment(),
+          sourceWidth: 1200,
+          sourceHeight: 600
+        }
+      ])
+    )
+    const frame = screen.getByTestId('chat-image-frame')
+    let frameWidth = 200
+    vi.spyOn(frame, 'getBoundingClientRect').mockImplementation(
+      () => ({ width: frameWidth, height: frameWidth / 2 }) as DOMRect
+    )
+
+    act(() => markNear())
+    await waitFor(() => expect(ensureDerivative).toHaveBeenCalledWith({ reference, maxEdge: 512 }))
+
+    frameWidth = 500
+    act(() => resizeCallback([], {} as never))
+    await waitFor(() => expect(ensureDerivative).toHaveBeenCalledWith({ reference, maxEdge: 1024 }))
+
+    await act(async () => {
+      resolve1024({
+        status: 'ready',
+        descriptor: { localMediaUrl: 'local-media:///derivatives/1024.webp' }
+      })
+    })
+    const image = await screen.findByRole('img', { name: 'Attachment image 1' })
+    expect(image).toHaveAttribute('src', 'local-media:///derivatives/1024.webp')
+
+    await act(async () => {
+      resolve512({
+        status: 'ready',
+        descriptor: { localMediaUrl: 'local-media:///derivatives/512.webp' }
+      })
+    })
+    expect(image).toHaveAttribute('src', 'local-media:///derivatives/1024.webp')
   })
 })
 

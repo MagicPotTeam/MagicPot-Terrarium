@@ -1,4 +1,5 @@
 ﻿/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable react-refresh/only-export-components */
 import React from 'react'
 import {
   Box,
@@ -67,7 +68,14 @@ import {
   getFileBadgeText
 } from '@renderer/utils/fileDisplay'
 import { useMessage } from '@renderer/hooks/useMessage'
+import { api } from '@renderer/utils/windowUtils'
 import { DccBridgeTarget, isSupportedDccBridgeModelSourceFormat } from '@shared/api/svcDccBridge'
+import type {
+  EnsureManagedMediaDerivativeResp,
+  ManagedMediaDerivativeMaxEdge,
+  ManagedMediaSvc
+} from '@shared/api/svcManagedMedia'
+import { normalizeMediaReference, type MediaReference } from '@shared/mediaReference'
 import type { SxProps, Theme } from '@mui/material/styles'
 
 interface ChatMessageListProps {
@@ -106,9 +114,161 @@ const COPIED_FEEDBACK_DURATION_MS = 1800
 
 const CHAT_IMAGE_FALLBACK_WIDTH = 320
 const CHAT_IMAGE_FALLBACK_HEIGHT = 240
+const CHAT_IMAGE_DERIVATIVE_ROOT_MARGIN = '800px 0px'
+const CHAT_IMAGE_DERIVATIVE_CACHE_MAX_RESOLVED_ENTRIES = 256
+const CHAT_IMAGE_DERIVATIVE_CACHE_MAX_PENDING_ENTRIES = 64
+const CHAT_IMAGE_DERIVATIVE_RESOLVED_TTL_MS = 30 * 60 * 1000
+const CHAT_IMAGE_DERIVATIVE_PENDING_TIMEOUT_MS = 30 * 1000
+const CHAT_IMAGE_DERIVATIVE_BUCKETS = [256, 512, 1024, 2048] as const
+
+type ChatImageDerivativeCacheEntry =
+  | {
+      state: 'pending'
+      promise: Promise<EnsureManagedMediaDerivativeResp>
+      token: object
+      expiresAt: number
+      reject: (error: unknown) => void
+      timeoutId: ReturnType<typeof setTimeout>
+    }
+  | { state: 'resolved'; result: EnsureManagedMediaDerivativeResp; expiresAt: number }
+
+const chatImageDerivativeCache = new Map<string, ChatImageDerivativeCacheEntry>()
+
+export const resetChatImageDerivativeCacheForTests = (): void => {
+  chatImageDerivativeCache.clear()
+}
+
+export const getChatImageDerivativeCacheSizeForTests = (): number => chatImageDerivativeCache.size
+
+const pruneChatImageDerivativeCache = (now: number): void => {
+  for (const [key, entry] of chatImageDerivativeCache) {
+    if (entry.expiresAt <= now) {
+      if (entry.state === 'pending') {
+        clearTimeout(entry.timeoutId)
+        entry.reject(new Error('Managed media derivative request expired'))
+      }
+      chatImageDerivativeCache.delete(key)
+    }
+  }
+
+  let resolvedCount = 0
+  let pendingCount = 0
+  for (const entry of chatImageDerivativeCache.values()) {
+    if (entry.state === 'resolved') resolvedCount += 1
+    else pendingCount += 1
+  }
+  if (pendingCount > CHAT_IMAGE_DERIVATIVE_CACHE_MAX_PENDING_ENTRIES) {
+    for (const [key, entry] of chatImageDerivativeCache) {
+      if (entry.state !== 'pending') continue
+      clearTimeout(entry.timeoutId)
+      chatImageDerivativeCache.delete(key)
+      entry.reject(new Error('Managed media derivative request evicted'))
+      pendingCount -= 1
+      if (pendingCount <= CHAT_IMAGE_DERIVATIVE_CACHE_MAX_PENDING_ENTRIES) break
+    }
+  }
+  if (resolvedCount <= CHAT_IMAGE_DERIVATIVE_CACHE_MAX_RESOLVED_ENTRIES) return
+
+  for (const [key, entry] of chatImageDerivativeCache) {
+    if (entry.state !== 'resolved') continue
+    chatImageDerivativeCache.delete(key)
+    resolvedCount -= 1
+    if (resolvedCount <= CHAT_IMAGE_DERIVATIVE_CACHE_MAX_RESOLVED_ENTRIES) break
+  }
+}
+
+export const getChatImageDerivativeMaxEdge = (
+  cssMaxDimension: number,
+  devicePixelRatio: number,
+  sourceMaxDimension?: number
+): ManagedMediaDerivativeMaxEdge => {
+  const dimension = Number.isFinite(cssMaxDimension) ? Math.max(0, cssMaxDimension) : 0
+  const dpr = Number.isFinite(devicePixelRatio) ? Math.min(3, Math.max(1, devicePixelRatio)) : 1
+  const validSourceEdge =
+    Number.isFinite(sourceMaxDimension) && (sourceMaxDimension ?? 0) > 0
+      ? (sourceMaxDimension as number)
+      : undefined
+  const requiredEdge = Math.min(dimension * dpr, validSourceEdge ?? Number.POSITIVE_INFINITY)
+  return (
+    CHAT_IMAGE_DERIVATIVE_BUCKETS.find((bucket) => requiredEdge <= bucket) ??
+    CHAT_IMAGE_DERIVATIVE_BUCKETS[CHAT_IMAGE_DERIVATIVE_BUCKETS.length - 1]
+  )
+}
+
+const getChatImageDerivativeCacheKey = (
+  reference: MediaReference & { kind: 'managed'; sha256: string },
+  maxEdge: ManagedMediaDerivativeMaxEdge
+): string => `${reference.sha256}:${reference.relativePath}:${maxEdge}`
+
+export const ensureCachedChatImageDerivative = (
+  service: ManagedMediaSvc,
+  reference: MediaReference & { kind: 'managed'; sha256: string },
+  maxEdge: ManagedMediaDerivativeMaxEdge
+): Promise<EnsureManagedMediaDerivativeResp> => {
+  const key = getChatImageDerivativeCacheKey(reference, maxEdge)
+  const now = Date.now()
+  pruneChatImageDerivativeCache(now)
+  const cached = chatImageDerivativeCache.get(key)
+  if (cached?.state === 'resolved') {
+    chatImageDerivativeCache.delete(key)
+    chatImageDerivativeCache.set(key, {
+      ...cached,
+      expiresAt: now + CHAT_IMAGE_DERIVATIVE_RESOLVED_TTL_MS
+    })
+    return Promise.resolve(cached.result)
+  }
+  if (cached?.state === 'pending') return cached.promise
+
+  const token = {}
+  let rejectPending!: (error: unknown) => void
+  const servicePromise = service.ensureDerivative({ reference, maxEdge }).then(
+    (result) => {
+      const current = chatImageDerivativeCache.get(key)
+      if (current?.state !== 'pending' || current.token !== token) return result
+      clearTimeout(current.timeoutId)
+      chatImageDerivativeCache.delete(key)
+      chatImageDerivativeCache.set(key, {
+        state: 'resolved',
+        result,
+        expiresAt: Date.now() + CHAT_IMAGE_DERIVATIVE_RESOLVED_TTL_MS
+      })
+      pruneChatImageDerivativeCache(Date.now())
+      return result
+    },
+    (error) => {
+      const current = chatImageDerivativeCache.get(key)
+      if (current?.state === 'pending' && current.token === token) {
+        clearTimeout(current.timeoutId)
+        chatImageDerivativeCache.delete(key)
+      }
+      throw error
+    }
+  )
+  const promise = new Promise<EnsureManagedMediaDerivativeResp>((resolve, reject) => {
+    rejectPending = reject
+    servicePromise.then(resolve, reject)
+  })
+  const timeoutId = setTimeout(() => {
+    const current = chatImageDerivativeCache.get(key)
+    if (current?.state !== 'pending' || current.token !== token) return
+    chatImageDerivativeCache.delete(key)
+    rejectPending(new Error('Managed media derivative request timed out'))
+  }, CHAT_IMAGE_DERIVATIVE_PENDING_TIMEOUT_MS)
+  chatImageDerivativeCache.set(key, {
+    state: 'pending',
+    promise,
+    token,
+    expiresAt: now + CHAT_IMAGE_DERIVATIVE_PENDING_TIMEOUT_MS,
+    reject: rejectPending,
+    timeoutId
+  })
+  pruneChatImageDerivativeCache(now)
+  return promise
+}
 
 const ChatImage: React.FC<{
   src: string
+  media?: MediaReference
   alt: string
   sourceWidth?: number
   sourceHeight?: number
@@ -116,13 +276,36 @@ const ChatImage: React.FC<{
   margin?: string
   onPreview: () => void
   onContextMenu: (event: React.MouseEvent<HTMLImageElement>) => void
-}> = ({ src, alt, sourceWidth, sourceHeight, maxHeight, margin, onPreview, onContextMenu }) => {
+}> = ({
+  src: originalSrc,
+  media,
+  alt,
+  sourceWidth,
+  sourceHeight,
+  maxHeight,
+  margin,
+  onPreview,
+  onContextMenu
+}) => {
   const { t } = useTranslation()
+  const frameRef = React.useRef<HTMLDivElement | null>(null)
+  const generationRef = React.useRef(0)
+  const [displaySrc, setDisplaySrc] = React.useState<string | null>(() =>
+    normalizeMediaReference(media)?.kind === 'managed' ? null : originalSrc
+  )
   const [failed, setFailed] = React.useState(false)
-
-  React.useEffect(() => {
-    setFailed(false)
-  }, [src])
+  const [nearViewport, setNearViewport] = React.useState(false)
+  const [maxEdge, setMaxEdge] = React.useState<ManagedMediaDerivativeMaxEdge | null>(null)
+  const [brokenDerivativeKey, setBrokenDerivativeKey] = React.useState<string | null>(null)
+  const managedMedia = React.useMemo(() => {
+    const normalized = normalizeMediaReference(media)
+    return normalized?.kind === 'managed' && normalized.sha256
+      ? (normalized as MediaReference & { kind: 'managed'; sha256: string })
+      : undefined
+  }, [media])
+  const mediaKey = managedMedia
+    ? `${managedMedia.version}:${managedMedia.relativePath}:${managedMedia.sha256}`
+    : ''
 
   const hasValidSourceDimensions =
     Number.isFinite(sourceWidth) &&
@@ -134,70 +317,191 @@ const ChatImage: React.FC<{
   const displayScale = Math.min(1, 900 / width, maxHeight / height)
   const boundedWidth = width * displayScale
   const boundedHeight = height * displayScale
+
+  React.useEffect(() => {
+    generationRef.current += 1
+    setDisplaySrc(managedMedia ? null : originalSrc)
+    setFailed(false)
+    setNearViewport(false)
+    setMaxEdge(null)
+    setBrokenDerivativeKey(null)
+  }, [managedMedia, originalSrc, mediaKey])
+
+  React.useEffect(() => {
+    if (!managedMedia) return
+    const frame = frameRef.current
+    if (!frame || typeof IntersectionObserver === 'undefined') return
+    const root = frame.closest('[data-chat-scroll-root]')
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries.find((candidate) => candidate.target === frame) ?? entries[0]
+        if (!entry) return
+        generationRef.current += 1
+        setNearViewport(entry.isIntersecting)
+        if (!entry.isIntersecting) {
+          setDisplaySrc(null)
+          setFailed(false)
+        }
+      },
+      { root, rootMargin: CHAT_IMAGE_DERIVATIVE_ROOT_MARGIN }
+    )
+    observer.observe(frame)
+    return () => observer.disconnect()
+  }, [mediaKey, originalSrc])
+
+  const measureRequiredEdge = React.useCallback(() => {
+    const rect = frameRef.current?.getBoundingClientRect()
+    const cssMaxDimension = Math.max(rect?.width || boundedWidth, rect?.height || boundedHeight)
+    const sourceMaxDimension = hasValidSourceDimensions ? Math.max(width, height) : undefined
+    setMaxEdge(
+      getChatImageDerivativeMaxEdge(cssMaxDimension, window.devicePixelRatio, sourceMaxDimension)
+    )
+  }, [boundedHeight, boundedWidth, hasValidSourceDimensions, height, width])
+
+  React.useEffect(() => {
+    if (!nearViewport) return
+    measureRequiredEdge()
+    window.addEventListener('resize', measureRequiredEdge)
+    const frame = frameRef.current
+    const observer =
+      frame && typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(measureRequiredEdge)
+        : undefined
+    if (frame) observer?.observe(frame)
+    return () => {
+      window.removeEventListener('resize', measureRequiredEdge)
+      observer?.disconnect()
+    }
+  }, [measureRequiredEdge, nearViewport])
+
+  React.useEffect(() => {
+    if (!nearViewport) return
+    if (!managedMedia || !maxEdge) {
+      setDisplaySrc(originalSrc)
+      return
+    }
+
+    const cacheKey = getChatImageDerivativeCacheKey(managedMedia, maxEdge)
+    if (cacheKey === brokenDerivativeKey) {
+      setDisplaySrc(originalSrc)
+      return
+    }
+
+    const service = (api() as unknown as { svcManagedMedia?: ManagedMediaSvc })?.svcManagedMedia
+    if (typeof service?.ensureDerivative !== 'function') {
+      setDisplaySrc(originalSrc)
+      return
+    }
+
+    const generation = ++generationRef.current
+    void ensureCachedChatImageDerivative(service, managedMedia, maxEdge).then(
+      (result) => {
+        if (generation !== generationRef.current || !nearViewport) return
+        setFailed(false)
+        setDisplaySrc(
+          result.status === 'ready' ? result.descriptor.localMediaUrl : result.localMediaUrl
+        )
+      },
+      () => {
+        if (generation !== generationRef.current || !nearViewport) return
+        setFailed(false)
+        setDisplaySrc(originalSrc)
+      }
+    )
+  }, [brokenDerivativeKey, managedMedia, maxEdge, nearViewport, originalSrc])
+
+  React.useEffect(
+    () => () => {
+      generationRef.current += 1
+    },
+    []
+  )
+
   const failureLabel = t('chat.image_load_failed_label', {
     name: alt,
     defaultValue: '{{name}} failed to load'
   })
 
-  if (failed) {
-    return (
-      <Box
-        role="img"
-        aria-label={failureLabel}
-        sx={{
-          width: `min(100%, ${boundedWidth}px)`,
-          height: boundedHeight,
-          maxHeight,
-          borderRadius: '12px',
-          border: 1,
-          borderColor: 'divider',
-          bgcolor: 'action.hover',
-          color: 'text.secondary',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          px: 2,
-          textAlign: 'center',
-          ...(margin ? { my: margin } : {})
-        }}
-      >
-        <Typography variant="body2">{failureLabel}</Typography>
-      </Box>
-    )
-  }
-
   return (
-    <img
-      src={src}
-      alt={alt}
-      width={width}
-      height={height}
-      loading="lazy"
-      decoding="async"
-      style={{
-        width: 'auto',
-        height: 'auto',
-        maxWidth: '100%',
-        maxHeight: `${maxHeight}px`,
+    <Box
+      ref={frameRef}
+      data-testid="chat-image-frame"
+      sx={{
+        width: `min(100%, ${boundedWidth}px)`,
+        height: boundedHeight,
+        maxHeight,
         borderRadius: '12px',
-        objectFit: 'contain',
-        display: 'block',
-        margin,
-        cursor: 'pointer'
+        overflow: 'hidden',
+        ...(margin ? { my: margin } : {})
       }}
-      draggable
-      onError={() => setFailed(true)}
-      onDragStart={(event) => {
-        event.stopPropagation()
-        event.dataTransfer.effectAllowed = 'copy'
-        setAgentImageDragPayload(event.dataTransfer, src)
-      }}
-      onClick={onPreview}
-      onContextMenu={onContextMenu}
-    />
+    >
+      {failed ? (
+        <Box
+          role="img"
+          aria-label={failureLabel}
+          sx={{
+            width: '100%',
+            height: '100%',
+            borderRadius: '12px',
+            border: 1,
+            borderColor: 'divider',
+            bgcolor: 'action.hover',
+            color: 'text.secondary',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            px: 2,
+            textAlign: 'center'
+          }}
+        >
+          <Typography variant="body2">{failureLabel}</Typography>
+        </Box>
+      ) : displaySrc ? (
+        <img
+          src={displaySrc}
+          alt={alt}
+          width={width}
+          height={height}
+          loading="lazy"
+          decoding="async"
+          style={{
+            width: '100%',
+            height: '100%',
+            maxWidth: '100%',
+            maxHeight: `${maxHeight}px`,
+            borderRadius: '12px',
+            objectFit: 'contain',
+            display: 'block',
+            cursor: 'pointer'
+          }}
+          draggable
+          onLoad={measureRequiredEdge}
+          onError={() => {
+            if (displaySrc !== originalSrc) {
+              if (managedMedia && maxEdge) {
+                const cacheKey = getChatImageDerivativeCacheKey(managedMedia, maxEdge)
+                chatImageDerivativeCache.delete(cacheKey)
+                setBrokenDerivativeKey(cacheKey)
+              }
+              generationRef.current += 1
+              setFailed(false)
+              setDisplaySrc(originalSrc)
+              return
+            }
+            setFailed(true)
+          }}
+          onDragStart={(event) => {
+            event.stopPropagation()
+            event.dataTransfer.effectAllowed = 'copy'
+            setAgentImageDragPayload(event.dataTransfer, originalSrc)
+          }}
+          onClick={onPreview}
+          onContextMenu={onContextMenu}
+        />
+      ) : null}
+    </Box>
   )
 }
-
 const CopiableIconButton: React.FC<{
   copyLabel: string
   copiedLabel: string
@@ -333,6 +637,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     <Box
       ref={chatContainerRef}
       data-chat-scroll-container="true"
+      data-chat-scroll-root
       data-testid="chat-message-list"
       sx={{
         flex: 1,
@@ -1290,6 +1595,7 @@ const UserMessageBubble: React.FC<{
                 {attachment.type === 'image' ? (
                   <ChatImage
                     src={normalizeLocalMediaUrl(attachment.url)}
+                    media={attachment.media}
                     alt={t('chat.attachment_image_alt', {
                       index: attIdx + 1,
                       defaultValue: 'Attachment image {{index}}'
@@ -1409,6 +1715,7 @@ const AssistantMessageBubble: React.FC<{
                 {attachment.type === 'image' ? (
                   <ChatImage
                     src={normalizeLocalMediaUrl(attachment.url)}
+                    media={attachment.media}
                     alt={t('chat.attachment_image_alt', {
                       index: attIdx + 1,
                       defaultValue: 'Attachment image {{index}}'
