@@ -22,6 +22,7 @@ import { registerIpcServer } from '@shared/api/createServer/registerIpcServer'
 import { createApiExtensionServices } from './extensionServices'
 import { AppUpdateSvcImpl } from './svcAppUpdateImpl'
 import { MagicAgentPlatformSvcImpl } from './svcMagicAgentPlatformImpl'
+import { ManagedMediaSvcImpl } from './svcManagedMediaImpl'
 
 export const createServer = (): Api => {
   const baseApi: BaseApi = {
@@ -45,7 +46,8 @@ export const createServer = (): Api => {
     svcDccBridge: new DccBridgeSvcImpl(),
     svcDuplicateCheck: new DuplicateCheckSvcImpl(),
     svcAppUpdate: new AppUpdateSvcImpl(),
-    svcMagicAgentPlatform: new MagicAgentPlatformSvcImpl()
+    svcMagicAgentPlatform: new MagicAgentPlatformSvcImpl(),
+    svcManagedMedia: new ManagedMediaSvcImpl()
   }
 
   return {

@@ -7,6 +7,11 @@ import {
 } from './apiUtils/serviceValidation'
 
 describe('apiDef', () => {
+  it('exposes the managed media derivative contract', () => {
+    expect(apiDef.svcManagedMedia.ensureDerivative.type).toBe('unary')
+    expect(apiDef.svcManagedMedia.ensureDerivative.request).toBeDefined()
+  })
+
   it('exposes the project canvas thumbnail service contract', () => {
     expect(apiDef.svcCanvasThumbnail).toBeDefined()
     expect(apiDef.svcCanvasThumbnail.getSourceFileMetadata.type).toBe('unary')

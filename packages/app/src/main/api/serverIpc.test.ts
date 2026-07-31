@@ -70,6 +70,7 @@ vi.mock('./svcDccBridgeImpl', () => ({ DccBridgeSvcImpl: createServiceClass() })
 vi.mock('./svcDuplicateCheckImpl', () => ({ DuplicateCheckSvcImpl: createServiceClass() }))
 vi.mock('./svcAppUpdateImpl', () => ({ AppUpdateSvcImpl: createServiceClass() }))
 vi.mock('./svcMagicAgentPlatformImpl', () => ({ MagicAgentPlatformSvcImpl: createServiceClass() }))
+vi.mock('./svcManagedMediaImpl', () => ({ ManagedMediaSvcImpl: createServiceClass() }))
 
 describe('serverIpc createServer', () => {
   beforeEach(() => {
@@ -86,6 +87,16 @@ describe('serverIpc createServer', () => {
     expect(apiDef.svcAppUpdate).toBeDefined()
     expect(api.svcMagicAgentPlatform).toBeDefined()
     expect(apiDef.svcMagicAgentPlatform).toBeDefined()
+    expect(api.svcManagedMedia).toBeDefined()
+    expect(apiDef.svcManagedMedia.ensureDerivative.type).toBe('unary')
+  })
+
+  it('registers svcManagedMedia on ipcMain', () => {
+    initServerIpc()
+    expect(handleMock).toHaveBeenCalledWith(
+      'svcManagedMedia.ensureDerivative',
+      expect.any(Function)
+    )
   })
 
   it('registers svcCanvasThumbnail unary methods on ipcMain', () => {
