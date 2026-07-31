@@ -1,7 +1,20 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { Box, Typography, CircularProgress, Alert, Tooltip, useTheme, Button } from '@mui/material'
+import {
+  Box,
+  Typography,
+  CircularProgress,
+  Alert,
+  Tooltip,
+  useTheme,
+  Button,
+  IconButton
+} from '@mui/material'
+import CloseIcon from '@mui/icons-material/Close'
+import AttachFileIcon from '@mui/icons-material/AttachFile'
+import AccessTimeIcon from '@mui/icons-material/AccessTime'
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import { useTranslation } from 'react-i18next'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useRuntimeMcpStatus } from '@renderer/hooks/useRuntimeMcpStatus'
@@ -256,9 +269,11 @@ type SendMessageOverrides = {
   forcedProfileId?: string | null
   hy3dParams?: ReturnType<typeof getHy3dParams>
   queueKey?: string
+  queuedAttachmentTypes?: ChatAttachment['type'][]
 }
 
 type QueuedSessionSend = {
+  id: number
   overrides?: SendMessageOverrides
   queueKey?: string
 }
@@ -1207,7 +1222,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
   })
   const loadingSessionIdsRef = useRef<Set<string>>(loadingSessionIds)
   const sendingSessionIdsRef = useRef<Set<string>>(new Set())
-  const queuedSessionSendsRef = useRef<Map<string, QueuedSessionSend[]>>(new Map())
+  const [queuedSessionSends, setQueuedSessionSends] = useState<Map<string, QueuedSessionSend[]>>(
+    new Map()
+  )
+  const queuedSessionSendsRef = useRef<Map<string, QueuedSessionSend[]>>(queuedSessionSends)
+  const queuedSessionSendIdRef = useRef(0)
+  const updateQueuedSessionSends = useCallback((next: Map<string, QueuedSessionSend[]>) => {
+    queuedSessionSendsRef.current = next
+    setQueuedSessionSends(next)
+  }, [])
   const pendingSessionSendKeysRef = useRef<Set<string>>(new Set())
   const drainQueuedSessionRef = useRef<(sessionId: string) => void>(() => undefined)
   const [composerClearVersion, setComposerClearVersion] = useState(0)
@@ -1679,6 +1702,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
           content: normalizedText,
           hiddenContext: hiddenText || '',
           queueKey: detail.requestId ?? detail.eventId ?? detail.runId,
+          queuedAttachmentTypes: [
+            ...rawAttachments.map((item) => item.type),
+            ...(image ? (['image'] as ChatAttachment['type'][]) : [])
+          ],
           resolveAttachments: async () => {
             const resolvedAttachments = await resolveAttachments(false)
             if (!image) return resolvedAttachments
@@ -2241,6 +2268,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
     () => sessions.find((s) => s.id === currentSessionId),
     [sessions, currentSessionId]
   )
+  const currentSessionQueuedSends = currentSessionId
+    ? (queuedSessionSends.get(currentSessionId) ?? [])
+    : []
+  const [isQueueExpanded, setIsQueueExpanded] = useState(false)
+  useEffect(() => {
+    if (currentSessionQueuedSends.length <= 3) setIsQueueExpanded(false)
+  }, [currentSessionId, currentSessionQueuedSends.length])
+  const visibleQueuedSends = isQueueExpanded
+    ? currentSessionQueuedSends
+    : currentSessionQueuedSends.slice(0, 3)
+  const hiddenQueuedSendCount = currentSessionQueuedSends.length - visibleQueuedSends.length
   const currentPendingConfirmation = currentSession
     ? (pendingExternalConfirmations[currentSession.id] ?? null)
     : null
@@ -5301,7 +5339,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             systemPrompt: activeSystemPrompt,
             externalAgentSkill: activeExternalAgentSkill
           })
-          const attachmentBatchEntries = buildAttachmentBatchEntries(rawAttachments)
+          const attachmentBatchEntries = buildAttachmentBatchEntries(userMessage.attachments)
           const attachmentChunks = chunkAttachmentBatchEntries(
             attachmentBatchEntries,
             maxAttachmentsPerRequest
@@ -5657,9 +5695,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       if (isBusy) {
         if (queueKey) pendingSessionSendKeysRef.current.add(queueKey)
-        const queue = queuedSessionSendsRef.current.get(targetSessionId) ?? []
-        queue.push({ overrides: queuedOverrides, queueKey })
-        queuedSessionSendsRef.current.set(targetSessionId, queue)
+        const queue = [
+          ...(queuedSessionSendsRef.current.get(targetSessionId) ?? []),
+          { id: ++queuedSessionSendIdRef.current, overrides: queuedOverrides, queueKey }
+        ]
+        const nextQueues = new Map(queuedSessionSendsRef.current)
+        nextQueues.set(targetSessionId, queue)
+        updateQueuedSessionSends(nextQueues)
         if (!overrides) {
           inputValueRef.current = ''
           setInputValue('')
@@ -5684,7 +5726,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
         drainQueuedSessionRef.current(targetSessionId)
       }
     },
-    [executeSendMessage, setInputValue, setPendingAttachments, setPendingHiddenContext]
+    [
+      executeSendMessage,
+      setInputValue,
+      setPendingAttachments,
+      setPendingHiddenContext,
+      updateQueuedSessionSends
+    ]
   )
 
   drainQueuedSessionRef.current = (sessionId: string) => {
@@ -5695,15 +5743,50 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return
     }
     const queue = queuedSessionSendsRef.current.get(sessionId)
-    const next = queue?.shift()
+    const next = queue?.[0]
     if (!next) {
-      queuedSessionSendsRef.current.delete(sessionId)
+      if (queuedSessionSendsRef.current.has(sessionId)) {
+        const nextQueues = new Map(queuedSessionSendsRef.current)
+        nextQueues.delete(sessionId)
+        updateQueuedSessionSends(nextQueues)
+      }
       return
     }
-    if (queue?.length === 0) queuedSessionSendsRef.current.delete(sessionId)
+    const nextQueues = new Map(queuedSessionSendsRef.current)
+    if (queue.length === 1) nextQueues.delete(sessionId)
+    else nextQueues.set(sessionId, queue.slice(1))
+    updateQueuedSessionSends(nextQueues)
     if (next.queueKey) pendingSessionSendKeysRef.current.delete(next.queueKey)
     void sendMessage(next.overrides)
   }
+
+  const removeQueuedSessionSend = useCallback(
+    (sessionId: string, queuedSendId: number) => {
+      const queue = queuedSessionSendsRef.current.get(sessionId) ?? []
+      const removed = queue.find((item) => item.id === queuedSendId)
+      if (!removed) return
+      const remaining = queue.filter((item) => item.id !== queuedSendId)
+      const nextQueues = new Map(queuedSessionSendsRef.current)
+      if (remaining.length > 0) nextQueues.set(sessionId, remaining)
+      else nextQueues.delete(sessionId)
+      if (removed.queueKey) pendingSessionSendKeysRef.current.delete(removed.queueKey)
+      updateQueuedSessionSends(nextQueues)
+    },
+    [updateQueuedSessionSends]
+  )
+
+  const editQueuedSessionSend = useCallback(
+    (sessionId: string, queuedSend: QueuedSessionSend) => {
+      const overrides = queuedSend.overrides
+      if (!overrides || overrides.resolveAttachments) return
+      setInputValue(overrides.content)
+      setPendingAttachments(overrides.attachments?.map(cloneChatAttachment) ?? [])
+      setPendingHiddenContext(overrides.hiddenContext ?? '')
+      removeQueuedSessionSend(sessionId, queuedSend.id)
+      window.setTimeout(() => composerInputRef.current?.focus(), 0)
+    },
+    [removeQueuedSessionSend, setInputValue, setPendingAttachments, setPendingHiddenContext]
+  )
 
   // 保持 sendMessageRef 与最新 sendMessage 同步，供 send-to-agent autoSend 使用
   sendMessageRef.current = sendMessage
@@ -6291,6 +6374,129 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 chatContainerRef={chatContainerRef}
                 messagesEndRef={messagesEndRef}
               />
+
+              {currentSessionId && currentSessionQueuedSends.length > 0 ? (
+                <Box
+                  data-testid="chat-queue-panel"
+                  role="region"
+                  aria-label={t('chat.queue_region', { defaultValue: '待发送消息' })}
+                  sx={{
+                    mx: { xs: 1, sm: 2 },
+                    mb: 0.75,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 0.5,
+                    maxWidth: { sm: 720 },
+                    alignSelf: 'center',
+                    width: { xs: 'calc(100% - 16px)', sm: 'calc(100% - 32px)' }
+                  }}
+                >
+                  {visibleQueuedSends.map((queuedSend) => {
+                    const attachmentTypes =
+                      queuedSend.overrides?.queuedAttachmentTypes ??
+                      queuedSend.overrides?.attachments?.map((item) => item.type) ??
+                      []
+                    const canEdit = Boolean(
+                      queuedSend.overrides && !queuedSend.overrides.resolveAttachments
+                    )
+                    return (
+                      <Box
+                        key={queuedSend.id}
+                        data-testid="chat-queue-item"
+                        sx={{
+                          minWidth: 0,
+                          px: 1.5,
+                          py: 0.75,
+                          display: 'flex',
+                          gap: 1,
+                          alignItems: 'center',
+                          border: '1px solid',
+                          borderColor: 'rgba(245, 158, 11, 0.2)',
+                          borderRadius: 2,
+                          bgcolor: 'rgba(245, 158, 11, 0.1)'
+                        }}
+                      >
+                        <AccessTimeIcon
+                          sx={{ fontSize: 17, color: 'warning.main', flexShrink: 0 }}
+                        />
+                        <Tooltip
+                          title={
+                            queuedSend.overrides?.content ||
+                            t('chat.queue_attachments', { defaultValue: '仅附件' })
+                          }
+                        >
+                          <Typography
+                            variant="body2"
+                            noWrap
+                            sx={{ minWidth: 0, flex: 1, fontSize: 13 }}
+                          >
+                            {queuedSend.overrides?.content ||
+                              t('chat.queue_attachments', { defaultValue: '仅附件' })}
+                          </Typography>
+                        </Tooltip>
+                        {attachmentTypes.length > 0 ? (
+                          <Box
+                            aria-label={t('chat.queue_attachment_count', {
+                              count: attachmentTypes.length,
+                              defaultValue: `${attachmentTypes.length} 个附件`
+                            })}
+                            sx={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 0.25,
+                              color: 'text.secondary',
+                              fontSize: 11,
+                              flexShrink: 0
+                            }}
+                          >
+                            <AttachFileIcon sx={{ fontSize: 13 }} />
+                            {attachmentTypes.length}
+                          </Box>
+                        ) : null}
+                        {canEdit ? (
+                          <Tooltip title={t('chat.queue_edit', { defaultValue: '编辑待发送消息' })}>
+                            <IconButton
+                              size="small"
+                              aria-label={t('chat.queue_edit', { defaultValue: '编辑待发送消息' })}
+                              onClick={() => editQueuedSessionSend(currentSessionId, queuedSend)}
+                              sx={{ p: 0.25, color: 'text.secondary' }}
+                            >
+                              <EditOutlinedIcon sx={{ fontSize: 15 }} />
+                            </IconButton>
+                          </Tooltip>
+                        ) : null}
+                        <Tooltip title={t('chat.queue_remove', { defaultValue: '取消待发送消息' })}>
+                          <IconButton
+                            size="small"
+                            aria-label={t('chat.queue_remove', { defaultValue: '取消待发送消息' })}
+                            onClick={() => removeQueuedSessionSend(currentSessionId, queuedSend.id)}
+                            sx={{ p: 0.25, color: 'text.secondary' }}
+                          >
+                            <CloseIcon sx={{ fontSize: 15 }} />
+                          </IconButton>
+                        </Tooltip>
+                      </Box>
+                    )
+                  })}
+                  {currentSessionQueuedSends.length > 3 ? (
+                    <Button
+                      size="small"
+                      onClick={() => setIsQueueExpanded((expanded) => !expanded)}
+                      aria-label={isQueueExpanded ? '收起' : `再显示 ${hiddenQueuedSendCount} 条`}
+                      sx={{
+                        alignSelf: 'center',
+                        minWidth: 0,
+                        px: 0.75,
+                        py: 0,
+                        color: 'warning.main',
+                        fontSize: 11
+                      }}
+                    >
+                      {isQueueExpanded ? '收起' : `再显示 ${hiddenQueuedSendCount} 条`}
+                    </Button>
+                  ) : null}
+                </Box>
+              ) : null}
 
               {/* 底部输入框 */}
               <ChatComposer

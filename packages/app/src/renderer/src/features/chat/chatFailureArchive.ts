@@ -27,6 +27,11 @@ export const sanitizeChatFailureArchiveRunId = (runId?: string | null): string =
   return normalized || FALLBACK_CHAT_FAILURE_RUN_ID
 }
 
+const redactInlineMediaBodies = (value: string): string =>
+  value.replace(/(?:data|blob):[^\s"'<>]+/gi, (url) =>
+    url.toLowerCase().startsWith('data:') ? '[redacted:data-url]' : '[redacted:blob-url]'
+  )
+
 const sanitizeChatFailureAttachmentUrl = (url?: string | null): string | undefined => {
   const trimmed = String(url || '').trim()
   if (!trimmed) return undefined
@@ -105,12 +110,12 @@ export const buildChatFailureArchivePayload = (options: {
   runId: options.sessionId ? sanitizeChatFailureArchiveRunId(options.sessionId) : null,
   profileId: options.profileId || null,
   skillId: options.skillId || null,
-  error: options.error,
+  error: redactInlineMediaBodies(options.error),
   createdAt: new Date(options.timestamp ?? Date.now()).toISOString(),
   userMessage: options.userMessage
     ? {
         role: options.userMessage.role,
-        content: options.userMessage.content,
+        content: redactInlineMediaBodies(options.userMessage.content),
         attachments: options.userMessage.attachments?.map((attachment) => ({
           type: attachment.type,
           url: sanitizeChatFailureAttachmentUrl(attachment.url),

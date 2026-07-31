@@ -1295,29 +1295,96 @@ describe('ChatPage runtime workflow integration', () => {
       )
     })
 
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
 
-    expect(fetchMock).toHaveBeenCalledWith('blob:user-upload-image')
-    expect(hoisted.saveImageToDirMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        fileName: expect.stringMatching(/^chat_upload_.*_1\.png$/),
-        dir: undefined,
-        data: expect.any(Uint8Array)
-      })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledWith('blob:duplicate-user-upload')
+    expect(hoisted.saveImageToDirMock).toHaveBeenCalledTimes(1)
+    expect(revokeObjectURL).not.toHaveBeenCalled()
+
+    const durableUrl = 'file://C:/MagicPot/AutoSave/Agent/chat_upload.png'
+    expect(readCurrentSessionState()?.messages[0]?.attachments?.map((item) => item.url)).toEqual([
+      durableUrl,
+      durableUrl
+    ])
+    for (const call of hoisted.requestChatCompletionMock.mock.calls) {
+      const requestMessages = call[0]?.messages as ChatMessage[] | undefined
+      const requestAttachments = requestMessages?.at(-1)?.attachments ?? []
+      expect(requestAttachments.length).toBeGreaterThan(0)
+      expect(requestAttachments.every((item) => !item.url.startsWith('blob:'))).toBe(true)
+      expect(requestAttachments.every((item) => item.url === durableUrl)).toBe(true)
+    }
+  })
+
+  it('preserves blob image URLs when outgoing persistence fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ blob: async () => new Blob(['image'], { type: 'image/png' }) }))
     )
+    hoisted.saveImageToDirMock.mockResolvedValueOnce({ savedPath: null })
 
-    const requestMessages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]?.messages as
-      | ChatMessage[]
-      | undefined
-    const requestAttachment = requestMessages?.at(-1)?.attachments?.[0]
-    expect(requestAttachment?.url).toBe('file://C:/MagicPot/AutoSave/Agent/chat_upload.png')
-
-    await waitFor(() => {
-      const currentSession = readCurrentSessionState()
-      expect(currentSession?.messages[0]?.attachments?.[0]?.url).toBe(
-        'file://C:/MagicPot/AutoSave/Agent/chat_upload.png'
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            targetScope: 'runtime-flow',
+            autoSend: true,
+            text: 'send despite persistence failure',
+            attachments: [
+              {
+                type: 'image',
+                url: 'blob:failed-user-upload',
+                fileName: 'failed.png',
+                mimeType: 'image/png'
+              }
+            ]
+          }
+        })
       )
     })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    expect(readCurrentSessionState()?.messages[0]?.attachments?.[0]?.url).toBe(
+      'blob:failed-user-upload'
+    )
+    const requestMessages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
+      ?.messages as ChatMessage[]
+    expect(requestMessages.at(-1)?.attachments?.[0]?.url).toBe('blob:failed-user-upload')
+  })
+
+  it('leaves durable outgoing image URLs unchanged', async () => {
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            targetScope: 'runtime-flow',
+            autoSend: true,
+            text: 'durable image',
+            attachments: [
+              {
+                type: 'image',
+                url: 'file://C:/MagicPot/existing.png',
+                fileName: 'existing.png',
+                mimeType: 'image/png'
+              }
+            ]
+          }
+        })
+      )
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    expect(hoisted.saveImageToDirMock).not.toHaveBeenCalled()
+    expect(readCurrentSessionState()?.messages[0]?.attachments?.[0]?.url).toBe(
+      'file://C:/MagicPot/existing.png'
+    )
+    const requestMessages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
+      ?.messages as ChatMessage[]
+    expect(requestMessages.at(-1)?.attachments?.[0]?.url).toBe('file://C:/MagicPot/existing.png')
   })
 
   it('renders model and reasoning controls in the workspace controls portal', async () => {
@@ -2038,6 +2105,7 @@ describe('ChatPage runtime workflow integration', () => {
 
     renderChatPage('empty-busy-enqueue')
     await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
 
     fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
       target: { value: 'active request' }
@@ -2051,6 +2119,39 @@ describe('ChatPage runtime workflow integration', () => {
 
     await act(async () => resolveFirstRequest?.({ content: 'done' }))
     expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('edits and cancels queued messages with the compact queue controls', async () => {
+    let resolveFirstRequest: ((value: { content: string }) => void) | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirstRequest = resolve
+        })
+    )
+
+    renderChatPage('queue-controls')
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    for (const text of ['active', 'second', 'third']) {
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: text } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      if (text === 'active') {
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      }
+    }
+
+    expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2)
+    expect(screen.getByTestId('chat-queue-panel')).not.toHaveTextContent('待发送 ·')
+    expect(screen.queryByRole('button', { name: /再显示/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getAllByRole('button', { name: '编辑待发送消息' })[0])
+    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('second')
+    expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1)
+    expect(screen.getByTestId('chat-queue-panel')).toHaveTextContent('third')
+
+    fireEvent.click(screen.getByRole('button', { name: '取消待发送消息' }))
+    expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument()
+    await act(async () => resolveFirstRequest?.({ content: 'done' }))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
   })
 
   it('queues concurrent auto-sends without early materialization and drains them FIFO after errors', async () => {
@@ -2098,10 +2199,19 @@ describe('ChatPage runtime workflow integration', () => {
 
       expect(fetchMock).not.toHaveBeenCalled()
       expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      const queuedItems = screen.getAllByTestId('chat-queue-item')
+      expect(queuedItems).toHaveLength(2)
+      expect(queuedItems.map((item) => item.textContent)).toEqual([
+        expect.stringContaining('second'),
+        expect.stringContaining('third')
+      ])
+      expect(within(queuedItems[0]).getByLabelText('1 个附件')).toBeInTheDocument()
+      expect(screen.getAllByRole('button', { name: '取消待发送消息' })).toHaveLength(2)
 
       await act(async () => rejectFirstRequest?.(new Error('first failed')))
 
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      await waitFor(() => expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument())
       expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
         'blob:second-canvas',
         'blob:third-canvas'

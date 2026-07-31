@@ -9,6 +9,26 @@ import {
 } from './chatFailureArchive'
 
 describe('chatFailureArchive', () => {
+  it('redacts inline image bodies from archived errors and message context', () => {
+    const inlineImage = `data:image/png;base64,${'A'.repeat(4096)}`
+    const payload = buildChatFailureArchivePayload({
+      sessionId: 'session-inline',
+      error: `request failed for ${inlineImage}`,
+      userMessage: {
+        role: 'user',
+        content: `inspect ${inlineImage}`,
+        hiddenContext: `private ${inlineImage}`,
+        attachments: [{ type: 'image', url: inlineImage }]
+      }
+    })
+    const serialized = JSON.stringify(payload)
+
+    expect(serialized).not.toContain('A'.repeat(100))
+    expect(serialized).not.toContain('hiddenContext')
+    expect(payload.error).toContain('[redacted:data-url]')
+    expect(payload.userMessage?.content).toContain('[redacted:data-url]')
+  })
+
   it('formats user-visible failure messages without changing blank messages', () => {
     expect(formatChatFailureMessage(' Failed ', 'run-1')).toBe('Failed (Run: run-1)')
     expect(formatChatFailureMessage('   ', 'run-1')).toBe('   ')
