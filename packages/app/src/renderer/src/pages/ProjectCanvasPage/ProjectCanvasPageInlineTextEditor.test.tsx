@@ -97,6 +97,7 @@ describe('ProjectCanvasPageInlineTextEditor', () => {
 
     const textarea = screen.getByLabelText('Media caption') as HTMLTextAreaElement
     expect(canvasContainer.contains(textarea)).toBe(true)
+    expect(textarea).toHaveAttribute('data-project-canvas-inline-text-editor', 'true')
     Object.defineProperty(textarea, 'offsetWidth', {
       configurable: true,
       value: item.width

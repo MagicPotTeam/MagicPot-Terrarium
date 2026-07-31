@@ -248,6 +248,7 @@ function renderVisualOverlays(options?: {
   sessionKey?: string
   isViewportInteracting?: boolean
   forceRenderAllItemsForExport?: boolean
+  dragContextRef?: React.RefObject<{ draggingId: string | null }>
   tool?: 'select' | 'hand' | 'annotate'
   onDragOver?: (event: ReactDragEvent<Element>) => void
   onDrop?: (event: ReactDragEvent<Element>) => void
@@ -282,6 +283,7 @@ function renderVisualOverlays(options?: {
       editingTextItemId={options?.editingTextItemId ?? null}
       activeOcrHover={options?.activeOcrHover ?? null}
       selectedIds={options?.selectedIds ?? new Set()}
+      dragContextRef={options?.dragContextRef}
       tool={options?.tool ?? 'select'}
       stagePos={{ x: 0, y: 0 }}
       stageScale={1}
@@ -979,6 +981,20 @@ describe('ProjectCanvasPageVisualOverlays selection chrome routing', () => {
     expect(textOverlayProps.get(textItem.id)?.isEditing).toBe(true)
   })
 
+  it('keeps the independent text overlay visible while its placeholder drag is active', () => {
+    const textItem = createTextItem('text-dragged-by-placeholder')
+
+    renderVisualOverlays({
+      textItems: [textItem],
+      selectedIds: new Set([textItem.id]),
+      dragContextRef: { current: { draggingId: textItem.id } }
+    })
+
+    expect(textOverlayProps.get(textItem.id)?.isSelected).toBe(true)
+    expect(textOverlayProps.get(textItem.id)?.showSelectionOutline).toBe(false)
+    expect(textOverlayProps.get(textItem.id)?.isEditing).toBe(false)
+  })
+
   it('forwards OCR emphasis and editing state to annotation overlays', () => {
     const annotationItem = createAnnotationItem('annotation-1')
 
@@ -994,5 +1010,22 @@ describe('ProjectCanvasPageVisualOverlays selection chrome routing', () => {
 
     expect(annotationOverlayProps.get(annotationItem.id)?.isEmphasized).toBe(true)
     expect(annotationOverlayProps.get(annotationItem.id)?.isEditing).toBe(true)
+  })
+
+  it('keeps an editing annotation visible while its placeholder drag is active', () => {
+    const annotationItem: CanvasAnnotationItem = {
+      ...createAnnotationItem('annotation-dragged-by-placeholder'),
+      shape: 'text-anno',
+      text: 'Dragged annotation text'
+    }
+
+    renderVisualOverlays({
+      annotationItems: [annotationItem],
+      selectedIds: new Set([annotationItem.id]),
+      editingTextItemId: annotationItem.id,
+      dragContextRef: { current: { draggingId: annotationItem.id } }
+    })
+
+    expect(annotationOverlayProps.get(annotationItem.id)?.isEditing).toBe(false)
   })
 })
