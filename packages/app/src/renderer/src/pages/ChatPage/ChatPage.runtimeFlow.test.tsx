@@ -2715,16 +2715,29 @@ describe('ChatPage runtime workflow integration', () => {
 
   it('does not let an older async draft persistence restore over newer composer input', async () => {
     const user = userEvent.setup()
-    const originalFetch = globalThis.fetch
-    let releaseFetch: (() => void) | null = null
-    const fetchMock = vi.fn(
+    let releaseImport: (() => void) | null = null
+    hoisted.importManagedDataUrlMock.mockImplementationOnce(
       () =>
-        new Promise<Response>((resolve) => {
-          releaseFetch = () =>
-            resolve(new Response(new Blob(['old'], { type: 'model/gltf-binary' })))
+        new Promise((resolve) => {
+          releaseImport = () =>
+            resolve({
+              version: 1,
+              reference: {
+                version: 1,
+                kind: 'managed',
+                relativePath: `originals/${'c'.repeat(64)}.glb`,
+                sha256: 'c'.repeat(64),
+                mimeType: 'model/gltf-binary',
+                sizeBytes: 5,
+                originalFileName: 'stale.glb'
+              },
+              localMediaUrl: 'media://managed/stale.glb',
+              mimeType: 'model/gltf-binary',
+              sizeBytes: 5,
+              sha256: 'c'.repeat(64)
+            })
         })
     )
-    vi.stubGlobal('fetch', fetchMock)
 
     try {
       renderChatPage('runtime-flow-stale-draft')
@@ -2739,30 +2752,26 @@ describe('ChatPage runtime workflow integration', () => {
       )
       await user.click(screen.getByTestId('chat-composer-upload-mock'))
 
-      await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+      await waitFor(() => expect(hoisted.importManagedDataUrlMock).toHaveBeenCalled())
 
       await user.type(screen.getByTestId('chat-composer-input-mock'), ' plus fresh edit')
 
       await act(async () => {
-        releaseFetch?.()
+        releaseImport?.()
         await Promise.resolve()
       })
 
-      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(
-        'stale draft plus fresh edit'
-      )
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(
+          'stale draft plus fresh edit'
+        )
+      })
 
       await act(async () => {
         await new Promise((resolve) => window.setTimeout(resolve, 250))
       })
-      if (fetchMock.mock.calls.length > 1) {
-        await act(async () => {
-          releaseFetch?.()
-          await Promise.resolve()
-        })
-      }
     } finally {
-      vi.stubGlobal('fetch', originalFetch)
+      releaseImport?.()
     }
   })
 
