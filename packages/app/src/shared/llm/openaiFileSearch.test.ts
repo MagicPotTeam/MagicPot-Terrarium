@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ProviderFileIdCache } from '../providerFileIdCache'
 import { createOpenAIFileSearchSession } from './openaiFileSearch'
 
 afterEach(() => {
@@ -49,7 +50,8 @@ describe('createOpenAIFileSearchSession', () => {
           ]
         }
       ],
-      fetchImpl: injectedFetch as typeof fetch
+      fetchImpl: injectedFetch as typeof fetch,
+      fileIdCache: new ProviderFileIdCache()
     })
 
     expect(session?.vectorStoreIds).toEqual(['vs-injected'])
@@ -105,7 +107,8 @@ describe('createOpenAIFileSearchSession', () => {
           ]
         }
       ],
-      signal: controller.signal
+      signal: controller.signal,
+      fileIdCache: new ProviderFileIdCache()
     })
 
     expect(session).not.toBeNull()
@@ -125,5 +128,142 @@ describe('createOpenAIFileSearchSession', () => {
         Authorization: 'Bearer sk-test'
       }
     })
+  })
+
+  it('reuses a cached upload without deleting it as session-owned', async () => {
+    const cache = new ProviderFileIdCache()
+    const messages = [
+      {
+        role: 'user' as const,
+        content: 'Analyze this file.',
+        attachments: [
+          {
+            type: 'file' as const,
+            url: 'data:text/plain;base64,aGVsbG8=',
+            fileName: 'note.txt',
+            mimeType: 'text/plain',
+            metadata: { mediaId: 'managed-media-1' }
+          }
+        ]
+      }
+    ]
+    const firstFetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'file-cached' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'vs-1' }) })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ data: [{ file_id: 'file-cached', status: 'completed' }] })
+      })
+    await createOpenAIFileSearchSession({
+      apiKey: 'sk-secret',
+      baseUrl: 'https://api.openai.com/v1/',
+      accountIdentifier: 'org-stable',
+      messages,
+      fetchImpl: firstFetch as typeof fetch,
+      fileIdCache: cache
+    })
+
+    const secondFetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'vs-2' }) })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ data: [{ file_id: 'file-cached', status: 'completed' }] })
+      })
+      .mockResolvedValueOnce({ ok: true })
+    const session = await createOpenAIFileSearchSession({
+      apiKey: 'sk-different-secret',
+      baseUrl: 'https://api.openai.com/v1',
+      accountIdentifier: 'org-stable',
+      messages,
+      fetchImpl: secondFetch as typeof fetch,
+      fileIdCache: cache
+    })
+    await session?.cleanup()
+
+    expect(secondFetch).toHaveBeenCalledTimes(4)
+    expect(
+      secondFetch.mock.calls.some(
+        ([url, init]) =>
+          String(url).endsWith('/files') && init?.method === 'POST' && init.body instanceof FormData
+      )
+    ).toBe(false)
+    expect(secondFetch.mock.calls.some(([url]) => String(url).includes('/files/file-cached'))).toBe(
+      false
+    )
+  })
+
+  it('invalidates a cached ID when OpenAI reports it missing', async () => {
+    const cache = new ProviderFileIdCache()
+    const messages = [
+      {
+        role: 'user' as const,
+        content: 'Analyze this file.',
+        attachments: [
+          {
+            type: 'file' as const,
+            url: 'data:text/plain;base64,aGVsbG8=',
+            fileName: 'note.txt',
+            mimeType: 'text/plain',
+            metadata: { mediaId: 'missing-media' }
+          }
+        ]
+      }
+    ]
+    const populateFetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'file-missing' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'vs-populate' }) })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ data: [{ file_id: 'file-missing', status: 'completed' }] })
+      })
+    await createOpenAIFileSearchSession({
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.openai.com/v1',
+      messages,
+      fetchImpl: populateFetch as typeof fetch,
+      fileIdCache: cache
+    })
+
+    const missingFetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'vs-missing' }) })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        text: async () => 'file not found'
+      })
+      .mockResolvedValueOnce({ ok: true })
+    await expect(
+      createOpenAIFileSearchSession({
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.openai.com/v1',
+        messages,
+        fetchImpl: missingFetch as typeof fetch,
+        fileIdCache: cache
+      })
+    ).rejects.toThrow('file not found')
+
+    const retryFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      statusText: 'Upload attempted',
+      text: async () => ''
+    })
+    await expect(
+      createOpenAIFileSearchSession({
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.openai.com/v1',
+        messages,
+        fetchImpl: retryFetch as typeof fetch,
+        fileIdCache: cache
+      })
+    ).rejects.toThrow('OpenAI file upload failed')
   })
 })
