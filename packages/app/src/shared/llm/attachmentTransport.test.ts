@@ -59,6 +59,22 @@ describe('provider attachment transport capabilities', () => {
     ).toBe('accessible-url')
   })
 
+  it('does not fall back when an explicitly requested transport is unavailable', () => {
+    const capabilities = resolveChatProfileCapabilities({
+      attachment_transports: ['file-id', 'request-data-url']
+    })
+
+    expect(
+      selectProviderAttachmentTransport(capabilities, {
+        requested: 'file-id',
+        available: {
+          'file-id': false,
+          'request-data-url': true
+        }
+      })
+    ).toBeUndefined()
+  })
+
   it('allows request-scoped Data URLs only when declared, available, and selected', () => {
     const capabilities = resolveChatProfileCapabilities({
       attachment_transports: ['request-data-url']
