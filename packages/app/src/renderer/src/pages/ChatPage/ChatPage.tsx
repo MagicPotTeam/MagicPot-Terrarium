@@ -152,6 +152,7 @@ import {
   parseInternalImageDragPayload
 } from '@renderer/utils/droppedImageUtils'
 import { collectDroppedDirectoryFiles } from '../ProjectCanvasPage/dropDirectory'
+import { importChatAttachment, importChatAttachmentUrl } from './chatManagedMediaAttachments'
 import {
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
   BUILT_IN_PROMPT_TRANSLATION_SKILL_ID,
@@ -194,7 +195,6 @@ import {
 import {
   getChatAttachmentMaxSizeMB,
   getChatAttachmentTypeForFile,
-  getLocalFilePath,
   summarizeChatAttachmentsForLog
 } from '@renderer/features/chat/chatAttachmentUtils'
 import {
@@ -608,15 +608,15 @@ const convertInlineImageToAttachment = async (
 ): Promise<ChatAttachment | null> => {
   const normalizedUrl = imageUrl.trim()
   if (!normalizedUrl) return null
-  if (normalizedUrl.startsWith('blob:')) {
-    return materializeInternalImageDragAttachment({
-      type: 'image',
+  const dimensions = await readImageDimensionsFromUrl(normalizedUrl)
+  if (normalizedUrl.startsWith('data:') || normalizedUrl.startsWith('blob:')) {
+    return importChatAttachmentUrl({
+      service: api().svcManagedMedia,
       url: normalizedUrl,
-      fileName
+      fileName,
+      dimensions
     })
   }
-
-  const dimensions = await readImageDimensionsFromUrl(normalizedUrl)
   return {
     type: 'image',
     url: normalizedUrl,
@@ -631,29 +631,21 @@ const convertInlineImageToAttachment = async (
 
 const buildImageChatAttachmentFromFile = async (
   file: File,
-  preferredUrl?: string,
   options?: {
     relativePath?: string
   }
 ): Promise<ChatAttachment> => {
-  const filePath = getLocalFilePath(file)
   const previewUrl = fileToBlobUrl(file)
   const dimensions = await readImageDimensionsFromUrl(previewUrl)
-  const attachmentUrl = preferredUrl || (filePath ? `file://${filePath}` : previewUrl)
-  if (previewUrl !== attachmentUrl) {
-    revokeBlobUrl(previewUrl)
-  }
-
-  return {
+  revokeBlobUrl(previewUrl)
+  return importChatAttachment({
+    service: api().svcManagedMedia,
+    file,
     type: 'image',
-    url: attachmentUrl,
     mimeType: normalizeFileMimeType(file.name, file.type),
-    fileName: file.name,
     relativePath: options?.relativePath,
-    sizeBytes: file.size,
-    sourceWidth: dimensions.sourceWidth,
-    sourceHeight: dimensions.sourceHeight
-  }
+    dimensions
+  })
 }
 
 const buildChatAttachmentFromDroppedFile = async (
@@ -663,31 +655,18 @@ const buildChatAttachmentFromDroppedFile = async (
   }
 ): Promise<ChatAttachment> => {
   const attachmentType = getChatAttachmentTypeForFile(file)
-  const filePath = getLocalFilePath(file)
 
   if (attachmentType === 'image') {
-    return buildImageChatAttachmentFromFile(file, undefined, options)
+    return buildImageChatAttachmentFromFile(file, options)
   }
 
-  if (filePath) {
-    return {
-      type: attachmentType,
-      url: `file://${filePath}`,
-      mimeType: normalizeFileMimeType(file.name, file.type),
-      fileName: file.name,
-      relativePath: options?.relativePath,
-      sizeBytes: file.size
-    }
-  }
-
-  return {
+  return importChatAttachment({
+    service: api().svcManagedMedia,
+    file,
     type: attachmentType,
-    url: fileToBlobUrl(file),
     mimeType: normalizeFileMimeType(file.name, file.type),
-    fileName: file.name,
-    relativePath: options?.relativePath,
-    sizeBytes: file.size
-  }
+    relativePath: options?.relativePath
+  })
 }
 
 const ChatPage: React.FC<ChatPageProps> = ({
@@ -5923,30 +5902,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
 
-      let url: string
       const attachmentIndex = pendingAttachments.length
-      const localFilePath = getLocalFilePath(file)
-
-      if (isImage) {
-        url = localFilePath ? `file://${localFilePath}` : fileToBlobUrl(file)
-      } else if (localFilePath) {
-        url = `file://${localFilePath}`
-      } else if (isVideo || isModel3d) {
-        url = fileToBlobUrl(file)
-      } else {
-        url = fileToBlobUrl(file)
-      }
 
       setUploadProgress((prev) => ({ ...prev, [attachmentIndex]: 100 }))
       const attachment: ChatAttachment = isImage
-        ? await buildImageChatAttachmentFromFile(file, url)
-        : {
+        ? await buildImageChatAttachmentFromFile(file)
+        : await importChatAttachment({
+            service: api().svcManagedMedia,
+            file,
             type: isVideo ? 'video' : 'model3d',
-            url,
-            mimeType: normalizeFileMimeType(file.name, file.type),
-            fileName: file.name,
-            sizeBytes: file.size
-          }
+            mimeType: normalizeFileMimeType(file.name, file.type)
+          })
       setPendingAttachments((prev) => [...prev, attachment])
       setTimeout(() => {
         setUploadProgress((prev) => {

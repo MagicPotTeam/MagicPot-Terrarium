@@ -99,6 +99,43 @@ describe('Quick App result auto-save claims', () => {
 })
 
 describe('Quick App result blob resources', () => {
+  it('keeps a reused blob URL stable until its final result is removed', () => {
+    const { store, revokeObjectURL, unsubscribe } = createTestStore()
+    cleanups.push(unsubscribe)
+    store.dispatch(
+      appendResults([
+        imageResult('first-reference', 'blob:shared'),
+        imageResult('second-reference', 'blob:shared')
+      ])
+    )
+
+    store.dispatch(deleteResult('first-reference'))
+    expect(revokeObjectURL).not.toHaveBeenCalled()
+
+    store.dispatch(deleteResult('second-reference'))
+    expect(revokeObjectURL).toHaveBeenCalledOnce()
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:shared')
+  })
+
+  it('revokes blob URLs on replacement, clear, and teardown', () => {
+    const revokeObjectURL = vi.fn()
+    const manager = createComfyResultResourceManager(revokeObjectURL)
+    const original = [imageResult('original')]
+    const replacement = [imageResult('replacement')]
+    const teardown = [imageResult('teardown')]
+
+    manager.sync([], original)
+    manager.sync(original, replacement)
+    manager.sync(replacement, [])
+    manager.sync([], teardown)
+    manager.teardown()
+
+    expect(revokeObjectURL.mock.calls).toEqual([
+      ['blob:original'],
+      ['blob:replacement'],
+      ['blob:teardown']
+    ])
+  })
   it('revokes the 21st result evicted by the capacity limit', () => {
     const { store, revokeObjectURL, unsubscribe } = createTestStore()
     cleanups.push(unsubscribe)
@@ -124,7 +161,11 @@ describe('Quick App result blob resources', () => {
     const { store, revokeObjectURL, unsubscribe } = createTestStore()
     cleanups.push(unsubscribe)
     store.dispatch(
-      appendResults([textResult('text'), imageResult('remote', 'https://example.test/a.png')])
+      appendResults([
+        textResult('text'),
+        imageResult('remote', 'https://example.test/a.png'),
+        imageResult('managed', 'local-media:///managed/a.png')
+      ])
     )
     store.dispatch(clearResults())
 
