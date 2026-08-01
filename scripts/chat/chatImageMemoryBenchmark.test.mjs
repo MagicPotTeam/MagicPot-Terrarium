@@ -1,7 +1,23 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import path from 'node:path'
-import { buildFixtureSession, createDeterministicPng } from './chatImageMemoryBenchmark.mjs'
+import { buildFixtureSession, createDeterministicPng, isChatImageMemoryReady } from './chatImageMemoryBenchmark.mjs'
+
+
+test('accepts a virtualized near-viewport image set without requiring all 100 images mounted', () => {
+  assert.equal(
+    isChatImageMemoryReady({ messageCount: 500, expectedMessageCount: 500, mountedImageCount: 12, nearViewportMountedImageCount: 8, expectsImages: true }),
+    true
+  )
+  assert.equal(
+    isChatImageMemoryReady({ messageCount: 500, expectedMessageCount: 500, mountedImageCount: 0, nearViewportMountedImageCount: 0, expectsImages: true }),
+    false
+  )
+  assert.equal(
+    isChatImageMemoryReady({ messageCount: 499, expectedMessageCount: 500, mountedImageCount: 12, nearViewportMountedImageCount: 8, expectsImages: true }),
+    false
+  )
+})
 
 test('creates byte-stable valid PNG attachments', () => {
   const first = createDeterministicPng(7, 32, 24)
@@ -21,7 +37,10 @@ test('builds an evenly distributed image-heavy 500-message session', () => {
   assert.equal(session.messages.length, 500)
   assert.equal(attachments.length, 100)
   assert.equal(new Set(attachments.map((attachment) => attachment.url)).size, 100)
-  assert.equal(session.storageScope, 'chat-image-memory-benchmark.agent-1')
-  assert.equal(session.storageKey, `chat-image-memory-benchmark.agent-1\u0000${session.id}`)
+  assert.equal(session.storageScope, 'tab-project-chat-image-memory-benchmark.agent-1')
+  assert.equal(
+    session.storageKey,
+    `tab-project-chat-image-memory-benchmark.agent-1\u0000${session.id}`
+  )
   assert.ok(session.messages.every((message) => message.content.includes('Deterministic benchmark')))
 })

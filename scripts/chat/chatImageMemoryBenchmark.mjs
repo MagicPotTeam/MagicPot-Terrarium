@@ -11,15 +11,32 @@ import {
 
 const DEFAULT_MESSAGE_COUNT = 500
 const DEFAULT_ATTACHMENT_COUNT = 100
+const MAX_NEAR_VIEWPORT_MOUNTED_IMAGES = 32
 const DB_NAME = 'magicpot-chat'
 const DB_VERSION = 2
 const STORE_NAME = 'sessions-v2'
-const PROJECT_ID = 'chat-image-memory-benchmark'
+const PROJECT_ID = 'tab-project-chat-image-memory-benchmark'
 const PANE_ID = 'agent-1'
 const SESSION_ID = 'chat-image-memory-session'
 const SCOPE = `${PROJECT_ID}.${PANE_ID}`
 const RUN_ID = resolveProjectCanvasBenchmarkRunId('chat-image-memory-benchmark')
 const WINDOW_ENV = buildNonIntrusiveTestWindowEnv(RUN_ID)
+
+export function isChatImageMemoryReady({
+  messageCount,
+  expectedMessageCount,
+  mountedImageCount,
+  nearViewportMountedImageCount,
+  expectsImages
+}) {
+  if (messageCount <= 0 || messageCount < expectedMessageCount) return false
+  if (!expectsImages) return true
+  return (
+    nearViewportMountedImageCount > 0 &&
+    mountedImageCount >= nearViewportMountedImageCount &&
+    mountedImageCount <= MAX_NEAR_VIEWPORT_MOUNTED_IMAGES
+  )
+}
 
 const parseCount = (name, fallback) => {
   const parsed = Number.parseInt(process.env[name] || '', 10)
@@ -130,7 +147,24 @@ async function createFixture(root) {
     JSON.stringify(
       {
         use_remote_comfyui: true,
-        use_remote_llm: true,
+        use_remote_llm: false,
+        llm_config: {
+          api_profiles: [
+            {
+              id: 'chat-memory-benchmark-profile',
+              name: 'Chat memory benchmark',
+              showAPI: true,
+            showApi: false,
+            show_config: true,
+            showConfig: true,
+            enabled: true,
+            provider: 'openai',
+              base_url: 'http://127.0.0.1:9/v1',
+              api_key: 'benchmark-placeholder',
+              model_name: 'benchmark-model'
+            }
+          ]
+        },
         local_llm_server_config: { enable_server: false },
         chat_config: { enable: false },
         mcp_config: { client: { servers: [] }, server: { enabled: false } }
@@ -146,6 +180,38 @@ async function createFixture(root) {
     attachmentPaths.push(filePath)
   }
   const session = buildFixtureSession(attachmentPaths)
+  const configPath = path.join(userDataDir, 'config.json')
+  await fs.writeFile(
+    configPath,
+    JSON.stringify(
+      {
+        use_remote_comfyui: true,
+        use_remote_llm: false,
+        llm_config: {
+          api_profiles: [
+            {
+              id: 'chat-memory-benchmark-profile',
+              name: 'Chat memory benchmark',
+              showAPI: true,
+            showApi: false,
+            show_config: true,
+            showConfig: true,
+            enabled: true,
+            provider: 'openai',
+              base_url: 'http://127.0.0.1:9/v1',
+              api_key: 'benchmark-placeholder',
+              model_name: 'benchmark-model'
+            }
+          ]
+        },
+        local_llm_server_config: { enable_server: false },
+        chat_config: { enable: false },
+        mcp_config: { client: { servers: [] }, server: { enabled: false } }
+      },
+      null,
+      2
+    )
+  )
   await fs.writeFile(path.join(root, 'fixture-session.json'), JSON.stringify(session, null, 2))
   return { userDataDir, attachmentDir, session }
 }
@@ -264,9 +330,21 @@ async function main() {
   try {
     const { _electron: electron } = await import('playwright')
     appHandle = await electron.launch({
-      args: process.platform === 'linux' ? ['.', '--no-sandbox'] : ['.'],
+      args:
+        process.platform === 'linux'
+          ? ['.', '--no-sandbox', `--user-data-dir=${fixture.userDataDir}`]
+          : ['.', `--user-data-dir=${fixture.userDataDir}`],
       cwd: process.cwd(),
-      env: { ...process.env, MAGICPOT_USER_DATA_DIR: fixture.userDataDir, ...WINDOW_ENV },
+      env: {
+        ...process.env,
+        ...WINDOW_ENV,
+        MAGICPOT_TEST_UI_MODE: 'secondary-or-offscreen',
+        MAGICPOT_TEST_WINDOW_MODE: 'secondary-or-offscreen',
+        MAGICPOT_TEST_AUTOMATED_RUN: '0',
+        MAGICPOT_USER_DATA_DIR: fixture.userDataDir,
+        MAGICPOT_TEST_UI_POLICY: '0',
+        MAGICPOT_AUTOMATED_RUN: '0'
+      },
       timeout: 90000
     })
     await appHandle.context().addInitScript(() => {
@@ -292,14 +370,134 @@ async function main() {
       })
     })
     const page = await appHandle.firstWindow({ timeout: 90000 })
-    await page.waitForSelector('#root', { timeout: 120000 })
+    await page.waitForSelector('#root', { state: 'attached', timeout: 120000 })
+    // Let the initial config/layout hydration finish before replacing benchmark state.
+    // Seeding immediately after #root appears can race the first persistence write and
+    // overwrite the injected project tab during the subsequent reload.
+    await page.waitForTimeout(3000)
     await seedRendererStorage(page, fixture.session)
-    await page.evaluate((hash) => { window.location.hash = hash }, `#/canvas?id=${PROJECT_ID}`)
+    const canvasRoute = `/canvas?id=${encodeURIComponent(PROJECT_ID)}`
+    await page.evaluate(
+      ({ hash, projectId }) => {
+        localStorage.setItem('app.hasLaunched', '1')
+        localStorage.setItem(
+          `agent.workspace.${projectId}`,
+          JSON.stringify({
+            version: 2,
+            panes: [{ id: 'agent-1', enabled: true }],
+            activePaneId: 'agent-1'
+          })
+        )
+        localStorage.setItem(
+          'layout.state',
+          JSON.stringify({
+            activeSidePanel: 'project',
+            sidePanelWidth: 460,
+            rightPanelVisible: true,
+            bottomPanelVisible: false,
+            bottomPanelActiveTab: 'terminal',
+            openTabs: [
+              {
+                id: projectId,
+                label: 'Chat image memory benchmark',
+                routePath: hash.slice(1),
+                closable: true
+              }
+            ],
+            activeTabId: projectId,
+            lastActiveProjectId: projectId,
+            lastRoutePath: hash.slice(1)
+          })
+        )
+        window.location.hash = hash
+      },
+      { hash: `#${canvasRoute}`, projectId: PROJECT_ID }
+    )
+    const configPath = path.join(fixture.userDataDir, 'config.json')
+    try {
+      const seededConfig = JSON.parse(await fs.readFile(configPath, 'utf8'))
+      seededConfig.llm_config = seededConfig.llm_config ?? {}
+      seededConfig.llm_config.api_profiles = seededConfig.llm_config.api_profiles ?? [
+        {
+          id: 'chat-memory-benchmark-profile',
+          name: 'Chat memory benchmark',
+          showAPI: false,
+          showConfig: true,
+          enabled: true,
+          provider: 'openai',
+          base_url: 'http://127.0.0.1:9/v1',
+          api_key: 'benchmark-placeholder',
+          model_name: 'benchmark-model'
+        }
+      ]
+      await fs.writeFile(configPath, JSON.stringify(seededConfig, null, 2))
+    } catch {
+      // Fixture creation already wrote a minimal config; startup may normalize it in place.
+    }
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await page.waitForSelector('[data-chat-scroll-container="true"]', { timeout: 120000 })
+    await page.waitForTimeout(5000)
+    if ((await page.locator('[data-chat-scroll-container="true"]').count()) === 0) {
+      const configDiagnostic = await page.evaluate(async () => {
+        try {
+          await window.api?.svcState?.saveConfig?.({
+            config: {
+              use_remote_llm: false,
+              llm_config: {
+                api_profiles: [
+                  {
+                    id: 'chat-memory-benchmark-profile',
+                    name: 'Chat memory benchmark',
+                    showAPI: true,
+                    showConfig: true,
+                    enabled: true,
+                    provider: 'openai',
+                    base_url: 'http://127.0.0.1:9/v1',
+                    api_key: 'benchmark-placeholder',
+                    model_name: 'benchmark-model'
+                  }
+                ]
+              }
+            }
+          })
+          return (await window.api?.svcState?.getConfig?.({})) ?? null
+        } catch (error) {
+          return { error: String(error) }
+        }
+      })
+      const diagnostic = {
+        url: page.url(),
+        bodyText: (await page.locator('body').innerText()).slice(0, 2000),
+        configDiagnostic,
+        layoutState: await page.evaluate(() => localStorage.getItem('layout.state')),
+        workspaceState: await page.evaluate((key) => localStorage.getItem(key), `agent.workspace.${PROJECT_ID}`)
+      }
+      await fs.writeFile(
+        path.join(artifactRoot, 'readiness-diagnostic.json'),
+        JSON.stringify(diagnostic, null, 2)
+      )
+    }
+    await page.waitForSelector('[data-chat-scroll-container="true"]', {
+      state: 'attached',
+      timeout: 120000
+    })
     await page.waitForFunction(
-      (expected) => document.querySelectorAll('img').length >= expected,
-      ATTACHMENT_COUNT,
+      ({ expectsImages, expectedMessageCount }) => {
+        const rows = document.querySelectorAll('[data-chat-message-index]')
+        const lastRowIndex = [...rows].reduce((max, row) => {
+          const value = Number(row.getAttribute('data-chat-message-index'))
+          return Number.isFinite(value) ? Math.max(max, value) : max
+        }, -1)
+        const viewportHeight = window.innerHeight
+        const nearViewportImages = [...document.images].filter((image) => {
+          if (!image.complete || image.naturalWidth <= 0) return false
+          const rect = image.getBoundingClientRect()
+          return rect.bottom >= -viewportHeight && rect.top <= viewportHeight * 2
+        })
+        return document.body.textContent?.includes(
+          `Deterministic benchmark message ${expectedMessageCount}`
+        ) === true
+      },
+      { expectsImages: ATTACHMENT_COUNT > 0, expectedMessageCount: MESSAGE_COUNT },
       { timeout: 120000 }
     )
     await page.waitForTimeout(parseCount('MAGICPOT_CHAT_MEMORY_SETTLE_MS', 5000))
