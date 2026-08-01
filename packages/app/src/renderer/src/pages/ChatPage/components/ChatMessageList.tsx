@@ -1,4 +1,4 @@
-﻿/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-refresh/only-export-components */
 import React from 'react'
 import {
@@ -111,6 +111,10 @@ export type ChatPendingConfirmation = {
 }
 
 const COPIED_FEEDBACK_DURATION_MS = 1800
+const CHAT_VIRTUALIZATION_THRESHOLD = 40
+const CHAT_VIRTUALIZATION_OVERSCAN_PX = 900
+const CHAT_ESTIMATED_MESSAGE_HEIGHT = 112
+const CHAT_STICK_TO_BOTTOM_THRESHOLD_PX = 48
 
 const CHAT_IMAGE_FALLBACK_WIDTH = 320
 const CHAT_IMAGE_FALLBACK_HEIGHT = 240
@@ -290,9 +294,7 @@ const ChatImage: React.FC<{
   const { t } = useTranslation()
   const frameRef = React.useRef<HTMLDivElement | null>(null)
   const generationRef = React.useRef(0)
-  const [displaySrc, setDisplaySrc] = React.useState<string | null>(() =>
-    normalizeMediaReference(media)?.kind === 'managed' ? null : originalSrc
-  )
+  const [displaySrc, setDisplaySrc] = React.useState<string | null>(null)
   const [failed, setFailed] = React.useState(false)
   const [nearViewport, setNearViewport] = React.useState(false)
   const [maxEdge, setMaxEdge] = React.useState<ManagedMediaDerivativeMaxEdge | null>(null)
@@ -320,7 +322,7 @@ const ChatImage: React.FC<{
 
   React.useEffect(() => {
     generationRef.current += 1
-    setDisplaySrc(managedMedia ? null : originalSrc)
+    setDisplaySrc(null)
     setFailed(false)
     setNearViewport(false)
     setMaxEdge(null)
@@ -328,9 +330,13 @@ const ChatImage: React.FC<{
   }, [managedMedia, originalSrc, mediaKey])
 
   React.useEffect(() => {
-    if (!managedMedia) return
     const frame = frameRef.current
-    if (!frame || typeof IntersectionObserver === 'undefined') return
+    if (!frame) return
+    if (typeof IntersectionObserver === 'undefined') {
+      // Preserve legacy image behavior in runtimes that cannot report visibility.
+      if (!managedMedia) setNearViewport(true)
+      return
+    }
     const root = frame.closest('[data-chat-scroll-root]')
     const observer = new IntersectionObserver(
       (entries) => {
@@ -565,6 +571,44 @@ const CopiableIconButton: React.FC<{
   )
 }
 
+const MeasuredChatRow: React.FC<{
+  identity: string
+  index: number
+  enabled: boolean
+  bottomSpacing: number
+  onHeight: (identity: string, index: number, height: number) => void
+  children: React.ReactNode
+}> = ({ identity, index, enabled, bottomSpacing, onHeight, children }) => {
+  const rowRef = React.useRef<HTMLDivElement | null>(null)
+
+  React.useLayoutEffect(() => {
+    if (!enabled || !rowRef.current) return
+
+    const row = rowRef.current
+    const initialHeight = row.getBoundingClientRect().height
+    if (initialHeight > 0) onHeight(identity, index, initialHeight)
+    if (typeof ResizeObserver === 'undefined') return
+
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return
+      onHeight(identity, index, entry.contentRect.height + bottomSpacing)
+    })
+    observer.observe(row)
+    return () => observer.disconnect()
+  }, [bottomSpacing, enabled, identity, index, onHeight])
+
+  return (
+    <div
+      ref={rowRef}
+      data-chat-message-index={index}
+      data-chat-message-identity={identity}
+      style={{ width: '100%', boxSizing: 'border-box', paddingBottom: bottomSpacing }}
+    >
+      {children}
+    </div>
+  )
+}
+
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
   active = true,
   currentSession,
@@ -602,6 +646,154 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     bottomOffset: number
     scrollLeft: number
   } | null>(null)
+
+  const messageIdentityMap = React.useRef(new WeakMap<object, string>())
+  const nextMessageIdentityRef = React.useRef(0)
+  const messageIdentities = React.useMemo(() => {
+    const seen = new Map<string, number>()
+    return messages.map((message) => {
+      const candidate = message as ChatMessage & { id?: string; messageId?: string }
+      const suppliedId = candidate.id || candidate.messageId
+      let base: string
+      if (suppliedId) {
+        base = `message-id:${suppliedId}`
+      } else {
+        const messageObject = message as object
+        base =
+          messageIdentityMap.current.get(messageObject) ??
+          `message-object:${nextMessageIdentityRef.current++}`
+        messageIdentityMap.current.set(messageObject, base)
+      }
+      const occurrence = seen.get(base) ?? 0
+      seen.set(base, occurrence + 1)
+      return `${base}:${occurrence}`
+    })
+  }, [messages])
+  const measuredHeights = React.useRef(new Map<string, number>())
+  const [scroll, setScroll] = React.useState({ top: 0, viewport: 0 })
+  const [heightRevision, setHeightRevision] = React.useState(0)
+  const visibleStartRef = React.useRef(0)
+  const pendingScrollAdjustmentRef = React.useRef(0)
+  const pendingStickToBottomRef = React.useRef(false)
+  const measuredSessionIdRef = React.useRef(currentSession?.id)
+  if (measuredSessionIdRef.current !== currentSession?.id) {
+    measuredSessionIdRef.current = currentSession?.id
+    measuredHeights.current.clear()
+  }
+  React.useEffect(() => {
+    const valid = new Set(messageIdentities)
+    for (const identity of measuredHeights.current.keys()) {
+      if (!valid.has(identity)) measuredHeights.current.delete(identity)
+    }
+  }, [messageIdentities])
+  const virtualized = messages.length > CHAT_VIRTUALIZATION_THRESHOLD
+  const itemHeight = React.useCallback(
+    (index: number) =>
+      measuredHeights.current.get(messageIdentities[index] ?? '') ?? CHAT_ESTIMATED_MESSAGE_HEIGHT,
+    [messageIdentities]
+  )
+  const measureRow = React.useCallback(
+    (identity: string, index: number, height: number) => {
+      if (height <= 0) return
+      const previousHeight = measuredHeights.current.get(identity) ?? CHAT_ESTIMATED_MESSAGE_HEIGHT
+      if (previousHeight === height) return
+
+      const container = chatContainerRef.current
+      if (container) {
+        // Capture this before the resize changes scrollHeight.
+        const wasNearBottom =
+          container.scrollHeight - container.clientHeight - container.scrollTop <=
+          CHAT_STICK_TO_BOTTOM_THRESHOLD_PX
+        pendingStickToBottomRef.current = pendingStickToBottomRef.current || wasNearBottom
+        if (!wasNearBottom && index < visibleStartRef.current) {
+          pendingScrollAdjustmentRef.current += height - previousHeight
+        }
+      }
+      measuredHeights.current.set(identity, height)
+      setHeightRevision((revision) => revision + 1)
+    },
+    [chatContainerRef]
+  )
+  React.useEffect(() => {
+    const container = chatContainerRef.current
+    if (!container) return
+    const update = () => setScroll({ top: container.scrollTop, viewport: container.clientHeight })
+    update()
+    container.addEventListener('scroll', update, { passive: true })
+    window.addEventListener('resize', update)
+    return () => {
+      container.removeEventListener('scroll', update)
+      window.removeEventListener('resize', update)
+    }
+  }, [chatContainerRef, messages.length])
+  const loadingIndex = isLoading && messages.length > 0 ? messages.length - 1 : null
+  const virtualWindow = React.useMemo(() => {
+    void heightRevision
+    if (!virtualized) {
+      return {
+        start: 0,
+        end: messages.length,
+        top: 0,
+        bottom: 0,
+        loadingGap: 0,
+        forcedLoadingIndex: null,
+        anchorStart: 0
+      }
+    }
+    const from = Math.max(0, scroll.top - CHAT_VIRTUALIZATION_OVERSCAN_PX)
+    const to = scroll.top + (scroll.viewport || 800) + CHAT_VIRTUALIZATION_OVERSCAN_PX
+    const offsets = [0]
+    for (let i = 0; i < messages.length; i += 1) {
+      offsets.push(offsets[i] + itemHeight(i))
+    }
+    let start = 0
+    while (start < messages.length - 1 && offsets[start + 1] < from) start += 1
+    let anchorStart = 0
+    while (anchorStart < messages.length - 1 && offsets[anchorStart + 1] < scroll.top) {
+      anchorStart += 1
+    }
+    let end = start
+    while (end < messages.length && offsets[end] < to) end += 1
+    end = Math.max(start + 1, end)
+    const forcedLoadingIndex =
+      loadingIndex !== null && (loadingIndex < start || loadingIndex >= end) ? loadingIndex : null
+    return {
+      start,
+      end,
+      top: offsets[start],
+      bottom:
+        forcedLoadingIndex === null
+          ? offsets[messages.length] - offsets[end]
+          : offsets[messages.length] - offsets[forcedLoadingIndex + 1],
+      loadingGap:
+        forcedLoadingIndex === null ? 0 : Math.max(0, offsets[forcedLoadingIndex] - offsets[end]),
+      forcedLoadingIndex,
+      anchorStart
+    }
+  }, [
+    heightRevision,
+    itemHeight,
+    loadingIndex,
+    messages.length,
+    messageIdentities,
+    scroll,
+    virtualized
+  ])
+  visibleStartRef.current = virtualWindow.anchorStart
+
+  React.useLayoutEffect(() => {
+    const container = chatContainerRef.current
+    if (!container) return
+
+    if (pendingStickToBottomRef.current) {
+      container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
+    } else if (pendingScrollAdjustmentRef.current) {
+      container.scrollTop += pendingScrollAdjustmentRef.current
+    }
+    pendingStickToBottomRef.current = false
+    pendingScrollAdjustmentRef.current = 0
+    setScroll({ top: container.scrollTop, viewport: container.clientHeight })
+  }, [chatContainerRef, heightRevision])
 
   const handleStartEditing = React.useCallback(
     (index: number, content: string) => {
@@ -677,86 +869,119 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           <Typography variant="h6">{t('chat.welcome_message')}</Typography>
         </Box>
       )}
-      {messages.map((message, index) => (
-        <Box
-          key={index}
-          sx={{
-            width: '100%',
-            display: 'flex',
-            flexDirection: 'column',
-            mb: message.role === 'user' ? 0 : 2
-          }}
-        >
-          {message.role === 'user' ? (
-            editingMessageIndex === index ? (
-              <UserMessageEditForm
-                key={index}
-                message={message}
-                index={index}
-                editingContent={editingContent}
-                onSetEditingContent={onSetEditingContent}
-                onCancel={() => {
-                  onSetEditingIndex(null)
-                  onSetEditingContent('')
-                }}
-                onSubmit={(content, attachments) => {
-                  const truncatedMessages = currentSession?.messages.slice(0, index) || []
-                  onSetEditingIndex(null)
-                  onSetEditingContent('')
-                  onSendEditedMessage(
-                    content,
-                    attachments,
-                    message.hiddenContext,
-                    truncatedMessages
-                  )
-                }}
-                savedChatScrollPositionRef={editScrollPositionRef}
-                isLight={isLight}
+      {virtualized && virtualWindow.top > 0 ? (
+        <div
+          data-testid="chat-virtual-top-spacer"
+          style={{ height: virtualWindow.top, flexShrink: 0 }}
+        />
+      ) : null}
+      {[
+        ...Array.from(
+          { length: virtualWindow.end - virtualWindow.start },
+          (_, offsetIndex) => offsetIndex + virtualWindow.start
+        ),
+        ...(virtualWindow.forcedLoadingIndex === null ? [] : [virtualWindow.forcedLoadingIndex])
+      ].map((index) => {
+        const message = messages[index]
+        return (
+          <React.Fragment key={messageIdentities[index]}>
+            {index === virtualWindow.forcedLoadingIndex && virtualWindow.loadingGap > 0 ? (
+              <div
+                data-testid="chat-virtual-loading-gap"
+                style={{ height: virtualWindow.loadingGap, flexShrink: 0 }}
               />
-            ) : (
-              <UserMessageBubble
-                message={message}
-                index={index}
-                isLight={isLight}
-                onEdit={() => {
-                  handleStartEditing(index, message.content || '')
-                }}
-                onPreviewImage={onPreviewImage}
-                onImageContextMenu={onImageContextMenu}
-                onDownloadAttachment={onDownloadAttachment}
-                onSendModelToDcc={onSendModelToDcc}
-                notifySuccess={notifySuccess}
-                t={t}
-                theme={theme}
-              />
-            )
-          ) : (
-            <AssistantMessageBubble
-              message={message}
-              replyDownloadBaseName={buildAssistantReplyDownloadBaseName(messages, index)}
-              replyDownloadMode={resolveAssistantReplyDownloadMode(
-                messages,
-                index,
-                currentSession?.skillId
+            ) : null}
+            <MeasuredChatRow
+              key={messageIdentities[index]}
+              identity={messageIdentities[index]}
+              index={index}
+              enabled={virtualized}
+              bottomSpacing={message.role === 'user' ? 0 : 16}
+              onHeight={measureRow}
+            >
+              {message.role === 'user' ? (
+                editingMessageIndex === index ? (
+                  <UserMessageEditForm
+                    key={messageIdentities[index]}
+                    message={message}
+                    index={index}
+                    editingContent={editingContent}
+                    onSetEditingContent={onSetEditingContent}
+                    onCancel={() => {
+                      onSetEditingIndex(null)
+                      onSetEditingContent('')
+                    }}
+                    onSubmit={(content, attachments) => {
+                      const truncatedMessages = currentSession?.messages.slice(0, index) || []
+                      onSetEditingIndex(null)
+                      onSetEditingContent('')
+                      onSendEditedMessage(
+                        content,
+                        attachments,
+                        message.hiddenContext,
+                        truncatedMessages
+                      )
+                    }}
+                    savedChatScrollPositionRef={editScrollPositionRef}
+                    isLight={isLight}
+                  />
+                ) : (
+                  <UserMessageBubble
+                    message={message}
+                    index={index}
+                    isLight={isLight}
+                    onEdit={() => {
+                      handleStartEditing(index, message.content || '')
+                    }}
+                    onPreviewImage={onPreviewImage}
+                    onImageContextMenu={onImageContextMenu}
+                    onDownloadAttachment={onDownloadAttachment}
+                    onSendModelToDcc={onSendModelToDcc}
+                    notifySuccess={notifySuccess}
+                    t={t}
+                    theme={theme}
+                  />
+                )
+              ) : (
+                <AssistantMessageBubble
+                  message={message}
+                  replyDownloadBaseName={buildAssistantReplyDownloadBaseName(messages, index)}
+                  replyDownloadMode={resolveAssistantReplyDownloadMode(
+                    messages,
+                    index,
+                    currentSession?.skillId
+                  )}
+                  batchSidecarExportEntries={
+                    batchSidecarExportAnchorIndex === index ? sidecarExportEntries : undefined
+                  }
+                  active={active}
+                  isLight={isLight}
+                  isLoading={isLoading && index === messages.length - 1}
+                  loadingStatus={
+                    isLoading && index === messages.length - 1 ? loadingStatus : undefined
+                  }
+                  onPreviewImage={onPreviewImage}
+                  onImageContextMenu={onImageContextMenu}
+                  onDownloadAttachment={onDownloadAttachment}
+                  onSendModelToDcc={onSendModelToDcc}
+                  notifySuccess={notifySuccess}
+                  t={t}
+                  theme={theme}
+                />
               )}
-              batchSidecarExportEntries={
-                batchSidecarExportAnchorIndex === index ? sidecarExportEntries : undefined
-              }
-              active={active}
-              isLight={isLight}
-              isLoading={isLoading && index === messages.length - 1}
-              loadingStatus={isLoading && index === messages.length - 1 ? loadingStatus : undefined}
-              onPreviewImage={onPreviewImage}
-              onImageContextMenu={onImageContextMenu}
-              onDownloadAttachment={onDownloadAttachment}
-              onSendModelToDcc={onSendModelToDcc}
-              notifySuccess={notifySuccess}
-              t={t}
-              theme={theme}
-            />
-          )}
-        </Box>
-      ))}
+            </MeasuredChatRow>
+          </React.Fragment>
+        )
+      })}
+      {virtualized && virtualWindow.bottom > 0 ? (
+        <div
+          data-testid="chat-virtual-bottom-spacer"
+          style={{
+            height: virtualWindow.bottom,
+            flexShrink: 0
+          }}
+        />
+      ) : null}
       {pendingConfirmation ? (
         <PendingConfirmationPanel
           confirmation={pendingConfirmation}

@@ -1062,7 +1062,7 @@ describe('ChatMessageList managed image derivatives', () => {
   }
   let intersectionCallbacks: IntersectionObserverCallback[]
   let intersectionOptions: IntersectionObserverInit[]
-  let resizeCallback: ResizeObserverCallback
+  let resizeCallback: ResizeObserverCallback | null = null
   const ensureDerivative = vi.fn()
 
   beforeEach(() => {
@@ -1160,25 +1160,44 @@ describe('ChatMessageList managed image derivatives', () => {
     expect(getChatImageDerivativeMaxEdge(400, 3)).toBe(2048)
   })
 
-  it('renders an unmanaged legacy image with its normalized original source on first commit', () => {
-    renderChatMessageList(
-      session([
-        {
-          type: 'image',
-          url: 'C:/demo/legacy.png',
-          sourceWidth: 400,
-          sourceHeight: 200
-        }
-      ])
-    )
+  it.each([
+    ['legacy path', 'C:/demo/legacy.png', 'local-media:///C:/demo/legacy.png'],
+    ['data URL', 'data:image/png;base64,AAAA', 'data:image/png;base64,AAAA'],
+    ['blob URL', 'blob:https://example.com/image-id', 'blob:https://example.com/image-id'],
+    ['file URL', 'file:///C:/demo/file.png', 'local-media:///C:/demo/file.png'],
+    ['remote URL', 'https://example.com/remote.png', 'https://example.com/remote.png']
+  ])(
+    'releases and restores an unmanaged %s image around the viewport',
+    (_label, url, expectedSrc) => {
+      renderChatMessageList(
+        session([
+          {
+            type: 'image',
+            url,
+            sourceWidth: 400,
+            sourceHeight: 200
+          }
+        ])
+      )
 
-    expect(screen.getByRole('img', { name: 'Attachment image 1' })).toHaveAttribute(
-      'src',
-      'local-media:///C:/demo/legacy.png'
-    )
-    expect(intersectionCallbacks).toHaveLength(0)
-    expect(ensureDerivative).not.toHaveBeenCalled()
-  })
+      expect(screen.queryByRole('img', { name: 'Attachment image 1' })).not.toBeInTheDocument()
+      expect(intersectionCallbacks).toHaveLength(1)
+
+      act(() => markNear())
+      const image = screen.getByRole('img', { name: 'Attachment image 1' })
+      expect(image).toHaveAttribute('src', expectedSrc)
+
+      act(() => markIntersection(false))
+      expect(screen.queryByRole('img', { name: 'Attachment image 1' })).not.toBeInTheDocument()
+
+      act(() => markNear())
+      expect(screen.getByRole('img', { name: 'Attachment image 1' })).toHaveAttribute(
+        'src',
+        expectedSrc
+      )
+      expect(ensureDerivative).not.toHaveBeenCalled()
+    }
+  )
 
   it('keeps a stable placeholder and performs no image IO without IntersectionObserver', () => {
     vi.stubGlobal('IntersectionObserver', undefined)
@@ -1451,7 +1470,7 @@ describe('ChatMessageList managed image derivatives', () => {
       .mockReturnValue({ width: 600, height: 300 } as DOMRect)
     markNear()
     await waitFor(() => expect(ensureDerivative).toHaveBeenCalledWith({ reference, maxEdge: 512 }))
-    resizeCallback([], {} as never)
+    resizeCallback?.([], {} as never)
     await waitFor(() => expect(ensureDerivative).toHaveBeenCalledWith({ reference, maxEdge: 512 }))
     rendered.unmount()
     resolveFirst({
@@ -1489,7 +1508,7 @@ describe('ChatMessageList managed image derivatives', () => {
     await waitFor(() => expect(ensureDerivative).toHaveBeenCalledWith({ reference, maxEdge: 512 }))
 
     frameWidth = 500
-    act(() => resizeCallback([], {} as never))
+    act(() => resizeCallback?.([], {} as never))
     await waitFor(() => expect(ensureDerivative).toHaveBeenCalledWith({ reference, maxEdge: 1024 }))
 
     await act(async () => {
@@ -1508,6 +1527,218 @@ describe('ChatMessageList managed image derivatives', () => {
       })
     })
     expect(image).toHaveAttribute('src', 'local-media:///derivatives/1024.webp')
+  })
+})
+
+describe('ChatMessageList dynamic-height virtualization', () => {
+  let resizeObservers: Array<{
+    callback: ResizeObserverCallback
+    target?: Element
+  }>
+
+  beforeEach(() => {
+    resizeObservers = []
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        readonly record: { callback: ResizeObserverCallback; target?: Element }
+        constructor(callback: ResizeObserverCallback) {
+          this.record = { callback }
+          resizeObservers.push(this.record)
+        }
+        observe(target: Element) {
+          this.record.target = target
+        }
+        disconnect() {
+          this.record.target = undefined
+        }
+        unobserve(target: Element) {
+          if (this.record.target === target) this.record.target = undefined
+        }
+      }
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const virtualSession: ChatSession = {
+    id: 'virtualized-session',
+    title: 'Virtualized session',
+    messages: Array.from({ length: 100 }, (_, index) => ({
+      role: 'assistant' as const,
+      content: `Virtual message ${index}`
+    }))
+  }
+
+  it('unmounts rows outside the viewport plus overscan', () => {
+    const chatContainerRef = React.createRef<HTMLDivElement>()
+    renderChatMessageList(virtualSession, { chatContainerRef })
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+
+    act(() => {
+      scroller.dispatchEvent(new Event('scroll'))
+    })
+
+    expect(screen.getByText('Virtual message 0')).toBeInTheDocument()
+    expect(screen.queryByText('Virtual message 99')).toBeNull()
+    expect(scroller.querySelectorAll('[data-chat-message-index]').length).toBeLessThan(100)
+
+    act(() => {
+      scroller.scrollTop = 10_800
+      scroller.dispatchEvent(new Event('scroll'))
+    })
+
+    expect(screen.queryByText('Virtual message 0')).toBeNull()
+    expect(screen.getByText('Virtual message 99')).toBeInTheDocument()
+  })
+
+  it('updates spacer height after a non-bottom row changes height', () => {
+    const chatContainerRef = React.createRef<HTMLDivElement>()
+    renderChatMessageList(virtualSession, { chatContainerRef })
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+
+    act(() => {
+      scroller.dispatchEvent(new Event('scroll'))
+    })
+    const bottomSpacer = screen.getByTestId('chat-virtual-bottom-spacer')
+    const initialHeight = Number.parseFloat(bottomSpacer.style.height)
+    const firstObserver = resizeObservers.find(
+      ({ target }) => target?.getAttribute('data-chat-message-index') === '0'
+    )
+    expect(firstObserver?.target).toBeTruthy()
+
+    act(() => {
+      firstObserver?.callback(
+        [
+          {
+            target: firstObserver.target,
+            contentRect: { height: 300 }
+          } as unknown as ResizeObserverEntry
+        ],
+        {} as ResizeObserver
+      )
+    })
+
+    const resizedBottomSpacer = screen.getByTestId('chat-virtual-bottom-spacer')
+    expect(Number.parseFloat(resizedBottomSpacer.style.height)).toBeGreaterThan(initialHeight)
+  })
+
+  it('updates the bottom spacer when a below-viewport overscan row changes height', () => {
+    const chatContainerRef = React.createRef<HTMLDivElement>()
+    renderChatMessageList(virtualSession, { chatContainerRef })
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+
+    act(() => {
+      scroller.dispatchEvent(new Event('scroll'))
+    })
+
+    const bottomSpacer = screen.getByTestId('chat-virtual-bottom-spacer')
+    const initialHeight = Number.parseFloat(bottomSpacer.style.height)
+    const belowViewportObserver = resizeObservers.find(
+      ({ target }) => target?.getAttribute('data-chat-message-index') === '10'
+    )
+    expect(belowViewportObserver?.target).toBeTruthy()
+    expect(screen.queryByText('Virtual message 10')).toBeInTheDocument()
+
+    act(() => {
+      belowViewportObserver?.callback(
+        [
+          {
+            target: belowViewportObserver.target,
+            contentRect: { height: 500 }
+          } as unknown as ResizeObserverEntry
+        ],
+        {} as ResizeObserver
+      )
+    })
+
+    expect(
+      Number.parseFloat(screen.getByTestId('chat-virtual-bottom-spacer').style.height)
+    ).toBeGreaterThan(initialHeight)
+  })
+
+  it('preserves no-id row identity when messages are prepended', () => {
+    const chatContainerRef = React.createRef<HTMLDivElement>()
+    const originalMessages = virtualSession.messages
+    const rendered = renderChatMessageList(virtualSession, { chatContainerRef })
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+
+    act(() => fireEvent.scroll(scroller))
+    const originalIdentity = screen
+      .getByText('Virtual message 0')
+      .closest('[data-chat-message-identity]')
+      ?.getAttribute('data-chat-message-identity')
+
+    rendered.rerender(
+      buildChatMessageList(
+        {
+          ...virtualSession,
+          messages: [{ role: 'assistant', content: 'Prepended message' }, ...originalMessages]
+        },
+        { chatContainerRef }
+      )
+    )
+
+    expect(
+      screen
+        .getByText('Virtual message 0')
+        .closest('[data-chat-message-identity]')
+        ?.getAttribute('data-chat-message-identity')
+    ).toBe(originalIdentity)
+  })
+
+  it('keeps virtualization active when context compression is present', () => {
+    const chatContainerRef = React.createRef<HTMLDivElement>()
+    renderChatMessageList(
+      {
+        ...virtualSession,
+        contextCompression: {
+          summary: 'Compressed history',
+          coveredMessageCount: 20,
+          sourceHash: 'virtual-source',
+          estimatedSourceTokens: 2_000,
+          estimatedSummaryTokens: 50,
+          updatedAt: 1_700_000,
+          manual: false
+        }
+      },
+      { chatContainerRef }
+    )
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+
+    act(() => {
+      scroller.scrollTop = 3_000
+      fireEvent.scroll(scroller)
+    })
+
+    expect(screen.getByTestId('chat-context-summary-card')).toBeInTheDocument()
+    expect(screen.getByTestId('chat-virtual-top-spacer')).toBeInTheDocument()
+    expect(scroller.querySelectorAll('[data-chat-message-index]').length).toBeLessThan(100)
+  })
+
+  it('keeps virtualization active while loading so the streaming bottom row stays mounted', () => {
+    const chatContainerRef = React.createRef<HTMLDivElement>()
+    renderChatMessageList(virtualSession, { isLoading: true, chatContainerRef })
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+
+    act(() => {
+      scroller.scrollTop = 3_000
+      fireEvent.scroll(scroller)
+    })
+
+    expect(screen.getByTestId('chat-virtual-top-spacer')).toBeInTheDocument()
+    expect(screen.getByTestId('chat-virtual-loading-gap')).toBeInTheDocument()
+    expect(screen.queryByTestId('chat-virtual-bottom-spacer')).toBeNull()
+    expect(scroller.querySelectorAll('[data-chat-message-index]').length).toBeLessThan(100)
+    expect(screen.getByText('Virtual message 99')).toBeInTheDocument()
   })
 })
 
