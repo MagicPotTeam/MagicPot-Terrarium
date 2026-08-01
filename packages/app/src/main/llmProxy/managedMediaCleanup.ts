@@ -12,12 +12,18 @@ const METADATA_SCHEMA = 'magicpot.managed-media/v1'
 type Manifest = Record<string, unknown>
 type Skipped = { relativePath: string; reason: string }
 
-export type ManagedMediaCleanupAction = {
-  /** Planner action for one validated derivative image file. */
-  kind: 'derivative-file'
-  mediaId: string
-  relativePath: string
-}
+export type ManagedMediaCleanupAction =
+  | {
+      /** Planner action for one validated derivative image file. */
+      kind: 'derivative-file'
+      mediaId: string
+      relativePath: string
+    }
+  | {
+      /** Planner action for one regular orphan staging file. */
+      kind: 'temp-file'
+      relativePath: string
+    }
 export type ManagedMediaCleanupPlan = {
   root: string
   referencedMediaIds: ReadonlySet<string>
@@ -187,6 +193,71 @@ async function planDerivatives(
   return actions
 }
 
+async function planTemporaryFiles(
+  root: string,
+  skipped: Skipped[]
+): Promise<ManagedMediaCleanupAction[]> {
+  const relativeRoot = '.staging'
+  const stagingRoot = absoluteFromRelative(root, relativeRoot)
+  if (!(await safeDirectory(root, stagingRoot))) return []
+  const actions: ManagedMediaCleanupAction[] = []
+  for (const entry of await entries(stagingRoot)) {
+    const relativePath = `${relativeRoot}/${entry.name}`
+    if (!entry.name.endsWith('.tmp') || entry.isSymbolicLink() || !entry.isFile()) {
+      skipped.push({ relativePath, reason: 'unrecognized staging entry' })
+      continue
+    }
+    try {
+      const target = absoluteFromRelative(root, relativePath)
+      if (!(await safeFile(root, target))) throw new Error('unsafe staging file')
+      actions.push({ kind: 'temp-file', relativePath })
+    } catch (error) {
+      skipped.push({ relativePath, reason: (error as Error).message })
+    }
+  }
+  return actions
+}
+
+export type ExecuteManagedMediaCleanupOptions = { dryRun?: boolean }
+export type ManagedMediaCleanupResult = { dryRun: boolean; deleted: string[]; skipped: Skipped[] }
+
+/** Execute only planner-confirmed files; dry-run is the safe default. */
+export async function executeManagedMediaCleanup(
+  plan: ManagedMediaCleanupPlan,
+  options: ExecuteManagedMediaCleanupOptions = {}
+): Promise<ManagedMediaCleanupResult> {
+  const dryRun = options.dryRun !== false
+  const deleted: string[] = []
+  const skipped: Skipped[] = []
+  for (const action of plan.actions) {
+    if (action.kind === 'derivative-file' && plan.referencedMediaIds.has(action.mediaId)) {
+      skipped.push({
+        relativePath: action.relativePath,
+        reason: 'referenced media is never deleted'
+      })
+      continue
+    }
+    let target: string
+    try {
+      target = absoluteFromRelative(plan.root, action.relativePath)
+      if (
+        action.kind === 'derivative-file'
+          ? !action.relativePath.startsWith(
+              `derivatives/${action.mediaId.slice(0, 2)}/${action.mediaId}/`
+            )
+          : !action.relativePath.startsWith('.staging/')
+      )
+        throw new Error('cleanup action is outside its allowed area')
+      if (!(await safeFile(plan.root, target))) throw new Error('cleanup target is no longer safe')
+      if (!dryRun) await fs.unlink(target)
+      deleted.push(action.relativePath)
+    } catch (error) {
+      skipped.push({ relativePath: action.relativePath, reason: (error as Error).message })
+    }
+  }
+  return { dryRun, deleted, skipped }
+}
+
 export async function planManagedMediaCleanup(
   input: PlanManagedMediaCleanupInput
 ): Promise<ManagedMediaCleanupPlan> {
@@ -195,7 +266,7 @@ export async function planManagedMediaCleanup(
     throw new Error('Managed media cleanup root must be an existing canonical directory')
   const referencedMediaIds = normalizeReferences(input.referencedMediaIds)
   const skipped: Skipped[] = []
-  const actions: ManagedMediaCleanupAction[] = []
+  const actions: ManagedMediaCleanupAction[] = await planTemporaryFiles(root, skipped)
   const metadataRoot = path.join(root, 'metadata')
   if (!(await safeDirectory(root, metadataRoot)))
     return { root, referencedMediaIds, actions, skipped }

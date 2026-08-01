@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
-import { planManagedMediaCleanup } from './managedMediaCleanup'
+import { executeManagedMediaCleanup, planManagedMediaCleanup } from './managedMediaCleanup'
 
 const referenced = '1'.repeat(64)
 const orphan = '2'.repeat(64)
@@ -66,7 +66,9 @@ describe('managedMediaCleanup safe planner', () => {
       chatMediaRoot: root,
       referencedMediaIds: [referenced]
     })
-    expect(plan.actions.some((x) => x.mediaId === referenced)).toBe(false)
+    expect(plan.actions.some((x) => x.kind === 'derivative-file' && x.mediaId === referenced)).toBe(
+      false
+    )
     expect(plan.skipped.some((x) => x.relativePath.includes(referenced))).toBe(false)
   })
   it('skips malformed metadata, derivative, and nonregular image entries', async () => {
@@ -103,5 +105,32 @@ describe('managedMediaCleanup safe planner', () => {
     })
     expect(plan.actions).toEqual([])
     expect(plan.skipped.some((x) => /original path|traversal/i.test(x.reason))).toBe(true)
+  })
+
+  it('dry-runs and executes only planned orphan derivatives and temp files', async () => {
+    const root = await fixture()
+    const temporary = path.join(root, '.staging', 'orphan.tmp')
+    await fs.mkdir(path.dirname(temporary), { recursive: true })
+    await fs.writeFile(temporary, 'temporary')
+    const plan = await planManagedMediaCleanup({
+      chatMediaRoot: root,
+      referencedMediaIds: [referenced]
+    })
+    expect(plan.actions).toEqual(
+      expect.arrayContaining([
+        { kind: 'derivative-file', mediaId: orphan, relativePath: expect.stringContaining(orphan) },
+        { kind: 'temp-file', relativePath: '.staging/orphan.tmp' }
+      ])
+    )
+    const dryRun = await executeManagedMediaCleanup(plan)
+    expect(dryRun.dryRun).toBe(true)
+    expect(await fs.stat(temporary)).toBeTruthy()
+    expect(await fs.stat(path.join(root, 'originals', '11', `${referenced}.png`))).toBeTruthy()
+    await executeManagedMediaCleanup(plan, { dryRun: false })
+    await expect(fs.stat(temporary)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(
+      fs.stat(path.join(root, 'derivatives', '22', orphan, identity, 'committed', 'image.webp'))
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.stat(path.join(root, 'originals', '11', `${referenced}.png`))).toBeTruthy()
   })
 })
