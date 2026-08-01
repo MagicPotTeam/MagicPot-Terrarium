@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+const managedMediaApiMock = vi.hoisted(() => ({
+  migrateLegacyDataUrl: vi.fn(),
+  reclaimLegacyMigration: vi.fn()
+}))
+
+vi.mock('../../utils/windowUtils', () => ({
+  api: () => ({ svcManagedMedia: managedMediaApiMock })
+}))
+
 type StoreMap = Map<string, Map<string, unknown>>
 
 function cloneValue<T>(value: T): T {
@@ -229,6 +238,8 @@ describe('chatStorage', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.unstubAllGlobals()
+    managedMediaApiMock.migrateLegacyDataUrl.mockReset()
+    managedMediaApiMock.reclaimLegacyMigration.mockReset()
     localStorage.clear()
   })
 
@@ -428,6 +439,62 @@ describe('chatStorage', () => {
       title: 'current'
     })
     expect(fakeIndexedDb.state.putCount).toBe(1)
+  })
+
+  it('single-flights concurrent legacy media migration reads', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const legacyDataUrl = 'data:image/png;base64,AAAA'
+    const reference = {
+      version: 1 as const,
+      kind: 'managed' as const,
+      id: 'a'.repeat(64),
+      relativePath: `originals/${'a'.repeat(64)}.png`,
+      mimeType: 'image/png',
+      originalFileName: 'legacy.png'
+    }
+    let releaseMigration: (() => void) | undefined
+    managedMediaApiMock.migrateLegacyDataUrl.mockReturnValue(
+      new Promise((resolve) => {
+        releaseMigration = () =>
+          resolve({
+            reference,
+            localMediaUrl: 'local-media:///originals/legacy.png',
+            createdNewOriginal: true,
+            createdNewMetadata: true
+          })
+      })
+    )
+
+    await storage.saveSessionToDB(
+      {
+        id: 'legacy-single-flight',
+        title: 'Legacy',
+        messages: [
+          {
+            role: 'user',
+            content: '',
+            attachments: [{ type: 'image', url: legacyDataUrl, fileName: 'legacy.png' }]
+          }
+        ]
+      },
+      'workspace-a'
+    )
+
+    const firstRead = storage.loadSessionFromDB('legacy-single-flight', 'workspace-a')
+    const secondRead = storage.loadSessionFromDB('legacy-single-flight', 'workspace-a')
+    await vi.waitFor(() => expect(managedMediaApiMock.migrateLegacyDataUrl).toHaveBeenCalledOnce())
+    releaseMigration?.()
+
+    const [first, second] = await Promise.all([firstRead, secondRead])
+    expect(managedMediaApiMock.migrateLegacyDataUrl).toHaveBeenCalledOnce()
+    expect(first?.messages[0]?.attachments?.[0]).toMatchObject({
+      url: 'local-media:///originals/legacy.png',
+      media: reference
+    })
+    expect(second).toEqual(first)
   })
 
   it('keeps sessions with the same id isolated by storage scope', async () => {
