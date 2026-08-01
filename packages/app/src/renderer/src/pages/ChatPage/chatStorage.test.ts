@@ -563,6 +563,42 @@ describe('chatStorage', () => {
     expect(loadedSessions[0]).not.toHaveProperty('contextCompressionActivity')
   })
 
+  it('keeps successfully loaded sessions unchanged when managed media migration is unavailable', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+
+    const storage = await import('./chatStorage')
+    const legacyDataUrl = 'data:image/png;base64,YQ=='
+    await storage.saveSessionToDB(
+      {
+        id: 'legacy-without-service',
+        title: 'Legacy image session',
+        messages: [
+          {
+            role: 'user',
+            content: 'legacy image',
+            attachments: [{ type: 'image', url: legacyDataUrl, fileName: 'legacy.png' }]
+          }
+        ]
+      },
+      'workspace-a'
+    )
+
+    await expect(storage.loadAllSessions('workspace-a')).resolves.toEqual([
+      expect.objectContaining({
+        id: 'legacy-without-service',
+        storageScope: 'workspace-a',
+        messages: [
+          expect.objectContaining({
+            attachments: [expect.objectContaining({ url: legacyDataUrl })]
+          })
+        ]
+      })
+    ])
+    expect(fakeIndexedDb.deletedNames).toEqual([])
+  })
+
   it('resets corrupted IndexedDB storage after fatal read errors and accepts future saves', async () => {
     const fakeIndexedDb = createFakeIndexedDb()
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
