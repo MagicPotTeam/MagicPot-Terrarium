@@ -1,8 +1,32 @@
 import fs from 'node:fs/promises'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { ServiceError } from '@shared/api/apiUtils/serviceValidation'
 import { ManagedMediaResolutionError } from '../llmProxy/managedMediaStore'
 import { ManagedMediaSvcImpl, type ManagedMediaSvcImplDependencies } from './svcManagedMediaImpl'
+
+function png(): Buffer {
+  return Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64'
+  )
+}
+
+async function withImportFixture(
+  run: (fixture: { root: string; media: string; source: string }) => Promise<void>
+): Promise<void> {
+  const root = `/managed-media-svc-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  const media = path.join(root, 'media')
+  const source = path.join(root, 'selected.png')
+  await fs.mkdir(media, { recursive: true })
+  await fs.writeFile(source, png())
+  try {
+    await run({ root, media, source })
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}
 
 const reference = {
   version: 1 as const,
@@ -58,6 +82,95 @@ const expectSanitizedFailure = async (promise: Promise<unknown>): Promise<void> 
 }
 
 describe('ManagedMediaSvcImpl', () => {
+  it('imports and deduplicates a valid selected file path or file URI', async () => {
+    await withImportFixture(async ({ media, source }) => {
+      const service = new ManagedMediaSvcImpl({ getMediaDir: () => media })
+      const request = {
+        sourcePath: source,
+        mimeType: 'image/png',
+        originalFileName: 'selected.png'
+      }
+      const first = await service.importFile(request)
+      const second = await service.importFile({
+        ...request,
+        sourcePath: pathToFileURL(source).toString()
+      })
+      expect(second).toEqual(first)
+      expect(first.reference).toMatchObject({ kind: 'managed', mimeType: 'image/png' })
+      expect(first.localMediaUrl).toMatch(/^local-media:/)
+    })
+  })
+
+  it('rejects non-file URIs and noncanonical paths before store import', async () => {
+    const importFile = vi.fn()
+    const service = new ManagedMediaSvcImpl({
+      getMediaDir: () => '/configured/media',
+      realpath: (async () => '/configured/media') as unknown as typeof fs.realpath,
+      importFile
+    })
+    for (const sourcePath of ['https://example.com/a.png', '/selected/../secret.png']) {
+      await expect(
+        service.importFile({ sourcePath, mimeType: 'image/png', originalFileName: 'a.png' })
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+    }
+    expect(importFile).not.toHaveBeenCalled()
+  })
+
+  it('lets the store reject symlink and managed-root sources and enforce max size', async () => {
+    await withImportFixture(async ({ root, media, source }) => {
+      const service = new ManagedMediaSvcImpl({ getMediaDir: () => media })
+      const link = path.join(root, 'link.png')
+      try {
+        await fs.symlink(source, link, process.platform === 'win32' ? 'file' : undefined)
+        await expect(
+          service.importFile({
+            sourcePath: link,
+            mimeType: 'image/png',
+            originalFileName: 'link.png'
+          })
+        ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_FAILED' })
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+      }
+
+      const imported = await service.importFile({
+        sourcePath: source,
+        mimeType: 'image/png',
+        originalFileName: 'selected.png'
+      })
+      const managedSource = path.join(media, ...imported.reference.relativePath.split('/'))
+      await expect(
+        service.importFile({
+          sourcePath: managedSource,
+          mimeType: 'image/png',
+          originalFileName: 'managed.png'
+        })
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_FAILED' })
+
+      const large = path.join(root, 'large.png')
+      await fs.writeFile(large, Buffer.alloc(25 * 1024 * 1024 + 1, 1))
+      await expect(
+        service.importFile({
+          sourcePath: large,
+          mimeType: 'image/png',
+          originalFileName: 'large.png'
+        })
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_FAILED' })
+    })
+  })
+
+  it('imports a clipboard data URL through the managed store', async () => {
+    await withImportFixture(async ({ media }) => {
+      const service = new ManagedMediaSvcImpl({ getMediaDir: () => media })
+      const result = await service.importDataUrl({
+        dataUrl: `data:image/png;base64,${png().toString('base64')}`,
+        originalFileName: 'paste.png'
+      })
+      expect(result.reference).toMatchObject({ kind: 'managed', mimeType: 'image/png' })
+      expect(result.localMediaUrl).toMatch(/^local-media:/)
+    })
+  })
+
   it('uses the single getMediaDir root and lets the derivative layer select format', async () => {
     const derive = vi.fn(async () => descriptor)
     await expect(create(derive).ensureDerivative({ reference, maxEdge: 512 })).resolves.toEqual({
