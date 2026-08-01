@@ -497,6 +497,35 @@ describe('chatStorage', () => {
     expect(second).toEqual(first)
   })
 
+  it('keeps legacy inline media unchanged when managed migration fails', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const legacyDataUrl = 'data:image/png;base64,AAAA'
+    managedMediaApiMock.migrateLegacyDataUrl.mockRejectedValue(new Error('migration unavailable'))
+
+    await storage.saveSessionToDB(
+      {
+        id: 'legacy-migration-failure',
+        title: 'Legacy failure',
+        messages: [
+          {
+            role: 'user',
+            content: '',
+            attachments: [{ type: 'image', url: legacyDataUrl, fileName: 'legacy.png' }]
+          }
+        ]
+      },
+      'workspace-a'
+    )
+
+    const loaded = await storage.loadSessionFromDB('legacy-migration-failure', 'workspace-a')
+
+    expect(loaded?.messages[0]?.attachments?.[0]).toMatchObject({ url: legacyDataUrl })
+    expect(managedMediaApiMock.reclaimLegacyMigration).not.toHaveBeenCalled()
+  })
+
   it('keeps sessions with the same id isolated by storage scope', async () => {
     const fakeIndexedDb = createFakeIndexedDb()
     fakeIndexedDb.state.failGetAllOnce = false
