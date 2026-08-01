@@ -11,6 +11,12 @@ export type LLMReasoningEffort =
   | 'max'
   | 'ultra'
 
+export type ProviderAttachmentTransport =
+  | 'file-id'
+  | 'multipart'
+  | 'accessible-url'
+  | 'request-data-url'
+
 export type ChatCapabilityProfile = {
   model_name?: string
   auth_mode?: string
@@ -22,6 +28,10 @@ export type ChatCapabilityProfile = {
   context_budget_tokens?: number
   contextWindowTokens?: number
   contextBudgetTokens?: number
+  attachment_transports?: readonly (ProviderAttachmentTransport | string)[]
+  attachmentTransports?: readonly (ProviderAttachmentTransport | string)[]
+  preferred_attachment_transport?: ProviderAttachmentTransport | string
+  preferredAttachmentTransport?: ProviderAttachmentTransport | string
 }
 
 export type ChatProfileCapabilities = {
@@ -30,6 +40,8 @@ export type ChatProfileCapabilities = {
   contextWindowTokens?: number
   contextBudgetTokens?: number
   supportsAutoContextCompression: boolean
+  attachmentTransports: ProviderAttachmentTransport[]
+  preferredAttachmentTransport?: ProviderAttachmentTransport
 }
 
 const GPT_5_4_LONG_CONTEXT_TOKENS = 1_050_000
@@ -44,6 +56,39 @@ const GPT_5_PRO_REASONING_EFFORTS: LLMReasoningEffort[] = ['high']
 const GPT_5_4_PRO_REASONING_EFFORTS: LLMReasoningEffort[] = ['medium', 'high', 'xhigh']
 const GPT_5_1_REASONING_EFFORTS: LLMReasoningEffort[] = ['none', 'low', 'medium', 'high']
 const GPT_5_REASONING_EFFORTS: LLMReasoningEffort[] = ['minimal', 'low', 'medium', 'high']
+
+const normalizeAttachmentTransport = (
+  value?: ProviderAttachmentTransport | string | null
+): ProviderAttachmentTransport | undefined => {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+  return normalized === 'file-id' ||
+    normalized === 'multipart' ||
+    normalized === 'accessible-url' ||
+    normalized === 'request-data-url'
+    ? normalized
+    : undefined
+}
+
+const resolveAttachmentCapabilities = (
+  profile?: ChatCapabilityProfile | null
+): Pick<ChatProfileCapabilities, 'attachmentTransports' | 'preferredAttachmentTransport'> => {
+  const declaredTransports = profile?.attachment_transports ?? profile?.attachmentTransports ?? []
+  const attachmentTransports = Array.from(
+    new Set(declaredTransports.map(normalizeAttachmentTransport).filter(Boolean))
+  ) as ProviderAttachmentTransport[]
+  const preferredAttachmentTransport = normalizeAttachmentTransport(
+    profile?.preferred_attachment_transport ?? profile?.preferredAttachmentTransport
+  )
+
+  return {
+    attachmentTransports,
+    ...(preferredAttachmentTransport && attachmentTransports.includes(preferredAttachmentTransport)
+      ? { preferredAttachmentTransport }
+      : {})
+  }
+}
 
 const normalizeModelName = (value?: string): string =>
   String(value || '')
@@ -165,11 +210,13 @@ export const resolveChatProfileCapabilities = (
 
   if (!isCodexReasoningProfile(profile)) {
     const explicitContextTokens = resolveExplicitContextTokens(profile)
+    const attachmentCapabilities = resolveAttachmentCapabilities(profile)
 
     return applyExtensions({
       reasoningEfforts: [],
       ...explicitContextTokens,
-      supportsAutoContextCompression: Boolean(explicitContextTokens.contextBudgetTokens)
+      supportsAutoContextCompression: Boolean(explicitContextTokens.contextBudgetTokens),
+      ...attachmentCapabilities
     })
   }
 
@@ -220,6 +267,7 @@ export const resolveChatProfileCapabilities = (
     normalizeReasoningEffort(defaultReasoningEffort, normalizedEfforts) ||
     normalizedEfforts[normalizedEfforts.length - 1]
   const explicitContextTokens = resolveExplicitContextTokens(profile)
+  const attachmentCapabilities = resolveAttachmentCapabilities(profile)
   const resolvedContextWindowTokens =
     explicitContextTokens.contextWindowTokens || contextWindowTokens
   const contextBudgetTokens = deriveContextBudgetTokens(
@@ -234,7 +282,8 @@ export const resolveChatProfileCapabilities = (
       : {}),
     ...(resolvedContextWindowTokens ? { contextWindowTokens: resolvedContextWindowTokens } : {}),
     ...(contextBudgetTokens ? { contextBudgetTokens } : {}),
-    supportsAutoContextCompression: Boolean(contextBudgetTokens)
+    supportsAutoContextCompression: Boolean(contextBudgetTokens),
+    ...attachmentCapabilities
   })
 }
 

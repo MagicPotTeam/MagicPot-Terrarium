@@ -5,6 +5,7 @@ import {
   requestChatCompletion,
   requestChatCompletionStream,
   resolveAttachmentBatchCapability,
+  resolveAttachmentRequestCapabilities,
   supportsStreamingChatCompletion
 } from './chatRequestUtils'
 import { HUNYUAN_3D_PROFILE_ID } from './chatPageShared'
@@ -39,6 +40,59 @@ afterEach(() => {
 })
 
 describe('normalizeChatAttachmentsForRequest', () => {
+  it('materializes a managed reference only in the explicit request copy', async () => {
+    const media = {
+      version: 1 as const,
+      kind: 'managed' as const,
+      relativePath:
+        'originals/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png',
+      sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      sizeBytes: 3,
+      mimeType: 'image/png',
+      originalFileName: 'durable.png'
+    }
+    const attachment: ChatAttachment = { type: 'image', url: 'local-media:///durable.png', media }
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const materializeForRequest = vi.fn().mockResolvedValue({
+      transport: 'request-data-url',
+      dataUrl: 'data:image/png;base64,YWJj',
+      mimeType: 'image/png',
+      sizeBytes: 3
+    })
+    const normalized = await normalizeChatAttachmentsForRequest([attachment], {
+      managedMediaService: { materializeForRequest } as never,
+      allowManagedRequestDataUrl: true
+    })
+    expect(normalized?.[0]).toMatchObject({ url: 'data:image/png;base64,YWJj', media })
+    expect(attachment.url).toBe('local-media:///durable.png')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('does not send or fetch an implicit local URL for managed media', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(
+      normalizeChatAttachmentsForRequest([
+        {
+          type: 'image',
+          url: 'local-media:///durable.png',
+          media: {
+            version: 1,
+            kind: 'managed',
+            relativePath:
+              'originals/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png',
+            sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            sizeBytes: 3,
+            mimeType: 'image/png',
+            originalFileName: 'durable.png'
+          }
+        }
+      ])
+    ).rejects.toThrow('no supported managed-media request transport')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('converts local image attachments into data URLs', async () => {
     const imageBlob = new Blob(['image-bytes'], { type: 'image/png' })
     const fetchMock = vi.fn().mockResolvedValue({
@@ -101,21 +155,48 @@ describe('normalizeChatAttachmentsForRequest', () => {
     ])
   })
 
-  it('preserves externally reachable HTTP image URLs without fetching them', async () => {
+  it('preserves a public HTTPS image URL only when accessible-url is allowed, without mutation', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
 
-    const attachments: ChatAttachment[] = [
-      {
-        type: 'image',
-        url: 'https://cdn.example.com/reference.png',
-        fileName: 'reference.png',
-        mimeType: 'image/png'
-      }
-    ]
+    const attachment: ChatAttachment = {
+      type: 'image',
+      url: 'https://cdn.example.com/reference.png',
+      fileName: 'reference.png',
+      mimeType: 'image/png'
+    }
+    const attachments = [attachment]
 
-    await expect(normalizeChatAttachmentsForRequest(attachments)).resolves.toEqual(attachments)
+    const normalized = await normalizeChatAttachmentsForRequest(attachments, {
+      allowAccessibleUrl: true
+    })
+
+    expect(normalized).toEqual(attachments)
+    expect(normalized?.[0]).toBe(attachment)
+    expect(attachments[0].url).toBe('https://cdn.example.com/reference.png')
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('falls back to request-scoped data URL materialization without accessible-url', async () => {
+    const imageBlob = new Blob(['remote-image'], { type: 'image/png' })
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      blob: async () => imageBlob
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const attachment: ChatAttachment = {
+      type: 'image',
+      url: 'https://cdn.example.com/reference.png',
+      fileName: 'reference.png',
+      mimeType: 'image/png'
+    }
+    const normalized = await normalizeChatAttachmentsForRequest([attachment])
+
+    expect(fetchMock).toHaveBeenCalledWith('https://cdn.example.com/reference.png')
+    expect(normalized?.[0].url).toMatch(/^data:image\/png;base64,/)
+    expect(normalized?.[0]).not.toBe(attachment)
+    expect(attachment.url).toBe('https://cdn.example.com/reference.png')
   })
 
   it('rejects local image URLs when they cannot be converted for the model', async () => {
@@ -137,6 +218,30 @@ describe('normalizeChatAttachmentsForRequest', () => {
         }
       ])
     ).rejects.toThrow('Unable to prepare image attachment "missing.png" for the model')
+  })
+})
+
+describe('resolveAttachmentRequestCapabilities', () => {
+  it('exposes accessible-url only when the selected profile declares it', () => {
+    const config = createConfig()
+    config.llm_config.api_profiles = [
+      {
+        id: 'url-profile',
+        model_name: 'vision-model',
+        base_url: 'https://api.example.com',
+        api_key: 'key',
+        attachment_transports: ['accessible-url']
+      } as Config['llm_config']['api_profiles'][number]
+    ]
+
+    expect(resolveAttachmentRequestCapabilities(config, 'url-profile')).toEqual({
+      allowManagedRequestDataUrl: false,
+      allowAccessibleUrl: true
+    })
+    expect(resolveAttachmentRequestCapabilities(config, 'missing-profile')).toEqual({
+      allowManagedRequestDataUrl: false,
+      allowAccessibleUrl: false
+    })
   })
 })
 
