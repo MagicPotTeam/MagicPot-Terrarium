@@ -1662,6 +1662,45 @@ describe('ChatMessageList dynamic-height virtualization', () => {
     ).toBeGreaterThan(initialHeight)
   })
 
+  it('restores scroll positions independently when switching sessions', () => {
+    const firstSession = {
+      id: 'scroll-session-a',
+      title: 'Session A',
+      messages: [{ role: 'assistant' as const, content: 'A' }],
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    }
+    const secondSession = {
+      ...firstSession,
+      id: 'scroll-session-b',
+      title: 'Session B',
+      messages: [{ role: 'assistant' as const, content: 'B' }]
+    }
+    const { rerender } = renderChatMessageList(firstSession)
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1200 })
+
+    act(() => {
+      scroller.scrollTop = 175
+      fireEvent.scroll(scroller)
+    })
+
+    rerender(buildChatMessageList(secondSession))
+    expect(scroller.scrollTop).toBe(800)
+
+    act(() => {
+      scroller.scrollTop = 525
+      fireEvent.scroll(scroller)
+    })
+
+    rerender(buildChatMessageList(firstSession))
+    expect(scroller.scrollTop).toBe(175)
+
+    rerender(buildChatMessageList(secondSession))
+    expect(scroller.scrollTop).toBe(525)
+  })
+
   it('preserves no-id row identity when messages are prepended', () => {
     const chatContainerRef = React.createRef<HTMLDivElement>()
     const originalMessages = virtualSession.messages

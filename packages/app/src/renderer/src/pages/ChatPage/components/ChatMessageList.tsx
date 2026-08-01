@@ -121,6 +121,8 @@ const CHAT_VIRTUALIZATION_THRESHOLD = 40
 const CHAT_VIRTUALIZATION_OVERSCAN_PX = 900
 const CHAT_ESTIMATED_MESSAGE_HEIGHT = 112
 const CHAT_STICK_TO_BOTTOM_THRESHOLD_PX = 48
+const CHAT_SESSION_SCROLL_POSITION_LIMIT = 100
+const chatSessionScrollPositions = new Map<string, number>()
 
 const CHAT_IMAGE_FALLBACK_WIDTH = 320
 const CHAT_IMAGE_FALLBACK_HEIGHT = 240
@@ -535,6 +537,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
   const messageIdentityMap = React.useRef(new WeakMap<object, string>())
   const nextMessageIdentityRef = React.useRef(0)
+  const restoredSessionIdRef = React.useRef<string | null>(null)
   const messageIdentities = React.useMemo(() => {
     const seen = new Map<string, number>()
     return messages.map((message) => {
@@ -666,6 +669,38 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     virtualized
   ])
   visibleStartRef.current = virtualWindow.anchorStart
+
+  React.useLayoutEffect(() => {
+    const sessionId = currentSession?.id
+    const container = chatContainerRef.current
+    if (!sessionId || !container) return
+
+    if (restoredSessionIdRef.current === null) {
+      restoredSessionIdRef.current = sessionId
+    } else if (restoredSessionIdRef.current !== sessionId) {
+      restoredSessionIdRef.current = sessionId
+      const savedScrollTop = chatSessionScrollPositions.get(sessionId)
+      container.scrollTop =
+        savedScrollTop ?? Math.max(0, container.scrollHeight - container.clientHeight)
+    }
+
+    setScroll({ top: container.scrollTop, viewport: container.clientHeight })
+
+    const saveScrollPosition = () => {
+      chatSessionScrollPositions.delete(sessionId)
+      chatSessionScrollPositions.set(sessionId, container.scrollTop)
+      if (chatSessionScrollPositions.size > CHAT_SESSION_SCROLL_POSITION_LIMIT) {
+        const oldestSessionId = chatSessionScrollPositions.keys().next().value
+        if (oldestSessionId) chatSessionScrollPositions.delete(oldestSessionId)
+      }
+    }
+
+    container.addEventListener('scroll', saveScrollPosition, { passive: true })
+    return () => {
+      saveScrollPosition()
+      container.removeEventListener('scroll', saveScrollPosition)
+    }
+  }, [chatContainerRef, currentSession?.id])
 
   React.useLayoutEffect(() => {
     const container = chatContainerRef.current
