@@ -2757,7 +2757,7 @@ describe('ChatPage runtime workflow integration', () => {
       await user.type(screen.getByTestId('chat-composer-input-mock'), ' plus fresh edit')
 
       await act(async () => {
-        releaseImport?.()
+        ;(releaseImport as (() => void) | null)?.()
         await Promise.resolve()
       })
 
@@ -2771,7 +2771,7 @@ describe('ChatPage runtime workflow integration', () => {
         await new Promise((resolve) => window.setTimeout(resolve, 250))
       })
     } finally {
-      releaseImport?.()
+      ;(releaseImport as (() => void) | null)?.()
     }
   })
 

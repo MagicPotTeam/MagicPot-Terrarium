@@ -256,6 +256,72 @@ describe('InputComfyImage', () => {
 
     expect(screen.queryByRole('img', { name: 'demo.png' })).not.toBeInTheDocument()
     expect(screen.getByText('Drop an image')).toBeInTheDocument()
+
     expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:preview')
+  })
+
+  it('revokes the previous preview blob when the value is replaced', async () => {
+    const createObjectURLMock = vi
+      .fn()
+      .mockReturnValueOnce('blob:first-preview')
+      .mockReturnValueOnce('blob:second-preview')
+    const revokeObjectURLMock = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURLMock
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURLMock
+    })
+    apiMocks.getView.mockResolvedValue({ result: new Uint8Array([1, 2, 3]) })
+
+    const { rerender } = render(
+      <InputComfyImage
+        label="Quick App Image"
+        value="first.png"
+        onChange={vi.fn()}
+        placeholder="Drop an image"
+      />
+    )
+    await screen.findByRole('img', { name: 'first.png' })
+    rerender(
+      <InputComfyImage
+        label="Quick App Image"
+        value="second.png"
+        onChange={vi.fn()}
+        placeholder="Drop an image"
+      />
+    )
+    await screen.findByRole('img', { name: 'second.png' })
+
+    expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:first-preview')
+  })
+
+  it('revokes the current preview blob when unmounted', async () => {
+    const createObjectURLMock = vi.fn(() => 'blob:current-preview')
+    const revokeObjectURLMock = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURLMock
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURLMock
+    })
+    apiMocks.getView.mockResolvedValue({ result: new Uint8Array([1, 2, 3]) })
+
+    const { unmount } = render(
+      <InputComfyImage
+        label="Quick App Image"
+        value="current.png"
+        onChange={vi.fn()}
+        placeholder="Drop an image"
+      />
+    )
+    await screen.findByRole('img', { name: 'current.png' })
+    unmount()
+
+    expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:current-preview')
   })
 })
