@@ -254,6 +254,30 @@ async function seedRendererStorage(page, session) {
   )
 }
 
+async function collectDetachedDomMetrics(page) {
+  const session = await page.context().newCDPSession(page)
+  try {
+    await session.send('DOM.enable')
+    const counters = await session.send('Memory.getDOMCounters')
+    const detached = await session.send('DOM.getDetachedDomNodes')
+    return {
+      documents: counters.documents,
+      nodes: counters.nodes,
+      jsEventListeners: counters.jsEventListeners,
+      detachedTreeCount: detached.detachedNodes.length,
+      detachedRetainedNodeCount: detached.detachedNodes.reduce(
+        (total, entry) => total + entry.retainedNodeIds.length,
+        0
+      ),
+      detachedImageTreeCount: detached.detachedNodes.filter(
+        (entry) => entry.treeNode.nodeName.toLowerCase() === 'img'
+      ).length
+    }
+  } finally {
+    await session.detach()
+  }
+}
+
 async function collectMemory(app, page) {
   const processMetrics = await app.evaluate(({ app }) =>
     app.getAppMetrics().map((metric) => ({
@@ -291,7 +315,14 @@ async function collectMemory(app, page) {
         : null
     }
   })
-  return { rendererProcesses, allProcesses: processMetrics, page: pageMetrics }
+  const detachedDom = await collectDetachedDomMetrics(page)
+  return {
+    rendererProcesses,
+    allProcesses: processMetrics,
+    page: pageMetrics,
+    detachedDom,
+    detachedDomHealthy: detachedDom.detachedImageTreeCount === 0
+  }
 }
 
 async function readWindowPlacement(app) {
