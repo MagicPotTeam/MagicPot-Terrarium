@@ -70,13 +70,19 @@ import {
 import { useMessage } from '@renderer/hooks/useMessage'
 import { api } from '@renderer/utils/windowUtils'
 import { DccBridgeTarget, isSupportedDccBridgeModelSourceFormat } from '@shared/api/svcDccBridge'
-import type {
-  EnsureManagedMediaDerivativeResp,
-  ManagedMediaDerivativeMaxEdge,
-  ManagedMediaSvc
-} from '@shared/api/svcManagedMedia'
+import type { ManagedMediaDerivativeMaxEdge, ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import { normalizeMediaReference, type MediaReference } from '@shared/mediaReference'
 import type { SxProps, Theme } from '@mui/material/styles'
+import {
+  ensureCachedChatImageDerivative,
+  getChatImageDerivativeCacheKey
+} from '../chatImageDerivativeScheduler'
+
+export {
+  ensureCachedChatImageDerivative,
+  getChatImageDerivativeCacheSizeForTests,
+  resetChatImageDerivativeCacheForTests
+} from '../chatImageDerivativeScheduler'
 
 interface ChatMessageListProps {
   active?: boolean
@@ -119,67 +125,7 @@ const CHAT_STICK_TO_BOTTOM_THRESHOLD_PX = 48
 const CHAT_IMAGE_FALLBACK_WIDTH = 320
 const CHAT_IMAGE_FALLBACK_HEIGHT = 240
 const CHAT_IMAGE_DERIVATIVE_ROOT_MARGIN = '800px 0px'
-const CHAT_IMAGE_DERIVATIVE_CACHE_MAX_RESOLVED_ENTRIES = 256
-const CHAT_IMAGE_DERIVATIVE_CACHE_MAX_PENDING_ENTRIES = 64
-const CHAT_IMAGE_DERIVATIVE_RESOLVED_TTL_MS = 30 * 60 * 1000
-const CHAT_IMAGE_DERIVATIVE_PENDING_TIMEOUT_MS = 30 * 1000
 const CHAT_IMAGE_DERIVATIVE_BUCKETS = [256, 512, 1024, 2048] as const
-
-type ChatImageDerivativeCacheEntry =
-  | {
-      state: 'pending'
-      promise: Promise<EnsureManagedMediaDerivativeResp>
-      token: object
-      expiresAt: number
-      reject: (error: unknown) => void
-      timeoutId: ReturnType<typeof setTimeout>
-    }
-  | { state: 'resolved'; result: EnsureManagedMediaDerivativeResp; expiresAt: number }
-
-const chatImageDerivativeCache = new Map<string, ChatImageDerivativeCacheEntry>()
-
-export const resetChatImageDerivativeCacheForTests = (): void => {
-  chatImageDerivativeCache.clear()
-}
-
-export const getChatImageDerivativeCacheSizeForTests = (): number => chatImageDerivativeCache.size
-
-const pruneChatImageDerivativeCache = (now: number): void => {
-  for (const [key, entry] of chatImageDerivativeCache) {
-    if (entry.expiresAt <= now) {
-      if (entry.state === 'pending') {
-        clearTimeout(entry.timeoutId)
-        entry.reject(new Error('Managed media derivative request expired'))
-      }
-      chatImageDerivativeCache.delete(key)
-    }
-  }
-
-  let resolvedCount = 0
-  let pendingCount = 0
-  for (const entry of chatImageDerivativeCache.values()) {
-    if (entry.state === 'resolved') resolvedCount += 1
-    else pendingCount += 1
-  }
-  if (pendingCount > CHAT_IMAGE_DERIVATIVE_CACHE_MAX_PENDING_ENTRIES) {
-    for (const [key, entry] of chatImageDerivativeCache) {
-      if (entry.state !== 'pending') continue
-      clearTimeout(entry.timeoutId)
-      chatImageDerivativeCache.delete(key)
-      entry.reject(new Error('Managed media derivative request evicted'))
-      pendingCount -= 1
-      if (pendingCount <= CHAT_IMAGE_DERIVATIVE_CACHE_MAX_PENDING_ENTRIES) break
-    }
-  }
-  if (resolvedCount <= CHAT_IMAGE_DERIVATIVE_CACHE_MAX_RESOLVED_ENTRIES) return
-
-  for (const [key, entry] of chatImageDerivativeCache) {
-    if (entry.state !== 'resolved') continue
-    chatImageDerivativeCache.delete(key)
-    resolvedCount -= 1
-    if (resolvedCount <= CHAT_IMAGE_DERIVATIVE_CACHE_MAX_RESOLVED_ENTRIES) break
-  }
-}
 
 export const getChatImageDerivativeMaxEdge = (
   cssMaxDimension: number,
@@ -197,77 +143,6 @@ export const getChatImageDerivativeMaxEdge = (
     CHAT_IMAGE_DERIVATIVE_BUCKETS.find((bucket) => requiredEdge <= bucket) ??
     CHAT_IMAGE_DERIVATIVE_BUCKETS[CHAT_IMAGE_DERIVATIVE_BUCKETS.length - 1]
   )
-}
-
-const getChatImageDerivativeCacheKey = (
-  reference: MediaReference & { kind: 'managed'; sha256: string },
-  maxEdge: ManagedMediaDerivativeMaxEdge
-): string => `${reference.sha256}:${reference.relativePath}:${maxEdge}`
-
-export const ensureCachedChatImageDerivative = (
-  service: ManagedMediaSvc,
-  reference: MediaReference & { kind: 'managed'; sha256: string },
-  maxEdge: ManagedMediaDerivativeMaxEdge
-): Promise<EnsureManagedMediaDerivativeResp> => {
-  const key = getChatImageDerivativeCacheKey(reference, maxEdge)
-  const now = Date.now()
-  pruneChatImageDerivativeCache(now)
-  const cached = chatImageDerivativeCache.get(key)
-  if (cached?.state === 'resolved') {
-    chatImageDerivativeCache.delete(key)
-    chatImageDerivativeCache.set(key, {
-      ...cached,
-      expiresAt: now + CHAT_IMAGE_DERIVATIVE_RESOLVED_TTL_MS
-    })
-    return Promise.resolve(cached.result)
-  }
-  if (cached?.state === 'pending') return cached.promise
-
-  const token = {}
-  let rejectPending!: (error: unknown) => void
-  const servicePromise = service.ensureDerivative({ reference, maxEdge }).then(
-    (result) => {
-      const current = chatImageDerivativeCache.get(key)
-      if (current?.state !== 'pending' || current.token !== token) return result
-      clearTimeout(current.timeoutId)
-      chatImageDerivativeCache.delete(key)
-      chatImageDerivativeCache.set(key, {
-        state: 'resolved',
-        result,
-        expiresAt: Date.now() + CHAT_IMAGE_DERIVATIVE_RESOLVED_TTL_MS
-      })
-      pruneChatImageDerivativeCache(Date.now())
-      return result
-    },
-    (error) => {
-      const current = chatImageDerivativeCache.get(key)
-      if (current?.state === 'pending' && current.token === token) {
-        clearTimeout(current.timeoutId)
-        chatImageDerivativeCache.delete(key)
-      }
-      throw error
-    }
-  )
-  const promise = new Promise<EnsureManagedMediaDerivativeResp>((resolve, reject) => {
-    rejectPending = reject
-    servicePromise.then(resolve, reject)
-  })
-  const timeoutId = setTimeout(() => {
-    const current = chatImageDerivativeCache.get(key)
-    if (current?.state !== 'pending' || current.token !== token) return
-    chatImageDerivativeCache.delete(key)
-    rejectPending(new Error('Managed media derivative request timed out'))
-  }, CHAT_IMAGE_DERIVATIVE_PENDING_TIMEOUT_MS)
-  chatImageDerivativeCache.set(key, {
-    state: 'pending',
-    promise,
-    token,
-    expiresAt: now + CHAT_IMAGE_DERIVATIVE_PENDING_TIMEOUT_MS,
-    reject: rejectPending,
-    timeoutId
-  })
-  pruneChatImageDerivativeCache(now)
-  return promise
 }
 
 const ChatImage: React.FC<{
@@ -294,6 +169,7 @@ const ChatImage: React.FC<{
   const { t } = useTranslation()
   const frameRef = React.useRef<HTMLDivElement | null>(null)
   const generationRef = React.useRef(0)
+  const abortControllerRef = React.useRef<AbortController | null>(null)
   const [displaySrc, setDisplaySrc] = React.useState<string | null>(null)
   const [failed, setFailed] = React.useState(false)
   const [nearViewport, setNearViewport] = React.useState(false)
@@ -345,6 +221,8 @@ const ChatImage: React.FC<{
         generationRef.current += 1
         setNearViewport(entry.isIntersecting)
         if (!entry.isIntersecting) {
+          abortControllerRef.current?.abort()
+          abortControllerRef.current = null
           setDisplaySrc(null)
           setFailed(false)
         }
@@ -400,7 +278,13 @@ const ChatImage: React.FC<{
     }
 
     const generation = ++generationRef.current
-    void ensureCachedChatImageDerivative(service, managedMedia, maxEdge).then(
+    abortControllerRef.current?.abort()
+    const abortController = new AbortController()
+    abortControllerRef.current = abortController
+    void ensureCachedChatImageDerivative(service, managedMedia, maxEdge, {
+      priority: -maxEdge,
+      signal: abortController.signal
+    }).then(
       (result) => {
         if (generation !== generationRef.current || !nearViewport) return
         setFailed(false)
@@ -414,6 +298,10 @@ const ChatImage: React.FC<{
         setDisplaySrc(originalSrc)
       }
     )
+    return () => {
+      abortController.abort()
+      if (abortControllerRef.current === abortController) abortControllerRef.current = null
+    }
   }, [brokenDerivativeKey, managedMedia, maxEdge, nearViewport, originalSrc])
 
   React.useEffect(
@@ -485,9 +373,7 @@ const ChatImage: React.FC<{
           onError={() => {
             if (displaySrc !== originalSrc) {
               if (managedMedia && maxEdge) {
-                const cacheKey = getChatImageDerivativeCacheKey(managedMedia, maxEdge)
-                chatImageDerivativeCache.delete(cacheKey)
-                setBrokenDerivativeKey(cacheKey)
+                setBrokenDerivativeKey(getChatImageDerivativeCacheKey(managedMedia, maxEdge))
               }
               generationRef.current += 1
               setFailed(false)
