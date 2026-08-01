@@ -346,6 +346,12 @@ function printHelp() {
   console.log(`Chat image renderer-memory benchmark\n\nUsage:\n  node scripts/chat/chatImageMemoryBenchmark.mjs [--help|--dry-run]\n\nEnvironment:\n  MAGICPOT_CHAT_MEMORY_MESSAGE_COUNT       default ${DEFAULT_MESSAGE_COUNT}\n  MAGICPOT_CHAT_MEMORY_ATTACHMENT_COUNT    default ${DEFAULT_ATTACHMENT_COUNT}\n  MAGICPOT_CHAT_MEMORY_SETTLE_MS            default 5000\n  MAGICPOT_TEST_RUN_ID                      stable artifact run id\n\nRequires a built Electron app (npm run build:pure).`)
 }
 
+async function assertWindowNeverVisibleOnPrimary(app) {
+  const placement = await readWindowPlacement(app)
+  assertNonIntrusiveWindowPlacement(placement, 'Chat image memory benchmark window')
+  return placement
+}
+
 async function main() {
   if (process.argv.includes('--help')) return printHelp()
   const artifactRoot = resolveProjectCanvasArtifactRoot(RUN_ID)
@@ -401,6 +407,7 @@ async function main() {
       })
     })
     const page = await appHandle.firstWindow({ timeout: 90000 })
+    await assertWindowNeverVisibleOnPrimary(appHandle)
     await page.waitForSelector('#root', { state: 'attached', timeout: 120000 })
     // Let the initial config/layout hydration finish before replacing benchmark state.
     // Seeding immediately after #root appears can race the first persistence write and
@@ -532,8 +539,7 @@ async function main() {
       { timeout: 120000 }
     )
     await page.waitForTimeout(parseCount('MAGICPOT_CHAT_MEMORY_SETTLE_MS', 5000))
-    const placement = await readWindowPlacement(appHandle)
-    assertNonIntrusiveWindowPlacement(placement, 'Chat image memory benchmark window')
+    const placement = await assertWindowNeverVisibleOnPrimary(appHandle)
     const metrics = await collectMemory(appHandle, page)
     const report = {
       benchmark: 'phase-1-chat-image-memory',
