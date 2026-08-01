@@ -1,5 +1,9 @@
 import type { Config } from '@shared/config/config'
 import { initServerIpc } from './api/serverIpc'
+import {
+  createManagedMediaCleanupScheduler,
+  type ManagedMediaCleanupScheduler
+} from './llmProxy/managedMediaCleanupScheduler'
 import { initializeAgentKernelRuntime, refreshAgentKernelRuntime } from './agentKernel/runtime'
 import { initComfyStateListener, stopComfyStateListener } from './comfy/state'
 import { initConfig, listenConfig } from './config/config'
@@ -9,12 +13,15 @@ import {
   syncMagicPotMcpPlatformDesktopTransports,
   stopMagicPotMcpPlatformRuntime
 } from './mcp/platform/runtime'
+import { closeAssistantTerminalPolicyRuntime } from './magicAgentPlatform2/productionRuntime'
 import { closeMagicPotMcpLegacySseSessions } from './mcp/platform/httpBridge'
 import { stopMcpClientManager, syncMcpClientManager } from './mcp/runtime'
 import { initTaskQueue, stopTaskQueue } from './queue/taskQueue'
 import { cleanupSubProcesses } from './subprocess/subprocess'
 import { setConsoleTransportEnabled } from './utils/loggingOverride'
 import { winController } from './winControls'
+
+let managedMediaCleanupScheduler: ManagedMediaCleanupScheduler | undefined
 
 async function runLifecycleStep(
   stepName: string,
@@ -54,7 +61,10 @@ function startBackgroundTasks(): void {
   initTaskQueue().catch((error) => console.error('[App] TaskQueue init failed', error))
   initComfyStateListener()
   winController.initIpc()
-  initServerIpc()
+  if (!managedMediaCleanupScheduler) {
+    managedMediaCleanupScheduler = createManagedMediaCleanupScheduler()
+  }
+  initServerIpc(managedMediaCleanupScheduler)
 }
 
 function registerRuntimeServiceManager(
@@ -104,9 +114,14 @@ export async function beforeQuit() {
   await runLifecycleStep('MCP clients stopped', () => stopMcpClientManager())
   await runLifecycleStep('MCP platform stopped', () => stopMagicPotMcpPlatformRuntime())
   await runLifecycleStep('Comfy listener stopped', () => stopComfyStateListener())
+  await runLifecycleStep('Managed media cleanup scheduler stopped', async () => {
+    await managedMediaCleanupScheduler?.stop()
+    managedMediaCleanupScheduler = undefined
+  })
   await runLifecycleStep('Subprocess cleanup finished', async () => {
     console.log('[App] Cleaning subprocesses...')
     await cleanupSubProcesses()
   })
+  await runLifecycleStep('Policy runtime stopped', () => closeAssistantTerminalPolicyRuntime())
   await runLifecycleStep('Task queue cleanup finished', () => stopTaskQueue())
 }

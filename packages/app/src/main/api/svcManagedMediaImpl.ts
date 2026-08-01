@@ -11,6 +11,8 @@ import type {
   MigrateLegacyManagedMediaResp,
   ReclaimLegacyManagedMediaReq,
   ReclaimLegacyManagedMediaResp,
+  UpdateManagedMediaReferenceSnapshotReq,
+  UpdateManagedMediaReferenceSnapshotResp,
   ManagedMediaDerivativeDescriptor,
   ManagedMediaSvc,
   MaterializeManagedMediaForRequestReq,
@@ -48,6 +50,10 @@ export type ManagedMediaSvcImplDependencies = {
   readFile?: typeof fs.readFile
   resolveReference?: typeof resolveManagedMediaReference
   migrateLegacy?: typeof migrateLegacyBase64MediaOnDemand
+  updateReferenceSnapshot?: (snapshot: {
+    complete: boolean
+    ids: readonly string[]
+  }) => void | Promise<void>
 }
 
 const invalidDependencyResult = (): ServiceError =>
@@ -111,6 +117,13 @@ function readyDescriptor(
 
 export class ManagedMediaSvcImpl implements ManagedMediaSvc {
   constructor(private readonly dependencies: ManagedMediaSvcImplDependencies = {}) {}
+
+  async updateReferenceSnapshot(
+    req: UpdateManagedMediaReferenceSnapshotReq
+  ): Promise<UpdateManagedMediaReferenceSnapshotResp> {
+    await this.dependencies.updateReferenceSnapshot?.({ complete: req.complete, ids: req.ids })
+    return { version: 1, accepted: true }
+  }
 
   async importFile(req: ImportManagedMediaFileReq): Promise<ImportManagedMediaResp> {
     try {

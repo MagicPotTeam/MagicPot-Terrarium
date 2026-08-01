@@ -23,8 +23,10 @@ import { createApiExtensionServices } from './extensionServices'
 import { AppUpdateSvcImpl } from './svcAppUpdateImpl'
 import { MagicAgentPlatformSvcImpl } from './svcMagicAgentPlatformImpl'
 import { ManagedMediaSvcImpl } from './svcManagedMediaImpl'
+import type { ManagedMediaCleanupScheduler } from '../llmProxy/managedMediaCleanupScheduler'
+import { getChatMediaDir } from '../llmProxy/chatMediaDir'
 
-export const createServer = (): Api => {
+export const createServer = (managedMediaCleanupScheduler?: ManagedMediaCleanupScheduler): Api => {
   const baseApi: BaseApi = {
     svcAdobeBridge: new AdobeBridgeSvcImpl(),
     svcState: new StateSvcImpl(),
@@ -47,7 +49,16 @@ export const createServer = (): Api => {
     svcDuplicateCheck: new DuplicateCheckSvcImpl(),
     svcAppUpdate: new AppUpdateSvcImpl(),
     svcMagicAgentPlatform: new MagicAgentPlatformSvcImpl(),
-    svcManagedMedia: new ManagedMediaSvcImpl()
+    svcManagedMedia: new ManagedMediaSvcImpl({
+      updateReferenceSnapshot: async (snapshot) => {
+        const chatMediaRoot = await getChatMediaDir()
+        managedMediaCleanupScheduler?.submitSnapshot({
+          complete: snapshot.complete,
+          chatMediaRoot,
+          referencedMediaIds: snapshot.ids
+        })
+      }
+    })
   }
 
   return {
@@ -56,7 +67,7 @@ export const createServer = (): Api => {
   }
 }
 
-export function initServerIpc(): void {
-  const api: Api = createServer()
+export function initServerIpc(managedMediaCleanupScheduler?: ManagedMediaCleanupScheduler): void {
+  const api: Api = createServer(managedMediaCleanupScheduler)
   registerIpcServer(apiDef, api)
 }

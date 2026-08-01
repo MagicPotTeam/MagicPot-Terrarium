@@ -74,6 +74,13 @@ export type MigrateLegacyManagedMediaResp = ImportManagedMediaResp & {
 }
 
 export type ReclaimLegacyManagedMediaReq = MigrateLegacyManagedMediaResp['checkpoint']
+
+export type UpdateManagedMediaReferenceSnapshotReq = {
+  version: 1
+  complete: boolean
+  ids: string[]
+}
+export type UpdateManagedMediaReferenceSnapshotResp = { version: 1; accepted: true }
 export type ReclaimLegacyManagedMediaResp = { queued: true }
 
 export type ManagedMediaSvc = {
@@ -81,6 +88,9 @@ export type ManagedMediaSvc = {
   importDataUrl(req: ImportManagedMediaDataUrlReq): Promise<ImportManagedMediaResp>
   migrateLegacyDataUrl(req: MigrateLegacyManagedMediaReq): Promise<MigrateLegacyManagedMediaResp>
   reclaimLegacyMigration(req: ReclaimLegacyManagedMediaReq): Promise<ReclaimLegacyManagedMediaResp>
+  updateReferenceSnapshot(
+    req: UpdateManagedMediaReferenceSnapshotReq
+  ): Promise<UpdateManagedMediaReferenceSnapshotResp>
   ensureDerivative(req: EnsureManagedMediaDerivativeReq): Promise<EnsureManagedMediaDerivativeResp>
   materializeForRequest(
     req: MaterializeManagedMediaForRequestReq
@@ -436,6 +446,37 @@ export const validateMaterializeManagedMediaForRequestResp = (
   return value as MaterializeManagedMediaForRequestResp
 }
 
+const validateUpdateReferenceSnapshotReq = (
+  value: unknown
+): UpdateManagedMediaReferenceSnapshotReq => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['version', 'complete', 'ids']) ||
+    value.version !== 1 ||
+    typeof value.complete !== 'boolean' ||
+    !Array.isArray(value.ids) ||
+    value.ids.length > 100_000 ||
+    value.ids.some((id) => typeof id !== 'string' || !/^[a-f0-9]{64}$/u.test(id))
+  ) {
+    throw new ServiceValidationError('svcManagedMedia.updateReferenceSnapshot request')
+  }
+  return { version: 1, complete: value.complete, ids: [...new Set(value.ids)] }
+}
+
+const validateUpdateReferenceSnapshotResp = (
+  value: unknown
+): UpdateManagedMediaReferenceSnapshotResp => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['version', 'accepted']) ||
+    value.version !== 1 ||
+    value.accepted !== true
+  ) {
+    throw new ServiceValidationError('svcManagedMedia.updateReferenceSnapshot response')
+  }
+  return value as UpdateManagedMediaReferenceSnapshotResp
+}
+
 export const managedMediaSvcDef: ServiceDefSheet<ManagedMediaSvc> = {
   importFile: {
     type: 'unary',
@@ -466,5 +507,10 @@ export const managedMediaSvcDef: ServiceDefSheet<ManagedMediaSvc> = {
     type: 'unary',
     request: validateMaterializeManagedMediaForRequestReq,
     response: validateMaterializeManagedMediaForRequestResp
+  },
+  updateReferenceSnapshot: {
+    type: 'unary',
+    request: validateUpdateReferenceSnapshotReq,
+    response: validateUpdateReferenceSnapshotResp
   }
 }

@@ -263,6 +263,18 @@ describe('ManagedMediaSvcImpl', () => {
     }
   )
 
+  it('forwards authoritative reference snapshots to the cleanup scheduler adapter', async () => {
+    const updateReferenceSnapshot = vi.fn()
+    const service = new ManagedMediaSvcImpl({ updateReferenceSnapshot })
+    await expect(
+      service.updateReferenceSnapshot({ version: 1, complete: true, ids: ['a'.repeat(64)] })
+    ).resolves.toEqual({ version: 1, accepted: true })
+    expect(updateReferenceSnapshot).toHaveBeenCalledWith({
+      complete: true,
+      ids: ['a'.repeat(64)]
+    })
+  })
+
   it('sanitizes generic errors', async () => {
     const derive = vi.fn(async () => {
       throw new Error('secret /private/path')

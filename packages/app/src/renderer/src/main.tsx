@@ -1,6 +1,7 @@
 // packages/app/src/renderer/packages/app/src/main.tsx
 import './utils/loggingOverride' // override console.log before anything else
 import { installPerformanceMeasureGuard } from './utils/performanceMeasureGuard'
+import { startManagedMediaReferenceScanner } from './services/managedMediaReferenceBootstrap'
 import './assets/main.css'
 import './i18n'
 import { Fragment, StrictMode } from 'react'
@@ -50,6 +51,7 @@ function scheduleDevReload(reason: unknown): void {
 }
 
 installPerformanceMeasureGuard()
+startManagedMediaReferenceScanner()
 
 function forceStartupHomeRoute(): void {
   if (!store.getState().layout.startupRestorePending) {
