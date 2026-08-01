@@ -73,6 +73,9 @@ const hoisted = vi.hoisted(() => ({
   selectFileMock: vi.fn(),
   fileToBlobUrlMock: vi.fn(() => 'blob:chat-draft'),
   fileToDataUrlMock: vi.fn(async () => 'data:application/octet-stream;base64,QUJD'),
+  importManagedFileMock: vi.fn(),
+  importManagedDataUrlMock: vi.fn(),
+  importManagedUrlMock: vi.fn(),
   readTextFileMock: vi.fn(),
   saveImageToDirMock: vi.fn(),
   chatMessageListMock: vi.fn(),
@@ -177,6 +180,11 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     },
     svcHyper: {
       saveImageToDir: hoisted.saveImageToDirMock
+    },
+    svcManagedMedia: {
+      importFile: hoisted.importManagedFileMock,
+      importDataUrl: hoisted.importManagedDataUrlMock,
+      importUrl: hoisted.importManagedUrlMock
     }
   })
 }))
@@ -779,6 +787,28 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.selectFileMock.mockResolvedValue(null)
     hoisted.fileToBlobUrlMock.mockClear()
     hoisted.fileToDataUrlMock.mockClear()
+    const managedResponse = {
+      version: 1 as const,
+      reference: {
+        version: 1 as const,
+        kind: 'managed' as const,
+        relativePath: `originals/${'a'.repeat(64)}.png`,
+        sha256: 'a'.repeat(64),
+        mimeType: 'image/png',
+        sizeBytes: 3,
+        originalFileName: 'attachment.png'
+      },
+      localMediaUrl: 'media://managed/original.png',
+      mimeType: 'image/png',
+      sizeBytes: 3,
+      sha256: 'a'.repeat(64)
+    }
+    hoisted.importManagedFileMock.mockReset()
+    hoisted.importManagedFileMock.mockResolvedValue(managedResponse)
+    hoisted.importManagedDataUrlMock.mockReset()
+    hoisted.importManagedDataUrlMock.mockResolvedValue(managedResponse)
+    hoisted.importManagedUrlMock.mockReset()
+    hoisted.importManagedUrlMock.mockResolvedValue(managedResponse)
     hoisted.requestChatCompletionMock.mockImplementation(
       async ({
         skillRuntime,
