@@ -24,6 +24,7 @@ class FakeIDBObjectStore {
     private storeName: string,
     private state: {
       failGetAllOnce: boolean
+      failPutOnce: boolean
       getAllCount: number
       getCount: number
       putCount: number
@@ -89,7 +90,20 @@ class FakeIDBObjectStore {
     return request
   }
 
+  private pendingError: DOMException | null = null
+
+  consumeError(): DOMException | null {
+    const error = this.pendingError
+    this.pendingError = null
+    return error
+  }
+
   put(value: unknown): void {
+    if (this.state.failPutOnce) {
+      this.state.failPutOnce = false
+      this.pendingError = new DOMException('Injected IndexedDB put failure', 'UnknownError')
+      return
+    }
     const record = value as { storageKey?: string; id?: string }
     const key = record.storageKey || record.id
     if (!key) {
@@ -118,6 +132,7 @@ class FakeIDBTransaction {
     private stores: StoreMap,
     private state: {
       failGetAllOnce: boolean
+      failPutOnce: boolean
       getAllCount: number
       getCount: number
       putCount: number
@@ -125,8 +140,8 @@ class FakeIDBTransaction {
     }
   ) {
     setTimeout(() => {
-      this.oncomplete?.()
-    }, 0)
+      if (!this.error) this.oncomplete?.()
+    }, 5)
   }
 
   objectStore(name: string): FakeIDBObjectStore {
@@ -147,6 +162,7 @@ class FakeIDBDatabase {
     private stores: StoreMap,
     private state: {
       failGetAllOnce: boolean
+      failPutOnce: boolean
       getAllCount: number
       getCount: number
       putCount: number
@@ -166,7 +182,22 @@ class FakeIDBDatabase {
   }
 
   transaction(_name: string, _mode: string): FakeIDBTransaction {
-    return new FakeIDBTransaction(this.stores, this.state)
+    const tx = new FakeIDBTransaction(this.stores, this.state)
+    const originalObjectStore = tx.objectStore.bind(tx)
+    tx.objectStore = (name: string) => {
+      const store = originalObjectStore(name)
+      const originalPut = store.put.bind(store)
+      store.put = (value: unknown) => {
+        originalPut(value)
+        const error = store.consumeError()
+        if (error) {
+          tx.error = error
+          setTimeout(() => tx.onerror?.(), 0)
+        }
+      }
+      return store
+    }
+    return tx
   }
 
   close(): void {
@@ -177,6 +208,7 @@ class FakeIDBDatabase {
 function createFakeIndexedDb() {
   const state = {
     failGetAllOnce: true,
+    failPutOnce: false,
     getAllCount: 0,
     getCount: 0,
     putCount: 0,
@@ -495,6 +527,53 @@ describe('chatStorage', () => {
       media: reference
     })
     expect(second).toEqual(first)
+  })
+
+  it('reclaims newly migrated media when persistence replacement fails', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const legacyDataUrl = 'data:image/png;base64,AAAA'
+    const reference = {
+      version: 1 as const,
+      kind: 'managed' as const,
+      sha256: 'd'.repeat(64),
+      relativePath: `originals/dd/${'d'.repeat(64)}.png`,
+      sizeBytes: 1024,
+      mimeType: 'image/png',
+      originalFileName: 'legacy.png'
+    }
+    const checkpoint = {
+      version: 1 as const,
+      reclaim: { reference }
+    }
+    managedMediaApiMock.migrateLegacyDataUrl.mockResolvedValue({
+      reference,
+      localMediaUrl: 'local-media:///originals/dd/legacy.png',
+      checkpoint
+    })
+
+    await storage.saveSessionToDB(
+      {
+        id: 'legacy-persist-failure',
+        title: 'Legacy persistence failure',
+        messages: [
+          {
+            role: 'user',
+            content: '',
+            attachments: [{ type: 'image', url: legacyDataUrl, fileName: 'legacy.png' }]
+          }
+        ]
+      },
+      'workspace-a'
+    )
+    fakeIndexedDb.state.failPutOnce = true
+
+    const loaded = await storage.loadSessionFromDB('legacy-persist-failure', 'workspace-a')
+
+    expect(loaded?.messages[0]?.attachments?.[0]).toMatchObject({ url: legacyDataUrl })
+    expect(managedMediaApiMock.reclaimLegacyMigration).toHaveBeenCalledWith(checkpoint)
   })
 
   it('keeps legacy inline media unchanged when managed migration fails', async () => {
