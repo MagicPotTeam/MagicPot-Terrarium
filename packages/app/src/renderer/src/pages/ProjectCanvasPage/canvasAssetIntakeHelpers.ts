@@ -455,7 +455,7 @@ export async function buildCanvasImagePreviewFromBlob({
   }
 }
 
-export async function readFileAsDataURL(file: File): Promise<string> {
+export async function readFileAsDataURL(file: Blob): Promise<string> {
   return await new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve(String(reader.result))

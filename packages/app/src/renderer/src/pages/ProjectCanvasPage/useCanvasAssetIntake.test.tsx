@@ -268,6 +268,105 @@ describe('useCanvasAssetIntake', () => {
     expect(results).toEqual(inputs.filter((value) => value !== 2))
   })
 
+  it('imports path-backed images through managed media without retaining sourceFile', async () => {
+    const originalImageCtor = window.Image
+    const originalApi = window.api
+    const importFile = vi.fn().mockResolvedValue({
+      localMediaUrl: 'local-media:///managed/path-image.png',
+      reference: { relativePath: 'managed/path-image.png' }
+    })
+    const importDataUrl = vi.fn()
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: { svcManagedMedia: { importFile, importDataUrl } }
+    })
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 32 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 24 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set: () => window.setTimeout(() => image.onload?.(new Event('load')), 0)
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const source = {
+        src: 'local-media:///C:/incoming/path-image.png',
+        fileName: 'path-image.png',
+        sizeBytes: 4
+      } satisfies CanvasImageSourceInput
+      const onComplete = vi.fn()
+      render(<LargeImageBatchHarness sources={[source]} onComplete={onComplete} />)
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+
+      expect(importFile).toHaveBeenCalledWith({
+        sourcePath: 'C:/incoming/path-image.png',
+        mimeType: 'image/png',
+        originalFileName: 'path-image.png'
+      })
+      expect(importDataUrl).not.toHaveBeenCalled()
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[]]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+      expect(imageItem?.src).toBe('local-media:///managed/path-image.png')
+      expect(imageItem).not.toHaveProperty('sourceFile')
+    } finally {
+      window.Image = originalImageCtor
+      Object.defineProperty(window, 'api', { configurable: true, value: originalApi })
+    }
+  })
+
+  it('imports pathless Files as data URLs without retaining sourceFile', async () => {
+    const originalImageCtor = window.Image
+    const originalApi = window.api
+    const importFile = vi.fn()
+    const importDataUrl = vi.fn().mockResolvedValue({
+      localMediaUrl: 'local-media:///managed/pathless.png',
+      reference: { relativePath: 'managed/pathless.png' }
+    })
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: { svcManagedMedia: { importFile, importDataUrl } }
+    })
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 32 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 24 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set: () => window.setTimeout(() => image.onload?.(new Event('load')), 0)
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const sourceFile = new File(['png'], 'pathless.png', { type: 'image/png' })
+      const source = {
+        src: 'blob:pathless-image',
+        fileName: sourceFile.name,
+        sizeBytes: sourceFile.size,
+        sourceFile
+      } satisfies CanvasImageSourceInput
+      const onComplete = vi.fn()
+      render(<LargeImageBatchHarness sources={[source]} onComplete={onComplete} />)
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+
+      expect(importFile).not.toHaveBeenCalled()
+      expect(importDataUrl).toHaveBeenCalledWith({
+        dataUrl: 'data:image/png;base64,cG5n',
+        originalFileName: 'pathless.png'
+      })
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[]]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+      expect(imageItem?.src).toBe('local-media:///managed/pathless.png')
+      expect(imageItem).not.toHaveProperty('sourceFile')
+    } finally {
+      window.Image = originalImageCtor
+      Object.defineProperty(window, 'api', { configurable: true, value: originalApi })
+    }
+  })
+
   it('creates source-only lazy items for large image batches after the first-screen eager budget', async () => {
     const originalImageCtor = window.Image
     const loadedSources: string[] = []

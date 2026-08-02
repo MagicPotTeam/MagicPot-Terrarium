@@ -868,8 +868,6 @@ export function useCanvasFileIntake({
         src,
         fileName: file.name,
         sizeBytes: file.size,
-        // Durable local-media/file URLs can be reopened through the preload filesystem bridge.
-        // Do not keep every File object in React canvas state for large Electron imports.
         ...(shouldRetainSourceFile ? { sourceFile: file } : {}),
         ...(sourceIdentity ? { sourceIdentity } : {})
       }

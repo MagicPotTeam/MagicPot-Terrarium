@@ -1,6 +1,7 @@
 import React from 'react'
 import { Box, Button, Menu, MenuItem, TextField, Typography, ListItemText } from '@mui/material'
 import ChevronRightIcon from '@mui/icons-material/ChevronRight'
+import type { CanvasSaveOptions } from './projectCanvasPageShared'
 
 type TranslateFn = (key: string, options?: Record<string, unknown>) => string
 
@@ -20,7 +21,7 @@ interface ProjectCanvasPageExportMenusProps {
   handleCloseExportSubmenu: () => void
   handleExportCanvasProjectFile: () => void | Promise<void>
   handleExportScopeWithFormat: (scope: ExportScope, format: ExportFormat) => void
-  handleSaveCanvas: () => void | Promise<void>
+  handleSaveCanvas: (options?: CanvasSaveOptions) => void | Promise<void>
   handleSaveCanvasAs: () => void | Promise<void>
   handleSaveCanvasAsFromContextMenu: () => void | Promise<void>
   openExportSubmenu: (anchorEl: HTMLElement) => void

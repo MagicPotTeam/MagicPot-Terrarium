@@ -1280,7 +1280,9 @@ export async function saveCanvasItems(
     // 1. Persist blob-backed binary data (image / model3d / video / file).
     const blobItems = items.filter(
       (item): item is BlobPersistableCanvasItem =>
-        isBlobPersistableCanvasItem(item) && hasLocallyPersistableCanvasSrc(item)
+        isBlobPersistableCanvasItem(item) &&
+        hasLocallyPersistableCanvasSrc(item) &&
+        !(item.type === 'image' && item.media?.kind === 'managed')
     )
     const persistedBlobEntries = (
       await Promise.all(

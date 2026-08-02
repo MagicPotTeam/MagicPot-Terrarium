@@ -49,25 +49,26 @@ describe('chatAttachmentUtils', () => {
     })
 
     const media = {
-      id: 'media-1',
-      kind: 'image' as const,
+      version: 1 as const,
+      kind: 'managed' as const,
       mimeType: 'image/png',
       originalFileName: 'preview.png',
-      relativePath: 'images/preview.png',
-      createdAt: '2026-01-01T00:00:00.000Z'
+      relativePath: 'images/preview.png'
     }
     const mediaLookup = vi.fn().mockReturnValue('file:///managed/preview.png')
 
-    expect(resolveChatAttachmentSource({ type: 'image', media }, { mediaLookup })).toEqual({
-      status: 'resolved',
-      url: 'file:///managed/preview.png',
-      source: 'media'
-    })
+    expect(resolveChatAttachmentSource({ type: 'image', url: '', media }, { mediaLookup })).toEqual(
+      {
+        status: 'resolved',
+        url: 'file:///managed/preview.png',
+        source: 'media'
+      }
+    )
     expect(mediaLookup).toHaveBeenCalledWith(media)
   })
 
   it('reports a missing attachment source', () => {
-    expect(resolveChatAttachmentSource({ type: 'file' })).toEqual({
+    expect(resolveChatAttachmentSource({ type: 'file', url: '' })).toEqual({
       status: 'unavailable',
       reason: 'missing-source'
     })

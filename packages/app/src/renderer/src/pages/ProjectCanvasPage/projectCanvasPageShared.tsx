@@ -37,6 +37,10 @@ export type AvailableQAppOption = {
   name: string
 }
 
+export type CanvasSaveOptions = {
+  suppressNotifications?: boolean
+}
+
 export const RhombusIconSVG = (props: SvgIconProps) => (
   <SvgIcon {...props}>
     <path d="M12 2L22 12L12 22L2 12Z" />

@@ -84,6 +84,8 @@ const expectSanitizedFailure = async (promise: Promise<unknown>): Promise<void> 
 describe('ManagedMediaSvcImpl', () => {
   it('imports and deduplicates a valid selected file path or file URI', async () => {
     await withImportFixture(async ({ media, source }) => {
+      const { rememberTrustedLocalFileSelections } = await import('./trustedFileSelection')
+      rememberTrustedLocalFileSelections([source])
       const service = new ManagedMediaSvcImpl({ getMediaDir: () => media })
       const request = {
         sourcePath: source,
@@ -118,6 +120,8 @@ describe('ManagedMediaSvcImpl', () => {
 
   it('lets the store reject symlink and managed-root sources and enforce max size', async () => {
     await withImportFixture(async ({ root, media, source }) => {
+      const { rememberTrustedLocalFileSelections } = await import('./trustedFileSelection')
+      rememberTrustedLocalFileSelections([source])
       const service = new ManagedMediaSvcImpl({ getMediaDir: () => media })
       const link = path.join(root, 'link.png')
       try {

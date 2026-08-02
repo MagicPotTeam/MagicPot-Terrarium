@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ComfyHistory } from '@shared/comfy/types'
+import { createComfyResultResourceManager } from '@renderer/store/comfyResultResources'
 import { transformResults } from './index'
 
 const getViewMock = vi.fn()
@@ -125,6 +126,25 @@ describe('transformImage', () => {
     expect(image.objectUrl).toBe('blob:image-result')
     expect(image.sourceBlob).toBeInstanceOf(Blob)
     expect(getViewMock).toHaveBeenCalledOnce()
+  })
+
+  it('tracks the fallback object URL for result teardown', async () => {
+    delete svcComfy.importOutputImage
+    const revokeObjectURL = vi.fn()
+    const manager = createComfyResultResourceManager(revokeObjectURL)
+
+    const results = await transformResults('prompt-1', createHistory())
+    manager.sync([], results)
+    manager.teardown()
+
+    expect(URL.createObjectURL).toHaveBeenCalledOnce()
+    expect(revokeObjectURL).toHaveBeenCalledOnce()
+    const result = results[0]
+    expect(result?.type).toBe('image')
+    if (!result || result.type !== 'image') {
+      throw new Error('Expected transformed image result')
+    }
+    expect(revokeObjectURL).toHaveBeenCalledWith(result.objectUrl)
   })
 
   it('falls back after a strict serialized service rejection', async () => {

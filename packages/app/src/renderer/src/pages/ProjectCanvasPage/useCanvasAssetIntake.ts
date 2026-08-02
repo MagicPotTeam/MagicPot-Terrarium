@@ -8,14 +8,19 @@ import {
 } from 'react'
 import type { ChatAttachment, OCRResult } from '@shared/api/svcLLMProxy'
 import type { FileItem } from '@shared/comfy/types'
-import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
+import { MAX_MANAGED_MEDIA_IMPORT_BYTES } from '@shared/api/svcManagedMedia'
+import {
+  getDownloadFileNameFromUrl,
+  normalizeLocalMediaUrl,
+  resolveLocalMediaPathFromUrl
+} from '../ChatPage/chatPageShared'
+import { guessMimeTypeFromFileName } from '@renderer/utils/fileDisplay'
 import { FILE_NODE_DEFAULT_HEIGHT, FILE_NODE_DEFAULT_WIDTH } from './projectCanvasPageShared'
 import { importCanvasFile } from './canvasStorage'
 import { resolveCanvas3DRenderActivationDelay } from './canvas3DRenderActivation'
 import {
   authorizeCanvasLocalMediaSourceUrl,
-  getCanvasLocalMediaSourceUrl,
-  getElectronCanvasFilePath
+  getCanvasLocalMediaSourceUrl
 } from './canvasLocalFileSource'
 import { readCanvasLocalImageBlobFromSource } from './canvasLocalImageSource'
 import {
@@ -119,11 +124,14 @@ type AddCanvasImageOptions = {
   sizeBytes?: number
   hasAlpha?: boolean
   sourceFile?: Blob
+  sourcePath?: string
+  sourceMimeType?: string
   sourceIdentity?: CanvasImageItem['sourceIdentity']
   thumbnailSet?: CanvasImageItem['thumbnailSet']
   provenance?: CanvasProvenanceSource
   promptId?: string
   fileItem?: FileItem
+  media?: CanvasImageItem['media']
   sourceWidthHint?: number
   sourceHeightHint?: number
   select?: boolean
@@ -163,7 +171,66 @@ type AddOcrResultToCanvasOptions = {
 }
 
 type CanvasImageInput = CanvasImageSourceInput
-type NormalizedCanvasImageSource = Exclude<CanvasImageSourceInput, string>
+type NormalizedCanvasImageSource = Exclude<CanvasImageSourceInput, string> & {
+  media?: CanvasImageItem['media']
+  sourcePath?: string
+  sourceMimeType?: string
+}
+
+const MANAGED_MEDIA_SAFE_FILE_NAME_PATTERN = /^[^\\/\p{Cc}<>:"|?*]+$/u
+
+function canImportCanvasImageAsManagedMedia(
+  sizeBytes: number,
+  mimeType: string,
+  fileName: string
+): boolean {
+  return (
+    sizeBytes > 0 &&
+    sizeBytes <= MAX_MANAGED_MEDIA_IMPORT_BYTES &&
+    mimeType.startsWith('image/') &&
+    fileName.length > 0 &&
+    fileName.length <= 255 &&
+    fileName !== '.' &&
+    fileName !== '..' &&
+    !/[. ]$/u.test(fileName) &&
+    !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/iu.test(fileName) &&
+    MANAGED_MEDIA_SAFE_FILE_NAME_PATTERN.test(fileName)
+  )
+}
+
+async function importCanvasImageSourceToManagedMedia(
+  source: NormalizedCanvasImageSource
+): Promise<NormalizedCanvasImageSource> {
+  const sourceFile = source.sourceFile
+  const sourcePath = source.sourcePath || resolveLocalMediaPathFromUrl(source.src) || ''
+  const managedMedia = typeof window !== 'undefined' ? window.api?.svcManagedMedia : undefined
+  if ((!sourceFile && !sourcePath) || !managedMedia) return source
+
+  const fileName = source.fileName || (sourceFile instanceof File ? sourceFile.name : '')
+  const mimeType =
+    source.sourceMimeType || sourceFile?.type || guessMimeTypeFromFileName(fileName) || ''
+  const sizeBytes = source.sizeBytes ?? sourceFile?.size ?? 0
+  if (!canImportCanvasImageAsManagedMedia(sizeBytes, mimeType, fileName)) return source
+
+  const imported = sourcePath
+    ? await managedMedia.importFile({
+        sourcePath,
+        mimeType,
+        originalFileName: fileName
+      })
+    : await managedMedia.importDataUrl({
+        dataUrl: await readFileAsDataURL(sourceFile!),
+        originalFileName: fileName
+      })
+
+  if (source.src.startsWith('blob:')) URL.revokeObjectURL(source.src)
+  const { sourceFile: _sourceFile, sourcePath: _sourcePath, ...rest } = source
+  return {
+    ...rest,
+    src: imported.localMediaUrl,
+    media: imported.reference
+  }
+}
 
 export type CanvasImageBatchImportProgressPhase =
   | 'preparing'
@@ -1026,6 +1093,25 @@ export function useCanvasAssetIntake({
     async (src: string, options: AddCanvasImageOptions = {}) => {
       let canvasOwnedObjectUrl: string | null = null
       try {
+        if (options.sourceFile || options.sourcePath) {
+          const managedSource = await importCanvasImageSourceToManagedMedia({
+            src,
+            ...(options.fileName ? { fileName: options.fileName } : {}),
+            ...(typeof options.sizeBytes === 'number' ? { sizeBytes: options.sizeBytes } : {}),
+            ...(options.sourceFile ? { sourceFile: options.sourceFile } : {}),
+            ...(options.sourcePath ? { sourcePath: options.sourcePath } : {}),
+            ...(options.sourceMimeType ? { sourceMimeType: options.sourceMimeType } : {})
+          })
+          if (managedSource.media) {
+            src = managedSource.src
+            options = {
+              ...options,
+              sourceFile: undefined,
+              sourcePath: undefined,
+              media: managedSource.media
+            }
+          }
+        }
         if (options.sourceFile && src.startsWith('blob:')) {
           const sourceFile: Blob = options.sourceFile
           let localMediaSrc: string | null = null
@@ -1060,6 +1146,7 @@ export function useCanvasAssetIntake({
           provenance,
           promptId,
           fileItem,
+          media,
           sourceWidthHint,
           sourceHeightHint,
           select,
@@ -1123,6 +1210,7 @@ export function useCanvasAssetIntake({
             ...(typeof resolvedHasAlpha === 'boolean' ? { hasAlpha: resolvedHasAlpha } : {}),
             ...(promptId ? { promptId } : {}),
             ...(fileItem ? { fileItem } : {}),
+            ...(media ? { media } : {}),
             x: pos.x,
             y: pos.y,
             width: fittedSize.width,
@@ -1182,6 +1270,7 @@ export function useCanvasAssetIntake({
               : {}),
             ...(promptId ? { promptId } : {}),
             ...(fileItem ? { fileItem } : {}),
+            ...(media ? { media } : {}),
             x: pos.x,
             y: pos.y,
             width: thumbnailFirstEntry.width,
@@ -1263,6 +1352,7 @@ export function useCanvasAssetIntake({
           ...(typeof resolvedHasAlpha === 'boolean' ? { hasAlpha: resolvedHasAlpha } : {}),
           ...(promptId ? { promptId } : {}),
           ...(fileItem ? { fileItem } : {}),
+          ...(media ? { media } : {}),
           x: pos.x,
           y: pos.y,
           width: fittedSize.width,
@@ -1326,6 +1416,7 @@ export function useCanvasAssetIntake({
           .map((source) => (typeof source === 'string' ? { src: source } : source))
           .filter((source): source is NormalizedCanvasImageSource => Boolean(source.src))
           .map(async (source) => {
+            source = await importCanvasImageSourceToManagedMedia(source)
             if (!source.sourceFile || !source.src.startsWith('blob:')) {
               return source
             }
@@ -1470,6 +1561,7 @@ export function useCanvasAssetIntake({
                   ? { sourceIdentity: entry.source.sourceIdentity }
                   : {}),
                 ...(entry.thumbnailSet ? { thumbnailSet: entry.thumbnailSet } : {}),
+                ...(entry.source.media ? { media: entry.source.media } : {}),
                 x: layoutEntry?.x ?? fallbackCenterPosition.x,
                 y: (layoutEntry?.y ?? fallbackCenterPosition.y) + batchYOffset,
                 width: layoutEntry?.width ?? entry.width,
@@ -1685,6 +1777,7 @@ export function useCanvasAssetIntake({
                 sizeBytes: thumbnailFirstEntry.sizeBytes,
                 hasAlpha: thumbnailFirstEntry.hasAlpha,
                 provenance: source.provenance,
+                media: source.media,
                 img: thumbnailFirstEntry.displayImage,
                 sourceIdentity: source.sourceIdentity,
                 thumbnailSet: thumbnailFirstEntry.thumbnailSet,
@@ -1730,6 +1823,7 @@ export function useCanvasAssetIntake({
               sizeBytes: resolvedSizeBytes,
               hasAlpha: resolvedHasAlpha,
               provenance: source.provenance,
+              media: source.media,
               img: thumbnailPreview.displayImage ?? displayImage,
               sourceIdentity: source.sourceIdentity,
               thumbnailSet: thumbnailPreview.thumbnailSet,
@@ -1803,6 +1897,7 @@ export function useCanvasAssetIntake({
           image: entry.img,
           ...(entry.sourceIdentity ? { sourceIdentity: entry.sourceIdentity } : {}),
           ...(entry.thumbnailSet ? { thumbnailSet: entry.thumbnailSet } : {}),
+          ...(entry.media ? { media: entry.media } : {}),
           sourceWidth: entry.sourceWidth,
           sourceHeight: entry.sourceHeight
         })

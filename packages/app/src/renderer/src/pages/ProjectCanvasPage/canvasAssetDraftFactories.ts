@@ -72,6 +72,7 @@ export function createCanvasImageItemDraft(
     thumbnailSet?: CanvasImageItem['thumbnailSet']
     promptId?: string
     fileItem?: CanvasImageItem['fileItem']
+    media?: CanvasImageItem['media']
     ocrBundleId?: string
     reportBundleId?: CanvasImageItem['reportBundleId']
     reportBundleRole?: CanvasImageItem['reportBundleRole']
@@ -94,6 +95,7 @@ export function createCanvasImageItemDraft(
     ...(typeof options.sourceHeight === 'number' ? { sourceHeight: options.sourceHeight } : {}),
     ...(options.promptId ? { promptId: options.promptId } : {}),
     ...(options.fileItem ? { fileItem: options.fileItem } : {}),
+    ...(options.media ? { media: options.media } : {}),
     ...(options.ocrBundleId ? { ocrBundleId: options.ocrBundleId } : {}),
     ...(options.reportBundleId ? { reportBundleId: options.reportBundleId } : {}),
     ...(options.reportBundleRole ? { reportBundleRole: options.reportBundleRole } : {}),
