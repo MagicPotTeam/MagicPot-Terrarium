@@ -1701,18 +1701,32 @@ describe('ChatMessageList dynamic-height virtualization', () => {
     expect(scroller.scrollTop).toBe(525)
   })
 
-  it('preserves no-id row identity when messages are prepended', () => {
+  it('preserves id-less virtualized media row identity across insertion and reorder', () => {
     const chatContainerRef = React.createRef<HTMLDivElement>()
-    const originalMessages = virtualSession.messages
-    const rendered = renderChatMessageList(virtualSession, { chatContainerRef })
+    const firstMediaMessage: ChatMessage = {
+      role: 'assistant',
+      content: 'Stable media row A',
+      attachments: [{ type: 'image', url: 'C:/demo/stable-a.png' }]
+    }
+    const secondMediaMessage: ChatMessage = {
+      role: 'assistant',
+      content: 'Stable media row B',
+      attachments: [{ type: 'image', url: 'C:/demo/stable-b.png' }]
+    }
+    const remainingMessages = virtualSession.messages.slice(2)
+    const originalMessages = [firstMediaMessage, secondMediaMessage, ...remainingMessages]
+    const rendered = renderChatMessageList(
+      { ...virtualSession, messages: originalMessages },
+      { chatContainerRef }
+    )
     const scroller = screen.getByTestId('chat-message-list')
     Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
 
     act(() => fireEvent.scroll(scroller))
-    const originalIdentity = screen
-      .getByText('Virtual message 0')
-      .closest('[data-chat-message-identity]')
-      ?.getAttribute('data-chat-message-identity')
+    const firstRow = screen.getByText('Stable media row A').closest('[data-chat-message-identity]')
+    const secondRow = screen.getByText('Stable media row B').closest('[data-chat-message-identity]')
+    expect(firstRow).toBeTruthy()
+    expect(secondRow).toBeTruthy()
 
     rendered.rerender(
       buildChatMessageList(
@@ -1724,12 +1738,32 @@ describe('ChatMessageList dynamic-height virtualization', () => {
       )
     )
 
+    expect(screen.getByText('Stable media row A').closest('[data-chat-message-identity]')).toBe(
+      firstRow
+    )
+    expect(screen.getByText('Stable media row B').closest('[data-chat-message-identity]')).toBe(
+      secondRow
+    )
+
+    rendered.rerender(
+      buildChatMessageList(
+        {
+          ...virtualSession,
+          messages: [secondMediaMessage, firstMediaMessage, ...remainingMessages]
+        },
+        { chatContainerRef }
+      )
+    )
+
+    expect(screen.getByText('Stable media row A').closest('[data-chat-message-identity]')).toBe(
+      firstRow
+    )
+    expect(screen.getByText('Stable media row B').closest('[data-chat-message-identity]')).toBe(
+      secondRow
+    )
     expect(
-      screen
-        .getByText('Virtual message 0')
-        .closest('[data-chat-message-identity]')
-        ?.getAttribute('data-chat-message-identity')
-    ).toBe(originalIdentity)
+      Array.from(scroller.querySelectorAll('[data-chat-message-identity]')).slice(0, 2)
+    ).toEqual([secondRow, firstRow])
   })
 
   it('keeps virtualization active when context compression is present', () => {

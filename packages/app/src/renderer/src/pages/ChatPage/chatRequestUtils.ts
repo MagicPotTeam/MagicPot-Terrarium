@@ -171,7 +171,7 @@ const isPublicHttpsUrl = (value: string): boolean => {
 
 const normalizeImageAttachmentForRequest = async (
   attachment: ChatAttachment,
-  options: { allowAccessibleUrl?: boolean }
+  options: { allowRequestDataUrl?: boolean; allowAccessibleUrl?: boolean }
 ): Promise<ChatAttachment> => {
   if (
     attachment.type !== 'image' ||
@@ -180,6 +180,12 @@ const normalizeImageAttachmentForRequest = async (
     (options.allowAccessibleUrl && isPublicHttpsUrl(attachment.url))
   ) {
     return attachment
+  }
+
+  if (!options.allowRequestDataUrl) {
+    throw new Error(
+      `Unable to prepare image attachment "${attachment.fileName || 'image'}" for the model: request-data-url transport is not supported`
+    )
   }
 
   try {
@@ -209,7 +215,8 @@ const normalizeImageAttachmentForRequest = async (
 }
 
 const normalizeFileAttachmentForRequest = async (
-  attachment: ChatAttachment
+  attachment: ChatAttachment,
+  options: { allowRequestDataUrl?: boolean }
 ): Promise<ChatAttachment> => {
   if (
     attachment.type !== 'file' ||
@@ -218,6 +225,12 @@ const normalizeFileAttachmentForRequest = async (
     !normalizeLocalMediaUrl(attachment.url).startsWith('local-media://')
   ) {
     return attachment
+  }
+
+  if (!options.allowRequestDataUrl) {
+    throw new Error(
+      `Unable to prepare file attachment "${attachment.fileName || 'file'}" for the model: request-data-url transport is not supported`
+    )
   }
 
   try {
@@ -239,12 +252,10 @@ const normalizeFileAttachmentForRequest = async (
           : blob.size
     }
   } catch (error) {
-    console.warn(
-      '[ChatPage] Failed to normalize file attachment for request:',
-      attachment.fileName || attachment.url,
-      error
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `Unable to prepare file attachment "${attachment.fileName || 'file'}" for the model: ${reason}`
     )
-    return attachment
   }
 }
 
@@ -253,6 +264,7 @@ export const normalizeChatAttachmentsForRequest = async (
   options: {
     managedMediaService?: ManagedMediaSvc
     allowManagedRequestDataUrl?: boolean
+    allowRequestDataUrl?: boolean
     allowAccessibleUrl?: boolean
   } = {}
 ): Promise<ChatAttachment[] | undefined> => {
@@ -286,7 +298,7 @@ export const normalizeChatAttachmentsForRequest = async (
       return attachment.type === 'image'
         ? normalizeImageAttachmentForRequest(attachment, options)
         : attachment.type === 'file'
-          ? normalizeFileAttachmentForRequest(attachment)
+          ? normalizeFileAttachmentForRequest(attachment, options)
           : attachment
     })
   )
@@ -621,6 +633,7 @@ const prepareMessagesForRequest = async (
     skipInlineAttachmentSummary?: (attachment: ChatAttachment) => boolean
     managedMediaService?: ManagedMediaSvc
     allowManagedRequestDataUrl?: boolean
+    allowRequestDataUrl?: boolean
     allowAccessibleUrl?: boolean
   } = {}
 ): Promise<ChatMessage[]> => {
@@ -1235,7 +1248,11 @@ export const resolveAttachmentBatchCapability = async (
 export const resolveAttachmentRequestCapabilities = (
   config: Config,
   profileId?: string | null
-): { allowManagedRequestDataUrl: boolean; allowAccessibleUrl: boolean } => {
+): {
+  allowManagedRequestDataUrl: boolean
+  allowRequestDataUrl: boolean
+  allowAccessibleUrl: boolean
+} => {
   const capabilities = resolveChatProfileCapabilities(resolveRequestProfile(config, profileId))
   const requestDataUrlTransport = selectProviderAttachmentTransport(capabilities, {
     available: { 'request-data-url': true },
@@ -1247,6 +1264,7 @@ export const resolveAttachmentRequestCapabilities = (
   })
   return {
     allowManagedRequestDataUrl: requestDataUrlTransport === 'request-data-url',
+    allowRequestDataUrl: requestDataUrlTransport === 'request-data-url',
     allowAccessibleUrl: accessibleUrlTransport === 'accessible-url'
   }
 }
