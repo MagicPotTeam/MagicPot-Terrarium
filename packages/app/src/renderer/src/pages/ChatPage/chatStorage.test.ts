@@ -487,6 +487,10 @@ describe('chatStorage', () => {
       mimeType: 'image/png',
       originalFileName: 'legacy.png'
     }
+    const checkpoint = {
+      version: 1 as const,
+      reclaim: { reference }
+    }
     let releaseMigration: (() => void) | undefined
     managedMediaApiMock.migrateLegacyDataUrl.mockReturnValue(
       new Promise((resolve) => {
@@ -494,8 +498,7 @@ describe('chatStorage', () => {
           resolve({
             reference,
             localMediaUrl: 'local-media:///originals/legacy.png',
-            createdNewOriginal: true,
-            createdNewMetadata: true
+            checkpoint
           })
       })
     )
@@ -514,6 +517,7 @@ describe('chatStorage', () => {
       },
       'workspace-a'
     )
+    const baselinePutCount = fakeIndexedDb.state.putCount
 
     const firstRead = storage.loadSessionFromDB('legacy-single-flight', 'workspace-a')
     const secondRead = storage.loadSessionFromDB('legacy-single-flight', 'workspace-a')
@@ -527,6 +531,15 @@ describe('chatStorage', () => {
       media: reference
     })
     expect(second).toEqual(first)
+    expect(second?.messages[0]?.attachments?.[0]?.media).toEqual(reference)
+    expect(fakeIndexedDb.state.putCount - baselinePutCount).toBe(1)
+    expect(managedMediaApiMock.reclaimLegacyMigration).not.toHaveBeenCalled()
+
+    await expect(storage.loadSessionFromDB('legacy-single-flight', 'workspace-a')).resolves.toEqual(
+      first
+    )
+    expect(managedMediaApiMock.migrateLegacyDataUrl).toHaveBeenCalledOnce()
+    expect(fakeIndexedDb.state.putCount - baselinePutCount).toBe(1)
   })
 
   it('reclaims newly migrated media when persistence replacement fails', async () => {

@@ -343,6 +343,60 @@ describe('ChatMessageList text selection and reply actions', () => {
     }
   })
 
+  it('restores independent scroll positions after switching from session A to B and back', () => {
+    const sessionA: ChatSession = {
+      id: 'session-scroll-a',
+      title: 'Session A',
+      messages: [{ role: 'assistant', content: 'Session A message' }]
+    }
+    const sessionB: ChatSession = {
+      id: 'session-scroll-b',
+      title: 'Session B',
+      messages: [{ role: 'assistant', content: 'Session B message' }]
+    }
+    const chatContainerRef = React.createRef<HTMLDivElement>()
+    const messagesEndRef = React.createRef<HTMLDivElement>()
+    const { rerender } = renderChatMessageList(sessionA, {
+      chatContainerRef,
+      messagesEndRef
+    })
+    const scrollContainer = screen.getByTestId('chat-message-list')
+
+    act(() => {
+      scrollContainer.scrollTop = 240
+      fireEvent.scroll(scrollContainer)
+    })
+
+    rerender(
+      buildChatMessageList(sessionB, {
+        chatContainerRef,
+        messagesEndRef
+      })
+    )
+    expect(scrollContainer.scrollTop).toBe(0)
+
+    act(() => {
+      scrollContainer.scrollTop = 120
+      fireEvent.scroll(scrollContainer)
+    })
+
+    rerender(
+      buildChatMessageList(sessionA, {
+        chatContainerRef,
+        messagesEndRef
+      })
+    )
+    expect(scrollContainer.scrollTop).toBe(240)
+
+    rerender(
+      buildChatMessageList(sessionB, {
+        chatContainerRef,
+        messagesEndRef
+      })
+    )
+    expect(scrollContainer.scrollTop).toBe(120)
+  })
+
   it('keeps a manually moved caret and scroll position while typing near the start', async () => {
     const user = userEvent.setup()
     const content = Array.from({ length: 50 }, (_, index) => `Line ${index + 1}`).join(
