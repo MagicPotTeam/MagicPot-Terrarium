@@ -44,9 +44,11 @@ import {
   normalizeLLMChatResult,
   normalizeOpenAIBaseUrl,
   parseStructuredLLMChatResult,
+  resolveChatProfileCapabilities,
   resolveProfileDeployment,
   resolveProfileProvider,
   resolveProfileModelUse,
+  selectProviderAttachmentTransport,
   resolveTaggerProviderDescriptor,
   resolveTaggerRuntimeDescriptor,
   isTaggerSkillRuntime,
@@ -66,6 +68,7 @@ import {
   uploadLocalHy3dModel
 } from '../llmProxy/hunyuan3dCos'
 import { validateStructuredSkillOutput } from './skillRuntimeStructuredOutput'
+import { DEFAULT_MANAGED_MEDIA_MAX_BYTES } from '../llmProxy/managedMediaStore'
 import { syncMcpClientManager } from '../mcp/runtime'
 import fs from 'node:fs/promises'
 import { isLocalFileSource } from '../utils/localFileUrl'
@@ -332,6 +335,63 @@ const mergeChatMetadata = (
   return {
     ...(primary || {}),
     ...(secondary || {})
+  }
+}
+
+const STRICT_RASTER_DATA_URL = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/
+
+const validateInlineImageAttachmentTransport = (
+  profile: LLMAPIProfile,
+  messages: ChatMessage[]
+): void => {
+  const provider = resolveProfileProvider(profile)
+  if (provider !== 'gemini' && provider !== 'claude' && provider !== 'ollama') {
+    return
+  }
+
+  const imageAttachments = messages.flatMap((message) =>
+    (message.attachments || []).filter((attachment) => attachment.type === 'image')
+  )
+  if (imageAttachments.length === 0) {
+    return
+  }
+
+  const capabilities = resolveChatProfileCapabilities(profile)
+  const requestDataUrlTransport = selectProviderAttachmentTransport(capabilities, {
+    available: { 'request-data-url': true },
+    requested: 'request-data-url'
+  })
+  if (requestDataUrlTransport !== 'request-data-url') {
+    throw new Error(
+      `Attachment transport error: ${provider} profile "${profile.id}" must declare "request-data-url" before accepting inline image attachments.`
+    )
+  }
+
+  for (const attachment of imageAttachments) {
+    const match = STRICT_RASTER_DATA_URL.exec(attachment.url)
+    if (!match) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" accepts only non-empty canonical base64 data URLs for PNG, JPEG, WebP, or GIF images; URLs, file IDs, and local references are not supported by the built-in client.`
+      )
+    }
+
+    const base64 = match[2]
+    if (base64.length % 4 !== 0) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" received malformed image base64.`
+      )
+    }
+    const decoded = Buffer.from(base64, 'base64')
+    if (decoded.toString('base64') !== base64) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" received non-canonical image base64.`
+      )
+    }
+    if (decoded.byteLength > DEFAULT_MANAGED_MEDIA_MAX_BYTES) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" image exceeds the ${DEFAULT_MANAGED_MEDIA_MAX_BYTES}-byte request attachment limit.`
+      )
+    }
   }
 }
 
@@ -1732,10 +1792,14 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       requestedProfileId,
       signal: options?.signal
     }
+    const extensionCli = mainHostExtensionApiV1.llmProxy
+      .map((extension) => extension.createCli?.(profileWithSelectedKey, extensionContext))
+      .find((client) => Boolean(client))
+    if (!extensionCli) {
+      validateInlineImageAttachmentTransport(profileWithSelectedKey, req.messages)
+    }
     const cli =
-      mainHostExtensionApiV1.llmProxy
-        .map((extension) => extension.createCli?.(profileWithSelectedKey, extensionContext))
-        .find((client) => Boolean(client)) ??
+      extensionCli ??
       cliFromProfile(profileWithSelectedKey, {
         fetchImpl: this.getFetchImpl()
       })

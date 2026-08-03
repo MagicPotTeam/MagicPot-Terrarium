@@ -2,10 +2,11 @@ import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
-import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
+import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
 import { cliFromProfile } from '@shared/llm'
 import * as configModule from '../config/config'
 import type { AssistantRuntime } from '../assistantRuntime/runtime'
+import { DEFAULT_MANAGED_MEDIA_MAX_BYTES } from '../llmProxy/managedMediaStore'
 import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
 import { tripoMainLlmProxyExtension } from '../extensions/tripoMainExtension'
 import {
@@ -253,6 +254,46 @@ describe('LLMProxySvcImpl', () => {
       })
     )
     expect(resp).toEqual({ content: 'extension response' })
+  })
+
+  it('does not impose built-in inline-image assumptions on extension-created clients', async () => {
+    const extensionChat = vi.fn().mockResolvedValue('extension image response')
+    mainHostExtensionApiV1.llmProxy.push({
+      id: 'test-image-extension',
+      createCli: () => ({ chat: extensionChat }) as never
+    })
+    vi.mocked(cliFromProfile).mockReturnValue(undefined as never)
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'extension-ollama',
+            model_name: 'extension-model',
+            base_url: 'https://extension.example',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+
+    const response = await new LLMProxySvcImpl().chat({
+      profileId: 'extension-ollama',
+      messages: [
+        {
+          role: 'user',
+          content: 'extension-owned image',
+          attachments: [
+            { type: 'image', url: 'https://extension.example/image.png', mimeType: 'image/png' }
+          ]
+        }
+      ]
+    })
+
+    expect(extensionChat).toHaveBeenCalledOnce()
+    expect(cliFromProfile).not.toHaveBeenCalled()
+    expect(response.content).toBe('extension image response')
   })
 
   it('allows main-process LLM extensions to transform runtime profile listings', async () => {
@@ -2052,6 +2093,172 @@ describe('LLMProxySvcImpl', () => {
         is_ocr_model: false
       }
     ])
+  })
+
+  it('rejects inline images for an undeclared Ollama attachment transport before provider chat', async () => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'ollama-profile',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileId: 'ollama-profile',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [
+              {
+                type: 'image',
+                url: 'data:image/png;base64,UE5H',
+                mimeType: 'image/png'
+              }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow('must declare "request-data-url"')
+
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
+  it('accepts an already materialized data image when Ollama declares request-data-url', async () => {
+    const providerChat = vi.fn().mockResolvedValue('image accepted')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'ollama-profile',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama',
+            ...({ attachment_transports: ['request-data-url'] } as Partial<LLMAPIProfile> & {
+              attachment_transports: string[]
+            })
+          }
+        ]
+      }
+    })
+
+    const messages = [
+      {
+        role: 'user' as const,
+        content: 'describe this image',
+        attachments: [
+          {
+            type: 'image' as const,
+            url: 'data:image/png;base64,UE5H',
+            mimeType: 'image/png'
+          }
+        ]
+      }
+    ]
+    const response = await new LLMProxySvcImpl().chat({
+      profileId: 'ollama-profile',
+      messages
+    })
+
+    expect(providerChat).toHaveBeenCalledWith(expect.objectContaining({ messages }))
+    expect(response.content).toBe('image accepted')
+  })
+
+  it.each([
+    ['empty payload', 'data:image/png;base64,'],
+    ['missing base64 marker', 'data:image/png,UE5H'],
+    ['invalid base64 characters', 'data:image/png;base64,not-base64'],
+    ['non-canonical base64', 'data:image/png;base64,UE5H=='],
+    ['unsupported image MIME', 'data:image/svg+xml;base64,PHN2Zz4=']
+  ])('rejects %s before built-in provider chat', async (_label, url) => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'ollama-profile',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama',
+            ...({ attachment_transports: ['request-data-url'] } as Partial<LLMAPIProfile> & {
+              attachment_transports: string[]
+            })
+          }
+        ]
+      }
+    })
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileId: 'ollama-profile',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [{ type: 'image', url, mimeType: 'image/png' }]
+          }
+        ]
+      })
+    ).rejects.toThrow(/canonical base64|malformed image base64|non-canonical image base64/)
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
+  it('rejects oversized inline images before built-in provider chat', async () => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'ollama-profile',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama',
+            ...({ attachment_transports: ['request-data-url'] } as Partial<LLMAPIProfile> & {
+              attachment_transports: string[]
+            })
+          }
+        ]
+      }
+    })
+    const oversized = Buffer.alloc(DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1, 1).toString('base64')
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileId: 'ollama-profile',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [
+              { type: 'image', url: `data:image/png;base64,${oversized}`, mimeType: 'image/png' }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(/exceeds the .*request attachment limit/)
+    expect(providerChat).not.toHaveBeenCalled()
   })
 
   it('accepts explicit Ollama providers on generic Agent gateways without API keys', async () => {
