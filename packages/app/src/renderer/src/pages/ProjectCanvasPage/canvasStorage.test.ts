@@ -454,6 +454,59 @@ describe('canvasStorage provenance metadata', () => {
     expect(exportedJson).not.toHaveProperty('qAppCache')
   })
 
+  it('revokes earlier restored URLs when object URL creation fails partway', async () => {
+    const createObjectUrlError = new Error('object URL creation failed')
+    URL.createObjectURL = vi
+      .fn()
+      .mockReturnValueOnce('blob:restored-first')
+      .mockImplementationOnce(() => {
+        throw createObjectUrlError
+      }) as typeof URL.createObjectURL
+
+    const data = {
+      magic: 'MAGICPOT_CANVAS',
+      version: CANVAS_FILE_VERSION,
+      createdAt: '2026-04-01T00:00:00.000Z',
+      items: [],
+      blobs: {
+        first: { base64: 'AQ==', mimeType: 'application/octet-stream' },
+        second: { base64: 'Ag==', mimeType: 'application/octet-stream' }
+      }
+    }
+
+    await expect(
+      importCanvasFile({ text: async () => JSON.stringify(data) } as unknown as File)
+    ).rejects.toBe(createObjectUrlError)
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1)
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:restored-first')
+  })
+
+  it('revokes every restored URL when later item restoration fails', async () => {
+    URL.createObjectURL = vi
+      .fn()
+      .mockReturnValueOnce('blob:restored-first')
+      .mockReturnValueOnce('blob:restored-second') as typeof URL.createObjectURL
+
+    const data = {
+      magic: 'MAGICPOT_CANVAS',
+      version: CANVAS_FILE_VERSION,
+      createdAt: '2026-04-01T00:00:00.000Z',
+      items: [null],
+      blobs: {
+        first: { base64: 'AQ==', mimeType: 'application/octet-stream' },
+        second: { base64: 'Ag==', mimeType: 'application/octet-stream' }
+      }
+    }
+    const file = {
+      text: async () => JSON.stringify(data)
+    } as unknown as File
+
+    await expect(importCanvasFile(file)).rejects.toThrow(TypeError)
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2)
+    expect(URL.revokeObjectURL).toHaveBeenNthCalledWith(1, 'blob:restored-first')
+    expect(URL.revokeObjectURL).toHaveBeenNthCalledWith(2, 'blob:restored-second')
+  })
+
   it('ignores legacy quick-app state during default .mpcanvas imports', async () => {
     const qAppSwitchEvents: string[] = []
     const handleQAppSwitch = (event: Event) => {

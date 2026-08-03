@@ -2207,37 +2207,48 @@ async function restoreCanvasFileData(
     }
   }
 
-  const restoredBlobUrls = new Map(
-    Object.entries(data.blobs || {}).map(([blobKey, embedded]) => {
+  const restoredBlobUrls = new Map<string, string>()
+
+  try {
+    for (const [blobKey, embedded] of Object.entries(data.blobs || {})) {
       const buffer = base64ToArrayBuffer(embedded.base64)
       const blob = new Blob([buffer], { type: embedded.mimeType })
-      return [blobKey, URL.createObjectURL(blob)] as const
-    })
-  )
+      restoredBlobUrls.set(blobKey, URL.createObjectURL(blob))
+    }
 
-  if (persistEmbeddedAssetsToIndexedDb) {
-    await persistCanvasFileEmbeddedAssets(data.blobs, storeKey)
-  }
+    if (persistEmbeddedAssetsToIndexedDb) {
+      await persistCanvasFileEmbeddedAssets(data.blobs, storeKey)
+    }
 
-  if (storageMode === 'project' && !canvasBaseDir) {
-    console.error('[Canvas Import] Project canvas file is missing its base directory context.')
-  }
+    if (storageMode === 'project' && !canvasBaseDir) {
+      console.error('[Canvas Import] Project canvas file is missing its base directory context.')
+    }
 
-  await validateProjectCanvasAssetRefs(data.items, canvasBaseDir, storageMode)
-  const resolvedItems = resolveProjectCanvasAssetUrls(data.items, canvasBaseDir, storageMode)
-  const restoredItems = restorePersistedCanvasItems(resolvedItems, restoredBlobUrls)
-  const blobCount = data.blobs ? Object.keys(data.blobs).length : 0
-  console.log(
-    `[Canvas Import] Version ${data.version}, mode ${storageMode}, created at ${data.createdAt}, restored ${data.items.length} items` +
-      (blobCount > 0 ? ` (${blobCount} embedded assets)` : '')
-  )
+    await validateProjectCanvasAssetRefs(data.items, canvasBaseDir, storageMode)
+    const resolvedItems = resolveProjectCanvasAssetUrls(data.items, canvasBaseDir, storageMode)
+    const restoredItems = restorePersistedCanvasItems(resolvedItems, restoredBlobUrls)
+    const blobCount = data.blobs ? Object.keys(data.blobs).length : 0
+    console.log(
+      `[Canvas Import] Version ${data.version}, mode ${storageMode}, created at ${data.createdAt}, restored ${data.items.length} items` +
+        (blobCount > 0 ? ` (${blobCount} embedded assets)` : '')
+    )
 
-  return {
-    items: restoredItems as CanvasItem[],
-    groups: data.groups || [],
-    groupBranches: data.groupBranches || [],
-    qAppKey: restoreQAppState ? data.currentQAppKey : undefined,
-    figmaBinding: data.figmaBinding || null
+    return {
+      items: restoredItems as CanvasItem[],
+      groups: data.groups || [],
+      groupBranches: data.groupBranches || [],
+      qAppKey: restoreQAppState ? data.currentQAppKey : undefined,
+      figmaBinding: data.figmaBinding || null
+    }
+  } catch (error) {
+    for (const url of restoredBlobUrls.values()) {
+      try {
+        URL.revokeObjectURL(url)
+      } catch {
+        // Preserve the restore failure while still attempting to revoke every created URL.
+      }
+    }
+    throw error
   }
 }
 
