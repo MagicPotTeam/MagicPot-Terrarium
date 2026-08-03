@@ -196,6 +196,73 @@ describe('createOpenAIFileSearchSession', () => {
     )
   })
 
+  it('reuses one upload for managed attachments with the same content hash at different paths', async () => {
+    const cache = new ProviderFileIdCache()
+    const sha256 = 'ABCDEF0123456789'.repeat(4)
+    const createMessages = (relativePath: string, hash: string) => [
+      {
+        role: 'user' as const,
+        content: 'Analyze this file.',
+        attachments: [
+          {
+            type: 'file' as const,
+            url: `local-media://${relativePath}`,
+            fileName: 'note.txt',
+            mimeType: 'text/plain',
+            media: {
+              version: 1 as const,
+              kind: 'managed' as const,
+              relativePath,
+              sha256: hash
+            }
+          }
+        ]
+      }
+    ]
+    const firstFetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, blob: async () => new Blob(['hello']) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'file-by-content' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'vs-1' }) })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ data: [{ file_id: 'file-by-content', status: 'completed' }] })
+      })
+    await createOpenAIFileSearchSession({
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.openai.com/v1',
+      messages: createMessages('uploads/first/note.txt', sha256),
+      fetchImpl: firstFetch as typeof fetch,
+      fileIdCache: cache
+    })
+
+    const secondFetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'vs-2' }) })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ data: [{ file_id: 'file-by-content', status: 'completed' }] })
+      })
+    await createOpenAIFileSearchSession({
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.openai.com/v1',
+      messages: createMessages('uploads/second/note.txt', sha256.toLowerCase()),
+      fetchImpl: secondFetch as typeof fetch,
+      fileIdCache: cache
+    })
+
+    const uploadCalls = [...firstFetch.mock.calls, ...secondFetch.mock.calls].filter(
+      ([url, init]) =>
+        String(url).endsWith('/files') && init?.method === 'POST' && init.body instanceof FormData
+    )
+    expect(uploadCalls).toHaveLength(1)
+    expect(secondFetch.mock.calls.some(([url]) => String(url).startsWith('local-media://'))).toBe(
+      false
+    )
+  })
+
   it('invalidates a cached ID when OpenAI reports it missing', async () => {
     const cache = new ProviderFileIdCache()
     const messages = [

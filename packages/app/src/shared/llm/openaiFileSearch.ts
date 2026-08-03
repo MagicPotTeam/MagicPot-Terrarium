@@ -17,6 +17,11 @@ const normalizeBaseUrl = (value: string): string => value.trim().replace(/\/+$/,
 const getStableString = (value: unknown): string | undefined =>
   typeof value === 'string' && value.trim() ? value.trim() : undefined
 
+const normalizeSha256 = (value: unknown): string | undefined => {
+  const sha256 = getStableString(value)
+  return sha256 && /^[a-f0-9]{64}$/i.test(sha256) ? sha256.toLowerCase() : undefined
+}
+
 const buildCacheKey = async (
   baseUrl: string,
   apiKey: string,
@@ -27,20 +32,22 @@ const buildCacheKey = async (
   const accountFingerprint = stableAccountIdentifier
     ? `id:${stableAccountIdentifier}`
     : `key-sha256:${await hashIdentity(apiKey)}`
+  const sha256 = normalizeSha256(attachment.media?.sha256)
   const mediaId = getStableString(attachment.metadata?.mediaId)
   const sourceIdentity =
     mediaId ||
     (attachment.media?.kind === 'managed' ? attachment.media.relativePath : undefined) ||
-    attachment.media?.sha256 ||
     attachment.relativePath ||
     attachment.url
 
   return {
     provider: 'openai',
     accountIdentity: `${normalizeBaseUrl(baseUrl)}:${accountFingerprint}`,
-    contentIdentity: mediaId
-      ? `media:${mediaId}`
-      : `source-sha256:${await hashIdentity(sourceIdentity)}`
+    contentIdentity: sha256
+      ? `content-sha256:${sha256}`
+      : mediaId
+        ? `media:${mediaId}`
+        : `source-sha256:${await hashIdentity(sourceIdentity)}`
   }
 }
 
