@@ -18,7 +18,12 @@ import {
   resolveOfficeFileNodeData,
   saveSpreadsheetPreviewSheetsToFile
 } from './officePreviewUtils'
-import type { CanvasFileItem, CanvasFilePreviewSheet, CanvasItem } from './types'
+import type {
+  CanvasFileItem,
+  CanvasFilePreviewImage,
+  CanvasFilePreviewSheet,
+  CanvasItem
+} from './types'
 import { isEditableSpreadsheetCanvasFile, isOfficePreviewableFile } from './types'
 
 type SetCanvasItems = Dispatch<SetStateAction<CanvasItem[]>>
@@ -29,6 +34,96 @@ type NotifyFn = (message: string) => unknown
 type CanvasFileExportDraft = {
   content?: string
   sheets?: CanvasFilePreviewSheet[]
+}
+
+const isBlobObjectUrl = (url: string): boolean => url.startsWith('blob:')
+
+const getOwnedPreviewImageUrlCounts = (
+  items: CanvasItem[],
+  ownedUrls: ReadonlySet<string>
+): Map<string, number> => {
+  const counts = new Map<string, number>()
+  for (const item of items) {
+    if (item.type !== 'file') continue
+    for (const image of item.previewImages || []) {
+      if (ownedUrls.has(image.src)) counts.set(image.src, (counts.get(image.src) || 0) + 1)
+    }
+  }
+  return counts
+}
+
+export const createCanvasFilePreviewUrlLifecycle = (
+  revokeObjectUrl: (url: string) => void = URL.revokeObjectURL.bind(URL)
+) => {
+  let referenceCounts = new Map<string, number>()
+  const ownedUrls = new Set<string>()
+  const pendingInstallUrls = new Set<string>()
+  let itemReferences = new Map<string, Set<string>>()
+  let disposed = false
+
+  const revokeOwnedUrl = (url: string) => {
+    if (!ownedUrls.delete(url)) return
+    pendingInstallUrls.delete(url)
+    revokeObjectUrl(url)
+  }
+
+  return {
+    sync(items: CanvasItem[]) {
+      if (disposed) return
+      // Ownership is acquired only through claimProduced. Existing blob preview strings may be
+      // owned elsewhere and must not be adopted merely because they appear in canvas state.
+      const nextReferenceCounts = getOwnedPreviewImageUrlCounts(items, ownedUrls)
+      const nextItemReferences = new Map<string, Set<string>>()
+      const replacedOrDiscardedUrls = new Set<string>()
+      for (const item of items) {
+        if (item.type !== 'file') continue
+        const nextUrls = new Set(
+          (item.previewImages || []).map((image) => image.src).filter((url) => ownedUrls.has(url))
+        )
+        nextItemReferences.set(item.id, nextUrls)
+        const previousUrls = itemReferences.get(item.id)
+        if (previousUrls) {
+          for (const url of previousUrls) {
+            if (!nextUrls.has(url)) replacedOrDiscardedUrls.add(url)
+          }
+        }
+      }
+      for (const url of nextReferenceCounts.keys()) pendingInstallUrls.delete(url)
+      // Item disappearance can be a transient history/undo state, so only an explicit preview
+      // replacement/discard (or final disposal) releases an installed URL.
+      for (const url of replacedOrDiscardedUrls) {
+        if (!nextReferenceCounts.has(url) && !pendingInstallUrls.has(url)) revokeOwnedUrl(url)
+      }
+      referenceCounts = nextReferenceCounts
+      itemReferences = nextItemReferences
+    },
+    claimProduced(images: readonly CanvasFilePreviewImage[]): boolean {
+      const blobUrls = images.map((image) => image.src).filter(isBlobObjectUrl)
+      if (disposed) {
+        for (const url of new Set(blobUrls)) revokeObjectUrl(url)
+        return false
+      }
+      for (const url of blobUrls) {
+        ownedUrls.add(url)
+        pendingInstallUrls.add(url)
+      }
+      return true
+    },
+    settleProduced(images: readonly CanvasFilePreviewImage[], installed: boolean) {
+      if (installed || disposed) return
+      for (const url of new Set(images.map((image) => image.src).filter(isBlobObjectUrl))) {
+        pendingInstallUrls.delete(url)
+        if (!referenceCounts.has(url)) revokeOwnedUrl(url)
+      }
+    },
+    dispose() {
+      if (disposed) return
+      disposed = true
+      for (const url of [...ownedUrls]) revokeOwnedUrl(url)
+      referenceCounts.clear()
+      itemReferences.clear()
+    }
+  }
 }
 
 type UseCanvasFilePreviewOptions = {
@@ -55,6 +150,35 @@ export function useCanvasFilePreview({
   const [fileDialogDraftContent, setFileDialogDraftContent] = useState('')
   const [fileDialogDraftSheets, setFileDialogDraftSheets] = useState<CanvasFilePreviewSheet[]>([])
   const attemptedOfficePreviewHydrationsRef = useRef<Set<string>>(new Set())
+  const previewUrlLifecycleRef = useRef<ReturnType<
+    typeof createCanvasFilePreviewUrlLifecycle
+  > | null>(null)
+  const previewUrlTeardownRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const currentItemsRef = useRef(items)
+  currentItemsRef.current = items
+
+  useEffect(() => {
+    if (previewUrlTeardownRef.current !== null) {
+      clearTimeout(previewUrlTeardownRef.current)
+      previewUrlTeardownRef.current = null
+    }
+    const lifecycle =
+      previewUrlLifecycleRef.current ||
+      (previewUrlLifecycleRef.current = createCanvasFilePreviewUrlLifecycle())
+    lifecycle.sync(currentItemsRef.current)
+    return () => {
+      // StrictMode immediately replays this effect. Defer disposal so that replay can retain the
+      // lifecycle, while a real unmount leaves the same disposed instance visible to async work.
+      previewUrlTeardownRef.current = setTimeout(() => {
+        lifecycle.dispose()
+        previewUrlTeardownRef.current = null
+      }, 0)
+    }
+  }, [])
+
+  useEffect(() => {
+    previewUrlLifecycleRef.current?.sync(items)
+  }, [items])
 
   const activeFileDialogItem = useMemo<CanvasFileItem | null>(() => {
     if (!activeFileDialogId) return null
@@ -102,6 +226,8 @@ export function useCanvasFilePreview({
         return
       }
       attemptedOfficePreviewHydrationsRef.current.add(fileItem.id)
+      const previewUrlLifecycle = previewUrlLifecycleRef.current
+      if (!previewUrlLifecycle) return
 
       try {
         const response = await fetch(fileItem.src)
@@ -114,6 +240,8 @@ export function useCanvasFilePreview({
         const nextPreviewData = normalizeOfficeFileNodeDataForCanvas(
           await resolveOfficeFileNodeData(hydratedFile)
         )
+        const producedPreviewImages = nextPreviewData.previewImages || []
+        if (!previewUrlLifecycle.claimProduced(producedPreviewImages)) return
         const hasResolvedPreviewText = Boolean(nextPreviewData.previewText?.trim())
         const hasResolvedPreviewImages = (nextPreviewData.previewImages?.length || 0) > 0
         const hasResolvedPreviewSheets = (nextPreviewData.previewSheets?.length || 0) > 0
@@ -123,14 +251,18 @@ export function useCanvasFilePreview({
           (!hasExistingPreviewText && hasResolvedPreviewText) ||
           (!hasExistingPreviewImages && hasResolvedPreviewImages)
         ) {
-          setItems(
-            (prev) =>
-              prev.map((item) =>
-                item.id === fileItem.id && item.type === 'file'
-                  ? { ...item, ...nextPreviewData }
-                  : item
-              ) as CanvasItem[]
-          )
+          setItems((prev) => {
+            let installed = false
+            const nextItems = prev.map((item) => {
+              if (item.id !== fileItem.id || item.type !== 'file') return item
+              installed = true
+              return { ...item, ...nextPreviewData }
+            }) as CanvasItem[]
+            previewUrlLifecycle.settleProduced(producedPreviewImages, installed)
+            return nextItems
+          })
+        } else {
+          previewUrlLifecycle.settleProduced(producedPreviewImages, false)
         }
       } catch (error) {
         console.warn('[ProjectCanvasPage] Failed to hydrate file preview assets:', error)
