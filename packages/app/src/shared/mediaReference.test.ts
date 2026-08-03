@@ -14,6 +14,17 @@ const baseReference = {
   originalFileName: 'image.png'
 } as const
 
+const validDerivative = (overrides: Record<string, unknown> = {}) => ({
+  maxEdge: 512,
+  relativePath: 'derivatives/preview.webp',
+  mimeType: 'image/webp',
+  sizeBytes: 1_024,
+  width: 512,
+  height: 384,
+  sha256: 'B'.repeat(64),
+  ...overrides
+})
+
 describe('MediaReference', () => {
   it.each(['managed', 'project-asset'] as const)(
     'accepts and normalizes a valid %s reference',
@@ -41,6 +52,95 @@ describe('MediaReference', () => {
       expect(isMediaReference(input)).toBe(true)
     }
   )
+
+  it('accepts bounded persisted metadata and strips unknown nested properties', () => {
+    const input = {
+      ...baseReference,
+      mediaId: 'media_A-1.0',
+      originalUrl: 'https://example.com/original/image.png',
+      width: 4_096,
+      height: 2_160,
+      status: 'ready',
+      derivatives: [
+        {
+          maxEdge: 512,
+          relativePath: 'derivatives/media_A-1.0/512.webp',
+          mimeType: 'IMAGE/WEBP',
+          sizeBytes: 12_345,
+          width: 512,
+          height: 270,
+          sha256: 'B'.repeat(64),
+          localMediaUrl: 'local-media:///must-not-persist',
+          unknownProperty: true
+        }
+      ],
+      unknownProperty: 'discard me'
+    }
+
+    expect(normalizeMediaReference(input)).toEqual({
+      ...baseReference,
+      sha256: hash.toLowerCase(),
+      mediaId: 'media_A-1.0',
+      originalUrl: 'https://example.com/original/image.png',
+      width: 4_096,
+      height: 2_160,
+      status: 'ready',
+      derivatives: [
+        {
+          maxEdge: 512,
+          relativePath: 'derivatives/media_A-1.0/512.webp',
+          mimeType: 'image/webp',
+          sizeBytes: 12_345,
+          width: 512,
+          height: 270,
+          sha256: 'b'.repeat(64)
+        }
+      ]
+    })
+  })
+
+  it.each([
+    ['empty media ID', { mediaId: '' }],
+    ['media ID with whitespace', { mediaId: 'media id' }],
+    ['overlong media ID', { mediaId: 'x'.repeat(256) }],
+    ['relative original URL', { originalUrl: '../image.png' }],
+    ['unsupported original URL scheme', { originalUrl: 'javascript:alert(1)' }],
+    ['original URL with credentials', { originalUrl: 'https://user:secret@example.com/image.png' }],
+    ['original URL with control data', { originalUrl: 'https://example.com/a\n.png' }],
+    ['overlong original URL', { originalUrl: `https://example.com/${'x'.repeat(8_192)}` }],
+    ['zero width', { width: 0 }],
+    ['fractional height', { height: 1.5 }],
+    ['unbounded width', { width: 1_000_001 }],
+    ['unknown status', { status: 'available' }]
+  ])('rejects unsafe persisted metadata: %s', (_label, metadata) => {
+    expect(normalizeMediaReference({ ...baseReference, ...metadata })).toBeUndefined()
+  })
+
+  it.each([
+    ['non-array descriptors', {}],
+    ['too many descriptors', Array.from({ length: 17 }, () => validDerivative())],
+    ['unsupported max edge', [validDerivative({ maxEdge: 255 })]],
+    ['unsafe relative path', [validDerivative({ relativePath: '../outside.webp' })]],
+    ['encoded traversal', [validDerivative({ relativePath: 'derivatives/%2e%2e/outside.webp' })]],
+    ['absolute path', [validDerivative({ relativePath: '/derivatives/preview.webp' })]],
+    ['invalid MIME type', [validDerivative({ mimeType: 'image/webp; charset=x' })]],
+    ['non-positive size', [validDerivative({ sizeBytes: 0 })]],
+    ['unbounded dimensions', [validDerivative({ width: 1_000_001 })]],
+    ['invalid hash', [validDerivative({ sha256: 'bad' })]],
+    [
+      'duplicate relative path',
+      [validDerivative(), validDerivative({ maxEdge: 1024, width: 1024, height: 768 })]
+    ]
+  ])('rejects invalid derivative metadata: %s', (_label, derivatives) => {
+    expect(normalizeMediaReference({ ...baseReference, derivatives })).toBeUndefined()
+  })
+
+  it('preserves version 1 references that predate optional metadata', () => {
+    expect(normalizeMediaReference(baseReference)).toEqual({
+      ...baseReference,
+      sha256: hash.toLowerCase()
+    })
+  })
 
   it('keeps legacy attachment JSON without media unchanged', () => {
     const legacy = { type: 'file', url: 'data:text/plain;base64,SGk=', fileName: 'note.txt' }
