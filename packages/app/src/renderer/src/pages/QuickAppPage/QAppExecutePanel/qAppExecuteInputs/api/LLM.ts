@@ -506,10 +506,324 @@ const inferImageMimeType = (imageUrl: string): string | undefined => {
   return match?.[1]
 }
 
+const MAX_REQUEST_IMAGE_BYTES = 25 * 1024 * 1024
+const STRICT_RASTER_DATA_URL = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/
+const SUPPORTED_RASTER_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+const QAPP_INLINE_IMAGE_POLICY_MARKER = 'qapp-renderer-materialized-v1'
+const MAX_PROVIDER_ACCESSIBLE_URL_LENGTH = 8 * 1024
+const RASTER_SIGNATURE_BYTES = 12
+const BASE64_PART_LENGTH = 16 * 1024
+const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+const imageLimitError = (): Error =>
+  new Error(
+    `Attachment transport error: image exceeds the ${MAX_REQUEST_IMAGE_BYTES}-byte request attachment limit.`
+  )
+
+class IncrementalRasterBase64Encoder {
+  private readonly base64Parts: string[] = []
+  private currentPart = ''
+  private readonly carry: number[] = []
+  private readonly signaturePrefix: number[] = []
+  private rawByteLength = 0
+
+  push(bytes: Uint8Array): void {
+    if (this.rawByteLength + bytes.byteLength > MAX_REQUEST_IMAGE_BYTES) throw imageLimitError()
+    this.rawByteLength += bytes.byteLength
+
+    for (
+      let index = 0;
+      index < bytes.length && this.signaturePrefix.length < RASTER_SIGNATURE_BYTES;
+      index += 1
+    ) {
+      this.signaturePrefix.push(bytes[index])
+    }
+
+    let offset = 0
+    while (this.carry.length < 3 && offset < bytes.length) this.carry.push(bytes[offset++])
+    if (this.carry.length === 3) {
+      this.appendTriple(this.carry[0], this.carry[1], this.carry[2])
+      this.carry.length = 0
+    }
+
+    const completeEnd = offset + Math.floor((bytes.length - offset) / 3) * 3
+    for (; offset < completeEnd; offset += 3) {
+      this.appendTriple(bytes[offset], bytes[offset + 1], bytes[offset + 2])
+    }
+    for (; offset < bytes.length; offset += 1) this.carry.push(bytes[offset])
+  }
+
+  finish(declaredSize: number | undefined, declaredMimeType: string): string {
+    if (declaredSize !== undefined && this.rawByteLength !== declaredSize) {
+      throw new Error('Attachment transport error: image response content length mismatch.')
+    }
+    if (this.rawByteLength === 0) throw new Error('Attachment transport error: image is empty.')
+
+    if (this.carry.length === 1) {
+      const first = this.carry[0]
+      this.appendCharacters(
+        BASE64_ALPHABET[first >> 2] + BASE64_ALPHABET[(first & 0x03) << 4] + '=='
+      )
+    } else if (this.carry.length === 2) {
+      const [first, second] = this.carry
+      this.appendCharacters(
+        BASE64_ALPHABET[first >> 2] +
+          BASE64_ALPHABET[((first & 0x03) << 4) | (second >> 4)] +
+          BASE64_ALPHABET[(second & 0x0f) << 2] +
+          '='
+      )
+    }
+    if (this.currentPart) this.base64Parts.push(this.currentPart)
+
+    const canonicalMimeType = assertRasterImageBytes(
+      Uint8Array.from(this.signaturePrefix),
+      declaredMimeType
+    )
+    return `data:${canonicalMimeType};base64,${this.base64Parts.join('')}`
+  }
+
+  private appendTriple(first: number, second: number, third: number): void {
+    this.appendCharacters(
+      BASE64_ALPHABET[first >> 2] +
+        BASE64_ALPHABET[((first & 0x03) << 4) | (second >> 4)] +
+        BASE64_ALPHABET[((second & 0x0f) << 2) | (third >> 6)] +
+        BASE64_ALPHABET[third & 0x3f]
+    )
+  }
+
+  private appendCharacters(value: string): void {
+    this.currentPart += value
+    if (this.currentPart.length >= BASE64_PART_LENGTH) {
+      this.base64Parts.push(this.currentPart)
+      this.currentPart = ''
+    }
+  }
+}
+
+const inferRasterMimeTypeFromBytes = (bytes: Uint8Array): string | undefined => {
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return 'image/png'
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'image/jpeg'
+  }
+  if (
+    bytes.length >= 12 &&
+    String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF' &&
+    String.fromCharCode(...bytes.subarray(8, 12)) === 'WEBP'
+  ) {
+    return 'image/webp'
+  }
+  if (
+    bytes.length >= 6 &&
+    (String.fromCharCode(...bytes.subarray(0, 6)) === 'GIF87a' ||
+      String.fromCharCode(...bytes.subarray(0, 6)) === 'GIF89a')
+  ) {
+    return 'image/gif'
+  }
+  return undefined
+}
+
+const assertRasterImageBytes = (bytes: Uint8Array, declaredMimeType: string): string => {
+  if (bytes.byteLength === 0) {
+    throw new Error('Attachment transport error: image is empty.')
+  }
+  const canonicalMimeType = inferRasterMimeTypeFromBytes(bytes)
+  if (!canonicalMimeType) {
+    throw new Error('Attachment transport error: image bytes are not a supported raster image.')
+  }
+  if (canonicalMimeType !== declaredMimeType) {
+    throw new Error(
+      `Attachment transport error: image MIME mismatch (${declaredMimeType} header, ${canonicalMimeType} bytes).`
+    )
+  }
+  return canonicalMimeType
+}
+
+const canonicalizeRequestImageDataUrl = (url: string): string => {
+  const match = STRICT_RASTER_DATA_URL.exec(url)
+  if (!match || match[2].length % 4 !== 0) {
+    throw new Error(
+      'Attachment transport error: expected a canonical PNG, JPEG, WebP, or GIF data URL.'
+    )
+  }
+
+  let binary: string
+  try {
+    binary = atob(match[2])
+  } catch {
+    throw new Error(
+      'Attachment transport error: expected a canonical PNG, JPEG, WebP, or GIF data URL.'
+    )
+  }
+  if (binary.length > MAX_REQUEST_IMAGE_BYTES) throw imageLimitError()
+  const canonicalBase64 = btoa(binary)
+  if (canonicalBase64 !== match[2]) {
+    throw new Error(
+      'Attachment transport error: expected a canonical PNG, JPEG, WebP, or GIF data URL.'
+    )
+  }
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+  const mimeType = assertRasterImageBytes(bytes, match[1])
+  return `data:${mimeType};base64,${canonicalBase64}`
+}
+
+const materializeRequestImageDataUrl = async (imageUrl: string): Promise<string> => {
+  const controller = new AbortController()
+  try {
+    const response = await fetch(imageUrl, { signal: controller.signal })
+    if (!response.ok) {
+      throw new Error(`Attachment transport error: image fetch failed with ${response.status}.`)
+    }
+    const mimeType = response.headers.get('content-type')?.toLowerCase().split(';', 1)[0].trim()
+    if (!mimeType || !SUPPORTED_RASTER_MIME_TYPES.has(mimeType)) {
+      throw new Error('Attachment transport error: fetched attachment is not a supported image.')
+    }
+
+    const contentLengthHeader = response.headers.get('content-length')
+    const declaredSize = contentLengthHeader === null ? undefined : Number(contentLengthHeader)
+    if (declaredSize !== undefined && (!Number.isFinite(declaredSize) || declaredSize < 0)) {
+      throw new Error('Attachment transport error: image response has an invalid content length.')
+    }
+    if (declaredSize !== undefined && declaredSize > MAX_REQUEST_IMAGE_BYTES) {
+      throw imageLimitError()
+    }
+
+    const encoder = new IncrementalRasterBase64Encoder()
+    const reader = response.body?.getReader()
+    if (reader) {
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (!value) continue
+          try {
+            encoder.push(value)
+          } catch (error) {
+            await reader.cancel().catch(() => undefined)
+            controller.abort()
+            throw error
+          }
+        }
+      } finally {
+        reader.releaseLock()
+      }
+    } else {
+      if (declaredSize === undefined) {
+        throw new Error(
+          'Attachment transport error: image response requires a bounded content length.'
+        )
+      }
+      const buffer = await response.arrayBuffer()
+      if (buffer.byteLength > MAX_REQUEST_IMAGE_BYTES) throw imageLimitError()
+      encoder.push(new Uint8Array(buffer))
+    }
+
+    return encoder.finish(declaredSize, mimeType)
+  } finally {
+    controller.abort()
+  }
+}
+
+const isPrivateOrLocalProviderHost = (hostname: string): boolean => {
+  const normalized = hostname
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+  if (
+    !normalized ||
+    normalized === 'localhost' ||
+    normalized === 'ip6-localhost' ||
+    normalized === 'ip6-loopback' ||
+    normalized.endsWith('.localhost') ||
+    normalized.endsWith('.local') ||
+    normalized.endsWith('.localdomain')
+  ) {
+    return true
+  }
+
+  const ipv4Match = normalized.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (ipv4Match) {
+    const octets = ipv4Match.slice(1).map(Number)
+    if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return true
+    const [first, second, third] = octets
+    return (
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      (first === 100 && second >= 64 && second <= 127) ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      (first === 192 && second === 0 && third === 0) ||
+      (first === 198 && (second === 18 || second === 19)) ||
+      first >= 224
+    )
+  }
+
+  return (
+    normalized === '::' ||
+    normalized === '::1' ||
+    /^f[cd][0-9a-f]{2}:/i.test(normalized) ||
+    /^fe[89ab][0-9a-f]:/i.test(normalized) ||
+    /^ff[0-9a-f]{2}:/i.test(normalized) ||
+    /^::ffff:(?:0\.|10\.|127\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.)/i.test(normalized)
+  )
+}
+
+const assertProviderAccessibleVideoUrl = (value: string): void => {
+  if (!value || value.length > MAX_PROVIDER_ACCESSIBLE_URL_LENGTH) {
+    throw new Error(
+      `Video attachment transport error: image URL must be non-empty and at most ${MAX_PROVIDER_ACCESSIBLE_URL_LENGTH} characters.`
+    )
+  }
+  try {
+    const parsed = new URL(value)
+    if (
+      parsed.protocol !== 'https:' ||
+      parsed.username ||
+      parsed.password ||
+      isPrivateOrLocalProviderHost(parsed.hostname)
+    ) {
+      throw new Error('unsafe')
+    }
+  } catch {
+    throw new Error(
+      'Video attachment transport error: dedicated video routes require a public HTTPS image URL without credentials; data, blob, file, local-media, localhost, and private-network URLs are not supported.'
+    )
+  }
+}
+
 export class MainProcessQAppLLMProxyCli implements LLMCliWithPrompt {
-  constructor(private readonly profileId: string) {}
+  private readonly profileId: string
+  private readonly requiresInlineRequestImage: boolean
+  private readonly isVideoProfile: boolean
+
+  constructor(profile: LLMAPIProfile) {
+    this.profileId = profile.id
+    const provider = resolveProfileProvider(profile)
+    this.isVideoProfile = resolveProfileModelUse(profile) === 'video'
+    this.requiresInlineRequestImage =
+      !this.isVideoProfile &&
+      (provider === 'gemini' || provider === 'claude' || provider === 'ollama')
+  }
 
   async chat(params: LLMChatParams): Promise<LLMChatResult> {
+    if (this.isVideoProfile) {
+      for (const attachment of params.messages.flatMap((message) => message.attachments || [])) {
+        if (attachment.type === 'image') assertProviderAccessibleVideoUrl(attachment.url)
+      }
+    }
     const result = await api().svcLLMProxy.chat({
       messages: params.messages,
       systemPrompt: params.systemPrompt,
@@ -531,19 +845,35 @@ export class MainProcessQAppLLMProxyCli implements LLMCliWithPrompt {
   }
 
   async generatePrompt(params: GeneratePromptParams): Promise<string> {
-    const mimeType = params.imageObjUrl ? inferImageMimeType(params.imageObjUrl) : undefined
+    let imageUrl = params.imageObjUrl
+    if (imageUrl && this.requiresInlineRequestImage) {
+      if (imageUrl.startsWith('data:')) {
+        imageUrl = canonicalizeRequestImageDataUrl(imageUrl)
+      } else {
+        imageUrl = await materializeRequestImageDataUrl(imageUrl)
+      }
+    }
+
+    const mimeType = imageUrl ? inferImageMimeType(imageUrl) : undefined
     const result = await this.chat({
       messages: [
         {
           role: 'user',
           content: params.prompt,
-          ...(params.imageObjUrl
+          ...(imageUrl
             ? {
                 attachments: [
                   {
                     type: 'image',
-                    url: params.imageObjUrl,
-                    ...(mimeType ? { mimeType } : {})
+                    url: imageUrl,
+                    ...(mimeType ? { mimeType } : {}),
+                    ...(this.requiresInlineRequestImage
+                      ? {
+                          metadata: {
+                            internalTransport: QAPP_INLINE_IMAGE_POLICY_MARKER
+                          }
+                        }
+                      : {})
                   }
                 ]
               }
@@ -568,14 +898,11 @@ export const cliFromProfile = (profile: LLMAPIProfile): LLMCli | undefined => {
 
   switch (resolveProfileProvider(profile)) {
     case 'ollama':
-      return new OllamaAPICli(profile.api_key || '', profile.base_url, profile.model_name)
     case 'gemini':
-      return new GeminiAPICli(profile.api_key, profile.base_url, profile.model_name)
     case 'claude':
-      return new ClaudeAPICli(profile.api_key, profile.base_url, profile.model_name)
     case 'kling':
     case 'volcengine':
-      return new MainProcessQAppLLMProxyCli(profile.id)
+      return new MainProcessQAppLLMProxyCli(profile)
     case 'openai':
     default:
       return new OpenAIAPICli(profile.api_key, profile.base_url, profile.model_name, {

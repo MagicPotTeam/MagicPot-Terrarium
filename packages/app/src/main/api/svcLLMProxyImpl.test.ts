@@ -2095,6 +2095,235 @@ describe('LLMProxySvcImpl', () => {
     ])
   })
 
+  it('accepts a marked qapp materialized image without persisted attachment capability', async () => {
+    const providerChat = vi.fn().mockResolvedValue('image accepted')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-ollama',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+    const messages = [
+      {
+        role: 'user' as const,
+        content: 'describe this image',
+        attachments: [
+          {
+            type: 'image' as const,
+            url: 'data:image/png;base64,iVBORw0KGgo=',
+            mimeType: 'image/png',
+            metadata: { internalTransport: 'qapp-renderer-materialized-v1' }
+          }
+        ]
+      }
+    ]
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileScope: 'qapp',
+        profileId: 'quick-ollama',
+        messages
+      })
+    ).resolves.toMatchObject({ content: 'image accepted' })
+    expect(providerChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          expect.objectContaining({
+            attachments: [
+              expect.objectContaining({
+                url: 'data:image/png;base64,iVBORw0KGgo=',
+                metadata: undefined
+              })
+            ]
+          })
+        ]
+      })
+    )
+  })
+
+  it.each([
+    ['gemini', 'Gemini Video'],
+    ['claude', 'Claude Video'],
+    ['ollama', 'Ollama Video']
+  ] as const)(
+    'preserves qapp %s video URL image attachments for provider chat',
+    async (provider, modelName) => {
+      const providerChat = vi.fn().mockResolvedValue('video queued')
+      vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+      mockConfig({
+        plugin_config: {
+          ...DEFAULT_CONFIG.plugin_config!,
+          api_profiles: [
+            {
+              id: `quick-${provider}-video`,
+              model_name: modelName,
+              base_url: 'https://video.example',
+              api_key: provider === 'ollama' ? '' : 'key',
+              provider,
+              model_use: 'video'
+            }
+          ]
+        }
+      })
+      const attachment = {
+        type: 'image' as const,
+        url: 'https://cdn.example/input.png?signature=keep'
+      }
+
+      await expect(
+        new LLMProxySvcImpl().chat({
+          profileScope: 'qapp',
+          profileId: `quick-${provider}-video`,
+          messages: [{ role: 'user', content: 'animate', attachments: [attachment] }]
+        })
+      ).resolves.toMatchObject({ content: 'video queued' })
+      expect(providerChat).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: [expect.objectContaining({ attachments: [attachment] })]
+        })
+      )
+    }
+  )
+
+  it('rejects an oversized qapp image arithmetically before decoding base64', async () => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-ollama',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+    const bufferFromSpy = vi.spyOn(Buffer, 'from')
+    const oversizedBase64 = `iVBORw0KGgoAAAAA${'A'.repeat(34_952_540 - 16)}`
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileScope: 'qapp',
+        profileId: 'quick-ollama',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [
+              {
+                type: 'image',
+                url: `data:image/png;base64,${oversizedBase64}`,
+                mimeType: 'image/png',
+                metadata: { internalTransport: 'qapp-renderer-materialized-v1' }
+              }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(/exceeds/)
+    expect(
+      bufferFromSpy.mock.calls.some(
+        ([value, encoding]) => encoding === 'base64' && typeof value === 'string'
+      )
+    ).toBe(false)
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
+  it('rejects a marked qapp malformed image before built-in provider chat', async () => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-ollama',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileScope: 'qapp',
+        profileId: 'quick-ollama',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [
+              {
+                type: 'image',
+                url: 'data:image/png;base64,UE5H==',
+                mimeType: 'image/png',
+                metadata: { internalTransport: 'qapp-renderer-materialized-v1' }
+              }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(/malformed image base64/)
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
+  it('rejects a marked qapp image whose declared MIME does not match its bytes', async () => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-ollama',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileScope: 'qapp',
+        profileId: 'quick-ollama',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [
+              {
+                type: 'image',
+                url: 'data:image/jpeg;base64,iVBORw0KGgo=',
+                mimeType: 'image/jpeg',
+                metadata: { internalTransport: 'qapp-renderer-materialized-v1' }
+              }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(/MIME mismatch/)
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
   it('rejects inline images for an undeclared Ollama attachment transport before provider chat', async () => {
     const providerChat = vi.fn().mockResolvedValue('should not run')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
@@ -2165,7 +2394,7 @@ describe('LLMProxySvcImpl', () => {
         attachments: [
           {
             type: 'image' as const,
-            url: 'data:image/png;base64,UE5H',
+            url: 'data:image/png;base64,iVBORw0KGgo=',
             mimeType: 'image/png'
           }
         ]
@@ -2219,6 +2448,90 @@ describe('LLMProxySvcImpl', () => {
         ]
       })
     ).rejects.toThrow(/canonical base64|malformed image base64|non-canonical image base64/)
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
+  it('passes every public HTTPS video image URL to the provider unchanged', async () => {
+    const providerChat = vi.fn().mockResolvedValue('queued')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-video',
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'access-id',
+            api_secret: 'secret-key',
+            provider: 'kling',
+            model_use: 'video'
+          }
+        ]
+      }
+    })
+    const messages = [
+      {
+        role: 'user' as const,
+        content: 'animate',
+        attachments: [
+          { type: 'image' as const, url: 'https://cdn.example/one.png?signature=keep' },
+          { type: 'image' as const, url: 'https://media.example/two.jpg' }
+        ]
+      }
+    ]
+
+    await new LLMProxySvcImpl().chat({
+      profileScope: 'qapp',
+      profileId: 'quick-video',
+      messages
+    })
+
+    expect(providerChat).toHaveBeenCalledWith(expect.objectContaining({ messages }))
+  })
+
+  it.each([
+    'data:image/png;base64,iVBORw0KGgo=',
+    'blob:https://app.example/image',
+    'file:///tmp/image.png',
+    'local-media://asset/image.png',
+    'https://user:secret@cdn.example/image.png',
+    'https://localhost/image.png',
+    'https://127.0.0.1/image.png',
+    'https://10.0.0.8/image.png',
+    'http://cdn.example/image.png'
+  ])('rejects unsafe video image URL %s before provider chat', async (url) => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-video',
+            model_name: 'seedance',
+            base_url: 'https://ark.cn-beijing.volces.com',
+            api_key: 'key',
+            provider: 'volcengine',
+            model_use: 'video'
+          }
+        ]
+      }
+    })
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileScope: 'qapp',
+        profileId: 'quick-video',
+        messages: [
+          {
+            role: 'user',
+            content: 'animate',
+            attachments: [{ type: 'image', url }]
+          }
+        ]
+      })
+    ).rejects.toThrow(/public HTTPS image URLs/)
     expect(providerChat).not.toHaveBeenCalled()
   })
 

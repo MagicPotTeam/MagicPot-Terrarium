@@ -74,6 +74,7 @@ import fs from 'node:fs/promises'
 import { isLocalFileSource } from '../utils/localFileUrl'
 import {
   MAX_REMOTE_FETCH_RESPONSE_BYTES,
+  isPrivateOrLocalRemoteFetchHost,
   parseAndValidateRemoteFetchRequest
 } from './remoteFetchPolicy'
 import { consumeTrustedLocalFileSelection } from './trustedFileSelection'
@@ -339,10 +340,55 @@ const mergeChatMetadata = (
 }
 
 const STRICT_RASTER_DATA_URL = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/
+const QAPP_INLINE_IMAGE_POLICY_MARKER = 'qapp-renderer-materialized-v1'
+const MAX_PROVIDER_ACCESSIBLE_URL_LENGTH = 8 * 1024
+const RASTER_SIGNATURE_BASE64_LENGTH = 16
+
+const inferRasterMimeTypeFromBytes = (bytes: Buffer): string | undefined => {
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return 'image/png'
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'image/jpeg'
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes.toString('ascii', 0, 4) === 'RIFF' &&
+    bytes.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return 'image/webp'
+  }
+  const gifSignature = bytes.toString('ascii', 0, 6)
+  if (gifSignature === 'GIF87a' || gifSignature === 'GIF89a') {
+    return 'image/gif'
+  }
+  return undefined
+}
+
+const stripQAppInlineImagePolicyMarker = (messages: ChatMessage[]): ChatMessage[] =>
+  messages.map((message) => ({
+    ...message,
+    ...(message.attachments
+      ? {
+          attachments: message.attachments.map((attachment) => {
+            if (attachment.metadata?.internalTransport !== QAPP_INLINE_IMAGE_POLICY_MARKER) {
+              return attachment
+            }
+            const metadata = { ...attachment.metadata }
+            delete metadata.internalTransport
+            return {
+              ...attachment,
+              ...(Object.keys(metadata).length > 0 ? { metadata } : { metadata: undefined })
+            }
+          })
+        }
+      : {})
+  }))
 
 const validateInlineImageAttachmentTransport = (
   profile: LLMAPIProfile,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  profileScope?: LLMChatReq['profileScope']
 ): void => {
   const provider = resolveProfileProvider(profile)
   if (provider !== 'gemini' && provider !== 'claude' && provider !== 'ollama') {
@@ -356,12 +402,17 @@ const validateInlineImageAttachmentTransport = (
     return
   }
 
+  const hasValidatedQAppInlineImagePolicy =
+    profileScope === 'qapp' &&
+    imageAttachments.every(
+      (attachment) => attachment.metadata?.internalTransport === QAPP_INLINE_IMAGE_POLICY_MARKER
+    )
   const capabilities = resolveChatProfileCapabilities(profile)
   const requestDataUrlTransport = selectProviderAttachmentTransport(capabilities, {
     available: { 'request-data-url': true },
     requested: 'request-data-url'
   })
-  if (requestDataUrlTransport !== 'request-data-url') {
+  if (!hasValidatedQAppInlineImagePolicy && requestDataUrlTransport !== 'request-data-url') {
     throw new Error(
       `Attachment transport error: ${provider} profile "${profile.id}" must declare "request-data-url" before accepting inline image attachments.`
     )
@@ -381,15 +432,70 @@ const validateInlineImageAttachmentTransport = (
         `Attachment transport error: ${provider} profile "${profile.id}" received malformed image base64.`
       )
     }
-    const decoded = Buffer.from(base64, 'base64')
-    if (decoded.toString('base64') !== base64) {
+
+    const paddingLength = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+    const decodedByteLength = (base64.length / 4) * 3 - paddingLength
+    if (decodedByteLength > DEFAULT_MANAGED_MEDIA_MAX_BYTES) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" image exceeds the ${DEFAULT_MANAGED_MEDIA_MAX_BYTES}-byte request attachment limit.`
+      )
+    }
+
+    const signatureBase64 = base64.slice(0, RASTER_SIGNATURE_BASE64_LENGTH)
+    const signatureBytes = Buffer.from(signatureBase64, 'base64')
+    const finalQuartet = base64.slice(-4)
+    if (
+      signatureBytes.toString('base64') !== signatureBase64 ||
+      Buffer.from(finalQuartet, 'base64').toString('base64') !== finalQuartet
+    ) {
       throw new Error(
         `Attachment transport error: ${provider} profile "${profile.id}" received non-canonical image base64.`
       )
     }
-    if (decoded.byteLength > DEFAULT_MANAGED_MEDIA_MAX_BYTES) {
+    const byteMimeType = inferRasterMimeTypeFromBytes(signatureBytes)
+    if (!byteMimeType) {
       throw new Error(
-        `Attachment transport error: ${provider} profile "${profile.id}" image exceeds the ${DEFAULT_MANAGED_MEDIA_MAX_BYTES}-byte request attachment limit.`
+        `Attachment transport error: ${provider} profile "${profile.id}" received unsupported raster image bytes.`
+      )
+    }
+    if (
+      byteMimeType !== match[1] ||
+      (attachment.mimeType && attachment.mimeType !== byteMimeType)
+    ) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" received an image MIME mismatch.`
+      )
+    }
+  }
+}
+
+const validateVideoImageAttachmentTransport = (
+  profile: LLMAPIProfile,
+  messages: ChatMessage[]
+): void => {
+  const imageAttachments = messages.flatMap((message) =>
+    (message.attachments || []).filter((attachment) => attachment.type === 'image')
+  )
+  for (const attachment of imageAttachments) {
+    const value = attachment.url
+    if (!value || value.length > MAX_PROVIDER_ACCESSIBLE_URL_LENGTH) {
+      throw new Error(
+        `Video attachment transport error: profile "${profile.id}" requires a non-empty image URL of at most ${MAX_PROVIDER_ACCESSIBLE_URL_LENGTH} characters.`
+      )
+    }
+    try {
+      const parsed = new URL(value)
+      if (
+        parsed.protocol !== 'https:' ||
+        parsed.username ||
+        parsed.password ||
+        isPrivateOrLocalRemoteFetchHost(parsed.hostname)
+      ) {
+        throw new Error('unsafe')
+      }
+    } catch {
+      throw new Error(
+        `Video attachment transport error: profile "${profile.id}" requires public HTTPS image URLs without credentials; data, blob, file, local-media, localhost, and private-network URLs are not supported.`
       )
     }
   }
@@ -1795,8 +1901,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     const extensionCli = mainHostExtensionApiV1.llmProxy
       .map((extension) => extension.createCli?.(profileWithSelectedKey, extensionContext))
       .find((client) => Boolean(client))
-    if (!extensionCli) {
-      validateInlineImageAttachmentTransport(profileWithSelectedKey, req.messages)
+    const modelUse = resolveProfileModelUse(profileWithSelectedKey)
+    if (!extensionCli && modelUse !== 'video') {
+      validateInlineImageAttachmentTransport(profileWithSelectedKey, req.messages, req.profileScope)
+    }
+    if (modelUse === 'video') {
+      validateVideoImageAttachmentTransport(profileWithSelectedKey, req.messages)
     }
     const cli =
       extensionCli ??
@@ -1807,7 +1917,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       throw new Error('Unable to create an LLM client.')
     }
 
-    const effectiveMessages = req.messages
+    const effectiveMessages = stripQAppInlineImagePolicyMarker(req.messages)
 
     console.log('[LLMProxySvc] chat request:', {
       profileId: profile.id,
