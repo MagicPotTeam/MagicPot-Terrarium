@@ -124,7 +124,7 @@ export type ReadLoraTriggerWordsNativeResp = {
 }
 
 export const MAX_READ_FILE_SLICE_BYTES = 16 * 1024 * 1024
-export const MAX_FULL_FILE_BYTES = 64 * 1024 * 1024
+export const MAX_FULL_FILE_BYTES = 256 * 1024 * 1024
 export const MAX_TEXT_FILE_BYTES = 8 * 1024 * 1024
 export const MAX_FILENAME_LENGTH = 255
 
