@@ -1755,6 +1755,77 @@ describe('ChatMessageList dynamic-height virtualization', () => {
     expect(scroller.scrollTop).toBe(525)
   })
 
+  it('sticks to the bottom using the pre-resize near-bottom state', () => {
+    const chatContainerRef = React.createRef<HTMLDivElement>()
+    let scrollHeight = 1_200
+    renderChatMessageList(virtualSession, { chatContainerRef })
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: {
+        configurable: true,
+        get: () => scrollHeight
+      }
+    })
+
+    act(() => {
+      scroller.scrollTop = 800
+      fireEvent.scroll(scroller)
+    })
+
+    const firstObserver = resizeObservers.find(
+      ({ target }) => target?.getAttribute('data-chat-message-index') === '0'
+    )
+    expect(firstObserver?.target).toBeTruthy()
+
+    act(() => {
+      scrollHeight = 1_300
+      firstObserver?.callback(
+        [
+          {
+            target: firstObserver.target,
+            contentRect: { height: 300 }
+          } as unknown as ResizeObserverEntry
+        ],
+        {} as ResizeObserver
+      )
+    })
+
+    expect(scroller.scrollTop).toBe(900)
+  })
+
+  it('clamps a restored session scroll position to the current maximum', () => {
+    const firstSession = {
+      id: 'scroll-clamp-session-a-direct-test',
+      title: 'Session A',
+      messages: [{ role: 'assistant' as const, content: 'A' }]
+    }
+    const secondSession = {
+      id: 'scroll-clamp-session-b-direct-test',
+      title: 'Session B',
+      messages: [{ role: 'assistant' as const, content: 'B' }]
+    }
+    let scrollHeight = 1_200
+    const { rerender } = renderChatMessageList(firstSession)
+    const scroller = screen.getByTestId('chat-message-list')
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: {
+        configurable: true,
+        get: () => scrollHeight
+      }
+    })
+
+    act(() => {
+      scroller.scrollTop = 900
+      fireEvent.scroll(scroller)
+    })
+
+    scrollHeight = 600
+    rerender(buildChatMessageList(secondSession))
+    expect(scroller.scrollTop).toBe(200)
+  })
+
   it('preserves id-less virtualized media row identity across insertion and reorder', () => {
     const chatContainerRef = React.createRef<HTMLDivElement>()
     const firstMediaMessage: ChatMessage = {

@@ -564,10 +564,15 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   const visibleStartRef = React.useRef(0)
   const pendingScrollAdjustmentRef = React.useRef(0)
   const pendingStickToBottomRef = React.useRef(false)
+  const wasNearBottomRef = React.useRef(false)
   const measuredSessionIdRef = React.useRef(currentSession?.id)
   if (measuredSessionIdRef.current !== currentSession?.id) {
     measuredSessionIdRef.current = currentSession?.id
     measuredHeights.current.clear()
+    pendingScrollAdjustmentRef.current = 0
+    pendingStickToBottomRef.current = false
+    wasNearBottomRef.current = false
+    visibleStartRef.current = 0
   }
   React.useEffect(() => {
     const valid = new Set(messageIdentities)
@@ -589,10 +594,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
       const container = chatContainerRef.current
       if (container) {
-        // Capture this before the resize changes scrollHeight.
-        const wasNearBottom =
-          container.scrollHeight - container.clientHeight - container.scrollTop <=
-          CHAT_STICK_TO_BOTTOM_THRESHOLD_PX
+        const wasNearBottom = wasNearBottomRef.current
         pendingStickToBottomRef.current = pendingStickToBottomRef.current || wasNearBottom
         if (!wasNearBottom && index < visibleStartRef.current) {
           pendingScrollAdjustmentRef.current += height - previousHeight
@@ -606,7 +608,12 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   React.useEffect(() => {
     const container = chatContainerRef.current
     if (!container) return
-    const update = () => setScroll({ top: container.scrollTop, viewport: container.clientHeight })
+    const update = () => {
+      const top = container.scrollTop
+      wasNearBottomRef.current =
+        container.scrollHeight - container.clientHeight - top <= CHAT_STICK_TO_BOTTOM_THRESHOLD_PX
+      setScroll({ top, viewport: container.clientHeight })
+    }
     update()
     container.addEventListener('scroll', update, { passive: true })
     window.addEventListener('resize', update)
@@ -680,8 +687,12 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     } else if (restoredSessionIdRef.current !== sessionId) {
       restoredSessionIdRef.current = sessionId
       const savedScrollTop = chatSessionScrollPositions.get(sessionId)
+      const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
       container.scrollTop =
-        savedScrollTop ?? Math.max(0, container.scrollHeight - container.clientHeight)
+        maxScrollTop > 0
+          ? Math.min(savedScrollTop ?? maxScrollTop, maxScrollTop)
+          : (savedScrollTop ?? 0)
+      wasNearBottomRef.current = maxScrollTop - container.scrollTop <= 80
     }
 
     setScroll({ top: container.scrollTop, viewport: container.clientHeight })

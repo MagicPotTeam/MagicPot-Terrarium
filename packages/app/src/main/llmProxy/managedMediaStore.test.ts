@@ -398,27 +398,50 @@ describe('managedMediaStore', () => {
     expect(await fs.readdir(path.join(storeRoot, '.staging'))).toEqual([])
   })
 
-  it('resolves references after restart and reports forged, missing, and corrupt data', async () => {
+  it('restores a managed PNG from a JSON-safe reference after restart without adapters', async () => {
+    // This is intentionally a store-only restart test: no Chat, Canvas, or Comfy adapter.
     const imported = await importMedia()
-    const resolved = await resolveManagedMediaReference(storeRoot, imported.reference, {
+    const persistedReference = JSON.parse(JSON.stringify(imported.reference))
+    const persistedPayload = JSON.stringify({ managedMedia: persistedReference })
+    const metadataPayload = await fs.readFile(imported.metadataPath, 'utf8')
+    const base64 = pngBytes.toString('base64')
+    expect(persistedPayload).not.toContain(base64)
+    expect(metadataPayload).not.toContain(base64)
+    expect(persistedReference).not.toHaveProperty('bytes')
+
+    const resolved = await resolveManagedMediaReference(storeRoot, persistedReference, {
       authorizedRoot
     })
-    expect(resolved.absolutePath).toBe(imported.absolutePath)
-    expect(resolved.metadata.sha256).toBe(imported.reference.sha256)
+    const resolvedAfterSecondRestart = await resolveManagedMediaReference(
+      storeRoot,
+      JSON.parse(JSON.stringify(persistedReference)),
+      { authorizedRoot }
+    )
+    for (const result of [resolved, resolvedAfterSecondRestart]) {
+      const resolvedBytes = await fs.readFile(result.absolutePath)
+      expect(resolvedBytes).toEqual(pngBytes)
+      expect(createHash('sha256').update(resolvedBytes).digest('hex')).toBe(
+        persistedReference.sha256
+      )
+      expect(result.metadata.sha256).toBe(persistedReference.sha256)
+      expect(result.metadata.mimeType).toBe('image/png')
+    }
+    expect(resolved.reference).toEqual(resolvedAfterSecondRestart.reference)
+
     await expect(
       resolveManagedMediaReference(
         storeRoot,
-        { ...imported.reference, relativePath: `originals/aa/${imported.reference.sha256}.png` },
+        { ...persistedReference, relativePath: `originals/aa/${persistedReference.sha256}.png` },
         { authorizedRoot }
       )
     ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_CORRUPT' })
     await fs.unlink(imported.absolutePath)
     await expect(
-      resolveManagedMediaReference(storeRoot, imported.reference, { authorizedRoot })
+      resolveManagedMediaReference(storeRoot, persistedReference, { authorizedRoot })
     ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_MISSING' })
     await fs.writeFile(imported.absolutePath, Buffer.alloc(pngBytes.length, 1))
     await expect(
-      resolveManagedMediaReference(storeRoot, imported.reference, { authorizedRoot })
+      resolveManagedMediaReference(storeRoot, persistedReference, { authorizedRoot })
     ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_CORRUPT' })
   })
 })
