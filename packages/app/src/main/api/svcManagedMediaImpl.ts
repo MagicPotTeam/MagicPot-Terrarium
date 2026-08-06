@@ -151,7 +151,13 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
         },
         { authorizedRoot }
       )
-      return importResponse(imported, authorizedRoot)
+      const response = importResponse(imported, authorizedRoot)
+      void (this.dependencies.ensureDerivative ?? ensureManagedMediaDerivative)({
+        authorizedRoot,
+        reference: response.reference,
+        maxEdge: 2048
+      }).catch(() => undefined)
+      return response
     } catch (error) {
       if (error instanceof ServiceError) throw error
       if (error instanceof ManagedMediaImportError) {
@@ -236,7 +242,13 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
         },
         { authorizedRoot }
       )
-      return importResponse(imported, authorizedRoot)
+      const response = importResponse(imported, authorizedRoot)
+      void (this.dependencies.ensureDerivative ?? ensureManagedMediaDerivative)({
+        authorizedRoot,
+        reference: response.reference,
+        maxEdge: 2048
+      }).catch(() => undefined)
+      return response
     } catch (error) {
       if (error instanceof ManagedMediaImportError) {
         throw new ServiceError(error.message, { code: error.code })
@@ -309,11 +321,34 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
       const mediaDir = getMediaDir()
       const authorizedRoot = await realpath(mediaDir)
       const resolved = await resolveReference(mediaDir, req.reference, { authorizedRoot })
-      const bytes = await readFile(resolved.absolutePath)
+      let selected = {
+        absolutePath: resolved.absolutePath,
+        mimeType: resolved.reference.mimeType,
+        sizeBytes: resolved.reference.sizeBytes!
+      }
+      try {
+        const derivative = await (
+          this.dependencies.ensureDerivative ?? ensureManagedMediaDerivative
+        )({
+          authorizedRoot,
+          reference: req.reference,
+          maxEdge: 2048
+        })
+        if (derivative.purpose === 'managed-media-derivative') {
+          selected = {
+            absolutePath: path.join(authorizedRoot, ...derivative.relativePath.split('/')),
+            mimeType: derivative.mimeType,
+            sizeBytes: derivative.sizeBytes
+          }
+        }
+      } catch {
+        // Request preprocessing is best-effort; the verified immutable original remains valid.
+      }
+      const bytes = await readFile(selected.absolutePath)
       return validateMaterializeManagedMediaForRequestResp({
         transport: 'request-data-url',
-        dataUrl: `data:${resolved.reference.mimeType};base64,${bytes.toString('base64')}`,
-        mimeType: resolved.reference.mimeType,
+        dataUrl: `data:${selected.mimeType};base64,${bytes.toString('base64')}`,
+        mimeType: selected.mimeType,
         sizeBytes: bytes.byteLength
       })
     } catch (error) {

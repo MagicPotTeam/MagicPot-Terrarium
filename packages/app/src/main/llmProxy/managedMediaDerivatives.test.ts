@@ -194,7 +194,7 @@ describe('ensureManagedMediaDerivative', () => {
     expect(first).toEqual(second)
     expect(sidecar.generate).toHaveBeenCalledTimes(1)
     expect(sidecar.generate.mock.calls[0][0]).toMatchObject({
-      thumbnail: { levels: [512], allowUpscale: false, format: 'png' },
+      thumbnail: { levels: [512], allowUpscale: false, cropTransparent: true, format: 'png' },
       maxConcurrency: 1,
       maxDecodedPixels: 64 * 1024 * 1024,
       maxOutputPixels: 512 * 512

@@ -17,11 +17,11 @@ describe('chatAttachmentUtils', () => {
     )
   })
 
-  it('keeps existing upload size limits per attachment type', () => {
+  it('uses requested image and generic file limits without changing video or model limits', () => {
     expect(getChatAttachmentMaxSizeMB('video')).toBe(500)
     expect(getChatAttachmentMaxSizeMB('model3d')).toBe(200)
-    expect(getChatAttachmentMaxSizeMB('image')).toBe(50)
-    expect(getChatAttachmentMaxSizeMB('file')).toBe(50)
+    expect(getChatAttachmentMaxSizeMB('image')).toBe(5)
+    expect(getChatAttachmentMaxSizeMB('file')).toBe(10)
   })
 
   it('normalizes local file paths and avoids logging full data urls', () => {

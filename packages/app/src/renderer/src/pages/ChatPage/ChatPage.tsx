@@ -5896,7 +5896,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       if (!isImage && !isVideo && !isModel3d) return
 
-      const maxSizeMB = isVideo ? 500 : isModel3d ? 200 : 50
+      const attachmentType: ChatAttachment['type'] = isVideo
+        ? 'video'
+        : isModel3d
+          ? 'model3d'
+          : 'image'
+      const maxSizeMB = getChatAttachmentMaxSizeMB(attachmentType)
       if (!checkFileSize(file, maxSizeMB)) {
         alert(`File is too large. Max ${maxSizeMB}MB, current size ${formatFileSize(file.size)}.`)
         return

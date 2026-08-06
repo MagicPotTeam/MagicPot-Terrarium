@@ -3,7 +3,11 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { ServiceError } from '@shared/api/apiUtils/serviceValidation'
-import { ManagedMediaResolutionError } from '../llmProxy/managedMediaStore'
+import {
+  DEFAULT_MANAGED_MEDIA_MAX_BYTES,
+  ManagedMediaResolutionError,
+  type ResolvedManagedMedia
+} from '../llmProxy/managedMediaStore'
 import { ManagedMediaSvcImpl, type ManagedMediaSvcImplDependencies } from './svcManagedMediaImpl'
 
 function png(): Buffer {
@@ -34,7 +38,7 @@ const reference = {
   relativePath: 'ab/file.png',
   sha256: 'a'.repeat(64),
   sizeBytes: 12,
-  mimeType: 'image/png',
+  mimeType: 'image/png' as const,
   originalFileName: 'file.png'
 }
 const descriptor = {
@@ -152,7 +156,7 @@ describe('ManagedMediaSvcImpl', () => {
       ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_FAILED' })
 
       const large = path.join(root, 'large.png')
-      await fs.writeFile(large, Buffer.alloc(25 * 1024 * 1024 + 1, 1))
+      await fs.writeFile(large, Buffer.alloc(DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1, 1))
       await expect(
         service.importFile({
           sourcePath: large,
@@ -172,6 +176,88 @@ describe('ManagedMediaSvcImpl', () => {
       })
       expect(result.reference).toMatchObject({ kind: 'managed', mimeType: 'image/png' })
       expect(result.localMediaUrl).toMatch(/^local-media:/)
+    })
+  })
+
+  it('uses the processed WebP for request materialization and falls back to original on failure', async () => {
+    const original = Buffer.from('original')
+    const processed = Buffer.from('processed')
+    const resolved: ResolvedManagedMedia = {
+      reference,
+      absolutePath: '/canonical/media/ab/file.png',
+      localMediaUrl: 'local-media:///canonical/media/ab/file.png',
+      metadataPath: '/canonical/media/ab/file.png.json',
+      metadata: {
+        schema: 'magicpot.managed-media/v1',
+        version: 1,
+        sha256: reference.sha256,
+        sizeBytes: reference.sizeBytes,
+        mimeType: reference.mimeType,
+        extension: 'png',
+        relativePath: reference.relativePath
+      },
+      integrityVerified: true,
+      verifiedAt: new Date(0).toISOString()
+    }
+    const resolveReference = vi.fn<
+      NonNullable<ManagedMediaSvcImplDependencies['resolveReference']>
+    >(async () => resolved)
+    const readFile = vi.fn(async (filePath: Parameters<typeof fs.readFile>[0]) =>
+      filePath.toString().endsWith('image.webp') ? processed : original
+    ) as unknown as typeof fs.readFile
+    const derivative = {
+      ...descriptor,
+      maxEdge: 2048 as const,
+      relativePath: 'derivatives/x/committed/image.webp'
+    }
+    const service = create(
+      vi.fn(async () => derivative),
+      { resolveReference, readFile }
+    )
+    await expect(
+      service.materializeForRequest({ reference, transport: 'request-data-url' })
+    ).resolves.toMatchObject({
+      mimeType: 'image/webp',
+      sizeBytes: processed.length,
+      dataUrl: `data:image/webp;base64,${processed.toString('base64')}`
+    })
+
+    const fallback = create(
+      vi.fn(async () => {
+        throw new Error('derive failed')
+      }),
+      {
+        resolveReference,
+        readFile
+      }
+    )
+    await expect(
+      fallback.materializeForRequest({ reference, transport: 'request-data-url' })
+    ).resolves.toMatchObject({
+      mimeType: 'image/png',
+      sizeBytes: original.length,
+      dataUrl: `data:image/png;base64,${original.toString('base64')}`
+    })
+  })
+
+  it('keeps import successful when automatic preprocessing fails', async () => {
+    await withImportFixture(async ({ media, source }) => {
+      const { rememberTrustedLocalFileSelections } = await import('./trustedFileSelection')
+      rememberTrustedLocalFileSelections([source])
+      const ensureDerivative = vi.fn(async () => {
+        throw new Error('derive failed')
+      })
+      const service = new ManagedMediaSvcImpl({ getMediaDir: () => media, ensureDerivative })
+      await expect(
+        service.importFile({
+          sourcePath: source,
+          mimeType: 'image/png',
+          originalFileName: 'selected.png'
+        })
+      ).resolves.toMatchObject({ reference: { kind: 'managed' } })
+      await vi.waitFor(() =>
+        expect(ensureDerivative).toHaveBeenCalledWith(expect.objectContaining({ maxEdge: 2048 }))
+      )
     })
   })
 

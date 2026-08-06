@@ -123,6 +123,7 @@ export type CanvasThumbnailSidecarThumbnailOptions = {
   maxWidth?: number
   maxHeight?: number
   allowUpscale?: boolean
+  cropTransparent?: boolean
   format?: CanvasThumbnailSidecarThumbnailFormat
 }
 
@@ -174,6 +175,9 @@ export type CanvasThumbnailSidecarSourceMetadata = {
   orientationApplied?: boolean
   postOrientationWidth?: number
   postOrientationHeight?: number
+  cropApplied?: boolean
+  processedWidth?: number
+  processedHeight?: number
   colorType: string
   format: string
 }

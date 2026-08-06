@@ -89,6 +89,8 @@ struct ThumbnailRequest {
     #[serde(default)]
     allow_upscale: bool,
     #[serde(default)]
+    crop_transparent: bool,
+    #[serde(default)]
     format: ThumbnailFormat,
 }
 
@@ -100,6 +102,7 @@ impl Default for ThumbnailRequest {
             max_width: None,
             max_height: None,
             allow_upscale: false,
+            crop_transparent: false,
             format: ThumbnailFormat::Png,
         }
     }
@@ -219,6 +222,9 @@ struct SourceMetadata {
     orientation_applied: bool,
     post_orientation_width: u32,
     post_orientation_height: u32,
+    crop_applied: bool,
+    processed_width: u32,
+    processed_height: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -484,6 +490,12 @@ fn process_item_inner(
     image.apply_orientation(orientation);
     let (oriented_width, oriented_height) = image.dimensions();
     guard_decoded_pixels(oriented_width, oriented_height, options.max_decoded_pixels)?;
+    let (mut image, crop_applied) = if options.thumbnail.crop_transparent {
+        crop_transparent_border(image)
+    } else {
+        (image, false)
+    };
+    let (processed_width, processed_height) = image.dimensions();
     guard_output_pixels(&image, &options.levels, options.max_output_pixels)?;
     if matches!(
         options.thumbnail.format,
@@ -577,6 +589,9 @@ fn process_item_inner(
             orientation_applied,
             post_orientation_width: oriented_width,
             post_orientation_height: oriented_height,
+            crop_applied,
+            processed_width,
+            processed_height,
         },
         hash,
         levels,
@@ -668,6 +683,43 @@ fn has_transparent_pixels(image: &DynamicImage) -> bool {
     image.color().has_alpha() && image.to_rgba8().pixels().any(|pixel| pixel.0[3] < 255)
 }
 
+fn crop_transparent_border(image: DynamicImage) -> (DynamicImage, bool) {
+    if !image.color().has_alpha() {
+        return (image, false);
+    }
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for (x, y, pixel) in rgba.enumerate_pixels() {
+        if pixel.0[3] == 0 {
+            continue;
+        }
+        bounds = Some(match bounds {
+            None => (x, y, x, y),
+            Some((left, top, right, bottom)) => {
+                (left.min(x), top.min(y), right.max(x), bottom.max(y))
+            }
+        });
+    }
+    let Some((left, top, right, bottom)) = bounds else {
+        return (DynamicImage::ImageRgba8(rgba), false);
+    };
+    let crop_width = right - left + 1;
+    let crop_height = bottom - top + 1;
+    let total = u64::from(width) * u64::from(height);
+    let removed = total - u64::from(crop_width) * u64::from(crop_height);
+    let meaningful = removed >= 4 && removed.saturating_mul(100) >= total;
+    if !meaningful {
+        return (DynamicImage::ImageRgba8(rgba), false);
+    }
+    (
+        DynamicImage::ImageRgba8(
+            image::imageops::crop_imm(&rgba, left, top, crop_width, crop_height).to_image(),
+        ),
+        true,
+    )
+}
+
 fn guard_source_size(size: u64, limit: u64) -> Result<()> {
     if size > limit {
         return Err(anyhow!(
@@ -716,7 +768,7 @@ fn create_thumbnail(image: &DynamicImage, max_side: u32, allow_upscale: bool) ->
     if target_width == width && target_height == height {
         return image.clone();
     }
-    image.resize_exact(target_width, target_height, FilterType::Triangle)
+    image.resize_exact(target_width, target_height, FilterType::Lanczos3)
 }
 
 fn thumbnail_dimensions(
@@ -1018,6 +1070,36 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn crops_only_meaningful_fully_transparent_borders() {
+        let mut bordered = ImageBuffer::from_pixel(10, 10, Rgba([0, 0, 0, 0]));
+        for y in 2..8 {
+            for x in 2..8 {
+                bordered.put_pixel(x, y, Rgba([10, 20, 30, 255]));
+            }
+        }
+        let (cropped, applied) = crop_transparent_border(DynamicImage::ImageRgba8(bordered));
+        assert!(applied);
+        assert_eq!(cropped.dimensions(), (6, 6));
+
+        let mut incidental = ImageBuffer::from_pixel(10, 10, Rgba([10, 20, 30, 255]));
+        incidental.put_pixel(0, 0, Rgba([0, 0, 0, 0]));
+        let (unchanged, applied) = crop_transparent_border(DynamicImage::ImageRgba8(incidental));
+        assert!(!applied);
+        assert_eq!(unchanged.dimensions(), (10, 10));
+    }
+
+    #[test]
+    fn resize_preserves_aspect_ratio_and_never_upscales() {
+        let image =
+            DynamicImage::ImageRgba8(ImageBuffer::from_pixel(400, 200, Rgba([1, 2, 3, 255])));
+        assert_eq!(create_thumbnail(&image, 100, false).dimensions(), (100, 50));
+        assert_eq!(
+            create_thumbnail(&image, 800, false).dimensions(),
+            (400, 200)
+        );
+    }
+
+    #[test]
     fn processes_supported_formats_and_keeps_batch_errors_per_item() {
         let temp = TempDir::new().expect("temp dir");
         let source_dir = temp.path().join("输入");
@@ -1062,6 +1144,7 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: false,
+                crop_transparent: false,
                 format: ThumbnailFormat::Png,
             },
             max_concurrency: Some(2),
@@ -1189,6 +1272,7 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: false,
+                crop_transparent: false,
                 format: ThumbnailFormat::Png,
             },
             max_concurrency: Some(1),
@@ -1221,6 +1305,7 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: true,
+                crop_transparent: false,
                 format: ThumbnailFormat::Png,
             },
             max_concurrency: Some(1),
@@ -1257,6 +1342,7 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: false,
+                crop_transparent: false,
                 format: ThumbnailFormat::Png,
             },
             max_concurrency: Some(1),
@@ -1302,6 +1388,7 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: false,
+                crop_transparent: false,
                 format: ThumbnailFormat::Webp,
             },
             max_concurrency: Some(1),
@@ -1358,6 +1445,7 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: false,
+                crop_transparent: false,
                 format: ThumbnailFormat::Png,
             },
             max_concurrency: Some(2),

@@ -5,6 +5,7 @@ import { Readable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
 import {
+  DEFAULT_MANAGED_MEDIA_MAX_BYTES,
   importManagedMedia,
   importManagedMediaFile,
   importManagedMediaStream,
@@ -99,10 +100,24 @@ describe('managedMediaStore', () => {
   it.each([
     ['truncated PNG', pngBytes.subarray(0, 30)],
     ['zero dimensions', png(0, 1)],
-    ['huge dimensions', png(70_000, 1)],
     ['signature only', Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])]
   ])('rejects structurally invalid %s', async (_label, bytes) => {
     await expect(importMedia({ bytes })).rejects.toThrow('structurally invalid')
+  })
+
+  it('accepts structurally valid images without rejecting large dimensions', async () => {
+    await expect(importMedia({ bytes: png(70_000, 1) })).resolves.toMatchObject({
+      reference: { mimeType: 'image/png' }
+    })
+  })
+
+  it('enforces a 20 MiB hard limit even when a larger override is requested', async () => {
+    expect(DEFAULT_MANAGED_MEDIA_MAX_BYTES).toBe(20 * 1024 * 1024)
+    const bytes = Buffer.alloc(DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1)
+    pngBytes.copy(bytes)
+    await expect(
+      importMedia({ bytes, maxBytes: DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1024 })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_TOO_LARGE' })
   })
 
   it.each(['CON.png', 'name. ', 'bad?.png', '../escape.png', 'folder/file.png'])(

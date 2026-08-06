@@ -10,11 +10,10 @@ import {
 } from '../../shared/mediaReference'
 
 export const MANAGED_MEDIA_METADATA_VERSION = 1 as const
-export const DEFAULT_MANAGED_MEDIA_MAX_BYTES = 25 * 1024 * 1024
+export const DEFAULT_MANAGED_MEDIA_MAX_BYTES = 20 * 1024 * 1024
 
 const METADATA_SCHEMA = 'magicpot.managed-media/v1'
 const MAX_METADATA_BYTES = 64 * 1024
-const MAX_IMAGE_DIMENSION = 65_535
 const MAX_JPEG_HEADER_BYTES = 1024 * 1024
 const IO_CHUNK_BYTES = 64 * 1024
 const MAX_STRUCTURAL_CHUNKS = 16_384
@@ -118,7 +117,7 @@ function sizeLimit(value?: number): number {
   const maxBytes = value ?? DEFAULT_MANAGED_MEDIA_MAX_BYTES
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)
     throw new ManagedMediaImportError('MANAGED_MEDIA_INVALID', 'Invalid managed media size limit')
-  return maxBytes
+  return Math.min(maxBytes, DEFAULT_MANAGED_MEDIA_MAX_BYTES)
 }
 function canonicalOriginalFileName(value: string): string {
   const normalized = String(value || '')
@@ -152,7 +151,7 @@ function normalizeMime(value: string): SupportedMimeType {
   return mime as SupportedMimeType
 }
 function dimensionsAreSafe(width: number, height: number): boolean {
-  return width > 0 && height > 0 && width <= MAX_IMAGE_DIMENSION && height <= MAX_IMAGE_DIMENSION
+  return width > 0 && height > 0
 }
 function serializeProvenance(value: ManagedMediaProvenance): ManagedMediaProvenance {
   if (

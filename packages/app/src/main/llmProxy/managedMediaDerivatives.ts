@@ -15,9 +15,10 @@ export const MANAGED_MEDIA_DERIVATIVE_MAX_EDGES = [256, 512, 1024, 2048] as cons
 export type ManagedMediaDerivativeMaxEdge = (typeof MANAGED_MEDIA_DERIVATIVE_MAX_EDGES)[number]
 export type ManagedMediaDerivativeFormat = 'png' | 'webp' | 'jpeg'
 
-const SCHEMA = 'magicpot.managed-media-derivative/v3'
-const ENCODER_VERSION = 'canvas-thumbnail-sidecar/v1'
+const SCHEMA = 'magicpot.managed-media-derivative/v4'
+const ENCODER_VERSION = 'canvas-thumbnail-sidecar/v2'
 const ORIENTATION_POLICY = 'apply-exif-before-resize/v1'
+const CROP_POLICY = 'crop-meaningful-transparent-border/v1'
 const MAX_DECODED_PIXELS = 64 * 1024 * 1024
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024
 const MAX_GENERATED_BYTES = 25 * 1024 * 1024
@@ -62,6 +63,7 @@ type DerivativeMetadata = ManagedMediaDerivativeDescriptor & {
   format: ManagedMediaDerivativeFormat
   encoderVersion: typeof ENCODER_VERSION
   orientationPolicy: typeof ORIENTATION_POLICY
+  cropPolicy: typeof CROP_POLICY
 }
 
 type BoundOutput = {
@@ -99,7 +101,9 @@ function identityFor(
   format: ManagedMediaDerivativeFormat
 ): string {
   return createHash('sha256')
-    .update(`${originalSha256}\0${maxEdge}\0${format}\0${ENCODER_VERSION}\0${ORIENTATION_POLICY}`)
+    .update(
+      `${originalSha256}\0${maxEdge}\0${format}\0${ENCODER_VERSION}\0${ORIENTATION_POLICY}\0${CROP_POLICY}`
+    )
     .digest('hex')
 }
 function expectedMime(format: ManagedMediaDerivativeFormat): ImageMime {
@@ -374,8 +378,12 @@ function bindManifest(
   if (!isPathInsideRoot(entryRoot, generatedPath) || !isPathInsideRoot(entryRoot, manifestPath))
     throw new Error('Sidecar content-tag output is outside expected cache entry')
   const sourceWidth =
-    manifest.source.orientedWidth ?? manifest.source.postOrientationWidth ?? manifest.source.width
+    manifest.source.processedWidth ??
+    manifest.source.orientedWidth ??
+    manifest.source.postOrientationWidth ??
+    manifest.source.width
   const sourceHeight =
+    manifest.source.processedHeight ??
     manifest.source.orientedHeight ??
     manifest.source.postOrientationHeight ??
     manifest.source.height
@@ -479,6 +487,7 @@ async function validateCommitted(
     metadata.relativePath !== relativePath ||
     metadata.encoderVersion !== ENCODER_VERSION ||
     metadata.orientationPolicy !== ORIENTATION_POLICY ||
+    metadata.cropPolicy !== CROP_POLICY ||
     metadata.mimeType !== expectedMime(format) ||
     metadata.purpose !== 'managed-media-derivative' ||
     metadata.localMediaUrl !== localUrl(imagePath) ||
@@ -565,6 +574,7 @@ async function generate(
         thumbnail: {
           levels: [maxEdge],
           allowUpscale: false,
+          cropTransparent: true,
           format: format as CanvasThumbnailSidecarThumbnailFormat
         },
         maxConcurrency: 1,
@@ -616,7 +626,8 @@ async function generate(
         originalSha256,
         format,
         encoderVersion: ENCODER_VERSION,
-        orientationPolicy: ORIENTATION_POLICY
+        orientationPolicy: ORIENTATION_POLICY,
+        cropPolicy: CROP_POLICY
       }
       await fs.writeFile(
         path.join(stagedCommit, 'manifest.json'),

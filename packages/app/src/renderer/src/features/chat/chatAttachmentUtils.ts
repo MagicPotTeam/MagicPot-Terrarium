@@ -61,7 +61,8 @@ export const getChatAttachmentTypeForFile = (
 export const getChatAttachmentMaxSizeMB = (type: ChatAttachment['type']): number => {
   if (type === 'video') return 500
   if (type === 'model3d') return 200
-  return 50
+  if (type === 'image') return 5
+  return 10
 }
 
 type FileWithOptionalPath = File & { path?: unknown }
