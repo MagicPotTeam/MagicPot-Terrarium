@@ -48,6 +48,7 @@ class MockOffscreenCanvas {
 const originalOffscreenCanvas = globalThis.OffscreenCanvas
 const originalImageData = globalThis.ImageData
 const originalCreateObjectUrl = URL.createObjectURL
+const originalRevokeObjectUrl = URL.revokeObjectURL
 
 beforeEach(() => {
   globalThis.OffscreenCanvas = MockOffscreenCanvas as any
@@ -62,6 +63,7 @@ afterEach(() => {
   globalThis.OffscreenCanvas = originalOffscreenCanvas
   globalThis.ImageData = originalImageData
   URL.createObjectURL = originalCreateObjectUrl
+  URL.revokeObjectURL = originalRevokeObjectUrl
 })
 
 describe('psdImport', () => {
@@ -192,6 +194,62 @@ describe('psdImport', () => {
       limit: 10
     } satisfies Partial<PsdImportLimitExceededError>)
     expect(arrayBuffer).not.toHaveBeenCalled()
+  })
+
+  it('revokes already-created layer URLs when a later import limit aborts materialization', async () => {
+    const revokeObjectUrl = vi.fn()
+    URL.revokeObjectURL = revokeObjectUrl
+    mockParsedPsd.current = {
+      type: 'Psd',
+      name: 'ROOT',
+      width: 2,
+      height: 2,
+      children: [
+        {
+          type: 'Layer',
+          name: 'Layer 1',
+          left: 0,
+          top: 0,
+          width: 1,
+          height: 1,
+          visible: true,
+          opacity: 255,
+          children: [],
+          composite: vi.fn(async () => new Uint8ClampedArray([255, 255, 255, 255]))
+        },
+        {
+          type: 'Layer',
+          name: 'Layer 2',
+          left: 0,
+          top: 0,
+          width: 2,
+          height: 2,
+          visible: true,
+          opacity: 255,
+          children: [],
+          composite: vi.fn(async () => new Uint8ClampedArray(16).fill(255))
+        }
+      ],
+      composite: vi.fn(async () => new Uint8ClampedArray(16).fill(255))
+    }
+
+    await expect(
+      materializePsdFile(
+        {
+          name: 'two-layers.psd',
+          arrayBuffer: vi.fn(async () => new ArrayBuffer(8))
+        },
+        {
+          limits: { maxPixelCount: 1 }
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'PsdImportLimitExceededError',
+      limitKind: 'pixelCount'
+    })
+
+    expect(revokeObjectUrl).toHaveBeenCalledTimes(1)
+    expect(revokeObjectUrl.mock.calls[0]?.[0]).toMatch(/^blob:mock-psd-/)
   })
 
   it('rejects PSD documents above the explicit layer-count guard', async () => {

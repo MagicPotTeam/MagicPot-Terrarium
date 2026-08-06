@@ -1052,15 +1052,28 @@ export function useCanvasAssetIntake({
 
   const handleImportPsdFile = useCallback(
     async (file: File) => {
+      let pendingObjectUrls: string[] = []
+      let appendSucceeded = false
       try {
         const { materializePsdFile } = await import('./psdImport')
         const imported = await materializePsdFile(file, {
           startZIndex: nextZIndexRef.current
         })
+        pendingObjectUrls = Array.from(
+          new Set(
+            imported.items
+              .map((item) => {
+                const src = (item as Partial<CanvasImageItem>).src
+                return typeof src === 'string' ? src : ''
+              })
+              .filter((src) => src.startsWith('blob:'))
+          )
+        )
         const restored = await appendImportedCanvasPayload({
           items: imported.items,
           groups: imported.groups
         })
+        appendSucceeded = true
 
         if (restored.length === 0) {
           notifyWarning(`No visible content could be imported from ${file.name}.`)
@@ -1084,6 +1097,12 @@ export function useCanvasAssetIntake({
           `Failed to import ${file.name}: ${error instanceof Error ? error.message : String(error)}`
         )
         return []
+      } finally {
+        if (!appendSucceeded) {
+          for (const objectUrl of pendingObjectUrls) {
+            URL.revokeObjectURL(objectUrl)
+          }
+        }
       }
     },
     [appendImportedCanvasPayload, nextZIndexRef, notifyError, notifySuccess, notifyWarning]

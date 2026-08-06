@@ -196,6 +196,13 @@ export async function materializePsdFile(
   const warnings: string[] = []
   const items: CanvasItem[] = []
   const groups: CanvasGroup[] = []
+  const createdObjectUrls = new Set<string>()
+  const revokeCreatedObjectUrls = () => {
+    for (const objectUrl of createdObjectUrls) {
+      URL.revokeObjectURL(objectUrl)
+    }
+    createdObjectUrls.clear()
+  }
   const idState = { nextId: 0 }
   const zIndexState = { nextZIndex: options?.startZIndex ?? 0 }
   const fileWithSize = file as unknown as Pick<File, 'size'>
@@ -234,6 +241,9 @@ export async function materializePsdFile(
     }
 
     const { src, sizeBytes } = await rgbaToObjectUrl(pixels, width, height)
+    if (src.startsWith('blob:')) {
+      createdObjectUrls.add(src)
+    }
     const itemId = nextId('psd-image', idState)
     items.push({
       id: itemId,
@@ -354,8 +364,13 @@ export async function materializePsdFile(
     }
   }
 
-  for (const child of (psd as ParsedPsdNode).children ?? []) {
-    await walk(child, [stripExtension(file.name)])
+  try {
+    for (const child of (psd as ParsedPsdNode).children ?? []) {
+      await walk(child, [stripExtension(file.name)])
+    }
+  } catch (error) {
+    revokeCreatedObjectUrls()
+    throw error
   }
 
   if (items.length === 0) {
@@ -370,6 +385,9 @@ export async function materializePsdFile(
       const composite = await psd.composite()
       if (composite.length > 0) {
         const flattenedPreview = await rgbaToObjectUrl(composite, psd.width, psd.height)
+        if (flattenedPreview.src.startsWith('blob:')) {
+          createdObjectUrls.add(flattenedPreview.src)
+        }
         const itemId = nextId('psd-image', idState)
         items.push({
           id: itemId,

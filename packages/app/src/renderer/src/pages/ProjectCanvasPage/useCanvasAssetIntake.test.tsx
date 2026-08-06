@@ -23,6 +23,13 @@ import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 import type { CanvasGroup, CanvasImageItem, CanvasItem } from './types'
 
 const importCanvasFileMock = vi.fn()
+const materializePsdFileMock = vi.fn()
+const hydrateCanvasImageItemForCanvasMock = vi.fn(async (itemOrArgs: unknown) => {
+  if (itemOrArgs && typeof itemOrArgs === 'object' && 'item' in itemOrArgs) {
+    return (itemOrArgs as { item: unknown }).item
+  }
+  return itemOrArgs
+})
 const authorizeCanvasLocalMediaSourceUrlMock = vi.fn<(file: File) => Promise<string | null>>()
 
 vi.mock('./canvasLocalFileSource', async (importOriginal) => {
@@ -32,6 +39,18 @@ vi.mock('./canvasLocalFileSource', async (importOriginal) => {
     authorizeCanvasLocalMediaSourceUrl: (file: File) => authorizeCanvasLocalMediaSourceUrlMock(file)
   }
 })
+
+vi.mock('./canvasAssetIntakeHelpers', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./canvasAssetIntakeHelpers')>()
+  return {
+    ...actual,
+    hydrateCanvasImageItemForCanvas: (args: unknown) => hydrateCanvasImageItemForCanvasMock(args)
+  }
+})
+
+vi.mock('./psdImport', () => ({
+  materializePsdFile: (...args: unknown[]) => materializePsdFileMock(...args)
+}))
 
 vi.mock('./canvasStorage', () => ({
   importCanvasFile: (...args: unknown[]) => importCanvasFileMock(...args),
@@ -69,6 +88,32 @@ function AssetIntakeHarness({
   useEffect(() => {
     void handleImportCanvasSceneFile(file)
   }, [file, handleImportCanvasSceneFile])
+
+  return null
+}
+
+function PsdImportHarness({
+  onComplete
+}: {
+  onComplete: (
+    value: Awaited<ReturnType<ReturnType<typeof useCanvasAssetIntake>['handleImportPsdFile']>>
+  ) => void
+}) {
+  const { handleImportPsdFile } = useCanvasAssetIntake({
+    nextZIndexRef: { current: 1 },
+    setItemsWithHistory: vi.fn(),
+    setGroups: vi.fn(),
+    setGroupBranches: vi.fn(),
+    setSelectedIds: vi.fn(),
+    setTool: vi.fn(),
+    notifyError: vi.fn(),
+    notifySuccess: vi.fn(),
+    notifyWarning: vi.fn()
+  })
+
+  useEffect(() => {
+    void handleImportPsdFile(new File(['psd'], 'demo.psd')).then(onComplete)
+  }, [handleImportPsdFile, onComplete])
 
   return null
 }
@@ -215,6 +260,14 @@ afterEach(() => {
 })
 
 beforeEach(() => {
+  materializePsdFileMock.mockReset()
+  hydrateCanvasImageItemForCanvasMock.mockReset()
+  hydrateCanvasImageItemForCanvasMock.mockImplementation(async (itemOrArgs) => {
+    if (itemOrArgs && typeof itemOrArgs === 'object' && 'item' in itemOrArgs) {
+      return (itemOrArgs as { item: unknown }).item
+    }
+    return itemOrArgs
+  })
   authorizeCanvasLocalMediaSourceUrlMock.mockResolvedValue(null)
   importCanvasFileMock.mockResolvedValue({
     items: [
@@ -244,6 +297,51 @@ beforeEach(() => {
 })
 
 describe('useCanvasAssetIntake', () => {
+  it('revokes deduplicated PSD object URLs when canvas adoption fails', async () => {
+    const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const onComplete = vi.fn()
+    materializePsdFileMock.mockResolvedValue({
+      sourceApp: 'photoshop',
+      warnings: [],
+      groups: [],
+      items: [
+        { id: 'psd-a', type: 'image', src: 'blob:psd-shared' },
+        { id: 'psd-b', type: 'image', src: 'blob:psd-shared' },
+        { id: 'psd-c', type: 'image', src: 'blob:psd-unique' }
+      ]
+    })
+    hydrateCanvasImageItemForCanvasMock.mockRejectedValueOnce(new Error('adoption failed'))
+
+    render(<PsdImportHarness onComplete={onComplete} />)
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalledWith([]))
+    expect(revokeObjectUrl).toHaveBeenCalledTimes(2)
+    expect(revokeObjectUrl).toHaveBeenCalledWith('blob:psd-shared')
+    expect(revokeObjectUrl).toHaveBeenCalledWith('blob:psd-unique')
+  })
+
+  it('keeps PSD object URLs after successful canvas adoption', async () => {
+    const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const onComplete = vi.fn()
+    materializePsdFileMock.mockResolvedValue({
+      sourceApp: 'photoshop',
+      warnings: [],
+      groups: [],
+      items: [{ id: 'psd-a', type: 'image', src: 'blob:psd-adopted' }]
+    })
+    hydrateCanvasImageItemForCanvasMock.mockImplementation(async (itemOrArgs) => {
+      if (itemOrArgs && typeof itemOrArgs === 'object' && 'item' in itemOrArgs) {
+        return (itemOrArgs as { item: unknown }).item
+      }
+      return itemOrArgs
+    })
+
+    render(<PsdImportHarness onComplete={onComplete} />)
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalled())
+    expect(revokeObjectUrl).not.toHaveBeenCalled()
+  })
+
   it('limits batch image preprocessing concurrency and preserves source order', async () => {
     let activeWorkers = 0
     let maxActiveWorkers = 0
