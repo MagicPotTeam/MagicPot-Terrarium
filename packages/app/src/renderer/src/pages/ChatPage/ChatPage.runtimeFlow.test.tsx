@@ -673,6 +673,8 @@ const renderChatPage = (
 
 const dispatchNewSession = async (
   detail: {
+    requestId?: string
+    title?: string
     skillId?: string
     profileId?: string
     initialMessage?: string
@@ -1855,6 +1857,164 @@ describe('ChatPage runtime workflow integration', () => {
         })
       )
     })
+  })
+
+  it('keeps six image-producing new sessions independently in flight and persists their durable results', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
+      }))
+    )
+    hoisted.saveImageToDirMock.mockImplementation(async ({ fileName }) => ({
+      savedPath: `C:/MagicPot/AutoSave/Agent/${fileName}`
+    }))
+    const requestIds = Array.from({ length: 6 }, (_, index) => `parallel-image-${index + 1}`)
+    const completions = new Map<
+      string,
+      {
+        signal?: AbortSignal
+        resolve: (value: { content: string; attachments: ChatAttachment[] }) => void
+      }
+    >()
+    const createdSessions = new Map<string, string>()
+    const handleSessionCreated = (event: Event) => {
+      const detail = (event as CustomEvent<{ requestId?: string; sessionId?: string }>).detail
+      if (detail.requestId && detail.sessionId)
+        createdSessions.set(detail.requestId, detail.sessionId)
+    }
+    window.addEventListener('chat:session-created', handleSessionCreated)
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockImplementation(
+      ({ conversationId, signal }: { conversationId?: string; signal?: AbortSignal }) =>
+        new Promise((resolve) => {
+          if (!conversationId) throw new Error('Expected a target session conversation id')
+          completions.set(conversationId, { signal, resolve })
+        })
+    )
+
+    try {
+      renderChatPage()
+      await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+      for (const [index, requestId] of requestIds.entries()) {
+        await dispatchNewSession({
+          requestId,
+          title: `Parallel image ${index + 1}`,
+          profileId: 'vision-model',
+          initialMessage: `Generate image ${index + 1}`,
+          initialAttachments: [createImageAttachment(`source-${index + 1}.png`)]
+        })
+      }
+
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(6))
+      await waitFor(() => expect(createdSessions.size).toBe(6))
+
+      const sessionIds = requestIds.map((requestId) => createdSessions.get(requestId))
+      expect(sessionIds.every(Boolean)).toBe(true)
+      expect(new Set(sessionIds).size).toBe(6)
+      expect(completions.size).toBe(6)
+      expect(sessionIds.every((sessionId) => completions.has(sessionId!))).toBe(true)
+      expect(
+        sessionIds.every((sessionId) => completions.get(sessionId!)?.signal?.aborted === false)
+      ).toBe(true)
+      expect(new Set(readScopedActiveLoadingSessionIds('runtime-flow'))).toEqual(
+        new Set(sessionIds)
+      )
+      const pendingSnapshots = sessionIds.map((sessionId) =>
+        hoisted.storedSessions.value.find((session) => session.id === sessionId)
+      )
+      expect(pendingSnapshots.every(Boolean)).toBe(true)
+      expect(
+        pendingSnapshots.every(
+          (session) =>
+            session?.messages[0]?.role === 'user' &&
+            session.messages[0]?.content ===
+              `Generate image ${
+                requestIds.indexOf(
+                  requestIds.find((requestId) => createdSessions.get(requestId) === session.id)!
+                ) + 1
+              }` &&
+            session.messages[0]?.attachments?.[0]?.fileName ===
+              `source-${
+                requestIds.indexOf(
+                  requestIds.find((requestId) => createdSessions.get(requestId) === session.id)!
+                ) + 1
+              }.png` &&
+            session.messages.at(-1)?.role === 'assistant'
+        )
+      ).toBe(true)
+      expect(
+        pendingSnapshots.every(
+          (session) =>
+            session?.messages.filter((message) => message.role === 'assistant').length === 1
+        )
+      ).toBe(true)
+
+      await act(async () => {
+        sessionIds.forEach((sessionId, index) => {
+          completions.get(sessionId!)?.resolve({
+            content: `result ${index + 1}`,
+            attachments: [
+              {
+                type: 'image',
+                url: `blob:provider-result-${index + 1}`,
+                fileName: `generated-${index + 1}.png`,
+                mimeType: 'image/png',
+                media: {
+                  version: 1,
+                  kind: 'managed',
+                  relativePath: `originals/${String(index + 1).repeat(64)}.png`,
+                  sha256: String(index + 1).repeat(64),
+                  mimeType: 'image/png',
+                  sizeBytes: index + 1,
+                  originalFileName: `generated-${index + 1}.png`
+                }
+              }
+            ]
+          })
+        })
+      })
+
+      await waitFor(() => {
+        for (const [index, sessionId] of sessionIds.entries()) {
+          const session = hoisted.storedSessions.value.find((item) => item.id === sessionId)
+          expect(session?.messages.at(-1)).toEqual(
+            expect.objectContaining({
+              role: 'assistant',
+              content: `result ${index + 1}`,
+              attachments: [
+                expect.objectContaining({
+                  url: expect.stringMatching(
+                    new RegExp(
+                      `^file://C:/MagicPot/AutoSave/Agent/agent_auto_.*_${sessionId}_1_0\\.png$`
+                    )
+                  ),
+                  fileName: `generated-${index + 1}.png`,
+                  media: expect.objectContaining({
+                    kind: 'managed',
+                    originalFileName: `generated-${index + 1}.png`
+                  })
+                })
+              ]
+            })
+          )
+        }
+      })
+      expect(readScopedActiveLoadingSessionIds('runtime-flow')).toEqual([])
+      expect(hoisted.saveImageToDirMock).toHaveBeenCalledTimes(6)
+      expect(
+        new Set(hoisted.saveImageToDirMock.mock.calls.map(([request]) => request.fileName)).size
+      ).toBe(6)
+      const persisted = JSON.stringify(hoisted.storedSessions.value)
+      expect(persisted).not.toMatch(/(?:data:[^,]*;base64,|blob:)/)
+      expect(
+        sessionIds.every((sessionId) => completions.get(sessionId!)?.signal?.aborted === false)
+      ).toBe(true)
+    } finally {
+      window.removeEventListener('chat:session-created', handleSessionCreated)
+    }
   })
 
   it('applies external send-to-agent input only to the matching targetScope', async () => {

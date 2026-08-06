@@ -3220,7 +3220,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     storageScope
                   })
                   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-                  const fileName = `agent_auto_${timestamp}.png`
+                  const fileName = `agent_auto_${timestamp}_${session.id}_${messageIndex}_${attachmentIndex}.png`
                   const response = await fetch(attachment.url)
                   const blob = await response.blob()
                   const data = await readBlobAsUint8Array(blob)
