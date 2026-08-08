@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "sessions": [
+    {
+      "sessionKey": "generic:dm:legacy-v1",
+      "route": {
+        "channel": "generic",
+        "scopeType": "dm",
+        "scopeId": "legacy-v1"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "session v1"
+        }
+      ],
+      "createdAt": 1700000000001,
+      "updatedAt": 1700000001001
+    }
+  ]
+}
