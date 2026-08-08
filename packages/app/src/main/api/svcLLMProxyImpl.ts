@@ -1960,6 +1960,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         systemPrompt: toolAwareSystemPrompt,
         reasoningEffort: req.reasoningEffort,
         maxOutputTokens: req.maxOutputTokens,
+        temperature: req.temperature,
         imageGenerationOptions: req.imageGenerationOptions,
         videoGenerationOptions: req.videoGenerationOptions,
         signal: options?.signal,

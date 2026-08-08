@@ -5,9 +5,7 @@ import type { ServiceValidator } from './serviceValidation'
 
 // Service 类型约束
 export type Service = {
-  [key: string]:
-    | ((req: any) => Promise<any>) // unary 方法
-    | ((req: any, resp: ServerStreaming<any>) => Promise<void>) // serverStreaming 方法
+  [key: string]: (...args: any[]) => Promise<any>
 }
 
 export type UnaryServiceDef<REQ, RESP> = {
@@ -27,7 +25,7 @@ export type ServerStreamingServiceDef<REQ, RESP> = {
 }
 
 // ServiceDefSheet 类型
-export type ServiceDefSheet<T extends Service> = {
+export type ServiceDefSheet<T extends object> = {
   [K in keyof T]: T[K] extends (req: infer REQ) => Promise<infer RESP>
     ? UnaryServiceDef<REQ, RESP>
     : T[K] extends (req: infer REQ, resp: ServerStreaming<infer RESP>) => Promise<void>
@@ -39,6 +37,6 @@ export type ServiceDefSheet<T extends Service> = {
 export type ApiType = Record<string, Service>
 
 // ApiDefSheet 类型定义
-export type ApiDefSheet<T extends ApiType> = {
-  [K in keyof T]: ServiceDefSheet<T[K]>
+export type ApiDefSheet<T> = {
+  [K in keyof T]: ServiceDefSheet<T[K] extends object ? T[K] : never>
 }

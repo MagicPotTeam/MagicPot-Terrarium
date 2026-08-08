@@ -24,6 +24,11 @@ export type ManagedMediaCleanupAction =
       kind: 'temp-file'
       relativePath: string
     }
+  | {
+      kind: 'reclaim-record'
+      relativePath: string
+      legacyLine?: string
+    }
 export type ManagedMediaCleanupPlan = {
   root: string
   referencedMediaIds: ReadonlySet<string>

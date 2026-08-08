@@ -126,6 +126,7 @@ export type LLMChatReq = {
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
   maxOutputTokens?: number
+  temperature?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
   videoGenerationOptions?: VideoGenerationOptions
   skillRuntime?: LLMChatSkillRuntime

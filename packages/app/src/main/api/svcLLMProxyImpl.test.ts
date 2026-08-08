@@ -2235,9 +2235,10 @@ describe('LLMProxySvcImpl', () => {
       })
     ).rejects.toThrow(/exceeds/)
     expect(
-      bufferFromSpy.mock.calls.some(
-        ([value, encoding]) => encoding === 'base64' && typeof value === 'string'
-      )
+      bufferFromSpy.mock.calls.some((call) => {
+        const args = Array.from(call)
+        return args[1] === 'base64' && typeof args[0] === 'string'
+      })
     ).toBe(false)
     expect(providerChat).not.toHaveBeenCalled()
   })

@@ -209,13 +209,37 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
       const authorizedRoot = await (this.dependencies.realpath ?? fs.realpath)(mediaDir)
       const reference = normalizeMediaReference(req.reclaim.reference)
       if (!reference || reference.kind !== 'managed') throw new Error('Invalid reclaim reference')
-      // Content-addressed imports may be shared. Queue a durable cleanup candidate instead of
-      // deleting the file here; the cleanup pass can prove it is unreferenced before removal.
-      const queuePath = path.join(authorizedRoot, 'legacy-migration-reclaim.jsonl')
-      await fs.appendFile(queuePath, `${JSON.stringify({ version: 1, reference })}\n`, {
-        encoding: 'utf8',
-        flag: 'a'
-      })
+      // Publish one record atomically so a poison record cannot block later migrations.
+      const spoolDir = path.join(authorizedRoot, '.legacy-migration-reclaim')
+      let spoolStat: Awaited<ReturnType<typeof fs.lstat>> | undefined
+      try {
+        spoolStat = await fs.lstat(spoolDir)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+      if (!spoolStat) await fs.mkdir(spoolDir)
+      spoolStat = await fs.lstat(spoolDir)
+      if (
+        !spoolStat.isDirectory() ||
+        spoolStat.isSymbolicLink() ||
+        path.resolve(await fs.realpath(spoolDir)) !== path.resolve(spoolDir)
+      )
+        throw new Error('Unsafe reclaim spool')
+      const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      const temporary = path.join(spoolDir, `${nonce}.tmp`)
+      const published = path.join(spoolDir, `${nonce}.json`)
+      try {
+        await fs.writeFile(
+          temporary,
+          `${JSON.stringify({ version: 1, reference, attempts: 0 })}
+`,
+          { encoding: 'utf8', flag: 'wx' }
+        )
+        await fs.rename(temporary, published)
+      } catch (error) {
+        await fs.rm(temporary, { force: true }).catch(() => undefined)
+        throw error
+      }
       return { queued: true }
     } catch {
       throw new ServiceError('Unable to queue legacy managed media reclaim', {
