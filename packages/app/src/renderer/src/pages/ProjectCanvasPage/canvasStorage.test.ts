@@ -344,6 +344,139 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.groupBranches).toEqual(groupBranches)
   })
 
+  it('persists legacy local-file identity but strips session identity and thumbnail derivatives', async () => {
+    const localFileIdentity = {
+      version: 1 as const,
+      kind: 'local-file' as const,
+      canonicalPath: 'C:\\assets\\original.png',
+      sourceKey: 'local-file:C:\\assets\\original.png',
+      sizeBytes: 12,
+      lastModifiedMs: 123,
+      mimeType: 'image/png',
+      fileName: 'original.png',
+      cacheKey: 'local-cache-key',
+      cacheRootDir: 'C:\\cache'
+    }
+    const sessionIdentity = {
+      version: 1 as const,
+      kind: 'session-blob' as const,
+      sourceKey: 'session:temporary-source',
+      sizeBytes: 12,
+      mimeType: 'image/png',
+      fileName: 'temporary.png',
+      cacheKey: 'session-cache-key'
+    }
+    const thumbnailSet = {
+      version: 1 as const,
+      cacheKey: 'session-cache-key',
+      sourceIdentity: sessionIdentity,
+      levels: [
+        {
+          maxSide: 128 as const,
+          src: 'blob:spatial-tile-runtime',
+          filename: 'tile-128.webp',
+          mimeType: 'image/webp' as const,
+          width: 128,
+          height: 64,
+          sizeBytes: 16
+        }
+      ],
+      createdAt: '2026-04-01T00:00:00.000Z',
+      updatedAt: '2026-04-01T00:00:00.000Z'
+    }
+    const item = {
+      ...createCanvasItem({
+        id: 'image-identity-compat',
+        type: 'image',
+        src: 'blob:runtime-source',
+        sourceWidth: 200,
+        sourceHeight: 100,
+        fileName: 'original.png'
+      }),
+      sourceIdentity: localFileIdentity,
+      sourceFile: new Blob(['original'], { type: 'image/png' }),
+      thumbnailSet
+    } as unknown as CanvasItem
+    const sessionItem = {
+      ...item,
+      id: 'image-session-compat',
+      sourceIdentity: sessionIdentity,
+      sourceFile: new Blob(['session'], { type: 'image/png' })
+    } as unknown as CanvasItem
+
+    await saveCanvasItems([item, sessionItem], 'identity-compat-test')
+    const restored = await loadCanvasItems('identity-compat-test')
+
+    expect(restored.items[0]).toMatchObject({
+      sourceIdentity: localFileIdentity,
+      src: 'blob:mock-export'
+    })
+    expect(restored.items[0]).not.toHaveProperty('thumbnailSet')
+    expect(restored.items[1]).not.toHaveProperty('sourceIdentity')
+    expect(restored.items[1]).not.toHaveProperty('thumbnailSet')
+
+    const db = await openFakeCanvasDb()
+    const blobStore = db.transaction('canvas-blobs', 'readonly').objectStore('canvas-blobs')
+    const readBlobEntry = (key: string): Promise<{ data: ArrayBuffer; mimeType: string }> =>
+      new Promise((resolve) => {
+        const request = blobStore.get(`identity-compat-test::canvas::${key}`)
+        request.onsuccess = () => resolve(request.result as { data: ArrayBuffer; mimeType: string })
+      })
+    const localBlobEntry = await readBlobEntry('image-identity-compat')
+    const sessionBlobEntry = await readBlobEntry('image-session-compat')
+    expect(localBlobEntry.mimeType).toBe('image/png')
+    expect(sessionBlobEntry.mimeType).toBe('image/png')
+    expect(new TextDecoder().decode(localBlobEntry.data)).toBe('original')
+    expect(new TextDecoder().decode(sessionBlobEntry.data)).toBe('session')
+
+    const persisted = await new Promise<unknown>((resolve) => {
+      const request = db
+        .transaction('canvas-items', 'readonly')
+        .objectStore('canvas-items')
+        .get('identity-compat-test')
+      request.onsuccess = () => resolve(request.result)
+    })
+    db.close()
+    expect((persisted as { items: Array<Record<string, unknown>> }).items).toHaveLength(2)
+    expect((persisted as { items: Array<Record<string, unknown>> }).items[0]).toMatchObject({
+      sourceIdentity: localFileIdentity,
+      src: ''
+    })
+    expect((persisted as { items: Array<Record<string, unknown>> }).items[0]).not.toHaveProperty(
+      'thumbnailSet'
+    )
+    expect((persisted as { items: Array<Record<string, unknown>> }).items[1]).not.toHaveProperty(
+      'thumbnailSet'
+    )
+  })
+
+  it('keeps legacy local-file source semantics readable without a thumbnail derivative', async () => {
+    const legacyItem = {
+      ...createCanvasItem({
+        id: 'legacy-local-file',
+        type: 'image',
+        src: 'local-file:///C:/assets/original.png'
+      }),
+      sourceIdentity: {
+        kind: 'local-file',
+        canonicalPath: 'C:\\assets\\original.png',
+        sizeBytes: 12,
+        cacheKey: 'legacy-local-cache'
+      }
+    } as unknown as CanvasItem
+
+    const legacyPayload: unknown = { items: [legacyItem] }
+    await seedCanvasMetadataStore('legacy-local-file-test', legacyPayload)
+    const restored = await loadCanvasItems('legacy-local-file-test')
+
+    expect(restored.items).toHaveLength(1)
+    expect(restored.items[0]).toMatchObject({
+      src: 'local-file:///C:/assets/original.png',
+      sourceIdentity: { kind: 'local-file', canonicalPath: 'C:\\assets\\original.png' }
+    })
+    expect(restored.items[0]).not.toHaveProperty('thumbnailSet')
+  })
+
   it('strips full-image identity crop from unrelated image persistence payloads', async () => {
     const items = [
       {

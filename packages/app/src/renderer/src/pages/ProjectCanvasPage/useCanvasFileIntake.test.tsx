@@ -393,7 +393,13 @@ describe('useCanvasFileIntake', () => {
       })
     )
     await waitFor(() => expect(addImageToCanvas).toHaveBeenCalledTimes(1))
-    expect(addImageToCanvas.mock.calls[0]?.[1]).toMatchObject({ clientX: 240, clientY: 180 })
+    const singleImageOptions = addImageToCanvas.mock.calls[0]?.[1]
+    expect(addImageToCanvas.mock.calls[0]?.[0]).not.toMatch(/^data:/i)
+    expect(singleImageOptions).toMatchObject({
+      clientX: 240,
+      clientY: 180,
+      sourceFile: expect.any(File)
+    })
 
     unmount()
     render(
@@ -427,7 +433,16 @@ describe('useCanvasFileIntake', () => {
     )
 
     await waitFor(() => expect(addImagesToCanvas).toHaveBeenCalledTimes(1))
-    expect(addImagesToCanvas.mock.calls[0]?.[1]).toEqual({ clientX: 300, clientY: 200 })
+    const [batchSources] = addImagesToCanvas.mock.calls[0] ?? []
+    expect(batchSources).toHaveLength(2)
+    expect(batchSources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          src: expect.not.stringMatching(/^data:/i),
+          sourceFile: expect.any(File)
+        })
+      ])
+    )
   })
 
   it('preserves fallback placement when the last pointer position is outside the canvas', async () => {
@@ -1090,16 +1105,18 @@ describe('useCanvasFileIntake', () => {
     })
 
     expect(addImagesToCanvas.mock.calls[0]?.[0]).toEqual([
-      {
+      expect.objectContaining({
         src: 'local-media:///C:/assets/first.png',
         fileName: 'first.png',
-        sizeBytes: firstImage.size
-      },
-      {
+        sizeBytes: firstImage.size,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      }),
+      expect.objectContaining({
         src: 'local-media:///C:/assets/second.png',
         fileName: 'second.png',
-        sizeBytes: secondImage.size
-      }
+        sizeBytes: secondImage.size,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      })
     ])
   })
 
@@ -1333,16 +1350,18 @@ describe('useCanvasFileIntake', () => {
 
     expect(getPathForFile).toHaveBeenCalledTimes(2)
     expect(addImagesToCanvas.mock.calls[0]?.[0]).toEqual([
-      {
+      expect.objectContaining({
         src: 'local-media:///C:/bridge/first.png',
         fileName: 'first.png',
-        sizeBytes: firstImage.size
-      },
-      {
+        sizeBytes: firstImage.size,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      }),
+      expect.objectContaining({
         src: 'local-media:///C:/bridge/second.png',
         fileName: 'second.png',
-        sizeBytes: secondImage.size
-      }
+        sizeBytes: secondImage.size,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      })
     ])
   })
 
@@ -1378,18 +1397,20 @@ describe('useCanvasFileIntake', () => {
     expect(createObjectURL).toHaveBeenCalledTimes(2)
     expect(readAsDataURL).not.toHaveBeenCalled()
     expect(addImagesToCanvas.mock.calls[0]?.[0]).toEqual([
-      {
+      expect.objectContaining({
         src: 'blob:first.png',
         fileName: 'first.png',
         sizeBytes: firstImage.size,
-        sourceFile: firstImage
-      },
-      {
+        sourceFile: firstImage,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      }),
+      expect.objectContaining({
         src: 'blob:second.png',
         fileName: 'second.png',
         sizeBytes: secondImage.size,
-        sourceFile: secondImage
-      }
+        sourceFile: secondImage,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      })
     ])
   })
 

@@ -29,7 +29,10 @@ import { detectFileType, isModelArchiveFile } from './types'
 import { CANVAS_IMPORT_ACCEPT } from './canvasImportAccept'
 import type { CanvasFileItem, CanvasImageItem } from './types'
 import { getElectronCanvasFilePath, resolveCanvasImageFileSource } from './canvasLocalFileSource'
-import { buildCanvasImageSourceIdentity } from './canvasThumbnailCache'
+import {
+  buildCanvasImageSourceIdentity,
+  buildCanvasSessionSourceIdentity
+} from './canvasThumbnailCache'
 import type { CanvasImageSourceIdentity } from './canvasThumbnailTypes'
 import {
   readCanvasImageBlobMetadata,
@@ -38,8 +41,35 @@ import {
 import type { CanvasImageBatchImportProgress } from './useCanvasAssetIntake'
 import { readProjectCanvasBenchmarkSharedThumbnailCacheRoot } from './projectCanvasBenchmarkRuntime'
 
+function createCanvasSessionSourceKey(): string {
+  const cryptoApi = typeof globalThis.crypto !== 'undefined' ? globalThis.crypto : undefined
+  if (cryptoApi?.randomUUID) {
+    return `canvas-session:${cryptoApi.randomUUID()}`
+  }
+  return `canvas-session:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`
+}
 type CanvasImageSourceObject = Exclude<CanvasImageSourceInput, string>
 
+function buildCanvasSessionBlobSourceIdentity(input: {
+  sourceKey: string
+  sizeBytes: number
+  mimeType?: string
+  fileName?: string
+}): CanvasImageSourceIdentity {
+  const sourceKey = input.sourceKey.trim()
+  const sizeBytes = Math.max(0, Math.floor(input.sizeBytes))
+  const mimeType = input.mimeType?.trim().toLowerCase() || 'application/octet-stream'
+  const fileName = input.fileName?.trim() || undefined
+  return {
+    version: 1,
+    kind: 'session-blob',
+    sourceKey,
+    sizeBytes,
+    mimeType,
+    ...(fileName ? { fileName } : {}),
+    cacheKey: `canvas-session-${sourceKey}-${sizeBytes}-${mimeType}-${fileName ?? ''}`
+  }
+}
 type AddImageToCanvasFn = (
   src: string,
   options?: {
@@ -862,7 +892,14 @@ export function useCanvasFileIntake({
         readCanvasImageBlobMetadata(file)
       ])
       const thumbnailCacheRoot = await resolveCanvasThumbnailCacheRoot(canvasId)
-      const sourceIdentity = await resolveCanvasImageLocalSourceIdentity(file, thumbnailCacheRoot)
+      const sourceIdentity =
+        (await resolveCanvasImageLocalSourceIdentity(file, thumbnailCacheRoot)) ??
+        buildCanvasSessionBlobSourceIdentity({
+          sourceKey: createCanvasSessionSourceKey(),
+          sizeBytes: file.size,
+          mimeType: file.type,
+          fileName: file.name
+        })
       const shouldRetainSourceFile = !/^(local-media|file):\/\//i.test(src.trim())
       const source: CanvasImageSourceObject = {
         src,
@@ -1466,23 +1503,22 @@ export function useCanvasFileIntake({
         return false
       }
 
-      const pastedImageSources: Array<{ src: string; fileName?: string; sizeBytes?: number }> = []
+      const pastedImageSources: CanvasImageSourceInput[] = []
       for (const item of Array.from(clipboardItems)) {
         if (!item.type.startsWith('image/')) continue
         const blob = item.getAsFile()
         if (!blob) continue
-        pastedImageSources.push({
-          src: await readFileAsDataURL(blob),
-          fileName: blob.name,
-          sizeBytes: blob.size
-        })
+        pastedImageSources.push(await resolveImageFileSourceInput(blob))
       }
 
       if (pastedImageSources.length > 0) {
         if (pastedImageSources.length === 1) {
-          await addImageToCanvas(pastedImageSources[0].src, {
-            fileName: pastedImageSources[0].fileName,
-            sizeBytes: pastedImageSources[0].sizeBytes,
+          const source = pastedImageSources[0]
+          await addImageToCanvas(typeof source === 'string' ? source : source.src, {
+            fileName: typeof source === 'string' ? undefined : source.fileName,
+            sizeBytes: typeof source === 'string' ? undefined : source.sizeBytes,
+            sourceFile: typeof source === 'string' ? undefined : source.sourceFile,
+            sourceIdentity: typeof source === 'string' ? undefined : source.sourceIdentity,
             ...pastePoint
           })
         } else {
@@ -1517,7 +1553,7 @@ export function useCanvasFileIntake({
       handleFile,
       handleFiles,
       readClipboardTextItem,
-      readFileAsDataURL
+      resolveImageFileSourceInput
     ]
   )
 
@@ -1536,22 +1572,21 @@ export function useCanvasFileIntake({
             .map((type) => ({ clipItem, type }))
         )
         if (imageClipItems.length > 0) {
-          const imageSources: Array<{ src: string; fileName?: string; sizeBytes?: number }> = []
+          const imageSources: CanvasImageSourceInput[] = []
           for (const [index, { clipItem, type }] of imageClipItems.entries()) {
             const blob = await clipItem.getType(type)
             const extension = type.split('/')[1]?.split('+')[0]?.trim() || 'png'
             const file = new File([blob], `pasted-${index + 1}.${extension}`, { type: blob.type })
-            imageSources.push({
-              src: await readFileAsDataURL(file),
-              fileName: file.name,
-              sizeBytes: file.size
-            })
+            imageSources.push(await resolveImageFileSourceInput(file))
           }
 
           if (imageSources.length === 1) {
-            await addImageToCanvas(imageSources[0].src, {
-              fileName: imageSources[0].fileName,
-              sizeBytes: imageSources[0].sizeBytes,
+            const source = imageSources[0]
+            await addImageToCanvas(typeof source === 'string' ? source : source.src, {
+              fileName: typeof source === 'string' ? undefined : source.fileName,
+              sizeBytes: typeof source === 'string' ? undefined : source.sizeBytes,
+              sourceFile: typeof source === 'string' ? undefined : source.sourceFile,
+              sourceIdentity: typeof source === 'string' ? undefined : source.sourceIdentity,
               ...pastePoint
             })
           } else if (imageSources.length > 1) {
@@ -1629,7 +1664,7 @@ export function useCanvasFileIntake({
     addPastedTextToCanvas,
     getCanvasPasteClientPoint,
     handleFiles,
-    readFileAsDataURL
+    resolveImageFileSourceInput
   ])
 
   const handleNativeClipboardPaste = useCallback(async () => {
@@ -1645,9 +1680,12 @@ export function useCanvasFileIntake({
           type: mimeType
         })
 
-        await addImageToCanvas(await readFileAsDataURL(file), {
+        const source = await resolveImageFileSourceInput(file)
+        await addImageToCanvas(source.src, {
           fileName: file.name,
           sizeBytes: file.size,
+          sourceFile: source.sourceFile,
+          sourceIdentity: source.sourceIdentity,
           ...pastePoint
         })
         return true
@@ -1672,7 +1710,12 @@ export function useCanvasFileIntake({
     }
 
     return false
-  }, [addImageToCanvas, addPastedTextToCanvas, getCanvasPasteClientPoint, readFileAsDataURL])
+  }, [
+    addImageToCanvas,
+    addPastedTextToCanvas,
+    getCanvasPasteClientPoint,
+    resolveImageFileSourceInput
+  ])
 
   const handlePasteFromClipboard = useCallback(
     async (event?: ClipboardEvent) => {

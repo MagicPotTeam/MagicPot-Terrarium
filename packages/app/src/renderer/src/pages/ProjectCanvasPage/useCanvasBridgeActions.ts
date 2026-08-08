@@ -225,7 +225,7 @@ export function useCanvasBridgeActions({
           ChatAttachment => attachment !== null
       ) as ChatAttachment[]
       if (materializedAttachments.length < allAttachments.length) {
-        notifyError(t('canvas.send_to_agent_failed', '部分图片无法读取，请重新导入后重试。'))
+        notifyError(t('canvas.send_to_agent_failed'))
       }
 
       window.setTimeout(() => {

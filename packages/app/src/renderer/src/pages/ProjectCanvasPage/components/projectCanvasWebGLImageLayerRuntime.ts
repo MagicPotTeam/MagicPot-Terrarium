@@ -316,3 +316,212 @@ export const areProjectCanvasWebGLItemReconcileSnapshotsEqual = (
   left: ProjectCanvasWebGLItemReconcileSnapshot | null | undefined,
   right: ProjectCanvasWebGLItemReconcileSnapshot | null | undefined
 ) => Boolean(left && right && left.itemId === right.itemId && left.renderKey === right.renderKey)
+
+export type ProjectCanvasWebGLSpatialTileResourceKey = {
+  source: string
+  level: number
+  config: string
+}
+export type ProjectCanvasWebGLSpatialTilePresentationKey = {
+  crop: string
+  transform: string
+  viewport: string
+}
+export type ProjectCanvasWebGLSpatialTileMode = 'fallback' | 'tiled'
+export type ProjectCanvasWebGLSpatialTileGeneration = {
+  resourceGeneration: number
+  presentationGeneration: number
+}
+export type ProjectCanvasWebGLSpatialTileState<Asset = unknown> = {
+  generation: ProjectCanvasWebGLSpatialTileGeneration
+  resourceKey: ProjectCanvasWebGLSpatialTileResourceKey | null
+  presentationKey: ProjectCanvasWebGLSpatialTilePresentationKey | null
+  mode: ProjectCanvasWebGLSpatialTileMode
+  requiredVisibleKeys: readonly string[]
+  readyKeys: readonly string[]
+  asset: Asset | null
+  candidate: {
+    generation: ProjectCanvasWebGLSpatialTileGeneration
+    presentationKey: ProjectCanvasWebGLSpatialTilePresentationKey
+    mode: ProjectCanvasWebGLSpatialTileMode
+    requiredVisibleKeys: readonly string[]
+    readyKeys: Set<string>
+    asset: Asset | null
+  } | null
+}
+export type ProjectCanvasWebGLSpatialTileStateMachineOptions<Asset> = {
+  initialResourceKey?: ProjectCanvasWebGLSpatialTileResourceKey | null
+  initialPresentationKey?: ProjectCanvasWebGLSpatialTilePresentationKey | null
+  initialAsset?: Asset | null
+  dispose?: (asset: Asset, reason: 'stale' | 'cancelled' | 'replaced') => void
+}
+export type ProjectCanvasWebGLSpatialTilePresentationToken = ProjectCanvasWebGLSpatialTileGeneration
+export type ProjectCanvasWebGLSpatialTileStateMachine<Asset = unknown> = ReturnType<
+  typeof createProjectCanvasWebGLSpatialTileStateMachine<Asset>
+>
+const sameSpatialTileKey = <T extends object>(left: T | null, right: T | null) =>
+  JSON.stringify(left) === JSON.stringify(right)
+
+/** Per-item state machine. Resource generations invalidate work; presentation generations reuse assets. */
+export function createProjectCanvasWebGLSpatialTileStateMachine<Asset = unknown>(
+  options: ProjectCanvasWebGLSpatialTileStateMachineOptions<Asset> = {}
+) {
+  if (options.initialAsset != null && options.initialResourceKey == null) {
+    throw new Error('A spatial tile initial asset requires an initial resource key.')
+  }
+
+  let state: ProjectCanvasWebGLSpatialTileState<Asset> = {
+    generation: { resourceGeneration: 0, presentationGeneration: 0 },
+    resourceKey: options.initialResourceKey ?? null,
+    presentationKey: options.initialPresentationKey ?? null,
+    mode: 'fallback',
+    requiredVisibleKeys: [],
+    readyKeys: [],
+    asset: options.initialAsset ?? null,
+    candidate: null
+  }
+  const dispose = (asset: Asset | null | undefined, reason: 'stale' | 'cancelled' | 'replaced') => {
+    if (asset != null) options.dispose?.(asset, reason)
+  }
+  const snapshot = (): ProjectCanvasWebGLSpatialTileState<Asset> => ({
+    ...state,
+    generation: { ...state.generation },
+    requiredVisibleKeys: [...state.requiredVisibleKeys],
+    readyKeys: [...state.readyKeys],
+    candidate: state.candidate
+      ? {
+          ...state.candidate,
+          generation: { ...state.candidate.generation },
+          readyKeys: new Set(state.candidate.readyKeys)
+        }
+      : null
+  })
+  const beginResource = (resourceKey: ProjectCanvasWebGLSpatialTileResourceKey) => {
+    if (sameSpatialTileKey(state.resourceKey, resourceKey)) return snapshot()
+    dispose(state.candidate?.asset, 'stale')
+    dispose(state.asset, 'stale')
+    state = {
+      ...state,
+      generation: {
+        resourceGeneration: state.generation.resourceGeneration + 1,
+        presentationGeneration: state.generation.presentationGeneration + 1
+      },
+      resourceKey,
+      presentationKey: null,
+      mode: 'fallback',
+      requiredVisibleKeys: [],
+      readyKeys: [],
+      asset: null,
+      candidate: null
+    }
+    return snapshot()
+  }
+  const beginPresentation = (
+    presentationKey: ProjectCanvasWebGLSpatialTilePresentationKey,
+    input: {
+      requiredVisibleKeys?: readonly string[]
+      mode?: ProjectCanvasWebGLSpatialTileMode
+    } = {}
+  ) => {
+    const requiredVisibleKeys = [...new Set(input.requiredVisibleKeys ?? [])]
+    const mode = input.mode ?? 'tiled'
+    if (
+      sameSpatialTileKey(state.presentationKey, presentationKey) &&
+      !state.candidate &&
+      state.mode === mode
+    )
+      return { token: { ...state.generation }, reusedAsset: state.asset, state: snapshot() }
+    dispose(state.candidate?.asset, 'cancelled')
+    const generation = {
+      resourceGeneration: state.generation.resourceGeneration,
+      presentationGeneration: state.generation.presentationGeneration + 1
+    }
+    state = {
+      ...state,
+      generation,
+      candidate: {
+        generation,
+        presentationKey,
+        mode,
+        requiredVisibleKeys,
+        readyKeys: new Set(),
+        asset: null
+      }
+    }
+    return { token: { ...generation }, reusedAsset: state.asset, state: snapshot() }
+  }
+  const isCurrent = (token: ProjectCanvasWebGLSpatialTilePresentationToken) =>
+    token.resourceGeneration === state.generation.resourceGeneration &&
+    token.presentationGeneration === state.generation.presentationGeneration
+  const setCandidateAsset = (
+    token: ProjectCanvasWebGLSpatialTilePresentationToken,
+    asset: Asset | null
+  ) => {
+    if (!isCurrent(token) || !state.candidate) {
+      if (asset != null) dispose(asset, 'stale')
+      return false
+    }
+    state.candidate.asset = asset
+    return true
+  }
+  const markTileReady = (token: ProjectCanvasWebGLSpatialTilePresentationToken, key: string) => {
+    if (!isCurrent(token) || !state.candidate) return false
+    state.candidate.readyKeys.add(key)
+    return true
+  }
+  const commitVisibleReady = (token: ProjectCanvasWebGLSpatialTilePresentationToken) => {
+    const candidate = state.candidate
+    if (
+      !isCurrent(token) ||
+      candidate == null ||
+      candidate.asset == null ||
+      candidate.requiredVisibleKeys.some((key) => !candidate.readyKeys.has(key))
+    ) {
+      return false
+    }
+    const previous = state.asset
+    state = {
+      ...state,
+      presentationKey: candidate.presentationKey,
+      mode: candidate.mode,
+      requiredVisibleKeys: [...candidate.requiredVisibleKeys],
+      readyKeys: [...candidate.readyKeys],
+      asset: candidate.asset,
+      candidate: null
+    }
+    if (previous !== state.asset) dispose(previous, 'replaced')
+    return true
+  }
+  const cancelPresentation = (token?: ProjectCanvasWebGLSpatialTilePresentationToken) => {
+    if (token && !isCurrent(token)) return false
+    dispose(state.candidate?.asset, 'cancelled')
+    state = { ...state, candidate: null }
+    return true
+  }
+  const leavePolicy = (token?: ProjectCanvasWebGLSpatialTilePresentationToken) => {
+    if (token && !isCurrent(token)) return false
+    dispose(state.candidate?.asset, 'cancelled')
+    dispose(state.asset, 'cancelled')
+    state = {
+      ...state,
+      presentationKey: null,
+      mode: 'fallback',
+      requiredVisibleKeys: [],
+      readyKeys: [],
+      asset: null,
+      candidate: null
+    }
+    return true
+  }
+  return {
+    getState: snapshot,
+    beginResource,
+    beginPresentation,
+    isCurrent,
+    setCandidateAsset,
+    markTileReady,
+    commitVisibleReady,
+    cancelPresentation,
+    leavePolicy
+  }
+}

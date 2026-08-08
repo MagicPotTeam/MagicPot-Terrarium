@@ -755,7 +755,7 @@ describe('useCanvasViewportPersistence', () => {
     await waitFor(() => {
       expect(mockSetUnsavedDocumentState).toHaveBeenCalledWith({
         dirty: true,
-        title: '未命名画布'
+        title: 'Untitled canvas'
       })
     })
 
@@ -778,7 +778,7 @@ describe('useCanvasViewportPersistence', () => {
       })
       expect(mockSetUnsavedDocumentState).toHaveBeenCalledWith({
         dirty: false,
-        title: '未命名画布'
+        title: 'Untitled canvas'
       })
     })
 
@@ -816,7 +816,7 @@ describe('useCanvasViewportPersistence', () => {
       })
       expect(mockSetUnsavedDocumentState).toHaveBeenCalledWith({
         dirty: true,
-        title: '未命名画布'
+        title: 'Untitled canvas'
       })
     })
   })

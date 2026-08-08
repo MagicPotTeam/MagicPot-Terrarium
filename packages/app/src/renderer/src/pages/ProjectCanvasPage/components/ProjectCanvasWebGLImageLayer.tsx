@@ -53,15 +53,25 @@ import {
   createProjectCanvasWebGLResidentTextureByteTracker,
   buildProjectCanvasWebGLItemReconcileSnapshot,
   areProjectCanvasWebGLItemReconcileSnapshotsEqual,
+  createProjectCanvasWebGLSpatialTileStateMachine,
   type ProjectCanvasWebGLItemReconcileSnapshot,
-  type ProjectCanvasWebGLPriorityQueueEntry
+  type ProjectCanvasWebGLPriorityQueueEntry,
+  type ProjectCanvasWebGLSpatialTileStateMachine
 } from './projectCanvasWebGLImageLayerRuntime'
 import {
   canReadCanvasLocalImageSource,
   createCanvasLocalImageObjectUrl,
   readCanvasLocalImageBlobFromSource
 } from '../canvasLocalImageSource'
-
+import { CanvasSpatialTileResourceManager } from '../canvasSpatialTileResourceManager'
+import { CanvasSpatialTileScheduler } from '../canvasSpatialTileScheduler'
+import { createCanvasSpatialTileWorkerClient } from '../canvasSpatialTileWorkerClient'
+import { buildCanvasSpatialTilePolicy } from '../canvasSpatialTilePolicy'
+import { buildCanvasSpatialTileRenderModel } from '../canvasSpatialTileRenderModel'
+import {
+  type CanvasSpatialTileGeometry,
+  type CanvasSpatialVisibleTile
+} from '../canvasSpatialTileTypes'
 type ProjectCanvasWebGLImageLayerProps = {
   items: CanvasImageItem[]
   selectedIds?: ReadonlySet<string>
@@ -80,8 +90,29 @@ type ProjectCanvasWebGLImageLayerProps = {
 type CachedImageRecord = {
   image: CanvasImageAsset
   src: string
+  imageBitmapOwnership: 'owned' | 'borrowed'
   imageBitmapReleaseId?: string
   objectUrlReleaseId?: string
+}
+
+type SpatialTilePresentationAsset = {
+  container: Container
+  tileKeys: string[]
+}
+
+type SpatialTileTextureAsset = {
+  texture: Texture
+  width: number
+  height: number
+  geometry: CanvasSpatialTileGeometry
+}
+
+type SpatialTileItemRuntime = {
+  stateMachine: ProjectCanvasWebGLSpatialTileStateMachine<SpatialTilePresentationAsset>
+  sourceKey: string
+  level: number
+  presentationKey: string
+  activeTileKeys: Set<string>
 }
 
 type SpriteRecord = {
@@ -871,6 +902,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const pendingLoadsRef = useRef(new Set<string>())
   const pendingLoadSrcByIdRef = useRef(new Map<string, string>())
   const pendingThumbnailLoadSrcByIdRef = useRef(new Map<string, string>())
+  const thumbnailLoadGenerationByIdRef = useRef(new Map<string, number>())
   const failedThumbnailLoadSrcByIdRef = useRef(new Map<string, string>())
   const thumbnailLoadQueueRef = useRef<SourceUpgradeQueueEntry[]>([])
   const activeThumbnailLoadCountRef = useRef(0)
@@ -888,6 +920,13 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const nextImageIdentityIdRef = useRef(1)
   const residentTextureByteTrackerRef = useRef(createProjectCanvasWebGLResidentTextureByteTracker())
   const releaseManagerRef = useRef(new CanvasImageReleaseManager())
+  const spatialTileWorkerClientRef = useRef(createCanvasSpatialTileWorkerClient())
+  const spatialTileSchedulerRef = useRef(
+    new CanvasSpatialTileScheduler(spatialTileWorkerClientRef.current)
+  )
+  const spatialTileResourceManagerRef = useRef(new CanvasSpatialTileResourceManager())
+  const spatialTileRuntimeByIdRef = useRef(new Map<string, SpatialTileItemRuntime>())
+  const spatialTileSourceBlobByKeyRef = useRef(new Map<string, Promise<Blob | null>>())
   const resourceBudgetTrackerRef = useRef(
     new CanvasImageResourceBudgetTracker({
       sourceTextureBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
@@ -1181,6 +1220,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       itemId,
       image,
       src,
+      imageBitmapOwnership = 'borrowed',
       reason = 'replaced'
     }: {
       cache: Map<string, CachedImageRecord>
@@ -1188,6 +1228,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       itemId: string
       image: CanvasImageAsset
       src: string
+      imageBitmapOwnership?: 'owned' | 'borrowed'
       reason?: CanvasImageReleaseReason
     }) => {
       const existing = cache.get(itemId)
@@ -1197,19 +1238,24 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       releaseCachedImageRecord(existing, reason)
       let imageBitmapReleaseId: string | undefined
-      if (isCanvasImageBitmapLike(image)) {
+      if (imageBitmapOwnership === 'owned' && isCanvasImageBitmapLike(image)) {
         imageBitmapReleaseId = getProjectCanvasCachedImageReleaseId(
           cacheKind,
           'imageBitmap',
           itemId,
           src
         )
-        releaseManagerRef.current.trackImageBitmap(imageBitmapReleaseId, image)
+        releaseManagerRef.current.trackImageBitmap(
+          imageBitmapReleaseId,
+          image,
+          imageBitmapOwnership ?? 'borrowed'
+        )
       }
 
       const record: CachedImageRecord = {
         image,
         src,
+        imageBitmapOwnership: imageBitmapOwnership ?? 'borrowed',
         imageBitmapReleaseId
       }
       cache.set(itemId, record)
@@ -1952,6 +1998,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       pendingLoads.clear()
       pendingLoadSrcByIdRef.current.clear()
       pendingThumbnailLoadSrcByIdRef.current.clear()
+      thumbnailLoadGenerationByIdRef.current.clear()
       failedThumbnailLoadSrcByIdRef.current.clear()
       thumbnailLoadQueueRef.current = []
       activeThumbnailLoadCountRef.current = 0
@@ -1992,6 +2039,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         }),
         { immediate: true }
       )
+
+      spatialTileWorkerClientRef.current.dispose()
+      spatialTileResourceManagerRef.current.clear()
+      spatialTileRuntimeByIdRef.current.forEach((runtime) => runtime.stateMachine.leavePolicy())
+      spatialTileRuntimeByIdRef.current.clear()
+      spatialTileSourceBlobByKeyRef.current.clear()
 
       try {
         appRef.current?.destroy(true, { children: true })
@@ -2348,7 +2401,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
                 cacheKind: 'source',
                 itemId: item.id,
                 image: resolvedImage,
-                src: item.src
+                src: item.src,
+                imageBitmapOwnership: 'owned'
               })
               scheduleImageVersionUpdate()
             } else {
@@ -2412,7 +2466,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               cacheKind: 'source',
               itemId: item.id,
               image: resolvedImage,
-              src: item.src
+              src: item.src,
+              imageBitmapOwnership: resolvedImage === img ? 'borrowed' : 'owned'
             })
             scheduleImageVersionUpdate()
           } else {
@@ -2665,28 +2720,39 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         }
 
         activeThumbnailLoadCountRef.current += 1
+        const requestGeneration = thumbnailLoadGenerationByIdRef.current.get(queued.itemId) ?? 0
         void loadImageElement(queued.src, {
           crossOrigin: shouldUseAnonymousCrossOrigin(queued.src) ? 'anonymous' : null
         })
           .then((image) => {
+            if (thumbnailLoadGenerationByIdRef.current.get(queued.itemId) !== requestGeneration) {
+              closeCanvasImageAssetIfPossible(image)
+              return
+            }
             clearPendingThumbnailLoad(queued.itemId, queued.src)
             const nextItem = currentItemByIdRef.current.get(queued.itemId)
-            if (nextItem) {
-              failedThumbnailLoadSrcByIdRef.current.delete(queued.itemId)
-              setCachedImageRecord({
-                cache: thumbnailCacheRef.current,
-                cacheKind: 'thumbnail',
-                itemId: queued.itemId,
-                image,
-                src: queued.src
-              })
-              scheduleImageVersionUpdate()
+            if (!nextItem?.thumbnailSet?.levels.some((level) => level.src === queued.src)) {
+              closeCanvasImageAssetIfPossible(image)
+              return
             }
+            failedThumbnailLoadSrcByIdRef.current.delete(queued.itemId)
+            setCachedImageRecord({
+              cache: thumbnailCacheRef.current,
+              cacheKind: 'thumbnail',
+              itemId: queued.itemId,
+              image,
+              src: queued.src,
+              imageBitmapOwnership: 'borrowed'
+            })
+            scheduleImageVersionUpdate()
           })
           .catch(() => {
+            if (thumbnailLoadGenerationByIdRef.current.get(queued.itemId) !== requestGeneration) {
+              return
+            }
             clearPendingThumbnailLoad(queued.itemId, queued.src)
             const nextItem = currentItemByIdRef.current.get(queued.itemId)
-            if (nextItem) {
+            if (nextItem?.thumbnailSet?.levels.some((level) => level.src === queued.src)) {
               failedThumbnailLoadSrcByIdRef.current.set(queued.itemId, queued.src)
               scheduleImageVersionUpdate()
             }
@@ -2723,6 +2789,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       pendingThumbnailLoadSrcByIdRef.current.set(item.id, src)
+      thumbnailLoadGenerationByIdRef.current.set(
+        item.id,
+        (thumbnailLoadGenerationByIdRef.current.get(item.id) ?? 0) + 1
+      )
       insertProjectCanvasWebGLPriorityQueueEntry(thumbnailLoadQueueRef.current, {
         itemId: item.id,
         src,

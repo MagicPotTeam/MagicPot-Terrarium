@@ -66,6 +66,15 @@ describe('useProjectCanvasPageRuntimeState model split undo flow', () => {
     const nextZIndexRef = { current: 1 }
     const setGroups = vi.fn()
     const setGroupBranches = vi.fn()
+    const originalElectronFile = window.electronFile
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: {
+        authorizeLocalMediaFile: vi.fn(
+          async (file: File) => (file as File & { path?: string }).path ?? ''
+        )
+      }
+    })
     const originalCreateObjectURL = URL.createObjectURL
     const originalRevokeObjectURL = URL.revokeObjectURL
     const createObjectUrlMock = vi.fn((value: Blob | MediaSource) => {
@@ -84,16 +93,21 @@ describe('useProjectCanvasPageRuntimeState model split undo flow', () => {
       value: revokeObjectUrlMock
     })
     const originalCreateElement = document.createElement.bind(document)
+    let metadataCallback: (() => void) | null = null
     const metadataVideo = {
       preload: '',
-      onloadedmetadata: null as null | (() => void),
+      get onloadedmetadata() {
+        return metadataCallback
+      },
+      set onloadedmetadata(value: (() => void) | null) {
+        metadataCallback = value
+      },
       onerror: null as null | (() => void),
       videoWidth: 1280,
       videoHeight: 720,
       _src: '',
       set src(value: string) {
         this._src = value
-        queueMicrotask(() => this.onloadedmetadata?.())
       },
       get src() {
         return this._src
@@ -153,6 +167,13 @@ describe('useProjectCanvasPageRuntimeState model split undo flow', () => {
         )
         await Promise.resolve()
       })
+      await vi.waitFor(() => expect(metadataCallback).toBeTypeOf('function'))
+      await act(async () => {
+        metadataCallback?.()
+      })
+      await vi.waitFor(() =>
+        expect(result.current.items.some((item) => item.type === 'video')).toBe(true)
+      )
 
       expect(result.current.items).toEqual(
         expect.arrayContaining([
@@ -176,6 +197,10 @@ describe('useProjectCanvasPageRuntimeState model split undo flow', () => {
       expect(createObjectUrlMock).toHaveBeenCalled()
       expect(revokeObjectUrlMock).toHaveBeenCalledWith('blob:mock-clip.mp4')
     } finally {
+      Object.defineProperty(window, 'electronFile', {
+        configurable: true,
+        value: originalElectronFile
+      })
       createElementSpy.mockRestore()
       if (originalCreateObjectURL) {
         Object.defineProperty(URL, 'createObjectURL', {

@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   buildCanvasImageSourceIdentity,
+  buildCanvasSessionSourceIdentity,
   canvasThumbnailManifestFromSet,
   createCanvasThumbnailSet
 } from './canvasThumbnailCache'
+import { generateCanvasThumbnailLevelsInScope } from './canvasThumbnailGeneration.worker'
 import {
   configureCanvasThumbnailWorkerPoolForTest,
   ensureCanvasThumbnailSet,
@@ -16,6 +18,7 @@ import {
   resetCanvasThumbnailWorkerPoolForTest
 } from './canvasThumbnailWorkerClient'
 import type {
+  CanvasLocalFileSourceIdentity,
   CanvasImageSourceIdentity,
   CanvasImageThumbnailLevel,
   CanvasThumbnailIpcBridge,
@@ -26,15 +29,15 @@ import type {
 
 function createIdentity(
   overrides: Partial<
-    Pick<CanvasImageSourceIdentity, 'canonicalPath' | 'sizeBytes' | 'lastModifiedMs'>
+    Pick<CanvasLocalFileSourceIdentity, 'canonicalPath' | 'sizeBytes' | 'lastModifiedMs'>
   > = {}
-): CanvasImageSourceIdentity {
+): CanvasLocalFileSourceIdentity {
   const identity = buildCanvasImageSourceIdentity({
     canonicalPath: overrides.canonicalPath ?? 'C:/Images/ref.png',
     sizeBytes: overrides.sizeBytes ?? 1234,
     lastModifiedMs: overrides.lastModifiedMs ?? 5678
   })
-  if (!identity) {
+  if (!identity || identity.kind !== 'local-file') {
     throw new Error('Expected test source identity to be valid.')
   }
   return identity
@@ -307,6 +310,40 @@ describe('canvasThumbnailWorkerClient', () => {
     )
   })
 
+  it('generates all five levels for a pathless identity as a renderer-only transient set', async () => {
+    const identity = buildCanvasSessionSourceIdentity({
+      sourceKey: 'canvas-session:test-pathless',
+      sizeBytes: 15,
+      mimeType: 'image/png',
+      fileName: 'pathless.png'
+    })
+    const { drawImage, close } = installRendererThumbnailMocks()
+    const generateThumbnailSet = vi.fn()
+    const createNativeThumbnail = vi.fn()
+    const writeThumbnailSet = vi.fn()
+
+    const result = await ensureCanvasThumbnailSet({
+      source: new Blob(['pathless-source'], { type: 'image/png' }),
+      identity,
+      bridge: {
+        readThumbnailManifest: vi.fn(async () => ({ manifest: null })),
+        generateThumbnailSet,
+        createNativeThumbnail,
+        writeThumbnailSet
+      }
+    })
+
+    expect(result.status).toBe('generated')
+    expect(result.thumbnailSet?.levels.map((level) => level.maxSide)).toEqual([
+      128, 256, 512, 1024, 2048
+    ])
+    expect(drawImage).toHaveBeenCalledTimes(5)
+    expect(close).toHaveBeenCalled()
+    expect(generateThumbnailSet).not.toHaveBeenCalled()
+    expect(createNativeThumbnail).not.toHaveBeenCalled()
+    expect(writeThumbnailSet).not.toHaveBeenCalled()
+  })
+
   it('falls back to PNG when WebP encoding is unavailable', async () => {
     const identity = createIdentity()
     installRendererThumbnailMocks({
@@ -484,6 +521,61 @@ describe('canvasThumbnailWorkerClient', () => {
     expect(bridge.createNativeThumbnail).toHaveBeenCalledTimes(5)
   })
 
+  it('reuses one canvas only after async encoding completes and returns it after errors', async () => {
+    const pendingEncodes: Array<(blob: Blob | null) => void> = []
+    const contextCanvases: HTMLCanvasElement[] = []
+    const originalCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) =>
+      originalCreateElement(tagName as 'canvas')) as typeof document.createElement)
+
+    setGlobalCreateImageBitmap(
+      vi.fn(async () => ({
+        width: 1024,
+        height: 512,
+        close: vi.fn()
+      }))
+    )
+    const getContext = vi
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockImplementation(function (this: HTMLCanvasElement) {
+        contextCanvases.push(this)
+        return null
+      })
+
+    await expect(
+      generateCanvasThumbnailLevelsInScope({
+        source: new Blob(['source'], { type: 'image/png' }),
+        levels: [128]
+      })
+    ).rejects.toThrow('Failed to create thumbnail canvas context.')
+
+    const drawImage = vi.fn()
+    getContext.mockReturnValue({
+      clearRect: vi.fn(),
+      drawImage,
+      imageSmoothingEnabled: false,
+      imageSmoothingQuality: 'low'
+    } as unknown as ReturnType<HTMLCanvasElement['getContext']>)
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(function (callback) {
+      pendingEncodes.push((blob) => callback(blob))
+    })
+
+    const generation = generateCanvasThumbnailLevelsInScope({
+      source: new Blob(['source'], { type: 'image/png' }),
+      levels: [128, 256]
+    })
+    await vi.waitFor(() => expect(pendingEncodes).toHaveLength(1))
+    expect(drawImage).toHaveBeenCalledTimes(1)
+
+    pendingEncodes.shift()?.(new Blob(['encoded-128'], { type: 'image/webp' }))
+    await vi.waitFor(() => expect(pendingEncodes).toHaveLength(1))
+    expect(drawImage).toHaveBeenCalledTimes(2)
+
+    pendingEncodes.shift()?.(new Blob(['encoded-256'], { type: 'image/webp' }))
+    await expect(generation).resolves.toHaveLength(2)
+    expect(contextCanvases.length).toBeGreaterThan(0)
+    expect(contextCanvases.every((canvas) => canvas === contextCanvases[0])).toBe(true)
+  })
   it('marks stale warm cache when regenerating after source metadata changes', async () => {
     const identity = createIdentity()
     const staleIdentity = buildCanvasImageSourceIdentity({

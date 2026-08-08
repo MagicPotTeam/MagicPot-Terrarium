@@ -8,6 +8,7 @@ import {
   type MutableRefObject,
   type SetStateAction
 } from 'react'
+import i18next from 'i18next'
 import type { Config } from '@shared/config/config'
 import type { CanvasFigmaBinding } from '@shared/figma'
 import { clearCanvasItems, loadCanvasItems, saveCanvasItems } from './canvasStorage'
@@ -176,12 +177,15 @@ export function useCanvasViewportPersistence({
   const [fitTrigger, setFitTrigger] = useState(0)
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false)
   const publishUnsavedState = useCallback(() => {
-    return window.win.setUnsavedDocumentState({
+    return window.win?.setUnsavedDocumentState?.({
       dirty:
         hasPendingCanvasChangesRef.current ||
         canvasSaveInFlightRef.current !== null ||
         lastCanvasSaveErrorRef.current !== null,
-      title: documentTitleRef.current?.trim() || '未命名画布'
+      title:
+        documentTitleRef.current?.trim() ||
+        i18next.t('canvas.untitled', { defaultValue: 'Untitled canvas' }) ||
+        'Untitled canvas'
     })
   }, [])
 
@@ -637,21 +641,23 @@ export function useCanvasViewportPersistence({
   }, [documentTitle, publishUnsavedState])
 
   useEffect(() => {
-    const removeSaveListener = window.win.onRequestUnsavedSave((requestId) => {
+    const winBridge = window.win
+    if (!winBridge?.onRequestUnsavedSave || !winBridge.reportUnsavedSaveResult) return
+    const removeSaveListener = winBridge.onRequestUnsavedSave((requestId) => {
       void persistLatestCanvasState()
         .then(() => {
           const success =
             !hasPendingCanvasChangesRef.current &&
             canvasSaveInFlightRef.current === null &&
             lastCanvasSaveErrorRef.current === null
-          return window.win.reportUnsavedSaveResult({
+          return winBridge.reportUnsavedSaveResult({
             requestId,
             success,
-            ...(!success && { error: '画布在保存过程中发生了新的更改，请重试。' })
+            ...(!success && { error: i18next.t('canvas.save_changed_retry') })
           })
         })
         .catch((error: unknown) =>
-          window.win.reportUnsavedSaveResult({
+          winBridge.reportUnsavedSaveResult({
             requestId,
             success: false,
             error: error instanceof Error ? error.message : String(error)
@@ -661,7 +667,7 @@ export function useCanvasViewportPersistence({
 
     return () => {
       removeSaveListener()
-      void window.win.setUnsavedDocumentState({
+      void winBridge.setUnsavedDocumentState?.({
         dirty: false,
         title: documentTitleRef.current || ''
       })

@@ -109,7 +109,9 @@ function openDB(): Promise<IDBDatabase> {
 function serializeItems(items: CanvasItem[]): SerializableCanvasItem[] {
   return items.map((item) => {
     if (item.type === 'image') {
-      const { image, sourceFile, ...rest } = item
+      const { image, sourceFile, thumbnailSet: _thumbnailSet, sourceIdentity, ...rest } = item
+      const persistedSourceIdentity =
+        sourceIdentity?.kind === 'local-file' ? sourceIdentity : undefined
       const sourceWidth =
         typeof rest.sourceWidth === 'number' &&
         Number.isFinite(rest.sourceWidth) &&
@@ -131,10 +133,16 @@ function serializeItems(items: CanvasItem[]): SerializableCanvasItem[] {
         rest.crop.height === sourceHeight
       ) {
         const { crop, ...normalized } = rest
-        return normalized as SerializableCanvasItem
+        return {
+          ...normalized,
+          ...(persistedSourceIdentity ? { sourceIdentity: persistedSourceIdentity } : {})
+        } as SerializableCanvasItem
       }
 
-      return rest as SerializableCanvasItem
+      return {
+        ...rest,
+        ...(persistedSourceIdentity ? { sourceIdentity: persistedSourceIdentity } : {})
+      } as SerializableCanvasItem
     }
     if (item.type === 'model3d') {
       const { deferRender, sourceFile, ...rest } = item as CanvasItem & {
