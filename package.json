@@ -40,9 +40,9 @@
     "dev:pure": "chcp 65001 >nul && node scripts/run-electron-vite.mjs dev --mode pure",
     "dev:embedded": "cross-env-shell VITE_BUILD_MODE=embedded VITE_PACKAGE_MODE=embedded VITE_BUILD_MODE_NAME=Embedded VITE_MAGICPOT_AUTO_START_COMFYUI=true \"chcp 65001 >nul && node scripts/run-electron-vite.mjs dev --mode embedded\"",
     "dev": "cross-env VITE_MAGICPOT_AUTO_START_COMFYUI=true npm run dev:pure",
-    "build:pure": "npm run build:lora-trigger-sidecar && npm run typecheck && cross-env VITE_BUILD_MODE=pure VITE_PACKAGE_MODE=pure VITE_BUILD_MODE_NAME=Pure electron-vite build --config config/electron/electron.vite.config.ts --mode pure",
+    "build:pure": "npm run build:lora-trigger-sidecar && npm run build:magicpot-command-job && npm run typecheck && cross-env VITE_BUILD_MODE=pure VITE_PACKAGE_MODE=pure VITE_BUILD_MODE_NAME=Pure electron-vite build --config config/electron/electron.vite.config.ts --mode pure",
     "analyze:bundle": "npm run typecheck && cross-env ANALYZE_BUNDLE=true VITE_BUILD_MODE=pure VITE_PACKAGE_MODE=pure VITE_BUILD_MODE_NAME=Pure electron-vite build --config config/electron/electron.vite.config.ts --mode pure",
-    "build:embedded": "npm run build:lora-trigger-sidecar && npm run typecheck && cross-env VITE_BUILD_MODE=embedded VITE_PACKAGE_MODE=embedded VITE_BUILD_MODE_NAME=Embedded electron-vite build --config config/electron/electron.vite.config.ts --mode embedded",
+    "build:embedded": "npm run build:lora-trigger-sidecar && npm run build:magicpot-command-job && npm run typecheck && cross-env VITE_BUILD_MODE=embedded VITE_PACKAGE_MODE=embedded VITE_BUILD_MODE_NAME=Embedded electron-vite build --config config/electron/electron.vite.config.ts --mode embedded",
     "build:lora-trigger-sidecar": "node scripts/build-lora-trigger-sidecar.mjs",
     "prepare:embedded-sources": "node scripts/prepare-embedded-comfyui-sources.mjs",
     "prepare:embedded-sources:dry-run": "node scripts/prepare-embedded-comfyui-sources.mjs --dry-run",
@@ -52,7 +52,7 @@
     "prepare:embedded-python:dry-run": "cross-env EMBEDDED_DRY_RUN=1 node scripts/prepare-embedded-python.mjs",
     "prepare:embedded": "npm run prepare:embedded-sources && npm run test:embedded-staging && npm run prepare:embedded-staging && npm run prepare:embedded-python",
     "postinstall": "electron-builder install-app-deps",
-    "package:win": "electron-builder --config config/electron/electron-builder.config.js --win --x64",
+    "package:win": "npm run build:magicpot-command-job && electron-builder --config config/electron/electron-builder.config.js --win --x64",
     "verify:packaged-runtime-dependencies": "node scripts/verify-packaged-runtime-dependencies.mjs",
     "test:packaged-runtime-dependencies": "vitest run --config scripts/verify-packaged-runtime-dependencies.vitest.config.mjs",
     "package:mac": "electron-builder --config config/electron/electron-builder.config.js --mac --arm64",
@@ -133,7 +133,9 @@
     "launcher:publish": "node scripts/launcher-dotnet/run.mjs publish",
     "launcher:bootstrap:publish": "node scripts/launcher-dotnet/run.mjs publish-bootstrap",
     "launcher:tools:publish": "node scripts/launcher-dotnet/run.mjs publish-tools",
-    "launcher:safe-file-ops:test": "dotnet run --project packages/launcher-dotnet/tools/MagicPot.SafeFileOps.SelfTest/MagicPot.SafeFileOps.SelfTest.csproj -c Release"
+    "launcher:safe-file-ops:test": "dotnet run --project packages/launcher-dotnet/tools/MagicPot.SafeFileOps.SelfTest/MagicPot.SafeFileOps.SelfTest.csproj -c Release",
+    "build:magicpot-command-job": "node scripts/build-magicpot-command-job.mjs",
+    "test:magicpot-command-job": "npm run build:magicpot-command-job && node scripts/test-magicpot-command-job.mjs"
   },
   "lint-staged": {
     "*": [

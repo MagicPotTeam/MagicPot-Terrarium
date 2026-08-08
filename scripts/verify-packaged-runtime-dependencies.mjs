@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const require = createRequire(import.meta.url)
@@ -39,6 +40,25 @@ export const requiredRuntimeFiles = [
 ]
 
 const runtimeRootPackages = ['@modelcontextprotocol/sdk']
+
+export function verifyPackagedWindowsCommandJobHelper(packagedRoot) {
+  const helper = path.join(packagedRoot, 'bin', 'magicpot-command-job', 'magicpot-command-job.exe')
+  const manifest = `${helper}.sha256`
+  if (!fs.existsSync(helper) || !fs.statSync(helper).isFile()) {
+    throw new Error(`Packaged Windows Job Object helper was not found: ${helper}`)
+  }
+  if (!fs.existsSync(manifest) || !fs.statSync(manifest).isFile()) {
+    throw new Error(`Packaged Windows Job Object helper manifest was not found: ${manifest}`)
+  }
+  const expected = fs.readFileSync(manifest, 'ascii').trim().toLowerCase()
+  if (!/^[a-f0-9]{64}$/.test(expected)) {
+    throw new Error(`Packaged Windows Job Object helper manifest is invalid: ${manifest}`)
+  }
+  const actual = createHash('sha256').update(fs.readFileSync(helper)).digest('hex')
+  if (actual !== expected) {
+    throw new Error(`Packaged Windows Job Object helper SHA-256 mismatch: ${helper}`)
+  }
+}
 
 function toArchivePath(relativePath) {
   return relativePath.split('/').join(path.sep)
@@ -133,6 +153,7 @@ export function verifyPackagedRuntimeDependencies(appOutDir, packager) {
   const resourcesDir = packager?.getResourcesDir
     ? packager.getResourcesDir(appOutDir)
     : path.join(appOutDir, 'resources')
+  verifyPackagedWindowsCommandJobHelper(path.dirname(resourcesDir))
   const asarPath = path.join(resourcesDir, 'app.asar')
   if (!fs.existsSync(asarPath)) {
     throw new Error(`Packaged app.asar was not found: ${asarPath}`)
