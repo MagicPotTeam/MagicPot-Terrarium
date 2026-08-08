@@ -166,7 +166,8 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
   winController.registerWindow(mainWindow)
   const trustedRendererUrl = resolveMainWindowRendererUrl()
   registerMagicAgentTrustedRouteBinding(mainWindow.webContents.id, undefined, {
-    trustedUrl: trustedRendererUrl
+    trustedUrl: trustedRendererUrl,
+    trustedWebContents: mainWindow.webContents
   })
   mainWindow.on('closed', () => {
     unregisterMagicAgentTrustedRouteBinding(mainWindow.webContents.id)

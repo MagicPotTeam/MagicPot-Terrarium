@@ -30,6 +30,8 @@ type KernelBackedToolContext = {
   workspaceContextFile?: string
   workspacePinnedContextFile?: string
   workspaceMetaFile?: string
+  workspaceRootDir?: string
+  toolPolicyOrigin?: 'assistant' | 'graph'
   resumeRun?: (
     route: AssistantRoute,
     runId: string,
@@ -143,7 +145,23 @@ export const syncAssistantToolsWithAgentKernel = (toolRegistry: AssistantToolReg
         transport: ['internal', 'mcp'],
         inputSchema: tool.inputSchema,
         metadata: {
-          source: 'assistant'
+          source: 'assistant',
+          ...(new Set([
+            'files.write',
+            'files.edit',
+            'files.multi-edit',
+            'files.json.write',
+            'files.snapshot.restore'
+          ]).has(tool.name)
+            ? { effects: [{ kind: 'filesystem.write', risk: 'high' }] }
+            : new Set(['git.branch', 'git.checkout', 'git.add', 'git.commit']).has(tool.name)
+              ? {
+                  effects: [
+                    { kind: 'filesystem.write', risk: 'high' },
+                    { kind: 'process.execute', risk: 'high' }
+                  ]
+                }
+              : {})
         }
       },
       invoker: async (request) => {
@@ -230,7 +248,7 @@ export const invokeAssistantToolViaKernel = async (options: {
 
   try {
     throwIfAborted(options.signal)
-    const result = await kernel.invokeTool({
+    const result = await kernel.invokeAuthorizedTool({
       toolName: normalizedToolName,
       args: options.args,
       session,

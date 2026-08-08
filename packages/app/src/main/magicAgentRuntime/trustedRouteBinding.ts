@@ -7,12 +7,15 @@ import {
 } from '@shared/magicAgent'
 
 const TRUSTED_ROUTE_ERROR = 'MagicAgent platform route is not trusted for this renderer.'
+const TRUSTED_APPROVAL_ERROR = 'MagicAgent approval access is not trusted for this renderer.'
 
 const bindingsBySenderId = new Map<number, MagicAgentTrustedRouteBinding>()
+const trustedWebContentsBySenderId = new Map<number, { id: number; isDestroyed: () => boolean }>()
 
 type RegisterMagicAgentTrustedRouteBindingOptions = {
   hashPath?: string
   trustedUrl?: string
+  trustedWebContents?: { id: number; isDestroyed: () => boolean }
 }
 
 const normalizeSenderId = (senderId: unknown): number => {
@@ -127,15 +130,55 @@ export const registerMagicAgentTrustedRouteBinding = (
     createdAt: Date.now()
   }
   bindingsBySenderId.set(normalizedSenderId, binding)
+  if (options.trustedWebContents) {
+    if (options.trustedWebContents.id !== normalizedSenderId) {
+      throw new Error('MagicAgent trusted route binding requires matching renderer webContents.')
+    }
+    trustedWebContentsBySenderId.set(normalizedSenderId, options.trustedWebContents)
+  } else {
+    trustedWebContentsBySenderId.delete(normalizedSenderId)
+  }
   return binding
 }
 
 export const unregisterMagicAgentTrustedRouteBinding = (senderId: number): void => {
-  bindingsBySenderId.delete(normalizeSenderId(senderId))
+  const normalizedSenderId = normalizeSenderId(senderId)
+  bindingsBySenderId.delete(normalizedSenderId)
+  trustedWebContentsBySenderId.delete(normalizedSenderId)
 }
 
 export const clearMagicAgentTrustedRouteBindingsForTest = (): void => {
   bindingsBySenderId.clear()
+  trustedWebContentsBySenderId.clear()
+}
+
+export const authorizeMagicAgentApprovalRenderer = (
+  invocation?: ServiceInvocationContext
+): void => {
+  // Direct main-process callers remain supported; renderer IPC always supplies this context.
+  if (!invocation) {
+    return
+  }
+
+  const senderId = normalizeSenderId(invocation.senderId)
+  const binding = bindingsBySenderId.get(senderId)
+  const trustedWebContents = trustedWebContentsBySenderId.get(senderId)
+  if (
+    !binding ||
+    !trustedWebContents ||
+    trustedWebContents.id !== senderId ||
+    trustedWebContents.isDestroyed()
+  ) {
+    throw new Error(TRUSTED_APPROVAL_ERROR)
+  }
+
+  if (
+    invocation.isMainFrame !== true ||
+    !hasTrustedUrl(invocation.frameUrl, binding.trustedUrl) ||
+    (invocation.senderUrl && !hasTrustedUrl(invocation.senderUrl, binding.trustedUrl))
+  ) {
+    throw new Error(TRUSTED_APPROVAL_ERROR)
+  }
 }
 
 export const authorizeMagicAgentTrustedRoute = (

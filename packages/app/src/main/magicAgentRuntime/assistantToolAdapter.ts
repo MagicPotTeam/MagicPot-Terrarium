@@ -18,7 +18,12 @@ export const createAssistantToolRegistryAdapter = (
     description: tool.description,
     inputSchema: tool.inputSchema,
     metadata: {
-      source: 'assistantRuntime'
+      source: 'assistantRuntime',
+      ...(tool.name === 'files.write' || tool.name === 'files.edit'
+        ? { effects: [{ kind: 'filesystem.write', risk: 'high' }] }
+        : tool.name === 'commands.background' || tool.name === 'commands.stop'
+          ? { effects: [{ kind: 'process.execute', risk: 'high' }] }
+          : {})
     },
     handler: async (args, context) =>
       assistantRegistry.callTool(tool.name, args, createContext(context))

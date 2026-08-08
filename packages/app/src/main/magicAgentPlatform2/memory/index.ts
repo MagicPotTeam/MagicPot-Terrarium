@@ -1,0 +1,6 @@
+export * from './embeddingProviderRegistry'
+export * from './sqliteSemanticMemoryStore'
+export * from './semanticMemoryService'
+export * from './semanticMemoryScopeResolver'
+export * from './assistantSessionMemorySource'
+export * from './publicSemanticMemoryService'

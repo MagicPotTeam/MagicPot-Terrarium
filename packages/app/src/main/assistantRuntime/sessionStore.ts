@@ -1,10 +1,12 @@
 import fs from 'fs/promises'
+import crypto from 'crypto'
 import path from 'path'
 import { ChatMessage } from '@shared/api/svcLLMProxy'
 import { getBuildEnv } from '../config/buildEnv'
 import { writeJsonFileAtomic } from '../magicAgentRuntime/graph/jsonPersistence'
 import {
   AssistantArtifactRef,
+  AssistantMessageEntry,
   AssistantContextSnapshot,
   AssistantResumeMode,
   AssistantRunEvent,
@@ -12,6 +14,8 @@ import {
   AssistantRunOrigin,
   AssistantRoute,
   AssistantSessionRecord,
+  AssistantSessionForkResult,
+  AssistantSessionForkLineage,
   AssistantSessionSummary,
   AssistantQualityGateState,
   AssistantTaskGroupState,
@@ -28,11 +32,70 @@ import {
   getAssistantWorkspaceState,
   listAssistantWorkspaceMetas
 } from './workspace'
+import {
+  AssistantSessionProjection,
+  AssistantSessionProjectionDiff,
+  diffAssistantSessionProjections,
+  exportAssistantSessionHtml,
+  exportAssistantSessionJsonl,
+  exportAssistantSessionMarkdown,
+  projectAssistantSession
+} from './sessionProjection'
+import {
+  AssistantSessionEnvelopeV4,
+  parseAndMigrateAssistantSessionEnvelope,
+  serializeAssistantSessionEnvelopeV4
+} from './sessionMigration'
+export type {
+  AssistantSessionProjection,
+  AssistantSessionProjectionDiff
+} from './sessionProjection'
 
 type PersistedSessionFile = {
-  version: 1 | 2 | 3
+  version: 1 | 2 | 3 | 4
   sessions: AssistantSessionRecord[]
   workflows?: AssistantWorkflowRecord[]
+}
+
+const persistMigratedEnvelope = async (
+  filePath: string,
+  sourceVersion: 1 | 2 | 3,
+  envelope: AssistantSessionEnvelopeV4
+): Promise<void> => {
+  const dir = path.dirname(filePath)
+  const backupPath = `${filePath}.v${sourceVersion}.bak`
+  const tempPath = path.join(
+    dir,
+    `.${path.basename(filePath)}.migration.${process.pid}.${crypto.randomUUID()}.tmp`
+  )
+  try {
+    const handle = await fs.open(tempPath, 'wx', 0o600)
+    try {
+      await handle.writeFile(serializeAssistantSessionEnvelopeV4(envelope), 'utf8')
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await fs
+      .copyFile(filePath, backupPath, fs.constants.COPYFILE_EXCL)
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'EEXIST') throw error
+      })
+    await fs.rename(tempPath, filePath)
+    const directory = await fs.open(dir, 'r').catch(() => null)
+    if (directory) {
+      try {
+        await directory.sync().catch((error: NodeJS.ErrnoException) => {
+          if (process.platform !== 'win32' || error.code !== 'EPERM') throw error
+        })
+      } finally {
+        await directory.close()
+      }
+    }
+  } catch (error) {
+    await fs.rm(tempPath, { force: true }).catch(() => undefined)
+    throw error
+  }
 }
 
 const STORE_FILENAME = 'chat-sessions.json'
@@ -278,6 +341,22 @@ const getRunResumeEligibility = (
 
   return { resumeEligible: true }
 }
+
+const legacyMessageId = (sessionKey: string, index: number): string =>
+  `legacy-${crypto.createHash('sha256').update(`${sessionKey}:${index}`).digest('hex').slice(0, 24)}`
+
+const backfillMessageEntries = (
+  sessionKey: string,
+  messages: ChatMessage[],
+  createdAt: number
+): AssistantMessageEntry[] =>
+  messages.map((message, index) => ({
+    messageId: legacyMessageId(sessionKey, index),
+    message,
+    order: index,
+    createdAt: createdAt + index,
+    attributionQuality: 'legacy-approximate'
+  }))
 
 const cleanString = (value?: string | null, maxLength = 400): string | undefined => {
   const normalized = String(value || '')
@@ -882,11 +961,30 @@ export class AssistantSessionStore {
           .slice(-ASSISTANT_SESSION_STORE_LIMITS.maxRunRecords)
       : []
 
+    const createdAt = Number.isFinite(session.createdAt) ? Number(session.createdAt) : Date.now()
+    const messages = Array.isArray(session.messages) ? session.messages : []
+    const rawEntries = Array.isArray(session.messageEntries) ? session.messageEntries : []
+    const messageEntries: AssistantMessageEntry[] =
+      rawEntries.length === messages.length &&
+      rawEntries.every((entry) => entry && typeof entry.messageId === 'string')
+        ? rawEntries.map((entry, index) => ({
+            ...entry,
+            message: messages[index],
+            order: index,
+            createdAt: Number.isFinite(entry.createdAt)
+              ? Number(entry.createdAt)
+              : createdAt + index,
+            attributionQuality:
+              entry.attributionQuality === 'exact' ? 'exact' : 'legacy-approximate'
+          }))
+        : backfillMessageEntries(sessionKey, messages, createdAt)
+
     return {
       sessionKey,
       route,
-      messages: Array.isArray(session.messages) ? session.messages : [],
-      createdAt: Number.isFinite(session.createdAt) ? Number(session.createdAt) : Date.now(),
+      messages,
+      messageEntries,
+      createdAt,
       updatedAt: Number.isFinite(session.updatedAt) ? Number(session.updatedAt) : Date.now(),
       workspace,
       ...(contextSnapshot ? { contextSnapshot } : {}),
@@ -896,7 +994,8 @@ export class AssistantSessionStore {
         : [],
       eventLog: Array.isArray(session.eventLog)
         ? session.eventLog.slice(-ASSISTANT_SESSION_STORE_LIMITS.maxEventLogEntries)
-        : []
+        : [],
+      ...(session.lineage ? { lineage: session.lineage } : {})
     }
   }
 
@@ -948,34 +1047,46 @@ export class AssistantSessionStore {
     this.loadPromise = (async () => {
       try {
         const raw = await fs.readFile(this.filePath, 'utf8')
-        const parsed = JSON.parse(raw) as PersistedSessionFile
-        const sessions = Array.isArray(parsed?.sessions) ? parsed.sessions : []
-        const workflows = Array.isArray(parsed?.workflows) ? parsed.workflows : []
+        const parsed = JSON.parse(raw) as unknown
+        const migration = parseAndMigrateAssistantSessionEnvelope(parsed)
+        const sessions = migration.envelope.sessions as Partial<AssistantSessionRecord>[]
+        const workflows = migration.envelope.workflows as Partial<AssistantWorkflowRecord>[]
+        const nextRecords = new Map<string, AssistantSessionRecord>()
+        const nextWorkflowRecords = new Map<string, AssistantWorkflowRecord>()
 
-        this.records.clear()
         for (const session of sessions) {
           const normalized = this.normalizePersistedRecord(session)
-          this.records.set(normalized.sessionKey, normalized)
+          nextRecords.set(normalized.sessionKey, normalized)
         }
 
+        for (const workflow of workflows) {
+          const normalized = normalizeWorkflowRecord(workflow)
+          if (normalized) nextWorkflowRecords.set(normalized.workflowId, normalized)
+        }
+
+        if (migration.migrated) {
+          const persistedEnvelope = parseAndMigrateAssistantSessionEnvelope({
+            version: 4,
+            sessions: [...nextRecords.values()],
+            workflows: [...nextWorkflowRecords.values()]
+          }).envelope
+          await persistMigratedEnvelope(
+            this.filePath,
+            migration.sourceVersion as 1 | 2 | 3,
+            persistedEnvelope
+          )
+        }
+
+        this.records.clear()
+        for (const [key, record] of nextRecords) this.records.set(key, record)
         this.workflowRecords.clear()
-        if (workflows.length > 0) {
-          for (const workflow of workflows) {
-            const normalized = normalizeWorkflowRecord(workflow)
-            if (normalized) {
-              this.workflowRecords.set(normalized.workflowId, normalized)
-            }
-          }
-        }
-
-        if (this.workflowRecords.size === 0) {
-          this.rebuildWorkflowRecords()
-        }
+        for (const [key, record] of nextWorkflowRecords) this.workflowRecords.set(key, record)
+        if (this.workflowRecords.size === 0) this.rebuildWorkflowRecords()
       } catch (error) {
         const err = error as NodeJS.ErrnoException
-        if (err?.code !== 'ENOENT') {
-          console.error('[AssistantSessionStore] Failed to load session store:', error)
-        }
+        if (err?.code === 'ENOENT') return
+        this.loadPromise = null
+        throw error
       }
     })()
 
@@ -984,7 +1095,7 @@ export class AssistantSessionStore {
 
   private queuePersist(): Promise<void> {
     const payload: PersistedSessionFile = {
-      version: 3,
+      version: 4,
       sessions: [...this.records.values()].sort((a, b) => a.updatedAt - b.updatedAt),
       workflows: [...this.workflowRecords.values()].sort(
         (a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt
@@ -1002,6 +1113,331 @@ export class AssistantSessionStore {
     await this.ensureLoaded()
     const sessionKey = getAssistantSessionKey(route)
     return this.records.get(sessionKey) || null
+  }
+
+  async getSessionProjection(route: AssistantRoute): Promise<AssistantSessionProjection | null> {
+    const session = await this.getSession(route)
+    return session ? projectAssistantSession(session) : null
+  }
+
+  async exportSession(
+    route: AssistantRoute,
+    format: 'markdown' | 'html' | 'jsonl'
+  ): Promise<string | null> {
+    const projection = await this.getSessionProjection(route)
+    if (!projection) return null
+    if (format === 'markdown') return exportAssistantSessionMarkdown(projection)
+    if (format === 'html') return exportAssistantSessionHtml(projection)
+    return exportAssistantSessionJsonl(projection)
+  }
+
+  async diffSessions(
+    leftRoute: AssistantRoute,
+    rightRoute: AssistantRoute
+  ): Promise<AssistantSessionProjectionDiff | null> {
+    const [left, right] = await Promise.all([
+      this.getSessionProjection(leftRoute),
+      this.getSessionProjection(rightRoute)
+    ])
+    return left && right ? diffAssistantSessionProjections(left, right) : null
+  }
+
+  async forkSessionAtEvent(
+    sourceRoute: AssistantRoute,
+    sourceEventId: string,
+    targetRoute: AssistantRoute
+  ): Promise<AssistantSessionForkResult> {
+    await this.ensureLoaded()
+    const sourceNormalized = normalizeAssistantRoute(sourceRoute)
+    const targetNormalized = normalizeAssistantRoute(targetRoute)
+    const sourceKey = getAssistantSessionKey(sourceNormalized)
+    const targetKey = getAssistantSessionKey(targetNormalized)
+    if (sourceKey === targetKey)
+      throw new Error('Fork source and target sessions must be distinct.')
+    if (this.records.has(targetKey))
+      throw new Error(`Fork target session already exists: ${targetKey}`)
+    const source = this.records.get(sourceKey)
+    if (!source) throw new Error(`Fork source session does not exist: ${sourceKey}`)
+
+    const cutoff = source.eventLog.findIndex((event) => event.eventId === sourceEventId)
+    if (cutoff < 0) throw new Error(`Fork source event does not exist: ${sourceEventId}`)
+    // Persisted eventLog position is authoritative. Timestamps may be duplicated or out of order.
+    const sourceEvents = source.eventLog.slice(0, cutoff + 1)
+    const sourceRunIds = new Set(sourceEvents.map((event) => event.runId))
+    const sourceRuns = source.runs.filter((run) => sourceRunIds.has(run.runId))
+    const selectedEvent = source.eventLog[cutoff]
+    const runIdMap = Object.fromEntries(sourceRuns.map((run) => [run.runId, crypto.randomUUID()]))
+    const eventIdMap = Object.fromEntries(
+      sourceEvents.map((event) => [event.eventId, crypto.randomUUID()])
+    )
+
+    // Artifacts belong to the historical slice only when retained event metadata
+    // references them. A run record is a current-state projection and may list
+    // artifacts produced after the selected event.
+    const artifactRefs = new Set<string>()
+    const scanArtifactRefs = (value: unknown): void => {
+      if (typeof value === 'string' && source.artifacts.some((item) => item.artifactId === value)) {
+        artifactRefs.add(value)
+      } else if (Array.isArray(value)) value.forEach(scanArtifactRefs)
+      else if (value && typeof value === 'object') {
+        Object.values(value as Record<string, unknown>).forEach(scanArtifactRefs)
+      }
+    }
+    sourceEvents.forEach((event) => scanArtifactRefs(event.metadata))
+    const sourceArtifacts = source.artifacts.filter((artifact) =>
+      artifactRefs.has(artifact.artifactId)
+    )
+    const artifactIdMap = Object.fromEntries(
+      sourceArtifacts.map((artifact) => [artifact.artifactId, crypto.randomUUID()])
+    )
+    const targetWorkspace = getAssistantWorkspaceState(targetNormalized)
+    const remapRun = (id?: string): string | undefined => (id ? runIdMap[id] : undefined)
+    const remapValue = (value: unknown): unknown => {
+      if (typeof value === 'string')
+        return runIdMap[value] || eventIdMap[value] || artifactIdMap[value] || value
+      if (Array.isArray(value)) return value.map(remapValue)
+      if (value && typeof value === 'object') {
+        return Object.fromEntries(
+          Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+            key,
+            remapValue(item)
+          ])
+        )
+      }
+      return value
+    }
+    const sourceMessageEntries = source.messageEntries || []
+    const messageIdMap: Record<string, string> = {}
+    const hasExactAttribution = sourceMessageEntries.some(
+      (entry) => entry.attributionQuality === 'exact'
+    )
+    const eventPositions = new Map(source.eventLog.map((event, index) => [event.eventId, index]))
+    if (hasExactAttribution) {
+      for (const entry of sourceMessageEntries) {
+        if (entry.message.role === 'system') continue
+        if (
+          entry.attributionQuality !== 'exact' ||
+          !entry.runId ||
+          !entry.eventId ||
+          eventPositions.get(entry.eventId) === undefined ||
+          source.eventLog[eventPositions.get(entry.eventId)!]?.runId !== entry.runId
+        ) {
+          throw new Error('Cannot fork session with malformed or mixed message attribution.')
+        }
+      }
+    }
+    const selectedMessageEntries = hasExactAttribution
+      ? sourceMessageEntries.filter(
+          (entry) =>
+            entry.message.role === 'system' ||
+            (entry.eventId !== undefined && eventPositions.get(entry.eventId)! <= cutoff)
+        )
+      : (() => {
+          const selectedRunIndex = source.runs.findIndex((run) => run.runId === selectedEvent.runId)
+          if (selectedRunIndex < 0) {
+            return sourceMessageEntries.filter((entry) => entry.message.role === 'system')
+          }
+          const firstNonSystem = source.messages.findIndex((message) => message.role !== 'system')
+          const systemCount = firstNonSystem < 0 ? source.messages.length : firstNonSystem
+          return sourceMessageEntries.slice(
+            0,
+            Math.min(sourceMessageEntries.length, systemCount + (selectedRunIndex + 1) * 2)
+          )
+        })()
+    selectedMessageEntries.forEach((entry) => {
+      messageIdMap[entry.messageId] = crypto.randomUUID()
+    })
+    const forkedAt = Date.now()
+    const attributionQuality = hasExactAttribution ? 'exact' : 'legacy-approximate'
+    const warning =
+      attributionQuality === 'exact'
+        ? 'Messages were forked exactly by durable event attribution. External side effects are not rolled back; workspace memory and files are neither copied nor shared.'
+        : 'Legacy messages have approximate attribution and are retained only through an inferred run boundary. External side effects are not rolled back; workspace memory and files are neither copied nor shared.'
+    const lineage: AssistantSessionForkLineage = {
+      sourceSessionKey: sourceKey,
+      sourceRoute: sourceNormalized,
+      sourceEventId,
+      sourceRunId: selectedEvent.runId,
+      sourceWorkspaceId: source.workspace.workspaceId,
+      forkedAt,
+      warning,
+      attributionQuality,
+      idMap: {
+        runs: runIdMap,
+        events: eventIdMap,
+        artifacts: artifactIdMap,
+        messages: messageIdMap
+      }
+    }
+    const runs: AssistantRunRecord[] = sourceRuns.map((run) => {
+      const retainedRunEvents = sourceEvents.filter((event) => event.runId === run.runId)
+      const terminalEvent = [...retainedRunEvents]
+        .reverse()
+        .find((event) => ['completed', 'failed', 'cancelled'].includes(event.type))
+      const startedEvent = retainedRunEvents.find((event) => event.type === 'started')
+      const queuedEvent = retainedRunEvents.find((event) => event.type === 'queued')
+      const latestEvent = retainedRunEvents[retainedRunEvents.length - 1]
+      const metadata = retainedRunEvents.reduce<Record<string, unknown>>(
+        (result, event) => ({ ...result, ...(event.metadata || {}) }),
+        {}
+      )
+      const mappedArtifactIds = run.artifactIds.flatMap((id) =>
+        artifactIdMap[id] ? [artifactIdMap[id]] : []
+      )
+      const base = {
+        runId: runIdMap[run.runId],
+        sessionKey: targetKey,
+        workspaceId: targetWorkspace.workspaceId,
+        route: targetNormalized,
+        runOrigin: run.runOrigin,
+        rootRunId:
+          remapRun(typeof metadata.rootRunId === 'string' ? metadata.rootRunId : run.rootRunId) ||
+          runIdMap[run.runId],
+        createdAt: queuedEvent?.createdAt ?? retainedRunEvents[0]?.createdAt ?? run.createdAt,
+        updatedAt: latestEvent?.createdAt ?? run.createdAt,
+        artifactIds: mappedArtifactIds
+      }
+
+      const terminalMessage = terminalEvent
+        ? sourceMessageEntries.find(
+            (entry) =>
+              entry.runId === run.runId &&
+              entry.eventId === terminalEvent.eventId &&
+              entry.message.role === 'assistant'
+          )
+        : undefined
+      const provenToolCalls = retainedRunEvents.flatMap((event) =>
+        event.type === 'tool' && typeof event.metadata?.toolName === 'string'
+          ? [{ toolName: event.metadata.toolName }]
+          : []
+      )
+      const provenFields = {
+        ...(startedEvent ? { startedAt: startedEvent.createdAt } : {}),
+        ...(typeof metadata.queuePosition === 'number'
+          ? { queuePosition: metadata.queuePosition }
+          : {}),
+        ...(typeof metadata.requestText === 'string' ? { requestText: metadata.requestText } : {}),
+        ...(typeof metadata.profileId === 'string' ? { profileId: metadata.profileId } : {}),
+        ...(typeof metadata.executionMode === 'string'
+          ? { executionMode: metadata.executionMode as AssistantRunRecord['executionMode'] }
+          : {}),
+        ...(typeof metadata.executionHistorySize === 'number'
+          ? { executionHistorySize: metadata.executionHistorySize }
+          : {}),
+        ...(typeof metadata.executionTraceLabel === 'string'
+          ? { executionTraceLabel: metadata.executionTraceLabel }
+          : {}),
+        ...(typeof metadata.parentRunId === 'string'
+          ? { parentRunId: remapRun(metadata.parentRunId) }
+          : {}),
+        ...(typeof metadata.resumeSourceRunId === 'string'
+          ? { resumeSourceRunId: remapRun(metadata.resumeSourceRunId) }
+          : {}),
+        ...(typeof metadata.resumeAttempt === 'number'
+          ? { resumeAttempt: metadata.resumeAttempt }
+          : {}),
+        ...(metadata.resumeMode === 'requeue' ? { resumeMode: 'requeue' as const } : {}),
+        ...(provenToolCalls.length > 0 ? { toolCalls: provenToolCalls } : {})
+      }
+
+      if (terminalEvent) {
+        return {
+          ...base,
+          ...provenFields,
+          status: terminalEvent.type as 'completed' | 'failed' | 'cancelled',
+          finishedAt: terminalEvent.createdAt,
+          ...(terminalMessage?.message.content
+            ? { responseText: terminalMessage.message.content }
+            : typeof metadata.responseText === 'string'
+              ? { responseText: metadata.responseText }
+              : {}),
+          ...(typeof metadata.errorMessage === 'string'
+            ? { errorMessage: metadata.errorMessage }
+            : {}),
+          ...(terminalEvent.type === 'cancelled' ? { cancelRequested: true } : {})
+        }
+      }
+
+      // Rebuild in-flight state only from lifecycle facts retained by the slice.
+      // Final replies, errors, tool usage, task state, and terminal timestamps are
+      // deliberately unavailable until an event proves them.
+      return {
+        ...base,
+        ...provenFields,
+        status: startedEvent ? ('running' as const) : ('queued' as const)
+      }
+    })
+    const artifacts: AssistantArtifactRef[] = sourceArtifacts.map((artifact) => ({
+      ...structuredClone(artifact),
+      artifactId: artifactIdMap[artifact.artifactId],
+      runId: remapRun(artifact.runId) || runIdMap[selectedEvent.runId],
+      originatingRunId: remapRun(artifact.originatingRunId),
+      ...(artifact.lineage
+        ? {
+            lineage: {
+              ...artifact.lineage,
+              workspaceId: targetWorkspace.workspaceId,
+              rootRunId: remapRun(artifact.lineage.rootRunId),
+              parentArtifactId: artifact.lineage.parentArtifactId
+                ? artifactIdMap[artifact.lineage.parentArtifactId]
+                : undefined
+            }
+          }
+        : {})
+    }))
+    const events: AssistantRunEvent[] = sourceEvents.map((event) => ({
+      ...structuredClone(event),
+      eventId: eventIdMap[event.eventId],
+      runId: runIdMap[event.runId],
+      sessionKey: targetKey,
+      route: targetNormalized,
+      ...(event.metadata ? { metadata: remapValue(event.metadata) as Record<string, unknown> } : {})
+    }))
+    const forkCreatedEvent: AssistantRunEvent = {
+      eventId: crypto.randomUUID(),
+      runId: runIdMap[selectedEvent.runId],
+      sessionKey: targetKey,
+      route: targetNormalized,
+      type: 'fork-created',
+      level: 'warning',
+      message: warning,
+      createdAt: forkedAt,
+      metadata: {
+        sourceSessionKey: sourceKey,
+        sourceEventId,
+        sourceRunId: selectedEvent.runId,
+        attributionQuality
+      }
+    }
+    const targetEntries: AssistantMessageEntry[] = selectedMessageEntries.map((entry, order) => ({
+      ...structuredClone(entry),
+      messageId: messageIdMap[entry.messageId],
+      order,
+      ...(entry.runId ? { runId: runIdMap[entry.runId] } : {}),
+      ...(entry.eventId ? { eventId: eventIdMap[entry.eventId] } : {})
+    }))
+    const target = this.normalizePersistedRecord({
+      route: targetNormalized,
+      messages: targetEntries.map((entry) => entry.message),
+      messageEntries: targetEntries,
+      createdAt: forkedAt,
+      updatedAt: forkedAt,
+      workspace: targetWorkspace,
+      runs,
+      artifacts,
+      eventLog: [...events, forkCreatedEvent],
+      lineage
+    })
+    this.records.set(targetKey, target)
+    this.rebuildWorkflowRecords()
+    try {
+      await this.queuePersist()
+    } catch (error) {
+      this.records.delete(targetKey)
+      this.rebuildWorkflowRecords()
+      throw error
+    }
+    return { session: target, lineage, forkCreatedEvent }
   }
 
   async listSessions(): Promise<AssistantSessionRecord[]> {
@@ -1110,6 +1546,7 @@ export class AssistantSessionStore {
       run?: AssistantRunRecord
       artifacts?: AssistantArtifactRef[]
       events?: AssistantRunEvent[]
+      messageEntries?: Array<Partial<AssistantMessageEntry>>
     }
   ): Promise<AssistantSessionRecord> {
     return this.mutateSession(route, (current) => {
@@ -1123,12 +1560,36 @@ export class AssistantSessionStore {
         }
       }
 
+      const nextMessages = [...current.messages, ...messages].slice(
+        -clampHistorySize(maxHistoryMessages)
+      )
+      const dropped = current.messages.length + messages.length - nextMessages.length
+      const appendedEntries: AssistantMessageEntry[] = messages.map((message, index) => {
+        const supplied = options?.messageEntries?.[index]
+        return {
+          messageId: supplied?.messageId || crypto.randomUUID(),
+          message,
+          order: (current.messageEntries || []).length + index,
+          createdAt: Number.isFinite(supplied?.createdAt)
+            ? Number(supplied?.createdAt)
+            : Date.now() + index,
+          attributionQuality:
+            supplied?.attributionQuality === 'exact' ? 'exact' : 'legacy-approximate',
+          ...(supplied?.runId ? { runId: supplied.runId } : {}),
+          ...(supplied?.eventId ? { eventId: supplied.eventId } : {})
+        }
+      })
+      const nextEntries = [...(current.messageEntries || []), ...appendedEntries]
+        .slice(Math.max(0, dropped))
+        .map((entry, order) => ({ ...entry, order }))
+
       return {
         ...current,
         updatedAt: Date.now(),
         workspace: options?.workspace || current.workspace,
         contextSnapshot: options?.contextSnapshot || current.contextSnapshot,
-        messages: [...current.messages, ...messages].slice(-clampHistorySize(maxHistoryMessages)),
+        messages: nextMessages,
+        messageEntries: nextEntries,
         runs: nextRuns.slice(-ASSISTANT_SESSION_STORE_LIMITS.maxRunRecords),
         artifacts: [...current.artifacts, ...(options?.artifacts || [])].slice(
           -ASSISTANT_SESSION_STORE_LIMITS.maxArtifactRecords

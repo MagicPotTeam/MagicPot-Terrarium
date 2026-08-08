@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { publishWorkflowCompletion } from '../../magicAgentPlatform2/triggers/workflowCompletionEvents'
 import { getAgentSessionKey, normalizeAgentRoute, type AgentRouteLike } from '@shared/agent'
 import type { MagicAgentGraphRunRecord } from '@shared/magicAgent'
 import {
@@ -43,6 +44,18 @@ export class MagicAgentGraphRunStore {
     }
     const record = { ...clone(run), runId, graphId, route, sessionKey }
     await writeJsonFileAtomic(this.runFilePath(sessionKey, runId), record)
+    if (
+      record.status === 'completed' ||
+      record.status === 'failed' ||
+      record.status === 'cancelled'
+    ) {
+      publishWorkflowCompletion({
+        runId: record.runId,
+        graphId: record.graphId,
+        status: record.status,
+        completedAt: record.updatedAt
+      })
+    }
   }
 
   async get(runId: string, route: AgentRouteLike): Promise<MagicAgentGraphRunRecord | undefined> {
@@ -53,7 +66,8 @@ export class MagicAgentGraphRunStore {
       () => undefined
     )
     if (!run || run.sessionKey !== sessionKey) return undefined
-    return clone(run)
+    const reconciled = await this.reconcileInterruptedRun(run)
+    return clone(reconciled)
   }
 
   async list(options: MagicAgentGraphRunStoreListOptions): Promise<MagicAgentGraphRunRecord[]> {
@@ -67,7 +81,10 @@ export class MagicAgentGraphRunStore {
         ? Number(options.limit)
         : undefined
     const records = await this.readSessionRuns(sessionKey)
-    const runs = records
+    const reconciledRecords = await Promise.all(
+      records.map((run) => this.reconcileInterruptedRun(run))
+    )
+    const runs = reconciledRecords
       .filter((run) => run.sessionKey === sessionKey)
       .filter((run) => !graphId || run.graphId === graphId)
       .sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt)
@@ -96,6 +113,103 @@ export class MagicAgentGraphRunStore {
 
   getRootDir(): string {
     return this.rootDir
+  }
+
+  private async reconcileInterruptedRun(
+    run: MagicAgentGraphRunRecord
+  ): Promise<MagicAgentGraphRunRecord> {
+    if (!['pending', 'running', 'pausing', 'paused'].includes(run.status)) return run
+    const interruptedAt = Date.now()
+    const message = 'MagicAgentGraph run was interrupted by process restart and cannot be resumed.'
+    const pendingInput = run.pendingInput
+    const cancelledPendingInput =
+      pendingInput && (pendingInput.status === 'awaiting' || pendingInput.status === 'submitted')
+        ? {
+            ...pendingInput,
+            status: 'cancelled' as const,
+            revision: pendingInput.revision + 1,
+            updatedAt: interruptedAt
+          }
+        : pendingInput
+    const pendingApproval = run.pendingApproval
+    const deniedPendingApproval =
+      pendingApproval && pendingApproval.status === 'awaiting'
+        ? {
+            ...pendingApproval,
+            status: 'denied' as const,
+            revision: pendingApproval.revision + 1,
+            updatedAt: interruptedAt
+          }
+        : pendingApproval
+    const nextSequence =
+      Math.max(0, ...(run.events || []).map((candidate) => candidate.sequence || 0)) + 1
+    const cancellationEvent =
+      cancelledPendingInput !== pendingInput
+        ? {
+            eventId: `graph-event-${interruptedAt}-input-cancelled`,
+            runId: run.runId,
+            graphId: run.graphId,
+            type: 'input.cancelled' as const,
+            message: 'Managed input was cancelled during startup reconciliation.',
+            createdAt: interruptedAt,
+            sequence: nextSequence,
+            nodeId: cancelledPendingInput?.nodeId,
+            metadata: {
+              nodeId: cancelledPendingInput?.nodeId,
+              pendingInputId: cancelledPendingInput?.pendingInputId,
+              revision: cancelledPendingInput?.revision,
+              status: 'cancelled',
+              reason: 'startup-interrupted'
+            }
+          }
+        : undefined
+    const approvalEvent =
+      deniedPendingApproval !== pendingApproval
+        ? {
+            eventId: `graph-event-${interruptedAt}-approval-denied`,
+            runId: run.runId,
+            graphId: run.graphId,
+            type: 'approval.denied' as const,
+            message: 'Tool approval was denied during startup reconciliation.',
+            createdAt: interruptedAt,
+            sequence: nextSequence + (cancellationEvent ? 1 : 0),
+            nodeId: deniedPendingApproval?.nodeId,
+            metadata: {
+              nodeId: deniedPendingApproval?.nodeId,
+              approvalId: deniedPendingApproval?.approvalId,
+              revision: deniedPendingApproval?.revision,
+              status: 'denied',
+              reason: 'startup-interrupted'
+            }
+          }
+        : undefined
+    const event = {
+      eventId: `graph-event-${interruptedAt}-${Math.random().toString(36).slice(2)}`,
+      runId: run.runId,
+      graphId: run.graphId,
+      type: 'graph.interrupted' as const,
+      message,
+      createdAt: interruptedAt,
+      sequence: nextSequence + (cancellationEvent ? 1 : 0) + (approvalEvent ? 1 : 0),
+      metadata: { previousStatus: run.status, interrupted: true }
+    }
+    const reconciled: MagicAgentGraphRunRecord = {
+      ...run,
+      status: 'failed',
+      updatedAt: interruptedAt,
+      endedAt: interruptedAt,
+      error: message,
+      ...(cancelledPendingInput ? { pendingInput: cancelledPendingInput } : {}),
+      ...(deniedPendingApproval ? { pendingApproval: deniedPendingApproval } : {}),
+      events: [
+        ...(run.events || []),
+        ...(cancellationEvent ? [cancellationEvent] : []),
+        ...(approvalEvent ? [approvalEvent] : []),
+        event
+      ]
+    }
+    await this.save(reconciled)
+    return reconciled
   }
 
   private async readSessionRuns(sessionKey: string): Promise<MagicAgentGraphRunRecord[]> {

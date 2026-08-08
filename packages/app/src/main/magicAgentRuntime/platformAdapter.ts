@@ -1,4 +1,6 @@
 import type { AgentRouteLike, AgentRunStatus } from '@shared/agent'
+import { getAgentSessionKey } from '@shared/agent'
+import type { PolicyJsonRecord } from '../../shared/magicAgentPlatform2'
 import type {
   MagicAgentPlatformAgentDefinition,
   MagicAgentPlatformRunReq,
@@ -16,6 +18,7 @@ import type { AssistantRuntime } from '../assistantRuntime/runtime'
 import type { AssistantRoute } from '../assistantRuntime/types'
 import { LLMProxySvcImpl } from '../api/svcLLMProxyImpl'
 import { getConfig } from '../config/config'
+import { getAssistantTerminalPolicyRuntime } from '../magicAgentPlatform2/productionRuntime'
 import { getAgentKernel, type AgentKernel } from '../agentKernel'
 import { MagicAgentRegistry } from './agentRegistry'
 import { MagicAgentRuntime } from './runtime'
@@ -31,8 +34,11 @@ import {
 } from './tools'
 import { isMagicAgentPlatformDeniedToolName } from './toolPolicy'
 
+import type { CooperativeExecutionGate } from '../magicAgentPlatform2/agents/cooperativeExecutionController'
+
 export type MagicAgentPlatformExecutionOptions = {
   signal?: AbortSignal
+  cooperativeExecution?: CooperativeExecutionGate
 }
 
 class MagicAgentPlatformTimeoutError extends Error {
@@ -186,7 +192,24 @@ const assistantToolToPlatformDefinition = (tool: {
   source: 'assistantRuntime',
   status: 'available',
   metadata: {
-    source: 'assistantRuntime'
+    source: 'assistantRuntime',
+    ...(new Set([
+      'files.write',
+      'files.edit',
+      'files.patch',
+      'files.multi-edit',
+      'files.json.write',
+      'files.snapshot.restore'
+    ]).has(tool.name)
+      ? { effects: [{ kind: 'filesystem.write', risk: 'high' }] }
+      : new Set(['git.branch', 'git.checkout', 'git.add', 'git.commit']).has(tool.name)
+        ? {
+            effects: [
+              { kind: 'filesystem.write', risk: 'high' },
+              { kind: 'process.execute', risk: 'high' }
+            ]
+          }
+        : {})
   }
 })
 
@@ -540,9 +563,19 @@ export class MagicAgentPlatformAdapter {
         ...(systemPrompt ? { systemPrompt } : {}),
         ...(req.profileId ? { profileId: req.profileId } : {}),
         signal: executionController.signal,
+        cooperativeExecution: options.cooperativeExecution,
         execution: {
-          mode: 'inherit',
+          mode: req.memory?.allowHistory === false ? 'no-history' : 'inherit',
+          ...(req.memory
+            ? {
+                allowHistory: req.memory.allowHistory,
+                contextMessageLimit: req.memory.contextMessageLimit
+              }
+            : {}),
           allowedToolNames: effectiveAllowedToolNames,
+          ...(req.maxToolIterations === undefined ? {} : { maxToolCalls: req.maxToolIterations }),
+          ...(req.maxOutputTokens === undefined ? {} : { maxOutputTokens: req.maxOutputTokens }),
+          ...(req.temperature === undefined ? {} : { temperature: req.temperature }),
           traceLabel:
             cleanString(req.metadata?.traceLabel) ||
             cleanString(req.metadata?.requestedBy) ||
@@ -904,11 +937,15 @@ export class MagicAgentPlatformAdapter {
         unavailableReason: `Unknown MagicAgent creative tool: ${name}`
       }
     }
-    const session = this.agentKernel.registerSession(
-      requirePlatformRoute(route, 'creative tool invocation'),
-      { source: 'kernel' }
-    )
-    const result = await this.agentKernel.invokeTool({
+    const platformRoute = requirePlatformRoute(route, 'creative tool invocation')
+    getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
+      route: platformRoute,
+      sessionId: getAgentSessionKey(platformRoute),
+      toolName: `creative.${name}`,
+      toolInput: args as PolicyJsonRecord
+    })
+    const session = this.agentKernel.registerSession(platformRoute, { source: 'kernel' })
+    const result = await this.agentKernel.invokeAuthorizedTool({
       toolName: toKernelCreativeToolName(name),
       args,
       session,

@@ -69,7 +69,29 @@ describe('toolBridge', () => {
     expect(refreshMagicPotMcpPlatformRuntime).toHaveBeenCalled()
   })
 
-  it('filters denied terminal tools from kernel sync and direct invocation', async () => {
+  it('exposes file mutation tools with high-risk filesystem effect metadata', () => {
+    const names = [
+      'files.write',
+      'files.edit',
+      'files.multi-edit',
+      'files.json.write',
+      'files.snapshot.restore'
+    ]
+    const registry = createToolRegistry(names)
+    syncAssistantToolsWithAgentKernel(registry)
+    for (const name of names) {
+      expect(getAgentKernel().getTool(name)?.tool.metadata).toMatchObject({
+        source: 'assistant',
+        effects: [{ kind: 'filesystem.write', risk: 'high' }]
+      })
+    }
+  })
+
+  it('exposes the policy-gated agent terminal through kernel sync and invocation', async () => {
+    vi.mocked(authorizeMagicPotMcpToolInvocation).mockReturnValue({
+      allowed: true,
+      policyId: 'policy-terminal'
+    })
     const registry = createToolRegistry(['safe.tool', ' Agent.Terminal.Run '])
 
     syncAssistantToolsWithAgentKernel(registry)
@@ -78,8 +100,8 @@ describe('toolBridge', () => {
       getAgentKernel()
         .listCapabilities()
         .map((capability) => capability.capabilityId)
-    ).toEqual(['chat.tool.safe.tool'])
-    expect(getAgentKernel().getTool('agent.terminal.run')).toBeUndefined()
+    ).toEqual(['chat.tool.safe.tool', 'chat.tool.agent.terminal.run'])
+    expect(getAgentKernel().getTool('agent.terminal.run')).toBeDefined()
 
     await expect(
       invokeAssistantToolViaKernel({
@@ -88,16 +110,12 @@ describe('toolBridge', () => {
         args: { command: 'pwd' },
         context
       })
-    ).rejects.toThrow(/not allowed through the MagicAgent platform boundary/)
+    ).resolves.toEqual({
+      content: 'called:agent.terminal.run',
+      metadata: { args: { command: 'pwd' } }
+    })
 
-    expect(authorizeMagicPotMcpToolInvocation).not.toHaveBeenCalled()
-    expect(registry.callTool).not.toHaveBeenCalled()
-    expect(appendMagicPotMcpAudit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        decision: 'deny',
-        target: 'chat.tool.agent.terminal.run'
-      })
-    )
+    expect(registry.callTool).toHaveBeenCalled()
   })
 
   it('keeps sync usable when MCP refresh is not initialized', () => {

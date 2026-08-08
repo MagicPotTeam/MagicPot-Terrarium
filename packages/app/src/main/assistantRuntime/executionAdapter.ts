@@ -41,9 +41,12 @@ type AssistantExecutionRequest = {
   }>
   profileId?: string
   systemPrompt?: string
+  maxOutputTokens?: number
+  temperature?: number
   executionMode?: AssistantExecutionMode
   executionHistorySize?: number
   executionTraceLabel?: string
+  maxToolCalls?: number
   sessionStore: AssistantSessionStore
   taskState: AssistantTaskState
   workspaceMemoryFile?: string
@@ -51,6 +54,7 @@ type AssistantExecutionRequest = {
   workspaceContextFile?: string
   workspacePinnedContextFile?: string
   workspaceMetaFile?: string
+  workspaceRootDir?: string
   resumeRun?: (
     route: AssistantRoute,
     runId: string,
@@ -113,6 +117,7 @@ type AssistantExecutionRequest = {
     options?: { async?: boolean }
   ) => Promise<AssistantRuntimeResult>
   signal?: AbortSignal
+  cooperativeExecution?: AssistantInboundMessage['cooperativeExecution']
   emitEvent?: (
     event: Pick<AssistantRunEvent, 'type' | 'level' | 'message' | 'metadata'>
   ) => Promise<void>
@@ -274,6 +279,7 @@ export class AssistantExecutionAdapter {
         workspaceContextFile: request.workspaceContextFile,
         workspacePinnedContextFile: request.workspacePinnedContextFile,
         workspaceMetaFile: request.workspaceMetaFile,
+        workspaceRootDir: request.workspaceRootDir,
         resumeRun: request.resumeRun,
         resumeWorkflow: request.resumeWorkflow,
         startTaskGroup: request.startTaskGroup,
@@ -291,6 +297,8 @@ export class AssistantExecutionAdapter {
     const executionMetadata = buildExecutionMetadata(request)
     const toolInvocation = parseToolInvocation(request.req.text)
     if (toolInvocation) {
+      if (request.maxToolCalls !== undefined && request.maxToolCalls < 1)
+        throw new Error('Assistant tool-call budget exhausted.')
       assertAssistantToolAllowed(toolInvocation.toolName, request.req.execution?.allowedToolNames)
       await request.emitEvent?.({
         type: 'progress',
@@ -302,31 +310,39 @@ export class AssistantExecutionAdapter {
           requestKind: 'tool-invocation'
         }
       })
-      const toolResult = await invokeAssistantToolViaKernel({
-        toolRegistry: this.toolRegistry,
-        toolName: toolInvocation.toolName,
-        args: toolInvocation.args,
-        signal: request.signal,
-        context: {
-          config: request.config,
-          route: request.route,
-          sessionStore: request.sessionStore,
-          taskState: request.taskState,
-          workspaceMemoryFile: request.workspaceMemoryFile,
-          workspaceTaskContextFile: request.workspaceTaskContextFile,
-          workspaceContextFile: request.workspaceContextFile,
-          workspacePinnedContextFile: request.workspacePinnedContextFile,
-          workspaceMetaFile: request.workspaceMetaFile,
-          resumeRun: request.resumeRun,
-          resumeWorkflow: request.resumeWorkflow,
-          startTaskGroup: request.startTaskGroup,
-          progressTaskGroup: request.progressTaskGroup,
-          approveTaskGroup: request.approveTaskGroup,
-          exportTaskGroup: request.exportTaskGroup,
-          cancelTaskGroup: request.cancelTaskGroup,
-          resumeTaskGroup: request.resumeTaskGroup
-        }
-      })
+      await request.cooperativeExecution?.checkpoint('tool-invocation')
+      const leaveTool = request.cooperativeExecution?.enter('tool-invocation')
+      let toolResult
+      try {
+        toolResult = await invokeAssistantToolViaKernel({
+          toolRegistry: this.toolRegistry,
+          toolName: toolInvocation.toolName,
+          args: toolInvocation.args,
+          signal: request.signal,
+          context: {
+            config: request.config,
+            route: request.route,
+            sessionStore: request.sessionStore,
+            taskState: request.taskState,
+            workspaceMemoryFile: request.workspaceMemoryFile,
+            workspaceTaskContextFile: request.workspaceTaskContextFile,
+            workspaceContextFile: request.workspaceContextFile,
+            workspacePinnedContextFile: request.workspacePinnedContextFile,
+            workspaceMetaFile: request.workspaceMetaFile,
+            workspaceRootDir: request.workspaceRootDir,
+            resumeRun: request.resumeRun,
+            resumeWorkflow: request.resumeWorkflow,
+            startTaskGroup: request.startTaskGroup,
+            progressTaskGroup: request.progressTaskGroup,
+            approveTaskGroup: request.approveTaskGroup,
+            exportTaskGroup: request.exportTaskGroup,
+            cancelTaskGroup: request.cancelTaskGroup,
+            resumeTaskGroup: request.resumeTaskGroup
+          }
+        })
+      } finally {
+        leaveTool?.()
+      }
 
       return {
         reply: {
@@ -383,16 +399,27 @@ export class AssistantExecutionAdapter {
     })
     const reusableContextPrompt = buildAssistantReusableContextPrompt(reusableContextPack)
     const systemPrompt = [request.systemPrompt, reusableContextPrompt].filter(Boolean).join('\n\n')
-    const reply = await this.chatService.chat(
-      {
-        messages: request.messages,
-        ...(request.profileId ? { profileId: request.profileId } : {}),
-        ...(systemPrompt ? { systemPrompt } : {})
-      },
-      {
-        signal: request.signal
-      }
-    )
+    await request.cooperativeExecution?.checkpoint('llm-inference')
+    const leaveLlm = request.cooperativeExecution?.enter('llm-inference')
+    let reply
+    try {
+      reply = await this.chatService.chat(
+        {
+          messages: request.messages,
+          ...(request.profileId ? { profileId: request.profileId } : {}),
+          ...(request.maxOutputTokens === undefined
+            ? {}
+            : { maxOutputTokens: request.maxOutputTokens }),
+          ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+          ...(systemPrompt ? { systemPrompt } : {})
+        },
+        {
+          signal: request.signal
+        }
+      )
+    } finally {
+      leaveLlm?.()
+    }
 
     const createdAt = Date.now()
     const attachments = [...(reply.attachments || [])]

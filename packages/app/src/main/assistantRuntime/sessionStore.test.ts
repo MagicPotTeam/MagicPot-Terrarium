@@ -36,6 +36,75 @@ describe('AssistantSessionStore', () => {
     vi.clearAllMocks()
   })
 
+  it('migrates legacy files through a durable temp file with one bounded backup', async () => {
+    const source = JSON.stringify({
+      version: 1,
+      sessions: [
+        {
+          sessionKey: 'generic:dm:migrate',
+          route: { channel: 'generic', scopeType: 'dm', scopeId: 'migrate' },
+          messages: [{ role: 'user', content: 'legacy' }],
+          createdAt: 1,
+          updatedAt: 2
+        }
+      ]
+    })
+    await fs.writeFile(filePath, source, 'utf8')
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'migrate' }
+
+    const first = new AssistantSessionStore(filePath)
+    expect((await first.getSession(route))?.messageEntries?.[0].attributionQuality).toBe(
+      'legacy-approximate'
+    )
+    expect(await fs.readFile(`${filePath}.v1.bak`, 'utf8')).toBe(source)
+    const migrated = await fs.readFile(filePath, 'utf8')
+    expect(JSON.parse(migrated).version).toBe(4)
+
+    const second = new AssistantSessionStore(filePath)
+    await second.getSession(route)
+    expect(await fs.readFile(filePath, 'utf8')).toBe(migrated)
+    expect((await fs.readdir(tempDir)).filter((name) => name.endsWith('.bak'))).toEqual([
+      'chat-sessions.json.v1.bak'
+    ])
+  })
+
+  it('fails closed on malformed/future files without replacing the source', async () => {
+    for (const source of ['{broken', JSON.stringify({ version: 5, sessions: [] })]) {
+      await fs.writeFile(filePath, source, 'utf8')
+      const store = new AssistantSessionStore(filePath)
+      await expect(
+        store.getSession({ channel: 'generic', scopeType: 'dm', scopeId: 'closed' })
+      ).rejects.toThrow()
+      expect(await fs.readFile(filePath, 'utf8')).toBe(source)
+    }
+  })
+
+  it('preserves source and in-memory state when migration rename fails', async () => {
+    const source = JSON.stringify({
+      version: 2,
+      sessions: [
+        {
+          sessionKey: 'generic:dm:rollback',
+          route: { channel: 'generic', scopeType: 'dm', scopeId: 'rollback' },
+          messages: [{ role: 'user', content: 'legacy' }],
+          createdAt: 1,
+          updatedAt: 2
+        }
+      ]
+    })
+    await fs.writeFile(filePath, source, 'utf8')
+    const renameSpy = vi
+      .spyOn(fs, 'rename')
+      .mockRejectedValueOnce(new Error('migration rename failed'))
+    const store = new AssistantSessionStore(filePath)
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'rollback' }
+    await expect(store.getSession(route)).rejects.toThrow('migration rename failed')
+    expect(await fs.readFile(filePath, 'utf8')).toBe(source)
+    renameSpy.mockRestore()
+    expect((await store.getSession(route))?.messages[0].content).toBe('legacy')
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8')).version).toBe(4)
+  })
+
   it('normalizes legacy session records into the v2 schema', async () => {
     await fs.writeFile(
       filePath,
@@ -389,7 +458,7 @@ describe('AssistantSessionStore', () => {
       gateId: 'task-group-1:quality-gate',
       status: 'passing'
     })
-    expect(persisted.version).toBe(3)
+    expect(persisted.version).toBe(4)
     expect(persisted.sessions[0]?.runs).toHaveLength(1)
     expect(persisted.sessions[0]?.artifacts).toHaveLength(1)
     expect(persisted.sessions[0]?.eventLog).toHaveLength(1)
@@ -653,7 +722,7 @@ describe('AssistantSessionStore', () => {
       }>
     }
 
-    expect(raw.version).toBe(3)
+    expect(raw.version).toBe(4)
     expect(raw.workflows).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -738,5 +807,274 @@ describe('AssistantSessionStore', () => {
     expect(pruneResult.retention.sessionCount).toBe(1)
     expect(pruneResult.retention.totalMessageCount).toBe(1)
     expect(sessions.map((session) => session.sessionKey)).toEqual(['generic:dm:fresh'])
+  })
+
+  it('forks at persisted event position with remapped bounded state and independent reload', async () => {
+    const sourceRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'fork-source' }
+    const targetRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'fork-target' }
+    const store = new AssistantSessionStore(filePath)
+    const workspace = getAssistantWorkspaceState(sourceRoute)
+    const run1 = {
+      runId: 'run-1',
+      sessionKey: 'generic:dm:fork-source',
+      workspaceId: workspace.workspaceId,
+      route: sourceRoute,
+      status: 'completed' as const,
+      runOrigin: 'new' as const,
+      rootRunId: 'run-1',
+      createdAt: 1,
+      updatedAt: 2,
+      artifactIds: ['artifact-1'],
+      toolCalls: [{ toolName: 'first' }]
+    }
+    const run2 = {
+      ...run1,
+      runId: 'run-2',
+      rootRunId: 'run-2',
+      createdAt: 3,
+      updatedAt: 4,
+      artifactIds: ['artifact-2'],
+      toolCalls: [{ toolName: 'future' }]
+    }
+    const event1 = {
+      eventId: 'event-1',
+      runId: 'run-1',
+      sessionKey: run1.sessionKey,
+      route: sourceRoute,
+      type: 'completed' as const,
+      level: 'info' as const,
+      message: 'cut',
+      createdAt: 999,
+      metadata: { artifactId: 'artifact-1' }
+    }
+    const event2 = {
+      eventId: 'event-2',
+      runId: 'run-2',
+      sessionKey: run1.sessionKey,
+      route: sourceRoute,
+      type: 'completed' as const,
+      level: 'info' as const,
+      message: 'future',
+      createdAt: 1
+    }
+    await store.appendTurn(
+      sourceRoute,
+      [
+        { role: 'user', content: 'one' },
+        { role: 'assistant', content: 'answer one' },
+        { role: 'user', content: 'future' },
+        { role: 'assistant', content: 'future answer' }
+      ],
+      100,
+      {
+        workspace,
+        run: run1,
+        events: [event1],
+        artifacts: [
+          { artifactId: 'artifact-1', runId: 'run-1', kind: 'file', createdAt: 1, source: 'tool' }
+        ]
+      }
+    )
+    await store.upsertRun(sourceRoute, run2, {
+      events: [event2],
+      artifacts: [
+        { artifactId: 'artifact-2', runId: 'run-2', kind: 'file', createdAt: 2, source: 'tool' }
+      ]
+    })
+    const sourceBefore = JSON.stringify(await store.getSession(sourceRoute))
+    const result = await store.forkSessionAtEvent(sourceRoute, 'event-1', targetRoute)
+    expect(JSON.stringify(await store.getSession(sourceRoute))).toBe(sourceBefore)
+    expect(result.session.messages.map((message) => message.content)).toEqual(['one', 'answer one'])
+    expect(result.session.runs).toHaveLength(1)
+    expect(result.session.runs[0].toolCalls).toEqual([])
+    expect(result.session.artifacts).toHaveLength(1)
+    expect(result.session.eventLog.map((event) => event.type)).toEqual([
+      'completed',
+      'fork-created'
+    ])
+    expect(result.session.workspace.workspaceId).not.toBe(workspace.workspaceId)
+    expect(result.session.runs[0].runId).not.toBe('run-1')
+    expect(result.session.artifacts[0].artifactId).not.toBe('artifact-1')
+    expect(result.lineage.idMap.runs['run-1']).toBe(result.session.runs[0].runId)
+    expect(result.lineage.warning).toContain('not rolled back')
+    const reloaded = new AssistantSessionStore(filePath)
+    expect((await reloaded.getSession(targetRoute))?.lineage).toEqual(result.lineage)
+    await reloaded.appendEvents(targetRoute, [
+      { ...result.forkCreatedEvent, eventId: 'target-future' }
+    ])
+    expect((await reloaded.getSession(sourceRoute))?.eventLog).toHaveLength(2)
+    expect((await reloaded.getSession(targetRoute))?.eventLog).toHaveLength(3)
+  })
+
+  it('reconstructs retained runs from lifecycle events instead of copying future final state', async () => {
+    const sourceRoute = {
+      channel: 'generic',
+      scopeType: 'dm' as const,
+      scopeId: 'fork-lifecycle-source'
+    }
+    const earlyTarget = {
+      channel: 'generic',
+      scopeType: 'dm' as const,
+      scopeId: 'fork-lifecycle-early'
+    }
+    const finalTarget = {
+      channel: 'generic',
+      scopeType: 'dm' as const,
+      scopeId: 'fork-lifecycle-final'
+    }
+    const store = new AssistantSessionStore(filePath)
+    const workspace = getAssistantWorkspaceState(sourceRoute)
+    const sessionKey = 'generic:dm:fork-lifecycle-source'
+    const runningRun = {
+      runId: 'run-lifecycle',
+      sessionKey,
+      workspaceId: workspace.workspaceId,
+      route: sourceRoute,
+      status: 'running' as const,
+      runOrigin: 'new' as const,
+      rootRunId: 'run-lifecycle',
+      createdAt: 10,
+      updatedAt: 20,
+      startedAt: 20,
+      requestText: 'make it',
+      toolCalls: [],
+      artifactIds: []
+    }
+    const startedEvent = {
+      eventId: 'run-started',
+      runId: runningRun.runId,
+      sessionKey,
+      route: sourceRoute,
+      type: 'started' as const,
+      level: 'info' as const,
+      message: 'started',
+      createdAt: 20,
+      metadata: { requestText: 'make it', executionMode: 'inherit', executionHistorySize: 1 }
+    }
+    await store.appendTurn(sourceRoute, [{ role: 'user', content: 'make it' }], 100, {
+      workspace,
+      run: runningRun,
+      events: [startedEvent],
+      messageEntries: [
+        {
+          runId: runningRun.runId,
+          eventId: startedEvent.eventId,
+          attributionQuality: 'exact',
+          createdAt: startedEvent.createdAt
+        }
+      ]
+    })
+
+    const artifact = {
+      artifactId: 'future-artifact',
+      runId: runningRun.runId,
+      kind: 'file' as const,
+      fileName: 'future.txt',
+      createdAt: 30,
+      source: 'tool' as const
+    }
+    const artifactEvent = {
+      eventId: 'artifact-linked',
+      runId: runningRun.runId,
+      sessionKey,
+      route: sourceRoute,
+      type: 'tool' as const,
+      level: 'info' as const,
+      message: 'artifact linked',
+      createdAt: 30,
+      metadata: { artifactId: artifact.artifactId, toolName: 'future.tool' }
+    }
+    const completedEvent = {
+      eventId: 'run-completed',
+      runId: runningRun.runId,
+      sessionKey,
+      route: sourceRoute,
+      type: 'completed' as const,
+      level: 'info' as const,
+      message: 'completed',
+      createdAt: 40,
+      metadata: { artifactId: artifact.artifactId, artifactCount: 1, toolCallCount: 1 }
+    }
+    const completedRun = {
+      ...runningRun,
+      status: 'completed' as const,
+      updatedAt: 40,
+      finishedAt: 40,
+      responseText: 'future response',
+      toolCalls: [{ toolName: 'future.tool', args: { secret: true } }],
+      artifactIds: [artifact.artifactId]
+    }
+    await store.appendTurn(sourceRoute, [{ role: 'assistant', content: 'future response' }], 100, {
+      workspace,
+      run: completedRun,
+      artifacts: [artifact],
+      events: [artifactEvent, completedEvent],
+      messageEntries: [
+        {
+          runId: runningRun.runId,
+          eventId: completedEvent.eventId,
+          attributionQuality: 'exact',
+          createdAt: completedEvent.createdAt
+        }
+      ]
+    })
+    const sourceBefore = JSON.stringify(await store.getSession(sourceRoute))
+
+    const early = await store.forkSessionAtEvent(sourceRoute, startedEvent.eventId, earlyTarget)
+    expect(early.session.messages.map((message) => message.content)).toEqual(['make it'])
+    expect(early.session.artifacts).toEqual([])
+    expect(early.session.runs[0]).toMatchObject({
+      status: 'running',
+      requestText: 'make it',
+      startedAt: 20,
+      artifactIds: []
+    })
+    expect(early.session.runs[0]).not.toHaveProperty('responseText')
+    expect(early.session.runs[0]).not.toHaveProperty('finishedAt')
+    expect(early.session.runs[0]).not.toHaveProperty('errorMessage')
+    expect(early.session.runs[0].toolCalls).toEqual([])
+
+    const final = await store.forkSessionAtEvent(sourceRoute, completedEvent.eventId, finalTarget)
+    expect(final.session.runs[0]).toMatchObject({
+      status: 'completed',
+      responseText: 'future response',
+      finishedAt: 40,
+      toolCalls: [{ toolName: 'future.tool' }]
+    })
+    expect(final.session.artifacts).toHaveLength(1)
+    expect(final.session.runs[0].artifactIds).toEqual([final.session.artifacts[0].artifactId])
+    expect(final.session.artifacts[0].artifactId).not.toBe(artifact.artifactId)
+    expect(JSON.stringify(await store.getSession(sourceRoute))).toBe(sourceBefore)
+
+    const reloaded = new AssistantSessionStore(filePath)
+    expect((await reloaded.getSession(earlyTarget))?.runs[0].status).toBe('running')
+    expect((await reloaded.getSession(earlyTarget))?.artifacts).toEqual([])
+    expect((await reloaded.getSession(finalTarget))?.lineage).toEqual(final.lineage)
+  })
+
+  it('rejects same/existing targets and missing events', async () => {
+    const source = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'fork-errors-source' }
+    const target = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'fork-errors-target' }
+    const store = new AssistantSessionStore(filePath)
+    await store.appendEvents(source, [
+      {
+        eventId: 'exists',
+        runId: 'run',
+        sessionKey: 'generic:dm:fork-errors-source',
+        route: source,
+        type: 'started',
+        level: 'info',
+        message: 'x',
+        createdAt: 1
+      }
+    ])
+    await expect(store.forkSessionAtEvent(source, 'exists', source)).rejects.toThrow('distinct')
+    await expect(store.forkSessionAtEvent(source, 'missing', target)).rejects.toThrow(
+      'event does not exist'
+    )
+    await store.appendEvents(target, [])
+    await expect(store.forkSessionAtEvent(source, 'exists', target)).rejects.toThrow(
+      'already exists'
+    )
   })
 })

@@ -177,6 +177,7 @@ export interface LLMChatParams {
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
   maxOutputTokens?: number
+  temperature?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
   videoGenerationOptions?: VideoGenerationOptions
   signal?: AbortSignal

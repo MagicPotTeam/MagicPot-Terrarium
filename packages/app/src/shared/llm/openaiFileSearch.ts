@@ -221,12 +221,12 @@ const loadAttachmentBlob = async (
   }
 
   const blob = await response.blob()
+  const mimeType = normalizeMimeType(attachment.mimeType) || 'application/octet-stream'
   return {
-    blob: blob.type
-      ? blob
-      : new Blob([await blob.arrayBuffer()], {
-          type: normalizeMimeType(attachment.mimeType) || 'application/octet-stream'
-        }),
+    blob:
+      blob.type || !(typeof blob.arrayBuffer === 'function')
+        ? blob
+        : new Blob([await blob.arrayBuffer()], { type: mimeType }),
     fileName
   }
 }

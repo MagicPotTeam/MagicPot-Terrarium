@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AgentKernel, getAgentKernel } from './index'
+import { AgentKernel, getAgentKernel, setAgentKernelRawInvocationGuardForTest } from './index'
 
 describe('agentKernel', () => {
   beforeEach(() => {
+    setAgentKernelRawInvocationGuardForTest(false)
     getAgentKernel().clear()
   })
 
   afterEach(() => {
+    setAgentKernelRawInvocationGuardForTest(false)
     vi.useRealTimers()
   })
 
@@ -183,6 +185,40 @@ describe('agentKernel', () => {
         source: 'bot'
       }
     })
+  })
+
+  it('rejects raw singleton tool invocation outside an authorized gateway', async () => {
+    setAgentKernelRawInvocationGuardForTest(true)
+    const kernel = getAgentKernel()
+    kernel.registerTool({
+      tool: {
+        capabilityId: 'test.raw.singleton',
+        name: 'test.raw.singleton',
+        kind: 'tool',
+        description: 'raw singleton guard',
+        version: '1.0.0',
+        scope: 'session',
+        transport: ['internal'],
+        inputSchema: { type: 'object' }
+      },
+      invoker: vi.fn(async () => ({ ok: true, output: { ok: true } }))
+    })
+    try {
+      await expect(
+        kernel.invokeTool({
+          toolName: 'test.raw.singleton',
+          args: {},
+          session: kernel.registerSession({
+            channel: 'generic',
+            scopeType: 'dm',
+            scopeId: 'raw-singleton'
+          }),
+          source: 'kernel'
+        })
+      ).rejects.toThrow(/authorized production gateway/)
+    } finally {
+      setAgentKernelRawInvocationGuardForTest(false)
+    }
   })
 
   it('rejects missing tool invokers and post-invocation aborts', async () => {

@@ -10,6 +10,7 @@ import {
 } from './appRuntime'
 import { resolveStartupUserDataDirectory } from './config/userDataDirectory'
 import { beforeQuit, beforeShow } from './lifeCycle'
+import { runMagicAgentApprovalSmoke } from './magicAgentPlatform2/productionRuntime'
 import { createMainWindow } from './mainWindow'
 import { startQAppWatcher, stopQAppWatcher } from './qApp/watcher'
 import { cleanupScreenshotManager, initScreenshotManager } from './screenshot/screenshotManager'
@@ -136,6 +137,14 @@ if (!launcherSmokeTest)
       await beforeShow()
       console.log('[App] beforeShow 完成')
       openMainWindow()
+      const approvalSmokeMarker = process.env['MAGICPOT_APPROVAL_SMOKE_MARKER']?.trim()
+      if (approvalSmokeMarker && process.env['MAGICPOT_APPROVAL_SMOKE'] === '1') {
+        void runMagicAgentApprovalSmoke(approvalSmokeMarker).catch((error) => {
+          console.error('MagicAgent approval smoke failed:', error)
+          // Keep the smoke-only app alive so the harness can read the durable failure marker.
+          // The harness owns shutdown for this explicitly environment-gated path.
+        })
+      }
       console.log('[App] createWindow 已调用')
     } catch (error) {
       console.error('[App] beforeShow 或 createWindow 出错:', error)

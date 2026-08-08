@@ -1,12 +1,17 @@
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { getAgentSessionKey, normalizeAgentRoute, type AgentRouteLike } from '@shared/agent'
+import type { GraphDefinitionV2Draft } from '../../../shared/magicAgentPlatform2'
 import type {
   MagicAgentGraphCreateRequest,
   MagicAgentGraphDefinition,
   MagicAgentGraphListItem
 } from '@shared/magicAgent'
 import { validateMagicAgentGraphDefinition } from './graphDefinition'
+import {
+  compileGraphDefinitionV2WithSubgraphs,
+  parseGraphDefinitionV2
+} from './graphDefinitionV2Runtime'
 import {
   assertSafeMagicAgentGraphId,
   createMagicAgentGraphStorageSegment,
@@ -34,6 +39,8 @@ export type MagicAgentUserGraphStoreListOptions = {
 }
 
 const USER_GRAPH_FILE = 'graph.json'
+const USER_GRAPH_V2_FILE = 'graph.v2.json'
+const USER_GRAPH_V2_PUBLISHED_DIR = 'graph.v2.published'
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
@@ -93,6 +100,111 @@ export class MagicAgentUserGraphStore {
     }
     await writeJsonFileAtomic(filePath, record)
     return clone(graph)
+  }
+
+  async saveV2(
+    graph: GraphDefinitionV2Draft,
+    options: { route?: AgentRouteLike; replace?: boolean } = {}
+  ): Promise<MagicAgentGraphDefinition> {
+    if (!options.route) throw new Error('Graph V2 persistence requires a route.')
+    const route = options.route
+    const plan = await compileGraphDefinitionV2WithSubgraphs(graph, async (graphId, version) =>
+      version ? this.getPublishedV2(graphId, version, route) : this.getV2Draft(graphId, route)
+    )
+    const saved = await this.save({
+      graph: plan.executableGraph,
+      route: options.route,
+      ...(options.replace ? { replace: true } : {})
+    })
+    const sessionKey = getAgentSessionKey(normalizeRoute(options.route))
+    if (!sessionKey) throw new Error('Graph V2 persistence requires a scoped route.')
+    const graphDir = path.join(this.rootDir, encodeURIComponent(sessionKey), saved.graphId)
+    await writeJsonFileAtomic(path.join(graphDir, USER_GRAPH_V2_FILE), plan.graph)
+    return saved
+  }
+
+  async getV2(
+    graphId: string,
+    route?: AgentRouteLike
+  ): Promise<GraphDefinitionV2Draft | undefined> {
+    return this.getV2Draft(graphId, route)
+  }
+
+  async getV2Draft(
+    graphId: string,
+    route?: AgentRouteLike
+  ): Promise<GraphDefinitionV2Draft | undefined> {
+    const normalizedGraphId = assertSafeMagicAgentGraphId(graphId)
+    if (!route) return undefined
+    const sessionKey = getAgentSessionKey(normalizeRoute(route))
+    if (!sessionKey) return undefined
+    const graphPath = path.join(
+      this.rootDir,
+      encodeURIComponent(sessionKey),
+      normalizedGraphId,
+      USER_GRAPH_V2_FILE
+    )
+    if (!(await pathExists(graphPath))) return undefined
+    return parseGraphDefinitionV2(await readJsonFile<unknown>(graphPath))
+  }
+
+  async publishV2(graphId: string, route: AgentRouteLike): Promise<GraphDefinitionV2Draft> {
+    const graph = await this.getV2Draft(graphId, route)
+    if (!graph) throw new Error(`Graph V2 draft "${graphId}" was not found.`)
+    const sessionKey = getAgentSessionKey(normalizeRoute(route))
+    if (!sessionKey) throw new Error('Graph V2 publishing requires a scoped route.')
+    const publishedPath = path.join(
+      this.rootDir,
+      encodeURIComponent(sessionKey),
+      graph.graphId,
+      USER_GRAPH_V2_PUBLISHED_DIR,
+      `${encodeURIComponent(graph.version)}.json`
+    )
+    if (await pathExists(publishedPath)) {
+      const existing = parseGraphDefinitionV2(await readJsonFile<unknown>(publishedPath))
+      if (JSON.stringify(existing) !== JSON.stringify(graph))
+        throw new Error(`Published Graph V2 version "${graph.version}" is immutable.`)
+      return clone(existing)
+    }
+    await writeJsonFileAtomic(publishedPath, graph)
+    return clone(graph)
+  }
+
+  async getPublishedV2(
+    graphId: string,
+    version: string,
+    route: AgentRouteLike
+  ): Promise<GraphDefinitionV2Draft | undefined> {
+    const sessionKey = getAgentSessionKey(normalizeRoute(route))
+    if (!sessionKey) return undefined
+    const filePath = path.join(
+      this.rootDir,
+      encodeURIComponent(sessionKey),
+      assertSafeMagicAgentGraphId(graphId),
+      USER_GRAPH_V2_PUBLISHED_DIR,
+      `${encodeURIComponent(cleanString(version))}.json`
+    )
+    if (!(await pathExists(filePath))) return undefined
+    return clone(parseGraphDefinitionV2(await readJsonFile<unknown>(filePath)))
+  }
+
+  async listPublishedV2(graphId: string, route: AgentRouteLike): Promise<GraphDefinitionV2Draft[]> {
+    const sessionKey = getAgentSessionKey(normalizeRoute(route))
+    if (!sessionKey) return []
+    const dir = path.join(
+      this.rootDir,
+      encodeURIComponent(sessionKey),
+      assertSafeMagicAgentGraphId(graphId),
+      USER_GRAPH_V2_PUBLISHED_DIR
+    )
+    if (!(await pathExists(dir))) return []
+    const entries = await readDirSafe(dir)
+    const graphs: GraphDefinitionV2Draft[] = []
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      graphs.push(parseGraphDefinitionV2(await readJsonFile<unknown>(path.join(dir, entry.name))))
+    }
+    return graphs.sort((left, right) => left.version.localeCompare(right.version)).map(clone)
   }
 
   async get(

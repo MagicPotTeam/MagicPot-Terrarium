@@ -5,6 +5,21 @@ import { McpClientConnectionSnapshot } from '@shared/api/svcState'
 import { Config, McpExternalServerConfig } from '@shared/config/config'
 import { createAbortError, isAbortError, throwIfAborted } from '@shared/agent'
 
+export type McpClientToolPolicy = Readonly<{
+  authorize(input: { alias: string; serverId: string }): { allowed: boolean; reason?: string }
+  audit(input: {
+    alias: string
+    serverId: string
+    decision: 'allow' | 'deny'
+    reason?: string
+  }): void
+}>
+
+const ALLOW_ALL_POLICY: McpClientToolPolicy = {
+  authorize: () => ({ allowed: true }),
+  audit: () => undefined
+}
+
 type ExternalToolDefinition = {
   name: string
   description: string
@@ -120,6 +135,8 @@ const renderToolContent = (content: unknown): string => {
 export class McpClientManager {
   private readonly clients = new Map<string, ManagedServerState>()
 
+  constructor(private readonly toolPolicy: McpClientToolPolicy = ALLOW_ALL_POLICY) {}
+
   async sync(config: Config): Promise<void> {
     const desiredServers = (config.mcp_config?.client?.servers || []).filter(
       (server) => server.enabled && String(server.id || '').trim()
@@ -177,6 +194,16 @@ export class McpClientManager {
       if (!state.client) {
         throw new Error(`MCP server "${state.id}" is not connected.`)
       }
+
+      const authorization = this.toolPolicy.authorize({ alias, serverId: state.id })
+      this.toolPolicy.audit({
+        alias,
+        serverId: state.id,
+        decision: authorization.allowed ? 'allow' : 'deny',
+        ...(authorization.reason ? { reason: authorization.reason } : {})
+      })
+      if (!authorization.allowed)
+        throw new Error(`MCP tool invocation denied by policy: ${authorization.reason || alias}`)
 
       const requestTimeoutMs = Math.max(
         1000,
