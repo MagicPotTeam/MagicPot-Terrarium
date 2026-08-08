@@ -11,6 +11,7 @@ import { DndProvider } from 'react-dnd'
 import { getAppDndManager } from './utils/dndManager'
 import ComfyLogBridge from './components/ComfyLogBridge'
 import ManagedComfyProcessBridge from './components/ManagedComfyProcessBridge'
+import MagicAgentApprovalCenter from './components/MagicAgentApprovalCenter'
 import { useComfyEventCallback } from './hooks/useComfyEvent'
 import { handleComfyExecutionActivityEvent } from './utils/comfyExecutionActivity'
 let hasHandledInitialComfyAutoStart = false
@@ -252,6 +253,7 @@ function App(): React.JSX.Element {
       <HashRouter>
         <DeferredComfyStartupBridges />
         <CanvasProjectDropBridge />
+        <MagicAgentApprovalCenter />
         <Layout />
       </HashRouter>
     </DndProvider>

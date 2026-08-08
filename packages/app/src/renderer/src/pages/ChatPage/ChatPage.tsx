@@ -6350,7 +6350,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 <Box
                   data-testid="chat-queue-panel"
                   role="region"
-                  aria-label={t('chat.queue_region', { defaultValue: '待发送消息' })}
+                  aria-label={t('chat.queue_region')}
                   sx={{
                     mx: { xs: 1, sm: 2 },
                     mb: 0.75,
@@ -6391,18 +6391,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
                           sx={{ fontSize: 17, color: 'warning.main', flexShrink: 0 }}
                         />
                         <Tooltip
-                          title={
-                            queuedSend.overrides?.content ||
-                            t('chat.queue_attachments', { defaultValue: '仅附件' })
-                          }
+                          title={queuedSend.overrides?.content || t('chat.queue_attachments')}
                         >
                           <Typography
                             variant="body2"
                             noWrap
                             sx={{ minWidth: 0, flex: 1, fontSize: 13 }}
                           >
-                            {queuedSend.overrides?.content ||
-                              t('chat.queue_attachments', { defaultValue: '仅附件' })}
+                            {queuedSend.overrides?.content || t('chat.queue_attachments')}
                           </Typography>
                         </Tooltip>
                         {attachmentTypes.length > 0 ? (
@@ -6425,10 +6421,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
                           </Box>
                         ) : null}
                         {canEdit ? (
-                          <Tooltip title={t('chat.queue_edit', { defaultValue: '编辑待发送消息' })}>
+                          <Tooltip title={t('chat.queue_edit')}>
                             <IconButton
                               size="small"
-                              aria-label={t('chat.queue_edit', { defaultValue: '编辑待发送消息' })}
+                              aria-label={t('chat.queue_edit')}
                               onClick={() => editQueuedSessionSend(currentSessionId, queuedSend)}
                               sx={{ p: 0.25, color: 'text.secondary' }}
                             >
@@ -6436,10 +6432,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
                             </IconButton>
                           </Tooltip>
                         ) : null}
-                        <Tooltip title={t('chat.queue_remove', { defaultValue: '取消待发送消息' })}>
+                        <Tooltip title={t('chat.queue_remove')}>
                           <IconButton
                             size="small"
-                            aria-label={t('chat.queue_remove', { defaultValue: '取消待发送消息' })}
+                            aria-label={t('chat.queue_remove')}
                             onClick={() => removeQueuedSessionSend(currentSessionId, queuedSend.id)}
                             sx={{ p: 0.25, color: 'text.secondary' }}
                           >
@@ -6453,7 +6449,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     <Button
                       size="small"
                       onClick={() => setIsQueueExpanded((expanded) => !expanded)}
-                      aria-label={isQueueExpanded ? '收起' : `再显示 ${hiddenQueuedSendCount} 条`}
+                      aria-label={
+                        isQueueExpanded
+                          ? t('chat.queue_collapse')
+                          : t('chat.queue_show_more', { count: hiddenQueuedSendCount })
+                      }
                       sx={{
                         alignSelf: 'center',
                         minWidth: 0,
@@ -6463,7 +6463,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
                         fontSize: 11
                       }}
                     >
-                      {isQueueExpanded ? '收起' : `再显示 ${hiddenQueuedSendCount} 条`}
+                      {isQueueExpanded
+                        ? t('chat.queue_collapse')
+                        : t('chat.queue_show_more', { count: hiddenQueuedSendCount })}
                     </Button>
                   ) : null}
                 </Box>

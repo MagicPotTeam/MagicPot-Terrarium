@@ -262,7 +262,9 @@
         "save_unavailable": "可以查看启动器设置，但当前桥接不支持保存。",
         "managed": "已托管",
         "mode_notify_short": "通知",
-        "mode_auto_short": "自动"
+        "mode_auto_short": "自动",
+        "commands_next_launch": "检查更新、安装最新版本和回滚命令将在下次启动 MagicPot Launcher 时执行；进入队列不代表已完成。",
+        "last_command_result": "上次 Launcher 命令：{{command}} — {{status}}（{{requestId}}）{{error}}"
       },
       "page_title": "更新",
       "page_description": "管理当前安装、发布通道和更新方式。",
@@ -769,7 +771,13 @@
     "context_summary_auto": "自动",
     "context_summary_title": "上下文已压缩",
     "context_summary_message_count": "{{count}} 条消息",
-    "context_summary_expand_label": "压缩后的上下文"
+    "context_summary_expand_label": "压缩后的上下文",
+    "queue_region": "待发送消息",
+    "queue_attachments": "仅附件",
+    "queue_edit": "编辑待发送消息",
+    "queue_remove": "取消待发送消息",
+    "queue_collapse": "收起",
+    "queue_show_more": "再显示 {{count}} 条"
   },
   "agent_workspace": {
     "title": "Agent 线程",
@@ -950,7 +958,10 @@
     "confirm_clear_desc": "确定要清空画布吗？此操作不可逆。",
     "clear": "清空",
     "action_send": "发送",
-    "group_conflict": "框选的部分有元素被创建在别的组合内。"
+    "group_conflict": "框选的部分有元素被创建在别的组合内。",
+    "send_to_agent_failed": "部分图片无法读取，请重新导入后重试。",
+    "untitled": "未命名画布",
+    "save_changed_retry": "画布在保存过程中发生了新的更改，请重试。"
   },
   "quickapp_api": {
     "api_profiles_section": "快应用 API 设置",

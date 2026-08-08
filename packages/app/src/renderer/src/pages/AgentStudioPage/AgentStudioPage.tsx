@@ -18,16 +18,31 @@ import {
 import { api } from '@renderer/utils/windowUtils'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import type { AgentRouteLike } from '@shared/agent'
+import { GraphV2Canvas } from './GraphV2Canvas'
+import { M6TopologyPanel } from './M6TopologyPanel'
+import { M6RendererManagementPanel } from './M6RendererManagementPanel'
+import { M5OperationsPanel } from './M5OperationsPanel'
+import { SessionExportComparePanel } from './SessionExportComparePanel'
+import { SemanticMemoryPanel } from './SemanticMemoryPanel'
 import type {
   MagicAgentPlatformAgentDefinition,
+  MagicAgentPlatformDriveResource,
   MagicAgentPlatformGraphListResp,
   MagicAgentPlatformListToolsResp,
   MagicAgentPlatformPackageListResp,
-  MagicAgentPlatformStatusResp
+  MagicAgentPlatformRuntimeGraphTopologyResp,
+  MagicAgentPlatformStatusResp,
+  MagicAgentPlatformTriggerResource
 } from '@shared/api/svcMagicAgentPlatform'
+import {
+  validateGraphDefinitionV2Draft,
+  type GraphDefinitionV2Draft,
+  type GraphV2NodeDescriptor
+} from '@shared/magicAgentPlatform2'
 import type {
   MagicAgentGraphDefinition,
   MagicAgentGraphNodeDefinition,
+  MagicAgentGraphRunPublicEvent,
   MagicAgentGraphRunRecord,
   MagicAgentGraphRunStatus,
   MagicAgentGraphRunStreamEvent
@@ -41,6 +56,22 @@ const AGENT_STUDIO_ROUTE: AgentRouteLike = {
 }
 const DEFAULT_GRAPH_PROMPT = 'Create a concise game concept pitch for a cozy puzzle adventure.'
 const GRAPH_RUN_HISTORY_LIMIT = 50
+const ATTACH_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const
+const ATTACH_STALE_AFTER_MS = 30_000
+const NODE_PREVIEW_MAX_CHARS = 2_000
+
+const durableNodePreview = (value: string | undefined): string | undefined => {
+  if (value === undefined) return undefined
+  const redacted = value.replace(
+    /\b(api[-_]?key|authorization|password|secret|token)\b\s*[:=]\s*[^\s,;}]+/gi,
+    '$1=[redacted]'
+  )
+  return redacted.length <= NODE_PREVIEW_MAX_CHARS
+    ? redacted
+    : `${redacted.slice(0, NODE_PREVIEW_MAX_CHARS)}…[truncated]`
+}
+
+type GraphRunAttachStatus = 'connecting' | 'live' | 'stale' | 'retrying' | 'ended' | 'failed'
 
 const terminalGraphRunStatuses = new Set<MagicAgentGraphRunStatus>([
   'completed',
@@ -54,6 +85,8 @@ const graphRunStatusColor: Record<
 > = {
   pending: 'default',
   running: 'primary',
+  pausing: 'warning',
+  paused: 'warning',
   completed: 'success',
   failed: 'error',
   cancelled: 'warning'
@@ -91,17 +124,44 @@ type StudioState = {
   tools: MagicAgentPlatformListToolsResp['tools']
   graphs: MagicAgentPlatformGraphListResp['graphs']
   packages: MagicAgentPlatformPackageListResp['packages']
+  triggers: readonly MagicAgentPlatformTriggerResource[]
+  drives: readonly MagicAgentPlatformDriveResource[]
 }
 
 const emptyState: StudioState = {
   agents: [],
   tools: [],
   graphs: [],
-  packages: []
+  packages: [],
+  triggers: [],
+  drives: []
 }
 
 const getErrorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
+
+const isPermanentAttachError = (error: unknown): boolean => {
+  const visited = new Set<unknown>()
+  const inspect = (value: unknown): boolean => {
+    if (value === null || typeof value !== 'object' || visited.has(value)) return false
+    visited.add(value)
+    const record = value as RecordLike
+    for (const key of ['status', 'statusCode', 'httpStatus', 'code']) {
+      const code = record[key]
+      if (
+        code === 401 ||
+        code === 403 ||
+        code === 404 ||
+        code === '401' ||
+        code === '403' ||
+        code === '404'
+      )
+        return true
+    }
+    return inspect(record.cause) || inspect(record.error)
+  }
+  return inspect(error)
+}
 
 const isRecord = (value: unknown): value is RecordLike =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -308,6 +368,25 @@ const stringifySnapshot = (value: unknown): string => {
   }
 }
 
+const summarizePublicPayload = (payload: Record<string, unknown>): string => {
+  const sensitiveKey = /authorization|cookie|credential|password|secret|token/i
+  const parts = Object.entries(payload)
+    .slice(0, 6)
+    .flatMap(([key, value]) => {
+      if (sensitiveKey.test(key)) return [`${key}: [redacted]`]
+      if (value === null || typeof value === 'number' || typeof value === 'boolean') {
+        return [`${key}: ${String(value)}`]
+      }
+      if (typeof value === 'string') {
+        return [`${key}: ${value.length > 120 ? `${value.slice(0, 117)}…` : value}`]
+      }
+      if (Array.isArray(value)) return [`${key}: [${value.length} items]`]
+      if (isRecord(value)) return [`${key}: {…}`]
+      return []
+    })
+  return parts.length ? parts.join(' · ') : 'No public payload'
+}
+
 const AgentStudioPage: React.FC = () => {
   const [state, setState] = useState<StudioState>(emptyState)
   const [loading, setLoading] = useState(true)
@@ -318,19 +397,140 @@ const AgentStudioPage: React.FC = () => {
   selectedGraphIdRef.current = selectedGraphId
   const [prompt, setPrompt] = useState(DEFAULT_GRAPH_PROMPT)
   const [activeRun, setActiveRun] = useState<MagicAgentGraphRunRecord | null>(null)
+  const [runTimeline, setRunTimeline] = useState<MagicAgentGraphRunPublicEvent[]>([])
+  const [attachStatus, setAttachStatus] = useState<GraphRunAttachStatus>('ended')
+  const [lastAttachEventAt, setLastAttachEventAt] = useState<number>()
   const [runHistory, setRunHistory] = useState<MagicAgentGraphRunRecord[]>([])
   const [refreshingRunId, setRefreshingRunId] = useState<string | null>(null)
   const [cancellingRunId, setCancellingRunId] = useState<string | null>(null)
+  const [steeringRunId, setSteeringRunId] = useState<string | null>(null)
+  const [pendingInputValue, setPendingInputValue] = useState('')
+  const [pendingInputAction, setPendingInputAction] = useState<'inject' | 'edit' | 'cancel' | null>(
+    null
+  )
   const [result, setResult] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [opsLoading, setOpsLoading] = useState(false)
+  const [opsAction, setOpsAction] = useState<string | null>(null)
 
   const platformEnabled = Boolean(state.status?.enabled)
+  const loadOperations = useCallback(async () => {
+    setOpsLoading(true)
+    try {
+      const [triggers, drives] = await Promise.all([
+        api().svcMagicAgentPlatform.listTriggers({}),
+        api().svcMagicAgentPlatform.listDrives({})
+      ])
+      setState((current) => ({ ...current, triggers: triggers.triggers, drives: drives.drives }))
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setOpsLoading(false)
+    }
+  }, [])
+  const triggerAction = async (
+    trigger: MagicAgentPlatformTriggerResource,
+    action: 'enable' | 'disable' | 'pause' | 'resume' | 'retry' | 'manualFire'
+  ) => {
+    setOpsAction(`${action}:${trigger.id}`)
+    const base = {
+      triggerId: trigger.id,
+      expectedTriggerRevision: trigger.revision,
+      idempotencyKey: `agent-studio-${action}-${trigger.id}-${Date.now()}`,
+      requestedAt: Date.now()
+    }
+    try {
+      const svc = api().svcMagicAgentPlatform
+      if (action === 'manualFire')
+        await svc.manualFireTrigger({ ...base, occurrenceId: `manual-${Date.now()}` })
+      else await svc[`${action}Trigger` as 'enableTrigger'](base)
+      await loadOperations()
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setOpsAction(null)
+    }
+  }
   const selectedGraph = useMemo(
     () => state.graphs.find((graph) => graph.graphId === selectedGraphId),
     [selectedGraphId, state.graphs]
   )
   const [selectedGraphDetail, setSelectedGraphDetail] = useState<MagicAgentGraphDefinition | null>(
     null
+  )
+  const [selectedGraphV2, setSelectedGraphV2] = useState<GraphDefinitionV2Draft | undefined>(
+    undefined
+  )
+  const [graphV2DraftText, setGraphV2DraftText] = useState('')
+  const [savingGraphV2, setSavingGraphV2] = useState(false)
+  const [publishingGraphV2, setPublishingGraphV2] = useState(false)
+  const [publishedGraphVersions, setPublishedGraphVersions] = useState<GraphDefinitionV2Draft[]>([])
+  const [graphV2NodeRegistryCount, setGraphV2NodeRegistryCount] = useState(0)
+  const [graphV2NodeDescriptors, setGraphV2NodeDescriptors] = useState<
+    readonly GraphV2NodeDescriptor[]
+  >([])
+  const [selectedGraphV2NodeId, setSelectedGraphV2NodeId] = useState<string>()
+  const [graphV2Issues, setGraphV2Issues] = useState<Readonly<Record<string, readonly string[]>>>(
+    {}
+  )
+  const [runtimeTopology, setRuntimeTopology] =
+    useState<MagicAgentPlatformRuntimeGraphTopologyResp>()
+  const [runtimeTopologyError, setRuntimeTopologyError] = useState<string>()
+  useEffect(() => {
+    let cancelled = false
+    if (!activeRun?.runId || !platformEnabled) {
+      setRuntimeTopology(undefined)
+      setRuntimeTopologyError(undefined)
+      return () => {
+        cancelled = true
+      }
+    }
+    const getRuntimeGraphTopology = api().svcMagicAgentPlatform.getRuntimeGraphTopology
+    if (typeof getRuntimeGraphTopology !== 'function') {
+      setRuntimeTopology(undefined)
+      setRuntimeTopologyError('Runtime topology service is unavailable.')
+      return () => {
+        cancelled = true
+      }
+    }
+    setRuntimeTopologyError(undefined)
+    void getRuntimeGraphTopology({
+      runId: activeRun.runId,
+      route: AGENT_STUDIO_ROUTE
+    })
+      .then((snapshot) => {
+        if (!cancelled) {
+          setRuntimeTopology(snapshot)
+          setRuntimeTopologyError(undefined)
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setRuntimeTopology(undefined)
+          setRuntimeTopologyError(getErrorMessage(error))
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activeRun?.runId,
+    activeRun?.updatedAt,
+    activeRun?.runtimeTopology?.revision,
+    platformEnabled
+  ])
+  const nodePreviews = useMemo(
+    () =>
+      Object.fromEntries(
+        (activeRun?.nodes ?? []).map((node) => [
+          node.nodeId,
+          {
+            input: durableNodePreview(node.input) ?? null,
+            output: durableNodePreview(node.output) ?? null
+          }
+        ])
+      ),
+    [activeRun]
   )
   const [graphDetailLoading, setGraphDetailLoading] = useState(false)
   const selectedGraphCatalog = useMemo(
@@ -396,13 +596,155 @@ const AgentStudioPage: React.FC = () => {
     selectedGraphCatalog.unavailable || selectedGraphCatalog.runnable === false
   const outputFallback = result && !activeRun?.outputs.length ? result : ''
   const activeWatchAbortRef = useRef<(() => void) | null>(null)
+  const activeAttachAbortRef = useRef<(() => void) | null>(null)
+  const attachedRunIdRef = useRef<string | null>(null)
+  const activeRunRef = useRef(activeRun)
+  activeRunRef.current = activeRun
+  const attachGenerationRef = useRef(0)
+  const attachRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const attachStaleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const timelineByRunRef = useRef(new Map<string, MagicAgentGraphRunPublicEvent[]>())
+  const cursorByRunRef = useRef(new Map<string, string>())
 
   const stopActiveGraphRunWatch = useCallback(() => {
     activeWatchAbortRef.current?.()
     activeWatchAbortRef.current = null
   }, [])
 
+  const stopActiveGraphRunAttach = useCallback(() => {
+    attachGenerationRef.current += 1
+    if (attachRetryTimerRef.current) clearTimeout(attachRetryTimerRef.current)
+    if (attachStaleTimerRef.current) clearTimeout(attachStaleTimerRef.current)
+    attachRetryTimerRef.current = null
+    attachStaleTimerRef.current = null
+    activeAttachAbortRef.current?.()
+    activeAttachAbortRef.current = null
+    attachedRunIdRef.current = null
+  }, [])
+
+  const startGraphRunAttach = useCallback(
+    (runId: string) => {
+      if (!runId || attachedRunIdRef.current === runId) return
+      stopActiveGraphRunAttach()
+      setRunTimeline(timelineByRunRef.current.get(runId) || [])
+      setLastAttachEventAt(undefined)
+      const generation = attachGenerationRef.current
+      let retryIndex = 0
+
+      const clearStaleTimer = (): void => {
+        if (attachStaleTimerRef.current) clearTimeout(attachStaleTimerRef.current)
+        attachStaleTimerRef.current = null
+      }
+      const armStaleTimer = (): void => {
+        clearStaleTimer()
+        attachStaleTimerRef.current = setTimeout(() => {
+          if (attachGenerationRef.current === generation && attachedRunIdRef.current === runId)
+            setAttachStatus('stale')
+        }, ATTACH_STALE_AFTER_MS)
+      }
+      const runIsTerminal = (): boolean => {
+        const run = activeRunRef.current
+        return Boolean(run?.runId === runId && terminalGraphRunStatuses.has(run.status))
+      }
+      const attemptAttach = (): void => {
+        if (attachGenerationRef.current !== generation || attachedRunIdRef.current !== runId) return
+        setAttachStatus('connecting')
+        armStaleTimer()
+        const [abortSender, abortReceiver] = newAbortHandler()
+        let aborted = false
+        const abortAttach = (): void => {
+          if (aborted) return
+          aborted = true
+          abortSender.abort()
+        }
+        activeAttachAbortRef.current = abortAttach
+        const afterEventId = cursorByRunRef.current.get(runId)
+
+        void api()
+          .svcMagicAgentPlatform.attachGraphRun(
+            { runId, route: AGENT_STUDIO_ROUTE, ...(afterEventId ? { afterEventId } : {}) },
+            {
+              abortReceiver,
+              onData: (event: MagicAgentGraphRunPublicEvent) => {
+                if (
+                  aborted ||
+                  attachGenerationRef.current !== generation ||
+                  activeAttachAbortRef.current !== abortAttach ||
+                  event.runId !== runId
+                )
+                  return
+                const current = timelineByRunRef.current.get(runId) || []
+                if (
+                  current.some(
+                    (item) => item.eventId === event.eventId || item.sequence === event.sequence
+                  )
+                )
+                  return
+                const next = [...current, event].sort(
+                  (left, right) =>
+                    left.sequence - right.sequence || left.timestamp - right.timestamp
+                )
+                timelineByRunRef.current.set(runId, next)
+                const lastEvent = next[next.length - 1]
+                if (lastEvent) cursorByRunRef.current.set(runId, lastEvent.eventId)
+                retryIndex = 0
+                setLastAttachEventAt(event.timestamp)
+                setAttachStatus('live')
+                armStaleTimer()
+                setRunTimeline(next)
+              }
+            }
+          )
+          .then(
+            () => ({ error: undefined }),
+            (error: unknown) => ({ error })
+          )
+          .then(({ error }) => {
+            if (
+              aborted ||
+              attachGenerationRef.current !== generation ||
+              activeAttachAbortRef.current !== abortAttach
+            )
+              return
+            activeAttachAbortRef.current = null
+            clearStaleTimer()
+            if (runIsTerminal()) {
+              attachedRunIdRef.current = null
+              setAttachStatus('ended')
+              return
+            }
+            if (error !== undefined && isPermanentAttachError(error)) {
+              attachedRunIdRef.current = null
+              setAttachStatus('failed')
+              setError(getErrorMessage(error))
+              return
+            }
+            const delay =
+              ATTACH_RETRY_DELAYS_MS[Math.min(retryIndex, ATTACH_RETRY_DELAYS_MS.length - 1)]
+            retryIndex += 1
+            setAttachStatus('retrying')
+            attachRetryTimerRef.current = setTimeout(() => {
+              attachRetryTimerRef.current = null
+              if (attachGenerationRef.current !== generation || runIsTerminal()) {
+                if (attachGenerationRef.current === generation) {
+                  attachedRunIdRef.current = null
+                  setAttachStatus('ended')
+                }
+                return
+              }
+              attemptAttach()
+            }, delay)
+          })
+      }
+
+      attachedRunIdRef.current = runId
+      attemptAttach()
+    },
+    [stopActiveGraphRunAttach]
+  )
+
   const applyGraphRunUpdate = useCallback((run: MagicAgentGraphRunRecord) => {
+    activeRunRef.current = run
     setActiveRun(run)
     setSelectedGraphId(run.graphId)
     setResult(formatGraphRunText(run))
@@ -411,14 +753,35 @@ const AgentStudioPage: React.FC = () => {
 
   const loadGraphDetail = useCallback(async (graphId: string) => {
     const inspectGraph = api().svcMagicAgentPlatform.inspectGraph
+    const getGraphV2 = api().svcMagicAgentPlatform.getGraphV2
+    const listPublishedGraphsV2 = api().svcMagicAgentPlatform.listPublishedGraphsV2
+    const listGraphV2NodeRegistry = api().svcMagicAgentPlatform.listGraphV2NodeRegistry
     if (!graphId || !inspectGraph) {
       setSelectedGraphDetail(null)
+      setSelectedGraphV2(undefined)
+      setGraphV2DraftText('')
       return
     }
     setGraphDetailLoading(true)
     try {
-      const response = await inspectGraph({ graphId })
+      const [response, v2Response, publishedResponse, registryResponse] = await Promise.all([
+        inspectGraph({ graphId }),
+        getGraphV2
+          ? getGraphV2({ graphId, route: AGENT_STUDIO_ROUTE })
+          : Promise.resolve({ definitionV2: undefined }),
+        listPublishedGraphsV2
+          ? listPublishedGraphsV2({ graphId, route: AGENT_STUDIO_ROUTE })
+          : Promise.resolve({ definitionsV2: [] }),
+        listGraphV2NodeRegistry ? listGraphV2NodeRegistry({}) : Promise.resolve({ descriptors: [] })
+      ])
       setSelectedGraphDetail(response.graph || null)
+      setSelectedGraphV2(v2Response.definitionV2)
+      setPublishedGraphVersions([...publishedResponse.definitionsV2])
+      setGraphV2NodeRegistryCount(registryResponse.descriptors.length)
+      setGraphV2NodeDescriptors(registryResponse.descriptors)
+      setGraphV2DraftText(
+        v2Response.definitionV2 ? JSON.stringify(v2Response.definitionV2, null, 2) : ''
+      )
     } catch {
       setSelectedGraphDetail(null)
     } finally {
@@ -509,6 +872,7 @@ const AgentStudioPage: React.FC = () => {
       const status = await api().svcMagicAgentPlatform.getStatus({})
       if (!status.enabled) {
         stopActiveGraphRunWatch()
+        stopActiveGraphRunAttach()
         setState({ ...emptyState, status })
         setSelectedGraphId('')
         setActiveRun(null)
@@ -517,11 +881,13 @@ const AgentStudioPage: React.FC = () => {
         return
       }
 
-      const [agents, tools, graphs, packages] = await Promise.all([
+      const [agents, tools, graphs, packages, triggers, drives] = await Promise.all([
         api().svcMagicAgentPlatform.listAgents({}),
         api().svcMagicAgentPlatform.listTools({}),
         api().svcMagicAgentPlatform.listGraphs({}),
-        api().svcMagicAgentPlatform.listPackages({})
+        api().svcMagicAgentPlatform.listPackages({}),
+        api().svcMagicAgentPlatform.listTriggers({}),
+        api().svcMagicAgentPlatform.listDrives({})
       ])
       const currentSelectedGraphId = selectedGraphIdRef.current
       const nextGraphId =
@@ -546,7 +912,9 @@ const AgentStudioPage: React.FC = () => {
         agents: agents.agents,
         tools: tools.tools,
         graphs: graphs.graphs,
-        packages: packages.packages
+        packages: packages.packages,
+        triggers: triggers.triggers,
+        drives: drives.drives
       })
       setSelectedGraphId(nextGraphId)
       setRunHistory(nextHistory)
@@ -559,13 +927,30 @@ const AgentStudioPage: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }, [stopActiveGraphRunWatch])
+  }, [stopActiveGraphRunAttach, stopActiveGraphRunWatch])
 
   useEffect(() => {
     void loadStudio()
   }, [loadStudio])
 
-  useEffect(() => () => stopActiveGraphRunWatch(), [stopActiveGraphRunWatch])
+  useEffect(
+    () => () => {
+      stopActiveGraphRunWatch()
+      stopActiveGraphRunAttach()
+    },
+    [stopActiveGraphRunAttach, stopActiveGraphRunWatch]
+  )
+
+  useEffect(() => {
+    if (!platformEnabled || !activeRun?.runId) {
+      stopActiveGraphRunAttach()
+      setAttachStatus('ended')
+      setLastAttachEventAt(undefined)
+      setRunTimeline([])
+      return
+    }
+    startGraphRunAttach(activeRun.runId)
+  }, [activeRun?.runId, platformEnabled, startGraphRunAttach, stopActiveGraphRunAttach])
 
   useEffect(() => {
     if (!platformEnabled || !selectedGraphId) {
@@ -601,11 +986,109 @@ const AgentStudioPage: React.FC = () => {
   const handleGraphChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
     const graphId = event.target.value
     stopActiveGraphRunWatch()
+    stopActiveGraphRunAttach()
     setSelectedGraphId(graphId)
     setActiveRun(null)
+    setRunTimeline([])
     setResult('')
     setError(null)
     void refreshGraphRuns(graphId)
+  }
+
+  const preflightGraphV2 = async (): Promise<boolean> => {
+    if (!selectedGraphV2 || !selectedGraphId) return false
+    const validation = validateGraphDefinitionV2Draft(selectedGraphV2)
+    const localized: Record<string, string[]> = {}
+    for (const issue of validation.issues) {
+      const match = issue.path.match(/nodes\[(\d+)\]/)
+      const node = match ? selectedGraphV2.nodes[Number(match[1])] : undefined
+      const key = node?.nodeId ?? '$graph'
+      localized[key] = [...(localized[key] ?? []), `${issue.path}: ${issue.message}`]
+    }
+    try {
+      const response = await api().svcMagicAgentPlatform.preflightGraphRun({
+        graphId: selectedGraphId,
+        route: AGENT_STUDIO_ROUTE,
+        ...(allowedToolNames.length ? { allowedToolNames } : {})
+      })
+      for (const issue of response.preflight.issues) {
+        const nodeId = typeof issue.nodeId === 'string' ? issue.nodeId : '$graph'
+        localized[nodeId] = [...(localized[nodeId] ?? []), issue.message]
+      }
+      setGraphV2Issues(localized)
+      const ok = validation.valid && response.preflight.safeToRun
+      setResult(
+        ok
+          ? 'Preflight passed. Graph is safe to run.'
+          : 'Preflight failed. Select highlighted nodes for details.'
+      )
+      return ok
+    } catch (error) {
+      setGraphV2Issues({ $graph: [getErrorMessage(error)] })
+      setError(getErrorMessage(error))
+      return false
+    }
+  }
+
+  const saveGraphV2Draft = async () => {
+    const saveGraphV2 = api().svcMagicAgentPlatform.saveGraphV2
+    if (!saveGraphV2 || !selectedGraphId || !graphV2DraftText.trim()) return
+    setSavingGraphV2(true)
+    try {
+      const definitionV2 = JSON.parse(graphV2DraftText) as GraphDefinitionV2Draft
+      const response = await saveGraphV2({
+        graph: definitionV2,
+        route: AGENT_STUDIO_ROUTE,
+        replace: true
+      })
+      setSelectedGraphDetail(response.graph)
+      setSelectedGraphV2(response.definitionV2)
+      setGraphV2DraftText(JSON.stringify(response.definitionV2, null, 2))
+      setResult(`Saved Graph V2 ${response.graph.graphId}.`)
+    } catch (error) {
+      setResult(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSavingGraphV2(false)
+    }
+  }
+
+  const publishGraphV2Draft = async () => {
+    const publishGraphV2 = api().svcMagicAgentPlatform.publishGraphV2
+    const listPublishedGraphsV2 = api().svcMagicAgentPlatform.listPublishedGraphsV2
+    if (!publishGraphV2 || !selectedGraphId) return
+    setPublishingGraphV2(true)
+    try {
+      const response = await publishGraphV2({ graphId: selectedGraphId, route: AGENT_STUDIO_ROUTE })
+      setSelectedGraphV2(response.definitionV2)
+      setGraphV2DraftText(JSON.stringify(response.definitionV2, null, 2))
+      const listed = listPublishedGraphsV2
+        ? await listPublishedGraphsV2({ graphId: selectedGraphId, route: AGENT_STUDIO_ROUTE })
+        : { definitionsV2: [response.definitionV2] }
+      setPublishedGraphVersions([...listed.definitionsV2])
+      setResult(`Published Graph V2 ${selectedGraphId} version ${response.definitionV2.version}.`)
+    } catch (error) {
+      setResult(getErrorMessage(error))
+    } finally {
+      setPublishingGraphV2(false)
+    }
+  }
+
+  const loadPublishedGraphV2 = async (version: string) => {
+    const getPublishedGraphV2 = api().svcMagicAgentPlatform.getPublishedGraphV2
+    if (!getPublishedGraphV2 || !selectedGraphId) return
+    try {
+      const response = await getPublishedGraphV2({
+        graphId: selectedGraphId,
+        route: AGENT_STUDIO_ROUTE,
+        version
+      })
+      if (!response.definitionV2) return
+      setSelectedGraphV2(response.definitionV2)
+      setGraphV2DraftText(JSON.stringify(response.definitionV2, null, 2))
+      setResult(`Loaded published Graph V2 version ${version}.`)
+    } catch (error) {
+      setResult(getErrorMessage(error))
+    }
   }
 
   const runSelectedGraph = async () => {
@@ -626,6 +1109,7 @@ const AgentStudioPage: React.FC = () => {
         input,
         route: AGENT_STUDIO_ROUTE,
         ...(allowedToolNames.length ? { allowedToolNames } : {}),
+        ...(selectedGraphV2 ? { definitionV2: selectedGraphV2 } : {}),
         metadata: {
           source: 'agent-studio',
           graphSnapshot,
@@ -633,6 +1117,62 @@ const AgentStudioPage: React.FC = () => {
         }
       })
       startGraphRunWatch(runId)
+      startGraphRunAttach(runId)
+      const response = await runPromise
+      applyGraphRunUpdate(response)
+      await refreshGraphRuns(response.graphId)
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const runGraphFromCanvasNode = async (nodeId: string, mode: 'single-node' | 'run-from-node') => {
+    const input = prompt.trim()
+    if (!platformEnabled) {
+      setResult(MAGIC_AGENT_FLAG_HELP)
+      return
+    }
+    if (!selectedGraphId || !input || runDisabledByGraph || runDisabledByToolPermissions) {
+      if (!input) setError('Enter an explicit input before testing a node.')
+      return
+    }
+
+    const requiresPriorRun =
+      mode === 'run-from-node' &&
+      Boolean(selectedGraphDetail?.channels.some((channel) => channel.to === nodeId))
+    const priorRunId =
+      requiresPriorRun && activeRun?.graphId === selectedGraphId ? activeRun.runId : undefined
+    if (requiresPriorRun && !priorRunId) {
+      setError('Select a prior durable run before running from this node.')
+      return
+    }
+
+    setRunning(true)
+    setError(null)
+    try {
+      const runId = createAgentStudioGraphRunId()
+      const nodeExecution =
+        mode === 'single-node'
+          ? { mode, nodeId, inputs: { input } }
+          : { mode, nodeId, ...(priorRunId ? { priorRunId } : {}) }
+      const runPromise = api().svcMagicAgentPlatform.runGraph({
+        runId,
+        graphId: selectedGraphId,
+        input,
+        route: AGENT_STUDIO_ROUTE,
+        nodeExecution,
+        ...(allowedToolNames.length ? { allowedToolNames } : {}),
+        ...(selectedGraphV2 ? { definitionV2: selectedGraphV2 } : {}),
+        metadata: {
+          source: 'agent-studio-node-execution',
+          graphSnapshot,
+          permissionSnapshot
+        }
+      })
+      startGraphRunWatch(runId)
+      startGraphRunAttach(runId)
       const response = await runPromise
       applyGraphRunUpdate(response)
       await refreshGraphRuns(response.graphId)
@@ -670,6 +1210,66 @@ const AgentStudioPage: React.FC = () => {
       setError(getErrorMessage(err))
     } finally {
       setRefreshingRunId(null)
+    }
+  }
+
+  const steerGraphRun = async (runId: string, action: 'pause' | 'resume') => {
+    if (!platformEnabled) {
+      setResult(MAGIC_AGENT_FLAG_HELP)
+      return
+    }
+    setSteeringRunId(runId)
+    setError(null)
+    try {
+      const request = { runId, route: AGENT_STUDIO_ROUTE }
+      const result =
+        action === 'pause'
+          ? await api().svcMagicAgentPlatform.pauseGraphRun(request)
+          : await api().svcMagicAgentPlatform.resumeGraphRun(request)
+      if (result.error) setError(result.error)
+      const response = await api().svcMagicAgentPlatform.getGraphRun(request)
+      if (response.run) {
+        applyGraphRunUpdate(response.run)
+        await refreshGraphRuns(response.run.graphId)
+      }
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setSteeringRunId(null)
+    }
+  }
+
+  const mutatePendingInput = async (action: 'inject' | 'edit' | 'cancel') => {
+    const pendingInput = activeRun?.pendingInput
+    if (!activeRun || !pendingInput) return
+    setPendingInputAction(action)
+    setError(null)
+    try {
+      const request = {
+        runId: activeRun.runId,
+        route: AGENT_STUDIO_ROUTE,
+        pendingInputId: pendingInput.pendingInputId,
+        expectedRevision: pendingInput.revision,
+        idempotencyKey: `agent-studio-input-${action}-${pendingInput.pendingInputId}-${pendingInput.revision}`
+      }
+      if (action === 'inject') {
+        await api().svcMagicAgentPlatform.injectPendingInput({
+          ...request,
+          value: pendingInputValue
+        })
+      } else if (action === 'edit') {
+        await api().svcMagicAgentPlatform.editPendingInput({
+          ...request,
+          value: pendingInputValue
+        })
+      } else {
+        await api().svcMagicAgentPlatform.cancelPendingInput(request)
+      }
+      await refreshGraphRun(activeRun.runId)
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setPendingInputAction(null)
     }
   }
 
@@ -728,6 +1328,11 @@ const AgentStudioPage: React.FC = () => {
         </Stack>
 
         {error ? <Alert severity="error">{error}</Alert> : null}
+        {runtimeTopologyError ? (
+          <Alert severity="error" data-testid="runtime-topology-error">
+            Failed to load runtime topology: {runtimeTopologyError}
+          </Alert>
+        ) : null}
         {state.status && !state.status.enabled ? (
           <Alert severity="info">{MAGIC_AGENT_FLAG_HELP}</Alert>
         ) : null}
@@ -788,6 +1393,12 @@ const AgentStudioPage: React.FC = () => {
             </Grid>
           </Grid>
         )}
+
+        <M6TopologyPanel />
+        <M6RendererManagementPanel />
+        <M5OperationsPanel />
+        <SessionExportComparePanel />
+        <SemanticMemoryPanel />
 
         <Card>
           <CardContent>
@@ -882,6 +1493,24 @@ const AgentStudioPage: React.FC = () => {
                       Refresh Active Run
                     </Button>
                   ) : null}
+                  {activeRun?.status === 'running' ? (
+                    <Button
+                      variant="outlined"
+                      onClick={() => void steerGraphRun(activeRun.runId, 'pause')}
+                      disabled={steeringRunId === activeRun.runId || !platformEnabled}
+                    >
+                      Pause Active Run
+                    </Button>
+                  ) : null}
+                  {activeRun?.status === 'paused' ? (
+                    <Button
+                      variant="outlined"
+                      onClick={() => void steerGraphRun(activeRun.runId, 'resume')}
+                      disabled={steeringRunId === activeRun.runId || !platformEnabled}
+                    >
+                      Resume Active Run
+                    </Button>
+                  ) : null}
                   {activeRun && isGraphRunCancellable(activeRun) ? (
                     <Button
                       color="warning"
@@ -938,6 +1567,96 @@ const AgentStudioPage: React.FC = () => {
                   ) : null}
                 </Box>
               ) : null}
+              {selectedGraphV2 ? (
+                <Card variant="outlined">
+                  <CardContent>
+                    <Stack spacing={1.5}>
+                      <Stack
+                        direction="row"
+                        spacing={1}
+                        alignItems="center"
+                        flexWrap="wrap"
+                        useFlexGap
+                      >
+                        <Typography variant="subtitle2">Graph V2 visual canvas</Typography>
+                        <Chip size="small" label={`registry ${graphV2NodeRegistryCount}`} />
+                        <Chip
+                          size="small"
+                          label={`${publishedGraphVersions.length} published`}
+                          color={publishedGraphVersions.length ? 'success' : 'warning'}
+                        />
+                        <Button size="small" onClick={() => void preflightGraphV2()}>
+                          Preflight
+                        </Button>
+                        <Button
+                          size="small"
+                          onClick={() => void publishGraphV2Draft()}
+                          disabled={publishingGraphV2 || savingGraphV2}
+                        >
+                          {publishingGraphV2 ? 'Publishing…' : 'Publish'}
+                        </Button>
+                        {publishedGraphVersions.map((definition) => (
+                          <Button
+                            key={definition.version}
+                            size="small"
+                            onClick={() => void loadPublishedGraphV2(definition.version)}
+                          >
+                            Load {definition.version}
+                          </Button>
+                        ))}
+                      </Stack>
+                      {graphV2Issues.$graph?.map((issue) => (
+                        <Alert key={issue} severity="error">
+                          {issue}
+                        </Alert>
+                      ))}
+                      <GraphV2Canvas
+                        definition={selectedGraphV2}
+                        nodeDescriptors={graphV2NodeDescriptors}
+                        selectedNodeId={selectedGraphV2NodeId}
+                        onSelectNode={setSelectedGraphV2NodeId}
+                        localizedErrors={graphV2Issues}
+                        runtimeTopology={runtimeTopology}
+                        nodePreviews={nodePreviews}
+                        onTestNode={(nodeId) => void runGraphFromCanvasNode(nodeId, 'single-node')}
+                        onRunFromNode={(nodeId) =>
+                          void runGraphFromCanvasNode(nodeId, 'run-from-node')
+                        }
+                        onChange={(definition) => {
+                          setGraphV2Issues({})
+                          setSelectedGraphV2(definition)
+                          setGraphV2DraftText(JSON.stringify(definition, null, 2))
+                        }}
+                      />
+                    </Stack>
+                  </CardContent>
+                </Card>
+              ) : null}
+              {selectedGraphV2 ? (
+                <Card variant="outlined">
+                  <CardContent>
+                    <Stack spacing={1.5}>
+                      <Typography variant="subtitle2">Graph V2 authoring document</Typography>
+                      <TextField
+                        label="Graph V2 JSON"
+                        multiline
+                        minRows={10}
+                        value={graphV2DraftText}
+                        onChange={(event) => setGraphV2DraftText(event.target.value)}
+                        fullWidth
+                        inputProps={{ 'aria-label': 'Graph V2 JSON' }}
+                      />
+                      <Button
+                        variant="contained"
+                        onClick={() => void saveGraphV2Draft()}
+                        disabled={savingGraphV2 || !graphV2DraftText.trim()}
+                      >
+                        {savingGraphV2 ? 'Saving Graph V2…' : 'Save Graph V2'}
+                      </Button>
+                    </Stack>
+                  </CardContent>
+                </Card>
+              ) : null}
               <TextField
                 label="Prompt"
                 value={prompt}
@@ -984,6 +1703,51 @@ const AgentStudioPage: React.FC = () => {
                     <Typography variant="body2" color="text.secondary">
                       Updated: {formatTimestamp(activeRun.updatedAt)}
                     </Typography>
+                    {activeRun.pendingInput ? (
+                      <Stack spacing={1.25} sx={{ mt: 1 }}>
+                        <Divider />
+                        <Typography variant="subtitle2">Pending input</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {activeRun.pendingInput.pendingInputId} · node{' '}
+                          {activeRun.pendingInput.nodeId} · revision{' '}
+                          {activeRun.pendingInput.revision} · {activeRun.pendingInput.status}
+                        </Typography>
+                        <TextField
+                          label="Pending input value"
+                          value={pendingInputValue}
+                          onChange={(event) => setPendingInputValue(event.target.value)}
+                          multiline
+                          minRows={2}
+                          size="small"
+                        />
+                        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                          <Button
+                            variant="contained"
+                            size="small"
+                            disabled={!pendingInputValue || pendingInputAction !== null}
+                            onClick={() => void mutatePendingInput('inject')}
+                          >
+                            Inject
+                          </Button>
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            disabled={!pendingInputValue || pendingInputAction !== null}
+                            onClick={() => void mutatePendingInput('edit')}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            color="warning"
+                            size="small"
+                            disabled={pendingInputAction !== null}
+                            onClick={() => void mutatePendingInput('cancel')}
+                          >
+                            Cancel input
+                          </Button>
+                        </Stack>
+                      </Stack>
+                    ) : null}
                     {activeRun.error ? <Alert severity="error">{activeRun.error}</Alert> : null}
                   </Stack>
                 ) : (
@@ -1080,88 +1844,160 @@ const AgentStudioPage: React.FC = () => {
             <Card>
               <CardContent>
                 <Stack
-                  direction="row"
+                  direction={{ xs: 'column', sm: 'row' }}
                   justifyContent="space-between"
-                  alignItems="center"
-                  spacing={2}
+                  alignItems={{ xs: 'flex-start', sm: 'center' }}
+                  spacing={1}
                 >
-                  <Typography variant="h6">Run History</Typography>
-                  {historyLoading ? <CircularProgress size={18} /> : null}
+                  <Typography variant="h6">Event Timeline</Typography>
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    alignItems="center"
+                    flexWrap="wrap"
+                    useFlexGap
+                    role="status"
+                    aria-live="polite"
+                    aria-label={`Event timeline connection ${attachStatus}`}
+                  >
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      color={
+                        attachStatus === 'live'
+                          ? 'success'
+                          : attachStatus === 'stale' || attachStatus === 'retrying'
+                            ? 'warning'
+                            : attachStatus === 'failed'
+                              ? 'error'
+                              : 'default'
+                      }
+                      label={`Client status: ${attachStatus}`}
+                    />
+                    <Typography variant="caption" color="text.secondary">
+                      Last event: {formatTimestamp(lastAttachEventAt)}
+                    </Typography>
+                  </Stack>
                 </Stack>
                 <Divider sx={{ my: 1 }} />
-                {runHistory.length ? (
-                  <Stack spacing={1.5}>
-                    {runHistory.map((run) => (
+                {activeRun && runTimeline.length ? (
+                  <Stack spacing={0.75} aria-label="Graph run event timeline">
+                    {runTimeline.map((event) => (
                       <Box
-                        key={run.runId}
-                        sx={{
-                          p: 1.5,
-                          border: '1px solid',
-                          borderColor: 'divider',
-                          borderRadius: 1
-                        }}
+                        key={event.eventId}
+                        data-testid={`timeline-event-${event.eventId}`}
+                        sx={{ display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', gap: 1 }}
                       >
-                        <Stack
-                          direction={{ xs: 'column', md: 'row' }}
-                          spacing={1}
-                          alignItems={{ xs: 'flex-start', md: 'center' }}
-                          justifyContent="space-between"
-                        >
-                          <Box>
-                            <Stack
-                              direction="row"
-                              spacing={1}
-                              alignItems="center"
-                              flexWrap="wrap"
-                              useFlexGap
-                            >
-                              <Chip
-                                label={run.status}
-                                color={graphRunStatusColor[run.status]}
-                                size="small"
-                              />
-                              <Typography fontWeight={600}>{run.runId}</Typography>
-                              <Typography variant="caption" color="text.secondary">
-                                {formatTimestamp(run.updatedAt)}
-                              </Typography>
-                            </Stack>
-                            <Typography variant="body2" color="text.secondary">
-                              {run.input}
-                            </Typography>
-                            {run.error ? (
-                              <Typography variant="caption" color="error">
-                                {run.error}
-                              </Typography>
-                            ) : null}
-                          </Box>
-                          <Stack direction="row" spacing={1}>
-                            <Button
-                              size="small"
-                              onClick={() => void refreshGraphRun(run.runId)}
-                              disabled={refreshingRunId === run.runId || !platformEnabled}
-                            >
-                              View {run.runId}
-                            </Button>
-                            {isGraphRunCancellable(run) ? (
-                              <Button
-                                size="small"
-                                color="warning"
-                                onClick={() => void cancelGraphRun(run.runId)}
-                                disabled={cancellingRunId === run.runId || !platformEnabled}
-                              >
-                                Cancel {run.runId}
-                              </Button>
-                            ) : null}
-                          </Stack>
-                        </Stack>
+                        <Typography variant="caption" fontWeight={700}>
+                          {event.sequence}
+                        </Typography>
+                        <Box>
+                          <Typography variant="caption" fontWeight={600}>
+                            {event.kind} · {formatTimestamp(event.timestamp)}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary" display="block">
+                            {summarizePublicPayload(event.payload)}
+                          </Typography>
+                        </Box>
                       </Box>
                     ))}
                   </Stack>
                 ) : (
                   <Typography variant="body2" color="text.secondary">
-                    No graph runs recorded for this route yet.
+                    No durable run events received yet.
                   </Typography>
                 )}
+              </CardContent>
+            </Card>
+          </Grid>
+          <Grid size={{ xs: 12 }}>
+            <Card>
+              <CardContent>
+                <Stack spacing={2}>
+                  <Stack
+                    direction="row"
+                    justifyContent="space-between"
+                    alignItems="center"
+                    spacing={2}
+                  >
+                    <Typography variant="h6">Run History</Typography>
+                    {historyLoading ? <CircularProgress size={18} /> : null}
+                  </Stack>
+                  <Divider sx={{ my: 1 }} />
+                  {runHistory.length ? (
+                    <Stack spacing={1.5}>
+                      {runHistory.map((run) => (
+                        <Box
+                          key={run.runId}
+                          sx={{
+                            p: 1.5,
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            borderRadius: 1
+                          }}
+                        >
+                          <Stack
+                            direction={{ xs: 'column', md: 'row' }}
+                            spacing={1}
+                            alignItems={{ xs: 'flex-start', md: 'center' }}
+                            justifyContent="space-between"
+                          >
+                            <Box>
+                              <Stack
+                                direction="row"
+                                spacing={1}
+                                alignItems="center"
+                                flexWrap="wrap"
+                                useFlexGap
+                              >
+                                <Chip
+                                  label={run.status}
+                                  color={graphRunStatusColor[run.status]}
+                                  size="small"
+                                />
+                                <Typography fontWeight={600}>{run.runId}</Typography>
+                                <Typography variant="caption" color="text.secondary">
+                                  {formatTimestamp(run.updatedAt)}
+                                </Typography>
+                              </Stack>
+                              <Typography variant="body2" color="text.secondary">
+                                {run.input}
+                              </Typography>
+                              {run.error ? (
+                                <Typography variant="caption" color="error">
+                                  {run.error}
+                                </Typography>
+                              ) : null}
+                            </Box>
+                            <Stack direction="row" spacing={1}>
+                              <Button
+                                size="small"
+                                onClick={() => void refreshGraphRun(run.runId)}
+                                disabled={refreshingRunId === run.runId || !platformEnabled}
+                              >
+                                View {run.runId}
+                              </Button>
+                              {isGraphRunCancellable(run) ? (
+                                <Button
+                                  size="small"
+                                  color="warning"
+                                  onClick={() => void cancelGraphRun(run.runId)}
+                                  disabled={cancellingRunId === run.runId || !platformEnabled}
+                                >
+                                  Cancel {run.runId}
+                                </Button>
+                              ) : null}
+                            </Stack>
+                          </Stack>
+                        </Box>
+                      ))}
+                    </Stack>
+                  ) : (
+                    <Typography variant="body2" color="text.secondary">
+                      No graph runs recorded for this route yet.
+                    </Typography>
+                  )}
+                </Stack>
               </CardContent>
             </Card>
           </Grid>
@@ -1205,6 +2041,9 @@ const AgentStudioPage: React.FC = () => {
               </CardContent>
             </Card>
           </Grid>
+        </Grid>
+
+        <Grid container spacing={2}>
           <Grid size={{ xs: 12, md: 6 }}>
             <Card>
               <CardContent>
@@ -1248,6 +2087,70 @@ const AgentStudioPage: React.FC = () => {
             </Card>
           </Grid>
         </Grid>
+
+        <Card>
+          <CardContent>
+            <Stack direction="row" justifyContent="space-between" alignItems="center">
+              <Typography variant="h6">Trigger & Drive Operations</Typography>
+              <Button size="small" onClick={() => void loadOperations()} disabled={opsLoading}>
+                Refresh Operations
+              </Button>
+            </Stack>
+            <Divider sx={{ my: 1 }} />
+            <Typography variant="subtitle2">Triggers</Typography>
+            <Stack spacing={1} sx={{ mt: 1 }}>
+              {state.triggers.map((trigger) => {
+                const record = isRecord(trigger.state) ? trigger.state : {}
+                return (
+                  <Stack
+                    key={trigger.id}
+                    direction="row"
+                    spacing={1}
+                    alignItems="center"
+                    flexWrap="wrap"
+                  >
+                    <Typography fontWeight={600}>
+                      {readString(record.title, record.name) || trigger.id}
+                    </Typography>
+                    <Chip size="small" label={readString(record.status) || 'unknown'} />
+                    {(['enable', 'disable', 'pause', 'resume', 'retry', 'manualFire'] as const).map(
+                      (action) => (
+                        <Button
+                          key={action}
+                          size="small"
+                          disabled={opsAction !== null}
+                          onClick={() => void triggerAction(trigger, action)}
+                        >
+                          {action === 'manualFire' ? 'manual fire' : action}
+                        </Button>
+                      )
+                    )}
+                  </Stack>
+                )
+              })}
+            </Stack>
+            <Divider sx={{ my: 1 }} />
+            <Typography variant="subtitle2">Drives</Typography>
+            <Stack spacing={1} sx={{ mt: 1 }}>
+              {state.drives.map((drive) => {
+                const record = isRecord(drive.state) ? drive.state : {}
+                const delivery = isRecord(record.delivery) ? record.delivery : {}
+                return (
+                  <Box key={drive.id}>
+                    <Typography fontWeight={600}>
+                      {readString(record.title, record.name) || drive.id}{' '}
+                      <Chip size="small" label={readString(record.status) || 'unknown'} />
+                    </Typography>
+                    <Typography variant="caption">
+                      {drive.id} · priority {String(record.priority ?? '—')} · delivery{' '}
+                      {stringifySnapshot(delivery)}
+                    </Typography>
+                  </Box>
+                )
+              })}
+            </Stack>
+          </CardContent>
+        </Card>
       </Stack>
     </Box>
   )

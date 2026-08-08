@@ -2333,12 +2333,12 @@ describe('ChatPage runtime workflow integration', () => {
     expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2)
     expect(screen.getByTestId('chat-queue-panel')).not.toHaveTextContent('待发送 ·')
     expect(screen.queryByRole('button', { name: /再显示/ })).not.toBeInTheDocument()
-    fireEvent.click(screen.getAllByRole('button', { name: '编辑待发送消息' })[0])
+    fireEvent.click(screen.getAllByRole('button', { name: 'chat.queue_edit' })[0])
     expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('second')
     expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1)
     expect(screen.getByTestId('chat-queue-panel')).toHaveTextContent('third')
 
-    fireEvent.click(screen.getByRole('button', { name: '取消待发送消息' }))
+    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_remove' }))
     expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument()
     await act(async () => resolveFirstRequest?.({ content: 'done' }))
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
@@ -2396,7 +2396,7 @@ describe('ChatPage runtime workflow integration', () => {
         expect.stringContaining('third')
       ])
       expect(within(queuedItems[0]).getByLabelText('1 个附件')).toBeInTheDocument()
-      expect(screen.getAllByRole('button', { name: '取消待发送消息' })).toHaveLength(2)
+      expect(screen.getAllByRole('button', { name: 'chat.queue_remove' })).toHaveLength(2)
 
       await act(async () => rejectFirstRequest?.(new Error('first failed')))
 

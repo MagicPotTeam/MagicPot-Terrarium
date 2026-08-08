@@ -874,7 +874,13 @@
     "context_summary_auto": "Automatic",
     "context_summary_title": "Context compressed",
     "context_summary_message_count": "{{count}} messages",
-    "context_summary_expand_label": "Compressed context"
+    "context_summary_expand_label": "Compressed context",
+    "queue_region": "Queued messages",
+    "queue_attachments": "Attachments only",
+    "queue_edit": "Edit queued message",
+    "queue_remove": "Cancel queued message",
+    "queue_collapse": "Collapse",
+    "queue_show_more": "Show {{count}} more"
   },
   "agent_workspace": {
     "title": "Agent Threads",
@@ -1152,7 +1158,10 @@
     "export_failed": "Export failed:",
     "confirm_clear_title": "Confirm Clear Canvas",
     "confirm_clear_desc": "Are you sure you want to clear the canvas? This action cannot be undone.",
-    "clear": "Clear"
+    "clear": "Clear",
+    "send_to_agent_failed": "Some images could not be read. Re-import them and try again.",
+    "untitled": "Untitled canvas",
+    "save_changed_retry": "The canvas changed while it was being saved. Try again."
   },
   "project_canvas": {
     "empty_state_title": "Empty Canvas",

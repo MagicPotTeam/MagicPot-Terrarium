@@ -177,15 +177,6 @@ const parseCssPixelValue = (value: unknown): number | null => {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-const scrollTextareaToBottom = (textarea: HTMLTextAreaElement) => {
-  textarea.scrollTop = textarea.scrollHeight
-  window.requestAnimationFrame(() => {
-    if (textarea.isConnected) {
-      textarea.scrollTop = textarea.scrollHeight
-    }
-  })
-}
-
 const StableNativeTextarea = React.forwardRef<HTMLTextAreaElement, InputBaseComponentProps>(
   function StableNativeTextarea(props, forwardedRef) {
     const { ownerState: _ownerState, style, value, defaultValue, onInput, rows, ...rest } = props
@@ -200,6 +191,8 @@ const StableNativeTextarea = React.forwardRef<HTMLTextAreaElement, InputBaseComp
       const resolvedStyle = style as React.CSSProperties | undefined
       const minHeight = parseCssPixelValue(resolvedStyle?.minHeight) ?? MIN_TEXTAREA_HEIGHT
       const maxHeight = parseCssPixelValue(resolvedStyle?.maxHeight)
+      const previousScrollTop = textarea.scrollTop
+      const wasAtBottom = textarea.scrollHeight - textarea.clientHeight - previousScrollTop <= 1
 
       textarea.style.height = 'auto'
       const nextHeight =
@@ -207,9 +200,7 @@ const StableNativeTextarea = React.forwardRef<HTMLTextAreaElement, InputBaseComp
           ? Math.max(minHeight, textarea.scrollHeight)
           : Math.max(minHeight, Math.min(textarea.scrollHeight, maxHeight))
       textarea.style.height = `${nextHeight}px`
-      if (document.activeElement === textarea) {
-        scrollTextareaToBottom(textarea)
-      }
+      textarea.scrollTop = wasAtBottom ? textarea.scrollHeight : previousScrollTop
     }, [style])
 
     useLayoutEffect(() => {
