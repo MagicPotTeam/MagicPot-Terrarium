@@ -201,12 +201,18 @@ export class MagicAgentSdkGateway {
       throw new Error('MagicAgent SDK authenticated actor must have non-empty kind and id.')
   }
 
+  preflightAuth(authorization: string | undefined): MagicAgentSdkGatewayResponse | undefined {
+    const suppliedToken = bearerToken(authorization)
+    if (!suppliedToken || !secureEqual(suppliedToken, this.token))
+      return { status: 401, body: { code: 'unauthorized', message: 'Invalid SDK bearer token.' } }
+    return undefined
+  }
+
   async dispatchStream(
     request: MagicAgentSdkGatewayRequest
   ): Promise<MagicAgentSdkGatewayStreamResponse> {
-    const suppliedToken = bearerToken(request.authorization)
-    if (!suppliedToken || !secureEqual(suppliedToken, this.token))
-      return { status: 401, body: { code: 'unauthorized', message: 'Invalid SDK bearer token.' } }
+    const authFailure = this.preflightAuth(request.authorization)
+    if (authFailure) return authFailure
     if (request.method !== 'graphRun.attach')
       return { status: 404, body: { code: 'not_found', message: request.method } }
     if (!request.payload || typeof request.payload !== 'object' || Array.isArray(request.payload))
@@ -237,10 +243,8 @@ export class MagicAgentSdkGateway {
   }
 
   async dispatch(request: MagicAgentSdkGatewayRequest): Promise<MagicAgentSdkGatewayResponse> {
-    const suppliedToken = bearerToken(request.authorization)
-    if (!suppliedToken || !secureEqual(suppliedToken, this.token)) {
-      return { status: 401, body: { code: 'unauthorized', message: 'Invalid SDK bearer token.' } }
-    }
+    const authFailure = this.preflightAuth(request.authorization)
+    if (authFailure) return authFailure
     const invocation: ServiceInvocationContext = {
       methodName: request.method,
       senderUrl: 'magicpot-sdk://authenticated-client',

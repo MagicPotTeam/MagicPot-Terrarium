@@ -7,6 +7,9 @@ import { MagicAgentSdkGateway } from './magicAgentSdkGateway'
 import type { MagicAgentPlatformSvcImpl } from './svcMagicAgentPlatformImpl'
 
 export type MagicAgentSdkDispatcher = {
+  preflightAuth?(
+    authorization: string | undefined
+  ): MagicAgentSdkGatewayResponse | undefined | Promise<MagicAgentSdkGatewayResponse | undefined>
   dispatch(request: {
     method: string
     payload: unknown
@@ -26,25 +29,66 @@ export type MagicAgentSdkHttpServerOptions = {
   authenticatedActor?: { kind: string; id: string }
   service?: MagicAgentPlatformSvcImpl
   gateway?: MagicAgentSdkDispatcher
+  bodyTimeoutMs?: number
 }
+
+const MAX_BODY_BYTES = 1024 * 1024
+const DEFAULT_BODY_TIMEOUT_MS = 15_000
+const HEADERS_TIMEOUT_MS = 10_000
+const REQUEST_TIMEOUT_MS = 30_000
+const KEEP_ALIVE_TIMEOUT_MS = 5_000
 
 export type MagicAgentSdkHttpServer = {
   baseUrl: string
   close(): Promise<void>
 }
 
-const readJsonBody = async (request: IncomingMessage): Promise<unknown> => {
-  const chunks: Buffer[] = []
-  let size = 0
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-    size += buffer.length
-    if (size > 1024 * 1024) throw new Error('SDK request body exceeds 1 MiB.')
-    chunks.push(buffer)
-  }
-  if (chunks.length === 0) return {}
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-}
+class RequestBodyTimeoutError extends Error {}
+
+const readJsonBody = (request: IncomingMessage, timeoutMs: number): Promise<unknown> =>
+  new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    const cleanup = (): void => {
+      clearTimeout(timer)
+      request.off('data', onData)
+      request.off('end', onEnd)
+      request.off('aborted', onAborted)
+      request.off('error', onError)
+    }
+    const fail = (error: Error): void => {
+      cleanup()
+      request.pause()
+      reject(error)
+    }
+    const onData = (chunk: Buffer | string): void => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      size += buffer.length
+      if (size > MAX_BODY_BYTES) {
+        fail(new Error('SDK request body exceeds 1 MiB.'))
+        return
+      }
+      chunks.push(buffer)
+    }
+    const onEnd = (): void => {
+      cleanup()
+      try {
+        resolve(chunks.length === 0 ? {} : JSON.parse(Buffer.concat(chunks).toString('utf8')))
+      } catch (error) {
+        reject(error)
+      }
+    }
+    const onAborted = (): void => fail(new Error('SDK request body was aborted.'))
+    const onError = (error: Error): void => fail(error)
+    const timer = setTimeout(
+      () => fail(new RequestBodyTimeoutError('SDK request body timed out.')),
+      timeoutMs
+    )
+    request.on('data', onData)
+    request.once('end', onEnd)
+    request.once('aborted', onAborted)
+    request.once('error', onError)
+  })
 
 const replyJson = (response: ServerResponse, status: number, body: unknown): void => {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
@@ -79,7 +123,13 @@ export const startMagicAgentSdkHttpServer = async (
         return
       }
       const method = decodeURIComponent(url.pathname.slice(prefix.length))
-      const payload = await readJsonBody(request)
+      const authFailure = await gateway.preflightAuth?.(request.headers.authorization)
+      if (authFailure) {
+        request.resume()
+        replyJson(response, authFailure.status, authFailure.body)
+        return
+      }
+      const payload = await readJsonBody(request, options.bodyTimeoutMs ?? DEFAULT_BODY_TIMEOUT_MS)
       const controller = new AbortController()
       if (method === 'graphRun.attach' && gateway.dispatchStream) {
         const result = await gateway.dispatchStream({
@@ -121,7 +171,7 @@ export const startMagicAgentSdkHttpServer = async (
         return
       }
       const pathname = new URL(request.url ?? '/', 'http://localhost').pathname
-      replyJson(response, 400, {
+      replyJson(response, error instanceof RequestBodyTimeoutError ? 408 : 400, {
         code: 'invalid_request',
         message: pathname.endsWith('/channel.ack')
           ? 'Runtime Channel acknowledgement failed.'
@@ -131,6 +181,9 @@ export const startMagicAgentSdkHttpServer = async (
       })
     }
   })
+  server.headersTimeout = HEADERS_TIMEOUT_MS
+  server.requestTimeout = REQUEST_TIMEOUT_MS
+  server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS
   const host = options.host ?? '127.0.0.1'
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)

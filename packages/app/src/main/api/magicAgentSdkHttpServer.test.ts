@@ -1,3 +1,5 @@
+import { request as httpRequest } from 'node:http'
+import { Socket } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   startMagicAgentSdkHttpServer,
@@ -5,6 +7,56 @@ import {
 } from './magicAgentSdkHttpServer'
 
 let server: MagicAgentSdkHttpServer | undefined
+
+const serverAddress = (baseUrl: string): { host: string; port: number } => {
+  const url = new URL(baseUrl)
+  return { host: url.hostname, port: Number(url.port) }
+}
+
+const rawRequest = (baseUrl: string, request: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const { host, port } = serverAddress(baseUrl)
+    const socket = new Socket()
+    let response = ''
+    socket.setEncoding('utf8')
+    socket.on('data', (chunk) => {
+      response += chunk
+      if (response.includes('\r\n\r\n')) {
+        socket.destroy()
+        resolve(response)
+      }
+    })
+    socket.once('error', reject)
+    socket.connect(port, host, () => socket.write(request))
+  })
+
+const partialBodyRequest = (
+  baseUrl: string,
+  timeoutMs: number
+): Promise<{ status: number; body: string }> =>
+  new Promise((resolve, reject) => {
+    const url = new URL('/v2/sdk/agent.run', baseUrl)
+    const request = httpRequest(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json',
+          'content-length': '100'
+        }
+      },
+      (response) => {
+        let body = ''
+        response.setEncoding('utf8')
+        response.on('data', (chunk) => (body += chunk))
+        response.on('end', () => resolve({ status: response.statusCode ?? 0, body }))
+      }
+    )
+    request.once('error', reject)
+    request.write('{"partial":')
+    setTimeout(() => request.destroy(), timeoutMs * 5)
+  })
 
 afterEach(async () => {
   await server?.close()
@@ -253,6 +305,54 @@ describe('MagicAgent SDK loopback HTTP server', () => {
     const body = await response.text()
     expect(response.status).toBe(400)
     expect(body).not.toContain(token)
+  })
+
+  it('rejects an unauthenticated incomplete body before waiting for it', async () => {
+    server = await startMagicAgentSdkHttpServer({
+      token: 'secret',
+      service: { runAgent: vi.fn() } as never
+    })
+    const response = await rawRequest(
+      server.baseUrl,
+      'POST /v2/sdk/agent.run HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{'
+    )
+    expect(response).toContain(' 401 ')
+  })
+
+  it('times out a partially delivered authenticated body', async () => {
+    server = await startMagicAgentSdkHttpServer({
+      token: 'secret',
+      service: { runAgent: vi.fn() } as never,
+      bodyTimeoutMs: 50
+    })
+    const response = await partialBodyRequest(server.baseUrl, 50)
+    expect(response.status).toBe(408)
+    expect(response.body).toContain('SDK request body timed out.')
+  })
+
+  it('accepts a legal request and rejects bodies over 1 MiB', async () => {
+    const runAgent = vi.fn(async () => ({ run: { runId: 'run-http', status: 'completed' } }))
+    server = await startMagicAgentSdkHttpServer({
+      token: 'secret',
+      service: { runAgent } as never
+    })
+    const headers = { authorization: 'Bearer secret', 'content-type': 'application/json' }
+    const valid = await fetch(`${server.baseUrl}/v2/sdk/agent.run`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ agentId: 'agent-1', input: { prompt: 'hello' } })
+    })
+    expect(valid.status).toBe(200)
+    expect(runAgent).toHaveBeenCalledOnce()
+
+    const oversized = await fetch(`${server.baseUrl}/v2/sdk/agent.run`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ value: 'x'.repeat(1024 * 1024) })
+    })
+    expect(oversized.status).toBe(400)
+    expect(await oversized.text()).toContain('SDK request body exceeds 1 MiB.')
+    expect(runAgent).toHaveBeenCalledOnce()
   })
 
   it('rejects unauthenticated requests and non-POST methods', async () => {
