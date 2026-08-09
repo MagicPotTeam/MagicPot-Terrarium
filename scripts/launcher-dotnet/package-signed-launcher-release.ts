@@ -6,7 +6,8 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
-  unlinkSync
+  unlinkSync,
+  writeFileSync
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'

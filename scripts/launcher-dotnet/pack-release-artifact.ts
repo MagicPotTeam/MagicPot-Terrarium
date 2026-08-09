@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
   closeSync,
   constants,

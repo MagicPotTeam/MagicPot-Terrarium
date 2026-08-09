@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { Stats } from 'node:fs'
 import {
   closeSync,
   constants,
@@ -466,7 +467,7 @@ export async function inspectArchive<T extends InstalledAppManifestV1 | Installe
 ): Promise<ArchiveResult<T>> {
   checkDeadline(deadline)
   const path = typeof source === 'string' ? source : undefined
-  let before: ReturnType<typeof lstatSync> | undefined, real: string | undefined
+  let before: Stats | undefined, real: string | undefined
   if (path !== undefined) {
     assertNoSymlinkChain(path, true, `${label} failed safety checks`)
     before = lstatSync(path)
