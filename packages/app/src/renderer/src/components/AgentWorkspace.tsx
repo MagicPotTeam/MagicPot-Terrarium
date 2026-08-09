@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Box,
   Button,
@@ -558,7 +558,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   const workspaceStrings = useMemo(() => createAgentWorkspaceStrings(t), [t])
   const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? openPanes[0] ?? null
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!previewsInitializedRef.current) {
       if (Object.keys(panePreviews).length === 0) return
       previewsInitializedRef.current = true
