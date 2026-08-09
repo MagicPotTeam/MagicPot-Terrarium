@@ -202,7 +202,7 @@ internal static class AutoUpdateCoordinatorSelfTest
         Need(!ReferenceEquals(scenario.Candidate.Release.Artifacts.Runtime, scenario.Candidate.Runtime), "candidate runtime selected from older release");
         Need(scenario.Candidate.App.RuntimeId == scenario.Candidate.Runtime.RuntimeId, "cross-release runtime satisfies new app");
         AutoUpdateResult result = await scenario.ExecuteAsync().ConfigureAwait(false);
-        Need(result.Status == "installed" && result.Version == Version, "cross-release pair installs successfully");
+        Need(result.Status == "installed" && result.Version == Version, $"cross-release pair installs successfully (Status={result.Status}, Version={result.Version ?? "<null>"}, Error.Code={result.Error?.Code ?? "<null>"}, Error.Stage={result.Error?.Stage ?? "<null>"})");
         Need(scenario.ReadActive().ActiveBuildId == Build && scenario.ReadActive().ActiveRuntimeId == Runtime, "cross-release pair becomes active");
         scenario.AssertClean(noJournal: true);
     }
