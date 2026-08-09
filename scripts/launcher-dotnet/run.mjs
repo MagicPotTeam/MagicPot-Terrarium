@@ -63,7 +63,7 @@ async function main() {
   if (command === 'check-config') { console.log(process.env.MAGICPOT_LAUNCHER_UPDATE_CONFIG ? 'launcher update configuration: valid' : 'launcher update configuration: disabled'); return }
   const dn = dotnet()
   run(dn, ['restore', solution, '-r', 'win-x64', ...props])
-  if (command === 'build') run(dn, ['build', solution, '-c', 'Release', '-r', 'win-x64', '--no-restore', ...props])
+  if (command === 'build') run(dn, ['build', solution, '-c', 'Release', '--no-restore', ...props])
   if (command === 'test') {
     const fake = path.join(launcherRoot, 'tests', 'MagicPot.Launcher.FakeApp', 'MagicPot.Launcher.FakeApp.csproj')
     run(dn, ['build', fake, '-c', 'Release', '-r', 'win-x64', '--no-restore'])
