@@ -78,8 +78,14 @@ const originalFeatureFlag = process.env['MAGICPOT_MAGICAGENT_PLATFORM']
 let sdkServer: MagicAgentSdkHttpServer | undefined
 const cleanups: Array<() => void | Promise<void>> = []
 
-const cleanupAfterTest = (cleanup: () => void | Promise<void>): void => {
-  cleanups.push(cleanup)
+const cleanupAfterTest = (cleanup: () => void | Promise<void>): (() => Promise<void>) => {
+  let cleanupPromise: Promise<void> | undefined
+  const cleanupOnce = (): Promise<void> => {
+    cleanupPromise ??= Promise.resolve().then(cleanup)
+    return cleanupPromise
+  }
+  cleanups.push(cleanupOnce)
+  return cleanupOnce
 }
 
 afterEach(async () => {
@@ -425,7 +431,7 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
 
     // Step 1: persist the schedule, close the application store, then reconstruct it.
     let store = new MagicAgentEventStore(databasePath)
-    cleanupAfterTest(() => store.close())
+    const cleanupInitialStore = cleanupAfterTest(() => store.close())
     let authorization = authorizationFor(store, 'before-reconstruction')
     const triggerGrantProvider = async (request: PolicyRequest) => {
       const id = `trigger-grant:${request.requestId}`
@@ -464,9 +470,10 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
       now()
     )
     await triggerRuntime.stop()
-    store.close()
+    await cleanupInitialStore()
 
     store = new MagicAgentEventStore(databasePath)
+    const cleanupStore = cleanupAfterTest(() => store.close())
     authorization = authorizationFor(store, 'after-reconstruction')
     const driveRuntime = new ProductionDriveRuntime({
       eventStore: store,
@@ -630,10 +637,10 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
       now,
       pollIntervalMs: 60_000
     })
-    cleanupAfterTest(() => channels.close())
-    cleanupAfterTest(() => closeProductionAgentInstanceLifecycle())
-    cleanupAfterTest(() => triggerRuntime.stop())
-    cleanupAfterTest(() => driveRuntime.stop())
+    const cleanupChannels = cleanupAfterTest(() => channels.close())
+    const cleanupAgents = cleanupAfterTest(() => closeProductionAgentInstanceLifecycle())
+    const cleanupTrigger = cleanupAfterTest(() => triggerRuntime.stop())
+    const cleanupDrive = cleanupAfterTest(() => driveRuntime.stop())
     const coordinator = vi.fn(async () => {
       // Step 2: the scheduled coordinator creates/wakes a durable Drive.
       driveRuntime.store.create({
@@ -1302,7 +1309,7 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
     // Steps 9-10: event-level Session fork, branch export and semantic diff via production service.
     const sessionFile = path.join(root, 'sessions.json')
     const sessionStore = new AssistantSessionStore(sessionFile)
-    cleanupAfterTest(() => sessionStore.flush())
+    const cleanupSession = cleanupAfterTest(() => sessionStore.flush())
     const assistantRuntime = new AssistantRuntime({ sessionStore })
     const sourceRoute = {
       channel: 'e2e',
@@ -1435,6 +1442,10 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
       authenticatedActor: actor,
       gateway: new MagicAgentSdkGateway(canonicalService, 'm8-authenticated-sdk-token', actor)
     })
+    const cleanupSdkServer = cleanupAfterTest(async () => {
+      await sdkServer?.close()
+      sdkServer = undefined
+    })
     const client = new MagicAgentClient(
       new HttpAgentTransport({ baseUrl: sdkServer.baseUrl, token: 'm8-authenticated-sdk-token' })
     )
@@ -1508,13 +1519,12 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
       /edited-private-input|safe-final-input|session-secret|tool-secret|credential-secret-id/
     )
     expect(existsSync(targetFile)).toBe(true)
-    await triggerRuntime.stop()
-    await driveRuntime.stop()
-    channels.close()
-    closeProductionAgentInstanceLifecycle()
-    await sessionStore.flush()
-    await sdkServer.close()
-    sdkServer = undefined
-    store.close()
+    await cleanupTrigger()
+    await cleanupDrive()
+    await cleanupChannels()
+    await cleanupAgents()
+    await cleanupSession()
+    await cleanupSdkServer()
+    await cleanupStore()
   }, 60_000)
 })

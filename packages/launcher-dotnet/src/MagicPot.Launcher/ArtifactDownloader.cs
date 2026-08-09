@@ -455,10 +455,46 @@ internal sealed class ArtifactDownloader : IDisposable
 
     private void AtomicWrite(string path, string text)
     {
-        ValidateRoot(); if (File.Exists(path)) _ = GetIdentity(path, false, true); var temporary = Child("." + Path.GetFileName(path) + "." + SafeUniqueId() + ".tmp");
-        try { var bytes = StrictUtf8.GetBytes(text); using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough)) { stream.Write(bytes); stream.Flush(true); } _ = GetIdentity(temporary, false, true); ValidateRoot(); if (File.Exists(path)) File.Replace(temporary, path, null, true); else File.Move(temporary, path); _ = GetIdentity(path, false, true); }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { throw new ArtifactDownloaderException("Metadata atomic write failed.", exception); }
+        ValidateRoot();
+        if (File.Exists(path)) _ = GetIdentity(path, false, true);
+        var temporary = Child("." + Path.GetFileName(path) + "." + SafeUniqueId() + ".tmp");
+        try
+        {
+            var bytes = StrictUtf8.GetBytes(text);
+            FileIdentity? temporaryIdentity;
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+            {
+                stream.Write(bytes);
+                stream.Flush(true);
+                temporaryIdentity = GetIdentity(stream.SafeFileHandle, false, true);
+            }
+            ValidateRoot();
+            if (File.Exists(path)) File.Replace(temporary, path, null, true);
+            else File.Move(temporary, path);
+            var publishedIdentity = GetPublishedIdentity(path);
+            if (temporaryIdentity is not null && publishedIdentity != temporaryIdentity) throw new ArtifactDownloaderException("Metadata identity changed during publication.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new ArtifactDownloaderException("Metadata atomic write failed.", exception);
+        }
         finally { BestEffortDelete(temporary); }
+    }
+
+    private FileIdentity? GetPublishedIdentity(string path)
+    {
+        const int attempts = 5;
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            ValidateRoot();
+            using var handle = CreateFileW(path, 0, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, FileFlagsAndAttributes.FileFlagOpenReparsePoint, IntPtr.Zero);
+            if (!handle.IsInvalid) return GetIdentity(handle, false, true);
+            var error = Marshal.GetLastWin32Error();
+            if (error is not ErrorFileNotFound and not ErrorPathNotFound || attempt == attempts - 1)
+                throw new ArtifactDownloaderException("State identity open failed.", new Win32Exception(error));
+            Thread.Sleep(TimeSpan.FromMilliseconds(10));
+        }
+        throw new UnreachableException();
     }
 
     private void Quarantine(string path, string extension, string label, Exception? reason = null)
