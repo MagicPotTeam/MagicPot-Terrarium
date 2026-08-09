@@ -375,7 +375,8 @@ internal static class AutoUpdateCoordinatorSelfTest
                 ActivationFactory = layout => new LocalSmokeActivationTransaction(layout, ProcessLauncher is null
                     ? new LocalSmokeActivationOptions { Timeout = TimeSpan.FromSeconds(10) }
                     : new LocalSmokeActivationOptions { Timeout = TimeSpan.FromSeconds(10), ProcessLauncher = ProcessLauncher }),
-                AfterActivation = afterActivation
+                AfterActivation = afterActivation,
+                Diagnostic = error => Console.Error.WriteLine("AutoUpdateCoordinator diagnostic: " + error)
             };
             var settings = new LauncherSettingsV1(1, mode, Channel, 3, 3, false);
             SelectedArtifactsV1? currentActive = currentActiveOverride ?? (useCurrentActive ? ResolveCurrentArtifacts() : null);
