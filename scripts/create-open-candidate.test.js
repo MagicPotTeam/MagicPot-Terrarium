@@ -163,6 +163,44 @@ describe('create-open-candidate policy', () => {
     ])
   })
 
+  it('ignores private-path fixtures and PEM format markers while retaining secret checks', () => {
+    const candidate = makeCandidate()
+    const completePem = [
+      '-----BEGIN PRIVATE KEY-----',
+      'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0123456789=',
+      '-----END PRIVATE KEY-----'
+    ].join('\n')
+
+    writeFile(candidate, 'packages/app/src/example.test.ts', "const fixture = '/private/path'\n")
+    writeFile(candidate, 'packages/app/src/example.ts', "const marker = '-----BEGIN PRIVATE KEY-----'\n")
+
+    expect(auditOpenCandidate(candidate)).toEqual([])
+
+    writeFile(candidate, 'config/private-key.pem', completePem)
+    expect(auditOpenCandidate(candidate)).toEqual([
+      {
+        file: 'config/private-key.pem',
+        line: 1,
+        rule: 'high-confidence-secret',
+        message: completePem
+      }
+    ])
+  })
+
+  it('continues to reject private paths outside test fixtures', () => {
+    const candidate = makeCandidate()
+    writeFile(candidate, 'packages/app/src/runtime.ts', "const path = '/private/path'\n")
+
+    expect(auditOpenCandidate(candidate)).toEqual([
+      {
+        file: 'packages/app/src/runtime.ts',
+        line: 1,
+        rule: 'private-path-reference',
+        message: '/private/path'
+      }
+    ])
+  })
+
   it('verifies an already-generated candidate even when it is not a git repository', () => {
     const candidate = makeCandidate()
     writeFile(candidate, 'README.md', '# MagicPot Open\n')

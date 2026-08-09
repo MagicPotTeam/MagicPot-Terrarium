@@ -21,6 +21,7 @@ const textExtensions = new Set([
   '.jsx',
   '.md',
   '.mjs',
+  '.pem',
   '.ts',
   '.tsx',
   '.txt',
@@ -272,6 +273,8 @@ const codexFunctionalPattern = new RegExp(
   'gi'
 )
 
+const isTestFixture = (relativeFile) => /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/i.test(relativeFile)
+
 const addContentIssues = ({ file, relativeFile, text, issues }) => {
   const rules = [
     {
@@ -280,17 +283,21 @@ const addContentIssues = ({ file, relativeFile, text, issues }) => {
     },
     {
       rule: 'private-path-reference',
+      skip: isTestFixture(relativeFile),
       pattern:
         /(?:[A-Za-z]:[\\/][^\r\n"'`]*(?:private|internal|premium|open-private)[\\/][^\r\n"'`]*)|(?:(?:^|[\\/"'`\s])(?:private|internal|premium|open-private)[\\/][^\r\n"'`\s)]+)/gi
     },
     {
       rule: 'high-confidence-secret',
       pattern:
-        /(?:sk-[A-Za-z0-9_-]{32,}|gh[pousr]_[A-Za-z0-9_]{36,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----)/g
+        /(?:sk-[A-Za-z0-9_-]{32,}|gh[pousr]_[A-Za-z0-9_]{36,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN ((?:RSA |OPENSSH |EC |DSA )?)PRIVATE KEY-----[A-Za-z0-9+/=\r\n]{32,8192}-----END \1PRIVATE KEY-----)/g
     }
   ]
 
-  for (const { rule, pattern } of rules) {
+  for (const { rule, pattern, skip = false } of rules) {
+    if (skip) {
+      continue
+    }
     for (const match of text.matchAll(pattern)) {
       const line = getLineNumber(text, match.index ?? 0)
       issues.push({
