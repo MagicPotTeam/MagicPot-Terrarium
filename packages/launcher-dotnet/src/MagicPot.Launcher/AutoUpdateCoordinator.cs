@@ -20,6 +20,7 @@ internal sealed class AutoUpdateCoordinatorOptions
     internal Func<LauncherLayout, LocalSmokeActivationTransaction>? ActivationFactory { get; init; }
     internal Func<LauncherLayout, InstalledSelectionResolver>? SelectionResolverFactory { get; init; }
     internal Action<LauncherLayout, ActivePointerV1>? AfterActivation { get; init; }
+    internal Action<Exception>? Diagnostic { get; init; }
     internal Func<DateTimeOffset>? Clock { get; init; }
 }
 
@@ -124,6 +125,7 @@ internal sealed class AutoUpdateCoordinator : IAutoUpdateCoordinator
         catch (ArtifactTransportException error) { Trace(error); return AutoUpdateResult.Unavailable(version); }
         catch (Exception error)
         {
+            options.Diagnostic?.Invoke(error);
             Trace(error); if (error is StaleActivationException) stage = "activate";
             if (stage == "verify-active" && activationReceipt is not null)
                 return VerifyActiveFailure(layout, resolver, before, activationReceipt.Current, currentActive.App.Version);

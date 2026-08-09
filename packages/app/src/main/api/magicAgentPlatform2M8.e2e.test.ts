@@ -1509,6 +1509,9 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
     )
     expect(existsSync(targetFile)).toBe(true)
     await triggerRuntime.stop()
+    await driveRuntime.stop()
+    channels.close()
+    closeProductionAgentInstanceLifecycle()
     await sessionStore.flush()
     await sdkServer.close()
     sdkServer = undefined
