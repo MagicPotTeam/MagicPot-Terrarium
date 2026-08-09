@@ -96,7 +96,7 @@ afterEach(async () => {
   for (const artifact of artifacts.splice(0)) rmSync(artifact, { recursive: true, force: true })
   if (originalFeatureFlag === undefined) delete process.env['MAGICPOT_MAGICAGENT_PLATFORM']
   else process.env['MAGICPOT_MAGICAGENT_PLATFORM'] = originalFeatureFlag
-})
+}, 60_000)
 
 const actor = { kind: 'user', id: 'owner' } as const
 const agentActor = { kind: 'agent', id: 'coding-agent' } as const

@@ -1,4 +1,5 @@
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -12,13 +13,8 @@ afterEach(() => {
 })
 
 const fileStore = (databasePath?: string) => {
-  const root = databasePath
-    ? undefined
-    : join('C:\\MagicPot-Terrarium-Tests', `magic-agent-drive-${Date.now()}-${Math.random()}`)
-  if (root) {
-    mkdirSync(root, { recursive: true })
-    roots.push(root)
-  }
+  const root = databasePath ? undefined : mkdtempSync(join(tmpdir(), 'magic-agent-drive-'))
+  if (root) roots.push(root)
   const path = databasePath ?? join(root!, 'events.sqlite')
   const eventStore = new MagicAgentEventStore(path)
   return { eventStore, store: new PersistentDriveStore(eventStore), databasePath: path }

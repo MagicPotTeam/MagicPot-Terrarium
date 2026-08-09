@@ -176,7 +176,7 @@ internal static class AutoUpdateCoordinatorSelfTest
         Directory.CreateDirectory(Path.Combine(scenario.Layout.Apps, Build));
         File.WriteAllText(Path.Combine(scenario.Layout.Apps, Build, "conflict.txt"), "conflict");
         AutoUpdateResult result = await scenario.ExecuteAsync().ConfigureAwait(false);
-        Need(result.Status == "failed" && result.Error?.Code == "install-failed" && result.Error.Stage == "install-app", "conflicting app final fails install");
+        Need(result.Status == "failed" && result.Error?.Code == "install-failed" && result.Error.Stage == "install-app", $"conflicting app final fails install (Status={result.Status}, Error.Code={result.Error?.Code ?? "<null>"}, Error.Stage={result.Error?.Stage ?? "<null>"})");
         scenario.AssertOldActive();
         scenario.AssertClean(noJournal: true);
     }

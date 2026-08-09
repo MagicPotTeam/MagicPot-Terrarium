@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.unmock('node:fs')
 vi.unmock('node:fs/promises')
-import { mkdirSync, rmSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import {
   TriggerOccurrenceConflictError,
@@ -29,17 +30,9 @@ afterEach(() => {
   roots.length = 0
 })
 const setup = (fileBacked = false) => {
-  const root = resolve(
-    'C:/MagicPot-Terrarium-Tests',
-    `.tmp-trigger-occurrence-${Date.now()}-${Math.random()}`
-  )
-  if (fileBacked) {
-    mkdirSync(resolve('C:/MagicPot-Terrarium-Tests'), { recursive: true })
-
-    mkdirSync(root, { recursive: true })
-    roots.push(root)
-  }
-  const eventStore = new MagicAgentEventStore(fileBacked ? resolve(root, 'events.db') : ':memory:')
+  const root = fileBacked ? mkdtempSync(join(tmpdir(), 'trigger-occurrence-')) : undefined
+  if (root) roots.push(root)
+  const eventStore = new MagicAgentEventStore(root ? join(root, 'events.db') : ':memory:')
   return { eventStore, store: new TriggerOccurrenceStore(eventStore) }
 }
 

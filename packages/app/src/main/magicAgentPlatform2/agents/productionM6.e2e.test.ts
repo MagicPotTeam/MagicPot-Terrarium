@@ -1,4 +1,5 @@
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MagicAgentPlatformRunResp } from '../../../shared/api/svcMagicAgentPlatform'
@@ -57,7 +58,7 @@ const files: string[] = []
 afterEach(() => {
   for (const file of files.splice(0)) {
     try {
-      rmSync(file, { force: true })
+      rmSync(file, { recursive: true, force: true })
     } catch {
       /* Windows SQLite handles may close asynchronously. */
     }
@@ -66,12 +67,9 @@ afterEach(() => {
 
 describe('M6 production E2E', () => {
   it('persists a three-Agent Team, wired channels, cooperative execution, config and replacement', async () => {
-    const databasePath = join(
-      'C:\\MagicPot-Terrarium-Tests',
-      `m6-e2e-${Date.now()}-${Math.random()}.sqlite`
-    )
-    mkdirSync('C:\\MagicPot-Terrarium-Tests', { recursive: true })
-    files.push(databasePath)
+    const root = mkdtempSync(join(tmpdir(), 'm6-e2e-'))
+    const databasePath = join(root, 'events.sqlite')
+    files.push(root)
     let clock = 100
     const now = () => clock++
     const actor = { kind: 'user', id: 'owner' } as const

@@ -1,10 +1,14 @@
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('electron', () => ({
-  app: { getPath: () => 'C:\\MagicPot-Terrarium-Tests' }
-}))
+vi.unmock('node:fs')
+vi.unmock('node:fs/promises')
+vi.mock('electron', async () => {
+  const { tmpdir: getTmpdir } = await import('node:os')
+  return { app: { getPath: () => getTmpdir() } }
+})
 
 import { HttpAgentTransport, MagicAgentClient } from '../../../../agent-sdk-typescript/src/index'
 import type { MagicAgentGraphDefinition, MagicAgentGraphRunPublicEvent } from '@shared/magicAgent'
@@ -107,13 +111,11 @@ afterEach(async () => {
 describe('M7 consolidated production boundary', () => {
   it('attaches, cursor re-attaches, pauses at a node boundary, resumes, and reopens SQLite', async () => {
     process.env['MAGICPOT_MAGICAGENT_PLATFORM'] = '1'
-    const databasePath = path.join(
-      'C:\\MagicPot-Terrarium-Tests',
-      `magic-agent-sdk-m7-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite3`
-    )
-    const artifactRoot = `${databasePath}.runs`
+    const root = mkdtempSync(path.join(tmpdir(), 'magic-agent-sdk-m7-'))
+    const databasePath = path.join(root, 'events.sqlite3')
+    const artifactRoot = path.join(root, 'runs')
     mkdirSync(artifactRoot, { recursive: true })
-    artifacts.push(artifactRoot, databasePath)
+    artifacts.push(root)
 
     const runStore = new MagicAgentGraphRunStore(artifactRoot)
     eventStore = new MagicAgentGraphRunEventStore(databasePath)

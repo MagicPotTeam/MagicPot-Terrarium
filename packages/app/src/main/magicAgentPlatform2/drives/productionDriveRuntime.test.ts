@@ -1,4 +1,6 @@
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('node:fs', async (importActual) => importActual())
@@ -26,9 +28,8 @@ const drive = {
 
 describe('Production Drive runtime/lifecycle/commands', () => {
   it('recovers an expired pending delivery after SQLite reopen and acknowledges once', async () => {
-    const root = `C:\\MagicPot-Terrarium-Tests\\drive-runtime-restart-${Date.now()}-${Math.random()}`
-    const databasePath = `${root}\\events.sqlite`
-    mkdirSync(root, { recursive: true })
+    const root = mkdtempSync(join(tmpdir(), 'drive-runtime-restart-'))
+    const databasePath = join(root, 'events.sqlite')
     try {
       const firstStore = new MagicAgentEventStore(databasePath)
       const first = new ProductionDriveRuntime({ eventStore: firstStore, deliver: vi.fn() })

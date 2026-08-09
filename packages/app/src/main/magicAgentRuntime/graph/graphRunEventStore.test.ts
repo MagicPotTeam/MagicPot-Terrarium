@@ -1,4 +1,5 @@
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -51,11 +52,7 @@ afterEach(() => {
 
 describe('MagicAgentGraphRunEventStore', () => {
   it('persists ordered idempotent events across reopen and applies cursors', () => {
-    const dir = path.join(
-      'C:\\MagicPot-Terrarium-Tests',
-      `graph-run-events-${Date.now()}-${Math.random()}`
-    )
-    mkdirSync(dir, { recursive: true })
+    const dir = mkdtempSync(path.join(tmpdir(), 'graph-run-events-'))
     dirs.push(dir)
     const databasePath = path.join(dir, 'events.sqlite3')
     let store = new MagicAgentGraphRunEventStore(databasePath)

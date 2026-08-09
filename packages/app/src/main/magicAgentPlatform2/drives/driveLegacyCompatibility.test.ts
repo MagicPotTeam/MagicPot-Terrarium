@@ -1,7 +1,10 @@
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+vi.unmock('node:fs')
+vi.unmock('node:fs/promises')
 vi.mock('electron', () => ({ app: { isPackaged: false, getPath: () => '' } }))
 import { AssistantSessionStore } from '../../assistantRuntime/sessionStore'
 import { MagicAgentGraphRunStore } from '../../magicAgentRuntime/graph/graphRunStore'
@@ -15,10 +18,7 @@ afterEach(() => {
 
 describe('Drive legacy resource compatibility', () => {
   it('preserves Session, Task Group, Run, and Artifact identities without mutating legacy stores', async () => {
-    const root = path.join(
-      'C:\\MagicPot-Terrarium-Tests',
-      `drive-legacy-${Date.now()}-${Math.random()}`
-    )
+    const root = mkdtempSync(path.join(tmpdir(), 'drive-legacy-'))
     roots.push(root)
     mkdirSync(root, { recursive: true })
     const sessionPath = path.join(root, 'sessions.json')
