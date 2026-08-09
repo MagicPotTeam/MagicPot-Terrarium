@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { backup, DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite'
 
 export const EVENT_STORE_APPLICATION_ID = 0x4d415032
@@ -116,6 +117,13 @@ export class NodeSQLiteAdapter {
 export function openReadOnlyDatabase(path: string): NodeSQLiteAdapter {
   if (path === ':memory:') return new NodeSQLiteAdapter(path, 0, 'read-only')
   return new NodeSQLiteAdapter(path, 0, 'read-only')
+}
+
+export function openImmutableReadOnlyDatabase(path: string): NodeSQLiteAdapter {
+  if (path === ':memory:') return openReadOnlyDatabase(path)
+  const url = pathToFileURL(path)
+  url.searchParams.set('immutable', '1')
+  return new NodeSQLiteAdapter(url.href, 0, 'read-only')
 }
 
 export function openReadWriteDatabase(path: string, timeout = 5000): NodeSQLiteAdapter {

@@ -28,7 +28,7 @@ import {
 import {
   backupDatabase,
   EVENT_STORE_SCHEMA_VERSION,
-  openReadOnlyDatabase,
+  openImmutableReadOnlyDatabase,
   type NodeSQLiteAdapter
 } from './sqliteAdapter'
 import { acquireEventStoreWriteLock, assertNoActiveInstanceLeases } from './writeLock'
@@ -527,11 +527,13 @@ function identityIsOneOf(
 }
 
 function validateFile(path: string) {
-  const db = openReadOnlyDatabase(path)
+  assertNoSidecars(path)
+  const db = openImmutableReadOnlyDatabase(path)
   try {
     return validateEventStoreDatabaseV3(db)
   } finally {
     db.close()
+    assertNoSidecars(path)
   }
 }
 function absoluteInput(path: string): string {

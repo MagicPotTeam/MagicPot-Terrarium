@@ -134,7 +134,13 @@ internal sealed class PreparedArtifactInstaller
         await using (lease.ConfigureAwait(false))
         {
             await using FileStream lockFile = await chain.OpenLockAsync(descriptor.Id + ".install.lock", lockTimeout, lockRetryDelay, cancellationToken).ConfigureAwait(false);
-            if (Directory.Exists(descriptor.FinalPath)) return await ValidateExistingAsync(package, descriptor, chain, cancellationToken).ConfigureAwait(false);
+            if (Directory.Exists(descriptor.FinalPath))
+            {
+                try { return await ValidateExistingAsync(package, descriptor, chain, cancellationToken).ConfigureAwait(false); }
+                catch (OperationCanceledException) { throw; }
+                catch (PreparedArtifactInstallationException) { throw; }
+                catch (Exception exception) { throw new PreparedArtifactInstallationException("Existing install target could not be safely validated.", exception); }
+            }
             if (File.Exists(descriptor.FinalPath)) throw new PreparedArtifactInstallationException("Install target exists and is not a directory.");
             string partial = Path.Combine(chain.ContainerPath, descriptor.Id + ".partial-" + SafeUniqueId());
             InstallPinnedTree? tree = null;
