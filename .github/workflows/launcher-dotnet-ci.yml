@@ -65,6 +65,9 @@ jobs:
           restore-keys: |
             windows-nuget-
 
+      - name: Install Node dependencies
+        run: npm ci
+
       - name: Test launcher configuration generator
         run: npm run launcher:config:test
 

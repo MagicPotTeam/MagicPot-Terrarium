@@ -1,6 +1,6 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -389,7 +389,15 @@ describe('CommandJobsToolHost', () => {
     ).toMatchObject({ consumed: true })
   })
 
-  it.runIf(process.platform === 'win32')(
+  it.runIf(
+    process.platform === 'win32' &&
+      existsSync(
+        path.resolve(
+          process.cwd(),
+          'packages/runtime-assets/resources/bin/magicpot-command-job/magicpot-command-job.exe'
+        )
+      )
+  )(
     'runs the production CommandJobs path through the verified Windows Job Object helper',
     async () => {
       const helper = path.resolve(

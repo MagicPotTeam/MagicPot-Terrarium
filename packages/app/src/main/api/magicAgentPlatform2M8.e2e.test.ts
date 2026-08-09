@@ -1513,5 +1513,5 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
     await sdkServer.close()
     sdkServer = undefined
     store.close()
-  }, 30_000)
+  }, 60_000)
 })

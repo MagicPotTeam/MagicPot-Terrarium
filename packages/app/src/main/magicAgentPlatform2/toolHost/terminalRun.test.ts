@@ -267,6 +267,7 @@ describe('TerminalRunToolHost', () => {
   it('kills execution at the bounded timeout', async () => {
     const { root, authorization } = setup('require-approval', { maxTimeoutMs: 50 })
     const marker = path.join(root, 'late.txt')
+    const markerArgument = Buffer.from(marker).toString('base64')
     const result = await new TerminalRunToolHost(authorization, {
       allowedRoots: [root],
       allowedCommands: [command]
@@ -275,7 +276,7 @@ describe('TerminalRunToolHost', () => {
         root,
         [
           '-e',
-          `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'late'), 500)`
+          `setTimeout(() => require('node:fs').writeFileSync(Buffer.from('${markerArgument}', 'base64').toString(), 'late'), 500)`
         ],
         authorization
       ),
@@ -290,7 +291,8 @@ describe('TerminalRunToolHost', () => {
   it('kills the complete process tree at the bounded timeout', async () => {
     const { root, authorization } = setup('require-approval', { maxTimeoutMs: 100 })
     const marker = path.join(root, 'grandchild-late.txt')
-    const grandchild = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'late'), 700)`
+    const markerArgument = Buffer.from(marker).toString('base64')
+    const grandchild = `setTimeout(() => require('node:fs').writeFileSync(Buffer.from('${markerArgument}', 'base64').toString(), 'late'), 700)`
     const parent = [
       "const { spawn } = require('node:child_process')",
       `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,

@@ -71,8 +71,11 @@ const secureEqual = (left: string, right: string): boolean => {
 }
 
 const bearerToken = (authorization: string | undefined): string | undefined => {
-  const match = /^Bearer\s+(.+)$/i.exec(authorization?.trim() ?? '')
-  return match?.[1]
+  const value = authorization?.trim()
+  if (!value || value.length < 8 || value.slice(0, 6).toLowerCase() !== 'bearer') return undefined
+  if (!/\s/.test(value[6])) return undefined
+  const token = value.slice(7).trimStart()
+  return token || undefined
 }
 
 const validateExternalEvent = (value: unknown): ExternalTriggerEvent => {

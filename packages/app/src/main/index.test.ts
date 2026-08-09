@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type WindowLike = { id: string }
@@ -57,7 +58,7 @@ const {
     initScreenshotManagerMock: vi.fn(),
     cleanupScreenshotManagerMock: vi.fn(),
     resolveStartupUserDataDirectoryMock: vi.fn(() => ({
-      path: '/test-user-data',
+      path: path.resolve('test-user-data'),
       source: 'default' as const
     })),
     initializeAppUpdateManagerMock: vi.fn(() => Promise.resolve()),
@@ -180,7 +181,7 @@ describe('main process startup window opening', () => {
     })
     resolveStartupUserDataDirectoryMock.mockClear()
     resolveStartupUserDataDirectoryMock.mockReturnValue({
-      path: '/test-user-data',
+      path: path.resolve('test-user-data'),
       source: 'default'
     })
   })

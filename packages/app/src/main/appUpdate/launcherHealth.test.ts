@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   createLauncherHealth,
@@ -8,6 +9,7 @@ import {
 const buildId = '20250101-010203-abcdef0'
 const runtimeId = 'runtime-1'
 const launchToken = 'token-1'
+const healthFilePath = path.resolve('launcher-health.json')
 
 function memoryFileSystem(initial?: string) {
   let text = initial
@@ -57,7 +59,7 @@ describe('launcher health confirmation receipt', () => {
   it('writes a matching receipt before deadline and omits null fields', async () => {
     const memory = memoryFileSystem(pendingJson())
     const health = createLauncherHealth({
-      filePath: 'C:\\launcher-health.json',
+      filePath: healthFilePath,
       rollbackThreshold: 3,
       fileSystem: memory.fs,
       now: () => new Date('2025-01-01T00:00:30.000Z')
@@ -76,7 +78,7 @@ describe('launcher health confirmation receipt', () => {
     const original = pendingJson()
     const memory = memoryFileSystem(original)
     const health = createLauncherHealth({
-      filePath: 'C:\\launcher-health.json',
+      filePath: healthFilePath,
       rollbackThreshold: 3,
       fileSystem: memory.fs,
       now: () => new Date('2024-12-31T23:59:59.999Z')
@@ -89,7 +91,7 @@ describe('launcher health confirmation receipt', () => {
     const original = pendingJson()
     const memory = memoryFileSystem(original)
     const health = createLauncherHealth({
-      filePath: 'C:\\launcher-health.json',
+      filePath: healthFilePath,
       rollbackThreshold: 3,
       fileSystem: memory.fs,
       now: () => new Date('2025-01-01T00:01:00.000Z')
@@ -102,7 +104,7 @@ describe('launcher health confirmation receipt', () => {
     const old = `{"schema":1,"failedAttemptCount":0,"lastHealthy":{"buildId":"${buildId}","runtimeId":"${runtimeId}","launchToken":"old","confirmedAt":"2024-12-31T00:00:00.000Z"}}`
     const memory = memoryFileSystem(old)
     const health = createLauncherHealth({
-      filePath: 'C:\\launcher-health.json',
+      filePath: healthFilePath,
       rollbackThreshold: 3,
       fileSystem: memory.fs,
       now: () => new Date('2025-01-01T00:00:00.000Z')

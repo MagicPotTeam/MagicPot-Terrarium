@@ -44,6 +44,7 @@ export type MagicAgentSdkHttpServer = {
 }
 
 class RequestBodyTimeoutError extends Error {}
+class RequestBodyTooLargeError extends Error {}
 
 const readJsonBody = (request: IncomingMessage, timeoutMs: number): Promise<unknown> =>
   new Promise((resolve, reject) => {
@@ -65,7 +66,7 @@ const readJsonBody = (request: IncomingMessage, timeoutMs: number): Promise<unkn
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
       size += buffer.length
       if (size > MAX_BODY_BYTES) {
-        fail(new Error('SDK request body exceeds 1 MiB.'))
+        fail(new RequestBodyTooLargeError('SDK request body exceeds 1 MiB.'))
         return
       }
       chunks.push(buffer)
@@ -175,9 +176,11 @@ export const startMagicAgentSdkHttpServer = async (
         code: 'invalid_request',
         message: pathname.endsWith('/channel.ack')
           ? 'Runtime Channel acknowledgement failed.'
-          : error instanceof Error
-            ? error.message
-            : String(error)
+          : error instanceof RequestBodyTimeoutError
+            ? 'SDK request body timed out.'
+            : error instanceof RequestBodyTooLargeError
+              ? 'SDK request body exceeds 1 MiB.'
+              : 'Invalid SDK request.'
       })
     }
   })
