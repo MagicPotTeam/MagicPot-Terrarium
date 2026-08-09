@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -19,7 +20,7 @@ const fixtureDir = path.resolve(
   process.cwd(),
   'packages/app/src/shared/magicAgentPlatform2/fixtures'
 )
-const memfsRoot = '/magicagent-platform2-legacy-fixtures'
+const memfsRoot = path.join(tmpdir(), 'magicagent-platform2-legacy-fixtures')
 const temporaryDirs: string[] = []
 const realFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
 const digest = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
@@ -30,10 +31,10 @@ async function readFrozenFixture(name: string): Promise<{ bytes: Buffer; value: 
 }
 
 async function copySessionFixture(name: string): Promise<{ filePath: string; before: Buffer }> {
-  const directory = path.posix.join(memfsRoot, `${name}-${crypto.randomUUID()}`)
+  const directory = path.join(memfsRoot, `${name}-${crypto.randomUUID()}`)
   await mkdir(directory, { recursive: true })
   temporaryDirs.push(directory)
-  const filePath = path.posix.join(directory, 'chat-sessions.json')
+  const filePath = path.join(directory, 'chat-sessions.json')
   const before = await realFs.readFile(path.join(fixtureDir, name))
   await writeFile(filePath, before)
   return { filePath, before }

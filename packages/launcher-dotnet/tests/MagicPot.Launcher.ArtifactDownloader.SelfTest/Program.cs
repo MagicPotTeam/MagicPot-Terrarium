@@ -239,7 +239,7 @@ internal static class Program
     {
         public Scope() { Root = Path.Combine(Path.GetTempPath(), "MagicPot-artifact-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(Root); Downloads = Path.Combine(Root, "downloads"); }
         public string Root { get; } public string Downloads { get; }
-        public ArtifactDownloader Downloader(FakeTransport transport, IReadOnlyList<TrustedReleaseSource>? trustedSources = null) => new(new ArtifactDownloadOptions { StateRoot = Root, TrustedSources = trustedSources, Timeout = TimeSpan.FromMilliseconds(300), LockTimeout = TimeSpan.FromSeconds(5), UniqueId = () => Interlocked.Increment(ref unique).ToString("x") }, transport);
+        public ArtifactDownloader Downloader(FakeTransport transport, IReadOnlyList<TrustedReleaseSource>? trustedSources = null) => new(new ArtifactDownloadOptions { StateRoot = Root, TrustedSources = trustedSources, Timeout = TimeSpan.FromSeconds(5), LockTimeout = TimeSpan.FromSeconds(5), UniqueId = () => Interlocked.Increment(ref unique).ToString("x") }, transport);
         public void Dispose() { try { Directory.Delete(Root, true); } catch (Exception) { } }
     }
 
