@@ -50,7 +50,7 @@ internal static class AutoUpdateCoordinatorSelfTest
             ?? throw new InvalidOperationException("MAGICPOT_FAKE_APP_DIR is required.");
         fakeAppDirectory = Path.GetFullPath(fakeAppDirectory);
         RequireFakeApp(fakeAppDirectory);
-        string parent = Path.Combine(Path.GetTempPath(), "MagicPot-AutoCoordinator-" + Guid.NewGuid().ToString("N"));
+        string parent = Path.Combine(Path.GetTempPath(), "mp-ac-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(parent);
         try
         {
