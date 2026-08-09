@@ -1148,7 +1148,7 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
     const graphEventStore = new MagicAgentGraphRunEventStore(
       path.join(root, 'managed-run-events.sqlite3')
     )
-    cleanupAfterTest(() => graphEventStore.close())
+    const cleanupGraphEventStore = cleanupAfterTest(() => graphEventStore.close())
     const graphService = new MagicAgentPlatformSvcImpl({
       graphRuntime,
       runEventStore: graphEventStore,
@@ -1204,6 +1204,7 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
     expect(managedRun.status).toBe('completed')
     expect(attachedEvents).toEqual(expect.arrayContaining(['input.edited', 'input.injected']))
     expect(JSON.stringify(managedRun.events)).not.toMatch(/edited-private-input|safe-final-input/)
+    await cleanupGraphEventStore()
 
     // Step 8: kill a real SQLite-owning fixture without cleanup, then reopen and replay once.
     const repositoryRoot = process.cwd()
@@ -1236,7 +1237,7 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
     let recoveryOutput = ''
     recoveryChild.stdout?.on('data', (chunk) => (recoveryOutput += String(chunk)))
     recoveryChild.stderr?.on('data', (chunk) => (recoveryOutput += String(chunk)))
-    cleanupAfterTest(() => terminateProcessTree(recoveryChild))
+    const cleanupRecoveryChild = cleanupAfterTest(() => terminateProcessTree(recoveryChild))
     try {
       await waitForFile(recoveryReadyPath, recoveryChild)
     } catch (error) {
@@ -1244,9 +1245,9 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
         `${error instanceof Error ? error.message : String(error)}\n${recoveryOutput}`
       )
     }
-    await terminateProcessTree(recoveryChild)
+    await cleanupRecoveryChild()
     let recoveryStore = new MagicAgentEventStore(recoveryDatabasePath)
-    cleanupAfterTest(() => recoveryStore.close())
+    const cleanupRecoveryStore = cleanupAfterTest(() => recoveryStore.close())
     const retainedEventCount = recoveryStore.countEvents()
     expect(recoveryStore.getEvent('m8-abrupt-side-effect-committed')).toMatchObject({
       type: 'm8.abrupt-side-effect.committed',
@@ -1276,7 +1277,7 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
       authorization: recoveryAuthorization,
       platformService: { runAgent: vi.fn() }
     })
-    cleanupAfterTest(() => recoveryOwner.close())
+    const cleanupRecoveryOwner = cleanupAfterTest(() => recoveryOwner.close())
     expect(recoveryOwner.store.get('abrupt-agent')?.state.status).toBe('running')
     recoveryOwner.start()
     expect(recoveryOwner.store.get('abrupt-agent')?.state.status).toBe('stopped')
@@ -1305,6 +1306,8 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
     expect(recoveryStore.listResources({ kind: 'm8-abrupt-side-effect', limit: 10 })).toHaveLength(
       1
     )
+    await cleanupRecoveryOwner()
+    await cleanupRecoveryStore()
 
     // Steps 9-10: event-level Session fork, branch export and semantic diff via production service.
     const sessionFile = path.join(root, 'sessions.json')
@@ -1393,7 +1396,7 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
       })
     })
     let memoryStore = new SqliteSemanticMemoryStore(memoryPath)
-    cleanupAfterTest(() => memoryStore.close())
+    const cleanupMemoryStore = cleanupAfterTest(() => memoryStore.close())
     let semantic = new PublicSemanticMemoryService({
       memory: new SemanticMemoryService(memoryStore, registry),
       assistantRuntime,
@@ -1422,7 +1425,8 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
       sourceSessionKey: 'e2e:dm:source'
     })
     expect(JSON.stringify(retrieval)).not.toContain('session-secret')
-    memoryStore.close()
+    await cleanupMemoryStore()
+    await cleanupSession()
 
     // Step 12: authenticated public SDK and canonical Studio/service store round-trip Graph V2 losslessly.
     const graphRoot = path.join(root, 'graphs')
@@ -1523,7 +1527,6 @@ describe('Magic Agent Platform 2 M8 strict production acceptance', () => {
     await cleanupDrive()
     await cleanupChannels()
     await cleanupAgents()
-    await cleanupSession()
     await cleanupSdkServer()
     await cleanupStore()
   }, 60_000)

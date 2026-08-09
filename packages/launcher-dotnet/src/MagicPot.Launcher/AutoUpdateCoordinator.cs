@@ -20,7 +20,6 @@ internal sealed class AutoUpdateCoordinatorOptions
     internal Func<LauncherLayout, LocalSmokeActivationTransaction>? ActivationFactory { get; init; }
     internal Func<LauncherLayout, InstalledSelectionResolver>? SelectionResolverFactory { get; init; }
     internal Action<LauncherLayout, ActivePointerV1>? AfterActivation { get; init; }
-    internal Action<Exception>? Diagnostic { get; init; }
     internal Func<DateTimeOffset>? Clock { get; init; }
 }
 
@@ -107,11 +106,10 @@ internal sealed class AutoUpdateCoordinator : IAutoUpdateCoordinator
                 token => downloader.DownloadAsync(runtimeRequest, token),
                 cancellationToken).ConfigureAwait(false);
             stage = "prepare";
-            (ap, rp) = await AwaitOwnedPairAsync(
-                token => preparer.PrepareAsync(ad, token),
-                token => preparer.PrepareAsync(rd, token),
-                cancellationToken).ConfigureAwait(false);
-            await ad.DisposeAsync().ConfigureAwait(false); ad = null; await rd.DisposeAsync().ConfigureAwait(false); rd = null;
+            ap = await preparer.PrepareAsync(ad, cancellationToken).ConfigureAwait(false);
+            await ad.DisposeAsync().ConfigureAwait(false); ad = null;
+            rp = await preparer.PrepareAsync(rd, cancellationToken).ConfigureAwait(false);
+            await rd.DisposeAsync().ConfigureAwait(false); rd = null;
             EnsureBinding(ap, rp, manifest.Proof, candidate); app = ap.TakeOwnership(); ap = null; runtime = rp.TakeOwnership(); rp = null;
             stage = "install-runtime"; rr = await installer.InstallAsync(runtime, cancellationToken).ConfigureAwait(false); await runtime.DisposeAsync().ConfigureAwait(false); runtime = null;
             stage = "install-app"; ar = await installer.InstallAsync(app, cancellationToken).ConfigureAwait(false); await app.DisposeAsync().ConfigureAwait(false); app = null;
@@ -125,7 +123,6 @@ internal sealed class AutoUpdateCoordinator : IAutoUpdateCoordinator
         catch (ArtifactTransportException error) { Trace(error); return AutoUpdateResult.Unavailable(version); }
         catch (Exception error)
         {
-            options.Diagnostic?.Invoke(error);
             Trace(error); if (error is StaleActivationException) stage = "activate";
             if (stage == "verify-active" && activationReceipt is not null)
                 return VerifyActiveFailure(layout, resolver, before, activationReceipt.Current, currentActive.App.Version);
