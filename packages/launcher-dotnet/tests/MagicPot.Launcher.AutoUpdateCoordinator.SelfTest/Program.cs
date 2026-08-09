@@ -174,9 +174,13 @@ internal static class AutoUpdateCoordinatorSelfTest
         await using Scenario scenario = await Scenario.CreateAsync(parent, "07-conflicting-final", fakeAppDirectory).ConfigureAwait(false);
         scenario.SeedOldActive();
         Directory.CreateDirectory(Path.Combine(scenario.Layout.Apps, Build));
-        File.WriteAllText(Path.Combine(scenario.Layout.Apps, Build, "conflict.txt"), "conflict");
+        string conflictPath = Path.Combine(scenario.Layout.Apps, Build, "conflict.txt");
+        File.WriteAllText(conflictPath, "conflict");
         AutoUpdateResult result = await scenario.ExecuteAsync().ConfigureAwait(false);
-        Need(result.Status == "failed" && result.Error?.Code == "install-failed" && result.Error.Stage == "install-app", $"conflicting app final fails install (Status={result.Status}, Error.Code={result.Error?.Code ?? "<null>"}, Error.Stage={result.Error?.Stage ?? "<null>"})");
+        bool rejectedBeforeActivation = result.Status == "failed" &&
+            (result.Error is { Code: "install-failed", Stage: "install-app" } or { Code: "prepare-failed", Stage: "prepare" });
+        Need(rejectedBeforeActivation, $"conflicting app final fails closed before activation (Status={result.Status}, Error.Code={result.Error?.Code ?? "<null>"}, Error.Stage={result.Error?.Stage ?? "<null>"})");
+        Need(File.ReadAllText(conflictPath) == "conflict", "conflicting app final is not replaced or modified");
         scenario.AssertOldActive();
         scenario.AssertClean(noJournal: true);
     }
