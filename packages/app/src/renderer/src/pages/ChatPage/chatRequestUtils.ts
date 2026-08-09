@@ -7,6 +7,8 @@ import {
   normalizeOpenAIBaseUrl,
   resolveProfileDeployment,
   resolveProfileProvider,
+  resolveChatProfileCapabilities,
+  selectProviderAttachmentTransport,
   type LLMReasoningEffort,
   type OpenAIImageGenerationOptions
 } from '@shared/llm'
@@ -25,6 +27,9 @@ import {
   getRemoteLlmServerOrigin
 } from '@renderer/utils/llmProfileUtils'
 import { normalizeLocalMediaUrl } from './chatPageShared'
+import { api } from '@renderer/utils/windowUtils'
+import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
+import { normalizeMediaReference } from '@shared/mediaReference'
 import {
   applySkillOutputModeContract,
   resolveSkillOutputImageGenerationOptions
@@ -135,11 +140,52 @@ const blobToDataUrl = (blob: Blob): Promise<string> =>
     reader.readAsDataURL(blob)
   })
 
+const isRequestDataImageUrl = (value: string): boolean => /^data:image\/[^;,]+;base64,/i.test(value)
+
+const isPublicHttpsUrl = (value: string): boolean => {
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+      return false
+    }
+
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    return (
+      hostname !== 'localhost' &&
+      hostname !== '::1' &&
+      !hostname.endsWith('.localhost') &&
+      !hostname.endsWith('.local') &&
+      !/^127\./.test(hostname) &&
+      !/^10\./.test(hostname) &&
+      !/^192\.168\./.test(hostname) &&
+      !/^169\.254\./.test(hostname) &&
+      !/^172\.(1[6-9]|2\d|3[01])\./.test(hostname) &&
+      !/^fc/i.test(hostname) &&
+      !/^fd/i.test(hostname) &&
+      !/^fe[89ab]/i.test(hostname)
+    )
+  } catch {
+    return false
+  }
+}
+
 const normalizeImageAttachmentForRequest = async (
-  attachment: ChatAttachment
+  attachment: ChatAttachment,
+  options: { allowRequestDataUrl?: boolean; allowAccessibleUrl?: boolean }
 ): Promise<ChatAttachment> => {
-  if (attachment.type !== 'image' || !attachment.url || attachment.url.startsWith('data:')) {
+  if (
+    attachment.type !== 'image' ||
+    !attachment.url ||
+    isRequestDataImageUrl(attachment.url) ||
+    (options.allowAccessibleUrl && isPublicHttpsUrl(attachment.url))
+  ) {
     return attachment
+  }
+
+  if (!options.allowRequestDataUrl) {
+    throw new Error(
+      `Unable to prepare image attachment "${attachment.fileName || 'image'}" for the model: request-data-url transport is not supported`
+    )
   }
 
   try {
@@ -161,17 +207,16 @@ const normalizeImageAttachmentForRequest = async (
           : blob.size
     }
   } catch (error) {
-    console.warn(
-      '[ChatPage] Failed to normalize image attachment for request:',
-      attachment.fileName || attachment.url,
-      error
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `Unable to prepare image attachment "${attachment.fileName || 'image'}" for the model: ${reason}`
     )
-    return attachment
   }
 }
 
 const normalizeFileAttachmentForRequest = async (
-  attachment: ChatAttachment
+  attachment: ChatAttachment,
+  options: { allowRequestDataUrl?: boolean }
 ): Promise<ChatAttachment> => {
   if (
     attachment.type !== 'file' ||
@@ -180,6 +225,12 @@ const normalizeFileAttachmentForRequest = async (
     !normalizeLocalMediaUrl(attachment.url).startsWith('local-media://')
   ) {
     return attachment
+  }
+
+  if (!options.allowRequestDataUrl) {
+    throw new Error(
+      `Unable to prepare file attachment "${attachment.fileName || 'file'}" for the model: request-data-url transport is not supported`
+    )
   }
 
   try {
@@ -201,30 +252,55 @@ const normalizeFileAttachmentForRequest = async (
           : blob.size
     }
   } catch (error) {
-    console.warn(
-      '[ChatPage] Failed to normalize file attachment for request:',
-      attachment.fileName || attachment.url,
-      error
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `Unable to prepare file attachment "${attachment.fileName || 'file'}" for the model: ${reason}`
     )
-    return attachment
   }
 }
 
 export const normalizeChatAttachmentsForRequest = async (
-  attachments: ChatAttachment[] | undefined
+  attachments: ChatAttachment[] | undefined,
+  options: {
+    managedMediaService?: ManagedMediaSvc
+    allowManagedRequestDataUrl?: boolean
+    allowRequestDataUrl?: boolean
+    allowAccessibleUrl?: boolean
+  } = {}
 ): Promise<ChatAttachment[] | undefined> => {
   if (!attachments?.length) {
     return undefined
   }
 
   return Promise.all(
-    attachments.map((attachment) =>
-      attachment.type === 'image'
-        ? normalizeImageAttachmentForRequest(attachment)
+    attachments.map(async (attachment) => {
+      const media = normalizeMediaReference(attachment.media)
+      if (media?.kind === 'managed') {
+        if (
+          !options.allowManagedRequestDataUrl ||
+          typeof options.managedMediaService?.materializeForRequest !== 'function'
+        ) {
+          throw new Error(
+            `Unable to prepare attachment "${attachment.fileName || 'attachment'}" for the model: no supported managed-media request transport`
+          )
+        }
+        const materialized = await options.managedMediaService.materializeForRequest({
+          reference: media,
+          transport: 'request-data-url'
+        })
+        return {
+          ...attachment,
+          url: materialized.dataUrl,
+          mimeType: materialized.mimeType,
+          sizeBytes: materialized.sizeBytes
+        }
+      }
+      return attachment.type === 'image'
+        ? normalizeImageAttachmentForRequest(attachment, options)
         : attachment.type === 'file'
-          ? normalizeFileAttachmentForRequest(attachment)
-          : Promise.resolve(attachment)
-    )
+          ? normalizeFileAttachmentForRequest(attachment, options)
+          : attachment
+    })
   )
 }
 
@@ -555,6 +631,10 @@ const prepareMessagesForRequest = async (
     reportInlineCharLimit?: number
     skipAttachmentContentAugmentation?: boolean
     skipInlineAttachmentSummary?: (attachment: ChatAttachment) => boolean
+    managedMediaService?: ManagedMediaSvc
+    allowManagedRequestDataUrl?: boolean
+    allowRequestDataUrl?: boolean
+    allowAccessibleUrl?: boolean
   } = {}
 ): Promise<ChatMessage[]> => {
   const prepared: ChatMessage[] = []
@@ -564,7 +644,7 @@ const prepareMessagesForRequest = async (
       message.role === 'user'
         ? await expandReportBundleAttachments(message.attachments)
         : message.attachments
-    const normalizedAttachments = await normalizeChatAttachmentsForRequest(attachments)
+    const normalizedAttachments = await normalizeChatAttachmentsForRequest(attachments, options)
     if (!normalizedAttachments?.length) {
       prepared.push({
         ...message,
@@ -1165,6 +1245,38 @@ export const resolveAttachmentBatchCapability = async (
   }
 }
 
+export const resolveAttachmentRequestCapabilities = (
+  config: Config,
+  profileId?: string | null
+): {
+  allowManagedRequestDataUrl: boolean
+  allowRequestDataUrl: boolean
+  allowAccessibleUrl: boolean
+} => {
+  const capabilities = resolveChatProfileCapabilities(resolveRequestProfile(config, profileId))
+  const requestDataUrlTransport = selectProviderAttachmentTransport(capabilities, {
+    available: { 'request-data-url': true },
+    requested: 'request-data-url'
+  })
+  const accessibleUrlTransport = selectProviderAttachmentTransport(capabilities, {
+    available: { 'accessible-url': true },
+    requested: 'accessible-url'
+  })
+  return {
+    allowManagedRequestDataUrl: requestDataUrlTransport === 'request-data-url',
+    allowRequestDataUrl: requestDataUrlTransport === 'request-data-url',
+    allowAccessibleUrl: accessibleUrlTransport === 'accessible-url'
+  }
+}
+
+const resolveManagedMediaRequestOptions = (input: RequestChatCompletionInput) => {
+  return {
+    managedMediaService: (api() as unknown as { svcManagedMedia?: ManagedMediaSvc })
+      .svcManagedMedia,
+    ...resolveAttachmentRequestCapabilities(input.config, input.profileId)
+  }
+}
+
 export const requestChatCompletion = async (
   input: RequestChatCompletionInput
 ): Promise<RequestChatCompletionResult> => {
@@ -1180,6 +1292,7 @@ export const requestChatCompletion = async (
   const requestMessages = await prepareMessagesForRequest(input.messages, {
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
+    ...resolveManagedMediaRequestOptions(input),
     skipInlineAttachmentSummary: (attachment) =>
       shouldSkipInlineAttachmentSummary(input.config, input.profileId, attachment)
   })
@@ -1205,6 +1318,7 @@ export const requestChatCompletionStream = async (
   const requestMessages = await prepareMessagesForRequest(input.messages, {
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
+    ...resolveManagedMediaRequestOptions(input),
     skipInlineAttachmentSummary: (attachment) =>
       shouldSkipInlineAttachmentSummary(input.config, input.profileId, attachment)
   })

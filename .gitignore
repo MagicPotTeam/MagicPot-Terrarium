@@ -61,10 +61,12 @@ config.json
 !/vendor/comfyui/run_nvidia_gpu.bat
 !/vendor/comfyui/run_nvidia_gpu_fast_fp16_accumulation.bat
 
-# Python cache
+# Python cache and packaging output
 __pycache__/
 *.py[cod]
 *$py.class
+/packages/agent-sdk-python/build/
+/packages/agent-sdk-python/src/*.egg-info/
 # Temporary & Generated files
 *.tsbuildinfo
 *.txt
@@ -119,3 +121,9 @@ record.json
 # Locally built native sidecar binaries
 /packages/runtime-assets/resources/bin/image-worker/
 /packages/runtime-assets/resources/bin/lora-trigger-sidecar/
+/packages/runtime-assets/resources/bin/magicpot-command-job/
+
+# .NET launcher build products and local release trust configuration
+packages/launcher-dotnet/**/bin/
+packages/launcher-dotnet/**/obj/
+packages/launcher-dotnet/launcher-update-config.local.json

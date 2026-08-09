@@ -1,4 +1,5 @@
-﻿/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable react-refresh/only-export-components */
 import React from 'react'
 import {
   Box,
@@ -26,7 +27,9 @@ import {
   InsertDriveFile as FileIcon,
   SlideshowOutlined as PowerPointFileIcon,
   KeyboardArrowDown as CollapseIcon,
-  KeyboardArrowRight as ExpandIcon
+  KeyboardArrowRight as ExpandIcon,
+  Close as CloseIcon,
+  Image as ImageIcon
 } from '@mui/icons-material'
 import {
   CheckCircleOutline as CopyDoneIcon,
@@ -65,8 +68,21 @@ import {
   getFileBadgeText
 } from '@renderer/utils/fileDisplay'
 import { useMessage } from '@renderer/hooks/useMessage'
+import { api } from '@renderer/utils/windowUtils'
 import { DccBridgeTarget, isSupportedDccBridgeModelSourceFormat } from '@shared/api/svcDccBridge'
+import type { ManagedMediaDerivativeMaxEdge, ManagedMediaSvc } from '@shared/api/svcManagedMedia'
+import { normalizeMediaReference, type MediaReference } from '@shared/mediaReference'
 import type { SxProps, Theme } from '@mui/material/styles'
+import {
+  ensureCachedChatImageDerivative,
+  getChatImageDerivativeCacheKey
+} from '../chatImageDerivativeScheduler'
+
+export {
+  ensureCachedChatImageDerivative,
+  getChatImageDerivativeCacheSizeForTests,
+  resetChatImageDerivativeCacheForTests
+} from '../chatImageDerivativeScheduler'
 
 interface ChatMessageListProps {
   active?: boolean
@@ -101,7 +117,285 @@ export type ChatPendingConfirmation = {
 }
 
 const COPIED_FEEDBACK_DURATION_MS = 1800
+const CHAT_VIRTUALIZATION_THRESHOLD = 40
+const CHAT_VIRTUALIZATION_OVERSCAN_PX = 900
+const CHAT_ESTIMATED_MESSAGE_HEIGHT = 112
+const CHAT_STICK_TO_BOTTOM_THRESHOLD_PX = 48
+const CHAT_SESSION_SCROLL_POSITION_LIMIT = 100
+const chatSessionScrollPositions = new Map<string, number>()
 
+const CHAT_IMAGE_FALLBACK_WIDTH = 320
+const CHAT_IMAGE_FALLBACK_HEIGHT = 240
+const CHAT_IMAGE_DERIVATIVE_ROOT_MARGIN = '800px 0px'
+const CHAT_IMAGE_DERIVATIVE_BUCKETS = [256, 512, 1024, 2048] as const
+
+export const getChatImageDerivativeMaxEdge = (
+  cssMaxDimension: number,
+  devicePixelRatio: number,
+  sourceMaxDimension?: number
+): ManagedMediaDerivativeMaxEdge => {
+  const dimension = Number.isFinite(cssMaxDimension) ? Math.max(0, cssMaxDimension) : 0
+  const dpr = Number.isFinite(devicePixelRatio) ? Math.min(3, Math.max(1, devicePixelRatio)) : 1
+  const validSourceEdge =
+    Number.isFinite(sourceMaxDimension) && (sourceMaxDimension ?? 0) > 0
+      ? (sourceMaxDimension as number)
+      : undefined
+  const requiredEdge = Math.min(dimension * dpr, validSourceEdge ?? Number.POSITIVE_INFINITY)
+  return (
+    CHAT_IMAGE_DERIVATIVE_BUCKETS.find((bucket) => requiredEdge <= bucket) ??
+    CHAT_IMAGE_DERIVATIVE_BUCKETS[CHAT_IMAGE_DERIVATIVE_BUCKETS.length - 1]
+  )
+}
+
+const ChatImage: React.FC<{
+  src: string
+  media?: MediaReference
+  alt: string
+  sourceWidth?: number
+  sourceHeight?: number
+  maxHeight: number
+  margin?: string
+  onPreview: () => void
+  onContextMenu: (event: React.MouseEvent<HTMLImageElement>) => void
+}> = ({
+  src: originalSrc,
+  media,
+  alt,
+  sourceWidth,
+  sourceHeight,
+  maxHeight,
+  margin,
+  onPreview,
+  onContextMenu
+}) => {
+  const { t } = useTranslation()
+  const frameRef = React.useRef<HTMLDivElement | null>(null)
+  const generationRef = React.useRef(0)
+  const abortControllerRef = React.useRef<AbortController | null>(null)
+  const [displaySrc, setDisplaySrc] = React.useState<string | null>(null)
+  const [failed, setFailed] = React.useState(false)
+  const [nearViewport, setNearViewport] = React.useState(false)
+  const [maxEdge, setMaxEdge] = React.useState<ManagedMediaDerivativeMaxEdge | null>(null)
+  const [brokenDerivativeKey, setBrokenDerivativeKey] = React.useState<string | null>(null)
+  const managedMedia = React.useMemo(() => {
+    const normalized = normalizeMediaReference(media)
+    return normalized?.kind === 'managed' && normalized.sha256
+      ? (normalized as MediaReference & { kind: 'managed'; sha256: string })
+      : undefined
+  }, [media])
+  const mediaKey = managedMedia
+    ? `${managedMedia.version}:${managedMedia.relativePath}:${managedMedia.sha256}`
+    : ''
+
+  const hasValidSourceDimensions =
+    Number.isFinite(sourceWidth) &&
+    Number.isFinite(sourceHeight) &&
+    (sourceWidth ?? 0) > 0 &&
+    (sourceHeight ?? 0) > 0
+  const width = hasValidSourceDimensions ? (sourceWidth as number) : CHAT_IMAGE_FALLBACK_WIDTH
+  const height = hasValidSourceDimensions ? (sourceHeight as number) : CHAT_IMAGE_FALLBACK_HEIGHT
+  const displayScale = Math.min(1, 900 / width, maxHeight / height)
+  const boundedWidth = width * displayScale
+  const boundedHeight = height * displayScale
+
+  React.useEffect(() => {
+    generationRef.current += 1
+    setDisplaySrc(null)
+    setFailed(false)
+    setNearViewport(false)
+    setMaxEdge(null)
+    setBrokenDerivativeKey(null)
+  }, [managedMedia, originalSrc, mediaKey])
+
+  React.useEffect(() => {
+    const frame = frameRef.current
+    if (!frame) return
+    if (typeof IntersectionObserver === 'undefined') {
+      // Preserve legacy image behavior in runtimes that cannot report visibility.
+      if (!managedMedia) setNearViewport(true)
+      return
+    }
+    const root = frame.closest('[data-chat-scroll-root]')
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries.find((candidate) => candidate.target === frame) ?? entries[0]
+        if (!entry) return
+        generationRef.current += 1
+        setNearViewport(entry.isIntersecting)
+        if (!entry.isIntersecting) {
+          abortControllerRef.current?.abort()
+          abortControllerRef.current = null
+          setDisplaySrc(null)
+          setFailed(false)
+        }
+      },
+      { root, rootMargin: CHAT_IMAGE_DERIVATIVE_ROOT_MARGIN }
+    )
+    observer.observe(frame)
+    return () => observer.disconnect()
+  }, [mediaKey, originalSrc])
+
+  const measureRequiredEdge = React.useCallback(() => {
+    const rect = frameRef.current?.getBoundingClientRect()
+    const cssMaxDimension = Math.max(rect?.width || boundedWidth, rect?.height || boundedHeight)
+    const sourceMaxDimension = hasValidSourceDimensions ? Math.max(width, height) : undefined
+    setMaxEdge(
+      getChatImageDerivativeMaxEdge(cssMaxDimension, window.devicePixelRatio, sourceMaxDimension)
+    )
+  }, [boundedHeight, boundedWidth, hasValidSourceDimensions, height, width])
+
+  React.useEffect(() => {
+    if (!nearViewport) return
+    measureRequiredEdge()
+    window.addEventListener('resize', measureRequiredEdge)
+    const frame = frameRef.current
+    const observer =
+      frame && typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(measureRequiredEdge)
+        : undefined
+    if (frame) observer?.observe(frame)
+    return () => {
+      window.removeEventListener('resize', measureRequiredEdge)
+      observer?.disconnect()
+    }
+  }, [measureRequiredEdge, nearViewport])
+
+  React.useEffect(() => {
+    if (!nearViewport) return
+    if (!managedMedia || !maxEdge) {
+      setDisplaySrc(originalSrc)
+      return
+    }
+
+    const cacheKey = getChatImageDerivativeCacheKey(managedMedia, maxEdge)
+    if (cacheKey === brokenDerivativeKey) {
+      setDisplaySrc(originalSrc)
+      return
+    }
+
+    const service = (api() as unknown as { svcManagedMedia?: ManagedMediaSvc })?.svcManagedMedia
+    if (typeof service?.ensureDerivative !== 'function') {
+      setDisplaySrc(originalSrc)
+      return
+    }
+
+    const generation = ++generationRef.current
+    abortControllerRef.current?.abort()
+    const abortController = new AbortController()
+    abortControllerRef.current = abortController
+    void ensureCachedChatImageDerivative(service, managedMedia, maxEdge, {
+      priority: -maxEdge,
+      signal: abortController.signal
+    }).then(
+      (result) => {
+        if (generation !== generationRef.current || !nearViewport) return
+        setFailed(false)
+        setDisplaySrc(
+          result.status === 'ready' ? result.descriptor.localMediaUrl : result.localMediaUrl
+        )
+      },
+      () => {
+        if (generation !== generationRef.current || !nearViewport) return
+        setFailed(false)
+        setDisplaySrc(originalSrc)
+      }
+    )
+    return () => {
+      abortController.abort()
+      if (abortControllerRef.current === abortController) abortControllerRef.current = null
+    }
+  }, [brokenDerivativeKey, managedMedia, maxEdge, nearViewport, originalSrc])
+
+  React.useEffect(
+    () => () => {
+      generationRef.current += 1
+    },
+    []
+  )
+
+  const failureLabel = t('chat.image_load_failed_label', {
+    name: alt,
+    defaultValue: '{{name}} failed to load'
+  })
+
+  return (
+    <Box
+      ref={frameRef}
+      data-testid="chat-image-frame"
+      sx={{
+        width: `min(100%, ${boundedWidth}px)`,
+        height: boundedHeight,
+        maxHeight,
+        borderRadius: '12px',
+        overflow: 'hidden',
+        ...(margin ? { my: margin } : {})
+      }}
+    >
+      {failed ? (
+        <Box
+          role="img"
+          aria-label={failureLabel}
+          sx={{
+            width: '100%',
+            height: '100%',
+            borderRadius: '12px',
+            border: 1,
+            borderColor: 'divider',
+            bgcolor: 'action.hover',
+            color: 'text.secondary',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            px: 2,
+            textAlign: 'center'
+          }}
+        >
+          <Typography variant="body2">{failureLabel}</Typography>
+        </Box>
+      ) : displaySrc ? (
+        <img
+          src={displaySrc}
+          alt={alt}
+          width={width}
+          height={height}
+          loading="lazy"
+          decoding="async"
+          style={{
+            width: '100%',
+            height: '100%',
+            maxWidth: '100%',
+            maxHeight: `${maxHeight}px`,
+            borderRadius: '12px',
+            objectFit: 'contain',
+            display: 'block',
+            cursor: 'pointer'
+          }}
+          draggable
+          onLoad={measureRequiredEdge}
+          onError={() => {
+            if (displaySrc !== originalSrc) {
+              if (managedMedia && maxEdge) {
+                setBrokenDerivativeKey(getChatImageDerivativeCacheKey(managedMedia, maxEdge))
+              }
+              generationRef.current += 1
+              setFailed(false)
+              setDisplaySrc(originalSrc)
+              return
+            }
+            setFailed(true)
+          }}
+          onDragStart={(event) => {
+            event.stopPropagation()
+            event.dataTransfer.effectAllowed = 'copy'
+            setAgentImageDragPayload(event.dataTransfer, originalSrc)
+          }}
+          onClick={onPreview}
+          onContextMenu={onContextMenu}
+        />
+      ) : null}
+    </Box>
+  )
+}
 const CopiableIconButton: React.FC<{
   copyLabel: string
   copiedLabel: string
@@ -165,6 +459,44 @@ const CopiableIconButton: React.FC<{
   )
 }
 
+const MeasuredChatRow: React.FC<{
+  identity: string
+  index: number
+  enabled: boolean
+  bottomSpacing: number
+  onHeight: (identity: string, index: number, height: number) => void
+  children: React.ReactNode
+}> = ({ identity, index, enabled, bottomSpacing, onHeight, children }) => {
+  const rowRef = React.useRef<HTMLDivElement | null>(null)
+
+  React.useLayoutEffect(() => {
+    if (!enabled || !rowRef.current) return
+
+    const row = rowRef.current
+    const initialHeight = row.getBoundingClientRect().height
+    if (initialHeight > 0) onHeight(identity, index, initialHeight)
+    if (typeof ResizeObserver === 'undefined') return
+
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return
+      onHeight(identity, index, entry.contentRect.height + bottomSpacing)
+    })
+    observer.observe(row)
+    return () => observer.disconnect()
+  }, [bottomSpacing, enabled, identity, index, onHeight])
+
+  return (
+    <div
+      ref={rowRef}
+      data-chat-message-index={index}
+      data-chat-message-identity={identity}
+      style={{ width: '100%', boxSizing: 'border-box', paddingBottom: bottomSpacing }}
+    >
+      {children}
+    </div>
+  )
+}
+
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
   active = true,
   currentSession,
@@ -198,15 +530,245 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     sidecarExportEntries.length > 1
       ? (sidecarExportEntries[sidecarExportEntries.length - 1]?.assistantMessageIndex ?? null)
       : null
+  const editScrollPositionRef = React.useRef<{
+    bottomOffset: number
+    scrollLeft: number
+  } | null>(null)
+
+  const messageIdentityMap = React.useRef(new WeakMap<object, string>())
+  const nextMessageIdentityRef = React.useRef(0)
+  const restoredSessionIdRef = React.useRef<string | null>(null)
+  const messageIdentities = React.useMemo(() => {
+    const seen = new Map<string, number>()
+    return messages.map((message) => {
+      const candidate = message as ChatMessage & { id?: string; messageId?: string }
+      const suppliedId = candidate.id || candidate.messageId
+      let base: string
+      if (suppliedId) {
+        base = `message-id:${suppliedId}`
+      } else {
+        const messageObject = message as object
+        base =
+          messageIdentityMap.current.get(messageObject) ??
+          `message-object:${nextMessageIdentityRef.current++}`
+        messageIdentityMap.current.set(messageObject, base)
+      }
+      const occurrence = seen.get(base) ?? 0
+      seen.set(base, occurrence + 1)
+      return `${base}:${occurrence}`
+    })
+  }, [messages])
+  const measuredHeights = React.useRef(new Map<string, number>())
+  const [scroll, setScroll] = React.useState({ top: 0, viewport: 0 })
+  const [heightRevision, setHeightRevision] = React.useState(0)
+  const visibleStartRef = React.useRef(0)
+  const pendingScrollAdjustmentRef = React.useRef(0)
+  const pendingStickToBottomRef = React.useRef(false)
+  const wasNearBottomRef = React.useRef(false)
+  const measuredSessionIdRef = React.useRef(currentSession?.id)
+  if (measuredSessionIdRef.current !== currentSession?.id) {
+    measuredSessionIdRef.current = currentSession?.id
+    measuredHeights.current.clear()
+    pendingScrollAdjustmentRef.current = 0
+    pendingStickToBottomRef.current = false
+    wasNearBottomRef.current = false
+    visibleStartRef.current = 0
+  }
+  React.useEffect(() => {
+    const valid = new Set(messageIdentities)
+    for (const identity of measuredHeights.current.keys()) {
+      if (!valid.has(identity)) measuredHeights.current.delete(identity)
+    }
+  }, [messageIdentities])
+  const virtualized = messages.length > CHAT_VIRTUALIZATION_THRESHOLD
+  const itemHeight = React.useCallback(
+    (index: number) =>
+      measuredHeights.current.get(messageIdentities[index] ?? '') ?? CHAT_ESTIMATED_MESSAGE_HEIGHT,
+    [messageIdentities]
+  )
+  const measureRow = React.useCallback(
+    (identity: string, index: number, height: number) => {
+      if (height <= 0) return
+      const previousHeight = measuredHeights.current.get(identity) ?? CHAT_ESTIMATED_MESSAGE_HEIGHT
+      if (previousHeight === height) return
+
+      const container = chatContainerRef.current
+      if (container) {
+        const wasNearBottom = wasNearBottomRef.current
+        pendingStickToBottomRef.current = pendingStickToBottomRef.current || wasNearBottom
+        if (!wasNearBottom && index < visibleStartRef.current) {
+          pendingScrollAdjustmentRef.current += height - previousHeight
+        }
+      }
+      measuredHeights.current.set(identity, height)
+      setHeightRevision((revision) => revision + 1)
+    },
+    [chatContainerRef]
+  )
+  React.useEffect(() => {
+    const container = chatContainerRef.current
+    if (!container) return
+    const update = () => {
+      const top = container.scrollTop
+      wasNearBottomRef.current =
+        container.scrollHeight - container.clientHeight - top <= CHAT_STICK_TO_BOTTOM_THRESHOLD_PX
+      setScroll({ top, viewport: container.clientHeight })
+    }
+    update()
+    container.addEventListener('scroll', update, { passive: true })
+    window.addEventListener('resize', update)
+    return () => {
+      container.removeEventListener('scroll', update)
+      window.removeEventListener('resize', update)
+    }
+  }, [chatContainerRef, messages.length])
+  const loadingIndex = isLoading && messages.length > 0 ? messages.length - 1 : null
+  const virtualWindow = React.useMemo(() => {
+    void heightRevision
+    if (!virtualized) {
+      return {
+        start: 0,
+        end: messages.length,
+        top: 0,
+        bottom: 0,
+        loadingGap: 0,
+        forcedLoadingIndex: null,
+        anchorStart: 0
+      }
+    }
+    const from = Math.max(0, scroll.top - CHAT_VIRTUALIZATION_OVERSCAN_PX)
+    const to = scroll.top + (scroll.viewport || 800) + CHAT_VIRTUALIZATION_OVERSCAN_PX
+    const offsets = [0]
+    for (let i = 0; i < messages.length; i += 1) {
+      offsets.push(offsets[i] + itemHeight(i))
+    }
+    let start = 0
+    while (start < messages.length - 1 && offsets[start + 1] < from) start += 1
+    let anchorStart = 0
+    while (anchorStart < messages.length - 1 && offsets[anchorStart + 1] < scroll.top) {
+      anchorStart += 1
+    }
+    let end = start
+    while (end < messages.length && offsets[end] < to) end += 1
+    end = Math.max(start + 1, end)
+    const forcedLoadingIndex =
+      loadingIndex !== null && (loadingIndex < start || loadingIndex >= end) ? loadingIndex : null
+    return {
+      start,
+      end,
+      top: offsets[start],
+      bottom:
+        forcedLoadingIndex === null
+          ? offsets[messages.length] - offsets[end]
+          : offsets[messages.length] - offsets[forcedLoadingIndex + 1],
+      loadingGap:
+        forcedLoadingIndex === null ? 0 : Math.max(0, offsets[forcedLoadingIndex] - offsets[end]),
+      forcedLoadingIndex,
+      anchorStart
+    }
+  }, [
+    heightRevision,
+    itemHeight,
+    loadingIndex,
+    messages.length,
+    messageIdentities,
+    scroll,
+    virtualized
+  ])
+  visibleStartRef.current = virtualWindow.anchorStart
+
+  React.useLayoutEffect(() => {
+    const sessionId = currentSession?.id
+    const container = chatContainerRef.current
+    if (!sessionId || !container) return
+
+    if (restoredSessionIdRef.current === null) {
+      restoredSessionIdRef.current = sessionId
+    } else if (restoredSessionIdRef.current !== sessionId) {
+      restoredSessionIdRef.current = sessionId
+      const savedScrollTop = chatSessionScrollPositions.get(sessionId)
+      const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
+      container.scrollTop =
+        maxScrollTop > 0
+          ? Math.min(savedScrollTop ?? maxScrollTop, maxScrollTop)
+          : (savedScrollTop ?? 0)
+      wasNearBottomRef.current = maxScrollTop - container.scrollTop <= 80
+    }
+
+    setScroll({ top: container.scrollTop, viewport: container.clientHeight })
+
+    const saveScrollPosition = () => {
+      chatSessionScrollPositions.delete(sessionId)
+      chatSessionScrollPositions.set(sessionId, container.scrollTop)
+      if (chatSessionScrollPositions.size > CHAT_SESSION_SCROLL_POSITION_LIMIT) {
+        const oldestSessionId = chatSessionScrollPositions.keys().next().value
+        if (oldestSessionId) chatSessionScrollPositions.delete(oldestSessionId)
+      }
+    }
+
+    container.addEventListener('scroll', saveScrollPosition, { passive: true })
+    return () => {
+      saveScrollPosition()
+      container.removeEventListener('scroll', saveScrollPosition)
+    }
+  }, [chatContainerRef, currentSession?.id])
+
+  React.useLayoutEffect(() => {
+    const container = chatContainerRef.current
+    if (!container) return
+
+    if (pendingStickToBottomRef.current) {
+      container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
+    } else if (pendingScrollAdjustmentRef.current) {
+      container.scrollTop += pendingScrollAdjustmentRef.current
+    }
+    pendingStickToBottomRef.current = false
+    pendingScrollAdjustmentRef.current = 0
+    setScroll({ top: container.scrollTop, viewport: container.clientHeight })
+  }, [chatContainerRef, heightRevision])
+
+  const handleStartEditing = React.useCallback(
+    (index: number, content: string) => {
+      const scrollContainer = chatContainerRef.current
+      editScrollPositionRef.current = scrollContainer
+        ? {
+            bottomOffset:
+              scrollContainer.scrollHeight -
+              scrollContainer.clientHeight -
+              scrollContainer.scrollTop,
+            scrollLeft: scrollContainer.scrollLeft
+          }
+        : null
+      onSetEditingIndex(index)
+      onSetEditingContent(content)
+    },
+    [chatContainerRef, onSetEditingContent, onSetEditingIndex]
+  )
+
+  React.useLayoutEffect(() => {
+    if (editingMessageIndex === null) return
+
+    const scrollContainer = chatContainerRef.current
+    const savedPosition = editScrollPositionRef.current
+    if (!scrollContainer || !savedPosition) return
+
+    scrollContainer.scrollTop =
+      scrollContainer.scrollHeight - scrollContainer.clientHeight - savedPosition.bottomOffset
+    scrollContainer.scrollLeft = savedPosition.scrollLeft
+  }, [chatContainerRef, editingMessageIndex])
+
   return (
     <Box
       ref={chatContainerRef}
+      data-chat-scroll-container="true"
+      data-chat-scroll-root
       data-testid="chat-message-list"
       sx={{
         flex: 1,
         minHeight: 0,
         overflow: 'auto',
         overflowX: 'hidden',
+        overflowAnchor: 'none',
         display: 'flex',
         flexDirection: 'column',
         maxWidth: '900px',
@@ -239,85 +801,119 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           <Typography variant="h6">{t('chat.welcome_message')}</Typography>
         </Box>
       )}
-      {messages.map((message, index) => (
-        <Box
-          key={index}
-          sx={{
-            width: '100%',
-            display: 'flex',
-            flexDirection: 'column',
-            mb: message.role === 'user' ? 0 : 2
-          }}
-        >
-          {message.role === 'user' ? (
-            editingMessageIndex === index ? (
-              <UserMessageEditForm
-                message={message}
-                index={index}
-                editingContent={editingContent}
-                onSetEditingContent={onSetEditingContent}
-                onCancel={() => {
-                  onSetEditingIndex(null)
-                  onSetEditingContent('')
-                }}
-                onSubmit={(content) => {
-                  const truncatedMessages = currentSession?.messages.slice(0, index) || []
-                  onSetEditingIndex(null)
-                  onSetEditingContent('')
-                  onSendEditedMessage(
-                    content,
-                    message.attachments,
-                    message.hiddenContext,
-                    truncatedMessages
-                  )
-                }}
-                isLight={isLight}
+      {virtualized && virtualWindow.top > 0 ? (
+        <div
+          data-testid="chat-virtual-top-spacer"
+          style={{ height: virtualWindow.top, flexShrink: 0 }}
+        />
+      ) : null}
+      {[
+        ...Array.from(
+          { length: virtualWindow.end - virtualWindow.start },
+          (_, offsetIndex) => offsetIndex + virtualWindow.start
+        ),
+        ...(virtualWindow.forcedLoadingIndex === null ? [] : [virtualWindow.forcedLoadingIndex])
+      ].map((index) => {
+        const message = messages[index]
+        return (
+          <React.Fragment key={messageIdentities[index]}>
+            {index === virtualWindow.forcedLoadingIndex && virtualWindow.loadingGap > 0 ? (
+              <div
+                data-testid="chat-virtual-loading-gap"
+                style={{ height: virtualWindow.loadingGap, flexShrink: 0 }}
               />
-            ) : (
-              <UserMessageBubble
-                message={message}
-                index={index}
-                isLight={isLight}
-                onEdit={() => {
-                  onSetEditingIndex(index)
-                  onSetEditingContent(message.content || '')
-                }}
-                onPreviewImage={onPreviewImage}
-                onImageContextMenu={onImageContextMenu}
-                onDownloadAttachment={onDownloadAttachment}
-                onSendModelToDcc={onSendModelToDcc}
-                notifySuccess={notifySuccess}
-                t={t}
-                theme={theme}
-              />
-            )
-          ) : (
-            <AssistantMessageBubble
-              message={message}
-              replyDownloadBaseName={buildAssistantReplyDownloadBaseName(messages, index)}
-              replyDownloadMode={resolveAssistantReplyDownloadMode(
-                messages,
-                index,
-                currentSession?.skillId
+            ) : null}
+            <MeasuredChatRow
+              key={messageIdentities[index]}
+              identity={messageIdentities[index]}
+              index={index}
+              enabled={virtualized}
+              bottomSpacing={message.role === 'user' ? 0 : 16}
+              onHeight={measureRow}
+            >
+              {message.role === 'user' ? (
+                editingMessageIndex === index ? (
+                  <UserMessageEditForm
+                    key={messageIdentities[index]}
+                    message={message}
+                    index={index}
+                    editingContent={editingContent}
+                    onSetEditingContent={onSetEditingContent}
+                    onCancel={() => {
+                      onSetEditingIndex(null)
+                      onSetEditingContent('')
+                    }}
+                    onSubmit={(content, attachments) => {
+                      const truncatedMessages = currentSession?.messages.slice(0, index) || []
+                      onSetEditingIndex(null)
+                      onSetEditingContent('')
+                      onSendEditedMessage(
+                        content,
+                        attachments,
+                        message.hiddenContext,
+                        truncatedMessages
+                      )
+                    }}
+                    savedChatScrollPositionRef={editScrollPositionRef}
+                    isLight={isLight}
+                  />
+                ) : (
+                  <UserMessageBubble
+                    message={message}
+                    index={index}
+                    isLight={isLight}
+                    onEdit={() => {
+                      handleStartEditing(index, message.content || '')
+                    }}
+                    onPreviewImage={onPreviewImage}
+                    onImageContextMenu={onImageContextMenu}
+                    onDownloadAttachment={onDownloadAttachment}
+                    onSendModelToDcc={onSendModelToDcc}
+                    notifySuccess={notifySuccess}
+                    t={t}
+                    theme={theme}
+                  />
+                )
+              ) : (
+                <AssistantMessageBubble
+                  message={message}
+                  replyDownloadBaseName={buildAssistantReplyDownloadBaseName(messages, index)}
+                  replyDownloadMode={resolveAssistantReplyDownloadMode(
+                    messages,
+                    index,
+                    currentSession?.skillId
+                  )}
+                  batchSidecarExportEntries={
+                    batchSidecarExportAnchorIndex === index ? sidecarExportEntries : undefined
+                  }
+                  active={active}
+                  isLight={isLight}
+                  isLoading={isLoading && index === messages.length - 1}
+                  loadingStatus={
+                    isLoading && index === messages.length - 1 ? loadingStatus : undefined
+                  }
+                  onPreviewImage={onPreviewImage}
+                  onImageContextMenu={onImageContextMenu}
+                  onDownloadAttachment={onDownloadAttachment}
+                  onSendModelToDcc={onSendModelToDcc}
+                  notifySuccess={notifySuccess}
+                  t={t}
+                  theme={theme}
+                />
               )}
-              batchSidecarExportEntries={
-                batchSidecarExportAnchorIndex === index ? sidecarExportEntries : undefined
-              }
-              active={active}
-              isLight={isLight}
-              isLoading={isLoading && index === messages.length - 1}
-              loadingStatus={isLoading && index === messages.length - 1 ? loadingStatus : undefined}
-              onPreviewImage={onPreviewImage}
-              onImageContextMenu={onImageContextMenu}
-              onDownloadAttachment={onDownloadAttachment}
-              onSendModelToDcc={onSendModelToDcc}
-              notifySuccess={notifySuccess}
-              t={t}
-              theme={theme}
-            />
-          )}
-        </Box>
-      ))}
+            </MeasuredChatRow>
+          </React.Fragment>
+        )
+      })}
+      {virtualized && virtualWindow.bottom > 0 ? (
+        <div
+          data-testid="chat-virtual-bottom-spacer"
+          style={{
+            height: virtualWindow.bottom,
+            flexShrink: 0
+          }}
+        />
+      ) : null}
       {pendingConfirmation ? (
         <PendingConfirmationPanel
           confirmation={pendingConfirmation}
@@ -550,6 +1146,7 @@ const ModelAttachmentCard: React.FC<{
       onDragStart={(event) => {
         if (!sourceUrl) return
         event.stopPropagation()
+        event.dataTransfer.effectAllowed = 'copy'
         setAgentModel3DDragPayload(event.dataTransfer, sourceUrl)
       }}
       sx={{
@@ -643,6 +1240,7 @@ const FileAttachmentCard: React.FC<{
       onDragStart={(event) => {
         if (!attachment.url) return
         event.stopPropagation()
+        event.dataTransfer.effectAllowed = 'copy'
         setAgentAttachmentDragPayload(event.dataTransfer, attachment, { ocrResult })
       }}
       sx={{
@@ -844,21 +1442,157 @@ const UserMessageEditForm: React.FC<{
   editingContent: string
   onSetEditingContent: (content: string) => void
   onCancel: () => void
-  onSubmit: (content: string) => void
+  onSubmit: (content: string, attachments?: ChatAttachment[]) => void
+  savedChatScrollPositionRef: React.MutableRefObject<{
+    bottomOffset: number
+    scrollLeft: number
+  } | null>
   isLight: boolean
-}> = ({ message, editingContent, onSetEditingContent, onCancel, onSubmit, isLight }) => {
+}> = ({
+  message,
+  editingContent,
+  onSetEditingContent,
+  onCancel,
+  onSubmit,
+  savedChatScrollPositionRef,
+  isLight
+}) => {
+  const { t } = useTranslation()
+  const [editingAttachments, setEditingAttachments] = React.useState<ChatAttachment[]>(
+    () => message.attachments ?? []
+  )
+  const visibleAttachments = getVisibleChatAttachments(editingAttachments)
+  const removeAttachment = (attachment: ChatAttachment): void => {
+    setEditingAttachments((current) => current.filter((item) => item !== attachment))
+  }
+  const editorRef = React.useRef<HTMLTextAreaElement | null>(null)
+  const initialCaretPositionRef = React.useRef(editingContent.length)
+  const hasPositionedInitialCaretRef = React.useRef(false)
+  const pendingSelectionRef = React.useRef<{
+    start: number
+    end: number
+    scrollTop: number
+    scrollLeft: number
+    chatScrollTop: number | null
+    chatScrollLeft: number | null
+    value: string
+  } | null>(null)
   const userBubbleBg = isLight ? '#eee7ff' : '#6f5bd6'
   const userBubbleText = isLight ? '#2f235f' : '#ffffff'
+
+  React.useLayoutEffect(() => {
+    const editor = editorRef.current
+    if (!editor) return
+
+    const chatScrollContainer = editor.closest(
+      '[data-chat-scroll-container="true"]'
+    ) as HTMLElement | null
+    const savedChatScrollPosition = savedChatScrollPositionRef.current
+    const restoreSavedChatScrollPosition = () => {
+      if (!chatScrollContainer || !savedChatScrollPosition) return
+      chatScrollContainer.scrollTop =
+        chatScrollContainer.scrollHeight -
+        chatScrollContainer.clientHeight -
+        savedChatScrollPosition.bottomOffset
+      chatScrollContainer.scrollLeft = savedChatScrollPosition.scrollLeft
+    }
+    const pendingSelection = pendingSelectionRef.current
+    if (pendingSelection) {
+      pendingSelectionRef.current = null
+      editor.setSelectionRange(pendingSelection.start, pendingSelection.end)
+      editor.scrollTop = pendingSelection.scrollTop
+      editor.scrollLeft = pendingSelection.scrollLeft
+      if (
+        chatScrollContainer &&
+        pendingSelection.chatScrollTop !== null &&
+        pendingSelection.chatScrollLeft !== null
+      ) {
+        chatScrollContainer.scrollTop = pendingSelection.chatScrollTop
+        chatScrollContainer.scrollLeft = pendingSelection.chatScrollLeft
+      }
+      return
+    }
+
+    if (!hasPositionedInitialCaretRef.current) {
+      hasPositionedInitialCaretRef.current = true
+      const caretPosition = initialCaretPositionRef.current
+      restoreSavedChatScrollPosition()
+      editor.focus({ preventScroll: true })
+      editor.setSelectionRange(caretPosition, caretPosition)
+      editor.scrollTop = editor.scrollHeight
+      restoreSavedChatScrollPosition()
+      const frame = window.requestAnimationFrame(restoreSavedChatScrollPosition)
+      return () => window.cancelAnimationFrame(frame)
+    }
+
+    return undefined
+  }, [editingContent, savedChatScrollPositionRef])
+
+  const handleEditorChange = React.useCallback(
+    (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+      const editor = event.currentTarget
+      const chatScrollContainer = editor.closest(
+        '[data-chat-scroll-container="true"]'
+      ) as HTMLElement | null
+      pendingSelectionRef.current = {
+        start: editor.selectionStart,
+        end: editor.selectionEnd,
+        scrollTop: editor.scrollTop,
+        scrollLeft: editor.scrollLeft,
+        chatScrollTop: chatScrollContainer?.scrollTop ?? null,
+        chatScrollLeft: chatScrollContainer?.scrollLeft ?? null,
+        value: editor.value
+      }
+      onSetEditingContent(editor.value)
+    },
+    [onSetEditingContent]
+  )
 
   return (
     <Box sx={{ px: 2, mb: 2, display: 'flex', justifyContent: 'flex-end' }}>
       <Box sx={{ maxWidth: '85%', width: '100%' }}>
+        {visibleAttachments.length > 0 && (
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
+            {visibleAttachments.map((attachment, attachmentIndex) => (
+              <Box
+                key={`${attachment.fileName || attachment.url || 'attachment'}-${attachmentIndex}`}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 0.75,
+                  maxWidth: 300,
+                  pl: 1.25,
+                  pr: 0.25,
+                  py: 0.25,
+                  borderRadius: 1,
+                  bgcolor: 'action.selected'
+                }}
+              >
+                <ImageIcon sx={{ fontSize: 16, color: 'text.secondary', flexShrink: 0 }} />
+                <Typography
+                  variant="body2"
+                  sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                >
+                  {attachment.fileName || 'Image'}
+                </Typography>
+                <IconButton
+                  size="small"
+                  aria-label={`Remove ${attachment.fileName || 'image'}`}
+                  onClick={() => removeAttachment(attachment)}
+                  sx={{ flexShrink: 0 }}
+                >
+                  <CloseIcon sx={{ fontSize: 16 }} />
+                </IconButton>
+              </Box>
+            ))}
+          </Box>
+        )}
         <TextField
           fullWidth
           multiline
-          autoFocus
+          inputRef={editorRef}
           value={editingContent}
-          onChange={(e) => onSetEditingContent(e.target.value)}
+          onChange={handleEditorChange}
           onKeyDown={(e) => {
             if (e.key === 'Escape') onCancel()
           }}
@@ -880,7 +1614,7 @@ const UserMessageEditForm: React.FC<{
             onClick={onCancel}
             sx={{ borderRadius: '18px', textTransform: 'none' }}
           >
-            取消
+            {t('common.cancel', { defaultValue: 'Cancel' })}
           </Button>
           <Button
             variant="contained"
@@ -889,11 +1623,11 @@ const UserMessageEditForm: React.FC<{
             onClick={() => {
               const newContent = editingContent.trim()
               if (!newContent) return
-              onSubmit(newContent)
+              onSubmit(newContent, editingAttachments.length > 0 ? editingAttachments : undefined)
             }}
             sx={{ borderRadius: '18px', textTransform: 'none' }}
           >
-            提交
+            {t('chat.save_and_rerun', { defaultValue: 'Save & Rerun' })}
           </Button>
         </Box>
       </Box>
@@ -1016,24 +1750,18 @@ const UserMessageBubble: React.FC<{
             {visibleAttachments.map((attachment, attIdx) => (
               <Box key={attIdx} sx={{ mb: 1 }}>
                 {attachment.type === 'image' ? (
-                  <img
+                  <ChatImage
                     src={normalizeLocalMediaUrl(attachment.url)}
-                    alt={`Attachment ${attIdx + 1}`}
-                    style={{
-                      maxWidth: '100%',
-                      maxHeight: '200px',
-                      borderRadius: '12px',
-                      objectFit: 'contain',
-                      display: 'block',
-                      cursor: 'pointer'
-                    }}
-                    draggable
-                    onDragStart={(e) => {
-                      e.stopPropagation()
-                      setAgentImageDragPayload(e.dataTransfer, attachment.url)
-                    }}
-                    onClick={() => onPreviewImage(attachment.url)}
-                    onContextMenu={(e) => onImageContextMenu(e, attachment.url)}
+                    media={attachment.media}
+                    alt={t('chat.attachment_image_alt', {
+                      index: attIdx + 1,
+                      defaultValue: 'Attachment image {{index}}'
+                    })}
+                    sourceWidth={attachment.sourceWidth}
+                    sourceHeight={attachment.sourceHeight}
+                    maxHeight={200}
+                    onPreview={() => onPreviewImage(attachment.url)}
+                    onContextMenu={(event) => onImageContextMenu(event, attachment.url)}
                   />
                 ) : attachment.type === 'video' ? (
                   <video
@@ -1142,24 +1870,18 @@ const AssistantMessageBubble: React.FC<{
             {visibleAttachments.map((attachment, attIdx) => (
               <Box key={attIdx} sx={{ mb: 1 }}>
                 {attachment.type === 'image' ? (
-                  <img
+                  <ChatImage
                     src={normalizeLocalMediaUrl(attachment.url)}
-                    alt={`Attachment ${attIdx + 1}`}
-                    style={{
-                      maxWidth: '100%',
-                      maxHeight: '600px',
-                      borderRadius: '12px',
-                      objectFit: 'contain',
-                      display: 'block',
-                      cursor: 'pointer'
-                    }}
-                    draggable
-                    onDragStart={(e) => {
-                      e.stopPropagation()
-                      setAgentImageDragPayload(e.dataTransfer, attachment.url)
-                    }}
-                    onClick={() => onPreviewImage(attachment.url)}
-                    onContextMenu={(e) => onImageContextMenu(e, attachment.url)}
+                    media={attachment.media}
+                    alt={t('chat.attachment_image_alt', {
+                      index: attIdx + 1,
+                      defaultValue: 'Attachment image {{index}}'
+                    })}
+                    sourceWidth={attachment.sourceWidth}
+                    sourceHeight={attachment.sourceHeight}
+                    maxHeight={600}
+                    onPreview={() => onPreviewImage(attachment.url)}
+                    onContextMenu={(event) => onImageContextMenu(event, attachment.url)}
                   />
                 ) : attachment.type === 'video' ? (
                   <AssistantVideoPlayer url={attachment.url} fileName={attachment.fileName} />
@@ -1295,6 +2017,7 @@ const AssistantVideoPlayer: React.FC<{ url: string; fileName?: string }> = ({ ur
       draggable
       onDragStart={(event) => {
         event.stopPropagation()
+        event.dataTransfer.effectAllowed = 'copy'
         setAgentVideoDragPayload(event.dataTransfer, url, fileName)
       }}
       sx={{
@@ -1637,30 +2360,17 @@ const AssistantMarkdownContent: React.FC<{
           }}
           components={{
             p: ({ children }) => <div style={{ margin: '0.8em 0' }}>{children}</div>,
-            img: ({ src, alt }) => (
-              <img
-                src={src}
-                alt={alt || ''}
-                style={{
-                  maxWidth: '100%',
-                  maxHeight: '600px',
-                  borderRadius: '12px',
-                  objectFit: 'contain',
-                  display: 'block',
-                  margin: '8px 0',
-                  cursor: 'pointer'
-                }}
-                draggable
-                onDragStart={(e) => {
-                  e.stopPropagation()
-                  if (src) {
-                    setAgentImageDragPayload(e.dataTransfer, src)
-                  }
-                }}
-                onClick={() => src && onPreviewImage(src)}
-                onContextMenu={(e) => src && onImageContextMenu(e, src)}
-              />
-            ),
+            img: ({ src, alt }) =>
+              src ? (
+                <ChatImage
+                  src={src}
+                  alt={alt || t('chat.image_alt', { defaultValue: 'Image' })}
+                  maxHeight={600}
+                  margin="8px 0"
+                  onPreview={() => onPreviewImage(src)}
+                  onContextMenu={(event) => onImageContextMenu(event, src)}
+                />
+              ) : null,
             a: ({ href, children }) => (
               <a
                 href={href}
@@ -1750,6 +2460,7 @@ const AssistantMarkdownContent: React.FC<{
           draggable
           onDragStart={(event) => {
             event.stopPropagation()
+            event.dataTransfer.effectAllowed = 'copy'
             setAgentVideoDragPayload(event.dataTransfer, url)
           }}
           style={{

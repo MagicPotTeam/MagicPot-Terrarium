@@ -44,9 +44,11 @@ import {
   normalizeLLMChatResult,
   normalizeOpenAIBaseUrl,
   parseStructuredLLMChatResult,
+  resolveChatProfileCapabilities,
   resolveProfileDeployment,
   resolveProfileProvider,
   resolveProfileModelUse,
+  selectProviderAttachmentTransport,
   resolveTaggerProviderDescriptor,
   resolveTaggerRuntimeDescriptor,
   isTaggerSkillRuntime,
@@ -66,11 +68,13 @@ import {
   uploadLocalHy3dModel
 } from '../llmProxy/hunyuan3dCos'
 import { validateStructuredSkillOutput } from './skillRuntimeStructuredOutput'
+import { DEFAULT_MANAGED_MEDIA_MAX_BYTES } from '../llmProxy/managedMediaStore'
 import { syncMcpClientManager } from '../mcp/runtime'
 import fs from 'node:fs/promises'
 import { isLocalFileSource } from '../utils/localFileUrl'
 import {
   MAX_REMOTE_FETCH_RESPONSE_BYTES,
+  isPrivateOrLocalRemoteFetchHost,
   parseAndValidateRemoteFetchRequest
 } from './remoteFetchPolicy'
 import { consumeTrustedLocalFileSelection } from './trustedFileSelection'
@@ -147,17 +151,150 @@ const getElectronNetFetch = (): typeof net.fetch | null => {
   return typeof candidate === 'function' ? candidate : null
 }
 
+export type ElectronIncomingMessageLike = {
+  headers: Record<string, string[] | undefined>
+  on: (event: 'data', listener: (chunk: Buffer | string) => void) => unknown
+  pause?: () => void
+  resume?: () => void
+  once: {
+    (event: 'aborted' | 'end', listener: () => void): unknown
+    (event: 'error', listener: (error: unknown) => void): unknown
+  }
+  statusCode: number
+  statusMessage: string
+}
+
+export type ElectronClientRequestLike = {
+  abort: () => void
+  end: (chunk?: string | Buffer) => unknown
+  once: {
+    (event: 'response', listener: (response: ElectronIncomingMessageLike) => void): unknown
+    (event: 'abort', listener: () => void): unknown
+    (event: 'error', listener: (error: unknown) => void): unknown
+  }
+  setHeader: (name: string, value: string) => void
+}
+
+export type ElectronRequestFactory = (options: {
+  method: string
+  url: string
+  redirect: 'follow'
+}) => ElectronClientRequestLike
+
+export const createElectronRequestFetch = (electronRequest: ElectronRequestFactory): FetchImpl =>
+  (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    if (init?.signal?.aborted) {
+      throw init.signal.reason || new DOMException('The operation was aborted.', 'AbortError')
+    }
+
+    const request = new Request(input, init)
+    const body = request.body ? Buffer.from(await request.arrayBuffer()) : null
+
+    if (request.signal.aborted) {
+      throw request.signal.reason || new DOMException('The operation was aborted.', 'AbortError')
+    }
+
+    return await new Promise<Response>((resolve, reject) => {
+      const clientRequest = electronRequest({
+        method: request.method,
+        url: request.url,
+        redirect: 'follow'
+      })
+      let settled = false
+
+      const cleanup = (): void => request.signal.removeEventListener('abort', handleAbort)
+      const fail = (error: unknown): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
+      const handleAbort = (): void => {
+        clientRequest.abort()
+        fail(request.signal.reason || new DOMException('The operation was aborted.', 'AbortError'))
+      }
+
+      request.headers.forEach((value, name) => {
+        if (name.toLowerCase() === 'content-length') return
+        clientRequest.setHeader(name, value)
+      })
+
+      clientRequest.once('error', fail)
+      clientRequest.once('abort', () =>
+        fail(new DOMException('The operation was aborted.', 'AbortError'))
+      )
+      clientRequest.once('response', (incoming) => {
+        const responseBody = new ReadableStream<Uint8Array>({
+          start(controller) {
+            incoming.on('data', (chunk: Buffer | string) => {
+              controller.enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+              if (controller.desiredSize != null && controller.desiredSize <= 0) incoming.pause?.()
+            })
+            incoming.once('error', (error) => controller.error(error))
+            incoming.once('aborted', () =>
+              controller.error(new Error('Electron network response was aborted.'))
+            )
+            incoming.once('end', () => controller.close())
+          },
+          pull() {
+            incoming.resume?.()
+          },
+          cancel() {
+            clientRequest.abort()
+          }
+        })
+
+        if (settled) return
+        settled = true
+        cleanup()
+
+        const headers = new Headers()
+        for (const [name, values] of Object.entries(incoming.headers)) {
+          for (const value of values ?? []) headers.append(name, value)
+        }
+        const response = new Response(responseBody, {
+          status: incoming.statusCode,
+          statusText: incoming.statusMessage,
+          headers
+        })
+        Object.defineProperty(response, 'url', { configurable: true, value: request.url })
+        resolve(response)
+      })
+
+      request.signal.addEventListener('abort', handleAbort, { once: true })
+      clientRequest.end(body || undefined)
+    })
+  }) as FetchImpl
+
+const createMainProcessElectronRequestFetch = (): FetchImpl | null => {
+  const electronRequest = (net as unknown as { request?: typeof net.request } | undefined)?.request
+  if (typeof electronRequest !== 'function') return null
+
+  return createElectronRequestFetch(
+    (options) => electronRequest.call(net, options) as unknown as ElectronClientRequestLike
+  )
+}
 const createMainProcessElectronFetch = (): FetchImpl | null => {
   const electronFetch = getElectronNetFetch()
-  if (!electronFetch) {
-    return null
-  }
+  const electronRequestFetch = createMainProcessElectronRequestFetch()
+  if (!electronFetch && !electronRequestFetch) return null
 
-  return ((input: RequestInfo | URL, init?: RequestInit) =>
-    electronFetch(
-      input instanceof URL ? input.toString() : (input as unknown as string | Request),
-      init as Parameters<typeof electronFetch>[1]
-    )) as FetchImpl
+  return ((input: RequestInfo | URL, init?: RequestInit) => {
+    const method = String(
+      init?.method || (input instanceof Request ? input.method : 'GET')
+    ).toUpperCase()
+    const hasBody = init?.body != null || (input instanceof Request && input.body != null)
+    if (hasBody && method !== 'GET' && method !== 'HEAD' && electronRequestFetch) {
+      return electronRequestFetch(input, init)
+    }
+    if (electronFetch) {
+      return electronFetch(
+        input instanceof URL ? input.toString() : (input as unknown as string | Request),
+        init as Parameters<typeof electronFetch>[1]
+      )
+    }
+    return electronRequestFetch!(input, init)
+  }) as FetchImpl
 }
 
 // ==================== Chat execution helpers ====================
@@ -199,6 +336,168 @@ const mergeChatMetadata = (
   return {
     ...(primary || {}),
     ...(secondary || {})
+  }
+}
+
+const STRICT_RASTER_DATA_URL = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/
+const QAPP_INLINE_IMAGE_POLICY_MARKER = 'qapp-renderer-materialized-v1'
+const MAX_PROVIDER_ACCESSIBLE_URL_LENGTH = 8 * 1024
+const RASTER_SIGNATURE_BASE64_LENGTH = 16
+
+const inferRasterMimeTypeFromBytes = (bytes: Buffer): string | undefined => {
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return 'image/png'
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'image/jpeg'
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes.toString('ascii', 0, 4) === 'RIFF' &&
+    bytes.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return 'image/webp'
+  }
+  const gifSignature = bytes.toString('ascii', 0, 6)
+  if (gifSignature === 'GIF87a' || gifSignature === 'GIF89a') {
+    return 'image/gif'
+  }
+  return undefined
+}
+
+const stripQAppInlineImagePolicyMarker = (messages: ChatMessage[]): ChatMessage[] =>
+  messages.map((message) => ({
+    ...message,
+    ...(message.attachments
+      ? {
+          attachments: message.attachments.map((attachment) => {
+            if (attachment.metadata?.internalTransport !== QAPP_INLINE_IMAGE_POLICY_MARKER) {
+              return attachment
+            }
+            const metadata = { ...attachment.metadata }
+            delete metadata.internalTransport
+            return {
+              ...attachment,
+              ...(Object.keys(metadata).length > 0 ? { metadata } : { metadata: undefined })
+            }
+          })
+        }
+      : {})
+  }))
+
+const validateInlineImageAttachmentTransport = (
+  profile: LLMAPIProfile,
+  messages: ChatMessage[],
+  profileScope?: LLMChatReq['profileScope']
+): void => {
+  const provider = resolveProfileProvider(profile)
+  if (provider !== 'gemini' && provider !== 'claude' && provider !== 'ollama') {
+    return
+  }
+
+  const imageAttachments = messages.flatMap((message) =>
+    (message.attachments || []).filter((attachment) => attachment.type === 'image')
+  )
+  if (imageAttachments.length === 0) {
+    return
+  }
+
+  const hasValidatedQAppInlineImagePolicy =
+    profileScope === 'qapp' &&
+    imageAttachments.every(
+      (attachment) => attachment.metadata?.internalTransport === QAPP_INLINE_IMAGE_POLICY_MARKER
+    )
+  const capabilities = resolveChatProfileCapabilities(profile)
+  const requestDataUrlTransport = selectProviderAttachmentTransport(capabilities, {
+    available: { 'request-data-url': true },
+    requested: 'request-data-url'
+  })
+  if (!hasValidatedQAppInlineImagePolicy && requestDataUrlTransport !== 'request-data-url') {
+    throw new Error(
+      `Attachment transport error: ${provider} profile "${profile.id}" must declare "request-data-url" before accepting inline image attachments.`
+    )
+  }
+
+  for (const attachment of imageAttachments) {
+    const match = STRICT_RASTER_DATA_URL.exec(attachment.url)
+    if (!match) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" accepts only non-empty canonical base64 data URLs for PNG, JPEG, WebP, or GIF images; URLs, file IDs, and local references are not supported by the built-in client.`
+      )
+    }
+
+    const base64 = match[2]
+    if (base64.length % 4 !== 0) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" received malformed image base64.`
+      )
+    }
+
+    const paddingLength = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+    const decodedByteLength = (base64.length / 4) * 3 - paddingLength
+    if (decodedByteLength > DEFAULT_MANAGED_MEDIA_MAX_BYTES) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" image exceeds the ${DEFAULT_MANAGED_MEDIA_MAX_BYTES}-byte request attachment limit.`
+      )
+    }
+
+    const signatureBase64 = base64.slice(0, RASTER_SIGNATURE_BASE64_LENGTH)
+    const signatureBytes = Buffer.from(signatureBase64, 'base64')
+    const finalQuartet = base64.slice(-4)
+    if (
+      signatureBytes.toString('base64') !== signatureBase64 ||
+      Buffer.from(finalQuartet, 'base64').toString('base64') !== finalQuartet
+    ) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" received non-canonical image base64.`
+      )
+    }
+    const byteMimeType = inferRasterMimeTypeFromBytes(signatureBytes)
+    if (!byteMimeType) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" received unsupported raster image bytes.`
+      )
+    }
+    if (
+      byteMimeType !== match[1] ||
+      (attachment.mimeType && attachment.mimeType !== byteMimeType)
+    ) {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" received an image MIME mismatch.`
+      )
+    }
+  }
+}
+
+const validateVideoImageAttachmentTransport = (
+  profile: LLMAPIProfile,
+  messages: ChatMessage[]
+): void => {
+  const imageAttachments = messages.flatMap((message) =>
+    (message.attachments || []).filter((attachment) => attachment.type === 'image')
+  )
+  for (const attachment of imageAttachments) {
+    const value = attachment.url
+    if (!value || value.length > MAX_PROVIDER_ACCESSIBLE_URL_LENGTH) {
+      throw new Error(
+        `Video attachment transport error: profile "${profile.id}" requires a non-empty image URL of at most ${MAX_PROVIDER_ACCESSIBLE_URL_LENGTH} characters.`
+      )
+    }
+    try {
+      const parsed = new URL(value)
+      if (
+        parsed.protocol !== 'https:' ||
+        parsed.username ||
+        parsed.password ||
+        isPrivateOrLocalRemoteFetchHost(parsed.hostname)
+      ) {
+        throw new Error('unsafe')
+      }
+    } catch {
+      throw new Error(
+        `Video attachment transport error: profile "${profile.id}" requires public HTTPS image URLs without credentials; data, blob, file, local-media, localhost, and private-network URLs are not supported.`
+      )
+    }
   }
 }
 
@@ -914,11 +1213,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       return electronFetch
     }
 
-    if (typeof globalThis.fetch === 'function') {
+    if (process.env.NODE_ENV === 'test' && typeof globalThis.fetch === 'function') {
       return globalThis.fetch.bind(globalThis) as FetchImpl
     }
 
-    throw new Error('Fetch API is unavailable in the main process runtime.')
+    throw new Error('Electron network APIs are unavailable in the main process runtime.')
   }
 
   private createConversationAbortContext(
@@ -1599,10 +1898,18 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       requestedProfileId,
       signal: options?.signal
     }
+    const extensionCli = mainHostExtensionApiV1.llmProxy
+      .map((extension) => extension.createCli?.(profileWithSelectedKey, extensionContext))
+      .find((client) => Boolean(client))
+    const modelUse = resolveProfileModelUse(profileWithSelectedKey)
+    if (!extensionCli && modelUse !== 'video') {
+      validateInlineImageAttachmentTransport(profileWithSelectedKey, req.messages, req.profileScope)
+    }
+    if (modelUse === 'video') {
+      validateVideoImageAttachmentTransport(profileWithSelectedKey, req.messages)
+    }
     const cli =
-      mainHostExtensionApiV1.llmProxy
-        .map((extension) => extension.createCli?.(profileWithSelectedKey, extensionContext))
-        .find((client) => Boolean(client)) ??
+      extensionCli ??
       cliFromProfile(profileWithSelectedKey, {
         fetchImpl: this.getFetchImpl()
       })
@@ -1610,7 +1917,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       throw new Error('Unable to create an LLM client.')
     }
 
-    const effectiveMessages = req.messages
+    const effectiveMessages = stripQAppInlineImagePolicyMarker(req.messages)
 
     console.log('[LLMProxySvc] chat request:', {
       profileId: profile.id,
@@ -1653,6 +1960,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         systemPrompt: toolAwareSystemPrompt,
         reasoningEffort: req.reasoningEffort,
         maxOutputTokens: req.maxOutputTokens,
+        temperature: req.temperature,
         imageGenerationOptions: req.imageGenerationOptions,
         videoGenerationOptions: req.videoGenerationOptions,
         signal: options?.signal,

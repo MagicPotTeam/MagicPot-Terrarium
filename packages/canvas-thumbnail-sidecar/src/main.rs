@@ -8,13 +8,21 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use clap::Parser;
 use image::imageops::FilterType;
-use image::{DynamicImage, GenericImageView, ImageFormat, ImageReader};
+use image::metadata::Orientation;
+use image::{DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader, Limits};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const DEFAULT_THUMB_LEVELS: [u32; 5] = [128, 256, 512, 1024, 2048];
 const DEFAULT_MAX_DECODED_PIXELS: u64 = 64 * 1024 * 1024;
+const DEFAULT_MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+const DEFAULT_MAX_OUTPUT_PIXELS: u64 = 32 * 1024 * 1024;
+const DEFAULT_MAX_GENERATED_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_MAX_SOURCE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_MAX_DECODED_PIXELS: u64 = 256 * 1024 * 1024;
+const MAX_MAX_OUTPUT_PIXELS: u64 = 128 * 1024 * 1024;
+const MAX_MAX_GENERATED_BYTES: u64 = 512 * 1024 * 1024;
 const HASH_CHUNK_BYTES: usize = 1024 * 1024;
 const CANVAS_THUMBNAIL_VERSION: u32 = 1;
 const CACHE_KEY_PREFIX: &str = "thumb";
@@ -42,6 +50,12 @@ struct BatchRequest {
     max_concurrency: Option<usize>,
     #[serde(default = "default_max_decoded_pixels")]
     max_decoded_pixels: u64,
+    #[serde(default = "default_max_source_bytes")]
+    max_source_bytes: u64,
+    #[serde(default = "default_max_output_pixels")]
+    max_output_pixels: u64,
+    #[serde(default = "default_max_generated_bytes")]
+    max_generated_bytes: u64,
     #[serde(default)]
     hash: HashAlgorithm,
 }
@@ -53,17 +67,12 @@ struct WorkItem {
     path: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum HashAlgorithm {
+    #[default]
     Blake3,
     Sha256,
-}
-
-impl Default for HashAlgorithm {
-    fn default() -> Self {
-        Self::Blake3
-    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -80,6 +89,8 @@ struct ThumbnailRequest {
     #[serde(default)]
     allow_upscale: bool,
     #[serde(default)]
+    crop_transparent: bool,
+    #[serde(default)]
     format: ThumbnailFormat,
 }
 
@@ -91,24 +102,20 @@ impl Default for ThumbnailRequest {
             max_width: None,
             max_height: None,
             allow_upscale: false,
+            crop_transparent: false,
             format: ThumbnailFormat::Png,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ThumbnailFormat {
+    #[default]
     Png,
     Jpg,
     Jpeg,
     Webp,
-}
-
-impl Default for ThumbnailFormat {
-    fn default() -> Self {
-        Self::Png
-    }
 }
 
 impl ThumbnailFormat {
@@ -206,8 +213,18 @@ struct SourceMetadata {
     last_modified_ms: u64,
     width: u32,
     height: u32,
+    raw_width: u32,
+    raw_height: u32,
+    oriented_width: u32,
+    oriented_height: u32,
     color_type: String,
     format: String,
+    orientation_applied: bool,
+    post_orientation_width: u32,
+    post_orientation_height: u32,
+    crop_applied: bool,
+    processed_width: u32,
+    processed_height: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -249,6 +266,9 @@ struct RuntimeOptions {
     thumbnail: ThumbnailRequest,
     levels: Vec<u32>,
     max_decoded_pixels: u64,
+    max_source_bytes: u64,
+    max_output_pixels: u64,
+    max_generated_bytes: u64,
     hash: HashAlgorithm,
 }
 
@@ -285,6 +305,7 @@ fn read_input(path: Option<&Path>) -> Result<String> {
 }
 
 fn process_batch(request: BatchRequest) -> Result<BatchResponse> {
+    validate_limits(&request)?;
     let levels = resolve_thumbnail_levels(&request.thumbnail)?;
 
     let cache_root = normalize_cache_root(&request.cache_root)?;
@@ -303,6 +324,9 @@ fn process_batch(request: BatchRequest) -> Result<BatchResponse> {
         thumbnail: request.thumbnail,
         levels,
         max_decoded_pixels: request.max_decoded_pixels,
+        max_source_bytes: request.max_source_bytes,
+        max_output_pixels: request.max_output_pixels,
+        max_generated_bytes: request.max_generated_bytes,
         hash: request.hash,
     };
 
@@ -326,6 +350,39 @@ fn process_batch(request: BatchRequest) -> Result<BatchResponse> {
     })
 }
 
+fn validate_limits(request: &BatchRequest) -> Result<()> {
+    if request.thumbnail.allow_upscale {
+        return Err(anyhow!("thumbnail.allowUpscale must be false"));
+    }
+    validate_limit(
+        "maxSourceBytes",
+        request.max_source_bytes,
+        MAX_MAX_SOURCE_BYTES,
+    )?;
+    validate_limit(
+        "maxDecodedPixels",
+        request.max_decoded_pixels,
+        MAX_MAX_DECODED_PIXELS,
+    )?;
+    validate_limit(
+        "maxOutputPixels",
+        request.max_output_pixels,
+        MAX_MAX_OUTPUT_PIXELS,
+    )?;
+    validate_limit(
+        "maxGeneratedBytes",
+        request.max_generated_bytes,
+        MAX_MAX_GENERATED_BYTES,
+    )
+}
+
+fn validate_limit(name: &str, value: u64, ceiling: u64) -> Result<()> {
+    if value == 0 || value > ceiling {
+        return Err(anyhow!("{name} must be between 1 and {ceiling}"));
+    }
+    Ok(())
+}
+
 fn resolve_thumbnail_levels(thumbnail: &ThumbnailRequest) -> Result<Vec<u32>> {
     let raw_levels = if let Some(levels) = thumbnail.levels.as_ref() {
         if levels.is_empty() {
@@ -345,7 +402,7 @@ fn resolve_thumbnail_levels(thumbnail: &ThumbnailRequest) -> Result<Vec<u32>> {
 }
 
 fn normalize_thumbnail_levels(mut levels: Vec<u32>) -> Result<Vec<u32>> {
-    if levels.iter().any(|level| *level == 0) {
+    if levels.contains(&0) {
         return Err(anyhow!("thumbnail levels must be greater than zero"));
     }
     if levels.iter().any(|level| *level > MAX_THUMB_LEVEL) {
@@ -365,7 +422,7 @@ fn normalize_thumbnail_levels(mut levels: Vec<u32>) -> Result<Vec<u32>> {
 fn bounded_worker_count(requested: Option<usize>, item_count: usize) -> usize {
     let available = std::thread::available_parallelism().map_or(1, usize::from);
     let requested = requested.unwrap_or(available).max(1);
-    requested.min(item_count.max(1))
+    requested.min(available).min(2).min(item_count.max(1))
 }
 
 fn process_item(item: WorkItem, options: &RuntimeOptions) -> ItemResult {
@@ -395,16 +452,15 @@ fn process_item_inner(
     options: &RuntimeOptions,
 ) -> Result<ThumbnailManifest> {
     let source_path = normalize_input_path(path)?;
-    let file_meta = fs::metadata(&source_path)
-        .with_context(|| format!("failed to stat source {}", display_path(&source_path)))?;
+    let file_meta = fs::metadata(&source_path)?;
     if !file_meta.is_file() {
         return Err(anyhow!(
             "source is not a file: {}",
             display_path(&source_path)
         ));
     }
-
     let source_size_bytes = file_meta.len();
+    guard_source_size(source_size_bytes, options.max_source_bytes)?;
     let source_last_modified_ms = modified_ms(&file_meta);
     let canonical_path = display_path(&source_path);
     let cache_key = build_canvas_thumbnail_cache_key(
@@ -413,44 +469,89 @@ fn process_item_inner(
         source_last_modified_ms,
     );
     let hash = hash_file(&source_path, options.hash)?;
+    let verified_meta = fs::metadata(&source_path)?;
+    guard_source_size(verified_meta.len(), options.max_source_bytes)?;
+    if verified_meta.len() != source_size_bytes {
+        return Err(anyhow!(
+            "source size changed while hashing; refusing to decode"
+        ));
+    }
 
-    let reader = ImageReader::open(&source_path)
-        .with_context(|| format!("failed to open image {}", display_path(&source_path)))?;
-    let reader = reader
-        .with_guessed_format()
-        .context("failed to detect image format")?;
+    let reader = ImageReader::open(&source_path)?.with_guessed_format()?;
     let image_format = reader
         .format()
         .ok_or_else(|| anyhow!("unsupported or unknown image format"))?;
     ensure_supported_input_format(image_format)?;
-
-    let (width, height) = reader
-        .into_dimensions()
-        .context("failed to read image dimensions")?;
-    guard_decoded_pixels(width, height, options.max_decoded_pixels)?;
-
-    let image = image::open(&source_path)
-        .with_context(|| format!("failed to decode image {}", display_path(&source_path)))?;
+    let (raw_width, raw_height) = reader.into_dimensions()?;
+    guard_decoded_pixels(raw_width, raw_height, options.max_decoded_pixels)?;
+    let (mut image, orientation) = decode_image(&source_path, options.max_decoded_pixels)?;
     let color_type = format!("{:?}", image.color());
-
-    let entry_dir = ensure_confined_dir(&options.cache_root, &[&cache_key])?;
-    let mut levels = Vec::with_capacity(options.levels.len());
-    for max_side in &options.levels {
-        let level = create_thumbnail_level(
-            &image,
-            *max_side,
-            &entry_dir,
-            options.thumbnail.format,
-            options.thumbnail.allow_upscale,
-        )?;
-        levels.push(level);
+    let orientation_applied = orientation != Orientation::NoTransforms;
+    image.apply_orientation(orientation);
+    let (oriented_width, oriented_height) = image.dimensions();
+    guard_decoded_pixels(oriented_width, oriented_height, options.max_decoded_pixels)?;
+    let (mut image, crop_applied) = if options.thumbnail.crop_transparent {
+        crop_transparent_border(image)
+    } else {
+        (image, false)
+    };
+    let (processed_width, processed_height) = image.dimensions();
+    guard_output_pixels(&image, &options.levels, options.max_output_pixels)?;
+    if matches!(
+        options.thumbnail.format,
+        ThumbnailFormat::Jpg | ThumbnailFormat::Jpeg
+    ) {
+        if has_transparent_pixels(&image) {
+            return Err(anyhow!(
+                "JPEG output rejects sources with transparent pixels; use png or webp output"
+            ));
+        }
+        image = DynamicImage::ImageRgb8(image.to_rgb8());
     }
 
+    let entry_dir = ensure_confined_dir(&options.cache_root, &[&cache_key])?;
+    let content_tag = &hash.hex[..hash.hex.len().min(16)];
+    let mut pending = Vec::with_capacity(options.levels.len());
+    let prepared = (|| -> Result<()> {
+        let mut total = 0_u64;
+        for max_side in &options.levels {
+            let level = prepare_thumbnail_level(
+                &image,
+                *max_side,
+                &entry_dir,
+                content_tag,
+                options.thumbnail.format,
+                options.thumbnail.allow_upscale,
+            )?;
+            total = total
+                .checked_add(level.metadata.size_bytes)
+                .ok_or_else(|| anyhow!("generated byte total overflow"))?;
+            if total > options.max_generated_bytes {
+                let _ = fs::remove_file(&level.temp_path);
+                return Err(anyhow!(
+                    "generated byte guard rejected output: {total} bytes exceeds limit {}",
+                    options.max_generated_bytes
+                ));
+            }
+            pending.push(level);
+        }
+        Ok(())
+    })();
+    if let Err(error) = prepared {
+        cleanup_pending(&pending);
+        return Err(error);
+    }
+
+    let levels = pending
+        .iter()
+        .map(|item| item.metadata.clone())
+        .collect::<Vec<_>>();
     let thumbnail = levels
         .last()
         .cloned()
         .ok_or_else(|| anyhow!("thumbnail level list is empty"))?;
-    let manifest_path = confined_join(&entry_dir, &["manifest.json"])?;
+    let manifest_filename = format!("manifest-{content_tag}-{}.json", fnv1a32(id, 0x811c9dc5));
+    let manifest_path = confined_join(&entry_dir, &[&manifest_filename])?;
     let timestamp = timestamp_string();
     let manifest = ThumbnailManifest {
         schema_version: CANVAS_THUMBNAIL_VERSION,
@@ -460,8 +561,8 @@ fn process_item_inner(
         canonical_path: canonical_path.clone(),
         source_size_bytes,
         source_last_modified_ms,
-        source_width: width,
-        source_height: height,
+        source_width: raw_width,
+        source_height: raw_height,
         source_identity: SourceIdentity {
             kind: "local-file",
             canonical_path: canonical_path.clone(),
@@ -476,10 +577,21 @@ fn process_item_inner(
             byte_length: source_size_bytes,
             size_bytes: source_size_bytes,
             last_modified_ms: source_last_modified_ms,
-            width,
-            height,
+            // Keep legacy width/height raw; additive fields make orientation explicit.
+            width: raw_width,
+            height: raw_height,
+            raw_width,
+            raw_height,
+            oriented_width,
+            oriented_height,
             color_type,
             format: format!("{:?}", image_format).to_ascii_lowercase(),
+            orientation_applied,
+            post_orientation_width: oriented_width,
+            post_orientation_height: oriented_height,
+            crop_applied,
+            processed_width,
+            processed_height,
         },
         hash,
         levels,
@@ -497,36 +609,139 @@ fn process_item_inner(
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
-
-    write_json_atomic(&manifest_path, &manifest)
-        .with_context(|| format!("failed to write manifest {}", display_path(&manifest_path)))?;
+    let manifest_temp = prepare_json(&manifest_path, &manifest)?;
+    if let Err(error) = publish_transaction(&pending, &manifest_temp, &manifest_path) {
+        cleanup_pending(&pending);
+        let _ = fs::remove_file(&manifest_temp);
+        return Err(error);
+    }
     Ok(manifest)
 }
 
-fn create_thumbnail_level(
+struct PendingLevel {
+    temp_path: PathBuf,
+    final_path: PathBuf,
+    metadata: ThumbnailLevelMetadata,
+}
+
+fn prepare_thumbnail_level(
     image: &DynamicImage,
     max_side: u32,
     entry_dir: &Path,
+    content_tag: &str,
     format: ThumbnailFormat,
     allow_upscale: bool,
-) -> Result<ThumbnailLevelMetadata> {
+) -> Result<PendingLevel> {
     let thumbnail_image = create_thumbnail(image, max_side, allow_upscale);
-    let (thumb_width, thumb_height) = thumbnail_image.dimensions();
-    let filename = format!("{}.{}", max_side, format.extension());
-    let thumb_path = confined_join(entry_dir, &[&filename])?;
-    let size_bytes = write_image_atomic(&thumbnail_image, &thumb_path, format)
-        .with_context(|| format!("failed to write thumbnail {}", display_path(&thumb_path)))?;
-
-    Ok(ThumbnailLevelMetadata {
-        max_side,
-        width: thumb_width,
-        height: thumb_height,
-        filename,
-        path: display_path(&thumb_path),
-        src: local_media_url(&thumb_path),
-        mime_type: format.mime_type().to_owned(),
-        size_bytes,
+    let (width, height) = thumbnail_image.dimensions();
+    let filename = format!("{max_side}-{content_tag}.{}", format.extension());
+    let final_path = confined_join(entry_dir, &[&filename])?;
+    let temp_path = unique_temp_path(entry_dir, &filename);
+    if let Err(error) = thumbnail_image.save_with_format(&temp_path, format.image_format()) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
+    let size_bytes = match fs::metadata(&temp_path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+    };
+    Ok(PendingLevel {
+        temp_path,
+        final_path: final_path.clone(),
+        metadata: ThumbnailLevelMetadata {
+            max_side,
+            width,
+            height,
+            filename,
+            path: display_path(&final_path),
+            src: local_media_url(&final_path),
+            mime_type: format.mime_type().to_owned(),
+            size_bytes,
+        },
     })
+}
+
+fn decode_image(path: &Path, max_decoded_pixels: u64) -> Result<(DynamicImage, Orientation)> {
+    let mut reader = ImageReader::open(path)?.with_guessed_format()?;
+    let max_alloc = max_decoded_pixels
+        .checked_mul(16)
+        .ok_or_else(|| anyhow!("decode allocation limit overflow"))?;
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(max_alloc);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder()?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let image = DynamicImage::from_decoder(decoder)
+        .with_context(|| format!("failed to decode image {}", display_path(path)))?;
+    Ok((image, orientation))
+}
+
+fn has_transparent_pixels(image: &DynamicImage) -> bool {
+    image.color().has_alpha() && image.to_rgba8().pixels().any(|pixel| pixel.0[3] < 255)
+}
+
+fn crop_transparent_border(image: DynamicImage) -> (DynamicImage, bool) {
+    if !image.color().has_alpha() {
+        return (image, false);
+    }
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for (x, y, pixel) in rgba.enumerate_pixels() {
+        if pixel.0[3] == 0 {
+            continue;
+        }
+        bounds = Some(match bounds {
+            None => (x, y, x, y),
+            Some((left, top, right, bottom)) => {
+                (left.min(x), top.min(y), right.max(x), bottom.max(y))
+            }
+        });
+    }
+    let Some((left, top, right, bottom)) = bounds else {
+        return (DynamicImage::ImageRgba8(rgba), false);
+    };
+    let crop_width = right - left + 1;
+    let crop_height = bottom - top + 1;
+    let total = u64::from(width) * u64::from(height);
+    let removed = total - u64::from(crop_width) * u64::from(crop_height);
+    let meaningful = removed >= 4 && removed.saturating_mul(100) >= total;
+    if !meaningful {
+        return (DynamicImage::ImageRgba8(rgba), false);
+    }
+    (
+        DynamicImage::ImageRgba8(
+            image::imageops::crop_imm(&rgba, left, top, crop_width, crop_height).to_image(),
+        ),
+        true,
+    )
+}
+
+fn guard_source_size(size: u64, limit: u64) -> Result<()> {
+    if size > limit {
+        return Err(anyhow!(
+            "source byte guard rejected file: {size} bytes exceeds limit {limit}"
+        ));
+    }
+    Ok(())
+}
+
+fn guard_output_pixels(image: &DynamicImage, levels: &[u32], limit: u64) -> Result<()> {
+    let (width, height) = image.dimensions();
+    let pixels = levels.iter().try_fold(0_u64, |total, max_side| {
+        let (output_width, output_height) = thumbnail_dimensions(width, height, *max_side, false);
+        total.checked_add(u64::from(output_width) * u64::from(output_height))
+    });
+    let pixels = pixels.ok_or_else(|| anyhow!("output pixel total overflow"))?;
+    if pixels > limit {
+        return Err(anyhow!(
+            "output pixel guard rejected thumbnails: {pixels} pixels exceeds limit {limit}"
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_supported_input_format(format: ImageFormat) -> Result<()> {
@@ -553,7 +768,7 @@ fn create_thumbnail(image: &DynamicImage, max_side: u32, allow_upscale: bool) ->
     if target_width == width && target_height == height {
         return image.clone();
     }
-    image.resize_exact(target_width, target_height, FilterType::Triangle)
+    image.resize_exact(target_width, target_height, FilterType::Lanczos3)
 }
 
 fn thumbnail_dimensions(
@@ -612,68 +827,66 @@ fn hash_file(path: &Path, algorithm: HashAlgorithm) -> Result<FileHash> {
     }
 }
 
-fn write_image_atomic(
-    image: &DynamicImage,
-    final_path: &Path,
-    format: ThumbnailFormat,
-) -> Result<u64> {
-    let parent = final_path
-        .parent()
-        .ok_or_else(|| anyhow!("thumbnail path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    let temp_path = unique_temp_path(
-        parent,
-        final_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("thumbnail"),
-    );
-    image.save_with_format(&temp_path, format.image_format())?;
-    let size_bytes = fs::metadata(&temp_path)?.len();
-    replace_file(&temp_path, final_path)?;
-    Ok(size_bytes)
-}
-
-fn write_json_atomic<T: Serialize>(final_path: &Path, value: &T) -> Result<()> {
+fn prepare_json<T: Serialize>(final_path: &Path, value: &T) -> Result<PathBuf> {
     let parent = final_path
         .parent()
         .ok_or_else(|| anyhow!("manifest path has no parent"))?;
-    fs::create_dir_all(parent)?;
     let temp_path = unique_temp_path(
         parent,
         final_path
             .file_name()
-            .and_then(|value| value.to_str())
+            .and_then(|v| v.to_str())
             .unwrap_or("manifest"),
     );
-    {
+    let result = (|| -> Result<()> {
         let mut file = File::create(&temp_path)?;
         serde_json::to_writer_pretty(&mut file, value)?;
-        file.write_all(b"\n")?;
-        file.sync_all().ok();
+        file.write_all(
+            b"
+",
+        )?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
     }
-    replace_file(&temp_path, final_path)?;
+    Ok(temp_path)
+}
+
+fn publish_transaction(
+    levels: &[PendingLevel],
+    manifest_temp: &Path,
+    manifest_path: &Path,
+) -> Result<()> {
+    let mut newly_published = Vec::new();
+    for level in levels {
+        if level.final_path.exists() {
+            continue;
+        }
+        if let Err(error) = fs::rename(&level.temp_path, &level.final_path) {
+            for path in newly_published {
+                let _ = fs::remove_file(path);
+            }
+            return Err(error)
+                .with_context(|| format!("failed to publish {}", display_path(&level.final_path)));
+        }
+        newly_published.push(level.final_path.clone());
+    }
+    if let Err(error) = fs::rename(manifest_temp, manifest_path) {
+        for path in newly_published {
+            let _ = fs::remove_file(path);
+        }
+        return Err(error)
+            .with_context(|| format!("failed to publish {}", display_path(manifest_path)));
+    }
     Ok(())
 }
 
-fn replace_file(temp_path: &Path, final_path: &Path) -> Result<()> {
-    match fs::rename(temp_path, final_path) {
-        Ok(()) => Ok(()),
-        Err(error) if final_path.exists() => {
-            fs::remove_file(final_path)?;
-            fs::rename(temp_path, final_path).with_context(|| {
-                format!(
-                    "failed to replace {} after initial rename error: {error}",
-                    display_path(final_path)
-                )
-            })
-        }
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "failed to move temporary file into {}",
-                display_path(final_path)
-            )
-        }),
+fn cleanup_pending(levels: &[PendingLevel]) {
+    for level in levels {
+        let _ = fs::remove_file(&level.temp_path);
     }
 }
 
@@ -838,11 +1051,53 @@ fn default_max_decoded_pixels() -> u64 {
     DEFAULT_MAX_DECODED_PIXELS
 }
 
+fn default_max_source_bytes() -> u64 {
+    DEFAULT_MAX_SOURCE_BYTES
+}
+
+fn default_max_output_pixels() -> u64 {
+    DEFAULT_MAX_OUTPUT_PIXELS
+}
+
+fn default_max_generated_bytes() -> u64 {
+    DEFAULT_MAX_GENERATED_BYTES
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::{ImageBuffer, Rgba};
     use tempfile::TempDir;
+
+    #[test]
+    fn crops_only_meaningful_fully_transparent_borders() {
+        let mut bordered = ImageBuffer::from_pixel(10, 10, Rgba([0, 0, 0, 0]));
+        for y in 2..8 {
+            for x in 2..8 {
+                bordered.put_pixel(x, y, Rgba([10, 20, 30, 255]));
+            }
+        }
+        let (cropped, applied) = crop_transparent_border(DynamicImage::ImageRgba8(bordered));
+        assert!(applied);
+        assert_eq!(cropped.dimensions(), (6, 6));
+
+        let mut incidental = ImageBuffer::from_pixel(10, 10, Rgba([10, 20, 30, 255]));
+        incidental.put_pixel(0, 0, Rgba([0, 0, 0, 0]));
+        let (unchanged, applied) = crop_transparent_border(DynamicImage::ImageRgba8(incidental));
+        assert!(!applied);
+        assert_eq!(unchanged.dimensions(), (10, 10));
+    }
+
+    #[test]
+    fn resize_preserves_aspect_ratio_and_never_upscales() {
+        let image =
+            DynamicImage::ImageRgba8(ImageBuffer::from_pixel(400, 200, Rgba([1, 2, 3, 255])));
+        assert_eq!(create_thumbnail(&image, 100, false).dimensions(), (100, 50));
+        assert_eq!(
+            create_thumbnail(&image, 800, false).dimensions(),
+            (400, 200)
+        );
+    }
 
     #[test]
     fn processes_supported_formats_and_keeps_batch_errors_per_item() {
@@ -889,10 +1144,14 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: false,
+                crop_transparent: false,
                 format: ThumbnailFormat::Png,
             },
             max_concurrency: Some(2),
             max_decoded_pixels: 10_000,
+            max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
+            max_output_pixels: DEFAULT_MAX_OUTPUT_PIXELS,
+            max_generated_bytes: DEFAULT_MAX_GENERATED_BYTES,
             hash: HashAlgorithm::Blake3,
         };
 
@@ -940,6 +1199,9 @@ mod tests {
             thumbnail: ThumbnailRequest::default(),
             max_concurrency: Some(1),
             max_decoded_pixels: 10_000_000,
+            max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
+            max_output_pixels: DEFAULT_MAX_OUTPUT_PIXELS,
+            max_generated_bytes: DEFAULT_MAX_GENERATED_BYTES,
             hash: HashAlgorithm::Sha256,
         };
 
@@ -980,7 +1242,8 @@ mod tests {
 
         let cache_root = fs::canonicalize(temp.path().join("cache")).unwrap();
         for level in &manifest.levels {
-            assert_eq!(level.filename, format!("{}.png", level.max_side));
+            assert!(level.filename.starts_with(&format!("{}-", level.max_side)));
+            assert!(level.filename.ends_with(".png"));
             assert_eq!(level.mime_type, "image/png");
             assert!(level.size_bytes > 0);
             assert!(level.src.starts_with("local-media:"));
@@ -1009,10 +1272,14 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: false,
+                crop_transparent: false,
                 format: ThumbnailFormat::Png,
             },
             max_concurrency: Some(1),
             max_decoded_pixels: 10_000,
+            max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
+            max_output_pixels: DEFAULT_MAX_OUTPUT_PIXELS,
+            max_generated_bytes: DEFAULT_MAX_GENERATED_BYTES,
             hash: HashAlgorithm::Blake3,
         })
         .expect("no-upscale batch");
@@ -1026,7 +1293,7 @@ mod tests {
             (128, 64, 32)
         );
 
-        let allow_upscale = process_batch(BatchRequest {
+        let upscale_rejected = process_batch(BatchRequest {
             cache_root: temp.path().join("cache-upscale"),
             items: vec![WorkItem {
                 id: "small".into(),
@@ -1038,15 +1305,17 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: true,
+                crop_transparent: false,
                 format: ThumbnailFormat::Png,
             },
             max_concurrency: Some(1),
             max_decoded_pixels: 10_000,
+            max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
+            max_output_pixels: DEFAULT_MAX_OUTPUT_PIXELS,
+            max_generated_bytes: DEFAULT_MAX_GENERATED_BYTES,
             hash: HashAlgorithm::Blake3,
-        })
-        .expect("allow-upscale batch");
-        let level = &allow_upscale.results[0].manifest.as_ref().unwrap().levels[0];
-        assert_eq!((level.width, level.height), (128, 64));
+        });
+        assert!(upscale_rejected.is_err());
     }
 
     #[test]
@@ -1073,10 +1342,14 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: false,
+                crop_transparent: false,
                 format: ThumbnailFormat::Png,
             },
             max_concurrency: Some(1),
             max_decoded_pixels: 10_000,
+            max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
+            max_output_pixels: DEFAULT_MAX_OUTPUT_PIXELS,
+            max_generated_bytes: DEFAULT_MAX_GENERATED_BYTES,
             hash: HashAlgorithm::Blake3,
         };
 
@@ -1115,10 +1388,14 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: false,
+                crop_transparent: false,
                 format: ThumbnailFormat::Webp,
             },
             max_concurrency: Some(1),
             max_decoded_pixels: 10_000,
+            max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
+            max_output_pixels: DEFAULT_MAX_OUTPUT_PIXELS,
+            max_generated_bytes: DEFAULT_MAX_GENERATED_BYTES,
             hash: HashAlgorithm::Blake3,
         })
         .expect("batch response");
@@ -1129,7 +1406,8 @@ mod tests {
         for level in &manifest.levels {
             assert!(Path::new(&level.path).starts_with(&canonical_cache_root));
             assert_eq!(level.mime_type, "image/webp");
-            assert_eq!(level.filename, format!("{}.webp", level.max_side));
+            assert!(level.filename.starts_with(&format!("{}-", level.max_side)));
+            assert!(level.filename.ends_with(".webp"));
         }
         assert!(confined_join(&canonical_cache_root, &["thumbs", "abc.png"]).is_ok());
         assert!(confined_join(&canonical_cache_root, &["..", "escape.png"]).is_err());
@@ -1167,10 +1445,14 @@ mod tests {
                 max_width: None,
                 max_height: None,
                 allow_upscale: false,
+                crop_transparent: false,
                 format: ThumbnailFormat::Png,
             },
             max_concurrency: Some(2),
             max_decoded_pixels: 10_000,
+            max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
+            max_output_pixels: DEFAULT_MAX_OUTPUT_PIXELS,
+            max_generated_bytes: DEFAULT_MAX_GENERATED_BYTES,
             hash: HashAlgorithm::Blake3,
         })
         .expect("batch response");
@@ -1209,6 +1491,9 @@ mod tests {
             thumbnail: ThumbnailRequest::default(),
             max_concurrency: Some(1),
             max_decoded_pixels: 100,
+            max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
+            max_output_pixels: DEFAULT_MAX_OUTPUT_PIXELS,
+            max_generated_bytes: DEFAULT_MAX_GENERATED_BYTES,
             hash: HashAlgorithm::Sha256,
         };
 
@@ -1226,6 +1511,83 @@ mod tests {
         assert!(confined_join(root, &["thumbs", "abc.png"]).is_ok());
         assert!(confined_join(root, &["..", "escape.png"]).is_err());
         assert!(confined_join(root, &["thumbs/../escape.png"]).is_err());
+    }
+
+    #[test]
+    fn validates_limits_levels_workers_and_extreme_aspect_ratio() {
+        assert!(normalize_thumbnail_levels(vec![0]).is_err());
+        assert!(normalize_thumbnail_levels(vec![8193]).is_err());
+        assert_eq!(normalize_thumbnail_levels(vec![8192]).unwrap(), vec![8192]);
+        assert!(bounded_worker_count(Some(usize::MAX), 100) <= 2);
+        assert_eq!(bounded_worker_count(Some(2), 1), 1);
+        assert_eq!(thumbnail_dimensions(10_000, 1, 128, false), (128, 1));
+
+        let request: BatchRequest = serde_json::from_value(serde_json::json!({
+            "cacheRoot": ".",
+            "maxSourceBytes": 0,
+            "items": []
+        }))
+        .expect("request");
+        assert!(validate_limits(&request).is_err());
+    }
+
+    #[test]
+    fn png_output_preserves_alpha() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("alpha.png");
+        let image = ImageBuffer::from_pixel(2, 2, Rgba([10, 20, 30, 40]));
+        DynamicImage::ImageRgba8(image)
+            .save_with_format(&source, ImageFormat::Png)
+            .expect("fixture");
+        let request: BatchRequest = serde_json::from_value(serde_json::json!({
+            "cacheRoot": temp.path().join("cache"),
+            "thumbnail": { "levels": [2], "format": "png" },
+            "items": [{ "id": "alpha", "path": source }]
+        }))
+        .expect("request");
+        let response = process_batch(request).expect("batch");
+        let manifest = response.results[0].manifest.as_ref().expect("manifest");
+        let output = image::open(&manifest.levels[0].path)
+            .expect("output")
+            .to_rgba8();
+        assert_eq!(output.get_pixel(0, 0).0[3], 40);
+        assert!(!manifest.source.orientation_applied);
+        assert_eq!(manifest.source.post_orientation_width, 2);
+        assert_eq!(manifest.source.post_orientation_height, 2);
+    }
+
+    #[test]
+    fn source_output_and_generated_limits_reject_cleanly() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("source.png");
+        save_test_image(&source, ImageFormat::Png, 8, 8);
+        for (name, extra) in [
+            ("source", serde_json::json!({"maxSourceBytes": 1})),
+            ("output", serde_json::json!({"maxOutputPixels": 1})),
+            ("generated", serde_json::json!({"maxGeneratedBytes": 1})),
+        ] {
+            let mut value = serde_json::json!({
+                "cacheRoot": temp.path().join(name),
+                "thumbnail": { "levels": [8], "format": "png" },
+                "items": [{ "id": name, "path": source.clone() }]
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let response = process_batch(serde_json::from_value(value).unwrap()).expect("batch");
+            assert!(!response.results[0].ok, "{name}");
+            let cache = temp.path().join(name);
+            if cache.exists() {
+                let leftovers = fs::read_dir(cache)
+                    .unwrap()
+                    .flat_map(|entry| fs::read_dir(entry.unwrap().path()).into_iter().flatten())
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                    .count();
+                assert_eq!(leftovers, 0, "{name}");
+            }
+        }
     }
 
     #[test]

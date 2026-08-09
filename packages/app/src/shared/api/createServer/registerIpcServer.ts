@@ -9,7 +9,6 @@ import {
   withServerStreamingValidation,
   withServiceValidation
 } from '@shared/api/apiUtils/serviceValidation'
-import { ApiType } from '../apiUtils/serviceDefSheet'
 import { ApiDefSheet } from '../apiUtils/serviceDefSheet'
 
 function portToStreamingResp<T>(port: MessagePortMain): ServerStreaming<T> {
@@ -23,9 +22,10 @@ function portToStreamingResp<T>(port: MessagePortMain): ServerStreaming<T> {
 function cleanupPort(port: MessagePortMain, handleResult: Promise<void>): Promise<void> {
   return handleResult
     .catch((error) => {
-      console.error('cleanupPort error', error)
+      const serializedError = serializeServiceError(error)
+      console.error('cleanupPort error', serializedError)
       const transport: ServerStreamingTransport<void> = {
-        error: serializeServiceError(error)
+        error: serializedError
       }
       port.postMessage(transport)
     })
@@ -101,10 +101,11 @@ function registerServerStreaming<REQ, RESP>(
   })
 }
 
-export function registerIpcServer<T extends ApiType>(apiDef: ApiDefSheet<T>, api: T): void {
+export function registerIpcServer<T extends object>(apiDef: ApiDefSheet<T>, api: T): void {
+  const apiServices = api as Record<string, object>
   for (const serviceName in apiDef) {
     const serviceDef = apiDef[serviceName]
-    const serviceApi = api[serviceName]
+    const serviceApi = apiServices[serviceName] as Record<string, (...args: never[]) => unknown>
 
     for (const methodName in serviceDef) {
       const methodDef = serviceDef[methodName]

@@ -1,7 +1,20 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { Box, Typography, CircularProgress, Alert, Tooltip, useTheme, Button } from '@mui/material'
+import {
+  Box,
+  Typography,
+  CircularProgress,
+  Alert,
+  Tooltip,
+  useTheme,
+  Button,
+  IconButton
+} from '@mui/material'
+import CloseIcon from '@mui/icons-material/Close'
+import AttachFileIcon from '@mui/icons-material/AttachFile'
+import AccessTimeIcon from '@mui/icons-material/AccessTime'
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import { useTranslation } from 'react-i18next'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useRuntimeMcpStatus } from '@renderer/hooks/useRuntimeMcpStatus'
@@ -61,7 +74,6 @@ import {
   normalizeChatProfileIdForStorage,
   readScopedActiveLoadingSessionIds,
   readScopedExternalLoadingSessionIds,
-  readScopedLoadingSessionIds,
   recordAutoSavedChatImageKey,
   scopedStorageKey,
   STORAGE_KEY_CURRENT_SESSION_ID,
@@ -136,9 +148,11 @@ import {
 import { mergeChatAttachmentsWithSkillReferenceAttachments } from '@renderer/utils/customSkillReferenceAttachments'
 import {
   isImageOnlyInternalDragPayload,
+  materializeInternalImageDragAttachment,
   parseInternalImageDragPayload
 } from '@renderer/utils/droppedImageUtils'
 import { collectDroppedDirectoryFiles } from '../ProjectCanvasPage/dropDirectory'
+import { importChatAttachment, importChatAttachmentUrl } from './chatManagedMediaAttachments'
 import {
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
   BUILT_IN_PROMPT_TRANSLATION_SKILL_ID,
@@ -181,7 +195,6 @@ import {
 import {
   getChatAttachmentMaxSizeMB,
   getChatAttachmentTypeForFile,
-  getLocalFilePath,
   summarizeChatAttachmentsForLog
 } from '@renderer/features/chat/chatAttachmentUtils'
 import {
@@ -240,6 +253,29 @@ type ExternalSendToAgentDetail = {
   scope?: string
   targetScope?: string
   autoSend?: boolean
+  requestId?: string
+  eventId?: string
+  runId?: string
+}
+
+type SendMessageOverrides = {
+  content: string
+  attachments?: ChatAttachment[]
+  resolveAttachments?: () => Promise<ChatAttachment[]>
+  hiddenContext?: string
+  baseMessages?: ChatMessage[]
+  targetSessionId?: string
+  forcedSkillId?: string | null
+  forcedProfileId?: string | null
+  hy3dParams?: ReturnType<typeof getHy3dParams>
+  queueKey?: string
+  queuedAttachmentTypes?: ChatAttachment['type'][]
+}
+
+type QueuedSessionSend = {
+  id: number
+  overrides?: SendMessageOverrides
+  queueKey?: string
 }
 
 type ExternalInitialChatMessage = {
@@ -554,31 +590,62 @@ const revokeBlobUrl = (url?: string): void => {
   URL.revokeObjectURL(url)
 }
 
+const hasDuplicateAttachment = (
+  attachments: ChatAttachment[],
+  candidate: ChatAttachment
+): boolean =>
+  attachments.some(
+    (attachment) =>
+      attachment.url === candidate.url ||
+      (Boolean(attachment.fileName) &&
+        attachment.fileName === candidate.fileName &&
+        attachment.sizeBytes === candidate.sizeBytes)
+  )
+
+const convertInlineImageToAttachment = async (
+  imageUrl: string,
+  fileName = 'pasted-image.png'
+): Promise<ChatAttachment | null> => {
+  const normalizedUrl = imageUrl.trim()
+  if (!normalizedUrl) return null
+  const dimensions = await readImageDimensionsFromUrl(normalizedUrl)
+  if (normalizedUrl.startsWith('data:') || normalizedUrl.startsWith('blob:')) {
+    return importChatAttachmentUrl({
+      service: api().svcManagedMedia,
+      url: normalizedUrl,
+      fileName,
+      dimensions
+    })
+  }
+  return {
+    type: 'image',
+    url: normalizedUrl,
+    fileName,
+    mimeType: normalizedUrl.startsWith('data:')
+      ? normalizedUrl.slice(5, normalizedUrl.indexOf(';')) || 'image/png'
+      : undefined,
+    sourceWidth: dimensions.sourceWidth,
+    sourceHeight: dimensions.sourceHeight
+  }
+}
+
 const buildImageChatAttachmentFromFile = async (
   file: File,
-  preferredUrl?: string,
   options?: {
     relativePath?: string
   }
 ): Promise<ChatAttachment> => {
-  const filePath = getLocalFilePath(file)
   const previewUrl = fileToBlobUrl(file)
   const dimensions = await readImageDimensionsFromUrl(previewUrl)
-  const attachmentUrl = preferredUrl || (filePath ? `file://${filePath}` : previewUrl)
-  if (previewUrl !== attachmentUrl) {
-    revokeBlobUrl(previewUrl)
-  }
-
-  return {
+  revokeBlobUrl(previewUrl)
+  return importChatAttachment({
+    service: api().svcManagedMedia,
+    file,
     type: 'image',
-    url: attachmentUrl,
     mimeType: normalizeFileMimeType(file.name, file.type),
-    fileName: file.name,
     relativePath: options?.relativePath,
-    sizeBytes: file.size,
-    sourceWidth: dimensions.sourceWidth,
-    sourceHeight: dimensions.sourceHeight
-  }
+    dimensions
+  })
 }
 
 const buildChatAttachmentFromDroppedFile = async (
@@ -588,31 +655,18 @@ const buildChatAttachmentFromDroppedFile = async (
   }
 ): Promise<ChatAttachment> => {
   const attachmentType = getChatAttachmentTypeForFile(file)
-  const filePath = getLocalFilePath(file)
 
   if (attachmentType === 'image') {
-    return buildImageChatAttachmentFromFile(file, undefined, options)
+    return buildImageChatAttachmentFromFile(file, options)
   }
 
-  if (filePath) {
-    return {
-      type: attachmentType,
-      url: `file://${filePath}`,
-      mimeType: normalizeFileMimeType(file.name, file.type),
-      fileName: file.name,
-      relativePath: options?.relativePath,
-      sizeBytes: file.size
-    }
-  }
-
-  return {
+  return importChatAttachment({
+    service: api().svcManagedMedia,
+    file,
     type: attachmentType,
-    url: fileToBlobUrl(file),
     mimeType: normalizeFileMimeType(file.name, file.type),
-    fileName: file.name,
-    relativePath: options?.relativePath,
-    sizeBytes: file.size
-  }
+    relativePath: options?.relativePath
+  })
 }
 
 const ChatPage: React.FC<ChatPageProps> = ({
@@ -957,6 +1011,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
     sessionPersistenceGateRef.current = true
     persistedSessionsRef.current = new Map()
     sessionMutationEpochRef.current += 1
+    const loadMutationEpoch = sessionMutationEpochRef.current
+    const sessionsAtLoadStart = new Map(sessionsRef.current.map((session) => [session.id, session]))
     if (sessionPersistenceRetryTimerRef.current) {
       clearTimeout(sessionPersistenceRetryTimerRef.current)
       sessionPersistenceRetryTimerRef.current = null
@@ -981,17 +1037,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
         storedSessions = migrated || (await loadAllSessions(storageScope))
         if (loadEpoch !== sessionLoadEpochRef.current) return
 
-        const loadMutationEpoch = sessionMutationEpochRef.current
+        const migrationMutationEpoch = sessionMutationEpochRef.current
         const migratedSessions = await migrateLoadedChatMediaSessions(
           storedSessions,
           loadEpoch,
-          loadMutationEpoch
+          migrationMutationEpoch
         )
-        if (
-          loadEpoch !== sessionLoadEpochRef.current ||
-          loadMutationEpoch !== sessionMutationEpochRef.current ||
-          storageScope !== storageScopeRef.current
-        ) {
+        if (loadEpoch !== sessionLoadEpochRef.current || storageScope !== storageScopeRef.current) {
           return
         }
         const sortedStoredSessions = sortSessionsByRecencyDesc(
@@ -1002,11 +1054,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
         persistedSessionsRef.current = new Map(
           sortedStoredSessions.map((session) => [session.id, session])
         )
+        const locallyMutatedSessionIds =
+          loadMutationEpoch === sessionMutationEpochRef.current
+            ? []
+            : sessionsRef.current
+                .filter((session) => sessionsAtLoadStart.get(session.id) !== session)
+                .map((session) => session.id)
         setSessions((prev) =>
-          mergeLoadedSessionsWithLocal(sortedStoredSessions, prev, [
-            pendingSessionIdRef.current,
-            currentSessionIdRef.current
-          ])
+          mergeLoadedSessionsWithLocal(
+            sortedStoredSessions,
+            prev,
+            [pendingSessionIdRef.current, currentSessionIdRef.current],
+            locallyMutatedSessionIds
+          )
         )
       } catch (e) {
         if (loadEpoch === sessionLoadEpochRef.current) {
@@ -1137,14 +1197,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   // ==================== Loading 状态 ====================
   const [loadingSessionIds, setLoadingSessionIds] = useState<Set<string>>(() => {
-    try {
-      const saved = localStorage.getItem(loadingIdsStorageKey)
-      return saved ? new Set(JSON.parse(saved) as string[]) : new Set()
-    } catch {
-      return new Set()
-    }
+    return new Set(readScopedActiveLoadingSessionIds(storageScope))
   })
   const loadingSessionIdsRef = useRef<Set<string>>(loadingSessionIds)
+  const sendingSessionIdsRef = useRef<Set<string>>(new Set())
+  const [queuedSessionSends, setQueuedSessionSends] = useState<Map<string, QueuedSessionSend[]>>(
+    new Map()
+  )
+  const queuedSessionSendsRef = useRef<Map<string, QueuedSessionSend[]>>(queuedSessionSends)
+  const queuedSessionSendIdRef = useRef(0)
+  const updateQueuedSessionSends = useCallback((next: Map<string, QueuedSessionSend[]>) => {
+    queuedSessionSendsRef.current = next
+    setQueuedSessionSends(next)
+  }, [])
+  const pendingSessionSendKeysRef = useRef<Set<string>>(new Set())
+  const drainQueuedSessionRef = useRef<(sessionId: string) => void>(() => undefined)
+  const [composerClearVersion, setComposerClearVersion] = useState(0)
   useEffect(() => {
     loadingSessionIdsRef.current = loadingSessionIds
   }, [loadingSessionIds])
@@ -1168,11 +1236,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
     : undefined
 
   useEffect(() => {
-    const scopedLoadingIds = new Set(readScopedLoadingSessionIds(storageScope))
+    const scopedActiveLoadingIds = new Set(readScopedActiveLoadingSessionIds(storageScope))
     const scopedExternalLoadingIds = new Set(readScopedExternalLoadingSessionIds(storageScope))
-    loadingSessionIdsRef.current = scopedLoadingIds
+    loadingSessionIdsRef.current = scopedActiveLoadingIds
     externalLoadingSessionIdsRef.current = scopedExternalLoadingIds
-    setLoadingSessionIds(scopedLoadingIds)
+    setLoadingSessionIds(scopedActiveLoadingIds)
     setExternalLoadingSessionIds(scopedExternalLoadingIds)
     setLoadingStatusBySessionId(readScopedChatLoadingStatuses(storageScope))
   }, [storageScope])
@@ -1210,9 +1278,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const updateExternalLoadingSessionState = useCallback(
-    (sessionId: string, loading: boolean) => {
+    (sessionId: string, loading: boolean, completed = !loading) => {
       const nextLoadingIds = new Set(
-        updateScopedExternalLoadingSessionId(storageScope, sessionId, loading)
+        updateScopedExternalLoadingSessionId(storageScope, sessionId, loading, completed)
       )
 
       externalLoadingSessionIdsRef.current = nextLoadingIds
@@ -1224,13 +1292,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const clearLoadingSessionTracking = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, completed = true) => {
       const nextLoadingIds = new Set(loadingSessionIdsRef.current)
       nextLoadingIds.delete(sessionId)
       loadingSessionIdsRef.current = nextLoadingIds
       setLoadingSessionIds(nextLoadingIds)
       setSessionLoadingStatus(sessionId, null)
-      updateScopedActiveLoadingSessionId(storageScope, sessionId, false)
+      updateScopedActiveLoadingSessionId(storageScope, sessionId, false, completed)
 
       try {
         const stored = JSON.parse(localStorage.getItem(loadingIdsStorageKey) || '[]') as string[]
@@ -1242,7 +1310,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         /* ignore storage failures */
       }
 
-      updateExternalLoadingSessionState(sessionId, false)
+      updateExternalLoadingSessionState(sessionId, false, completed)
+      queueMicrotask(() => drainQueuedSessionRef.current(sessionId))
     },
     [loadingIdsStorageKey, setSessionLoadingStatus, storageScope, updateExternalLoadingSessionState]
   )
@@ -1257,7 +1326,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ?.abort('Chat context compression cancelled.')
       contextCompactAbortControllersRef.current.delete(sessionId)
       compactingSessionIdsRef.current.delete(sessionId)
-      clearLoadingSessionTracking(sessionId)
+      clearLoadingSessionTracking(sessionId, false)
       setSessions((prev) => removeTrailingEmptyAssistantMessage(prev, sessionId))
       emitPreviewRefresh('preview-only')
       window.dispatchEvent(
@@ -1356,39 +1425,52 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   }, [active, loadingIdsStorageKey, setSessions, storageScope])
 
-  // 校验 loading IDs：移除无效的（已有 content 或无空 assistant 占位符的）
+  // 校验 loading IDs：实时请求可以已经写入流式内容，controller/external run 才是权威状态。
   useEffect(() => {
     if (!sessionsLoaded) return
 
+    let persistedLoadingIds: string[] = []
+    try {
+      const savedLoadingIds = JSON.parse(
+        localStorage.getItem(loadingIdsStorageKey) || '[]'
+      ) as unknown
+      if (Array.isArray(savedLoadingIds)) {
+        persistedLoadingIds = savedLoadingIds.filter(
+          (sessionId): sessionId is string => typeof sessionId === 'string'
+        )
+      }
+    } catch {
+      /* sanitize malformed persisted loading state below */
+    }
+
     const removedLoadingIds: string[] = []
-    const validLoadingIds = [...loadingSessionIds].filter((sessionId) => {
+    const trackedLoadingIds = Array.from(new Set([...loadingSessionIds, ...persistedLoadingIds]))
+    const validLoadingIds = trackedLoadingIds.filter((sessionId) => {
       const session = sessions.find((item) => item.id === sessionId)
       const hasLiveRequest =
         sessionAbortControllersRef.current.has(sessionId) ||
-        readScopedActiveLoadingSessionIds(storageScope).includes(sessionId) ||
         externalLoadingSessionIdsRef.current.has(sessionId)
       if (!session || session.messages.length === 0 || !hasLiveRequest) {
         removedLoadingIds.push(sessionId)
         return false
       }
-
-      const lastMessage = session.messages[session.messages.length - 1]
-      const hasPendingAssistantPlaceholder =
-        lastMessage?.role === 'assistant' &&
-        !lastMessage.content &&
-        (!lastMessage.attachments || lastMessage.attachments.length === 0)
-      if (!hasPendingAssistantPlaceholder) {
-        removedLoadingIds.push(sessionId)
-      }
-      return hasPendingAssistantPlaceholder
+      return true
     })
 
-    if (validLoadingIds.length === loadingSessionIds.size) return
+    const validLoadingIdSet = new Set(validLoadingIds)
+    const stateIsCurrent =
+      validLoadingIdSet.size === loadingSessionIds.size &&
+      [...validLoadingIdSet].every((sessionId) => loadingSessionIds.has(sessionId))
+    const storageIsCurrent =
+      validLoadingIdSet.size === persistedLoadingIds.length &&
+      persistedLoadingIds.every((sessionId) => validLoadingIdSet.has(sessionId))
+    if (stateIsCurrent && storageIsCurrent) return
 
     const nextLoadingIds = new Set(validLoadingIds)
     loadingSessionIdsRef.current = nextLoadingIds
     setLoadingSessionIds(nextLoadingIds)
     for (const sessionId of removedLoadingIds) {
+      updateScopedActiveLoadingSessionId(storageScope, sessionId, false, false)
       setSessionLoadingStatus(sessionId, null)
     }
 
@@ -1414,6 +1496,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         scope?: string
         sessionId?: string
         loading?: boolean
+        completed?: boolean
       }>
 
       if (customEvent.detail?.scope) {
@@ -1425,7 +1508,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const sessionId = customEvent.detail?.sessionId
       if (!sessionId) return
 
-      updateExternalLoadingSessionState(sessionId, customEvent.detail.loading !== false)
+      const loading = customEvent.detail.loading !== false
+      updateExternalLoadingSessionState(
+        sessionId,
+        loading,
+        customEvent.detail.completed ?? !loading
+      )
     }
 
     window.addEventListener('chat:set-external-loading', handleExternalLoading)
@@ -1446,6 +1534,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const [searchKeyword, setSearchKeyword] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const chatContainerRef = useRef<HTMLDivElement>(null)
+  const shouldFollowMessagesRef = useRef(false)
   const inputValueRef = useRef(inputValue)
   const pendingAttachmentsRef = useRef<ChatAttachment[]>(pendingAttachments)
   const pendingHiddenContextRef = useRef(pendingHiddenContext)
@@ -1567,76 +1656,78 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
 
+      const rawAttachments = [...(attachments ?? []), ...(attachment ? [attachment] : [])]
+      const resolveAttachments = async (materializeBlobImages = true): Promise<ChatAttachment[]> =>
+        (
+          await Promise.all(
+            rawAttachments.map((item) =>
+              materializeBlobImages || !item.url.startsWith('blob:')
+                ? materializeInternalImageDragAttachment(item)
+                : Promise.resolve(item)
+            )
+          )
+        ).filter(
+          (
+            item
+          ): item is Awaited<ReturnType<typeof materializeInternalImageDragAttachment>> &
+            ChatAttachment => item !== null
+        ) as ChatAttachment[]
+
       if (autoSend && sendMessageRef.current) {
-        const sendAttachments = [...(attachments || [])]
-        if (attachment?.url && !sendAttachments.some((item) => item.url === attachment.url)) {
-          sendAttachments.push(attachment)
-        }
-
-        const sendExternalMessage = (resolvedAttachments: ChatAttachment[]) => {
-          void sendMessageRef.current?.({
-            content: text || '',
-            attachments: resolvedAttachments.length > 0 ? resolvedAttachments : undefined,
-            hiddenContext: hiddenText
-          })
-        }
-
-        if (image) {
-          fetch(image)
-            .then((res) => res.blob())
-            .then(async (blob) => {
-              const nextAttachment = await buildImageChatAttachmentFromFile(
-                new File([blob], getDownloadFileNameFromUrl(image, 'image.png'), {
-                  type: blob.type || 'image/png'
-                }),
-                image
-              )
-              if (!sendAttachments.some((item) => item.url === nextAttachment.url)) {
-                sendAttachments.push(nextAttachment)
-              }
-              sendExternalMessage(sendAttachments)
-            })
-            .catch((err) => {
-              console.error('[ChatPage] Failed to parse canvas image:', err)
-              sendExternalMessage(sendAttachments)
-            })
-          return
-        }
-
-        sendExternalMessage(sendAttachments)
+        const normalizedText = text || ''
+        const sendMessage = sendMessageRef.current
+        if (!normalizedText.trim() && rawAttachments.length === 0 && !image) return
+        void sendMessage({
+          content: normalizedText,
+          hiddenContext: hiddenText || '',
+          queueKey: detail.requestId ?? detail.eventId ?? detail.runId,
+          queuedAttachmentTypes: [
+            ...rawAttachments.map((item) => item.type),
+            ...(image ? (['image'] as ChatAttachment['type'][]) : [])
+          ],
+          resolveAttachments: async () => {
+            const resolvedAttachments = await resolveAttachments(false)
+            if (!image) return resolvedAttachments
+            const imageAttachment = await convertInlineImageToAttachment(image, 'pasted-image.png')
+            return imageAttachment ? [...resolvedAttachments, imageAttachment] : resolvedAttachments
+          }
+        }).catch((err) => {
+          console.error('[ChatPage] Failed to send external attachments:', err)
+        })
         return
       }
 
-      if (attachment?.url) {
-        setPendingAttachments((prev) => {
-          if (prev.some((item) => item.url === attachment.url)) return prev
-          return [...prev, attachment]
+      void resolveAttachments()
+        .then((resolvedAttachments) => {
+          if (resolvedAttachments.length === 0) return
+          setPendingAttachments((prev) => {
+            let next = prev
+            for (const item of resolvedAttachments) {
+              if (!item.url || hasDuplicateAttachment(next, item)) continue
+              if (next === prev) next = [...prev]
+              next.push(item)
+            }
+            return next
+          })
         })
-      }
+        .catch((err) => {
+          console.error('[ChatPage] Failed to materialize external attachments:', err)
+        })
 
       if (image) {
-        fetch(image)
-          .then((res) => res.blob())
-          .then(async (blob) => {
-            const nextAttachment = await buildImageChatAttachmentFromFile(
-              new File([blob], getDownloadFileNameFromUrl(image, 'image.png'), {
-                type: blob.type || 'image/png'
-              }),
-              image
-            )
+        void convertInlineImageToAttachment(image, 'pasted-image.png')
+          .then((imageAttachment) => {
+            if (!imageAttachment) return
             setPendingAttachments((prev) => {
-              if (prev.some((item) => item.url === image)) return prev
-              return [...prev, nextAttachment]
+              if (hasDuplicateAttachment(prev, imageAttachment)) return prev
+              return [...prev, imageAttachment]
             })
           })
           .catch((err) => console.error('[ChatPage] Failed to parse canvas image:', err))
       }
 
       if (text) {
-        setInputValue((prev) => {
-          const base = prev.trim()
-          return base ? `${base}\n\n${text}` : text
-        })
+        setInputValue((prev) => (prev ? `${prev}\n${text}` : text))
       }
 
       if (hiddenText) {
@@ -2156,6 +2247,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
     () => sessions.find((s) => s.id === currentSessionId),
     [sessions, currentSessionId]
   )
+  const currentSessionQueuedSends = currentSessionId
+    ? (queuedSessionSends.get(currentSessionId) ?? [])
+    : []
+  const [isQueueExpanded, setIsQueueExpanded] = useState(false)
+  useEffect(() => {
+    if (currentSessionQueuedSends.length <= 3) setIsQueueExpanded(false)
+  }, [currentSessionId, currentSessionQueuedSends.length])
+  const visibleQueuedSends = isQueueExpanded
+    ? currentSessionQueuedSends
+    : currentSessionQueuedSends.slice(0, 3)
+  const hiddenQueuedSendCount = currentSessionQueuedSends.length - visibleQueuedSends.length
   const currentPendingConfirmation = currentSession
     ? (pendingExternalConfirmations[currentSession.id] ?? null)
     : null
@@ -3013,17 +3115,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   // ==================== 外部事件：send-to-agent ====================
   // sendMessage 定义在后面，通过 ref 在 event handler 中引用
-  const sendMessageRef = useRef<
-    | ((overrides?: {
-        content: string
-        attachments?: ChatAttachment[]
-        hiddenContext?: string
-        targetSessionId?: string
-        forcedSkillId?: string | null
-        forcedProfileId?: string | null
-      }) => Promise<void>)
-    | null
-  >(null)
+  const sendMessageRef = useRef<((overrides?: SendMessageOverrides) => Promise<void>) | null>(null)
 
   useEffect(() => {
     const handleSendToAgent = (e: Event) => {
@@ -3037,6 +3129,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         scope?: string
         targetScope?: string
         autoSend?: boolean
+        requestId?: string
+        eventId?: string
+        runId?: string
       }>
       const detail = customEvent.detail
       const targetScope = detail.targetScope ?? detail.scope
@@ -3125,7 +3220,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     storageScope
                   })
                   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-                  const fileName = `agent_auto_${timestamp}.png`
+                  const fileName = `agent_auto_${timestamp}_${session.id}_${messageIndex}_${attachmentIndex}.png`
                   const response = await fetch(attachment.url)
                   const blob = await response.blob()
                   const data = await readBlobAsUint8Array(blob)
@@ -3372,29 +3467,38 @@ const ChatPage: React.FC<ChatPageProps> = ({
     return container.scrollHeight - container.scrollTop - container.clientHeight < 150
   }, [])
 
+  useEffect(() => {
+    const container = chatContainerRef.current
+    if (!container) return
+
+    const handleUserScrollIntent = () => {
+      window.requestAnimationFrame(() => {
+        shouldFollowMessagesRef.current = isNearBottom()
+      })
+    }
+
+    shouldFollowMessagesRef.current = isNearBottom()
+    container.addEventListener('wheel', handleUserScrollIntent, { passive: true })
+    container.addEventListener('touchmove', handleUserScrollIntent, { passive: true })
+    return () => {
+      container.removeEventListener('wheel', handleUserScrollIntent)
+      container.removeEventListener('touchmove', handleUserScrollIntent)
+    }
+  }, [currentSessionId, isNearBottom])
+
   const prevMessageCountRef = useRef(0)
-  const prevIsLoadingRef = useRef(false)
   useEffect(() => {
     if (!active) return
     const currentMessages = sessions.find((s) => s.id === currentSessionId)?.messages || []
     const messageCount = currentMessages.length
     if (messageCount > prevMessageCountRef.current || messageCount === 0) {
-      scrollToBottom()
-      setTimeout(() => scrollToBottom(), 200)
+      if (shouldFollowMessagesRef.current) {
+        scrollToBottom()
+        setTimeout(() => scrollToBottom(), 200)
+      }
     }
     prevMessageCountRef.current = messageCount
   }, [active, sessions, currentSessionId, scrollToBottom])
-
-  useEffect(() => {
-    if (!active) return
-    if (prevIsLoadingRef.current && !isLoading) {
-      setTimeout(() => scrollToBottom(), 100)
-    }
-    prevIsLoadingRef.current = isLoading
-    if (isLoading && isNearBottom()) {
-      scrollToBottom()
-    }
-  }, [active, isLoading, scrollToBottom, isNearBottom])
 
   // ==================== 粘贴处理 ====================
   useEffect(() => {
@@ -3483,13 +3587,43 @@ const ChatPage: React.FC<ChatPageProps> = ({
             sourceWidth,
             sourceHeight
           } = internalPayload
+          const draggedImageFiles = Array.from(e.dataTransfer.files || []).filter((file) =>
+            file.type.startsWith('image/')
+          )
+          const expectedDraggedFileName = internalPayload.fileItem?.filename?.trim()
+          const draggedImageFile = expectedDraggedFileName
+            ? draggedImageFiles.find((file) => file.name.trim() === expectedDraggedFileName)
+            : draggedImageFiles[0]
           const nextAttachments: ChatAttachment[] = [...attachments]
           const hasImageAttachment = nextAttachments.some(
             (attachment) => attachment.type === 'image'
           )
           const droppedText = textContent?.trim()
           const droppedHiddenText = hiddenTextContent?.trim()
-          if (!hasImageAttachment && previewImageUrl) {
+          if (!hasImageAttachment && draggedImageFile) {
+            const draggedFileAttachment = await buildChatAttachmentFromDroppedFile(
+              draggedImageFile,
+              {
+                relativePath: draggedImageFile.name
+              }
+            )
+            const materializedDraggedFileAttachment =
+              (await materializeInternalImageDragAttachment(draggedFileAttachment)) ||
+              draggedFileAttachment
+            if (materializedDraggedFileAttachment.url !== draggedFileAttachment.url) {
+              revokeBlobUrl(draggedFileAttachment.url)
+            }
+            nextAttachments.push({
+              ...materializedDraggedFileAttachment,
+              metadata: {
+                ...(materializedDraggedFileAttachment.metadata || {}),
+                ...(promptId ? { promptId } : {}),
+                ...(internalPayload.fileItem ? { fileItem: internalPayload.fileItem } : {})
+              },
+              sourceWidth: sourceWidth ?? materializedDraggedFileAttachment.sourceWidth,
+              sourceHeight: sourceHeight ?? materializedDraggedFileAttachment.sourceHeight
+            })
+          } else if (!hasImageAttachment && previewImageUrl) {
             nextAttachments.push({
               type: 'image',
               url: previewImageUrl,
@@ -3514,7 +3648,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
             })
           }
 
-          if (nextAttachments.length > 0) {
+          const materializedAttachments = (
+            await Promise.all(
+              nextAttachments.map((attachment) =>
+                materializeInternalImageDragAttachment(attachment)
+              )
+            )
+          ).filter(
+            (
+              attachment
+            ): attachment is Awaited<ReturnType<typeof materializeInternalImageDragAttachment>> &
+              ChatAttachment => attachment !== null
+          ) as ChatAttachment[]
+
+          if (materializedAttachments.length > 0) {
             setPendingAttachments((prev) => {
               const seen = new Set(
                 prev.map(
@@ -3524,7 +3671,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               )
               const merged = [...prev]
 
-              for (const attachment of nextAttachments) {
+              for (const attachment of materializedAttachments) {
                 const key = `${attachment.type}:${attachment.url}:${attachment.fileName || ''}`
                 if (seen.has(key)) continue
                 seen.add(key)
@@ -3546,7 +3693,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             setPendingHiddenContext((prev) => mergeHiddenContext(prev, droppedHiddenText))
           }
 
-          if (nextAttachments.length > 0 || droppedText || droppedHiddenText) {
+          if (materializedAttachments.length > 0 || droppedText || droppedHiddenText) {
             return
           }
         } catch (err) {
@@ -4434,17 +4581,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
         config: { download_dir: config.download_dir },
         storageScope
       })
+      const persistenceByBlobUrl = new Map<string, Promise<string | null>>()
       const persistedAttachments = await Promise.all(
         attachments.map(async (attachment, attachmentIndex): Promise<ChatAttachment> => {
           if (attachment.type !== 'image' || !attachment.url.startsWith('blob:')) {
             return attachment
           }
 
-          const savedPath = await saveChatImageAttachmentBlobToDir({
-            attachment,
-            attachmentIndex,
-            targetDir
-          })
+          let persistence = persistenceByBlobUrl.get(attachment.url)
+          if (!persistence) {
+            persistence = saveChatImageAttachmentBlobToDir({
+              attachment,
+              attachmentIndex,
+              targetDir
+            })
+            persistenceByBlobUrl.set(attachment.url, persistence)
+          }
+          const savedPath = await persistence
 
           if (!savedPath) {
             return attachment
@@ -4483,36 +4636,25 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [persistUserImageAttachments]
   )
 
-  const sendMessage = useCallback(
-    async (overrides?: {
-      content: string
-      attachments?: ChatAttachment[]
-      hiddenContext?: string
-      baseMessages?: ChatMessage[]
-      targetSessionId?: string
-      forcedSkillId?: string | null
-      forcedProfileId?: string | null
-      hy3dParams?: ReturnType<typeof getHy3dParams>
-    }) => {
+  const executeSendMessage = useCallback(
+    async (overrides?: SendMessageOverrides) => {
       const targetSessionId = overrides?.targetSessionId ?? currentSessionIdRef.current
       const cs = sessionsRef.current.find((s) => s.id === targetSessionId)
 
       const msgContent = overrides ? overrides.content : inputValueRef.current.trim()
-      const msgAttachments = overrides
+      let msgAttachments = overrides
         ? overrides.attachments
         : pendingAttachmentsRef.current.length > 0
           ? [...pendingAttachmentsRef.current]
           : undefined
+      if (overrides?.resolveAttachments) {
+        msgAttachments = await overrides.resolveAttachments()
+      }
       const msgHiddenContext = (
         overrides ? overrides.hiddenContext : pendingHiddenContextRef.current
       )?.trim()
 
       if (!cs || !targetSessionId) return
-
-      if (targetSessionId && loadingSessionIdsRef.current.has(targetSessionId)) {
-        console.log('[ChatPage] Target session is still generating, skip duplicate send')
-        return
-      }
 
       const activeSkillId = resolveAvailableSkillId(
         overrides?.forcedSkillId ?? cs.skillId ?? selectedSkillId
@@ -5169,14 +5311,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
           await persistSessionsToStorage(responseUpdater, 'tool-response')
           traceOutputKinds = ['tool_response']
           traceResponseCount = 1
-        } else if (useAttachmentBatching && rawAttachments) {
+        } else if (useAttachmentBatching && userMessage.attachments) {
           const maxAttachmentsPerRequest = await resolveAttachmentBatchCapability({
             config,
             profileId,
             systemPrompt: activeSystemPrompt,
             externalAgentSkill: activeExternalAgentSkill
           })
-          const attachmentBatchEntries = buildAttachmentBatchEntries(rawAttachments)
+          const attachmentBatchEntries = buildAttachmentBatchEntries(userMessage.attachments)
           const attachmentChunks = chunkAttachmentBatchEntries(
             attachmentBatchEntries,
             maxAttachmentsPerRequest
@@ -5310,6 +5452,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           )
 
           setSessions(responseUpdater)
+          clearLoadingSessionTracking(targetSessionId, true)
           await persistSessionsToStorage(responseUpdater, 'response')
           traceOutputKinds = summarizeChatAttachmentKindsForTrace(result.attachments)
           traceResponseCount = 1
@@ -5424,7 +5567,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (sessionAbortControllersRef.current.get(targetSessionId) === sessionAbortController) {
             sessionAbortControllersRef.current.delete(targetSessionId)
           }
-          clearLoadingSessionTracking(targetSessionId)
+          clearLoadingSessionTracking(targetSessionId, !wasCancelled)
           emitPreviewRefresh('preview-only')
 
           if (!wasCancelled) {
@@ -5500,6 +5643,128 @@ const ChatPage: React.FC<ChatPageProps> = ({
       selectedReasoningEffort,
       startContextCompactJob
     ]
+  )
+
+  const sendMessage = useCallback(
+    async (overrides?: SendMessageOverrides): Promise<void> => {
+      const targetSessionId = overrides?.targetSessionId ?? currentSessionIdRef.current
+      if (!targetSessionId) return
+
+      const queueKey = overrides?.queueKey
+        ? `${targetSessionId}\u0000${overrides.queueKey}`
+        : undefined
+      if (queueKey && pendingSessionSendKeysRef.current.has(queueKey)) return
+
+      let queuedOverrides = overrides
+      const isBusy =
+        sendingSessionIdsRef.current.has(targetSessionId) ||
+        loadingSessionIdsRef.current.has(targetSessionId)
+      if (isBusy && !queuedOverrides) {
+        queuedOverrides = {
+          content: inputValueRef.current.trim(),
+          attachments:
+            pendingAttachmentsRef.current.length > 0
+              ? [...pendingAttachmentsRef.current]
+              : undefined,
+          hiddenContext: pendingHiddenContextRef.current,
+          targetSessionId
+        }
+        if (!queuedOverrides.content && !queuedOverrides.attachments?.length) return
+      }
+
+      if (isBusy) {
+        if (queueKey) pendingSessionSendKeysRef.current.add(queueKey)
+        const queue = [
+          ...(queuedSessionSendsRef.current.get(targetSessionId) ?? []),
+          { id: ++queuedSessionSendIdRef.current, overrides: queuedOverrides, queueKey }
+        ]
+        const nextQueues = new Map(queuedSessionSendsRef.current)
+        nextQueues.set(targetSessionId, queue)
+        updateQueuedSessionSends(nextQueues)
+        if (!overrides) {
+          inputValueRef.current = ''
+          setInputValue('')
+          pendingAttachmentsRef.current = []
+          setPendingAttachments([])
+          pendingHiddenContextRef.current = ''
+          setPendingHiddenContext('')
+          // inputValueState may still contain the previous debounced value. Force the
+          // composer's local draft to observe the accepted queue clear immediately.
+          setComposerClearVersion((version) => version + 1)
+        }
+        return
+      }
+
+      if (queueKey) pendingSessionSendKeysRef.current.add(queueKey)
+      sendingSessionIdsRef.current.add(targetSessionId)
+      try {
+        await executeSendMessage(queuedOverrides)
+      } finally {
+        sendingSessionIdsRef.current.delete(targetSessionId)
+        if (queueKey) pendingSessionSendKeysRef.current.delete(queueKey)
+        drainQueuedSessionRef.current(targetSessionId)
+      }
+    },
+    [
+      executeSendMessage,
+      setInputValue,
+      setPendingAttachments,
+      setPendingHiddenContext,
+      updateQueuedSessionSends
+    ]
+  )
+
+  drainQueuedSessionRef.current = (sessionId: string) => {
+    if (
+      sendingSessionIdsRef.current.has(sessionId) ||
+      loadingSessionIdsRef.current.has(sessionId)
+    ) {
+      return
+    }
+    const queue = queuedSessionSendsRef.current.get(sessionId)
+    const next = queue?.[0]
+    if (!next) {
+      if (queuedSessionSendsRef.current.has(sessionId)) {
+        const nextQueues = new Map(queuedSessionSendsRef.current)
+        nextQueues.delete(sessionId)
+        updateQueuedSessionSends(nextQueues)
+      }
+      return
+    }
+    const nextQueues = new Map(queuedSessionSendsRef.current)
+    if (queue.length === 1) nextQueues.delete(sessionId)
+    else nextQueues.set(sessionId, queue.slice(1))
+    updateQueuedSessionSends(nextQueues)
+    if (next.queueKey) pendingSessionSendKeysRef.current.delete(next.queueKey)
+    void sendMessage(next.overrides)
+  }
+
+  const removeQueuedSessionSend = useCallback(
+    (sessionId: string, queuedSendId: number) => {
+      const queue = queuedSessionSendsRef.current.get(sessionId) ?? []
+      const removed = queue.find((item) => item.id === queuedSendId)
+      if (!removed) return
+      const remaining = queue.filter((item) => item.id !== queuedSendId)
+      const nextQueues = new Map(queuedSessionSendsRef.current)
+      if (remaining.length > 0) nextQueues.set(sessionId, remaining)
+      else nextQueues.delete(sessionId)
+      if (removed.queueKey) pendingSessionSendKeysRef.current.delete(removed.queueKey)
+      updateQueuedSessionSends(nextQueues)
+    },
+    [updateQueuedSessionSends]
+  )
+
+  const editQueuedSessionSend = useCallback(
+    (sessionId: string, queuedSend: QueuedSessionSend) => {
+      const overrides = queuedSend.overrides
+      if (!overrides || overrides.resolveAttachments) return
+      setInputValue(overrides.content)
+      setPendingAttachments(overrides.attachments?.map(cloneChatAttachment) ?? [])
+      setPendingHiddenContext(overrides.hiddenContext ?? '')
+      removeQueuedSessionSend(sessionId, queuedSend.id)
+      window.setTimeout(() => composerInputRef.current?.focus(), 0)
+    },
+    [removeQueuedSessionSend, setInputValue, setPendingAttachments, setPendingHiddenContext]
   )
 
   // 保持 sendMessageRef 与最新 sendMessage 同步，供 send-to-agent autoSend 使用
@@ -5631,36 +5896,28 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       if (!isImage && !isVideo && !isModel3d) return
 
-      const maxSizeMB = isVideo ? 500 : isModel3d ? 200 : 50
+      const attachmentType: ChatAttachment['type'] = isVideo
+        ? 'video'
+        : isModel3d
+          ? 'model3d'
+          : 'image'
+      const maxSizeMB = getChatAttachmentMaxSizeMB(attachmentType)
       if (!checkFileSize(file, maxSizeMB)) {
         alert(`File is too large. Max ${maxSizeMB}MB, current size ${formatFileSize(file.size)}.`)
         return
       }
 
-      let url: string
       const attachmentIndex = pendingAttachments.length
-      const localFilePath = getLocalFilePath(file)
-
-      if (isImage) {
-        url = localFilePath ? `file://${localFilePath}` : fileToBlobUrl(file)
-      } else if (localFilePath) {
-        url = `file://${localFilePath}`
-      } else if (isVideo || isModel3d) {
-        url = fileToBlobUrl(file)
-      } else {
-        url = fileToBlobUrl(file)
-      }
 
       setUploadProgress((prev) => ({ ...prev, [attachmentIndex]: 100 }))
       const attachment: ChatAttachment = isImage
-        ? await buildImageChatAttachmentFromFile(file, url)
-        : {
+        ? await buildImageChatAttachmentFromFile(file)
+        : await importChatAttachment({
+            service: api().svcManagedMedia,
+            file,
             type: isVideo ? 'video' : 'model3d',
-            url,
-            mimeType: normalizeFileMimeType(file.name, file.type),
-            fileName: file.name,
-            sizeBytes: file.size
-          }
+            mimeType: normalizeFileMimeType(file.name, file.type)
+          })
       setPendingAttachments((prev) => [...prev, attachment])
       setTimeout(() => {
         setUploadProgress((prev) => {
@@ -6089,6 +6346,131 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 messagesEndRef={messagesEndRef}
               />
 
+              {currentSessionId && currentSessionQueuedSends.length > 0 ? (
+                <Box
+                  data-testid="chat-queue-panel"
+                  role="region"
+                  aria-label={t('chat.queue_region')}
+                  sx={{
+                    mx: { xs: 1, sm: 2 },
+                    mb: 0.75,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 0.5,
+                    maxWidth: { sm: 720 },
+                    alignSelf: 'center',
+                    width: { xs: 'calc(100% - 16px)', sm: 'calc(100% - 32px)' }
+                  }}
+                >
+                  {visibleQueuedSends.map((queuedSend) => {
+                    const attachmentTypes =
+                      queuedSend.overrides?.queuedAttachmentTypes ??
+                      queuedSend.overrides?.attachments?.map((item) => item.type) ??
+                      []
+                    const canEdit = Boolean(
+                      queuedSend.overrides && !queuedSend.overrides.resolveAttachments
+                    )
+                    return (
+                      <Box
+                        key={queuedSend.id}
+                        data-testid="chat-queue-item"
+                        sx={{
+                          minWidth: 0,
+                          px: 1.5,
+                          py: 0.75,
+                          display: 'flex',
+                          gap: 1,
+                          alignItems: 'center',
+                          border: '1px solid',
+                          borderColor: 'rgba(245, 158, 11, 0.2)',
+                          borderRadius: 2,
+                          bgcolor: 'rgba(245, 158, 11, 0.1)'
+                        }}
+                      >
+                        <AccessTimeIcon
+                          sx={{ fontSize: 17, color: 'warning.main', flexShrink: 0 }}
+                        />
+                        <Tooltip
+                          title={queuedSend.overrides?.content || t('chat.queue_attachments')}
+                        >
+                          <Typography
+                            variant="body2"
+                            noWrap
+                            sx={{ minWidth: 0, flex: 1, fontSize: 13 }}
+                          >
+                            {queuedSend.overrides?.content || t('chat.queue_attachments')}
+                          </Typography>
+                        </Tooltip>
+                        {attachmentTypes.length > 0 ? (
+                          <Box
+                            aria-label={t('chat.queue_attachment_count', {
+                              count: attachmentTypes.length,
+                              defaultValue: `${attachmentTypes.length} 个附件`
+                            })}
+                            sx={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 0.25,
+                              color: 'text.secondary',
+                              fontSize: 11,
+                              flexShrink: 0
+                            }}
+                          >
+                            <AttachFileIcon sx={{ fontSize: 13 }} />
+                            {attachmentTypes.length}
+                          </Box>
+                        ) : null}
+                        {canEdit ? (
+                          <Tooltip title={t('chat.queue_edit')}>
+                            <IconButton
+                              size="small"
+                              aria-label={t('chat.queue_edit')}
+                              onClick={() => editQueuedSessionSend(currentSessionId, queuedSend)}
+                              sx={{ p: 0.25, color: 'text.secondary' }}
+                            >
+                              <EditOutlinedIcon sx={{ fontSize: 15 }} />
+                            </IconButton>
+                          </Tooltip>
+                        ) : null}
+                        <Tooltip title={t('chat.queue_remove')}>
+                          <IconButton
+                            size="small"
+                            aria-label={t('chat.queue_remove')}
+                            onClick={() => removeQueuedSessionSend(currentSessionId, queuedSend.id)}
+                            sx={{ p: 0.25, color: 'text.secondary' }}
+                          >
+                            <CloseIcon sx={{ fontSize: 15 }} />
+                          </IconButton>
+                        </Tooltip>
+                      </Box>
+                    )
+                  })}
+                  {currentSessionQueuedSends.length > 3 ? (
+                    <Button
+                      size="small"
+                      onClick={() => setIsQueueExpanded((expanded) => !expanded)}
+                      aria-label={
+                        isQueueExpanded
+                          ? t('chat.queue_collapse')
+                          : t('chat.queue_show_more', { count: hiddenQueuedSendCount })
+                      }
+                      sx={{
+                        alignSelf: 'center',
+                        minWidth: 0,
+                        px: 0.75,
+                        py: 0,
+                        color: 'warning.main',
+                        fontSize: 11
+                      }}
+                    >
+                      {isQueueExpanded
+                        ? t('chat.queue_collapse')
+                        : t('chat.queue_show_more', { count: hiddenQueuedSendCount })}
+                    </Button>
+                  ) : null}
+                </Box>
+              ) : null}
+
               {/* 底部输入框 */}
               <ChatComposer
                 active={active}
@@ -6104,7 +6486,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 disabled={!currentSession}
                 composerInputRef={composerInputRef}
                 onPreviewImage={imagePreview.setPreviewImage}
-                inputSyncKey={currentSessionId || 'no-session'}
+                inputSyncKey={`${currentSessionId || 'no-session'}:${composerClearVersion}`}
                 selectedSkillName={
                   selectedCustomSkill ? getCustomSkillName(selectedCustomSkill) : undefined
                 }

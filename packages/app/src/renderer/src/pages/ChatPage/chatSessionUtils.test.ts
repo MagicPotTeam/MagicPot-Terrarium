@@ -168,6 +168,34 @@ describe('chatSessionUtils collections', () => {
     ).toEqual(loadedSessions[0].messages)
   })
 
+  it('keeps a locally mutated response when an async storage read returns its stale snapshot', () => {
+    const loadedSessions: ChatSession[] = [
+      {
+        id: 'active',
+        title: 'Active',
+        messages: [
+          { role: 'user', content: 'run the graph' },
+          { role: 'assistant', content: '' }
+        ],
+        createdAt: 300
+      }
+    ]
+    const localSessions: ChatSession[] = [
+      {
+        ...loadedSessions[0],
+        messages: [
+          loadedSessions[0].messages[0],
+          { role: 'assistant', content: 'Graph run completed.' }
+        ]
+      }
+    ]
+
+    expect(
+      mergeLoadedSessionsWithLocal(loadedSessions, localSessions, ['active'], ['active'])[0]
+        .messages
+    ).toEqual(localSessions[0].messages)
+  })
+
   it('does not resurrect unrelated missing local sessions during reloads', () => {
     const loadedSessions: ChatSession[] = [
       { id: 'older', title: 'Older', messages: [], createdAt: 100 }

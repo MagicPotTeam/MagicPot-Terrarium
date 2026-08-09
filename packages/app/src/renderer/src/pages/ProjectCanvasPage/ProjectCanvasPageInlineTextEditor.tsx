@@ -223,6 +223,7 @@ export default function ProjectCanvasPageInlineTextEditor({
   const editor = (
     <textarea
       ref={inlineTextAreaRef}
+      data-project-canvas-inline-text-editor="true"
       autoFocus
       aria-label={mediaCaptionPlaceholder}
       placeholder=""

@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "sessions": [
+    {
+      "sessionKey": "generic:dm:legacy-v2",
+      "route": {
+        "channel": "generic",
+        "scopeType": "dm",
+        "scopeId": "legacy-v2"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "session v2"
+        }
+      ],
+      "createdAt": 1700000000002,
+      "updatedAt": 1700000001002,
+      "runs": [
+        {
+          "runId": "run-v2",
+          "sessionKey": "generic:dm:legacy-v2",
+          "workspaceId": "workspace-v2",
+          "route": {
+            "channel": "generic",
+            "scopeType": "dm",
+            "scopeId": "legacy-v2"
+          },
+          "status": "completed",
+          "runOrigin": "new",
+          "rootRunId": "run-v2",
+          "createdAt": 1700000000102,
+          "updatedAt": 1700000000202,
+          "startedAt": 1700000000112,
+          "finishedAt": 1700000000192,
+          "requestText": "compatibility request",
+          "responseText": "compatibility response",
+          "toolCallCount": 0,
+          "artifactCount": 0,
+          "eventCount": 0
+        }
+      ],
+      "artifacts": [],
+      "eventLog": []
+    }
+  ]
+}

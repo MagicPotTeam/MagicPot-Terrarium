@@ -79,6 +79,13 @@ const mergeSessionIdentity = (
   updatedAt: Math.max(current.updatedAt, next.updatedAt)
 })
 
+const RAW_TOOL_INVOCATION_TOKEN = Symbol('magicpot.agentKernel.rawToolInvocation')
+let enforceRawToolInvocationGateway = true
+
+export const setAgentKernelRawInvocationGuardForTest = (enabled: boolean): void => {
+  enforceRawToolInvocationGateway = enabled
+}
+
 export class AgentKernel {
   private readonly capabilities = new AgentCapabilityRegistry()
   private readonly toolRegistrations = new Map<string, AgentToolRegistration>()
@@ -207,8 +214,16 @@ export class AgentKernel {
 
   async invokeTool(
     request: AgentToolInvocationRequest,
-    invoker?: AgentToolInvoker
+    invoker?: AgentToolInvoker,
+    rawInvocationToken?: symbol
   ): Promise<AgentToolInvocationResult> {
+    if (
+      enforceRawToolInvocationGateway &&
+      this === getAgentKernel() &&
+      rawInvocationToken !== RAW_TOOL_INVOCATION_TOKEN
+    ) {
+      throw new Error('AgentKernel raw tool invocation must use an authorized production gateway.')
+    }
     throwIfAborted(request.signal)
 
     const session =
@@ -273,6 +288,13 @@ export class AgentKernel {
       }
     })
     return normalized
+  }
+
+  async invokeAuthorizedTool(
+    request: AgentToolInvocationRequest,
+    invoker?: AgentToolInvoker
+  ): Promise<AgentToolInvocationResult> {
+    return this.invokeTool(request, invoker, RAW_TOOL_INVOCATION_TOKEN)
   }
 
   createMasterRun(spec: AgentMasterRunSpec): AgentOrchestrationRun {

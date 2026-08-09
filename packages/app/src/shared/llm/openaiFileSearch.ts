@@ -1,8 +1,55 @@
-import type { ChatAttachment, ChatMessage } from './types'
+import { ProviderFileIdCache, type ProviderFileIdCacheKey } from '../providerFileIdCache'
 import type { FetchImpl } from './clients'
+import type { ChatAttachment, ChatMessage } from './types'
 
 const FILE_SEARCH_READY_TIMEOUT_MS = 30_000
 const FILE_SEARCH_POLL_INTERVAL_MS = 1_000
+const providerFileIdCache = new ProviderFileIdCache()
+
+const hashIdentity = async (value: string): Promise<string> => {
+  const bytes = new TextEncoder().encode(value)
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+const normalizeBaseUrl = (value: string): string => value.trim().replace(/\/+$/, '').toLowerCase()
+
+const getStableString = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.trim() ? value.trim() : undefined
+
+const normalizeSha256 = (value: unknown): string | undefined => {
+  const sha256 = getStableString(value)
+  return sha256 && /^[a-f0-9]{64}$/i.test(sha256) ? sha256.toLowerCase() : undefined
+}
+
+const buildCacheKey = async (
+  baseUrl: string,
+  apiKey: string,
+  attachment: ChatAttachment,
+  accountIdentifier?: string
+): Promise<ProviderFileIdCacheKey> => {
+  const stableAccountIdentifier = getStableString(accountIdentifier)
+  const accountFingerprint = stableAccountIdentifier
+    ? `id:${stableAccountIdentifier}`
+    : `key-sha256:${await hashIdentity(apiKey)}`
+  const sha256 = normalizeSha256(attachment.media?.sha256)
+  const mediaId = getStableString(attachment.metadata?.mediaId)
+  const sourceIdentity =
+    mediaId ||
+    (attachment.media?.kind === 'managed' ? attachment.media.relativePath : undefined) ||
+    attachment.relativePath ||
+    attachment.url
+
+  return {
+    provider: 'openai',
+    accountIdentity: `${normalizeBaseUrl(baseUrl)}:${accountFingerprint}`,
+    contentIdentity: sha256
+      ? `content-sha256:${sha256}`
+      : mediaId
+        ? `media:${mediaId}`
+        : `source-sha256:${await hashIdentity(sourceIdentity)}`
+  }
+}
 
 const FILE_SEARCH_SUPPORTED_EXTENSIONS = new Set([
   'c',
@@ -174,12 +221,12 @@ const loadAttachmentBlob = async (
   }
 
   const blob = await response.blob()
+  const mimeType = normalizeMimeType(attachment.mimeType) || 'application/octet-stream'
   return {
-    blob: blob.type
-      ? blob
-      : new Blob([await blob.arrayBuffer()], {
-          type: normalizeMimeType(attachment.mimeType) || 'application/octet-stream'
-        }),
+    blob:
+      blob.type || !(typeof blob.arrayBuffer === 'function')
+        ? blob
+        : new Blob([await blob.arrayBuffer()], { type: mimeType }),
     fileName
   }
 }
@@ -265,6 +312,15 @@ const createVectorStore = async (
   return payload.id
 }
 
+class OpenAIFileAttachError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message)
+  }
+}
+
 const addFileToVectorStore = async (
   apiKey: string,
   baseUrl: string,
@@ -286,10 +342,11 @@ const addFileToVectorStore = async (
   )
 
   if (!response.ok) {
-    throw new Error(
+    throw new OpenAIFileAttachError(
       `OpenAI vector store file attach failed: ${response.status} ${response.statusText} ${await safeText(
         response
-      )}`
+      )}`,
+      response.status
     )
   }
 }
@@ -416,30 +473,64 @@ export function buildOpenAIFileSearchTool(vectorStoreIds: string[]): Record<stri
 export async function createOpenAIFileSearchSession(options: {
   apiKey: string
   baseUrl: string
+  accountIdentifier?: string
+  fileIdCache?: ProviderFileIdCache
   messages: ChatMessage[]
   signal?: AbortSignal
   fetchImpl?: FetchImpl
 }): Promise<OpenAIFileSearchSession | null> {
   const attachments = collectOpenAIFileSearchAttachments(options.messages)
+  const fileIdCache = options.fileIdCache ?? providerFileIdCache
   if (!attachments.length) {
     return null
   }
 
-  const fileIds: string[] = []
+  const files: Array<{
+    cacheKey: ProviderFileIdCacheKey
+    fileId: string
+    sessionOwned: boolean
+  }> = []
   let vectorStoreId = ''
+
+  const deleteSessionOwnedFiles = async (): Promise<void> => {
+    await Promise.allSettled(
+      files
+        .filter((file) => file.sessionOwned)
+        .map(async (file) => {
+          fileIdCache.invalidate(file.cacheKey)
+          await safeDelete(
+            options.apiKey,
+            `${options.baseUrl}/files/${encodeURIComponent(file.fileId)}`,
+            options.fetchImpl
+          )
+        })
+    )
+  }
 
   try {
     for (const [index, attachment] of attachments.entries()) {
-      fileIds.push(
-        await uploadFile(
-          options.apiKey,
-          options.baseUrl,
-          attachment,
-          index,
-          options.signal,
-          options.fetchImpl
-        )
+      const cacheKey = await buildCacheKey(
+        options.baseUrl,
+        options.apiKey,
+        attachment,
+        options.accountIdentifier
       )
+      const cached = fileIdCache.get(cacheKey)
+      if (cached) {
+        files.push({ cacheKey, fileId: cached.fileId, sessionOwned: false })
+        continue
+      }
+
+      const fileId = await uploadFile(
+        options.apiKey,
+        options.baseUrl,
+        attachment,
+        index,
+        options.signal,
+        options.fetchImpl
+      )
+      fileIdCache.set(cacheKey, { fileId })
+      files.push({ cacheKey, fileId, sessionOwned: true })
     }
 
     vectorStoreId = await createVectorStore(
@@ -448,22 +539,33 @@ export async function createOpenAIFileSearchSession(options: {
       options.signal,
       options.fetchImpl
     )
-    for (const fileId of fileIds) {
-      await addFileToVectorStore(
-        options.apiKey,
-        options.baseUrl,
-        vectorStoreId,
-        fileId,
-        options.signal,
-        options.fetchImpl
-      )
+    for (const file of files) {
+      try {
+        await addFileToVectorStore(
+          options.apiKey,
+          options.baseUrl,
+          vectorStoreId,
+          file.fileId,
+          options.signal,
+          options.fetchImpl
+        )
+      } catch (error) {
+        if (
+          !file.sessionOwned &&
+          error instanceof OpenAIFileAttachError &&
+          [400, 404].includes(error.status)
+        ) {
+          fileIdCache.invalidate(file.cacheKey)
+        }
+        throw error
+      }
     }
 
     await waitForVectorStoreFiles(
       options.apiKey,
       options.baseUrl,
       vectorStoreId,
-      fileIds,
+      files.map((file) => file.fileId),
       options.signal,
       options.fetchImpl
     )
@@ -479,15 +581,7 @@ export async function createOpenAIFileSearchSession(options: {
           )
         }
 
-        await Promise.allSettled(
-          fileIds.map((fileId) =>
-            safeDelete(
-              options.apiKey,
-              `${options.baseUrl}/files/${encodeURIComponent(fileId)}`,
-              options.fetchImpl
-            )
-          )
-        )
+        await deleteSessionOwnedFiles()
       }
     }
   } catch (error) {
@@ -499,15 +593,7 @@ export async function createOpenAIFileSearchSession(options: {
       )
     }
 
-    await Promise.allSettled(
-      fileIds.map((fileId) =>
-        safeDelete(
-          options.apiKey,
-          `${options.baseUrl}/files/${encodeURIComponent(fileId)}`,
-          options.fetchImpl
-        )
-      )
-    )
+    await deleteSessionOwnedFiles()
 
     throw error
   }

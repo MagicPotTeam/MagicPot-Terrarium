@@ -4,7 +4,14 @@ export type MagicAgentGraphNodeKind = 'agent' | 'tool' | 'input' | 'condition' |
 
 export type MagicAgentGraphChannelKind = 'handoff' | 'artifact' | 'message' | 'control'
 
-export type MagicAgentGraphRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type MagicAgentGraphRunStatus =
+  | 'pending'
+  | 'running'
+  | 'pausing'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
 
 export type MagicAgentGraphNodeRunStatus =
   | 'pending'
@@ -27,6 +34,8 @@ export type MagicAgentGraphConditionDefinition = {
   value?: unknown
 }
 
+export type MagicAgentGraphInputMode = 'run' | 'managed'
+
 export type MagicAgentGraphNodeDefinition = {
   nodeId: string
   kind: MagicAgentGraphNodeKind
@@ -37,7 +46,7 @@ export type MagicAgentGraphNodeDefinition = {
   capabilities?: string[]
   agentId?: string
   toolName?: string
-  config?: Record<string, unknown>
+  config?: Record<string, unknown> & { inputMode?: MagicAgentGraphInputMode }
   condition?: MagicAgentGraphConditionDefinition
   metadata?: Record<string, unknown>
 }
@@ -207,12 +216,22 @@ export type MagicAgentGraphRunEventListRequest = {
   limit?: number
 }
 
+export type MagicAgentGraphNodeExecution =
+  | { mode: 'single-node'; nodeId: string; inputs: Record<string, unknown> }
+  | {
+      mode: 'run-from-node'
+      nodeId: string
+      inputs?: Record<string, unknown>
+      priorRunId?: string
+    }
+
 export type MagicAgentGraphRunRequest = {
   graphId: string
   input: string
   route: AgentRouteLike
   runId?: string
   outputIds?: string[]
+  nodeExecution?: MagicAgentGraphNodeExecution
   allowedToolNames?: string[] | null
   metadata?: Record<string, unknown>
 }
@@ -249,18 +268,68 @@ export type MagicAgentGraphRunChannelRecord = {
   metadata?: Record<string, unknown>
 }
 
+export type MagicAgentGraphRuntimeTopologyResourceKind =
+  | 'node'
+  | 'agent-invocation'
+  | 'channel'
+  | 'wire'
+
+export type MagicAgentGraphRuntimeTopologyResource = {
+  resourceId: string
+  kind: MagicAgentGraphRuntimeTopologyResourceKind
+  nodeKind?: MagicAgentGraphNodeKind
+  status?: MagicAgentGraphNodeRunStatus | 'delivered'
+  sourceNodeId?: string
+  targetNodeId?: string
+  sourceChannelId?: string
+  sourceResourceId?: string
+  targetResourceId?: string
+  createdAt: number
+  metadata?: Record<string, unknown>
+}
+
+export type MagicAgentGraphRuntimeTopologySnapshot = {
+  graphId: string
+  runId: string
+  route: AgentRouteLike
+  sessionKey: string
+  revision: number
+  resources: MagicAgentGraphRuntimeTopologyResource[]
+}
+
 export type MagicAgentGraphRunEventType =
   | 'graph.started'
   | 'graph.completed'
   | 'graph.failed'
   | 'graph.cancelled'
+  | 'graph.pause.requested'
+  | 'graph.paused'
+  | 'graph.resumed'
+  | 'graph.interrupted'
+  | 'input.pending'
+  | 'input.injected'
+  | 'input.edited'
+  | 'input.consumed'
+  | 'input.cancelled'
   | 'node.started'
   | 'node.completed'
   | 'node.failed'
   | 'node.skipped'
   | 'tool.invoked'
+  | 'approval.pending'
+  | 'approval.approved'
+  | 'approval.denied'
   | 'channel.message'
   | 'output.created'
+
+export type MagicAgentGraphRunPublicEvent = {
+  eventId: string
+  runId: string
+  sequence: number
+  kind: MagicAgentGraphRunEventType
+  timestamp: number
+  payload: Record<string, unknown>
+}
 
 export type MagicAgentGraphRunEvent = {
   eventId: string
@@ -274,6 +343,30 @@ export type MagicAgentGraphRunEvent = {
   channelId?: string
   outputId?: string
   metadata?: Record<string, unknown>
+}
+
+export type MagicAgentGraphPendingInputStatus = 'awaiting' | 'submitted' | 'consumed' | 'cancelled'
+
+export type MagicAgentGraphPendingInputRecord = {
+  pendingInputId: string
+  nodeId: string
+  revision: number
+  status: MagicAgentGraphPendingInputStatus
+  createdAt: number
+  updatedAt: number
+}
+
+export type MagicAgentGraphPendingApprovalStatus = 'awaiting' | 'approved' | 'denied'
+
+export type MagicAgentGraphPendingApprovalRecord = {
+  approvalId: string
+  nodeId: string
+  toolName: string
+  requestDigest: string
+  revision: number
+  status: MagicAgentGraphPendingApprovalStatus
+  createdAt: number
+  updatedAt: number
 }
 
 export type MagicAgentGraphRunRecord = {
@@ -291,9 +384,13 @@ export type MagicAgentGraphRunRecord = {
   channels: MagicAgentGraphRunChannelRecord[]
   outputs: MagicAgentGraphRunOutput[]
   events?: MagicAgentGraphRunEvent[]
+  pendingInput?: MagicAgentGraphPendingInputRecord
+  pendingApproval?: MagicAgentGraphPendingApprovalRecord
   graphSnapshot?: MagicAgentGraphDefinition
   permissionSnapshot?: MagicAgentGraphPermissionSnapshot
   preflightSnapshot?: MagicAgentGraphPreflightSnapshot
+  /** Durable exact topology attribution; absent on legacy persisted runs. */
+  runtimeTopology?: MagicAgentGraphRuntimeTopologySnapshot
   error?: string
   metadata?: Record<string, unknown>
 }
@@ -317,6 +414,20 @@ export type MagicAgentGraphRunResult = MagicAgentGraphRunRecord
 export type MagicAgentGraphCancelResult = {
   runId: string
   cancelled: boolean
+  status?: MagicAgentGraphRunStatus
+  error?: string
+}
+
+export type MagicAgentGraphPauseResult = {
+  runId: string
+  paused: boolean
+  status?: MagicAgentGraphRunStatus
+  error?: string
+}
+
+export type MagicAgentGraphResumeResult = {
+  runId: string
+  resumed: boolean
   status?: MagicAgentGraphRunStatus
   error?: string
 }

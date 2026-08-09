@@ -21,11 +21,15 @@ export type AssistantRoute = {
   senderName?: string
 }
 
+import type { CooperativeExecutionGate } from '../magicAgentPlatform2/agents/cooperativeExecutionController'
+
 export type AssistantInboundMessage = {
   route: AssistantRoute
   text?: string
   attachments?: ChatAttachment[]
   profileId?: string
+  maxOutputTokens?: number
+  temperature?: number
   systemPrompt?: string
   execution?: AssistantExecutionPolicy
   workspaceId?: string
@@ -34,6 +38,7 @@ export type AssistantInboundMessage = {
   resetHistory?: boolean
   taskGroup?: Partial<AssistantTaskGroupState> | null
   signal?: AbortSignal
+  cooperativeExecution?: CooperativeExecutionGate
   onEvent?: (event: AssistantRunEvent) => void | Promise<void>
 }
 
@@ -52,8 +57,9 @@ export type AssistantExecutionMode = 'inherit' | 'isolated' | 'no-history'
 export type AssistantExecutionPolicy = {
   mode?: AssistantExecutionMode
   allowHistory?: boolean
-  contextMessageLimit?: 0 | 3 | 5 | 10 | 'all'
+  contextMessageLimit?: number | 'all'
   allowedToolNames?: string[]
+  maxToolCalls?: number
   traceLabel?: string
   captureArtifacts?: boolean
 }
@@ -157,10 +163,34 @@ export type AssistantRunEvent = {
     | 'cancelled'
     | 'failed'
     | 'tool'
+    | 'fork-created'
   level: 'info' | 'warning' | 'error'
   message: string
   createdAt: number
   metadata?: Record<string, unknown>
+}
+
+export type AssistantSessionForkLineage = {
+  sourceSessionKey: string
+  sourceRoute: AssistantRoute
+  sourceEventId: string
+  sourceRunId: string
+  forkedAt: number
+  warning: string
+  attributionQuality?: 'exact' | 'legacy-approximate'
+  sourceWorkspaceId: string
+  idMap: {
+    runs: Record<string, string>
+    events: Record<string, string>
+    artifacts: Record<string, string>
+    messages?: Record<string, string>
+  }
+}
+
+export type AssistantSessionForkRequest = {
+  sourceRoute: AssistantRoute
+  sourceEventId: string
+  targetRoute: AssistantRoute
 }
 
 export type AssistantWorkspaceState = {
@@ -341,10 +371,23 @@ export type AssistantRunRecord = {
   lineage?: AssistantArtifactLineageRef
 }
 
+export type AssistantMessageAttributionQuality = 'exact' | 'legacy-approximate'
+
+export type AssistantMessageEntry = {
+  messageId: string
+  message: ChatMessage
+  order: number
+  createdAt: number
+  attributionQuality: AssistantMessageAttributionQuality
+  runId?: string
+  eventId?: string
+}
+
 export type AssistantSessionRecord = {
   sessionKey: string
   route: AssistantRoute
   messages: ChatMessage[]
+  messageEntries?: AssistantMessageEntry[]
   createdAt: number
   updatedAt: number
   workspace: AssistantWorkspaceState
@@ -352,6 +395,13 @@ export type AssistantSessionRecord = {
   runs: AssistantRunRecord[]
   artifacts: AssistantArtifactRef[]
   eventLog: AssistantRunEvent[]
+  lineage?: AssistantSessionForkLineage
+}
+
+export type AssistantSessionForkResult = {
+  session: AssistantSessionRecord
+  lineage: AssistantSessionForkLineage
+  forkCreatedEvent: AssistantRunEvent
 }
 
 export type AssistantSessionSummary = {

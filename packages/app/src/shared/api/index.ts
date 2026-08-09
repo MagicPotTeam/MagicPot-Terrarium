@@ -20,6 +20,7 @@ import { ShellSvc, shellSvcDef } from './svcShell'
 import { StateSvc, stateSvcDef } from './svcState'
 import { AppUpdateSvc, appUpdateSvcDef } from './svcAppUpdate'
 import { MagicAgentPlatformSvc, magicAgentPlatformSvcDef } from './svcMagicAgentPlatform'
+import { ManagedMediaSvc, managedMediaSvcDef } from './svcManagedMedia'
 import { apiExtensionDef, type ApiExtensionServices } from './extensionServices'
 
 export type BaseApi = {
@@ -44,6 +45,7 @@ export type BaseApi = {
   svcDuplicateCheck: DuplicateCheckSvc
   svcAppUpdate: AppUpdateSvc
   svcMagicAgentPlatform: MagicAgentPlatformSvc
+  svcManagedMedia: ManagedMediaSvc
 }
 
 export type Api = BaseApi & ApiExtensionServices
@@ -70,5 +72,6 @@ export const apiDef: ApiDefSheet<Api> = {
   svcDuplicateCheck: duplicateCheckSvcDef,
   svcAppUpdate: appUpdateSvcDef,
   svcMagicAgentPlatform: magicAgentPlatformSvcDef,
+  svcManagedMedia: managedMediaSvcDef,
   ...apiExtensionDef
 }

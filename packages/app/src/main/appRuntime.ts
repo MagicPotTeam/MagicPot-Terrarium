@@ -71,6 +71,14 @@ function registerWebContentsPolicies(getMainWindow: () => BrowserWindow | null):
           mainWindow.webContents.send('app:close-tab')
         }
       }
+
+      if (
+        input.type === 'keyDown' &&
+        (input.control || input.meta) &&
+        input.key.toLowerCase() === 's'
+      ) {
+        event.preventDefault()
+      }
     })
   })
 }

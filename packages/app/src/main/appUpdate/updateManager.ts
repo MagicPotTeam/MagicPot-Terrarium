@@ -1,8 +1,10 @@
-import path from 'path'
+﻿import path from 'path'
 import { app, type App } from 'electron'
 import type { ProgressInfo, ReleaseNoteInfo, UpdateInfo } from 'builder-util-runtime'
 import type { AppUpdater } from 'electron-updater'
 import type { AppUpdateStatus } from '@shared/api/svcAppUpdate'
+import { isValidBuildId, isValidRuntimeId } from '@shared/appUpdate/launcherProtocol'
+import { isValidLaunchToken } from './launcherHealth'
 import {
   PACKAGE_MODE,
   PACKAGE_VERSION,
@@ -20,6 +22,17 @@ const UPDATE_PROVIDER = {
 
 const isSupportedPackagedBuild = (): boolean =>
   app.isPackaged && (PACKAGE_MODE === 'pure' || PACKAGE_MODE === 'embedded')
+
+const isLauncherManaged = (): boolean => {
+  const root = process.env.MAGICPOT_LAUNCHER_ROOT
+  return (
+    typeof root === 'string' &&
+    path.isAbsolute(root) &&
+    isValidBuildId(process.env.MAGICPOT_LAUNCH_BUILD_ID) &&
+    isValidRuntimeId(process.env.MAGICPOT_LAUNCH_RUNTIME_ID) &&
+    isValidLaunchToken(process.env.MAGICPOT_LAUNCH_TOKEN)
+  )
+}
 
 function getCurrentInstallDirectory(): string {
   return path.dirname(app.getPath('exe'))
@@ -115,8 +128,17 @@ function setUnsupportedStatus(): AppUpdateStatus {
   })
 }
 
+function setLauncherManagedStatus(): AppUpdateStatus {
+  return emitStatus({
+    ...status,
+    state: 'managed-by-launcher',
+    supported: false,
+    errorMessage: undefined
+  })
+}
+
 async function getUpdater(): Promise<AppUpdater | null> {
-  if (!isSupportedPackagedBuild()) {
+  if (isLauncherManaged() || !isSupportedPackagedBuild()) {
     return null
   }
 
@@ -235,6 +257,17 @@ async function getUpdater(): Promise<AppUpdater | null> {
 }
 
 export function getAppUpdateStatus(): AppUpdateStatus {
+  if (isLauncherManaged()) {
+    return {
+      ...status,
+      state: 'managed-by-launcher',
+      supported: false,
+      canCheck: false,
+      canDownload: false,
+      canInstall: false
+    }
+  }
+
   if (!isSupportedPackagedBuild()) {
     return {
       ...status,
@@ -258,6 +291,9 @@ export function addAppUpdateStatusListener(listener: UpdateListener): () => void
 }
 
 export async function initializeAppUpdateManager(): Promise<AppUpdateStatus> {
+  if (isLauncherManaged()) {
+    return setLauncherManagedStatus()
+  }
   if (!isSupportedPackagedBuild()) {
     return setUnsupportedStatus()
   }
@@ -267,6 +303,9 @@ export async function initializeAppUpdateManager(): Promise<AppUpdateStatus> {
 }
 
 export async function checkForAppUpdates(): Promise<AppUpdateStatus> {
+  if (isLauncherManaged()) {
+    return setLauncherManagedStatus()
+  }
   const activeUpdater = await getUpdater()
   if (!activeUpdater) {
     return setUnsupportedStatus()
@@ -287,6 +326,9 @@ export async function checkForAppUpdates(): Promise<AppUpdateStatus> {
 }
 
 export async function downloadAppUpdate(): Promise<AppUpdateStatus> {
+  if (isLauncherManaged()) {
+    return setLauncherManagedStatus()
+  }
   const activeUpdater = await getUpdater()
   if (!activeUpdater) {
     return setUnsupportedStatus()
@@ -313,6 +355,9 @@ export async function downloadAppUpdate(): Promise<AppUpdateStatus> {
 }
 
 export async function installAppUpdate(): Promise<AppUpdateStatus> {
+  if (isLauncherManaged()) {
+    return setLauncherManagedStatus()
+  }
   const activeUpdater = await getUpdater()
   if (!activeUpdater) {
     return setUnsupportedStatus()

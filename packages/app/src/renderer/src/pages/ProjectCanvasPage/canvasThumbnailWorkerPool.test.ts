@@ -83,6 +83,7 @@ class TestScheduler {
 
 function createIdentity(id: string): CanvasImageSourceIdentity {
   return {
+    version: 1,
     kind: 'local-file',
     canonicalPath: `C:/images/${id}.png`,
     sizeBytes: 1024 + id.length,

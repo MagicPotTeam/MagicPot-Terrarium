@@ -24,6 +24,15 @@ import { comfyResultAutoSaveClaims } from '@renderer/store/comfyResultResources'
 const getPositiveImageDimension = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
 
+const isLocalMediaUrl = (value: string) => value.trim().startsWith('local-media://')
+
+const loadResultBlob = async (result: ResultCardProps<'image'>['result']): Promise<Blob> => {
+  if (result.sourceBlob) return result.sourceBlob
+  const response = await fetch(result.objectUrl)
+  if (response.ok === false) throw new Error(`Failed to load image (${response.status})`)
+  return response.blob()
+}
+
 const ResultCardImage: ResultCardComponent<'image'> = ({
   result,
   index,
@@ -84,8 +93,7 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
 
   const handleCopyImage = async () => {
     try {
-      const response = await fetch(result.objectUrl)
-      const blob = await response.blob()
+      const blob = await loadResultBlob(result)
       const arrayBuffer = await blob.arrayBuffer()
       const res = await api().svcHyper.writeImageToClipboard({ data: new Uint8Array(arrayBuffer) })
       if (res.success) {
@@ -221,8 +229,7 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
   const handleSendToPhotoshop = async () => {
     try {
       // 将 blob URL 转换为 base64
-      const response = await fetch(result.objectUrl)
-      const blob = await response.blob()
+      const blob = await loadResultBlob(result)
       const reader = new FileReader()
       const dataUrl = await new Promise<string>((resolve, reject) => {
         reader.onload = () => resolve(reader.result as string)
@@ -273,8 +280,7 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
 
               const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
               const fileName = `${t('quickapp.results.generated_image')}_${timestamp}.png`
-              const response = await fetch(result.objectUrl)
-              const blob = await response.blob()
+              const blob = await loadResultBlob(result)
               const arrayBuffer = await blob.arrayBuffer()
               const data = new Uint8Array(arrayBuffer)
               const res = await api().svcHyper.saveImageToDir({ data, fileName, dir: downloadDir })
@@ -338,6 +344,16 @@ const ResultCardImage: ResultCardComponent<'image'> = ({
             resultSourceWidth ?? getPositiveImageDimension(e.currentTarget.naturalWidth)
           const sourceHeight =
             resultSourceHeight ?? getPositiveImageDimension(e.currentTarget.naturalHeight)
+          if (result.sourceBlob && typeof File !== 'undefined') {
+            const dragFileName = result.fileItem.filename || 'quickapp-image.png'
+            const dragSourceFile =
+              result.sourceBlob instanceof File && result.sourceBlob.name === dragFileName
+                ? result.sourceBlob
+                : new File([result.sourceBlob], dragFileName, {
+                    type: result.sourceBlob.type || 'image/png'
+                  })
+            e.dataTransfer.items?.add?.(dragSourceFile)
+          }
           const payload = JSON.stringify({
             objectUrl: result.objectUrl,
             promptId: result.promptId,

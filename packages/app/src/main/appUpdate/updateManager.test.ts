@@ -1,18 +1,32 @@
-import path from 'path'
+﻿import path from 'path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 type SetupOptions = {
   isPackaged: boolean
   packageMode: 'pure' | 'embedded'
   exePath?: string
+  launcherEnv?: Partial<
+    Record<
+      | 'MAGICPOT_LAUNCHER_ROOT'
+      | 'MAGICPOT_LAUNCH_BUILD_ID'
+      | 'MAGICPOT_LAUNCH_RUNTIME_ID'
+      | 'MAGICPOT_LAUNCH_TOKEN',
+      string
+    >
+  >
 }
 
 async function loadUpdateManager({
   isPackaged,
   packageMode,
-  exePath = path.join('D:', 'MagicPot', 'MagicPot.exe')
+  exePath = path.join('D:', 'MagicPot', 'MagicPot.exe'),
+  launcherEnv = {}
 }: SetupOptions) {
   vi.resetModules()
+  vi.stubEnv('MAGICPOT_LAUNCHER_ROOT', launcherEnv.MAGICPOT_LAUNCHER_ROOT ?? '')
+  vi.stubEnv('MAGICPOT_LAUNCH_BUILD_ID', launcherEnv.MAGICPOT_LAUNCH_BUILD_ID ?? '')
+  vi.stubEnv('MAGICPOT_LAUNCH_RUNTIME_ID', launcherEnv.MAGICPOT_LAUNCH_RUNTIME_ID ?? '')
+  vi.stubEnv('MAGICPOT_LAUNCH_TOKEN', launcherEnv.MAGICPOT_LAUNCH_TOKEN ?? '')
 
   const appMock = {
     isPackaged,
@@ -59,6 +73,7 @@ async function loadUpdateManager({
 describe('updateManager', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllEnvs()
   })
 
   it('stays unsupported in development even when the build mode is pure', async () => {
@@ -73,6 +88,83 @@ describe('updateManager', () => {
       canCheck: false
     })
     expect(autoUpdaterMock.setFeedURL).not.toHaveBeenCalled()
+  })
+
+  it('does not trust an incomplete launcher environment marker', async () => {
+    const { module, autoUpdaterMock } = await loadUpdateManager({
+      isPackaged: true,
+      packageMode: 'pure',
+      launcherEnv: {
+        MAGICPOT_LAUNCHER_ROOT: path.resolve('D:', 'ForgedLauncher')
+      }
+    })
+
+    await module.initializeAppUpdateManager()
+
+    expect(autoUpdaterMock.setFeedURL).toHaveBeenCalledOnce()
+  })
+
+  it('does not load or call electron-updater when launched by a validated Launcher', async () => {
+    const { module, autoUpdaterMock, appMock } = await loadUpdateManager({
+      isPackaged: true,
+      packageMode: 'pure',
+      launcherEnv: {
+        MAGICPOT_LAUNCHER_ROOT: path.resolve('D:', 'MagicPotLauncher'),
+        MAGICPOT_LAUNCH_BUILD_ID: '20250102-030405-abcdef0',
+        MAGICPOT_LAUNCH_RUNTIME_ID: 'python-3.12.1',
+        MAGICPOT_LAUNCH_TOKEN: '0123456789abcdef0123456789abcdef'
+      }
+    })
+
+    for (const action of [
+      module.initializeAppUpdateManager,
+      module.checkForAppUpdates,
+      module.downloadAppUpdate,
+      module.installAppUpdate
+    ]) {
+      await expect(action()).resolves.toMatchObject({
+        state: 'managed-by-launcher',
+        supported: false,
+        canCheck: false,
+        canDownload: false,
+        canInstall: false
+      })
+    }
+    expect(autoUpdaterMock.setFeedURL).not.toHaveBeenCalled()
+    expect(autoUpdaterMock.checkForUpdates).not.toHaveBeenCalled()
+    expect(autoUpdaterMock.downloadUpdate).not.toHaveBeenCalled()
+    expect(autoUpdaterMock.quitAndInstall).not.toHaveBeenCalled()
+    expect(appMock.on).not.toHaveBeenCalled()
+  })
+
+  it('does not treat partial or invalid Launcher environment as managed', async () => {
+    const { module, autoUpdaterMock } = await loadUpdateManager({
+      isPackaged: true,
+      packageMode: 'pure',
+      launcherEnv: {
+        MAGICPOT_LAUNCHER_ROOT: 'relative-root',
+        MAGICPOT_LAUNCH_BUILD_ID: 'invalid',
+        MAGICPOT_LAUNCH_RUNTIME_ID: 'python-3.12.1'
+      }
+    })
+
+    await expect(module.initializeAppUpdateManager()).resolves.toMatchObject({ state: 'idle' })
+    expect(autoUpdaterMock.setFeedURL).toHaveBeenCalledOnce()
+  })
+
+  it('requires the Launcher token before disabling the legacy updater', async () => {
+    const { module, autoUpdaterMock } = await loadUpdateManager({
+      isPackaged: true,
+      packageMode: 'pure',
+      launcherEnv: {
+        MAGICPOT_LAUNCHER_ROOT: path.resolve('managed-root'),
+        MAGICPOT_LAUNCH_BUILD_ID: '20250102-030405-abcdef0',
+        MAGICPOT_LAUNCH_RUNTIME_ID: 'python-3.12.1'
+      }
+    })
+
+    await expect(module.initializeAppUpdateManager()).resolves.toMatchObject({ state: 'idle' })
+    expect(autoUpdaterMock.setFeedURL).toHaveBeenCalledOnce()
   })
 
   it('supports embedded packaged builds by installing pure updates into the current app directory', async () => {

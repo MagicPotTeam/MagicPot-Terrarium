@@ -1019,10 +1019,19 @@ async function importBenchmarkImageFiles(page, stagedImages, scenarioName) {
     )
     // Keep this path-only upload bounded. Do not pass payload buffers here: Playwright would
     // base64-encode them through CDP and inflate benchmark Node/Electron memory.
-    await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:set-input-files`, () =>
-      importInput.setInputFiles(batch, { timeout: 60000 })
-    )
-    importedCount += batch.length
+    for (const filePath of batch) {
+      const expectedFileCount = importedCount + 1
+      await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:set-input-file`, () =>
+        importInput.setInputFiles([filePath], { timeout: 60000 })
+      )
+      await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:wait-input-file`, () =>
+        waitForBenchmarkImportedItemCount(page, expectedFileCount)
+      )
+      await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:clear-input-file`, () =>
+        importInput.setInputFiles([], { timeout: 10000 })
+      )
+      importedCount = expectedFileCount
+    }
     batch.length = 0
     await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:clear-input-files`, async () => {
       try {

@@ -60,6 +60,25 @@ describe('AssistantRuntime', () => {
     }
   })
 
+  it('forwards runtime inference limits to the LLM chat service', async () => {
+    const chat = vi.fn(async (_req: LLMChatReq): Promise<LLMChatResp> => ({ content: 'bounded' }))
+    const runtime = new AssistantRuntime({
+      chatService: { chat },
+      sessionStore: store,
+      configProvider: createConfig
+    })
+    await runtime.handleMessage({
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'inference' },
+      text: 'hello',
+      maxOutputTokens: 321,
+      temperature: 0.25
+    })
+    expect(chat).toHaveBeenCalledWith(
+      expect.objectContaining({ maxOutputTokens: 321, temperature: 0.25 }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+  })
+
   it('reuses stored conversation history for the same route', async () => {
     const requests: LLMChatReq[] = []
     const chat = vi.fn(async (req: LLMChatReq): Promise<LLMChatResp> => {
@@ -1496,5 +1515,27 @@ describe('AssistantRuntime', () => {
     expect(requests).toHaveLength(1)
     expect(requests[0].systemPrompt).not.toContain('Shared Detach Workspace')
     expect(requests[0].systemPrompt).not.toContain('Reuse the shared workspace while attached.')
+  })
+
+  it('exposes the internal event fork store wrapper', async () => {
+    const source = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'runtime-fork-source' }
+    const target = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'runtime-fork-target' }
+    await store.appendEvents(source, [
+      {
+        eventId: 'runtime-fork-event',
+        runId: 'runtime-fork-run',
+        sessionKey: 'generic:dm:runtime-fork-source',
+        route: source,
+        type: 'started',
+        level: 'info',
+        message: 'fork point',
+        createdAt: 1
+      }
+    ])
+    const runtime = new AssistantRuntime({ sessionStore: store, configProvider: createConfig })
+    const result = await runtime.forkSessionAtEvent(source, 'runtime-fork-event', target)
+    expect(result.session.sessionKey).toBe('generic:dm:runtime-fork-target')
+    expect(result.forkCreatedEvent.type).toBe('fork-created')
+    expect(await runtime.getSession(target)).toMatchObject({ lineage: result.lineage })
   })
 })

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "releaseNotesUrl": "https://github.com/example/repository/releases/tag/v0.0.0-test",
+  "minimumLauncherVersion": "0.0.0-test",
+  "publishedAt": "2026-01-02T03:04:06Z",
+  "app": {
+    "archive": "C:\\ABSOLUTE\\release\\magicpot-app.zip",
+    "url": "https://github.com/example/repository/releases/download/v0.0.0-test/magicpot-app.zip"
+  },
+  "runtime": {
+    "archive": "C:\\ABSOLUTE\\release\\magicpot-runtime.zip",
+    "url": "https://github.com/example/repository/releases/download/v0.0.0-test/magicpot-runtime.zip"
+  }
+}

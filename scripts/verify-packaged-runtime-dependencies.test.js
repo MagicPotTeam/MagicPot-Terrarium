@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPackage } from '@electron/asar'
@@ -31,6 +32,14 @@ function createTempApp(includedFiles, packageJsonByRoot = {}) {
     )
   }
 
+  const helper = path.join(appOutDir, 'bin', 'magicpot-command-job', 'magicpot-command-job.exe')
+  fs.mkdirSync(path.dirname(helper), { recursive: true })
+  fs.writeFileSync(helper, 'trusted-helper')
+  fs.writeFileSync(
+    `${helper}.sha256`,
+    `${createHash('sha256').update(fs.readFileSync(helper)).digest('hex')}
+`
+  )
   return createPackage(sourceDir, path.join(appOutDir, 'resources', 'app.asar')).then(
     () => appOutDir
   )
@@ -58,6 +67,17 @@ describe('verify-packaged-runtime-dependencies', () => {
       'node_modules/zod-to-json-schema': { name: 'zod-to-json-schema' }
     })
     expect(() => verifyPackagedRuntimeDependencies(appOutDir)).not.toThrow()
+  })
+
+  it('rejects a missing or tampered Windows Job Object helper', async () => {
+    const appOutDir = await createTempApp(requiredRuntimeFiles, {
+      'node_modules/@modelcontextprotocol/sdk': { name: '@modelcontextprotocol/sdk' }
+    })
+    const helper = path.join(appOutDir, 'bin', 'magicpot-command-job', 'magicpot-command-job.exe')
+    fs.writeFileSync(helper, 'tampered-helper')
+    expect(() => verifyPackagedRuntimeDependencies(appOutDir)).toThrow('SHA-256 mismatch')
+    fs.rmSync(helper)
+    expect(() => verifyPackagedRuntimeDependencies(appOutDir)).toThrow('helper was not found')
   })
 
   it('reports missing transitive MCP runtime dependencies', async () => {

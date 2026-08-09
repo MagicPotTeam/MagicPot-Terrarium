@@ -19,6 +19,8 @@ export type CanvasImageBitmapLike = {
   close: () => void
 }
 
+export type CanvasImageBitmapOwnership = 'owned' | 'borrowed'
+
 export type CanvasImageLeaseDisposer = () => void
 
 export type CanvasImageReleaseErrorSnapshot = {
@@ -156,7 +158,25 @@ export class CanvasImageReleaseManager {
     })
   }
 
-  trackImageBitmap(id: string, imageBitmap: CanvasImageBitmapLike): CanvasImageReleaseHandle {
+  trackImageBitmap(
+    id: string,
+    imageBitmap: CanvasImageBitmapLike,
+    ownership: CanvasImageBitmapOwnership = 'owned'
+  ): CanvasImageReleaseHandle {
+    if (ownership === 'borrowed') {
+      return {
+        id,
+        kind: 'imageBitmap',
+        release: (reason: CanvasImageReleaseReason = 'manual') => ({
+          id,
+          kind: null,
+          reason: normalizeReleaseReason(reason, 'manual'),
+          released: false,
+          errors: []
+        })
+      }
+    }
+
     return this.track({
       id,
       kind: 'imageBitmap',

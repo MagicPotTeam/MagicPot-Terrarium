@@ -31,6 +31,15 @@ export type ListFilesInFolderResp = {
   }[]
 }
 
+export type PruneAutoSaveProjectsReq = {
+  currentProjectDirName: string
+  maxProjects: number
+}
+
+export type PruneAutoSaveProjectsResp = {
+  removedProjectDirs: string[]
+}
+
 export type SaveImageToPathReq = {
   image: Uint8Array
   outputPath: string
@@ -115,7 +124,7 @@ export type ReadLoraTriggerWordsNativeResp = {
 }
 
 export const MAX_READ_FILE_SLICE_BYTES = 16 * 1024 * 1024
-export const MAX_FULL_FILE_BYTES = 64 * 1024 * 1024
+export const MAX_FULL_FILE_BYTES = 256 * 1024 * 1024
 export const MAX_TEXT_FILE_BYTES = 8 * 1024 * 1024
 export const MAX_FILENAME_LENGTH = 255
 
@@ -180,6 +189,36 @@ const requireText = (value: unknown, method: string): string => {
   )
 }
 
+const validatePruneAutoSaveProjectsReq = (value: unknown): PruneAutoSaveProjectsReq => {
+  const method = 'pruneAutoSaveProjects'
+  const req = requireRecord(value, method)
+  const currentProjectDirName = requireNonEmptyString(
+    req.currentProjectDirName,
+    method,
+    'currentProjectDirName'
+  )
+  if (
+    currentProjectDirName.includes('/') ||
+    currentProjectDirName.includes(String.fromCharCode(92))
+  ) {
+    throw new ServiceValidationError(method, undefined, [
+      { path: ['currentProjectDirName'], message: 'Expected a directory basename' }
+    ])
+  }
+  const maxProjects = req.maxProjects
+  if (
+    typeof maxProjects !== 'number' ||
+    !Number.isInteger(maxProjects) ||
+    maxProjects < 1 ||
+    maxProjects > 100
+  ) {
+    throw new ServiceValidationError(method, undefined, [
+      { path: ['maxProjects'], message: 'Expected an integer from 1 to 100' }
+    ])
+  }
+  return { currentProjectDirName, maxProjects }
+}
+
 const validatePathReq =
   <T extends { fullPath: string }>(method: string) =>
   (value: unknown): T => {
@@ -237,6 +276,7 @@ const validateReadFileSliceReq = (value: unknown): ReadFileSliceReq => {
 export type FsSvc = {
   listImagesInFolder(req: ListImagesInFolderReq): Promise<ListImagesInFolderResp>
   listFilesInFolder(req: ListFilesInFolderReq): Promise<ListFilesInFolderResp>
+  pruneAutoSaveProjects(req: PruneAutoSaveProjectsReq): Promise<PruneAutoSaveProjectsResp>
   saveImageToPath(req: SaveImageToPathReq): Promise<SaveImageToPathResp>
   saveQAppInputImage(req: SaveQAppInputImageReq): Promise<SaveQAppInputImageResp>
   readImageFromPath(req: ReadImageFromPathReq): Promise<ReadImageFromPathResp>
@@ -255,6 +295,10 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
   },
   listFilesInFolder: {
     type: 'unary'
+  },
+  pruneAutoSaveProjects: {
+    type: 'unary',
+    request: validatePruneAutoSaveProjectsReq
   },
   saveImageToPath: {
     type: 'unary',

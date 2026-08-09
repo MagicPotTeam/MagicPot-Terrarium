@@ -19,6 +19,7 @@ import type {
 } from './types'
 import type { CanvasTool } from './projectCanvasPageShared'
 import { measureCanvasTextBoxSize } from './canvasTextLayout'
+import { authorizeCanvasLocalMediaSourceUrl } from './canvasLocalFileSource'
 
 type CanvasPoint = { x: number; y: number }
 
@@ -334,14 +335,16 @@ export function useCanvasMediaAssetIntake({
       }
     ) => {
       const probeObjectUrl = URL.createObjectURL(file)
-      const persistentSrc = getCanvasLocalMediaSourceUrl(file) || probeObjectUrl
-      const releaseProbeObjectUrl = () => {
-        if (persistentSrc !== probeObjectUrl) {
-          URL.revokeObjectURL(probeObjectUrl)
-        }
-      }
+      const releaseProbeObjectUrl = () => URL.revokeObjectURL(probeObjectUrl)
 
-      const createVideoItem = (width: number, height: number) => {
+      const createVideoItem = async (width: number, height: number) => {
+        const persistentSrc = await authorizeCanvasLocalMediaSourceUrl(file)
+        if (!persistentSrc) {
+          releaseProbeObjectUrl()
+          console.error('[Canvas] Failed to authorize local video:', file.name)
+          return
+        }
+        releaseProbeObjectUrl()
         const pos = getCenterPosition(width, height)
         const newItem: CanvasVideoItem = createCanvasVideoItemDraft({
           id: createCanvasItemId('video'),
@@ -372,7 +375,6 @@ export function useCanvasMediaAssetIntake({
       const video = document.createElement('video')
       video.preload = 'metadata'
       video.onloadedmetadata = () => {
-        releaseProbeObjectUrl()
         const rawWidth = Math.max(1, video.videoWidth || VIDEO_FALLBACK_WIDTH)
         const rawHeight = Math.max(1, video.videoHeight || VIDEO_FALLBACK_HEIGHT)
         const maxSide = Math.max(rawWidth, rawHeight)
@@ -384,7 +386,6 @@ export function useCanvasMediaAssetIntake({
       }
       video.onerror = () => {
         console.error('[Canvas] Failed to load video metadata:', file.name)
-        releaseProbeObjectUrl()
         createVideoItem(VIDEO_FALLBACK_WIDTH, VIDEO_FALLBACK_HEIGHT)
       }
       video.src = probeObjectUrl

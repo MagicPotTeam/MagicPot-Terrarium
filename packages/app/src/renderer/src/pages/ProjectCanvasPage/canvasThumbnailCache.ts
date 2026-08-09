@@ -56,6 +56,7 @@ export function buildCanvasImageSourceIdentity(
   }
 
   return {
+    version: 1,
     kind: 'local-file',
     canonicalPath,
     sizeBytes,
@@ -69,7 +70,72 @@ export function buildCanvasImageSourceIdentity(
   }
 }
 
-export const buildCanvasThumbnailSourceIdentity = buildCanvasImageSourceIdentity
+export function buildCanvasSessionSourceKey(source: Blob): string {
+  const file = source instanceof File ? source : null
+  return [
+    'canvas-session',
+    file?.name?.trim() ?? '',
+    source.type.trim().toLowerCase(),
+    Math.max(0, Math.floor(source.size)),
+    file && file.lastModified > 0 ? Math.floor(file.lastModified) : ''
+  ].join(':')
+}
+
+export function buildCanvasSessionSourceIdentity(input: {
+  sourceKey: string
+  sizeBytes: number
+  mimeType?: string
+  fileName?: string
+}): CanvasImageSourceIdentity {
+  const sourceKey = input.sourceKey.trim()
+  const sizeBytes = Math.max(0, Math.floor(input.sizeBytes))
+  const mimeType = input.mimeType?.trim().toLowerCase() || 'application/octet-stream'
+  const fileName = input.fileName?.trim() || undefined
+  const identity = [sourceKey, sizeBytes, mimeType, fileName ?? ''].join('\n')
+  return {
+    version: 1,
+    kind: 'session-blob',
+    sourceKey,
+    sizeBytes,
+    mimeType,
+    ...(fileName ? { fileName } : {}),
+    cacheKey: `${CACHE_KEY_PREFIX}-session-${fnv1a32(identity, 0x811c9dc5)}${fnv1a32(identity, 0x9e3779b9)}`
+  }
+}
+
+export function buildCanvasSessionSourceIdentityFromBlob(source: Blob): CanvasImageSourceIdentity {
+  const file = source instanceof File ? source : null
+  return buildCanvasSessionSourceIdentity({
+    sourceKey: buildCanvasSessionSourceKey(source),
+    sizeBytes: source.size,
+    mimeType: source.type,
+    ...(file?.name ? { fileName: file.name } : {})
+  })
+}
+
+function areCanvasSourceIdentitiesEqual(
+  left: CanvasImageSourceIdentity,
+  right: CanvasImageSourceIdentity
+): boolean {
+  if (
+    left.kind !== right.kind ||
+    left.cacheKey !== right.cacheKey ||
+    left.sizeBytes !== right.sizeBytes
+  ) {
+    return false
+  }
+  if (left.kind === 'local-file' && right.kind === 'local-file') {
+    return (
+      left.canonicalPath === right.canonicalPath && left.lastModifiedMs === right.lastModifiedMs
+    )
+  }
+  return (
+    left.kind === 'session-blob' &&
+    right.kind === 'session-blob' &&
+    left.sourceKey === right.sourceKey &&
+    left.mimeType === right.mimeType
+  )
+}
 
 export function isCanvasThumbnailSetFresh(
   thumbnailSet: CanvasImageThumbnailSet | null | undefined,
@@ -80,9 +146,7 @@ export function isCanvasThumbnailSetFresh(
     sourceIdentity &&
     thumbnailSet.version === 1 &&
     thumbnailSet.cacheKey === sourceIdentity.cacheKey &&
-    thumbnailSet.sourceIdentity.canonicalPath === sourceIdentity.canonicalPath &&
-    thumbnailSet.sourceIdentity.sizeBytes === sourceIdentity.sizeBytes &&
-    thumbnailSet.sourceIdentity.lastModifiedMs === sourceIdentity.lastModifiedMs &&
+    areCanvasSourceIdentitiesEqual(thumbnailSet.sourceIdentity, sourceIdentity) &&
     CANVAS_THUMBNAIL_LEVELS.every((level) =>
       thumbnailSet.levels.some((candidate) => candidate.maxSide === level && candidate.src)
     )
@@ -183,6 +247,10 @@ export function validateCanvasThumbnailManifestForIdentity(
     return { status: 'miss', thumbnailSet: null }
   }
 
+  if (sourceIdentity.kind !== 'local-file') {
+    return { status: 'miss', thumbnailSet: null }
+  }
+
   if (
     manifest.cacheKey !== sourceIdentity.cacheKey ||
     manifest.canonicalPath !== sourceIdentity.canonicalPath ||
@@ -203,6 +271,10 @@ export function validateCanvasThumbnailManifestForIdentity(
 export function canvasThumbnailManifestFromSet(
   thumbnailSet: CanvasImageThumbnailSet
 ): CanvasThumbnailManifest {
+  if (thumbnailSet.sourceIdentity.kind !== 'local-file') {
+    throw new Error('Canvas thumbnail manifests require a local-file source identity.')
+  }
+
   return {
     version: 1,
     cacheKey: thumbnailSet.cacheKey,

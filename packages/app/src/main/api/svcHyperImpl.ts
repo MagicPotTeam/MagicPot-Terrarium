@@ -2,7 +2,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { createHash, randomUUID } from 'node:crypto'
 import nodeOs from 'node:os'
-import { dialog } from 'electron'
+import { app, dialog } from 'electron'
 import { sleep } from '@shared/utils/utilFuncs'
 import { ConfigUtils } from '@shared/config/configUtils'
 import { connectSubProcess, killSubProcess, spawnSubProcess } from '../subprocess/subprocess'
@@ -956,25 +956,37 @@ export class HyperSvcImpl implements HyperSvc {
     data: Uint8Array
     fileName: string
     dir?: string
-  }): Promise<{ savedPath: string }> {
+  }): Promise<{ savedPath: string; canceled?: boolean }> {
     const fsPromises = await import('fs/promises')
     const pathModule = await import('path')
-    const os = await import('os')
 
     // 文件名必须在主进程边界做净化，防止附件名路径穿越。
     const originalFileName = sanitizeSaveImageFileName(req.fileName)
+    const data = Buffer.from(req.data)
 
-    // 默认保存到桌面/魔壶图片保存
-    const targetDir = pathModule.resolve(
-      req.dir || pathModule.join(os.homedir(), 'Desktop', '魔壶图片保存')
-    )
+    if (!req.dir) {
+      const extension = pathModule.extname(originalFileName).replace(/^\./, '').toLowerCase()
+      const result = await dialog.showSaveDialog({
+        title: '保存图片',
+        defaultPath: pathModule.join(app.getPath('downloads'), originalFileName),
+        filters: extension
+          ? [{ name: `${extension.toUpperCase()} image`, extensions: [extension] }]
+          : undefined
+      })
+      if (result.canceled || !result.filePath) {
+        return { savedPath: '', canceled: true }
+      }
 
-    // 确保目录存在
+      await fsPromises.mkdir(pathModule.dirname(result.filePath), { recursive: true })
+      await fsPromises.writeFile(result.filePath, data)
+      return { savedPath: result.filePath, canceled: false }
+    }
+
+    const targetDir = pathModule.resolve(req.dir)
     await fsPromises.mkdir(targetDir, { recursive: true })
 
     const ext = pathModule.extname(originalFileName)
     const base = pathModule.basename(originalFileName, ext)
-    const data = Buffer.from(req.data)
     let counter = 0
     while (true) {
       const fileName = counter === 0 ? originalFileName : `${base}_${counter}${ext}`
@@ -986,7 +998,7 @@ export class HyperSvcImpl implements HyperSvc {
 
       try {
         await fsPromises.writeFile(filePath, data, { flag: 'wx' })
-        return { savedPath: filePath }
+        return { savedPath: filePath, canceled: false }
       } catch (error) {
         if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') {
           throw error

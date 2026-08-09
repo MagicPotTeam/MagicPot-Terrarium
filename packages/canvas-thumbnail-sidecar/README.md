@@ -1,5 +1,9 @@
 # canvas-thumbnail-sidecar
 
+- GIF input is intentionally deferred: enabling `image/gif` requires a safely regenerated `Cargo.lock`; the required transitive crates were not present in the local registry cache and no Rust toolchain was available.
+- `maxSourceBytes`, `maxOutputPixels`, and `maxGeneratedBytes` are optional hardening limits in addition to `maxDecodedPixels`.
+- Outputs use content-keyed filenames and are encoded to temporary files, cumulatively size-checked, then published before the versioned manifest. Failed publication preserves prior cache entries and cleans only newly created files/temps.
+
 Rust/native thumbnail sidecar for Project Canvas local image assets. The crate is standalone and reads a JSON batch request from stdin (or `--input`) and writes a JSON batch response to stdout.
 
 ## CLI

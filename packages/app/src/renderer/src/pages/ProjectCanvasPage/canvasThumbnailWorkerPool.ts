@@ -87,12 +87,24 @@ export function createCanvasThumbnailWorkerPoolRequestKey({
   preferWebp
 }: CanvasThumbnailGenerationRequest & { levels?: readonly CanvasThumbnailLevelSize[] }): string {
   const normalizedLevels = normalizeCanvasThumbnailWorkerLevels(levels)
+  const identityKeyParts =
+    identity.kind === 'local-file'
+      ? [
+          identity.canonicalPath,
+          Math.floor(identity.sizeBytes),
+          Math.floor(identity.lastModifiedMs),
+          identity.cacheRootDir ?? ''
+        ]
+      : [
+          identity.sourceKey,
+          Math.floor(identity.sizeBytes),
+          identity.mimeType,
+          identity.fileName ?? ''
+        ]
+
   return [
     identity.cacheKey,
-    identity.canonicalPath,
-    Math.floor(identity.sizeBytes),
-    Math.floor(identity.lastModifiedMs),
-    identity.cacheRootDir ?? '',
+    ...identityKeyParts,
     source.size,
     source.type,
     normalizedLevels.join(','),

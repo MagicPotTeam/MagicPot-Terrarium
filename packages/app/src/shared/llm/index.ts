@@ -25,9 +25,15 @@ export {
   normalizeReasoningEffort,
   resolveChatProfileCapabilities,
   type LLMReasoningEffort,
+  type ProviderAttachmentTransport,
   type ChatCapabilityProfile,
   type ChatProfileCapabilities
 } from './profileCapabilities'
+export {
+  selectProviderAttachmentTransport,
+  type AttachmentTransportAvailability,
+  type SelectAttachmentTransportOptions
+} from './attachmentTransport'
 export {
   OpenAIAPICli,
   GeminiAPICli,

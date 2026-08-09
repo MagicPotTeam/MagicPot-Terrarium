@@ -11,6 +11,10 @@ const bridgeMounts = vi.hoisted(() => ({
   connectWs: vi.fn()
 }))
 
+vi.mock('./components/CanvasProjectDropBridge', () => ({
+  default: () => null
+}))
+
 vi.mock('./components/Layout', () => ({
   default: () => <div data-testid="app-shell">App shell</div>
 }))

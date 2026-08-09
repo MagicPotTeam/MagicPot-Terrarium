@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Config, LLMAPIProfile } from '@shared/config/config'
 import { isRunnableProfile } from '@shared/llm'
 import { rendererHostExtensionApiV1 } from '@renderer/extensions/generatedRegistry'
@@ -20,6 +20,7 @@ export function useChatProfiles(config: Config, isReady: boolean, enabled: boole
   const [discoveredModelsByProfileId, setDiscoveredModelsByProfileId] = useState<
     Record<string, string[]>
   >({})
+  const discoveryGenerationRef = useRef(0)
   const remoteLlmServerOrigin = useMemo(
     () => getRemoteLlmServerOrigin(config).replace(/\/+$/, ''),
     [config]
@@ -70,38 +71,48 @@ export function useChatProfiles(config: Config, isReady: boolean, enabled: boole
   ])
 
   useEffect(() => {
-    if (!enabled || !isReady || useRemoteLlm) {
-      setDiscoveredModelsByProfileId({})
-      return
-    }
-
+    const generation = ++discoveryGenerationRef.current
     const profiles = (config?.llm_config?.api_profiles || []).filter(isRunnableProfile)
-    if (profiles.length === 0) {
-      setDiscoveredModelsByProfileId({})
-      return
-    }
+    const profileIds = new Set(profiles.map((profile) => profile.id))
 
-    let cancelled = false
+    // Configuration can change while this pane is inactive. Drop discoveries whose
+    // base profile no longer exists, but retain valid discoveries across deactivation.
+    setDiscoveredModelsByProfileId((current) => {
+      const retained = Object.fromEntries(
+        Object.entries(current).filter(([profileId]) => !useRemoteLlm && profileIds.has(profileId))
+      )
+      return Object.keys(retained).length === Object.keys(current).length ? current : retained
+    })
+
+    if (!enabled || !isReady || useRemoteLlm || profiles.length === 0) return
+
     const controller = new AbortController()
     void Promise.all(
       profiles.map(async (profile) => {
         try {
-          if (controller.signal.aborted) return [profile.id, []] as const
+          if (controller.signal.aborted) return null
           const modelNames = await rendererHostExtensionApiV1.chat?.discoverModelNames?.(profile)
           return [profile.id, modelNames || []] as const
         } catch (error) {
           console.warn('[ChatPage] Failed to discover CLIProxyAPI/Codex models:', error)
-          return [profile.id, []] as const
+          return null
         }
       })
     ).then((entries) => {
-      if (!cancelled) {
-        setDiscoveredModelsByProfileId(Object.fromEntries(entries))
-      }
+      if (controller.signal.aborted || discoveryGenerationRef.current !== generation) return
+
+      // Successful results replace active discoveries (including an explicit empty
+      // result). Failed results retain the last known-good models.
+      setDiscoveredModelsByProfileId((current) => {
+        const next = { ...current }
+        for (const entry of entries) {
+          if (entry) next[entry[0]] = entry[1]
+        }
+        return next
+      })
     })
 
     return () => {
-      cancelled = true
       controller.abort()
     }
   }, [config?.llm_config?.api_profiles, enabled, isReady, useRemoteLlm])

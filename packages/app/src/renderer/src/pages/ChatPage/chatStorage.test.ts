@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+const managedMediaApiMock = vi.hoisted(() => ({
+  migrateLegacyDataUrl: vi.fn(),
+  reclaimLegacyMigration: vi.fn()
+}))
+
+vi.mock('../../utils/windowUtils', () => ({
+  api: () => ({ svcManagedMedia: managedMediaApiMock })
+}))
+
 type StoreMap = Map<string, Map<string, unknown>>
 
 function cloneValue<T>(value: T): T {
@@ -15,6 +24,7 @@ class FakeIDBObjectStore {
     private storeName: string,
     private state: {
       failGetAllOnce: boolean
+      failPutOnce: boolean
       getAllCount: number
       getCount: number
       putCount: number
@@ -80,7 +90,20 @@ class FakeIDBObjectStore {
     return request
   }
 
+  private pendingError: DOMException | null = null
+
+  consumeError(): DOMException | null {
+    const error = this.pendingError
+    this.pendingError = null
+    return error
+  }
+
   put(value: unknown): void {
+    if (this.state.failPutOnce) {
+      this.state.failPutOnce = false
+      this.pendingError = new DOMException('Injected IndexedDB put failure', 'UnknownError')
+      return
+    }
     const record = value as { storageKey?: string; id?: string }
     const key = record.storageKey || record.id
     if (!key) {
@@ -109,6 +132,7 @@ class FakeIDBTransaction {
     private stores: StoreMap,
     private state: {
       failGetAllOnce: boolean
+      failPutOnce: boolean
       getAllCount: number
       getCount: number
       putCount: number
@@ -116,8 +140,8 @@ class FakeIDBTransaction {
     }
   ) {
     setTimeout(() => {
-      this.oncomplete?.()
-    }, 0)
+      if (!this.error) this.oncomplete?.()
+    }, 5)
   }
 
   objectStore(name: string): FakeIDBObjectStore {
@@ -138,6 +162,7 @@ class FakeIDBDatabase {
     private stores: StoreMap,
     private state: {
       failGetAllOnce: boolean
+      failPutOnce: boolean
       getAllCount: number
       getCount: number
       putCount: number
@@ -157,7 +182,22 @@ class FakeIDBDatabase {
   }
 
   transaction(_name: string, _mode: string): FakeIDBTransaction {
-    return new FakeIDBTransaction(this.stores, this.state)
+    const tx = new FakeIDBTransaction(this.stores, this.state)
+    const originalObjectStore = tx.objectStore.bind(tx)
+    tx.objectStore = (name: string) => {
+      const store = originalObjectStore(name)
+      const originalPut = store.put.bind(store)
+      store.put = (value: unknown) => {
+        originalPut(value)
+        const error = store.consumeError()
+        if (error) {
+          tx.error = error
+          setTimeout(() => tx.onerror?.(), 0)
+        }
+      }
+      return store
+    }
+    return tx
   }
 
   close(): void {
@@ -168,6 +208,7 @@ class FakeIDBDatabase {
 function createFakeIndexedDb() {
   const state = {
     failGetAllOnce: true,
+    failPutOnce: false,
     getAllCount: 0,
     getCount: 0,
     putCount: 0,
@@ -229,6 +270,8 @@ describe('chatStorage', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.unstubAllGlobals()
+    managedMediaApiMock.migrateLegacyDataUrl.mockReset()
+    managedMediaApiMock.reclaimLegacyMigration.mockReset()
     localStorage.clear()
   })
 
@@ -430,6 +473,151 @@ describe('chatStorage', () => {
     expect(fakeIndexedDb.state.putCount).toBe(1)
   })
 
+  it('single-flights concurrent legacy media migration reads', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const legacyDataUrl = 'data:image/png;base64,AAAA'
+    const reference = {
+      version: 1 as const,
+      kind: 'managed' as const,
+      id: 'a'.repeat(64),
+      relativePath: `originals/${'a'.repeat(64)}.png`,
+      mimeType: 'image/png',
+      originalFileName: 'legacy.png'
+    }
+    const checkpoint = {
+      version: 1 as const,
+      reclaim: { reference }
+    }
+    let releaseMigration: (() => void) | undefined
+    managedMediaApiMock.migrateLegacyDataUrl.mockReturnValue(
+      new Promise((resolve) => {
+        releaseMigration = () =>
+          resolve({
+            reference,
+            localMediaUrl: 'local-media:///originals/legacy.png',
+            checkpoint
+          })
+      })
+    )
+
+    await storage.saveSessionToDB(
+      {
+        id: 'legacy-single-flight',
+        title: 'Legacy',
+        messages: [
+          {
+            role: 'user',
+            content: '',
+            attachments: [{ type: 'image', url: legacyDataUrl, fileName: 'legacy.png' }]
+          }
+        ]
+      },
+      'workspace-a'
+    )
+    const baselinePutCount = fakeIndexedDb.state.putCount
+
+    const firstRead = storage.loadSessionFromDB('legacy-single-flight', 'workspace-a')
+    const secondRead = storage.loadSessionFromDB('legacy-single-flight', 'workspace-a')
+    await vi.waitFor(() => expect(managedMediaApiMock.migrateLegacyDataUrl).toHaveBeenCalledOnce())
+    releaseMigration?.()
+
+    const [first, second] = await Promise.all([firstRead, secondRead])
+    expect(managedMediaApiMock.migrateLegacyDataUrl).toHaveBeenCalledOnce()
+    expect(first?.messages[0]?.attachments?.[0]).toMatchObject({
+      url: 'local-media:///originals/legacy.png',
+      media: reference
+    })
+    expect(second).toEqual(first)
+    expect(second?.messages[0]?.attachments?.[0]?.media).toEqual(reference)
+    expect(fakeIndexedDb.state.putCount - baselinePutCount).toBe(1)
+    expect(managedMediaApiMock.reclaimLegacyMigration).not.toHaveBeenCalled()
+
+    await expect(storage.loadSessionFromDB('legacy-single-flight', 'workspace-a')).resolves.toEqual(
+      first
+    )
+    expect(managedMediaApiMock.migrateLegacyDataUrl).toHaveBeenCalledOnce()
+    expect(fakeIndexedDb.state.putCount - baselinePutCount).toBe(1)
+  })
+
+  it('reclaims newly migrated media when persistence replacement fails', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const legacyDataUrl = 'data:image/png;base64,AAAA'
+    const reference = {
+      version: 1 as const,
+      kind: 'managed' as const,
+      sha256: 'd'.repeat(64),
+      relativePath: `originals/dd/${'d'.repeat(64)}.png`,
+      sizeBytes: 1024,
+      mimeType: 'image/png',
+      originalFileName: 'legacy.png'
+    }
+    const checkpoint = {
+      version: 1 as const,
+      reclaim: { reference }
+    }
+    managedMediaApiMock.migrateLegacyDataUrl.mockResolvedValue({
+      reference,
+      localMediaUrl: 'local-media:///originals/dd/legacy.png',
+      checkpoint
+    })
+
+    await storage.saveSessionToDB(
+      {
+        id: 'legacy-persist-failure',
+        title: 'Legacy persistence failure',
+        messages: [
+          {
+            role: 'user',
+            content: '',
+            attachments: [{ type: 'image', url: legacyDataUrl, fileName: 'legacy.png' }]
+          }
+        ]
+      },
+      'workspace-a'
+    )
+    fakeIndexedDb.state.failPutOnce = true
+
+    const loaded = await storage.loadSessionFromDB('legacy-persist-failure', 'workspace-a')
+
+    expect(loaded?.messages[0]?.attachments?.[0]).toMatchObject({ url: legacyDataUrl })
+    expect(managedMediaApiMock.reclaimLegacyMigration).toHaveBeenCalledWith(checkpoint)
+  })
+
+  it('keeps legacy inline media unchanged when managed migration fails', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const legacyDataUrl = 'data:image/png;base64,AAAA'
+    managedMediaApiMock.migrateLegacyDataUrl.mockRejectedValue(new Error('migration unavailable'))
+
+    await storage.saveSessionToDB(
+      {
+        id: 'legacy-migration-failure',
+        title: 'Legacy failure',
+        messages: [
+          {
+            role: 'user',
+            content: '',
+            attachments: [{ type: 'image', url: legacyDataUrl, fileName: 'legacy.png' }]
+          }
+        ]
+      },
+      'workspace-a'
+    )
+
+    const loaded = await storage.loadSessionFromDB('legacy-migration-failure', 'workspace-a')
+
+    expect(loaded?.messages[0]?.attachments?.[0]).toMatchObject({ url: legacyDataUrl })
+    expect(managedMediaApiMock.reclaimLegacyMigration).not.toHaveBeenCalled()
+  })
+
   it('keeps sessions with the same id isolated by storage scope', async () => {
     const fakeIndexedDb = createFakeIndexedDb()
     fakeIndexedDb.state.failGetAllOnce = false
@@ -561,6 +749,42 @@ describe('chatStorage', () => {
       })
     ])
     expect(loadedSessions[0]).not.toHaveProperty('contextCompressionActivity')
+  })
+
+  it('keeps successfully loaded sessions unchanged when managed media migration is unavailable', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+
+    const storage = await import('./chatStorage')
+    const legacyDataUrl = 'data:image/png;base64,YQ=='
+    await storage.saveSessionToDB(
+      {
+        id: 'legacy-without-service',
+        title: 'Legacy image session',
+        messages: [
+          {
+            role: 'user',
+            content: 'legacy image',
+            attachments: [{ type: 'image', url: legacyDataUrl, fileName: 'legacy.png' }]
+          }
+        ]
+      },
+      'workspace-a'
+    )
+
+    await expect(storage.loadAllSessions('workspace-a')).resolves.toEqual([
+      expect.objectContaining({
+        id: 'legacy-without-service',
+        storageScope: 'workspace-a',
+        messages: [
+          expect.objectContaining({
+            attachments: [expect.objectContaining({ url: legacyDataUrl })]
+          })
+        ]
+      })
+    ])
+    expect(fakeIndexedDb.deletedNames).toEqual([])
   })
 
   it('resets corrupted IndexedDB storage after fatal read errors and accepts future saves', async () => {

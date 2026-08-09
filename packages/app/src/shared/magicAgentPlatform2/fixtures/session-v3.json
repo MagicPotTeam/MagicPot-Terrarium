@@ -1,0 +1,57 @@
+{
+  "version": 3,
+  "sessions": [
+    {
+      "sessionKey": "generic:dm:legacy-v3",
+      "route": {
+        "channel": "generic",
+        "scopeType": "dm",
+        "scopeId": "legacy-v3"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "session v3"
+        }
+      ],
+      "createdAt": 1700000000003,
+      "updatedAt": 1700000001003,
+      "runs": [
+        {
+          "runId": "run-v3",
+          "sessionKey": "generic:dm:legacy-v3",
+          "workspaceId": "workspace-v3",
+          "route": {
+            "channel": "generic",
+            "scopeType": "dm",
+            "scopeId": "legacy-v3"
+          },
+          "status": "completed",
+          "runOrigin": "new",
+          "rootRunId": "run-v3",
+          "createdAt": 1700000000103,
+          "updatedAt": 1700000000203,
+          "startedAt": 1700000000113,
+          "finishedAt": 1700000000193,
+          "requestText": "compatibility request",
+          "responseText": "compatibility response",
+          "toolCallCount": 0,
+          "artifactCount": 0,
+          "eventCount": 0,
+          "taskGroup": {
+            "taskGroupId": "fixture-group",
+            "title": "Frozen task group",
+            "status": "approved",
+            "approvedAt": 1700000000150,
+            "approvedBy": "fixture",
+            "rootRunId": "run-v3",
+            "updatedAt": 1700000000200
+          }
+        }
+      ],
+      "artifacts": [],
+      "eventLog": []
+    }
+  ],
+  "workflows": []
+}

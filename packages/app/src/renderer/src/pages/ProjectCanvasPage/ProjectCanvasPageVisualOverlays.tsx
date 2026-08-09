@@ -101,6 +101,7 @@ type ProjectCanvasPageVisualOverlaysProps = {
   editingTextItemId: string | null
   activeOcrHover: CanvasOcrHoverDetail | null
   selectedIds: Set<string>
+  dragContextRef?: React.RefObject<{ draggingId: string | null }>
   tool: CanvasTool
   stagePos: StagePosition
   stageScale: number
@@ -288,6 +289,7 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
   editingTextItemId,
   activeOcrHover,
   selectedIds,
+  dragContextRef,
   tool,
   stagePos,
   stageScale,
@@ -536,6 +538,7 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
   const mountedTextItems = mountedDomOverlayItems.textItems
   const mountedAnnotationItems = mountedDomOverlayItems.annotationItems
   const mountedTextOrFileIdSet = mountedDomOverlayItems.mountedTextOrFileIdSet
+  const activePlaceholderDragItemId = dragContextRef?.current?.draggingId ?? null
   const domOverlayCount =
     mountedVideoCount +
     mountedHtmlItems.length +
@@ -767,7 +770,8 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
                   }
                   isEditing={
                     editingTextItemId === item.id ||
-                    selectedSingleSelectionOverlaySuppressedItemId === item.id
+                    (selectedSingleSelectionOverlaySuppressedItemId === item.id &&
+                      activePlaceholderDragItemId !== item.id)
                   }
                 />
               )
@@ -787,7 +791,7 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
                 attachedParentItem={
                   item.attachedToId ? (itemById.get(item.attachedToId) ?? null) : null
                 }
-                isEditing={editingTextItemId === item.id}
+                isEditing={editingTextItemId === item.id && activePlaceholderDragItemId !== item.id}
                 isEmphasized={isEmphasized}
                 stageScale={stageScale}
               />

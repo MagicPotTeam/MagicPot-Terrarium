@@ -1,0 +1,10 @@
+{
+  "version": "0.0.0-test",
+  "buildId": "20260102-030406-abcdef0",
+  "commitSha": "abcdef0123456789abcdef0123456789abcdef01",
+  "runtimeId": "example.invalid-runtime-test",
+  "platform": "win32",
+  "arch": "x64",
+  "entrypoint": "MagicPot.exe",
+  "createdAt": "2026-01-02T03:04:06Z"
+}

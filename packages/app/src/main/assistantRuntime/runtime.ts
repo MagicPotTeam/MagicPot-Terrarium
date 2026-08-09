@@ -15,7 +15,9 @@ import {
   AssistantRunTrace,
   AssistantWorkflowInspection,
   AssistantWorkflowSummary,
-  AssistantSessionStore
+  AssistantSessionStore,
+  type AssistantSessionProjection,
+  type AssistantSessionProjectionDiff
 } from './sessionStore'
 import { AssistantToolRegistry, type AssistantToolDefinition } from './toolRegistry'
 import {
@@ -32,6 +34,7 @@ import {
   AssistantRunStatus,
   AssistantRuntimeResult,
   AssistantSessionRecord,
+  AssistantSessionForkResult,
   AssistantSessionSummary,
   AssistantQualityGateState,
   AssistantWorkspaceAccessMode,
@@ -589,10 +592,9 @@ const resolveExecutionContextMessageLimit = (
   const contextMessageLimit = req.execution?.contextMessageLimit
   if (
     contextMessageLimit === 'all' ||
-    contextMessageLimit === 0 ||
-    contextMessageLimit === 3 ||
-    contextMessageLimit === 5 ||
-    contextMessageLimit === 10
+    (typeof contextMessageLimit === 'number' &&
+      Number.isInteger(contextMessageLimit) &&
+      contextMessageLimit >= 0)
   ) {
     return contextMessageLimit
   }
@@ -1216,11 +1218,26 @@ export class AssistantRuntime {
       ...(executionTraceLabel ? { executionTraceLabel } : {}),
       ...(taskGroup ? { taskGroup } : {})
     }
-    await this.sessionStore.upsertRun(route, runningRun, {
-      workspace,
-      contextSnapshot,
-      events: [startEvent]
-    })
+    await this.sessionStore.appendTurn(
+      route,
+      [userMessage],
+      clampHistoryMessages(config.chat_config?.max_history_messages),
+      {
+        workspace,
+        contextSnapshot,
+        run: runningRun,
+        events: [startEvent],
+        messageEntries: [
+          {
+            messageId: crypto.randomUUID(),
+            runId,
+            eventId: startEvent.eventId,
+            createdAt: startEvent.createdAt,
+            attributionQuality: 'exact'
+          }
+        ]
+      }
+    )
     await this.emitEvents(req, [startEvent])
     this.broadcastEvents(route, [startEvent])
 
@@ -1236,42 +1253,56 @@ export class AssistantRuntime {
     }
     this.runAbortControllers.set(runId, abortController)
 
-    const executionResult = await this.executionAdapter
-      .run({
-        runId,
-        route,
-        req,
-        config,
-        messages: executionMessages,
-        profileId,
-        systemPrompt,
-        executionMode,
-        executionHistorySize,
-        executionTraceLabel,
-        sessionStore: this.sessionStore,
-        taskState: startedState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile,
-        workspaceMetaFile: workspace.workspaceMetaFile,
-        resumeRun: this.resumeRun.bind(this),
-        resumeWorkflow: this.resumeWorkflow.bind(this),
-        signal: abortController.signal,
-        emitEvent: async (event) =>
-          this.appendAndEmitEvent(
-            req,
-            route,
-            createEvent(runId, route, event.type, event.message, {
-              level: event.level,
-              metadata: event.metadata
-            })
-          )
-      })
-      .catch((error) => {
-        req.signal?.removeEventListener('abort', forwardExternalAbort)
-        throw error
-      })
+    await req.cooperativeExecution?.checkpoint('assistant-turn')
+    const leaveAssistantTurn = req.cooperativeExecution?.enter('assistant-turn')
+    let executionResult
+    try {
+      executionResult = await this.executionAdapter
+        .run({
+          runId,
+          route,
+          req,
+          config,
+          messages: executionMessages,
+          profileId,
+          systemPrompt,
+          executionMode,
+          executionHistorySize,
+          executionTraceLabel,
+          ...(req.execution?.maxToolCalls === undefined
+            ? {}
+            : { maxToolCalls: req.execution.maxToolCalls }),
+          ...(req.maxOutputTokens === undefined ? {} : { maxOutputTokens: req.maxOutputTokens }),
+          ...(req.temperature === undefined ? {} : { temperature: req.temperature }),
+          sessionStore: this.sessionStore,
+          taskState: startedState,
+          workspaceMemoryFile: workspace.memoryFile,
+          workspaceTaskContextFile: workspace.taskContextFile,
+          workspaceContextFile: workspace.contextFile,
+          workspacePinnedContextFile: workspace.pinnedContextFile,
+          workspaceMetaFile: workspace.workspaceMetaFile,
+          workspaceRootDir: workspace.workspaceRootDir,
+          resumeRun: this.resumeRun.bind(this),
+          resumeWorkflow: this.resumeWorkflow.bind(this),
+          signal: abortController.signal,
+          cooperativeExecution: req.cooperativeExecution,
+          emitEvent: async (event) =>
+            this.appendAndEmitEvent(
+              req,
+              route,
+              createEvent(runId, route, event.type, event.message, {
+                level: event.level,
+                metadata: event.metadata
+              })
+            )
+        })
+        .catch((error) => {
+          req.signal?.removeEventListener('abort', forwardExternalAbort)
+          throw error
+        })
+    } finally {
+      leaveAssistantTurn?.()
+    }
 
     const reply = executionResult.reply
     if (req.signal?.aborted) {
@@ -1345,18 +1376,28 @@ export class AssistantRuntime {
       )
     ]
 
+    const terminalEvent = finalEvents[finalEvents.length - 1]
     const stored =
       completionStatus === 'completed'
         ? await this.sessionStore.appendTurn(
             route,
-            [userMessage, assistantMessage],
+            [assistantMessage],
             clampHistoryMessages(config.chat_config?.max_history_messages),
             {
               workspace,
               contextSnapshot,
               run: finalRun,
               artifacts: artifactsWithLineage,
-              events: finalEvents
+              events: finalEvents,
+              messageEntries: [
+                {
+                  messageId: crypto.randomUUID(),
+                  runId,
+                  eventId: terminalEvent.eventId,
+                  createdAt: terminalEvent.createdAt,
+                  attributionQuality: 'exact'
+                }
+              ]
             }
           )
         : await this.sessionStore.upsertRun(route, finalRun, {
@@ -2006,6 +2047,7 @@ export class AssistantRuntime {
             workspaceContextFile: workspace.contextFile,
             workspacePinnedContextFile: workspace.pinnedContextFile,
             workspaceMetaFile: workspace.workspaceMetaFile,
+            workspaceRootDir: workspace.workspaceRootDir,
             resumeRun: this.resumeRun.bind(this),
             resumeWorkflow: this.resumeWorkflow.bind(this)
           }
@@ -2160,6 +2202,7 @@ export class AssistantRuntime {
             workspaceContextFile: workspace.contextFile,
             workspacePinnedContextFile: workspace.pinnedContextFile,
             workspaceMetaFile: workspace.workspaceMetaFile,
+            workspaceRootDir: workspace.workspaceRootDir,
             resumeRun: this.resumeRun.bind(this),
             resumeWorkflow: this.resumeWorkflow.bind(this)
           }
@@ -2346,6 +2389,7 @@ export class AssistantRuntime {
             workspaceContextFile: workspace.contextFile,
             workspacePinnedContextFile: workspace.pinnedContextFile,
             workspaceMetaFile: workspace.workspaceMetaFile,
+            workspaceRootDir: workspace.workspaceRootDir,
             resumeRun: this.resumeRun.bind(this),
             resumeWorkflow: this.resumeWorkflow.bind(this)
           }
@@ -2382,6 +2426,7 @@ export class AssistantRuntime {
             workspaceContextFile: workspace.contextFile,
             workspacePinnedContextFile: workspace.pinnedContextFile,
             workspaceMetaFile: workspace.workspaceMetaFile,
+            workspaceRootDir: workspace.workspaceRootDir,
             resumeRun: this.resumeRun.bind(this),
             resumeWorkflow: this.resumeWorkflow.bind(this)
           }
@@ -2429,6 +2474,7 @@ export class AssistantRuntime {
           workspaceContextFile: workspace.contextFile,
           workspacePinnedContextFile: workspace.pinnedContextFile,
           workspaceMetaFile: workspace.workspaceMetaFile,
+          workspaceRootDir: workspace.workspaceRootDir,
           resumeRun: this.resumeRun.bind(this),
           resumeWorkflow: this.resumeWorkflow.bind(this),
           startTaskGroup: this.startTaskGroup.bind(this),
@@ -3763,8 +3809,35 @@ export class AssistantRuntime {
     return this.resumeWorkflow(workflow?.workflowId || taskGroupId, normalizedRoute, options)
   }
 
+  /** Internal backend slice only; no IPC/service API is exposed yet. */
+  async forkSessionAtEvent(
+    sourceRoute: AssistantRoute,
+    sourceEventId: string,
+    targetRoute: AssistantRoute
+  ): Promise<AssistantSessionForkResult> {
+    return this.sessionStore.forkSessionAtEvent(sourceRoute, sourceEventId, targetRoute)
+  }
+
   async getSession(route: AssistantRoute): Promise<AssistantSessionRecord | null> {
     return this.sessionStore.getSession(route)
+  }
+
+  async getSessionProjection(route: AssistantRoute): Promise<AssistantSessionProjection | null> {
+    return this.sessionStore.getSessionProjection(route)
+  }
+
+  async exportSession(
+    route: AssistantRoute,
+    format: 'markdown' | 'html' | 'jsonl'
+  ): Promise<string | null> {
+    return this.sessionStore.exportSession(route, format)
+  }
+
+  async diffSessions(
+    leftRoute: AssistantRoute,
+    rightRoute: AssistantRoute
+  ): Promise<AssistantSessionProjectionDiff | null> {
+    return this.sessionStore.diffSessions(leftRoute, rightRoute)
   }
 
   async getSessionSummary(route: AssistantRoute): Promise<AssistantSessionSummary | null> {

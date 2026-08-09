@@ -1,0 +1,24 @@
+{
+  "name": "@magicpot/agent-sdk",
+  "version": "2.0.0",
+  "description": "Dependency-free TypeScript SDK for MagicAgent Platform 2.0 contracts, policy evaluation, tools and testing.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "examples",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run --config vitest.config.mjs"
+  },
+  "license": "MIT"
+}

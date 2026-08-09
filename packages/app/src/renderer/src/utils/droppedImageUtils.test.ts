@@ -57,6 +57,26 @@ describe('droppedImageUtils', () => {
     HTMLCanvasElement.prototype.getContext = originalGetContext
     HTMLCanvasElement.prototype.toDataURL = originalToDataURL
     vi.unstubAllGlobals()
+    vi.stubGlobal(
+      'FileReader',
+      class MockFileReader {
+        result: string | ArrayBuffer | null = null
+        error: DOMException | null = null
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+
+        readAsDataURL(blob: Blob) {
+          void blob.arrayBuffer().then((buffer) => {
+            const bytes = new Uint8Array(buffer)
+            let binary = ''
+            for (const byte of bytes) binary += String.fromCharCode(byte)
+            const base64 = btoa(binary)
+            this.result = `data:${blob.type || 'application/octet-stream'};base64,${base64}`
+            this.onload?.()
+          })
+        }
+      }
+    )
   })
 
   it('parses internal payloads from the quick app mime type', () => {
@@ -576,6 +596,53 @@ describe('droppedImageUtils', () => {
     expect(file?.name).toBe('source.png')
     expect(file?.type).toBe('image/png')
     expect(file?.size).toBeGreaterThan(0)
+  })
+
+  it('copies blob image attachments into a stable data URL for the receiver', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const payload = new Uint8Array([99, 97, 110, 118, 97, 115])
+        return new Response(payload, {
+          status: 200,
+          headers: { 'Content-Type': 'image/png' }
+        })
+      })
+    )
+
+    await expect(
+      materializeInternalImageDragAttachment({
+        type: 'image',
+        url: 'blob:canvas-source',
+        fileName: 'canvas.png',
+        mimeType: 'image/png',
+        metadata: { caption: 'canvas context' }
+      })
+    ).resolves.toEqual(
+      expect.objectContaining({
+        type: 'image',
+        url: 'data:image/png;base64,Y2FudmFz',
+        fileName: 'canvas.png',
+        mimeType: 'image/png',
+        sizeBytes: 6,
+        metadata: { caption: 'canvas context' }
+      })
+    )
+  })
+
+  it('returns null when a blob image attachment can no longer be read', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 404 }))
+    )
+
+    await expect(
+      materializeInternalImageDragAttachment({
+        type: 'image',
+        url: 'blob:revoked-canvas-source',
+        fileName: 'canvas.png'
+      })
+    ).resolves.toBeNull()
   })
 
   it('recrops through the canvas image loader if file payload decoding fails', async () => {

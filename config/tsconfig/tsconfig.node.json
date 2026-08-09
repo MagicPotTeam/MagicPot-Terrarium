@@ -5,7 +5,8 @@
     "../../config/electron/electron.vite.config.*",
     "../../packages/app/src/main/**/*",
     "../../packages/app/src/preload/**/*",
-    "../../packages/app/src/shared/**/*"
+    "../../packages/app/src/shared/**/*",
+    "../../packages/launcher/src/**/*"
   ],
   "compilerOptions": {
     "baseUrl": "../..",

@@ -9,6 +9,9 @@
  */
 
 import type { ChatAttachment, ChatMessage } from '@shared/api/svcLLMProxy'
+import type { ManagedMediaSvc, MigrateLegacyManagedMediaResp } from '@shared/api/svcManagedMedia'
+import { normalizeMediaReference } from '@shared/mediaReference'
+import { api } from '@renderer/utils/windowUtils'
 import { normalizeChatProfileIdForStorage } from './chatPageShared'
 import type { ChatContextCompressionSummary } from './chatContextCompression'
 
@@ -58,6 +61,109 @@ let fatalStorageError: Error | null = null
 let fatalStorageErrorLogged = false
 let storageRecoveryPromise: Promise<boolean> | null = null
 const sessionMutationQueues = new Map<string, Promise<void>>()
+const legacyMigrationFlights = new Map<string, Promise<ChatSession>>()
+
+function attachmentNeedsLegacyMigration(attachment: ChatAttachment): boolean {
+  return (
+    attachment.type === 'image' &&
+    !normalizeMediaReference(attachment.media) &&
+    /^data:image\/[a-z0-9!#$&^_.+-]+;base64,/i.test(attachment.url)
+  )
+}
+
+async function reclaimLegacyImports(
+  service: ManagedMediaSvc,
+  checkpoints: MigrateLegacyManagedMediaResp['checkpoint'][]
+): Promise<void> {
+  if (!service.reclaimLegacyMigration) return
+  await Promise.allSettled(
+    checkpoints.map((checkpoint) => service.reclaimLegacyMigration(checkpoint))
+  )
+}
+
+async function migrateLegacyAttachmentsInSession(
+  original: ChatSession,
+  scope: string,
+  retryRemaining = 1,
+  pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][] = []
+): Promise<ChatSession> {
+  const service = (api() as unknown as { svcManagedMedia?: ManagedMediaSvc } | undefined)
+    ?.svcManagedMedia
+  if (!service?.migrateLegacyDataUrl) return original
+
+  let changed = false
+  const migrate = async (attachment: ChatAttachment): Promise<ChatAttachment> => {
+    if (!attachmentNeedsLegacyMigration(attachment)) return attachment
+    const migrated = await service.migrateLegacyDataUrl({
+      dataUrl: attachment.url,
+      metadata: {
+        originalFileName: attachment.fileName || 'legacy-image',
+        sourceWidth: attachment.sourceWidth,
+        sourceHeight: attachment.sourceHeight
+      }
+    })
+    pendingReclaims.push(migrated.checkpoint)
+    changed = true
+    return { ...attachment, url: migrated.localMediaUrl, media: migrated.reference }
+  }
+
+  try {
+    const messages: ChatMessage[] = []
+    for (const message of original.messages) {
+      if (!message.attachments) {
+        messages.push(message)
+        continue
+      }
+      const attachments: ChatAttachment[] = []
+      for (const attachment of message.attachments) attachments.push(await migrate(attachment))
+      messages.push({ ...message, attachments })
+    }
+    const draft = original.draft
+      ? {
+          ...original.draft,
+          pendingAttachments: [] as ChatAttachment[]
+        }
+      : undefined
+    if (draft) {
+      for (const attachment of original.draft!.pendingAttachments) {
+        draft.pendingAttachments.push(await migrate(attachment))
+      }
+    }
+    if (!changed) return original
+    const replacement = { ...original, messages, ...(draft ? { draft } : {}) }
+    const persisted = await compareAndUpdateSessionInDB(original.id, scope, {
+      expectedSession: original,
+      update: () => replacement
+    })
+    if (persisted) return persisted
+
+    const current = await loadSessionRawFromDB(original.id, scope)
+    if (!current || retryRemaining <= 0) {
+      await reclaimLegacyImports(service, pendingReclaims)
+      return current || original
+    }
+    await reclaimLegacyImports(service, pendingReclaims)
+    return migrateLegacyAttachmentsInSession(current, scope, retryRemaining - 1, [])
+  } catch (error) {
+    await reclaimLegacyImports(service, pendingReclaims)
+    console.warn('[ChatStorage] Failed to migrate legacy image attachment:', error)
+    return original
+  }
+}
+
+function migrateLegacyAttachmentsSingleFlight(
+  session: ChatSession,
+  scope: string
+): Promise<ChatSession> {
+  const key = createSessionStorageKey(session.id, scope)
+  const existing = legacyMigrationFlights.get(key)
+  if (existing) return existing
+  const flight = migrateLegacyAttachmentsInSession(session, scope).finally(() => {
+    if (legacyMigrationFlights.get(key) === flight) legacyMigrationFlights.delete(key)
+  })
+  legacyMigrationFlights.set(key, flight)
+  return flight
+}
 
 function createSessionStorageKey(sessionId: string, scope = 'default'): string {
   return `${normalizeScope(scope)}\u0000${sessionId}`
@@ -551,19 +657,20 @@ export async function loadAllSessions(scope = 'default'): Promise<ChatSession[]>
     return []
   }
 
+  let sessions: ChatSession[]
+  const targetScope = normalizeScope(scope)
   try {
     const db = await openDB()
-    return await new Promise((resolve, reject) => {
+    sessions = await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readonly')
       const store = tx.objectStore(STORE_NAME)
       const request = store.getAll()
       request.onsuccess = () => {
-        const targetScope = normalizeScope(scope)
-        const sessions = ((request.result || []) as StoredChatSession[])
+        const loadedSessions = ((request.result || []) as StoredChatSession[])
           .filter((session) => normalizeScope(session.storageScope) === targetScope)
           .map((session) => normalizeSession(session, targetScope))
-        sessions.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
-        resolve(sessions)
+        loadedSessions.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+        resolve(loadedSessions)
       }
       request.onerror = () =>
         reject(createStorageError(request.error, 'IndexedDB failed to load chat sessions.'))
@@ -573,10 +680,14 @@ export async function loadAllSessions(scope = 'default'): Promise<ChatSession[]>
     await handleStorageFailure(storageError, 'loadAllSessions failed')
     return []
   }
+
+  // Listing stays cheap. Legacy media is migrated only when its session is opened, preserving
+  // the original record until the replacement has been atomically persisted.
+  return sessions
 }
 
 /** Load a single session by ID without scanning the whole store. */
-export async function loadSessionFromDB(
+async function loadSessionRawFromDB(
   sessionId: string,
   scope = 'default'
 ): Promise<ChatSession | null> {
@@ -613,6 +724,15 @@ export async function loadSessionFromDB(
     await handleStorageFailure(storageError, 'loadSession failed')
     return null
   }
+}
+
+/** Load a single session and lazily replace legacy image data URLs after an atomic save. */
+export async function loadSessionFromDB(
+  sessionId: string,
+  scope = 'default'
+): Promise<ChatSession | null> {
+  const session = await loadSessionRawFromDB(sessionId, scope)
+  return session ? migrateLegacyAttachmentsSingleFlight(session, normalizeScope(scope)) : null
 }
 
 export interface CompareAndUpdateSessionOptions {

@@ -243,6 +243,7 @@ function buildBaseProps(overrides: Record<string, unknown> = {}) {
     handleResolveFigmaBinding: vi.fn(),
     handleRunCanvasTarget: vi.fn(),
     handleSaveCanvas: vi.fn(),
+    isSavingCanvasFile: false,
     handleSaveCanvasAs: vi.fn(),
     handleSaveCanvasAsFromContextMenu: vi.fn(),
     handleSaveFigmaBinding: vi.fn(),
@@ -444,10 +445,38 @@ describe('ProjectCanvasPageTopToolbar', () => {
 
     fireEvent.click(saveButton as HTMLElement)
     expect(handleSaveCanvas).toHaveBeenCalledTimes(1)
+    expect(handleSaveCanvas).toHaveBeenCalledWith()
     expect(handleOpenExportMenu).not.toHaveBeenCalled()
 
     fireEvent.click(menuButton as HTMLElement)
     expect(handleOpenExportMenu).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a spinner and disables save while the canvas file is saving', () => {
+    render(
+      <ThemeProvider theme={theme}>
+        <ProjectCanvasPageTopToolbar
+          {...buildBaseProps({
+            isSavingCanvasFile: true,
+            items: [
+              {
+                id: 'item-1',
+                type: 'text',
+                text: 'A',
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10
+              }
+            ]
+          })}
+        />
+      </ThemeProvider>
+    )
+
+    const spinner = screen.getByLabelText('saving-canvas')
+    expect(spinner.closest('button')).toBeDisabled()
+    expect(screen.queryByTestId('FileDownloadIcon')).not.toBeInTheDocument()
   })
 
   it('keeps the toolbar above overflowing stage overlays', () => {

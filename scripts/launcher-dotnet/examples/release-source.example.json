@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "trustedSources": [
+    {
+      "origin": "https://github.com",
+      "repoPathPrefix": "/example/repository"
+    }
+  ]
+}

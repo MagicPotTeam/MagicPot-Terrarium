@@ -279,9 +279,17 @@ export function extractModelPackageFiles(
   }
 
   const linkedAssets: Record<string, string> = {}
+  const createdUrls: string[] = []
 
-  for (const entry of selectedEntries.linkedAssetEntries) {
-    linkedAssets[entry.path] = URL.createObjectURL(entry.file)
+  try {
+    for (const entry of selectedEntries.linkedAssetEntries) {
+      const url = URL.createObjectURL(entry.file)
+      createdUrls.push(url)
+      linkedAssets[entry.path] = url
+    }
+  } catch (error) {
+    createdUrls.forEach((url) => URL.revokeObjectURL(url))
+    throw error
   }
 
   return {

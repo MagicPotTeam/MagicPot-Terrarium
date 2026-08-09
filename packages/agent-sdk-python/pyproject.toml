@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "magicpot-agent-sdk"
+version = "2.0.0"
+description = "Dependency-free Python SDK for MagicAgent Platform 2.0"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "MagicPot"}]
+
+[tool.setuptools.packages.find]
+where = ["src"]

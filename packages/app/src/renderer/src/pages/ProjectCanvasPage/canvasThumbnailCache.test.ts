@@ -10,13 +10,14 @@ import {
   validateCanvasThumbnailManifestForIdentity
 } from './canvasThumbnailCache'
 import type {
+  CanvasLocalFileSourceIdentity,
   CanvasImageSourceIdentity,
   CanvasImageThumbnailLevel,
   CanvasThumbnailLevelSize
 } from './canvasThumbnailTypes'
 
 function createIdentity(
-  overrides: Partial<CanvasImageSourceIdentity> = {}
+  overrides: Partial<CanvasLocalFileSourceIdentity> = {}
 ): CanvasImageSourceIdentity {
   const identity = buildCanvasImageSourceIdentity({
     canonicalPath: overrides.canonicalPath ?? 'C:/Images/ref.png',

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Box,
   Button,
@@ -22,7 +22,12 @@ import { useTranslation } from 'react-i18next'
 import ChatPage from '@renderer/pages/ChatPage/ChatPage'
 import { loadAllSessions, type ChatSession } from '@renderer/pages/ChatPage/chatStorage'
 import { getLocalizedConversationTitle } from '@renderer/pages/ChatPage/chatLocaleUtils'
-import { readScopedLoadingSessionIds } from '@renderer/pages/ChatPage/chatPageShared'
+import {
+  CHAT_SESSION_LOADING_STATE_EVENT,
+  readScopedActiveLoadingSessionIds,
+  readScopedExternalLoadingSessionIds,
+  type ChatSessionLoadingStateEvent
+} from '@renderer/pages/ChatPage/chatPageShared'
 import {
   buildAgentPaneScope,
   buildCanvasAgentRoute
@@ -206,7 +211,10 @@ const arePanePreviewsEqual = (
 }
 
 const isPaneRunning = (scope: string): boolean => {
-  return readScopedLoadingSessionIds(scope).length > 0
+  return (
+    readScopedActiveLoadingSessionIds(scope).length > 0 ||
+    readScopedExternalLoadingSessionIds(scope).length > 0
+  )
 }
 
 const buildPanePreview = (
@@ -279,13 +287,21 @@ const loadPanePreview = async (
 const PaneStatusIndicator: React.FC<{ status?: PanePreviewStatus }> = ({ status = 'idle' }) => {
   if (status === 'running') {
     return (
-      <CircularProgress size={12} thickness={6} sx={{ color: 'primary.main', flexShrink: 0 }} />
+      <CircularProgress
+        data-testid="agent-thread-status"
+        data-status="running"
+        size={12}
+        thickness={6}
+        sx={{ color: 'primary.main', flexShrink: 0 }}
+      />
     )
   }
 
   if (status === 'done') {
     return (
       <Box
+        data-testid="agent-thread-status"
+        data-status="unread"
         sx={(theme) => ({
           width: 9,
           height: 9,
@@ -302,6 +318,8 @@ const PaneStatusIndicator: React.FC<{ status?: PanePreviewStatus }> = ({ status 
 
   return (
     <Box
+      data-testid="agent-thread-status"
+      data-status="read"
       sx={(theme) => ({
         width: 8,
         height: 8,
@@ -323,15 +341,18 @@ type PaneListItemProps = {
   defaultTitle: string
   defaultSubtitle: string
   selected: boolean
+  unread: boolean
   dragging: boolean
   dragOver: boolean
   onRemove: (paneId: string) => void
   onSelect: (paneId: string) => void
   onDragStart: (paneId: string) => void
   onDragEnd: () => void
-  onDragOver: (paneId: string) => void
-  onDrop: (paneId: string) => void
+  onDragOver: (event: React.DragEvent<HTMLElement>, paneId: string) => void
+  onDrop: (event: React.DragEvent<HTMLElement>, paneId: string) => void
 }
+
+const AGENT_THREAD_REORDER_DRAG_MIME = 'application/x-magicpot-agent-thread-reorder'
 
 const PaneListItem: React.FC<PaneListItemProps> = ({
   index,
@@ -342,6 +363,7 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
   defaultTitle,
   defaultSubtitle,
   selected,
+  unread,
   dragging,
   dragOver,
   onRemove,
@@ -357,7 +379,9 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     tabIndex={0}
     data-agent-workspace-scope={paneScope}
     draggable
-    onClick={() => onSelect(pane.id)}
+    onClick={() => {
+      onSelect(pane.id)
+    }}
     onKeyDown={(event) => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault()
@@ -366,18 +390,15 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     }}
     onDragStart={(event) => {
       event.dataTransfer.effectAllowed = 'move'
-      event.dataTransfer.setData('text/plain', pane.id)
+      event.dataTransfer.setData(AGENT_THREAD_REORDER_DRAG_MIME, pane.id)
       onDragStart(pane.id)
     }}
     onDragEnd={onDragEnd}
     onDragOver={(event) => {
-      event.preventDefault()
-      event.dataTransfer.dropEffect = 'move'
-      onDragOver(pane.id)
+      onDragOver(event, pane.id)
     }}
     onDrop={(event) => {
-      event.preventDefault()
-      onDrop(pane.id)
+      onDrop(event, pane.id)
     }}
     sx={(theme) => ({
       width: '100%',
@@ -406,7 +427,9 @@ const PaneListItem: React.FC<PaneListItemProps> = ({
     })}
   >
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0, flex: 1 }}>
-      <PaneStatusIndicator status={preview?.status} />
+      <PaneStatusIndicator
+        status={preview?.status === 'done' && !unread ? 'idle' : preview?.status}
+      />
 
       <Box sx={{ minWidth: 0, flex: 1 }}>
         <Typography
@@ -503,6 +526,15 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
     () => readLocalStorage(collapsedStorageKey) === '1'
   )
   const [panePreviews, setPanePreviews] = useState<Record<string, PanePreview>>({})
+  const [unreadPaneIds, setUnreadPaneIds] = useState<Set<string>>(new Set())
+  const clearPaneUnread = useCallback((paneId: string) => {
+    setUnreadPaneIds((prev) => {
+      if (!prev.has(paneId)) return prev
+      const next = new Set(prev)
+      next.delete(paneId)
+      return next
+    })
+  }, [])
   const [draggingPaneId, setDraggingPaneId] = useState<string | null>(null)
   const [dragOverPaneId, setDragOverPaneId] = useState<string | null>(null)
   const [tracePanelOpen, setTracePanelOpen] = useState(false)
@@ -520,9 +552,81 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
   })
   const pendingExternalPaneRequestsRef = useRef<Array<{ requestId?: string; paneId: string }>>([])
   const previewRefreshSequenceRef = useRef(0)
+  const previewsInitializedRef = useRef(false)
+  const panesObservedRunningRef = useRef<Set<string>>(new Set())
   const openPanes = useMemo(() => getOpenPanes(panes), [panes])
   const workspaceStrings = useMemo(() => createAgentWorkspaceStrings(t), [t])
   const activePane = openPanes.find((pane) => pane.id === activePaneId) ?? openPanes[0] ?? null
+
+  useLayoutEffect(() => {
+    if (!previewsInitializedRef.current) {
+      if (Object.keys(panePreviews).length === 0) return
+      previewsInitializedRef.current = true
+      for (const [paneId, preview] of Object.entries(panePreviews)) {
+        if (preview.status === 'running') panesObservedRunningRef.current.add(paneId)
+      }
+      return
+    }
+
+    for (const [paneId, preview] of Object.entries(panePreviews)) {
+      if (preview.status === 'running') panesObservedRunningRef.current.add(paneId)
+    }
+  }, [panePreviews])
+
+  useEffect(() => {
+    previewsInitializedRef.current = false
+    panesObservedRunningRef.current.clear()
+    setUnreadPaneIds(new Set())
+  }, [projectId])
+
+  useEffect(() => {
+    const paneIdByScope = new Map(
+      openPanes.map((pane) => [buildAgentPaneScope(projectId, pane.id), pane.id])
+    )
+    const handleLoadingState = (event: Event) => {
+      const detail = (event as CustomEvent<Partial<ChatSessionLoadingStateEvent>>).detail
+      const paneId = detail?.scope ? paneIdByScope.get(detail.scope) : undefined
+      if (!paneId) return
+
+      setPanePreviews((prev) => {
+        const current = prev[paneId]
+        const status: PanePreviewStatus = detail.running
+          ? 'running'
+          : detail.completed === true
+            ? 'done'
+            : 'idle'
+        if (current?.status === status) return prev
+
+        const paneIndex = openPanes.findIndex((pane) => pane.id === paneId)
+        return {
+          ...prev,
+          [paneId]: {
+            title: current?.title || getPaneLabel(paneId, paneIndex, workspaceStrings.paneLabel),
+            subtitle: current?.subtitle || workspaceStrings.emptyConversation,
+            status
+          }
+        }
+      })
+
+      if (detail.running) {
+        panesObservedRunningRef.current.add(paneId)
+        setUnreadPaneIds((prev) => {
+          if (!prev.has(paneId)) return prev
+          const next = new Set(prev)
+          next.delete(paneId)
+          return next
+        })
+        return
+      }
+
+      if (!panesObservedRunningRef.current.delete(paneId)) return
+      if (detail.completed !== true) return
+      setUnreadPaneIds((prev) => new Set(prev).add(paneId))
+    }
+
+    window.addEventListener(CHAT_SESSION_LOADING_STATE_EVENT, handleLoadingState)
+    return () => window.removeEventListener(CHAT_SESSION_LOADING_STATE_EVENT, handleLoadingState)
+  }, [openPanes, projectId, workspaceStrings])
 
   useEffect(() => {
     const nextPanes = readStoredPanes(storageKey)
@@ -950,6 +1054,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
               defaultTitle={getPaneLabel(pane.id, index, workspaceStrings.paneLabel)}
               defaultSubtitle={workspaceStrings.emptyConversation}
               selected={pane.id === activePaneId}
+              unread={unreadPaneIds.has(pane.id)}
               dragging={pane.id === draggingPaneId}
               dragOver={pane.id === dragOverPaneId && pane.id !== draggingPaneId}
               onRemove={handleRemovePane}
@@ -962,10 +1067,31 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
                 setDraggingPaneId(null)
                 setDragOverPaneId(null)
               }}
-              onDragOver={setDragOverPaneId}
-              onDrop={(paneId) => {
-                handleReorderPane(paneId)
-                setDraggingPaneId(null)
+              onDragOver={(event, paneId) => {
+                const dragTypes = Array.from(event.dataTransfer.types ?? [])
+                const isThreadReorderDrag = dragTypes.includes(AGENT_THREAD_REORDER_DRAG_MIME)
+                if (!isThreadReorderDrag) {
+                  return
+                }
+
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+                if (draggingPaneId) {
+                  setDragOverPaneId(paneId)
+                }
+              }}
+              onDrop={(event, paneId) => {
+                const dragTypes = Array.from(event.dataTransfer.types ?? [])
+                const isThreadReorderDrag = dragTypes.includes(AGENT_THREAD_REORDER_DRAG_MIME)
+                if (!isThreadReorderDrag) {
+                  return
+                }
+
+                event.preventDefault()
+                if (draggingPaneId) {
+                  handleReorderPane(paneId)
+                  setDraggingPaneId(null)
+                }
               }}
             />
           ))}
@@ -988,6 +1114,16 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
               aria-hidden={!isActivePane}
               data-agent-workspace-pane={pane.id}
               data-agent-workspace-scope={scope}
+              onPointerDownCapture={(event) => {
+                const target = event.target as Element
+                if (!target.closest('[data-chat-scroll-container="true"]')) return
+                clearPaneUnread(pane.id)
+              }}
+              onScrollCapture={(event) => {
+                const target = event.target as Element
+                if (!target.matches('[data-chat-scroll-container="true"]')) return
+                clearPaneUnread(pane.id)
+              }}
               sx={{
                 position: 'absolute',
                 inset: 0,

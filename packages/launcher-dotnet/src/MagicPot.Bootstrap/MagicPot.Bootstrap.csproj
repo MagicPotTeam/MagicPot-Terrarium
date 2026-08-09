@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>MagicPot.Bootstrap</AssemblyName>
+    <RootNamespace>MagicPot.Bootstrap</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../MagicPot.Launcher/MagicPot.Launcher.csproj" AdditionalProperties="BootstrapGeneratedTrustConfig=$(BootstrapGeneratedTrustConfig);BuildAsLibrary=true" />
+  </ItemGroup>
+</Project>

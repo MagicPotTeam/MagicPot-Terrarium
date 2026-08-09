@@ -274,6 +274,11 @@ const normalizeOpenAIImageMimeType = (value: unknown): string => {
 const extensionFromOpenAIImageMimeType = (mimeType: string): string =>
   mimeType === 'image/jpeg' ? 'jpg' : mimeType.replace(/^image\//, '') || 'png'
 
+const buildGeneratedImageFileName = (mimeType: string, imageIndex: number): string => {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  return `openai-image_${timestamp}_${imageIndex + 1}.${extensionFromOpenAIImageMimeType(mimeType)}`
+}
+
 const normalizeOpenAIImageDataUrl = (value: string, mimeType: string): string => {
   const trimmed = value.trim()
   return trimmed.startsWith('data:') ? trimmed : `data:${mimeType};base64,${trimmed}`
@@ -308,7 +313,7 @@ const extractOpenAIImagesGenerationResult = (
   const attachments: NonNullable<LLMChatResult['attachments']> = []
   const textParts: string[] = []
 
-  for (const item of data) {
+  for (const [imageIndex, item] of data.entries()) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       continue
     }
@@ -338,7 +343,7 @@ const extractOpenAIImagesGenerationResult = (
       type: 'image',
       url: imageUrl,
       mimeType,
-      fileName: `openai-image.${extensionFromOpenAIImageMimeType(mimeType)}`
+      fileName: buildGeneratedImageFileName(mimeType, imageIndex)
     })
   }
 
@@ -408,6 +413,7 @@ export class OpenAIAPICli implements LLMCli {
       instructions: params.systemPrompt?.trim() || 'You are a helpful assistant.',
       store: false
     }
+    if (params.temperature !== undefined) requestBody.temperature = params.temperature
     if (params.maxOutputTokens) {
       requestBody.max_output_tokens = params.maxOutputTokens
     }
@@ -564,7 +570,7 @@ export class OpenAIAPICli implements LLMCli {
       : {
           model: this.modelName,
           messages: apiMessages,
-          temperature: 0.7,
+          temperature: params.temperature ?? 0.7,
           stream: false
         }
     if (params.maxOutputTokens && !usesImagesGenerationEndpoint) {
@@ -759,6 +765,12 @@ export class GeminiAPICli implements LLMCli {
     const requestBody: Record<string, any> = {
       contents
     }
+    if (params.temperature !== undefined) {
+      requestBody.generationConfig = {
+        ...(requestBody.generationConfig || {}),
+        temperature: params.temperature
+      }
+    }
     if (params.maxOutputTokens) {
       requestBody.generationConfig = {
         ...(requestBody.generationConfig || {}),
@@ -938,7 +950,8 @@ export class ClaudeAPICli implements LLMCli {
     const requestBody: Record<string, any> = {
       model: this.modelName,
       max_tokens: params.maxOutputTokens || this.options.maxTokens || 4096,
-      messages: claudeMessages
+      messages: claudeMessages,
+      ...(params.temperature === undefined ? {} : { temperature: params.temperature })
     }
 
     if (systemPrompt) {
@@ -1126,7 +1139,14 @@ export class OllamaAPICli implements LLMCli {
       model: this.modelName,
       messages: ollamaMessages,
       stream: false,
-      ...(params.maxOutputTokens ? { options: { num_predict: params.maxOutputTokens } } : {})
+      ...(params.maxOutputTokens || params.temperature !== undefined
+        ? {
+            options: {
+              ...(params.maxOutputTokens ? { num_predict: params.maxOutputTokens } : {}),
+              ...(params.temperature === undefined ? {} : { temperature: params.temperature })
+            }
+          }
+        : {})
     }
 
     let resp: Response

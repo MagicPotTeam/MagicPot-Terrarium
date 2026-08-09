@@ -338,6 +338,7 @@ function isManifestForIdentity(
   identity: CanvasImageSourceIdentity
 ): boolean {
   return (
+    identity.kind === 'local-file' &&
     manifest.version === 1 &&
     manifest.cacheKey === identity.cacheKey &&
     manifest.canonicalPath === identity.canonicalPath &&
@@ -356,7 +357,7 @@ async function writeThumbnailSetToCache({
   levels: CanvasGeneratedThumbnailLevel[]
 }): Promise<CanvasImageThumbnailSet> {
   const transientSet = createThumbnailSetFromGeneratedLevels({ identity, levels })
-  if (!bridge?.writeThumbnailSet) {
+  if (identity.kind !== 'local-file' || !bridge?.writeThumbnailSet) {
     return transientSet
   }
 
@@ -388,7 +389,7 @@ export async function readWarmCanvasThumbnailSet(
   identity: CanvasImageSourceIdentity,
   bridge = getCanvasThumbnailIpcBridge()
 ): Promise<WarmCanvasThumbnailReadResult> {
-  if (!bridge?.readThumbnailManifest) {
+  if (identity.kind !== 'local-file' || !bridge?.readThumbnailManifest) {
     return { status: 'cache-miss', thumbnailSet: null, manifest: null }
   }
 
@@ -431,7 +432,7 @@ async function generateSidecarThumbnailSet({
   levels: readonly CanvasThumbnailLevelSize[]
   preferWebp: boolean
 }): Promise<CanvasImageThumbnailSet | null> {
-  if (!bridge?.generateThumbnailSet) {
+  if (identity.kind !== 'local-file' || !bridge?.generateThumbnailSet) {
     return null
   }
 
@@ -462,7 +463,7 @@ async function generateNativeThumbnailLevels({
   bridge: CanvasThumbnailIpcBridge | null
   levels: readonly CanvasThumbnailLevelSize[]
 }): Promise<CanvasGeneratedThumbnailLevel[]> {
-  if (!bridge?.createNativeThumbnail) {
+  if (identity.kind !== 'local-file' || !bridge?.createNativeThumbnail) {
     return []
   }
 

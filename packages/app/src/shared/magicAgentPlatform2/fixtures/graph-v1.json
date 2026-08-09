@@ -1,0 +1,125 @@
+{
+  "graphId": "legacy-compat-graph",
+  "name": "Legacy compatibility graph",
+  "description": "Frozen Graph V1 exercising every node kind.",
+  "version": "1.2.3",
+  "tags": ["legacy", "compatibility"],
+  "nodes": [
+    {
+      "nodeId": "input-1",
+      "kind": "input",
+      "name": "Input",
+      "description": "Input node",
+      "metadata": {
+        "fixture": true
+      }
+    },
+    {
+      "nodeId": "agent-2",
+      "kind": "agent",
+      "name": "Planner",
+      "description": "Planner node",
+      "agentId": "assistant",
+      "instruction": "Plan a concise answer.",
+      "metadata": {
+        "fixture": true
+      }
+    },
+    {
+      "nodeId": "tool-3",
+      "kind": "tool",
+      "name": "Lookup",
+      "description": "Lookup node",
+      "toolName": "knowledge.search",
+      "config": {
+        "limit": 3
+      },
+      "metadata": {
+        "fixture": true
+      }
+    },
+    {
+      "nodeId": "condition-4",
+      "kind": "condition",
+      "name": "Check",
+      "description": "Check node",
+      "condition": {
+        "sourceNodeId": "tool-3",
+        "operator": "truthy"
+      },
+      "metadata": {
+        "fixture": true
+      }
+    },
+    {
+      "nodeId": "merge-5",
+      "kind": "merge",
+      "name": "Merge",
+      "description": "Merge node",
+      "metadata": {
+        "fixture": true
+      }
+    },
+    {
+      "nodeId": "output-6",
+      "kind": "output",
+      "name": "Output",
+      "description": "Output node",
+      "metadata": {
+        "fixture": true
+      }
+    }
+  ],
+  "channels": [
+    {
+      "channelId": "input-agent",
+      "from": "input-1",
+      "to": "agent-2",
+      "kind": "message",
+      "required": true
+    },
+    {
+      "channelId": "agent-tool",
+      "from": "agent-2",
+      "to": "tool-3",
+      "kind": "handoff"
+    },
+    {
+      "channelId": "tool-check",
+      "from": "tool-3",
+      "to": "condition-4",
+      "kind": "control"
+    },
+    {
+      "channelId": "check-merge",
+      "from": "condition-4",
+      "to": "merge-5",
+      "kind": "message",
+      "condition": {
+        "sourceNodeId": "condition-4",
+        "operator": "truthy"
+      }
+    },
+    {
+      "channelId": "merge-output",
+      "from": "merge-5",
+      "to": "output-6",
+      "kind": "artifact"
+    }
+  ],
+  "outputs": [
+    {
+      "outputId": "answer",
+      "name": "Answer",
+      "description": "Final answer",
+      "sourceNodeId": "output-6",
+      "channelId": "merge-output",
+      "mimeType": "text/plain"
+    }
+  ],
+  "entryNodeIds": ["input-1"],
+  "metadata": {
+    "schema": "graph-v1",
+    "owner": "compatibility-suite"
+  }
+}

@@ -7,6 +7,11 @@ import {
 } from './apiUtils/serviceValidation'
 
 describe('apiDef', () => {
+  it('exposes the managed media derivative contract', () => {
+    expect(apiDef.svcManagedMedia.ensureDerivative.type).toBe('unary')
+    expect(apiDef.svcManagedMedia.ensureDerivative.request).toBeDefined()
+  })
+
   it('exposes the project canvas thumbnail service contract', () => {
     expect(apiDef.svcCanvasThumbnail).toBeDefined()
     expect(apiDef.svcCanvasThumbnail.getSourceFileMetadata.type).toBe('unary')
@@ -32,15 +37,361 @@ describe('apiDef', () => {
     expect(apiDef.svcMagicAgentPlatform.listTools.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.callTool.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.runAgent.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.listRuntimeChannels.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.getRuntimeChannel.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.listRuntimeChannelWires.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.getRuntimeChannelWire.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.claimRuntimeChannelMessage.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.acknowledgeRuntimeChannelMessage.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.listGraphs.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.runGraph.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.getRuntimeGraphTopology.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.watchGraphRun.type).toBe('serverStreaming')
+    expect(apiDef.svcMagicAgentPlatform.listPendingApprovals.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.watchPendingApprovals.type).toBe('serverStreaming')
+    expect(apiDef.svcMagicAgentPlatform.resolvePendingApproval.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.validatePackageManifest.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.installPackage.type).toBe('unary')
     expect(apiDef.svcMagicAgentPlatform.callTool.request).toBeDefined()
     expect(apiDef.svcMagicAgentPlatform.runAgent.request).toBeDefined()
     expect(apiDef.svcMagicAgentPlatform.watchGraphRun.request).toBeDefined()
+    expect(apiDef.svcMagicAgentPlatform.watchPendingApprovals.request).toBeDefined()
+    expect(apiDef.svcMagicAgentPlatform.resolvePendingApproval.request).toBeDefined()
     expect(apiDef.svcMagicAgentPlatform.installPackage.request).toBeDefined()
+  })
+
+  it('strictly validates least-privilege runtime topology requests', () => {
+    const validator = apiDef.svcMagicAgentPlatform.getRuntimeGraphTopology.request
+    const request = {
+      runId: 'run-1',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'agent-studio' }
+    }
+    expect(validateServiceValue(request, validator)).toEqual(request)
+    expect(() =>
+      validateServiceValue({ ...request, sessionKey: 'private-session' }, validator)
+    ).toThrow(ServiceValidationError)
+    expect(() => validateServiceValue({ ...request, route: undefined }, validator)).toThrow(
+      ServiceValidationError
+    )
+  })
+
+  it('strictly validates Runtime Channel reads', () => {
+    const validator = apiDef.svcMagicAgentPlatform.getRuntimeChannel.request
+    expect(validateServiceValue({ channelId: 'channel-1' }, validator)).toEqual({
+      channelId: 'channel-1'
+    })
+    expect(() => validateServiceValue({ channelId: 'channel-1', extra: true }, validator)).toThrow(
+      ServiceValidationError
+    )
+  })
+
+  it('strictly validates create/remove grant metadata and rejects actor injection', () => {
+    const remove = {
+      instanceId: 'instance',
+      expectedRevision: 1,
+      removedAt: 2,
+      idempotencyKey: 'remove',
+      grantId: 'grant',
+      expectedGrantUseCount: 0
+    }
+    expect(
+      validateServiceValue(remove, apiDef.svcMagicAgentPlatform.removeAgentInstance.request)
+    ).toEqual(remove)
+    expect(() =>
+      validateServiceValue(
+        { ...remove, actor: { kind: 'user', id: 'caller' } },
+        apiDef.svcMagicAgentPlatform.removeAgentInstance.request
+      )
+    ).toThrow(ServiceValidationError)
+  })
+
+  it('strictly validates Agent pause/resume and rejects actor injection', () => {
+    const pause = { instanceId: 'instance', expectedRevision: 1, idempotencyKey: 'pause' }
+    expect(
+      validateServiceValue(pause, apiDef.svcMagicAgentPlatform.pauseAgentInstance.request)
+    ).toEqual(pause)
+    expect(() =>
+      validateServiceValue(
+        { ...pause, actor: { kind: 'agent', id: 'other' } },
+        apiDef.svcMagicAgentPlatform.pauseAgentInstance.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(
+      validateServiceValue(
+        { ...pause, idempotencyKey: 'resume' },
+        apiDef.svcMagicAgentPlatform.resumeAgentInstance.request
+      )
+    ).toEqual({ ...pause, idempotencyKey: 'resume' })
+  })
+
+  it('strictly validates actor-free Agent replace', () => {
+    const validator = apiDef.svcMagicAgentPlatform.replaceAgentInstance.request
+    const request = {
+      instanceId: 'instance',
+      expectedRevision: 0,
+      definitionId: 'new',
+      name: 'New',
+      configVersion: 'v2',
+      replacedAt: 2,
+      idempotencyKey: 'replace'
+    }
+    expect(validateServiceValue(request, validator)).toEqual(request)
+    expect(() =>
+      validateServiceValue({ ...request, actor: { kind: 'agent', id: 'spoof' } }, validator)
+    ).toThrow(ServiceValidationError)
+  })
+
+  it('strictly validates actor-free Team mutations', () => {
+    const create = apiDef.svcMagicAgentPlatform.createTeam.request
+    const add = apiDef.svcMagicAgentPlatform.addTeamMember.request
+    const remove = apiDef.svcMagicAgentPlatform.removeTeamMember.request
+    const createReq = { team: { id: 'team', name: 'Team', createdAt: 1 }, idempotencyKey: 'create' }
+    const addReq = {
+      teamId: 'team',
+      expectedRevision: 0,
+      member: { memberId: 'member', agentInstanceId: 'agent', role: 'leader', joinedAt: 2 },
+      idempotencyKey: 'add'
+    }
+    const removeReq = {
+      teamId: 'team',
+      expectedRevision: 1,
+      memberId: 'member',
+      removedAt: 3,
+      idempotencyKey: 'remove'
+    }
+    expect(validateServiceValue(createReq, create)).toEqual(createReq)
+    expect(validateServiceValue(addReq, add)).toEqual(addReq)
+    expect(validateServiceValue(removeReq, remove)).toEqual(removeReq)
+    const removeTeam = apiDef.svcMagicAgentPlatform.removeTeam.request
+    const removeTeamReq = {
+      teamId: 'team',
+      expectedRevision: 2,
+      removedAt: 4,
+      idempotencyKey: 'remove-team'
+    }
+    expect(validateServiceValue(removeTeamReq, removeTeam)).toEqual(removeTeamReq)
+    expect(() =>
+      validateServiceValue({ ...removeTeamReq, actor: { kind: 'user', id: 'spoof' } }, removeTeam)
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue({ ...createReq, actor: { kind: 'user', id: 'spoof' } }, create)
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue({ ...createReq, team: { ...createReq.team, ownerId: 'spoof' } }, create)
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        { ...addReq, member: { ...addReq.member, addedBy: { kind: 'user', id: 'spoof' } } },
+        add
+      )
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue({ ...addReq, member: { ...addReq.member, role: 'admin' } }, add)
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue({ ...removeReq, actor: { kind: 'user', id: 'spoof' } }, remove)
+    ).toThrow(ServiceValidationError)
+  })
+
+  it('deeply validates immutable Agent config content and rejects authority injection', () => {
+    const request = {
+      config: {
+        version: 'v2',
+        definitionId: 'definition',
+        model: { profileId: 'model' },
+        systemPrompt: 'safe',
+        inference: { temperature: 0.2, maxTokens: 100 },
+        tools: { allowedToolNames: ['read'] },
+        memory: { allowHistory: false, contextMessageLimit: 10, scope: 'instance' },
+        policy: { policyIds: ['base'], workspaceRoots: ['/workspace'] },
+        channels: { channelIds: [] },
+        budgets: { maxRuntimeMs: 1000, maxToolCalls: 2 },
+        createdAt: 1
+      },
+      idempotencyKey: 'create'
+    }
+    const validator = apiDef.svcMagicAgentPlatform.createAgentConfigVersion.request
+    expect(validateServiceValue(request, validator)).toEqual(request)
+    for (const injected of [
+      { ...request, actor: { kind: 'user', id: 'attacker' } },
+      { ...request, config: { ...request.config, createdBy: { kind: 'user', id: 'attacker' } } },
+      { ...request, config: { ...request.config, contentDigest: '0'.repeat(64) } },
+      {
+        ...request,
+        config: { ...request.config, tools: { allowedToolNames: ['read'], permit: 'secret' } }
+      }
+    ])
+      expect(() => validateServiceValue(injected, validator)).toThrow(ServiceValidationError)
+  })
+
+  it('strictly validates Agent config version commands and rejects actor/config payload injection', () => {
+    const stage = {
+      instanceId: 'instance',
+      expectedRevision: 0,
+      configVersion: 'v2',
+      stagedAt: 1,
+      idempotencyKey: 'stage'
+    }
+    const validator = apiDef.svcMagicAgentPlatform.stageAgentConfig.request
+    expect(validateServiceValue(stage, validator)).toEqual(stage)
+    expect(() =>
+      validateServiceValue({ ...stage, actor: { kind: 'agent', id: 'attacker' } }, validator)
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue({ ...stage, config: { prompt: 'secret' } }, validator)
+    ).toThrow(ServiceValidationError)
+  })
+
+  it('strictly validates Runtime Channel publish and rejects actor injection', () => {
+    const publish = {
+      message: {
+        id: 'message',
+        channelId: 'channel',
+        publisherMemberId: 'producer',
+        payload: { text: 'hello' },
+        priority: 1,
+        publishedAt: 2
+      },
+      expectedChannelRevision: 1,
+      idempotencyKey: 'publish',
+      grantId: 'grant',
+      expectedGrantUseCount: 0
+    }
+    expect(
+      validateServiceValue(
+        publish,
+        apiDef.svcMagicAgentPlatform.publishRuntimeChannelMessage.request
+      )
+    ).toEqual(publish)
+    expect(() =>
+      validateServiceValue(
+        { ...publish, actor: { kind: 'agent', id: 'other' } },
+        apiDef.svcMagicAgentPlatform.publishRuntimeChannelMessage.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        { ...publish, message: { ...publish.message, claimToken: 'secret' } },
+        apiDef.svcMagicAgentPlatform.publishRuntimeChannelMessage.request
+      )
+    ).toThrow(ServiceValidationError)
+  })
+
+  it('strictly validates Runtime Channel create and rejects actor/member injection', () => {
+    const create = {
+      channel: { id: 'channel', name: 'Channel', mode: 'queue', capacity: 5 },
+      createdAt: 1,
+      idempotencyKey: 'create',
+      grantId: 'grant',
+      expectedGrantUseCount: 0
+    }
+    expect(
+      validateServiceValue(create, apiDef.svcMagicAgentPlatform.createRuntimeChannel.request)
+    ).toEqual(create)
+    expect(() =>
+      validateServiceValue(
+        { ...create, actor: { kind: 'user', id: 'caller' } },
+        apiDef.svcMagicAgentPlatform.createRuntimeChannel.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        { ...create, channel: { ...create.channel, members: [] } },
+        apiDef.svcMagicAgentPlatform.createRuntimeChannel.request
+      )
+    ).toThrow(ServiceValidationError)
+  })
+
+  it('strictly validates Runtime Channel Agent membership mutation', () => {
+    const join = {
+      channelId: 'channel',
+      expectedRevision: 0,
+      member: { memberId: 'member', agentInstanceId: 'agent', role: 'consumer', joinedAt: 1 },
+      joinedAt: 1,
+      idempotencyKey: 'join'
+    }
+    const validator = apiDef.svcMagicAgentPlatform.joinRuntimeChannel.request
+    expect(validateServiceValue(join, validator)).toEqual(join)
+    expect(() =>
+      validateServiceValue({ ...join, actor: { kind: 'agent', id: 'attacker' } }, validator)
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        { ...join, member: { ...join.member, graphTargetId: 'graph' } },
+        validator
+      )
+    ).toThrow(ServiceValidationError)
+  })
+
+  it('strictly validates Runtime Channel wire mutation and rejects actor injection', () => {
+    const wire = {
+      wire: {
+        id: 'wire',
+        sourceChannelId: 'source',
+        targetChannelId: 'target',
+        targetPublisherMemberId: 'publisher',
+        enabled: true,
+        createdAt: 1,
+        maxHops: 4
+      },
+      idempotencyKey: 'wire'
+    }
+    const validator = apiDef.svcMagicAgentPlatform.wireRuntimeChannel.request
+    expect(validateServiceValue(wire, validator)).toEqual(wire)
+    expect(() =>
+      validateServiceValue({ ...wire, actor: { kind: 'agent', id: 'attacker' } }, validator)
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue({ ...wire, wire: { ...wire.wire, enabled: 'yes' } }, validator)
+    ).toThrow(ServiceValidationError)
+  })
+
+  it('strictly validates Runtime Channel wire lookup', () => {
+    const validator = apiDef.svcMagicAgentPlatform.getRuntimeChannelWire.request
+    expect(validateServiceValue({ wireId: 'wire' }, validator)).toEqual({ wireId: 'wire' })
+    expect(() => validateServiceValue({ wireId: 'wire', forwarding: true }, validator)).toThrow(
+      ServiceValidationError
+    )
+  })
+
+  it('strictly validates Runtime Channel delivery without accepting actor injection', () => {
+    const claim = {
+      messageId: 'message',
+      expectedRevision: 0,
+      consumerMemberId: 'consumer',
+      claimedAt: 1,
+      leaseMs: 100,
+      idempotencyKey: 'claim'
+    }
+    expect(
+      validateServiceValue(claim, apiDef.svcMagicAgentPlatform.claimRuntimeChannelMessage.request)
+    ).toEqual(claim)
+    expect(() =>
+      validateServiceValue(
+        { ...claim, actor: { kind: 'agent', id: 'attacker' } },
+        apiDef.svcMagicAgentPlatform.claimRuntimeChannelMessage.request
+      )
+    ).toThrow(ServiceValidationError)
+    const ack = {
+      messageId: 'message',
+      expectedRevision: 1,
+      consumerMemberId: 'consumer',
+      acknowledgedAt: 2,
+      token: 'secret-token',
+      idempotencyKey: 'ack'
+    }
+    expect(
+      validateServiceValue(
+        ack,
+        apiDef.svcMagicAgentPlatform.acknowledgeRuntimeChannelMessage.request
+      )
+    ).toEqual(ack)
+    expect(() =>
+      validateServiceValue(
+        { ...ack, actor: { kind: 'agent', id: 'attacker' } },
+        apiDef.svcMagicAgentPlatform.acknowledgeRuntimeChannelMessage.request
+      )
+    ).toThrow(ServiceValidationError)
   })
 
   it('validates MagicAgent Platform renderer requests at the API boundary', () => {
@@ -101,6 +452,17 @@ describe('apiDef', () => {
       source: 'creative',
       route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
     })
+    expect(
+      validateServiceValue(
+        {
+          agentId: 'agent-1',
+          text: 'continue',
+          sessionId: 'session-1',
+          route: { channel: 'drive', scopeType: 'channel', scopeId: 'drive-1' }
+        },
+        apiDef.svcMagicAgentPlatform.runAgent.request
+      )
+    ).toMatchObject({ sessionId: 'session-1' })
   })
 
   it('requires route binding for mutating and run-scoped MagicAgent graph requests', () => {
@@ -216,6 +578,43 @@ describe('apiDef', () => {
         apiDef.svcMagicAgentPlatform.runGraph.request
       )
     ).toMatchObject({ graphId: 'graph.demo', input: 'hello', route })
+    expect(
+      validateServiceValue(
+        {
+          graphId: 'graph.demo',
+          input: 'hello',
+          route,
+          nodeExecution: { mode: 'single-node', nodeId: 'final', inputs: { input: 'explicit' } }
+        },
+        apiDef.svcMagicAgentPlatform.runGraph.request
+      )
+    ).toMatchObject({
+      nodeExecution: { mode: 'single-node', nodeId: 'final', inputs: { input: 'explicit' } }
+    })
+    expect(
+      validateServiceValue(
+        {
+          graphId: 'graph.demo',
+          input: 'hello',
+          route,
+          nodeExecution: { mode: 'run-from-node', nodeId: 'final', priorRunId: 'run-prior' }
+        },
+        apiDef.svcMagicAgentPlatform.runGraph.request
+      )
+    ).toMatchObject({
+      nodeExecution: { mode: 'run-from-node', nodeId: 'final', priorRunId: 'run-prior' }
+    })
+    expect(() =>
+      validateServiceValue(
+        {
+          graphId: 'graph.demo',
+          input: 'hello',
+          route,
+          nodeExecution: { mode: 'single-node', nodeId: 'final' }
+        },
+        apiDef.svcMagicAgentPlatform.runGraph.request
+      )
+    ).toThrow(ServiceValidationError)
     expect(
       validateServiceValue(
         { graphId: 'graph.demo', route, limit: 50 },

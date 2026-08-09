@@ -1,4 +1,5 @@
 import type { FileItem } from '@shared/comfy/types'
+import type { MediaReference } from '@shared/mediaReference'
 import type { ReportBundleRole } from '@shared/reportBundle'
 import type { Hy3dMediaState, Hy3dParams } from '../ChatPage/hy3d/types'
 import type { CanvasImageSourceIdentity, CanvasImageThumbnailSet } from './canvasThumbnailTypes'
@@ -112,6 +113,7 @@ export interface CanvasImageItem extends CanvasItemBase {
   crop?: { x: number; y: number; width: number; height: number }
   promptId?: string
   fileItem?: FileItem
+  media?: MediaReference
   ocrBundleId?: string
 }
 

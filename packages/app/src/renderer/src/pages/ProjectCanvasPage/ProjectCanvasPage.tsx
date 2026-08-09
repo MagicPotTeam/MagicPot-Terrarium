@@ -643,6 +643,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     handleCloseExportSubmenu,
     openExportSubmenu,
     handleSaveCanvas,
+    isSavingCanvasFile,
     handleSaveCanvasAs,
     handleSaveCanvasAsFromContextMenu,
     handleExportCanvasProjectFile,
@@ -669,7 +670,9 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     loadImageFromSrc,
     getCanvasItemVisualBounds,
     notifySuccess,
-    notifyError
+    notifyError,
+    notifyInfo,
+    closeMessage
   })
 
   const handleOpenTargetSchemeManager = useCallback(() => {
@@ -857,6 +860,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
       canvasId,
       canvasContainerRef,
       canvasActiveRef,
+      lastViewportPointRef,
       notifyWarning,
       addImageToCanvas,
       addImagesToCanvas,
@@ -915,6 +919,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
   } = useCanvasViewportPersistence({
     config,
     canvasId,
+    documentTitle: projectName,
     items,
     groups,
     groupBranches,
@@ -1590,6 +1595,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     handleResolveFigmaBinding,
     handleRunCanvasTarget,
     handleSaveCanvas,
+    isSavingCanvasFile,
     handleSaveCanvasAs,
     handleSaveCanvasAsFromContextMenu,
     handleExportCanvasProjectFile,

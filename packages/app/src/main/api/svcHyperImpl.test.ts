@@ -2,14 +2,20 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { getBuildEnvMock, getConfigMock } = vi.hoisted(() => ({
+const { getBuildEnvMock, getConfigMock, showSaveDialogMock, getPathMock } = vi.hoisted(() => ({
   getBuildEnvMock: vi.fn(),
-  getConfigMock: vi.fn()
+  getConfigMock: vi.fn(),
+  showSaveDialogMock: vi.fn(),
+  getPathMock: vi.fn(() => 'C:/downloads')
 }))
 
 vi.mock('electron', () => ({
   dialog: {
-    showMessageBox: vi.fn()
+    showMessageBox: vi.fn(),
+    showSaveDialog: showSaveDialogMock
+  },
+  app: {
+    getPath: getPathMock
   }
 }))
 
@@ -96,6 +102,8 @@ describe('HyperSvcImpl.comfyPortDetect', () => {
     vi.clearAllMocks()
     getConfigMock.mockReturnValue(baseConfig)
     getBuildEnvMock.mockReturnValue(windowsBuildEnv)
+    getPathMock.mockReturnValue('C:/downloads')
+    showSaveDialogMock.mockResolvedValue({ canceled: true })
   })
 
   it('ignores established Windows TCP connections that mention the ComfyUI port', async () => {
@@ -171,6 +179,26 @@ describe('HyperSvcImpl.saveImageToDir', () => {
     expect(fs.existsSync(path.join(testRoot, 'startup', 'payload.js'))).toBe(false)
   })
 
+  it('opens a save dialog and does not write when image saving is canceled', async () => {
+    const svc = new HyperSvcImpl()
+    const writeFileSpy = vi.spyOn(fs.promises, 'writeFile')
+
+    await expect(
+      svc.saveImageToDir({
+        data: new Uint8Array([1, 2, 3]),
+        fileName: 'openai-image_2026-07-29T09-30-45_1.png'
+      })
+    ).resolves.toEqual({ savedPath: '', canceled: true })
+
+    expect(showSaveDialogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: '保存图片',
+        defaultPath: expect.stringContaining('openai-image_2026-07-29T09-30-45_1.png')
+      })
+    )
+    expect(writeFileSpy).not.toHaveBeenCalled()
+  })
+
   it('uses exclusive writes and suffixes conflicting filenames', async () => {
     const svc = new HyperSvcImpl()
     const targetDir = path.join(testRoot, 'downloads')
@@ -186,6 +214,19 @@ describe('HyperSvcImpl.saveImageToDir', () => {
     expect(response.savedPath).toBe(path.resolve(targetDir, 'image_1.png'))
     expect(fs.readFileSync(path.join(targetDir, 'image.png'))).toEqual(Buffer.from([9]))
     expect(fs.readFileSync(response.savedPath)).toEqual(Buffer.from([1, 2, 3]))
+  })
+
+  it('rejects traversal filenames before opening the save dialog', async () => {
+    const svc = new HyperSvcImpl()
+
+    await expect(
+      svc.saveImageToDir({
+        data: new Uint8Array([1]),
+        fileName: '../outside.png'
+      })
+    ).rejects.toThrow(/path separators|traversal/i)
+
+    expect(showSaveDialogMock).not.toHaveBeenCalled()
   })
 })
 

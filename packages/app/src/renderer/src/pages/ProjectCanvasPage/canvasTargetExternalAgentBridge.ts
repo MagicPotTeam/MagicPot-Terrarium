@@ -197,17 +197,24 @@ export function setExternalChatSessionLoading(options: {
   scope: string
   sessionId?: string | null
   loading: boolean
+  completed?: boolean
 }) {
   if (!options.sessionId) return
 
-  updateScopedExternalLoadingSessionId(options.scope, options.sessionId, options.loading)
+  updateScopedExternalLoadingSessionId(
+    options.scope,
+    options.sessionId,
+    options.loading,
+    options.completed ?? !options.loading
+  )
 
   window.dispatchEvent(
     new CustomEvent('chat:set-external-loading', {
       detail: {
         scope: options.scope,
         sessionId: options.sessionId,
-        loading: options.loading
+        loading: options.loading,
+        completed: options.completed
       }
     })
   )

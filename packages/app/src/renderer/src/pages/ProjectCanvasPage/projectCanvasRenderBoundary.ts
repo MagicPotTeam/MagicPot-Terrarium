@@ -10,6 +10,7 @@ import { resolveCanvasImageDisplayCrop } from './canvasImageDisplayUtils'
 import { getCanvasImageAssetSize } from './canvasImageAssetUtils'
 import { getCanvasViewportBounds } from './canvasViewportPlacementUtils'
 import { PROJECT_CANVAS_MIN_STAGE_SCALE } from './projectCanvasViewportScale'
+import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 
 export type ProjectCanvasRenderableMediaKind = 'image' | 'video' | 'model3d' | 'html'
 export type ProjectCanvasRenderableSurface =
@@ -306,6 +307,10 @@ export function isProjectCanvasRenderableInteractionProxy(
 export function buildProjectCanvasRenderableItem(
   item: CanvasItem
 ): ProjectCanvasRenderableItem | null {
+  if (isCanvasItemTransientlyHidden(item.id)) {
+    return null
+  }
+
   const transform = buildRenderableTransform(item)
   switch (item.type) {
     case 'image':

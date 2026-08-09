@@ -108,55 +108,83 @@ type DownloadResponse = {
   finalUrl: URL
 }
 
-async function requestDownload(
-  initialUrl: URL,
-  signal: AbortSignal,
-  redirects = 0
-): Promise<DownloadResponse> {
+async function requestDownload(initialUrl: URL, signal: AbortSignal): Promise<DownloadResponse> {
   assertRemoteFetchHostnameIsNotExplicitlyLocal(initialUrl.hostname)
   if (signal.aborted) throw signal.reason
 
-  const idleTimeout = new AbortController()
-  const abortForCaller = () => idleTimeout.abort(signal.reason)
-  signal.addEventListener('abort', abortForCaller, { once: true })
-  const idleTimer = setTimeout(
-    () => idleTimeout.abort(new Error('Download failed: request was idle for too long.')),
-    DOWNLOAD_IDLE_TIMEOUT_MS
-  )
+  return new Promise((resolve, reject) => {
+    const request = net.request({ method: 'GET', url: initialUrl.toString(), redirect: 'manual' })
+    let redirects = 0
+    let finalUrl = initialUrl
+    let settled = false
+    const cleanup = () => {
+      clearTimeout(idleTimer)
+      signal.removeEventListener('abort', abortForCaller)
+    }
+    const fail = (error: unknown) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      request.abort()
+      reject(error)
+    }
+    const abortForCaller = () => fail(signal.reason)
+    const idleTimer = setTimeout(
+      () => fail(new Error('Download failed: request was idle for too long.')),
+      DOWNLOAD_IDLE_TIMEOUT_MS
+    )
 
-  let response: Response
-  try {
-    response = await net.fetch(initialUrl.toString(), {
-      method: 'GET',
-      redirect: 'manual',
-      signal: idleTimeout.signal
+    signal.addEventListener('abort', abortForCaller, { once: true })
+    request.on('redirect', (statusCode, _method, redirectUrl) => {
+      try {
+        if (!REDIRECT_STATUS_CODES.has(statusCode)) {
+          throw new Error(`Download failed: unsupported redirect status ${statusCode}.`)
+        }
+        redirects += 1
+        if (redirects > MAX_DOWNLOAD_REDIRECTS) {
+          throw new Error('Download failed: too many redirects.')
+        }
+        const parsedRedirect = requireHttpsUrl(redirectUrl)
+        assertRemoteFetchHostnameIsNotExplicitlyLocal(parsedRedirect.hostname)
+        finalUrl = parsedRedirect
+        request.followRedirect()
+      } catch (error) {
+        fail(error)
+      }
     })
-  } finally {
-    clearTimeout(idleTimer)
-    signal.removeEventListener('abort', abortForCaller)
-  }
-
-  const status = response.status
-  if (REDIRECT_STATUS_CODES.has(status)) {
-    await response.body?.cancel().catch(() => undefined)
-    const location = response.headers.get('location')
-    if (!location) {
-      throw new Error('Download failed: redirect has no location.')
-    }
-    if (redirects >= MAX_DOWNLOAD_REDIRECTS) {
-      throw new Error('Download failed: too many redirects.')
-    }
-    const redirectUrl = requireHttpsUrl(new URL(location, initialUrl).toString())
-    return requestDownload(redirectUrl, signal, redirects + 1)
-  }
-  if (status < 200 || status >= 300) {
-    await response.body?.cancel().catch(() => undefined)
-    throw new Error(`Download failed: ${status} ${response.statusText || ''}`.trim())
-  }
-  if (!response.body) {
-    throw new Error('Download failed: response body is empty.')
-  }
-  return { response, finalUrl: initialUrl }
+    request.on('response', (incoming) => {
+      if (settled) {
+        request.abort()
+        return
+      }
+      settled = true
+      cleanup()
+      const headers = new Headers()
+      for (const [name, value] of Object.entries(incoming.headers)) {
+        if (value != null) headers.set(name, Array.isArray(value) ? value.join(', ') : value)
+      }
+      const response = new Response(
+        Readable.toWeb(incoming as unknown as Readable) as ReadableStream<Uint8Array>,
+        {
+          status: incoming.statusCode,
+          statusText: incoming.statusMessage,
+          headers
+        }
+      )
+      if (response.status < 200 || response.status >= 300) {
+        void response.body?.cancel()
+        reject(new Error(`Download failed: ${response.status} ${response.statusText || ''}`.trim()))
+        return
+      }
+      if (!response.body) {
+        reject(new Error('Download failed: response body is empty.'))
+        return
+      }
+      resolve({ response, finalUrl })
+    })
+    request.on('error', fail)
+    request.end()
+  })
 }
 
 function runGitClone(url: string, targetDir: string): Promise<void> {

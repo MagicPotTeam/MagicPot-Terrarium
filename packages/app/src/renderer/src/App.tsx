@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from 'react'
 import { HashRouter } from 'react-router-dom'
 import Layout from './components/Layout'
+import CanvasProjectDropBridge from './components/CanvasProjectDropBridge'
 import { useConfig } from './hooks/useConfig'
 import { useComfyProcess } from './store/hooks/comfyProcess'
 import { api } from './utils/windowUtils'
@@ -10,6 +11,7 @@ import { DndProvider } from 'react-dnd'
 import { getAppDndManager } from './utils/dndManager'
 import ComfyLogBridge from './components/ComfyLogBridge'
 import ManagedComfyProcessBridge from './components/ManagedComfyProcessBridge'
+import MagicAgentApprovalCenter from './components/MagicAgentApprovalCenter'
 import { useComfyEventCallback } from './hooks/useComfyEvent'
 import { handleComfyExecutionActivityEvent } from './utils/comfyExecutionActivity'
 let hasHandledInitialComfyAutoStart = false
@@ -250,6 +252,8 @@ function App(): React.JSX.Element {
     <DndProvider manager={appDndManager}>
       <HashRouter>
         <DeferredComfyStartupBridges />
+        <CanvasProjectDropBridge />
+        <MagicAgentApprovalCenter />
         <Layout />
       </HashRouter>
     </DndProvider>

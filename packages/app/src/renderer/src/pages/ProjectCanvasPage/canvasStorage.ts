@@ -1,4 +1,4 @@
-﻿// packages/app/src/renderer/src/pages/ProjectCanvasPage/canvasStorage.ts
+// packages/app/src/renderer/src/pages/ProjectCanvasPage/canvasStorage.ts
 // Canvas persistence (IndexedDB) plus export/import helpers.
 import type {
   CanvasFileItem,
@@ -17,6 +17,7 @@ import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
 import { sanitizeFilePart } from './canvasExportNamingUtils'
 import { extractMimeTypeFromSourceUrl } from './canvasImageMetadata'
+import { getElectronCanvasFilePath } from './canvasLocalFileSource'
 
 const DB_NAME = 'magicpot-canvas'
 const DB_VERSION = 2 // bumped for new blob store
@@ -25,6 +26,8 @@ const BLOB_STORE_NAME = 'canvas-blobs' // Stores binary payloads such as 3D mode
 const BLOB_STORE_KEY_SEPARATOR = '::canvas::'
 const KEY = 'default' // Single-canvas scene; use a fixed key.
 const PROJECT_CANVAS_FILENAME = 'project.mpcanvas'
+const AUTOSAVE_CANVAS_FILENAME = PROJECT_CANVAS_FILENAME
+const AUTOSAVE_PROJECT_LIMIT = 8
 const PROJECT_ASSET_DIRNAME = 'assets'
 const PROJECT_CROPPABLE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
@@ -106,7 +109,9 @@ function openDB(): Promise<IDBDatabase> {
 function serializeItems(items: CanvasItem[]): SerializableCanvasItem[] {
   return items.map((item) => {
     if (item.type === 'image') {
-      const { image, sourceFile, ...rest } = item
+      const { image, sourceFile, thumbnailSet: _thumbnailSet, sourceIdentity, ...rest } = item
+      const persistedSourceIdentity =
+        sourceIdentity?.kind === 'local-file' ? sourceIdentity : undefined
       const sourceWidth =
         typeof rest.sourceWidth === 'number' &&
         Number.isFinite(rest.sourceWidth) &&
@@ -128,10 +133,16 @@ function serializeItems(items: CanvasItem[]): SerializableCanvasItem[] {
         rest.crop.height === sourceHeight
       ) {
         const { crop, ...normalized } = rest
-        return normalized as SerializableCanvasItem
+        return {
+          ...normalized,
+          ...(persistedSourceIdentity ? { sourceIdentity: persistedSourceIdentity } : {})
+        } as SerializableCanvasItem
       }
 
-      return rest as SerializableCanvasItem
+      return {
+        ...rest,
+        ...(persistedSourceIdentity ? { sourceIdentity: persistedSourceIdentity } : {})
+      } as SerializableCanvasItem
     }
     if (item.type === 'model3d') {
       const { deferRender, sourceFile, ...rest } = item as CanvasItem & {
@@ -207,6 +218,7 @@ type CanvasFileRestoreOptions = {
   restoreQAppState?: boolean
   persistEmbeddedAssetsToIndexedDb?: boolean
   canvasBaseDir?: string
+  storeKey?: string
 }
 
 type BlobPersistableCanvasItem =
@@ -757,6 +769,17 @@ async function resolveProjectStorageRootPath(): Promise<string | null> {
   }
 }
 
+async function resolveAutoSaveRootPath(): Promise<string | null> {
+  if (!window.api?.svcState) return null
+  try {
+    const response = await window.api.svcState.getUserDataDirectoryState({})
+    return response.state?.autoSaveRoot || null
+  } catch (error) {
+    console.warn('[Canvas Storage] Failed to resolve autosave root:', error)
+    return null
+  }
+}
+
 function resolveProjectStorageDirName(storeKey: string): string {
   const project = getProjectById(storeKey)
   const normalizedStoredDirName = project?.storageDirName
@@ -948,6 +971,49 @@ async function writeProjectAssetFiles(
       })
     })
   )
+}
+
+async function saveAutoSaveCanvasFile(
+  storeKey: string,
+  items: CanvasItem[],
+  groups: CanvasGroup[],
+  groupBranches: CanvasGroupBranch[],
+  figmaBinding: CanvasFigmaBinding | null,
+  blobEntries: readonly ResolvedCanvasBinaryAsset[]
+): Promise<boolean> {
+  if (!window.api?.svcFs || !window.path) return false
+  const autoSaveRoot = await resolveAutoSaveRootPath()
+  if (!autoSaveRoot) return false
+  const projectDir = window.path.join(autoSaveRoot, resolveProjectStorageDirName(storeKey))
+  const assetDir = window.path.join(projectDir, PROJECT_ASSET_DIRNAME)
+  try {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
+    const { canvasFileData, assetEntries } = await buildProjectCanvasFileData(
+      items,
+      projectDir,
+      groups,
+      groupBranches,
+      figmaBinding,
+      blobEntries,
+      storeKey
+    )
+    await writeProjectAssetFiles(assetDir, assetEntries)
+    await window.api.svcFs.writeTextFile({
+      outputPath: projectDir,
+      filename: AUTOSAVE_CANVAS_FILENAME,
+      content: JSON.stringify(canvasFileData)
+    })
+    if (typeof window.api.svcFs.pruneAutoSaveProjects === 'function') {
+      void window.api.svcFs.pruneAutoSaveProjects({
+        currentProjectDirName: resolveProjectStorageDirName(storeKey),
+        maxProjects: AUTOSAVE_PROJECT_LIMIT
+      })
+    }
+    return true
+  } catch (error) {
+    console.warn('[Canvas Storage] Failed to write autosave:', error)
+    return false
+  }
 }
 
 async function saveProjectCanvasFile(
@@ -1146,6 +1212,20 @@ function isMissingMirrorFileError(error: unknown): boolean {
   return error instanceof Error && /file not found/i.test(error.message)
 }
 
+async function loadCanvasItemsFromAutoSaveFile(storeKey: string): Promise<CanvasSnapshot | null> {
+  if (!window.path) return null
+  const autoSaveRoot = await resolveAutoSaveRootPath()
+  if (!autoSaveRoot) return null
+  const projectDir = window.path.join(autoSaveRoot, resolveProjectStorageDirName(storeKey))
+  return readCanvasItemsFromProjectFile(window.path.join(projectDir, AUTOSAVE_CANVAS_FILENAME))
+}
+
+async function loadCanvasFallback(storeKey: string): Promise<CanvasSnapshot | null> {
+  return (
+    (await loadCanvasItemsFromAutoSaveFile(storeKey)) || loadCanvasItemsFromProjectFile(storeKey)
+  )
+}
+
 async function loadCanvasItemsFromProjectFile(storeKey: string): Promise<CanvasSnapshot | null> {
   const location = await getProjectCanvasLocation(storeKey)
   if (!location) {
@@ -1208,7 +1288,9 @@ export async function saveCanvasItems(
     // 1. Persist blob-backed binary data (image / model3d / video / file).
     const blobItems = items.filter(
       (item): item is BlobPersistableCanvasItem =>
-        isBlobPersistableCanvasItem(item) && hasLocallyPersistableCanvasSrc(item)
+        isBlobPersistableCanvasItem(item) &&
+        hasLocallyPersistableCanvasSrc(item) &&
+        !(item.type === 'image' && item.media?.kind === 'managed')
     )
     const persistedBlobEntries = (
       await Promise.all(
@@ -1264,32 +1346,8 @@ export async function saveCanvasItems(
 
     await saveBlobEntries(db, storeKey, allBlobEntries)
 
-    // 2. Remove blob entries that are no longer referenced.
-    const currentBlobIds = new Set<string>([
-      ...blobItems.map((item) => item.id),
-      ...persistedTextureEntries.map((entry) => entry.key)
-    ])
-    try {
-      const allBlobKeys = await new Promise<IDBValidKey[]>((resolve, reject) => {
-        const tx = db.transaction(BLOB_STORE_NAME, 'readonly')
-        const store = tx.objectStore(BLOB_STORE_NAME)
-        const req = store.getAllKeys()
-        req.onsuccess = () => resolve(req.result)
-        req.onerror = () =>
-          rejectCanvasStorageError(reject, 'blob key enumeration request', req.error)
-      })
-      for (const key of allBlobKeys) {
-        const k = key as string
-        const logicalKey = getLogicalCanvasBlobKey(storeKey, k)
-        if (logicalKey === null) {
-          continue
-        }
-        if (currentBlobIds.has(logicalKey)) continue
-        await deleteBlobData(db, k)
-      }
-    } catch {
-      // getAllKeys may not be available in very old environments, ignore
-    }
+    // Keep stale entries until a later successful snapshot/explicit clear. Deleting them before
+    // metadata commits creates a crash window where the previous snapshot references missing blobs.
 
     // 3. Save canvas metadata.
     const tx = db.transaction(STORE_NAME, 'readwrite')
@@ -1326,7 +1384,7 @@ export async function saveCanvasItems(
       }
     })
 
-    await saveProjectCanvasFile(
+    await saveAutoSaveCanvasFile(
       storeKey,
       items,
       groups,
@@ -1335,10 +1393,9 @@ export async function saveCanvasItems(
       allBlobEntries
     )
   } catch (err) {
-    console.error(
-      '[Canvas Storage] 保存失败:',
-      normalizeCanvasStorageError(err, '[Canvas Storage] Save failed.')
-    )
+    const normalizedError = normalizeCanvasStorageError(err, '[Canvas Storage] Save failed.')
+    console.error('[Canvas Storage] 保存失败:', normalizedError)
+    throw normalizedError
   }
 }
 
@@ -1370,7 +1427,7 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
 
     if (persisted === undefined) {
       db.close()
-      const projectSnapshot = await loadCanvasItemsFromProjectFile(storeKey)
+      const projectSnapshot = await loadCanvasFallback(storeKey)
       return projectSnapshot ?? { items: [], groups: [], groupBranches: [], figmaBinding: null }
     }
 
@@ -1384,7 +1441,7 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
 
     if (resolvedIndexedDbItems.length === 0) {
       db.close()
-      const projectSnapshot = await loadCanvasItemsFromProjectFile(storeKey)
+      const projectSnapshot = await loadCanvasFallback(storeKey)
       return projectSnapshot ?? { items: [], groups, groupBranches, figmaBinding }
     }
 
@@ -1418,7 +1475,7 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
 
     db.close()
     if (restoredItems.length === 0 && resolvedIndexedDbItems.length > 0) {
-      const projectSnapshot = await loadCanvasItemsFromProjectFile(storeKey)
+      const projectSnapshot = await loadCanvasFallback(storeKey)
       return projectSnapshot ?? { items: [], groups, groupBranches, figmaBinding }
     }
     return { items: restoredItems, groups, groupBranches, figmaBinding }
@@ -1427,7 +1484,7 @@ export async function loadCanvasItems(storeKey: string = KEY): Promise<{
       '[Canvas Storage] 加载失败:',
       normalizeCanvasStorageError(err, '[Canvas Storage] Load failed.')
     )
-    const projectSnapshot = await loadCanvasItemsFromProjectFile(storeKey)
+    const projectSnapshot = await loadCanvasFallback(storeKey)
     return projectSnapshot ?? { items: [], groups: [], groupBranches: [], figmaBinding: null }
   }
 }
@@ -1473,7 +1530,7 @@ export async function clearCanvasItems(storeKey: string = KEY): Promise<void> {
     }
     db.close()
 
-    await saveProjectCanvasFile(storeKey, [], [], [], null)
+    await saveAutoSaveCanvasFile(storeKey, [], [], [], null, [])
   } catch (err) {
     console.error(
       '[Canvas Storage] 清空失败:',
@@ -2106,7 +2163,8 @@ async function validateProjectCanvasAssetRefs(
 }
 
 async function persistCanvasFileEmbeddedAssets(
-  blobs: Record<string, EmbeddedBlob> | undefined
+  blobs: Record<string, EmbeddedBlob> | undefined,
+  storeKey: string = KEY
 ): Promise<void> {
   if (!blobs || Object.keys(blobs).length === 0) {
     return
@@ -2119,7 +2177,7 @@ async function persistCanvasFileEmbeddedAssets(
       data: base64ToArrayBuffer(embedded.base64),
       mimeType: embedded.mimeType
     }))
-    await saveBlobEntries(db, KEY, entries)
+    await saveBlobEntries(db, storeKey, entries)
     db.close()
     console.log(`[Canvas Import] Persisted ${entries.length} embedded assets to IndexedDB`)
   } catch (error) {
@@ -2138,7 +2196,8 @@ async function restoreCanvasFileData(
   const {
     restoreQAppState = true,
     persistEmbeddedAssetsToIndexedDb = true,
-    canvasBaseDir
+    canvasBaseDir,
+    storeKey = KEY
   } = options
   const storageMode = resolveCanvasFileStorageMode(data)
 
@@ -2156,37 +2215,48 @@ async function restoreCanvasFileData(
     }
   }
 
-  const restoredBlobUrls = new Map(
-    Object.entries(data.blobs || {}).map(([blobKey, embedded]) => {
+  const restoredBlobUrls = new Map<string, string>()
+
+  try {
+    for (const [blobKey, embedded] of Object.entries(data.blobs || {})) {
       const buffer = base64ToArrayBuffer(embedded.base64)
       const blob = new Blob([buffer], { type: embedded.mimeType })
-      return [blobKey, URL.createObjectURL(blob)] as const
-    })
-  )
+      restoredBlobUrls.set(blobKey, URL.createObjectURL(blob))
+    }
 
-  if (persistEmbeddedAssetsToIndexedDb) {
-    await persistCanvasFileEmbeddedAssets(data.blobs)
-  }
+    if (persistEmbeddedAssetsToIndexedDb) {
+      await persistCanvasFileEmbeddedAssets(data.blobs, storeKey)
+    }
 
-  if (storageMode === 'project' && !canvasBaseDir) {
-    console.error('[Canvas Import] Project canvas file is missing its base directory context.')
-  }
+    if (storageMode === 'project' && !canvasBaseDir) {
+      console.error('[Canvas Import] Project canvas file is missing its base directory context.')
+    }
 
-  await validateProjectCanvasAssetRefs(data.items, canvasBaseDir, storageMode)
-  const resolvedItems = resolveProjectCanvasAssetUrls(data.items, canvasBaseDir, storageMode)
-  const restoredItems = restorePersistedCanvasItems(resolvedItems, restoredBlobUrls)
-  const blobCount = data.blobs ? Object.keys(data.blobs).length : 0
-  console.log(
-    `[Canvas Import] Version ${data.version}, mode ${storageMode}, created at ${data.createdAt}, restored ${data.items.length} items` +
-      (blobCount > 0 ? ` (${blobCount} embedded assets)` : '')
-  )
+    await validateProjectCanvasAssetRefs(data.items, canvasBaseDir, storageMode)
+    const resolvedItems = resolveProjectCanvasAssetUrls(data.items, canvasBaseDir, storageMode)
+    const restoredItems = restorePersistedCanvasItems(resolvedItems, restoredBlobUrls)
+    const blobCount = data.blobs ? Object.keys(data.blobs).length : 0
+    console.log(
+      `[Canvas Import] Version ${data.version}, mode ${storageMode}, created at ${data.createdAt}, restored ${data.items.length} items` +
+        (blobCount > 0 ? ` (${blobCount} embedded assets)` : '')
+    )
 
-  return {
-    items: restoredItems as CanvasItem[],
-    groups: data.groups || [],
-    groupBranches: data.groupBranches || [],
-    qAppKey: restoreQAppState ? data.currentQAppKey : undefined,
-    figmaBinding: data.figmaBinding || null
+    return {
+      items: restoredItems as CanvasItem[],
+      groups: data.groups || [],
+      groupBranches: data.groupBranches || [],
+      qAppKey: restoreQAppState ? data.currentQAppKey : undefined,
+      figmaBinding: data.figmaBinding || null
+    }
+  } catch (error) {
+    for (const url of restoredBlobUrls.values()) {
+      try {
+        URL.revokeObjectURL(url)
+      } catch {
+        // Preserve the restore failure while still attempting to revoke every created URL.
+      }
+    }
+    throw error
   }
 }
 
@@ -2202,7 +2272,8 @@ export async function exportCanvasFile(
   groups: CanvasGroup[] = [],
   figmaBinding: CanvasFigmaBinding | null = null,
   groupBranches: CanvasGroupBranch[] = [],
-  updateCurrentDocumentPath: boolean = true
+  updateCurrentDocumentPath: boolean = true,
+  onSaveDialogOpened?: () => void
 ): Promise<void> {
   const name =
     fileName ||
@@ -2240,11 +2311,13 @@ export async function exportCanvasFile(
 
     if (!targetPath) {
       const projectCanvasLocation = canvasId ? await getProjectCanvasLocation(canvasId) : null
-      const res = await window.api.svcDialog.showSaveDialog({
+      const saveDialogPromise = window.api.svcDialog.showSaveDialog({
         title: forceSaveAs ? 'Save Canvas As' : 'Save Canvas',
         defaultPath: cachedTargetPath || projectCanvasLocation?.canvasFullPath || name,
         filters: [{ name: 'MPCANVAS File', extensions: ['mpcanvas'] }]
       })
+      onSaveDialogOpened?.()
+      const res = await saveDialogPromise
       if (res.canceled || !res.filePath) {
         return // User canceled.
       }
@@ -2310,7 +2383,10 @@ export async function exportCanvasFileAsStandalone(
   )
 }
 
-export async function importCanvasFile(file: File): Promise<{
+export async function importCanvasFile(
+  file: File,
+  targetStoreKey: string = KEY
+): Promise<{
   items: CanvasItem[]
   groups: CanvasGroup[]
   groupBranches: CanvasGroupBranch[]
@@ -2319,7 +2395,7 @@ export async function importCanvasFile(file: File): Promise<{
 }> {
   const text = await file.text()
   const data = JSON.parse(text) as CanvasFileData
-  const canvasFilePath = (file as File & { path?: string }).path
+  const canvasFilePath = getElectronCanvasFilePath(file)
   const canvasBaseDir =
     canvasFilePath && window.path && typeof window.path.dirname === 'function'
       ? window.path.dirname(canvasFilePath)
@@ -2327,6 +2403,7 @@ export async function importCanvasFile(file: File): Promise<{
   return await restoreCanvasFileData(data, {
     restoreQAppState: false,
     persistEmbeddedAssetsToIndexedDb: true,
+    storeKey: targetStoreKey,
     canvasBaseDir
   })
 }

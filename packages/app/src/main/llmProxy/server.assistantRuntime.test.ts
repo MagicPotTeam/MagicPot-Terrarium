@@ -4,6 +4,7 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
+import { subscribeTrustedChannelMessages } from '../magicAgentPlatform2/triggers/channelMessageEvents'
 
 let currentConfig: Config = DEFAULT_CONFIG
 let testArtifactDir = ''
@@ -433,6 +434,38 @@ describe('LLM proxy server legacy compatibility', () => {
         })
       ])
     })
+  })
+
+  it('publishes trusted Channel metadata without raw message content', async () => {
+    const events: unknown[] = []
+    const unsubscribe = subscribeTrustedChannelMessages((event) => events.push(event))
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/bot/message`, {
+        method: 'POST',
+        headers: {
+          'X-MagicPot-Bot-Secret': 'proxy-secret',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          channelId: 'channel-ingress',
+          messageId: 'message-ingress',
+          eventId: 'event-ingress',
+          message: 'top secret channel text'
+        })
+      })
+      expect(response.status).toBe(200)
+      expect(events).toEqual([
+        expect.objectContaining({
+          channelId: 'channel-ingress',
+          messageId: 'message-ingress',
+          eventId: 'event-ingress',
+          payloadDigest: expect.stringMatching(/^[a-f0-9]{64}$/)
+        })
+      ])
+      expect(JSON.stringify(events)).not.toContain('top secret channel text')
+    } finally {
+      unsubscribe()
+    }
   })
 
   it('accepts legacy bot secret headers as proxy tokens', async () => {

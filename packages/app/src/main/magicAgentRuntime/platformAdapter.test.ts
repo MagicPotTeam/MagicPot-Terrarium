@@ -26,6 +26,21 @@ const createAssistantRuntime = () => ({
       name: 'assistant.echo',
       description: 'Assistant echo.',
       inputSchema: { type: 'object' }
+    },
+    {
+      name: 'files.write',
+      description: 'Write file.',
+      inputSchema: { type: 'object' }
+    },
+    {
+      name: 'files.edit',
+      description: 'Edit file.',
+      inputSchema: { type: 'object' }
+    },
+    {
+      name: 'files.patch',
+      description: 'Patch file.',
+      inputSchema: { type: 'object' }
     }
   ]),
   callTool: vi.fn(async (_route, name: string, args: Record<string, unknown>) => ({
@@ -92,8 +107,19 @@ describe('MagicAgentPlatformAdapter', () => {
 
     expect(adapter.listAgents().map((agent) => agent.id)).toContain('magicpot.default.chat')
     expect(adapter.listTools().map((tool) => `${tool.source}:${tool.name}`)).toEqual(
-      expect.arrayContaining(['assistantRuntime:assistant.echo', 'creative:creative.echo'])
+      expect.arrayContaining([
+        'assistantRuntime:assistant.echo',
+        'assistantRuntime:files.write',
+        'assistantRuntime:files.edit',
+        'assistantRuntime:files.patch',
+        'creative:creative.echo'
+      ])
     )
+    for (const name of ['files.write', 'files.edit', 'files.patch']) {
+      expect(adapter.listTools().find((tool) => tool.name === name)?.metadata).toMatchObject({
+        effects: [{ kind: 'filesystem.write', risk: 'high' }]
+      })
+    }
     expect(agentKernel.listCapabilities()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -167,7 +193,7 @@ describe('MagicAgentPlatformAdapter', () => {
     const listedTools = adapter
       .listTools()
       .map((tool) => `${tool.source}:${tool.name.trim().toLowerCase()}`)
-    expect(listedTools).not.toContain('assistantRuntime:agent.terminal.run')
+    expect(listedTools).toContain('assistantRuntime:agent.terminal.run')
     expect(listedTools).not.toContain('creative:terminal.run')
     expect(
       agentKernel.listCapabilities().map((capability) => capability.capabilityId)
@@ -236,6 +262,7 @@ describe('MagicAgentPlatformAdapter', () => {
         text: 'make art',
         route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' },
         allowedToolNames: ['assistant.echo'],
+        maxToolIterations: 2,
         metadata: { traceLabel: 'safe-run' }
       })
     ).resolves.toMatchObject({
@@ -254,10 +281,41 @@ describe('MagicAgentPlatformAdapter', () => {
         execution: expect.objectContaining({
           mode: 'inherit',
           allowedToolNames: ['assistant.echo'],
+          maxToolCalls: 2,
           traceLabel: 'safe-run'
         })
       })
     )
+  })
+
+  it('passes files.patch only through the route-scoped Agent execution allowlist', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolRegistry: new MagicAgentCreativeToolRegistry({ adapters: [creativeAdapter] })
+    })
+
+    await adapter.runAgent({
+      agentId: 'magicpot.default.chat',
+      text: 'apply approved patch',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' },
+      allowedToolNames: ['files.patch']
+    })
+
+    expect(assistantRuntime.handleMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        execution: expect.objectContaining({ allowedToolNames: ['files.patch'] })
+      })
+    )
+    await expect(
+      adapter.callTool({
+        name: 'files.patch',
+        args: { path: 'a.txt', patch: 'unsafe' },
+        route: { channel: 'generic', scopeType: 'dm', scopeId: 'demo' }
+      })
+    ).resolves.toMatchObject({ status: 'permission-denied' })
+    expect(assistantRuntime.callTool).not.toHaveBeenCalled()
   })
 
   it('includes the default registered agent system prompt in AssistantRuntime execution', async () => {
@@ -457,7 +515,7 @@ describe('MagicAgentPlatformAdapter', () => {
     )
   })
 
-  it('does not allow renderer-facing runAgent to re-expose AssistantRuntime terminal execution', async () => {
+  it('allows trusted platform routes to request the policy-gated AssistantRuntime terminal', async () => {
     const assistantRuntime = createAssistantRuntime()
     const adapter = new MagicAgentPlatformAdapter({
       chatService: createChatService(),
@@ -474,7 +532,9 @@ describe('MagicAgentPlatformAdapter', () => {
 
     expect(assistantRuntime.handleMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        execution: expect.objectContaining({ allowedToolNames: ['assistant.echo'] })
+        execution: expect.objectContaining({
+          allowedToolNames: ['assistant.echo', 'agent.terminal.run']
+        })
       })
     )
   })

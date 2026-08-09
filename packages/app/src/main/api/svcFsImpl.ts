@@ -6,6 +6,8 @@ import {
   MAX_TEXT_FILE_BYTES,
   ListFilesInFolderReq,
   ListFilesInFolderResp,
+  PruneAutoSaveProjectsReq,
+  PruneAutoSaveProjectsResp,
   ListImagesInFolderReq,
   ListImagesInFolderResp,
   SaveImageToPathReq,
@@ -27,6 +29,7 @@ import {
 } from '@shared/api/svcFs'
 import fs from 'fs/promises'
 import * as path from 'path'
+import { getCurrentUserDataDirectoryState } from '../config/userDataDirectory'
 import { app } from 'electron'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -268,6 +271,47 @@ export class FsSvcImpl implements FsSvc {
     return { files }
   }
 
+  pruneAutoSaveProjects = async (
+    req: PruneAutoSaveProjectsReq
+  ): Promise<PruneAutoSaveProjectsResp> => {
+    const autoSaveRoot = path.resolve(getCurrentUserDataDirectoryState().autoSaveRoot)
+    const currentProjectDir = path.join(autoSaveRoot, req.currentProjectDirName)
+    const entries = await runBoundedFsOp(() =>
+      fs.readdir(autoSaveRoot, { withFileTypes: true })
+    ).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return []
+      throw error
+    })
+    const projects: { projectDir: string; lastModifiedMs: number }[] = []
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+      const projectDir = path.join(autoSaveRoot, entry.name)
+      const relative = path.relative(autoSaveRoot, projectDir)
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue
+      try {
+        const realProjectDir = await runBoundedFsOp(() => fs.realpath(projectDir))
+        const realRoot = await runBoundedFsOp(() => fs.realpath(autoSaveRoot))
+        const realRelative = path.relative(realRoot, realProjectDir)
+        if (!realRelative || realRelative.startsWith('..') || path.isAbsolute(realRelative))
+          continue
+        const canvasPath = path.join(realProjectDir, 'project.mpcanvas')
+        const stats = await runBoundedFsOp(() => fs.stat(canvasPath))
+        if (stats.isFile())
+          projects.push({ projectDir: realProjectDir, lastModifiedMs: stats.mtimeMs })
+      } catch {
+        // Ignore incomplete cache directories.
+      }
+    }
+    projects.sort((left, right) => right.lastModifiedMs - left.lastModifiedMs)
+    const removedProjectDirs: string[] = []
+    for (const project of projects.slice(req.maxProjects)) {
+      if (path.resolve(project.projectDir) === path.resolve(currentProjectDir)) continue
+      await runBoundedFsOp(() => fs.rm(project.projectDir, { recursive: true, force: true }))
+      removedProjectDirs.push(project.projectDir)
+    }
+    return { removedProjectDirs }
+  }
+
   saveImageToPath = async (req: SaveImageToPathReq): Promise<SaveImageToPathResp> => {
     const { image, outputPath, filename } = req
     requireBoundedPayload(image, MAX_FULL_FILE_BYTES, 'Image')
@@ -402,7 +446,15 @@ export class FsSvcImpl implements FsSvc {
       await runBoundedFsOp(() => fs.mkdir(outputPath, { recursive: true }))
     }
 
-    await runBoundedFsOp(() => fs.writeFile(fullPath, content, 'utf8'))
+    await runBoundedFsOp(async () => {
+      const tempPath = `${fullPath}.tmp-${process.pid}-${Date.now()}`
+      try {
+        await fs.writeFile(tempPath, content, 'utf8')
+        await fs.rename(tempPath, fullPath)
+      } finally {
+        await fs.rm(tempPath, { force: true }).catch(() => undefined)
+      }
+    })
 
     return {
       success: true,

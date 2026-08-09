@@ -20,6 +20,7 @@ vi.mock('../config/buildEnv', () => ({
 
 import { AssistantSessionStore } from './sessionStore'
 import { AssistantToolRegistry } from './toolRegistry'
+import { getAssistantTerminalPolicyRuntime } from '../magicAgentPlatform2/productionRuntime'
 import { ProjectTraceFSCli } from '../projectTrace/fs'
 import {
   appendAssistantMemoryLog,
@@ -599,6 +600,14 @@ describe('AssistantToolRegistry', () => {
     expect(registry.listTools().map((tool) => tool.name)).toEqual(
       expect.arrayContaining([
         'session.status',
+        'files.write',
+        'files.edit',
+        'files.patch',
+        'files.multi-edit',
+        'files.json.write',
+        'files.diff',
+        'files.snapshot.list',
+        'files.snapshot.restore',
         'session.summary',
         'session.history',
         'session.cleanup',
@@ -976,7 +985,7 @@ describe('AssistantToolRegistry', () => {
     ).rejects.toThrow('agent.terminal.run is disabled')
   })
 
-  it('requires explicit confirmation before running the agent terminal', async () => {
+  it('does not treat model-provided confirm as the policy authorization boundary', async () => {
     const registry = new AssistantToolRegistry()
     const route = {
       channel: 'generic',
@@ -998,23 +1007,24 @@ describe('AssistantToolRegistry', () => {
       }
     }
 
-    await expect(
-      registry.callTool(
-        'agent.terminal.run',
-        {
-          command: 'node',
-          args: ['--version'],
-          confirm: false,
-          cwd: tempDir
-        },
-        {
-          config,
-          route,
-          sessionStore: store,
-          taskState
-        }
-      )
-    ).rejects.toThrow('agent.terminal.run requires confirm: true')
+    const result = await registry.callTool(
+      'agent.terminal.run',
+      {
+        command: 'node',
+        args: ['--version'],
+        confirm: false,
+        cwd: tempDir
+      },
+      {
+        config,
+        route,
+        sessionStore: store,
+        taskState,
+        terminalApproval: (request) =>
+          getAssistantTerminalPolicyRuntime().createTrustedApproval(request)
+      }
+    )
+    expect(JSON.parse(result.content).authorizationId).toBeTypeOf('string')
   })
 
   it('rejects destructive or non-allowlisted agent terminal commands', async () => {
@@ -1190,15 +1200,9 @@ describe('AssistantToolRegistry', () => {
       )
       const payload = JSON.parse(result.content)
 
-      expect(payload.exitCode).toBe(0)
-      expect(payload.timedOut).toBe(false)
+      expect(payload.status).toBe('completed')
+      expect(payload.authorizationId).toBeTypeOf('string')
       expect(payload.truncated).toBe(false)
-      expect(payload.cwd).toBe(await fs.realpath(tempDir))
-      expect(payload.command).toEqual({
-        executable: 'node',
-        args: ['--version'],
-        requested: 'node --version'
-      })
       expect(payload.stdout.trim()).toBe(process.version)
     } finally {
       await realFs.rm(tempDir, { recursive: true, force: true })

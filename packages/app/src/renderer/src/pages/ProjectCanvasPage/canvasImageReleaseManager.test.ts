@@ -71,6 +71,26 @@ describe('canvasImageReleaseManager', () => {
     })
   })
 
+  it('does not close borrowed image bitmaps', () => {
+    const close = vi.fn()
+    const manager = createCanvasImageReleaseManager()
+
+    const borrowed = manager.trackImageBitmap('borrowed', { close }, 'borrowed')
+
+    expect(manager.has('borrowed')).toBe(false)
+    expect(borrowed.release('removed')).toMatchObject({
+      id: 'borrowed',
+      kind: null,
+      released: false,
+      reason: 'removed'
+    })
+    expect(close).not.toHaveBeenCalled()
+    expect(manager.getMetricsSnapshot()).toMatchObject({
+      activeImageBitmapCount: 0,
+      closedImageBitmapCount: 0
+    })
+  })
+
   it('makes duplicate release idempotent and ignores stale replacement handles', () => {
     const revokeObjectUrl = vi.fn()
     const manager = new CanvasImageReleaseManager({ revokeObjectUrl })

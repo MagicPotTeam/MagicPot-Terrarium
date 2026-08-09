@@ -623,6 +623,23 @@ const collectOutputTextAndImages = (
   }
 }
 
+const OPENAI_RESPONSES_IMAGE_URL_ERROR =
+  'OpenAI Responses image attachments must use an HTTP(S) URL or a base64 data:image URL.'
+
+const assertOpenAIResponsesImageUrl = (value: string): string => {
+  const normalized = value.trim()
+  if (/^https?:\/\/[^\s]+$/i.test(normalized)) {
+    return normalized
+  }
+
+  const dataUrlMatch = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/]+={0,2})$/i.exec(normalized)
+  if (dataUrlMatch && dataUrlMatch[2].length % 4 === 0) {
+    return normalized
+  }
+
+  throw new Error(OPENAI_RESPONSES_IMAGE_URL_ERROR)
+}
+
 export function buildOpenAIResponsesInput(messages: ChatMessage[]): OpenAIResponsesInputMessage[] {
   const input: OpenAIResponsesInputMessage[] = []
 
@@ -665,7 +682,7 @@ export function buildOpenAIResponsesInput(messages: ChatMessage[]): OpenAIRespon
       for (const attachment of imageAttachments) {
         content.push({
           type: 'input_image',
-          image_url: attachment.url
+          image_url: assertOpenAIResponsesImageUrl(attachment.url)
         })
       }
 
@@ -726,14 +743,23 @@ export function serializeOpenAIResponsesOutput(payload: unknown): string | null 
     return formattedText || null
   }
 
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   return JSON.stringify({
     content: formattedText,
-    attachments: images.map((image) => ({
-      type: 'image',
-      url: image.url,
-      ...(image.mimeType ? { mimeType: image.mimeType } : {}),
-      ...(image.fileName ? { fileName: image.fileName } : {})
-    }))
+    attachments: images.map((image, imageIndex) => {
+      const extension =
+        image.mimeType === 'image/jpeg'
+          ? 'jpg'
+          : image.mimeType?.replace(/^image\//, '') ||
+            image.fileName?.match(/\.([^.]+)$/)?.[1] ||
+            'png'
+      return {
+        type: 'image',
+        url: image.url,
+        ...(image.mimeType ? { mimeType: image.mimeType } : {}),
+        fileName: `openai-image_${timestamp}_${imageIndex + 1}.${extension}`
+      }
+    })
   })
 }
 

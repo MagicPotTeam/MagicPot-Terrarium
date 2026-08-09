@@ -1,0 +1,15 @@
+{
+  "graphId": "legacy-compat-graph",
+  "input": "Run the frozen compatibility graph.",
+  "route": {
+    "channel": "generic",
+    "scopeType": "dm",
+    "scopeId": "fixture-run"
+  },
+  "runId": "fixture-run-001",
+  "outputIds": ["answer"],
+  "allowedToolNames": ["knowledge.search"],
+  "metadata": {
+    "requestedBy": "legacy-fixture-test"
+  }
+}

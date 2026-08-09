@@ -740,6 +740,7 @@ vi.mock('./components/CanvasSelectionActionToolbar', () => ({
 vi.mock('@renderer/utils/droppedImageUtils', () => ({
   AGENT_IMAGE_DRAG_MIME: 'application/x-ai-image',
   getDroppedImageFile: vi.fn(),
+  materializeInternalImageDragAttachment: vi.fn(async (attachment) => attachment),
   parseInternalImageDragPayload: vi.fn(() => null)
 }))
 

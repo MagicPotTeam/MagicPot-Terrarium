@@ -18,6 +18,8 @@ import {
   GetQueueResp,
   GetViewReq,
   GetViewResp,
+  ImportOutputImageReq,
+  ImportOutputImageResp,
   PostPromptReq,
   PostPromptResp,
   SubmitWorkflowReq,
@@ -49,6 +51,65 @@ import { sleep } from '@shared/utils/utilFuncs'
 import { ComfyQueueResp, Workflow } from '@shared/comfy/types'
 import { processWorkflowLoras } from '../comfy/loraBypass'
 import { normalizeExecutableWorkflow } from '@shared/comfy/funcs'
+import path from 'node:path'
+import { Readable } from 'node:stream'
+import { getChatMediaDir } from '../llmProxy/chatMediaDir'
+import {
+  DEFAULT_MANAGED_MEDIA_MAX_BYTES,
+  importManagedMediaStream,
+  ManagedMediaImportError
+} from '../llmProxy/managedMediaStore'
+
+const COMFY_OUTPUT_IMPORT_TIMEOUT_MS = 30_000
+
+function isCanonicalUnencoded(value: string): boolean {
+  try {
+    return decodeURIComponent(value) === value
+  } catch {
+    return false
+  }
+}
+
+const hasControlCharacter = (value: string): boolean =>
+  Array.from(value).some((character) => {
+    const code = character.charCodeAt(0)
+    return code <= 0x1f || code === 0x7f
+  })
+
+function validateComfyOutputFilename(value: unknown): string {
+  const filename = typeof value === 'string' ? value : ''
+  if (!filename) {
+    throw new Error('Invalid ComfyUI output filename: expected a non-empty basename')
+  }
+  if (!isCanonicalUnencoded(filename)) {
+    throw new Error('Invalid ComfyUI output filename: percent-encoded aliases are not allowed')
+  }
+  if (
+    path.posix.basename(filename) !== filename ||
+    hasControlCharacter(filename) ||
+    /[?#:\\]/u.test(filename)
+  ) {
+    throw new Error('Invalid ComfyUI output filename: unsafe path characters')
+  }
+  return filename
+}
+
+function validateComfyOutputSubfolder(value: unknown): string {
+  const subfolder = value == null ? '' : typeof value === 'string' ? value : ''
+  if (!subfolder) return ''
+  const segments = subfolder.split('/')
+  if (
+    !isCanonicalUnencoded(subfolder) ||
+    hasControlCharacter(subfolder) ||
+    /[?#:\\]/u.test(subfolder) ||
+    subfolder.startsWith('/') ||
+    segments.some((segment) => !segment || segment === '.' || segment === '..') ||
+    path.posix.normalize(subfolder) !== subfolder
+  ) {
+    throw new Error('Invalid ComfyUI output subfolder')
+  }
+  return subfolder
+}
 
 // Map to store qAppKey by task ID (for later retrieval when loading quick app)
 const MAX_TASK_QAPP_KEYS = 200
@@ -195,6 +256,93 @@ export class ComfySvcImpl implements ComfySvc {
     // 现在不另外保存声称结果，这里直接访问 ComfyUI 的 view 接口
     const res = await this.cli().view(req)
     return { result: res }
+  }
+  importOutputImage = async (req: ImportOutputImageReq): Promise<ImportOutputImageResp> => {
+    if (!req || req.type !== 'output') throw new Error('ComfyUI output type must be output')
+    const filename = validateComfyOutputFilename(req.filename)
+    const subfolder = validateComfyOutputSubfolder(req.subfolder)
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), COMFY_OUTPUT_IMPORT_TIMEOUT_MS)
+    try {
+      const response = await this.cli().viewResponse(
+        { filename, subfolder, type: 'output' },
+        controller.signal
+      )
+      if (response.status >= 300 && response.status < 400) {
+        throw new Error('ComfyUI view redirect rejected')
+      }
+      if (!response.ok) throw new Error(`ComfyUI view failed with HTTP ${response.status}`)
+      const mimeType = String(response.headers.get('content-type') || '')
+        .split(';', 1)[0]
+        .trim()
+        .toLowerCase()
+      if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mimeType)) {
+        throw new ManagedMediaImportError(
+          'MANAGED_MEDIA_UNSUPPORTED',
+          'ComfyUI view returned an unsupported image type'
+        )
+      }
+      const contentLengthHeader = response.headers.get('content-length')
+      const contentLength = contentLengthHeader == null ? null : Number(contentLengthHeader)
+      if (
+        contentLengthHeader != null &&
+        (!/^\d+$/u.test(contentLengthHeader) || !Number.isSafeInteger(contentLength))
+      ) {
+        throw new ManagedMediaImportError(
+          'MANAGED_MEDIA_INVALID',
+          'ComfyUI view returned an invalid content length'
+        )
+      }
+      if (contentLength != null && contentLength > DEFAULT_MANAGED_MEDIA_MAX_BYTES) {
+        controller.abort()
+        throw new Error(`ComfyUI output exceeds the ${DEFAULT_MANAGED_MEDIA_MAX_BYTES} byte limit`)
+      }
+      if (!response.body) throw new Error('ComfyUI view returned an empty body')
+      const authorizedRoot = getChatMediaDir()
+      // Global content-addressed storage is intentional. Session/lifecycle ownership lives in
+      // persisted references, not renderer-provided directory isolation.
+      const imported = await importManagedMediaStream(
+        {
+          chatMediaRoot: path.join(authorizedRoot, 'comfy-outputs', 'global'),
+          stream: Readable.fromWeb(
+            response.body as import('node:stream/web').ReadableStream<Uint8Array>
+          ),
+          mimeType,
+          originalFileName: filename,
+          provenance: { source: 'comfy-output', filename, subfolder, type: 'output' },
+          maxBytes: DEFAULT_MANAGED_MEDIA_MAX_BYTES,
+          signal: controller.signal
+        },
+        { authorizedRoot }
+      )
+      const importedReference = imported.reference
+      const importedMimeType = importedReference.mimeType
+      const importedSizeBytes = importedReference.sizeBytes
+      const importedFileName = importedReference.originalFileName
+      if (
+        typeof importedMimeType !== 'string' ||
+        !importedMimeType ||
+        !Number.isSafeInteger(importedSizeBytes) ||
+        (importedSizeBytes ?? -1) < 0 ||
+        typeof importedFileName !== 'string' ||
+        !importedFileName
+      ) {
+        throw new ManagedMediaImportError(
+          'MANAGED_MEDIA_INVALID',
+          'Imported ComfyUI output metadata is invalid'
+        )
+      }
+      return {
+        reference: importedReference,
+        localMediaUrl: imported.localMediaUrl,
+        mimeType: importedMimeType,
+        sizeBytes: importedSizeBytes as number,
+        fileName: importedFileName
+      }
+    } finally {
+      clearTimeout(timeout)
+      controller.abort()
+    }
   }
   connectWs = async (req: ConnectWsReq, resp: ServerStreaming<ConnectWsResp>): Promise<void> => {
     const requestedClientId = normalizeComfyEventClientId(req.client_id)

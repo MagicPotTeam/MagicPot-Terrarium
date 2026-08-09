@@ -113,7 +113,7 @@ let textureFromWidths: number[] = []
 let textureFromAlphaModes: unknown[] = []
 let textureScaleModeReadCount = 0
 let textureScaleModeWriteCount = 0
-const originalDevicePixelRatio = window.devicePixelRatio
+const originalDevicePixelRatio = typeof window === 'undefined' ? 1 : window.devicePixelRatio
 
 type MockImageInstance = {
   onload: null | (() => void)
@@ -406,6 +406,7 @@ function createThumbnailSetFixture(
   options: { square?: boolean } = {}
 ) {
   const sourceIdentity: CanvasImageSourceIdentity = {
+    version: 1,
     kind: 'local-file',
     canonicalPath: 'C:/images/thumb-lod.png',
     sizeBytes: 123456,
@@ -2786,6 +2787,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const createPrioritizedThumbnailItem = (index: number) => {
       const cacheKey = `thumbnail-priority-${index}`
       const sourceIdentity: CanvasImageSourceIdentity = {
+        version: 1,
         kind: 'local-file',
         canonicalPath: `C:/images/thumbnail-priority-${index}.png`,
         sizeBytes: 123456 + index,
@@ -2878,6 +2880,87 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     }
   }, 30000)
 
+  it('ignores stale thumbnail resolutions after the item source changes', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const attemptedSrcs: string[] = []
+    const imageInstances: MockImageInstance[] = []
+    const MockImage = createMockImageClass({
+      width: 1024,
+      height: 512,
+      attemptedSrcs,
+      imageInstances
+    })
+    vi.stubGlobal('Image', MockImage as unknown as typeof Image)
+
+    try {
+      const firstFixture = createThumbnailSetFixture('canvas-thumbnail-stale-first')
+      const firstItem = createItem({
+        id: 'image-thumbnail-stale',
+        src: 'file:///image-thumbnail-stale-first.png',
+        image: createImage(192, 96),
+        width: 3200,
+        height: 1600,
+        sourceWidth: 4096,
+        sourceHeight: 2048,
+        sourceIdentity: firstFixture.sourceIdentity,
+        thumbnailSet: firstFixture.thumbnailSet
+      })
+      const secondFixture = createThumbnailSetFixture('canvas-thumbnail-stale-second')
+      const secondThumbnailSet = {
+        ...secondFixture.thumbnailSet,
+        levels: secondFixture.thumbnailSet.levels.map((level) => ({
+          ...level,
+          src: level.src.replace('thumb-lod', 'thumb-lod-second')
+        }))
+      }
+      const secondItem = createItem({
+        ...firstItem,
+        src: 'file:///image-thumbnail-stale-second.png',
+        sourceIdentity: secondFixture.sourceIdentity,
+        thumbnailSet: secondThumbnailSet
+      })
+
+      const { rerender } = render(
+        <ProjectCanvasWebGLImageLayer
+          items={[firstItem]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          stageScale={0.15}
+        />
+      )
+
+      await waitFor(() => {
+        expect(attemptedSrcs).toEqual(['local-media:///thumb-lod/1024.webp'])
+        expect(imageInstances).toHaveLength(1)
+      })
+
+      rerender(
+        <ProjectCanvasWebGLImageLayer
+          items={[secondItem]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          stageScale={0.15}
+        />
+      )
+
+      await waitFor(() => {
+        expect(attemptedSrcs).toEqual([
+          'local-media:///thumb-lod/1024.webp',
+          'local-media:///thumb-lod-second/1024.webp'
+        ])
+        expect(imageInstances).toHaveLength(2)
+      })
+
+      act(() => {
+        imageInstances[0].onload?.()
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(getLiveSpriteByLabel('image-thumbnail-stale')?.texture.width).toBe(192)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }, 30000)
+
   it('upgrades large-batch preview sprites through thumbnail LOD without loading source textures', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const attemptedSrcs: string[] = []
@@ -2919,8 +3002,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
       await waitFor(
         () => {
-          expect(getLiveSpriteByLabel('image-thumbnail-lod')?.texture.width).toBe(192)
           expect(attemptedSrcs).toEqual(['local-media:///thumb-lod/1024.webp'])
+          expect(imageInstances).toHaveLength(1)
         },
         { timeout: 15000 }
       )
@@ -3065,6 +3148,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       await waitFor(
         () => {
           expect(attemptedSrcs).toEqual(['local-media:///thumb-lod/1024.webp'])
+          expect(imageInstances).toHaveLength(1)
+          expect(getLiveSpriteByLabel('image-thumbnail-budgeted')?.texture.width).toBe(192)
         },
         { timeout: 15000 }
       )

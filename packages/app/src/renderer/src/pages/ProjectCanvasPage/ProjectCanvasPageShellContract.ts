@@ -2,7 +2,7 @@ import type React from 'react'
 
 import type { CanvasGroupSummary } from './groupMenuUtils'
 import type { CanvasGroupPlaybackState } from './useCanvasGroupPlayback'
-import type { CanvasTool } from './projectCanvasPageShared'
+import type { CanvasSaveOptions, CanvasTool } from './projectCanvasPageShared'
 import type { AnnotationShape, CanvasGroup, CanvasGroupBranch, CanvasItem } from './types'
 
 export type ProjectCanvasPageTranslate = (key: string, options?: Record<string, unknown>) => string
@@ -98,7 +98,8 @@ export type ProjectCanvasPageTopToolbarProps = ProjectCanvasPageToolbarGroupTree
   handleOpenExportMenu: (anchorEl: HTMLElement) => void
   handleOpenGenerationTraceHistory: () => void
   handleOpenGroupMenu: (anchorEl: HTMLElement) => void
-  handleSaveCanvas: () => void | Promise<void>
+  handleSaveCanvas: (options?: CanvasSaveOptions) => void | Promise<void>
+  isSavingCanvasFile: boolean
   handleSaveCanvasAs: () => void | Promise<void>
   handleSaveCanvasAsFromContextMenu: () => void | Promise<void>
   handleToggleAnnotationFillMode: () => void

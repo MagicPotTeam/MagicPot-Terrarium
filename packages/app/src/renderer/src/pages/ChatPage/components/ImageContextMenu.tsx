@@ -69,11 +69,16 @@ interface ImageContextMenuProps {
   config: any
 }
 
-const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
-  imageContextMenu,
-  onClose,
-  config
-}) => {
+// Keep this helper exported: ChatPage consumers may use the same native-save
+// path without rendering the context menu. A missing named export prevents
+// Vite/Electron from linking the renderer module and crashes startup.
+// eslint-disable-next-line react-refresh/only-export-components
+export const saveImageToFile = async (imageUrl: string, fileName: string) => {
+  const { data } = await resolveImageBytes(imageUrl, fileName)
+  return api().svcHyper.saveImageToDir({ data, fileName })
+}
+
+const ImageContextMenu: React.FC<ImageContextMenuProps> = ({ imageContextMenu, onClose }) => {
   const { t } = useTranslation()
   const { notifySuccess, notifyError } = useMessage()
 
@@ -118,30 +123,14 @@ const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
         onClick={async () => {
           if (imageContextMenu) {
             try {
-              let downloadDir = config.download_dir
-
-              if (!downloadDir) {
-                const result = await api().svcDialog.showOpenDialog({
-                  title: t('chat.select_download_dir'),
-                  properties: ['openDirectory']
-                })
-                if (result.canceled || !result.filePaths?.length) {
-                  onClose()
-                  return
-                }
-                downloadDir = result.filePaths[0]
-              }
-
               const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-              const fileName = `image_${timestamp}.png`
-              const { data } = await resolveImageBytes(imageContextMenu.imageUrl || '', fileName)
-              const res = await api().svcHyper.saveImageToDir({
-                data,
-                fileName,
-                dir: downloadDir
-              })
-              console.log(`[保存] 已保存到 ${res.savedPath}`)
-              // Keep image-save success silent because the toast covers the canvas.
+              const result = await saveImageToFile(
+                imageContextMenu.imageUrl || '',
+                `image_${timestamp}.png`
+              )
+              if (!result.canceled && result.savedPath) {
+                console.log(`[保存] 已保存到 ${result.savedPath}`)
+              }
             } catch (error) {
               console.error('保存图片失败:', error)
               notifyError(

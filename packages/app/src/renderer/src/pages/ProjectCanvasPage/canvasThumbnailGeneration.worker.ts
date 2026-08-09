@@ -9,6 +9,40 @@ import {
 
 type CanvasLike = OffscreenCanvas | HTMLCanvasElement
 
+const MAX_IDLE_THUMBNAIL_CANVASES = 2
+const MAX_RETAINED_THUMBNAIL_CANVAS_PIXELS = 4096 * 4096
+
+class ThumbnailCanvasPool {
+  private readonly idle: CanvasLike[] = []
+
+  acquire(width: number, height: number): CanvasLike | null {
+    const canvas = this.idle.pop() ?? createThumbnailCanvas(width, height)
+    if (!canvas) {
+      return null
+    }
+
+    canvas.width = width
+    canvas.height = height
+    return canvas
+  }
+
+  release(canvas: CanvasLike): void {
+    const pixels = canvas.width * canvas.height
+    if (
+      pixels > MAX_RETAINED_THUMBNAIL_CANVAS_PIXELS ||
+      this.idle.length >= MAX_IDLE_THUMBNAIL_CANVASES
+    ) {
+      canvas.width = 1
+      canvas.height = 1
+      return
+    }
+
+    this.idle.push(canvas)
+  }
+}
+
+const thumbnailCanvasPool = new ThumbnailCanvasPool()
+
 function getImageBitmapWidth(bitmap: ImageBitmap): number {
   return typeof bitmap.width === 'number' ? bitmap.width : 0
 }
@@ -179,28 +213,32 @@ export async function generateCanvasThumbnailLevelsInScope({
         sourceHeight,
         maxSide
       })
-      const canvas = createThumbnailCanvas(width, height)
+      const canvas = thumbnailCanvasPool.acquire(width, height)
       if (!canvas) {
         throw new Error('No canvas implementation is available.')
       }
 
-      const context = get2dContext(canvas)
-      if (!context) {
-        throw new Error('Failed to create thumbnail canvas context.')
+      try {
+        const context = get2dContext(canvas)
+        if (!context) {
+          throw new Error('Failed to create thumbnail canvas context.')
+        }
+
+        context.clearRect(0, 0, width, height)
+        context.drawImage(bitmap, 0, 0, width, height)
+
+        const { blob, mimeType } = await encodeThumbnailBlob(canvas, preferWebp)
+        generated.push({
+          maxSide,
+          width,
+          height,
+          mimeType,
+          format: mimeType === 'image/webp' ? 'webp' : 'png',
+          blob
+        })
+      } finally {
+        thumbnailCanvasPool.release(canvas)
       }
-
-      context.clearRect(0, 0, width, height)
-      context.drawImage(bitmap, 0, 0, width, height)
-
-      const { blob, mimeType } = await encodeThumbnailBlob(canvas, preferWebp)
-      generated.push({
-        maxSide,
-        width,
-        height,
-        mimeType,
-        format: mimeType === 'image/webp' ? 'webp' : 'png',
-        blob
-      })
     }
 
     return generated

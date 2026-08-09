@@ -386,6 +386,83 @@ describe('ResultCardImage', () => {
     })
   })
 
+  it('adds a File-backed source blob to the native drag payload', async () => {
+    const sourceBlob = new File(['image-bytes'], 'drag-source.png', { type: 'image/png' })
+    render(
+      <ResultCardImage
+        result={
+          {
+            type: 'image',
+            id: 'image-drag-source',
+            promptId: 'prompt-drag-source',
+            objectUrl: 'blob:drag-source',
+            sourceBlob,
+            fileItem: {
+              filename: 'drag-source.png',
+              subfolder: '',
+              type: 'output'
+            }
+          } as any
+        }
+        index={0}
+        config={{} as any}
+        buildEnv={{} as any}
+      />
+    )
+
+    const image = await screen.findByRole('img')
+    const add = vi.fn()
+    const dataTransfer = {
+      items: { add },
+      setData: vi.fn(),
+      effectAllowed: ''
+    } as unknown as DataTransfer
+
+    fireEvent.dragStart(image, { dataTransfer })
+
+    expect(add).toHaveBeenCalledWith(sourceBlob)
+  })
+
+  it('renames a mismatched source File to the advertised QuickApp filename', async () => {
+    const sourceBlob = new File(['image-bytes'], 'temporary-name.png', { type: 'image/png' })
+    render(
+      <ResultCardImage
+        result={
+          {
+            type: 'image',
+            id: 'image-drag-renamed-source',
+            promptId: 'prompt-drag-renamed-source',
+            objectUrl: 'blob:drag-renamed-source',
+            sourceBlob,
+            fileItem: {
+              filename: 'generated-result.png',
+              subfolder: '',
+              type: 'output'
+            }
+          } as any
+        }
+        index={0}
+        config={{} as any}
+        buildEnv={{} as any}
+      />
+    )
+
+    const image = await screen.findByRole('img')
+    const add = vi.fn()
+    const dataTransfer = {
+      items: { add },
+      setData: vi.fn(),
+      effectAllowed: ''
+    } as unknown as DataTransfer
+
+    fireEvent.dragStart(image, { dataTransfer })
+
+    expect(add).toHaveBeenCalledTimes(1)
+    const draggedFile = add.mock.calls[0][0] as File
+    expect(draggedFile.name).toBe('generated-result.png')
+    expect(draggedFile.type).toBe('image/png')
+  })
+
   it('uses stored source dimensions for image layout and drag payload before decode completes', async () => {
     const setData = vi.fn()
     const dataTransfer = {

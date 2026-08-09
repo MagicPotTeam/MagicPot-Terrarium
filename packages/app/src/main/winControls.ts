@@ -1,5 +1,6 @@
 // packages/app/src/main/winControls.ts
 import { BrowserWindow, ipcMain } from 'electron'
+import { unsavedChangesController } from './unsavedChanges'
 
 class WinController {
   private mainWindow: BrowserWindow | null = null
@@ -12,11 +13,24 @@ class WinController {
     }
     mainWindow.on('maximize', sendMaxState)
     mainWindow.on('unmaximize', sendMaxState)
+    mainWindow.on('close', (event) => {
+      event.preventDefault()
+      void unsavedChangesController.confirm(mainWindow).then((shouldClose) => {
+        if (shouldClose && !mainWindow.isDestroyed()) mainWindow.destroy()
+      })
+    })
+    unsavedChangesController.attach(mainWindow)
 
     this.mainWindow = mainWindow
   }
 
+  async confirmAppQuit(): Promise<boolean> {
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) return true
+    return unsavedChangesController.confirm(this.mainWindow)
+  }
+
   initIpc() {
+    unsavedChangesController.registerIpc()
     // 窗口控制 IPC
     ipcMain.handle('win:minimize', () => {
       if (!this.mainWindow?.isDestroyed()) this.mainWindow?.minimize()

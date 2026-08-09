@@ -11,6 +11,10 @@ import { useCanvasViewportPersistence } from './useCanvasViewportPersistence'
 const mockClearCanvasItems = vi.fn()
 const mockLoadCanvasItems = vi.fn()
 const mockSaveCanvasItems = vi.fn()
+const mockSetUnsavedDocumentState = vi.fn()
+const mockReportUnsavedSaveResult = vi.fn()
+let requestUnsavedSave: ((requestId: string) => void) | null = null
+let removeUnsavedSaveListener: ReturnType<typeof vi.fn<() => void>>
 
 vi.mock('./canvasStorage', () => ({
   clearCanvasItems: (...args: unknown[]) => mockClearCanvasItems(...args),
@@ -47,12 +51,72 @@ function createImageItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageI
   }
 }
 
+function renderPersistenceForExitTest(canvasId: string) {
+  return renderHook(() => {
+    const [items, setItems] = React.useState<CanvasItem[]>([])
+    const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+    const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+    const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+    const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+    const [stageScale, setStageScale] = React.useState(1)
+    const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+
+    useCanvasViewportPersistence({
+      config: DEFAULT_CONFIG,
+      canvasId,
+      items,
+      groups,
+      groupBranches,
+      selectedIds,
+      figmaBinding,
+      stagePos,
+      stageScale,
+      stageSize: { width: 1280, height: 720 },
+      maxFitStageScale: 2,
+      clampStageScale: (value: number) => value,
+      getCanvasItemsVisualBounds: () => null,
+      hydrateCanvasImageItemForCanvas: vi.fn(async (item) => item),
+      nextZIndexRef: React.useRef(1),
+      setItems,
+      setItemsWithHistory: setItems,
+      setGroups,
+      setGroupBranches,
+      setSelectedIds,
+      setStagePos,
+      setStageScale,
+      setFigmaBinding,
+      handleImportFiles: vi.fn(),
+      addModel3DToCanvas: vi.fn(),
+      addVideoToCanvas: vi.fn()
+    })
+
+    return { setItems }
+  })
+}
+
 describe('useCanvasViewportPersistence', () => {
   beforeEach(() => {
     mockClearCanvasItems.mockReset()
     mockLoadCanvasItems.mockReset()
     mockSaveCanvasItems.mockReset()
     mockSaveCanvasItems.mockResolvedValue(undefined)
+    mockSetUnsavedDocumentState.mockReset().mockResolvedValue(undefined)
+    mockReportUnsavedSaveResult.mockReset().mockResolvedValue(undefined)
+    requestUnsavedSave = null
+    removeUnsavedSaveListener = vi.fn()
+    window.win = {
+      minimize: vi.fn(),
+      toggleMaximize: vi.fn(),
+      isMaximized: vi.fn(async () => false),
+      close: vi.fn(),
+      setUnsavedDocumentState: mockSetUnsavedDocumentState,
+      reportUnsavedSaveResult: mockReportUnsavedSaveResult,
+      onRequestUnsavedSave: vi.fn((callback: (requestId: string) => void) => {
+        requestUnsavedSave = callback
+        return removeUnsavedSaveListener
+      }),
+      onMaximizeChanged: vi.fn(() => vi.fn())
+    }
   })
 
   afterEach(() => {
@@ -401,6 +465,74 @@ describe('useCanvasViewportPersistence', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('waits for an in-flight autosave before clearing the canvas', async () => {
+    let resolveSave!: () => void
+    const inFlightSave = new Promise<void>((resolve) => {
+      resolveSave = resolve
+    })
+    mockLoadCanvasItems.mockResolvedValue({
+      items: [],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    mockSaveCanvasItems.mockImplementationOnce(() => inFlightSave)
+
+    const { result } = renderHook(() => {
+      const [items, setItems] = React.useState<CanvasItem[]>([])
+      const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+      const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+      const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+      const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+      const [stageScale, setStageScale] = React.useState(1)
+      const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+
+      const persistence = useCanvasViewportPersistence({
+        config: DEFAULT_CONFIG,
+        canvasId: 'canvas-clear-queue-test',
+        items,
+        groups,
+        groupBranches,
+        selectedIds,
+        figmaBinding,
+        stagePos,
+        stageScale,
+        stageSize: { width: 1280, height: 720 },
+        maxFitStageScale: 2,
+        clampStageScale: (value: number) => value,
+        getCanvasItemsVisualBounds: () => null,
+        hydrateCanvasImageItemForCanvas: vi.fn(async (item) => item),
+        nextZIndexRef: { current: 1 },
+        setItems,
+        setItemsWithHistory: setItems,
+        setGroups,
+        setGroupBranches,
+        setSelectedIds,
+        setStagePos,
+        setStageScale,
+        setFigmaBinding,
+        handleImportFiles: vi.fn(),
+        addModel3DToCanvas: vi.fn(),
+        addVideoToCanvas: vi.fn()
+      })
+
+      return { persistence, setItems }
+    })
+
+    await waitFor(() => expect(mockLoadCanvasItems).toHaveBeenCalled())
+    act(() => result.current.setItems([createImageItem({ id: 'clear-me' })]))
+    await waitFor(() => expect(mockSaveCanvasItems).toHaveBeenCalled())
+
+    act(() => result.current.persistence.handleConfirmClearDialog())
+    await Promise.resolve()
+    expect(mockClearCanvasItems).not.toHaveBeenCalled()
+
+    resolveSave()
+    await waitFor(() =>
+      expect(mockClearCanvasItems).toHaveBeenCalledWith('canvas-clear-queue-test')
+    )
+  })
+
   it('serializes autosaves so an older slow save cannot overwrite newer canvas state', async () => {
     vi.useFakeTimers()
     mockLoadCanvasItems.mockResolvedValue({
@@ -598,6 +730,95 @@ describe('useCanvasViewportPersistence', () => {
     })
 
     secondMount.unmount()
+  })
+
+  it('reports dirty state and immediately saves the latest canvas on a native save request', async () => {
+    mockLoadCanvasItems.mockResolvedValue({
+      items: [],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    const { result, unmount } = renderPersistenceForExitTest('canvas-native-save-test')
+
+    await waitFor(() => {
+      expect(mockLoadCanvasItems).toHaveBeenCalledWith('canvas-native-save-test')
+      expect(requestUnsavedSave).not.toBeNull()
+    })
+    mockSaveCanvasItems.mockClear()
+    mockSetUnsavedDocumentState.mockClear()
+
+    act(() => {
+      result.current.setItems([createImageItem({ id: 'native-save-image' })])
+    })
+
+    await waitFor(() => {
+      expect(mockSetUnsavedDocumentState).toHaveBeenCalledWith({
+        dirty: true,
+        title: 'Untitled canvas'
+      })
+    })
+
+    await act(async () => {
+      requestUnsavedSave?.('save-request-1')
+      await Promise.resolve()
+    })
+
+    await waitFor(() => {
+      expect(mockSaveCanvasItems).toHaveBeenCalledWith(
+        [expect.objectContaining({ id: 'native-save-image' })],
+        'canvas-native-save-test',
+        [],
+        [],
+        null
+      )
+      expect(mockReportUnsavedSaveResult).toHaveBeenCalledWith({
+        requestId: 'save-request-1',
+        success: true
+      })
+      expect(mockSetUnsavedDocumentState).toHaveBeenCalledWith({
+        dirty: false,
+        title: 'Untitled canvas'
+      })
+    })
+
+    unmount()
+    expect(removeUnsavedSaveListener).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports native save failures and remains dirty', async () => {
+    mockLoadCanvasItems.mockResolvedValue({
+      items: [],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    mockSaveCanvasItems.mockRejectedValueOnce(new Error('disk full'))
+    const { result } = renderPersistenceForExitTest('canvas-native-save-failure-test')
+
+    await waitFor(() => expect(requestUnsavedSave).not.toBeNull())
+    mockSaveCanvasItems.mockClear()
+    act(() => {
+      result.current.setItems([createImageItem({ id: 'failed-native-save-image' })])
+    })
+
+    await act(async () => {
+      requestUnsavedSave?.('save-request-failure')
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => {
+      expect(mockReportUnsavedSaveResult).toHaveBeenCalledWith({
+        requestId: 'save-request-failure',
+        success: false,
+        error: 'disk full'
+      })
+      expect(mockSetUnsavedDocumentState).toHaveBeenCalledWith({
+        dirty: true,
+        title: 'Untitled canvas'
+      })
+    })
   })
 
   it('defers automatic canvas saves while large image import is active', async () => {

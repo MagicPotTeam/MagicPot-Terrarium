@@ -344,6 +344,139 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.groupBranches).toEqual(groupBranches)
   })
 
+  it('persists legacy local-file identity but strips session identity and thumbnail derivatives', async () => {
+    const localFileIdentity = {
+      version: 1 as const,
+      kind: 'local-file' as const,
+      canonicalPath: 'C:\\assets\\original.png',
+      sourceKey: 'local-file:C:\\assets\\original.png',
+      sizeBytes: 12,
+      lastModifiedMs: 123,
+      mimeType: 'image/png',
+      fileName: 'original.png',
+      cacheKey: 'local-cache-key',
+      cacheRootDir: 'C:\\cache'
+    }
+    const sessionIdentity = {
+      version: 1 as const,
+      kind: 'session-blob' as const,
+      sourceKey: 'session:temporary-source',
+      sizeBytes: 12,
+      mimeType: 'image/png',
+      fileName: 'temporary.png',
+      cacheKey: 'session-cache-key'
+    }
+    const thumbnailSet = {
+      version: 1 as const,
+      cacheKey: 'session-cache-key',
+      sourceIdentity: sessionIdentity,
+      levels: [
+        {
+          maxSide: 128 as const,
+          src: 'blob:spatial-tile-runtime',
+          filename: 'tile-128.webp',
+          mimeType: 'image/webp' as const,
+          width: 128,
+          height: 64,
+          sizeBytes: 16
+        }
+      ],
+      createdAt: '2026-04-01T00:00:00.000Z',
+      updatedAt: '2026-04-01T00:00:00.000Z'
+    }
+    const item = {
+      ...createCanvasItem({
+        id: 'image-identity-compat',
+        type: 'image',
+        src: 'blob:runtime-source',
+        sourceWidth: 200,
+        sourceHeight: 100,
+        fileName: 'original.png'
+      }),
+      sourceIdentity: localFileIdentity,
+      sourceFile: new Blob(['original'], { type: 'image/png' }),
+      thumbnailSet
+    } as unknown as CanvasItem
+    const sessionItem = {
+      ...item,
+      id: 'image-session-compat',
+      sourceIdentity: sessionIdentity,
+      sourceFile: new Blob(['session'], { type: 'image/png' })
+    } as unknown as CanvasItem
+
+    await saveCanvasItems([item, sessionItem], 'identity-compat-test')
+    const restored = await loadCanvasItems('identity-compat-test')
+
+    expect(restored.items[0]).toMatchObject({
+      sourceIdentity: localFileIdentity,
+      src: 'blob:mock-export'
+    })
+    expect(restored.items[0]).not.toHaveProperty('thumbnailSet')
+    expect(restored.items[1]).not.toHaveProperty('sourceIdentity')
+    expect(restored.items[1]).not.toHaveProperty('thumbnailSet')
+
+    const db = await openFakeCanvasDb()
+    const blobStore = db.transaction('canvas-blobs', 'readonly').objectStore('canvas-blobs')
+    const readBlobEntry = (key: string): Promise<{ data: ArrayBuffer; mimeType: string }> =>
+      new Promise((resolve) => {
+        const request = blobStore.get(`identity-compat-test::canvas::${key}`)
+        request.onsuccess = () => resolve(request.result as { data: ArrayBuffer; mimeType: string })
+      })
+    const localBlobEntry = await readBlobEntry('image-identity-compat')
+    const sessionBlobEntry = await readBlobEntry('image-session-compat')
+    expect(localBlobEntry.mimeType).toBe('image/png')
+    expect(sessionBlobEntry.mimeType).toBe('image/png')
+    expect(new TextDecoder().decode(localBlobEntry.data)).toBe('original')
+    expect(new TextDecoder().decode(sessionBlobEntry.data)).toBe('session')
+
+    const persisted = await new Promise<unknown>((resolve) => {
+      const request = db
+        .transaction('canvas-items', 'readonly')
+        .objectStore('canvas-items')
+        .get('identity-compat-test')
+      request.onsuccess = () => resolve(request.result)
+    })
+    db.close()
+    expect((persisted as { items: Array<Record<string, unknown>> }).items).toHaveLength(2)
+    expect((persisted as { items: Array<Record<string, unknown>> }).items[0]).toMatchObject({
+      sourceIdentity: localFileIdentity,
+      src: ''
+    })
+    expect((persisted as { items: Array<Record<string, unknown>> }).items[0]).not.toHaveProperty(
+      'thumbnailSet'
+    )
+    expect((persisted as { items: Array<Record<string, unknown>> }).items[1]).not.toHaveProperty(
+      'thumbnailSet'
+    )
+  })
+
+  it('keeps legacy local-file source semantics readable without a thumbnail derivative', async () => {
+    const legacyItem = {
+      ...createCanvasItem({
+        id: 'legacy-local-file',
+        type: 'image',
+        src: 'local-file:///C:/assets/original.png'
+      }),
+      sourceIdentity: {
+        kind: 'local-file',
+        canonicalPath: 'C:\\assets\\original.png',
+        sizeBytes: 12,
+        cacheKey: 'legacy-local-cache'
+      }
+    } as unknown as CanvasItem
+
+    const legacyPayload: unknown = { items: [legacyItem] }
+    await seedCanvasMetadataStore('legacy-local-file-test', legacyPayload)
+    const restored = await loadCanvasItems('legacy-local-file-test')
+
+    expect(restored.items).toHaveLength(1)
+    expect(restored.items[0]).toMatchObject({
+      src: 'local-file:///C:/assets/original.png',
+      sourceIdentity: { kind: 'local-file', canonicalPath: 'C:\\assets\\original.png' }
+    })
+    expect(restored.items[0]).not.toHaveProperty('thumbnailSet')
+  })
+
   it('strips full-image identity crop from unrelated image persistence payloads', async () => {
     const items = [
       {
@@ -452,6 +585,59 @@ describe('canvasStorage provenance metadata', () => {
     expect(exportedJson.items).toBeDefined()
     expect(exportedJson).not.toHaveProperty('currentQAppKey')
     expect(exportedJson).not.toHaveProperty('qAppCache')
+  })
+
+  it('revokes earlier restored URLs when object URL creation fails partway', async () => {
+    const createObjectUrlError = new Error('object URL creation failed')
+    URL.createObjectURL = vi
+      .fn()
+      .mockReturnValueOnce('blob:restored-first')
+      .mockImplementationOnce(() => {
+        throw createObjectUrlError
+      }) as typeof URL.createObjectURL
+
+    const data = {
+      magic: 'MAGICPOT_CANVAS',
+      version: CANVAS_FILE_VERSION,
+      createdAt: '2026-04-01T00:00:00.000Z',
+      items: [],
+      blobs: {
+        first: { base64: 'AQ==', mimeType: 'application/octet-stream' },
+        second: { base64: 'Ag==', mimeType: 'application/octet-stream' }
+      }
+    }
+
+    await expect(
+      importCanvasFile({ text: async () => JSON.stringify(data) } as unknown as File)
+    ).rejects.toBe(createObjectUrlError)
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1)
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:restored-first')
+  })
+
+  it('revokes every restored URL when later item restoration fails', async () => {
+    URL.createObjectURL = vi
+      .fn()
+      .mockReturnValueOnce('blob:restored-first')
+      .mockReturnValueOnce('blob:restored-second') as typeof URL.createObjectURL
+
+    const data = {
+      magic: 'MAGICPOT_CANVAS',
+      version: CANVAS_FILE_VERSION,
+      createdAt: '2026-04-01T00:00:00.000Z',
+      items: [null],
+      blobs: {
+        first: { base64: 'AQ==', mimeType: 'application/octet-stream' },
+        second: { base64: 'Ag==', mimeType: 'application/octet-stream' }
+      }
+    }
+    const file = {
+      text: async () => JSON.stringify(data)
+    } as unknown as File
+
+    await expect(importCanvasFile(file)).rejects.toThrow(TypeError)
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2)
+    expect(URL.revokeObjectURL).toHaveBeenNthCalledWith(1, 'blob:restored-first')
+    expect(URL.revokeObjectURL).toHaveBeenNthCalledWith(2, 'blob:restored-second')
   })
 
   it('ignores legacy quick-app state during default .mpcanvas imports', async () => {
@@ -920,7 +1106,9 @@ describe('canvasStorage provenance metadata', () => {
       fileName: 'missing.png',
       sourceFile: undefined
     } as CanvasItem
-    await saveCanvasItems([brokenItem], 'failed-save-consistency-test')
+    await expect(saveCanvasItems([brokenItem], 'failed-save-consistency-test')).rejects.toThrow(
+      'binary data could not be persisted'
+    )
     const restored = await loadCanvasItems('failed-save-consistency-test')
 
     expect(errorSpy).toHaveBeenCalled()
@@ -1132,8 +1320,7 @@ describe('canvasStorage provenance metadata', () => {
 
     const projectCanvasPath = path.win32.join(
       userDataDir,
-      'renderer-state',
-      'project-canvas',
+      'AutoSave',
       '.mirror-fallback-test__mirror-fallback-test',
       'project.mpcanvas'
     )
@@ -1166,7 +1353,7 @@ describe('canvasStorage provenance metadata', () => {
       id: 'image-blob-mirror-1',
       type: 'image',
       fileName: 'generated-image.png',
-      src: 'local-media:///C:/mock-user-data/renderer-state/project-canvas/.mirror-fallback-test__mirror-fallback-test/assets/images/image-blob-mirror-1__generated-image.png'
+      src: 'local-media:///C:/mock-user-data/AutoSave/.mirror-fallback-test__mirror-fallback-test/assets/images/image-blob-mirror-1__generated-image.png'
     })
   })
 
@@ -1249,8 +1436,7 @@ describe('canvasStorage provenance metadata', () => {
 
     const mirroredAssetPath = path.win32.join(
       userDataDir,
-      'renderer-state',
-      'project-canvas',
+      'AutoSave',
       '.local-import-persistence-test__local-import-persistence-test',
       'assets',
       'images',
@@ -1352,12 +1538,13 @@ describe('canvasStorage provenance metadata', () => {
       } as CanvasItem
     ]
 
-    await saveCanvasItems(items, 'unresolved-project-asset-test')
+    await expect(saveCanvasItems(items, 'unresolved-project-asset-test')).rejects.toThrow(
+      'binary data could not be persisted'
+    )
 
     const projectCanvasPath = path.win32.join(
       userDataDir,
-      'renderer-state',
-      'project-canvas',
+      'AutoSave',
       '.unresolved-project-asset-test__unresolved-project-asset-test',
       'project.mpcanvas'
     )
@@ -1691,13 +1878,16 @@ describe('canvasStorage provenance metadata', () => {
     )
 
     const projectCanvasPath = path.win32.join(
-      userDataDir,
-      'renderer-state',
-      'project-canvas',
+      'C:/mock-storage',
+      'AutoSave',
       '.project-crop-cache-test__project-crop-cache-test',
       'project.mpcanvas'
     )
-    const projectCanvasJson = JSON.parse(textFiles.get(projectCanvasPath) || '{}') as {
+    const projectCanvasContent =
+      textFiles.get(projectCanvasPath) ||
+      [...textFiles.entries()].find(([fullPath]) => fullPath.endsWith('project.mpcanvas'))?.[1] ||
+      '{}'
+    const projectCanvasJson = JSON.parse(projectCanvasContent) as {
       items?: Array<{
         src?: string
         crop?: unknown
@@ -1716,17 +1906,7 @@ describe('canvasStorage provenance metadata', () => {
     })
     expect(projectCanvasJson.items?.[0]?.crop).toBeUndefined()
     expect(
-      binaryFiles.has(
-        path.win32.join(
-          userDataDir,
-          'renderer-state',
-          'project-canvas',
-          '.project-crop-cache-test__project-crop-cache-test',
-          'assets',
-          'images',
-          'image-crop-1__photo.jpg'
-        )
-      )
+      [...binaryFiles.keys()].some((fullPath) => fullPath.endsWith('image-crop-1__photo.jpg'))
     ).toBe(true)
 
     Object.defineProperty(globalThis, 'indexedDB', {
@@ -1740,7 +1920,7 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.items[0]).toMatchObject({
       id: 'image-crop-1',
       type: 'image',
-      src: 'local-media:///C:/mock-user-data-crop/renderer-state/project-canvas/.project-crop-cache-test__project-crop-cache-test/assets/images/image-crop-1__photo.jpg',
+      src: 'local-media:///C:/mock-user-data-crop/AutoSave/.project-crop-cache-test__project-crop-cache-test/assets/images/image-crop-1__photo.jpg',
       sourceWidth: 320,
       sourceHeight: 180
     })
@@ -1880,7 +2060,7 @@ describe('canvasStorage provenance metadata', () => {
     expect(restored.items).toHaveLength(1)
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       '[Canvas Storage] Project asset missing:',
-      'c:/mock-user-data-missing/renderer-state/project-canvas/.project-missing-test__project-missing-test/assets/images/image-project-missing-1__missing-image.png'
+      'c:/mock-user-data-missing/autosave/.project-missing-test__project-missing-test/assets/images/image-project-missing-1__missing-image.png'
     )
   })
 

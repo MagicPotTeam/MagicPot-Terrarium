@@ -212,6 +212,25 @@ describe('extractModelArchive', () => {
     })
   })
 
+  it('revokes linked asset URLs when creating a later URL fails', () => {
+    const createError = new Error('could not create object URL')
+    createObjectURL
+      .mockReturnValueOnce('blob:created-before-failure')
+      .mockImplementationOnce(() => {
+        throw createError
+      })
+
+    expect(() =>
+      extractModelPackageFiles([
+        { path: 'hero.fbx', file: new File(['fbx'], 'hero.fbx') },
+        { path: 'hero.fbm/diffuse.png', file: new File(['png'], 'diffuse.png') },
+        { path: 'hero.fbm/normal.png', file: new File(['png'], 'normal.png') }
+      ])
+    ).toThrow(createError)
+    expect(revokeObjectURL).toHaveBeenCalledOnce()
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:created-before-failure')
+  })
+
   it('lists contained model extensions from a mixed package', () => {
     const extensions = listContainedModelExtensions([
       {

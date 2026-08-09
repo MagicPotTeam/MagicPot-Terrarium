@@ -6,7 +6,10 @@ export default defineConfig({
   test: {
     name: 'node-smoke',
     environment: 'node',
-    include: ['packages/app/src/main/startup.smoke.test.ts'],
+    include: [
+      'packages/app/src/main/startup.smoke.test.ts',
+      'packages/app/src/main/approval.packaged.smoke.test.ts'
+    ],
     server: {
       deps: {
         inline: ['@electron-toolkit/utils']

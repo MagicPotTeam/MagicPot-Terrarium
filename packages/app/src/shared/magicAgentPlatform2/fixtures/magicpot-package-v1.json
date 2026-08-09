@@ -1,0 +1,18 @@
+{
+  "manifestVersion": 1,
+  "id": "compat.fixture",
+  "name": "Compatibility Fixture",
+  "version": "1.0.0",
+  "description": "Frozen package manifest compatibility evidence.",
+  "author": "MagicPot",
+  "license": "MIT",
+  "keywords": ["compatibility", "fixture"],
+  "contributions": [
+    {
+      "id": "legacy-graph",
+      "kind": "graph",
+      "title": "Legacy Graph",
+      "entry": "graphs/legacy.json"
+    }
+  ]
+}

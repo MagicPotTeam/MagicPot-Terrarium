@@ -8,6 +8,7 @@ type AddImageToCanvasFn = (
     fileName?: string
     promptId?: CanvasImageItem['promptId']
     fileItem?: CanvasImageItem['fileItem']
+    media?: CanvasImageItem['media']
     sourceFile?: Blob
     sourceWidthHint?: number
     sourceHeightHint?: number
@@ -16,7 +17,17 @@ type AddImageToCanvasFn = (
 ) => Promise<CanvasImageItem | null | undefined>
 
 type AddImagesToCanvasFn = (
-  sources: Array<string | { src: string; fileName?: string; sizeBytes?: number }>
+  sources: Array<
+    | string
+    | {
+        src: string
+        fileName?: string
+        sizeBytes?: number
+        sourceFile?: Blob
+        sourceWidthHint?: number
+        sourceHeightHint?: number
+      }
+  >
 ) => Promise<unknown>
 
 type AddModel3DUrlToCanvasFn = (
@@ -100,6 +111,7 @@ export function useCanvasCustomAddEvents({
           select?: boolean
           promptId?: CanvasImageItem['promptId']
           fileItem?: CanvasImageItem['fileItem']
+          media?: CanvasImageItem['media']
           sourceFile?: Blob
           sourceWidth?: number
           sourceHeight?: number
@@ -130,6 +142,7 @@ export function useCanvasCustomAddEvents({
           fileName: detail.fileName || detail.fileItem?.filename,
           promptId: detail.promptId,
           fileItem: detail.fileItem,
+          media: detail.media,
           sourceFile: detail.sourceFile,
           sourceWidthHint,
           sourceHeightHint,
@@ -287,7 +300,16 @@ export function useCanvasCustomAddEvents({
     const handleAddFromAI = (event: Event) => {
       const detail = ((event as CustomEvent).detail || {}) as {
         text?: string
-        images?: string[]
+        images?: Array<
+          | string
+          | {
+              src: string
+              fileName?: string
+              sourceFile?: Blob
+              sourceWidthHint?: number
+              sourceHeightHint?: number
+            }
+        >
         projectId?: string
       }
 

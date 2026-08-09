@@ -59,6 +59,7 @@ import {
 } from './projectCanvasWebGLRuntimeState'
 import { resolveCanvasImageLodDecision } from './canvasImageLodPolicy'
 import { isAnimatedGifCanvasImage } from './canvasAnimatedImageUtils'
+import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 import type {
   CanvasAnnotationItem,
   CanvasFileItem,
@@ -122,6 +123,7 @@ type CanvasRectInteractionOverlayItem = {
 type CanvasAnnotationInteractionOverlayItem = CanvasRectInteractionOverlayItem
 type CanvasPlaceholderInteractionOverlayItem = CanvasRectInteractionOverlayItem
 
+const PROJECT_CANVAS_INLINE_TEXT_EDITOR_SELECTOR = '[data-project-canvas-inline-text-editor="true"]'
 const STAGE_MARQUEE_FALLBACK_BLOCKING_SELECTORS = [
   '[data-canvas-item-id][data-canvas-overlay]',
   '[data-project-canvas-crop-overlay="dom"]',
@@ -130,6 +132,7 @@ const STAGE_MARQUEE_FALLBACK_BLOCKING_SELECTORS = [
   '[data-project-canvas-multi-selection-transform-overlay="true"]',
   '[data-canvas-multi-select-drag-surface="true"]',
   '[data-canvas-multi-select-handle]',
+  PROJECT_CANVAS_INLINE_TEXT_EDITOR_SELECTOR,
   '.image-action-toolbar',
   '.blob-item-action-toolbar',
   '.file-action-toolbar',
@@ -1294,7 +1297,10 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const sortedAllImageItems = React.useMemo(
     () =>
       allCanvasItems
-        .filter((item): item is CanvasImageItem => item.type === 'image')
+        .filter(
+          (item): item is CanvasImageItem =>
+            item.type === 'image' && !isCanvasItemTransientlyHidden(item.id)
+        )
         .sort((left, right) => left.zIndex - right.zIndex),
     [allCanvasItems]
   )
@@ -2330,6 +2336,13 @@ export default function ProjectCanvasPageStageScene(props: any) {
         return
       }
 
+      if (
+        event.target instanceof Element &&
+        event.target.closest(PROJECT_CANVAS_INLINE_TEXT_EDITOR_SELECTOR)
+      ) {
+        return
+      }
+
       activateCanvas()
 
       const isStageLayerTarget = isStageEventLayerTarget(event.target)
@@ -3067,6 +3080,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
       ref={handleCanvasContainerRef}
       tabIndex={0}
       data-testid="project-canvas-stage-root"
+      data-project-canvas-drop-surface="true"
       data-stage-scale={stageScale}
       data-stage-pos-x={stagePos.x}
       data-stage-pos-y={stagePos.y}

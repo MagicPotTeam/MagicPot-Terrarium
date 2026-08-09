@@ -1,7 +1,7 @@
 import { Config } from '@shared/config/config'
 import { DeepPartial } from '@shared/utils/utilTypes'
 
-export type SettingsTab = 'general' | 'environment' | 'llm' | 'plugin' | 'mcp' | 'about'
+export type SettingsTab = 'general' | 'environment' | 'llm' | 'plugin' | 'mcp' | 'updates' | 'about'
 
 export interface PanelProps {
   settingsValue: Config

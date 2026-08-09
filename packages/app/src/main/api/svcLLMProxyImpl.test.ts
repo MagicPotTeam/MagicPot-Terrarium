@@ -1,17 +1,24 @@
+import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
-import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
+import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
 import { cliFromProfile } from '@shared/llm'
 import * as configModule from '../config/config'
 import type { AssistantRuntime } from '../assistantRuntime/runtime'
+import { DEFAULT_MANAGED_MEDIA_MAX_BYTES } from '../llmProxy/managedMediaStore'
 import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
 import { tripoMainLlmProxyExtension } from '../extensions/tripoMainExtension'
 import {
   clearTrustedLocalFileSelectionsForTest,
   rememberTrustedLocalFileSelections
 } from './trustedFileSelection'
-import { LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE, LLMProxySvcImpl } from './svcLLMProxyImpl'
+import {
+  createElectronRequestFetch,
+  type ElectronClientRequestLike,
+  LLM_CONVERSATION_REQUEST_ACTIVE_ERROR_CODE,
+  LLMProxySvcImpl
+} from './svcLLMProxyImpl'
 
 const {
   generateFromMessagesMock,
@@ -118,6 +125,80 @@ const mockConfig = (overrides: Partial<Config>): void => {
   } as Config)
 }
 
+describe('createElectronRequestFetch', () => {
+  it('writes large JSON bodies through Electron ClientRequest and maps the response', async () => {
+    const requestEvents = new EventEmitter()
+    const responseEvents = new EventEmitter() as EventEmitter & {
+      headers: Record<string, string[]>
+      statusCode: number
+      statusMessage: string
+    }
+    responseEvents.headers = { 'content-type': ['application/json'], 'x-test': ['ok'] }
+    responseEvents.statusCode = 200
+    responseEvents.statusMessage = 'OK'
+
+    const headers = new Map<string, string>()
+    let writtenBody: Buffer | undefined
+    const clientRequest = Object.assign(requestEvents, {
+      abort: vi.fn(),
+      end: vi.fn((chunk?: string | Buffer) => {
+        writtenBody = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
+      }),
+      setHeader: vi.fn((name: string, value: string) => headers.set(name, value))
+    }) as unknown as ElectronClientRequestLike
+    const requestFactory = vi.fn(() => clientRequest)
+    const fetchImpl = createElectronRequestFetch(requestFactory)
+    const payload = JSON.stringify({ image: 'x'.repeat(1_000_000) })
+
+    const responsePromise = fetchImpl('https://example.com/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer token' },
+      body: payload
+    })
+    await vi.waitFor(() => expect(clientRequest.end).toHaveBeenCalledOnce())
+    requestEvents.emit('response', responseEvents)
+    responseEvents.emit('data', Buffer.from('{"ok":'))
+    const response = await responsePromise
+    responseEvents.emit('data', Buffer.from('true}'))
+    responseEvents.emit('end')
+
+    expect(requestFactory).toHaveBeenCalledWith({
+      method: 'POST',
+      url: 'https://example.com/responses',
+      redirect: 'follow'
+    })
+    expect(writtenBody?.toString()).toBe(payload)
+    expect(headers.get('content-type')).toBe('application/json')
+    expect(headers.get('authorization')).toBe('Bearer token')
+    expect(headers.has('content-length')).toBe(false)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('x-test')).toBe('ok')
+    await expect(response.json()).resolves.toEqual({ ok: true })
+  })
+
+  it('aborts Electron ClientRequest when the Fetch signal is aborted', async () => {
+    const requestEvents = new EventEmitter()
+    const clientRequest = Object.assign(requestEvents, {
+      abort: vi.fn(),
+      end: vi.fn(),
+      setHeader: vi.fn()
+    }) as unknown as ElectronClientRequestLike
+    const fetchImpl = createElectronRequestFetch(() => clientRequest)
+    const controller = new AbortController()
+    const responsePromise = fetchImpl('https://example.com/responses', {
+      method: 'POST',
+      body: '{}',
+      signal: controller.signal
+    })
+
+    await vi.waitFor(() => expect(clientRequest.end).toHaveBeenCalledOnce())
+    controller.abort()
+
+    await expect(responsePromise).rejects.toMatchObject({ name: 'AbortError' })
+    expect(clientRequest.abort).toHaveBeenCalledOnce()
+  })
+})
+
 describe('LLMProxySvcImpl', () => {
   it('allows main-process LLM extensions to normalize requests and provide clients', async () => {
     const extensionChat = vi.fn().mockResolvedValue({ content: 'extension response' })
@@ -173,6 +254,46 @@ describe('LLMProxySvcImpl', () => {
       })
     )
     expect(resp).toEqual({ content: 'extension response' })
+  })
+
+  it('does not impose built-in inline-image assumptions on extension-created clients', async () => {
+    const extensionChat = vi.fn().mockResolvedValue('extension image response')
+    mainHostExtensionApiV1.llmProxy.push({
+      id: 'test-image-extension',
+      createCli: () => ({ chat: extensionChat }) as never
+    })
+    vi.mocked(cliFromProfile).mockReturnValue(undefined as never)
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'extension-ollama',
+            model_name: 'extension-model',
+            base_url: 'https://extension.example',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+
+    const response = await new LLMProxySvcImpl().chat({
+      profileId: 'extension-ollama',
+      messages: [
+        {
+          role: 'user',
+          content: 'extension-owned image',
+          attachments: [
+            { type: 'image', url: 'https://extension.example/image.png', mimeType: 'image/png' }
+          ]
+        }
+      ]
+    })
+
+    expect(extensionChat).toHaveBeenCalledOnce()
+    expect(cliFromProfile).not.toHaveBeenCalled()
+    expect(response.content).toBe('extension image response')
   })
 
   it('allows main-process LLM extensions to transform runtime profile listings', async () => {
@@ -1972,6 +2093,486 @@ describe('LLMProxySvcImpl', () => {
         is_ocr_model: false
       }
     ])
+  })
+
+  it('accepts a marked qapp materialized image without persisted attachment capability', async () => {
+    const providerChat = vi.fn().mockResolvedValue('image accepted')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-ollama',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+    const messages = [
+      {
+        role: 'user' as const,
+        content: 'describe this image',
+        attachments: [
+          {
+            type: 'image' as const,
+            url: 'data:image/png;base64,iVBORw0KGgo=',
+            mimeType: 'image/png',
+            metadata: { internalTransport: 'qapp-renderer-materialized-v1' }
+          }
+        ]
+      }
+    ]
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileScope: 'qapp',
+        profileId: 'quick-ollama',
+        messages
+      })
+    ).resolves.toMatchObject({ content: 'image accepted' })
+    expect(providerChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          expect.objectContaining({
+            attachments: [
+              expect.objectContaining({
+                url: 'data:image/png;base64,iVBORw0KGgo=',
+                metadata: undefined
+              })
+            ]
+          })
+        ]
+      })
+    )
+  })
+
+  it.each([
+    ['gemini', 'Gemini Video'],
+    ['claude', 'Claude Video'],
+    ['ollama', 'Ollama Video']
+  ] as const)(
+    'preserves qapp %s video URL image attachments for provider chat',
+    async (provider, modelName) => {
+      const providerChat = vi.fn().mockResolvedValue('video queued')
+      vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+      mockConfig({
+        plugin_config: {
+          ...DEFAULT_CONFIG.plugin_config!,
+          api_profiles: [
+            {
+              id: `quick-${provider}-video`,
+              model_name: modelName,
+              base_url: 'https://video.example',
+              api_key: provider === 'ollama' ? '' : 'key',
+              provider,
+              model_use: 'video'
+            }
+          ]
+        }
+      })
+      const attachment = {
+        type: 'image' as const,
+        url: 'https://cdn.example/input.png?signature=keep'
+      }
+
+      await expect(
+        new LLMProxySvcImpl().chat({
+          profileScope: 'qapp',
+          profileId: `quick-${provider}-video`,
+          messages: [{ role: 'user', content: 'animate', attachments: [attachment] }]
+        })
+      ).resolves.toMatchObject({ content: 'video queued' })
+      expect(providerChat).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: [expect.objectContaining({ attachments: [attachment] })]
+        })
+      )
+    }
+  )
+
+  it('rejects an oversized qapp image arithmetically before decoding base64', async () => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-ollama',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+    const bufferFromSpy = vi.spyOn(Buffer, 'from')
+    const oversizedBase64 = `iVBORw0KGgoAAAAA${'A'.repeat(34_952_540 - 16)}`
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileScope: 'qapp',
+        profileId: 'quick-ollama',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [
+              {
+                type: 'image',
+                url: `data:image/png;base64,${oversizedBase64}`,
+                mimeType: 'image/png',
+                metadata: { internalTransport: 'qapp-renderer-materialized-v1' }
+              }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(/exceeds/)
+    expect(
+      bufferFromSpy.mock.calls.some((call) => {
+        const args = Array.from(call)
+        return args[1] === 'base64' && typeof args[0] === 'string'
+      })
+    ).toBe(false)
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
+  it('rejects a marked qapp malformed image before built-in provider chat', async () => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-ollama',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileScope: 'qapp',
+        profileId: 'quick-ollama',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [
+              {
+                type: 'image',
+                url: 'data:image/png;base64,UE5H==',
+                mimeType: 'image/png',
+                metadata: { internalTransport: 'qapp-renderer-materialized-v1' }
+              }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(/malformed image base64/)
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
+  it('rejects a marked qapp image whose declared MIME does not match its bytes', async () => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-ollama',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileScope: 'qapp',
+        profileId: 'quick-ollama',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [
+              {
+                type: 'image',
+                url: 'data:image/jpeg;base64,iVBORw0KGgo=',
+                mimeType: 'image/jpeg',
+                metadata: { internalTransport: 'qapp-renderer-materialized-v1' }
+              }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(/MIME mismatch/)
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
+  it('rejects inline images for an undeclared Ollama attachment transport before provider chat', async () => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'ollama-profile',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama'
+          }
+        ]
+      }
+    })
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileId: 'ollama-profile',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [
+              {
+                type: 'image',
+                url: 'data:image/png;base64,UE5H',
+                mimeType: 'image/png'
+              }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow('must declare "request-data-url"')
+
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
+  it('accepts an already materialized data image when Ollama declares request-data-url', async () => {
+    const providerChat = vi.fn().mockResolvedValue('image accepted')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'ollama-profile',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama',
+            ...({ attachment_transports: ['request-data-url'] } as Partial<LLMAPIProfile> & {
+              attachment_transports: string[]
+            })
+          }
+        ]
+      }
+    })
+
+    const messages = [
+      {
+        role: 'user' as const,
+        content: 'describe this image',
+        attachments: [
+          {
+            type: 'image' as const,
+            url: 'data:image/png;base64,iVBORw0KGgo=',
+            mimeType: 'image/png'
+          }
+        ]
+      }
+    ]
+    const response = await new LLMProxySvcImpl().chat({
+      profileId: 'ollama-profile',
+      messages
+    })
+
+    expect(providerChat).toHaveBeenCalledWith(expect.objectContaining({ messages }))
+    expect(response.content).toBe('image accepted')
+  })
+
+  it.each([
+    ['empty payload', 'data:image/png;base64,'],
+    ['missing base64 marker', 'data:image/png,UE5H'],
+    ['invalid base64 characters', 'data:image/png;base64,not-base64'],
+    ['non-canonical base64', 'data:image/png;base64,UE5H=='],
+    ['unsupported image MIME', 'data:image/svg+xml;base64,PHN2Zz4=']
+  ])('rejects %s before built-in provider chat', async (_label, url) => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'ollama-profile',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama',
+            ...({ attachment_transports: ['request-data-url'] } as Partial<LLMAPIProfile> & {
+              attachment_transports: string[]
+            })
+          }
+        ]
+      }
+    })
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileId: 'ollama-profile',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [{ type: 'image', url, mimeType: 'image/png' }]
+          }
+        ]
+      })
+    ).rejects.toThrow(/canonical base64|malformed image base64|non-canonical image base64/)
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
+  it('passes every public HTTPS video image URL to the provider unchanged', async () => {
+    const providerChat = vi.fn().mockResolvedValue('queued')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-video',
+            model_name: 'kling-v3',
+            base_url: 'https://api-beijing.klingai.com',
+            api_key: 'access-id',
+            api_secret: 'secret-key',
+            provider: 'kling',
+            model_use: 'video'
+          }
+        ]
+      }
+    })
+    const messages = [
+      {
+        role: 'user' as const,
+        content: 'animate',
+        attachments: [
+          { type: 'image' as const, url: 'https://cdn.example/one.png?signature=keep' },
+          { type: 'image' as const, url: 'https://media.example/two.jpg' }
+        ]
+      }
+    ]
+
+    await new LLMProxySvcImpl().chat({
+      profileScope: 'qapp',
+      profileId: 'quick-video',
+      messages
+    })
+
+    expect(providerChat).toHaveBeenCalledWith(expect.objectContaining({ messages }))
+  })
+
+  it.each([
+    'data:image/png;base64,iVBORw0KGgo=',
+    'blob:https://app.example/image',
+    'file:///tmp/image.png',
+    'local-media://asset/image.png',
+    'https://user:secret@cdn.example/image.png',
+    'https://localhost/image.png',
+    'https://127.0.0.1/image.png',
+    'https://10.0.0.8/image.png',
+    'http://cdn.example/image.png'
+  ])('rejects unsafe video image URL %s before provider chat', async (url) => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-video',
+            model_name: 'seedance',
+            base_url: 'https://ark.cn-beijing.volces.com',
+            api_key: 'key',
+            provider: 'volcengine',
+            model_use: 'video'
+          }
+        ]
+      }
+    })
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileScope: 'qapp',
+        profileId: 'quick-video',
+        messages: [
+          {
+            role: 'user',
+            content: 'animate',
+            attachments: [{ type: 'image', url }]
+          }
+        ]
+      })
+    ).rejects.toThrow(/public HTTPS image URLs/)
+    expect(providerChat).not.toHaveBeenCalled()
+  })
+
+  it('rejects oversized inline images before built-in provider chat', async () => {
+    const providerChat = vi.fn().mockResolvedValue('should not run')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'ollama-profile',
+            model_name: 'llava',
+            base_url: 'http://localhost:11434',
+            api_key: '',
+            provider: 'ollama',
+            ...({ attachment_transports: ['request-data-url'] } as Partial<LLMAPIProfile> & {
+              attachment_transports: string[]
+            })
+          }
+        ]
+      }
+    })
+    const oversized = Buffer.alloc(DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1, 1).toString('base64')
+
+    await expect(
+      new LLMProxySvcImpl().chat({
+        profileId: 'ollama-profile',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe this image',
+            attachments: [
+              { type: 'image', url: `data:image/png;base64,${oversized}`, mimeType: 'image/png' }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(/exceeds the .*request attachment limit/)
+    expect(providerChat).not.toHaveBeenCalled()
   })
 
   it('accepts explicit Ollama providers on generic Agent gateways without API keys', async () => {

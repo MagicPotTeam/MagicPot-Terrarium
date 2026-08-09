@@ -116,6 +116,29 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
     expect(recoverRenderer).toHaveBeenCalledWith(window, details)
   })
 
+  it('attempts automatic renderer recovery only once per window', () => {
+    const window = createWindow()
+    const recoverRenderer = vi.fn()
+    const firstDetails: RendererGoneDetails = { reason: 'oom', exitCode: 137 }
+    const secondDetails: RendererGoneDetails = { reason: 'crashed', exitCode: 1 }
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    attachRendererDiagnostics(window as never, { recoverRenderer })
+
+    const rendererGoneListener = window.webContents.on.mock.calls.find(
+      ([event]) => event === 'render-process-gone'
+    )?.[1]
+    rendererGoneListener?.({}, firstDetails)
+    rendererGoneListener?.({}, secondDetails)
+
+    expect(recoverRenderer).toHaveBeenCalledTimes(1)
+    expect(recoverRenderer).toHaveBeenCalledWith(window, firstDetails)
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[App] Renderer recovery skipped because an automatic recovery was already attempted',
+      secondDetails
+    )
+  })
+
   it('does not recursively forward renderer diagnostic console echoes', () => {
     const window = createWindow()
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)

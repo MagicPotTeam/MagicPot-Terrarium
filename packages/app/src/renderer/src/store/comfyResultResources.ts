@@ -45,6 +45,7 @@ export const createComfyResultResourceManager = (
 
   const revoke = (url: string) => {
     if (!activeUrls.delete(url)) return
+    if (!url.startsWith('blob:')) return
     revokeObjectURL(url)
   }
 

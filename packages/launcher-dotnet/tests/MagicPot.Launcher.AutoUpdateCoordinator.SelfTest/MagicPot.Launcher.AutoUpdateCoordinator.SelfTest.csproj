@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0-windows</TargetFramework><RuntimeIdentifier>win-x64</RuntimeIdentifier><PlatformTarget>x64</PlatformTarget><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><TreatWarningsAsErrors>true</TreatWarningsAsErrors><EnableDefaultCompileItems>false</EnableDefaultCompileItems><StartupObject>MagicPot.Launcher.AutoUpdateCoordinatorSelfTest</StartupObject></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/MagicPot.Launcher/**/*.cs" Exclude="../../src/MagicPot.Launcher/Program.cs;../../src/MagicPot.Launcher/obj/**/*.cs;../../src/MagicPot.Launcher/bin/**/*.cs" LinkBase="src" />
+    <Compile Include="Program.cs" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+    <ProjectReference Include="../MagicPot.Launcher.FakeApp/MagicPot.Launcher.FakeApp.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+  <Target Name="SetFakeAppDirectory" BeforeTargets="Run"><PropertyGroup><RunWorkingDirectory>$(MSBuildProjectDirectory)</RunWorkingDirectory><RunEnvironment>MAGICPOT_FAKE_APP_DIR=$(MSBuildThisFileDirectory)..\MagicPot.Launcher.FakeApp\bin\$(Configuration)\net8.0-windows\win-x64</RunEnvironment></PropertyGroup></Target>
+</Project>

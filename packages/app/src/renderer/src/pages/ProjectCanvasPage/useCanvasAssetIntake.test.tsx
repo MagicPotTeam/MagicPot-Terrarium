@@ -18,9 +18,39 @@ import {
   createCanvasThumbnailSet
 } from './canvasThumbnailCache'
 import type { CanvasImageSourceInput } from './canvasAssetIntakeHelpers'
+import { buildProjectCanvasRenderableItems } from './projectCanvasRenderBoundary'
+import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 import type { CanvasGroup, CanvasImageItem, CanvasItem } from './types'
 
 const importCanvasFileMock = vi.fn()
+const materializePsdFileMock = vi.fn()
+const hydrateCanvasImageItemForCanvasMock = vi.fn(async (itemOrArgs: unknown) => {
+  if (itemOrArgs && typeof itemOrArgs === 'object' && 'item' in itemOrArgs) {
+    return (itemOrArgs as { item: unknown }).item
+  }
+  return itemOrArgs
+})
+const authorizeCanvasLocalMediaSourceUrlMock = vi.fn<(file: File) => Promise<string | null>>()
+
+vi.mock('./canvasLocalFileSource', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./canvasLocalFileSource')>()
+  return {
+    ...actual,
+    authorizeCanvasLocalMediaSourceUrl: (file: File) => authorizeCanvasLocalMediaSourceUrlMock(file)
+  }
+})
+
+vi.mock('./canvasAssetIntakeHelpers', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./canvasAssetIntakeHelpers')>()
+  return {
+    ...actual,
+    hydrateCanvasImageItemForCanvas: (args: unknown) => hydrateCanvasImageItemForCanvasMock(args)
+  }
+})
+
+vi.mock('./psdImport', () => ({
+  materializePsdFile: (...args: unknown[]) => materializePsdFileMock(...args)
+}))
 
 vi.mock('./canvasStorage', () => ({
   importCanvasFile: (...args: unknown[]) => importCanvasFileMock(...args),
@@ -62,11 +92,40 @@ function AssetIntakeHarness({
   return null
 }
 
+function PsdImportHarness({
+  onComplete
+}: {
+  onComplete: (
+    value: Awaited<ReturnType<ReturnType<typeof useCanvasAssetIntake>['handleImportPsdFile']>>
+  ) => void
+}) {
+  const { handleImportPsdFile } = useCanvasAssetIntake({
+    nextZIndexRef: { current: 1 },
+    setItemsWithHistory: vi.fn(),
+    setGroups: vi.fn(),
+    setGroupBranches: vi.fn(),
+    setSelectedIds: vi.fn(),
+    setTool: vi.fn(),
+    notifyError: vi.fn(),
+    notifySuccess: vi.fn(),
+    notifyWarning: vi.fn()
+  })
+
+  useEffect(() => {
+    void handleImportPsdFile(new File(['psd'], 'demo.psd')).then(onComplete)
+  }, [handleImportPsdFile, onComplete])
+
+  return null
+}
+
 function LargeImageBatchHarness({
   onComplete,
   onProgress,
   onSelectionChange,
+  onItemsUpdate,
+  onHistoryCommit,
   sources,
+  pasteOptions,
   getBatchGridLayout = (sizes) =>
     sizes.map((size, index) => ({
       x: index * 10,
@@ -78,7 +137,10 @@ function LargeImageBatchHarness({
   onComplete: (items: CanvasItem[], result: unknown) => void
   onProgress?: (progress: CanvasImageBatchImportProgress | null) => void
   onSelectionChange?: (selectedIds: Set<string>) => void
+  onItemsUpdate?: (items: CanvasItem[]) => void
+  onHistoryCommit?: (items: CanvasItem[]) => void
   sources: CanvasImageSourceInput[]
+  pasteOptions?: { clientX?: number; clientY?: number }
   getBatchGridLayout?: (
     sizes: Array<{ width: number; height: number }>,
     options?: { gap?: number; minColumns?: number; maxColumns?: number; allowUpscale?: boolean }
@@ -87,9 +149,20 @@ function LargeImageBatchHarness({
   const nextZIndexRef = React.useRef(1)
   const itemsRef = React.useRef<CanvasItem[]>([])
 
-  const applyItemsUpdate = React.useCallback((update: React.SetStateAction<CanvasItem[]>) => {
-    itemsRef.current = typeof update === 'function' ? update(itemsRef.current) : update
-  }, [])
+  const applyItemsUpdate = React.useCallback(
+    (update: React.SetStateAction<CanvasItem[]>) => {
+      itemsRef.current = typeof update === 'function' ? update(itemsRef.current) : update
+      onItemsUpdate?.([...itemsRef.current])
+    },
+    [onItemsUpdate]
+  )
+  const applyItemsUpdateWithHistory = React.useCallback(
+    (update: React.SetStateAction<CanvasItem[]>) => {
+      applyItemsUpdate(update)
+      onHistoryCommit?.([...itemsRef.current])
+    },
+    [applyItemsUpdate, onHistoryCommit]
+  )
   const setSelectedIds = React.useCallback(
     (update: React.SetStateAction<Set<string>>) => {
       const selectedIds = typeof update === 'function' ? update(new Set<string>()) : update
@@ -103,8 +176,12 @@ function LargeImageBatchHarness({
     fitImageToCanvasSize: (width, height) => ({ width, height }),
     getBatchGridLayout,
     getCenterPosition: () => ({ x: 0, y: 0 }),
+    getCanvasPointFromClient: (clientX, clientY) =>
+      typeof clientX === 'number' && typeof clientY === 'number'
+        ? { x: clientX, y: clientY }
+        : null,
     nextZIndexRef,
-    setItemsWithHistory: applyItemsUpdate,
+    setItemsWithHistory: applyItemsUpdateWithHistory,
     setItemsWithoutHistory: applyItemsUpdate,
     setGroups: vi.fn(),
     setGroupBranches: vi.fn(),
@@ -118,7 +195,7 @@ function LargeImageBatchHarness({
 
   useEffect(() => {
     let cancelled = false
-    void addImagesToCanvas(sources).then((result) => {
+    void addImagesToCanvas(sources, pasteOptions).then((result) => {
       if (!cancelled) {
         onComplete(itemsRef.current, result)
       }
@@ -126,7 +203,7 @@ function LargeImageBatchHarness({
     return () => {
       cancelled = true
     }
-  }, [addImagesToCanvas, onComplete, sources])
+  }, [addImagesToCanvas, onComplete, pasteOptions, sources])
 
   return null
 }
@@ -183,6 +260,15 @@ afterEach(() => {
 })
 
 beforeEach(() => {
+  materializePsdFileMock.mockReset()
+  hydrateCanvasImageItemForCanvasMock.mockReset()
+  hydrateCanvasImageItemForCanvasMock.mockImplementation(async (itemOrArgs) => {
+    if (itemOrArgs && typeof itemOrArgs === 'object' && 'item' in itemOrArgs) {
+      return (itemOrArgs as { item: unknown }).item
+    }
+    return itemOrArgs
+  })
+  authorizeCanvasLocalMediaSourceUrlMock.mockResolvedValue(null)
   importCanvasFileMock.mockResolvedValue({
     items: [
       {
@@ -211,6 +297,51 @@ beforeEach(() => {
 })
 
 describe('useCanvasAssetIntake', () => {
+  it('revokes deduplicated PSD object URLs when canvas adoption fails', async () => {
+    const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const onComplete = vi.fn()
+    materializePsdFileMock.mockResolvedValue({
+      sourceApp: 'photoshop',
+      warnings: [],
+      groups: [],
+      items: [
+        { id: 'psd-a', type: 'image', src: 'blob:psd-shared' },
+        { id: 'psd-b', type: 'image', src: 'blob:psd-shared' },
+        { id: 'psd-c', type: 'image', src: 'blob:psd-unique' }
+      ]
+    })
+    hydrateCanvasImageItemForCanvasMock.mockRejectedValueOnce(new Error('adoption failed'))
+
+    render(<PsdImportHarness onComplete={onComplete} />)
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalledWith([]))
+    expect(revokeObjectUrl).toHaveBeenCalledTimes(2)
+    expect(revokeObjectUrl).toHaveBeenCalledWith('blob:psd-shared')
+    expect(revokeObjectUrl).toHaveBeenCalledWith('blob:psd-unique')
+  })
+
+  it('keeps PSD object URLs after successful canvas adoption', async () => {
+    const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const onComplete = vi.fn()
+    materializePsdFileMock.mockResolvedValue({
+      sourceApp: 'photoshop',
+      warnings: [],
+      groups: [],
+      items: [{ id: 'psd-a', type: 'image', src: 'blob:psd-adopted' }]
+    })
+    hydrateCanvasImageItemForCanvasMock.mockImplementation(async (itemOrArgs) => {
+      if (itemOrArgs && typeof itemOrArgs === 'object' && 'item' in itemOrArgs) {
+        return (itemOrArgs as { item: unknown }).item
+      }
+      return itemOrArgs
+    })
+
+    render(<PsdImportHarness onComplete={onComplete} />)
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalled())
+    expect(revokeObjectUrl).not.toHaveBeenCalled()
+  })
+
   it('limits batch image preprocessing concurrency and preserves source order', async () => {
     let activeWorkers = 0
     let maxActiveWorkers = 0
@@ -233,6 +364,105 @@ describe('useCanvasAssetIntake', () => {
 
     expect(maxActiveWorkers).toBeLessThanOrEqual(PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY)
     expect(results).toEqual(inputs.filter((value) => value !== 2))
+  })
+
+  it('imports path-backed images through managed media without retaining sourceFile', async () => {
+    const originalImageCtor = window.Image
+    const originalApi = window.api
+    const importFile = vi.fn().mockResolvedValue({
+      localMediaUrl: 'local-media:///managed/path-image.png',
+      reference: { relativePath: 'managed/path-image.png' }
+    })
+    const importDataUrl = vi.fn()
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: { svcManagedMedia: { importFile, importDataUrl } }
+    })
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 32 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 24 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set: () => window.setTimeout(() => image.onload?.(new Event('load')), 0)
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const source = {
+        src: 'local-media:///C:/incoming/path-image.png',
+        fileName: 'path-image.png',
+        sizeBytes: 4
+      } satisfies CanvasImageSourceInput
+      const onComplete = vi.fn()
+      render(<LargeImageBatchHarness sources={[source]} onComplete={onComplete} />)
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+
+      expect(importFile).toHaveBeenCalledWith({
+        sourcePath: 'C:/incoming/path-image.png',
+        mimeType: 'image/png',
+        originalFileName: 'path-image.png'
+      })
+      expect(importDataUrl).not.toHaveBeenCalled()
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[]]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+      expect(imageItem?.src).toBe('local-media:///managed/path-image.png')
+      expect(imageItem).not.toHaveProperty('sourceFile')
+    } finally {
+      window.Image = originalImageCtor
+      Object.defineProperty(window, 'api', { configurable: true, value: originalApi })
+    }
+  })
+
+  it('imports pathless Files as data URLs without retaining sourceFile', async () => {
+    const originalImageCtor = window.Image
+    const originalApi = window.api
+    const importFile = vi.fn()
+    const importDataUrl = vi.fn().mockResolvedValue({
+      localMediaUrl: 'local-media:///managed/pathless.png',
+      reference: { relativePath: 'managed/pathless.png' }
+    })
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: { svcManagedMedia: { importFile, importDataUrl } }
+    })
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 32 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 24 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set: () => window.setTimeout(() => image.onload?.(new Event('load')), 0)
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const sourceFile = new File(['png'], 'pathless.png', { type: 'image/png' })
+      const source = {
+        src: 'blob:pathless-image',
+        fileName: sourceFile.name,
+        sizeBytes: sourceFile.size,
+        sourceFile
+      } satisfies CanvasImageSourceInput
+      const onComplete = vi.fn()
+      render(<LargeImageBatchHarness sources={[source]} onComplete={onComplete} />)
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+
+      expect(importFile).not.toHaveBeenCalled()
+      expect(importDataUrl).toHaveBeenCalledWith({
+        dataUrl: 'data:image/png;base64,cG5n',
+        originalFileName: 'pathless.png'
+      })
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[]]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+      expect(imageItem?.src).toBe('local-media:///managed/pathless.png')
+      expect(imageItem).not.toHaveProperty('sourceFile')
+    } finally {
+      window.Image = originalImageCtor
+      Object.defineProperty(window, 'api', { configurable: true, value: originalApi })
+    }
   })
 
   it('creates source-only lazy items for large image batches after the first-screen eager budget', async () => {
@@ -1163,6 +1393,99 @@ describe('useCanvasAssetIntake', () => {
     expect((maxBottom - minY) / (maxRight - minX)).toBeLessThan(1.2)
   })
 
+  it('streams an anchored large image paste and centers the final arranged group at the anchor', async () => {
+    const sources: CanvasImageSourceInput[] = Array.from({ length: 48 }, (_, index) => ({
+      src: `https://example.invalid/anchored-large-paste-${index}.png`,
+      fileName: `anchored-large-paste-${index}.png`,
+      sizeBytes: 9 * 1024 * 1024,
+      sourceWidthHint: 120,
+      sourceHeightHint: 90
+    }))
+    const onComplete = vi.fn()
+    const onProgress = vi.fn()
+    const itemUpdates: CanvasItem[][] = []
+    const renderableCounts: number[] = []
+    const hiddenImageCounts: number[] = []
+    const historyCommits: CanvasItem[][] = []
+    const pasteOptions = { clientX: 640, clientY: 360 }
+
+    render(
+      <LargeImageBatchHarness
+        sources={sources}
+        pasteOptions={pasteOptions}
+        onComplete={onComplete}
+        onProgress={onProgress}
+        onItemsUpdate={(items) => {
+          itemUpdates.push(items)
+          renderableCounts.push(buildProjectCanvasRenderableItems(items).length)
+          hiddenImageCounts.push(
+            items.filter((item) => item.type === 'image' && isCanvasItemTransientlyHidden(item.id))
+              .length
+          )
+        }}
+        onHistoryCommit={(items) => historyCommits.push(items)}
+      />
+    )
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1), { timeout: 5000 })
+
+    const [items, result] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem[]]
+    const imageItems = items.filter((item): item is CanvasImageItem => item.type === 'image')
+    const minX = Math.min(...imageItems.map((item) => item.x))
+    const minY = Math.min(...imageItems.map((item) => item.y))
+    const maxX = Math.max(...imageItems.map((item) => item.x + item.width))
+    const maxY = Math.max(...imageItems.map((item) => item.y + item.height))
+    const progressEvents = onProgress.mock.calls.map(
+      ([progress]) => progress as CanvasImageBatchImportProgress
+    )
+
+    expect(result).toHaveLength(sources.length)
+    expect(imageItems).toHaveLength(sources.length)
+    expect(progressEvents.some((event) => event.phase === 'committing')).toBe(true)
+    expect(itemUpdates.length).toBeGreaterThan(1)
+    expect(hiddenImageCounts.slice(0, -1).every((count) => count > 0)).toBe(true)
+    expect(renderableCounts.slice(0, -1).every((count) => count === 0)).toBe(true)
+    expect(imageItems.every((item) => !isCanvasItemTransientlyHidden(item.id))).toBe(true)
+    expect(buildProjectCanvasRenderableItems(items)).toHaveLength(sources.length)
+    expect(historyCommits).toHaveLength(1)
+    expect(historyCommits[0].every((item) => !isCanvasItemTransientlyHidden(item.id))).toBe(true)
+    expect((minX + maxX) / 2).toBe(pasteOptions.clientX)
+    expect((minY + maxY) / 2).toBe(pasteOptions.clientY)
+  })
+
+  it('reveals transiently hidden anchored items when the intake owner unmounts', async () => {
+    const sources: CanvasImageSourceInput[] = Array.from({ length: 48 }, (_, index) => ({
+      src: `https://example.invalid/unmounted-anchor-${index}.png`,
+      fileName: `unmounted-anchor-${index}.png`,
+      sizeBytes: 9 * 1024 * 1024,
+      sourceWidthHint: 120,
+      sourceHeightHint: 90
+    }))
+    const hiddenItemIds: string[] = []
+    let unmountHarness: () => void = () => undefined
+
+    const rendered = render(
+      <LargeImageBatchHarness
+        sources={sources}
+        pasteOptions={{ clientX: 640, clientY: 360 }}
+        onComplete={vi.fn()}
+        onItemsUpdate={(items) => {
+          const hiddenItems = items.filter(
+            (item) => item.type === 'image' && isCanvasItemTransientlyHidden(item.id)
+          )
+          if (hiddenItems.length > 0 && hiddenItemIds.length === 0) {
+            hiddenItemIds.push(...hiddenItems.map((item) => item.id))
+            queueMicrotask(() => unmountHarness())
+          }
+        }}
+      />
+    )
+    unmountHarness = rendered.unmount
+
+    await waitFor(() => expect(hiddenItemIds.length).toBeGreaterThan(0), { timeout: 5000 })
+    expect(hiddenItemIds.every((itemId) => !isCanvasItemTransientlyHidden(itemId))).toBe(true)
+  })
+
   it('reports progress while streaming large image batches into the canvas', async () => {
     const sources: CanvasImageSourceInput[] = Array.from({ length: 48 }, (_, index) => ({
       src: `https://example.invalid/real-board/progress-${index}.png`,
@@ -1287,6 +1610,245 @@ describe('useCanvasAssetIntake', () => {
     }
   })
 
+  it('takes ownership of a source-file-backed blob URL before storing it on canvas', async () => {
+    const originalImageCtor = window.Image
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const sourceFile = new File([new Uint8Array([1, 2, 3, 4])], 'qapp-result.png', {
+      type: 'image/png'
+    })
+    const createObjectURL = vi.fn(() => 'blob:canvas-owned-result')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL
+    })
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'width', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'height', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set() {
+          queueMicrotask(() => image.onload?.(new Event('load')))
+        }
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const onComplete = vi.fn()
+      render(
+        <SingleImageHarness
+          src="blob:qapp-result-owned-elsewhere"
+          options={{ sourceFile, fileName: sourceFile.name }}
+          onComplete={onComplete}
+        />
+      )
+
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem | null]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(createObjectURL).toHaveBeenCalledWith(sourceFile)
+      expect(imageItem?.src).toBe('blob:canvas-owned-result')
+      expect(imageItem?.sourceFile).toBe(sourceFile)
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+    } finally {
+      window.Image = originalImageCtor
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        value: originalCreateObjectURL
+      })
+      Object.defineProperty(URL, 'revokeObjectURL', {
+        configurable: true,
+        value: originalRevokeObjectURL
+      })
+    }
+  })
+
+  it('uses an authorized local-media URL for file-backed QuickApp results', async () => {
+    const originalImageCtor = window.Image
+    const sourceFile = new File([new Uint8Array([9, 10, 11, 12])], 'stable-result.png', {
+      type: 'image/png'
+    })
+    authorizeCanvasLocalMediaSourceUrlMock.mockResolvedValue(
+      'local-media:///C:/outputs/stable-result.png'
+    )
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'width', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'height', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set() {
+          queueMicrotask(() => image.onload?.(new Event('load')))
+        }
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const onComplete = vi.fn()
+      render(
+        <SingleImageHarness
+          src="blob:qapp-result-owned-elsewhere"
+          options={{ sourceFile, fileName: sourceFile.name }}
+          onComplete={onComplete}
+        />
+      )
+
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem | null]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+
+      expect(authorizeCanvasLocalMediaSourceUrlMock).toHaveBeenCalledWith(sourceFile)
+      expect(imageItem?.src).toBe('local-media:///C:/outputs/stable-result.png')
+      expect(imageItem?.sourceFile).toBe(sourceFile)
+    } finally {
+      window.Image = originalImageCtor
+    }
+  })
+
+  it('falls back to a canvas-owned object URL when local-media authorization fails', async () => {
+    const originalImageCtor = window.Image
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const sourceFile = new File([new Uint8Array([13, 14, 15, 16])], 'fallback-result.png', {
+      type: 'image/png'
+    })
+    authorizeCanvasLocalMediaSourceUrlMock.mockRejectedValue(new Error('authorization failed'))
+    const createObjectURL = vi.fn(() => 'blob:canvas-fallback-result')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL
+    })
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'width', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'height', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set() {
+          queueMicrotask(() => image.onload?.(new Event('load')))
+        }
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const onComplete = vi.fn()
+      render(
+        <SingleImageHarness
+          src="blob:qapp-result-owned-elsewhere"
+          options={{ sourceFile, fileName: sourceFile.name }}
+          onComplete={onComplete}
+        />
+      )
+
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem | null]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+
+      expect(createObjectURL).toHaveBeenCalledWith(sourceFile)
+      expect(imageItem?.src).toBe('blob:canvas-fallback-result')
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+    } finally {
+      window.Image = originalImageCtor
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        value: originalCreateObjectURL
+      })
+      Object.defineProperty(URL, 'revokeObjectURL', {
+        configurable: true,
+        value: originalRevokeObjectURL
+      })
+    }
+  })
+
+  it('takes ownership of source-file-backed blob URLs during batch intake', async () => {
+    const originalImageCtor = window.Image
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const sourceFile = new File([new Uint8Array([5, 6, 7, 8])], 'batch-result.png', {
+      type: 'image/png'
+    })
+    const createObjectURL = vi.fn(() => 'blob:canvas-owned-batch-result')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL
+    })
+    window.Image = function MockImage() {
+      const image = document.createElement('img')
+      Object.defineProperty(image, 'naturalWidth', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'naturalHeight', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'width', { configurable: true, value: 320 })
+      Object.defineProperty(image, 'height', { configurable: true, value: 180 })
+      Object.defineProperty(image, 'src', {
+        configurable: true,
+        set() {
+          queueMicrotask(() => image.onload?.(new Event('load')))
+        }
+      })
+      return image
+    } as unknown as typeof Image
+
+    try {
+      const onComplete = vi.fn()
+      const sources: CanvasImageSourceInput[] = [
+        {
+          src: 'blob:qapp-batch-result-owned-elsewhere',
+          sourceFile,
+          fileName: sourceFile.name,
+          sourceWidthHint: 320,
+          sourceHeightHint: 180
+        }
+      ]
+      render(<LargeImageBatchHarness sources={sources} onComplete={onComplete} />)
+
+      await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+      const [items] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem[]]
+      const imageItem = items.find((item): item is CanvasImageItem => item.type === 'image')
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(createObjectURL).toHaveBeenCalledWith(sourceFile)
+      expect(imageItem?.src).toBe('blob:canvas-owned-batch-result')
+      expect(imageItem?.sourceFile).toBe(sourceFile)
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+    } finally {
+      window.Image = originalImageCtor
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        value: originalCreateObjectURL
+      })
+      Object.defineProperty(URL, 'revokeObjectURL', {
+        configurable: true,
+        value: originalRevokeObjectURL
+      })
+    }
+  })
+
   it('preserves the original source File blob on the canvas image item', async () => {
     const originalImageCtor = window.Image
     window.Image = function MockImage() {
@@ -1337,7 +1899,7 @@ describe('useCanvasAssetIntake', () => {
     }
   })
 
-  it('binds the imported .mpcanvas path as the current save target when opening into an empty canvas', async () => {
+  it('does not bind an imported .mpcanvas as the autosave target for an empty canvas', async () => {
     const file = new File(['{}'], 'opened-file.mpcanvas', {
       type: 'application/json'
     }) as File & { path?: string }
@@ -1348,11 +1910,9 @@ describe('useCanvasAssetIntake', () => {
     render(<AssetIntakeHarness file={file} />)
 
     await waitFor(() => {
-      expect(canvasStorage.rememberCanvasSaveTargetPath).toHaveBeenCalledWith(
-        'canvas-1',
-        'C:\\projects\\opened-file.mpcanvas'
-      )
+      expect(importCanvasFileMock).toHaveBeenCalledWith(file, 'canvas-1')
     })
+    expect(canvasStorage.rememberCanvasSaveTargetPath).not.toHaveBeenCalled()
   })
 
   it('does not replace the current save target when .mpcanvas content is merged into a non-empty canvas', async () => {
@@ -1366,7 +1926,7 @@ describe('useCanvasAssetIntake', () => {
     render(<AssetIntakeHarness file={file} resolveCurrentItemCount={() => 3} />)
 
     await waitFor(() => {
-      expect(importCanvasFileMock).toHaveBeenCalledWith(file)
+      expect(importCanvasFileMock).toHaveBeenCalledWith(file, 'canvas-1')
     })
 
     expect(canvasStorage.rememberCanvasSaveTargetPath).not.toHaveBeenCalled()

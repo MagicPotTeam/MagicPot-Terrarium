@@ -1,4 +1,4 @@
-import { is, platform } from '@electron-toolkit/utils'
+﻿import { is, platform } from '@electron-toolkit/utils'
 import { app } from 'electron'
 import { Build, BuildEnv, BuildMode, EmbeddedDefaults, Env, PathMap } from '@shared/config/buildEnv'
 import path from 'path'
@@ -66,7 +66,10 @@ function getDataDir() {
 ////////////////
 
 function getComfyRuntimeRoot(env: Env): string {
-  return env.build === 'development' ? 'vendor/comfyui' : 'ComfyUI_windows_portable'
+  if (env.build === 'development') return 'vendor/comfyui'
+  const launcherRuntimeDirectory = process.env.MAGICPOT_RUNTIME_DIR
+  if (launcherRuntimeDirectory?.trim()) return launcherRuntimeDirectory.trim()
+  return 'ComfyUI_windows_portable'
 }
 
 function getEmbeddedDefaultsByPlatform(env: Env): EmbeddedDefaults {
@@ -93,8 +96,16 @@ function getEmbeddedDefaultsByPlatform(env: Env): EmbeddedDefaults {
 
 function resolveEmbeddedDefaults(baseDir: string, defaults: EmbeddedDefaults): EmbeddedDefaults {
   return {
-    pythonCmd: defaults.pythonCmd ? path.join(baseDir, defaults.pythonCmd) : '',
-    comfyuiDir: defaults.comfyuiDir ? path.join(baseDir, defaults.comfyuiDir) : '',
+    pythonCmd: defaults.pythonCmd
+      ? path.isAbsolute(defaults.pythonCmd)
+        ? defaults.pythonCmd
+        : path.join(baseDir, defaults.pythonCmd)
+      : '',
+    comfyuiDir: defaults.comfyuiDir
+      ? path.isAbsolute(defaults.comfyuiDir)
+        ? defaults.comfyuiDir
+        : path.join(baseDir, defaults.comfyuiDir)
+      : '',
     comfyuiArgs: defaults.comfyuiArgs
   }
 }

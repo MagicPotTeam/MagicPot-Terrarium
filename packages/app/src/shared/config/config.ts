@@ -378,6 +378,14 @@ type ConfigShape = {
 
   use_remote_llm: boolean
 
+  magic_agent_sdk_server_config: {
+    enable_server: boolean
+    port: number
+    access_token: string
+    actor_kind: string
+    actor_id: string
+  }
+
   local_llm_server_config: {
     enable_server: boolean
     port: number
@@ -522,10 +530,17 @@ export const DEFAULT_CONFIG: Config = {
     auto_check_interval_minutes: 15
   },
   use_remote_llm: false,
+  magic_agent_sdk_server_config: {
+    enable_server: false,
+    port: 0,
+    access_token: '',
+    actor_kind: '',
+    actor_id: ''
+  },
   local_llm_server_config: {
     enable_server: false,
     port: 3721,
-    bind_host: '127.0.0.1',
+    bind_host: '0.0.0.0',
     access_token: '',
     access_tokens: []
   },

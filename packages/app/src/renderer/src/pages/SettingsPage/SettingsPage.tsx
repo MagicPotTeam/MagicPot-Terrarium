@@ -6,7 +6,8 @@ import {
   Extension as ExtensionIcon,
   Hub as HubIcon,
   Info as InfoIcon,
-  Settings as SettingsIcon
+  Settings as SettingsIcon,
+  SystemUpdateAlt as UpdateIcon
 } from '@mui/icons-material'
 import { useTheme } from '@mui/material/styles'
 import { useLocation } from 'react-router-dom'
@@ -21,6 +22,7 @@ import PanelEnvironment from './PanelEnvironment'
 import PanelGeneral from './PanelGeneral'
 import PanelLLM from './PanelLLM'
 import PanelMcp from './PanelMcp'
+import PanelUpdates from './PanelUpdates'
 import type { PanelProps, SettingsTab } from './PanelProps'
 
 const PanelPlugin = lazyWithRetry(() => import('./PanelPlugin'))
@@ -31,6 +33,7 @@ const SETTINGS_TABS: readonly SettingsTab[] = [
   'plugin',
   'llm',
   'mcp',
+  'updates',
   'about'
 ]
 
@@ -150,6 +153,16 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
         )
       },
       {
+        label: localizedText('settings.tabs.updates', 'Updates'),
+        value: 'updates',
+        icon: <UpdateIcon sx={{ fontSize: 18 }} />,
+        Panel: PanelUpdates,
+        description: localizedText(
+          'settings.tab_descs.updates',
+          'Check for app updates and configure Launcher update preferences'
+        )
+      },
+      {
         label: t('settings.tabs.about'),
         value: 'about',
         icon: <InfoIcon sx={{ fontSize: 18 }} />,
@@ -184,7 +197,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onClose }) => {
 
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <Typography sx={{ fontSize: 12, fontWeight: 500, color: settingsMetaColor }}>
-              Magic Pot {PACKAGE_VERSION}
+              MagicPot-Terrarium {PACKAGE_VERSION}
             </Typography>
             {onClose && (
               <Tooltip title={t('general.close')} arrow>

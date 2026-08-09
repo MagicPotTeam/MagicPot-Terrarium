@@ -106,6 +106,65 @@ const renderFileAttachmentIcon = (attachment: ChatAttachment) => {
 const MIN_TEXTAREA_HEIGHT = 24
 const TEXTAREA_BOTTOM_VISIBILITY_PADDING = 28
 const COMPOSER_VERTICAL_OVERHEAD = 140
+const ATTACHMENT_TRAY_GAP = 12
+const ATTACHMENT_PREVIEW_ITEM_HEIGHT = 80
+
+const ComposerImageThumbnail: React.FC<{
+  src: string
+  alt: string
+  onPreview: () => void
+}> = ({ src, alt, onPreview }) => {
+  const { t } = useTranslation()
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    setFailed(false)
+  }, [src])
+
+  const failureLabel = t('chat.image_load_failed_label', {
+    name: alt,
+    defaultValue: '{{name}} failed to load'
+  })
+
+  if (failed) {
+    return (
+      <Box
+        role="img"
+        aria-label={failureLabel}
+        sx={{
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          bgcolor: 'action.hover',
+          color: 'text.secondary',
+          px: 1,
+          textAlign: 'center'
+        }}
+      >
+        <Typography variant="caption">
+          {t('chat.image_unavailable', { defaultValue: 'Image unavailable' })}
+        </Typography>
+      </Box>
+    )
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      width={80}
+      height={ATTACHMENT_PREVIEW_ITEM_HEIGHT}
+      loading="lazy"
+      decoding="async"
+      style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
+      onError={() => setFailed(true)}
+      onClick={onPreview}
+    />
+  )
+}
+const ATTACHMENT_PREVIEW_SCROLLBAR_GUTTER = 12
 const MIN_ATTACHMENT_PREVIEW_HEIGHT = 88
 const MAX_ATTACHMENT_PREVIEW_HEIGHT = 240
 const ATTACHMENT_PREVIEW_HEIGHT_RATIO = 0.32
@@ -116,15 +175,6 @@ const parseCssPixelValue = (value: unknown): number | null => {
 
   const parsed = Number.parseFloat(value)
   return Number.isFinite(parsed) ? parsed : null
-}
-
-const scrollTextareaToBottom = (textarea: HTMLTextAreaElement) => {
-  textarea.scrollTop = textarea.scrollHeight
-  window.requestAnimationFrame(() => {
-    if (textarea.isConnected) {
-      textarea.scrollTop = textarea.scrollHeight
-    }
-  })
 }
 
 const StableNativeTextarea = React.forwardRef<HTMLTextAreaElement, InputBaseComponentProps>(
@@ -141,6 +191,8 @@ const StableNativeTextarea = React.forwardRef<HTMLTextAreaElement, InputBaseComp
       const resolvedStyle = style as React.CSSProperties | undefined
       const minHeight = parseCssPixelValue(resolvedStyle?.minHeight) ?? MIN_TEXTAREA_HEIGHT
       const maxHeight = parseCssPixelValue(resolvedStyle?.maxHeight)
+      const previousScrollTop = textarea.scrollTop
+      const wasAtBottom = textarea.scrollHeight - textarea.clientHeight - previousScrollTop <= 1
 
       textarea.style.height = 'auto'
       const nextHeight =
@@ -148,9 +200,7 @@ const StableNativeTextarea = React.forwardRef<HTMLTextAreaElement, InputBaseComp
           ? Math.max(minHeight, textarea.scrollHeight)
           : Math.max(minHeight, Math.min(textarea.scrollHeight, maxHeight))
       textarea.style.height = `${nextHeight}px`
-      if (document.activeElement === textarea) {
-        scrollTextareaToBottom(textarea)
-      }
+      textarea.scrollTop = wasAtBottom ? textarea.scrollHeight : previousScrollTop
     }, [style])
 
     useLayoutEffect(() => {
@@ -335,6 +385,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   const hasModelSelectorSlot = modelSelectorSlot != null
 
   const composerRootRef = useRef<HTMLDivElement | null>(null)
+  const attachmentPreviewRef = useRef<HTMLDivElement | null>(null)
   const committedInputValueRef = useRef(inputValue)
   const lastInputSyncRef = useRef({ key: inputSyncKey, value: inputValue })
   const isComposingInputRef = useRef(false)
@@ -347,6 +398,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   const [attachmentPreviewMaxHeight, setAttachmentPreviewMaxHeight] = useState<number | undefined>(
     undefined
   )
+  const [attachmentPreviewOverflowing, setAttachmentPreviewOverflowing] = useState(false)
 
   useEffect(() => {
     const syncKeyChanged = inputSyncKey !== lastInputSyncRef.current.key
@@ -373,19 +425,34 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     if (!flexCol) return
 
     const parentRect = flexCol.getBoundingClientRect()
-    // The composer sits at the bottom of a flex column. When content grows, the
-    // message list above can shrink, so the textarea should be capped by the
-    // panel height instead of the composer's current rendered height.
-    const maxHeight = Math.round(
-      Math.max(MIN_TEXTAREA_HEIGHT, parentRect.height - COMPOSER_VERTICAL_OVERHEAD)
-    )
-    const nextAttachmentPreviewMaxHeight = Math.round(
-      Math.min(
-        MAX_ATTACHMENT_PREVIEW_HEIGHT,
-        Math.max(
-          MIN_ATTACHMENT_PREVIEW_HEIGHT,
-          Math.floor(parentRect.height * ATTACHMENT_PREVIEW_HEIGHT_RATIO)
+    const composerMaxHeight = Math.max(MIN_TEXTAREA_HEIGHT, parentRect.height)
+    const nextAttachmentPreviewMaxHeight = visiblePendingAttachmentEntries.length
+      ? Math.max(
+          0,
+          Math.min(
+            MAX_ATTACHMENT_PREVIEW_HEIGHT,
+            Math.max(
+              MIN_ATTACHMENT_PREVIEW_HEIGHT,
+              Math.floor(parentRect.height * ATTACHMENT_PREVIEW_HEIGHT_RATIO)
+            ),
+            composerMaxHeight -
+              COMPOSER_VERTICAL_OVERHEAD -
+              ATTACHMENT_TRAY_GAP -
+              MIN_TEXTAREA_HEIGHT
+          )
         )
+      : 0
+    // The attachment tray and textarea share one vertical budget. Previously the
+    // textarea received the full panel allowance and the tray was added on top,
+    // which pushed the composer below the clipped Agent pane.
+    const maxHeight = Math.round(
+      Math.max(
+        MIN_TEXTAREA_HEIGHT,
+        composerMaxHeight -
+          COMPOSER_VERTICAL_OVERHEAD -
+          (nextAttachmentPreviewMaxHeight > 0
+            ? nextAttachmentPreviewMaxHeight + ATTACHMENT_TRAY_GAP
+            : 0)
       )
     )
 
@@ -393,7 +460,16 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     setAttachmentPreviewMaxHeight((prev) =>
       Object.is(prev, nextAttachmentPreviewMaxHeight) ? prev : nextAttachmentPreviewMaxHeight
     )
-  }, [])
+
+    const attachmentPreview = attachmentPreviewRef.current
+    setAttachmentPreviewOverflowing(
+      Boolean(
+        attachmentPreview &&
+        nextAttachmentPreviewMaxHeight > 0 &&
+        attachmentPreview.scrollHeight > nextAttachmentPreviewMaxHeight
+      )
+    )
+  }, [visiblePendingAttachmentEntries.length])
 
   useLayoutEffect(() => {
     let resizeFrameId: number | null = null
@@ -669,6 +745,9 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
         bgcolor: theme.palette.mode === 'light' ? 'transparent' : undefined,
         display: 'flex',
         flexDirection: 'column',
+        flexShrink: 0,
+        minHeight: 0,
+        maxHeight: '100%',
         width: '100%'
       }}
     >
@@ -698,6 +777,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
           {/* 待上传附件预览 */}
           {visiblePendingAttachmentEntries.length > 0 && (
             <Box
+              ref={attachmentPreviewRef}
               data-testid="chat-composer-attachments"
               sx={{
                 mb: 1,
@@ -708,7 +788,11 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                 maxHeight: resolvedAttachmentPreviewMaxHeight,
                 overflowY: 'auto',
                 overflowX: 'hidden',
-                pr: 0.5
+                pb: 0.5,
+                pr: attachmentPreviewOverflowing ? `${ATTACHMENT_PREVIEW_SCROLLBAR_GUTTER}px` : 0.5,
+                '& > *': {
+                  flexShrink: 0
+                }
               }}
             >
               {visiblePendingAttachmentEntries.map(({ attachment, originalIndex }, idx) => {
@@ -719,7 +803,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                     sx={{
                       position: 'relative',
                       width: 80,
-                      height: 80,
+                      height: ATTACHMENT_PREVIEW_ITEM_HEIGHT,
                       borderRadius: 1,
                       overflow: 'hidden',
                       border: 1,
@@ -727,17 +811,10 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                     }}
                   >
                     {attachment.type === 'image' ? (
-                      <img
+                      <ComposerImageThumbnail
                         src={normalizeLocalMediaUrl(attachment.url)}
                         alt={t('chat.preview_alt_index', { index: idx + 1 })}
-                        style={{
-                          width: '100%',
-                          height: '100%',
-                          objectFit: 'cover',
-                          cursor: 'pointer'
-                        }}
-                        loading="lazy"
-                        onClick={() => onPreviewImage(attachment.url)}
+                        onPreview={() => onPreviewImage(attachment.url)}
                       />
                     ) : attachment.type === 'video' ? (
                       <Box

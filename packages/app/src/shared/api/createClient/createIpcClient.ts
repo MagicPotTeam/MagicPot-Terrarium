@@ -4,7 +4,7 @@ import {
   ServerStreamingTransport,
   ServerStreamingError
 } from '@shared/api/apiUtils/streaming'
-import { ApiDefSheet, ApiType, ServiceDefSheet } from '../apiUtils/serviceDefSheet'
+import { ApiDefSheet } from '../apiUtils/serviceDefSheet'
 
 function normalizeInvokeError(error: unknown): Error {
   const fallback =
@@ -88,22 +88,16 @@ function invokeServerStreaming<REQ, RESP>(
  *
  * @returns Api Instance
  */
-export function createIpcClient<T extends ApiType>(apiDef: ApiDefSheet<T>): T {
+export function createIpcClient<T extends object>(apiDef: ApiDefSheet<T>): T {
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const result = {} as any
 
   // 遍历 apiDef 中的每个服务
-  for (const [serviceName, serviceDef] of Object.entries(apiDef) as [
-    string,
-    ServiceDefSheet<T[string]>
-  ][]) {
+  for (const [serviceName, serviceDef] of Object.entries(apiDef) as [string, object][]) {
     result[serviceName] = {}
 
     // 遍历每个服务中的方法定义
-    for (const [methodName, methodDef] of Object.entries(serviceDef) as [
-      string,
-      ServiceDefSheet<T[string]>[string]
-    ][]) {
+    for (const [methodName, methodDef] of Object.entries(serviceDef)) {
       const fullMethodName = `${serviceName}.${methodName}`
 
       // 根据方法类型调用对应的 invoke 函数

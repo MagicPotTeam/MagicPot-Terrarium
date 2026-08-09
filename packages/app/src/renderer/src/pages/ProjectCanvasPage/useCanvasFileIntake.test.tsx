@@ -12,6 +12,8 @@ import { useCanvasFileIntake } from './useCanvasFileIntake'
 type TestAddImageToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addImageToCanvas']
 type TestAddImagesToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addImagesToCanvas']
 type TestAddFileToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addFileToCanvas']
+type TestAddModel3DToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addModel3DToCanvas']
+type TestAddVideoToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addVideoToCanvas']
 type TestAddTextToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addTextToCanvas']
 type TestNotifyWarning = NonNullable<Parameters<typeof useCanvasFileIntake>[0]['notifyWarning']>
 type TestImageBatchImportProgress = NonNullable<
@@ -128,6 +130,40 @@ function buildTypeOnlyFileDragEvent(types: string[]): DragEvent {
   return event
 }
 
+function buildAgentAttachmentDropEvent(path: string, clientX = 120, clientY = 160): DragEvent {
+  const event = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+  const data = new Map<string, string>([
+    [
+      'application/x-qapp-image',
+      JSON.stringify({
+        itemTypes: ['image'],
+        attachments: [
+          {
+            type: 'image',
+            url: path,
+            name: path.split(/[\\/]/).pop() ?? 'attachment',
+            mimeType: 'image/png'
+          }
+        ]
+      })
+    ],
+    ['text/plain', path]
+  ])
+  Object.defineProperty(event, 'dataTransfer', {
+    configurable: true,
+    value: {
+      files: [] as unknown as FileList,
+      items: [] as unknown as DataTransferItemList,
+      types: ['application/x-qapp-image', 'text/plain'],
+      dropEffect: 'none',
+      getData: (type: string) => data.get(type) ?? ''
+    }
+  })
+  Object.defineProperty(event, 'clientX', { configurable: true, value: clientX })
+  Object.defineProperty(event, 'clientY', { configurable: true, value: clientY })
+  return event
+}
+
 function buildTypelessDragEvent(): DragEvent {
   const event = new Event('dragover', { bubbles: true, cancelable: true }) as DragEvent
   Object.defineProperty(event, 'dataTransfer', {
@@ -149,35 +185,43 @@ function FileIntakeHarness({
   addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined),
   addImagesToCanvas = vi.fn<TestAddImagesToCanvas>().mockResolvedValue(undefined),
   addFileToCanvas = vi.fn<TestAddFileToCanvas>().mockResolvedValue(undefined),
+  addModel3DToCanvas = vi.fn<TestAddModel3DToCanvas>().mockResolvedValue(undefined),
+  addVideoToCanvas = vi.fn<TestAddVideoToCanvas>().mockResolvedValue(undefined),
   notifyWarning = vi.fn<TestNotifyWarning>(),
   onImageBatchImportProgress = vi.fn<TestImageBatchImportProgress>(),
   quickAppTargetActive = false,
   withExternalInput = false,
-  initialCanvasActive = true
+  initialCanvasActive = true,
+  lastViewportPoint = null
 }: {
   addTextToCanvas: TestAddTextToCanvas
   addImageToCanvas?: TestAddImageToCanvas
   addImagesToCanvas?: TestAddImagesToCanvas
   addFileToCanvas?: TestAddFileToCanvas
+  addModel3DToCanvas?: TestAddModel3DToCanvas
+  addVideoToCanvas?: TestAddVideoToCanvas
   notifyWarning?: TestNotifyWarning
   onImageBatchImportProgress?: TestImageBatchImportProgress
   quickAppTargetActive?: boolean
   withExternalInput?: boolean
   initialCanvasActive?: boolean
+  lastViewportPoint?: { x: number; y: number } | null
 }) {
   const canvasContainerRef = useRef<HTMLDivElement>(null)
   const canvasActiveRef = useRef(initialCanvasActive)
+  const lastViewportPointRef = useRef<{ x: number; y: number } | null>(lastViewportPoint)
 
   const { handleDrop, handleDragOver } = useCanvasFileIntake({
     canvasId: 'canvas-1',
     canvasContainerRef,
     canvasActiveRef,
+    lastViewportPointRef,
     notifyWarning,
     addImageToCanvas,
     addImagesToCanvas,
-    addModel3DToCanvas: vi.fn().mockResolvedValue(undefined),
+    addModel3DToCanvas,
     addModel3DUrlToCanvas: vi.fn(),
-    addVideoToCanvas: vi.fn().mockResolvedValue(undefined),
+    addVideoToCanvas,
     addFileToCanvas,
     addOcrResultToCanvas: vi.fn().mockResolvedValue(undefined),
     addTextToCanvas,
@@ -218,6 +262,9 @@ function FileIntakeHarness({
         }}
         onDrop={handleDrop}
         onDragOver={handleDragOver}
+        onPointerMove={(event) => {
+          lastViewportPointRef.current = { x: event.clientX, y: event.clientY }
+        }}
       >
         canvas
       </div>
@@ -245,6 +292,7 @@ afterEach(() => {
     Reflect.deleteProperty(globalThis, 'createImageBitmap')
   }
   resetQuickAppImagePasteTargetsForTest()
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -287,6 +335,185 @@ describe('useCanvasFileIntake', () => {
 
     await waitFor(() => {
       expect(addTextToCanvas).toHaveBeenCalledWith('Pasted via shortcut')
+    })
+  })
+
+  it('pastes clipboard text at the last pointer position inside the canvas', async () => {
+    const addTextToCanvas = vi.fn<TestAddTextToCanvas>()
+    render(<FileIntakeHarness addTextToCanvas={addTextToCanvas} />)
+
+    const canvas = screen.getByTestId('canvas-paste-surface')
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 10,
+      top: 20,
+      right: 510,
+      bottom: 420,
+      width: 500,
+      height: 400,
+      x: 10,
+      y: 20,
+      toJSON: () => ({})
+    })
+    fireEvent.pointerMove(canvas, { clientX: 210, clientY: 160 })
+    window.dispatchEvent(buildClipboardPasteEvent({ text: 'Pointer text', includeItems: false }))
+
+    await waitFor(() => {
+      expect(addTextToCanvas).toHaveBeenCalledWith('Pointer text', 210, 160)
+    })
+  })
+
+  it('pastes clipboard images and image batches at the last in-canvas pointer position', async () => {
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
+    const addImagesToCanvas = vi.fn<TestAddImagesToCanvas>().mockResolvedValue(undefined)
+    const { unmount } = render(
+      <FileIntakeHarness
+        addTextToCanvas={vi.fn()}
+        addImageToCanvas={addImageToCanvas}
+        addImagesToCanvas={addImagesToCanvas}
+      />
+    )
+
+    let canvas = screen.getByTestId('canvas-paste-surface')
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 400,
+      width: 600,
+      height: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    })
+    fireEvent.pointerMove(canvas, { clientX: 240, clientY: 180 })
+    window.dispatchEvent(
+      buildClipboardPasteEvent({
+        includeItems: false,
+        files: [new File(['one'], 'one.png', { type: 'image/png' })]
+      })
+    )
+    await waitFor(() => expect(addImageToCanvas).toHaveBeenCalledTimes(1))
+    const singleImageOptions = addImageToCanvas.mock.calls[0]?.[1]
+    expect(addImageToCanvas.mock.calls[0]?.[0]).not.toMatch(/^data:/i)
+    expect(singleImageOptions).toMatchObject({
+      clientX: 240,
+      clientY: 180,
+      sourceFile: expect.any(File)
+    })
+
+    unmount()
+    render(
+      <FileIntakeHarness
+        addTextToCanvas={vi.fn()}
+        addImageToCanvas={addImageToCanvas}
+        addImagesToCanvas={addImagesToCanvas}
+      />
+    )
+    canvas = screen.getByTestId('canvas-paste-surface')
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 400,
+      width: 600,
+      height: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    })
+    fireEvent.pointerMove(canvas, { clientX: 300, clientY: 200 })
+    window.dispatchEvent(
+      buildClipboardPasteEvent({
+        includeItems: false,
+        files: [
+          new File(['one'], 'one.png', { type: 'image/png' }),
+          new File(['two'], 'two.png', { type: 'image/png' })
+        ]
+      })
+    )
+
+    await waitFor(() => expect(addImagesToCanvas).toHaveBeenCalledTimes(1))
+    const [batchSources] = addImagesToCanvas.mock.calls[0] ?? []
+    expect(batchSources).toHaveLength(2)
+    expect(batchSources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          src: expect.not.stringMatching(/^data:/i),
+          sourceFile: expect.any(File)
+        })
+      ])
+    )
+  })
+
+  it('preserves fallback placement when the last pointer position is outside the canvas', async () => {
+    const addTextToCanvas = vi.fn<TestAddTextToCanvas>()
+    render(<FileIntakeHarness addTextToCanvas={addTextToCanvas} />)
+
+    const canvas = screen.getByTestId('canvas-paste-surface')
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      top: 100,
+      right: 500,
+      bottom: 400,
+      width: 400,
+      height: 300,
+      x: 100,
+      y: 100,
+      toJSON: () => ({})
+    })
+    fireEvent.pointerMove(canvas, { clientX: 50, clientY: 50 })
+    window.dispatchEvent(buildClipboardPasteEvent({ text: 'Fallback text', includeItems: false }))
+
+    await waitFor(() => expect(addTextToCanvas).toHaveBeenCalledWith('Fallback text'))
+  })
+
+  it('routes pasted 3D, video, and ordinary files with pointer coordinates', async () => {
+    const addModel3DToCanvas = vi.fn<TestAddModel3DToCanvas>().mockResolvedValue(undefined)
+    const addVideoToCanvas = vi.fn<TestAddVideoToCanvas>().mockResolvedValue(undefined)
+    const addFileToCanvas = vi.fn<TestAddFileToCanvas>().mockResolvedValue(undefined)
+    render(
+      <FileIntakeHarness
+        addTextToCanvas={vi.fn()}
+        addModel3DToCanvas={addModel3DToCanvas}
+        addVideoToCanvas={addVideoToCanvas}
+        addFileToCanvas={addFileToCanvas}
+      />
+    )
+
+    const canvas = screen.getByTestId('canvas-paste-surface')
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 400,
+      width: 600,
+      height: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    })
+    fireEvent.pointerMove(canvas, { clientX: 320, clientY: 220 })
+    window.dispatchEvent(
+      buildClipboardPasteEvent({
+        includeItems: false,
+        files: [
+          new File(['model'], 'mesh.glb', { type: 'model/gltf-binary' }),
+          new File(['video'], 'clip.mp4', { type: 'video/mp4' }),
+          new File(['data'], 'notes.csv', { type: 'text/csv' })
+        ]
+      })
+    )
+
+    await waitFor(() => {
+      expect(addModel3DToCanvas).toHaveBeenCalledWith(expect.any(File), {
+        clientX: 320,
+        clientY: 220
+      })
+      expect(addVideoToCanvas).toHaveBeenCalledWith(expect.any(File), {
+        clientX: 320,
+        clientY: 220
+      })
+      expect(addFileToCanvas).toHaveBeenCalledWith(expect.any(File), 320, 220)
     })
   })
 
@@ -613,7 +840,8 @@ describe('useCanvasFileIntake', () => {
 
       expect(agentDragOverListener).toHaveBeenCalledTimes(1)
       expect(agentDropListener).toHaveBeenCalledTimes(1)
-      expect(dragOverEvent.defaultPrevented).toBe(false)
+      expect(dragOverEvent.defaultPrevented).toBe(true)
+      expect(dragOverEvent.dataTransfer?.dropEffect).toBe('copy')
       expect(dropEvent.defaultPrevented).toBe(false)
       expect(addImageToCanvas).not.toHaveBeenCalled()
     } finally {
@@ -655,6 +883,80 @@ describe('useCanvasFileIntake', () => {
       })
       agentRoot.remove()
     }
+  })
+
+  it('waits briefly after mouse-up before importing an agent attachment', async () => {
+    vi.useFakeTimers()
+    const addTextToCanvas = vi.fn()
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
+
+    render(
+      <FileIntakeHarness addTextToCanvas={addTextToCanvas} addImageToCanvas={addImageToCanvas} />
+    )
+
+    try {
+      const dropEvent = buildAgentAttachmentDropEvent('/tmp/agent-reference.png', 320, 240)
+      screen.getByTestId('canvas-paste-surface').dispatchEvent(dropEvent)
+
+      expect(dropEvent.defaultPrevented).toBe(true)
+      expect(addImageToCanvas).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(119)
+      expect(addImageToCanvas).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(1)
+      await Promise.resolve()
+      expect(addImageToCanvas).toHaveBeenCalledTimes(1)
+      expect(addImageToCanvas).toHaveBeenCalledWith(
+        'local-media:///tmp/agent-reference.png',
+        expect.objectContaining({
+          clientX: 320,
+          clientY: 240,
+          fileName: 'agent-reference.png'
+        })
+      )
+    } finally {
+      await vi.runOnlyPendingTimersAsync()
+      vi.useRealTimers()
+    }
+  })
+
+  it('uses the matching QuickApp drag file as the stable canvas source', async () => {
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
+    const sourceFile = new File(['generated-image'], 'generated.png', { type: 'image/png' })
+    render(<FileIntakeHarness addTextToCanvas={vi.fn()} addImageToCanvas={addImageToCanvas} />)
+
+    const quickAppPayload = JSON.stringify({
+      objectUrl: 'blob:quickapp-result-owned-elsewhere',
+      fileItem: { filename: sourceFile.name },
+      sourceWidth: 1024,
+      sourceHeight: 768
+    })
+    const dropEvent = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+    Object.defineProperty(dropEvent, 'clientX', { configurable: true, value: 320 })
+    Object.defineProperty(dropEvent, 'clientY', { configurable: true, value: 240 })
+    Object.defineProperty(dropEvent, 'dataTransfer', {
+      configurable: true,
+      value: {
+        files: [sourceFile],
+        items: [],
+        getData: vi.fn((type: string) =>
+          type === 'application/x-qapp-image' ? quickAppPayload : ''
+        )
+      }
+    })
+    screen.getByTestId('canvas-paste-surface').dispatchEvent(dropEvent)
+
+    await waitFor(() => expect(addImageToCanvas).toHaveBeenCalledTimes(1))
+    expect(addImageToCanvas.mock.calls[0]?.[0]).toBe('blob:quickapp-result-owned-elsewhere')
+    expect(addImageToCanvas.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        sourceFile,
+        fileName: sourceFile.name,
+        sourceWidthHint: 1024,
+        sourceHeightHint: 768
+      })
+    )
   })
 
   it('prefers the internal quick-app image payload over placeholder drop files', async () => {
@@ -803,16 +1105,18 @@ describe('useCanvasFileIntake', () => {
     })
 
     expect(addImagesToCanvas.mock.calls[0]?.[0]).toEqual([
-      {
+      expect.objectContaining({
         src: 'local-media:///C:/assets/first.png',
         fileName: 'first.png',
-        sizeBytes: firstImage.size
-      },
-      {
+        sizeBytes: firstImage.size,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      }),
+      expect.objectContaining({
         src: 'local-media:///C:/assets/second.png',
         fileName: 'second.png',
-        sizeBytes: secondImage.size
-      }
+        sizeBytes: secondImage.size,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      })
     ])
   })
 
@@ -1046,16 +1350,18 @@ describe('useCanvasFileIntake', () => {
 
     expect(getPathForFile).toHaveBeenCalledTimes(2)
     expect(addImagesToCanvas.mock.calls[0]?.[0]).toEqual([
-      {
+      expect.objectContaining({
         src: 'local-media:///C:/bridge/first.png',
         fileName: 'first.png',
-        sizeBytes: firstImage.size
-      },
-      {
+        sizeBytes: firstImage.size,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      }),
+      expect.objectContaining({
         src: 'local-media:///C:/bridge/second.png',
         fileName: 'second.png',
-        sizeBytes: secondImage.size
-      }
+        sizeBytes: secondImage.size,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      })
     ])
   })
 
@@ -1091,18 +1397,20 @@ describe('useCanvasFileIntake', () => {
     expect(createObjectURL).toHaveBeenCalledTimes(2)
     expect(readAsDataURL).not.toHaveBeenCalled()
     expect(addImagesToCanvas.mock.calls[0]?.[0]).toEqual([
-      {
+      expect.objectContaining({
         src: 'blob:first.png',
         fileName: 'first.png',
         sizeBytes: firstImage.size,
-        sourceFile: firstImage
-      },
-      {
+        sourceFile: firstImage,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      }),
+      expect.objectContaining({
         src: 'blob:second.png',
         fileName: 'second.png',
         sizeBytes: secondImage.size,
-        sourceFile: secondImage
-      }
+        sourceFile: secondImage,
+        sourceIdentity: expect.objectContaining({ kind: 'session-blob' })
+      })
     ])
   })
 

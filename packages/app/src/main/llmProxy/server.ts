@@ -5,7 +5,8 @@ import http from 'http'
 import os from 'os'
 import fs from 'fs'
 import path from 'path'
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { publishTrustedChannelMessage } from '../magicAgentPlatform2/triggers/channelMessageEvents'
 import { app } from 'electron'
 import { buildMagicPotAppCatalogSnapshot } from '@shared/app/catalog'
 import {
@@ -48,7 +49,7 @@ const testUiPolicy = resolveTestUiPolicy(readTestUiEnv())
 const CANVAS_SYNC_REMOVED_ERROR =
   'Canvas mirroring has been removed. Remote agents can only access content explicitly attached to the current request.'
 const LEGACY_CHAT_ENDPOINTS = new Set(['/api/bot/message', '/api/bot/chat', '/api/message'])
-const DEFAULT_LLM_PROXY_BIND_HOST = '127.0.0.1'
+const DEFAULT_LLM_PROXY_BIND_HOST = '0.0.0.0'
 const DEFAULT_HTTP_BODY_LIMIT_BYTES = 16 * 1024 * 1024
 const HTTP_HEADERS_TIMEOUT_MS = 15_000
 const HTTP_REQUEST_TIMEOUT_MS = 120_000
@@ -1650,7 +1651,22 @@ export function startLLMProxyServer(): void {
           return
         }
         const parsedBody = await readJsonRequestBody<unknown>(req, { allowEmpty: true })
-        const reqData = normalizeLegacyChatRequest(isRecord(parsedBody) ? parsedBody : {})
+        const rawRequest = isRecord(parsedBody) ? parsedBody : {}
+        const reqData = normalizeLegacyChatRequest(rawRequest)
+        const channelId = cleanUnknownString(rawRequest.channelId)
+        const messageId = cleanUnknownString(rawRequest.messageId)
+        const eventId = cleanUnknownString(rawRequest.eventId) || messageId
+        if (channelId && messageId && eventId) {
+          const content =
+            cleanUnknownString(rawRequest.message) || cleanUnknownString(rawRequest.text) || ''
+          publishTrustedChannelMessage({
+            eventId,
+            channelId,
+            messageId,
+            receivedAt: Date.now(),
+            payloadDigest: createHash('sha256').update(content, 'utf8').digest('hex')
+          })
+        }
         if (reqData.messages.length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'Missing message content or messages.' }))

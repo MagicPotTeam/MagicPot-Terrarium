@@ -1,4 +1,5 @@
 import { Config } from '@shared/config/config'
+import type { PolicyJsonRecord } from '../../shared/magicAgentPlatform2'
 import { throwIfAborted } from '@shared/agent'
 import { MAGICPOT_SESSION_STATUS_TOOL_NAME, normalizeMagicPotToolName } from '@shared/app/types'
 import type { ProjectTraceDocument, ProjectTraceProjectRef } from '@shared/projectTrace'
@@ -32,7 +33,31 @@ import {
 import { McpClientManager } from '../mcp/clientManager'
 import { getMcpClientManager } from '../mcp/runtime'
 import { getMcpRuntimeStatus } from '../mcp/status'
-import { runAgentTerminalCommand } from './agentTerminal'
+import { prepareAgentTerminalCommand } from './agentTerminal'
+import {
+  getAssistantTerminalPolicyRuntime,
+  type AssistantTerminalPolicyRuntime
+} from '../magicAgentPlatform2/productionRuntime'
+import {
+  createFilesToolPolicyRequest,
+  createTerminalPolicyRequest,
+  assertPolicyRequest,
+  type PolicyRequest
+} from '@shared/magicAgentPlatform2'
+import {
+  FilesToolHost,
+  GitToolHost,
+  CommandJobsToolHost,
+  type CommandJobsConfinementAdapter,
+  PythonToolHost,
+  NotebookToolHost,
+  NotebookExecutionCoordinator,
+  PythonNotebookExecutionBoundary,
+  probePythonInterpreter,
+  createProductionCommandJobsConfinementAdapter,
+  createMagicAgentToolAuditSink
+} from '../magicAgentPlatform2/toolHost'
+import { randomUUID } from 'node:crypto'
 import { ProjectTraceFSCli } from '../projectTrace/fs'
 import {
   buildProjectTraceReplayBundle,
@@ -56,6 +81,13 @@ export type AssistantToolCallContext = {
   workspaceTaskContext?: AssistantTaskContext
   workspacePinnedContext?: AssistantPinnedContext
   workspaceReusableContext?: AssistantReusableContextPack
+  workspaceRootDir?: string
+  toolPolicyOrigin?: 'assistant' | 'graph'
+  terminalPolicyRuntime?: AssistantTerminalPolicyRuntime
+  commandConfinementAdapter?: CommandJobsConfinementAdapter
+  terminalApproval?: (
+    request: PolicyRequest
+  ) => { grantId: string; expectedGrantUseCount: number } | undefined
   resumeRun?: (
     route: AssistantRoute,
     runId: string,
@@ -443,6 +475,469 @@ const summarizeStoreLimits = async (
 }
 
 const baseDefinitions: AssistantToolDefinition[] = [
+  {
+    name: 'files.tree',
+    description: 'List a bounded, deterministic tree within the current route workspace.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        path: { type: 'string' },
+        maxDepth: { type: 'integer', minimum: 0, maximum: 12 },
+        maxEntries: { type: 'integer', minimum: 1, maximum: 2000 },
+        maxStringLength: { type: 'integer', minimum: 1, maximum: 1048576 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.read',
+    description:
+      'Read bounded UTF-8 text, allowlisted PNG/JPEG/GIF/WebP bytes, or conservatively extracted PDF text and metadata from a regular workspace file. Media type is verified by magic bytes; binary payloads are never audited.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path'],
+      properties: {
+        path: { type: 'string' },
+        maxBytes: { type: 'integer', minimum: 1, maximum: 1048576 },
+        maxStringLength: { type: 'integer', minimum: 1, maximum: 1048576 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.glob',
+    description:
+      'Match bounded workspace-relative files and directories using *, ?, and ** segments.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['pattern'],
+      properties: {
+        pattern: { type: 'string', maxLength: 512 },
+        path: { type: 'string' },
+        maxDepth: { type: 'integer', minimum: 0, maximum: 12 },
+        maxFiles: { type: 'integer', minimum: 1, maximum: 2000 },
+        maxStringLength: { type: 'integer', minimum: 1, maximum: 1048576 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.grep',
+    description:
+      'Search bounded UTF-8 workspace files with a literal or restricted regular expression.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['query'],
+      properties: {
+        query: { type: 'string', maxLength: 512 },
+        mode: { type: 'string', enum: ['literal', 'regex'] },
+        path: { type: 'string' },
+        fileGlob: { type: 'string', maxLength: 512 },
+        caseSensitive: { type: 'boolean' },
+        maxDepth: { type: 'integer', minimum: 0, maximum: 12 },
+        maxFiles: { type: 'integer', minimum: 1, maximum: 2000 },
+        maxMatches: { type: 'integer', minimum: 1, maximum: 2000 },
+        maxReadBytes: { type: 'integer', minimum: 1, maximum: 1048576 },
+        maxSnippetLength: { type: 'integer', minimum: 1, maximum: 2000 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.json.read',
+    description: 'Read, select, bound, and redact a UTF-8 JSON file within the workspace.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path'],
+      properties: {
+        path: { type: 'string' },
+        pointer: { type: 'string' },
+        maxBytes: { type: 'integer', minimum: 1, maximum: 1048576 },
+        maxDepth: { type: 'integer', minimum: 0, maximum: 12 },
+        maxEntries: { type: 'integer', minimum: 1, maximum: 10000 },
+        maxStringLength: { type: 'integer', minimum: 1, maximum: 1048576 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.write',
+    description:
+      'Create or fully replace a bounded UTF-8 regular file with CAS and a pre-write snapshot.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path', 'content'],
+      properties: {
+        path: { type: 'string' },
+        content: { type: 'string', maxLength: 1048576 },
+        create: { type: 'boolean' },
+        expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+        maxBytes: { type: 'integer', minimum: 1, maximum: 1048576 },
+        maxDiffBytes: { type: 'integer', minimum: 1, maximum: 262144 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.edit',
+    description: 'Apply ordered exact text replacements to one CAS-protected UTF-8 regular file.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path', 'expectedSha256', 'replacements'],
+      properties: {
+        path: { type: 'string' },
+        expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+        replacements: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['old', 'new', 'expectedOccurrences'],
+            properties: {
+              old: { type: 'string', minLength: 1 },
+              new: { type: 'string' },
+              expectedOccurrences: { type: 'integer', minimum: 1 }
+            }
+          }
+        },
+        maxBytes: { type: 'integer', minimum: 1, maximum: 1048576 },
+        maxDiffBytes: { type: 'integer', minimum: 1, maximum: 262144 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.patch',
+    description: 'Apply one exact-path complete-file unified patch with SHA-256 CAS and snapshot.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path', 'patch', 'expectedSha256'],
+      properties: {
+        path: { type: 'string' },
+        patch: { type: 'string', minLength: 1, maxLength: 262144 },
+        expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+        maxBytes: { type: 'integer', minimum: 1, maximum: 1048576 },
+        maxDiffBytes: { type: 'integer', minimum: 1, maximum: 262144 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.multi-edit',
+    description:
+      'Atomically apply validated CAS edits across distinct workspace files with rollback.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['edits'],
+      properties: {
+        edits: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 32,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['path', 'expectedSha256', 'replacements'],
+            properties: {
+              path: { type: 'string' },
+              expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+              replacements: {
+                type: 'array',
+                minItems: 1,
+                maxItems: 100,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['old', 'new', 'expectedOccurrences'],
+                  properties: {
+                    old: { type: 'string', minLength: 1 },
+                    new: { type: 'string' },
+                    expectedOccurrences: { type: 'integer', minimum: 1 }
+                  }
+                }
+              }
+            }
+          }
+        },
+        maxBytes: { type: 'integer', minimum: 1, maximum: 1048576 },
+        maxDiffBytes: { type: 'integer', minimum: 1, maximum: 262144 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.json.write',
+    description:
+      'Write canonical pretty JSON or update one safe existing JSON path with CAS and snapshot.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path'],
+      properties: {
+        path: { type: 'string' },
+        value: {},
+        update: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['path', 'value'],
+          properties: { path: { type: 'string' }, value: {} }
+        },
+        create: { type: 'boolean' },
+        expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+        maxBytes: { type: 'integer', minimum: 1, maximum: 1048576 },
+        maxDiffBytes: { type: 'integer', minimum: 1, maximum: 262144 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.diff',
+    description: 'Compare current workspace text with supplied text or a validated snapshot.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path'],
+      properties: {
+        path: { type: 'string' },
+        text: { type: 'string', maxLength: 1048576 },
+        snapshotToken: { type: 'string' },
+        maxBytes: { type: 'integer', minimum: 1, maximum: 1048576 },
+        maxDiffBytes: { type: 'integer', minimum: 1, maximum: 262144 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.snapshot.list',
+    description: 'List bounded snapshot manifest metadata without exposing snapshot content.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        path: { type: 'string' },
+        maxEntries: { type: 'integer', minimum: 1, maximum: 1000 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'files.snapshot.restore',
+    description: 'CAS-restore a validated snapshot after creating a safety snapshot.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path', 'restoreToken', 'expectedSha256'],
+      properties: {
+        path: { type: 'string' },
+        restoreToken: { type: 'string' },
+        expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    }
+  },
+  {
+    name: 'notebook.list',
+    description: 'List bounded valid nbformat-v4 notebooks in the route workspace.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        path: { type: 'string' },
+        maxEntries: { type: 'integer', minimum: 1, maximum: 1000 }
+      }
+    }
+  },
+  {
+    name: 'notebook.read',
+    description: 'Read and strictly validate one workspace nbformat-v4 notebook.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path'],
+      properties: { path: { type: 'string' } }
+    }
+  },
+  ...(['insert', 'replace', 'delete', 'convert', 'clear-outputs'] as const).map((operation) => ({
+    name: `notebook.${operation}`,
+    description: `Stateless CAS notebook ${operation} with one approved notebook.write mutation.`,
+    inputSchema: {
+      type: 'object',
+      additionalProperties: true,
+      required: ['path', 'expectedSha256'],
+      properties: {
+        path: { type: 'string' },
+        expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' }
+      }
+    }
+  })),
+  ...(['execute-cell', 'execute-all'] as const).map((operation) => ({
+    name: `notebook.${operation}`,
+    description:
+      'Execute notebook code cells in one bounded stateless Python invocation; outputs commit atomically after SHA/generation CAS.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path', 'expectedSha256', 'expectedGeneration'],
+      properties: {
+        path: { type: 'string' },
+        expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+        expectedGeneration: { type: 'integer', minimum: 0 },
+        cellIds: { type: 'array', minItems: 1, maxItems: 256, items: { type: 'string' } },
+        artifacts: { type: 'array', maxItems: 32, items: { type: 'string' } },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 600000 },
+        maxOutputBytes: { type: 'integer', minimum: 1, maximum: 4194304 }
+      }
+    }
+  })),
+  ...(['status', 'interrupt', 'restart'] as const).map((operation) => ({
+    name: `notebook.${operation}`,
+    description: `Stateless notebook execution ${operation}.`,
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['path'],
+      properties: { path: { type: 'string' }, executionId: { type: 'string' } }
+    }
+  })),
+  {
+    name: 'git.status',
+    description:
+      'Return bounded structured Git working-tree status for a workspace-contained repository.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        repository: { type: 'string' },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 },
+        maxOutputBytes: { type: 'integer', minimum: 1, maximum: 524288 }
+      }
+    }
+  },
+  {
+    name: 'git.diff',
+    description: 'Return a bounded text-only Git diff and deterministic file statistics.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        repository: { type: 'string' },
+        revision: { type: 'string' },
+        pathspecs: { type: 'array', maxItems: 64, items: { type: 'string' } },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 },
+        maxOutputBytes: { type: 'integer', minimum: 1, maximum: 524288 }
+      }
+    }
+  },
+  {
+    name: 'git.log',
+    description: 'Return bounded, deterministically parsed local Git commit history.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        repository: { type: 'string' },
+        revision: { type: 'string' },
+        pathspecs: { type: 'array', maxItems: 64, items: { type: 'string' } },
+        maxCommits: { type: 'integer', minimum: 1, maximum: 100 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 },
+        maxOutputBytes: { type: 'integer', minimum: 1, maximum: 524288 }
+      }
+    }
+  },
+  {
+    name: 'git.show',
+    description: 'Show one bounded local commit with metadata, text diff, and file statistics.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['revision'],
+      properties: {
+        repository: { type: 'string' },
+        revision: { type: 'string' },
+        pathspecs: { type: 'array', maxItems: 64, items: { type: 'string' } },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 },
+        maxOutputBytes: { type: 'integer', minimum: 1, maximum: 524288 }
+      }
+    }
+  },
+  {
+    name: 'git.branch',
+    description: 'Create one new local branch at the CAS-validated current HEAD.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['branch', 'expectedHead'],
+      properties: {
+        repository: { type: 'string' },
+        branch: { type: 'string' },
+        expectedHead: { type: 'string', pattern: '^[0-9a-f]{40}$' },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 },
+        maxOutputBytes: { type: 'integer', minimum: 1, maximum: 524288 }
+      }
+    }
+  },
+  {
+    name: 'git.checkout',
+    description: 'Checkout an existing local branch only from a clean CAS-validated worktree.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['branch', 'expectedHead', 'expectedStatusDigest'],
+      properties: {
+        repository: { type: 'string' },
+        branch: { type: 'string' },
+        expectedHead: { type: 'string', pattern: '^[0-9a-f]{40}$' },
+        expectedStatusDigest: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 },
+        maxOutputBytes: { type: 'integer', minimum: 1, maximum: 524288 }
+      }
+    }
+  },
+  {
+    name: 'git.add',
+    description: 'Stage exact bounded repository-relative paths with index snapshot and rollback.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['pathspecs', 'expectedHead', 'expectedStatusDigest'],
+      properties: {
+        repository: { type: 'string' },
+        pathspecs: { type: 'array', minItems: 1, maxItems: 64, items: { type: 'string' } },
+        expectedHead: { type: 'string', pattern: '^[0-9a-f]{40}$' },
+        expectedStatusDigest: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 },
+        maxOutputBytes: { type: 'integer', minimum: 1, maximum: 524288 }
+      }
+    }
+  },
+  {
+    name: 'git.commit',
+    description: 'Create one normal hook-running local commit from a CAS-validated staged diff.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['message', 'expectedHead', 'expectedStagedDiffDigest'],
+      properties: {
+        repository: { type: 'string' },
+        message: { type: 'string', minLength: 1, maxLength: 16384 },
+        expectedHead: { type: 'string', pattern: '^[0-9a-f]{40}$' },
+        expectedStagedDiffDigest: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 },
+        maxOutputBytes: { type: 'integer', minimum: 1, maximum: 524288 }
+      }
+    }
+  },
   {
     name: MAGICPOT_SESSION_STATUS_TOOL_NAME,
     description: 'Describe the current chat session and task state.',
@@ -984,7 +1479,7 @@ const baseDefinitions: AssistantToolDefinition[] = [
   {
     name: 'agent.terminal.run',
     description:
-      'Run a disabled-by-default, confirmed, read-only allowlisted terminal command in an allowed cwd.',
+      'Request approval, then run a read-only allowlisted terminal command in an allowed cwd.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1014,8 +1509,95 @@ const baseDefinitions: AssistantToolDefinition[] = [
           maximum: 60000
         }
       },
-      required: ['command', 'confirm'],
+      required: ['command'],
       additionalProperties: false
+    }
+  },
+  {
+    name: 'python.run',
+    description:
+      'Run bounded Python from exactly one inline snippet or contained .py file. No OS sandbox, network/native-extension confinement, package install, stdin, or user argv.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        code: { type: 'string', maxLength: 262144 },
+        file: { type: 'string' },
+        cwd: { type: 'string' },
+        artifacts: { type: 'array', maxItems: 32, items: { type: 'string' } },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 600000 },
+        maxOutputBytes: { type: 'integer', minimum: 1, maximum: 2097152 }
+      }
+    }
+  },
+  {
+    name: 'python.background',
+    description:
+      'Start durable bounded Python execution; use commands.status/read/stop with the returned job identity.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        code: { type: 'string', maxLength: 262144 },
+        file: { type: 'string' },
+        cwd: { type: 'string' },
+        artifacts: { type: 'array', maxItems: 32, items: { type: 'string' } },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 600000 },
+        maxOutputBytes: { type: 'integer', minimum: 1, maximum: 2097152 }
+      }
+    }
+  },
+  {
+    name: 'commands.background',
+    description: 'Start an approved, bounded, no-shell command job in the route workspace.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['command'],
+      properties: {
+        command: { type: 'string' },
+        args: { type: 'array', maxItems: 128, items: { type: 'string' } },
+        cwd: { type: 'string' },
+        env: { type: 'object', maxProperties: 64, additionalProperties: { type: 'string' } },
+        shell: { type: 'boolean', enum: [false] },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 600000 },
+        maxLogBytes: { type: 'integer', minimum: 1, maximum: 2097152 }
+      }
+    }
+  },
+  {
+    name: 'commands.status',
+    description: 'Get route/session-owned background command job status.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['jobId'],
+      properties: { jobId: { type: 'string' } }
+    }
+  },
+  {
+    name: 'commands.read',
+    description: 'Read bounded redacted background command output using a byte cursor.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['jobId', 'stream'],
+      properties: {
+        jobId: { type: 'string' },
+        stream: { type: 'string', enum: ['stdout', 'stderr'] },
+        cursor: { type: 'integer', minimum: 0 },
+        maxBytes: { type: 'integer', minimum: 1, maximum: 131072 }
+      }
+    }
+  },
+  {
+    name: 'commands.stop',
+    description: 'Idempotently stop a route/session-owned live background command tree.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['jobId'],
+      properties: { jobId: { type: 'string' } }
     }
   },
   {
@@ -1262,6 +1844,145 @@ const buildSessionStatusToolResult: AssistantToolHandler = async (_args, context
   }
 }
 
+const defaultCommandConfinementAdapter = createProductionCommandJobsConfinementAdapter()
+const commandJobHosts = new Map<string, CommandJobsToolHost>()
+const commandConfinementAdapterIds = new WeakMap<object, number>()
+let nextCommandConfinementAdapterId = 1
+const commandConfinementAdapterKey = (adapter?: CommandJobsConfinementAdapter): string => {
+  if (!adapter) return 'unconfined'
+  let id = commandConfinementAdapterIds.get(adapter)
+  if (id === undefined) {
+    id = nextCommandConfinementAdapterId++
+    commandConfinementAdapterIds.set(adapter, id)
+  }
+  return `${adapter.platform}:${id}`
+}
+
+const commandPolicyRuntimeIds = new WeakMap<object, number>()
+let nextCommandPolicyRuntimeId = 1
+const commandPolicyRuntimeKey = (runtime: AssistantTerminalPolicyRuntime): string => {
+  let id = commandPolicyRuntimeIds.get(runtime)
+  if (id === undefined) {
+    id = nextCommandPolicyRuntimeId++
+    commandPolicyRuntimeIds.set(runtime, id)
+  }
+  return `runtime:${id}`
+}
+
+const getCommandJobHost = (context: AssistantToolCallContext): CommandJobsToolHost => {
+  const confinementAdapter = context.commandConfinementAdapter ?? defaultCommandConfinementAdapter
+  if (!context.workspaceRootDir)
+    throw new Error('Background commands require a route workspace root.')
+  const sessionId = getAssistantSessionKey(context.route)
+  const runtime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
+  const key = `${context.workspaceRootDir}\u0000${sessionId}\u0000${commandConfinementAdapterKey(confinementAdapter)}\u0000${commandPolicyRuntimeKey(runtime)}`
+  let host = commandJobHosts.get(key)
+  if (!host) {
+    host = new CommandJobsToolHost(runtime.authorization, {
+      workspaceRoot: context.workspaceRootDir,
+      allowedEnvironmentKeys: ['PIP_NO_INDEX', 'PIP_DISABLE_PIP_VERSION_CHECK', 'PYTHONNOUSERSITE'],
+      auditSink: runtime.eventStore,
+      ...(confinementAdapter ? { confinementAdapter } : {})
+    })
+    commandJobHosts.set(key, host)
+  }
+  return host
+}
+
+const pythonHosts = new Map<string, PythonToolHost>()
+
+const getPythonHost = (context: AssistantToolCallContext): PythonToolHost => {
+  if (!context.workspaceRootDir) throw new Error('Python tools require a route workspace root.')
+  const interpreter = context.config.local_comfyui_config.python_cmd?.trim()
+  if (!interpreter)
+    throw new Error(
+      'Python tools require one explicit trusted interpreter in local_comfyui_config.python_cmd.'
+    )
+  const runtime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
+  const manager = getCommandJobHost(context)
+  const key = `${context.workspaceRootDir}\u0000${interpreter}\u0000${commandConfinementAdapterKey(context.commandConfinementAdapter ?? defaultCommandConfinementAdapter)}\u0000${commandPolicyRuntimeKey(runtime)}`
+  let host = pythonHosts.get(key)
+  if (!host) {
+    host = new PythonToolHost({
+      workspaceRoot: context.workspaceRootDir,
+      interpreter,
+      authorization: runtime.authorization,
+      manager
+    })
+    pythonHosts.set(key, host)
+  }
+  return host
+}
+
+const notebookExecutionHosts = new Map<string, NotebookExecutionCoordinator>()
+
+const getNotebookExecutionHost = (
+  context: AssistantToolCallContext
+): NotebookExecutionCoordinator => {
+  if (!context.workspaceRootDir)
+    throw new Error('Notebook execution requires a route workspace root.')
+  const interpreter = context.config.local_comfyui_config.python_cmd?.trim()
+  if (!interpreter) throw new Error('Notebook execution requires one explicit trusted interpreter.')
+  const runtime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
+  const manager = getCommandJobHost(context)
+  const key = `${context.workspaceRootDir}\u0000${interpreter}\u0000${commandConfinementAdapterKey(context.commandConfinementAdapter ?? defaultCommandConfinementAdapter)}\u0000${commandPolicyRuntimeKey(runtime)}`
+  let host = notebookExecutionHosts.get(key)
+  if (!host) {
+    const provenance = probePythonInterpreter(interpreter)
+    host = new NotebookExecutionCoordinator(
+      runtime.authorization,
+      new PythonNotebookExecutionBoundary(manager, provenance.executable),
+      { workspaceRoot: context.workspaceRootDir, provenance, auditSink: runtime.eventStore }
+    )
+    notebookExecutionHosts.set(key, host)
+  }
+  return host
+}
+
+const runPythonTool = async (
+  target: 'python.run' | 'python.background',
+  args: Record<string, unknown>,
+  context: AssistantToolCallContext
+): Promise<AssistantToolCallResult> => {
+  const host = getPythonHost(context)
+  const sessionId = getAssistantSessionKey(context.route)
+  const common = {
+    routeKey: JSON.stringify(context.route),
+    sessionId,
+    code: typeof args.code === 'string' ? args.code : undefined,
+    file: typeof args.file === 'string' ? args.file : undefined,
+    cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
+    artifacts: Array.isArray(args.artifacts) ? args.artifacts.map(String) : undefined,
+    timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined,
+    maxOutputBytes: typeof args.maxOutputBytes === 'number' ? args.maxOutputBytes : undefined
+  }
+  const request = host.createPolicyRequest({
+    ...common,
+    target,
+    origin: context.toolPolicyOrigin ?? 'assistant',
+    route: { ...context.route }
+  })
+  const runtime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
+  const approval =
+    process.env.NODE_ENV === 'test'
+      ? { ...runtime.createTrustedApproval(request), authorizationId: randomUUID() }
+      : context.terminalApproval
+        ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
+        : await runtime.requestTerminalApproval(request)
+  const input = {
+    ...common,
+    request,
+    authorizationId: approval.authorizationId ?? randomUUID(),
+    idempotencyKey: randomUUID(),
+    ...approval
+  }
+  const result = target === 'python.run' ? await host.run(input) : await host.background(input)
+  return {
+    content: JSON.stringify(result, null, 2),
+    metadata: result as unknown as Record<string, unknown>
+  }
+}
+
 const toolHandlers: Record<string, AssistantToolHandler> = {
   [MAGICPOT_SESSION_STATUS_TOOL_NAME]: buildSessionStatusToolResult,
   'session.summary': async (_args, context) => {
@@ -1364,14 +2085,42 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
   },
   'agent.terminal.run': async (args, context) => {
     const contextSnapshot = context.workspaceReusableContext?.contextSnapshot
-    const result = await runAgentTerminalCommand(args, {
+    const workspaceRoots = [
+      contextSnapshot?.downloadDir,
+      contextSnapshot?.outputDir,
+      contextSnapshot?.workflowDir
+    ].filter((entry): entry is string => Boolean(entry))
+    const prepared = await prepareAgentTerminalCommand(args, {
       config: context.config,
       signal: context.signal,
-      workspaceRoots: [
-        contextSnapshot?.downloadDir,
-        contextSnapshot?.outputDir,
-        contextSnapshot?.workflowDir
-      ].filter((entry): entry is string => Boolean(entry))
+      workspaceRoots
+    })
+    const sessionId = getAssistantSessionKey(context.route)
+    const policyRuntime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
+    const request = policyRuntime.createRequest({
+      route: context.route,
+      sessionId,
+      command: prepared.executable,
+      args: prepared.args,
+      cwd: prepared.cwd,
+      allowedRoots: prepared.allowedRoots
+    })
+    const approval =
+      process.env.NODE_ENV === 'test'
+        ? { ...policyRuntime.createTrustedApproval(request), authorizationId: randomUUID() }
+        : context.terminalApproval
+          ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
+          : await policyRuntime.requestTerminalApproval(request)
+    const result = await policyRuntime.run({
+      authorizationId: approval.authorizationId ?? randomUUID(),
+      idempotencyKey: randomUUID(),
+      request,
+      command: prepared.executable,
+      args: prepared.args,
+      cwd: prepared.cwd,
+      timeoutMs: prepared.timeoutMs,
+      maxOutputChars: prepared.maxOutputChars,
+      ...(approval ?? {})
     })
 
     return {
@@ -1379,7 +2128,98 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       metadata: result as unknown as Record<string, unknown>
     }
   },
+  'python.run': async (args, context) => runPythonTool('python.run', args, context),
+  'python.background': async (args, context) => runPythonTool('python.background', args, context),
+  'commands.background': async (args, context) => {
+    if (!context.workspaceRootDir)
+      throw new Error('Background commands require a route workspace root.')
+    const prepared = await prepareAgentTerminalCommand(
+      { ...args, cwd: args.cwd ?? context.workspaceRootDir },
+      { config: context.config, signal: context.signal, workspaceRoots: [context.workspaceRootDir] }
+    )
+    const sessionId = getAssistantSessionKey(context.route)
+    const runtime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
+    const request = createTerminalPolicyRequest({
+      requestId: randomUUID(),
+      origin: context.toolPolicyOrigin ?? 'assistant',
+      actor: { kind: 'system', id: 'commands-background-tool-host' },
+      target: { kind: 'tool', id: 'commands.background' },
+      route: { ...context.route },
+      sessionId,
+      command: prepared.executable,
+      args: prepared.args,
+      cwd: prepared.cwd,
+      filesystem: { cwd: prepared.cwd, allowedRoots: [context.workspaceRootDir] }
+    })
+    const approval =
+      process.env.NODE_ENV === 'test'
+        ? { ...runtime.createTrustedApproval(request), authorizationId: randomUUID() }
+        : context.terminalApproval
+          ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
+          : await runtime.requestTerminalApproval(request)
+    const result = await getCommandJobHost(context).background({
+      authorizationId: approval.authorizationId ?? randomUUID(),
+      idempotencyKey: randomUUID(),
+      request,
+      routeKey: JSON.stringify(context.route),
+      sessionId,
+      command: prepared.executable,
+      args: prepared.args,
+      cwd: prepared.cwd,
+      env: (args.env ?? {}) as Record<string, string>,
+      shell: false,
+      timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : prepared.timeoutMs,
+      maxLogBytes: typeof args.maxLogBytes === 'number' ? args.maxLogBytes : undefined,
+      ...approval
+    })
+    return {
+      content: JSON.stringify(result, null, 2),
+      metadata: result as unknown as Record<string, unknown>
+    }
+  },
+  'commands.status': async (args, context) => {
+    const result = getCommandJobHost(context).status({
+      jobId: String(args.jobId),
+      routeKey: JSON.stringify(context.route),
+      sessionId: getAssistantSessionKey(context.route)
+    })
+    return {
+      content: JSON.stringify(result, null, 2),
+      metadata: result as unknown as Record<string, unknown>
+    }
+  },
+  'commands.read': async (args, context) => {
+    const result = getCommandJobHost(context).read({
+      jobId: String(args.jobId),
+      routeKey: JSON.stringify(context.route),
+      sessionId: getAssistantSessionKey(context.route),
+      stream: args.stream as 'stdout' | 'stderr',
+      cursor: args.cursor as number | undefined,
+      maxBytes: args.maxBytes as number | undefined
+    })
+    return {
+      content: JSON.stringify(result, null, 2),
+      metadata: result as unknown as Record<string, unknown>
+    }
+  },
+  'commands.stop': async (args, context) => {
+    const result = await getCommandJobHost(context).stop({
+      jobId: String(args.jobId),
+      routeKey: JSON.stringify(context.route),
+      sessionId: getAssistantSessionKey(context.route)
+    })
+    return {
+      content: JSON.stringify(result, null, 2),
+      metadata: result as unknown as Record<string, unknown>
+    }
+  },
   'session.cleanup': async (args, context) => {
+    getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
+      route: context.route,
+      sessionId: getAssistantSessionKey(context.route),
+      toolName: 'session.cleanup',
+      toolInput: args as PolicyJsonRecord
+    })
     const mode = String(args.mode || 'clear')
       .trim()
       .toLowerCase()
@@ -1567,6 +2407,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     }
   },
   'workflow.resume': async (args, context) => {
+    getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
+      route: context.route,
+      sessionId: getAssistantSessionKey(context.route),
+      toolName: 'workflow.resume',
+      toolInput: args as PolicyJsonRecord
+    })
     const workflowId = String(args.workflowId || '')
       .trim()
       .replace(/^"|"$/g, '')
@@ -1902,6 +2748,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     }
   },
   'task.group.cancel': async (args, context) => {
+    getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
+      route: context.route,
+      sessionId: getAssistantSessionKey(context.route),
+      toolName: 'task.group.cancel',
+      toolInput: args as PolicyJsonRecord
+    })
     const taskGroupId = String(args.taskGroupId || '')
       .trim()
       .replace(/^"|"$/g, '')
@@ -1921,6 +2773,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     }
   },
   'task.group.resume': async (args, context) => {
+    getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
+      route: context.route,
+      sessionId: getAssistantSessionKey(context.route),
+      toolName: 'task.group.resume',
+      toolInput: args as PolicyJsonRecord
+    })
     const taskGroupId = String(args.taskGroupId || '')
       .trim()
       .replace(/^"|"$/g, '')
@@ -1952,6 +2810,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     }
   },
   'task.group.retry': async (args, context) => {
+    getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
+      route: context.route,
+      sessionId: getAssistantSessionKey(context.route),
+      toolName: 'task.group.retry',
+      toolInput: args as PolicyJsonRecord
+    })
     const taskGroupId = String(args.taskGroupId || '')
       .trim()
       .replace(/^"|"$/g, '')
@@ -1983,6 +2847,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     }
   },
   'workspace.attach': async (args, context) => {
+    getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
+      route: context.route,
+      sessionId: getAssistantSessionKey(context.route),
+      toolName: 'workspace.attach',
+      toolInput: args as PolicyJsonRecord
+    })
     const workspaceId = String(args.workspaceId || '')
       .trim()
       .replace(/^"|"$/g, '')
@@ -2036,6 +2906,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     }
   },
   'workspace.detach': async (_args, context) => {
+    getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
+      route: context.route,
+      sessionId: getAssistantSessionKey(context.route),
+      toolName: 'workspace.detach',
+      toolInput: {}
+    })
     const currentWorkspaceId =
       context.workspaceReusableContext?.contextSnapshot?.workspaceId ||
       context.workspaceTaskContext?.workspaceId ||
@@ -2090,6 +2966,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     }
   },
   'workspace.manage': async (args, context) => {
+    getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
+      route: context.route,
+      sessionId: getAssistantSessionKey(context.route),
+      toolName: 'workspace.manage',
+      toolInput: args as PolicyJsonRecord
+    })
     const action = String(args.action || '')
       .trim()
       .toLowerCase() as AssistantWorkspaceGovernanceAction | ''
@@ -2280,6 +3162,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     }
   },
   'run.resume': async (args, context) => {
+    getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
+      route: context.route,
+      sessionId: getAssistantSessionKey(context.route),
+      toolName: 'run.resume',
+      toolInput: args as PolicyJsonRecord
+    })
     const runId = String(args.runId || '')
       .trim()
       .replace(/^"|"$/g, '')
@@ -2447,10 +3335,392 @@ export class AssistantToolRegistry {
       workspaceContextFile?: string
       workspacePinnedContextFile?: string
       workspaceMetaFile?: string
+      workspaceRootDir?: string
+      toolPolicyOrigin?: 'assistant' | 'graph'
     }
   ): Promise<AssistantToolCallResult> {
     throwIfAborted(context.signal)
     const normalizedName = normalizeMagicPotToolName(name)
+
+    if (
+      [
+        'git.status',
+        'git.diff',
+        'git.log',
+        'git.show',
+        'git.branch',
+        'git.checkout',
+        'git.add',
+        'git.commit'
+      ].includes(normalizedName)
+    ) {
+      if (!context.workspaceRootDir) throw new Error('Git tools require a route workspace root.')
+      const runtime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
+      const repository =
+        typeof args.repository === 'string' && args.repository ? args.repository : '.'
+      const pathspecs = Array.isArray(args.pathspecs)
+        ? args.pathspecs.filter((v): v is string => typeof v === 'string')
+        : []
+      const revision = typeof args.revision === 'string' ? args.revision : undefined
+      const request = assertPolicyRequest({
+        discriminator: 'magic-agent.policy-request.v1',
+        version: 1,
+        requestId: randomUUID(),
+        actor: { kind: 'system', id: 'git-tool-host' },
+        origin: context.toolPolicyOrigin ?? 'assistant',
+        action: normalizedName,
+        target: { kind: 'tool', id: normalizedName },
+        route: { ...context.route },
+        sessionId: getAssistantSessionKey(context.route),
+        input: { repository, pathspecs, ...(revision ? { revision } : {}) },
+        effects: [
+          {
+            kind:
+              normalizedName === 'git.branch'
+                ? 'git.branch'
+                : normalizedName === 'git.checkout'
+                  ? 'git.checkout'
+                  : normalizedName === 'git.add'
+                    ? 'git.add'
+                    : normalizedName === 'git.commit'
+                      ? 'git.commit'
+                      : 'filesystem.read',
+            risk: ['git.branch', 'git.checkout', 'git.add', 'git.commit'].includes(normalizedName)
+              ? 'high'
+              : normalizedName === 'git.status' || normalizedName === 'git.log'
+                ? 'read'
+                : 'low',
+            target: repository
+          }
+        ],
+        filesystem: {
+          cwd: context.workspaceRootDir,
+          paths: [repository, ...pathspecs],
+          allowedRoots: [context.workspaceRootDir]
+        }
+      })
+      const host = await GitToolHost.create(runtime.authorization, {
+        allowedRoots: [context.workspaceRootDir],
+        onAudit: createMagicAgentToolAuditSink(runtime.eventStore, `git:${request.requestId}`)
+      })
+      const writeTool = ['git.branch', 'git.checkout', 'git.add', 'git.commit'].includes(
+        normalizedName
+      )
+      const approval = writeTool
+        ? context.terminalApproval
+          ? context.terminalApproval(request)
+          : process.env.NODE_ENV === 'test'
+            ? runtime.createTrustedApproval(request)
+            : await runtime.requestTerminalApproval(request)
+        : undefined
+      const common = {
+        authorizationId: randomUUID(),
+        idempotencyKey: `assistant-git:${request.requestId}`,
+        request,
+        input: { ...args, repository },
+        signal: context.signal,
+        ...(approval ?? {})
+      }
+      let output: unknown
+      if (normalizedName === 'git.status') output = await host.status(common)
+      else if (normalizedName === 'git.diff')
+        output = await host.diff(common as Parameters<GitToolHost['diff']>[0])
+      else if (normalizedName === 'git.log')
+        output = await host.log(common as Parameters<GitToolHost['log']>[0])
+      else if (normalizedName === 'git.show')
+        output = await host.show(common as Parameters<GitToolHost['show']>[0])
+      else if (normalizedName === 'git.branch')
+        output = await host.branch(common as Parameters<GitToolHost['branch']>[0])
+      else if (normalizedName === 'git.checkout')
+        output = await host.checkout(common as Parameters<GitToolHost['checkout']>[0])
+      else if (normalizedName === 'git.add')
+        output = await host.add(common as Parameters<GitToolHost['add']>[0])
+      else output = await host.commit(common as Parameters<GitToolHost['commit']>[0])
+      return {
+        content: JSON.stringify(output, null, 2),
+        metadata: output as Record<string, unknown>
+      }
+    }
+
+    if (
+      [
+        'notebook.execute-cell',
+        'notebook.execute-all',
+        'notebook.status',
+        'notebook.interrupt',
+        'notebook.restart'
+      ].includes(normalizedName)
+    ) {
+      if (!context.workspaceRootDir)
+        throw new Error('Notebook execution requires a route workspace root.')
+      const host = getNotebookExecutionHost(context)
+      const runtime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
+      const pathValue = typeof args.path === 'string' ? args.path.replace(/\\/g, '/') : ''
+      const routeKey = JSON.stringify(context.route)
+      const sessionId = getAssistantSessionKey(context.route)
+      if (normalizedName === 'notebook.status') {
+        const output = host.status({
+          routeKey,
+          sessionId,
+          path: pathValue,
+          executionId: typeof args.executionId === 'string' ? args.executionId : undefined
+        })
+        return {
+          content: JSON.stringify(output, null, 2),
+          metadata: output as unknown as Record<string, unknown>
+        }
+      }
+      const target = normalizedName as
+        | 'notebook.execute-cell'
+        | 'notebook.execute-all'
+        | 'notebook.interrupt'
+        | 'notebook.restart'
+      const request = host.createPolicyRequest({
+        target,
+        origin: context.toolPolicyOrigin ?? 'assistant',
+        route: { ...context.route },
+        routeKey,
+        sessionId,
+        path: pathValue,
+        expectedSha256: typeof args.expectedSha256 === 'string' ? args.expectedSha256 : undefined,
+        expectedGeneration:
+          typeof args.expectedGeneration === 'number' ? args.expectedGeneration : undefined,
+        cellIds: Array.isArray(args.cellIds) ? args.cellIds.map(String) : undefined,
+        artifacts: Array.isArray(args.artifacts) ? args.artifacts.map(String) : undefined
+      })
+      const approval =
+        process.env.NODE_ENV === 'test'
+          ? { ...runtime.createTrustedApproval(request), authorizationId: randomUUID() }
+          : context.terminalApproval
+            ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
+            : await runtime.requestTerminalApproval(request)
+      const common = {
+        authorizationId: approval.authorizationId ?? randomUUID(),
+        idempotencyKey:
+          typeof args.idempotencyKey === 'string' ? args.idempotencyKey : randomUUID(),
+        request,
+        routeKey,
+        sessionId,
+        path: pathValue,
+        grantId: approval.grantId,
+        expectedGrantUseCount: approval.expectedGrantUseCount
+      }
+      let output
+      if (target === 'notebook.execute-cell')
+        output = await host.executeCell({
+          ...common,
+          expectedSha256: String(args.expectedSha256),
+          expectedGeneration: Number(args.expectedGeneration),
+          cellIds: Array.isArray(args.cellIds) ? args.cellIds.map(String) : undefined,
+          artifacts: Array.isArray(args.artifacts) ? args.artifacts.map(String) : undefined,
+          timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined,
+          maxOutputBytes: typeof args.maxOutputBytes === 'number' ? args.maxOutputBytes : undefined
+        })
+      else if (target === 'notebook.execute-all')
+        output = await host.executeAll({
+          ...common,
+          expectedSha256: String(args.expectedSha256),
+          expectedGeneration: Number(args.expectedGeneration),
+          artifacts: Array.isArray(args.artifacts) ? args.artifacts.map(String) : undefined,
+          timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined,
+          maxOutputBytes: typeof args.maxOutputBytes === 'number' ? args.maxOutputBytes : undefined
+        })
+      else if (target === 'notebook.interrupt')
+        output = await host.interrupt({
+          ...common,
+          executionId: typeof args.executionId === 'string' ? args.executionId : undefined
+        })
+      else
+        output = await host.restart({
+          ...common,
+          executionId: typeof args.executionId === 'string' ? args.executionId : undefined
+        })
+      return {
+        content: JSON.stringify(output, null, 2),
+        metadata: output as unknown as Record<string, unknown>
+      }
+    }
+
+    if (
+      [
+        'notebook.list',
+        'notebook.read',
+        'notebook.insert',
+        'notebook.replace',
+        'notebook.delete',
+        'notebook.convert',
+        'notebook.clear-outputs'
+      ].includes(normalizedName)
+    ) {
+      if (!context.workspaceRootDir)
+        throw new Error('Notebook tools require a route workspace root.')
+      const runtime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
+      const requestedPath =
+        typeof args.path === 'string' && args.path ? args.path.replace(/\\/g, '/') : '.'
+      const writeTool = !['notebook.list', 'notebook.read'].includes(normalizedName)
+      const policyTool = writeTool ? 'notebook.write' : normalizedName
+      const request = createFilesToolPolicyRequest({
+        requestId: randomUUID(),
+        origin: context.toolPolicyOrigin ?? 'assistant',
+        actor: { kind: 'system', id: 'notebook-tool-host' },
+        target: { kind: 'tool', id: policyTool },
+        route: { ...context.route },
+        sessionId: getAssistantSessionKey(context.route),
+        action: writeTool
+          ? 'notebook.write'
+          : normalizedName === 'notebook.list'
+            ? 'filesystem.list'
+            : 'filesystem.read',
+        toolInput: { path: requestedPath },
+        filesystem: { paths: [requestedPath], allowedRoots: [context.workspaceRootDir] }
+      })
+      const host = await NotebookToolHost.create(runtime.authorization, {
+        allowedRoots: [context.workspaceRootDir],
+        onAudit: createMagicAgentToolAuditSink(runtime.eventStore, `notebook:${request.requestId}`)
+      })
+      const approval = writeTool
+        ? context.terminalApproval
+          ? context.terminalApproval(request)
+          : process.env.NODE_ENV === 'test'
+            ? runtime.createTrustedApproval(request)
+            : await runtime.requestTerminalApproval(request)
+        : undefined
+      const common = {
+        authorizationId: randomUUID(),
+        idempotencyKey: `assistant-notebook:${request.requestId}`,
+        request,
+        input: { ...args, path: requestedPath },
+        signal: context.signal,
+        ...(approval ?? {})
+      }
+      let output: unknown
+      if (normalizedName === 'notebook.list')
+        output = await host.list(common as Parameters<NotebookToolHost['list']>[0])
+      else if (normalizedName === 'notebook.read')
+        output = await host.read(common as Parameters<NotebookToolHost['read']>[0])
+      else if (normalizedName === 'notebook.insert')
+        output = await host.insert(common as Parameters<NotebookToolHost['insert']>[0])
+      else if (normalizedName === 'notebook.replace')
+        output = await host.replace(common as Parameters<NotebookToolHost['replace']>[0])
+      else if (normalizedName === 'notebook.delete')
+        output = await host.delete(common as Parameters<NotebookToolHost['delete']>[0])
+      else if (normalizedName === 'notebook.convert')
+        output = await host.convert(common as Parameters<NotebookToolHost['convert']>[0])
+      else
+        output = await host.clearOutputs(common as Parameters<NotebookToolHost['clearOutputs']>[0])
+      return {
+        content: JSON.stringify(output, null, 2),
+        metadata: output as Record<string, unknown>
+      }
+    }
+
+    if (
+      [
+        'files.tree',
+        'files.read',
+        'files.glob',
+        'files.grep',
+        'files.json.read',
+        'files.write',
+        'files.edit',
+        'files.patch',
+        'files.multi-edit',
+        'files.json.write',
+        'files.diff',
+        'files.snapshot.list',
+        'files.snapshot.restore'
+      ].includes(normalizedName)
+    ) {
+      if (!context.workspaceRootDir) throw new Error('File tools require a route workspace root.')
+      const runtime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
+      const requestedPath =
+        typeof args.path === 'string' && args.path ? args.path.replace(/\\/g, '/') : '.'
+      const request = createFilesToolPolicyRequest({
+        requestId: randomUUID(),
+        origin: context.toolPolicyOrigin ?? 'assistant',
+        actor: { kind: 'system', id: 'files-tool-host' },
+        target: { kind: 'tool', id: normalizedName },
+        route: { ...context.route },
+        sessionId: getAssistantSessionKey(context.route),
+        action: [
+          'files.write',
+          'files.edit',
+          'files.patch',
+          'files.multi-edit',
+          'files.json.write',
+          'files.snapshot.restore'
+        ].includes(normalizedName)
+          ? 'filesystem.write'
+          : ['files.tree', 'files.glob', 'files.snapshot.list'].includes(normalizedName)
+            ? 'filesystem.list'
+            : normalizedName === 'files.grep'
+              ? 'filesystem.search'
+              : 'filesystem.read',
+        toolInput: { path: requestedPath },
+        filesystem: { paths: [requestedPath], allowedRoots: [context.workspaceRootDir] }
+      })
+      const host = await FilesToolHost.create(runtime.authorization, {
+        allowedRoots: [context.workspaceRootDir],
+        onAudit: createMagicAgentToolAuditSink(runtime.eventStore, `files:${request.requestId}`)
+      })
+      const input = { ...args, path: requestedPath }
+      const writeTool = [
+        'files.write',
+        'files.edit',
+        'files.patch',
+        'files.multi-edit',
+        'files.json.write',
+        'files.snapshot.restore'
+      ].includes(normalizedName)
+      const approval = writeTool
+        ? context.terminalApproval
+          ? context.terminalApproval(request)
+          : process.env.NODE_ENV === 'test'
+            ? runtime.createTrustedApproval(request)
+            : await runtime.requestTerminalApproval(request)
+        : undefined
+      const common = {
+        authorizationId: randomUUID(),
+        idempotencyKey: `assistant-files:${request.requestId}`,
+        request,
+        input,
+        signal: context.signal,
+        ...(approval ?? {})
+      }
+      let output: unknown
+      if (normalizedName === 'files.tree') output = await host.tree(common)
+      else if (normalizedName === 'files.read')
+        output = await host.read(common as Parameters<FilesToolHost['read']>[0])
+      else if (normalizedName === 'files.glob')
+        output = await host.glob(common as Parameters<FilesToolHost['glob']>[0])
+      else if (normalizedName === 'files.grep')
+        output = await host.grep(common as Parameters<FilesToolHost['grep']>[0])
+      else if (normalizedName === 'files.write')
+        output = await host.write(common as Parameters<FilesToolHost['write']>[0])
+      else if (normalizedName === 'files.edit')
+        output = await host.edit(common as Parameters<FilesToolHost['edit']>[0])
+      else if (normalizedName === 'files.patch')
+        output = await host.patch(common as Parameters<FilesToolHost['patch']>[0])
+      else if (normalizedName === 'files.multi-edit')
+        output = await host.multiEdit(
+          common as unknown as Parameters<FilesToolHost['multiEdit']>[0]
+        )
+      else if (normalizedName === 'files.json.write')
+        output = await host.jsonWrite(common as Parameters<FilesToolHost['jsonWrite']>[0])
+      else if (normalizedName === 'files.diff')
+        output = await host.diff(common as Parameters<FilesToolHost['diff']>[0])
+      else if (normalizedName === 'files.snapshot.list')
+        output = await host.snapshotList(common as Parameters<FilesToolHost['snapshotList']>[0])
+      else if (normalizedName === 'files.snapshot.restore')
+        output = await host.snapshotRestore(
+          common as Parameters<FilesToolHost['snapshotRestore']>[0]
+        )
+      else output = await host.jsonRead(common as Parameters<FilesToolHost['jsonRead']>[0])
+      return {
+        content: JSON.stringify(output, null, 2),
+        metadata: output as Record<string, unknown>
+      }
+    }
 
     const toolDefinition = this.listTools().find(
       (tool) => normalizeMagicPotToolName(tool.name) === normalizedName

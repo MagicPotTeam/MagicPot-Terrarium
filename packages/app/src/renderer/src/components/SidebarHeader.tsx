@@ -53,7 +53,7 @@ const SidebarHeader: React.FC = () => {
         <Box
           component="img"
           src={sidebarLogoImg}
-          alt="Magic Pot"
+          alt="MagicPot-Terrarium"
           sx={{
             width: LOGO_SIZE,
             height: LOGO_SIZE,

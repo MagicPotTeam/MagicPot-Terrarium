@@ -141,6 +141,13 @@ describe('config', () => {
     const configModule = await loadConfigModule()
     await configModule.initConfig()
 
+    expect(configModule.getConfig().magic_agent_sdk_server_config).toEqual({
+      enable_server: false,
+      port: 0,
+      access_token: '',
+      actor_kind: '',
+      actor_id: ''
+    })
     expect(configModule.getConfig().local_llm_server_config.enable_server).toBe(false)
     expect(configModule.getConfig().mcp_config.server.enabled).toBe(false)
     expect(configModule.getConfig().mcp_config.server.expose_resources).toBe(false)

@@ -3,6 +3,7 @@ import { ClaudeAPICli, GeminiAPICli, OpencodeZenAPICli, OpenAIAPICli } from './c
 
 describe('shared llm endpoint normalization', () => {
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
@@ -85,10 +86,40 @@ describe('shared llm endpoint normalization', () => {
     )
   })
 
-  it('uses the configured OpenAI images endpoint with a prompt body', async () => {
+  it('rejects unsupported image URLs before sending a Responses request', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new OpenAIAPICli('sk-test', 'https://api.openai.com/v1', 'gpt-5.4')
+
+    await expect(
+      client.chat({
+        messages: [
+          {
+            role: 'user',
+            content: 'Inspect this image',
+            attachments: [
+              {
+                type: 'image',
+                url: 'local-media://C%3A%5Cmagicpot%5Cimage.png',
+                mimeType: 'image/png'
+              }
+            ]
+          }
+        ]
+      })
+    ).rejects.toThrow(
+      'OpenAI Responses image attachments must use an HTTP(S) URL or a base64 data:image URL.'
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('uses the configured OpenAI images endpoint with timestamped, indexed filenames', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-29T09:30:45.000Z'))
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ data: [{ b64_json: 'aW1hZ2U=' }] })
+      json: async () => ({ data: [{ b64_json: 'aW1hZ2U=' }, { b64_json: 'aW1hZ2Uy' }] })
     })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -102,7 +133,16 @@ describe('shared llm endpoint normalization', () => {
       client.chat({ messages: [{ role: 'user', content: 'draw an image' }] })
     ).resolves.toMatchObject({
       content: '',
-      attachments: [expect.objectContaining({ type: 'image' })]
+      attachments: [
+        expect.objectContaining({
+          type: 'image',
+          fileName: 'openai-image_2026-07-29T09-30-45_1.png'
+        }),
+        expect.objectContaining({
+          type: 'image',
+          fileName: 'openai-image_2026-07-29T09-30-45_2.png'
+        })
+      ]
     })
     expect(fetchMock).toHaveBeenCalledWith(
       'https://codexapis.com/v1/images/generations',

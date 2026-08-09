@@ -10,7 +10,7 @@ const MAX_OUTPUT_CHARS = 60_000
 const DEFAULT_GIT_LOG_LIMIT = 20
 const MAX_GIT_LOG_LIMIT = 50
 
-type AgentTerminalCommandInput = {
+export type AgentTerminalCommandInput = {
   command?: unknown
   args?: unknown
   cwd?: unknown
@@ -19,7 +19,7 @@ type AgentTerminalCommandInput = {
   maxOutputChars?: unknown
 }
 
-type AgentTerminalRunContext = {
+export type AgentTerminalRunContext = {
   config: Config
   workspaceRoots?: string[]
   signal?: AbortSignal
@@ -42,6 +42,15 @@ export type AgentTerminalCommandResult = {
     args: string[]
     requested: string
   }
+}
+
+export type PreparedAgentTerminalCommand = {
+  cwd: string
+  allowedRoots: string[]
+  executable: string
+  args: string[]
+  timeoutMs: number
+  maxOutputChars: number
 }
 
 type NormalizedAgentTerminalCommand = {
@@ -444,27 +453,42 @@ const appendLimitedOutput = (
   return current + nextText
 }
 
+export const prepareAgentTerminalCommand = async (
+  input: AgentTerminalCommandInput,
+  context: AgentTerminalRunContext
+): Promise<PreparedAgentTerminalCommand> => {
+  if (!context.config.project_trace_config?.enable_agent_terminal) {
+    throw new Error('agent.terminal.run is disabled by project_trace_config.enable_agent_terminal.')
+  }
+  const { cwd, allowedRoots } = await resolveAgentTerminalCwd(input.cwd, context)
+  const normalized = normalizeAgentTerminalCommand(input)
+  return {
+    cwd,
+    allowedRoots,
+    executable: await resolveSpawnExecutable(normalized.executable, cwd, allowedRoots),
+    args: normalized.spawnArgs,
+    timeoutMs: clampInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, 100, MAX_TIMEOUT_MS),
+    maxOutputChars: clampInteger(
+      input.maxOutputChars,
+      DEFAULT_MAX_OUTPUT_CHARS,
+      100,
+      MAX_OUTPUT_CHARS
+    )
+  }
+}
+
 export const runAgentTerminalCommand = async (
   input: AgentTerminalCommandInput,
   context: AgentTerminalRunContext
 ): Promise<AgentTerminalCommandResult> => {
-  if (!context.config.project_trace_config?.enable_agent_terminal) {
-    throw new Error('agent.terminal.run is disabled by project_trace_config.enable_agent_terminal.')
-  }
   if (input.confirm !== true) {
     throw new Error('agent.terminal.run requires confirm: true.')
   }
 
-  const { cwd, allowedRoots } = await resolveAgentTerminalCwd(input.cwd, context)
+  const prepared = await prepareAgentTerminalCommand(input, context)
+  const { cwd, timeoutMs, maxOutputChars } = prepared
   const normalized = normalizeAgentTerminalCommand(input)
-  const spawnExecutable = await resolveSpawnExecutable(normalized.executable, cwd, allowedRoots)
-  const timeoutMs = clampInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, 100, MAX_TIMEOUT_MS)
-  const maxOutputChars = clampInteger(
-    input.maxOutputChars,
-    DEFAULT_MAX_OUTPUT_CHARS,
-    100,
-    MAX_OUTPUT_CHARS
-  )
+  const spawnExecutable = prepared.executable
 
   if (context.signal?.aborted) {
     throw new Error('agent.terminal.run was aborted.')

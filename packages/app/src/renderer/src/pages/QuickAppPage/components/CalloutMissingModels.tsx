@@ -7,6 +7,7 @@ import {
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { api } from '@renderer/utils/windowUtils'
+import { getServiceErrorMessage } from '@shared/api/apiUtils/serviceValidation'
 import { DownloadFileProgressEvent, DownloadFileResp } from '@shared/api/svcShell'
 import { QAppRequiredModel } from '@shared/qApp/cfgTypes'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -258,7 +259,9 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
       }
     } catch (error) {
       if (isMountedRef.current) {
-        notifyError(t('qapp.callout.model_download_failed', { error: String(error) }))
+        notifyError(
+          t('qapp.callout.model_download_failed', { error: getServiceErrorMessage(error) })
+        )
       }
     }
   }

@@ -231,7 +231,7 @@ const SidebarInner: React.FC = () => {
               whiteSpace: 'nowrap'
             }}
           >
-            Magic Pot {PACKAGE_VERSION}
+            MagicPot-Terrarium {PACKAGE_VERSION}
           </Box>
         )}
       </Box>

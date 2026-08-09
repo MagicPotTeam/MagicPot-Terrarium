@@ -47,10 +47,24 @@ export type BuiltInPath = {
 /**
  * 窗口控制 API ，暴露给标题栏使用
  */
+export type UnsavedDocumentState = {
+  dirty: boolean
+  title: string
+}
+
+export type UnsavedSaveResult = {
+  requestId: string
+  success: boolean
+  error?: string
+}
+
 export type WinBridge = {
   minimize: () => Promise<void>
   toggleMaximize: () => Promise<void>
   isMaximized: () => Promise<boolean>
   close: () => Promise<void>
+  setUnsavedDocumentState: (state: UnsavedDocumentState) => Promise<void>
+  reportUnsavedSaveResult: (result: UnsavedSaveResult) => Promise<void>
+  onRequestUnsavedSave: (cb: (requestId: string) => void) => () => void
   onMaximizeChanged: (cb: (isMax: boolean) => void) => () => void
 }

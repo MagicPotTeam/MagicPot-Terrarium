@@ -6,7 +6,8 @@ import type {
 export const CANVAS_THUMBNAIL_LEVELS = [128, 256, 512, 1024, 2048] as const
 export type CanvasThumbnailLevelSize = (typeof CANVAS_THUMBNAIL_LEVELS)[number]
 
-export type CanvasImageSourceIdentity = {
+export type CanvasLocalFileSourceIdentity = {
+  version: 1
   kind: 'local-file'
   canonicalPath: string
   sizeBytes: number
@@ -14,6 +15,20 @@ export type CanvasImageSourceIdentity = {
   cacheKey: string
   cacheRootDir?: string
 }
+
+export type CanvasSessionBlobSourceIdentity = {
+  version: 1
+  kind: 'session-blob'
+  sourceKey: string
+  sizeBytes: number
+  mimeType: string
+  fileName?: string
+  cacheKey: string
+}
+
+export type CanvasImageSourceIdentity =
+  | CanvasLocalFileSourceIdentity
+  | CanvasSessionBlobSourceIdentity
 
 export type CanvasImageThumbnailLevel = {
   maxSide: CanvasThumbnailLevelSize
@@ -26,7 +41,6 @@ export type CanvasImageThumbnailLevel = {
 }
 
 export type CanvasThumbnailMimeType = CanvasImageThumbnailLevel['mimeType']
-
 export type CanvasThumbnailFormat = 'webp' | 'png'
 
 export type CanvasImageThumbnailSet = {

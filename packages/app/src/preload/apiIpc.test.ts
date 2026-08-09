@@ -40,6 +40,25 @@ describe('newApiIpc', () => {
     expect(invokeMock).toHaveBeenNthCalledWith(1, 'svcState.getConfig', {})
   })
 
+  it('invokes svcManagedMedia through preload', async () => {
+    invokeMock.mockResolvedValueOnce({ status: 'ready' })
+    const api = newApiIpc()
+    const req = {
+      reference: {
+        version: 1,
+        kind: 'managed',
+        relativePath: 'x',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 1,
+        mimeType: 'image/png',
+        originalFileName: 'x.png'
+      },
+      maxEdge: 256
+    } as const
+    await api.svcManagedMedia.ensureDerivative(req)
+    expect(invokeMock).toHaveBeenCalledWith('svcManagedMedia.ensureDerivative', req)
+  })
+
   it('exposes svcCanvasThumbnail unary methods through the preload API client', async () => {
     invokeMock.mockResolvedValue(undefined)
 

@@ -1,8 +1,13 @@
 import { mkdir, rm } from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { MagicAgentGraphDefinition, MagicAgentGraphRunStreamEvent } from '@shared/magicAgent'
+import type {
+  MagicAgentGraphDefinition,
+  MagicAgentGraphRunRecord,
+  MagicAgentGraphRunStreamEvent
+} from '@shared/magicAgent'
 import { MagicAgentGraphRuntime } from './MagicAgentGraphRuntime'
 import { MagicAgentGraphRunStore } from './graphRunStore'
+import { MagicAgentGraphRunEventStore } from './graphRunEventStore'
 
 const testRoute = { channel: 'generic', scopeType: 'dm', scopeId: 'graph-test' } as const
 
@@ -170,6 +175,235 @@ describe('MagicAgentGraphRuntime', () => {
     expect(runtime.listRuns('generic:dm:graph-test')).toHaveLength(1)
     expect(runtime.listRuns('generic:dm:other')).toEqual([])
     expect(runtime.listRuns('')).toEqual([])
+  })
+
+  it('uses execution-scope skip reasons for single-node and run-from-node modes', async () => {
+    const runtime = new MagicAgentGraphRuntime([])
+    runtime.create({ graph: createTestGraph(), route: testRoute })
+
+    const singleNode = await runtime.run({
+      graphId: 'test.graph',
+      input: 'Write only.',
+      route: testRoute,
+      nodeExecution: { mode: 'single-node', nodeId: 'writer', inputs: { input: 'Write only.' } }
+    })
+    expect(singleNode.nodes?.find((node) => node.nodeId === 'writer')?.status).toBe('completed')
+    expect(singleNode.nodes?.find((node) => node.nodeId === 'planner')?.metadata).toMatchObject({
+      reason: 'Node is outside requested execution scope.'
+    })
+
+    const runFromNode = await runtime.run({
+      graphId: 'test.graph',
+      input: 'Continue from writer.',
+      route: testRoute,
+      nodeExecution: { mode: 'run-from-node', nodeId: 'writer' }
+    })
+    expect(runFromNode.nodes?.find((node) => node.nodeId === 'planner')?.metadata).toMatchObject({
+      reason: 'Node is outside requested execution scope.'
+    })
+    expect(runFromNode.nodes?.find((node) => node.nodeId === 'writer')?.status).toBe('completed')
+    expect(runFromNode.nodes?.find((node) => node.nodeId === 'final')?.status).toBe('completed')
+  })
+
+  it('appends ordered channel and output lineage to the durable attach log and omits invented waiting events', async () => {
+    const eventStore = new MagicAgentGraphRunEventStore(':memory:')
+    const runtime = new MagicAgentGraphRuntime([], { runEventStore: eventStore })
+    runtime.create({ graph: createTestGraph(), route: testRoute })
+
+    await runtime.run({
+      graphId: 'test.graph',
+      input: 'secret raw input',
+      route: testRoute,
+      runId: 'run-durable-events'
+    })
+
+    const events = eventStore.listAfter('run-durable-events')
+    const kinds = events.map((event) => event.kind)
+    expect(kinds.filter((kind) => kind === 'channel.message')).toHaveLength(2)
+    expect(kinds).toContain('output.created')
+    expect(kinds.indexOf('channel.message')).toBeLessThan(kinds.indexOf('output.created'))
+    expect(events.find((event) => event.kind === 'channel.message')?.payload).toMatchObject({
+      channelId: 'plan-to-writer',
+      kind: 'handoff',
+      status: 'delivered',
+      messageCount: 1
+    })
+    expect(events.find((event) => event.kind === 'output.created')?.payload).toMatchObject({
+      outputId: 'final-doc',
+      nodeId: 'final',
+      channelId: 'writer-to-final',
+      channelKind: 'artifact',
+      channelCount: 1
+    })
+    expect(
+      kinds.some((kind) => String(kind).includes('approval') || String(kind).includes('waiting'))
+    ).toBe(false)
+    expect(JSON.stringify(events)).not.toContain('secret raw input')
+    eventStore.close()
+  })
+
+  it('dispatches first-party nodes only through the configured production executor', async () => {
+    const graph = createTestGraph('test.first-party-executor')
+    graph.nodes = [
+      {
+        nodeId: 'publish',
+        kind: 'tool',
+        name: 'Publish',
+        description: 'Publishes a channel message.',
+        config: {
+          firstParty: {
+            family: 'communication',
+            operation: 'channel-message',
+            config: { channelId: 'channel-1', publisherMemberId: 'member-1' }
+          }
+        }
+      }
+    ]
+    graph.channels = []
+    graph.outputs = [
+      {
+        outputId: 'receipt',
+        sourceNodeId: 'publish',
+        name: 'Receipt',
+        description: 'Publish receipt.'
+      }
+    ]
+    graph.entryNodeIds = ['publish']
+    const firstPartyNodeExecutor = vi.fn(async () => ({ published: true }))
+    const callTool = vi.fn()
+    const runtime = new MagicAgentGraphRuntime([], { firstPartyNodeExecutor, callTool })
+    runtime.create({ graph, route: testRoute })
+
+    await expect(
+      runtime.run({
+        graphId: graph.graphId,
+        input: '{"message":"hello"}',
+        route: testRoute,
+        runId: 'run-first-party'
+      })
+    ).resolves.toMatchObject({ status: 'completed' })
+    expect(firstPartyNodeExecutor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        family: 'communication',
+        operation: 'channel-message',
+        config: { channelId: 'channel-1', publisherMemberId: 'member-1' },
+        input: '{"message":"hello"}'
+      })
+    )
+    expect(callTool).not.toHaveBeenCalled()
+
+    const unavailable = new MagicAgentGraphRuntime()
+    unavailable.create({ graph, route: testRoute })
+    await expect(
+      unavailable.run({
+        graphId: graph.graphId,
+        input: 'hello',
+        route: testRoute,
+        runId: 'run-first-party-unavailable'
+      })
+    ).resolves.toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/unconfigured in this environment/)
+    })
+  })
+
+  it('durably appends tool invocation identity without arguments, results, or channel payloads', async () => {
+    const eventStore = new MagicAgentGraphRunEventStore(':memory:')
+    const graph = createTestGraph('test.tool-events')
+    graph.nodes[0] = {
+      nodeId: 'planner',
+      kind: 'tool',
+      name: 'Planner tool',
+      description: 'Calls a tool.',
+      toolName: 'safe.tool',
+      config: { args: { prompt: 'raw-tool-argument' } }
+    }
+    const runtime = new MagicAgentGraphRuntime([], {
+      runEventStore: eventStore,
+      callTool: async (request) => ({
+        ok: true,
+        toolName: request.name,
+        source: 'magicAgentRuntime',
+        status: 'ok',
+        content: 'raw-tool-result'
+      })
+    })
+    runtime.create({ graph, route: testRoute })
+
+    await runtime.run({
+      graphId: graph.graphId,
+      input: 'raw-run-input',
+      route: testRoute,
+      runId: 'run-tool-events',
+      allowedToolNames: ['safe.tool']
+    })
+
+    const events = eventStore.listAfter('run-tool-events')
+    expect(events.find((event) => event.kind === 'tool.invoked')?.payload).toMatchObject({
+      nodeId: 'planner',
+      toolName: 'safe.tool',
+      status: 'invoked'
+    })
+    expect(JSON.stringify(events)).not.toMatch(/raw-tool-argument|raw-tool-result|raw-run-input/)
+    eventStore.close()
+  })
+
+  it('invokes files.patch only when the Graph run explicitly allowlists it', async () => {
+    const graph = createTestGraph('test.files-patch')
+    graph.nodes = [
+      {
+        nodeId: 'patch',
+        kind: 'tool',
+        name: 'Patch file',
+        description: 'Applies an approved patch.',
+        toolName: 'files.patch',
+        config: {
+          args: { path: 'a.txt', patch: 'redacted-patch', expectedSha256: 'a'.repeat(64) }
+        }
+      }
+    ]
+    graph.channels = []
+    graph.outputs = [
+      {
+        outputId: 'result',
+        sourceNodeId: 'patch',
+        name: 'Patch result',
+        description: 'The result of applying the patch.'
+      }
+    ]
+    graph.entryNodeIds = ['patch']
+    const callTool = vi.fn(async (request) => ({
+      ok: true,
+      toolName: request.name,
+      source: 'magicAgentRuntime' as const,
+      status: 'ok' as const,
+      content: 'patched'
+    }))
+    const runtime = new MagicAgentGraphRuntime([], { callTool })
+    runtime.create({ graph, route: testRoute })
+
+    await runtime.run({
+      graphId: graph.graphId,
+      input: '',
+      route: testRoute,
+      runId: 'run-files-patch',
+      allowedToolNames: ['files.patch']
+    })
+    expect(callTool).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'files.patch' }),
+      expect.anything()
+    )
+
+    const denied = await runtime.run({
+      graphId: graph.graphId,
+      input: '',
+      route: testRoute,
+      runId: 'run-files-patch-denied',
+      allowedToolNames: []
+    })
+    expect(denied).toMatchObject({ status: 'failed' })
+    expect(denied.error).toMatch(/not allowed/i)
+    expect(callTool).toHaveBeenCalledTimes(1)
   })
 
   it('partitions and bounds graph runs by route session key and graph id', async () => {
@@ -1257,6 +1491,14 @@ describe('MagicAgentGraphRuntime', () => {
       expect(reloaded?.events?.map((event) => event.type)).toEqual(
         expect.arrayContaining(['graph.started', 'graph.completed'])
       )
+      expect(reloaded?.runtimeTopology).toEqual(result.runtimeTopology)
+      expect(reloaded?.runtimeTopology?.resources).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: 'node', sourceNodeId: 'planner' }),
+          expect.objectContaining({ kind: 'channel', sourceChannelId: 'plan-to-writer' }),
+          expect.objectContaining({ kind: 'wire', sourceChannelId: 'plan-to-writer' })
+        ])
+      )
 
       const listed = await reloadedRuntime.listRunsForRoute(testRoute, 'test.persisted-run')
       expect(listed.map((run) => run.runId)).toEqual(['run-persist-1'])
@@ -1388,5 +1630,132 @@ describe('MagicAgentGraphRuntime', () => {
         }
       })
     ).toThrow(/contains a cycle/i)
+  })
+  it('edits managed input without waking and replays exactly', async () => {
+    const graph = createTestGraph()
+    graph.nodes[0] = { ...graph.nodes[0], kind: 'input', config: { inputMode: 'managed' } }
+    const runtime = new MagicAgentGraphRuntime([graph])
+    const route = { channel: 'generic', scopeType: 'dm', scopeId: 'managed-edit' }
+    const runPromise = runtime.run({
+      graphId: graph.graphId,
+      input: 'ordinary',
+      route,
+      runId: 'managed-edit-run'
+    })
+    let pending
+    for (let index = 0; index < 50 && !pending; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2))
+      pending = runtime.getRun('managed-edit-run', 'generic:dm:managed-edit')?.pendingInput
+    }
+    const request = {
+      runId: 'managed-edit-run',
+      sessionKey: 'generic:dm:managed-edit',
+      pendingInputId: pending!.pendingInputId,
+      expectedRevision: pending!.revision,
+      value: 'edited-secret',
+      idempotencyKey: 'edit-1'
+    }
+    const edited = await runtime.editPendingInput(request)
+    expect(edited).toMatchObject({ status: 'awaiting', revision: pending!.revision + 1 })
+    expect(await runtime.editPendingInput(request)).toMatchObject({ replayed: true })
+    expect(runtime.getRun('managed-edit-run', 'generic:dm:managed-edit')?.status).toBe('running')
+    expect(
+      JSON.stringify(runtime.getRun('managed-edit-run', 'generic:dm:managed-edit'))
+    ).not.toContain('edited-secret')
+    const latest = runtime.getRun('managed-edit-run', 'generic:dm:managed-edit')!.pendingInput!
+    await runtime.injectPendingInput({
+      runId: 'managed-edit-run',
+      sessionKey: 'generic:dm:managed-edit',
+      pendingInputId: latest.pendingInputId,
+      expectedRevision: latest.revision,
+      value: 'final-value'
+    })
+    await runPromise
+  })
+
+  it('waits for managed input and injects it exactly once', async () => {
+    const graph = createTestGraph()
+    graph.nodes[0] = {
+      ...graph.nodes[0],
+      kind: 'input',
+      config: { inputMode: 'managed', prompt: 'secret prompt', sensitive: true }
+    }
+    const runtime = new MagicAgentGraphRuntime([graph])
+    const route = { channel: 'generic', scopeType: 'dm', scopeId: 'managed' }
+    const runPromise = runtime.run({
+      graphId: graph.graphId,
+      input: 'ordinary',
+      route,
+      runId: 'managed-run'
+    })
+    let pending
+    for (let index = 0; index < 50 && !pending; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2))
+      pending = runtime.getRun('managed-run', 'generic:dm:managed')?.pendingInput
+    }
+    expect(pending?.status).toBe('awaiting')
+    const result = await runtime.injectPendingInput({
+      runId: 'managed-run',
+      sessionKey: 'generic:dm:managed',
+      pendingInputId: pending!.pendingInputId,
+      expectedRevision: pending!.revision,
+      value: 'managed-value'
+    })
+    expect(result.status).toBe('submitted')
+    const run = await runPromise
+    expect(run.status).toBe('completed')
+    expect(run.pendingInput?.status).toBe('consumed')
+    expect(run.outputs[0]?.content).toContain('managed-value')
+    expect(JSON.stringify(run.events)).not.toContain('secret prompt')
+    expect(JSON.stringify(run.events)).not.toContain('managed-value')
+    expect(run.events?.filter((event) => event.type === 'input.consumed')).toHaveLength(1)
+  })
+  it('persists stable runtime topology node and agent-invocation terminal transitions', async () => {
+    const saved: Array<MagicAgentGraphRunRecord> = []
+    const runStore = new MagicAgentGraphRunStore(
+      `/tmp/runtime-topology-store-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    )
+    vi.spyOn(runStore, 'save').mockImplementation(async (run: MagicAgentGraphRunRecord) => {
+      saved.push(structuredClone(run))
+    })
+    const runtime = new MagicAgentGraphRuntime([], {
+      runStore,
+      runAgent: vi.fn(async () => ({
+        runId: 'agent-run',
+        agentId: 'planner',
+        status: 'completed' as const,
+        content: 'done',
+        messages: [{ role: 'assistant' as const, content: 'done' }],
+        toolCalls: [],
+        events: [],
+        startedAt: 1,
+        finishedAt: 2
+      }))
+    })
+    runtime.create({ graph: createTestGraph('test.runtime-topology'), route: testRoute })
+
+    const result = await runtime.run({
+      graphId: 'test.runtime-topology',
+      input: 'Run.',
+      route: testRoute,
+      runId: 'runtime-topology-run'
+    })
+    const topology = result.runtimeTopology!
+    const planner = topology.resources.find(
+      (resource) => resource.resourceId === 'graph-node:runtime-topology-run:planner'
+    )
+    const invocation = topology.resources.find(
+      (resource) => resource.resourceId === 'graph-agent-invocation:runtime-topology-run:planner'
+    )
+    expect(planner).toMatchObject({ status: 'completed', createdAt: expect.any(Number) })
+    expect(invocation).toMatchObject({ status: 'completed', createdAt: expect.any(Number) })
+    expect(
+      topology.resources.filter((resource) => resource.resourceId === planner?.resourceId)
+    ).toHaveLength(1)
+    expect(
+      topology.resources.filter((resource) => resource.resourceId === invocation?.resourceId)
+    ).toHaveLength(1)
+    expect(topology.revision).toBeGreaterThan(topology.resources[0].createdAt)
+    expect(saved.at(-1)?.runtimeTopology).toEqual(topology)
   })
 })

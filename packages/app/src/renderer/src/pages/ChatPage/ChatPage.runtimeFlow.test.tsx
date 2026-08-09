@@ -19,6 +19,8 @@ import {
 } from './builtInSkills'
 import {
   buildChatWorkspaceControlsPortalId,
+  CHAT_SESSION_LOADING_STATE_EVENT,
+  readScopedActiveLoadingSessionIds,
   scopedStorageKey,
   STORAGE_KEY_CURRENT_SESSION_ID,
   STORAGE_KEY_LOADING_IDS,
@@ -71,6 +73,9 @@ const hoisted = vi.hoisted(() => ({
   selectFileMock: vi.fn(),
   fileToBlobUrlMock: vi.fn(() => 'blob:chat-draft'),
   fileToDataUrlMock: vi.fn(async () => 'data:application/octet-stream;base64,QUJD'),
+  importManagedFileMock: vi.fn(),
+  importManagedDataUrlMock: vi.fn(),
+  importManagedUrlMock: vi.fn(),
   readTextFileMock: vi.fn(),
   saveImageToDirMock: vi.fn(),
   chatMessageListMock: vi.fn(),
@@ -175,6 +180,11 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     },
     svcHyper: {
       saveImageToDir: hoisted.saveImageToDirMock
+    },
+    svcManagedMedia: {
+      importFile: hoisted.importManagedFileMock,
+      importDataUrl: hoisted.importManagedDataUrlMock,
+      importUrl: hoisted.importManagedUrlMock
     }
   })
 }))
@@ -469,6 +479,8 @@ vi.mock('./components/ChatComposer', () => ({
     selectedSkillName,
     modelSelectorSlot,
     inputSyncKey,
+    isLoading,
+    onStopGenerating,
     onCompressContext,
     onClearContext,
     disableCompressContext,
@@ -482,6 +494,8 @@ vi.mock('./components/ChatComposer', () => ({
     selectedSkillName?: string
     modelSelectorSlot?: React.ReactNode
     inputSyncKey?: string
+    isLoading: boolean
+    onStopGenerating: () => void
     onCompressContext?: () => void
     onClearContext?: () => void
     disableCompressContext?: boolean
@@ -502,6 +516,12 @@ vi.mock('./components/ChatComposer', () => ({
           onChange={(event) => {
             setDraftValue(event.target.value)
             onInputChange(event.target.value)
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault()
+              onSend()
+            }
           }}
         />
         <button type="button" data-testid="chat-composer-upload-mock" onClick={onUploadFile}>
@@ -526,6 +546,11 @@ vi.mock('./components/ChatComposer', () => ({
         <button type="button" data-testid="chat-composer-send-mock" onClick={onSend}>
           send
         </button>
+        {isLoading ? (
+          <button type="button" data-testid="chat-composer-stop-mock" onClick={onStopGenerating}>
+            stop
+          </button>
+        ) : null}
         <div data-testid="chat-composer-attachment-count">{pendingAttachments.length}</div>
         <div data-testid="chat-composer-attachment-names">
           {pendingAttachments.map((attachment) => attachment.fileName || attachment.url).join('|')}
@@ -648,6 +673,8 @@ const renderChatPage = (
 
 const dispatchNewSession = async (
   detail: {
+    requestId?: string
+    title?: string
     skillId?: string
     profileId?: string
     initialMessage?: string
@@ -762,6 +789,28 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.selectFileMock.mockResolvedValue(null)
     hoisted.fileToBlobUrlMock.mockClear()
     hoisted.fileToDataUrlMock.mockClear()
+    const managedResponse = {
+      version: 1 as const,
+      reference: {
+        version: 1 as const,
+        kind: 'managed' as const,
+        relativePath: `originals/${'a'.repeat(64)}.png`,
+        sha256: 'a'.repeat(64),
+        mimeType: 'image/png',
+        sizeBytes: 3,
+        originalFileName: 'attachment.png'
+      },
+      localMediaUrl: 'media://managed/original.png',
+      mimeType: 'image/png',
+      sizeBytes: 3,
+      sha256: 'a'.repeat(64)
+    }
+    hoisted.importManagedFileMock.mockReset()
+    hoisted.importManagedFileMock.mockResolvedValue(managedResponse)
+    hoisted.importManagedDataUrlMock.mockReset()
+    hoisted.importManagedDataUrlMock.mockResolvedValue(managedResponse)
+    hoisted.importManagedUrlMock.mockReset()
+    hoisted.importManagedUrlMock.mockResolvedValue(managedResponse)
     hoisted.requestChatCompletionMock.mockImplementation(
       async ({
         skillRuntime,
@@ -818,6 +867,63 @@ describe('ChatPage runtime workflow integration', () => {
       const currentSession = readCurrentSessionState()
       expect(currentSession?.profileId).toBe('vision-model')
     })
+  })
+
+  it('does not let a delayed storage refresh overwrite a newer in-memory response', async () => {
+    const session: ChatSession = {
+      id: 'storage-load-race',
+      title: 'Storage load race',
+      messages: [
+        { role: 'user', content: 'run graph' },
+        { role: 'assistant', content: '' }
+      ],
+      createdAt: 300
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+
+    let releaseRefresh!: (sessions: ChatSession[]) => void
+    hoisted.loadAllSessionsMock.mockImplementationOnce(
+      () =>
+        new Promise<ChatSession[]>((resolve) => {
+          releaseRefresh = resolve
+        })
+    )
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:preview-refresh', {
+          detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+        })
+      )
+    })
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:append-message', {
+          detail: {
+            scope: 'runtime-flow',
+            sessionId: session.id,
+            role: 'assistant',
+            content: 'new graph output'
+          }
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('new graph output')
+    )
+
+    await act(async () => {
+      releaseRefresh([session])
+    })
+
+    expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('new graph output')
   })
 
   it('re-roots legacy chat media URLs on load and persists the migrated session', async () => {
@@ -1170,30 +1276,30 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
-  it('persists outgoing blob image attachments before storing user messages', async () => {
+  it('persists duplicate blob image URLs once and uses durable URLs for history and batched requests', async () => {
     const fetchMock = vi.fn(async () => ({
-      blob: async () =>
-        new Blob([new Uint8Array([1, 2, 3])], {
-          type: 'image/png'
-        })
+      blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
     }))
     vi.stubGlobal('fetch', fetchMock)
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, revokeObjectURL })
     hoisted.storedSessions.value = [
       {
-        id: 'session-blob-user-image',
-        title: 'Blob user image',
+        id: 'session-duplicate-blob-user-image',
+        title: 'Duplicate blob user image',
         profileId: 'vision-model',
         messages: []
       }
     ]
     localStorage.setItem(
       scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
-      'session-blob-user-image'
+      'session-duplicate-blob-user-image'
     )
 
     renderChatPage()
-
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe('session-blob-user-image'))
+    await waitFor(() =>
+      expect(readCurrentSessionState()?.id).toBe('session-duplicate-blob-user-image')
+    )
 
     await act(async () => {
       window.dispatchEvent(
@@ -1201,12 +1307,68 @@ describe('ChatPage runtime workflow integration', () => {
           detail: {
             targetScope: 'runtime-flow',
             autoSend: true,
-            text: 'describe this',
+            text: 'describe both',
             attachments: [
               {
                 type: 'image',
-                url: 'blob:user-upload-image',
-                fileName: 'upload.png',
+                url: 'blob:duplicate-user-upload',
+                fileName: 'first.png',
+                mimeType: 'image/png'
+              },
+              {
+                type: 'image',
+                url: 'blob:duplicate-user-upload',
+                fileName: 'second.png',
+                mimeType: 'image/png'
+              }
+            ]
+          }
+        })
+      )
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledWith('blob:duplicate-user-upload')
+    expect(hoisted.saveImageToDirMock).toHaveBeenCalledTimes(1)
+    expect(revokeObjectURL).not.toHaveBeenCalled()
+
+    const durableUrl = 'file://C:/MagicPot/AutoSave/Agent/chat_upload.png'
+    expect(readCurrentSessionState()?.messages[0]?.attachments?.map((item) => item.url)).toEqual([
+      durableUrl,
+      durableUrl
+    ])
+    for (const call of hoisted.requestChatCompletionMock.mock.calls) {
+      const requestMessages = call[0]?.messages as ChatMessage[] | undefined
+      const requestAttachments = requestMessages?.at(-1)?.attachments ?? []
+      expect(requestAttachments.length).toBeGreaterThan(0)
+      expect(requestAttachments.every((item) => !item.url.startsWith('blob:'))).toBe(true)
+      expect(requestAttachments.every((item) => item.url === durableUrl)).toBe(true)
+    }
+  })
+
+  it('preserves blob image URLs when outgoing persistence fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ blob: async () => new Blob(['image'], { type: 'image/png' }) }))
+    )
+    hoisted.saveImageToDirMock.mockResolvedValueOnce({ savedPath: null })
+
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            targetScope: 'runtime-flow',
+            autoSend: true,
+            text: 'send despite persistence failure',
+            attachments: [
+              {
+                type: 'image',
+                url: 'blob:failed-user-upload',
+                fileName: 'failed.png',
                 mimeType: 'image/png'
               }
             ]
@@ -1216,28 +1378,45 @@ describe('ChatPage runtime workflow integration', () => {
     })
 
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-
-    expect(fetchMock).toHaveBeenCalledWith('blob:user-upload-image')
-    expect(hoisted.saveImageToDirMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        fileName: expect.stringMatching(/^chat_upload_.*_1\.png$/),
-        dir: undefined,
-        data: expect.any(Uint8Array)
-      })
+    expect(readCurrentSessionState()?.messages[0]?.attachments?.[0]?.url).toBe(
+      'blob:failed-user-upload'
     )
+    const requestMessages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
+      ?.messages as ChatMessage[]
+    expect(requestMessages.at(-1)?.attachments?.[0]?.url).toBe('blob:failed-user-upload')
+  })
 
-    const requestMessages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]?.messages as
-      | ChatMessage[]
-      | undefined
-    const requestAttachment = requestMessages?.at(-1)?.attachments?.[0]
-    expect(requestAttachment?.url).toBe('file://C:/MagicPot/AutoSave/Agent/chat_upload.png')
-
-    await waitFor(() => {
-      const currentSession = readCurrentSessionState()
-      expect(currentSession?.messages[0]?.attachments?.[0]?.url).toBe(
-        'file://C:/MagicPot/AutoSave/Agent/chat_upload.png'
+  it('leaves durable outgoing image URLs unchanged', async () => {
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            targetScope: 'runtime-flow',
+            autoSend: true,
+            text: 'durable image',
+            attachments: [
+              {
+                type: 'image',
+                url: 'file://C:/MagicPot/existing.png',
+                fileName: 'existing.png',
+                mimeType: 'image/png'
+              }
+            ]
+          }
+        })
       )
     })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    expect(hoisted.saveImageToDirMock).not.toHaveBeenCalled()
+    expect(readCurrentSessionState()?.messages[0]?.attachments?.[0]?.url).toBe(
+      'file://C:/MagicPot/existing.png'
+    )
+    const requestMessages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
+      ?.messages as ChatMessage[]
+    expect(requestMessages.at(-1)?.attachments?.[0]?.url).toBe('file://C:/MagicPot/existing.png')
   })
 
   it('renders model and reasoning controls in the workspace controls portal', async () => {
@@ -1627,8 +1806,10 @@ describe('ChatPage runtime workflow integration', () => {
       expect(latestProps?.currentSession?.id).toBe(staleSession.id)
       expect(latestProps?.isLoading).toBe(false)
     })
-    expect(localStorage.getItem(scopedStorageKey(STORAGE_KEY_LOADING_IDS, 'runtime-flow'))).toBe(
-      '[]'
+    await waitFor(() =>
+      expect(localStorage.getItem(scopedStorageKey(STORAGE_KEY_LOADING_IDS, 'runtime-flow'))).toBe(
+        '[]'
+      )
     )
   })
 
@@ -1676,6 +1857,164 @@ describe('ChatPage runtime workflow integration', () => {
         })
       )
     })
+  })
+
+  it('keeps six image-producing new sessions independently in flight and persists their durable results', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
+      }))
+    )
+    hoisted.saveImageToDirMock.mockImplementation(async ({ fileName }) => ({
+      savedPath: `C:/MagicPot/AutoSave/Agent/${fileName}`
+    }))
+    const requestIds = Array.from({ length: 6 }, (_, index) => `parallel-image-${index + 1}`)
+    const completions = new Map<
+      string,
+      {
+        signal?: AbortSignal
+        resolve: (value: { content: string; attachments: ChatAttachment[] }) => void
+      }
+    >()
+    const createdSessions = new Map<string, string>()
+    const handleSessionCreated = (event: Event) => {
+      const detail = (event as CustomEvent<{ requestId?: string; sessionId?: string }>).detail
+      if (detail.requestId && detail.sessionId)
+        createdSessions.set(detail.requestId, detail.sessionId)
+    }
+    window.addEventListener('chat:session-created', handleSessionCreated)
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockImplementation(
+      ({ conversationId, signal }: { conversationId?: string; signal?: AbortSignal }) =>
+        new Promise((resolve) => {
+          if (!conversationId) throw new Error('Expected a target session conversation id')
+          completions.set(conversationId, { signal, resolve })
+        })
+    )
+
+    try {
+      renderChatPage()
+      await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+      for (const [index, requestId] of requestIds.entries()) {
+        await dispatchNewSession({
+          requestId,
+          title: `Parallel image ${index + 1}`,
+          profileId: 'vision-model',
+          initialMessage: `Generate image ${index + 1}`,
+          initialAttachments: [createImageAttachment(`source-${index + 1}.png`)]
+        })
+      }
+
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(6))
+      await waitFor(() => expect(createdSessions.size).toBe(6))
+
+      const sessionIds = requestIds.map((requestId) => createdSessions.get(requestId))
+      expect(sessionIds.every(Boolean)).toBe(true)
+      expect(new Set(sessionIds).size).toBe(6)
+      expect(completions.size).toBe(6)
+      expect(sessionIds.every((sessionId) => completions.has(sessionId!))).toBe(true)
+      expect(
+        sessionIds.every((sessionId) => completions.get(sessionId!)?.signal?.aborted === false)
+      ).toBe(true)
+      expect(new Set(readScopedActiveLoadingSessionIds('runtime-flow'))).toEqual(
+        new Set(sessionIds)
+      )
+      const pendingSnapshots = sessionIds.map((sessionId) =>
+        hoisted.storedSessions.value.find((session) => session.id === sessionId)
+      )
+      expect(pendingSnapshots.every(Boolean)).toBe(true)
+      expect(
+        pendingSnapshots.every(
+          (session) =>
+            session?.messages[0]?.role === 'user' &&
+            session.messages[0]?.content ===
+              `Generate image ${
+                requestIds.indexOf(
+                  requestIds.find((requestId) => createdSessions.get(requestId) === session.id)!
+                ) + 1
+              }` &&
+            session.messages[0]?.attachments?.[0]?.fileName ===
+              `source-${
+                requestIds.indexOf(
+                  requestIds.find((requestId) => createdSessions.get(requestId) === session.id)!
+                ) + 1
+              }.png` &&
+            session.messages.at(-1)?.role === 'assistant'
+        )
+      ).toBe(true)
+      expect(
+        pendingSnapshots.every(
+          (session) =>
+            session?.messages.filter((message) => message.role === 'assistant').length === 1
+        )
+      ).toBe(true)
+
+      await act(async () => {
+        sessionIds.forEach((sessionId, index) => {
+          completions.get(sessionId!)?.resolve({
+            content: `result ${index + 1}`,
+            attachments: [
+              {
+                type: 'image',
+                url: `blob:provider-result-${index + 1}`,
+                fileName: `generated-${index + 1}.png`,
+                mimeType: 'image/png',
+                media: {
+                  version: 1,
+                  kind: 'managed',
+                  relativePath: `originals/${String(index + 1).repeat(64)}.png`,
+                  sha256: String(index + 1).repeat(64),
+                  mimeType: 'image/png',
+                  sizeBytes: index + 1,
+                  originalFileName: `generated-${index + 1}.png`
+                }
+              }
+            ]
+          })
+        })
+      })
+
+      await waitFor(() => {
+        for (const [index, sessionId] of sessionIds.entries()) {
+          const session = hoisted.storedSessions.value.find((item) => item.id === sessionId)
+          expect(session?.messages.at(-1)).toEqual(
+            expect.objectContaining({
+              role: 'assistant',
+              content: `result ${index + 1}`,
+              attachments: [
+                expect.objectContaining({
+                  url: expect.stringMatching(
+                    new RegExp(
+                      `^file://C:/MagicPot/AutoSave/Agent/agent_auto_.*_${sessionId}_1_0\\.png$`
+                    )
+                  ),
+                  fileName: `generated-${index + 1}.png`,
+                  media: expect.objectContaining({
+                    kind: 'managed',
+                    originalFileName: `generated-${index + 1}.png`
+                  })
+                })
+              ]
+            })
+          )
+        }
+      })
+      expect(readScopedActiveLoadingSessionIds('runtime-flow')).toEqual([])
+      expect(hoisted.saveImageToDirMock).toHaveBeenCalledTimes(6)
+      expect(
+        new Set(hoisted.saveImageToDirMock.mock.calls.map(([request]) => request.fileName)).size
+      ).toBe(6)
+      const persisted = JSON.stringify(hoisted.storedSessions.value)
+      expect(persisted).not.toMatch(/(?:data:[^,]*;base64,|blob:)/)
+      expect(
+        sessionIds.every((sessionId) => completions.get(sessionId!)?.signal?.aborted === false)
+      ).toBe(true)
+    } finally {
+      window.removeEventListener('chat:session-created', handleSessionCreated)
+    }
   })
 
   it('applies external send-to-agent input only to the matching targetScope', async () => {
@@ -1774,6 +2113,309 @@ describe('ChatPage runtime workflow integration', () => {
         'active-only.png'
       )
     })
+  })
+
+  it('materializes blob attachments received from send-to-agent before previewing them', async () => {
+    const originalFileReader = globalThis.FileReader
+    const originalFetch = globalThis.fetch
+    vi.stubGlobal(
+      'FileReader',
+      class MockFileReader {
+        result: string | ArrayBuffer | null = null
+        error: DOMException | null = null
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+
+        readAsDataURL(blob: Blob) {
+          void blob.arrayBuffer().then((buffer) => {
+            const bytes = new Uint8Array(buffer)
+            let binary = ''
+            for (const byte of bytes) binary += String.fromCharCode(byte)
+            this.result = `data:${blob.type};base64,${btoa(binary)}`
+            this.onload?.()
+          })
+        }
+      }
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(new Uint8Array([99, 97, 110, 118, 97, 115]), {
+            status: 200,
+            headers: { 'Content-Type': 'image/png' }
+          })
+      )
+    )
+
+    renderChatPage('blob-materialization-test')
+
+    try {
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              scope: 'blob-materialization-test',
+              attachment: {
+                type: 'image',
+                url: 'blob:canvas-source',
+                fileName: 'canvas.png',
+                mimeType: 'image/png'
+              }
+            }
+          })
+        )
+      })
+
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+        expect(globalThis.fetch).toHaveBeenCalledWith('blob:canvas-source')
+      })
+    } finally {
+      vi.stubGlobal('FileReader', originalFileReader)
+      vi.stubGlobal('fetch', originalFetch)
+    }
+  })
+
+  it('clears normal-response loading before deferred persistence completes', async () => {
+    const scope = 'deferred-response-persistence'
+    let releasePersistence: (() => void) | undefined
+    let resolveResponse: ((value: { content: string }) => void) | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveResponse = resolve
+        })
+    )
+    const loadingEvents: Array<{ running?: boolean; completed?: boolean }> = []
+    const handleLoadingState = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ scope?: string; running?: boolean; completed?: boolean }>
+      ).detail
+      if (detail.scope === scope) loadingEvents.push(detail)
+    }
+    window.addEventListener(CHAT_SESSION_LOADING_STATE_EVENT, handleLoadingState)
+
+    try {
+      renderChatPage(scope)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'finish before persistence' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        releasePersistence = resolve
+      })
+      await act(async () => resolveResponse?.({ content: 'assistant response' }))
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('assistant response')
+      )
+
+      expect(readScopedActiveLoadingSessionIds(scope)).toEqual([])
+      expect(loadingEvents.at(-1)).toMatchObject({ running: false, completed: true })
+    } finally {
+      releasePersistence?.()
+      hoisted.saveSessionToDBGate.value = null
+      window.removeEventListener(CHAT_SESSION_LOADING_STATE_EVENT, handleLoadingState)
+    }
+  })
+
+  it('queues Enter while loading, preserves attachments lazily, and continues after stop', async () => {
+    let firstSignal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock
+      .mockImplementationOnce(
+        (request: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            firstSignal = request.signal
+            request.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+              once: true
+            })
+          })
+      )
+      .mockResolvedValueOnce({ content: 'queued done' })
+
+    renderChatPage('queued-enter-stop')
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'active request' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+
+    const queuedAttachment = createImageAttachment('queued.png')
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            text: 'queued text',
+            attachment: queuedAttachment,
+            targetScope: 'queued-enter-stop'
+          }
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('queued text')
+    )
+    expect(screen.getByTestId('chat-composer-attachment-names')).toHaveTextContent('queued.png')
+
+    fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+    await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(''))
+    expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+    expect(firstSignal?.aborted).toBe(true)
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    const queuedRequest = hoisted.requestChatCompletionMock.mock.calls[1]?.[0] as {
+      messages: ChatMessage[]
+    }
+    expect(queuedRequest.messages.findLast((message) => message.role === 'user')).toEqual(
+      expect.objectContaining({
+        content: 'queued text',
+        attachments: [expect.objectContaining({ fileName: 'queued.png' })]
+      })
+    )
+  })
+
+  it('does not clear the draft when a busy enqueue has no sendable content', async () => {
+    let resolveFirstRequest: ((value: { content: string }) => void) | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirstRequest = resolve
+        })
+    )
+
+    renderChatPage('empty-busy-enqueue')
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'active request' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '   ' } })
+    fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('   ')
+
+    await act(async () => resolveFirstRequest?.({ content: 'done' }))
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('edits and cancels queued messages with the compact queue controls', async () => {
+    let resolveFirstRequest: ((value: { content: string }) => void) | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirstRequest = resolve
+        })
+    )
+
+    renderChatPage('queue-controls')
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    for (const text of ['active', 'second', 'third']) {
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: text } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      if (text === 'active') {
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      }
+    }
+
+    expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2)
+    expect(screen.getByTestId('chat-queue-panel')).not.toHaveTextContent('待发送 ·')
+    expect(screen.queryByRole('button', { name: /再显示/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getAllByRole('button', { name: 'chat.queue_edit' })[0])
+    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('second')
+    expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1)
+    expect(screen.getByTestId('chat-queue-panel')).toHaveTextContent('third')
+
+    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_remove' }))
+    expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument()
+    await act(async () => resolveFirstRequest?.({ content: 'done' }))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+  })
+
+  it('queues concurrent auto-sends without early materialization and drains them FIFO after errors', async () => {
+    let rejectFirstRequest: ((error: Error) => void) | undefined
+    hoisted.requestChatCompletionMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectFirstRequest = reject
+          })
+      )
+      .mockResolvedValueOnce({ content: 'second done' })
+      .mockResolvedValueOnce({ content: 'third done' })
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.fn(
+      async (url: string) => new Response(new Blob([url], { type: 'image/png' }))
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      renderChatPage('concurrent-auto-send')
+      await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+      for (const detail of [
+        { text: 'first', requestId: 'first' },
+        {
+          text: 'second',
+          requestId: 'second',
+          attachment: { type: 'image', url: 'blob:second-canvas', mimeType: 'image/png' }
+        },
+        {
+          text: 'third',
+          requestId: 'third',
+          attachment: { type: 'image', url: 'blob:third-canvas', mimeType: 'image/png' }
+        }
+      ]) {
+        await act(async () => {
+          window.dispatchEvent(
+            new CustomEvent('send-to-agent', {
+              detail: { ...detail, autoSend: true, targetScope: 'concurrent-auto-send' }
+            })
+          )
+        })
+      }
+
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      const queuedItems = screen.getAllByTestId('chat-queue-item')
+      expect(queuedItems).toHaveLength(2)
+      expect(queuedItems.map((item) => item.textContent)).toEqual([
+        expect.stringContaining('second'),
+        expect.stringContaining('third')
+      ])
+      expect(within(queuedItems[0]).getByLabelText('1 个附件')).toBeInTheDocument()
+      expect(screen.getAllByRole('button', { name: 'chat.queue_remove' })).toHaveLength(2)
+
+      await act(async () => rejectFirstRequest?.(new Error('first failed')))
+
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      await waitFor(() => expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument())
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+        'blob:second-canvas',
+        'blob:third-canvas'
+      ])
+      expect(
+        hoisted.requestChatCompletionMock.mock.calls.map(
+          ([request]) =>
+            request.messages.findLast((message: { role: string }) => message.role === 'user')
+              ?.content
+        )
+      ).toEqual(['first', 'second', 'third'])
+    } finally {
+      vi.stubGlobal('fetch', originalFetch)
+    }
   })
 
   it('auto-sends singular send-to-agent attachments instead of dropping them', async () => {
@@ -2233,16 +2875,29 @@ describe('ChatPage runtime workflow integration', () => {
 
   it('does not let an older async draft persistence restore over newer composer input', async () => {
     const user = userEvent.setup()
-    const originalFetch = globalThis.fetch
-    let releaseFetch: (() => void) | null = null
-    const fetchMock = vi.fn(
+    let releaseImport: (() => void) | null = null
+    hoisted.importManagedDataUrlMock.mockImplementationOnce(
       () =>
-        new Promise<Response>((resolve) => {
-          releaseFetch = () =>
-            resolve(new Response(new Blob(['old'], { type: 'model/gltf-binary' })))
+        new Promise((resolve) => {
+          releaseImport = () =>
+            resolve({
+              version: 1,
+              reference: {
+                version: 1,
+                kind: 'managed',
+                relativePath: `originals/${'c'.repeat(64)}.glb`,
+                sha256: 'c'.repeat(64),
+                mimeType: 'model/gltf-binary',
+                sizeBytes: 5,
+                originalFileName: 'stale.glb'
+              },
+              localMediaUrl: 'media://managed/stale.glb',
+              mimeType: 'model/gltf-binary',
+              sizeBytes: 5,
+              sha256: 'c'.repeat(64)
+            })
         })
     )
-    vi.stubGlobal('fetch', fetchMock)
 
     try {
       renderChatPage('runtime-flow-stale-draft')
@@ -2257,30 +2912,26 @@ describe('ChatPage runtime workflow integration', () => {
       )
       await user.click(screen.getByTestId('chat-composer-upload-mock'))
 
-      await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+      await waitFor(() => expect(hoisted.importManagedDataUrlMock).toHaveBeenCalled())
 
       await user.type(screen.getByTestId('chat-composer-input-mock'), ' plus fresh edit')
 
       await act(async () => {
-        releaseFetch?.()
+        ;(releaseImport as (() => void) | null)?.()
         await Promise.resolve()
       })
 
-      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(
-        'stale draft plus fresh edit'
-      )
+      await waitFor(() => {
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(
+          'stale draft plus fresh edit'
+        )
+      })
 
       await act(async () => {
         await new Promise((resolve) => window.setTimeout(resolve, 250))
       })
-      if (fetchMock.mock.calls.length > 1) {
-        await act(async () => {
-          releaseFetch?.()
-          await Promise.resolve()
-        })
-      }
     } finally {
-      vi.stubGlobal('fetch', originalFetch)
+      ;(releaseImport as (() => void) | null)?.()
     }
   })
 

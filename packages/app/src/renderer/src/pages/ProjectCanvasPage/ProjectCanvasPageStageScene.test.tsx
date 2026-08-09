@@ -3114,6 +3114,38 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(props.handleStageMouseDown).not.toHaveBeenCalled()
   })
 
+  it('does not activate the canvas or start marquee capture from the inline text editor', () => {
+    const requestAnimationFrameSpy = vi.spyOn(window, 'requestAnimationFrame')
+    const props = createBaseProps([])
+
+    render(<ProjectCanvasPageStageScene {...props} />)
+
+    const stageRoot = screen.getByTestId('project-canvas-stage-root')
+    const textarea = document.createElement('textarea')
+    textarea.dataset.projectCanvasInlineTextEditor = 'true'
+    stageRoot.appendChild(textarea)
+
+    fireEvent.pointerDown(textarea, {
+      button: 0,
+      buttons: 1,
+      clientX: 240,
+      clientY: 180,
+      pointerId: 13,
+      pointerType: 'mouse'
+    })
+    fireEvent.mouseDown(textarea, {
+      button: 0,
+      buttons: 1,
+      clientX: 240,
+      clientY: 180
+    })
+
+    expect(requestAnimationFrameSpy).not.toHaveBeenCalled()
+    expect(props.handleStageMouseDown).not.toHaveBeenCalled()
+
+    requestAnimationFrameSpy.mockRestore()
+  })
+
   it('does not start marquee fallback capture from the text item drag toolbar', () => {
     const props = createBaseProps([])
 

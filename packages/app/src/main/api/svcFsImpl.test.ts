@@ -172,6 +172,32 @@ describe('FsSvcImpl', () => {
     })
   })
 
+  describe('pruneAutoSaveProjects request validation', () => {
+    it('rejects path separators in the project directory basename', () => {
+      expect(() =>
+        validateServiceValue(
+          {
+            currentProjectDirName: '../outside',
+            maxProjects: 8
+          },
+          fsSvcDef.pruneAutoSaveProjects.request
+        )
+      ).toThrow(/directory basename/i)
+    })
+
+    it('accepts an ordinary project directory basename and an eight-project limit', () => {
+      expect(
+        validateServiceValue(
+          {
+            currentProjectDirName: '.scene__scene',
+            maxProjects: 8
+          },
+          fsSvcDef.pruneAutoSaveProjects.request
+        )
+      ).toEqual({ currentProjectDirName: '.scene__scene', maxProjects: 8 })
+    })
+  })
+
   describe('listFilesInFolder', () => {
     it('scans directories with extension filtering and recursive traversal', async () => {
       const nestedDir = path.join(testRoot, 'nested')

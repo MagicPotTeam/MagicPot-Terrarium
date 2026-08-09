@@ -14,6 +14,7 @@ import { attachRendererDiagnostics } from './rendererDiagnostics'
 import { winController } from './winControls'
 import { attachWindowStatePersistence, readWindowState, type WindowState } from './windowState'
 import { normalizeAllowedExternalUrl } from './utils/externalUrl'
+import { authorizeScopedLocalMediaPath } from './localMediaAccess'
 import {
   registerMagicAgentTrustedRouteBinding,
   unregisterMagicAgentTrustedRouteBinding
@@ -52,6 +53,10 @@ function registerCanvasStartSystemDrag(): void {
   if (canvasStartSystemDragRegistered) {
     return
   }
+
+  ipcMain.handle('local-media:authorize-scoped-path', (_event, filePath: string): string => {
+    return authorizeScopedLocalMediaPath(filePath) ? filePath : ''
+  })
 
   ipcMain.handle(
     'canvas:start-system-drag',
@@ -123,7 +128,7 @@ function loadWindowContent(window: BrowserWindow, rendererUrl: string): void {
   window.loadURL(rendererUrl)
 }
 
-export function createMainWindow(): BrowserWindow {
+export function createMainWindow(onCreated?: (window: BrowserWindow) => void): BrowserWindow {
   registerCanvasStartSystemDrag()
 
   const statePath = join(app.getPath('userData'), 'window-state.json')
@@ -152,6 +157,7 @@ export function createMainWindow(): BrowserWindow {
     }
   })
 
+  onCreated?.(mainWindow)
   ;(mainWindow as BrowserWindow & { [key: symbol]: boolean | undefined })[
     Symbol.for('magicpot.testWindowRuntime.skipTaskbar')
   ] = testUiPolicy.suppressTaskbar ? true : undefined
@@ -160,7 +166,8 @@ export function createMainWindow(): BrowserWindow {
   winController.registerWindow(mainWindow)
   const trustedRendererUrl = resolveMainWindowRendererUrl()
   registerMagicAgentTrustedRouteBinding(mainWindow.webContents.id, undefined, {
-    trustedUrl: trustedRendererUrl
+    trustedUrl: trustedRendererUrl,
+    trustedWebContents: mainWindow.webContents
   })
   mainWindow.on('closed', () => {
     unregisterMagicAgentTrustedRouteBinding(mainWindow.webContents.id)
