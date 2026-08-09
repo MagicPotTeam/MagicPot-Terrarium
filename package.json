@@ -226,6 +226,7 @@
     "@types/react-dom": "^19.1.6",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@types/ws": "^8.18.1",
+    "@types/yauzl": "3.4.0",
     "@vitejs/plugin-react": "^4.7.0",
     "@vitest/coverage-v8": "^4.1.8",
     "cross-env": "^10.0.0",
@@ -249,7 +250,8 @@
     "ts-json-schema-generator": "^2.4.0",
     "typescript": "^5.8.3",
     "vite": "^7.3.3",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.8",
+    "yauzl": "3.4.0"
   },
   "optionalDependencies": {
     "dmg-license": "^1.0.11"

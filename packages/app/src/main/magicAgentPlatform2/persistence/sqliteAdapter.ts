@@ -1,6 +1,5 @@
-import { mkdirSync, type PathLike } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { backup, DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite'
 
 export const EVENT_STORE_APPLICATION_ID = 0x4d415032
@@ -68,12 +67,7 @@ export class NodeSQLiteAdapter {
   readonly timeout: number
   readonly database: DatabaseSync
 
-  constructor(
-    path: string,
-    timeout = 5000,
-    mode: OpenMode = 'read-write',
-    databasePath: PathLike = path
-  ) {
+  constructor(path: string, timeout = 5000, mode: OpenMode = 'read-write') {
     if (typeof path !== 'string' || path.length === 0)
       throw new TypeError('SQLite path must be a non-empty string.')
     if (!Number.isSafeInteger(timeout) || timeout < 0) {
@@ -85,7 +79,7 @@ export class NodeSQLiteAdapter {
     try {
       if (mode === 'read-write' && path !== ':memory:')
         mkdirSync(dirname(path), { recursive: true })
-      this.database = new DatabaseSync(databasePath, {
+      this.database = new DatabaseSync(path, {
         ...DATABASE_OPTIONS,
         ...(mode === 'read-only' ? { readOnly: true } : {})
       })
@@ -121,9 +115,7 @@ export class NodeSQLiteAdapter {
 
 export function openReadOnlyDatabase(path: string): NodeSQLiteAdapter {
   if (path === ':memory:') return new NodeSQLiteAdapter(path, 0, 'read-only')
-  const immutableUrl = pathToFileURL(path)
-  immutableUrl.searchParams.set('immutable', '1')
-  return new NodeSQLiteAdapter(path, 0, 'read-only', immutableUrl)
+  return new NodeSQLiteAdapter(path, 0, 'read-only')
 }
 
 export function openReadWriteDatabase(path: string, timeout = 5000): NodeSQLiteAdapter {

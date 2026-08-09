@@ -19,7 +19,7 @@ afterEach(async () => {
 })
 
 describe('openReadOnlyDatabase', () => {
-  it('opens an immutable file URL through Node SQLite while retaining the filesystem path', () => {
+  it('opens a read-only database path containing spaces and rejects writes', () => {
     const path = join(directory, 'path with spaces', 'events.sqlite')
     const writer = openReadWriteDatabase(path)
     writer.exec(
