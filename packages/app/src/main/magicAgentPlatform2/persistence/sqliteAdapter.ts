@@ -130,12 +130,12 @@ export function openReadWriteDatabase(path: string, timeout = 5000): NodeSQLiteA
   return new NodeSQLiteAdapter(path, timeout, 'read-write')
 }
 
-export function backupDatabase(
+export async function backupDatabase(
   source: NodeSQLiteAdapter,
   targetPath: string,
   options: { rate?: number } = {}
 ): Promise<void> {
-  return backup(source.database, targetPath, options)
+  await backup(source.database, targetPath, options)
 }
 
 function isMissingFileError(error: unknown): boolean {
