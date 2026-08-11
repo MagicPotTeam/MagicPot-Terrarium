@@ -8,6 +8,7 @@ import {
   publishTrustedChannelMessage
 } from './channelMessageEvents'
 import type { PersistentTriggerState } from './persistentTriggerStore'
+import { readTriggerTrustedDispatchContext } from '../../magicAgentRuntime/triggerTrustedDispatchContext'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import { MagicAgentPolicyAuthorizationService } from '../policy'
 import type { AssistantTerminalPolicyRuntime } from '../productionRuntime'
@@ -283,6 +284,7 @@ describe('production trigger lifecycle adapter', () => {
       expect.objectContaining({
         agentId: 'a',
         text: 'p',
+        sessionId: 's',
         route: {
           channel: 'magic-agent-trigger',
           scopeType: 'agent',
@@ -292,6 +294,29 @@ describe('production trigger lifecycle adapter', () => {
       }),
       expect.objectContaining({ methodName: 'magic-agent.trigger.run' })
     )
+    const agentRequest = runAgent.mock.calls[0][0]
+    expect(readTriggerTrustedDispatchContext(agentRequest)).toMatchObject({
+      triggerId: 'agent-trigger',
+      occurrenceAt: 1000,
+      triggerType: 'schedule',
+      triggerTitle: 'agent-trigger',
+      targetAgentId: 'a',
+      targetSessionId: 's'
+    })
+    expect(readTriggerTrustedDispatchContext(agentRequest)?.requestId).toMatch(
+      /^trigger-run:agent-trigger:.+:1000$/
+    )
+    expect(JSON.parse(JSON.stringify(agentRequest))).toEqual({
+      agentId: 'a',
+      text: 'p',
+      sessionId: 's',
+      route: {
+        channel: 'magic-agent-trigger',
+        scopeType: 'agent',
+        scopeId: 'a',
+        threadId: 'trigger-runtime'
+      }
+    })
     lifecycle.runtime.store.create(
       makeTrigger('graph-trigger', { kind: 'graph-run', graphId: 'g', input: { x: 1 } }),
       1000

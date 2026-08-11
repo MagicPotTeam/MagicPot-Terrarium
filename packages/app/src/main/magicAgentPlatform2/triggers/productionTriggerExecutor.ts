@@ -17,12 +17,14 @@ import {
 } from './trustedTargetAdapter'
 import type { PersistentTriggerState } from './persistentTriggerStore'
 import type { TriggerOccurrenceState } from './triggerOccurrenceStore'
+import type { TriggerTrustedDispatchContext } from '../../magicAgentRuntime/triggerTrustedDispatchContext'
 
 export type TriggerAgentDispatchInput = Readonly<{
   agentId: string
   prompt: string
   sessionId?: string
   route: PolicyJsonRecord
+  trustedContext?: TriggerTrustedDispatchContext
 }>
 
 export type TriggerGraphDispatchInput = Readonly<{
@@ -91,6 +93,7 @@ const occurrenceInput = (trigger: PersistentTriggerState) => {
 
 const dispatchTarget = <TResult>(
   target: TrustedTriggerExecutionTarget,
+  policyInput: TriggerPolicyRequestFactoryInput,
   route: PolicyJsonRecord,
   dispatch: ProductionTriggerDispatchers<TResult>
 ): Promise<TResult> | TResult => {
@@ -99,7 +102,25 @@ const dispatchTarget = <TResult>(
       agentId: target.agentId,
       prompt: target.prompt,
       ...(target.sessionId === undefined ? {} : { sessionId: target.sessionId }),
-      route
+      route,
+      trustedContext: {
+        triggerId: policyInput.triggerId,
+        requestId: policyInput.requestId,
+        occurrenceAt: policyInput.occurrence.occurrenceAt,
+        triggerType: policyInput.trigger.type,
+        triggerTitle: policyInput.trigger.title,
+        targetAgentId: target.agentId,
+        ...(policyInput.occurrence.occurrenceId === undefined
+          ? {}
+          : { occurrenceId: policyInput.occurrence.occurrenceId }),
+        ...(target.sessionId === undefined ? {} : { targetSessionId: target.sessionId }),
+        ...(policyInput.occurrence.source === undefined
+          ? {}
+          : { source: policyInput.occurrence.source }),
+        ...(policyInput.occurrence.attempt === undefined
+          ? {}
+          : { attempt: policyInput.occurrence.attempt })
+      }
     })
   return dispatch.runGraph({
     graphId: target.graphId,
@@ -184,7 +205,12 @@ export class ProductionTriggerExecutor<TResult = unknown> {
       this.options.authorizationService,
       this.options.grantProvider,
       (_request, _authorization) =>
-        dispatchTarget(adapted.executionTarget, route, this.options.dispatch),
+        dispatchTarget(
+          adapted.executionTarget,
+          adapted.policyRequestInput,
+          route,
+          this.options.dispatch
+        ),
       this.now,
       this.options.outcomes === undefined
         ? undefined
