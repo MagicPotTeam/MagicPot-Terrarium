@@ -206,9 +206,11 @@ describe('projectCanvasRenderBoundary', () => {
     const renderImage = buildProjectCanvasRenderableImage(createItem(), image)!
 
     expect(getProjectCanvasRenderTransformKey(renderImage)).toBe('12|34|100|80|1.5|0.75|15')
-    expect(getProjectCanvasRenderTextureKey(renderImage)).toBe(
-      'https://example.com/image.png|200|100|10|20|30|40'
+    const textureKey = getProjectCanvasRenderTextureKey(renderImage)
+    expect(textureKey).toMatch(
+      /^https:\/\/example\.com\/image\.png\|\d+\|200\|100\|10\|20\|30\|40$/
     )
+    expect(getProjectCanvasRenderTextureKey(renderImage)).toBe(textureKey)
   })
 
   it('resolves image runtime routes from crop and WebGL load state', () => {
