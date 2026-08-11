@@ -24,7 +24,8 @@ const {
   initializeAppUpdateManagerMock,
   isAppUpdateInstallInProgressMock,
   startLauncherSmokeTestMock,
-  confirmLauncherHealthMock
+  confirmLauncherHealthMock,
+  flushLocalMediaAccessGrantsMock
 } = vi.hoisted(() => {
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
   const appMock = {
@@ -64,7 +65,8 @@ const {
     initializeAppUpdateManagerMock: vi.fn(() => Promise.resolve()),
     isAppUpdateInstallInProgressMock: vi.fn(() => false),
     startLauncherSmokeTestMock: vi.fn(() => false),
-    confirmLauncherHealthMock: vi.fn(() => Promise.resolve(false))
+    confirmLauncherHealthMock: vi.fn(() => Promise.resolve(false)),
+    flushLocalMediaAccessGrantsMock: vi.fn()
   }
 })
 
@@ -81,6 +83,10 @@ vi.mock('./appRuntime', () => ({
 
 vi.mock('./config/userDataDirectory', () => ({
   resolveStartupUserDataDirectory: resolveStartupUserDataDirectoryMock
+}))
+
+vi.mock('./localMediaAccess', () => ({
+  flushLocalMediaAccessGrants: flushLocalMediaAccessGrantsMock
 }))
 
 vi.mock('./lifeCycle', () => ({
@@ -160,6 +166,7 @@ describe('main process startup window opening', () => {
     beforeShowMock.mockReset()
     beforeShowMock.mockResolvedValue(undefined)
     beforeQuitMock.mockClear()
+    flushLocalMediaAccessGrantsMock.mockClear()
     startQAppWatcherMock.mockClear()
     stopQAppWatcherMock.mockClear()
     initScreenshotManagerMock.mockClear()
@@ -223,8 +230,7 @@ describe('main process startup window opening', () => {
     await loadModule()
 
     const activateHandler = appMock.on.mock.calls.find(([event]) => event === 'activate')?.[1] as
-      | (() => void)
-      | undefined
+      (() => void) | undefined
 
     expect(activateHandler).toBeTypeOf('function')
 
@@ -250,8 +256,7 @@ describe('main process startup window opening', () => {
     await loadModule()
 
     const activateHandler = appMock.on.mock.calls.find(([event]) => event === 'activate')?.[1] as
-      | (() => void)
-      | undefined
+      (() => void) | undefined
 
     expect(activateHandler).toBeTypeOf('function')
 
@@ -366,6 +371,7 @@ describe('main process startup window opening', () => {
     await beforeQuitHandler?.(event)
 
     expect(event.preventDefault).not.toHaveBeenCalled()
+    expect(flushLocalMediaAccessGrantsMock).toHaveBeenCalledTimes(1)
     expect(beforeQuitMock).not.toHaveBeenCalled()
     expect(cleanupScreenshotManagerMock).toHaveBeenCalled()
     expect(stopQAppWatcherMock).toHaveBeenCalled()

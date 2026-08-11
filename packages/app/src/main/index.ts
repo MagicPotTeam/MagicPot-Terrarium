@@ -17,6 +17,7 @@ import { cleanupScreenshotManager, initScreenshotManager } from './screenshot/sc
 import { confirmLauncherHealth, startLauncherSmokeTest } from './appUpdate/appLauncherBridge'
 import { initializeAppUpdateManager, isAppUpdateInstallInProgress } from './appUpdate/updateManager'
 import { winController } from './winControls'
+import { flushLocalMediaAccessGrants } from './localMediaAccess'
 
 const startupUserData = resolveStartupUserDataDirectory()
 fs.mkdirSync(startupUserData.path, { recursive: true })
@@ -164,6 +165,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', async (event) => {
+  flushLocalMediaAccessGrants()
   console.log('[App] 应用即将退出...')
   if (isAppUpdateInstallInProgress()) {
     cleanupScreenshotManager()

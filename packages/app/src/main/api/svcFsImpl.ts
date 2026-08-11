@@ -31,6 +31,7 @@ import fs from 'fs/promises'
 import * as path from 'path'
 import { getCurrentUserDataDirectoryState } from '../config/userDataDirectory'
 import { app } from 'electron'
+import { resolveAuthorizedLocalMediaPath } from '../localMediaAccess'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 
@@ -342,7 +343,17 @@ export class FsSvcImpl implements FsSvc {
   }
 
   readImageFromPath = async (req: ReadImageFromPathReq): Promise<ReadImageFromPathResp> => {
-    const { fullPath } = req
+    const storageState = getCurrentUserDataDirectoryState()
+    const fullPath = resolveAuthorizedLocalMediaPath(req.fullPath, [
+      app.getPath('userData'),
+      path.join(app.getPath('temp'), 'magicpot-local-media'),
+      storageState.projectRoot,
+      storageState.autoSaveRoot
+    ])
+
+    if (!fullPath) {
+      throw new Error('Local image path is not authorized')
+    }
 
     if (!(await pathExists(fullPath))) {
       throw new Error(`File not found: ${fullPath}`)

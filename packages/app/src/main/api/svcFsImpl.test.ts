@@ -1,6 +1,13 @@
 import fs from 'fs'
 import path from 'path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+vi.mock('electron', () => ({
+  app: {
+    getAppPath: vi.fn(() => process.cwd()),
+    getPath: vi.fn((name: string) => path.join(process.cwd(), '.magicpot-trash', name))
+  }
+}))
 import {
   fsSvcDef,
   MAX_FULL_FILE_BYTES,
@@ -9,6 +16,10 @@ import {
 } from '@shared/api/svcFs'
 import { validateServiceValue } from '@shared/api/apiUtils/serviceValidation'
 import { FsSvcImpl } from './svcFsImpl'
+import {
+  authorizeScopedLocalMediaDirectory,
+  clearScopedLocalMediaPathsForTest
+} from '../localMediaAccess'
 
 const getTestRoot = (): string =>
   path.join(
@@ -29,7 +40,26 @@ describe('FsSvcImpl', () => {
   })
 
   afterEach(() => {
+    clearScopedLocalMediaPathsForTest()
     fs.rmSync(testRoot, { recursive: true, force: true })
+  })
+
+  describe('readImageFromPath authorization', () => {
+    it('rejects arbitrary renderer paths but permits images under a trusted directory selection', async () => {
+      const fullPath = path.join(testRoot, 'nested', 'image.png')
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true })
+      fs.writeFileSync(fullPath, Buffer.from([10, 20, 30]))
+
+      await expect(service.readImageFromPath({ fullPath })).rejects.toThrow(
+        'Local image path is not authorized'
+      )
+
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+      await expect(service.readImageFromPath({ fullPath })).resolves.toEqual({
+        image: new Uint8Array([10, 20, 30]),
+        filename: 'image.png'
+      })
+    })
   })
 
   describe('readFileFromPath', () => {

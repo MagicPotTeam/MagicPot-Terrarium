@@ -4,7 +4,11 @@ import { getTestWindowPolicy } from './testWindowRuntime'
 import path from 'node:path'
 import { type TestUiPolicy } from './testUiPolicy'
 import { normalizeLocalFilePath, toFileUrl } from './utils/localFileUrl'
-import { hasLocalMediaTraversal, resolveAuthorizedLocalMediaPath } from './localMediaAccess'
+import {
+  hasLocalMediaTraversal,
+  initializeLocalMediaAccess,
+  resolveAuthorizedLocalMediaPath
+} from './localMediaAccess'
 import { getCurrentUserDataDirectoryState } from './config/userDataDirectory'
 
 const silentErrorCodes = [
@@ -166,7 +170,7 @@ function getLocalMediaAllowedRoots(): string[] {
   const storageState = getCurrentUserDataDirectoryState()
   return [
     app.getPath('userData'),
-    app.getPath('temp'),
+    path.join(app.getPath('temp'), 'magicpot-local-media'),
     storageState.projectRoot,
     storageState.autoSaveRoot
   ].map((root) => path.resolve(root))
@@ -222,6 +226,7 @@ export function initializeMainProcessRuntime(getMainWindow: () => BrowserWindow 
 }
 
 export async function setupReadyAppRuntime(): Promise<void> {
+  initializeLocalMediaAccess(path.join(app.getPath('userData'), 'local-media-grants.json'))
   protocol.handle('local-media', handleLocalMediaRequest)
   console.log('[App] local-media:// 协议已注册')
 

@@ -432,17 +432,7 @@ const Layout: React.FC = () => {
       dispatch(closeTab(tabId))
     }
 
-    const ipc = (
-      window as {
-        electron?: {
-          ipcRenderer?: {
-            on: (channel: string, listener: () => void) => void
-            removeListener: (channel: string, listener: () => void) => void
-          }
-        }
-      }
-    ).electron?.ipcRenderer
-    ipc?.on('app:close-tab', closeActiveTab)
+    const removeCloseTabListener = window.appEvents?.onCloseActiveTab(closeActiveTab)
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w') {
@@ -453,7 +443,7 @@ const Layout: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown)
 
     return () => {
-      ipc?.removeListener('app:close-tab', closeActiveTab)
+      removeCloseTabListener?.()
       window.removeEventListener('keydown', handleKeyDown)
     }
   }, [dispatch, navigate])
