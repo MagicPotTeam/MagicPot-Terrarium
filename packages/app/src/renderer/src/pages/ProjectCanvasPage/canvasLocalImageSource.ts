@@ -1,4 +1,7 @@
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
+import { resolveAuthorizedCanvasLocalMediaSourceUrl } from './canvasLocalFileSource'
+
+const inFlightLocalImageBlobReads = new Map<string, Promise<Blob | null>>()
 
 function decodePathPart(value: string): string {
   try {
@@ -79,33 +82,85 @@ export function canReadCanvasLocalImageSource(sourceUrl: string): boolean {
   return Boolean(
     resolveCanvasLocalFilePathFromSource(sourceUrl) &&
     typeof window !== 'undefined' &&
-    window.api?.svcFs?.readImageFromPath
+    typeof fetch === 'function' &&
+    window.electronFile?.resolveAuthorizedLocalMediaPath
   )
 }
 
 export async function readCanvasLocalImageBlobFromSource(
   sourceUrl: string,
-  fileName?: string
+  fileName?: string,
+  options: { signal?: AbortSignal } = {}
 ): Promise<Blob | null> {
-  const fullPath = resolveCanvasLocalFilePathFromSource(sourceUrl)
-  if (!fullPath || typeof window === 'undefined' || !window.api?.svcFs?.readImageFromPath) {
+  if (options.signal?.aborted) {
+    throw new DOMException('Local image read aborted.', 'AbortError')
+  }
+  const authorizedSource = await resolveAuthorizedCanvasLocalMediaSourceUrl(sourceUrl)
+  if (options.signal?.aborted) {
+    throw new DOMException('Local image read aborted.', 'AbortError')
+  }
+  if (!authorizedSource || typeof fetch !== 'function') {
     return null
   }
 
   try {
-    const { image, filename } = await window.api.svcFs.readImageFromPath({ fullPath })
-    const mimeType = normalizeFileMimeType(fileName ?? filename ?? fullPath, undefined, 'image/png')
-    return new Blob([image as BlobPart], { type: mimeType })
+    const response = await fetch(authorizedSource, { signal: options.signal })
+    if (!response.ok && response.status !== 0) {
+      throw new Error(`Failed to fetch local image source: ${response.status}`)
+    }
+
+    const blob = await response.blob()
+    if (options.signal?.aborted) {
+      throw new DOMException('Local image read aborted.', 'AbortError')
+    }
+    if (blob.type) return blob
+
+    const fullPath = resolveCanvasLocalFilePathFromSource(authorizedSource) ?? authorizedSource
+    const mimeType = normalizeFileMimeType(fileName ?? fullPath, undefined, 'image/png')
+    return blob.slice(0, blob.size, mimeType)
   } catch (error) {
-    console.warn('[Canvas] Failed to read local image source:', fullPath, error)
+    if (options.signal?.aborted || (error as { name?: unknown } | null)?.name === 'AbortError') {
+      throw error
+    }
+    console.warn('[Canvas] Failed to read local image source:', authorizedSource, error)
     return null
   }
+}
+
+export function readCanvasLocalImageBlobFromSourceShared(
+  sourceUrl: string,
+
+  fileName?: string
+): Promise<Blob | null> {
+  const fullPath = resolveCanvasLocalFilePathFromSource(sourceUrl)
+
+  if (!fullPath) {
+    return Promise.resolve(null)
+  }
+
+  const key = `${fullPath}\n${fileName ?? ''}`
+
+  const existing = inFlightLocalImageBlobReads.get(key)
+
+  if (existing) {
+    return existing
+  }
+
+  const pending = readCanvasLocalImageBlobFromSource(sourceUrl, fileName).finally(() => {
+    if (inFlightLocalImageBlobReads.get(key) === pending) {
+      inFlightLocalImageBlobReads.delete(key)
+    }
+  })
+
+  inFlightLocalImageBlobReads.set(key, pending)
+
+  return pending
 }
 
 export async function createCanvasLocalImageObjectUrl(
   sourceUrl: string,
   fileName?: string
 ): Promise<string | null> {
-  const blob = await readCanvasLocalImageBlobFromSource(sourceUrl, fileName)
+  const blob = await readCanvasLocalImageBlobFromSourceShared(sourceUrl, fileName)
   return blob ? URL.createObjectURL(blob) : null
 }

@@ -1,9 +1,8 @@
 // packages/app/src/preload/index.ts
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { electronAPI } from '@electron-toolkit/preload'
 import { newApiIpc } from './apiIpc'
 import pkgPath from 'path'
-import type { BuiltInPath } from '@shared/utils/utilWindow'
+import type { AppEventBridge, BuiltInPath, CanvasScreenshotBridge } from '@shared/utils/utilWindow'
 import type { Api } from '@shared/api'
 import { winBridge } from './winBridge'
 
@@ -18,11 +17,17 @@ const electronFile = {
       return ''
     }
   },
-  async authorizeLocalMediaFile(file: unknown): Promise<string> {
+  authorizeLocalMediaFile(file: unknown): string {
     try {
       const filePath = (webUtils.getPathForFile as (target: unknown) => string)(file) || ''
-      if (!filePath) return ''
-      return (await ipcRenderer.invoke('local-media:authorize-scoped-path', filePath)) || ''
+      return authorizeLocalMediaFilePath(filePath) ? filePath : ''
+    } catch {
+      return ''
+    }
+  },
+  async resolveAuthorizedLocalMediaPath(filePath: string): Promise<string> {
+    try {
+      return (await ipcRenderer.invoke('local-media:resolve-scoped-path', filePath)) || ''
     } catch {
       return ''
     }
@@ -70,6 +75,45 @@ function createProjectCanvasBenchmarkRuntime(): ProjectCanvasBenchmarkRuntimeBri
 }
 
 const projectCanvasBenchmarkRuntime = createProjectCanvasBenchmarkRuntime()
+const canvasScreenshot: CanvasScreenshotBridge = {
+  capture: () => ipcRenderer.invoke('screenshot:capture'),
+  getShortcut: () => ipcRenderer.invoke('screenshot:getShortcut'),
+  setShortcut: (accelerator, reservedShortcuts) =>
+    ipcRenderer.invoke('screenshot:setShortcut', accelerator, reservedShortcuts),
+  selectRegion: (region) => ipcRenderer.send('screenshot:region', region),
+  cancelSelection: () => ipcRenderer.send('screenshot:cancel'),
+  setFloatingOpacity: (windowId, opacity) =>
+    ipcRenderer.send('floating:opacity', windowId, opacity),
+  closeFloatingWindow: (windowId) => ipcRenderer.send('floating:close', windowId),
+  sendFloatingToCanvas: (windowId) => ipcRenderer.send('floating:to-canvas', windowId),
+  onAddImage: (cb) => {
+    const listener = (_event: unknown, dataUrl: string) => cb(dataUrl)
+    ipcRenderer.on('canvas:add-image', listener)
+    return () => ipcRenderer.removeListener('canvas:add-image', listener)
+  }
+}
+
+function subscribeToMainEvent(channel: 'app:close-tab' | 'qapp:dir-changed', cb: () => void) {
+  const listener = () => cb()
+  ipcRenderer.on(channel, listener)
+  return () => ipcRenderer.removeListener(channel, listener)
+}
+
+const appEvents: AppEventBridge = {
+  onCloseActiveTab: (cb) => subscribeToMainEvent('app:close-tab', cb),
+  onQAppDirectoryChanged: (cb) => subscribeToMainEvent('qapp:dir-changed', cb)
+}
+
+function authorizeLocalMediaFilePath(filePath: string): boolean {
+  if (!filePath) return false
+  try {
+    // The picker/drag File object is validated in preload with webUtils, so the renderer
+    // cannot manufacture an arbitrary absolute path for this capability.
+    return ipcRenderer.sendSync('local-media:authorize-picker-path', filePath) === true
+  } catch {
+    return false
+  }
+}
 
 function defineImmutableMainWorldValue(name: string, value: unknown): void {
   Object.defineProperty(window, name, {
@@ -82,7 +126,8 @@ function defineImmutableMainWorldValue(name: string, value: unknown): void {
 
 if (process.contextIsolated) {
   try {
-    contextBridge.exposeInMainWorld('electron', electronAPI)
+    contextBridge.exposeInMainWorld('canvasScreenshot', canvasScreenshot)
+    contextBridge.exposeInMainWorld('appEvents', appEvents)
     contextBridge.exposeInMainWorld('electronFile', electronFile)
     contextBridge.exposeInMainWorld('api', api)
     contextBridge.exposeInMainWorld('path', path)
@@ -96,9 +141,12 @@ if (process.contextIsolated) {
   }
 } else {
   // 非隔离环境降级：直接挂到 window（开发/特殊配置下使用）
-  // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- electronAPI 在运行时由 electron-toolkit 注入
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- screenshot bridge is injected at runtime
   // @ts-ignore
-  window.electron = electronAPI
+  window.canvasScreenshot = canvasScreenshot
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- named app event bridge is injected at runtime
+  // @ts-ignore
+  window.appEvents = appEvents
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment -- Electron file bridge is injected at runtime
   // @ts-ignore
   window.electronFile = electronFile

@@ -58,6 +58,23 @@ export type UnsavedSaveResult = {
   error?: string
 }
 
+export type CanvasScreenshotBridge = {
+  capture: () => Promise<unknown>
+  getShortcut: () => Promise<unknown>
+  setShortcut: (accelerator: string, reservedShortcuts?: unknown) => Promise<unknown>
+  selectRegion: (region: { x: number; y: number; w: number; h: number }) => void
+  cancelSelection: () => void
+  setFloatingOpacity: (windowId: string, opacity: number) => void
+  closeFloatingWindow: (windowId: string) => void
+  sendFloatingToCanvas: (windowId: string) => void
+  onAddImage: (cb: (dataUrl: string) => void) => () => void
+}
+
+export type AppEventBridge = {
+  onCloseActiveTab: (cb: () => void) => () => void
+  onQAppDirectoryChanged: (cb: () => void) => () => void
+}
+
 export type WinBridge = {
   minimize: () => Promise<void>
   toggleMaximize: () => Promise<void>

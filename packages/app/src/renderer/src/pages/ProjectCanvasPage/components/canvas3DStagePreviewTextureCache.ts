@@ -7,7 +7,10 @@ import {
   measureSceneDataLayout,
   tuneLoadedModelSceneForDisplay
 } from './modelLoaders/shared'
-import { readCachedSceneInstanceClone } from './modelLoaders/sceneInstanceCloneCache'
+import {
+  disposeSceneInstanceMaterials,
+  readCachedSceneInstanceClone
+} from './modelLoaders/sceneInstanceCloneCache'
 import {
   CANVAS_3D_STAGE_PREVIEW_LIGHTING_CONFIG,
   CANVAS_3D_STAGE_PREVIEW_MODEL_ROTATION
@@ -144,6 +147,8 @@ const createPreviewRenderable = (
   if (!sceneLayout) {
     if (sceneAsset instanceof THREE.BufferGeometry) {
       sceneAsset.dispose()
+    } else {
+      disposeSceneInstanceMaterials(sceneAsset)
     }
     return null
   }
@@ -181,7 +186,7 @@ const createPreviewRenderable = (
     object: renderObject,
     size: sceneLayout.bounds.size,
     radius: sceneLayout.bounds.radius,
-    dispose: () => {}
+    dispose: () => disposeSceneInstanceMaterials(sceneAsset)
   }
 }
 

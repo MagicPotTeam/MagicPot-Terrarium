@@ -1,12 +1,82 @@
-import { describe, expect, it } from 'vitest'
+import { act, renderHook } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
 
 import {
+  clearSceneInstanceForBufferGeometry,
   configureTextureAwareLoader,
   dummyTextureUrl,
   measureSceneDataLayout,
-  tuneLoadedModelSceneForDisplay
+  tuneLoadedModelSceneForDisplay,
+  useGeometrySceneMaterial
 } from './shared'
+
+describe('useGeometrySceneMaterial', () => {
+  it('owns and disposes its material without disposing borrowed geometry on unmount', () => {
+    const borrowedGeometry = new THREE.BoxGeometry()
+    const geometryDispose = vi.spyOn(borrowedGeometry, 'dispose')
+    const { result, unmount } = renderHook(({ sceneData }) => useGeometrySceneMaterial(sceneData), {
+      initialProps: {
+        sceneData: borrowedGeometry as THREE.Object3D | THREE.BufferGeometry
+      }
+    })
+    const material = result.current
+    const materialDispose = vi.spyOn(material as THREE.MeshStandardMaterial, 'dispose')
+
+    expect(material).toBeInstanceOf(THREE.MeshStandardMaterial)
+    unmount()
+
+    expect(materialDispose).toHaveBeenCalledOnce()
+    expect(geometryDispose).not.toHaveBeenCalled()
+  })
+
+  it('creates an owned material on Object3D to geometry switch and releases it on unmount', () => {
+    const objectScene = new THREE.Group()
+    const borrowedGeometry = new THREE.BoxGeometry()
+    const geometryDispose = vi.spyOn(borrowedGeometry, 'dispose')
+    const { result, rerender, unmount } = renderHook(
+      ({ sceneData }) => useGeometrySceneMaterial(sceneData),
+      { initialProps: { sceneData: objectScene as THREE.Object3D | THREE.BufferGeometry } }
+    )
+
+    expect(result.current).toBeNull()
+    act(() => {
+      rerender({ sceneData: borrowedGeometry })
+    })
+    const material = result.current
+    const materialDispose = vi.spyOn(material as THREE.MeshStandardMaterial, 'dispose')
+
+    expect(material).toBeInstanceOf(THREE.MeshStandardMaterial)
+    unmount()
+
+    expect(materialDispose).toHaveBeenCalledOnce()
+    expect(geometryDispose).not.toHaveBeenCalled()
+  })
+})
+
+describe('clearSceneInstanceForBufferGeometry', () => {
+  it('drops the previous object instance without disposing borrowed geometry', () => {
+    const borrowedGeometry = new THREE.BoxGeometry()
+    const geometryDispose = vi.spyOn(borrowedGeometry, 'dispose')
+    let retainedInstance: THREE.Object3D | null = new THREE.Group()
+
+    const cleared = clearSceneInstanceForBufferGeometry(borrowedGeometry, () => {
+      retainedInstance = null
+    })
+
+    expect(cleared).toBe(true)
+    expect(retainedInstance).toBeNull()
+    expect(geometryDispose).not.toHaveBeenCalled()
+  })
+
+  it('leaves the current object instance intact for Object3D input', () => {
+    const retainedInstance = new THREE.Group()
+    const clear = vi.fn()
+
+    expect(clearSceneInstanceForBufferGeometry(retainedInstance, clear)).toBe(false)
+    expect(clear).not.toHaveBeenCalled()
+  })
+})
 
 describe('measureSceneDataLayout', () => {
   it('derives centered bounds for off-origin object scenes', () => {

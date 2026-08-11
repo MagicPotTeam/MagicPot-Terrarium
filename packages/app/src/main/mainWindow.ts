@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, nativeImage, screen, shell } from 'electron'
 import * as fs from 'fs'
-import { basename, extname, join } from 'path'
+import { basename, extname, join, resolve } from 'path'
 import { pathToFileURL } from 'url'
 import icon from '../../../runtime-assets/resources/icon.png?asset'
 import { isDev } from './config/buildEnv'
@@ -14,7 +14,8 @@ import { attachRendererDiagnostics } from './rendererDiagnostics'
 import { winController } from './winControls'
 import { attachWindowStatePersistence, readWindowState, type WindowState } from './windowState'
 import { normalizeAllowedExternalUrl } from './utils/externalUrl'
-import { authorizeScopedLocalMediaPath } from './localMediaAccess'
+import { authorizeScopedLocalMediaPath, resolveAuthorizedLocalMediaPath } from './localMediaAccess'
+import { getCurrentUserDataDirectoryState } from './config/userDataDirectory'
 import {
   registerMagicAgentTrustedRouteBinding,
   unregisterMagicAgentTrustedRouteBinding
@@ -30,6 +31,7 @@ type CanvasStartSystemDragPayload = {
 
 const testUiPolicy = getTestWindowPolicy()
 let canvasStartSystemDragRegistered = false
+let trustedCanvasRendererWebContentsId: number | null = null
 
 function sanitizeDragFileName(fileName: string): string {
   const trimmed = (fileName || '').trim()
@@ -54,8 +56,23 @@ function registerCanvasStartSystemDrag(): void {
     return
   }
 
-  ipcMain.handle('local-media:authorize-scoped-path', (_event, filePath: string): string => {
-    return authorizeScopedLocalMediaPath(filePath) ? filePath : ''
+  ipcMain.on('local-media:authorize-picker-path', (event, filePath: string) => {
+    event.returnValue =
+      event.sender.id === trustedCanvasRendererWebContentsId &&
+      authorizeScopedLocalMediaPath(filePath)
+  })
+
+  ipcMain.handle('local-media:resolve-scoped-path', (event, filePath: string): string => {
+    if (event.sender.id !== trustedCanvasRendererWebContentsId) return ''
+    const storageState = getCurrentUserDataDirectoryState()
+    return (
+      resolveAuthorizedLocalMediaPath(filePath, [
+        resolve(app.getPath('userData')),
+        resolve(join(app.getPath('temp'), 'magicpot-local-media')),
+        resolve(storageState.projectRoot),
+        resolve(storageState.autoSaveRoot)
+      ]) ?? ''
+    )
   })
 
   ipcMain.handle(
@@ -63,7 +80,7 @@ function registerCanvasStartSystemDrag(): void {
     async (event, payload: CanvasStartSystemDragPayload): Promise<{ filePath: string }> => {
       const tempDir = resolveTestArtifactPath({
         desktopPath: app.getPath('desktop'),
-        tempPath: app.getPath('temp'),
+        tempPath: join(app.getPath('temp'), 'magicpot-local-media'),
         policy: testUiPolicy,
         segments: ['drag']
       })
@@ -74,6 +91,7 @@ function registerCanvasStartSystemDrag(): void {
         const uniquePrefix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
         const fullPath = join(tempDir, `${uniquePrefix}-${fileName}`)
         fs.writeFileSync(fullPath, Buffer.from(file.data))
+        authorizeScopedLocalMediaPath(fullPath)
         return fullPath
       })
 
@@ -157,6 +175,7 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
     }
   })
 
+  trustedCanvasRendererWebContentsId = mainWindow.webContents.id
   onCreated?.(mainWindow)
   ;(mainWindow as BrowserWindow & { [key: symbol]: boolean | undefined })[
     Symbol.for('magicpot.testWindowRuntime.skipTaskbar')
@@ -170,6 +189,9 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
     trustedWebContents: mainWindow.webContents
   })
   mainWindow.on('closed', () => {
+    if (trustedCanvasRendererWebContentsId === mainWindow.webContents.id) {
+      trustedCanvasRendererWebContentsId = null
+    }
     unregisterMagicAgentTrustedRouteBinding(mainWindow.webContents.id)
   })
 

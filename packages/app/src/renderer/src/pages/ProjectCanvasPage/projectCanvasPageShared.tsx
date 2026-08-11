@@ -4,7 +4,10 @@ import SvgIcon from '@mui/material/SvgIcon'
 import type { SvgIconProps } from '@mui/material/SvgIcon'
 import type { AdobeBridgeTarget } from '@shared/api/svcAdobeBridge'
 import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
-import { getCanvasLocalMediaSourceUrl } from './canvasLocalFileSource'
+import {
+  authorizeCanvasLocalMediaSourceUrl,
+  resolveAuthorizedCanvasLocalMediaSourceUrl
+} from './canvasLocalFileSource'
 import { AGENT_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
 import type { OfficeFileNodeData } from './officePreviewUtils'
 export {
@@ -402,6 +405,15 @@ const resolveQuickAppImageDragData = (rawPayload: string): ResolvedDroppedAgentI
   }
 }
 
+function normalizeRemoteAgentImageUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value.trim())
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : null
+  } catch {
+    return null
+  }
+}
+
 export async function resolveDroppedAgentImageDataUrl(
   dataTransfer: Pick<DataTransfer, 'getData' | 'files'>
 ): Promise<ResolvedDroppedAgentImageData | null> {
@@ -410,35 +422,71 @@ export async function resolveDroppedAgentImageDataUrl(
   if (!agentImageUrl && !quickAppImagePayload) return null
 
   const quickAppImageData = resolveQuickAppImageDragData(quickAppImagePayload)
+  const normalizedAgentWebUrl = normalizeRemoteAgentImageUrl(agentImageUrl)
   const droppedImageFile = resolveDroppedImageFile(dataTransfer, quickAppImageData?.fileName)
   if (droppedImageFile) {
-    const normalizedAgentUrl = normalizeLocalMediaUrl(agentImageUrl)
-    return {
-      src:
-        quickAppImageData?.src ||
-        normalizedAgentUrl ||
-        getCanvasLocalMediaSourceUrl(droppedImageFile) ||
-        '',
-      fileName: droppedImageFile.name || quickAppImageData?.fileName,
-      sizeBytes:
-        Number.isFinite(droppedImageFile.size) && droppedImageFile.size >= 0
-          ? droppedImageFile.size
-          : undefined,
-      sourceWidthHint: quickAppImageData?.sourceWidthHint,
-      sourceHeightHint: quickAppImageData?.sourceHeightHint,
-      sourceFile: droppedImageFile
+    const authorizedFileUrl = await authorizeCanvasLocalMediaSourceUrl(droppedImageFile)
+    if (authorizedFileUrl) {
+      return {
+        src: authorizedFileUrl,
+        fileName: droppedImageFile.name || quickAppImageData?.fileName,
+        sizeBytes:
+          Number.isFinite(droppedImageFile.size) && droppedImageFile.size >= 0
+            ? droppedImageFile.size
+            : undefined,
+        sourceWidthHint: quickAppImageData?.sourceWidthHint,
+        sourceHeightHint: quickAppImageData?.sourceHeightHint,
+        sourceFile: droppedImageFile
+      }
+    }
+
+    const safeFallbackSrc =
+      quickAppImageData && !/^local-media:|^file:/i.test(quickAppImageData.src)
+        ? quickAppImageData.src
+        : normalizedAgentWebUrl || ''
+    if (safeFallbackSrc) {
+      const hasUsableDroppedFileBytes =
+        Number.isFinite(droppedImageFile.size) && droppedImageFile.size > 0
+      return {
+        src: safeFallbackSrc,
+        fileName:
+          quickAppImageData?.fileName ||
+          droppedImageFile.name ||
+          getDownloadFileNameFromUrl(safeFallbackSrc, 'dropped-image.png'),
+        sizeBytes:
+          quickAppImageData?.sizeBytes ??
+          (hasUsableDroppedFileBytes ? droppedImageFile.size : undefined),
+        sourceWidthHint: quickAppImageData?.sourceWidthHint,
+        sourceHeightHint: quickAppImageData?.sourceHeightHint,
+        sourceFile: hasUsableDroppedFileBytes ? droppedImageFile : undefined
+      }
     }
   }
 
-  const normalizedAgentUrl = normalizeLocalMediaUrl(agentImageUrl)
-  if (normalizedAgentUrl) {
+  const normalizedAgentLocalCandidate = normalizeLocalMediaUrl(agentImageUrl)
+  const normalizedAgentLocalUrl = /^local-media:|^file:/i.test(normalizedAgentLocalCandidate)
+    ? normalizedAgentLocalCandidate
+    : ''
+  if (normalizedAgentLocalUrl) {
+    const authorizedSrc = await resolveAuthorizedCanvasLocalMediaSourceUrl(normalizedAgentLocalUrl)
+    if (!authorizedSrc) return null
     return {
-      src: normalizedAgentUrl,
-      fileName: getDownloadFileNameFromUrl(normalizedAgentUrl, 'dropped-image.png')
+      src: authorizedSrc,
+      fileName: getDownloadFileNameFromUrl(authorizedSrc, 'dropped-image.png')
+    }
+  }
+  if (normalizedAgentWebUrl) {
+    return {
+      src: normalizedAgentWebUrl,
+      fileName: getDownloadFileNameFromUrl(normalizedAgentWebUrl, 'dropped-image.png')
     }
   }
 
   if (quickAppImageData) {
+    if (/^local-media:|^file:/i.test(quickAppImageData.src)) {
+      const authorizedSrc = await resolveAuthorizedCanvasLocalMediaSourceUrl(quickAppImageData.src)
+      return authorizedSrc ? { ...quickAppImageData, src: authorizedSrc } : null
+    }
     return quickAppImageData
   }
 

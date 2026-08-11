@@ -12,6 +12,7 @@ const originalDevicePixelRatio = window.devicePixelRatio
 const originalCreateObjectURL = URL.createObjectURL
 const originalRevokeObjectURL = URL.revokeObjectURL
 const originalApi = window.api
+const originalElectronFile = window.electronFile
 
 function createImage(width: number, height: number) {
   const image = document.createElement('img')
@@ -66,6 +67,11 @@ afterEach(() => {
     configurable: true,
     writable: true,
     value: originalApi
+  })
+  Object.defineProperty(window, 'electronFile', {
+    configurable: true,
+    writable: true,
+    value: originalElectronFile
   })
   Object.defineProperty(window, 'devicePixelRatio', {
     configurable: true,
@@ -191,25 +197,24 @@ describe('CanvasImageDomPreview', () => {
     expect(document.querySelector('img')).toBeNull()
   })
 
-  it('materializes local source previews through svcFs before rendering the image', async () => {
-    const readImageFromPath = vi.fn(async () => ({
-      image: new Uint8Array([1, 2, 3, 4]),
-      filename: 'huge.png'
-    }))
+  it('materializes authorized local source previews before rendering the image', async () => {
+    const resolveAuthorizedLocalMediaPath = vi.fn(async () => 'C:/real-board/huge.png')
+    const fetchLocalMedia = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'image/png' }))
+      )
     const createObjectUrl = vi.fn(() => 'blob:materialized-preview')
     const revokeObjectUrl = vi.fn()
     URL.createObjectURL = createObjectUrl as unknown as typeof URL.createObjectURL
     URL.revokeObjectURL = revokeObjectUrl as unknown as typeof URL.revokeObjectURL
-    Object.defineProperty(window, 'api', {
+    Object.defineProperty(window, 'electronFile', {
       configurable: true,
       writable: true,
       value: {
-        svcFs: {
-          readImageFromPath
-        }
+        resolveAuthorizedLocalMediaPath
       }
     })
-
     const { unmount } = render(
       <CanvasImageDomPreview
         item={createItem({ image: undefined as unknown as CanvasImageItem['image'] })}
@@ -223,7 +228,10 @@ describe('CanvasImageDomPreview', () => {
     await waitFor(() => {
       expect(document.querySelector('img')?.getAttribute('src')).toBe('blob:materialized-preview')
     })
-    expect(readImageFromPath).toHaveBeenCalledWith({ fullPath: 'C:/real-board/huge.png' })
+    expect(resolveAuthorizedLocalMediaPath).toHaveBeenCalledWith('C:/real-board/huge.png')
+    expect(fetchLocalMedia).toHaveBeenCalledWith('local-media:///C:/real-board/huge.png', {
+      signal: undefined
+    })
 
     unmount()
 

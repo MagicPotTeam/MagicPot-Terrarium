@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CanvasAnnotationItem, CanvasItem, CanvasTextItem } from './types'
 
 vi.mock('@renderer/utils/droppedImageUtils', () => ({
@@ -13,6 +13,14 @@ const emptyFileList = {
   length: 0,
   item: () => null
 } as unknown as FileList
+const originalElectronFile = window.electronFile
+
+afterEach(() => {
+  Object.defineProperty(window, 'electronFile', {
+    configurable: true,
+    value: originalElectronFile
+  })
+})
 
 function createTextItem(overrides: Partial<CanvasTextItem> = {}): CanvasTextItem {
   return {
@@ -144,7 +152,13 @@ const createFileList = (file: File): FileList =>
   }) as unknown as FileList
 
 describe('resolveDroppedAgentImageDataUrl', () => {
-  it('uses an object URL for an Agent image file without base64 materialization', async () => {
+  it('uses an authorized local URL for an Agent image file without base64 materialization', async () => {
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: {
+        authorizeLocalMediaFile: vi.fn(async () => 'C:/demo/image.png')
+      }
+    })
     const file = new File(['image-bytes'], 'image.png', { type: 'image/png' })
     const dataTransfer = {
       getData: (type: string) =>
@@ -161,7 +175,13 @@ describe('resolveDroppedAgentImageDataUrl', () => {
     })
   })
 
-  it('uses the normalized Agent URL when no image file is present', async () => {
+  it('uses the authorized normalized Agent URL when no image file is present', async () => {
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: {
+        resolveAuthorizedLocalMediaPath: vi.fn(async (filePath: string) => filePath)
+      }
+    })
     const dataTransfer = {
       getData: (type: string) =>
         type === 'application/x-ai-image' ? 'file:///C:/demo/image.png' : '',

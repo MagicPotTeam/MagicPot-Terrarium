@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { MagicAgentDriveState } from '../../../shared/magicAgentPlatform2/drive'
+import type { PolicyJsonRecord } from '../../../shared/magicAgentPlatform2/policy'
+import { canonicalPolicyJson } from '../../../shared/magicAgentPlatform2/policy'
 import type { StoredResource } from '../persistence/eventStore'
 import type { PersistentDriveStore } from './persistentDriveStore'
 
@@ -88,19 +90,25 @@ export class DriveDeliveryScheduler {
       token
     })
     if (!claimed) return false
+    const withoutProgress = (state: MagicAgentDriveState): PolicyJsonRecord => {
+      const { progress: _progress, ...settlementState } = state
+      return settlementState as unknown as PolicyJsonRecord
+    }
+    const claimedSettlementState = canonicalPolicyJson(withoutProgress(claimed.state))
+    const settlementRevision = (): number => {
+      const current = this.options.store.get(claimed.id)
+      if (!current || current.state.delivery?.lease?.token !== token)
+        throw new Error('Drive delivery lease conflict.')
+      if (canonicalPolicyJson(withoutProgress(current.state)) !== claimedSettlementState)
+        throw new Error('Drive delivery state conflict.')
+      return current.revision
+    }
     try {
       await this.options.deliver(claimed)
-      this.options.store.acknowledgeDelivery({
-        driveId: claimed.id,
-        expectedRevision: claimed.revision,
-        token,
-        acknowledgedAt: this.now(),
-        idempotencyKey: `scheduler-ack:${token}`
-      })
     } catch (error) {
       this.options.store.failDelivery({
         driveId: claimed.id,
-        expectedRevision: claimed.revision,
+        expectedRevision: settlementRevision(),
         token,
         failedAt: this.now(),
         reason: error instanceof Error ? error.message : String(error),
@@ -108,7 +116,15 @@ export class DriveDeliveryScheduler {
         maxAttempts: this.maxAttempts,
         idempotencyKey: `scheduler-fail:${token}`
       })
+      return true
     }
+    this.options.store.acknowledgeDelivery({
+      driveId: claimed.id,
+      expectedRevision: settlementRevision(),
+      token,
+      acknowledgedAt: this.now(),
+      idempotencyKey: `scheduler-ack:${token}`
+    })
     return true
   }
 }

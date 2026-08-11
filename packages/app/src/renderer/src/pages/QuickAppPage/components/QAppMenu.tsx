@@ -1040,25 +1040,12 @@ export default function QAppMenu({
     window.addEventListener('qapp:refresh-list', handleRefreshList)
 
     // 监听主进程文件系统变更通知（用户在资源管理器中删除/添加快应用文件时触发）
-    const ipc = (
-      window as {
-        electron?: {
-          ipcRenderer?: {
-            on?: (channel: string, listener: () => void) => void
-            removeListener?: (channel: string, listener: () => void) => void
-          }
-        }
-      }
-    ).electron?.ipcRenderer
-    if (typeof ipc?.on === 'function') {
-      ipc.on('qapp:dir-changed', handleRefreshList)
-    }
+    const removeDirectoryChangedListener =
+      window.appEvents?.onQAppDirectoryChanged(handleRefreshList)
 
     return () => {
       window.removeEventListener('qapp:refresh-list', handleRefreshList)
-      if (typeof ipc?.removeListener === 'function') {
-        ipc.removeListener('qapp:dir-changed', handleRefreshList)
-      }
+      removeDirectoryChangedListener?.()
     }
   }, [refreshTabs])
 

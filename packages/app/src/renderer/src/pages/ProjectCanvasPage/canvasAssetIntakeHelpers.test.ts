@@ -88,6 +88,7 @@ describe('canvasAssetIntakeHelpers', () => {
   const originalRevokeObjectURL = URL.revokeObjectURL
   const originalCreateImageBitmap = globalThis.createImageBitmap
   const originalApi = window.api
+  const originalElectronFile = window.electronFile
 
   const nextLoadedWidth = 2048
   const nextLoadedHeight = 1024
@@ -133,6 +134,11 @@ describe('canvasAssetIntakeHelpers', () => {
       configurable: true,
       writable: true,
       value: originalApi
+    })
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      writable: true,
+      value: originalElectronFile
     })
     HTMLCanvasElement.prototype.getContext = originalGetContext
     HTMLCanvasElement.prototype.toBlob = originalToBlob
@@ -220,7 +226,7 @@ describe('canvasAssetIntakeHelpers', () => {
     expect(getCanvasImagePreviewMaxSideForBatch(Number.NaN)).toBe(CANVAS_IMAGE_PROXY_MAX_SIDE)
   })
 
-  it('loads dropped local-media images through svcFs object URLs before decoding', async () => {
+  it('loads dropped local-media images through an authorized protocol URL', async () => {
     const loadedSources: string[] = []
     window.Image = function MockImage() {
       const image = createImage(640, 360)
@@ -238,28 +244,20 @@ describe('canvasAssetIntakeHelpers', () => {
       return image
     } as unknown as typeof Image
 
-    const readImageFromPath = vi.fn(async () => ({
-      image: new Uint8Array([1, 2, 3, 4]),
-      filename: 'reference.png'
-    }))
-    const createObjectUrl = vi.fn((_blob: Blob) => 'blob:local-image')
-    URL.createObjectURL = createObjectUrl as unknown as typeof URL.createObjectURL
+    const resolveAuthorizedLocalMediaPath = vi.fn(async (filePath: string) => filePath)
 
-    Object.defineProperty(window, 'api', {
+    Object.defineProperty(window, 'electronFile', {
       configurable: true,
       writable: true,
       value: {
-        svcFs: {
-          readImageFromPath
-        }
+        resolveAuthorizedLocalMediaPath
       }
     })
 
     const loaded = await loadImageFromSrc('local-media:///C:/assets/reference.png')
 
-    expect(readImageFromPath).toHaveBeenCalledWith({ fullPath: 'C:/assets/reference.png' })
-    expect(createObjectUrl).toHaveBeenCalled()
-    expect(loadedSources).toEqual(['blob:local-image'])
+    expect(resolveAuthorizedLocalMediaPath).toHaveBeenCalledWith('C:/assets/reference.png')
+    expect(loadedSources).toEqual(['local-media:///C:/assets/reference.png'])
     expect(loaded).toMatchObject({
       width: 640,
       height: 360
@@ -400,23 +398,23 @@ describe('canvasAssetIntakeHelpers', () => {
     })
   })
 
-  it('rehydrates persisted local images through svcFs when local-media image loading is blocked', async () => {
-    const readImageFromPath = vi.fn(async () => ({
-      image: new Uint8Array([1, 2, 3, 4]),
-      filename: 'reference.png'
-    }))
+  it('rehydrates persisted local images through an authorized protocol fetch', async () => {
+    const resolveAuthorizedLocalMediaPath = vi.fn(async (filePath: string) => filePath)
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: async () => new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'image/png' })
+    } as Response)
     const createObjectUrl = vi.fn(() => 'blob:recovered-local-image')
     const revokeObjectUrl = vi.fn()
     URL.createObjectURL = createObjectUrl as unknown as typeof URL.createObjectURL
     URL.revokeObjectURL = revokeObjectUrl as unknown as typeof URL.revokeObjectURL
 
-    Object.defineProperty(window, 'api', {
+    Object.defineProperty(window, 'electronFile', {
       configurable: true,
       writable: true,
       value: {
-        svcFs: {
-          readImageFromPath
-        }
+        resolveAuthorizedLocalMediaPath
       }
     })
 
@@ -460,7 +458,10 @@ describe('canvasAssetIntakeHelpers', () => {
       maxPreviewSide: CANVAS_IMAGE_PROXY_MAX_SIDE
     })
 
-    expect(readImageFromPath).toHaveBeenCalledWith({ fullPath: 'C:/assets/reference.png' })
+    expect(resolveAuthorizedLocalMediaPath).toHaveBeenCalledWith('C:/assets/reference.png')
+    expect(fetchMock).toHaveBeenCalledWith('local-media:///C:/assets/reference.png', {
+      signal: undefined
+    })
     expect(loadImageFromSrc).toHaveBeenNthCalledWith(1, 'local-media:///C:/assets/reference.png')
     expect(loadImageFromSrc).toHaveBeenNthCalledWith(2, 'blob:recovered-local-image')
     expect(revokeObjectUrl).toHaveBeenCalledWith('blob:recovered-local-image')
@@ -589,7 +590,7 @@ describe('canvasAssetIntakeHelpers', () => {
     })
   })
 
-  it('recovers warm thumbnail previews through svcFs when local-media loading is blocked', async () => {
+  it('recovers warm thumbnail previews through an authorized protocol fetch', async () => {
     const sourceIdentity = buildCanvasImageSourceIdentity({
       canonicalPath: 'C:/assets/reference.png',
       sizeBytes: 4096,
@@ -610,10 +611,12 @@ describe('canvasAssetIntakeHelpers', () => {
       })),
       now: new Date('2026-05-02T00:00:00.000Z')
     })
-    const readImageFromPath = vi.fn(async () => ({
-      image: new Uint8Array([1, 2, 3, 4]),
-      filename: '512.webp'
-    }))
+    const resolveAuthorizedLocalMediaPath = vi.fn(async (filePath: string) => filePath)
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: async () => new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'image/webp' })
+    } as Response)
     const createObjectUrl = vi.fn(() => 'blob:recovered-thumbnail')
     const revokeObjectUrl = vi.fn()
     URL.createObjectURL = createObjectUrl as unknown as typeof URL.createObjectURL
@@ -627,10 +630,14 @@ describe('canvasAssetIntakeHelpers', () => {
           readThumbnailManifest: vi.fn(async () => ({
             manifest: canvasThumbnailManifestFromSet(thumbnailSet)
           }))
-        },
-        svcFs: {
-          readImageFromPath
         }
+      }
+    })
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      writable: true,
+      value: {
+        resolveAuthorizedLocalMediaPath
       }
     })
 
@@ -671,7 +678,10 @@ describe('canvasAssetIntakeHelpers', () => {
 
     const hydrated = await hydrateCanvasImageItemForCanvas({ item, loadImageFromSrc })
 
-    expect(readImageFromPath).toHaveBeenCalledWith({ fullPath: 'cache/reference/512.webp' })
+    expect(resolveAuthorizedLocalMediaPath).toHaveBeenCalledWith('/cache/reference/512.webp')
+    expect(fetchMock).toHaveBeenCalledWith('local-media:///cache/reference/512.webp', {
+      signal: undefined
+    })
     expect(loadImageFromSrc).toHaveBeenNthCalledWith(1, 'local-media:///cache/reference/512.webp')
     expect(loadImageFromSrc).toHaveBeenNthCalledWith(2, 'blob:recovered-thumbnail')
     expect(revokeObjectUrl).toHaveBeenCalledWith('blob:recovered-thumbnail')

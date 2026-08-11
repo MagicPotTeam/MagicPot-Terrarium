@@ -355,12 +355,12 @@ function getOverlayHTML(): string {
       hint.style.display = 'block';
       return;
     }
-    window.electron.ipcRenderer.send('screenshot:region', { x, y, w, h });
+    window.canvasScreenshot.selectRegion({ x, y, w, h });
   });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-      window.electron.ipcRenderer.send('screenshot:cancel');
+      window.canvasScreenshot.cancelSelection();
     }
   });
 </script>
@@ -420,14 +420,14 @@ function getFloatingHTML(windowId: string, imageFileName: string): string {
 </div>
 <div class="opacity-slider">
   <input type="range" min="20" max="100" value="100"
-    oninput="window.electron.ipcRenderer.send('floating:opacity', '${windowId}', this.value / 100)" />
+    oninput="window.canvasScreenshot.setFloatingOpacity('${windowId}', this.value / 100)" />
 </div>
 <script>
   function closeThis() {
-    window.electron.ipcRenderer.send('floating:close', '${windowId}');
+    window.canvasScreenshot.closeFloatingWindow('${windowId}');
   }
   function sendToCanvas() {
-    window.electron.ipcRenderer.send('floating:to-canvas', '${windowId}');
+    window.canvasScreenshot.sendFloatingToCanvas('${windowId}');
   }
 </script>
 </body>

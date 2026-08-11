@@ -93,13 +93,10 @@ export function useCanvasCustomAddEvents({
   handleAppendGenerationTraceCandidate
 }: UseCanvasCustomAddEventsOptions) {
   useEffect(() => {
-    const removeIpc = window.electron?.ipcRenderer?.on?.(
-      'canvas:add-image',
-      (_event: unknown, dataUrl: string) => {
-        console.log('[Canvas] Received image from floating window')
-        void addImageToCanvas(dataUrl)
-      }
-    )
+    const removeIpc = window.canvasScreenshot?.onAddImage((dataUrl) => {
+      console.log('[Canvas] Received image from floating window')
+      void addImageToCanvas(dataUrl)
+    })
 
     const handleCustomAdd = (event: Event) => {
       const detail = (

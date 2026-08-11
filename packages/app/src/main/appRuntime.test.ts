@@ -39,12 +39,25 @@ vi.mock('@electron-toolkit/utils', () => ({
   }
 }))
 
+const { initializeLocalMediaAccessMock } = vi.hoisted(() => ({
+  initializeLocalMediaAccessMock: vi.fn()
+}))
+
+vi.mock('./localMediaAccess', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./localMediaAccess')>()
+  return { ...actual, initializeLocalMediaAccess: initializeLocalMediaAccessMock }
+})
+
 vi.mock('./testWindowRuntime', () => ({
   getTestWindowPolicy: vi.fn()
 }))
 
 import { protocol } from 'electron'
-import { initializeMainProcessRuntime, withLocalMediaCorsHeaders } from './appRuntime'
+import {
+  initializeMainProcessRuntime,
+  setupReadyAppRuntime,
+  withLocalMediaCorsHeaders
+} from './appRuntime'
 
 describe('appRuntime local-media protocol helpers', () => {
   it('registers local-media as a CORS-enabled privileged scheme without bypassing CSP', () => {
@@ -69,6 +82,22 @@ describe('appRuntime local-media protocol helpers', () => {
         }
       ).mock.calls[0][0][0].privileges.bypassCSP
     ).toBeUndefined()
+  })
+
+  it('loads durable local-media grants before registering the protocol handler', async () => {
+    const order: string[] = []
+    initializeLocalMediaAccessMock.mockImplementationOnce(() => order.push('grants'))
+    vi.mocked(protocol.handle).mockImplementationOnce(() => {
+      order.push('protocol')
+    })
+
+    await setupReadyAppRuntime()
+
+    expect(initializeLocalMediaAccessMock).toHaveBeenCalledWith(
+      expect.stringMatching(/userData[\\/]local-media-grants\.json$/)
+    )
+    expect(protocol.handle).toHaveBeenCalledWith('local-media', expect.any(Function))
+    expect(order).toEqual(['grants', 'protocol'])
   })
 
   it('adds CORS headers while preserving the proxied local file response metadata', async () => {

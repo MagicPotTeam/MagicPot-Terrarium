@@ -1,4 +1,5 @@
 import type { ProductionAgentInstanceLifecycle } from '../agents/productionAgentInstanceLifecycleOwner'
+import { attachRuntimeChannelTrustedDispatchContext } from '../../magicAgentRuntime/runtimeChannelTrustedDispatchContext'
 import type { RuntimeChannelAgentWake } from './runtimeChannelWakeRouter'
 
 export const createRuntimeChannelAgentWakeAdapter =
@@ -10,12 +11,20 @@ export const createRuntimeChannelAgentWakeAdapter =
       instanceId: instance.id,
       expectedRevision: instance.revision,
       actor: { kind: 'system', id: 'runtime-channel-wakeup' },
-      request: {
-        agentId: instance.state.definitionId,
-        text: `Runtime Channel ${wake.channelId} has pending messages: ${wake.pendingMessageIds.join(', ')}`,
-        route: { channel: 'runtime-channel', scopeType: 'dm', scopeId: wake.channelId },
-        allowedToolNames: [...instance.state.limits.allowedToolNames]
-      },
+      request: attachRuntimeChannelTrustedDispatchContext(
+        {
+          agentId: instance.state.definitionId,
+          text: `Runtime Channel ${wake.channelId} has pending messages: ${wake.pendingMessageIds.join(', ')}`,
+          route: { channel: 'runtime-channel', scopeType: 'dm', scopeId: wake.channelId },
+          allowedToolNames: [...instance.state.limits.allowedToolNames]
+        },
+        {
+          channelId: wake.channelId,
+          memberId: wake.memberId,
+          pendingMessageIds: wake.pendingMessageIds,
+          agentInstanceId: wake.agentInstanceId
+        }
+      ),
       idempotencyKey: `channel-wake:${wake.channelId}:${wake.pendingMessageIds.join(':')}`
     })
   }

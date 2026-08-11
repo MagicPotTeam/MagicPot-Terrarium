@@ -1,11 +1,16 @@
 // packages/app/src/preload/index.d.ts
-import type { ElectronAPI } from '@electron-toolkit/preload'
 import type { Api } from '@shared/api'
-import type { BuiltInPath, WinBridge } from '@shared/utils/utilWindow'
+import type {
+  AppEventBridge,
+  BuiltInPath,
+  CanvasScreenshotBridge,
+  WinBridge
+} from '@shared/utils/utilWindow'
 
 export type ElectronFileBridge = {
   getPathForFile(file: File): string
-  authorizeLocalMediaFile(file: File): Promise<string>
+  authorizeLocalMediaFile(file: File): string | Promise<string>
+  resolveAuthorizedLocalMediaPath(filePath: string): Promise<string>
 }
 
 export type ProjectCanvasBenchmarkRuntimeBridge = Readonly<{
@@ -16,7 +21,8 @@ export type ProjectCanvasBenchmarkRuntimeBridge = Readonly<{
 
 declare global {
   interface Window {
-    electron: ElectronAPI
+    appEvents?: AppEventBridge
+    canvasScreenshot?: CanvasScreenshotBridge
     electronFile?: ElectronFileBridge
     api: Api
     path: BuiltInPath

@@ -15,6 +15,7 @@ import {
   startProductionDriveLifecycle
 } from './productionDriveLifecycle'
 import { ProductionDriveRuntime } from './productionDriveRuntime'
+import { readDriveTrustedDispatchContext } from '../../magicAgentRuntime/driveTrustedDispatchContext'
 
 const drive = {
   id: 'drive-1',
@@ -123,20 +124,22 @@ describe('Production Drive runtime/lifecycle/commands', () => {
   })
 
   it('delivers an explicit agent target through the public Policy-gated runAgent path', async () => {
-    const runAgent = vi.fn(async () => ({
-      runId: 'run-1',
-      agentId: 'agent-1',
-      status: 'completed' as const,
-      content: '',
-      messages: [],
-      toolCalls: [],
-      events: [],
-      createdAt: 1,
-      updatedAt: 1,
-      startedAt: 1,
-      finishedAt: 1,
-      metadata: {}
-    }))
+    const runAgent = vi.fn(
+      async (_request: import('@shared/api/svcMagicAgentPlatform').MagicAgentPlatformRunReq) => ({
+        runId: 'run-1',
+        agentId: 'agent-1',
+        status: 'completed' as const,
+        content: '',
+        messages: [],
+        toolCalls: [],
+        events: [],
+        createdAt: 1,
+        updatedAt: 1,
+        startedAt: 1,
+        finishedAt: 1,
+        metadata: {}
+      })
+    )
     const deliver = createProductionDriveDelivery({ runAgent })
     await deliver({
       kind: 'drive',
@@ -149,6 +152,20 @@ describe('Production Drive runtime/lifecycle/commands', () => {
         ...drive,
         deliveryTarget: { kind: 'agent', agentId: 'agent-1', text: 'Continue goal' }
       }
+    })
+    const deliveredRequest = runAgent.mock.calls[0]![0]!
+    expect(readDriveTrustedDispatchContext(deliveredRequest)).toEqual({
+      driveId: 'drive-1',
+      driveRevision: 2,
+      status: 'active',
+      assigneeId: 'agent-1',
+      targetAgentId: 'agent-1'
+    })
+    expect(JSON.parse(JSON.stringify(deliveredRequest))).toEqual({
+      route: { channel: 'magicpot-drive://runtime', scopeType: 'channel', scopeId: 'drive-1' },
+      agentId: 'agent-1',
+      text: 'Continue goal',
+      metadata: { driveId: 'drive-1', driveRevision: 2 }
     })
     expect(runAgent).toHaveBeenCalledWith(
       expect.objectContaining({

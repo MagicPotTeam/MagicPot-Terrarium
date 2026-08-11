@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readRuntimeChannelTrustedDispatchContext } from '../../magicAgentRuntime/runtimeChannelTrustedDispatchContext'
 import { createRuntimeChannelAgentWakeAdapter } from './runtimeChannelAgentWakeAdapter'
 
 describe('runtimeChannelAgentWakeAdapter', () => {
@@ -12,7 +13,7 @@ describe('runtimeChannelAgentWakeAdapter', () => {
         limits: { allowedToolNames: ['read'] }
       }
     }
-    const start = vi.fn(async () => undefined)
+    const start = vi.fn(async (_input: unknown) => undefined)
     const adapter = createRuntimeChannelAgentWakeAdapter({
       store: { get: vi.fn(() => instance) },
       commands: { start }
@@ -23,7 +24,10 @@ describe('runtimeChannelAgentWakeAdapter', () => {
       memberId: 'member',
       pendingMessageIds: ['message-1', 'message-2']
     })
-    expect(start).toHaveBeenCalledWith({
+    const call = start.mock.calls[0]?.[0] as {
+      request: Parameters<typeof readRuntimeChannelTrustedDispatchContext>[0]
+    }
+    expect(call).toMatchObject({
       instanceId: 'instance',
       expectedRevision: 3,
       actor: { kind: 'system', id: 'runtime-channel-wakeup' },
@@ -35,10 +39,22 @@ describe('runtimeChannelAgentWakeAdapter', () => {
       },
       idempotencyKey: 'channel-wake:channel:message-1:message-2'
     })
+    expect(readRuntimeChannelTrustedDispatchContext(call.request)).toEqual({
+      channelId: 'channel',
+      memberId: 'member',
+      pendingMessageIds: ['message-1', 'message-2'],
+      agentInstanceId: 'instance'
+    })
+    expect(JSON.parse(JSON.stringify(call.request))).toEqual({
+      agentId: 'agent-definition',
+      text: 'Runtime Channel channel has pending messages: message-1, message-2',
+      route: { channel: 'runtime-channel', scopeType: 'dm', scopeId: 'channel' },
+      allowedToolNames: ['read']
+    })
   })
 
   it('carries Runtime Channel identity in the route scope for config enforcement', async () => {
-    const start = vi.fn(async () => undefined)
+    const start = vi.fn(async (_input: unknown) => undefined)
     const adapter = createRuntimeChannelAgentWakeAdapter({
       store: {
         get: vi.fn(() => ({

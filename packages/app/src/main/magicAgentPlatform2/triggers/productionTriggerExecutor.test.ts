@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import { MagicAgentPolicyAuthorizationService } from '../policy'
 import type { PersistentTriggerState } from './persistentTriggerStore'
+import type { TriggerOccurrenceState } from './triggerOccurrenceStore'
 import {
   ProductionTriggerExecutor,
   TriggerOutcomePersistenceError
@@ -103,7 +104,77 @@ describe('production trigger executor', () => {
     })
     expect(runAgent).toHaveBeenCalledOnce()
     expect(runAgent.mock.calls[0][0].route).toEqual({ trusted: true })
+    expect(runAgent.mock.calls[0][0].trustedContext).toEqual({
+      triggerId: 'trigger-1',
+      requestId: 'trigger-run:trigger-1:claim-1:100',
+      occurrenceAt: 100,
+      triggerType: 'schedule',
+      triggerTitle: 'Nightly',
+      targetAgentId: 'agent-1',
+      targetSessionId: 'session-1'
+    })
     expect(resolveTrustedRoute).toHaveBeenCalledOnce()
+  })
+
+  it('includes trusted occurrence provenance in persistent agent dispatches', async () => {
+    const service = setup('allow')
+    const runAgent = vi.fn(async (input) => input)
+    const executor = new ProductionTriggerExecutor({
+      authorizationService: service,
+      grantProvider: async (request) => {
+        const grant = service.createApprovalGrant({
+          grantId: 'occurrence-grant',
+          request,
+          approvedBy: { kind: 'user', id: 'approver-1' },
+          issuedAt: 1000,
+          expiresAt: 2000,
+          maxUses: 1,
+          idempotencyKey: 'occurrence-grant'
+        })
+        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
+      },
+      resolveTrustedRoute: () => ({ trusted: true }),
+      dispatch: { runAgent, runGraph: vi.fn() },
+      now: () => 1000
+    })
+    const occurrence: TriggerOccurrenceState = {
+      schemaVersion: 1,
+      occurrenceId: 'occurrence-1',
+      triggerId: 'trigger-1',
+      source: 'channel-message',
+      scheduledAt: 321,
+      requestedAt: 300,
+      status: 'claimed',
+      attempt: 2,
+      idempotencyKey: 'occurrence-key',
+      semanticDigest: 'digest',
+      claim: { owner: 'worker-1', claimedAt: 310, expiresAt: 1310 },
+      createdAt: 300,
+      updatedAt: 310
+    }
+
+    await executor.executeOccurrence(
+      trigger({
+        kind: 'agent-run',
+        agentId: 'agent-1',
+        prompt: 'occurrence prompt',
+        sessionId: 'session-1'
+      }),
+      occurrence
+    )
+
+    expect(runAgent.mock.calls[0][0].trustedContext).toEqual({
+      triggerId: 'trigger-1',
+      occurrenceId: 'occurrence-1',
+      requestId: 'trigger-run:trigger-1:occurrence-1:worker-1',
+      occurrenceAt: 321,
+      triggerType: 'schedule',
+      triggerTitle: 'Nightly',
+      targetAgentId: 'agent-1',
+      targetSessionId: 'session-1',
+      source: 'channel-message',
+      attempt: 2
+    })
   })
 
   it('maps graph target and preserves input only for dispatch', async () => {
@@ -132,6 +203,7 @@ describe('production trigger executor', () => {
     )
     expect(result).toMatchObject({ graphId: 'graph-1', input: { secret: 'payload' } })
     expect(runGraph).toHaveBeenCalledOnce()
+    expect(runGraph.mock.calls[0][0]).not.toHaveProperty('trustedContext')
     const audit = service.listAuditResources().map((resource) => JSON.stringify(resource.state))
     expect(audit.join(String.fromCharCode(10))).not.toContain('"secret":"payload"')
   })

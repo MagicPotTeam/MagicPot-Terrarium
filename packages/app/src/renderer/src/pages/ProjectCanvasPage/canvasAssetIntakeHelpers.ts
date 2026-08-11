@@ -7,9 +7,11 @@ import { isCanvasThumbnailSetFresh, pickBestCanvasThumbnailLevel } from './canva
 import { ensureCanvasThumbnailSet, readWarmCanvasThumbnailSet } from './canvasThumbnailWorkerClient'
 import type { CanvasImageSourceIdentity, CanvasImageThumbnailSet } from './canvasThumbnailTypes'
 import {
+  canReadCanvasLocalImageSource,
   createCanvasLocalImageObjectUrl,
   readCanvasLocalImageBlobFromSource
 } from './canvasLocalImageSource'
+import { resolveAuthorizedCanvasLocalMediaSourceUrl } from './canvasLocalFileSource'
 
 export const CANVAS_IMAGE_PROXY_MAX_SIDE = 2048
 export const CANVAS_IMAGE_PROXY_SMALL_BATCH_MAX_SIDE = 1024
@@ -490,14 +492,14 @@ function loadImageElementFromSrc(src: string, logSource = src): Promise<LoadedCa
 }
 
 export async function loadImageFromSrc(src: string): Promise<LoadedCanvasImage> {
-  const localObjectUrl = await createCanvasLocalImageObjectUrl(src)
-  try {
-    return await loadImageElementFromSrc(localObjectUrl ?? src, src)
-  } finally {
-    if (localObjectUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
-      URL.revokeObjectURL(localObjectUrl)
-    }
+  if (!canReadCanvasLocalImageSource(src)) {
+    return loadImageElementFromSrc(src, src)
   }
+  const authorizedSource = await resolveAuthorizedCanvasLocalMediaSourceUrl(src)
+  if (!authorizedSource) {
+    throw new Error('Local image source is not authorized.')
+  }
+  return loadImageElementFromSrc(authorizedSource, src)
 }
 
 async function createComfyImageObjectUrl(item: CanvasImageItem): Promise<string | null> {

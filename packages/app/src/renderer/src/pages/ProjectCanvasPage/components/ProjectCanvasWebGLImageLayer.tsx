@@ -50,7 +50,6 @@ import {
   insertProjectCanvasWebGLPriorityQueueEntry,
   refreshProjectCanvasWebGLPriorityQueuePriorities,
   reprioritizeProjectCanvasWebGLPriorityQueueEntry,
-  createProjectCanvasWebGLResidentTextureByteTracker,
   buildProjectCanvasWebGLItemReconcileSnapshot,
   areProjectCanvasWebGLItemReconcileSnapshotsEqual,
   createProjectCanvasWebGLSpatialTileStateMachine,
@@ -60,10 +59,23 @@ import {
 } from './projectCanvasWebGLImageLayerRuntime'
 import {
   canReadCanvasLocalImageSource,
-  createCanvasLocalImageObjectUrl,
   readCanvasLocalImageBlobFromSource
 } from '../canvasLocalImageSource'
+import { resolveAuthorizedCanvasLocalMediaSourceUrl } from '../canvasLocalFileSource'
 import { CanvasSpatialTileResourceManager } from '../canvasSpatialTileResourceManager'
+import {
+  CanvasImageAsyncSharedResourcePool,
+  CanvasImageRequestTokenTracker,
+  CanvasImageSharedResourceByteTracker,
+  CanvasImageSharedReservationTracker,
+  CanvasImageSharedResourcePool,
+  type CanvasImageSharedResourceLease,
+  getCanvasImageSharedDecodedAssetKey,
+  getCanvasImageSourceRevisionKey,
+  getCanvasImageStableSourceKey,
+  hasCanvasImageStrongSourceIdentity,
+  type CanvasImageRequestToken
+} from '../canvasImageResourceLifecycle'
 import { CanvasSpatialTileScheduler } from '../canvasSpatialTileScheduler'
 import { createCanvasSpatialTileWorkerClient } from '../canvasSpatialTileWorkerClient'
 import { buildCanvasSpatialTilePolicy } from '../canvasSpatialTilePolicy'
@@ -90,9 +102,38 @@ type ProjectCanvasWebGLImageLayerProps = {
 type CachedImageRecord = {
   image: CanvasImageAsset
   src: string
+  sourceRevisionKey: string
+  providedImageIdentityKey: number | string
   imageBitmapOwnership: 'owned' | 'borrowed'
-  imageBitmapReleaseId?: string
-  objectUrlReleaseId?: string
+  decodedAssetReleaseId?: string
+}
+
+function isCachedImageRecordCurrent(
+  record: CachedImageRecord | null | undefined,
+  source: CanvasImageItem,
+  providedImageIdentityKey: number | string
+): record is CachedImageRecord {
+  return Boolean(
+    record &&
+    record.sourceRevisionKey === getCanvasImageSourceRevisionKey(source) &&
+    (hasCanvasImageStrongSourceIdentity(source) ||
+      record.providedImageIdentityKey === providedImageIdentityKey)
+  )
+}
+
+function getCanvasImageSharedTextureKey(
+  item: CanvasImageItem,
+  image: CanvasImageAsset,
+  decodedVariantKey: string,
+  decodedIdentityKey: number | string
+): string {
+  const { width, height } = getCanvasImageAssetSize(image)
+  const stableSourceKey = getCanvasImageStableSourceKey(item)
+  const sourceKey = stableSourceKey ?? `unstable:${getCanvasImageSourceRevisionKey(item)}`
+  const decodedIdentitySuffix = hasCanvasImageStrongSourceIdentity(item)
+    ? ''
+    : `|decoded:${decodedIdentityKey}`
+  return `${sourceKey}|decoded-variant:${decodedVariantKey}${decodedIdentitySuffix}|texture:${width}x${height}`
 }
 
 type SpatialTilePresentationAsset = {
@@ -126,9 +167,19 @@ type SpriteRecord = {
   textureByteSize: number
   lastUsedAt: number
   sawTinyPreview: boolean
+  sharedTextureKey: string
 }
 
 type SourceUpgradeQueueEntry = ProjectCanvasWebGLPriorityQueueEntry
+
+type ThumbnailLoadQueueEntry = SourceUpgradeQueueEntry & {
+  sourceRevisionKey: string
+}
+
+type ImageLoadQueueEntry = SourceUpgradeQueueEntry & {
+  sourceRevisionKey: string
+  requestToken: CanvasImageRequestToken
+}
 
 type ResizablePixiApplication = Application & {
   renderer?: {
@@ -316,18 +367,18 @@ function isProjectCanvasCachedSourceImage(
 function withProjectCanvasWebGLTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
-  message: string
+  message: string,
+  onTimeout?: () => void
 ): Promise<T> {
   let settled = false
+  let timedOut = false
+  const timeoutError = new Error(message)
 
   return new Promise((resolve, reject) => {
     const timeoutId = window.setTimeout(() => {
-      if (settled) {
-        return
-      }
-
-      settled = true
-      reject(new Error(message))
+      if (settled) return
+      timedOut = true
+      onTimeout?.()
     }, timeoutMs)
 
     promise.then(
@@ -339,16 +390,18 @@ function withProjectCanvasWebGLTimeout<T>(
 
         settled = true
         window.clearTimeout(timeoutId)
+        if (timedOut) {
+          closeCanvasImageAssetIfPossible(value)
+          reject(timeoutError)
+          return
+        }
         resolve(value)
       },
       (error) => {
-        if (settled) {
-          return
-        }
-
+        if (settled) return
         settled = true
         window.clearTimeout(timeoutId)
-        reject(error)
+        reject(timedOut ? timeoutError : error)
       }
     )
   })
@@ -385,14 +438,14 @@ function destroyProjectCanvasTexture(texture: Texture | null | undefined, destro
   texture.destroy(destroySource)
 }
 
-function destroyProjectCanvasSpriteRecord(record: SpriteRecord) {
+function destroyProjectCanvasSpriteRecord(record: SpriteRecord, releaseSourceTexture: () => void) {
   record.sprite.removeFromParent()
   record.sprite.destroy()
 
   if (record.texture !== record.sourceTexture) {
     destroyProjectCanvasTexture(record.texture, false)
   }
-  destroyProjectCanvasTexture(record.sourceTexture ?? record.texture, true)
+  releaseSourceTexture()
 }
 
 function getProjectCanvasTextureScaleMode(): 'linear' {
@@ -411,8 +464,7 @@ function createProjectCanvasTexture(image: CanvasImageAsset): Texture {
 
 function applyProjectCanvasTextureScaleMode(record: SpriteRecord) {
   const textureSource = (record.sourceTexture ?? record.texture).source as
-    | { scaleMode?: 'nearest' | 'linear' }
-    | undefined
+    { scaleMode?: 'nearest' | 'linear' } | undefined
   if (!textureSource) {
     return
   }
@@ -460,8 +512,7 @@ function refreshProjectCanvasTextureAfterTinyPreview(
   }
 
   const textureSource = (record.sourceTexture ?? record.texture).source as
-    | { destroyed?: boolean; unload?: () => void }
-    | undefined
+    { destroyed?: boolean; unload?: () => void } | undefined
   if (textureSource && !textureSource.destroyed && typeof textureSource.unload === 'function') {
     textureSource.unload()
   }
@@ -569,22 +620,23 @@ function shouldForceSelectedSourceTextureUpgrade(
   )
 }
 
-function loadImageElementDirect(
+async function loadImageElementDirect(
   src: string,
-  options: { crossOrigin?: 'anonymous' | null } = {}
+  options: { crossOrigin?: 'anonymous' | null; signal?: AbortSignal } = {}
 ): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image()
     let settled = false
-    const timeoutId = window.setTimeout(() => {
-      if (settled) {
-        return
-      }
-
-      settled = true
+    const stopBrowserLoad = () => {
       image.onload = null
       image.onerror = null
-      reject(new Error('Timed out loading image element.'))
+      if (image.src) image.src = ''
+    }
+    const timeoutId = window.setTimeout(() => {
+      settle(() => {
+        stopBrowserLoad()
+        reject(new Error('Timed out loading image element.'))
+      })
     }, PROJECT_CANVAS_WEBGL_IMAGE_ELEMENT_LOAD_TIMEOUT_MS)
     const settle = (callback: () => void) => {
       if (settled) {
@@ -595,8 +647,20 @@ function loadImageElementDirect(
       window.clearTimeout(timeoutId)
       image.onload = null
       image.onerror = null
+      options.signal?.removeEventListener('abort', abort)
       callback()
     }
+    const abort = () => {
+      settle(() => {
+        stopBrowserLoad()
+        reject(new DOMException('Image load aborted.', 'AbortError'))
+      })
+    }
+    if (options.signal?.aborted) {
+      abort()
+      return
+    }
+    options.signal?.addEventListener('abort', abort, { once: true })
     if (options.crossOrigin) {
       image.crossOrigin = options.crossOrigin
     }
@@ -607,25 +671,29 @@ function loadImageElementDirect(
   })
 }
 
-function loadImageElement(
+async function loadImageElement(
   src: string,
-  options: { crossOrigin?: 'anonymous' | null } = {}
+  options: {
+    crossOrigin?: 'anonymous' | null
+    isCurrent?: () => boolean
+    signal?: AbortSignal
+  } = {}
 ): Promise<HTMLImageElement> {
   if (!canReadCanvasLocalImageSource(src)) {
     return loadImageElementDirect(src, options)
   }
 
-  return createCanvasLocalImageObjectUrl(src).then(async (localObjectUrl) => {
-    if (!localObjectUrl) {
-      return loadImageElementDirect(src, options)
-    }
-
-    try {
-      return await loadImageElementDirect(localObjectUrl, options)
-    } finally {
-      URL.revokeObjectURL(localObjectUrl)
-    }
-  })
+  const authorizedSource = await resolveAuthorizedCanvasLocalMediaSourceUrl(src)
+  if (options.signal?.aborted) {
+    throw new DOMException('Image load aborted.', 'AbortError')
+  }
+  if (!authorizedSource) {
+    throw new Error('Local image source is not authorized.')
+  }
+  if (options.isCurrent?.() === false) {
+    throw new Error('Image load request is stale.')
+  }
+  return loadImageElementDirect(authorizedSource, options)
 }
 
 function resolveBoundedSourceTextureSize(width: number, height: number) {
@@ -764,11 +832,13 @@ function resolveCanvasImageThumbnailLodLevel(
 async function loadBoundedSourceTextureFromUrl({
   src,
   sourceWidth,
-  sourceHeight
+  sourceHeight,
+  signal
 }: {
   src: string
   sourceWidth: number
   sourceHeight: number
+  signal?: AbortSignal
 }): Promise<CanvasImageAsset | null> {
   if (typeof fetch !== 'function' || typeof createImageBitmap !== 'function') {
     return null
@@ -779,23 +849,39 @@ async function loadBoundedSourceTextureFromUrl({
     return null
   }
 
-  const localBlob = await readCanvasLocalImageBlobFromSource(src)
+  if (signal?.aborted) throw new DOMException('Image decode aborted.', 'AbortError')
+  const isLocalImageSource = /^(?:file:|local-media:)/i.test(src)
+  const localBlob = isLocalImageSource
+    ? await readCanvasLocalImageBlobFromSource(src, undefined, { signal })
+    : null
+  if (signal?.aborted) throw new DOMException('Image decode aborted.', 'AbortError')
+  if (isLocalImageSource && !localBlob) {
+    throw new Error('Local image source is not authorized or could not be read.')
+  }
   let blob = localBlob
   if (!blob) {
-    const response = await fetch(src)
+    const response = await fetch(src, { signal })
+    if (signal?.aborted) throw new DOMException('Image decode aborted.', 'AbortError')
     if (!response.ok && response.status !== 0) {
       throw new Error(`Failed to fetch bounded source texture: ${response.status}`)
     }
 
     blob = await response.blob()
+    if (signal?.aborted) throw new DOMException('Image decode aborted.', 'AbortError')
   }
 
-  return createImageBitmap(blob, {
+  if (signal?.aborted) throw new DOMException('Image decode aborted.', 'AbortError')
+  const bitmap = await createImageBitmap(blob, {
     resizeWidth: targetSize.width,
     resizeHeight: targetSize.height,
     resizeQuality: 'high',
     premultiplyAlpha: PROJECT_CANVAS_IMAGE_BITMAP_PREMULTIPLY_ALPHA
   })
+  if (signal?.aborted) {
+    bitmap.close()
+    return null
+  }
+  return bitmap
 }
 
 async function downscaleSourceTextureForWebGL(image: HTMLImageElement): Promise<CanvasImageAsset> {
@@ -858,13 +944,16 @@ async function downscaleSourceTextureForWebGL(image: HTMLImageElement): Promise<
 
 async function loadBoundedSourceTextureViaImageElement({
   src,
-  useAnonymousCrossOrigin
+  useAnonymousCrossOrigin,
+  signal
 }: {
   src: string
   useAnonymousCrossOrigin: boolean
+  signal?: AbortSignal
 }): Promise<CanvasImageAsset> {
   const image = await loadImageElement(src, {
-    crossOrigin: useAnonymousCrossOrigin ? 'anonymous' : null
+    crossOrigin: useAnonymousCrossOrigin ? 'anonymous' : null,
+    signal
   })
   return downscaleSourceTextureForWebGL(image)
 }
@@ -901,16 +990,22 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const skippedSourceUpgradeSrcByIdRef = useRef(new Map<string, string>())
   const pendingLoadsRef = useRef(new Set<string>())
   const pendingLoadSrcByIdRef = useRef(new Map<string, string>())
+  const pendingLoadRequestTokenByIdRef = useRef(new Map<string, CanvasImageRequestToken>())
+  const pendingLoadCancelByTokenRef = useRef(new Map<number, () => void>())
   const pendingThumbnailLoadSrcByIdRef = useRef(new Map<string, string>())
+  const thumbnailLoadRevisionByIdRef = useRef(new Map<string, string>())
   const thumbnailLoadGenerationByIdRef = useRef(new Map<string, number>())
+  const thumbnailLoadAbortByIdRef = useRef(new Map<string, AbortController>())
   const failedThumbnailLoadSrcByIdRef = useRef(new Map<string, string>())
-  const thumbnailLoadQueueRef = useRef<SourceUpgradeQueueEntry[]>([])
+  const failedThumbnailLoadRevisionByIdRef = useRef(new Map<string, string>())
+  const thumbnailLoadQueueRef = useRef<ThumbnailLoadQueueEntry[]>([])
   const activeThumbnailLoadCountRef = useRef(0)
-  const initialLoadQueueRef = useRef<SourceUpgradeQueueEntry[]>([])
+  const initialLoadQueueRef = useRef<ImageLoadQueueEntry[]>([])
   const activeInitialLoadCountRef = useRef(0)
-  const sourceUpgradeQueueRef = useRef<SourceUpgradeQueueEntry[]>([])
+  const sourceUpgradeQueueRef = useRef<ImageLoadQueueEntry[]>([])
   const sourceUpgradeEligibleIdsRef = useRef(new Set<string>())
   const activeSourceUpgradeSrcByIdRef = useRef(new Map<string, string>())
+  const activeSourceUpgradeRequestTokenByIdRef = useRef(new Map<string, CanvasImageRequestToken>())
   const activeSourceUpgradeCountRef = useRef(0)
   const spriteRecordsRef = useRef(new Map<string, SpriteRecord>())
   const itemReconcileSnapshotByIdRef = useRef(
@@ -918,7 +1013,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   )
   const imageIdentityIdsRef = useRef(new WeakMap<object, number>())
   const nextImageIdentityIdRef = useRef(1)
-  const residentTextureByteTrackerRef = useRef(createProjectCanvasWebGLResidentTextureByteTracker())
+  const sharedTexturePoolRef = useRef(new CanvasImageSharedResourcePool<Texture>())
+  const sharedTextureByteTrackerRef = useRef(new CanvasImageSharedResourceByteTracker())
+  const imageLoadRequestTokensRef = useRef(new CanvasImageRequestTokenTracker())
+  const sharedDecodedImagePoolRef = useRef(
+    new CanvasImageAsyncSharedResourcePool<CanvasImageAsset | null>()
+  )
+  const sharedDecodeBudgetReservationsRef = useRef(new CanvasImageSharedReservationTracker())
+  const runtimeGenerationRef = useRef(0)
   const releaseManagerRef = useRef(new CanvasImageReleaseManager())
   const spatialTileWorkerClientRef = useRef(createCanvasSpatialTileWorkerClient())
   const spatialTileSchedulerRef = useRef(
@@ -1114,7 +1216,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   )
 
   const getResidentTextureBytes = useCallback(
-    () => residentTextureByteTrackerRef.current.getTotal(),
+    () => sharedTextureByteTrackerRef.current.getTotal(),
     []
   )
 
@@ -1137,18 +1239,33 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     []
   )
 
+  const getCanvasImageLoadSource = useCallback(
+    (item: CanvasImageItem) => ({
+      ...item,
+      weakRevisionKey: getCanvasImageAssetIdentityKey(item.image)
+    }),
+    [getCanvasImageAssetIdentityKey]
+  )
+
+  const beginImageLoadToken = useCallback(
+    (item: CanvasImageItem) =>
+      imageLoadRequestTokensRef.current.begin(item.id, getCanvasImageLoadSource(item)),
+    [getCanvasImageLoadSource]
+  )
+  const isCurrentImageLoadToken = useCallback(
+    (token: CanvasImageRequestToken, item: CanvasImageItem) =>
+      imageLoadRequestTokensRef.current.isCurrent(token, getCanvasImageLoadSource(item)),
+    [getCanvasImageLoadSource]
+  )
+
   const releaseCachedImageRecord = useCallback(
     (record: CachedImageRecord | undefined, reason: CanvasImageReleaseReason) => {
       if (!record) {
         return
       }
 
-      if (record.imageBitmapReleaseId) {
-        releaseManagerRef.current.release(record.imageBitmapReleaseId, reason)
-      }
-      if (record.objectUrlReleaseId) {
-        releaseManagerRef.current.release(record.objectUrlReleaseId, reason)
-        resourceBudgetTrackerRef.current.remove(record.objectUrlReleaseId)
+      if (record.decodedAssetReleaseId) {
+        releaseManagerRef.current.release(record.decodedAssetReleaseId, reason)
       }
     },
     []
@@ -1220,7 +1337,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       itemId,
       image,
       src,
+      sourceRevisionKey,
+      providedImageIdentityKey,
       imageBitmapOwnership = 'borrowed',
+      decodedAssetRelease,
       reason = 'replaced'
     }: {
       cache: Map<string, CachedImageRecord>
@@ -1228,35 +1348,53 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       itemId: string
       image: CanvasImageAsset
       src: string
+      sourceRevisionKey: string
+      providedImageIdentityKey: number | string
       imageBitmapOwnership?: 'owned' | 'borrowed'
+      decodedAssetRelease?: () => void
       reason?: CanvasImageReleaseReason
     }) => {
       const existing = cache.get(itemId)
-      if (existing?.image === image && existing.src === src) {
+      if (
+        existing?.image === image &&
+        existing.src === src &&
+        existing.sourceRevisionKey === sourceRevisionKey &&
+        existing.providedImageIdentityKey === providedImageIdentityKey
+      ) {
+        decodedAssetRelease?.()
         return existing
       }
 
       releaseCachedImageRecord(existing, reason)
-      let imageBitmapReleaseId: string | undefined
-      if (imageBitmapOwnership === 'owned' && isCanvasImageBitmapLike(image)) {
-        imageBitmapReleaseId = getProjectCanvasCachedImageReleaseId(
+      let decodedAssetReleaseId: string | undefined
+      if (
+        decodedAssetRelease ||
+        (imageBitmapOwnership === 'owned' && isCanvasImageBitmapLike(image))
+      ) {
+        decodedAssetReleaseId = getProjectCanvasCachedImageReleaseId(
           cacheKind,
           'imageBitmap',
           itemId,
-          src
+          sourceRevisionKey
         )
-        releaseManagerRef.current.trackImageBitmap(
-          imageBitmapReleaseId,
-          image,
-          imageBitmapOwnership ?? 'borrowed'
-        )
+        if (decodedAssetRelease) {
+          releaseManagerRef.current.trackLease(decodedAssetReleaseId, decodedAssetRelease)
+        } else if (isCanvasImageBitmapLike(image)) {
+          releaseManagerRef.current.trackImageBitmap(
+            decodedAssetReleaseId,
+            image,
+            imageBitmapOwnership
+          )
+        }
       }
 
       const record: CachedImageRecord = {
         image,
         src,
-        imageBitmapOwnership: imageBitmapOwnership ?? 'borrowed',
-        imageBitmapReleaseId
+        sourceRevisionKey,
+        providedImageIdentityKey,
+        imageBitmapOwnership,
+        decodedAssetReleaseId
       }
       cache.set(itemId, record)
       return record
@@ -1264,31 +1402,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     [releaseCachedImageRecord]
   )
 
-  const trackTransientObjectUrl = useCallback((itemId: string, src: string, objectUrl: string) => {
-    const objectUrlReleaseId = getProjectCanvasCachedImageReleaseId(
-      'transient',
-      'objectUrl',
-      itemId,
-      src
-    )
-    releaseManagerRef.current.trackObjectUrl(objectUrlReleaseId, objectUrl)
-    resourceBudgetTrackerRef.current.upsert({
-      id: objectUrlReleaseId,
-      objectUrlCount: 1,
-      evictable: false
-    })
-
-    return (reason: CanvasImageReleaseReason = 'manual') => {
-      releaseManagerRef.current.release(objectUrlReleaseId, reason)
-      resourceBudgetTrackerRef.current.remove(objectUrlReleaseId)
-    }
-  }, [])
-
   const setTextureBudgetReservation = useCallback(
     ({
       itemId,
       image,
       textureByteSize,
+      sharedTextureKey,
       selected,
       priority,
       lastAccessedAt
@@ -1296,6 +1415,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       itemId: string
       image: CanvasImageAsset
       textureByteSize: number
+      sharedTextureKey: string
       selected: boolean
       priority: number
       lastAccessedAt: number
@@ -1303,7 +1423,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       const cachedSource = imageCacheRef.current.get(itemId)
       const isSourceTexture = isProjectCanvasCachedSourceImage(image, cachedSource)
       resourceBudgetTrackerRef.current.upsert({
-        id: `project-canvas-webgl:texture:${itemId}`,
+        id: `project-canvas-webgl:texture:${sharedTextureKey}`,
         sourceTextureBytes: isSourceTexture ? textureByteSize : 0,
         thumbnailTextureBytes: isSourceTexture ? 0 : textureByteSize,
         evictable: true,
@@ -1316,26 +1436,27 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     []
   )
 
-  const removeTextureBudgetReservation = useCallback((itemId: string) => {
-    resourceBudgetTrackerRef.current.remove(`project-canvas-webgl:texture:${itemId}`)
+  const removeTextureBudgetReservation = useCallback((sharedTextureKey: string) => {
+    resourceBudgetTrackerRef.current.remove(`project-canvas-webgl:texture:${sharedTextureKey}`)
   }, [])
 
   const beginDecodeBudgetReservation = useCallback(
-    (item: CanvasImageItem, mode: 'initial' | 'source-upgrade', decodeByteSize: number) => {
-      const reservationId = `project-canvas-webgl:decode:${mode}:${item.id}:${item.src}`
-      resourceBudgetTrackerRef.current.upsert({
-        id: reservationId,
-        decodedInFlightBytes: Math.min(
-          Math.max(0, decodeByteSize),
-          PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES
-        ),
-        activeSourceUpgrades: mode === 'source-upgrade' ? 1 : 0,
-        evictable: false
-      })
-
-      return () => {
-        resourceBudgetTrackerRef.current.remove(reservationId)
-      }
+    (sharedDecodedKey: string, mode: 'initial' | 'source-upgrade', decodeByteSize: number) => {
+      const reservationId = `project-canvas-webgl:decode:${sharedDecodedKey}`
+      return sharedDecodeBudgetReservationsRef.current.acquire(
+        sharedDecodedKey,
+        () =>
+          resourceBudgetTrackerRef.current.admit({
+            id: reservationId,
+            decodedInFlightBytes: Math.min(
+              Math.max(0, decodeByteSize),
+              PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES
+            ),
+            activeSourceUpgrades: mode === 'source-upgrade' ? 1 : 0,
+            evictable: false
+          }).allowed,
+        () => resourceBudgetTrackerRef.current.remove(reservationId)
+      )
     },
     []
   )
@@ -1356,12 +1477,20 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         const fallbackImage = item.image
         const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
         const hasCurrentThumbnailCache =
-          cachedThumbnail &&
+          isCachedImageRecordCurrent(
+            cachedThumbnail,
+            item,
+            getCanvasImageAssetIdentityKey(item.image)
+          ) &&
           isCanvasThumbnailSetFresh(item.thumbnailSet, item.sourceIdentity) &&
           item.thumbnailSet.levels.some((level) => level.src === cachedThumbnail.src)
         const previewImage = hasCurrentThumbnailCache ? cachedThumbnail.image : fallbackImage
         const cached = imageCacheRef.current.get(item.id)
-        const hasCachedSource = Boolean(cached && cached.src === item.src)
+        const hasCachedSource = isCachedImageRecordCurrent(
+          cached,
+          item,
+          getCanvasImageAssetIdentityKey(item.image)
+        )
         const renderItem = renderItemsRef.current.get(item.id)
         const forceSelectedSourceTexture = shouldForceSelectedSourceTextureUpgrade(
           item.id,
@@ -1410,7 +1539,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             if (shouldUpgradeFallback) {
               sourceUpgradeablePreviewImageCount += 1
             }
-          } else if (cached && cached.src === item.src && renderItem.image === cached.image) {
+          } else if (hasCachedSource && renderItem.image === cached.image) {
             usingSourceImageCount += 1
           } else if (!fallbackImage && hasCachedSource) {
             usingSourceImageCount += 1
@@ -1435,8 +1564,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           }
         }
 
-        const pendingSrc = pendingLoadSrcByIdRef.current.get(item.id)
-        if (!renderItem && !previewImage && !hasCachedSource && pendingSrc !== item.src) {
+        const pendingToken = pendingLoadRequestTokenByIdRef.current.get(item.id)
+        const hasCurrentPendingLoad = Boolean(
+          pendingToken && isCurrentImageLoadToken(pendingToken, item)
+        )
+        if (!renderItem && !previewImage && !hasCachedSource && !hasCurrentPendingLoad) {
           missingImageCount += 1
         }
       }
@@ -1464,7 +1596,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         missingImageCount
       }
     },
-    [getResidentTextureBytes]
+    [getCanvasImageAssetIdentityKey, getResidentTextureBytes, isCurrentImageLoadToken]
   )
 
   const collectResolvedImageIds = useCallback(() => {
@@ -1476,13 +1608,13 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       const cached = imageCacheRef.current.get(item.id)
-      if (cached && cached.src === item.src) {
+      if (isCachedImageRecordCurrent(cached, item, getCanvasImageAssetIdentityKey(item.image))) {
         resolvedIds.add(item.id)
       }
     })
 
     return resolvedIds
-  }, [])
+  }, [getCanvasImageAssetIdentityKey])
 
   const emitItemLoadMetricsSnapshot = useCallback(
     (
@@ -1664,7 +1796,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         }
         sourceUpgradeAllowedAtRef.current = Number.POSITIVE_INFINITY
         thumbnailLoadQueueRef.current = []
-        pendingThumbnailLoadSrcByIdRef.current.clear()
+        pendingThumbnailLoadSrcByIdRef.current.forEach((_src, itemId) => {
+          if (thumbnailLoadAbortByIdRef.current.has(itemId)) return
+          pendingThumbnailLoadSrcByIdRef.current.delete(itemId)
+          thumbnailLoadRevisionByIdRef.current.delete(itemId)
+        })
         clearSourceUpgradeQueue()
         return
       }
@@ -1706,7 +1842,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
       sourceUpgradeAllowedAtRef.current = 0
       thumbnailLoadQueueRef.current = []
-      pendingThumbnailLoadSrcByIdRef.current.clear()
+      pendingThumbnailLoadSrcByIdRef.current.forEach((_src, itemId) => {
+        if (thumbnailLoadAbortByIdRef.current.has(itemId)) return
+        pendingThumbnailLoadSrcByIdRef.current.delete(itemId)
+        thumbnailLoadRevisionByIdRef.current.delete(itemId)
+      })
       hasDeferredMetricsReportRef.current = true
       forceViewportReconcile()
       return
@@ -1885,11 +2025,17 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
-      destroyProjectCanvasSpriteRecord(record)
+      destroyProjectCanvasSpriteRecord(record, () => {
+        sharedTexturePoolRef.current.release(record.sharedTextureKey, (texture) =>
+          destroyProjectCanvasTexture(texture, true)
+        )
+        const releasedBytes = sharedTextureByteTrackerRef.current.release(record.sharedTextureKey)
+        if (releasedBytes > 0) {
+          removeTextureBudgetReservation(record.sharedTextureKey)
+        }
+      })
       spriteRecordsRef.current.delete(itemId)
       itemReconcileSnapshotByIdRef.current.delete(itemId)
-      residentTextureByteTrackerRef.current.delete(itemId)
-      removeTextureBudgetReservation(itemId)
 
       if (!options?.retainPreview) {
         previewStateRef.current.delete(itemId)
@@ -1932,6 +2078,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
 
     let disposed = false
+    runtimeGenerationRef.current += 1
+    const runtimeGeneration = runtimeGenerationRef.current
     const pendingLoads = pendingLoadsRef.current
     const failedLoadSrcById = failedLoadSrcByIdRef.current
     const failedSourceUpgradeSrcById = failedSourceUpgradeSrcByIdRef.current
@@ -1995,19 +2143,29 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       imageElementLoadTimeoutsRef.current.clear()
 
       hasDeferredImageVersionUpdateRef.current = false
+      initialLoadQueueRef.current = []
+      sourceUpgradeQueueRef.current = []
+      pendingLoadCancelByTokenRef.current.forEach((cancel) => cancel())
+      pendingLoadCancelByTokenRef.current.clear()
       pendingLoads.clear()
       pendingLoadSrcByIdRef.current.clear()
+      pendingLoadRequestTokenByIdRef.current.clear()
+      thumbnailLoadAbortByIdRef.current.forEach((controller) => controller.abort())
+      thumbnailLoadAbortByIdRef.current.clear()
       pendingThumbnailLoadSrcByIdRef.current.clear()
+      thumbnailLoadRevisionByIdRef.current.clear()
       thumbnailLoadGenerationByIdRef.current.clear()
       failedThumbnailLoadSrcByIdRef.current.clear()
+      failedThumbnailLoadRevisionByIdRef.current.clear()
       thumbnailLoadQueueRef.current = []
       activeThumbnailLoadCountRef.current = 0
       initialLoadQueueRef.current = []
       activeInitialLoadCountRef.current = 0
-      sourceUpgradeQueueRef.current = []
       sourceUpgradeEligibleIdsRef.current.clear()
       activeSourceUpgradeSrcByIdRef.current.clear()
+      activeSourceUpgradeRequestTokenByIdRef.current.clear()
       activeSourceUpgradeCountRef.current = 0
+      imageLoadRequestTokensRef.current.clear()
       failedLoadSrcById.clear()
       failedSourceUpgradeSrcById.clear()
       skippedSourceUpgradeSrcByIdRef.current.clear()
@@ -2015,11 +2173,19 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       clearCachedImageRecords(thumbnailCacheRef.current, 'component-unmount')
       releaseManagerRef.current.releaseAll('component-unmount')
       spriteRecords.forEach((record) => {
-        destroyProjectCanvasSpriteRecord(record)
+        destroyProjectCanvasSpriteRecord(record, () => {
+          sharedTexturePoolRef.current.release(record.sharedTextureKey, (texture) =>
+            destroyProjectCanvasTexture(texture, true)
+          )
+        })
       })
       spriteRecords.clear()
+      sharedTexturePoolRef.current.clear((texture) => destroyProjectCanvasTexture(texture, true))
       itemReconcileSnapshotByIdRef.current.clear()
-      residentTextureByteTrackerRef.current.clear()
+      sharedTextureByteTrackerRef.current.clear()
+      sharedDecodeBudgetReservationsRef.current.clear((sharedDecodedKey) => {
+        resourceBudgetTrackerRef.current.remove(`project-canvas-webgl:decode:${sharedDecodedKey}`)
+      })
       resourceBudgetTrackerRef.current.clear()
       spriteUsageCounterRef.current = 0
       activeItemCountRef.current = 0
@@ -2126,6 +2292,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
     return () => {
       disposed = true
+      if (runtimeGenerationRef.current === runtimeGeneration) {
+        runtimeGenerationRef.current += 1
+      }
       runtimeFailureHandlerRef.current = null
       cleanupRuntime('cleanup')
     }
@@ -2264,11 +2433,18 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     let suppressDenseSourceUpgrades = false
     let residentCandidateImageCountForThumbnailLod = 1
 
-    const clearPendingLoad = (itemId: string, src: string) => {
-      if (pendingLoadSrcByIdRef.current.get(itemId) === src) {
-        pendingLoadsRef.current.delete(itemId)
-        pendingLoadSrcByIdRef.current.delete(itemId)
+    const clearPendingLoad = (requestToken: CanvasImageRequestToken) => {
+      pendingLoadCancelByTokenRef.current.delete(requestToken.sequence)
+      if (pendingLoadRequestTokenByIdRef.current.get(requestToken.itemId) === requestToken) {
+        pendingLoadsRef.current.delete(requestToken.itemId)
+        pendingLoadSrcByIdRef.current.delete(requestToken.itemId)
+        pendingLoadRequestTokenByIdRef.current.delete(requestToken.itemId)
       }
+    }
+
+    const cancelPendingLoad = (requestToken: CanvasImageRequestToken) => {
+      pendingLoadCancelByTokenRef.current.get(requestToken.sequence)?.()
+      clearPendingLoad(requestToken)
     }
 
     const isSourceUpgradeIdleBlocked = () =>
@@ -2283,19 +2459,39 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     const startImageLoad = (
       item: CanvasImageItem,
       mode: 'initial' | 'source-upgrade',
-      priority = 0
+      priority = 0,
+      requestToken?: CanvasImageRequestToken
     ) => {
       if (mode === 'initial') {
         queueInitialImageLoad(item, priority)
         return
       }
 
-      startImageLoadNow(item, mode)
+      const activeRequestToken = requestToken ?? beginImageLoadToken(item)
+      if (!requestToken) {
+        pendingLoadsRef.current.add(item.id)
+        pendingLoadSrcByIdRef.current.set(item.id, item.src)
+        pendingLoadRequestTokenByIdRef.current.set(item.id, activeRequestToken)
+      }
+      return startImageLoadNow(item, mode, activeRequestToken, priority)
     }
 
-    function startImageLoadNow(item: CanvasImageItem, mode: 'initial' | 'source-upgrade') {
+    function startImageLoadNow(
+      item: CanvasImageItem,
+      mode: 'initial' | 'source-upgrade',
+      requestToken: CanvasImageRequestToken,
+      priority: number
+    ) {
       if (!item.src) {
+        clearPendingLoad(requestToken)
         return
+      }
+      const requestRuntimeGeneration = runtimeGenerationRef.current
+      const sourceRevisionKey = requestToken.sourceRevisionKey
+      const isRequestCurrent = () => {
+        if (runtimeGenerationRef.current !== requestRuntimeGeneration) return false
+        const currentItem = currentItemByIdRef.current.get(item.id)
+        return Boolean(currentItem && isCurrentImageLoadToken(requestToken, currentItem))
       }
 
       const finishInitialLoad = () => {
@@ -2305,6 +2501,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
         activeInitialLoadCountRef.current = Math.max(0, activeInitialLoadCountRef.current - 1)
         pumpInitialImageLoadQueue()
+        pumpSourceUpgradeQueue()
       }
 
       const finishSourceUpgrade = () => {
@@ -2313,17 +2510,21 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         }
 
         activeSourceUpgradeCountRef.current = Math.max(0, activeSourceUpgradeCountRef.current - 1)
-        if (activeSourceUpgradeSrcByIdRef.current.get(item.id) === item.src) {
+        if (activeSourceUpgradeRequestTokenByIdRef.current.get(item.id) === requestToken) {
           activeSourceUpgradeSrcByIdRef.current.delete(item.id)
+          activeSourceUpgradeRequestTokenByIdRef.current.delete(item.id)
         }
+        pumpInitialImageLoadQueue()
         pumpSourceUpgradeQueue()
       }
 
-      const markUnavailableSource = () => {
+      const markUnavailableSource = (outcome: 'skipped' | 'failed') => {
         const currentItem = currentItemByIdRef.current.get(item.id)
-        if (currentItem && currentItem.src === item.src) {
-          if (mode === 'source-upgrade' && item.image) {
+        if (currentItem && isRequestCurrent()) {
+          if (mode === 'source-upgrade' && outcome === 'skipped') {
             skippedSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
+          } else if (mode === 'source-upgrade') {
+            failedSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
           } else {
             failedLoadSrcByIdRef.current.set(item.id, item.src)
           }
@@ -2337,33 +2538,85 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         sourceWidth: item.sourceWidth ?? item.width,
         sourceHeight: item.sourceHeight ?? item.height
       })
-      if (!canUploadProjectCanvasTexture(sourceDecodeByteSize)) {
-        if (mode === 'source-upgrade') {
-          activeSourceUpgradeCountRef.current += 1
-          activeSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
+      const requiresBoundedDecode = !canUploadProjectCanvasTexture(sourceDecodeByteSize)
+      if (mode === 'source-upgrade') {
+        activeSourceUpgradeCountRef.current += 1
+        activeSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
+        activeSourceUpgradeRequestTokenByIdRef.current.set(item.id, requestToken)
+      } else {
+        activeInitialLoadCountRef.current += 1
+        pendingLoadsRef.current.add(item.id)
+        pendingLoadSrcByIdRef.current.set(item.id, item.src)
+        pendingLoadRequestTokenByIdRef.current.set(item.id, requestToken)
+      }
+
+      const decodedVariant = requiresBoundedDecode
+        ? `bounded:${item.sourceWidth ?? item.width}x${item.sourceHeight ?? item.height}`
+        : mode === 'source-upgrade'
+          ? 'source-upgrade'
+          : 'source'
+      const sharedDecodedKey =
+        getCanvasImageSharedDecodedAssetKey({
+          source: getCanvasImageLoadSource(item),
+          variant: decodedVariant
+        }) ?? `request:${sourceRevisionKey}:${requestToken.sequence}:${decodedVariant}`
+      const releaseDecodeBudgetReservation = beginDecodeBudgetReservation(
+        sharedDecodedKey,
+        mode,
+        sourceDecodeByteSize
+      )
+      if (!releaseDecodeBudgetReservation) {
+        if (mode === 'initial') {
+          activeInitialLoadCountRef.current = Math.max(0, activeInitialLoadCountRef.current - 1)
+          insertProjectCanvasWebGLPriorityQueueEntry(initialLoadQueueRef.current, {
+            itemId: item.id,
+            src: item.src,
+            priority,
+            sourceRevisionKey,
+            requestToken
+          })
         } else {
-          activeInitialLoadCountRef.current += 1
-          pendingLoadsRef.current.add(item.id)
-          pendingLoadSrcByIdRef.current.set(item.id, item.src)
+          activeSourceUpgradeCountRef.current = Math.max(0, activeSourceUpgradeCountRef.current - 1)
+          activeSourceUpgradeSrcByIdRef.current.delete(item.id)
+          activeSourceUpgradeRequestTokenByIdRef.current.delete(item.id)
+          insertProjectCanvasWebGLPriorityQueueEntry(sourceUpgradeQueueRef.current, {
+            itemId: item.id,
+            src: item.src,
+            priority,
+            sourceRevisionKey,
+            requestToken
+          })
         }
-        const releaseDecodeBudgetReservation = beginDecodeBudgetReservation(
-          item,
+        return false
+      }
+      const loadDecodedAsset = async (signal: AbortSignal): Promise<CanvasImageAsset | null> => {
+        const releaseProducerDecodeBudgetReservation = beginDecodeBudgetReservation(
+          sharedDecodedKey,
           mode,
           sourceDecodeByteSize
         )
-
-        void (async () => {
-          try {
+        if (!releaseProducerDecodeBudgetReservation) {
+          throw new Error('Shared decode producer lost its budget reservation.')
+        }
+        const decodeController = new AbortController()
+        const abortDecode = () => decodeController.abort()
+        if (signal.aborted) abortDecode()
+        signal.addEventListener('abort', abortDecode, { once: true })
+        const decodeSignal = decodeController.signal
+        try {
+          if (requiresBoundedDecode) {
             let resolvedImage: CanvasImageAsset | null = null
             try {
               resolvedImage = await withProjectCanvasWebGLTimeout(
                 loadBoundedSourceTextureFromUrl({
                   src: item.src,
                   sourceWidth: item.sourceWidth ?? item.width,
-                  sourceHeight: item.sourceHeight ?? item.height
+                  sourceHeight: item.sourceHeight ?? item.height,
+                  signal: decodeSignal
                 }),
                 PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS,
-                'Timed out loading bounded source texture.'
+                'Timed out loading bounded source texture.',
+                abortDecode
               )
             } catch {
               resolvedImage = null
@@ -2375,188 +2628,105 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               resolvedImage = await withProjectCanvasWebGLTimeout(
                 loadBoundedSourceTextureViaImageElement({
                   src: item.src,
-                  useAnonymousCrossOrigin: shouldUseAnonymousCrossOrigin(item.src)
+                  useAnonymousCrossOrigin: shouldUseAnonymousCrossOrigin(item.src),
+                  signal: decodeSignal
                 }),
                 PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS,
-                'Timed out loading bounded source texture through an image element.'
+                'Timed out loading bounded source texture through an image element.',
+                abortDecode
               )
             }
-            clearPendingLoad(item.id, item.src)
-            finishInitialLoad()
-            finishSourceUpgrade()
-            releaseDecodeBudgetReservation()
+            return resolvedImage
+          }
 
-            if (!resolvedImage) {
-              markUnavailableSource()
-              return
-            }
-
-            const currentItem = currentItemByIdRef.current.get(item.id)
-            if (currentItem && currentItem.src === item.src) {
-              failedLoadSrcByIdRef.current.delete(item.id)
-              failedSourceUpgradeSrcByIdRef.current.delete(item.id)
-              skippedSourceUpgradeSrcByIdRef.current.delete(item.id)
-              setCachedImageRecord({
-                cache: imageCacheRef.current,
-                cacheKind: 'source',
-                itemId: item.id,
-                image: resolvedImage,
-                src: item.src,
-                imageBitmapOwnership: 'owned'
-              })
-              scheduleImageVersionUpdate()
-            } else {
-              closeCanvasImageAssetIfPossible(resolvedImage)
-              if (currentItem) {
-                scheduleImageVersionUpdate()
-              }
-            }
+          const image = await withProjectCanvasWebGLTimeout(
+            loadImageElement(item.src, {
+              crossOrigin: shouldUseAnonymousCrossOrigin(item.src) ? 'anonymous' : null,
+              signal: decodeSignal
+            }),
+            PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS,
+            'Timed out loading source texture through an image element.',
+            abortDecode
+          )
+          if (mode !== 'source-upgrade') {
+            return image
+          }
+          try {
+            return await withProjectCanvasWebGLTimeout(
+              downscaleSourceTextureForWebGL(image),
+              PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS,
+              'Timed out downscaling source texture.',
+              abortDecode
+            )
           } catch {
-            clearPendingLoad(item.id, item.src)
-            finishInitialLoad()
-            finishSourceUpgrade()
-            releaseDecodeBudgetReservation()
-            markUnavailableSource()
+            return image
           }
-        })()
-        return
+        } finally {
+          signal.removeEventListener('abort', abortDecode)
+          releaseProducerDecodeBudgetReservation()
+        }
       }
 
-      if (mode === 'source-upgrade') {
-        activeSourceUpgradeCountRef.current += 1
-        activeSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
-      } else {
-        activeInitialLoadCountRef.current += 1
-        pendingLoadsRef.current.add(item.id)
-        pendingLoadSrcByIdRef.current.set(item.id, item.src)
-      }
-      const releaseDecodeBudgetReservation = beginDecodeBudgetReservation(
-        item,
-        mode,
-        sourceDecodeByteSize
-      )
-
-      const handleImageLoad = (img: HTMLImageElement) => {
-        clearPendingLoad(item.id, item.src)
-        void (async () => {
-          let resolvedImage: CanvasImageAsset = img
-          if (mode === 'source-upgrade') {
-            try {
-              resolvedImage = await withProjectCanvasWebGLTimeout(
-                downscaleSourceTextureForWebGL(img),
-                PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS,
-                'Timed out downscaling source texture.'
-              )
-            } catch {
-              resolvedImage = img
-            }
-          }
-
-          finishSourceUpgrade()
-          finishInitialLoad()
-          releaseDecodeBudgetReservation()
-
-          const currentItem = currentItemByIdRef.current.get(item.id)
-          if (currentItem && currentItem.src === item.src) {
-            failedLoadSrcByIdRef.current.delete(item.id)
-            failedSourceUpgradeSrcByIdRef.current.delete(item.id)
-            skippedSourceUpgradeSrcByIdRef.current.delete(item.id)
-            setCachedImageRecord({
-              cache: imageCacheRef.current,
-              cacheKind: 'source',
-              itemId: item.id,
-              image: resolvedImage,
-              src: item.src,
-              imageBitmapOwnership: resolvedImage === img ? 'borrowed' : 'owned'
-            })
-            scheduleImageVersionUpdate()
-          } else {
-            closeCanvasImageAssetIfPossible(resolvedImage)
-            if (currentItem) {
-              scheduleImageVersionUpdate()
-            }
-          }
-        })()
-      }
-
-      const handleImageError = () => {
-        clearPendingLoad(item.id, item.src)
+      let finalized = false
+      const finalizeRequest = () => {
+        if (finalized) return
+        finalized = true
+        pendingLoadCancelByTokenRef.current.delete(requestToken.sequence)
+        clearPendingLoad(requestToken)
+        releaseDecodeBudgetReservation()
         finishInitialLoad()
         finishSourceUpgrade()
-        releaseDecodeBudgetReservation()
-
-        const currentItem = currentItemByIdRef.current.get(item.id)
-        if (currentItem && currentItem.src === item.src) {
-          if (mode === 'source-upgrade' && item.image) {
-            failedSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
-          } else {
-            failedLoadSrcByIdRef.current.set(item.id, item.src)
-          }
-          emitItemLoadMetricsSnapshot()
-        } else if (currentItem) {
-          scheduleImageVersionUpdate()
-        }
       }
 
-      const startImageElementLoad = (
-        resolvedSrc: string,
-        releaseResolvedObjectUrl?: (reason?: CanvasImageReleaseReason) => void
-      ) => {
-        const img = new Image()
-        let settled = false
-        const timeoutId = window.setTimeout(() => {
-          if (settled) {
-            return
-          }
+      const handleDecodedLease = ({
+        resource: resolvedImage,
+        release
+      }: CanvasImageSharedResourceLease<CanvasImageAsset | null>) => {
+        finalizeRequest()
 
-          settled = true
-          imageElementLoadTimeoutsRef.current.delete(timeoutId)
-          img.onload = null
-          img.onerror = null
-          releaseResolvedObjectUrl?.('error-cleanup')
-          handleImageError()
-        }, PROJECT_CANVAS_WEBGL_IMAGE_ELEMENT_LOAD_TIMEOUT_MS)
-        imageElementLoadTimeoutsRef.current.add(timeoutId)
-        const settleImageElementLoad = (callback: () => void) => {
-          if (settled) {
-            return
-          }
-
-          settled = true
-          window.clearTimeout(timeoutId)
-          imageElementLoadTimeoutsRef.current.delete(timeoutId)
-          img.onload = null
-          img.onerror = null
-          releaseResolvedObjectUrl?.('manual')
-          callback()
+        if (!resolvedImage) {
+          release()
+          markUnavailableSource('skipped')
+          return
         }
-        if (shouldUseAnonymousCrossOrigin(item.src)) {
-          img.crossOrigin = 'anonymous'
+        if (!isRequestCurrent()) {
+          release()
+          return
         }
-        img.onload = () => settleImageElementLoad(() => handleImageLoad(img))
-        img.onerror = () => settleImageElementLoad(handleImageError)
-        img.src = resolvedSrc
-      }
 
-      if (canReadCanvasLocalImageSource(item.src)) {
-        void createCanvasLocalImageObjectUrl(item.src)
-          .then((localObjectUrl) => {
-            if (!localObjectUrl) {
-              startImageElementLoad(item.src)
-              return
-            }
-
-            startImageElementLoad(
-              localObjectUrl,
-              trackTransientObjectUrl(item.id, item.src, localObjectUrl)
-            )
-          })
-          .catch(() => {
-            startImageElementLoad(item.src)
-          })
-      } else {
-        startImageElementLoad(item.src)
+        failedLoadSrcByIdRef.current.delete(item.id)
+        failedSourceUpgradeSrcByIdRef.current.delete(item.id)
+        skippedSourceUpgradeSrcByIdRef.current.delete(item.id)
+        setCachedImageRecord({
+          cache: imageCacheRef.current,
+          cacheKind: 'source',
+          itemId: item.id,
+          image: resolvedImage,
+          src: item.src,
+          sourceRevisionKey: getCanvasImageSourceRevisionKey(item),
+          providedImageIdentityKey: getCanvasImageAssetIdentityKey(item.image),
+          imageBitmapOwnership: 'borrowed',
+          decodedAssetRelease: release
+        })
+        scheduleImageVersionUpdate()
       }
+      const cancelSharedDecodeLease = sharedDecodedImagePoolRef.current.acquireWithCallback(
+        sharedDecodedKey,
+        loadDecodedAsset,
+        closeCanvasImageAssetIfPossible,
+        handleDecodedLease,
+        () => {
+          finalizeRequest()
+          markUnavailableSource('failed')
+        }
+      )
+      if (!finalized) {
+        pendingLoadCancelByTokenRef.current.set(requestToken.sequence, () => {
+          cancelSharedDecodeLease()
+          finalizeRequest()
+        })
+      }
+      return true
     }
 
     function pumpInitialImageLoadQueue() {
@@ -2575,14 +2745,16 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         const currentItem = currentItemByIdRef.current.get(queued.itemId)
         if (
           !currentItem ||
-          currentItem.src !== queued.src ||
-          pendingLoadSrcByIdRef.current.get(queued.itemId) !== queued.src
+          pendingLoadRequestTokenByIdRef.current.get(queued.itemId) !== queued.requestToken ||
+          !isCurrentImageLoadToken(queued.requestToken, currentItem)
         ) {
-          clearPendingLoad(queued.itemId, queued.src)
+          cancelPendingLoad(queued.requestToken)
           continue
         }
 
-        startImageLoadNow(currentItem, 'initial')
+        if (!startImageLoadNow(currentItem, 'initial', queued.requestToken, queued.priority)) {
+          return
+        }
       }
     }
 
@@ -2591,8 +2763,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
-      const pendingSrc = pendingLoadSrcByIdRef.current.get(item.id)
-      if (pendingSrc === item.src) {
+      const pendingToken = pendingLoadRequestTokenByIdRef.current.get(item.id)
+      if (pendingToken && isCurrentImageLoadToken(pendingToken, item)) {
         reprioritizeProjectCanvasWebGLPriorityQueueEntry(
           initialLoadQueueRef.current,
           item.id,
@@ -2602,12 +2774,19 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
+      const requestToken = beginImageLoadToken(item)
+      initialLoadQueueRef.current = initialLoadQueueRef.current.filter(
+        (entry) => entry.itemId !== item.id
+      )
       pendingLoadsRef.current.add(item.id)
       pendingLoadSrcByIdRef.current.set(item.id, item.src)
+      pendingLoadRequestTokenByIdRef.current.set(item.id, requestToken)
       insertProjectCanvasWebGLPriorityQueueEntry(initialLoadQueueRef.current, {
         itemId: item.id,
         src: item.src,
-        priority
+        priority,
+        sourceRevisionKey: requestToken.sourceRevisionKey,
+        requestToken
       })
       pumpInitialImageLoadQueue()
     }
@@ -2626,7 +2805,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           return
         }
 
-        if (activeSourceUpgradeSrcByIdRef.current.get(queued.itemId) === queued.src) {
+        if (
+          activeSourceUpgradeRequestTokenByIdRef.current.get(queued.itemId) === queued.requestToken
+        ) {
           continue
         }
 
@@ -2652,8 +2833,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           : currentItem?.image
         if (
           !currentItem ||
-          currentItem.src !== queued.src ||
-          pendingLoadSrcByIdRef.current.get(queued.itemId) !== queued.src ||
+          pendingLoadRequestTokenByIdRef.current.get(queued.itemId) !== queued.requestToken ||
+          !isCurrentImageLoadToken(queued.requestToken, currentItem) ||
           !sourceUpgradeEligibleIdsRef.current.has(queued.itemId) ||
           !upgradePreviewImage ||
           shouldSuppressSourceUpgradeForItem(currentItem, forceSelectedSourceTexture) ||
@@ -2667,32 +2848,50 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             residentTextureBudgetBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES
           })
         ) {
-          clearPendingLoad(queued.itemId, queued.src)
+          cancelPendingLoad(queued.requestToken)
           continue
         }
 
-        startImageLoad(currentItem, 'source-upgrade')
+        if (!startImageLoad(currentItem, 'source-upgrade', queued.priority, queued.requestToken)) {
+          return
+        }
       }
     }
 
     const queueSourceUpgrade = (item: CanvasImageItem, priority: number) => {
-      if (!item.src || pendingLoadSrcByIdRef.current.get(item.id) === item.src) {
+      if (!item.src) {
+        return
+      }
+      const pendingToken = pendingLoadRequestTokenByIdRef.current.get(item.id)
+      if (pendingToken && isCurrentImageLoadToken(pendingToken, item)) {
         return
       }
 
+      const requestToken = beginImageLoadToken(item)
+      sourceUpgradeQueueRef.current = sourceUpgradeQueueRef.current.filter(
+        (entry) => entry.itemId !== item.id
+      )
       pendingLoadsRef.current.add(item.id)
       pendingLoadSrcByIdRef.current.set(item.id, item.src)
+      pendingLoadRequestTokenByIdRef.current.set(item.id, requestToken)
       insertProjectCanvasWebGLPriorityQueueEntry(sourceUpgradeQueueRef.current, {
         itemId: item.id,
         src: item.src,
-        priority
+        priority,
+        sourceRevisionKey: requestToken.sourceRevisionKey,
+        requestToken
       })
       pumpSourceUpgradeQueue()
     }
 
-    const clearPendingThumbnailLoad = (itemId: string, src: string) => {
-      if (pendingThumbnailLoadSrcByIdRef.current.get(itemId) === src) {
+    const clearPendingThumbnailLoad = (itemId: string, src: string, sourceRevisionKey?: string) => {
+      if (
+        pendingThumbnailLoadSrcByIdRef.current.get(itemId) === src &&
+        (sourceRevisionKey === undefined ||
+          thumbnailLoadRevisionByIdRef.current.get(itemId) === sourceRevisionKey)
+      ) {
         pendingThumbnailLoadSrcByIdRef.current.delete(itemId)
+        thumbnailLoadRevisionByIdRef.current.delete(itemId)
       }
     }
 
@@ -2713,51 +2912,72 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         const currentItem = currentItemByIdRef.current.get(queued.itemId)
         if (
           !currentItem ||
-          pendingThumbnailLoadSrcByIdRef.current.get(queued.itemId) !== queued.src
+          getCanvasImageSourceRevisionKey(currentItem) !== queued.sourceRevisionKey ||
+          pendingThumbnailLoadSrcByIdRef.current.get(queued.itemId) !== queued.src ||
+          thumbnailLoadRevisionByIdRef.current.get(queued.itemId) !== queued.sourceRevisionKey
         ) {
-          clearPendingThumbnailLoad(queued.itemId, queued.src)
+          clearPendingThumbnailLoad(queued.itemId, queued.src, queued.sourceRevisionKey)
           continue
         }
 
         activeThumbnailLoadCountRef.current += 1
         const requestGeneration = thumbnailLoadGenerationByIdRef.current.get(queued.itemId) ?? 0
+        const requestRevisionKey = queued.sourceRevisionKey
+        const abortController = new AbortController()
+        thumbnailLoadAbortByIdRef.current.get(queued.itemId)?.abort()
+        thumbnailLoadAbortByIdRef.current.set(queued.itemId, abortController)
         void loadImageElement(queued.src, {
-          crossOrigin: shouldUseAnonymousCrossOrigin(queued.src) ? 'anonymous' : null
+          crossOrigin: shouldUseAnonymousCrossOrigin(queued.src) ? 'anonymous' : null,
+          signal: abortController.signal
         })
           .then((image) => {
             if (thumbnailLoadGenerationByIdRef.current.get(queued.itemId) !== requestGeneration) {
               closeCanvasImageAssetIfPossible(image)
               return
             }
-            clearPendingThumbnailLoad(queued.itemId, queued.src)
+            clearPendingThumbnailLoad(queued.itemId, queued.src, requestRevisionKey)
             const nextItem = currentItemByIdRef.current.get(queued.itemId)
-            if (!nextItem?.thumbnailSet?.levels.some((level) => level.src === queued.src)) {
+            if (
+              !nextItem?.thumbnailSet?.levels.some((level) => level.src === queued.src) ||
+              getCanvasImageSourceRevisionKey(nextItem) !== requestRevisionKey
+            ) {
               closeCanvasImageAssetIfPossible(image)
               return
             }
             failedThumbnailLoadSrcByIdRef.current.delete(queued.itemId)
+            failedThumbnailLoadRevisionByIdRef.current.delete(queued.itemId)
             setCachedImageRecord({
               cache: thumbnailCacheRef.current,
               cacheKind: 'thumbnail',
               itemId: queued.itemId,
               image,
               src: queued.src,
+              sourceRevisionKey: requestRevisionKey,
+              providedImageIdentityKey: getCanvasImageAssetIdentityKey(nextItem.image),
               imageBitmapOwnership: 'borrowed'
             })
             scheduleImageVersionUpdate()
           })
           .catch(() => {
+            if (abortController.signal.aborted) return
             if (thumbnailLoadGenerationByIdRef.current.get(queued.itemId) !== requestGeneration) {
               return
             }
-            clearPendingThumbnailLoad(queued.itemId, queued.src)
+            clearPendingThumbnailLoad(queued.itemId, queued.src, requestRevisionKey)
             const nextItem = currentItemByIdRef.current.get(queued.itemId)
-            if (nextItem?.thumbnailSet?.levels.some((level) => level.src === queued.src)) {
+            if (
+              nextItem?.thumbnailSet?.levels.some((level) => level.src === queued.src) &&
+              getCanvasImageSourceRevisionKey(nextItem) === requestRevisionKey
+            ) {
               failedThumbnailLoadSrcByIdRef.current.set(queued.itemId, queued.src)
+              failedThumbnailLoadRevisionByIdRef.current.set(queued.itemId, requestRevisionKey)
               scheduleImageVersionUpdate()
             }
           })
           .finally(() => {
+            if (thumbnailLoadAbortByIdRef.current.get(queued.itemId) === abortController) {
+              thumbnailLoadAbortByIdRef.current.delete(queued.itemId)
+            }
             activeThumbnailLoadCountRef.current = Math.max(
               0,
               activeThumbnailLoadCountRef.current - 1
@@ -2772,12 +2992,20 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return false
       }
 
-      if (failedThumbnailLoadSrcByIdRef.current.get(item.id) === src) {
+      const sourceRevisionKey = getCanvasImageSourceRevisionKey(item)
+      const failedSrc = failedThumbnailLoadSrcByIdRef.current.get(item.id)
+      const failedRevisionKey = failedThumbnailLoadRevisionByIdRef.current.get(item.id)
+      if (failedSrc === src && failedRevisionKey === sourceRevisionKey) {
         return false
+      }
+      if (failedSrc && (failedSrc !== src || failedRevisionKey !== sourceRevisionKey)) {
+        failedThumbnailLoadSrcByIdRef.current.delete(item.id)
+        failedThumbnailLoadRevisionByIdRef.current.delete(item.id)
       }
 
       const pendingSrc = pendingThumbnailLoadSrcByIdRef.current.get(item.id)
-      if (pendingSrc === src) {
+      const pendingRevisionKey = thumbnailLoadRevisionByIdRef.current.get(item.id)
+      if (pendingSrc === src && pendingRevisionKey === sourceRevisionKey) {
         reprioritizeProjectCanvasWebGLPriorityQueueEntry(
           thumbnailLoadQueueRef.current,
           item.id,
@@ -2788,7 +3016,15 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return true
       }
 
+      if (pendingSrc || thumbnailLoadAbortByIdRef.current.has(item.id)) {
+        thumbnailLoadAbortByIdRef.current.get(item.id)?.abort()
+        thumbnailLoadAbortByIdRef.current.delete(item.id)
+        thumbnailLoadQueueRef.current = thumbnailLoadQueueRef.current.filter(
+          (entry) => entry.itemId !== item.id
+        )
+      }
       pendingThumbnailLoadSrcByIdRef.current.set(item.id, src)
+      thumbnailLoadRevisionByIdRef.current.set(item.id, sourceRevisionKey)
       thumbnailLoadGenerationByIdRef.current.set(
         item.id,
         (thumbnailLoadGenerationByIdRef.current.get(item.id) ?? 0) + 1
@@ -2796,7 +3032,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       insertProjectCanvasWebGLPriorityQueueEntry(thumbnailLoadQueueRef.current, {
         itemId: item.id,
         src,
-        priority
+        priority,
+        sourceRevisionKey
       })
       pumpThumbnailLoadQueue()
       return true
@@ -2819,7 +3056,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return item.image
       }
 
-      const cached = imageCacheRef.current.get(item.id)
+      let cached = imageCacheRef.current.get(item.id)
+      if (
+        cached &&
+        !isCachedImageRecordCurrent(cached, item, getCanvasImageAssetIdentityKey(item.image))
+      ) {
+        deleteCachedImageRecord(imageCacheRef.current, item.id, 'replaced')
+        cached = undefined
+      }
       let fallbackImage = item.image
       const existingRecord = spriteRecordsRef.current.get(item.id)
       const forceSelectedSourceTexture = shouldForceSelectedSourceTextureUpgrade(
@@ -2830,6 +3074,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
       const hasCurrentThumbnailCache =
         cachedThumbnail &&
+        isCachedImageRecordCurrent(
+          cachedThumbnail,
+          item,
+          getCanvasImageAssetIdentityKey(item.image)
+        ) &&
         isCanvasThumbnailSetFresh(item.thumbnailSet, item.sourceIdentity) &&
         item.thumbnailSet.levels.some((level) => level.src === cachedThumbnail.src)
       const currentThumbnail = hasCurrentThumbnailCache ? cachedThumbnail : null
@@ -2841,9 +3090,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       const failedThumbnailSrc = failedThumbnailLoadSrcByIdRef.current.get(item.id)
       if (
         failedThumbnailSrc &&
-        !item.thumbnailSet?.levels.some((level) => level.src === failedThumbnailSrc)
+        (failedThumbnailLoadRevisionByIdRef.current.get(item.id) !==
+          getCanvasImageSourceRevisionKey(item) ||
+          !item.thumbnailSet?.levels.some((level) => level.src === failedThumbnailSrc))
       ) {
         failedThumbnailLoadSrcByIdRef.current.delete(item.id)
+        failedThumbnailLoadRevisionByIdRef.current.delete(item.id)
       }
       const thumbnailLevel = resolveCanvasImageThumbnailLodLevel(
         item,
@@ -2866,7 +3118,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           )
         }
       }
-      if (cached && cached.src === item.src) {
+      if (cached) {
         failedLoadSrcByIdRef.current.delete(item.id)
         const cachedSourceDecision = resolveCanvasImageLodDecision({
           item,
@@ -2957,7 +3209,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return null
       }
 
-      if (!item.src || pendingLoadSrcByIdRef.current.get(item.id) === item.src) {
+      const pendingToken = pendingLoadRequestTokenByIdRef.current.get(item.id)
+      if (!item.src || (pendingToken && isCurrentImageLoadToken(pendingToken, item))) {
         return null
       }
 
@@ -2980,39 +3233,84 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         skippedSourceUpgradeSrcByIdRef.current.delete(itemId)
       }
     })
-    pendingLoadSrcByIdRef.current.forEach((_src, itemId) => {
-      if (!nextIds.has(itemId)) {
-        pendingLoadSrcByIdRef.current.delete(itemId)
-        pendingLoadsRef.current.delete(itemId)
+    pendingLoadRequestTokenByIdRef.current.forEach((requestToken, itemId) => {
+      const currentItem = itemById.get(itemId)
+      if (!currentItem || !isCurrentImageLoadToken(requestToken, currentItem)) {
+        cancelPendingLoad(requestToken)
+        if (!currentItem) {
+          imageLoadRequestTokensRef.current.invalidate(itemId)
+        }
       }
     })
-    pendingThumbnailLoadSrcByIdRef.current.forEach((_src, itemId) => {
-      if (!nextIds.has(itemId)) {
+    pendingThumbnailLoadSrcByIdRef.current.forEach((pendingSrc, itemId) => {
+      const currentItem = itemById.get(itemId)
+      const pendingRevisionKey = thumbnailLoadRevisionByIdRef.current.get(itemId)
+      const isCurrentThumbnailSource = Boolean(
+        currentItem?.thumbnailSet &&
+        pendingRevisionKey === getCanvasImageSourceRevisionKey(currentItem) &&
+        isCanvasThumbnailSetFresh(currentItem.thumbnailSet, currentItem.sourceIdentity) &&
+        currentItem.thumbnailSet.levels.some((level) => level.src === pendingSrc)
+      )
+      if (!nextIds.has(itemId) || !isCurrentThumbnailSource) {
+        thumbnailLoadAbortByIdRef.current.get(itemId)?.abort()
+        thumbnailLoadAbortByIdRef.current.delete(itemId)
         pendingThumbnailLoadSrcByIdRef.current.delete(itemId)
+        thumbnailLoadRevisionByIdRef.current.delete(itemId)
+        thumbnailLoadQueueRef.current = thumbnailLoadQueueRef.current.filter(
+          (entry) => entry.itemId !== itemId
+        )
+        thumbnailLoadGenerationByIdRef.current.set(
+          itemId,
+          (thumbnailLoadGenerationByIdRef.current.get(itemId) ?? 0) + 1
+        )
       }
     })
-    failedThumbnailLoadSrcByIdRef.current.forEach((_src, itemId) => {
-      if (!nextIds.has(itemId)) {
+    failedThumbnailLoadSrcByIdRef.current.forEach((failedSrc, itemId) => {
+      const currentItem = itemById.get(itemId)
+      if (
+        !currentItem ||
+        failedThumbnailLoadRevisionByIdRef.current.get(itemId) !==
+          getCanvasImageSourceRevisionKey(currentItem) ||
+        !currentItem.thumbnailSet?.levels.some((level) => level.src === failedSrc)
+      ) {
         failedThumbnailLoadSrcByIdRef.current.delete(itemId)
+        failedThumbnailLoadRevisionByIdRef.current.delete(itemId)
       }
     })
     initialLoadQueueRef.current = initialLoadQueueRef.current.filter((entry) => {
-      const shouldKeep =
-        nextIds.has(entry.itemId) && pendingLoadSrcByIdRef.current.get(entry.itemId) === entry.src
+      const item = itemById.get(entry.itemId)
+      const shouldKeep = Boolean(
+        item &&
+        pendingLoadRequestTokenByIdRef.current.get(entry.itemId) === entry.requestToken &&
+        isCurrentImageLoadToken(entry.requestToken, item)
+      )
       if (!shouldKeep) {
-        clearPendingLoad(entry.itemId, entry.src)
+        cancelPendingLoad(entry.requestToken)
       }
       return shouldKeep
     })
-    sourceUpgradeQueueRef.current = sourceUpgradeQueueRef.current.filter(
-      (entry) =>
-        nextIds.has(entry.itemId) && pendingLoadSrcByIdRef.current.get(entry.itemId) === entry.src
-    )
-    thumbnailLoadQueueRef.current = thumbnailLoadQueueRef.current.filter(
-      (entry) =>
+    sourceUpgradeQueueRef.current = sourceUpgradeQueueRef.current.filter((entry) => {
+      const item = itemById.get(entry.itemId)
+      const shouldKeep = Boolean(
+        item &&
+        pendingLoadRequestTokenByIdRef.current.get(entry.itemId) === entry.requestToken &&
+        isCurrentImageLoadToken(entry.requestToken, item)
+      )
+      if (!shouldKeep) {
+        cancelPendingLoad(entry.requestToken)
+      }
+      return shouldKeep
+    })
+    thumbnailLoadQueueRef.current = thumbnailLoadQueueRef.current.filter((entry) => {
+      const item = itemById.get(entry.itemId)
+      return Boolean(
+        item &&
         nextIds.has(entry.itemId) &&
-        pendingThumbnailLoadSrcByIdRef.current.get(entry.itemId) === entry.src
-    )
+        pendingThumbnailLoadSrcByIdRef.current.get(entry.itemId) === entry.src &&
+        thumbnailLoadRevisionByIdRef.current.get(entry.itemId) === entry.sourceRevisionKey &&
+        getCanvasImageSourceRevisionKey(item) === entry.sourceRevisionKey
+      )
+    })
     const currentStageScale = stageScaleRef.current
     const currentStagePos = stagePosRef.current
     const currentStageSize = stageSizeRef.current
@@ -3069,10 +3367,24 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       safeScale < PROJECT_CANVAS_WEBGL_DENSE_SOURCE_UPGRADE_MAX_SCALE
     sourceUpgradeEligibleIdsRef.current = residentCandidateIds
     residentCandidateIdsRef.current = residentCandidateIds
+    pendingThumbnailLoadSrcByIdRef.current.forEach((_pendingSrc, itemId) => {
+      if (residentCandidateIds.has(itemId)) return
+      thumbnailLoadAbortByIdRef.current.get(itemId)?.abort()
+      thumbnailLoadAbortByIdRef.current.delete(itemId)
+      pendingThumbnailLoadSrcByIdRef.current.delete(itemId)
+      thumbnailLoadRevisionByIdRef.current.delete(itemId)
+      thumbnailLoadQueueRef.current = thumbnailLoadQueueRef.current.filter(
+        (entry) => entry.itemId !== itemId
+      )
+      thumbnailLoadGenerationByIdRef.current.set(
+        itemId,
+        (thumbnailLoadGenerationByIdRef.current.get(itemId) ?? 0) + 1
+      )
+    })
     sourceUpgradeQueueRef.current = sourceUpgradeQueueRef.current.filter((entry) => {
       const item = itemById.get(entry.itemId)
       if (!item) {
-        clearPendingLoad(entry.itemId, entry.src)
+        cancelPendingLoad(entry.requestToken)
         return false
       }
       const forceSelectedSourceTexture = shouldForceSelectedSourceTextureUpgrade(
@@ -3081,13 +3393,13 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         stageScaleRef.current
       )
       const shouldKeep =
-        item.src === entry.src &&
         residentCandidateIds.has(entry.itemId) &&
         nextIds.has(entry.itemId) &&
-        pendingLoadSrcByIdRef.current.get(entry.itemId) === entry.src &&
+        pendingLoadRequestTokenByIdRef.current.get(entry.itemId) === entry.requestToken &&
+        isCurrentImageLoadToken(entry.requestToken, item) &&
         !shouldSuppressSourceUpgradeForItem(item, forceSelectedSourceTexture)
       if (!shouldKeep) {
-        clearPendingLoad(entry.itemId, entry.src)
+        cancelPendingLoad(entry.requestToken)
       }
       return shouldKeep
     })
@@ -3162,14 +3474,18 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     orderedItems.forEach((item) => addResidentTarget(item.id))
     thumbnailLoadQueueRef.current = thumbnailLoadQueueRef.current.filter((entry) => {
       const item = itemById.get(entry.itemId)
-      const shouldKeep =
-        Boolean(item?.thumbnailSet?.levels.some((level) => level.src === entry.src)) &&
+      const shouldKeep = Boolean(
+        item &&
+        item.thumbnailSet?.levels.some((level) => level.src === entry.src) &&
+        getCanvasImageSourceRevisionKey(item) === entry.sourceRevisionKey &&
         residentCandidateIds.has(entry.itemId) &&
         residentTargetIds.has(entry.itemId) &&
         nextIds.has(entry.itemId) &&
-        pendingThumbnailLoadSrcByIdRef.current.get(entry.itemId) === entry.src
+        pendingThumbnailLoadSrcByIdRef.current.get(entry.itemId) === entry.src &&
+        thumbnailLoadRevisionByIdRef.current.get(entry.itemId) === entry.sourceRevisionKey
+      )
       if (!shouldKeep) {
-        clearPendingThumbnailLoad(entry.itemId, entry.src)
+        clearPendingThumbnailLoad(entry.itemId, entry.src, entry.sourceRevisionKey)
       }
       return shouldKeep
     })
@@ -3244,10 +3560,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             suppressDenseSourceUpgrades,
             pendingLoadSrcByIdRef.current.get(item.id),
             pendingThumbnailLoadSrcByIdRef.current.get(item.id),
+            thumbnailLoadRevisionByIdRef.current.get(item.id),
             failedLoadSrcByIdRef.current.get(item.id),
             failedSourceUpgradeSrcByIdRef.current.get(item.id),
             skippedSourceUpgradeSrcByIdRef.current.get(item.id),
             failedThumbnailLoadSrcByIdRef.current.get(item.id),
+            failedThumbnailLoadRevisionByIdRef.current.get(item.id),
             cachedSource?.src,
             getCanvasImageAssetIdentityKey(cachedSource?.image),
             cachedThumbnail?.src,
@@ -3304,6 +3622,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           itemId: item.id,
           image: previousRenderItem.image,
           textureByteSize: existingRecord.textureByteSize,
+          sharedTextureKey: existingRecord.sharedTextureKey,
           selected: selectedIds?.has(item.id) === true,
           priority: getSourceUpgradePriority(item),
           lastAccessedAt: existingRecord.lastUsedAt
@@ -3358,7 +3677,24 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
       residentCandidateTextureBytes += textureByteSize
 
-      const textureKey = getProjectCanvasRenderTextureKey(renderItem)
+      const sourceRevisionKey = getCanvasImageSourceRevisionKey(item)
+      const decodedVariantKey = isProjectCanvasCachedSourceImage(
+        renderItem.image,
+        imageCacheRef.current.get(item.id)
+      )
+        ? 'source'
+        : thumbnailCacheRef.current.get(item.id)?.image === renderItem.image
+          ? `thumbnail:${thumbnailCacheRef.current.get(item.id)?.src ?? ''}`
+          : getCanvasImageStableSourceKey(item)
+            ? 'provided-source'
+            : `provided-object:${getCanvasImageAssetIdentityKey(renderItem.image)}`
+      const sharedTextureKey = getCanvasImageSharedTextureKey(
+        item,
+        renderItem.image,
+        decodedVariantKey,
+        getCanvasImageAssetIdentityKey(renderItem.image)
+      )
+      const textureKey = `${getProjectCanvasRenderTextureKey(renderItem)}|${sourceRevisionKey}`
       const transformState = preview ?? renderItem
       const transformKey = getProjectCanvasRenderTransformKey(transformState)
       const preserveExistingRenderItem = () => {
@@ -3419,13 +3755,23 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       protectedResidentIds.add(item.id)
 
       const currentResidentTextureBytes = () =>
-        Math.max(0, getResidentTextureBytes() - (existingRecord?.textureByteSize ?? 0))
+        Math.max(
+          0,
+          getResidentTextureBytes() -
+            (existingRecord
+              ? sharedTextureByteTrackerRef.current.getReleaseBytes(existingRecord.sharedTextureKey)
+              : 0)
+        )
+      const additionalTextureBytes = sharedTextureByteTrackerRef.current.getAdditionalBytes(
+        sharedTextureKey,
+        textureByteSize
+      )
 
       while (
         spriteRecordsRef.current.size - (existingRecord ? 1 : 0) >=
           PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT ||
         (spriteRecordsRef.current.size > 0 &&
-          currentResidentTextureBytes() + textureByteSize >
+          currentResidentTextureBytes() + additionalTextureBytes >
             PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES)
       ) {
         const evictedItemId = evictOldestResidentSprite(protectedResidentIds)
@@ -3441,7 +3787,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT
       const wouldExceedTextureBudget =
         spriteRecordsRef.current.size - (existingRecord ? 1 : 0) > 0 &&
-        residentTextureBytes + textureByteSize > PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES
+        residentTextureBytes + additionalTextureBytes > PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES
 
       if (wouldExceedResidentLimit || wouldExceedTextureBudget) {
         if (existingRecord) {
@@ -3453,7 +3799,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       let baseTexture: Texture | null = null
       let texture: Texture | null = null
       try {
-        baseTexture = createProjectCanvasTexture(image)
+        baseTexture = sharedTexturePoolRef.current.acquire(sharedTextureKey, () =>
+          createProjectCanvasTexture(image)
+        )
+        sharedTextureByteTrackerRef.current.acquire(sharedTextureKey, textureByteSize)
         if (!baseTexture) {
           throw new Error('Pixi returned an empty texture.')
         }
@@ -3491,13 +3840,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           textureHeight,
           textureByteSize,
           lastUsedAt: 0,
-          sawTinyPreview: isProjectCanvasTinyPreview(transformState, stageScaleRef.current)
+          sawTinyPreview: isProjectCanvasTinyPreview(transformState, stageScaleRef.current),
+          sharedTextureKey
         })
-        residentTextureByteTrackerRef.current.set(item.id, textureByteSize)
         setTextureBudgetReservation({
           itemId: item.id,
           image,
           textureByteSize,
+          sharedTextureKey,
           selected: selectedIds?.has(item.id) === true,
           priority: getSourceUpgradePriority(item),
           lastAccessedAt: spriteUsageCounterRef.current + 1
@@ -3526,7 +3876,15 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         if (texture && texture !== baseTexture) {
           texture.destroy(false)
         }
-        baseTexture?.destroy(true)
+        if (baseTexture) {
+          sharedTexturePoolRef.current.release(sharedTextureKey, (sharedTexture) =>
+            destroyProjectCanvasTexture(sharedTexture, true)
+          )
+          const releasedBytes = sharedTextureByteTrackerRef.current.release(sharedTextureKey)
+          if (releasedBytes > 0) {
+            removeTextureBudgetReservation(sharedTextureKey)
+          }
+        }
         console.warn(
           '[Canvas WebGL] Failed to create image texture, skipping item:',
           item.id,
@@ -3616,25 +3974,28 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
   }, [
     beginDecodeBudgetReservation,
+    beginImageLoadToken,
     destroySpriteRecord,
     collectImageHealthCounts,
     deleteCachedImageRecord,
     emitItemLoadMetricsSnapshot,
     evictOldestResidentSprite,
     imageVersion,
+    isCurrentImageLoadToken,
     isInitialized,
     itemSpatialIndex,
     items,
     markSpriteRecordUsed,
     pruneDecodedImageCacheForResidentTargets,
+    removeTextureBudgetReservation,
     cancelScheduledRender,
     scheduleRender,
     scheduleImageVersionUpdate,
     getCanvasImageAssetIdentityKey,
+    getCanvasImageLoadSource,
     getResidentTextureBytes,
     setCachedImageRecord,
     setTextureBudgetReservation,
-    trackTransientObjectUrl,
     selectedIds,
     viewportVersion
   ])

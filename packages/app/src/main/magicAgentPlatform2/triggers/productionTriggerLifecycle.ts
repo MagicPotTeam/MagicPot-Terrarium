@@ -11,6 +11,7 @@ import { subscribeWorkflowCompletions } from './workflowCompletionEvents'
 import { subscribeTrustedChannelMessages } from './channelMessageEvents'
 import { ProductionTriggerRuntime } from './productionTriggerRuntime'
 import type { PersistentTriggerState } from './persistentTriggerStore'
+import { attachTriggerTrustedDispatchContext } from '../../magicAgentRuntime/triggerTrustedDispatchContext'
 
 export const TRIGGER_ROUTE = 'magicpot-trigger://runtime' as const
 const SERVICE_ROUTE = (scopeId: string): AgentRouteLike => ({
@@ -66,11 +67,17 @@ export class ProductionTriggerLifecycle {
       eventStore: this.eventStore,
       authorization: options.policyRuntime.authorization,
       service: {
-        runAgent: (input) =>
-          options.service.runAgent(
-            { agentId: input.agentId, text: input.prompt, route: SERVICE_ROUTE(input.agentId) },
-            TRIGGER_INVOCATION
-          ),
+        runAgent: (input) => {
+          const request: MagicAgentPlatformRunReq = {
+            agentId: input.agentId,
+            text: input.prompt,
+            route: SERVICE_ROUTE(input.agentId),
+            ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId })
+          }
+          if (input.trustedContext)
+            attachTriggerTrustedDispatchContext(request, input.trustedContext)
+          return options.service.runAgent(request, TRIGGER_INVOCATION)
+        },
         runGraph: (input) =>
           options.service.runGraph(
             {

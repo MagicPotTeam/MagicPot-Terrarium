@@ -1117,7 +1117,7 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
           size="small"
           onClick={() => {
             try {
-              window.electron?.ipcRenderer?.invoke?.('screenshot:capture')
+              void window.canvasScreenshot?.capture()
             } catch (err) {
               console.error('[Canvas] 启动系统截图失败', err)
             }

@@ -1,12 +1,13 @@
 /* eslint-disable react/no-unknown-property */
 /* eslint-disable react-refresh/only-export-components */
-import React, { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import { RoomEnvironment, SkeletonUtils } from 'three-stdlib'
 import {
-  hasCachedSceneInstanceClone,
+  cloneSceneInstanceAsset,
   readCachedSceneInstanceClone,
+  retainSceneInstanceMaterials,
   writeCachedSceneInstanceClone
 } from './sceneInstanceCloneCache'
 import { resolveModelInspectionMetadata } from './modelInspectionMetadata'
@@ -467,6 +468,34 @@ export const ModelSceneCanvasSetup: React.FC<{ enableEnvironment?: boolean }> = 
   return null
 }
 
+export const clearSceneInstanceForBufferGeometry = (
+  sceneData: THREE.Object3D | THREE.BufferGeometry,
+  clearSceneInstance: () => void
+): sceneData is THREE.BufferGeometry => {
+  if (!(sceneData instanceof THREE.BufferGeometry)) return false
+  clearSceneInstance()
+  return true
+}
+
+export const useGeometrySceneMaterial = (
+  sceneData: THREE.Object3D | THREE.BufferGeometry
+): THREE.MeshStandardMaterial | null => {
+  const [geometryMaterial, setGeometryMaterial] = useState<THREE.MeshStandardMaterial | null>(null)
+
+  useLayoutEffect(() => {
+    if (!(sceneData instanceof THREE.BufferGeometry)) {
+      setGeometryMaterial(null)
+      return
+    }
+
+    const material = new THREE.MeshStandardMaterial({ color: '#cccccc' })
+    setGeometryMaterial(material)
+    return () => material.dispose()
+  }, [sceneData])
+
+  return sceneData instanceof THREE.BufferGeometry ? geometryMaterial : null
+}
+
 export const BaseScene: React.FC<{
   sceneData: THREE.Object3D | THREE.BufferGeometry
   initialRotation?: [number, number, number]
@@ -485,56 +514,57 @@ export const BaseScene: React.FC<{
   const rootRef = useRef<THREE.Group>(null)
   const contentRef = useRef<THREE.Group>(null)
   const { gl, scene, invalidate } = useThree()
-  const renderSceneData = useMemo(() => {
-    if (sceneData instanceof THREE.BufferGeometry) {
-      if (instanceCacheKey && !hasCachedSceneInstanceClone(instanceCacheKey)) {
-        const cachedGeometry = sceneData.clone()
-        resolveModelInspectionMetadata(cachedGeometry, { animationCount })
-        writeCachedSceneInstanceClone({
-          cacheKey: instanceCacheKey,
-          renderSceneData: cachedGeometry
-        })
-      }
-
-      resolveModelInspectionMetadata(sceneData, { animationCount })
-      return sceneData
-    }
+  const geometryMaterial = useGeometrySceneMaterial(sceneData)
+  const [sceneInstance, setSceneInstance] = useState<{
+    sceneData: THREE.Object3D
+    instanceCacheKey: string | undefined
+    renderSceneData: THREE.Object3D
+  } | null>(null)
+  useLayoutEffect(() => {
+    if (clearSceneInstanceForBufferGeometry(sceneData, () => setSceneInstance(null))) return
 
     const maxAnisotropy = gl.capabilities.getMaxAnisotropy()
+    let nextRenderSceneData: THREE.Object3D
 
     if (!instanceCacheKey) {
-      const sceneClone = tuneLoadedModelSceneForDisplay(cloneObject3D(sceneData), {
-        maxAnisotropy
-      })
-      resolveModelInspectionMetadata(sceneClone, { animationCount })
-      return sceneClone
-    }
-    const cachedSceneClone = readCachedSceneInstanceClone(instanceCacheKey)
-    if (cachedSceneClone instanceof THREE.Object3D) {
-      const renderedSceneClone = tuneLoadedModelSceneForDisplay(cachedSceneClone, {
-        maxAnisotropy
-      })
-      resolveModelInspectionMetadata(renderedSceneClone, { animationCount })
-      return renderedSceneClone
+      nextRenderSceneData = cloneSceneInstanceAsset(sceneData)
+    } else {
+      const cachedSceneClone = readCachedSceneInstanceClone(instanceCacheKey)
+      if (cachedSceneClone) {
+        nextRenderSceneData = cachedSceneClone
+      } else {
+        const sceneTemplate = cloneObject3D(sceneData)
+        resolveModelInspectionMetadata(sceneTemplate, { animationCount })
+        writeCachedSceneInstanceClone({
+          cacheKey: instanceCacheKey,
+          renderSceneData: sceneTemplate
+        })
+        nextRenderSceneData = readCachedSceneInstanceClone(instanceCacheKey) as THREE.Object3D
+      }
     }
 
-    const sceneTemplate = tuneLoadedModelSceneForDisplay(cloneObject3D(sceneData), {
-      maxAnisotropy
+    tuneLoadedModelSceneForDisplay(nextRenderSceneData, { maxAnisotropy })
+    resolveModelInspectionMetadata(nextRenderSceneData, { animationCount })
+    const releaseMaterials = retainSceneInstanceMaterials(nextRenderSceneData)
+    setSceneInstance({
+      sceneData,
+      instanceCacheKey,
+      renderSceneData: nextRenderSceneData
     })
-    resolveModelInspectionMetadata(sceneTemplate, { animationCount })
-    writeCachedSceneInstanceClone({
-      cacheKey: instanceCacheKey,
-      renderSceneData: sceneTemplate
-    })
-    const renderedSceneClone = tuneLoadedModelSceneForDisplay(cloneObject3D(sceneTemplate), {
-      maxAnisotropy
-    })
-    resolveModelInspectionMetadata(renderedSceneClone, { animationCount })
-    return renderedSceneClone
+
+    return releaseMaterials
   }, [animationCount, gl, instanceCacheKey, sceneData])
+  const renderSceneData =
+    sceneData instanceof THREE.BufferGeometry
+      ? sceneData
+      : sceneInstance?.sceneData === sceneData &&
+          sceneInstance.instanceCacheKey === instanceCacheKey
+        ? sceneInstance.renderSceneData
+        : null
+  const inspectionSceneData = renderSceneData ?? sceneData
   const modelInspectionMetadata = useMemo(
-    () => resolveModelInspectionMetadata(renderSceneData, { animationCount }),
-    [animationCount, renderSceneData]
+    () => resolveModelInspectionMetadata(inspectionSceneData, { animationCount }),
+    [animationCount, inspectionSceneData]
   )
   const precomputedLayout = useMemo(() => {
     const cachedLayout = readSceneLayoutCache(sceneData, initialRotation)
@@ -557,7 +587,7 @@ export const BaseScene: React.FC<{
   }, [initialRotation, sceneData])
 
   useLayoutEffect(() => {
-    if (!rootRef.current || !contentRef.current || !sceneData) return
+    if (!rootRef.current || !contentRef.current || !renderSceneData) return
     let cancelled = false
     let rafId = 0
     let retryFrameCount = 0
@@ -669,20 +699,22 @@ export const BaseScene: React.FC<{
     )
   }, [instanceCacheKey, modelInspectionMetadata])
 
+  if (!renderSceneData) return null
+
   if (renderSceneData instanceof THREE.BufferGeometry) {
+    if (!geometryMaterial) return null
+
     return (
-      <group ref={rootRef}>
+      <group ref={rootRef} dispose={null}>
         <group ref={contentRef}>
-          <mesh geometry={renderSceneData}>
-            <meshStandardMaterial color="#cccccc" />
-          </mesh>
+          <mesh geometry={renderSceneData} material={geometryMaterial} />
         </group>
       </group>
     )
   }
 
   return (
-    <group ref={rootRef}>
+    <group ref={rootRef} dispose={null}>
       <group ref={contentRef}>
         <primitive object={renderSceneData} rotation={initialRotation} />
       </group>

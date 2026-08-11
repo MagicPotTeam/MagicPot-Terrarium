@@ -113,6 +113,7 @@ let textureFromWidths: number[] = []
 let textureFromAlphaModes: unknown[] = []
 let textureScaleModeReadCount = 0
 let textureScaleModeWriteCount = 0
+let createdBaseTextures: MockTextureInstance[] = []
 const originalDevicePixelRatio = typeof window === 'undefined' ? 1 : window.devicePixelRatio
 
 type MockImageInstance = {
@@ -256,7 +257,7 @@ function installPixiMock() {
           }
         }
 
-        return new MockTexture({
+        const texture = new MockTexture({
           source,
           frame: {
             x: 0,
@@ -265,6 +266,8 @@ function installPixiMock() {
             height: image.naturalHeight || image.height || 1
           }
         })
+        createdBaseTextures.push(texture)
+        return texture
       }
     }
 
@@ -448,8 +451,83 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     textureFromAlphaModes = []
     textureScaleModeReadCount = 0
     textureScaleModeWriteCount = 0
+    createdBaseTextures = []
     setWindowDevicePixelRatio(originalDevicePixelRatio)
     installPixiMock()
+  })
+
+  it('shares one source texture across stable-source crops with independent decoded objects and destroys it after the final consumer leaves', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const firstDecodedImage = createImage(400, 240)
+    const secondDecodedImage = createImage(400, 240)
+    const sharedIdentity: CanvasImageSourceIdentity = {
+      version: 1,
+      kind: 'local-file',
+      cacheKey: 'shared-crop-source',
+      canonicalPath: 'C:/images/shared.png',
+      sizeBytes: 1_024,
+      lastModifiedMs: 1
+    }
+    const first = createItem({
+      id: 'shared-crop-a',
+      src: 'local-media:///C:/images/shared.png',
+      image: firstDecodedImage,
+      sourceIdentity: sharedIdentity,
+      crop: { x: 0, y: 0, width: 200, height: 240 }
+    })
+    const second = createItem({
+      id: 'shared-crop-b',
+      src: first.src,
+      x: 260,
+      image: secondDecodedImage,
+      sourceIdentity: sharedIdentity,
+      crop: { x: 200, y: 0, width: 200, height: 240 }
+    })
+
+    const { rerender } = render(
+      <ProjectCanvasWebGLImageLayer items={[first, second]} {...TEST_STAGE_VIEWPORT_1280_720} />
+    )
+
+    await waitFor(() => {
+      expect(getLiveSpriteByLabel(first.id)).not.toBeNull()
+      expect(getLiveSpriteByLabel(second.id)).not.toBeNull()
+    })
+    expect(createdBaseTextures).toHaveLength(1)
+
+    rerender(<ProjectCanvasWebGLImageLayer items={[second]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+    await waitFor(() => expect(getLiveSpriteByLabel(first.id)).toBeNull())
+    expect(createdBaseTextures[0].destroyed).toBe(false)
+
+    rerender(<ProjectCanvasWebGLImageLayer items={[]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+    await waitFor(() => expect(getLiveSpriteByLabel(second.id)).toBeNull())
+    expect(createdBaseTextures[0].destroyed).toBe(true)
+    expect(createdBaseTextures[0].destroySourceCalled).toBe(true)
+  })
+
+  it('dedupes immutable data URLs across independent provided image objects', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const src = 'data:image/png;base64,c2FtZS1waXhlbHM='
+    const first = createItem({
+      id: 'data-url-a',
+      src,
+      image: createImage(320, 180)
+    })
+    const second = createItem({
+      id: 'data-url-b',
+      src,
+      x: 360,
+      image: createImage(320, 180)
+    })
+
+    render(
+      <ProjectCanvasWebGLImageLayer items={[first, second]} {...TEST_STAGE_VIEWPORT_1280_720} />
+    )
+
+    await waitFor(() => {
+      expect(getLiveSpriteByLabel(first.id)).not.toBeNull()
+      expect(getLiveSpriteByLabel(second.id)).not.toBeNull()
+    })
+    expect(createdBaseTextures).toHaveLength(1)
   })
 
   it('initializes Pixi with explicit canvas clearing to avoid transparent-frame trails', async () => {
@@ -828,6 +906,30 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(updatedSprite.scale.x).toBe(5)
     expect(updatedSprite.scale.y).toBe(6)
   }, 30000)
+
+  it('does not reuse a stale texture when the same URL is refreshed with a new decoded object', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const firstImage = createImage(200, 120)
+    const secondImage = createImage(200, 120)
+    const first = createItem({ src: 'https://example.test/same.png', image: firstImage })
+    const { rerender } = render(
+      <ProjectCanvasWebGLImageLayer items={[first]} {...TEST_STAGE_VIEWPORT_1280_720} />
+    )
+
+    await waitFor(() => expect(createdBaseTextures).toHaveLength(1))
+    const firstTexture = createdBaseTextures[0]
+
+    rerender(
+      <ProjectCanvasWebGLImageLayer
+        items={[createItem({ src: first.src, image: secondImage })]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+      />
+    )
+
+    await waitFor(() => expect(createdBaseTextures).toHaveLength(2))
+    expect(firstTexture.destroyed).toBe(true)
+    expect((createdBaseTextures[1].source as { image?: unknown }).image).toBe(secondImage)
+  })
 
   it('re-sorts sprites when an item z-index changes', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
@@ -1890,7 +1992,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     )
   }, 30000)
 
-  it('queues visible src-only image loads behind a bounded initial load pool', async () => {
+  it('does not start queued initial decodes while tearing down the bounded load pool', async () => {
     const {
       default: ProjectCanvasWebGLImageLayer,
       PROJECT_CANVAS_WEBGL_INITIAL_IMAGE_LOAD_CONCURRENCY
@@ -1922,7 +2024,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         image: undefined as unknown as HTMLImageElement
       })
 
-      render(
+      const { unmount } = render(
         <ProjectCanvasWebGLImageLayer
           items={[...srcOnlyItems, offscreenSrcOnlyItem]}
           {...TEST_STAGE_VIEWPORT_1280_720}
@@ -1945,19 +2047,29 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         { timeout: 15000 }
       )
 
-      expect(attemptedSrcs).toHaveLength(PROJECT_CANVAS_WEBGL_INITIAL_IMAGE_LOAD_CONCURRENCY)
+      expect(attemptedSrcs.filter(Boolean)).toHaveLength(
+        PROJECT_CANVAS_WEBGL_INITIAL_IMAGE_LOAD_CONCURRENCY
+      )
       const visibleSrcs = new Set(srcOnlyItems.map((item) => item.src))
       expect(attemptedSrcs.every((src) => visibleSrcs.has(src))).toBe(true)
       expect(attemptedSrcs).not.toContain(offscreenSrcOnlyItem.src)
       expect(createdSprites).toHaveLength(0)
 
+      unmount()
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(attemptedSrcs.filter(Boolean)).toHaveLength(
+        PROJECT_CANVAS_WEBGL_INITIAL_IMAGE_LOAD_CONCURRENCY
+      )
+
       act(() => {
         imageInstances[0].onload?.()
       })
 
-      await waitFor(() => {
-        expect(attemptedSrcs).toHaveLength(PROJECT_CANVAS_WEBGL_INITIAL_IMAGE_LOAD_CONCURRENCY + 1)
-      })
+      expect(attemptedSrcs.filter(Boolean)).toHaveLength(
+        PROJECT_CANVAS_WEBGL_INITIAL_IMAGE_LOAD_CONCURRENCY
+      )
     } finally {
       vi.unstubAllGlobals()
     }
@@ -2006,9 +2118,10 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       })
       queuedAnimationFrames.clear()
 
-      act(() => {
+      await act(async () => {
         imageInstances[0].onload?.()
         imageInstances[1].onload?.()
+        await Promise.resolve()
       })
 
       expect(queuedAnimationFrames.size).toBe(1)
@@ -2072,7 +2185,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
       await waitFor(
         () => {
-          expect(attemptedSrcs).toEqual([
+          expect(attemptedSrcs.filter(Boolean)).toEqual([
             'file:///image-replaced-old.png',
             'file:///image-replaced-new.png'
           ])
@@ -2151,6 +2264,63 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         },
         { timeout: 15000 }
       )
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }, 30000)
+
+  it('re-decodes a populated weak remote source cache when the provided image revision changes', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const attemptedSrcs: string[] = []
+    const imageInstances: MockImageInstance[] = []
+    const MockImage = createMockImageClass({
+      width: 4096,
+      height: 4096,
+      attemptedSrcs,
+      imageInstances
+    })
+    vi.stubGlobal('Image', MockImage as unknown as typeof Image)
+
+    try {
+      const src = 'https://example.test/populated-cache.png'
+      const firstPreview = createImage(1024, 1024)
+      const secondPreview = createImage(1024, 1024)
+      const firstItem = createItem({
+        id: 'image-populated-cache',
+        src,
+        width: 4096,
+        height: 4096,
+        sourceWidth: 4096,
+        sourceHeight: 4096,
+        image: firstPreview
+      })
+      const { rerender } = render(
+        <ProjectCanvasWebGLImageLayer
+          items={[firstItem]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          stageScale={2}
+        />
+      )
+
+      await waitFor(() => expect(attemptedSrcs.filter(Boolean)).toEqual([src]))
+      act(() => imageInstances[0].onload?.())
+      await waitFor(() => expect(getLiveSpriteByLabel(firstItem.id)?.texture.width).toBe(4096))
+
+      rerender(
+        <ProjectCanvasWebGLImageLayer
+          items={[{ ...firstItem, image: secondPreview }]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          stageScale={2}
+        />
+      )
+
+      await waitFor(() => expect(attemptedSrcs.filter(Boolean)).toEqual([src, src]))
+      act(() => imageInstances[1].onload?.())
+      await waitFor(() => {
+        const liveTexture = getLiveSpriteByLabel(firstItem.id)?.texture
+        expect(liveTexture?.width).toBe(4096)
+        expect((liveTexture?.source as { image?: unknown }).image).toBe(imageInstances[1])
+      })
     } finally {
       vi.unstubAllGlobals()
     }
@@ -2942,11 +3112,12 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       )
 
       await waitFor(() => {
-        expect(attemptedSrcs).toEqual([
+        expect(attemptedSrcs.filter(Boolean)).toEqual([
           'local-media:///thumb-lod/1024.webp',
           'local-media:///thumb-lod-second/1024.webp'
         ])
         expect(imageInstances).toHaveLength(2)
+        expect(imageInstances[0].src).toBe('')
       })
 
       act(() => {
@@ -2960,6 +3131,131 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       vi.unstubAllGlobals()
     }
   }, 30000)
+
+  it('restarts a thumbnail load when the source revision changes but the level URL stays the same', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const attemptedSrcs: string[] = []
+    const imageInstances: MockImageInstance[] = []
+    const MockImage = createMockImageClass({
+      width: 1024,
+      height: 512,
+      attemptedSrcs,
+      imageInstances
+    })
+    vi.stubGlobal('Image', MockImage as unknown as typeof Image)
+
+    try {
+      const firstFixture = createThumbnailSetFixture('canvas-thumbnail-same-url-first')
+      const secondFixture = createThumbnailSetFixture('canvas-thumbnail-same-url-second')
+      const firstItem = createItem({
+        id: 'image-thumbnail-same-url',
+        src: 'file:///image-thumbnail-same-url.png',
+        image: createImage(192, 96),
+        width: 3200,
+        height: 1600,
+        sourceWidth: 4096,
+        sourceHeight: 2048,
+        sourceIdentity: firstFixture.sourceIdentity,
+        thumbnailSet: firstFixture.thumbnailSet
+      })
+      const secondThumbnailSet: CanvasImageThumbnailSet = {
+        ...firstFixture.thumbnailSet,
+        cacheKey: secondFixture.sourceIdentity.cacheKey,
+        sourceIdentity: secondFixture.sourceIdentity,
+        updatedAt: '2026-05-03T00:00:00.000Z'
+      }
+      const secondItem = createItem({
+        ...firstItem,
+        sourceIdentity: secondFixture.sourceIdentity,
+        thumbnailSet: secondThumbnailSet
+      })
+      const thumbnailSrc = 'local-media:///thumb-lod/1024.webp'
+
+      const { rerender } = render(
+        <ProjectCanvasWebGLImageLayer
+          items={[firstItem]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          stageScale={0.15}
+        />
+      )
+
+      await waitFor(() => {
+        expect(attemptedSrcs.filter(Boolean)).toEqual([thumbnailSrc])
+        expect(imageInstances).toHaveLength(1)
+      })
+
+      rerender(
+        <ProjectCanvasWebGLImageLayer
+          items={[secondItem]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          stageScale={0.15}
+        />
+      )
+
+      await waitFor(() => {
+        expect(attemptedSrcs.filter(Boolean)).toEqual([thumbnailSrc, thumbnailSrc])
+        expect(imageInstances).toHaveLength(2)
+        expect(imageInstances[0].src).toBe('')
+      })
+
+      act(() => imageInstances[1].onload?.())
+      await waitFor(() => {
+        const liveTexture = getLiveSpriteByLabel(secondItem.id)?.texture
+        expect(liveTexture?.width).toBe(1024)
+        expect((liveTexture?.source as { image?: unknown }).image).toBe(imageInstances[1])
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }, 30000)
+
+  it('aborts an active thumbnail load when its item is removed', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const attemptedSrcs: string[] = []
+    const imageInstances: MockImageInstance[] = []
+    const MockImage = createMockImageClass({
+      width: 1024,
+      height: 512,
+      attemptedSrcs,
+      imageInstances
+    })
+    vi.stubGlobal('Image', MockImage as unknown as typeof Image)
+
+    try {
+      const fixture = createThumbnailSetFixture('canvas-thumbnail-abort')
+      const item = createItem({
+        id: 'image-thumbnail-abort',
+        image: createImage(192, 96),
+        width: 3200,
+        height: 1600,
+        sourceWidth: 4096,
+        sourceHeight: 2048,
+        sourceIdentity: fixture.sourceIdentity,
+        thumbnailSet: fixture.thumbnailSet
+      })
+      const { rerender } = render(
+        <ProjectCanvasWebGLImageLayer
+          items={[item]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          stageScale={0.15}
+        />
+      )
+
+      await waitFor(() => expect(imageInstances).toHaveLength(1))
+      rerender(
+        <ProjectCanvasWebGLImageLayer
+          items={[]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          stageScale={0.15}
+        />
+      )
+
+      await waitFor(() => expect(imageInstances[0].src).toBe(''))
+      expect(attemptedSrcs.filter(Boolean)).toEqual(['local-media:///thumb-lod/1024.webp'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 
   it('upgrades large-batch preview sprites through thumbnail LOD without loading source textures', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
@@ -3553,6 +3849,12 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       attemptedSrcs
     })
 
+    const originalElectronFile = window.electronFile
+    const resolveAuthorizedLocalMediaPath = vi.fn(async (filePath: string) => filePath)
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: { resolveAuthorizedLocalMediaPath }
+    })
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
     vi.stubGlobal('fetch', fetchMock)
     vi.stubGlobal('createImageBitmap', createImageBitmapMock)
@@ -3578,7 +3880,10 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
       await waitFor(
         () => {
-          expect(fetchMock).toHaveBeenCalledWith('local-media:///C:/real-board/huge.png')
+          expect(fetchMock).toHaveBeenCalledWith(
+            'local-media:///C:/real-board/huge.png',
+            expect.objectContaining({ signal: expect.any(AbortSignal) })
+          )
           expect(createImageBitmapMock).toHaveBeenCalledWith(expect.any(Blob), {
             resizeWidth: 4096,
             resizeHeight: 2509,
@@ -3593,21 +3898,18 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect(attemptedSrcs).toEqual([])
     } finally {
       vi.unstubAllGlobals()
+      Object.defineProperty(window, 'electronFile', {
+        configurable: true,
+        value: originalElectronFile
+      })
     }
   }, 30000)
 
-  it('loads source-only local-media images through svcFs object URLs', async () => {
+  it('loads source-only local-media images through authorized protocol URLs', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
-    const originalApi = window.api
-    const originalCreateObjectURL = URL.createObjectURL
-    const originalRevokeObjectURL = URL.revokeObjectURL
+    const originalElectronFile = window.electronFile
     const attemptedSrcs: string[] = []
-    const readImageFromPath = vi.fn(async () => ({
-      image: new Uint8Array([1, 2, 3, 4]),
-      filename: 'source-only.png'
-    }))
-    const createObjectURLMock = vi.fn((_blob: Blob) => 'blob:webgl-local-image')
-    const revokeObjectURLMock = vi.fn()
+    const resolveAuthorizedLocalMediaPath = vi.fn(async (filePath: string) => filePath)
 
     const MockImage = createMockImageClass({
       width: 640,
@@ -3618,16 +3920,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       }
     })
 
-    URL.createObjectURL = createObjectURLMock as unknown as typeof URL.createObjectURL
-    URL.revokeObjectURL = revokeObjectURLMock as unknown as typeof URL.revokeObjectURL
-    Object.defineProperty(window, 'api', {
+    Object.defineProperty(window, 'electronFile', {
       configurable: true,
-      writable: true,
-      value: {
-        svcFs: {
-          readImageFromPath
-        }
-      }
+      value: { resolveAuthorizedLocalMediaPath }
     })
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -3648,39 +3943,34 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
       await waitFor(
         () => {
-          expect(readImageFromPath).toHaveBeenCalledWith({
-            fullPath: 'C:/real-board/source-only.png'
-          })
-          expect(attemptedSrcs).toEqual(['blob:webgl-local-image'])
-          expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:webgl-local-image')
+          expect(resolveAuthorizedLocalMediaPath).toHaveBeenCalledWith(
+            'C:/real-board/source-only.png'
+          )
+          expect(attemptedSrcs).toEqual(['local-media:///C:/real-board/source-only.png'])
           expect(getLiveSpriteByLabel('image-local-source-only')?.texture.width).toBe(640)
         },
         { timeout: 15000 }
       )
     } finally {
       vi.unstubAllGlobals()
-      URL.createObjectURL = originalCreateObjectURL
-      URL.revokeObjectURL = originalRevokeObjectURL
-      Object.defineProperty(window, 'api', {
+      Object.defineProperty(window, 'electronFile', {
         configurable: true,
-        writable: true,
-        value: originalApi
+        value: originalElectronFile
       })
     }
   }, 30000)
 
-  it('releases pending local-media object URLs when the WebGL layer unmounts before image load settles', async () => {
+  it('ignores a local-media authorization result that arrives after unmount', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
-    const originalApi = window.api
-    const originalCreateObjectURL = URL.createObjectURL
-    const originalRevokeObjectURL = URL.revokeObjectURL
+    const originalElectronFile = window.electronFile
     const attemptedSrcs: string[] = []
-    const readImageFromPath = vi.fn(async () => ({
-      image: new Uint8Array([1, 2, 3, 4]),
-      filename: 'pending-source.png'
-    }))
-    const createObjectURLMock = vi.fn((_blob: Blob) => 'blob:webgl-pending-local-image')
-    const revokeObjectURLMock = vi.fn()
+    let resolveAuthorization: ((filePath: string) => void) | null = null
+    const resolveAuthorizedLocalMediaPath = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveAuthorization = resolve
+        })
+    )
 
     const MockImage = createMockImageClass({
       width: 640,
@@ -3688,16 +3978,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       attemptedSrcs
     })
 
-    URL.createObjectURL = createObjectURLMock as unknown as typeof URL.createObjectURL
-    URL.revokeObjectURL = revokeObjectURLMock as unknown as typeof URL.revokeObjectURL
-    Object.defineProperty(window, 'api', {
+    Object.defineProperty(window, 'electronFile', {
       configurable: true,
-      writable: true,
-      value: {
-        svcFs: {
-          readImageFromPath
-        }
-      }
+      value: { resolveAuthorizedLocalMediaPath }
     })
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
@@ -3716,29 +3999,24 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         />
       )
 
-      await waitFor(
-        () => {
-          expect(readImageFromPath).toHaveBeenCalledWith({
-            fullPath: 'C:/real-board/pending-source.png'
-          })
-          expect(attemptedSrcs).toEqual(['blob:webgl-pending-local-image'])
-        },
-        { timeout: 15000 }
-      )
-
-      expect(revokeObjectURLMock).not.toHaveBeenCalled()
+      await waitFor(() => {
+        expect(resolveAuthorizedLocalMediaPath).toHaveBeenCalledWith(
+          'C:/real-board/pending-source.png'
+        )
+      })
       unmount()
 
-      expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:webgl-pending-local-image')
-      expect(revokeObjectURLMock).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        resolveAuthorization?.('C:/real-board/pending-source.png')
+        await Promise.resolve()
+      })
+
+      expect(attemptedSrcs).toEqual([])
     } finally {
       vi.unstubAllGlobals()
-      URL.createObjectURL = originalCreateObjectURL
-      URL.revokeObjectURL = originalRevokeObjectURL
-      Object.defineProperty(window, 'api', {
+      Object.defineProperty(window, 'electronFile', {
         configurable: true,
-        writable: true,
-        value: originalApi
+        value: originalElectronFile
       })
     }
   }, 30000)
@@ -3761,6 +4039,12 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       imageInstances
     })
 
+    const originalElectronFile = window.electronFile
+    const resolveAuthorizedLocalMediaPath = vi.fn(async (filePath: string) => filePath)
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: { resolveAuthorizedLocalMediaPath }
+    })
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
     vi.stubGlobal('fetch', fetchMock)
     vi.stubGlobal('createImageBitmap', createImageBitmapMock)
@@ -3786,7 +4070,10 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
       await waitFor(
         () => {
-          expect(fetchMock).toHaveBeenCalledWith('local-media:///C:/real-board/huge-fallback.png')
+          expect(fetchMock).toHaveBeenCalledWith(
+            'local-media:///C:/real-board/huge-fallback.png',
+            expect.objectContaining({ signal: expect.any(AbortSignal) })
+          )
           expect(attemptedSrcs).toEqual(['local-media:///C:/real-board/huge-fallback.png'])
         },
         { timeout: 15000 }
@@ -3810,6 +4097,10 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       )
     } finally {
       vi.unstubAllGlobals()
+      Object.defineProperty(window, 'electronFile', {
+        configurable: true,
+        value: originalElectronFile
+      })
     }
   }, 30000)
 
@@ -3826,6 +4117,12 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       attemptedSrcs
     })
 
+    const originalElectronFile = window.electronFile
+    const resolveAuthorizedLocalMediaPath = vi.fn(async (filePath: string) => filePath)
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: { resolveAuthorizedLocalMediaPath }
+    })
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
     vi.stubGlobal('fetch', fetchMock)
     vi.stubGlobal(
@@ -3854,7 +4151,10 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
       await waitFor(
         () => {
-          expect(fetchMock).toHaveBeenCalledWith('local-media:///C:/real-board/ultra-jumbo.png')
+          expect(fetchMock).toHaveBeenCalledWith(
+            'local-media:///C:/real-board/ultra-jumbo.png',
+            expect.objectContaining({ signal: expect.any(AbortSignal) })
+          )
           expect(getLiveSpriteByLabel('image-ultra-jumbo-fetch-fail')?.texture.width).toBe(512)
         },
         { timeout: 15000 }
@@ -3868,6 +4168,10 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect(getLiveSpriteByLabel('image-ultra-jumbo-fetch-fail')?.texture.width).toBe(512)
     } finally {
       vi.unstubAllGlobals()
+      Object.defineProperty(window, 'electronFile', {
+        configurable: true,
+        value: originalElectronFile
+      })
     }
   }, 30000)
 
