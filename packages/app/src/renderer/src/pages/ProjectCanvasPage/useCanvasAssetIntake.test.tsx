@@ -31,12 +31,17 @@ const hydrateCanvasImageItemForCanvasMock = vi.fn(async (itemOrArgs: unknown) =>
   return itemOrArgs
 })
 const authorizeCanvasLocalMediaSourceUrlMock = vi.fn<(file: File) => Promise<string | null>>()
+const resolveAuthorizedCanvasLocalMediaSourceUrlMock =
+  vi.fn<(sourceUrl: string) => Promise<string | null>>()
 
 vi.mock('./canvasLocalFileSource', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./canvasLocalFileSource')>()
   return {
     ...actual,
-    authorizeCanvasLocalMediaSourceUrl: (file: File) => authorizeCanvasLocalMediaSourceUrlMock(file)
+    authorizeCanvasLocalMediaSourceUrl: (file: File) =>
+      authorizeCanvasLocalMediaSourceUrlMock(file),
+    resolveAuthorizedCanvasLocalMediaSourceUrl: (sourceUrl: string) =>
+      resolveAuthorizedCanvasLocalMediaSourceUrlMock(sourceUrl)
   }
 })
 
@@ -256,6 +261,7 @@ function SingleImageHarness({
 }
 
 afterEach(() => {
+  vi.unstubAllGlobals()
   vi.clearAllMocks()
 })
 
@@ -269,6 +275,17 @@ beforeEach(() => {
     return itemOrArgs
   })
   authorizeCanvasLocalMediaSourceUrlMock.mockResolvedValue(null)
+  resolveAuthorizedCanvasLocalMediaSourceUrlMock.mockImplementation(async (sourceUrl) => sourceUrl)
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const sourceUrl = String(input)
+      if (sourceUrl.startsWith('local-media:')) {
+        return new Response(new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'image/png' }))
+      }
+      return new Response(new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'image/png' }))
+    }) as typeof fetch
+  )
   importCanvasFileMock.mockResolvedValue({
     items: [
       {
@@ -393,14 +410,18 @@ describe('useCanvasAssetIntake', () => {
       const source = {
         src: 'local-media:///C:/incoming/path-image.png',
         fileName: 'path-image.png',
-        sizeBytes: 4
-      } satisfies CanvasImageSourceInput
+        sizeBytes: 4,
+        sourcePath: String.raw`C:\incoming\hash#query?\literal%2F-%25-图像.png`
+      } satisfies CanvasImageSourceInput & { sourcePath: string }
       const onComplete = vi.fn()
       render(<LargeImageBatchHarness sources={[source]} onComplete={onComplete} />)
       await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
 
+      expect(resolveAuthorizedCanvasLocalMediaSourceUrlMock).toHaveBeenCalledWith(
+        'local-media:///C:/incoming/hash%23query%3F/literal%252F-%2525-%E5%9B%BE%E5%83%8F.png'
+      )
       expect(importFile).toHaveBeenCalledWith({
-        sourcePath: 'C:/incoming/path-image.png',
+        sourcePath: 'C:/incoming/hash#query?/literal%2F-%25-图像.png',
         mimeType: 'image/png',
         originalFileName: 'path-image.png'
       })
@@ -1168,7 +1189,7 @@ describe('useCanvasAssetIntake', () => {
       expect(result).toHaveLength(1)
       expect(imageItems).toHaveLength(1)
       expect(loadedSources).toHaveLength(0)
-      expect(fetchMock).toHaveBeenCalledWith(hugeSource.src)
+      expect(fetchMock).toHaveBeenCalledWith(hugeSource.src, { signal: undefined })
       expect(createImageBitmapMock).toHaveBeenCalledWith(previewBlob, {
         resizeWidth: 2048,
         resizeHeight: 1255,
@@ -1198,14 +1219,10 @@ describe('useCanvasAssetIntake', () => {
     }
   })
 
-  it('reads local-media deferred previews through svcFs when the file bridge is available', async () => {
-    const originalApi = window.api
+  it('streams authorized local-media deferred previews without svcFs byte IPC', async () => {
     const originalCreateImageBitmap = globalThis.createImageBitmap
     const originalFetch = globalThis.fetch
-    const readImageFromPath = vi.fn(async () => ({
-      image: new Uint8Array([1, 2, 3, 4]),
-      filename: 'huge-from-bridge.png'
-    }))
+    const previewBlob = new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'image/png' })
     const previewBitmap = {
       width: 2048,
       height: 1255,
@@ -1214,17 +1231,8 @@ describe('useCanvasAssetIntake', () => {
     const createImageBitmapMock = vi.fn(
       async () => previewBitmap
     ) as unknown as typeof createImageBitmap
-    const fetchMock = vi.fn()
+    const fetchMock = vi.fn(async () => new Response(previewBlob))
 
-    Object.defineProperty(window, 'api', {
-      configurable: true,
-      writable: true,
-      value: {
-        svcFs: {
-          readImageFromPath
-        }
-      }
-    })
     Object.defineProperty(globalThis, 'createImageBitmap', {
       configurable: true,
       value: createImageBitmapMock
@@ -1255,11 +1263,9 @@ describe('useCanvasAssetIntake', () => {
 
       const [items] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem[]]
       const imageItems = items.filter((item): item is CanvasImageItem => item.type === 'image')
-      expect(readImageFromPath).toHaveBeenCalledWith({
-        fullPath: 'C:/real-board/huge-from-bridge.png'
-      })
-      expect(fetchMock).not.toHaveBeenCalled()
-      expect(createImageBitmapMock).toHaveBeenCalledWith(expect.any(Blob), {
+      expect(resolveAuthorizedCanvasLocalMediaSourceUrlMock).toHaveBeenCalledWith(hugeSource.src)
+      expect(fetchMock).toHaveBeenCalledWith(hugeSource.src, { signal: undefined })
+      expect(createImageBitmapMock).toHaveBeenCalledWith(expect.anything(), {
         resizeWidth: 2048,
         resizeHeight: 1255,
         resizeQuality: 'high',
@@ -1267,11 +1273,6 @@ describe('useCanvasAssetIntake', () => {
       })
       expect(imageItems[0].image).toBe(previewBitmap)
     } finally {
-      Object.defineProperty(window, 'api', {
-        configurable: true,
-        writable: true,
-        value: originalApi
-      })
       if (originalCreateImageBitmap) {
         Object.defineProperty(globalThis, 'createImageBitmap', {
           configurable: true,

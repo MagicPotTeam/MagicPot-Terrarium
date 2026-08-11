@@ -13,6 +13,7 @@ import {
   normalizeLocalMediaUrl
 } from '@renderer/pages/ChatPage/chatPageShared'
 import { loadImageFromSrc } from '@renderer/pages/ProjectCanvasPage/canvasAssetIntakeHelpers'
+import { resolveCanvasLocalFilePathFromSource } from '@renderer/pages/ProjectCanvasPage/canvasLocalImageSource'
 import { stripHtmlToText } from './htmlText'
 
 export const QAPP_IMAGE_DRAG_MIME = 'application/x-qapp-image'
@@ -472,25 +473,8 @@ export const getDroppedImageUrl = (dataTransfer: DragDataReader): string | null 
   return null
 }
 
-const decodeLocalImagePath = (url: string): string | null => {
-  if (url.startsWith('local-media:///')) {
-    return decodeURIComponent(url.slice('local-media:///'.length))
-  }
-
-  if (url.startsWith('local-media://')) {
-    return decodeURIComponent(url.slice('local-media://'.length).replace(/^\/+/, ''))
-  }
-
-  if (url.startsWith('file:///')) {
-    return decodeURIComponent(url.slice('file:///'.length))
-  }
-
-  if (url.startsWith('file://')) {
-    return decodeURIComponent(url.slice('file://'.length).replace(/^\/+/, ''))
-  }
-
-  return null
-}
+const decodeLocalImagePath = (url: string): string | null =>
+  resolveCanvasLocalFilePathFromSource(url)
 
 const inferMimeTypeFromFileName = (fileName: string): string =>
   getImageMimeTypeFromFileName(fileName) || 'image/png'
@@ -516,10 +500,34 @@ const inferFileNameFromUrl = (url: string, fallback: string): string => {
   }
 }
 
+const resolveAuthorizedDroppedLocalPath = async (url: string): Promise<string | null> => {
+  const localPath = decodeLocalImagePath(url)
+  if (!localPath || typeof window === 'undefined') return null
+
+  try {
+    return (await window.electronFile?.resolveAuthorizedLocalMediaPath?.(localPath)) || null
+  } catch {
+    return null
+  }
+}
+
+const authorizeNativeDroppedImageFile = async (file: File): Promise<void> => {
+  if (typeof window === 'undefined') return
+  try {
+    await window.electronFile?.authorizeLocalMediaFile?.(file)
+  } catch {
+    // The File payload remains usable in browser-only and degraded preload environments.
+  }
+}
+
 const loadImageFileFromUrl = async (url: string, fallbackFileName: string): Promise<File> => {
   const localPath = decodeLocalImagePath(url)
   if (localPath) {
-    const { image, filename } = await api().svcFs.readImageFromPath({ fullPath: localPath })
+    const authorizedPath = await resolveAuthorizedDroppedLocalPath(url)
+    if (!authorizedPath) {
+      throw new Error('Local image path is not authorized')
+    }
+    const { image, filename } = await api().svcFs.readImageFromPath({ fullPath: authorizedPath })
     const fileName = filename || fallbackFileName
     return new File([image as BlobPart], fileName, {
       type: inferMimeTypeFromFileName(fileName)
@@ -828,7 +836,10 @@ export const getDroppedImageFile = async (
 ): Promise<File | null> => {
   const droppedFiles = Array.from(dataTransfer.files ?? [])
   const imageFile = droppedFiles.find((file) => isSupportedImageDropFile(file, options))
-  if (imageFile) return imageFile
+  if (imageFile) {
+    await authorizeNativeDroppedImageFile(imageFile)
+    return imageFile
+  }
 
   const internalPayload = parseInternalImageDragPayload(dataTransfer)
   if (internalPayload) {

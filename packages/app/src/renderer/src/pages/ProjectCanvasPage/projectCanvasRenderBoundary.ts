@@ -14,28 +14,15 @@ import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 
 export type ProjectCanvasRenderableMediaKind = 'image' | 'video' | 'model3d' | 'html'
 export type ProjectCanvasRenderableSurface =
-  | 'webgl-image'
-  | 'webgl-model3d-stage'
-  | 'html-video-overlay'
-  | 'html-overlay'
+  'webgl-image' | 'webgl-model3d-stage' | 'html-video-overlay' | 'html-overlay'
 export type ProjectCanvasImageRuntimeRoute =
-  | 'webgl-primary'
-  | 'budget-image-proxy'
-  | 'fallback-image-proxy'
-  | 'crop-excluded'
+  'webgl-primary' | 'budget-image-proxy' | 'fallback-image-proxy' | 'crop-excluded'
 export type ProjectCanvasImageInteractionMode =
-  | 'dom-image-overlay'
-  | 'placeholder-hit-proxy'
-  | 'crop-excluded'
+  'dom-image-overlay' | 'placeholder-hit-proxy' | 'crop-excluded'
 export type ProjectCanvasVideoBudgetMode =
-  | 'active-playing'
-  | 'visible-paused'
-  | 'poster-frame'
-  | 'unmounted'
+  'active-playing' | 'visible-paused' | 'poster-frame' | 'unmounted'
 export type ProjectCanvasInteractionProxy =
-  | 'canvas-image-node'
-  | 'canvas-placeholder'
-  | 'html-overlay'
+  'canvas-image-node' | 'canvas-placeholder' | 'html-overlay'
 
 export type ProjectCanvasBudgetedVideoItem = {
   item: CanvasVideoItem
@@ -54,11 +41,7 @@ export type ProjectCanvasVideoBudgetSummary = {
 export type ProjectCanvasResolvedRenderSurface = ProjectCanvasRenderableSurface | 'fallback-image'
 
 export type ProjectCanvasImageFallbackReason =
-  | 'unloaded'
-  | 'failed'
-  | 'unsupported'
-  | 'webgl-unavailable'
-  | 'generated-cooldown'
+  'unloaded' | 'failed' | 'unsupported' | 'webgl-unavailable' | 'generated-cooldown'
 
 export type ProjectCanvasResolvedRenderItem = ProjectCanvasRenderableItem & {
   runtimeSurface: ProjectCanvasResolvedRenderSurface
@@ -1000,13 +983,23 @@ export function getProjectCanvasRenderTransformKey(renderState: ProjectCanvasIma
   ].join('|')
 }
 
+const projectCanvasDecodedImageIdentities = new WeakMap<object, number>()
+
+let nextProjectCanvasDecodedImageIdentity = 1
+
 export function getProjectCanvasRenderTextureKey(
   item: Pick<ProjectCanvasRenderableImage, 'src' | 'image' | 'crop'>
 ): string {
   const { width: imageWidth, height: imageHeight } = getCanvasImageAssetSize(item.image)
+  let imageIdentity = projectCanvasDecodedImageIdentities.get(item.image as object)
+  if (imageIdentity === undefined) {
+    imageIdentity = nextProjectCanvasDecodedImageIdentity++
+    projectCanvasDecodedImageIdentities.set(item.image as object, imageIdentity)
+  }
 
   return [
     item.src,
+    imageIdentity,
     imageWidth,
     imageHeight,
     item.crop?.x ?? 0,

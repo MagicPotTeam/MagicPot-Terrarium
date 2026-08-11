@@ -220,7 +220,7 @@ const CanvasTransientUi: React.FC<CanvasTransientUiProps> = (props) => {
                 // 转成 Electron accelerator 格式
                 const accelerator = recordedShortcut.replace('Ctrl', 'CommandOrControl')
                 try {
-                  window.electron?.ipcRenderer?.invoke?.('screenshot:setShortcut', accelerator)
+                  void window.canvasScreenshot?.setShortcut(accelerator)
                   setCurrentShortcut(recordedShortcut)
                 } catch (err) {
                   console.error('[Canvas] 保存截图快捷键失败', err)

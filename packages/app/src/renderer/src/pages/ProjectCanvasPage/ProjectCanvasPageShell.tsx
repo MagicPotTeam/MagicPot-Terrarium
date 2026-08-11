@@ -756,18 +756,17 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
               return
             }
 
-            const invoke = window.electron?.ipcRenderer?.invoke
-            if (!invoke) {
+            const screenshotBridge = window.canvasScreenshot
+            if (!screenshotBridge) {
               notifyError('当前环境不支持修改截图快捷键。')
               return
             }
 
             try {
-              const result = await invoke(
-                'screenshot:setShortcut',
+              const result = (await screenshotBridge.setShortcut(
                 toElectronAccelerator(recordedShortcut),
                 buildReservedCanvasShortcuts(toolShortcuts)
-              )
+              )) as { success?: boolean; error?: string }
 
               if (result?.success === false) {
                 notifyError(result.error || '截图快捷键设置失败。')

@@ -8,6 +8,7 @@ const { loadImageFromSrcMock } = vi.hoisted(() => ({
 }))
 const originalGetContext = HTMLCanvasElement.prototype.getContext
 const originalToDataURL = HTMLCanvasElement.prototype.toDataURL
+const originalElectronFile = window.electronFile
 
 vi.mock('./windowUtils', () => ({
   api: () => ({
@@ -56,6 +57,13 @@ describe('droppedImageUtils', () => {
     loadImageFromSrcMock.mockReset()
     HTMLCanvasElement.prototype.getContext = originalGetContext
     HTMLCanvasElement.prototype.toDataURL = originalToDataURL
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: {
+        authorizeLocalMediaFile: vi.fn(async () => ''),
+        resolveAuthorizedLocalMediaPath: vi.fn(async (filePath: string) => filePath)
+      }
+    })
     vi.unstubAllGlobals()
     vi.stubGlobal(
       'FileReader',
@@ -522,7 +530,12 @@ describe('droppedImageUtils', () => {
     expect(file?.size).toBe(4)
   })
 
-  it('loads agent local-media drags through the fs service', async () => {
+  it('loads agent local-media drags only after the preload bridge revalidates the path', async () => {
+    const resolveAuthorizedLocalMediaPath = vi.fn(async () => 'C:/demo/agent.png')
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: { resolveAuthorizedLocalMediaPath }
+    })
     readImageFromPathMock.mockResolvedValue({
       image: new Uint8Array([9, 8, 7]),
       filename: 'agent.png'
@@ -534,11 +547,55 @@ describe('droppedImageUtils', () => {
       })
     )
 
+    expect(resolveAuthorizedLocalMediaPath).toHaveBeenCalledWith('C:/demo/agent.png')
     expect(readImageFromPathMock).toHaveBeenCalledWith({
       fullPath: 'C:/demo/agent.png'
     })
     expect(file?.name).toBe('agent.png')
     expect(file?.type).toBe('image/png')
+  })
+
+  it('rejects persisted external local paths when preload cannot revalidate them', async () => {
+    const resolveAuthorizedLocalMediaPath = vi.fn(async () => '')
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: { resolveAuthorizedLocalMediaPath }
+    })
+
+    await expect(
+      getDroppedImageFile(
+        createDataTransfer({
+          [AGENT_IMAGE_DRAG_MIME]: 'local-media:///C:/external/legacy.png'
+        })
+      )
+    ).rejects.toThrow('Local image path is not authorized')
+    expect(resolveAuthorizedLocalMediaPath).toHaveBeenCalledWith('C:/external/legacy.png')
+    expect(readImageFromPathMock).not.toHaveBeenCalled()
+  })
+
+  it('revalidates persisted app-root local paths after restart before reading them', async () => {
+    const resolveAuthorizedLocalMediaPath = vi.fn(
+      async () => 'C:/MagicPot/Data/.chat_media/legacy.png'
+    )
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: { resolveAuthorizedLocalMediaPath }
+    })
+    readImageFromPathMock.mockResolvedValue({
+      image: new Uint8Array([4, 5, 6]),
+      filename: 'legacy.png'
+    })
+
+    const file = await getDroppedImageFile(
+      createDataTransfer({
+        [AGENT_IMAGE_DRAG_MIME]: 'local-media:///C:/MagicPot/Data/.chat_media/legacy.png'
+      })
+    )
+
+    expect(readImageFromPathMock).toHaveBeenCalledWith({
+      fullPath: 'C:/MagicPot/Data/.chat_media/legacy.png'
+    })
+    expect(file?.name).toBe('legacy.png')
   })
 
   it('recrops lightweight internal canvas image attachments from the original source', async () => {
@@ -897,12 +954,18 @@ describe('droppedImageUtils', () => {
     ).toBeNull()
   })
 
-  it('accepts OS file drops whose image file has an empty MIME type', async () => {
+  it('authorizes native OS image Files through preload without requiring a renderer path', async () => {
+    const authorizeLocalMediaFile = vi.fn(async () => 'C:/drop/folder-photo.JPG')
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: { authorizeLocalMediaFile }
+    })
     const file = new File(['image-bytes'], 'folder-photo.JPG', { type: '' })
     const dataTransfer = createDataTransfer({}, [file])
 
     expect(getDroppedImageDropError(dataTransfer)).toBeNull()
     await expect(getDroppedImageFile(dataTransfer)).resolves.toBe(file)
+    expect(authorizeLocalMediaFile).toHaveBeenCalledWith(file)
   })
 
   it('rejects unsupported files for image-only drops with a specific message', () => {

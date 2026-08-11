@@ -20,7 +20,8 @@ import { importCanvasFile } from './canvasStorage'
 import { resolveCanvas3DRenderActivationDelay } from './canvas3DRenderActivation'
 import {
   authorizeCanvasLocalMediaSourceUrl,
-  getCanvasLocalMediaSourceUrl
+  resolveAuthorizedCanvasLocalMediaSourceUrl,
+  toLocalMediaUrl
 } from './canvasLocalFileSource'
 import { readCanvasLocalImageBlobFromSource } from './canvasLocalImageSource'
 import {
@@ -202,7 +203,15 @@ async function importCanvasImageSourceToManagedMedia(
   source: NormalizedCanvasImageSource
 ): Promise<NormalizedCanvasImageSource> {
   const sourceFile = source.sourceFile
-  const sourcePath = source.sourcePath || resolveLocalMediaPathFromUrl(source.src) || ''
+  const requestedSourceUrl = source.sourcePath
+    ? toLocalMediaUrl(source.sourcePath) || ''
+    : source.src
+  const requestedSourcePath = resolveLocalMediaPathFromUrl(requestedSourceUrl) || ''
+  const sourcePath = requestedSourcePath
+    ? resolveLocalMediaPathFromUrl(
+        (await resolveAuthorizedCanvasLocalMediaSourceUrl(requestedSourceUrl)) || ''
+      ) || ''
+    : ''
   const managedMedia = typeof window !== 'undefined' ? window.api?.svcManagedMedia : undefined
   if ((!sourceFile && !sourcePath) || !managedMedia) return source
 
@@ -233,10 +242,7 @@ async function importCanvasImageSourceToManagedMedia(
 }
 
 export type CanvasImageBatchImportProgressPhase =
-  | 'preparing'
-  | 'loading'
-  | 'committing'
-  | 'complete'
+  'preparing' | 'loading' | 'committing' | 'complete'
 
 export type CanvasImageBatchImportProgress = {
   phase: CanvasImageBatchImportProgressPhase
@@ -875,15 +881,17 @@ export function useCanvasAssetIntake({
   const isMountedRef = useRef(true)
 
   useEffect(() => {
+    const transientHiddenCanvasItemIds = transientHiddenCanvasItemIdsRef.current
+    const ownedCanvasImageObjectUrls = ownedCanvasImageObjectUrlsRef.current
     isMountedRef.current = true
     return () => {
       isMountedRef.current = false
-      showCanvasItemsTransiently(transientHiddenCanvasItemIdsRef.current)
-      transientHiddenCanvasItemIdsRef.current.clear()
-      for (const objectUrl of ownedCanvasImageObjectUrlsRef.current) {
+      showCanvasItemsTransiently(transientHiddenCanvasItemIds)
+      transientHiddenCanvasItemIds.clear()
+      for (const objectUrl of ownedCanvasImageObjectUrls) {
         URL.revokeObjectURL(objectUrl)
       }
-      ownedCanvasImageObjectUrlsRef.current.clear()
+      ownedCanvasImageObjectUrls.clear()
     }
   }, [])
 
@@ -1957,7 +1965,15 @@ export function useCanvasAssetIntake({
         reportBundleManifestUrl?: CanvasFileItem['reportBundleManifestUrl']
       }
     ) => {
-      const src = getCanvasLocalMediaSourceUrl(file) || URL.createObjectURL(file)
+      const src = await authorizeCanvasLocalMediaSourceUrl(file)
+      if (!src) {
+        notifyError(
+          t('canvas.file_add_failed', {
+            defaultValue: 'This local file could not be authorized for persistent canvas use.'
+          })
+        )
+        return null
+      }
 
       try {
         const { resolveOfficeFileNodeData } = await import('./officePreviewUtils')
@@ -2267,7 +2283,8 @@ export function useCanvasAssetIntake({
           console.log('[Canvas] Resolved 3D source file:', file.name, '=>', extracted.sourcePath)
         }
 
-        const src = getCanvasLocalMediaSourceUrl(sourceFile) || URL.createObjectURL(sourceFile)
+        const src =
+          (await authorizeCanvasLocalMediaSourceUrl(sourceFile)) || URL.createObjectURL(sourceFile)
         const defaultSize = 400
         const pos = resolvePlacement({
           width: defaultSize,

@@ -297,6 +297,15 @@ afterEach(() => {
 })
 
 beforeEach(() => {
+  Object.defineProperty(window, 'electronFile', {
+    configurable: true,
+    value: {
+      getPathForFile: (file: File) => (file as File & { path?: string }).path ?? '',
+      authorizeLocalMediaFile: async (file: File) => (file as File & { path?: string }).path ?? '',
+      resolveAuthorizedLocalMediaPath: async (filePath: string) => filePath
+    }
+  })
+
   const clipboardMock: ClipboardMock = {
     read: vi.fn().mockResolvedValue([]),
     readText: vi.fn().mockResolvedValue('')
@@ -1329,7 +1338,11 @@ describe('useCanvasFileIntake', () => {
 
     Object.defineProperty(window, 'electronFile', {
       configurable: true,
-      value: { getPathForFile }
+      value: {
+        getPathForFile,
+        authorizeLocalMediaFile: async (file: File) => getPathForFile(file),
+        resolveAuthorizedLocalMediaPath: async (filePath: string) => filePath
+      }
     })
 
     render(

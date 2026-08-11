@@ -5,6 +5,7 @@ import {
   EXPORT_IMAGE_MAX_SIDE,
   resolveCanvasExportRasterConfig
 } from './canvasExportRasterUtils'
+import { AGENT_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
 import { getCanvasItemBounds, resolveDroppedAgentImageDataUrl } from './projectCanvasPageShared'
 
 describe('resolveCanvasExportRasterConfig', () => {
@@ -90,6 +91,36 @@ describe('getCanvasItemBounds', () => {
 })
 
 describe('resolveDroppedAgentImageDataUrl', () => {
+  it('keeps remote agent image URLs on the remote loading path', async () => {
+    const dataTransfer = {
+      files: [],
+      getData: (type: string) =>
+        type === AGENT_IMAGE_DRAG_MIME ? 'https://cdn.example.com/output/generated.png' : ''
+    } as unknown as Pick<DataTransfer, 'getData' | 'files'>
+
+    await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
+      src: 'https://cdn.example.com/output/generated.png',
+      fileName: 'generated.png'
+    })
+  })
+
+  it('falls back to a validated remote agent URL when a synthetic file cannot be authorized', async () => {
+    const placeholderFile = new File([], 'generated.png', { type: 'image/png' })
+    const dataTransfer = {
+      files: [placeholderFile],
+      getData: (type: string) =>
+        type === AGENT_IMAGE_DRAG_MIME ? 'https://cdn.example.com/output/generated.png' : ''
+    } as unknown as Pick<DataTransfer, 'getData' | 'files'>
+
+    await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
+      src: 'https://cdn.example.com/output/generated.png',
+      fileName: 'generated.png',
+      sizeBytes: undefined,
+      sourceWidthHint: undefined,
+      sourceHeightHint: undefined
+    })
+  })
+
   it('prefers the internal quick-app image payload over placeholder files', async () => {
     const placeholderFile = new File(['x'], 'placeholder.png', { type: 'image/png' })
     const createObjectURL = vi.fn(() => 'blob:placeholder-file')

@@ -22,7 +22,15 @@ export type UseCanvasScreenshotShortcutSyncOptions = {
 }
 
 function getDefaultScreenshotShortcutInvoke(): ScreenshotShortcutInvoke | undefined {
-  return window.electron?.ipcRenderer?.invoke as ScreenshotShortcutInvoke | undefined
+  const bridge = window.canvasScreenshot
+  if (!bridge) return undefined
+
+  return (channel, ...args) => {
+    if (channel === 'screenshot:getShortcut') {
+      return bridge.getShortcut()
+    }
+    return bridge.setShortcut(String(args[0] ?? ''), args[1])
+  }
 }
 
 export function useCanvasScreenshotShortcutSync({
@@ -39,8 +47,7 @@ export function useCanvasScreenshotShortcutSync({
     void (async () => {
       try {
         const result = (await invoke('screenshot:getShortcut')) as
-          | { shortcut?: unknown }
-          | undefined
+          { shortcut?: unknown } | undefined
         const activeShortcut = toDisplayShortcut(
           typeof result?.shortcut === 'string' ? result.shortcut : DEFAULT_SCREENSHOT_SHORTCUT
         )

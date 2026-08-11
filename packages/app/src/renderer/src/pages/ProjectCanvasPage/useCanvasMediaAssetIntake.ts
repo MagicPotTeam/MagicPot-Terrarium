@@ -85,22 +85,6 @@ const VIDEO_FALLBACK_WIDTH = 480
 const VIDEO_FALLBACK_HEIGHT = 270
 const VIDEO_MAX_SIDE = 600
 
-type ElectronCanvasFile = File & {
-  path?: string
-}
-
-function getCanvasLocalMediaSourceUrl(file: File): string | null {
-  const filePath =
-    typeof (file as ElectronCanvasFile).path === 'string'
-      ? (file as ElectronCanvasFile).path!.replace(/\\/g, '/')
-      : ''
-  if (!filePath) {
-    return null
-  }
-
-  return normalizeLocalMediaUrl(`file://${filePath}`)
-}
-
 function measureCanvasTextBox(text: string): { width: number; height: number } {
   return measureCanvasTextBoxSize({
     text,
@@ -185,7 +169,8 @@ export function useCanvasMediaAssetIntake({
           console.log('[Canvas] Resolved 3D source file:', file.name, '=>', extracted.sourcePath)
         }
 
-        const src = getCanvasLocalMediaSourceUrl(sourceFile) || URL.createObjectURL(sourceFile)
+        const src =
+          (await authorizeCanvasLocalMediaSourceUrl(sourceFile)) || URL.createObjectURL(sourceFile)
         const pos = getCenterPosition(MODEL_DEFAULT_SIZE, MODEL_DEFAULT_SIZE)
         const assetCount = linkedAssets ? Object.keys(linkedAssets).length : 0
 
@@ -193,6 +178,7 @@ export function useCanvasMediaAssetIntake({
           id: createCanvasItemId('model'),
           src,
           fileName: sourceFile.name,
+          sourceFile,
           ...(assetCount > 0 ? { textures: linkedAssets } : {}),
           x: pos.x,
           y: pos.y,
