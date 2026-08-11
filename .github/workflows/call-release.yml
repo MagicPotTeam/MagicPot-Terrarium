@@ -60,13 +60,22 @@ jobs:
             ${{ runner.os }}-embedded-python-
 
       - name: Build embedded package
+        env:
+          PIP_NO_CACHE_DIR: '1'
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
 
+          Get-PSDrive -Name C | Select-Object Name,Used,Free
+          Write-Host '::group::Build embedded app'
           npm run build:embedded
+          Write-Host '::endgroup::'
+          Write-Host '::group::Prepare embedded runtime'
           npm run prepare:embedded
+          Write-Host '::endgroup::'
+          Write-Host '::group::Build image worker'
           npm run build:image-worker
+          Write-Host '::endgroup::'
           $env:PACKAGE_MODE = 'embedded'
           # Keep electron-builder in package-only mode even when Actions exposes repository tokens.
           Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
@@ -93,6 +102,48 @@ jobs:
           if ($missingPortableFiles.Count -gt 0) {
             throw "Embedded package is missing required ComfyUI portable files: $($missingPortableFiles -join ', ')"
           }
+
+      - name: Collect embedded build diagnostics
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $diagnosticsDir = 'dist/embedded-diagnostics'
+          New-Item -ItemType Directory -Force -Path $diagnosticsDir | Out-Null
+
+          Get-PSDrive -Name C |
+            Select-Object Name,Used,Free |
+            Format-List |
+            Out-File (Join-Path $diagnosticsDir 'disk-usage.txt')
+
+          $requirementsManifest = '.staging/embedded/custom-node-requirements.json'
+          if (Test-Path -LiteralPath $requirementsManifest) {
+            Copy-Item -LiteralPath $requirementsManifest -Destination $diagnosticsDir
+          }
+
+          $constraints = '.staging/embedded/constraints.txt'
+          if (Test-Path -LiteralPath $constraints) {
+            Copy-Item -LiteralPath $constraints -Destination $diagnosticsDir
+          }
+
+          $python = '.staging/embedded/python_embeded/python.exe'
+          if (Test-Path -LiteralPath $python) {
+            & $python -s -m pip list --format=freeze 2>&1 |
+              Out-File (Join-Path $diagnosticsDir 'pip-list.txt')
+            $global:LASTEXITCODE = 0
+            & $python -s -m pip check 2>&1 |
+              Out-File (Join-Path $diagnosticsDir 'pip-check.txt')
+            $global:LASTEXITCODE = 0
+          }
+
+      - name: Upload embedded build diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedded-build-diagnostics
+          path: dist/embedded-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Build pure package
         run: |
