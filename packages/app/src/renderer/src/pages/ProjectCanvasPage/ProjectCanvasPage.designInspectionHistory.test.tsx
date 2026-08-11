@@ -1149,19 +1149,28 @@ describe('ProjectCanvasPage generation-first entry', () => {
     mockSaveCanvasItems.mockReset()
     mockSaveCanvasItems.mockResolvedValue(undefined)
     mockElectronInvoke.mockReset()
-    mockElectronInvoke.mockImplementation(async (channel: string) => {
-      if (channel === 'screenshot:getShortcut') {
-        return { success: true, shortcut: '`' }
+    mockElectronInvoke.mockImplementation(
+      async (channel: string, shortcut?: string, reservedShortcuts?: string[]) => {
+        if (channel === 'screenshot:getShortcut') {
+          return { success: true, shortcut: '`' }
+        }
+        return { success: true, shortcut, reservedShortcuts }
       }
-      return { success: true }
-    })
-    Object.defineProperty(window, 'electron', {
+    )
+    Object.defineProperty(window, 'canvasScreenshot', {
       configurable: true,
       writable: true,
       value: {
-        ipcRenderer: {
-          invoke: mockElectronInvoke
-        }
+        capture: vi.fn(),
+        getShortcut: () => mockElectronInvoke('screenshot:getShortcut'),
+        setShortcut: (shortcut: string, reservedShortcuts?: string[]) =>
+          mockElectronInvoke('screenshot:setShortcut', shortcut, reservedShortcuts),
+        selectRegion: vi.fn(),
+        cancelSelection: vi.fn(),
+        setFloatingOpacity: vi.fn(),
+        closeFloatingWindow: vi.fn(),
+        sendFloatingToCanvas: vi.fn(),
+        onAddImage: vi.fn(() => vi.fn())
       }
     })
     mockLoadCanvasItems.mockResolvedValue({
