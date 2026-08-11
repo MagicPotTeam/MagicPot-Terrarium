@@ -92,6 +92,27 @@ describe('sceneInstanceCloneCache', () => {
     expect(clonedMaterial.uniforms.nested.value.texture).toBe(texture)
   })
 
+  it('does not copy prototype-mutating material keys while restoring shared textures', () => {
+    const texture = new THREE.Texture()
+    const material = new THREE.MeshBasicMaterial()
+    const expectedPrototype = THREE.MeshBasicMaterial.prototype
+    vi.spyOn(material, 'clone').mockReturnValue(new THREE.MeshBasicMaterial())
+    Object.defineProperties(material, {
+      __proto__: { value: texture, enumerable: true, configurable: true },
+      constructor: { value: texture, enumerable: true, configurable: true },
+      prototype: { value: texture, enumerable: true, configurable: true }
+    })
+
+    const clone = cloneSceneInstanceAsset(
+      new THREE.Mesh(new THREE.BoxGeometry(), material)
+    ) as THREE.Mesh
+    const clonedMaterial = clone.material as THREE.MeshBasicMaterial
+
+    expect(Object.getPrototypeOf(clonedMaterial)).toBe(expectedPrototype)
+    expect(Object.prototype.hasOwnProperty.call(clonedMaterial, 'constructor')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(clonedMaterial, 'prototype')).toBe(false)
+  })
+
   it('isolates every material-array entry while retaining intra-instance sharing', () => {
     const geometry = new THREE.BoxGeometry()
     const sharedMaterial = new THREE.MeshStandardMaterial()

@@ -58,6 +58,8 @@ export function cloneSceneInstanceAsset(
     const originalRecord = originalValue as Record<string, unknown>
     const clonedRecord = clonedValue as Record<string, unknown>
     Object.keys(originalRecord).forEach((key) => {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') return
+
       const originalChild = originalRecord[key]
       if ((originalChild as THREE.Texture | undefined)?.isTexture) {
         clonedRecord[key] = originalChild
