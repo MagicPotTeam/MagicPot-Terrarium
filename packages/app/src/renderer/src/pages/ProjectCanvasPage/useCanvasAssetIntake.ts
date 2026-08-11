@@ -1965,15 +1965,7 @@ export function useCanvasAssetIntake({
         reportBundleManifestUrl?: CanvasFileItem['reportBundleManifestUrl']
       }
     ) => {
-      const src = await authorizeCanvasLocalMediaSourceUrl(file)
-      if (!src) {
-        notifyError(
-          t('canvas.file_add_failed', {
-            defaultValue: 'This local file could not be authorized for persistent canvas use.'
-          })
-        )
-        return null
-      }
+      const src = (await authorizeCanvasLocalMediaSourceUrl(file)) || URL.createObjectURL(file)
 
       try {
         const { resolveOfficeFileNodeData } = await import('./officePreviewUtils')
