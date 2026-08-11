@@ -1,6 +1,18 @@
 import type { AgentRouteLike, AgentRunStatus } from '@shared/agent'
-import { getAgentSessionKey } from '@shared/agent'
-import type { PolicyJsonRecord } from '../../shared/magicAgentPlatform2'
+import {
+  createDriveProgressAction,
+  createReplyEmitAction,
+  getAgentSessionKey,
+  type AgentAction,
+  type AgentEvent,
+  type ChildStartPayload,
+  type DriveProgressPayload,
+  type JsonValue,
+  isJsonValue,
+  type MessagePublishPayload
+} from '@shared/agent'
+import type { PolicyJsonRecord, RuntimeChannelMessageState } from '../../shared/magicAgentPlatform2'
+import { canonicalPolicyJson, sha256PolicyText } from '../../shared/magicAgentPlatform2/policy'
 import type {
   MagicAgentPlatformAgentDefinition,
   MagicAgentPlatformRunReq,
@@ -19,7 +31,8 @@ import type { AssistantRoute } from '../assistantRuntime/types'
 import { LLMProxySvcImpl } from '../api/svcLLMProxyImpl'
 import { getConfig } from '../config/config'
 import { getAssistantTerminalPolicyRuntime } from '../magicAgentPlatform2/productionRuntime'
-import { getAgentKernel, type AgentKernel } from '../agentKernel'
+import { getProductionAgentInstanceLifecycle } from '../magicAgentPlatform2/agents/productionAgentInstanceLifecycleOwner'
+import { getAgentKernel, AgentKernel } from '../agentKernel'
 import { MagicAgentRegistry } from './agentRegistry'
 import { MagicAgentRuntime } from './runtime'
 import { MagicAgentToolRegistry } from './toolRegistry'
@@ -33,6 +46,18 @@ import {
   type MagicAgentCreativeToolResult
 } from './tools'
 import { isMagicAgentPlatformDeniedToolName } from './toolPolicy'
+import {
+  readDriveTrustedDispatchContext,
+  type DriveTrustedDispatchContext
+} from './driveTrustedDispatchContext'
+import {
+  readRuntimeChannelTrustedDispatchContext,
+  type RuntimeChannelTrustedDispatchContext
+} from './runtimeChannelTrustedDispatchContext'
+import {
+  readTriggerTrustedDispatchContext,
+  type TriggerTrustedDispatchContext
+} from './triggerTrustedDispatchContext'
 
 import type { CooperativeExecutionGate } from '../magicAgentPlatform2/agents/cooperativeExecutionController'
 
@@ -56,9 +81,37 @@ export type MagicAgentPlatformAdapterDeps = {
   creativeToolRegistry?: MagicAgentCreativeToolRegistry
   creativeToolDependencies?: Partial<MagicAgentCreativeToolDependencies>
   agentKernel?: AgentKernel
+  dispatchKernel?: AgentKernel
+  reportDriveProgress?: (payload: DriveProgressPayload) => unknown | Promise<unknown>
+  publishMessage?: (
+    payload: MessagePublishPayload,
+    context: { agentInstanceId: string; sourceEvent: AgentEvent }
+  ) => unknown | Promise<unknown>
+  startChild?: (
+    payload: ChildStartPayload,
+    context: {
+      actor: { kind: 'agent'; id: string }
+      agentInstanceId: string
+      sourceEvent: AgentEvent
+    }
+  ) => unknown | Promise<unknown>
+  driveProgressSettlementMax?: number
+  messagePublishSettlementMax?: number
+  childStartSettlementMax?: number
 }
 
 const MAGIC_AGENT_KERNEL_PREFIX = 'magicagent.platform'
+const MAGIC_AGENT_USER_MESSAGE_EVENT = 'user.message'
+const MAGIC_AGENT_CHANNEL_MESSAGE_EVENT = 'channel.message'
+const MAGIC_AGENT_DRIVE_ASSIGNED_EVENT = 'drive.assigned'
+const MAGIC_AGENT_TRIGGER_FIRED_EVENT = 'trigger.fired'
+const MAGIC_AGENT_REPLY_EMIT_ACTION = 'reply.emit'
+const MAGIC_AGENT_DRIVE_PROGRESS_ACTION = 'drive.progress'
+const MAGIC_AGENT_MESSAGE_PUBLISH_ACTION = 'message.publish'
+const MAGIC_AGENT_CHILD_START_ACTION = 'child.start'
+const DRIVE_ROUTE = 'magicpot-drive://runtime'
+const TRIGGER_CHANNEL = 'magic-agent-trigger'
+const TRIGGER_THREAD = 'trigger-runtime'
 
 const cleanString = (value: unknown): string => String(value || '').trim()
 
@@ -82,6 +135,257 @@ const cloneRecord = (value?: Record<string, unknown>): Record<string, unknown> |
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+
+const toJsonValue = (value: unknown, label: string): JsonValue => {
+  try {
+    const serialized = JSON.stringify(value)
+    if (serialized === undefined) throw new Error()
+    return JSON.parse(serialized) as JsonValue
+  } catch {
+    throw new TypeError(`${label} must be JSON serializable.`)
+  }
+}
+
+const parseRunRequestPayload = (payload: JsonValue): MagicAgentPlatformRunReq => {
+  if (!isRecord(payload) || !isRecord(payload.request)) {
+    throw new TypeError('MagicAgent message payload must contain a request object.')
+  }
+  const request = payload.request
+  if (typeof request.text !== 'string' || !isRecord(request.route)) {
+    throw new TypeError('MagicAgent message request requires text and route fields.')
+  }
+  return request as MagicAgentPlatformRunReq
+}
+
+const runtimeChannelEventId = (
+  context: RuntimeChannelTrustedDispatchContext,
+  agentId: string
+): string =>
+  `channel-message:${sha256PolicyText(
+    canonicalPolicyJson({
+      channelId: context.channelId,
+      memberId: context.memberId,
+      pendingMessageIds: [...context.pendingMessageIds],
+      agentInstanceId: context.agentInstanceId,
+      agentId
+    })
+  )}`
+
+const driveEventId = (
+  context: DriveTrustedDispatchContext,
+  request: MagicAgentPlatformRunReq,
+  agentId: string,
+  sessionId: string
+): string =>
+  `drive-assigned:${sha256PolicyText(
+    canonicalPolicyJson({
+      driveId: context.driveId,
+      driveRevision: context.driveRevision,
+      targetAgentId: context.targetAgentId,
+      targetSessionId: context.targetSessionId ?? sessionId,
+      agentId,
+      text: request.text,
+      profileId: request.profileId ?? null,
+      allowedToolNames: request.allowedToolNames ? [...request.allowedToolNames] : null
+    })
+  )}`
+
+const triggerEventId = (
+  context: TriggerTrustedDispatchContext,
+  request: MagicAgentPlatformRunReq,
+  agentId: string,
+  sessionId: string
+): string =>
+  `trigger-fired:${sha256PolicyText(
+    canonicalPolicyJson({
+      triggerId: context.triggerId,
+      occurrenceId: context.occurrenceId ?? null,
+      requestId: context.requestId,
+      occurrenceAt: context.occurrenceAt,
+      source: context.source ?? null,
+      attempt: context.attempt ?? null,
+      targetAgentId: context.targetAgentId,
+      targetSessionId: context.targetSessionId ?? sessionId,
+      agentId,
+      text: request.text,
+      profileId: request.profileId ?? null,
+      allowedToolNames: request.allowedToolNames ? [...request.allowedToolNames] : null
+    })
+  )}`
+
+const parseRunResponsePayload = (payload: JsonValue): MagicAgentPlatformRunResp => {
+  if (
+    !isRecord(payload) ||
+    !isRecord(payload.response) ||
+    typeof payload.response.runId !== 'string' ||
+    typeof payload.response.agentId !== 'string' ||
+    typeof payload.response.status !== 'string' ||
+    typeof payload.response.content !== 'string'
+  ) {
+    throw new TypeError('MagicAgent reply.emit action contains an invalid response payload.')
+  }
+  return payload.response as MagicAgentPlatformRunResp
+}
+
+const parseDriveProgressPayload = (payload: JsonValue): DriveProgressPayload => {
+  if (
+    !isRecord(payload) ||
+    typeof payload.driveId !== 'string' ||
+    !payload.driveId.trim() ||
+    !Number.isInteger(payload.expectedRevision) ||
+    Number(payload.expectedRevision) < 0 ||
+    typeof payload.summary !== 'string' ||
+    !payload.summary.trim() ||
+    !Array.isArray(payload.evidence) ||
+    !Number.isFinite(payload.reportedAt) ||
+    Number(payload.reportedAt) < 0 ||
+    typeof payload.idempotencyKey !== 'string' ||
+    !payload.idempotencyKey.trim()
+  )
+    throw new TypeError('MagicAgent drive.progress action contains an invalid payload.')
+  for (const item of payload.evidence) {
+    if (
+      !isRecord(item) ||
+      !['session', 'run', 'artifact', 'url', 'text'].includes(String(item.kind)) ||
+      typeof item.ref !== 'string' ||
+      !item.ref.trim() ||
+      (item.digest !== undefined &&
+        (typeof item.digest !== 'string' || !/^[a-f0-9]{64}$/i.test(item.digest)))
+    )
+      throw new TypeError('MagicAgent drive.progress action contains invalid evidence.')
+  }
+  return payload as DriveProgressPayload
+}
+
+const parseMessagePublishPayload = (payload: JsonValue): MessagePublishPayload => {
+  const allowedKeys = new Set([
+    'channelId',
+    'publisherMemberId',
+    'messageId',
+    'payload',
+    'priority',
+    'publishedAt',
+    'expiresAt',
+    'expectedChannelRevision',
+    'idempotencyKey'
+  ])
+  if (
+    !isRecord(payload) ||
+    Object.keys(payload).some((key) => !allowedKeys.has(key)) ||
+    !['channelId', 'publisherMemberId', 'messageId', 'idempotencyKey'].every(
+      (key) => typeof payload[key] === 'string' && Boolean(String(payload[key]).trim())
+    ) ||
+    !Object.prototype.hasOwnProperty.call(payload, 'payload') ||
+    !isJsonValue(payload.payload) ||
+    !Number.isInteger(payload.priority) ||
+    !Number.isFinite(payload.priority) ||
+    !Number.isFinite(payload.publishedAt) ||
+    Number(payload.publishedAt) < 0 ||
+    (payload.expiresAt !== undefined &&
+      (!Number.isFinite(payload.expiresAt) ||
+        Number(payload.expiresAt) <= Number(payload.publishedAt))) ||
+    !Number.isInteger(payload.expectedChannelRevision) ||
+    Number(payload.expectedChannelRevision) < 0
+  )
+    throw new TypeError('MagicAgent message.publish action contains an invalid payload.')
+  return payload as MessagePublishPayload
+}
+
+const parseChildStartPayload = (payload: JsonValue): ChildStartPayload => {
+  if (!isRecord(payload) || !isRecord(payload.child) || !isRecord(payload.child.limits))
+    throw new TypeError('MagicAgent child.start action contains an invalid payload.')
+  const child = payload.child as Record<string, JsonValue>
+  const limits = child.limits as Record<string, JsonValue>
+  const nonempty = (value: unknown): boolean => typeof value === 'string' && Boolean(value.trim())
+  const nonnegativeInteger = (value: unknown): boolean =>
+    Number.isInteger(value) && Number(value) >= 0
+  const positiveInteger = (value: unknown): boolean => Number.isInteger(value) && Number(value) > 0
+  const validStringArray = (value: unknown): value is string[] =>
+    Array.isArray(value) &&
+    value.every(nonempty) &&
+    new Set(value as string[]).size === value.length
+  if (
+    !nonempty(payload.parentInstanceId) ||
+    !nonnegativeInteger(payload.parentExpectedRevision) ||
+    !nonempty(child.id) ||
+    !nonempty(child.name) ||
+    !nonempty(child.definitionId) ||
+    (child.ownerId !== undefined && !nonempty(child.ownerId)) ||
+    !nonempty(child.configVersion) ||
+    (child.pendingConfigVersion !== undefined && !nonempty(child.pendingConfigVersion)) ||
+    (child.previousConfigVersion !== undefined && !nonempty(child.previousConfigVersion)) ||
+    (child.configActivatedAt !== undefined && !nonnegativeInteger(child.configActivatedAt)) ||
+    !nonnegativeInteger(limits.maxChildren) ||
+    !nonnegativeInteger(limits.maxDepth) ||
+    !positiveInteger(limits.maxConcurrency) ||
+    !positiveInteger(limits.maxRuntimeMs) ||
+    !validStringArray(limits.allowedToolNames) ||
+    !validStringArray(limits.workspaceRoots) ||
+    (child.runtimeTopologyAttribution !== undefined &&
+      !isJsonValue(child.runtimeTopologyAttribution)) ||
+    !nonnegativeInteger(payload.createdAt) ||
+    !nonempty(payload.idempotencyKey)
+  )
+    throw new TypeError('MagicAgent child.start action contains an invalid payload.')
+  return payload as unknown as ChildStartPayload
+}
+
+const defaultStartChild = async (
+  payload: ChildStartPayload,
+  context: {
+    actor: { kind: 'agent'; id: string }
+    agentInstanceId: string
+    sourceEvent: AgentEvent
+  }
+): Promise<void> => {
+  const lifecycle = getProductionAgentInstanceLifecycle()
+  if (!lifecycle) throw new Error('Production Agent instance lifecycle is unavailable.')
+  // child.start reserves a managed child in created state; it does not run it.
+  lifecycle.commands.createChild({
+    actor: context.actor,
+    parentInstanceId: payload.parentInstanceId,
+    parentExpectedRevision: payload.parentExpectedRevision,
+    instance: payload.child as unknown as Omit<
+      import('../../shared/magicAgentPlatform2').MagicAgentInstanceState,
+      'parentInstanceId' | 'depth' | 'status'
+    >,
+    createdAt: payload.createdAt,
+    idempotencyKey: payload.idempotencyKey
+  })
+}
+
+const defaultReportDriveProgress = async (payload: DriveProgressPayload): Promise<void> => {
+  const { getProductionDriveLifecycle } =
+    await import('../magicAgentPlatform2/drives/productionDriveLifecycle')
+  const lifecycle = getProductionDriveLifecycle()
+  if (!lifecycle) throw new Error('Production Drive lifecycle is unavailable.')
+  lifecycle.commands.reportProgress(payload)
+}
+
+const defaultPublishMessage = async (
+  payload: MessagePublishPayload,
+  context: { agentInstanceId: string; sourceEvent: AgentEvent }
+): Promise<void> => {
+  const { getProductionRuntimeChannelLifecycle } =
+    await import('../magicAgentPlatform2/channels/productionRuntimeChannelLifecycle')
+  const lifecycle = getProductionRuntimeChannelLifecycle()
+  if (!lifecycle) throw new Error('Production Runtime Channel lifecycle is unavailable.')
+  const message: RuntimeChannelMessageState = {
+    id: payload.messageId,
+    channelId: payload.channelId,
+    publisherMemberId: payload.publisherMemberId,
+    payload: payload.payload,
+    priority: payload.priority,
+    publishedAt: payload.publishedAt,
+    ...(payload.expiresAt === undefined ? {} : { expiresAt: payload.expiresAt })
+  }
+  lifecycle.commands.publish({
+    actor: { kind: 'agent', id: context.agentInstanceId },
+    message,
+    expectedChannelRevision: payload.expectedChannelRevision,
+    idempotencyKey: payload.idempotencyKey
+  })
+}
 
 const toKernelSafeSegment = (value: unknown): string =>
   cleanString(value).replace(/[^a-zA-Z0-9_.-]+/g, '_') || 'unknown'
@@ -316,6 +620,41 @@ const isMagicAgentCreativeToolResult = (value: unknown): value is MagicAgentCrea
 const isPermissionError = (error: unknown): boolean =>
   error instanceof Error && /permission|not allowed|denied/i.test(error.message)
 
+const composeAbortSignals = (
+  signals: ReadonlyArray<AbortSignal | undefined>
+): { signal: AbortSignal; cleanup: () => void } => {
+  const controller = new AbortController()
+  const activeSignals = signals.filter((signal): signal is AbortSignal => Boolean(signal))
+  const listeners = new Map<AbortSignal, () => void>()
+  for (const signal of activeSignals) {
+    const forward = (): void => controller.abort(signal.reason)
+    if (signal.aborted) {
+      forward()
+      break
+    }
+    listeners.set(signal, forward)
+    signal.addEventListener('abort', forward, { once: true })
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      for (const [signal, listener] of listeners) signal.removeEventListener('abort', listener)
+      listeners.clear()
+    }
+  }
+}
+
+type PendingRunContext = {
+  options: MagicAgentPlatformExecutionOptions
+  callers: number
+  handlerActive: boolean
+}
+
+type ActionSettlement = {
+  fingerprint: string
+  execution: Promise<void>
+}
+
 export class MagicAgentPlatformAdapter {
   private readonly assistantRuntime: Pick<
     AssistantRuntime,
@@ -324,9 +663,32 @@ export class MagicAgentPlatformAdapter {
   private readonly creativeToolRegistry: MagicAgentCreativeToolRegistry
   private readonly creativeToolDependencies?: Partial<MagicAgentCreativeToolDependencies>
   private readonly agentKernel: AgentKernel
+  private readonly dispatchKernel: AgentKernel
   private readonly runtimeToolRegistry: MagicAgentToolRegistry
   private readonly runtime: MagicAgentRuntime
+  private readonly reportDriveProgress: (
+    payload: DriveProgressPayload
+  ) => unknown | Promise<unknown>
+  private readonly publishMessage: (
+    payload: MessagePublishPayload,
+    context: { agentInstanceId: string; sourceEvent: AgentEvent }
+  ) => unknown | Promise<unknown>
+  private readonly startChild: NonNullable<MagicAgentPlatformAdapterDeps['startChild']>
+  private readonly driveProgressSettlementMax: number
+  private readonly messagePublishSettlementMax: number
+  private readonly childStartSettlementMax: number
+  private readonly driveProgressSettlements = new Map<string, ActionSettlement>()
+  private readonly messagePublishSettlements = new Map<string, ActionSettlement>()
+  private readonly childStartSettlements = new Map<string, ActionSettlement>()
+  private readonly pendingRunOptions = new Map<string, PendingRunContext>()
+  private readonly activeInvocationControllers = new Set<AbortController>()
+  private readonly unregisterUserMessageHandler: () => void
+  private readonly unregisterChannelMessageHandler: () => void
+  private readonly unregisterDriveAssignedHandler: () => void
+  private readonly unregisterTriggerFiredHandler: () => void
+  private readonly ownsDispatchKernel: boolean
   private readonly managedKernelCapabilityIds = new Set<string>()
+  private disposed = false
   private kernelSurfaceSignature = ''
 
   constructor(deps: MagicAgentPlatformAdapterDeps = {}) {
@@ -334,6 +696,51 @@ export class MagicAgentPlatformAdapter {
     this.creativeToolRegistry = deps.creativeToolRegistry || createMagicAgentCreativeToolRegistry()
     this.creativeToolDependencies = deps.creativeToolDependencies
     this.agentKernel = deps.agentKernel || getAgentKernel()
+    this.ownsDispatchKernel = !deps.dispatchKernel
+    this.dispatchKernel = deps.dispatchKernel || new AgentKernel()
+    this.reportDriveProgress = deps.reportDriveProgress || defaultReportDriveProgress
+    this.publishMessage = deps.publishMessage || defaultPublishMessage
+    this.startChild = deps.startChild || defaultStartChild
+    this.driveProgressSettlementMax = deps.driveProgressSettlementMax ?? 1_000
+    this.messagePublishSettlementMax = deps.messagePublishSettlementMax ?? 1_000
+    this.childStartSettlementMax = deps.childStartSettlementMax ?? 1_000
+    if (!Number.isInteger(this.driveProgressSettlementMax) || this.driveProgressSettlementMax < 0)
+      throw new Error('MagicAgent drive progress settlement max must be a nonnegative integer.')
+    if (!Number.isInteger(this.messagePublishSettlementMax) || this.messagePublishSettlementMax < 0)
+      throw new Error('MagicAgent message publish settlement max must be a nonnegative integer.')
+    if (!Number.isInteger(this.childStartSettlementMax) || this.childStartSettlementMax < 0)
+      throw new Error('MagicAgent child start settlement max must be a nonnegative integer.')
+    this.unregisterUserMessageHandler = this.dispatchKernel.registerActionHandler(
+      MAGIC_AGENT_USER_MESSAGE_EVENT,
+      (event, context) => this.handleMessage(event, context.signal)
+    )
+    try {
+      this.unregisterChannelMessageHandler = this.dispatchKernel.registerActionHandler(
+        MAGIC_AGENT_CHANNEL_MESSAGE_EVENT,
+        (event, context) => this.handleMessage(event, context.signal)
+      )
+      try {
+        this.unregisterDriveAssignedHandler = this.dispatchKernel.registerActionHandler(
+          MAGIC_AGENT_DRIVE_ASSIGNED_EVENT,
+          (event, context) => this.handleMessage(event, context.signal)
+        )
+        try {
+          this.unregisterTriggerFiredHandler = this.dispatchKernel.registerActionHandler(
+            MAGIC_AGENT_TRIGGER_FIRED_EVENT,
+            (event, context) => this.handleMessage(event, context.signal)
+          )
+        } catch (error) {
+          this.unregisterDriveAssignedHandler()
+          throw error
+        }
+      } catch (error) {
+        this.unregisterChannelMessageHandler()
+        throw error
+      }
+    } catch (error) {
+      this.unregisterUserMessageHandler()
+      throw error
+    }
 
     this.runtimeToolRegistry = deps.toolRegistry || new MagicAgentToolRegistry()
     this.runtime = new MagicAgentRuntime({
@@ -342,6 +749,113 @@ export class MagicAgentPlatformAdapter {
       toolRegistry: this.runtimeToolRegistry
     })
     this.refreshRuntimeTools()
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.unregisterUserMessageHandler()
+    this.unregisterChannelMessageHandler()
+    this.unregisterDriveAssignedHandler()
+    this.unregisterTriggerFiredHandler()
+    for (const controller of this.activeInvocationControllers) {
+      controller.abort(new Error('MagicAgentPlatformAdapter has been disposed.'))
+    }
+    this.activeInvocationControllers.clear()
+    this.pendingRunOptions.clear()
+    this.driveProgressSettlements.clear()
+    this.messagePublishSettlements.clear()
+    this.childStartSettlements.clear()
+    if (this.ownsDispatchKernel) this.dispatchKernel.clear()
+  }
+
+  private async executeActionOnce(
+    action: AgentAction,
+    payload: JsonValue,
+    settlements: Map<string, ActionSettlement>,
+    settlementMax: number,
+    execute: () => unknown | Promise<unknown>,
+    label: string
+  ): Promise<void> {
+    const fingerprint = canonicalPolicyJson(payload as unknown as PolicyJsonRecord)
+    const existing = settlements.get(action.actionId)
+    if (existing) {
+      if (existing.fingerprint !== fingerprint)
+        throw new Error(`MagicAgent ${label} action "${action.actionId}" payload conflict.`)
+      return existing.execution
+    }
+
+    const settlement: ActionSettlement = { fingerprint, execution: Promise.resolve() }
+    settlement.execution = Promise.resolve(execute()).then(
+      () => {
+        if (settlements.get(action.actionId) !== settlement) return
+        if (settlementMax === 0) {
+          settlements.delete(action.actionId)
+          return
+        }
+        settlements.delete(action.actionId)
+        settlements.set(action.actionId, settlement)
+        while (settlements.size > settlementMax) {
+          const oldest = settlements.keys().next().value
+          if (oldest === undefined) break
+          settlements.delete(oldest)
+        }
+      },
+      (error) => {
+        if (settlements.get(action.actionId) === settlement) settlements.delete(action.actionId)
+        throw error
+      }
+    )
+    settlements.set(action.actionId, settlement)
+    return settlement.execution
+  }
+
+  private executeDriveProgressOnce(
+    action: AgentAction,
+    payload: DriveProgressPayload
+  ): Promise<void> {
+    return this.executeActionOnce(
+      action,
+      payload as unknown as JsonValue,
+      this.driveProgressSettlements,
+      this.driveProgressSettlementMax,
+      () => this.reportDriveProgress(payload),
+      MAGIC_AGENT_DRIVE_PROGRESS_ACTION
+    )
+  }
+
+  private executeMessagePublishOnce(
+    action: AgentAction,
+    payload: MessagePublishPayload,
+    context: { agentInstanceId: string; sourceEvent: AgentEvent }
+  ): Promise<void> {
+    return this.executeActionOnce(
+      action,
+      payload as unknown as JsonValue,
+      this.messagePublishSettlements,
+      this.messagePublishSettlementMax,
+      () => this.publishMessage(payload, context),
+      MAGIC_AGENT_MESSAGE_PUBLISH_ACTION
+    )
+  }
+
+  private executeChildStartOnce(
+    action: AgentAction,
+    payload: ChildStartPayload,
+    context: {
+      actor: { kind: 'agent'; id: string }
+      agentInstanceId: string
+      sourceEvent: AgentEvent
+    }
+  ): Promise<void> {
+    return this.executeActionOnce(
+      action,
+      payload as unknown as JsonValue,
+      this.childStartSettlements,
+      this.childStartSettlementMax,
+      () => this.startChild(payload, context),
+      MAGIC_AGENT_CHILD_START_ACTION
+    )
   }
 
   refreshRuntimeTools(): void {
@@ -362,9 +876,7 @@ export class MagicAgentPlatformAdapter {
                 args,
                 {
                   allowedToolNames: context.metadata?.allowedToolNames as
-                    | string[]
-                    | null
-                    | undefined
+                    string[] | null | undefined
                 }
               )
               return {
@@ -504,6 +1016,370 @@ export class MagicAgentPlatformAdapter {
   }
 
   async runAgent(
+    req: MagicAgentPlatformRunReq,
+    options: MagicAgentPlatformExecutionOptions = {}
+  ): Promise<MagicAgentPlatformRunResp> {
+    if (this.disposed) throw new Error('MagicAgentPlatformAdapter has been disposed.')
+    const invocationController = new AbortController()
+    this.activeInvocationControllers.add(invocationController)
+    const invocationSignals = composeAbortSignals([options.signal, invocationController.signal])
+    let pendingEventId: string | undefined
+    try {
+      const rawRoute = req.route
+      const route = requirePlatformRoute(rawRoute, 'agent run')
+      const agentId = normalizeMagicPotToolName(req.agentId) || 'magicpot.default.chat'
+      const channelContext = readRuntimeChannelTrustedDispatchContext(req)
+      const driveContext = readDriveTrustedDispatchContext(req)
+      const triggerContext = readTriggerTrustedDispatchContext(req)
+      if ([channelContext, driveContext, triggerContext].filter(Boolean).length > 1) {
+        throw new Error(
+          'MagicAgent run cannot contain conflicting Channel, Drive, or Trigger trusted contexts.'
+        )
+      }
+      if (
+        channelContext &&
+        (route.channel !== 'runtime-channel' ||
+          route.scopeType !== 'dm' ||
+          route.scopeId !== channelContext.channelId)
+      ) {
+        throw new Error(
+          'Runtime Channel trusted context must match a runtime-channel dm route scoped to its channelId.'
+        )
+      }
+      const sessionId = cleanString(req.sessionId) || getAgentSessionKey(route)
+      if (driveContext) {
+        if (
+          route.channel !== DRIVE_ROUTE ||
+          route.scopeType !== 'channel' ||
+          route.scopeId !== driveContext.driveId
+        ) {
+          throw new Error(
+            'Drive trusted context must match the Drive runtime channel route scoped to its driveId.'
+          )
+        }
+        if (agentId !== driveContext.targetAgentId) {
+          throw new Error('Drive trusted context targetAgentId must match the normalized agentId.')
+        }
+        if (
+          req.metadata?.driveId !== driveContext.driveId ||
+          req.metadata?.driveRevision !== driveContext.driveRevision
+        ) {
+          throw new Error('Drive request metadata must exactly match its trusted Drive context.')
+        }
+        if (driveContext.targetSessionId && driveContext.targetSessionId !== sessionId) {
+          throw new Error(
+            'Drive trusted context targetSessionId must match the resolved sessionId.'
+          )
+        }
+      }
+      if (triggerContext) {
+        if (
+          rawRoute.channel !== TRIGGER_CHANNEL ||
+          String(rawRoute.scopeType) !== 'agent' ||
+          rawRoute.scopeId !== triggerContext.targetAgentId ||
+          rawRoute.threadId !== TRIGGER_THREAD
+        ) {
+          throw new Error('Trigger trusted context must match the trigger runtime agent route.')
+        }
+        if (agentId !== triggerContext.targetAgentId) {
+          throw new Error(
+            'Trigger trusted context targetAgentId must match the normalized agentId.'
+          )
+        }
+        if (triggerContext.targetSessionId && triggerContext.targetSessionId !== sessionId) {
+          throw new Error(
+            'Trigger trusted context targetSessionId must match the resolved sessionId.'
+          )
+        }
+      }
+      const eventId = channelContext
+        ? runtimeChannelEventId(channelContext, agentId)
+        : driveContext
+          ? driveEventId(driveContext, req, agentId, sessionId)
+          : triggerContext
+            ? triggerEventId(triggerContext, req, agentId, sessionId)
+            : crypto.randomUUID()
+      const correlationId =
+        channelContext || driveContext || triggerContext
+          ? eventId
+          : cleanString(req.metadata?.correlationId) || eventId
+      const event: AgentEvent = channelContext
+        ? {
+            eventId,
+            type: MAGIC_AGENT_CHANNEL_MESSAGE_EVENT,
+            payload: toJsonValue(
+              {
+                request: { ...req, route },
+                channelId: channelContext.channelId,
+                memberId: channelContext.memberId,
+                pendingMessageIds: [...channelContext.pendingMessageIds],
+                agentInstanceId: channelContext.agentInstanceId
+              },
+              'MagicAgent channel.message payload'
+            ),
+            createdAt: 0,
+            correlationId,
+            sessionId,
+            agentId,
+            provenance: {
+              source: 'runtimeChannel',
+              requestedBy: `runtime-channel-member:${channelContext.memberId}`,
+              channel: channelContext.channelId,
+              traceId: correlationId
+            }
+          }
+        : driveContext
+          ? {
+              eventId,
+              type: MAGIC_AGENT_DRIVE_ASSIGNED_EVENT,
+              payload: toJsonValue(
+                {
+                  request: { ...req, route },
+                  driveId: driveContext.driveId,
+                  driveRevision: driveContext.driveRevision,
+                  status: driveContext.status,
+                  ...(driveContext.ownerId ? { ownerId: driveContext.ownerId } : {}),
+                  ...(driveContext.assigneeId ? { assigneeId: driveContext.assigneeId } : {}),
+                  targetAgentId: driveContext.targetAgentId,
+                  ...(driveContext.targetSessionId
+                    ? { targetSessionId: driveContext.targetSessionId }
+                    : {})
+                },
+                'MagicAgent drive.assigned payload'
+              ),
+              createdAt: 0,
+              correlationId,
+              sessionId,
+              agentId,
+              provenance: {
+                source: 'drive',
+                requestedBy: driveContext.ownerId
+                  ? `drive-owner:${driveContext.ownerId}`
+                  : `drive:${driveContext.driveId}`,
+                channel: driveContext.driveId,
+                traceId: eventId
+              }
+            }
+          : triggerContext
+            ? {
+                eventId,
+                type: MAGIC_AGENT_TRIGGER_FIRED_EVENT,
+                payload: toJsonValue(
+                  {
+                    request: { ...req, route },
+                    triggerId: triggerContext.triggerId,
+                    occurrenceId: triggerContext.occurrenceId,
+                    requestId: triggerContext.requestId,
+                    occurrenceAt: triggerContext.occurrenceAt,
+                    triggerType: triggerContext.triggerType,
+                    triggerTitle: triggerContext.triggerTitle,
+                    source: triggerContext.source,
+                    attempt: triggerContext.attempt,
+                    targetAgentId: triggerContext.targetAgentId,
+                    targetSessionId: triggerContext.targetSessionId
+                  },
+                  'MagicAgent trigger.fired payload'
+                ),
+                createdAt: triggerContext.occurrenceAt,
+                correlationId,
+                sessionId,
+                agentId,
+                provenance: {
+                  source: 'trigger',
+                  requestedBy: `trigger:${triggerContext.triggerId}`,
+                  channel: TRIGGER_CHANNEL,
+                  traceId: eventId
+                }
+              }
+            : {
+                eventId,
+                type: MAGIC_AGENT_USER_MESSAGE_EVENT,
+                payload: toJsonValue(
+                  { request: { ...req, route } },
+                  'MagicAgent user.message payload'
+                ),
+                createdAt: Date.now(),
+                correlationId,
+                sessionId,
+                agentId,
+                provenance: {
+                  source: 'magicAgentPlatform',
+                  requestedBy: cleanString(req.metadata?.requestedBy) || 'svcMagicAgentPlatform',
+                  channel: route.channel,
+                  traceId: cleanString(req.metadata?.traceLabel) || correlationId
+                }
+              }
+
+      pendingEventId = eventId
+      const pending = this.pendingRunOptions.get(eventId)
+      if (pending) {
+        if (pending.options.cooperativeExecution !== options.cooperativeExecution) {
+          throw new Error(
+            `MagicAgent event "${eventId}" has conflicting concurrent execution options.`
+          )
+        }
+        pending.callers += 1
+      } else {
+        this.pendingRunOptions.set(eventId, {
+          options:
+            channelContext || driveContext || triggerContext
+              ? { cooperativeExecution: options.cooperativeExecution }
+              : { ...options, signal: invocationSignals.signal },
+          callers: 1,
+          handlerActive: false
+        })
+      }
+      let response: MagicAgentPlatformRunResp | undefined
+      const dispatchSignal =
+        channelContext || driveContext || triggerContext
+          ? invocationSignals.signal
+          : invocationController.signal
+      for await (const action of this.dispatchKernel.dispatch(event, dispatchSignal)) {
+        if (response)
+          throw new Error(
+            `MagicAgent unary run expected exactly one ${MAGIC_AGENT_REPLY_EMIT_ACTION}; received an action after terminal.`
+          )
+        if (action.type === MAGIC_AGENT_REPLY_EMIT_ACTION) {
+          response = parseRunResponsePayload(action.payload)
+          continue
+        }
+        if (action.type === MAGIC_AGENT_MESSAGE_PUBLISH_ACTION) {
+          if (!channelContext || event.type !== MAGIC_AGENT_CHANNEL_MESSAGE_EVENT)
+            throw new Error(
+              'MagicAgent message.publish is only valid for a trusted channel.message event.'
+            )
+          const published = parseMessagePublishPayload(action.payload)
+          if (
+            published.channelId !== channelContext.channelId ||
+            published.publisherMemberId !== channelContext.memberId
+          )
+            throw new Error('MagicAgent message.publish does not match trusted Channel context.')
+          await this.executeMessagePublishOnce(action, published, {
+            agentInstanceId: channelContext.agentInstanceId,
+            sourceEvent: event
+          })
+          continue
+        }
+        if (action.type === MAGIC_AGENT_CHILD_START_ACTION) {
+          if (!channelContext || event.type !== MAGIC_AGENT_CHANNEL_MESSAGE_EVENT)
+            throw new Error(
+              'MagicAgent child.start is only valid for a trusted channel.message event.'
+            )
+          const childStart = parseChildStartPayload(action.payload)
+          if (childStart.parentInstanceId !== channelContext.agentInstanceId)
+            throw new Error('MagicAgent child.start does not match trusted Channel context.')
+          await this.executeChildStartOnce(action, childStart, {
+            actor: { kind: 'agent', id: channelContext.agentInstanceId },
+            agentInstanceId: channelContext.agentInstanceId,
+            sourceEvent: event
+          })
+          continue
+        }
+        if (action.type === MAGIC_AGENT_DRIVE_PROGRESS_ACTION) {
+          if (!driveContext || event.type !== MAGIC_AGENT_DRIVE_ASSIGNED_EVENT)
+            throw new Error(
+              'MagicAgent drive.progress is only valid for a trusted drive.assigned event.'
+            )
+          const progress = parseDriveProgressPayload(action.payload)
+          if (
+            progress.driveId !== driveContext.driveId ||
+            progress.expectedRevision !== driveContext.driveRevision
+          )
+            throw new Error('MagicAgent drive.progress does not match trusted Drive context.')
+          await this.executeDriveProgressOnce(action, progress)
+          continue
+        }
+        throw new Error(`MagicAgent unary run received unsupported action "${action.type}".`)
+      }
+      if (!response)
+        throw new Error(
+          `MagicAgent unary run expected exactly one ${MAGIC_AGENT_REPLY_EMIT_ACTION}.`
+        )
+      return response
+    } finally {
+      if (pendingEventId) {
+        const pending = this.pendingRunOptions.get(pendingEventId)
+        if (pending) {
+          pending.callers -= 1
+          if (pending.callers === 0 && !pending.handlerActive) {
+            this.pendingRunOptions.delete(pendingEventId)
+          }
+        }
+      }
+      invocationSignals.cleanup()
+      this.activeInvocationControllers.delete(invocationController)
+    }
+  }
+
+  private handleMessage(event: AgentEvent, signal: AbortSignal): AsyncIterable<AgentAction> {
+    const pending = this.pendingRunOptions.get(event.eventId)
+    if (!pending) {
+      throw new Error(
+        `MagicAgent ${event.type} event was not created by an authorized adapter invocation.`
+      )
+    }
+    pending.handlerActive = true
+    const options = pending.options
+    const request = parseRunRequestPayload(event.payload)
+    const runAgentAuthorized = this.runAgentAuthorized.bind(this)
+    const releaseHandler = (): void => {
+      pending.handlerActive = false
+      if (pending.callers === 0) this.pendingRunOptions.delete(event.eventId)
+    }
+    return {
+      async *[Symbol.asyncIterator]() {
+        try {
+          const combined = composeAbortSignals([options.signal, signal])
+          try {
+            const response = await runAgentAuthorized(request, {
+              ...options,
+              signal: combined.signal
+            })
+            if (event.type === MAGIC_AGENT_DRIVE_ASSIGNED_EVENT) {
+              if (!isRecord(event.payload))
+                throw new TypeError('MagicAgent drive.assigned payload is invalid.')
+              const driveId = event.payload.driveId
+              const expectedRevision = event.payload.driveRevision
+              if (typeof driveId !== 'string' || !Number.isInteger(expectedRevision))
+                throw new TypeError('MagicAgent drive.assigned payload is invalid.')
+              yield createDriveProgressAction({
+                actionId: `${event.eventId}:drive-progress`,
+                payload: {
+                  driveId,
+                  expectedRevision: expectedRevision as number,
+                  summary: cleanString(response.content) || 'Drive run completed.',
+                  evidence: [
+                    { kind: 'run', ref: response.runId },
+                    ...(event.sessionId ? [{ kind: 'session' as const, ref: event.sessionId }] : [])
+                  ],
+                  reportedAt: event.createdAt,
+                  idempotencyKey: `${event.eventId}:drive-progress`
+                },
+                correlationId: event.correlationId,
+                sessionId: event.sessionId,
+                agentId: event.agentId,
+                provenance: event.provenance
+              })
+            }
+            yield createReplyEmitAction({
+              actionId: `${event.eventId}:reply`,
+              payload: { response: toJsonValue(response, 'MagicAgent reply.emit response') },
+              correlationId: event.correlationId,
+              sessionId: event.sessionId,
+              agentId: event.agentId,
+              provenance: event.provenance
+            })
+          } finally {
+            combined.cleanup()
+          }
+        } finally {
+          releaseHandler()
+        }
+      }
+    }
+  }
+
+  private async runAgentAuthorized(
     req: MagicAgentPlatformRunReq,
     options: MagicAgentPlatformExecutionOptions = {}
   ): Promise<MagicAgentPlatformRunResp> {
