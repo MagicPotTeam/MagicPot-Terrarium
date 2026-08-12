@@ -63,18 +63,19 @@ describe('preload capability boundary', () => {
     )
   })
 
-  it('authorizes picker files only through webUtils.getPathForFile', () => {
+  it('authorizes picker files only through webUtils.getPathForFile and async IPC', async () => {
     const file = { name: 'selected.png' }
     getPathForFileMock.mockReturnValue('/picked/selected.png')
-    sendSyncMock.mockReturnValue(true)
+    invokeMock.mockResolvedValue(true)
     const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
 
-    expect(electronFile.authorizeLocalMediaFile(file)).toBe('/picked/selected.png')
+    await expect(electronFile.authorizeLocalMediaFile(file)).resolves.toBe('/picked/selected.png')
     expect(getPathForFileMock).toHaveBeenCalledWith(file)
-    expect(sendSyncMock).toHaveBeenCalledWith(
+    expect(invokeMock).toHaveBeenCalledWith(
       'local-media:authorize-picker-path',
       '/picked/selected.png'
     )
+    expect(sendSyncMock).not.toHaveBeenCalled()
   })
 
   it('exposes only named main-process event subscriptions', () => {
