@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
+import { killWindowsProcessTree } from './windows-process-tree.mjs'
 
 const DEV_USER_DATA_DIRNAME = '.aiengineelectron-dev'
 const userDataDir = path.join(process.cwd(), DEV_USER_DATA_DIRNAME)
@@ -55,7 +56,24 @@ const child = spawn(electronViteBin, args, {
   stdio: 'inherit'
 })
 
+let shutdownRequested = false
+
+function cleanupChildTree() {
+  if (shutdownRequested) return
+  shutdownRequested = true
+  killWindowsProcessTree(child.pid)
+}
+
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.once(signal, () => {
+    cleanupChildTree()
+    process.exit(0)
+  })
+}
+process.once('exit', cleanupChildTree)
+
 child.on('exit', (code, signal) => {
+  shutdownRequested = true
   if (signal) {
     process.kill(process.pid, signal)
     return

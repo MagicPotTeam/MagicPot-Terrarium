@@ -25,7 +25,7 @@ const TerminalPage: React.FC = () => {
   const consoleScrollbarTrack = isLight ? '#e5e7eb' : '#161b22'
   const consoleScrollbarThumb = isLight ? '#c0c8d2' : '#30363d'
   const location = useLocation()
-  const { state, setPid, setIsRunning, addOutput } = useComfyProcess()
+  const { state, setPid, setIsRunning, setIsManaged, addOutput } = useComfyProcess()
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true)
   const outputRef = useRef<HTMLDivElement>(null)
   const autoStartRef = useRef(false)
@@ -61,16 +61,21 @@ const TerminalPage: React.FC = () => {
       return
     }
 
+    let startedProcessStream = false
     try {
       const { pid } = await api().svcHyper.comfyPortDetect({})
       if (pid !== 0) {
         if (pid !== state.pid) {
           setPid(pid)
         }
+        setIsManaged(false)
+        setIsRunning(true)
         window.dispatchEvent(new CustomEvent('comfyui:ready'))
         return
       }
 
+      startedProcessStream = true
+      setIsManaged(true)
       setIsRunning(true)
       addOutput(t('terminal.starting_server'))
       await api().svcHyper.startComfyUI(
@@ -90,9 +95,11 @@ const TerminalPage: React.FC = () => {
         addOutput('ERROR> ' + String(error))
       }
     } finally {
-      setIsRunning(false)
+      if (startedProcessStream) {
+        setIsRunning(false)
+      }
     }
-  }, [setIsRunning, addOutput, setPid, state.isRunning, state.pid, t])
+  }, [setIsRunning, setIsManaged, addOutput, setPid, state.isRunning, state.pid, t])
 
   // 快速启动逻辑（仅一次）
   useEffect(() => {
@@ -162,7 +169,7 @@ const TerminalPage: React.FC = () => {
                 color="error"
                 startIcon={<StopIcon />}
                 onClick={handleStopServer}
-                disabled={!state.isRunning}
+                disabled={!state.isRunning || !state.isManaged}
               >
                 {t('terminal.btn_stop')}
               </Button>

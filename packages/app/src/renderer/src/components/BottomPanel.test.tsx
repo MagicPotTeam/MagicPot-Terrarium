@@ -8,6 +8,12 @@ import { MAX_COMFY_OUTPUT_LINES } from '@renderer/store/slices/comfyProcess'
 
 const dispatchMock = vi.fn()
 const clearOutputMock = vi.fn()
+const setPidMock = vi.fn()
+const setIsRunningMock = vi.fn()
+const setIsManagedMock = vi.fn()
+const addOutputMock = vi.fn()
+const comfyPortDetectMock = vi.fn()
+const startComfyUIMock = vi.fn()
 let bottomPanelActiveTab = 'elements'
 
 vi.mock('../store', () => ({
@@ -38,6 +44,11 @@ vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
     svcLog: {
       watchAppLogs: vi.fn(async () => undefined)
+    },
+    svcHyper: {
+      comfyPortDetect: comfyPortDetectMock,
+      startComfyUI: startComfyUIMock,
+      killSubProcess: vi.fn(async () => undefined)
     }
   })
 }))
@@ -46,12 +57,14 @@ vi.mock('@renderer/store/hooks/comfyProcess', () => ({
   useComfyProcess: () => ({
     state: {
       isRunning: false,
+      isManaged: false,
       pid: 0,
       output: ['[comfyui] previous run line']
     },
-    setPid: vi.fn(),
-    setIsRunning: vi.fn(),
-    addOutput: vi.fn(),
+    setPid: setPidMock,
+    setIsRunning: setIsRunningMock,
+    setIsManaged: setIsManagedMock,
+    addOutput: addOutputMock,
     clearOutput: clearOutputMock
   })
 }))
@@ -83,6 +96,12 @@ describe('BottomPanel element info', () => {
   beforeEach(() => {
     dispatchMock.mockClear()
     clearOutputMock.mockClear()
+    setPidMock.mockClear()
+    setIsRunningMock.mockClear()
+    setIsManagedMock.mockClear()
+    addOutputMock.mockClear()
+    comfyPortDetectMock.mockReset()
+    startComfyUIMock.mockReset()
     bottomPanelActiveTab = 'elements'
   })
 
@@ -308,6 +327,22 @@ describe('BottomPanel element info', () => {
     expect(screen.getByTestId('element-panel-render-limit').textContent).toContain(
       '\u5df2\u9009 75 \u4e2a\u5143\u7d20'
     )
+  })
+
+  it('marks an already-running ComfyUI process as running', async () => {
+    bottomPanelActiveTab = 'comfyui'
+    comfyPortDetectMock.mockResolvedValue({ pid: 15756 })
+
+    render(<BottomPanel />)
+    fireEvent.click(screen.getByLabelText('terminal.btn_start').querySelector('button')!)
+
+    await act(async () => {})
+
+    expect(setPidMock).toHaveBeenCalledWith(15756)
+    expect(setIsRunningMock).toHaveBeenCalledWith(true)
+    expect(setIsManagedMock).toHaveBeenCalledWith(false)
+    expect(startComfyUIMock).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('terminal.btn_stop').querySelector('button')).toBeDisabled()
   })
 
   it('allows clearing the dedicated ComfyUI log panel', () => {

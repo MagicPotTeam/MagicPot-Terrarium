@@ -19,6 +19,7 @@ import { initializeAppUpdateManager, isAppUpdateInstallInProgress } from './appU
 import { winController } from './winControls'
 import { flushLocalMediaAccessGrants } from './localMediaAccess'
 import { registerLocalMediaFileIntakeIpc } from './localMediaFileIntakeIpc'
+import { cleanupSubProcesses } from './subprocess/subprocess'
 
 const startupUserData = resolveStartupUserDataDirectory()
 fs.mkdirSync(startupUserData.path, { recursive: true })
@@ -168,12 +169,25 @@ app.on('window-all-closed', () => {
   }
 })
 
+let allowFinalQuit = false
+let updateQuitCleanupPromise: Promise<void> | null = null
+
 app.on('before-quit', async (event) => {
+  if (allowFinalQuit) return
+
   flushLocalMediaAccessGrants()
   console.log('[App] 应用即将退出...')
   if (isAppUpdateInstallInProgress()) {
-    cleanupScreenshotManager()
-    stopQAppWatcher()
+    event.preventDefault()
+    if (!updateQuitCleanupPromise) {
+      cleanupScreenshotManager()
+      stopQAppWatcher()
+      updateQuitCleanupPromise = cleanupSubProcesses().finally(() => {
+        allowFinalQuit = true
+        app.quit()
+      })
+    }
+    await updateQuitCleanupPromise
     return
   }
 

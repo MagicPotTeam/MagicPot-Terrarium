@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import https from 'node:https'
 import path from 'node:path'
@@ -11,6 +12,8 @@ const stagingRoot = path.join(repoRoot, '.staging', 'embedded')
 const comfyDir = path.join(stagingRoot, 'ComfyUI')
 const pythonDir = path.join(stagingRoot, 'python_embeded')
 const cacheRoot = path.join(repoRoot, '.cache', 'embedded-python')
+const currentPhasePath = path.join(stagingRoot, 'embedded-python-current-phase.txt')
+const lastSuccessfulPhasePath = path.join(stagingRoot, 'embedded-python-last-successful-phase.txt')
 
 const pythonVersion = process.env.EMBEDDED_PYTHON_VERSION || '3.13.11'
 const pythonArch = process.env.EMBEDDED_PYTHON_ARCH || 'amd64'
@@ -22,12 +25,19 @@ const getPipUrl = process.env.EMBEDDED_GET_PIP_URL || 'https://bootstrap.pypa.io
 const torchIndexUrl =
   process.env.EMBEDDED_TORCH_INDEX_URL || 'https://download.pytorch.org/whl/cu130'
 const llamaCppIndexUrl =
-  process.env.EMBEDDED_LLAMA_CPP_INDEX_URL ||
-  'https://abetlen.github.io/llama-cpp-python/whl/cpu'
+  process.env.EMBEDDED_LLAMA_CPP_INDEX_URL || 'https://abetlen.github.io/llama-cpp-python/whl/cpu'
 const llamaCppPythonVersion = process.env.EMBEDDED_LLAMA_CPP_PYTHON_VERSION || '0.3.19'
+const llamaCppWheelName = `llama_cpp_python-${llamaCppPythonVersion}-cp313-cp313-win_amd64.whl`
+const llamaCppWheelUrl =
+  process.env.EMBEDDED_LLAMA_CPP_WHEEL_URL ||
+  `https://github.com/abetlen/llama-cpp-python/releases/download/v${llamaCppPythonVersion}/${llamaCppWheelName}`
+const llamaCppWheelSha256 =
+  process.env.EMBEDDED_LLAMA_CPP_WHEEL_SHA256 ||
+  'a7ff33fd7f76f4d747f13e032c66747c3c8b05b4ea185609c6b133032ec7249a'
 const transformersVersion = process.env.EMBEDDED_TRANSFORMERS_VERSION || '4.57.6'
 const huggingfaceHubVersion = process.env.EMBEDDED_HUGGINGFACE_HUB_VERSION || '0.36.2'
 const decoratorVersion = process.env.EMBEDDED_DECORATOR_VERSION || '4.4.2'
+const tipoKgenVersion = process.env.EMBEDDED_TIPO_KGEN_VERSION || '0.3.0'
 
 const skipTorch = process.env.EMBEDDED_SKIP_TORCH === '1'
 const skipSmoke = process.env.EMBEDDED_SKIP_SMOKE === '1'
@@ -76,7 +86,8 @@ function run(command, args, options = {}) {
     env: {
       ...process.env,
       PYTHONUTF8: '1',
-      PYTHONNOUSERSITE: '1'
+      PYTHONNOUSERSITE: '1',
+      ...options.env
     },
     stdio: 'inherit'
   })
@@ -88,7 +99,8 @@ function runCapture(command, args, options = {}) {
     env: {
       ...process.env,
       PYTHONUTF8: '1',
-      PYTHONNOUSERSITE: '1'
+      PYTHONNOUSERSITE: '1',
+      ...options.env
     },
     encoding: 'utf8'
   })
@@ -105,11 +117,7 @@ function downloadFile(url, destination, redirectCount = 0) {
   ensureDir(path.dirname(destination))
   return new Promise((resolve, reject) => {
     const request = https.get(url, (response) => {
-      if (
-        response.statusCode >= 300 &&
-        response.statusCode < 400 &&
-        response.headers.location
-      ) {
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume()
         const redirectedUrl = new URL(response.headers.location, url).toString()
         downloadFile(redirectedUrl, destination, redirectCount + 1).then(resolve, reject)
@@ -217,6 +225,7 @@ function writeConstraints() {
       `transformers==${transformersVersion}`,
       `huggingface-hub==${huggingfaceHubVersion}`,
       `decorator==${decoratorVersion}`,
+      `tipo-kgen==${tipoKgenVersion}`,
       'numpy<2.5',
       ''
     ].join('\n')
@@ -290,8 +299,12 @@ function getCustomNodeRequirementFiles() {
 
   const selected = []
   for (const files of byDir.values()) {
-    const fixed = files.find((filePath) => path.basename(filePath).toLowerCase() === 'requirements_fixed.txt')
-    const regular = files.find((filePath) => path.basename(filePath).toLowerCase() === 'requirements.txt')
+    const fixed = files.find(
+      (filePath) => path.basename(filePath).toLowerCase() === 'requirements_fixed.txt'
+    )
+    const regular = files.find(
+      (filePath) => path.basename(filePath).toLowerCase() === 'requirements.txt'
+    )
     selected.push(fixed || regular || files[0])
   }
 
@@ -319,7 +332,11 @@ function installRequirements(constraintsPath) {
   const manifestPath = path.join(stagingRoot, 'custom-node-requirements.json')
   fs.writeFileSync(
     manifestPath,
-    `${JSON.stringify(customRequirementFiles.map((filePath) => path.relative(stagingRoot, filePath)), null, 2)}\n`
+    `${JSON.stringify(
+      customRequirementFiles.map((filePath) => path.relative(stagingRoot, filePath)),
+      null,
+      2
+    )}\n`
   )
 
   for (const requirementsFile of customRequirementFiles) {
@@ -341,15 +358,33 @@ function installRequirements(constraintsPath) {
   pip(['check'])
 }
 
-function installSmokeRuntimeExtras() {
-  pip([
-    'install',
-    '--upgrade',
-    '--prefer-binary',
-    `llama-cpp-python==${llamaCppPythonVersion}`,
-    'rotary-embedding-torch',
-    ...extraIndexArgs()
+async function ensureVerifiedLlamaCppWheel() {
+  const wheelPath = path.join(cacheRoot, llamaCppWheelName)
+  await ensureDownloaded(llamaCppWheelUrl, wheelPath)
+  const actualSha256 = crypto.createHash('sha256').update(fs.readFileSync(wheelPath)).digest('hex')
+  if (actualSha256 !== llamaCppWheelSha256.toLowerCase()) {
+    fs.rmSync(wheelPath, { force: true })
+    throw new Error(
+      `llama-cpp-python wheel SHA256 mismatch: expected ${llamaCppWheelSha256}, got ${actualSha256}`
+    )
+  }
+  return wheelPath
+}
+
+function installVerifiedLlamaCppWheel(wheelPath) {
+  pip(['install', '--upgrade', '--force-reinstall', '--no-deps', wheelPath])
+}
+
+function verifyPinnedTipoRuntime() {
+  run(pythonExe(), [
+    '-s',
+    '-c',
+    `import importlib.metadata; import kgen; import llama_cpp; assert importlib.metadata.version('tipo-kgen') == '${tipoKgenVersion}'; assert importlib.metadata.version('llama-cpp-python') == '${llamaCppPythonVersion}'; info = llama_cpp.llama_print_system_info().decode(); print(info); assert 'AVX512 = 1' not in info, info`
   ])
+}
+
+function installSmokeRuntimeExtras() {
+  pip(['install', '--upgrade', '--prefer-binary', 'rotary-embedding-torch', ...extraIndexArgs()])
 
   // smZNodes imports compel, but installing compel with full dependencies pulls notebook/ipython
   // and conflicts with moviepy's decorator pin. Existing ComfyUI deps cover the imports it uses.
@@ -410,7 +445,9 @@ function removeRuntimePath(targetPath, stats) {
 
 function pruneEmbeddedRuntime() {
   if (!pruneRuntime) {
-    console.log('[prepare-embedded-python] Skipping runtime pruning because EMBEDDED_PRUNE_RUNTIME=0')
+    console.log(
+      '[prepare-embedded-python] Skipping runtime pruning because EMBEDDED_PRUNE_RUNTIME=0'
+    )
     return
   }
 
@@ -492,7 +529,10 @@ function pruneEmbeddedRuntime() {
 
     if (!keepOnnxRuntimeGpu) {
       const onnxRuntimeCapiDir = path.join(sitePackages, 'onnxruntime', 'capi')
-      for (const fileName of ['onnxruntime_providers_cuda.dll', 'onnxruntime_providers_tensorrt.dll']) {
+      for (const fileName of [
+        'onnxruntime_providers_cuda.dll',
+        'onnxruntime_providers_tensorrt.dll'
+      ]) {
         removeRuntimePath(path.join(onnxRuntimeCapiDir, fileName), stats)
       }
     }
@@ -538,6 +578,14 @@ function pruneEmbeddedRuntime() {
   )
 }
 
+function runPhase(name, action) {
+  fs.writeFileSync(currentPhasePath, `${name}\n`)
+  console.log(`[prepare-embedded-python] Starting phase: ${name}`)
+  const result = action()
+  fs.writeFileSync(lastSuccessfulPhasePath, `${name}\n`)
+  return result
+}
+
 function smokeTest() {
   if (skipSmoke) {
     console.log('[prepare-embedded-python] Skipping smoke test because EMBEDDED_SKIP_SMOKE=1')
@@ -546,19 +594,18 @@ function smokeTest() {
 
   const mainPy = path.join(comfyDir, 'main.py')
   const result = runCapture(pythonExe(), ['-s', mainPy, '--quick-test-for-ci', '--cpu'], {
-    cwd: stagingRoot
+    cwd: stagingRoot,
+    env: { TIPO_NO_AUTO_INSTALL: '1' }
   })
   const output = `${result.stdout || ''}\n${result.stderr || ''}`
+  fs.writeFileSync(path.join(stagingRoot, 'comfy-quick-test.log'), output)
 
   if (result.status !== 0) {
     throw new Error(`ComfyUI quick test failed with exit code ${result.status}`)
   }
 
   if (strictSmoke) {
-    const failurePatterns = [
-      /\(IMPORT FAILED\)/i,
-      /^Cannot import .+custom nodes:/im
-    ]
+    const failurePatterns = [/\(IMPORT FAILED\)/i, /^Cannot import .+custom nodes:/im]
     const matched = failurePatterns.find((pattern) => pattern.test(output))
     if (matched) {
       throw new Error(`ComfyUI quick test output matched failure pattern: ${matched}`)
@@ -568,10 +615,14 @@ function smokeTest() {
 
 async function main() {
   if (process.platform !== 'win32') {
-    throw new Error('prepare-embedded-python currently builds the Windows python_embeded package only')
+    throw new Error(
+      'prepare-embedded-python currently builds the Windows python_embeded package only'
+    )
   }
   if (!fs.existsSync(comfyDir)) {
-    throw new Error(`Missing staged ComfyUI. Run npm run prepare:embedded-staging first: ${comfyDir}`)
+    throw new Error(
+      `Missing staged ComfyUI. Run npm run prepare:embedded-staging first: ${comfyDir}`
+    )
   }
 
   if (dryRun) {
@@ -583,11 +634,14 @@ async function main() {
           getPipUrl,
           torchIndexUrl,
           llamaCppIndexUrl,
+          llamaCppWheelUrl,
+          llamaCppWheelSha256,
           constraints: [
             `llama-cpp-python==${llamaCppPythonVersion}`,
             `transformers==${transformersVersion}`,
             `huggingface-hub==${huggingfaceHubVersion}`,
-            `decorator==${decoratorVersion}`
+            `decorator==${decoratorVersion}`,
+            `tipo-kgen==${tipoKgenVersion}`
           ],
           requirementsMode,
           pruneRuntime,
@@ -613,18 +667,21 @@ async function main() {
 
   await ensureDownloaded(pythonZipUrl, pythonZipPath)
   await ensureDownloaded(getPipUrl, getPipPath)
+  const llamaCppWheelPath = await ensureVerifiedLlamaCppWheel()
 
-  extractPython(pythonZipPath)
-  configureEmbeddedPythonPath()
-  bootstrapPip(getPipPath)
-  const constraintsPath = writeConstraints()
-  installTorchStack()
-  installRequirements(constraintsPath)
-  installSmokeRuntimeExtras()
-  pruneEmbeddedRuntime()
-  removePythonCaches()
-  smokeTest()
-  removePythonCaches()
+  runPhase('extract-python', () => extractPython(pythonZipPath))
+  runPhase('configure-python-path', configureEmbeddedPythonPath)
+  runPhase('bootstrap-pip', () => bootstrapPip(getPipPath))
+  const constraintsPath = runPhase('write-constraints', writeConstraints)
+  runPhase('install-torch', installTorchStack)
+  runPhase('install-requirements', () => installRequirements(constraintsPath))
+  runPhase('install-smoke-extras', installSmokeRuntimeExtras)
+  runPhase('install-verified-llama-cpp', () => installVerifiedLlamaCppWheel(llamaCppWheelPath))
+  runPhase('verify-tipo-runtime', verifyPinnedTipoRuntime)
+  runPhase('prune-runtime', pruneEmbeddedRuntime)
+  runPhase('remove-python-caches-before-smoke', removePythonCaches)
+  runPhase('comfy-quick-test', smokeTest)
+  runPhase('remove-python-caches-after-smoke', removePythonCaches)
 
   console.log(`[prepare-embedded-python] Wrote ${pythonDir}`)
 }

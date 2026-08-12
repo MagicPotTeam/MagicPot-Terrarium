@@ -8,7 +8,7 @@ import { api, hasManagedComfyStartupApi } from '@renderer/utils/windowUtils'
 
 export default function ManagedComfyProcessBridge(): null {
   const { isReady, config, configUtils } = useConfig()
-  const { state, setPid, setIsRunning, addOutput } = useComfyProcess()
+  const { state, setPid, setIsRunning, setIsManaged, addOutput } = useComfyProcess()
   const managedComfyStartupApiAvailable = hasManagedComfyStartupApi()
   const hasAttemptedInitialAttachRef = useRef(false)
   const isUnmountedRef = useRef(false)
@@ -38,7 +38,7 @@ export default function ManagedComfyProcessBridge(): null {
     hasAttemptedInitialAttachRef.current = true
 
     const attachManagedComfyProcess = async () => {
-      let hasActiveLogStream = false
+      let confirmedManagedAttach = false
 
       try {
         const { pid } = await api().svcHyper.comfyPortDetect({})
@@ -48,12 +48,6 @@ export default function ManagedComfyProcessBridge(): null {
 
         const [abortSender, abortReceiver] = newAbortHandler()
         attachAbortSenderRef.current = abortSender
-        hasActiveLogStream = true
-
-        setPid(pid)
-        setIsRunning(true)
-        window.dispatchEvent(new CustomEvent('comfyui:ready'))
-        addOutput(`> [comfyui] detected existing process with pid: ${pid}`)
 
         await api().svcHyper.connectSubProcess(
           { pid },
@@ -62,7 +56,14 @@ export default function ManagedComfyProcessBridge(): null {
               if (isUnmountedRef.current) {
                 return
               }
-              if (data.pid !== 0) {
+              if (!confirmedManagedAttach) {
+                confirmedManagedAttach = true
+                setPid(data.pid || pid)
+                setIsManaged(true)
+                setIsRunning(true)
+                window.dispatchEvent(new CustomEvent('comfyui:ready'))
+                addOutput(`> [comfyui] detected existing managed process with pid: ${pid}`)
+              } else if (data.pid !== 0) {
                 setPid(data.pid)
               }
             },
@@ -79,7 +80,7 @@ export default function ManagedComfyProcessBridge(): null {
           addOutput('ERROR> ' + String(error))
         }
       } finally {
-        if (!isUnmountedRef.current && hasActiveLogStream) {
+        if (!isUnmountedRef.current && confirmedManagedAttach) {
           setIsRunning(false)
         }
         attachAbortSenderRef.current = null
@@ -95,6 +96,7 @@ export default function ManagedComfyProcessBridge(): null {
     state.pid,
     setPid,
     setIsRunning,
+    setIsManaged,
     addOutput
   ])
 

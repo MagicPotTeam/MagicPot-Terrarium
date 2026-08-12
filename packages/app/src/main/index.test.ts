@@ -26,7 +26,8 @@ const {
   startLauncherSmokeTestMock,
   confirmLauncherHealthMock,
   flushLocalMediaAccessGrantsMock,
-  registerLocalMediaFileIntakeIpcMock
+  registerLocalMediaFileIntakeIpcMock,
+  cleanupSubProcessesMock
 } = vi.hoisted(() => {
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
   const appMock = {
@@ -68,7 +69,8 @@ const {
     startLauncherSmokeTestMock: vi.fn(() => false),
     confirmLauncherHealthMock: vi.fn(() => Promise.resolve(false)),
     flushLocalMediaAccessGrantsMock: vi.fn(),
-    registerLocalMediaFileIntakeIpcMock: vi.fn()
+    registerLocalMediaFileIntakeIpcMock: vi.fn(),
+    cleanupSubProcessesMock: vi.fn(() => Promise.resolve())
   }
 })
 
@@ -121,6 +123,10 @@ vi.mock('./appUpdate/appLauncherBridge', () => ({
 vi.mock('./appUpdate/updateManager', () => ({
   initializeAppUpdateManager: initializeAppUpdateManagerMock,
   isAppUpdateInstallInProgress: isAppUpdateInstallInProgressMock
+}))
+
+vi.mock('./subprocess/subprocess', () => ({
+  cleanupSubProcesses: cleanupSubProcessesMock
 }))
 
 vi.mock('./utils/loggingOverride', () => ({}))
@@ -368,7 +374,40 @@ describe('main process startup window opening', () => {
     expect(confirmLauncherHealthMock).not.toHaveBeenCalled()
   })
 
-  it('does not intercept quit when an update install is in progress', async () => {
+  it('waits for update cleanup once before allowing the final quit', async () => {
+    isAppUpdateInstallInProgressMock.mockReturnValue(true)
+    let finishCleanup: (() => void) | undefined
+    cleanupSubProcessesMock.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finishCleanup = resolve))
+    )
+    await loadModule()
+
+    const beforeQuitHandler = appMock.on.mock.calls.find(
+      ([event]) => event === 'before-quit'
+    )?.[1] as ((event: { preventDefault: () => void }) => Promise<void>) | undefined
+    const firstEvent = { preventDefault: vi.fn() }
+    const repeatedEvent = { preventDefault: vi.fn() }
+
+    const firstQuit = beforeQuitHandler?.(firstEvent)
+    const repeatedQuit = beforeQuitHandler?.(repeatedEvent)
+
+    expect(firstEvent.preventDefault).toHaveBeenCalledTimes(1)
+    expect(repeatedEvent.preventDefault).toHaveBeenCalledTimes(1)
+    expect(cleanupSubProcessesMock).toHaveBeenCalledTimes(1)
+    expect(appMock.quit).not.toHaveBeenCalled()
+
+    finishCleanup?.()
+    await firstQuit
+    await repeatedQuit
+
+    expect(appMock.quit).toHaveBeenCalledTimes(1)
+    const finalEvent = { preventDefault: vi.fn() }
+    await beforeQuitHandler?.(finalEvent)
+    expect(finalEvent.preventDefault).not.toHaveBeenCalled()
+    expect(cleanupSubProcessesMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('intercepts update quit until subprocess cleanup completes', async () => {
     isAppUpdateInstallInProgressMock.mockReturnValue(true)
     await loadModule()
 
@@ -380,9 +419,11 @@ describe('main process startup window opening', () => {
     expect(beforeQuitHandler).toBeTypeOf('function')
     await beforeQuitHandler?.(event)
 
-    expect(event.preventDefault).not.toHaveBeenCalled()
+    expect(event.preventDefault).toHaveBeenCalledTimes(1)
     expect(flushLocalMediaAccessGrantsMock).toHaveBeenCalledTimes(1)
     expect(beforeQuitMock).not.toHaveBeenCalled()
+    expect(cleanupSubProcessesMock).toHaveBeenCalledTimes(1)
+    expect(appMock.quit).toHaveBeenCalledTimes(1)
     expect(cleanupScreenshotManagerMock).toHaveBeenCalled()
     expect(stopQAppWatcherMock).toHaveBeenCalled()
   })

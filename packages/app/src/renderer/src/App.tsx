@@ -153,7 +153,7 @@ function shouldAutoStartLocalComfyUIInThisRuntime(): boolean {
 
 function AutoStartLocalComfyUI(): null {
   const { isReady, config, configUtils } = useConfig()
-  const { state, setPid, setIsRunning, addOutput } = useComfyProcess()
+  const { state, setPid, setIsRunning, setIsManaged, addOutput } = useComfyProcess()
   const comfyCommandAvailable = configUtils.isComfyUICommandAvailable()
 
   useEffect(() => {
@@ -181,12 +181,22 @@ function AutoStartLocalComfyUI(): null {
     let cancelled = false
 
     const startLocalComfyUI = async () => {
+      let startedProcessStream = false
       try {
         const { pid } = await api().svcHyper.comfyPortDetect({})
-        if (cancelled || pid !== 0) {
+        if (cancelled) {
+          return
+        }
+        if (pid !== 0) {
+          setPid(pid)
+          setIsManaged(false)
+          setIsRunning(true)
+          window.dispatchEvent(new CustomEvent('comfyui:ready'))
           return
         }
 
+        startedProcessStream = true
+        setIsManaged(true)
         setIsRunning(true)
         addOutput('应用启动，自动启动 ComfyUI...')
 
@@ -218,7 +228,7 @@ function AutoStartLocalComfyUI(): null {
           addOutput('ERROR> ' + String(error))
         }
       } finally {
-        if (!cancelled) {
+        if (!cancelled && startedProcessStream) {
           setIsRunning(false)
         }
       }
@@ -236,6 +246,7 @@ function AutoStartLocalComfyUI(): null {
     state.isRunning,
     setPid,
     setIsRunning,
+    setIsManaged,
     addOutput
   ])
 

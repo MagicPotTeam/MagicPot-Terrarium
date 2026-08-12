@@ -54,23 +54,38 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
+          $diagnosticsDir = 'dist/embedded-candidate-diagnostics'
+          New-Item -ItemType Directory -Force -Path $diagnosticsDir | Out-Null
+
+          function Invoke-NativeLogged {
+            param(
+              [Parameter(Mandatory = $true)][string] $Name,
+              [Parameter(Mandatory = $true)][scriptblock] $Command
+            )
+
+            $logPath = Join-Path $diagnosticsDir "$Name.log"
+            Write-Host "::group::$Name"
+            & $Command 2>&1 | Tee-Object -FilePath $logPath
+            $exitCode = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            Set-Content -LiteralPath (Join-Path $diagnosticsDir "$Name.exit-code.txt") -Value $exitCode
+            if ($exitCode -ne 0) {
+              throw "$Name failed with exit code $exitCode. See $logPath"
+            }
+            Set-Content -LiteralPath (Join-Path $diagnosticsDir 'last-successful-phase.txt') -Value $Name
+          }
 
           Get-PSDrive -Name C | Select-Object Name,Used,Free
-          Write-Host '::group::Build embedded app'
-          npm run build:embedded
-          Write-Host '::endgroup::'
-          Write-Host '::group::Prepare embedded runtime'
-          npm run prepare:embedded
-          Write-Host '::endgroup::'
-          Write-Host '::group::Build image worker'
-          npm run build:image-worker
-          Write-Host '::endgroup::'
+          Invoke-NativeLogged 'build-embedded-app' { npm run build:embedded }
+          Invoke-NativeLogged 'prepare-embedded-runtime' { npm run prepare:embedded }
+          Invoke-NativeLogged 'build-image-worker' { npm run build:image-worker }
 
           $env:PACKAGE_MODE = 'embedded'
           Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
           Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
-          npx electron-builder --config config/electron/electron-builder.config.js --win --x64 --publish never
+          Invoke-NativeLogged 'electron-builder' {
+            npx electron-builder --config config/electron/electron-builder.config.js --win --x64 --publish never
+          }
 
           $portableRoot = Join-Path $PWD 'dist\embedded\win-unpacked\ComfyUI_windows_portable'
           $requiredPortableFiles = @(
@@ -108,7 +123,10 @@ jobs:
 
           foreach ($source in @(
             '.staging/embedded/custom-node-requirements.json',
-            '.staging/embedded/constraints.txt'
+            '.staging/embedded/constraints.txt',
+            '.staging/embedded/embedded-python-current-phase.txt',
+            '.staging/embedded/embedded-python-last-successful-phase.txt',
+            '.staging/embedded/comfy-quick-test.log'
           )) {
             if (Test-Path -LiteralPath $source) {
               Copy-Item -LiteralPath $source -Destination $diagnosticsDir

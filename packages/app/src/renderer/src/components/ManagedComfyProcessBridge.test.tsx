@@ -14,6 +14,7 @@ const comfyPortDetectMock = vi.fn()
 const connectSubProcessMock = vi.fn()
 const setPidMock = vi.fn()
 const setIsRunningMock = vi.fn()
+const setIsManagedMock = vi.fn()
 const addOutputMock = vi.fn()
 
 vi.mock('@renderer/hooks/useConfig', () => ({
@@ -35,6 +36,7 @@ vi.mock('@renderer/store/hooks/comfyProcess', () => ({
     },
     setPid: setPidMock,
     setIsRunning: setIsRunningMock,
+    setIsManaged: setIsManagedMock,
     addOutput: addOutputMock
   })
 }))
@@ -60,6 +62,7 @@ describe('ManagedComfyProcessBridge', () => {
     connectSubProcessMock.mockReset()
     setPidMock.mockReset()
     setIsRunningMock.mockReset()
+    setIsManagedMock.mockReset()
     addOutputMock.mockReset()
   })
 
@@ -86,11 +89,31 @@ describe('ManagedComfyProcessBridge', () => {
 
     expect(setPidMock).toHaveBeenCalledWith(4321)
     expect(setIsRunningMock).toHaveBeenCalledWith(true)
+    expect(setIsManagedMock).toHaveBeenCalledWith(true)
     expect(addOutputMock).toHaveBeenCalledWith(
-      '> [comfyui] detected existing process with pid: 4321'
+      '> [comfyui] detected existing managed process with pid: 4321'
     )
     expect(addOutputMock).toHaveBeenCalledTimes(1)
     expect(setIsRunningMock).toHaveBeenLastCalledWith(false)
+  })
+
+  it('does not mark an externally detected pid as managed when attach emits no data', async () => {
+    comfyPortDetectMock.mockResolvedValue({ pid: 9876 })
+    connectSubProcessMock.mockResolvedValue(undefined)
+
+    render(<ManagedComfyProcessBridge />)
+
+    await waitFor(() => {
+      expect(connectSubProcessMock).toHaveBeenCalledWith(
+        { pid: 9876 },
+        expect.objectContaining({ onData: expect.any(Function) })
+      )
+    })
+
+    expect(setPidMock).not.toHaveBeenCalled()
+    expect(setIsManagedMock).not.toHaveBeenCalled()
+    expect(setIsRunningMock).not.toHaveBeenCalled()
+    expect(addOutputMock).not.toHaveBeenCalled()
   })
 
   it('does nothing when no existing local ComfyUI process is detected', async () => {
