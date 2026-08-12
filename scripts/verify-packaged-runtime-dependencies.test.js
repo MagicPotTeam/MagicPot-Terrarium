@@ -57,12 +57,16 @@ describe('verify-packaged-runtime-dependencies', () => {
       'node_modules/@modelcontextprotocol/sdk': {
         name: '@modelcontextprotocol/sdk',
         dependencies: {
-          '@hono/node-server': '1.19.13',
+          '@hono/node-server': '2.1.0',
           hono: '4.12.26',
           'zod-to-json-schema': '3.25.2'
         }
       },
-      'node_modules/@hono/node-server': { name: '@hono/node-server' },
+      'node_modules/@hono/node-server': {
+        name: '@hono/node-server',
+        version: '2.1.0',
+        main: 'dist/index.mjs'
+      },
       'node_modules/hono': { name: 'hono' },
       'node_modules/zod-to-json-schema': { name: 'zod-to-json-schema' }
     })
