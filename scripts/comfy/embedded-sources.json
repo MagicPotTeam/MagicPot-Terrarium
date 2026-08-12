@@ -3,7 +3,7 @@
     {
       "name": "ComfyUI",
       "url": "https://github.com/Comfy-Org/ComfyUI.git",
-      "commit": "03978e1e81475f19eebd7edc065cc55cb4e15e10",
+      "commit": "bd34f338ac505ea79e43968753968a464060e609",
       "relativePath": "vendor/comfyui/ComfyUI"
     },
     {
@@ -21,7 +21,7 @@
     {
       "name": "ComfyUI-Easy-Use",
       "url": "https://github.com/yolain/ComfyUI-Easy-Use.git",
-      "commit": "54d080bf6a4f52da287e984f305243c10db097f5",
+      "commit": "595e0738a9e3f8d0d9c4d875461b2d2c9e7559c7",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use"
     },
     {
@@ -40,13 +40,13 @@
     {
       "name": "ComfyUI-KJNodes",
       "url": "https://github.com/kijai/ComfyUI-KJNodes.git",
-      "commit": "e27a505b3ba6ce42687fe00500deda103d9d6071",
+      "commit": "6ab7e8130e449ed2c0037589bcf84146ceb7fc9c",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-KJNodes"
     },
     {
       "name": "ComfyUI-Manager",
       "url": "https://github.com/Comfy-Org/ComfyUI-Manager.git",
-      "commit": "bd88cffa7166484cbd16c3eba8a5a377a20b01dc",
+      "commit": "97421c49658aaa8cf6e64736a8cb21697db3f866",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager"
     },
     {
@@ -70,19 +70,19 @@
     {
       "name": "comfyui_LLM_party",
       "url": "https://github.com/heshengtao/comfyui_LLM_party.git",
-      "commit": "39bca5e48505d3cfc292392479c065aa58cc2a48",
+      "commit": "3790b26a438bb8e77c1ad24d93870f710cc8ae41",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/comfyui_LLM_party"
     },
     {
       "name": "ComfyUI_smZNodes",
       "url": "https://github.com/shiimizu/ComfyUI_smZNodes.git",
-      "commit": "9562d76c3cf206a3c2362e2baf8bbf717a4869a5",
+      "commit": "9ef7c63acec6c09b2e8dfe26bbf9c9876857a004",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI_smZNodes"
     },
     {
       "name": "z-tipo-extension",
       "url": "https://github.com/KohakuBlueleaf/z-tipo-extension.git",
-      "commit": "d6bbb86726e06f3e3ab60c804f811993dc740223",
+      "commit": "67a443f5b4156a4c42746a3d272ea1bfcce00c95",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/z-tipo-extension"
     }
   ]
