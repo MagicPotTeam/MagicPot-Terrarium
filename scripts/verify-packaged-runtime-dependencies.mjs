@@ -20,7 +20,7 @@ export const requiredRuntimeFiles = [
   'node_modules/@modelcontextprotocol/sdk/dist/cjs/server/stdio.js',
   'node_modules/@modelcontextprotocol/sdk/dist/cjs/server/streamableHttp.js',
   'node_modules/@hono/node-server/package.json',
-  'node_modules/@hono/node-server/dist/index.js',
+  'node_modules/@hono/node-server/dist/index.mjs',
   'node_modules/hono/package.json',
   'node_modules/hono/dist/cjs/index.js',
   'node_modules/ajv-formats/package.json',
