@@ -3,11 +3,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from './App'
 
+const appTestState = vi.hoisted(() => ({
+  autoStartComfyPortDetect: vi.fn(),
+  setPid: vi.fn(),
+  setIsRunning: vi.fn(),
+  setIsManaged: vi.fn()
+}))
+
 const bridgeMounts = vi.hoisted(() => ({
   comfyExecutionActivityBridge: 0,
   comfyLogBridge: 0,
   managedComfyProcessBridge: 0,
-  autoStartComfyPortDetect: vi.fn(),
+  autoStartComfyPortDetect: appTestState.autoStartComfyPortDetect,
+  setPid: appTestState.setPid,
+  setIsRunning: appTestState.setIsRunning,
+  setIsManaged: appTestState.setIsManaged,
   connectWs: vi.fn()
 }))
 
@@ -67,10 +77,12 @@ vi.mock('./hooks/useConfig', () => ({
 vi.mock('./store/hooks/comfyProcess', () => ({
   useComfyProcess: () => ({
     state: {
-      isRunning: false
+      isRunning: false,
+      isManaged: false
     },
-    setPid: vi.fn(),
-    setIsRunning: vi.fn(),
+    setPid: bridgeMounts.setPid,
+    setIsRunning: bridgeMounts.setIsRunning,
+    setIsManaged: bridgeMounts.setIsManaged,
     addOutput: vi.fn()
   })
 }))
@@ -91,6 +103,9 @@ describe('App startup', () => {
     bridgeMounts.comfyLogBridge = 0
     bridgeMounts.managedComfyProcessBridge = 0
     bridgeMounts.autoStartComfyPortDetect.mockReset()
+    bridgeMounts.setPid.mockReset()
+    bridgeMounts.setIsRunning.mockReset()
+    bridgeMounts.setIsManaged.mockReset()
     bridgeMounts.connectWs.mockReset()
     Reflect.deleteProperty(window, 'requestIdleCallback')
     Reflect.deleteProperty(window, 'cancelIdleCallback')

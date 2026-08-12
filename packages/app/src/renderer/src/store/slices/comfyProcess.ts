@@ -5,12 +5,14 @@ export const MAX_COMFY_OUTPUT_LINES = 1000
 export interface ComfyProcessState {
   pid: number
   isRunning: boolean
+  isManaged: boolean
   output: string[]
 }
 
 const initialState: ComfyProcessState = {
   pid: 0,
   isRunning: false,
+  isManaged: false,
   output: []
 }
 
@@ -30,6 +32,9 @@ const comfyProcessSlice = createSlice({
     },
     setIsRunning: (state, action: PayloadAction<boolean>) => {
       state.isRunning = action.payload
+    },
+    setIsManaged: (state, action: PayloadAction<boolean>) => {
+      state.isManaged = action.payload
     },
     addOutput: (state, action: PayloadAction<string>) => {
       state.output.push(action.payload)
@@ -52,6 +57,6 @@ const comfyProcessSlice = createSlice({
   }
 })
 
-export const { setPid, setIsRunning, addOutput, addOutputBatch, clearOutput } =
+export const { setPid, setIsRunning, setIsManaged, addOutput, addOutputBatch, clearOutput } =
   comfyProcessSlice.actions
 export default comfyProcessSlice

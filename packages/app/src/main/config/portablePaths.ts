@@ -413,6 +413,7 @@ export function createPortablePythonEnv(
     PYTHONIOENCODING: 'utf-8',
     PYTHONUTF8: '1',
     PYTHONLEGACYWINDOWSSTDIO: '1',
-    PYTHONUNBUFFERED: '1'
+    PYTHONUNBUFFERED: '1',
+    TIPO_NO_AUTO_INSTALL: '1'
   }
 }

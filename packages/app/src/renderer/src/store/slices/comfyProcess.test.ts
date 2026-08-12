@@ -11,6 +11,7 @@ describe('comfyProcessSlice output retention', () => {
       {
         pid: 0,
         isRunning: false,
+        isManaged: false,
         output: Array.from({ length: MAX_COMFY_OUTPUT_LINES }, (_, index) => `line-${index}`)
       },
       addOutput(`line-${MAX_COMFY_OUTPUT_LINES}`)

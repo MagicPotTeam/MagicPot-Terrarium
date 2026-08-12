@@ -773,7 +773,6 @@ export class HyperSvcImpl implements HyperSvc {
       })
     }
 
-    logInfo('connect ComfyUI...')
     await connectSubProcess({
       pid: req.pid,
       hooks: {

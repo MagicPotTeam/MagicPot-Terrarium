@@ -925,7 +925,7 @@ const ComfyUIPanel: React.FC = () => {
   const { t } = useTranslation()
   const theme = useTheme()
   const consolePalette = getConsolePalette(theme.palette.mode as 'light' | 'dark')
-  const { state, setPid, setIsRunning, addOutput, clearOutput } = useComfyProcess()
+  const { state, setPid, setIsRunning, setIsManaged, addOutput, clearOutput } = useComfyProcess()
   const outputText = useMemo(
     () => joinBoundedLogLines(state.output, MAX_COMFY_OUTPUT_LINES),
     [state.output]
@@ -948,16 +948,21 @@ const ComfyUIPanel: React.FC = () => {
       return
     }
 
+    let startedProcessStream = false
     try {
       const { pid } = await api().svcHyper.comfyPortDetect({})
       if (pid !== 0) {
         if (pid !== state.pid) {
           setPid(pid)
         }
+        setIsManaged(false)
+        setIsRunning(true)
         window.dispatchEvent(new CustomEvent('comfyui:ready'))
         return
       }
 
+      startedProcessStream = true
+      setIsManaged(true)
       setIsRunning(true)
       addOutput(t('terminal.starting_server'))
       await api().svcHyper.startComfyUI(
@@ -977,9 +982,11 @@ const ComfyUIPanel: React.FC = () => {
         addOutput('ERROR> ' + String(error))
       }
     } finally {
-      setIsRunning(false)
+      if (startedProcessStream) {
+        setIsRunning(false)
+      }
     }
-  }, [setIsRunning, addOutput, setPid, state.isRunning, state.pid, t])
+  }, [setIsRunning, setIsManaged, addOutput, setPid, state.isRunning, state.pid, t])
 
   const handleStopServer = useCallback(async () => {
     addOutput(t('terminal.stopping_server'))
@@ -1041,7 +1048,7 @@ const ComfyUIPanel: React.FC = () => {
             <IconButton
               size="small"
               onClick={handleStopServer}
-              disabled={!state.isRunning}
+              disabled={!state.isRunning || !state.isManaged}
               sx={{
                 p: 0.3,
                 color: '#f87171',
