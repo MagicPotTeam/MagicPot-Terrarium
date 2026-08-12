@@ -285,7 +285,7 @@ const addContentIssues = ({ file, relativeFile, text, issues }) => {
       rule: 'private-path-reference',
       skip: isTestFixture(relativeFile),
       pattern:
-        /(?:[A-Za-z]:[\\/][^\r\n"'`]*(?:private|internal|premium|open-private)[\\/][^\r\n"'`]*)|(?:(?:^|[\\/"'`\s])(?:private|internal|premium|open-private)[\\/][^\r\n"'`\s)]+)/gi
+        /(?:[A-Za-z]:[\\/][^\r\n"'`]*[\\/](?:private|internal|premium|open-private)[\\/][^\r\n"'`]*)|(?:(?:^|[\\/"'`\s])(?:private|internal|premium|open-private)[\\/][^\r\n"'`\s)]+)/gi
     },
     {
       rule: 'high-confidence-secret',

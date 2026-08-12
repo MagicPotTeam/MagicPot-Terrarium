@@ -172,7 +172,11 @@ describe('create-open-candidate policy', () => {
     ].join('\n')
 
     writeFile(candidate, 'packages/app/src/example.test.ts', "const fixture = '/private/path'\n")
-    writeFile(candidate, 'packages/app/src/example.ts', "const marker = '-----BEGIN PRIVATE KEY-----'\n")
+    writeFile(
+      candidate,
+      'packages/app/src/example.ts',
+      "const marker = '-----BEGIN PRIVATE KEY-----'\n"
+    )
 
     expect(auditOpenCandidate(candidate)).toEqual([])
 
@@ -189,7 +193,14 @@ describe('create-open-candidate policy', () => {
 
   it('continues to reject private paths outside test fixtures', () => {
     const candidate = makeCandidate()
-    writeFile(candidate, 'packages/app/src/runtime.ts', "const path = '/private/path'\n")
+    const windowsPath = ['C:', 'workspace', 'internal', 'config.json'].join(String.fromCharCode(92))
+    writeFile(
+      candidate,
+      'packages/app/src/runtime.ts',
+      `const posixPath = '/private/path'
+const windowsPath = '${windowsPath}'
+`
+    )
 
     expect(auditOpenCandidate(candidate)).toEqual([
       {
@@ -197,8 +208,25 @@ describe('create-open-candidate policy', () => {
         line: 1,
         rule: 'private-path-reference',
         message: '/private/path'
+      },
+      {
+        file: 'packages/app/src/runtime.ts',
+        line: 2,
+        rule: 'private-path-reference',
+        message: windowsPath
       }
     ])
+  })
+
+  it('allows scoped package names containing internal in lockfile URLs', () => {
+    const candidate = makeCandidate()
+    writeFile(
+      candidate,
+      'package-lock.json',
+      '{"resolved":"https://registry.npmjs.org/@electron-internal/extract-zip/-/extract-zip-1.0.5.tgz"}'
+    )
+
+    expect(auditOpenCandidate(candidate)).toEqual([])
   })
 
   it('verifies an already-generated candidate even when it is not a git repository', () => {
