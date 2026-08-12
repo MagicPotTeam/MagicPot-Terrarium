@@ -18,6 +18,7 @@ import { confirmLauncherHealth, startLauncherSmokeTest } from './appUpdate/appLa
 import { initializeAppUpdateManager, isAppUpdateInstallInProgress } from './appUpdate/updateManager'
 import { winController } from './winControls'
 import { flushLocalMediaAccessGrants } from './localMediaAccess'
+import { registerLocalMediaFileIntakeIpc } from './localMediaFileIntakeIpc'
 
 const startupUserData = resolveStartupUserDataDirectory()
 fs.mkdirSync(startupUserData.path, { recursive: true })
@@ -54,7 +55,10 @@ if (startupUserData.source === 'env') {
 let mainWindow: BrowserWindow | null = null
 const launcherSmokeTest = startLauncherSmokeTest({ app })
 
-if (!launcherSmokeTest) initializeMainProcessRuntime(() => mainWindow)
+if (!launcherSmokeTest) {
+  initializeMainProcessRuntime(() => mainWindow)
+  registerLocalMediaFileIntakeIpc(() => mainWindow)
+}
 
 function createWindow(onCreated: (window: BrowserWindow) => void): BrowserWindow {
   const startupPolicy = getAppStartupTestWindowPolicy()

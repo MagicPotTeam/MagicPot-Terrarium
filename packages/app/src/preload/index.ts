@@ -17,10 +17,10 @@ const electronFile = {
       return ''
     }
   },
-  authorizeLocalMediaFile(file: unknown): string {
+  async authorizeLocalMediaFile(file: unknown): Promise<string> {
     try {
       const filePath = (webUtils.getPathForFile as (target: unknown) => string)(file) || ''
-      return authorizeLocalMediaFilePath(filePath) ? filePath : ''
+      return (await authorizeLocalMediaFilePath(filePath)) ? filePath : ''
     } catch {
       return ''
     }
@@ -104,12 +104,12 @@ const appEvents: AppEventBridge = {
   onQAppDirectoryChanged: (cb) => subscribeToMainEvent('qapp:dir-changed', cb)
 }
 
-function authorizeLocalMediaFilePath(filePath: string): boolean {
+async function authorizeLocalMediaFilePath(filePath: string): Promise<boolean> {
   if (!filePath) return false
   try {
     // The picker/drag File object is validated in preload with webUtils, so the renderer
     // cannot manufacture an arbitrary absolute path for this capability.
-    return ipcRenderer.sendSync('local-media:authorize-picker-path', filePath) === true
+    return (await ipcRenderer.invoke('local-media:authorize-picker-path', filePath)) === true
   } catch {
     return false
   }

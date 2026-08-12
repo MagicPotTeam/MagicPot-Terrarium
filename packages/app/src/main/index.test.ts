@@ -25,7 +25,8 @@ const {
   isAppUpdateInstallInProgressMock,
   startLauncherSmokeTestMock,
   confirmLauncherHealthMock,
-  flushLocalMediaAccessGrantsMock
+  flushLocalMediaAccessGrantsMock,
+  registerLocalMediaFileIntakeIpcMock
 } = vi.hoisted(() => {
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
   const appMock = {
@@ -66,7 +67,8 @@ const {
     isAppUpdateInstallInProgressMock: vi.fn(() => false),
     startLauncherSmokeTestMock: vi.fn(() => false),
     confirmLauncherHealthMock: vi.fn(() => Promise.resolve(false)),
-    flushLocalMediaAccessGrantsMock: vi.fn()
+    flushLocalMediaAccessGrantsMock: vi.fn(),
+    registerLocalMediaFileIntakeIpcMock: vi.fn()
   }
 })
 
@@ -87,6 +89,9 @@ vi.mock('./config/userDataDirectory', () => ({
 
 vi.mock('./localMediaAccess', () => ({
   flushLocalMediaAccessGrants: flushLocalMediaAccessGrantsMock
+}))
+vi.mock('./localMediaFileIntakeIpc', () => ({
+  registerLocalMediaFileIntakeIpc: registerLocalMediaFileIntakeIpcMock
 }))
 
 vi.mock('./lifeCycle', () => ({
@@ -167,6 +172,7 @@ describe('main process startup window opening', () => {
     beforeShowMock.mockResolvedValue(undefined)
     beforeQuitMock.mockClear()
     flushLocalMediaAccessGrantsMock.mockClear()
+    registerLocalMediaFileIntakeIpcMock.mockClear()
     startQAppWatcherMock.mockClear()
     stopQAppWatcherMock.mockClear()
     initScreenshotManagerMock.mockClear()
@@ -208,6 +214,10 @@ describe('main process startup window opening', () => {
     beforeShowMock.mockRejectedValueOnce(new Error('beforeShow failed'))
 
     await loadModule()
+
+    expect(registerLocalMediaFileIntakeIpcMock).toHaveBeenCalledTimes(1)
+    const getRegisteredMainWindow = registerLocalMediaFileIntakeIpcMock.mock.calls[0]?.[0]
+    expect(getRegisteredMainWindow()).toBe(fallbackWindow)
 
     expect(createMainWindowMock).toHaveBeenCalledTimes(1)
     expect(initScreenshotManagerMock).toHaveBeenCalledTimes(1)
