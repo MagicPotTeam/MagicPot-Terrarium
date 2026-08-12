@@ -53,7 +53,7 @@ jobs:
                 echo "release_mode=retry" >> "$GITHUB_OUTPUT"
                 echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
                 echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
-                echo "ref=refs/heads/master" >> "$GITHUB_OUTPUT"
+                echo "ref=$LAST_RELEASE_COMMIT" >> "$GITHUB_OUTPUT"
                 exit 0
               else
                 IS_DRAFT=$(echo "$RELEASE_JSON" | jq -r '.isDraft')
@@ -73,7 +73,7 @@ jobs:
                   echo "release_mode=retry" >> "$GITHUB_OUTPUT"
                   echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
                   echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
-                  echo "ref=refs/heads/master" >> "$GITHUB_OUTPUT"
+                  echo "ref=$LAST_RELEASE_COMMIT" >> "$GITHUB_OUTPUT"
                   exit 0
                 fi
               fi
@@ -225,9 +225,44 @@ jobs:
 
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
-  release:
+  candidate-ci:
     needs: bump-version
     if: needs.bump-version.result == 'success'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/call-ci.yml
+    with:
+      ref: ${{ needs.bump-version.outputs.ref }}
+
+  candidate-build:
+    needs: bump-version
+    if: needs.bump-version.result == 'success'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/call-build.yml
+    with:
+      ref: ${{ needs.bump-version.outputs.ref }}
+
+  candidate-embedded:
+    needs: bump-version
+    if: needs.bump-version.result == 'success'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/call-embedded-candidate.yml
+    with:
+      ref: ${{ needs.bump-version.outputs.ref }}
+
+  release:
+    needs:
+      - bump-version
+      - candidate-ci
+      - candidate-build
+      - candidate-embedded
+    if: >-
+      needs.bump-version.result == 'success' &&
+      needs.candidate-ci.result == 'success' &&
+      needs.candidate-build.result == 'success' &&
+      needs.candidate-embedded.result == 'success'
     uses: ./.github/workflows/call-release.yml
     with:
       tag_name: ${{ needs.bump-version.outputs.tag_name }}
@@ -259,9 +294,22 @@ jobs:
             --subject "${{ needs.bump-version.outputs.commit_message }}" \
             --body ""
 
-  release-existing:
+  retry-candidate-embedded:
     needs: check-commits
     if: needs.check-commits.outputs.release_mode == 'retry'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/call-embedded-candidate.yml
+    with:
+      ref: ${{ needs.check-commits.outputs.ref }}
+
+  release-existing:
+    needs:
+      - check-commits
+      - retry-candidate-embedded
+    if: >-
+      needs.check-commits.outputs.release_mode == 'retry' &&
+      needs.retry-candidate-embedded.result == 'success'
     uses: ./.github/workflows/call-release.yml
     with:
       tag_name: ${{ needs.check-commits.outputs.tag_name }}

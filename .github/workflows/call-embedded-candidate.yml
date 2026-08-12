@@ -1,0 +1,135 @@
+name: Embedded Candidate
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The exact release candidate ref to validate
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate-windows-embedded:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+          cache: 'npm'
+
+      - name: Cache Electron
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/electron/
+            ~/AppData/Local/electron-builder/
+          key: ${{ runner.os }}-electron-cache-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-cache-
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Cache embedded Python downloads
+        uses: actions/cache@v4
+        with:
+          path: .cache/embedded-python
+          key: ${{ runner.os }}-embedded-python-${{ hashFiles('scripts/prepare-embedded-python.mjs') }}
+          restore-keys: |
+            ${{ runner.os }}-embedded-python-
+
+      - name: Build embedded candidate
+        env:
+          PIP_NO_CACHE_DIR: '1'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          Get-PSDrive -Name C | Select-Object Name,Used,Free
+          Write-Host '::group::Build embedded app'
+          npm run build:embedded
+          Write-Host '::endgroup::'
+          Write-Host '::group::Prepare embedded runtime'
+          npm run prepare:embedded
+          Write-Host '::endgroup::'
+          Write-Host '::group::Build image worker'
+          npm run build:image-worker
+          Write-Host '::endgroup::'
+
+          $env:PACKAGE_MODE = 'embedded'
+          Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
+          Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+          npx electron-builder --config config/electron/electron-builder.config.js --win --x64 --publish never
+
+          $portableRoot = Join-Path $PWD 'dist\embedded\win-unpacked\ComfyUI_windows_portable'
+          $requiredPortableFiles = @(
+            'advanced\run_nvidia_gpu_disable_api_nodes.bat',
+            'update\current_requirements.txt',
+            'update\update.py',
+            'update\update_comfyui.bat',
+            'update\update_comfyui_and_python_dependencies.bat',
+            'update\update_comfyui_stable.bat',
+            'run_cpu.bat',
+            'run_nvidia_gpu.bat',
+            'run_nvidia_gpu_fast_fp16_accumulation.bat'
+          )
+          $missingPortableFiles = @(
+            $requiredPortableFiles | Where-Object {
+              -not (Test-Path -LiteralPath (Join-Path $portableRoot $_) -PathType Leaf)
+            }
+          )
+          if ($missingPortableFiles.Count -gt 0) {
+            throw "Embedded package is missing required ComfyUI portable files: $($missingPortableFiles -join ', ')"
+          }
+
+      - name: Collect embedded candidate diagnostics
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $diagnosticsDir = 'dist/embedded-candidate-diagnostics'
+          New-Item -ItemType Directory -Force -Path $diagnosticsDir | Out-Null
+
+          Get-PSDrive -Name C |
+            Select-Object Name,Used,Free |
+            Format-List |
+            Out-File (Join-Path $diagnosticsDir 'disk-usage.txt')
+
+          foreach ($source in @(
+            '.staging/embedded/custom-node-requirements.json',
+            '.staging/embedded/constraints.txt'
+          )) {
+            if (Test-Path -LiteralPath $source) {
+              Copy-Item -LiteralPath $source -Destination $diagnosticsDir
+            }
+          }
+
+          $python = '.staging/embedded/python_embeded/python.exe'
+          if (Test-Path -LiteralPath $python) {
+            & $python -s -m pip list --format=freeze 2>&1 |
+              Out-File (Join-Path $diagnosticsDir 'pip-list.txt')
+            $global:LASTEXITCODE = 0
+            & $python -s -m pip check 2>&1 |
+              Out-File (Join-Path $diagnosticsDir 'pip-check.txt')
+            $global:LASTEXITCODE = 0
+          }
+
+      - name: Upload embedded candidate diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedded-candidate-diagnostics
+          path: dist/embedded-candidate-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
