@@ -8,6 +8,8 @@ export type {
   GeneratePromptParams,
   LLMChatFinishReason,
   LLMChatMetadata,
+  LLMChatTokenUsage,
+  LLMImageHistoryPolicy,
   LLMChatParams,
   LLMChatResult,
   LLMDeltaEvent,

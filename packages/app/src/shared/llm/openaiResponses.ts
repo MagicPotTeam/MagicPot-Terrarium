@@ -7,6 +7,7 @@ import type {
   OpenAIImageGenerationOutputFormat,
   OpenAIImageGenerationQuality
 } from './types'
+import { selectMessagesForImageHistoryPolicy } from './imageHistory'
 
 type ResponsesInputContent =
   | { type: 'input_text'; text: string }
@@ -42,6 +43,91 @@ export type OpenAIResponsesOutput = {
   citations: OpenAIResponsesCitation[]
   text: string
   images: OpenAIResponsesImageAttachment[]
+}
+
+export type OpenAIResponsesImagePolicy = {
+  maxImages: number
+  maxDecodedBytesPerImage: number
+  maxAggregateDecodedBytes: number
+  maxPixelsPerImage: number
+  maxRequestBodyBytes: number
+}
+
+export const DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY: OpenAIResponsesImagePolicy = {
+  maxImages: 10,
+  maxDecodedBytesPerImage: 8 * 1024 * 1024,
+  // Allows for base64 expansion and JSON overhead below the 16 MiB proxy limit.
+  maxAggregateDecodedBytes: 11 * 1024 * 1024,
+  maxPixelsPerImage: 36_000_000,
+  maxRequestBodyBytes: 16 * 1024 * 1024
+}
+
+const supportedInputImageMimeTypes = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+
+export const inspectOpenAIResponsesImageDataUrl = (
+  value: string
+): { mimeType: string; decodedBytes: number } | null => {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/]+={0,2})$/i.exec(value.trim())
+  if (
+    !match ||
+    match[2].length % 4 !== 0 ||
+    !supportedInputImageMimeTypes.has(match[1].toLowerCase())
+  ) {
+    return null
+  }
+  const padding = match[2].endsWith('==') ? 2 : match[2].endsWith('=') ? 1 : 0
+  return {
+    mimeType: match[1].toLowerCase(),
+    decodedBytes: (match[2].length / 4) * 3 - padding
+  }
+}
+
+export const validateOpenAIResponsesImages = (
+  messages: ChatMessage[],
+  policy: OpenAIResponsesImagePolicy = DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY
+): { imageCount: number; decodedBytes: number } => {
+  let imageCount = 0
+  let decodedBytes = 0
+  for (const message of messages) {
+    for (const attachment of message.attachments || []) {
+      if (attachment.type !== 'image') continue
+      imageCount += 1
+      if (imageCount > policy.maxImages)
+        throw new Error(`Too many images; the limit is ${policy.maxImages}.`)
+      const inspected = inspectOpenAIResponsesImageDataUrl(attachment.url)
+      if (!inspected && !/^https:\/\/[^\s]+$/i.test(attachment.url.trim())) {
+        throw new Error('Images must be supported base64 data URLs or public HTTPS URLs.')
+      }
+      const bytes = inspected?.decodedBytes || attachment.sizeBytes || 0
+      if (bytes > policy.maxDecodedBytesPerImage) {
+        throw new Error(`Image exceeds the ${policy.maxDecodedBytesPerImage}-byte decoded limit.`)
+      }
+      decodedBytes += bytes
+      if (decodedBytes > policy.maxAggregateDecodedBytes) {
+        throw new Error(
+          `Images exceed the ${policy.maxAggregateDecodedBytes}-byte aggregate decoded limit.`
+        )
+      }
+      const width = attachment.sourceWidth || attachment.media?.width
+      const height = attachment.sourceHeight || attachment.media?.height
+      if (width && height && width * height > policy.maxPixelsPerImage) {
+        throw new Error(`Image dimensions exceed the ${policy.maxPixelsPerImage}-pixel limit.`)
+      }
+    }
+  }
+  return { imageCount, decodedBytes }
+}
+
+export const assertOpenAIResponsesRequestBodySize = (
+  serializedBody: string,
+  policy: OpenAIResponsesImagePolicy = DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY
+): void => {
+  const bytes = new TextEncoder().encode(serializedBody).byteLength
+  if (bytes > policy.maxRequestBodyBytes) {
+    throw new Error(
+      `OpenAI Responses request body exceeds the ${policy.maxRequestBodyBytes}-byte limit.`
+    )
+  }
 }
 
 const DEFAULT_IMAGE_ANALYSIS_PROMPT = 'Please analyze the attached image.'
@@ -640,10 +726,14 @@ const assertOpenAIResponsesImageUrl = (value: string): string => {
   throw new Error(OPENAI_RESPONSES_IMAGE_URL_ERROR)
 }
 
-export function buildOpenAIResponsesInput(messages: ChatMessage[]): OpenAIResponsesInputMessage[] {
+export function buildOpenAIResponsesInput(
+  messages: ChatMessage[],
+  options?: { imageHistory?: 'all' | 'latest-user-turn' }
+): OpenAIResponsesInputMessage[] {
   const input: OpenAIResponsesInputMessage[] = []
+  const selectedMessages = selectMessagesForImageHistoryPolicy(messages, options?.imageHistory)
 
-  for (const message of messages) {
+  for (const message of selectedMessages) {
     if (message.role === 'system') {
       continue
     }

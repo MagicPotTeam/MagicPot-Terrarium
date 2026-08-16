@@ -1962,6 +1962,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         maxOutputTokens: req.maxOutputTokens,
         temperature: req.temperature,
         imageGenerationOptions: req.imageGenerationOptions,
+        imageHistoryPolicy: req.imageHistoryPolicy,
         videoGenerationOptions: req.videoGenerationOptions,
         signal: options?.signal,
         sessionUrl: req.sessionUrl,

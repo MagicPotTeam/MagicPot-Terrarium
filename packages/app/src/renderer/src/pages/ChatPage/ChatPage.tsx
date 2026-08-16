@@ -34,6 +34,7 @@ import {
   normalizeReasoningEffort,
   resolveChatProfileCapabilities
 } from '@shared/llm'
+import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
 import type { AgentRouteLike } from '@shared/agent'
 import type { ProjectTraceEventStatus } from '@shared/projectTrace'
 import {
@@ -85,13 +86,17 @@ import {
 import {
   buildChatContextCompactPromptMessages,
   buildChatContextCompressionPlan,
+  buildChatContextTokenCalibrationFingerprint,
   createContextCompressionSourceHash,
+  estimateChatMessagesTokenBreakdown,
   estimateChatMessagesTokenCount,
+  recordChatContextTokenObservation,
   estimateTextTokenCount,
   resolveChatContextCompactSummaryMaxTokens,
   resolveChatContextCompactWindow,
   wrapChatContextCompactSummary,
-  type ChatContextCompressionSummary
+  type ChatContextCompressionSummary,
+  type ChatContextTokenCalibration
 } from './chatContextCompression'
 import type { ChatLoadingStatus } from './chatLoadingStatus'
 import { buildAssistantMessageFromResult } from './chatMessageUtils'
@@ -113,6 +118,7 @@ import { getLocalizedConversationTitle } from './chatLocaleUtils'
 import {
   requestChatCompletion,
   requestChatCompletionStream,
+  resolveChatPageRequestImageHistoryPolicy,
   resolveAttachmentBatchCapability,
   supportsStreamingChatCompletion,
   type RequestChatTokenUsage
@@ -311,13 +317,7 @@ type ChatContextCompactActivityType =
   | 'send_progress'
 
 type ChatContextCompactSkipReason =
-  | 'no_session'
-  | 'too_short'
-  | 'busy'
-  | 'cooldown'
-  | 'stale'
-  | 'aborted'
-  | 'failed'
+  'no_session' | 'too_short' | 'busy' | 'cooldown' | 'stale' | 'aborted' | 'failed'
 
 const HY3D_SIGNED_URL_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const CHAT_INPUT_STATE_COMMIT_DELAY_MS = 80
@@ -816,6 +816,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const compactingSessionIdsRef = useRef<Set<string>>(new Set())
   const contextCompactAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
   const contextCompactLastAttemptAtBySessionIdRef = useRef<Map<string, number>>(new Map())
+  const contextTokenCalibrationByFingerprintRef = useRef<Map<string, ChatContextTokenCalibration>>(
+    new Map()
+  )
+  const fullImageHistoryRecoverySessionIdsRef = useRef<Set<string>>(new Set())
   const autoSaveScanInitializedRef = useRef(false)
   const autoSaveScanCursorBySessionIdRef = useRef<Map<string, number>>(new Map())
   const setSessions = useCallback<React.Dispatch<React.SetStateAction<ChatSession[]>>>((value) => {
@@ -4905,12 +4909,29 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const buildRequestExecutionState = (requestMessage: ChatMessage, sessionUrl?: string) => {
         const requestMessageWithRuntimeContext =
           buildRequestMessageWithRuntimeContext(requestMessage)
+        const imageHistoryDecision = resolveChatPageRequestImageHistoryPolicy({
+          fullHistoryRecoveryPending: Boolean(
+            targetSessionId && fullImageHistoryRecoverySessionIdsRef.current.has(targetSessionId)
+          )
+        })
+        if (imageHistoryDecision.consumeFullHistoryRecovery && targetSessionId) {
+          fullImageHistoryRecoverySessionIdsRef.current.delete(targetSessionId)
+        }
+        const imageHistoryPolicy = imageHistoryDecision.imageHistoryPolicy
+        const calibrationFingerprint = buildChatContextTokenCalibrationFingerprint({
+          profileId,
+          profile: selectedCapabilityProfile,
+          imageHistoryPolicy
+        })
+        const calibration =
+          contextTokenCalibrationByFingerprintRef.current.get(calibrationFingerprint)
         const compressionPlan = buildChatContextCompressionPlan({
           historyMessages,
           requestMessage: requestMessageWithRuntimeContext,
           profile: selectedCapabilityProfile,
           enabled: isAutoContextCompressionAvailable,
-          cachedSummary: latestContextCompressionSummary
+          cachedSummary: latestContextCompressionSummary,
+          calibration
         })
 
         const shouldDropSessionUrlForCompressedRequest = Boolean(
@@ -4967,12 +4988,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
           : requestMessageWithRuntimeContext
 
+        const requestMessages = [
+          ...compressionPlan.requestHistoryMessages,
+          requestMessageWithCompressedContext
+        ]
+        const selectedRequestMessages = selectMessagesForImageHistoryPolicy(
+          requestMessages,
+          imageHistoryPolicy
+        )
         return {
           compressionPlan,
-          requestMessages: [
-            ...compressionPlan.requestHistoryMessages,
-            requestMessageWithCompressedContext
-          ],
+          calibrationFingerprint,
+          estimatedTokens: estimateChatMessagesTokenBreakdown(selectedRequestMessages, calibration),
+          imageHistoryPolicy,
+          requestMessages,
           sessionUrl: shouldDropSessionUrlForCompressedRequest ? undefined : sessionUrl
         }
       }
@@ -5066,6 +5095,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           systemPrompt: activeSystemPrompt,
           reasoningEffort: selectedReasoningEffort,
           imageGenerationOptions: requestImageGenerationOptions,
+          imageHistoryPolicy: requestState.imageHistoryPolicy,
           skillRuntime: serializedSkillRuntime,
           externalAgentSkill: activeExternalAgentSkill,
           sessionUrl: requestState.sessionUrl,
@@ -5074,6 +5104,21 @@ const ChatPage: React.FC<ChatPageProps> = ({
           signal: sessionAbortController.signal
         })
         maybeStartContextCompactFromUsage(result.usage)
+        contextTokenCalibrationByFingerprintRef.current.set(
+          requestState.calibrationFingerprint,
+          recordChatContextTokenObservation(
+            contextTokenCalibrationByFingerprintRef.current.get(
+              requestState.calibrationFingerprint
+            ),
+            {
+              estimatedTextTokens: requestState.estimatedTokens.textTokens,
+              estimatedImageTokens: requestState.estimatedTokens.imageTokens,
+              actualInputTextTokens: result.usage?.inputTextTokens,
+              actualInputImageTokens: result.usage?.inputImageTokens,
+              actualInputTokens: result.usage?.promptTokens
+            }
+          )
+        )
         let response = result.content
         const hasStructuredResponse =
           Boolean(response?.trim()) ||
@@ -5132,6 +5177,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           systemPrompt: activeSystemPrompt,
           reasoningEffort: selectedReasoningEffort,
           imageGenerationOptions: requestImageGenerationOptions,
+          imageHistoryPolicy: requestState.imageHistoryPolicy,
           skillRuntime: serializedSkillRuntime,
           externalAgentSkill: activeExternalAgentSkill,
           sessionUrl: requestState.sessionUrl,
@@ -5187,6 +5233,21 @@ const ChatPage: React.FC<ChatPageProps> = ({
         })
 
         maybeStartContextCompactFromUsage(streamedResult.result.usage)
+        contextTokenCalibrationByFingerprintRef.current.set(
+          requestState.calibrationFingerprint,
+          recordChatContextTokenObservation(
+            contextTokenCalibrationByFingerprintRef.current.get(
+              requestState.calibrationFingerprint
+            ),
+            {
+              estimatedTextTokens: requestState.estimatedTokens.textTokens,
+              estimatedImageTokens: requestState.estimatedTokens.imageTokens,
+              actualInputTextTokens: streamedResult.result.usage?.inputTextTokens,
+              actualInputImageTokens: streamedResult.result.usage?.inputImageTokens,
+              actualInputTokens: streamedResult.result.usage?.promptTokens
+            }
+          )
+        )
         const response = streamedResult.response.replace(/file:\/\/\//g, 'local-media:///')
         streamedResponse = response
         streamedSessionUrl = streamedResult.result.sessionUrl || streamedSessionUrl

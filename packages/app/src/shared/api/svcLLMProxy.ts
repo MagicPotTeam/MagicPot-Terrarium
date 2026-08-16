@@ -10,7 +10,11 @@ import {
   TaggerProviderOption,
   TaggerRuntimeCacheScopeOption
 } from '@shared/config/config'
-import type { OpenAIImageGenerationOptions, VideoGenerationOptions } from '@shared/llm/types'
+import type {
+  LLMImageHistoryPolicy,
+  OpenAIImageGenerationOptions,
+  VideoGenerationOptions
+} from '@shared/llm/types'
 import type { LLMReasoningEffort } from '@shared/llm/profileCapabilities'
 import type { MediaReference } from '@shared/mediaReference'
 import type { ReportBundleRole } from '@shared/reportBundle'
@@ -128,6 +132,7 @@ export type LLMChatReq = {
   maxOutputTokens?: number
   temperature?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
+  imageHistoryPolicy?: LLMImageHistoryPolicy
   videoGenerationOptions?: VideoGenerationOptions
   skillRuntime?: LLMChatSkillRuntime
   route?: AgentRouteLike
@@ -156,6 +161,8 @@ export type LLMChatResp = {
   metadata?: Record<string, unknown>
   usage?: {
     promptTokens?: number
+    inputTextTokens?: number
+    inputImageTokens?: number
     completionTokens?: number
     totalTokens?: number
   }
@@ -189,6 +196,8 @@ export type LLMChatStreamResp = {
   metadata?: Record<string, unknown>
   usage?: {
     promptTokens?: number
+    inputTextTokens?: number
+    inputImageTokens?: number
     completionTokens?: number
     totalTokens?: number
   }

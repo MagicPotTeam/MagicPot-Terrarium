@@ -32,6 +32,18 @@ export type ChatContextCompressionPlan = {
   requestHistoryMessages: ChatMessage[]
 }
 
+export {
+  buildChatContextTokenCalibrationFingerprint,
+  recordChatContextTokenObservation,
+  resetChatContextTokenCalibration,
+  type ChatContextTokenCalibration
+} from './imageUsageCalibration'
+import {
+  estimateChatMessageImageTokenCount,
+  estimateChatMessagesTokenBreakdown,
+  type ChatContextTokenCalibration
+} from './imageUsageCalibration'
+
 export type ChatContextCompactWindow = {
   compactCount: number
   keepRecentCount: number
@@ -112,24 +124,31 @@ export const estimateTextTokenCount = (text: string | undefined | null): number 
   return Math.max(1, Math.ceil(wideGlyphCount * 1.05 + narrowGlyphCount / 4))
 }
 
-const estimateAttachmentTokenCount = (message: ChatMessage): number =>
+const estimateNonImageAttachmentTokenCount = (message: ChatMessage): number =>
   (message.attachments || []).reduce((total, attachment) => {
+    if (attachment.type === 'image') return total
     const descriptor = [
       attachment.type,
       attachment.fileName,
       attachment.mimeType,
-      attachment.relativePath
+      attachment.ocrResult?.text
     ]
       .filter(Boolean)
       .join(' ')
-    return total + 28 + estimateTextTokenCount(descriptor)
+    return total + estimateTextTokenCount(descriptor)
   }, 0)
+
+export {
+  estimateChatMessageImageTokenCount,
+  estimateChatMessagesTokenBreakdown
+} from './imageUsageCalibration'
 
 export const estimateChatMessageTokenCount = (message: ChatMessage): number =>
   10 +
   estimateTextTokenCount(message.content) +
   estimateTextTokenCount(message.hiddenContext) +
-  estimateAttachmentTokenCount(message)
+  estimateNonImageAttachmentTokenCount(message) +
+  estimateChatMessageImageTokenCount(message)
 
 export const estimateChatMessagesTokenCount = (messages: readonly ChatMessage[]): number =>
   messages.reduce((total, message) => total + estimateChatMessageTokenCount(message), 0)
@@ -529,11 +548,13 @@ const resolveCompressionCount = (
   historyMessages: readonly ChatMessage[],
   requestTokens: number,
   contextBudgetTokens: number,
-  force = false
+  force = false,
+  calibration?: ChatContextTokenCalibration
 ): number => {
   if (
     !force &&
-    requestTokens + estimateChatMessagesTokenCount(historyMessages) < contextBudgetTokens
+    requestTokens + estimateChatMessagesTokenBreakdown(historyMessages, calibration).totalTokens <
+      contextBudgetTokens
   ) {
     return 0
   }
@@ -547,16 +568,22 @@ export const buildChatContextCompressionPlan = (input: {
   profile?: ChatCapabilityProfile | null
   enabled: boolean
   cachedSummary?: ChatContextCompressionSummary
+  calibration?: ChatContextTokenCalibration
   force?: boolean
 }): ChatContextCompressionPlan => {
   const capabilities = resolveChatProfileCapabilities(input.profile)
   const contextBudgetTokens = capabilities.contextBudgetTokens ?? null
   const contextWindowTokens = capabilities.contextWindowTokens ?? null
-  const requestTokens = estimateChatMessageTokenCount(input.requestMessage)
+  const requestTokens = estimateChatMessagesTokenBreakdown(
+    [input.requestMessage],
+    input.calibration
+  ).totalTokens
   const cachedSummary = input.cachedSummary?.summary.trim() ? input.cachedSummary : undefined
   const cachedSummaryTokens = cachedSummary ? estimateTextTokenCount(cachedSummary.summary) : 0
   const estimatedInputTokens =
-    cachedSummaryTokens + estimateChatMessagesTokenCount(input.historyMessages) + requestTokens
+    cachedSummaryTokens +
+    estimateChatMessagesTokenBreakdown(input.historyMessages, input.calibration).totalTokens +
+    requestTokens
   const usageRatio = contextBudgetTokens
     ? Math.min(1, estimatedInputTokens / contextBudgetTokens)
     : null
@@ -579,7 +606,8 @@ export const buildChatContextCompressionPlan = (input: {
     input.historyMessages,
     requestTokens + cachedSummaryTokens,
     effectiveBudgetTokens,
-    input.force
+    input.force,
+    input.calibration
   )
   if (compressionCount === 0) {
     return {
@@ -633,7 +661,7 @@ export const buildChatContextCompressionPlan = (input: {
     contextWindowTokens,
     estimatedCompressedInputTokens:
       compressionSummary.estimatedSummaryTokens +
-      estimateChatMessagesTokenCount(requestHistoryMessages) +
+      estimateChatMessagesTokenBreakdown(requestHistoryMessages, input.calibration).totalTokens +
       requestTokens,
     usageRatio,
     shouldCompress: true,
