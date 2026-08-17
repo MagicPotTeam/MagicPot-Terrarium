@@ -39,6 +39,8 @@ export type LLMAPIProfile = {
   codex_fast_mode?: boolean
   context_window_tokens?: number
   context_budget_tokens?: number
+  /** Only enable when the provider request path actually consumes and returns a continuation id/url. */
+  supports_session_continuation?: boolean
   provider?: LLMProviderOption
   deployment?: LLMDeployment
   model_use?: LLMModelUseOption
@@ -77,14 +79,7 @@ export type SkillReferenceAttachment = {
 
 export type CustomSkillExecutionMode = 'inherit' | 'isolated'
 export type CustomSkillOutputMode =
-  | 'default'
-  | 'text'
-  | 'image'
-  | 'video'
-  | 'model3d'
-  | 'chat'
-  | 'sidecar'
-  | 'structured'
+  'default' | 'text' | 'image' | 'video' | 'model3d' | 'chat' | 'sidecar' | 'structured'
 export type CustomSkillFallbackStrategy = 'default' | 'smaller-batches' | 'single-file'
 export type CustomSkillContextMessageLimit = 0 | 3 | 5 | 10 | 'all'
 export type CustomSkillOutputSchema = JsonValue

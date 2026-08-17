@@ -130,6 +130,19 @@ const RESPONSES_SCOPE_ERROR_FRAGMENT = 'Missing scopes: api.responses.write'
 const RESPONSES_SCOPE_ERROR_MESSAGE =
   'The current OpenAI account is missing the required Responses permission (`api.responses.write`). Check the configured account or workspace, then try again.'
 
+export const isInvalidSessionContinuationError = (error: unknown): boolean => {
+  const message = (error instanceof Error ? error.message : String(error || ''))
+    .trim()
+    .toLowerCase()
+  if (!message || !/\b(?:400|404|409|410|422)\b/.test(message)) {
+    return false
+  }
+  return (
+    /(?:invalid|expired|stale|unknown|not found|no longer available)/.test(message) &&
+    /(?:session|continuation|previous[_ -]?response)/.test(message)
+  )
+}
+
 const mapLocalChatRequestErrorMessage = (message: string): string => {
   const normalized = message.trim()
   if (/\b401\b/.test(normalized) && normalized.includes(RESPONSES_SCOPE_ERROR_FRAGMENT)) {

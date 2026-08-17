@@ -41,6 +41,8 @@ export interface ChatSession {
   storageScope?: string
   /** Session continuation URL preserved across replies when the runtime returns one. */
   sessionUrl?: string
+  /** Base profile id that owns sessionUrl; prevents reuse after a profile/provider switch. */
+  sessionProfileId?: string
   createdAt?: number
 }
 
@@ -118,6 +120,16 @@ async function migrateLegacyAttachmentsInSession(
       for (const attachment of message.attachments) attachments.push(await migrate(attachment))
       messages.push({ ...message, attachments })
     }
+    const replayImageMessages: ChatMessage[] = []
+    for (const message of original.contextCompression?.replayImageMessages || []) {
+      if (!message.attachments) {
+        replayImageMessages.push(message)
+        continue
+      }
+      const attachments: ChatAttachment[] = []
+      for (const attachment of message.attachments) attachments.push(await migrate(attachment))
+      replayImageMessages.push({ ...message, attachments })
+    }
     const draft = original.draft
       ? {
           ...original.draft,
@@ -130,7 +142,18 @@ async function migrateLegacyAttachmentsInSession(
       }
     }
     if (!changed) return original
-    const replacement = { ...original, messages, ...(draft ? { draft } : {}) }
+    const contextCompression = original.contextCompression
+      ? {
+          ...original.contextCompression,
+          ...(replayImageMessages.length > 0 ? { replayImageMessages } : {})
+        }
+      : undefined
+    const replacement = {
+      ...original,
+      messages,
+      ...(draft ? { draft } : {}),
+      ...(contextCompression ? { contextCompression } : {})
+    }
     const persisted = await compareAndUpdateSessionInDB(original.id, scope, {
       expectedSession: original,
       update: () => replacement
@@ -394,7 +417,13 @@ export function deleteSessionDraftBackup(sessionId: string, scope = 'default'): 
 }
 
 function normalizeSession(session: ChatSession | LegacyChatSession, scope?: string): ChatSession {
-  const { sessionUrl, draft, storageKey: _storageKey, ...rest } = session as StoredChatSession
+  const {
+    sessionUrl,
+    sessionProfileId,
+    draft,
+    storageKey: _storageKey,
+    ...rest
+  } = session as StoredChatSession
   delete (rest as Record<string, unknown>).contextCompressionActivity
   const legacySessionUrlEntry = Object.entries(session as Record<string, unknown>).find(
     ([key, value]) =>
@@ -407,6 +436,9 @@ function normalizeSession(session: ChatSession | LegacyChatSession, scope?: stri
   return {
     ...rest,
     ...(sessionUrl || legacySessionUrl ? { sessionUrl: sessionUrl || legacySessionUrl } : {}),
+    ...(typeof sessionProfileId === 'string' && sessionProfileId.trim()
+      ? { sessionProfileId: normalizeChatProfileIdForStorage(sessionProfileId) }
+      : {}),
     ...(normalizedDraft ? { draft: normalizedDraft } : {}),
     profileId: normalizeChatProfileIdForStorage(session.profileId),
     storageScope: normalizeScope(scope ?? session.storageScope)

@@ -118,6 +118,7 @@ import { getLocalizedConversationTitle } from './chatLocaleUtils'
 import {
   requestChatCompletion,
   requestChatCompletionStream,
+  isInvalidSessionContinuationError,
   resolveChatPageRequestExecutionImagePolicy,
   resolveAttachmentBatchCapability,
   supportsStreamingChatCompletion,
@@ -863,7 +864,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const migratedSessions = await Promise.all(
         loadedSessions.map(async (loadedSession) => {
           const migrated = migrateLegacyChatMediaMessages(loadedSession.messages, dataDir)
-          if (!migrated.changed) return loadedSession
+          const migratedReplay = migrateLegacyChatMediaMessages(
+            loadedSession.contextCompression?.replayImageMessages || [],
+            dataDir
+          )
+          if (!migrated.changed && !migratedReplay.changed) return loadedSession
 
           const sessionKey = `${storageScope}\u0000${loadedSession.id}`
           try {
@@ -883,7 +888,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   const persistedSession = persistedSessionsRef.current.get(loadedSession.id)
                   return currentSession === loadedSession || currentSession === persistedSession
                 })(),
-              update: (currentSession) => ({ ...currentSession, messages: migrated.value })
+              update: (currentSession) => ({
+                ...currentSession,
+                ...(migrated.changed ? { messages: migrated.value } : {}),
+                ...(migratedReplay.changed && currentSession.contextCompression
+                  ? {
+                      contextCompression: {
+                        ...currentSession.contextCompression,
+                        replayImageMessages: migratedReplay.value
+                      }
+                    }
+                  : {})
+              })
             })
             return committed || loadedSession
           } catch (error) {
@@ -2439,7 +2455,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
         },
         profile: selectedCapabilityProfile,
         enabled: isAutoContextCompressionAvailable,
-        cachedSummary: currentSession?.contextCompression
+        cachedSummary: currentSession?.contextCompression,
+        imageHistoryPolicy:
+          selectedProfileCapabilities.supportsSessionContinuation && currentSession?.sessionUrl
+            ? 'latest-user-turn'
+            : 'all'
       }),
     [
       currentSession?.contextCompression,
@@ -2448,7 +2468,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       isAutoContextCompressionAvailable,
       pendingAttachments,
       pendingHiddenContext,
-      selectedCapabilityProfile
+      selectedCapabilityProfile,
+      selectedProfileCapabilities.supportsSessionContinuation
     ]
   )
   const canCompressCurrentContext = Boolean(currentSession && currentSession.messages.length > 0)
@@ -2670,6 +2691,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
 
           const summaryText = wrapChatContextCompactSummary(rawSummary, compactRound)
+          const replayImageMessages = [
+            ...(previousSummary?.replayImageMessages || []),
+            ...messagesToCompress.flatMap((message, index) => {
+              if (message.role !== 'user') return []
+              const imageAttachments = (message.attachments || []).filter(
+                (attachment) => attachment.type === 'image'
+              )
+              if (imageAttachments.length === 0) return []
+              return [
+                {
+                  role: 'user' as const,
+                  content: `Historical image replay from compacted user message ${index + 1}.`,
+                  attachments: imageAttachments
+                }
+              ]
+            })
+          ]
           const summary: ChatContextCompressionSummary = {
             summary: summaryText,
             coveredMessageCount:
@@ -2687,6 +2725,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               ? { lastTotalTokens: result.usage.totalTokens }
               : {}),
             ...(options.manual ? { manual: true } : {}),
+            ...(replayImageMessages.length > 0 ? { replayImageMessages } : {}),
             metadata: {
               ...(previousSummary?.metadata || {}),
               previousSourceHash,
@@ -2705,6 +2744,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             tokensBefore: estimatedSourceTokens,
             tokensAfter:
               summary.estimatedSummaryTokens +
+              estimateChatMessagesTokenCount(replayImageMessages) +
               estimateChatMessagesTokenCount(compactWindow.liveMessages),
             summaryPreview: summary.summary.slice(0, 400)
           }
@@ -4431,8 +4471,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const nextProfileId = resolveAvailableProfileId(profileId)
       setSelectedProfileId(nextProfileId)
       if (currentSession) {
+        const previousBaseProfileId = normalizeChatProfileIdForStorage(currentSession.profileId)
+        const nextBaseProfileId = normalizeChatProfileIdForStorage(nextProfileId)
+        const profileChanged = previousBaseProfileId !== nextBaseProfileId
         const updated = sessions.map((s) =>
-          s.id === currentSessionId ? { ...s, profileId: nextProfileId ?? undefined } : s
+          s.id === currentSessionId
+            ? {
+                ...s,
+                profileId: nextProfileId ?? undefined,
+                ...(profileChanged ? { sessionUrl: undefined, sessionProfileId: undefined } : {})
+              }
+            : s
         )
         setSessions(updated)
       }
@@ -4754,6 +4803,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           availableProfiles.find((profile) => profile.id === baseProfileId) ||
           null
         : null
+      const activeCapabilityProfile = activeProfile as ChatCapabilityProfile | null
+      const activeProfileCapabilities = resolveChatProfileCapabilities(activeCapabilityProfile)
       const responseModelName =
         (activeProfile?.model_name || baseProfileId || '').trim() || undefined
       const skillAttachmentSupport =
@@ -4802,7 +4853,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
         shouldBatchAttachments(rawAttachments) && !shouldPreserveMultiAttachmentRequest
       const latestContextCompressionSummary = cs.contextCompression
       let shouldDiscardSessionUrlForContextCompact = false
-      let primaryRequestDispatchPending = true
+      const activeContinuationProfileId = normalizeChatProfileIdForStorage(baseProfileId)
+      const continuationProfileMatches =
+        !currentSessionUrl ||
+        !cs.sessionProfileId ||
+        normalizeChatProfileIdForStorage(cs.sessionProfileId) === activeContinuationProfileId
+      let requestContinuationUrl =
+        activeProfileCapabilities.supportsSessionContinuation && continuationProfileMatches
+          ? currentSessionUrl?.trim() || undefined
+          : undefined
+      if (currentSessionUrl && !continuationProfileMatches) {
+        shouldDiscardSessionUrlForContextCompact = true
+      }
+      let requestHistoryMessages = historyMessages
       const sessionAbortController = new AbortController()
       sessionAbortControllersRef.current.set(targetSessionId, sessionAbortController)
 
@@ -4906,55 +4969,55 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
           : requestMessage
 
-      const buildRequestExecutionState = (
-        requestMessage: ChatMessage,
-        sessionUrl?: string,
-        options?: { isPrimaryDispatch?: boolean }
-      ) => {
+      const buildRequestExecutionState = (requestMessage: ChatMessage, sessionUrl?: string) => {
         const requestMessageWithRuntimeContext =
           buildRequestMessageWithRuntimeContext(requestMessage)
+        const hasUsableSessionContinuation = Boolean(
+          activeProfileCapabilities.supportsSessionContinuation && sessionUrl?.trim()
+        )
         const preliminaryImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
-          shouldResetContinuation: false,
-          isPrimaryDispatch: options?.isPrimaryDispatch
+          supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
+          hasUsableSessionContinuation,
+          shouldResetContinuation: false
         }).preliminaryImageHistoryPolicy
         const preliminaryCalibrationFingerprint = buildChatContextTokenCalibrationFingerprint({
           profileId,
-          profile: selectedCapabilityProfile,
+          profile: activeCapabilityProfile,
           imageHistoryPolicy: preliminaryImageHistoryPolicy
         })
         const preliminaryCalibration = contextTokenCalibrationByFingerprintRef.current.get(
           preliminaryCalibrationFingerprint
         )
         let compressionPlan = buildChatContextCompressionPlan({
-          historyMessages,
+          historyMessages: requestHistoryMessages,
           requestMessage: requestMessageWithRuntimeContext,
-          profile: selectedCapabilityProfile,
+          profile: activeCapabilityProfile,
           enabled: isAutoContextCompressionAvailable,
           cachedSummary: latestContextCompressionSummary,
           calibration: preliminaryCalibration,
           imageHistoryPolicy: preliminaryImageHistoryPolicy
         })
 
-        const isPrimaryDispatch = options?.isPrimaryDispatch !== false
         const shouldDropSessionUrlForCompressedRequest = Boolean(
           compressionPlan.shouldCompress && isAutoContextCompressionAvailable
         )
         const imageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
-          shouldResetContinuation: shouldDropSessionUrlForCompressedRequest,
-          isPrimaryDispatch
+          supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
+          hasUsableSessionContinuation,
+          shouldResetContinuation: shouldDropSessionUrlForCompressedRequest
         }).imageHistoryPolicy
         const calibrationFingerprint = buildChatContextTokenCalibrationFingerprint({
           profileId,
-          profile: selectedCapabilityProfile,
+          profile: activeCapabilityProfile,
           imageHistoryPolicy
         })
         const calibration =
           contextTokenCalibrationByFingerprintRef.current.get(calibrationFingerprint)
         if (imageHistoryPolicy !== preliminaryImageHistoryPolicy) {
           compressionPlan = buildChatContextCompressionPlan({
-            historyMessages,
+            historyMessages: requestHistoryMessages,
             requestMessage: requestMessageWithRuntimeContext,
-            profile: selectedCapabilityProfile,
+            profile: activeCapabilityProfile,
             enabled: isAutoContextCompressionAvailable,
             cachedSummary: latestContextCompressionSummary,
             calibration,
@@ -5015,6 +5078,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           : requestMessageWithRuntimeContext
 
         const requestMessages = [
+          ...compressionPlan.requestReplayImageMessages,
           ...compressionPlan.requestHistoryMessages,
           requestMessageWithCompressedContext
         ]
@@ -5022,6 +5086,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
           requestMessages,
           imageHistoryPolicy
         )
+        const selectedImageCount = selectedRequestMessages.reduce(
+          (total, message) =>
+            total +
+            (message.attachments || []).filter((attachment) => attachment.type === 'image').length,
+          0
+        )
+        if (selectedImageCount > 10) {
+          throw new Error(
+            `This request reconstructs ${selectedImageCount} images, exceeding the supported limit of 10. Start a new session or remove older image references.`
+          )
+        }
         return {
           compressionPlan,
           calibrationFingerprint,
@@ -5033,17 +5108,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
 
       const resolvePersistedSessionUrl = (sessionUrl?: string): string | null | undefined =>
-        shouldDiscardSessionUrlForContextCompact || !executionContext.shouldPersistSessionUrl
+        shouldDiscardSessionUrlForContextCompact ||
+        !executionContext.shouldPersistSessionUrl ||
+        !activeProfileCapabilities.supportsSessionContinuation
           ? null
-          : sessionUrl
+          : sessionUrl?.trim() || undefined
 
       const maybeStartContextCompactFromUsage = (usage?: RequestChatTokenUsage): void => {
         const observedInputTokens = usage?.promptTokens ?? usage?.totalTokens
         const contextWindowTokens =
-          selectedProfileCapabilities.contextWindowTokens ||
-          selectedProfileCapabilities.contextBudgetTokens
+          activeProfileCapabilities.contextWindowTokens ||
+          activeProfileCapabilities.contextBudgetTokens
         const triggerTokens =
-          selectedProfileCapabilities.contextBudgetTokens ||
+          activeProfileCapabilities.contextBudgetTokens ||
           (contextWindowTokens
             ? Math.floor((contextWindowTokens * AUTO_CONTEXT_COMPRESSION_TRIGGER_PERCENT) / 100)
             : undefined)
@@ -5102,9 +5179,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         requestMessage: ChatMessage,
         sessionUrl?: string
       ) => {
-        const requestState = buildRequestExecutionState(requestMessage, sessionUrl, {
-          isPrimaryDispatch: primaryRequestDispatchPending
-        })
+        const requestState = buildRequestExecutionState(requestMessage, sessionUrl)
         updateLoadingStatus(
           t('chat.loading_wait_response', {
             defaultValue: '等待模型响应'
@@ -5114,35 +5189,47 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }),
           3
         )
-        const resultPromise = requestChatCompletion({
-          config,
-          messages: requestState.requestMessages,
-          storageScope,
-          route,
-          profileId,
-          systemPrompt: activeSystemPrompt,
-          reasoningEffort: selectedReasoningEffort,
-          imageGenerationOptions: requestImageGenerationOptions,
-          imageHistoryPolicy: requestState.imageHistoryPolicy,
-          skillRuntime: serializedSkillRuntime,
-          externalAgentSkill: activeExternalAgentSkill,
-          sessionUrl: requestState.sessionUrl,
-          conversationId: targetSessionId ?? undefined,
-          isEdit: !!overrides?.baseMessages,
-          signal: sessionAbortController.signal
-        })
-        primaryRequestDispatchPending = false
-        const result = await resultPromise
+        const dispatchCompletion = (state: ReturnType<typeof buildRequestExecutionState>) =>
+          requestChatCompletion({
+            config,
+            messages: state.requestMessages,
+            storageScope,
+            route,
+            profileId,
+            systemPrompt: activeSystemPrompt,
+            reasoningEffort: selectedReasoningEffort,
+            imageGenerationOptions: requestImageGenerationOptions,
+            imageHistoryPolicy: state.imageHistoryPolicy,
+            skillRuntime: serializedSkillRuntime,
+            externalAgentSkill: activeExternalAgentSkill,
+            sessionUrl: state.sessionUrl,
+            conversationId: targetSessionId ?? undefined,
+            isEdit: !!overrides?.baseMessages,
+            signal: sessionAbortController.signal
+          })
+        let completedRequestState = requestState
+        let result
+        try {
+          result = await dispatchCompletion(requestState)
+        } catch (error) {
+          if (!requestState.sessionUrl || !isInvalidSessionContinuationError(error)) {
+            throw error
+          }
+          requestContinuationUrl = undefined
+          shouldDiscardSessionUrlForContextCompact = true
+          completedRequestState = buildRequestExecutionState(requestMessage, undefined)
+          result = await dispatchCompletion(completedRequestState)
+        }
         maybeStartContextCompactFromUsage(result.usage)
         contextTokenCalibrationByFingerprintRef.current.set(
-          requestState.calibrationFingerprint,
+          completedRequestState.calibrationFingerprint,
           recordChatContextTokenObservation(
             contextTokenCalibrationByFingerprintRef.current.get(
-              requestState.calibrationFingerprint
+              completedRequestState.calibrationFingerprint
             ),
             {
-              estimatedTextTokens: requestState.estimatedTokens.textTokens,
-              estimatedImageTokens: requestState.estimatedTokens.imageTokens,
+              estimatedTextTokens: completedRequestState.estimatedTokens.textTokens,
+              estimatedImageTokens: completedRequestState.estimatedTokens.imageTokens,
               actualInputTextTokens: result.usage?.inputTextTokens,
               actualInputImageTokens: result.usage?.inputImageTokens,
               actualInputTokens: result.usage?.promptTokens
@@ -5187,9 +5274,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         streamedOcrResult = undefined
         seenStreamAttachmentKeys.clear()
 
-        const requestState = buildRequestExecutionState(requestMessage, sessionUrl, {
-          isPrimaryDispatch: primaryRequestDispatchPending
-        })
+        const requestState = buildRequestExecutionState(requestMessage, sessionUrl)
         updateLoadingStatus(
           t('chat.loading_wait_response', {
             defaultValue: '等待模型响应'
@@ -5263,8 +5348,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
           }
         })
-        primaryRequestDispatchPending = false
-        const streamedResult = await streamedResultPromise
+        let streamedResult
+        try {
+          streamedResult = await streamedResultPromise
+        } catch (error) {
+          if (
+            !requestState.sessionUrl ||
+            !isInvalidSessionContinuationError(error) ||
+            streamedResponse ||
+            streamedAttachments.length > 0
+          ) {
+            throw error
+          }
+          requestContinuationUrl = undefined
+          shouldDiscardSessionUrlForContextCompact = true
+          return requestCompletionForUserMessage(requestMessage, undefined)
+        }
 
         maybeStartContextCompactFromUsage(streamedResult.result.usage)
         contextTokenCalibrationByFingerprintRef.current.set(
@@ -5418,7 +5517,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             attachmentBatchEntries,
             maxAttachmentsPerRequest
           )
-          let returnedSessionUrl: string | undefined
+          let returnedSessionUrl: string | undefined = requestContinuationUrl
           const executeSingleAttachmentEntry = async (
             entry: (typeof attachmentBatchEntries)[number]
           ) => {
@@ -5427,9 +5526,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
             ])
             const singleResult = await requestCompletionForUserMessage(
               singleUserMessage,
-              currentSessionUrl
+              requestContinuationUrl
             )
-            returnedSessionUrl = singleResult.result.sessionUrl || returnedSessionUrl
+            requestHistoryMessages = [...requestHistoryMessages, singleUserMessage]
+            if (activeProfileCapabilities.supportsSessionContinuation) {
+              requestContinuationUrl = singleResult.result.sessionUrl || requestContinuationUrl
+            }
+            returnedSessionUrl = requestContinuationUrl || returnedSessionUrl
             completedAssistantMessages.push({
               ...buildAssistantMessageFromResult(
                 {
@@ -5463,12 +5566,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
             )
             const { result, response } = await requestCompletionForUserMessage(
               chunkUserMessage,
-              currentSessionUrl
+              requestContinuationUrl
             )
-            returnedSessionUrl = result.sessionUrl || returnedSessionUrl
+            const candidateContinuationUrl =
+              activeProfileCapabilities.supportsSessionContinuation && result.sessionUrl
+                ? result.sessionUrl
+                : requestContinuationUrl
 
             const parsedBatchResponses = parseAttachmentBatchResponse(response, chunk.length)
             if (parsedBatchResponses) {
+              requestHistoryMessages = [...requestHistoryMessages, chunkUserMessage]
+              requestContinuationUrl = candidateContinuationUrl
+              returnedSessionUrl = requestContinuationUrl || returnedSessionUrl
               completedAssistantMessages.push(
                 ...parsedBatchResponses.map((responseContent, index) => ({
                   ...buildAssistantMessageFromResult(
@@ -5511,7 +5620,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
             replaceLastMessageWithMessagesInSession(prev, {
               sessionId: targetSessionId,
               messages: completedAssistantMessages,
-              sessionUrl: resolvePersistedSessionUrl(returnedSessionUrl)
+              sessionUrl: resolvePersistedSessionUrl(returnedSessionUrl),
+              sessionProfileId: returnedSessionUrl ? activeContinuationProfileId : null
             })
           )
 
@@ -5523,8 +5633,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           traceResponseCount = completedAssistantMessages.length
         } else {
           const { result, response } = shouldStreamStandardResponse
-            ? await requestStreamedCompletionForUserMessage(userMessage, currentSessionUrl)
-            : await requestCompletionForUserMessage(userMessage, currentSessionUrl)
+            ? await requestStreamedCompletionForUserMessage(userMessage, requestContinuationUrl)
+            : await requestCompletionForUserMessage(userMessage, requestContinuationUrl)
           const responseUpdater = withLatestContextCompression((prev: ChatSession[]) =>
             replaceLastMessageInSession(prev, {
               sessionId: targetSessionId,
@@ -5542,7 +5652,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   skillId: activeSkillRuntime.skill?.id
                 }
               ),
-              sessionUrl: resolvePersistedSessionUrl(result.sessionUrl)
+              sessionUrl: resolvePersistedSessionUrl(result.sessionUrl),
+              sessionProfileId: result.sessionUrl ? activeContinuationProfileId : null
             })
           )
 
@@ -5574,7 +5685,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
               return replaceLastMessageWithMessagesInSession(prev, {
                 sessionId: targetSessionId,
                 messages: completedAssistantMessages,
-                sessionUrl: resolvePersistedSessionUrl(streamedSessionUrl)
+                sessionUrl: resolvePersistedSessionUrl(streamedSessionUrl),
+                sessionProfileId: streamedSessionUrl ? activeContinuationProfileId : null
               })
             }
 
@@ -5588,7 +5700,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   ...(streamedOcrResult ? { ocrResult: streamedOcrResult } : {}),
                   ...(responseModelName ? { modelName: responseModelName } : {})
                 },
-                sessionUrl: resolvePersistedSessionUrl(streamedSessionUrl)
+                sessionUrl: resolvePersistedSessionUrl(streamedSessionUrl),
+                sessionProfileId: streamedSessionUrl ? activeContinuationProfileId : null
               })
             }
 
@@ -5637,17 +5750,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
             runId,
             payload: archivePayload
           })
+          const errorSessionUrl = shouldDiscardSessionUrlForContextCompact ? null : undefined
           const errorUpdater = withLatestContextCompression((prev: ChatSession[]) => {
             if (completedAssistantMessages.length > 0) {
               return replaceLastMessageWithMessagesInSession(prev, {
                 sessionId: targetSessionId,
-                messages: [...completedAssistantMessages, errorMessage]
+                messages: [...completedAssistantMessages, errorMessage],
+                sessionUrl: errorSessionUrl
               })
             }
 
             return replaceLastMessageInSession(prev, {
               sessionId: targetSessionId,
-              message: errorMessage
+              message: errorMessage,
+              sessionUrl: errorSessionUrl
             })
           })
           setSessions(errorUpdater)

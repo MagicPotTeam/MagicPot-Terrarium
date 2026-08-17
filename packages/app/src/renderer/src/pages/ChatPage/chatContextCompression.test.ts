@@ -109,5 +109,57 @@ describe('chatContextCompression', () => {
     expect(latestPlan.requestHistoryMessages[1]?.content).toBe('historical answer stays')
     expect(allPlan.shouldCompress).toBe(true)
     expect(allPlan.compressionSummary?.summary).toContain('historical text stays')
+    expect(allPlan.requestReplayImageMessages).toEqual([
+      {
+        role: 'user',
+        content: 'Historical image replay from compacted user message 1.',
+        attachments: [
+          expect.objectContaining({
+            type: 'image',
+            url: 'local-media:///historical.png'
+          })
+        ]
+      }
+    ])
+    expect(latestPlan.requestReplayImageMessages).toEqual([])
+  })
+
+  it('replays images preserved by an earlier successful compaction', () => {
+    const cachedSummary: ChatContextCompressionSummary = {
+      summary: 'older compacted context',
+      coveredMessageCount: 2,
+      sourceHash: 'older-hash',
+      estimatedSourceTokens: 100,
+      estimatedSummaryTokens: 10,
+      updatedAt: 100,
+      replayImageMessages: [
+        {
+          role: 'user',
+          content: 'Historical image replay from compacted user message 1.',
+          attachments: [{ type: 'image', url: 'local-media:///already-compacted.png' }]
+        }
+      ]
+    }
+
+    const withoutReplay = buildChatContextCompressionPlan({
+      historyMessages: createTurnMessages(2),
+      requestMessage: { role: 'user', content: 'continue' },
+      enabled: false,
+      cachedSummary: { ...cachedSummary, replayImageMessages: undefined },
+      imageHistoryPolicy: 'all'
+    })
+    const plan = buildChatContextCompressionPlan({
+      historyMessages: createTurnMessages(2),
+      requestMessage: { role: 'user', content: 'continue' },
+      enabled: false,
+      cachedSummary,
+      imageHistoryPolicy: 'all'
+    })
+
+    expect(plan.shouldCompress).toBe(false)
+    expect(plan.estimatedInputTokens).toBeGreaterThan(withoutReplay.estimatedInputTokens)
+    expect(plan.requestReplayImageMessages[0]?.attachments?.[0]?.url).toBe(
+      'local-media:///already-compacted.png'
+    )
   })
 })

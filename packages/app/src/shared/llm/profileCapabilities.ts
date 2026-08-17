@@ -2,20 +2,10 @@ import type { LLMDeployment, LLMProviderOption } from '@shared/config/config'
 import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 
 export type LLMReasoningEffort =
-  | 'none'
-  | 'minimal'
-  | 'low'
-  | 'medium'
-  | 'high'
-  | 'xhigh'
-  | 'max'
-  | 'ultra'
+  'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 
 export type ProviderAttachmentTransport =
-  | 'file-id'
-  | 'multipart'
-  | 'accessible-url'
-  | 'request-data-url'
+  'file-id' | 'multipart' | 'accessible-url' | 'request-data-url'
 
 export type ChatCapabilityProfile = {
   model_name?: string
@@ -32,6 +22,8 @@ export type ChatCapabilityProfile = {
   attachmentTransports?: readonly (ProviderAttachmentTransport | string)[]
   preferred_attachment_transport?: ProviderAttachmentTransport | string
   preferredAttachmentTransport?: ProviderAttachmentTransport | string
+  supports_session_continuation?: boolean
+  supportsSessionContinuation?: boolean
 }
 
 export type ChatProfileCapabilities = {
@@ -40,6 +32,7 @@ export type ChatProfileCapabilities = {
   contextWindowTokens?: number
   contextBudgetTokens?: number
   supportsAutoContextCompression: boolean
+  supportsSessionContinuation: boolean
   attachmentTransports: ProviderAttachmentTransport[]
   preferredAttachmentTransport?: ProviderAttachmentTransport
 }
@@ -141,6 +134,9 @@ const resolveExplicitContextTokens = (
   }
 }
 
+const resolveSessionContinuationCapability = (profile?: ChatCapabilityProfile | null): boolean =>
+  profile?.supports_session_continuation === true || profile?.supportsSessionContinuation === true
+
 const isCodexReasoningProfile = (profile?: ChatCapabilityProfile | null): boolean => {
   if (!profile) {
     return false
@@ -216,6 +212,7 @@ export const resolveChatProfileCapabilities = (
       reasoningEfforts: [],
       ...explicitContextTokens,
       supportsAutoContextCompression: Boolean(explicitContextTokens.contextBudgetTokens),
+      supportsSessionContinuation: resolveSessionContinuationCapability(profile),
       ...attachmentCapabilities
     })
   }
@@ -283,6 +280,7 @@ export const resolveChatProfileCapabilities = (
     ...(resolvedContextWindowTokens ? { contextWindowTokens: resolvedContextWindowTokens } : {}),
     ...(contextBudgetTokens ? { contextBudgetTokens } : {}),
     supportsAutoContextCompression: Boolean(contextBudgetTokens),
+    supportsSessionContinuation: resolveSessionContinuationCapability(profile),
     ...attachmentCapabilities
   })
 }

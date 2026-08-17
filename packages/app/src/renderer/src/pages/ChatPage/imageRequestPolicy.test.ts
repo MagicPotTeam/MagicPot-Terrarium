@@ -2,26 +2,49 @@ import { describe, expect, it } from 'vitest'
 import { resolveChatPageRequestExecutionImagePolicy } from './imageRequestPolicy'
 
 describe('resolveChatPageRequestExecutionImagePolicy', () => {
-  it('keeps normal dispatches on latest-user-turn history', () => {
-    expect(resolveChatPageRequestExecutionImagePolicy({ shouldResetContinuation: false })).toEqual({
+  it('replays all image history when the provider does not support session continuation', () => {
+    expect(
+      resolveChatPageRequestExecutionImagePolicy({
+        supportsSessionContinuation: false,
+        hasUsableSessionContinuation: false,
+        shouldResetContinuation: false
+      })
+    ).toEqual({
+      preliminaryImageHistoryPolicy: 'all',
+      imageHistoryPolicy: 'all'
+    })
+  })
+
+  it('replays all image history before a supported continuation has been established', () => {
+    expect(
+      resolveChatPageRequestExecutionImagePolicy({
+        supportsSessionContinuation: true,
+        hasUsableSessionContinuation: false,
+        shouldResetContinuation: false
+      }).imageHistoryPolicy
+    ).toBe('all')
+  })
+
+  it('uses latest-user-turn only with an explicit usable continuation', () => {
+    expect(
+      resolveChatPageRequestExecutionImagePolicy({
+        supportsSessionContinuation: true,
+        hasUsableSessionContinuation: true,
+        shouldResetContinuation: false
+      })
+    ).toEqual({
       preliminaryImageHistoryPolicy: 'latest-user-turn',
       imageHistoryPolicy: 'latest-user-turn'
     })
   })
 
-  it('uses all image history for the primary dispatch that resets continuation', () => {
-    expect(resolveChatPageRequestExecutionImagePolicy({ shouldResetContinuation: true })).toEqual({
-      preliminaryImageHistoryPolicy: 'latest-user-turn',
-      imageHistoryPolicy: 'all'
-    })
-  })
-
-  it('does not repeat all mode for batched or tool subcalls', () => {
+  it('replays all image history whenever continuation is reset', () => {
     expect(
       resolveChatPageRequestExecutionImagePolicy({
-        shouldResetContinuation: true,
-        isPrimaryDispatch: false
+        supportsSessionContinuation: true,
+        hasUsableSessionContinuation: true,
+        shouldResetContinuation: true
       }).imageHistoryPolicy
-    ).toBe('latest-user-turn')
+    ).toBe('all')
   })
 })

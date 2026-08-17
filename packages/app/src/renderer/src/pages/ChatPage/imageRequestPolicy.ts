@@ -6,12 +6,20 @@ export type ChatPageRequestExecutionImagePolicy = {
 }
 
 export const resolveChatPageRequestExecutionImagePolicy = (options: {
+  supportsSessionContinuation: boolean
+  hasUsableSessionContinuation: boolean
   shouldResetContinuation: boolean
-  isPrimaryDispatch?: boolean
-}): ChatPageRequestExecutionImagePolicy => ({
-  preliminaryImageHistoryPolicy: 'latest-user-turn',
-  imageHistoryPolicy:
-    options.shouldResetContinuation && options.isPrimaryDispatch !== false
-      ? 'all'
-      : 'latest-user-turn'
-})
+}): ChatPageRequestExecutionImagePolicy => {
+  const canUseIncrementalImageHistory =
+    options.supportsSessionContinuation &&
+    options.hasUsableSessionContinuation &&
+    !options.shouldResetContinuation
+  const imageHistoryPolicy: LLMImageHistoryPolicy = canUseIncrementalImageHistory
+    ? 'latest-user-turn'
+    : 'all'
+
+  return {
+    preliminaryImageHistoryPolicy: imageHistoryPolicy,
+    imageHistoryPolicy
+  }
+}
