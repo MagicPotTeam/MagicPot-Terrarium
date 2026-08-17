@@ -36,7 +36,7 @@ import {
   resolveSkillOutputImageGenerationOptions
 } from './chatSkillOutputMode'
 import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
-export { resolveChatPageRequestImageHistoryPolicy } from './imageRequestPolicy'
+export { resolveChatPageRequestExecutionImagePolicy } from './imageRequestPolicy'
 
 type ChatRequestPayload = {
   messages: Array<{

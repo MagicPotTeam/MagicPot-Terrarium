@@ -73,4 +73,41 @@ describe('chatContextCompression', () => {
     expect(plan.compressionSummary?.summary).toContain('Prior compacted summary to preserve')
     expect(plan.compressionSummary?.summary).toContain('old fact')
   })
+  it('budgets only latest-user-turn images while preserving historical text and indices', () => {
+    const historyMessages: ChatMessage[] = [
+      {
+        role: 'user',
+        content: 'historical text stays',
+        attachments: [
+          {
+            type: 'image',
+            url: 'local-media:///historical.png',
+            sourceWidth: 16_384,
+            sourceHeight: 16_384
+          }
+        ]
+      },
+      { role: 'assistant', content: 'historical answer stays' },
+      ...createTurnMessages(4)
+    ]
+    const input = {
+      historyMessages,
+      requestMessage: { role: 'user' as const, content: 'current request' },
+      profile: { context_budget_tokens: 50_000 },
+      enabled: true
+    }
+
+    const latestPlan = buildChatContextCompressionPlan({
+      ...input,
+      imageHistoryPolicy: 'latest-user-turn'
+    })
+    const allPlan = buildChatContextCompressionPlan({ ...input, imageHistoryPolicy: 'all' })
+
+    expect(latestPlan.shouldCompress).toBe(false)
+    expect(latestPlan.requestHistoryMessages).toHaveLength(historyMessages.length)
+    expect(latestPlan.requestHistoryMessages[0]?.content).toBe('historical text stays')
+    expect(latestPlan.requestHistoryMessages[1]?.content).toBe('historical answer stays')
+    expect(allPlan.shouldCompress).toBe(true)
+    expect(allPlan.compressionSummary?.summary).toContain('historical text stays')
+  })
 })

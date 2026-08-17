@@ -1,13 +1,17 @@
 import type { LLMImageHistoryPolicy } from '@shared/llm'
 
-export type ChatPageRequestImageHistoryDecision = {
+export type ChatPageRequestExecutionImagePolicy = {
+  preliminaryImageHistoryPolicy: LLMImageHistoryPolicy
   imageHistoryPolicy: LLMImageHistoryPolicy
-  consumeFullHistoryRecovery: boolean
 }
 
-export const resolveChatPageRequestImageHistoryPolicy = (options: {
-  fullHistoryRecoveryPending: boolean
-}): ChatPageRequestImageHistoryDecision => ({
-  imageHistoryPolicy: options.fullHistoryRecoveryPending ? 'all' : 'latest-user-turn',
-  consumeFullHistoryRecovery: options.fullHistoryRecoveryPending
+export const resolveChatPageRequestExecutionImagePolicy = (options: {
+  shouldResetContinuation: boolean
+  isPrimaryDispatch?: boolean
+}): ChatPageRequestExecutionImagePolicy => ({
+  preliminaryImageHistoryPolicy: 'latest-user-turn',
+  imageHistoryPolicy:
+    options.shouldResetContinuation && options.isPrimaryDispatch !== false
+      ? 'all'
+      : 'latest-user-turn'
 })

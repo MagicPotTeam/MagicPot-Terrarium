@@ -1,6 +1,11 @@
 import type { ChatMessage } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
-import type { ChatCapabilityProfile, ChatProfileCapabilities } from '@shared/llm'
+import type {
+  ChatCapabilityProfile,
+  ChatProfileCapabilities,
+  LLMImageHistoryPolicy
+} from '@shared/llm'
 import { resolveChatProfileCapabilities } from '@shared/llm'
+import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
 
 export type ChatContextCompressionSummary = {
   summary: string
@@ -569,20 +574,27 @@ export const buildChatContextCompressionPlan = (input: {
   enabled: boolean
   cachedSummary?: ChatContextCompressionSummary
   calibration?: ChatContextTokenCalibration
+  imageHistoryPolicy?: LLMImageHistoryPolicy
   force?: boolean
 }): ChatContextCompressionPlan => {
   const capabilities = resolveChatProfileCapabilities(input.profile)
   const contextBudgetTokens = capabilities.contextBudgetTokens ?? null
   const contextWindowTokens = capabilities.contextWindowTokens ?? null
+  const budgetMessages = selectMessagesForImageHistoryPolicy(
+    [...input.historyMessages, input.requestMessage],
+    input.imageHistoryPolicy
+  )
+  const budgetHistoryMessages = budgetMessages.slice(0, input.historyMessages.length)
+  const budgetRequestMessage = budgetMessages[input.historyMessages.length] || input.requestMessage
   const requestTokens = estimateChatMessagesTokenBreakdown(
-    [input.requestMessage],
+    [budgetRequestMessage],
     input.calibration
   ).totalTokens
   const cachedSummary = input.cachedSummary?.summary.trim() ? input.cachedSummary : undefined
   const cachedSummaryTokens = cachedSummary ? estimateTextTokenCount(cachedSummary.summary) : 0
   const estimatedInputTokens =
     cachedSummaryTokens +
-    estimateChatMessagesTokenBreakdown(input.historyMessages, input.calibration).totalTokens +
+    estimateChatMessagesTokenBreakdown(budgetHistoryMessages, input.calibration).totalTokens +
     requestTokens
   const usageRatio = contextBudgetTokens
     ? Math.min(1, estimatedInputTokens / contextBudgetTokens)
@@ -603,7 +615,7 @@ export const buildChatContextCompressionPlan = (input: {
 
   const effectiveBudgetTokens = contextBudgetTokens || Number.MAX_SAFE_INTEGER
   const compressionCount = resolveCompressionCount(
-    input.historyMessages,
+    budgetHistoryMessages,
     requestTokens + cachedSummaryTokens,
     effectiveBudgetTokens,
     input.force,
@@ -661,7 +673,13 @@ export const buildChatContextCompressionPlan = (input: {
     contextWindowTokens,
     estimatedCompressedInputTokens:
       compressionSummary.estimatedSummaryTokens +
-      estimateChatMessagesTokenBreakdown(requestHistoryMessages, input.calibration).totalTokens +
+      estimateChatMessagesTokenBreakdown(
+        selectMessagesForImageHistoryPolicy(
+          [...requestHistoryMessages, input.requestMessage],
+          input.imageHistoryPolicy
+        ).slice(0, requestHistoryMessages.length),
+        input.calibration
+      ).totalTokens +
       requestTokens,
     usageRatio,
     shouldCompress: true,

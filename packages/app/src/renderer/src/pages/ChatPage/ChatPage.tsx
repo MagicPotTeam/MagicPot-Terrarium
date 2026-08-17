@@ -118,7 +118,7 @@ import { getLocalizedConversationTitle } from './chatLocaleUtils'
 import {
   requestChatCompletion,
   requestChatCompletionStream,
-  resolveChatPageRequestImageHistoryPolicy,
+  resolveChatPageRequestExecutionImagePolicy,
   resolveAttachmentBatchCapability,
   supportsStreamingChatCompletion,
   type RequestChatTokenUsage
@@ -819,7 +819,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const contextTokenCalibrationByFingerprintRef = useRef<Map<string, ChatContextTokenCalibration>>(
     new Map()
   )
-  const fullImageHistoryRecoverySessionIdsRef = useRef<Set<string>>(new Set())
   const autoSaveScanInitializedRef = useRef(false)
   const autoSaveScanCursorBySessionIdRef = useRef<Map<string, number>>(new Map())
   const setSessions = useCallback<React.Dispatch<React.SetStateAction<ChatSession[]>>>((value) => {
@@ -4803,6 +4802,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         shouldBatchAttachments(rawAttachments) && !shouldPreserveMultiAttachmentRequest
       const latestContextCompressionSummary = cs.contextCompression
       let shouldDiscardSessionUrlForContextCompact = false
+      let primaryRequestDispatchPending = true
       const sessionAbortController = new AbortController()
       sessionAbortControllersRef.current.set(targetSessionId, sessionAbortController)
 
@@ -4906,18 +4906,43 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
           : requestMessage
 
-      const buildRequestExecutionState = (requestMessage: ChatMessage, sessionUrl?: string) => {
+      const buildRequestExecutionState = (
+        requestMessage: ChatMessage,
+        sessionUrl?: string,
+        options?: { isPrimaryDispatch?: boolean }
+      ) => {
         const requestMessageWithRuntimeContext =
           buildRequestMessageWithRuntimeContext(requestMessage)
-        const imageHistoryDecision = resolveChatPageRequestImageHistoryPolicy({
-          fullHistoryRecoveryPending: Boolean(
-            targetSessionId && fullImageHistoryRecoverySessionIdsRef.current.has(targetSessionId)
-          )
+        const preliminaryImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
+          shouldResetContinuation: false,
+          isPrimaryDispatch: options?.isPrimaryDispatch
+        }).preliminaryImageHistoryPolicy
+        const preliminaryCalibrationFingerprint = buildChatContextTokenCalibrationFingerprint({
+          profileId,
+          profile: selectedCapabilityProfile,
+          imageHistoryPolicy: preliminaryImageHistoryPolicy
         })
-        if (imageHistoryDecision.consumeFullHistoryRecovery && targetSessionId) {
-          fullImageHistoryRecoverySessionIdsRef.current.delete(targetSessionId)
-        }
-        const imageHistoryPolicy = imageHistoryDecision.imageHistoryPolicy
+        const preliminaryCalibration = contextTokenCalibrationByFingerprintRef.current.get(
+          preliminaryCalibrationFingerprint
+        )
+        let compressionPlan = buildChatContextCompressionPlan({
+          historyMessages,
+          requestMessage: requestMessageWithRuntimeContext,
+          profile: selectedCapabilityProfile,
+          enabled: isAutoContextCompressionAvailable,
+          cachedSummary: latestContextCompressionSummary,
+          calibration: preliminaryCalibration,
+          imageHistoryPolicy: preliminaryImageHistoryPolicy
+        })
+
+        const isPrimaryDispatch = options?.isPrimaryDispatch !== false
+        const shouldDropSessionUrlForCompressedRequest = Boolean(
+          compressionPlan.shouldCompress && isAutoContextCompressionAvailable
+        )
+        const imageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
+          shouldResetContinuation: shouldDropSessionUrlForCompressedRequest,
+          isPrimaryDispatch
+        }).imageHistoryPolicy
         const calibrationFingerprint = buildChatContextTokenCalibrationFingerprint({
           profileId,
           profile: selectedCapabilityProfile,
@@ -4925,18 +4950,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
         })
         const calibration =
           contextTokenCalibrationByFingerprintRef.current.get(calibrationFingerprint)
-        const compressionPlan = buildChatContextCompressionPlan({
-          historyMessages,
-          requestMessage: requestMessageWithRuntimeContext,
-          profile: selectedCapabilityProfile,
-          enabled: isAutoContextCompressionAvailable,
-          cachedSummary: latestContextCompressionSummary,
-          calibration
-        })
+        if (imageHistoryPolicy !== preliminaryImageHistoryPolicy) {
+          compressionPlan = buildChatContextCompressionPlan({
+            historyMessages,
+            requestMessage: requestMessageWithRuntimeContext,
+            profile: selectedCapabilityProfile,
+            enabled: isAutoContextCompressionAvailable,
+            cachedSummary: latestContextCompressionSummary,
+            calibration,
+            imageHistoryPolicy,
+            force: compressionPlan.shouldCompress
+          })
+        }
 
-        const shouldDropSessionUrlForCompressedRequest = Boolean(
-          compressionPlan.shouldCompress && isAutoContextCompressionAvailable
-        )
         if (shouldDropSessionUrlForCompressedRequest) {
           shouldDiscardSessionUrlForContextCompact = true
         }
@@ -5076,7 +5102,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         requestMessage: ChatMessage,
         sessionUrl?: string
       ) => {
-        const requestState = buildRequestExecutionState(requestMessage, sessionUrl)
+        const requestState = buildRequestExecutionState(requestMessage, sessionUrl, {
+          isPrimaryDispatch: primaryRequestDispatchPending
+        })
         updateLoadingStatus(
           t('chat.loading_wait_response', {
             defaultValue: '等待模型响应'
@@ -5086,7 +5114,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }),
           3
         )
-        const result = await requestChatCompletion({
+        const resultPromise = requestChatCompletion({
           config,
           messages: requestState.requestMessages,
           storageScope,
@@ -5103,6 +5131,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           isEdit: !!overrides?.baseMessages,
           signal: sessionAbortController.signal
         })
+        primaryRequestDispatchPending = false
+        const result = await resultPromise
         maybeStartContextCompactFromUsage(result.usage)
         contextTokenCalibrationByFingerprintRef.current.set(
           requestState.calibrationFingerprint,
@@ -5157,7 +5187,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         streamedOcrResult = undefined
         seenStreamAttachmentKeys.clear()
 
-        const requestState = buildRequestExecutionState(requestMessage, sessionUrl)
+        const requestState = buildRequestExecutionState(requestMessage, sessionUrl, {
+          isPrimaryDispatch: primaryRequestDispatchPending
+        })
         updateLoadingStatus(
           t('chat.loading_wait_response', {
             defaultValue: '等待模型响应'
@@ -5168,7 +5200,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           3
         )
         let hasMarkedStreamingOutput = false
-        const streamedResult = await requestChatCompletionStream({
+        const streamedResultPromise = requestChatCompletionStream({
           config,
           messages: requestState.requestMessages,
           storageScope,
@@ -5231,6 +5263,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
           }
         })
+        primaryRequestDispatchPending = false
+        const streamedResult = await streamedResultPromise
 
         maybeStartContextCompactFromUsage(streamedResult.result.usage)
         contextTokenCalibrationByFingerprintRef.current.set(
