@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import {
+  isInvalidSessionContinuationError,
   normalizeChatAttachmentsForRequest,
   requestChatCompletion,
   requestChatCompletionStream,
@@ -37,6 +38,21 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   localStorage.clear()
+})
+
+describe('isInvalidSessionContinuationError', () => {
+  it('classifies only definitive client-side continuation rejections', () => {
+    expect(isInvalidSessionContinuationError(new Error('410 expired session continuation'))).toBe(
+      true
+    )
+    expect(isInvalidSessionContinuationError(new Error('404 previous_response not found'))).toBe(
+      true
+    )
+    expect(isInvalidSessionContinuationError(new Error('503 session service unavailable'))).toBe(
+      false
+    )
+    expect(isInvalidSessionContinuationError(new Error('network timeout'))).toBe(false)
+  })
 })
 
 describe('normalizeChatAttachmentsForRequest', () => {

@@ -1,6 +1,11 @@
 import type { ChatMessage } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
-import type { ChatCapabilityProfile, ChatProfileCapabilities } from '@shared/llm'
+import type {
+  ChatCapabilityProfile,
+  ChatProfileCapabilities,
+  LLMImageHistoryPolicy
+} from '@shared/llm'
 import { resolveChatProfileCapabilities } from '@shared/llm'
+import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
 
 export type ChatContextCompressionSummary = {
   summary: string
@@ -17,6 +22,8 @@ export type ChatContextCompressionSummary = {
   lastCompactSkipReason?: string
   lastPromptTokens?: number
   lastTotalTokens?: number
+  /** Request-only durable user image references preserved across successful compaction rounds. */
+  replayImageMessages?: ChatMessage[]
   metadata?: Record<string, unknown>
 }
 
@@ -30,7 +37,20 @@ export type ChatContextCompressionPlan = {
   shouldCompress: boolean
   compressionSummary?: ChatContextCompressionSummary
   requestHistoryMessages: ChatMessage[]
+  requestReplayImageMessages: ChatMessage[]
 }
+
+export {
+  buildChatContextTokenCalibrationFingerprint,
+  recordChatContextTokenObservation,
+  resetChatContextTokenCalibration,
+  type ChatContextTokenCalibration
+} from './imageUsageCalibration'
+import {
+  estimateChatMessageImageTokenCount,
+  estimateChatMessagesTokenBreakdown,
+  type ChatContextTokenCalibration
+} from './imageUsageCalibration'
 
 export type ChatContextCompactWindow = {
   compactCount: number
@@ -112,24 +132,31 @@ export const estimateTextTokenCount = (text: string | undefined | null): number 
   return Math.max(1, Math.ceil(wideGlyphCount * 1.05 + narrowGlyphCount / 4))
 }
 
-const estimateAttachmentTokenCount = (message: ChatMessage): number =>
+const estimateNonImageAttachmentTokenCount = (message: ChatMessage): number =>
   (message.attachments || []).reduce((total, attachment) => {
+    if (attachment.type === 'image') return total
     const descriptor = [
       attachment.type,
       attachment.fileName,
       attachment.mimeType,
-      attachment.relativePath
+      attachment.ocrResult?.text
     ]
       .filter(Boolean)
       .join(' ')
-    return total + 28 + estimateTextTokenCount(descriptor)
+    return total + estimateTextTokenCount(descriptor)
   }, 0)
+
+export {
+  estimateChatMessageImageTokenCount,
+  estimateChatMessagesTokenBreakdown
+} from './imageUsageCalibration'
 
 export const estimateChatMessageTokenCount = (message: ChatMessage): number =>
   10 +
   estimateTextTokenCount(message.content) +
   estimateTextTokenCount(message.hiddenContext) +
-  estimateAttachmentTokenCount(message)
+  estimateNonImageAttachmentTokenCount(message) +
+  estimateChatMessageImageTokenCount(message)
 
 export const estimateChatMessagesTokenCount = (messages: readonly ChatMessage[]): number =>
   messages.reduce((total, message) => total + estimateChatMessageTokenCount(message), 0)
@@ -529,11 +556,13 @@ const resolveCompressionCount = (
   historyMessages: readonly ChatMessage[],
   requestTokens: number,
   contextBudgetTokens: number,
-  force = false
+  force = false,
+  calibration?: ChatContextTokenCalibration
 ): number => {
   if (
     !force &&
-    requestTokens + estimateChatMessagesTokenCount(historyMessages) < contextBudgetTokens
+    requestTokens + estimateChatMessagesTokenBreakdown(historyMessages, calibration).totalTokens <
+      contextBudgetTokens
   ) {
     return 0
   }
@@ -547,16 +576,36 @@ export const buildChatContextCompressionPlan = (input: {
   profile?: ChatCapabilityProfile | null
   enabled: boolean
   cachedSummary?: ChatContextCompressionSummary
+  calibration?: ChatContextTokenCalibration
+  imageHistoryPolicy?: LLMImageHistoryPolicy
   force?: boolean
 }): ChatContextCompressionPlan => {
   const capabilities = resolveChatProfileCapabilities(input.profile)
   const contextBudgetTokens = capabilities.contextBudgetTokens ?? null
   const contextWindowTokens = capabilities.contextWindowTokens ?? null
-  const requestTokens = estimateChatMessageTokenCount(input.requestMessage)
+  const budgetMessages = selectMessagesForImageHistoryPolicy(
+    [...input.historyMessages, input.requestMessage],
+    input.imageHistoryPolicy
+  )
+  const budgetHistoryMessages = budgetMessages.slice(0, input.historyMessages.length)
+  const budgetRequestMessage = budgetMessages[input.historyMessages.length] || input.requestMessage
+  const requestTokens = estimateChatMessagesTokenBreakdown(
+    [budgetRequestMessage],
+    input.calibration
+  ).totalTokens
   const cachedSummary = input.cachedSummary?.summary.trim() ? input.cachedSummary : undefined
   const cachedSummaryTokens = cachedSummary ? estimateTextTokenCount(cachedSummary.summary) : 0
+  const cachedReplayImageMessages =
+    input.imageHistoryPolicy === 'all' ? cachedSummary?.replayImageMessages || [] : []
+  const cachedReplayImageTokens = estimateChatMessagesTokenBreakdown(
+    cachedReplayImageMessages,
+    input.calibration
+  ).totalTokens
   const estimatedInputTokens =
-    cachedSummaryTokens + estimateChatMessagesTokenCount(input.historyMessages) + requestTokens
+    cachedSummaryTokens +
+    cachedReplayImageTokens +
+    estimateChatMessagesTokenBreakdown(budgetHistoryMessages, input.calibration).totalTokens +
+    requestTokens
   const usageRatio = contextBudgetTokens
     ? Math.min(1, estimatedInputTokens / contextBudgetTokens)
     : null
@@ -570,16 +619,18 @@ export const buildChatContextCompressionPlan = (input: {
       estimatedCompressedInputTokens: estimatedInputTokens,
       usageRatio,
       shouldCompress: false,
-      requestHistoryMessages: [...input.historyMessages]
+      requestHistoryMessages: [...input.historyMessages],
+      requestReplayImageMessages: [...cachedReplayImageMessages]
     }
   }
 
   const effectiveBudgetTokens = contextBudgetTokens || Number.MAX_SAFE_INTEGER
   const compressionCount = resolveCompressionCount(
-    input.historyMessages,
-    requestTokens + cachedSummaryTokens,
+    budgetHistoryMessages,
+    requestTokens + cachedSummaryTokens + cachedReplayImageTokens,
     effectiveBudgetTokens,
-    input.force
+    input.force,
+    input.calibration
   )
   if (compressionCount === 0) {
     return {
@@ -590,16 +641,38 @@ export const buildChatContextCompressionPlan = (input: {
       estimatedCompressedInputTokens: estimatedInputTokens,
       usageRatio,
       shouldCompress: false,
-      requestHistoryMessages: [...input.historyMessages]
+      requestHistoryMessages: [...input.historyMessages],
+      requestReplayImageMessages: [...cachedReplayImageMessages]
     }
   }
 
   const messagesToCompress = input.historyMessages.slice(0, compressionCount)
   const requestHistoryMessages = input.historyMessages.slice(compressionCount)
+  const currentReplayImageMessages = messagesToCompress.flatMap((message, index) => {
+    if (message.role !== 'user') return []
+    const imageAttachments = (message.attachments || []).filter(
+      (attachment) => attachment.type === 'image'
+    )
+    if (imageAttachments.length === 0) return []
+    return [
+      {
+        role: 'user' as const,
+        content: `Historical image replay from compacted user message ${index + 1}.`,
+        attachments: imageAttachments
+      }
+    ]
+  })
+  const preservedReplayImageMessages = [
+    ...(cachedSummary?.replayImageMessages || []),
+    ...currentReplayImageMessages
+  ]
+  const requestReplayImageMessages =
+    input.imageHistoryPolicy === 'all' ? preservedReplayImageMessages : []
   const sourceHash = createContextCompressionSourceHash(messagesToCompress)
   const compactRound = (cachedSummary?.compactRound || 0) + 1
   const canReuseCachedSummary =
     !cachedSummary?.manual &&
+    currentReplayImageMessages.length === 0 &&
     cachedSummary?.coveredMessageCount === compressionCount &&
     cachedSummary?.sourceHash === sourceHash &&
     cachedSummary.summary.trim()
@@ -620,11 +693,17 @@ export const buildChatContextCompressionPlan = (input: {
         estimatedSummaryTokens: 0,
         updatedAt: Date.now(),
         ...(cachedSummary?.manual ? { manual: true } : {}),
+        ...(preservedReplayImageMessages.length > 0
+          ? { replayImageMessages: preservedReplayImageMessages }
+          : {}),
         ...(cachedSummary?.metadata ? { metadata: cachedSummary.metadata } : {}),
         compactRound
       }
 
   compressionSummary.estimatedSummaryTokens = estimateTextTokenCount(compressionSummary.summary)
+  if (preservedReplayImageMessages.length > 0) {
+    compressionSummary.replayImageMessages = preservedReplayImageMessages
+  }
 
   return {
     capabilities,
@@ -633,11 +712,20 @@ export const buildChatContextCompressionPlan = (input: {
     contextWindowTokens,
     estimatedCompressedInputTokens:
       compressionSummary.estimatedSummaryTokens +
-      estimateChatMessagesTokenCount(requestHistoryMessages) +
+      estimateChatMessagesTokenBreakdown(requestReplayImageMessages, input.calibration)
+        .totalTokens +
+      estimateChatMessagesTokenBreakdown(
+        selectMessagesForImageHistoryPolicy(
+          [...requestHistoryMessages, input.requestMessage],
+          input.imageHistoryPolicy
+        ).slice(0, requestHistoryMessages.length),
+        input.calibration
+      ).totalTokens +
       requestTokens,
     usageRatio,
     shouldCompress: true,
     compressionSummary,
-    requestHistoryMessages
+    requestHistoryMessages,
+    requestReplayImageMessages
   }
 }

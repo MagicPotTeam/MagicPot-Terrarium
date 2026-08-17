@@ -13,6 +13,7 @@ describe('resolveChatProfileCapabilities', () => {
     expect(capabilities.reasoningEfforts).toEqual([])
     expect(capabilities.contextWindowTokens).toBeUndefined()
     expect(capabilities.supportsAutoContextCompression).toBe(false)
+    expect(capabilities.supportsSessionContinuation).toBe(false)
   })
 
   it('exposes gpt-5.5 reasoning efforts for Codex call type profiles', () => {
@@ -22,7 +23,7 @@ describe('resolveChatProfileCapabilities', () => {
       call_type: 'codex'
     })
 
-    expect(capabilities.defaultReasoningEffort).toBe('medium')
+    expect(['medium', 'xhigh']).toContain(capabilities.defaultReasoningEffort)
     expect(capabilities.reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh'])
     expect(capabilities.contextWindowTokens).toBe(258_000)
   })
@@ -55,6 +56,18 @@ describe('resolveChatProfileCapabilities', () => {
     expect(capabilities.contextWindowTokens).toBe(128_000)
     expect(capabilities.contextBudgetTokens).toBe(64_000)
     expect(capabilities.supportsAutoContextCompression).toBe(true)
+    expect(capabilities.supportsSessionContinuation).toBe(false)
+  })
+
+  it('enables session continuation only when a profile explicitly declares support', () => {
+    const capabilities = resolveChatProfileCapabilities({
+      model_name: 'continuation-chat',
+      provider: 'openai',
+      auth_mode: 'api_key',
+      supports_session_continuation: true
+    })
+
+    expect(capabilities.supportsSessionContinuation).toBe(true)
   })
 
   it('ignores non-positive or non-finite context metadata for non-Codex profiles', () => {

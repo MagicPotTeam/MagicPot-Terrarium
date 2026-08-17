@@ -52,9 +52,13 @@ export type LLMChatMetadata = Record<string, unknown>
 
 export type LLMChatTokenUsage = {
   promptTokens?: number
+  inputTextTokens?: number
+  inputImageTokens?: number
   completionTokens?: number
   totalTokens?: number
 }
+
+export type LLMImageHistoryPolicy = 'latest-user-turn' | 'all'
 
 export interface LLMChatResult {
   content: string
@@ -105,11 +109,7 @@ export type VideoGenerationMode = 'std' | 'pro' | '4k'
 export type VideoGenerationSound = 'on' | 'off'
 export type VideoGenerationDurationMode = 'fixed' | 'adaptive'
 export type VideoGenerationCameraPreset =
-  | 'none'
-  | 'down_back'
-  | 'forward_up'
-  | 'right_turn_forward'
-  | 'left_turn_forward'
+  'none' | 'down_back' | 'forward_up' | 'right_turn_forward' | 'left_turn_forward'
 export type VideoGenerationCameraControlType = 'simple' | VideoGenerationCameraPreset
 export interface VideoGenerationCameraSimpleControls {
   horizontal?: number
@@ -125,17 +125,9 @@ export interface VideoGenerationCameraControl {
 }
 export type VideoGenerationImageReferenceRole = 'first_frame' | 'last_frame' | 'reference_image'
 export type VideoGenerationVideoReferenceRole =
-  | 'video'
-  | 'source_video'
-  | 'reference_video'
-  | 'video_reference'
+  'video' | 'source_video' | 'reference_video' | 'video_reference'
 export type VideoGenerationAudioReferenceRole =
-  | 'audio'
-  | 'source_audio'
-  | 'reference_audio'
-  | 'audio_reference'
-  | 'voiceover'
-  | 'music'
+  'audio' | 'source_audio' | 'reference_audio' | 'audio_reference' | 'voiceover' | 'music'
 export type VideoGenerationReferenceRole =
   | VideoGenerationImageReferenceRole
   | VideoGenerationVideoReferenceRole
@@ -179,6 +171,8 @@ export interface LLMChatParams {
   maxOutputTokens?: number
   temperature?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
+  /** Controls whether provider requests reconstruct historical image bytes from local artifacts. */
+  imageHistoryPolicy?: LLMImageHistoryPolicy
   videoGenerationOptions?: VideoGenerationOptions
   signal?: AbortSignal
   sessionUrl?: string

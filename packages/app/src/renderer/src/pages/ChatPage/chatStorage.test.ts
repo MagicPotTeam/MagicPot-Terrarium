@@ -542,6 +542,58 @@ describe('chatStorage', () => {
     expect(fakeIndexedDb.state.putCount - baselinePutCount).toBe(1)
   })
 
+  it('migrates compacted replay image attachments to managed media on reload', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const legacyDataUrl = 'data:image/png;base64,AAAA'
+    const reference = {
+      version: 1 as const,
+      kind: 'managed' as const,
+      id: 'b'.repeat(64),
+      relativePath: `originals/${'b'.repeat(64)}.png`,
+      mimeType: 'image/png',
+      originalFileName: 'compacted.png'
+    }
+    managedMediaApiMock.migrateLegacyDataUrl.mockResolvedValue({
+      reference,
+      localMediaUrl: 'local-media:///originals/compacted.png',
+      checkpoint: { version: 1 as const, reclaim: { reference } }
+    })
+
+    await storage.saveSessionToDB(
+      {
+        id: 'legacy-compacted-replay',
+        title: 'Legacy compacted replay',
+        messages: [],
+        contextCompression: {
+          summary: 'compacted',
+          coveredMessageCount: 2,
+          sourceHash: 'source',
+          estimatedSourceTokens: 10,
+          estimatedSummaryTokens: 2,
+          updatedAt: 1,
+          replayImageMessages: [
+            {
+              role: 'user',
+              content: 'Historical image replay.',
+              attachments: [{ type: 'image', url: legacyDataUrl, fileName: 'compacted.png' }]
+            }
+          ]
+        }
+      },
+      'workspace-a'
+    )
+
+    const loaded = await storage.loadSessionFromDB('legacy-compacted-replay', 'workspace-a')
+
+    expect(loaded?.contextCompression?.replayImageMessages?.[0]?.attachments?.[0]).toMatchObject({
+      url: 'local-media:///originals/compacted.png',
+      media: reference
+    })
+  })
+
   it('reclaims newly migrated media when persistence replacement fails', async () => {
     const fakeIndexedDb = createFakeIndexedDb()
     fakeIndexedDb.state.failGetAllOnce = false
@@ -719,6 +771,8 @@ describe('chatStorage', () => {
         id: 'compressed-session',
         title: 'Compressed session',
         messages: [{ role: 'user', content: 'recent live message' }],
+        sessionUrl: 'continuation-url',
+        sessionProfileId: 'base-model',
         contextCompression,
         contextCompressionActivity: [
           {
@@ -737,6 +791,8 @@ describe('chatStorage', () => {
     expect(loadedSession).toMatchObject({
       id: 'compressed-session',
       storageScope: 'workspace-a',
+      sessionUrl: 'continuation-url',
+      sessionProfileId: 'base-model',
       contextCompression
     })
     expect(loadedSession).not.toHaveProperty('contextCompressionActivity')
@@ -745,6 +801,8 @@ describe('chatStorage', () => {
     expect(loadedSessions).toEqual([
       expect.objectContaining({
         id: 'compressed-session',
+        sessionUrl: 'continuation-url',
+        sessionProfileId: 'base-model',
         contextCompression
       })
     ])

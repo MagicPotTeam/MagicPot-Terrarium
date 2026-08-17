@@ -193,12 +193,14 @@ type ReplaceLastMessageInput = {
   sessionId: string
   message: ChatMessage
   sessionUrl?: string | null
+  sessionProfileId?: string | null
 }
 
 type ReplaceLastMessagesInput = {
   sessionId: string
   messages: ChatMessage[]
   sessionUrl?: string | null
+  sessionProfileId?: string | null
 }
 
 const resolveNextSessionUrl = (
@@ -232,6 +234,8 @@ export const replaceLastMessageInSession = (
       ...session,
       title: newTitle,
       sessionUrl: resolveNextSessionUrl(session.sessionUrl, input.sessionUrl),
+      sessionProfileId:
+        input.sessionUrl === null ? undefined : input.sessionProfileId || session.sessionProfileId,
       messages:
         session.messages.length > 0
           ? [...session.messages.slice(0, -1), input.message]
@@ -260,6 +264,8 @@ export const replaceLastMessageWithMessagesInSession = (
       ...session,
       title: newTitle,
       sessionUrl: resolveNextSessionUrl(session.sessionUrl, input.sessionUrl),
+      sessionProfileId:
+        input.sessionUrl === null ? undefined : input.sessionProfileId || session.sessionProfileId,
       messages:
         session.messages.length > 0
           ? [...session.messages.slice(0, -1), ...input.messages]

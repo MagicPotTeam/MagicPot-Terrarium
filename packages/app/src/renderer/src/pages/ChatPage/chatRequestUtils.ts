@@ -9,6 +9,7 @@ import {
   resolveProfileProvider,
   resolveChatProfileCapabilities,
   selectProviderAttachmentTransport,
+  type LLMImageHistoryPolicy,
   type LLMReasoningEffort,
   type OpenAIImageGenerationOptions
 } from '@shared/llm'
@@ -34,6 +35,8 @@ import {
   applySkillOutputModeContract,
   resolveSkillOutputImageGenerationOptions
 } from './chatSkillOutputMode'
+import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
+export { resolveChatPageRequestExecutionImagePolicy } from './imageRequestPolicy'
 
 type ChatRequestPayload = {
   messages: Array<{
@@ -47,6 +50,7 @@ type ChatRequestPayload = {
   reasoningEffort?: LLMReasoningEffort
   maxOutputTokens?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
+  imageHistoryPolicy?: LLMImageHistoryPolicy
   skillRuntime?: LLMChatSkillRuntime
   sessionUrl?: string
   conversationId?: string
@@ -63,6 +67,7 @@ type RequestChatCompletionInput = {
   reasoningEffort?: LLMReasoningEffort
   maxOutputTokens?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
+  imageHistoryPolicy?: LLMImageHistoryPolicy
   skillRuntime?: LLMChatSkillRuntime
   externalAgentSkill?: CustomSkill | null
   sessionUrl?: string
@@ -73,6 +78,8 @@ type RequestChatCompletionInput = {
 
 export type RequestChatTokenUsage = {
   promptTokens?: number
+  inputTextTokens?: number
+  inputImageTokens?: number
   completionTokens?: number
   totalTokens?: number
 }
@@ -122,6 +129,19 @@ const throwIfAborted = (signal?: AbortSignal): void => {
 const RESPONSES_SCOPE_ERROR_FRAGMENT = 'Missing scopes: api.responses.write'
 const RESPONSES_SCOPE_ERROR_MESSAGE =
   'The current OpenAI account is missing the required Responses permission (`api.responses.write`). Check the configured account or workspace, then try again.'
+
+export const isInvalidSessionContinuationError = (error: unknown): boolean => {
+  const message = (error instanceof Error ? error.message : String(error || ''))
+    .trim()
+    .toLowerCase()
+  if (!message || !/\b(?:400|404|409|410|422)\b/.test(message)) {
+    return false
+  }
+  return (
+    /(?:invalid|expired|stale|unknown|not found|no longer available)/.test(message) &&
+    /(?:session|continuation|previous[_ -]?response)/.test(message)
+  )
+}
 
 const mapLocalChatRequestErrorMessage = (message: string): string => {
   const normalized = message.trim()
@@ -266,6 +286,7 @@ export const normalizeChatAttachmentsForRequest = async (
     allowManagedRequestDataUrl?: boolean
     allowRequestDataUrl?: boolean
     allowAccessibleUrl?: boolean
+    imageHistoryPolicy?: LLMImageHistoryPolicy
   } = {}
 ): Promise<ChatAttachment[] | undefined> => {
   if (!attachments?.length) {
@@ -473,6 +494,7 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
     ...(requestImageGenerationOptions
       ? { imageGenerationOptions: requestImageGenerationOptions }
       : {}),
+    ...(input.imageHistoryPolicy ? { imageHistoryPolicy: input.imageHistoryPolicy } : {}),
     ...(input.skillRuntime ? { skillRuntime: input.skillRuntime } : {}),
     sessionUrl: input.sessionUrl,
     conversationId: input.conversationId,
@@ -635,11 +657,13 @@ const prepareMessagesForRequest = async (
     allowManagedRequestDataUrl?: boolean
     allowRequestDataUrl?: boolean
     allowAccessibleUrl?: boolean
+    imageHistoryPolicy?: LLMImageHistoryPolicy
   } = {}
 ): Promise<ChatMessage[]> => {
   const prepared: ChatMessage[] = []
+  const selectedMessages = selectMessagesForImageHistoryPolicy(messages, options.imageHistoryPolicy)
 
-  for (const message of messages) {
+  for (const message of selectedMessages) {
     const attachments =
       message.role === 'user'
         ? await expandReportBundleAttachments(message.attachments)
@@ -694,18 +718,34 @@ const normalizeChatTokenUsage = (
     (metadata?.usage && typeof metadata.usage === 'object'
       ? (metadata.usage as Record<string, unknown>)
       : metadata)
-  const promptTokens = normalizeTokenCount(rawUsage?.promptTokens ?? rawUsage?.prompt_tokens)
-  const completionTokens = normalizeTokenCount(
-    rawUsage?.completionTokens ?? rawUsage?.completion_tokens
-  )
-  const totalTokens = normalizeTokenCount(rawUsage?.totalTokens ?? rawUsage?.total_tokens)
-  return promptTokens !== undefined || completionTokens !== undefined || totalTokens !== undefined
-    ? {
-        ...(promptTokens !== undefined ? { promptTokens } : {}),
-        ...(completionTokens !== undefined ? { completionTokens } : {}),
-        ...(totalTokens !== undefined ? { totalTokens } : {})
-      }
-    : undefined
+  const inputTokenDetails = (rawUsage?.input_tokens_details ??
+    rawUsage?.inputTokensDetails ??
+    rawUsage?.inputTokenDetails) as Record<string, unknown> | undefined
+  const normalized = {
+    promptTokens: normalizeTokenCount(
+      rawUsage?.promptTokens ??
+        rawUsage?.prompt_tokens ??
+        rawUsage?.inputTokens ??
+        rawUsage?.input_tokens
+    ),
+    inputTextTokens: normalizeTokenCount(
+      rawUsage?.inputTextTokens ??
+        rawUsage?.input_text_tokens ??
+        inputTokenDetails?.text_tokens ??
+        inputTokenDetails?.textTokens
+    ),
+    inputImageTokens: normalizeTokenCount(
+      rawUsage?.inputImageTokens ??
+        rawUsage?.input_image_tokens ??
+        inputTokenDetails?.image_tokens ??
+        inputTokenDetails?.imageTokens
+    ),
+    completionTokens: normalizeTokenCount(
+      rawUsage?.completionTokens ?? rawUsage?.completion_tokens
+    ),
+    totalTokens: normalizeTokenCount(rawUsage?.totalTokens ?? rawUsage?.total_tokens)
+  }
+  return Object.values(normalized).some((value) => value !== undefined) ? normalized : undefined
 }
 
 const normalizeResponse = (response: {
@@ -1293,6 +1333,7 @@ export const requestChatCompletion = async (
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
     ...resolveManagedMediaRequestOptions(input),
+    imageHistoryPolicy: input.imageHistoryPolicy,
     skipInlineAttachmentSummary: (attachment) =>
       shouldSkipInlineAttachmentSummary(input.config, input.profileId, attachment)
   })
@@ -1319,6 +1360,7 @@ export const requestChatCompletionStream = async (
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
     ...resolveManagedMediaRequestOptions(input),
+    imageHistoryPolicy: input.imageHistoryPolicy,
     skipInlineAttachmentSummary: (attachment) =>
       shouldSkipInlineAttachmentSummary(input.config, input.profileId, attachment)
   })

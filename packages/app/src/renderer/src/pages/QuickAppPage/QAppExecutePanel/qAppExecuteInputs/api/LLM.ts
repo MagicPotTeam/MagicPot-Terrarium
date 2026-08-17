@@ -24,6 +24,7 @@ import {
   isOllamaProfile,
   resolveProfileProvider,
   resolveProfileModelUse,
+  resolveProfileCallType,
   isRunnableProfile
 } from '@shared/llm'
 import type {
@@ -95,8 +96,7 @@ export class OpenAIAPICli extends SharedOpenAIAPICli implements LLMCliWithPrompt
     type Role = 'system' | 'user' | 'assistant'
     type TextMessage = { role: Role; content: string }
     type VisionContent =
-      | { type: 'text'; text: string }
-      | { type: 'image_url'; image_url: { url: string } }
+      { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
     type VisionMessage = { role: 'user'; content: VisionContent[] }
     type ChatMessage = TextMessage | VisionMessage
 
@@ -894,6 +894,11 @@ export class MainProcessQAppLLMProxyCli implements LLMCliWithPrompt {
 export const cliFromProfile = (profile: LLMAPIProfile): LLMCli | undefined => {
   if (!isRunnableProfile(profile)) {
     return undefined
+  }
+
+  const callType = resolveProfileCallType(profile)
+  if (callType !== 'api' && callType !== 'local') {
+    return new MainProcessQAppLLMProxyCli(profile)
   }
 
   switch (resolveProfileProvider(profile)) {
