@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
+import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 import {
   ClaudeAPICli,
   GeminiAPICli,
@@ -15,6 +16,7 @@ const PNG_DATA_URL = 'data:image/png;base64,iVBORw0KGgo='
 const { llmProxyChatMock } = vi.hoisted(() => ({
   llmProxyChatMock: vi.fn()
 }))
+const originalLlmProfileExtensions = [...sharedHostExtensionApiV1.llmProfiles]
 
 vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
@@ -28,6 +30,7 @@ describe('QuickApp renderer LLM compatibility', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     llmProxyChatMock.mockReset()
+    sharedHostExtensionApiV1.llmProfiles = [...originalLlmProfileExtensions]
   })
 
   it.each([
@@ -54,6 +57,61 @@ describe('QuickApp renderer LLM compatibility', () => {
     }
   ])('routes $provider QuickApp profiles through the guarded proxy', (profile) => {
     expect(cliFromProfile(profile)).toBeInstanceOf(MainProcessQAppLLMProxyCli)
+  })
+
+  it('routes model-less CLIProxyAPI image interrogation through the main-process proxy', async () => {
+    sharedHostExtensionApiV1.llmProfiles = [
+      {
+        id: 'cliproxyapi-test',
+        isRunnableProfile: (profile) =>
+          profile.call_type === 'cliproxyapi'
+            ? Boolean(profile.base_url?.trim() && profile.api_key?.trim())
+            : undefined,
+        resolveProfileCallType: (profile) =>
+          profile.call_type === 'cliproxyapi' ? 'cliproxyapi' : undefined
+      }
+    ]
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    llmProxyChatMock.mockResolvedValueOnce({ content: 'interrogated prompt' })
+
+    const config = {
+      ...DEFAULT_CONFIG,
+      plugin_config: {
+        ...DEFAULT_CONFIG.plugin_config!,
+        api_profiles: [
+          {
+            id: 'quick-cliproxyapi',
+            model_name: '',
+            base_url: 'https://proxy.example.test/v1',
+            api_key: 'cpa-test',
+            call_type: 'cliproxyapi',
+            is_vision_model: true
+          }
+        ]
+      }
+    }
+    const client = defaultCliFromProfile(config, true)
+
+    expect(client).toBeInstanceOf(MainProcessQAppLLMProxyCli)
+    await expect(
+      client?.generatePrompt({
+        prompt: 'describe this canvas image',
+        imageObjUrl: PNG_DATA_URL
+      })
+    ).resolves.toBe('interrogated prompt')
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(llmProxyChatMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileId: 'quick-cliproxyapi',
+        profileScope: 'qapp',
+        messages: [
+          expect.objectContaining({
+            attachments: [expect.objectContaining({ url: PNG_DATA_URL })]
+          })
+        ]
+      })
+    )
   })
 
   it('keeps renderer provider classes exported for direct compatibility use', () => {
