@@ -40,6 +40,14 @@ import {
 import { isCanvasThumbnailSetFresh, pickBestCanvasThumbnailLevel } from '../canvasThumbnailCache'
 import type { CanvasImageThumbnailLevel, CanvasImageThumbnailSet } from '../canvasThumbnailTypes'
 import { PROJECT_CANVAS_MIN_STAGE_SCALE } from '../projectCanvasViewportScale'
+import {
+  PROJECT_CANVAS_ADAPTIVE_QUALITY_DOWNGRADE_DEBOUNCE_MS,
+  PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS,
+  createProjectCanvasRenderQualityGovernor,
+  isProjectCanvasAdaptiveQualityEnabled,
+  resolveProjectCanvasRenderDpr,
+  type ProjectCanvasRenderQuality
+} from '../canvasRenderQuality'
 import { useCanvasSpatialIndexLifecycle } from '../useCanvasSpatialIndexLifecycle'
 import {
   areProjectCanvasWebGLRuntimeMetricsEqual,
@@ -192,6 +200,7 @@ type ImageLoadQueueEntry = SourceUpgradeQueueEntry & {
 type ResizablePixiApplication = Application & {
   renderer?: {
     resize?: (width: number, height: number) => void
+    resolution?: number
   }
 }
 
@@ -529,10 +538,12 @@ function refreshProjectCanvasTextureAfterTinyPreview(
   record.sawTinyPreview = false
 }
 
-function getProjectCanvasRenderDeviceScale() {
-  return typeof window !== 'undefined' && Number.isFinite(window.devicePixelRatio)
-    ? Math.min(2, Math.max(1, window.devicePixelRatio || 1))
-    : 1
+function getProjectCanvasRenderDeviceScale(quality: ProjectCanvasRenderQuality = 'full') {
+  const baseDpr =
+    typeof window !== 'undefined' && Number.isFinite(window.devicePixelRatio)
+      ? Math.min(2, Math.max(1, window.devicePixelRatio || 1))
+      : 1
+  return resolveProjectCanvasRenderDpr(baseDpr, quality)
 }
 
 const areProjectCanvasWebGLMetricsEqual = areProjectCanvasWebGLRuntimeMetricsEqual
@@ -1064,6 +1075,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const spriteUsageCounterRef = useRef(0)
   const rafRef = useRef<number | null>(null)
   const renderThrottleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const qualityTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const renderQualityGovernorRef = useRef(createProjectCanvasRenderQualityGovernor())
+  const renderQualityRef = useRef<ProjectCanvasRenderQuality>('full')
   const lastRenderAtRef = useRef(0)
   const webglRenderCountRef = useRef(0)
   const webglErrorLastCheckedRenderRef = useRef(0)
@@ -1919,6 +1933,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         clearTimeout(renderThrottleTimerRef.current)
         renderThrottleTimerRef.current = null
       }
+      if (qualityTransitionTimerRef.current != null) {
+        clearTimeout(qualityTransitionTimerRef.current)
+        qualityTransitionTimerRef.current = null
+      }
       if (sourceUpgradeIdleTimerRef.current != null) {
         clearTimeout(sourceUpgradeIdleTimerRef.current)
         sourceUpgradeIdleTimerRef.current = null
@@ -2001,8 +2019,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       const rawHeight = preferredSize?.height ?? rect?.height ?? 0
       const width = Number.isFinite(rawWidth) && rawWidth > 0 ? Math.round(rawWidth) : 1
       const height = Number.isFinite(rawHeight) && rawHeight > 0 ? Math.round(rawHeight) : 1
+      const renderer = (app as ResizablePixiApplication).renderer
+      const nextResolution = getProjectCanvasRenderDeviceScale(renderQualityRef.current)
+      const resolutionChanged = Boolean(renderer && renderer.resolution !== nextResolution)
+      if (renderer && resolutionChanged) {
+        renderer.resolution = nextResolution
+      }
       const lastSize = rendererSizeRef.current
-      if (lastSize?.width === width && lastSize.height === height) {
+      if (lastSize?.width === width && lastSize.height === height && !resolutionChanged) {
         return
       }
 
@@ -2013,11 +2037,60 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       canvas.style.display = 'block'
       canvas.style.width = '100%'
       canvas.style.height = '100%'
-      ;(app as ResizablePixiApplication).renderer?.resize?.(width, height)
+      renderer?.resize?.(width, height)
       renderImmediateOrSchedule()
     },
     [renderImmediateOrSchedule]
   )
+
+  const applyRenderQuality = useCallback(
+    (quality: ProjectCanvasRenderQuality) => {
+      const nextQuality = isProjectCanvasAdaptiveQualityEnabled() ? quality : 'full'
+      if (renderQualityRef.current === nextQuality) {
+        return
+      }
+      renderQualityRef.current = nextQuality
+      resizeRendererToStage(stageSizeRef.current)
+    },
+    [resizeRendererToStage]
+  )
+
+  useEffect(() => {
+    if (qualityTransitionTimerRef.current !== null) {
+      clearTimeout(qualityTransitionTimerRef.current)
+      qualityTransitionTimerRef.current = null
+    }
+
+    const governor = renderQualityGovernorRef.current
+    const interactionActive = isViewportInteracting || isPerformanceThrottled
+    const now = window.performance.now()
+    if (!isProjectCanvasAdaptiveQualityEnabled()) {
+      governor.reset()
+      applyRenderQuality('full')
+      return
+    }
+
+    applyRenderQuality(governor.update({ now, interactionActive }))
+    const transitionDelayMs = interactionActive
+      ? PROJECT_CANVAS_ADAPTIVE_QUALITY_DOWNGRADE_DEBOUNCE_MS
+      : PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS
+    qualityTransitionTimerRef.current = setTimeout(() => {
+      qualityTransitionTimerRef.current = null
+      applyRenderQuality(
+        governor.update({
+          now: window.performance.now(),
+          interactionActive
+        })
+      )
+    }, transitionDelayMs)
+
+    return () => {
+      if (qualityTransitionTimerRef.current !== null) {
+        clearTimeout(qualityTransitionTimerRef.current)
+        qualityTransitionTimerRef.current = null
+      }
+    }
+  }, [applyRenderQuality, isPerformanceThrottled, isViewportInteracting])
 
   const applyViewportTransform = useCallback(
     (pos: { x: number; y: number }, scale: number) => {
@@ -2236,6 +2309,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       lastAppliedViewportRef.current = null
       previewState.clear()
       renderItems.clear()
+      renderQualityGovernorRef.current.reset()
+      renderQualityRef.current = 'full'
       spriteReconcileGenerationRef.current += 1
       spriteReconcileMutationStatsRef.current = {
         generation: spriteReconcileGenerationRef.current,
@@ -2287,7 +2362,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           clearBeforeRender: true,
           antialias: true,
           autoDensity: true,
-          resolution: getProjectCanvasRenderDeviceScale(),
+          resolution: getProjectCanvasRenderDeviceScale(renderQualityRef.current),
           autoStart: false,
           sharedTicker: false,
           preference: 'webgl',
