@@ -228,6 +228,8 @@ const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_IMAGE_VERSION_MAX_DEFER_MS = 750
 const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_INITIAL_IMAGE_LOAD_CONCURRENCY = 2
 const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_SPRITE_RECONCILE_BATCH_SIZE = 4
 const PROJECT_CANVAS_WEBGL_METRICS_THROTTLE_MS = 250
+const PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_RENDER_INTERVAL = 60
+const PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_INTERVAL_MS = 1000
 export const PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_MAX_SIDE = 4096
 const PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_CONCURRENCY = 2
 const PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_VIEWPORT_IDLE_DELAY_MS = 80
@@ -1063,6 +1065,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const rafRef = useRef<number | null>(null)
   const renderThrottleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastRenderAtRef = useRef(0)
+  const webglRenderCountRef = useRef(0)
+  const webglErrorLastCheckedRenderRef = useRef(0)
+  const webglErrorLastCheckedAtRef = useRef(Number.NEGATIVE_INFINITY)
+  const webglErrorCheckRequestedRef = useRef(true)
   const activeItemCountRef = useRef(0)
   const stagePosRef = useRef(stagePos)
   const stageScaleRef = useRef(stageScale)
@@ -1696,6 +1702,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       return
     }
 
+    const renderCount = webglRenderCountRef.current + 1
+    webglRenderCountRef.current = renderCount
     const startedAt = window.performance.now()
     try {
       app.render()
@@ -1704,13 +1712,26 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       return
     }
 
-    const webglRuntimeFailure = getProjectCanvasWebGLRuntimeFailure(app)
-    if (webglRuntimeFailure) {
-      runtimeFailureHandlerRef.current?.(webglRuntimeFailure)
-      return
+    const finishedAt = window.performance.now()
+    const shouldCheckWebGLRuntimeError =
+      webglErrorCheckRequestedRef.current ||
+      renderCount === 1 ||
+      renderCount - webglErrorLastCheckedRenderRef.current >=
+        PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_RENDER_INTERVAL ||
+      finishedAt - webglErrorLastCheckedAtRef.current >=
+        PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_INTERVAL_MS
+    if (shouldCheckWebGLRuntimeError) {
+      webglErrorCheckRequestedRef.current = false
+      webglErrorLastCheckedRenderRef.current = renderCount
+      webglErrorLastCheckedAtRef.current = finishedAt
+      const webglRuntimeFailure = getProjectCanvasWebGLRuntimeFailure(app)
+      if (webglRuntimeFailure) {
+        runtimeFailureHandlerRef.current?.(webglRuntimeFailure)
+        return
+      }
     }
 
-    lastRenderAtRef.current = window.performance.now()
+    lastRenderAtRef.current = finishedAt
     const lastRenderDurationMs = Math.max(0, lastRenderAtRef.current - startedAt)
     if (isViewportInteractingRef.current) {
       metricsRef.current.renderCount += 1
@@ -2292,6 +2313,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         app.stage.addChild(world)
         appRef.current = app
         worldRef.current = world
+        webglRenderCountRef.current = 0
+        webglErrorLastCheckedRenderRef.current = 0
+        webglErrorLastCheckedAtRef.current = Number.NEGATIVE_INFINITY
+        webglErrorCheckRequestedRef.current = true
         contextLostCanvas = canvas
         contextLostHandler = handleContextLost
         canvas.addEventListener('webglcontextlost', handleContextLost)
@@ -3836,9 +3861,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       let baseTexture: Texture | null = null
       let texture: Texture | null = null
       try {
-        baseTexture = sharedTexturePoolRef.current.acquire(sharedTextureKey, () =>
-          createProjectCanvasTexture(image)
-        )
+        let createdSharedTexture = false
+        baseTexture = sharedTexturePoolRef.current.acquire(sharedTextureKey, () => {
+          createdSharedTexture = true
+          return createProjectCanvasTexture(image)
+        })
+        if (createdSharedTexture) {
+          webglErrorCheckRequestedRef.current = true
+        }
         sharedTextureByteTrackerRef.current.acquire(sharedTextureKey, textureByteSize)
         if (!baseTexture) {
           throw new Error('Pixi returned an empty texture.')

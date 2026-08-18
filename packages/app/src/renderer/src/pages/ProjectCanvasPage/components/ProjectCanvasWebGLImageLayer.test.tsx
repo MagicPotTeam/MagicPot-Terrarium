@@ -1552,6 +1552,53 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     }
   }, 30000)
 
+  it('samples WebGL errors during repeated preview renders instead of checking every frame', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+
+    render(
+      <ProjectCanvasWebGLImageLayer
+        ref={ref}
+        items={[createItem()]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+      />
+    )
+
+    await waitFor(
+      () => {
+        expect(ref.current).not.toBeNull()
+        expect(createdApplications).toHaveLength(1)
+        expect(createdSprites).toHaveLength(1)
+      },
+      { timeout: 15000 }
+    )
+
+    const app = createdApplications[0]
+    const initialRenderCount = app.render.mock.calls.length
+    const initialErrorCheckCount = app.renderer.gl.getError.mock.calls.length
+
+    for (let index = 0; index < 20; index += 1) {
+      act(() => {
+        ref.current?.syncItemPreview('image-1', {
+          x: 24 + index,
+          y: 36,
+          width: 200,
+          height: 120,
+          scaleX: 1,
+          scaleY: 1,
+          rotation: 0
+        })
+      })
+    }
+
+    const additionalRenderCount = app.render.mock.calls.length - initialRenderCount
+    const additionalErrorCheckCount =
+      app.renderer.gl.getError.mock.calls.length - initialErrorCheckCount
+    expect(additionalRenderCount).toBeGreaterThanOrEqual(20)
+    expect(additionalErrorCheckCount).toBeGreaterThanOrEqual(0)
+    expect(additionalErrorCheckCount).toBeLessThan(additionalRenderCount)
+  }, 30000)
+
   it('tears down the WebGL canvas and reports not-ready when Pixi rendering fails', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
