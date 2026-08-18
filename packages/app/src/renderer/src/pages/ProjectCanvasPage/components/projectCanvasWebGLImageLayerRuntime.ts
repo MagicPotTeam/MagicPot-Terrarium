@@ -1,3 +1,41 @@
+export type ProjectCanvasWebGLItemIndexes<TItem extends { id: string }> = {
+  itemById: Map<string, TItem>
+  itemIds: Set<string>
+}
+
+export type ProjectCanvasWebGLItemIndexesCache<TItem extends { id: string }> = (
+  items: readonly TItem[]
+) => ProjectCanvasWebGLItemIndexes<TItem>
+
+export function buildProjectCanvasWebGLItemIndexes<TItem extends { id: string }>(
+  items: readonly TItem[]
+): ProjectCanvasWebGLItemIndexes<TItem> {
+  const itemById = new Map<string, TItem>()
+  const itemIds = new Set<string>()
+  for (const item of items) {
+    itemById.set(item.id, item)
+    itemIds.add(item.id)
+  }
+  return { itemById, itemIds }
+}
+
+export function createProjectCanvasWebGLItemIndexesCache<
+  TItem extends { id: string }
+>(): ProjectCanvasWebGLItemIndexesCache<TItem> {
+  let indexedItems: readonly TItem[] | null = null
+  let indexes: ProjectCanvasWebGLItemIndexes<TItem> | null = null
+
+  return (items) => {
+    if (indexedItems === items && indexes) {
+      return indexes
+    }
+
+    indexedItems = items
+    indexes = buildProjectCanvasWebGLItemIndexes(items)
+    return indexes
+  }
+}
+
 export type ProjectCanvasWebGLPriorityQueueEntry = {
   itemId: string
   src: string

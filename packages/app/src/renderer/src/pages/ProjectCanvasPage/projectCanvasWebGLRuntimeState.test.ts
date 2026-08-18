@@ -49,6 +49,8 @@ function createMetrics(
     viewportCulledImageCount: 1,
     spriteReconcilePassCount: 3,
     lastSpriteReconcileDurationMs: 1.5,
+    lastSpriteSortDurationMs: 2.25,
+    spriteSortCount: 4,
     lastSpriteReconcileCandidateCount: 2,
     lastSpriteReconcileTargetCount: 1,
     lastSpriteReconcileCreatedCount: 1,
@@ -88,6 +90,18 @@ describe('projectCanvasWebGLRuntimeState', () => {
     expect(
       areProjectCanvasWebGLRuntimeMetricsEqual(
         createMetrics({ spriteReconcilePassCount: metrics.spriteReconcilePassCount! + 1 }),
+        metrics
+      )
+    ).toBe(false)
+    expect(
+      areProjectCanvasWebGLRuntimeMetricsEqual(
+        createMetrics({ lastSpriteSortDurationMs: metrics.lastSpriteSortDurationMs! + 1 }),
+        metrics
+      )
+    ).toBe(false)
+    expect(
+      areProjectCanvasWebGLRuntimeMetricsEqual(
+        createMetrics({ spriteSortCount: metrics.spriteSortCount! + 1 }),
         metrics
       )
     ).toBe(false)
@@ -235,6 +249,8 @@ describe('projectCanvasWebGLRuntimeState', () => {
         renderCount: 4,
         spriteReconcilePassCount: 3,
         lastSpriteReconcileDurationMs: 1.5,
+        lastSpriteSortDurationMs: 2.25,
+        spriteSortCount: 4,
         lastSpriteReconcileTargetCount: 1,
         lastSpriteReconcileDeferredCount: 0,
         residentLimit: 48,

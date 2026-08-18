@@ -5,6 +5,8 @@ import { createProjectCanvasWebGLSpatialTileStateMachine } from './projectCanvas
 import {
   areProjectCanvasWebGLItemReconcileSnapshotsEqual,
   buildProjectCanvasWebGLItemReconcileSnapshot,
+  buildProjectCanvasWebGLItemIndexes,
+  createProjectCanvasWebGLItemIndexesCache,
   createProjectCanvasWebGLResidentTextureByteTracker,
   insertProjectCanvasWebGLPriorityQueueEntry,
   refreshProjectCanvasWebGLPriorityQueuePriorities,
@@ -16,6 +18,23 @@ const queueIds = (queue: readonly ProjectCanvasWebGLPriorityQueueEntry[]) =>
   queue.map((entry) => entry.itemId)
 
 describe('projectCanvasWebGLImageLayerRuntime', () => {
+  it('builds item indexes in one pass and reuses cached indexes by array identity', () => {
+    const firstItems = [
+      { id: 'a', value: 1 },
+      { id: 'b', value: 2 }
+    ]
+    const secondItems = [{ id: 'a', value: 3 }]
+    const firstIndexes = buildProjectCanvasWebGLItemIndexes(firstItems)
+    expect(firstIndexes.itemById.get('b')?.value).toBe(2)
+    expect(firstIndexes.itemIds).toEqual(new Set(['a', 'b']))
+
+    const getIndexes = createProjectCanvasWebGLItemIndexesCache<(typeof firstItems)[number]>()
+    expect(getIndexes(firstItems)).toBe(getIndexes(firstItems))
+    expect(getIndexes(firstItems).itemById.get('a')?.value).toBe(1)
+    expect(getIndexes(secondItems)).not.toBe(firstIndexes)
+    expect(getIndexes(secondItems).itemById.get('a')?.value).toBe(3)
+  })
+
   it('keeps priority queues in descending priority order as entries are inserted', () => {
     const queue: ProjectCanvasWebGLPriorityQueueEntry[] = []
 

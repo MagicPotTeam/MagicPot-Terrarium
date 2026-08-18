@@ -18,6 +18,8 @@ export type ProjectCanvasWebGLRuntimeMetrics = {
   viewportCulledImageCount: number
   spriteReconcilePassCount?: number
   lastSpriteReconcileDurationMs?: number | null
+  lastSpriteSortDurationMs?: number | null
+  spriteSortCount?: number
   lastSpriteReconcileCandidateCount?: number
   lastSpriteReconcileTargetCount?: number
   lastSpriteReconcileCreatedCount?: number
@@ -129,6 +131,8 @@ const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   viewportCulledImageCount: 0,
   spriteReconcilePassCount: 0,
   lastSpriteReconcileDurationMs: null,
+  lastSpriteSortDurationMs: null,
+  spriteSortCount: 0,
   lastSpriteReconcileCandidateCount: 0,
   lastSpriteReconcileTargetCount: 0,
   lastSpriteReconcileCreatedCount: 0,
@@ -187,6 +191,8 @@ const PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS = [
   'viewportCulledImageCount',
   'spriteReconcilePassCount',
   'lastSpriteReconcileDurationMs',
+  'lastSpriteSortDurationMs',
+  'spriteSortCount',
   'lastSpriteReconcileCandidateCount',
   'lastSpriteReconcileTargetCount',
   'lastSpriteReconcileCreatedCount',

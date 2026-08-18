@@ -866,8 +866,16 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('recreates sprite state when the texture key changes', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const initialItem = createItem()
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
+    const onMetricsChange = (metrics: ProjectCanvasWebGLRuntimeMetrics) => {
+      metricsCalls.push(metrics)
+    }
     const { rerender } = render(
-      <ProjectCanvasWebGLImageLayer items={[initialItem]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      <ProjectCanvasWebGLImageLayer
+        items={[initialItem]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+        onMetricsChange={onMetricsChange}
+      />
     )
 
     await waitFor(
@@ -888,6 +896,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           })
         ]}
         {...TEST_STAGE_VIEWPORT_1280_720}
+        onMetricsChange={onMetricsChange}
       />
     )
 
@@ -905,6 +914,19 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(originalTexture.destroySourceCalled).toBe(true)
     expect(updatedSprite.scale.x).toBe(5)
     expect(updatedSprite.scale.y).toBe(6)
+    await waitFor(
+      () => {
+        expect(
+          metricsCalls.some(
+            (metrics) =>
+              metrics.lastSpriteReconcileCreatedCount === 1 &&
+              metrics.lastSpriteReconcileReusedCount === 0 &&
+              metrics.lastSpriteReconcileRemovedCount === 1
+          )
+        ).toBe(true)
+      },
+      { timeout: 15000 }
+    )
   }, 30000)
 
   it('does not reuse a stale texture when the same URL is refreshed with a new decoded object', async () => {
@@ -942,11 +964,16 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       y: 60,
       zIndex: 2
     })
+    const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
+    const onMetricsChange = (metrics: ProjectCanvasWebGLRuntimeMetrics) => {
+      metricsCalls.push(metrics)
+    }
 
     const { rerender } = render(
       <ProjectCanvasWebGLImageLayer
         items={[firstItem, secondItem]}
         {...TEST_STAGE_VIEWPORT_1280_720}
+        onMetricsChange={onMetricsChange}
       />
     )
 
@@ -961,11 +988,39 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       'image-1',
       'image-2'
     ])
+    await waitFor(
+      () => {
+        expect(metricsCalls.at(-1)?.spriteSortCount ?? 0).toBeGreaterThanOrEqual(1)
+      },
+      { timeout: 15000 }
+    )
+    const initialSpriteSortCount = metricsCalls.at(-1)?.spriteSortCount ?? 0
+    const initialReconcilePassCount = metricsCalls.at(-1)?.spriteReconcilePassCount ?? 0
+    const movedFirstItem = { ...firstItem, x: firstItem.x + 12 }
 
     rerender(
       <ProjectCanvasWebGLImageLayer
-        items={[{ ...firstItem, zIndex: 3 }, secondItem]}
+        items={[movedFirstItem, secondItem]}
         {...TEST_STAGE_VIEWPORT_1280_720}
+        onMetricsChange={onMetricsChange}
+      />
+    )
+
+    await waitFor(
+      () => {
+        expect(metricsCalls.at(-1)?.spriteReconcilePassCount ?? 0).toBeGreaterThan(
+          initialReconcilePassCount
+        )
+      },
+      { timeout: 15000 }
+    )
+    expect(metricsCalls.at(-1)?.spriteSortCount).toBe(initialSpriteSortCount)
+
+    rerender(
+      <ProjectCanvasWebGLImageLayer
+        items={[{ ...movedFirstItem, zIndex: 3 }, secondItem]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+        onMetricsChange={onMetricsChange}
       />
     )
 
@@ -978,6 +1033,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       },
       { timeout: 15000 }
     )
+    expect(metricsCalls.at(-1)?.spriteSortCount).toBeGreaterThan(initialSpriteSortCount)
+    expect(metricsCalls.at(-1)?.lastSpriteSortDurationMs).toEqual(expect.any(Number))
+    expect(metricsCalls.at(-1)?.lastSpriteSortDurationMs ?? -1).toBeGreaterThanOrEqual(0)
   }, 30000)
 
   it('keeps sprite order deterministic for equal zIndex items', async () => {
@@ -1175,6 +1233,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       viewportCulledImageCount: 0,
       spriteReconcilePassCount: 0,
       lastSpriteReconcileDurationMs: null,
+      lastSpriteSortDurationMs: null,
+      spriteSortCount: 0,
       lastSpriteReconcileCandidateCount: 0,
       lastSpriteReconcileTargetCount: 0,
       lastSpriteReconcileCreatedCount: 0,

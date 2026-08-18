@@ -52,6 +52,7 @@ import {
   reprioritizeProjectCanvasWebGLPriorityQueueEntry,
   buildProjectCanvasWebGLItemReconcileSnapshot,
   areProjectCanvasWebGLItemReconcileSnapshotsEqual,
+  createProjectCanvasWebGLItemIndexesCache,
   createProjectCanvasWebGLSpatialTileStateMachine,
   type ProjectCanvasWebGLItemReconcileSnapshot,
   type ProjectCanvasWebGLPriorityQueueEntry,
@@ -168,6 +169,13 @@ type SpriteRecord = {
   lastUsedAt: number
   sawTinyPreview: boolean
   sharedTextureKey: string
+  reconcileGeneration: number
+  reconcileBaseline: boolean
+}
+
+type SpriteReconcileMutationStats = {
+  generation: number
+  removedBaselineCount: number
 }
 
 type SourceUpgradeQueueEntry = ProjectCanvasWebGLPriorityQueueEntry
@@ -1008,6 +1016,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const activeSourceUpgradeRequestTokenByIdRef = useRef(new Map<string, CanvasImageRequestToken>())
   const activeSourceUpgradeCountRef = useRef(0)
   const spriteRecordsRef = useRef(new Map<string, SpriteRecord>())
+  const spriteReconcileGenerationRef = useRef(0)
+  const spriteReconcileMutationStatsRef = useRef<SpriteReconcileMutationStats>({
+    generation: 0,
+    removedBaselineCount: 0
+  })
   const itemReconcileSnapshotByIdRef = useRef(
     new Map<string, ProjectCanvasWebGLItemReconcileSnapshot>()
   )
@@ -1042,10 +1055,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const previewStateRef = useRef(new Map<string, ProjectCanvasImagePreview>())
   const renderItemsRef = useRef(new Map<string, ProjectCanvasRenderableImage>())
   const currentItemsRef = useRef(items)
-  const currentItemByIdRef = useRef(
-    new Map<string, CanvasImageItem>(items.map((item) => [item.id, item]))
-  )
-  const currentItemIdsRef = useRef(new Set(items.map((item) => item.id)))
+  const currentItemIndexesRef = useRef(createProjectCanvasWebGLItemIndexesCache<CanvasImageItem>())
+  const currentItemIndexes = currentItemIndexesRef.current(items)
+  const currentItemByIdRef = useRef(currentItemIndexes.itemById)
+  const currentItemIdsRef = useRef(currentItemIndexes.itemIds)
   const spriteUsageCounterRef = useRef(0)
   const rafRef = useRef<number | null>(null)
   const renderThrottleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1672,8 +1685,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
   useEffect(() => {
     currentItemsRef.current = items
-    currentItemByIdRef.current = new Map(items.map((item) => [item.id, item]))
-    currentItemIdsRef.current = new Set(items.map((item) => item.id))
+    const indexes = currentItemIndexesRef.current(items)
+    currentItemByIdRef.current = indexes.itemById
+    currentItemIdsRef.current = indexes.itemIds
   }, [items])
 
   const renderApp = useCallback(() => {
@@ -2025,6 +2039,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
+      const reconcileMutationStats = spriteReconcileMutationStatsRef.current
+      if (
+        record.reconcileGeneration === reconcileMutationStats.generation &&
+        record.reconcileBaseline
+      ) {
+        reconcileMutationStats.removedBaselineCount += 1
+      }
+
       destroyProjectCanvasSpriteRecord(record, () => {
         sharedTexturePoolRef.current.release(record.sharedTextureKey, (texture) =>
           destroyProjectCanvasTexture(texture, true)
@@ -2193,6 +2215,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       lastAppliedViewportRef.current = null
       previewState.clear()
       renderItems.clear()
+      spriteReconcileGenerationRef.current += 1
+      spriteReconcileMutationStatsRef.current = {
+        generation: spriteReconcileGenerationRef.current,
+        removedBaselineCount: 0
+      }
       const releaseMetrics = releaseManagerRef.current.getMetricsSnapshot()
       reportMetrics(
         createProjectCanvasWebGLRuntimeMetrics({
@@ -2421,12 +2448,22 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
 
     const spriteReconcileStartedAt = window.performance.now()
-    const previousSpriteRecords = new Map(spriteRecordsRef.current)
+    const spriteReconcileGeneration = spriteReconcileGenerationRef.current + 1
+    spriteReconcileGenerationRef.current = spriteReconcileGeneration
+    spriteReconcileMutationStatsRef.current = {
+      generation: spriteReconcileGeneration,
+      removedBaselineCount: 0
+    }
+    for (const record of spriteRecordsRef.current.values()) {
+      record.reconcileGeneration = spriteReconcileGeneration
+      record.reconcileBaseline = true
+    }
     activeItemCountRef.current = items.length
     if (currentItemsRef.current !== items) {
       currentItemsRef.current = items
-      currentItemByIdRef.current = new Map(items.map((item) => [item.id, item]))
-      currentItemIdsRef.current = new Set(items.map((item) => item.id))
+      const indexes = currentItemIndexesRef.current(items)
+      currentItemByIdRef.current = indexes.itemById
+      currentItemIdsRef.current = indexes.itemIds
     }
     const itemById = currentItemByIdRef.current
     const nextIds = currentItemIdsRef.current
@@ -3841,7 +3878,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           textureByteSize,
           lastUsedAt: 0,
           sawTinyPreview: isProjectCanvasTinyPreview(transformState, stageScaleRef.current),
-          sharedTextureKey
+          sharedTextureKey,
+          reconcileGeneration: spriteReconcileGeneration,
+          reconcileBaseline: false
         })
         setTextureBudgetReservation({
           itemId: item.id,
@@ -3894,10 +3933,27 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     })
 
     pumpSourceUpgradeQueue()
+    let lastSpriteSortDurationMs: number | null = null
+    let spriteSortCount = metricsRef.current.spriteSortCount ?? 0
     if (worldOrderDirty && world.children.length > 1) {
+      const spriteSortStartedAt = window.performance.now()
       world.sortChildren()
+      lastSpriteSortDurationMs = Math.max(0, window.performance.now() - spriteSortStartedAt)
+      spriteSortCount += 1
     }
     renderItemsRef.current = nextRenderItems
+    let createdSpriteCount = 0
+    let reusedSpriteCount = 0
+    for (const record of spriteRecordsRef.current.values()) {
+      if (record.reconcileGeneration !== spriteReconcileGeneration) {
+        continue
+      }
+      if (record.reconcileBaseline) {
+        reusedSpriteCount += 1
+      } else {
+        createdSpriteCount += 1
+      }
+    }
     if (reconciledSnapshotItems.size > 0) {
       const finalResidentTextureBytesForReconcileSnapshot = getResidentTextureBytes()
       reconciledSnapshotItems.forEach((item, itemId) => {
@@ -3909,24 +3965,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         }
       })
     }
-    let createdSpriteCount = 0
-    let reusedSpriteCount = 0
-    let removedSpriteCount = 0
-    spriteRecordsRef.current.forEach((record, itemId) => {
-      const previousRecord = previousSpriteRecords.get(itemId)
-      if (!previousRecord) {
-        createdSpriteCount += 1
-      } else if (previousRecord === record) {
-        reusedSpriteCount += 1
-      } else {
-        createdSpriteCount += 1
-      }
-    })
-    previousSpriteRecords.forEach((previousRecord, itemId) => {
-      if (spriteRecordsRef.current.get(itemId) !== previousRecord) {
-        removedSpriteCount += 1
-      }
-    })
+    const removedSpriteCount = spriteReconcileMutationStatsRef.current.removedBaselineCount
     const spriteReconcileDurationMs = Math.max(
       0,
       window.performance.now() - spriteReconcileStartedAt
@@ -3950,6 +3989,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         lastSpriteReconcileReusedCount: reusedSpriteCount,
         lastSpriteReconcileRemovedCount: removedSpriteCount,
         lastSpriteReconcileDeferredCount: deferredNewSpriteCount,
+        spriteSortCount,
+        ...(lastSpriteSortDurationMs === null ? {} : { lastSpriteSortDurationMs }),
         ...imageHealthCounts
       },
       'items',
