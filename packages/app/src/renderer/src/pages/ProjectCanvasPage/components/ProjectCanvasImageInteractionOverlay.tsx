@@ -605,6 +605,8 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
   const elementRef = React.useRef<HTMLDivElement | null>(null)
   const sessionRef = React.useRef<InteractionSession | null>(null)
   const draftTransformRef = React.useRef<CanvasImageTransform | null>(null)
+  const previewChangeFrameRef = React.useRef<number | null>(null)
+  const pendingPreviewRef = React.useRef<ProjectCanvasImagePreview | null>(null)
   const lastEmittedPreviewKeyRef = React.useRef<string | null>(null)
   const pointerCanvasViewportRectRef = React.useRef<CanvasViewportRect | null>(null)
   const windowPointerMoveHandlerRef = React.useRef<(event: PointerEvent) => void>(() => {})
@@ -691,8 +693,19 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
     [broadcastDomPreviewSync, item.id, onPreviewChange]
   )
 
+  const cancelPendingPreviewChange = React.useCallback(() => {
+    if (previewChangeFrameRef.current != null) {
+      window.cancelAnimationFrame(previewChangeFrameRef.current)
+      previewChangeFrameRef.current = null
+    }
+
+    pendingPreviewRef.current = null
+  }, [])
+
   const flushPendingPreviewChange = React.useCallback(
     (nextTransform: CanvasImageTransform) => {
+      cancelPendingPreviewChange()
+
       const preview = buildPreview(item, nextTransform)
       const previewKey = getProjectCanvasRenderTransformKey(preview)
       if (lastEmittedPreviewKeyRef.current === previewKey) {
@@ -701,12 +714,31 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
 
       emitPreviewChangeNow(preview, { immediateSync: true })
     },
-    [emitPreviewChangeNow, item]
+    [cancelPendingPreviewChange, emitPreviewChangeNow, item]
   )
 
   const schedulePreviewChange = React.useCallback(
     (transform: CanvasImageTransform) => {
-      emitPreviewChangeNow(buildPreview(item, transform), { immediateSync: true })
+      pendingPreviewRef.current = buildPreview(item, transform)
+      if (previewChangeFrameRef.current != null) {
+        return
+      }
+
+      previewChangeFrameRef.current = window.requestAnimationFrame(() => {
+        previewChangeFrameRef.current = null
+        const preview = pendingPreviewRef.current
+        pendingPreviewRef.current = null
+        if (!preview) {
+          return
+        }
+
+        const previewKey = getProjectCanvasRenderTransformKey(preview)
+        if (lastEmittedPreviewKeyRef.current === previewKey) {
+          return
+        }
+
+        emitPreviewChangeNow(preview, { immediateSync: true })
+      })
     },
     [emitPreviewChangeNow, item]
   )
@@ -749,6 +781,7 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
 
   React.useEffect(() => {
     return () => {
+      cancelPendingPreviewChange()
       lastEmittedPreviewKeyRef.current = null
       shouldSelectOnDragFinishRef.current = false
       clearPointerCanvasViewportRect()
@@ -759,6 +792,7 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
     }
   }, [
     broadcastDomPreviewSync,
+    cancelPendingPreviewChange,
     clearPointerCanvasViewportRect,
     item.id,
     onPreviewChange,
@@ -805,8 +839,7 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
         )
       const preferredPlacement =
         (toolbar.dataset.selectionToolbarPreferredPlacement as
-          | SelectionActionStackPlacement
-          | undefined) ?? 'auto'
+          SelectionActionStackPlacement | undefined) ?? 'auto'
       const toolbarPosition = resolveSelectionActionToolbarPosition(
         {
           minX: imageBounds.minX,
@@ -886,6 +919,7 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
       }
 
       if (currentSession.kind === 'drag' && !currentSession.moved) {
+        cancelPendingPreviewChange()
         draftTransformRef.current = null
         flushPendingDraftTransformCommit(null)
         if (shouldSelectOnDragFinish) {
@@ -918,6 +952,7 @@ const ProjectCanvasImageInteractionOverlay: React.FC<ProjectCanvasImageInteracti
       }
     },
     [
+      cancelPendingPreviewChange,
       clearPointerCanvasViewportRect,
       detachWindowPointerListeners,
       committedTransform,

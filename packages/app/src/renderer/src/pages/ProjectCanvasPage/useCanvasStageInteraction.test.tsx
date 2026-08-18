@@ -80,16 +80,16 @@ describe('useCanvasStageInteraction', () => {
       .__canvasInteractionTrace
   })
 
-  it('applies middle-mouse pan transforms immediately while deferring React state', () => {
+  it('batches middle-mouse pan transforms once per frame and flushes the latest position', () => {
     const rafCallbacks = new Map<number, FrameRequestCallback>()
     let rafId = 0
-    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(
-      (callback: FrameRequestCallback) => {
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback: FrameRequestCallback) => {
         rafId += 1
         rafCallbacks.set(rafId, callback)
         return rafId
-      }
-    )
+      })
     vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id: number) => {
       rafCallbacks.delete(id)
     })
@@ -117,25 +117,47 @@ describe('useCanvasStageInteraction', () => {
     })
 
     expect(options.stagePosRef.current).toEqual({ x: 35, y: 49 })
-    expect(onViewportChange).toHaveBeenCalledTimes(2)
-    expect(onViewportChange).toHaveBeenLastCalledWith({ x: 35, y: 49 }, 1)
+    expect(onViewportChange).not.toHaveBeenCalled()
     expect(options.setStagePos).not.toHaveBeenCalled()
+    expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(1)
     expect(rafCallbacks.size).toBe(1)
 
+    const firstFrame = rafCallbacks.entries().next().value
+    expect(firstFrame).toBeDefined()
+    rafCallbacks.delete(firstFrame![0])
     act(() => {
-      rafCallbacks.values().next().value?.(16)
+      firstFrame![1](16)
     })
 
-    expect(onViewportChange).toHaveBeenCalledTimes(2)
+    expect(onViewportChange).toHaveBeenCalledTimes(1)
     expect(onViewportChange).toHaveBeenLastCalledWith({ x: 35, y: 49 }, 1)
     expect(options.setStagePos).not.toHaveBeenCalled()
+
+    act(() => {
+      result.current.handleStageMouseMove({
+        evt: new MouseEvent('mousemove', { clientX: 145, clientY: 180 }),
+        type: 'mousemove'
+      })
+      result.current.handleStageMouseMove({
+        evt: new MouseEvent('mousemove', { clientX: 155, clientY: 190 }),
+        type: 'mousemove'
+      })
+    })
+
+    expect(options.stagePosRef.current).toEqual({ x: 55, y: 70 })
+    expect(onViewportChange).toHaveBeenCalledTimes(1)
+    expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(2)
+    expect(rafCallbacks.size).toBe(1)
 
     act(() => {
       window.dispatchEvent(new MouseEvent('mouseup'))
     })
 
+    expect(rafCallbacks.size).toBe(0)
+    expect(onViewportChange).toHaveBeenCalledTimes(2)
+    expect(onViewportChange).toHaveBeenLastCalledWith({ x: 55, y: 70 }, 1)
     expect(options.setStagePos).toHaveBeenCalledTimes(1)
-    expect(options.setStagePos).toHaveBeenLastCalledWith({ x: 35, y: 49 })
+    expect(options.setStagePos).toHaveBeenLastCalledWith({ x: 55, y: 70 })
 
     unmount()
   })
@@ -157,13 +179,14 @@ describe('useCanvasStageInteraction', () => {
     })
 
     expect(options.stagePosRef.current).toEqual({ x: 60, y: 70 })
-    expect(onViewportChange).toHaveBeenCalledWith({ x: 60, y: 70 }, 1)
+    expect(onViewportChange).not.toHaveBeenCalled()
     expect(options.setStagePos).not.toHaveBeenCalled()
 
     act(() => {
       window.dispatchEvent(new MouseEvent('mouseup'))
     })
 
+    expect(onViewportChange).toHaveBeenCalledWith({ x: 60, y: 70 }, 1)
     expect(options.setStagePos).toHaveBeenCalledWith({ x: 60, y: 70 })
 
     unmount()
