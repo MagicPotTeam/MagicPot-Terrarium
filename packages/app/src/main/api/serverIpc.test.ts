@@ -52,6 +52,7 @@ vi.mock('electron', () => ({
 vi.mock('./svcAdobeBridgeImpl', () => ({ AdobeBridgeSvcImpl: createServiceClass() }))
 vi.mock('./svcStateImpl', () => ({ StateSvcImpl: createServiceClass() }))
 vi.mock('./svcComfyImpl', () => ({ ComfySvcImpl: createServiceClass() }))
+vi.mock('./svcComfyBatchImpl', () => ({ ComfyBatchSvcImpl: createServiceClass() }))
 vi.mock('./svcCanvasThumbnailImpl', () => ({ CanvasThumbnailSvcImpl: createServiceClass() }))
 vi.mock('./svcTargetSchemeImpl', () => ({ TargetSchemeSvcImpl: createServiceClass() }))
 vi.mock('./svcProjectTraceImpl', () => ({ ProjectTraceSvcImpl: createServiceClass() }))
@@ -89,6 +90,8 @@ describe('serverIpc createServer', () => {
     expect(apiDef.svcMagicAgentPlatform).toBeDefined()
     expect(api.svcManagedMedia).toBeDefined()
     expect(apiDef.svcManagedMedia.ensureDerivative.type).toBe('unary')
+    expect(api.svcComfyBatch).toBeDefined()
+    expect(apiDef.svcComfyBatch.start.type).toBe('unary')
   })
 
   it('registers svcManagedMedia on ipcMain', () => {

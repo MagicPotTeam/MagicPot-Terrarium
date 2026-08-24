@@ -2,6 +2,7 @@ import { Stack } from '@mui/material'
 import ResultList from './ResultList'
 import SubmitWorkflowButton from '../QAppExecutePanel/SubmitWorkflowButton'
 import RealtimeGenerationSwitch from '../QAppExecutePanel/RealtimeGenerationSwitch'
+import BatchProcessButton from '../QAppExecutePanel/BatchProcessButton'
 import { useComfyStatus } from '@renderer/store/hooks/comfyStatus'
 import { useQAppContext } from '../components/QAppContext'
 
@@ -46,6 +47,15 @@ export default function ResultSection({ isDesignMode = false }: ResultSectionPro
               validate={validate}
               buildWorkflow={buildWorkflow}
             />
+            {!isDesignMode && qAppCfg?.batchProcess?.enabled && (
+              <BatchProcessButton
+                isConnected={isConnected}
+                imageInputSlot={qAppCfg.batchProcess.imageInputSlot}
+                outputNodeIds={qAppCfg.outputNodeIds}
+                validate={validate}
+                buildWorkflow={buildWorkflow}
+              />
+            )}
           </Stack>
           {buildWorkflow && (
             <RealtimeGenerationSwitch

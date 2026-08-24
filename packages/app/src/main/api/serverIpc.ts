@@ -2,6 +2,7 @@ import { Api, BaseApi, apiDef } from '@shared/api'
 import { AdobeBridgeSvcImpl } from './svcAdobeBridgeImpl'
 import { StateSvcImpl } from './svcStateImpl'
 import { ComfySvcImpl } from './svcComfyImpl'
+import { ComfyBatchSvcImpl } from './svcComfyBatchImpl'
 import { CanvasThumbnailSvcImpl } from './svcCanvasThumbnailImpl'
 import { ProjectTraceSvcImpl } from './svcProjectTraceImpl'
 import { TargetSchemeSvcImpl } from './svcTargetSchemeImpl'
@@ -32,6 +33,7 @@ export const createServer = (managedMediaCleanupScheduler?: ManagedMediaCleanupS
     svcState: new StateSvcImpl(),
     svcHyper: new HyperSvcImpl(),
     svcComfy: new ComfySvcImpl(),
+    svcComfyBatch: new ComfyBatchSvcImpl(),
     svcQApp: new QAppSvcImpl(),
     svcTargetScheme: new TargetSchemeSvcImpl(),
     svcProjectTrace: new ProjectTraceSvcImpl(),

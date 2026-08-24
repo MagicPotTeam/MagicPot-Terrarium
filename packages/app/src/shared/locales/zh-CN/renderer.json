@@ -690,6 +690,35 @@
         "complete": "视频生成完成。",
         "failed": "生成失败：{{error}}"
       }
+    },
+    "batch": {
+      "button": "目录批处理",
+      "title": "ComfyUI 图片目录批处理",
+      "instances": "ComfyUI 实例",
+      "enabled": "启用",
+      "name": "名称",
+      "url": "ComfyUI URL / AutoDL 转发地址",
+      "concurrency": "并发",
+      "test": "测试",
+      "add_instance": "添加实例",
+      "start": "选择目录并开始",
+      "output_hint": "输出只写入源目录旁的 *.output；原目录不会被修改，也不会创建 *.work。",
+      "total": "总数：{{count}}",
+      "success": "成功：{{count}}",
+      "failed": "失败：{{count}}",
+      "skipped": "跳过：{{count}}",
+      "running": "运行中：{{count}}",
+      "pending": "等待：{{count}}",
+      "state": "状态：{{state}}",
+      "cancel": "取消",
+      "retry": "重试未完成项",
+      "new": "新建批次",
+      "close": "关闭",
+      "select_source": "选择源图片目录",
+      "cancel_sent": "批处理取消请求已发送",
+      "source": "原目录",
+      "output": "输出目录",
+      "comfy_not_ready": "ComfyUI 尚未就绪。"
     }
   },
   "chat": {

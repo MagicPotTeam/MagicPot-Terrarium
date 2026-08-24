@@ -793,6 +793,35 @@
         "complete": "Video generation completed.",
         "failed": "Generation failed: {{error}}"
       }
+    },
+    "batch": {
+      "button": "Batch folder",
+      "title": "ComfyUI image batch",
+      "instances": "ComfyUI instances",
+      "enabled": "Enabled",
+      "name": "Name",
+      "url": "ComfyUI URL / AutoDL forwarded URL",
+      "concurrency": "Concurrency",
+      "test": "Test",
+      "add_instance": "Add instance",
+      "start": "Choose folder and start",
+      "output_hint": "Outputs are written only to the adjacent *.output folder. The source folder is never modified and no *.work folder is created.",
+      "total": "Total: {{count}}",
+      "success": "Succeeded: {{count}}",
+      "failed": "Failed: {{count}}",
+      "skipped": "Skipped: {{count}}",
+      "running": "Running: {{count}}",
+      "pending": "Pending: {{count}}",
+      "state": "State: {{state}}",
+      "cancel": "Cancel",
+      "retry": "Retry unfinished items",
+      "new": "New batch",
+      "close": "Close",
+      "select_source": "Choose source image folder",
+      "cancel_sent": "Batch cancellation requested",
+      "source": "Source",
+      "output": "Output",
+      "comfy_not_ready": "ComfyUI is not ready yet."
     }
   },
   "chat": {
