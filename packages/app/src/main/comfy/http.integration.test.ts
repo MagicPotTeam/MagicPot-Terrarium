@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import { once } from 'node:events'
+import { beforeAll } from 'vitest'
 import { WebSocketServer } from 'ws'
-import { TLS_TEST_CERT, TLS_TEST_KEY } from './http.tlsFixture'
+import { createTlsTestCredentials } from './http.tlsFixture'
 vi.mock('../config/config', () => ({ getConfig: vi.fn(() => ({})) }))
 vi.mock('../config/buildEnv', () => ({ getBuildEnv: vi.fn(() => ({})) }))
 vi.mock('./networkPolicy', async (importOriginal) => {
@@ -21,6 +22,11 @@ import { ComfyHttpCli } from './http'
 
 let server: Server
 let origin: string
+let tlsTestCredentials: Awaited<ReturnType<typeof createTlsTestCredentials>>
+
+beforeAll(async () => {
+  tlsTestCredentials = await createTlsTestCredentials()
+})
 
 beforeEach(async () => {
   server = createServer(async (request, response) => {
@@ -114,7 +120,7 @@ describe('ComfyHttpCli fake endpoint integration', () => {
   it('keeps certificate hostname validation and SNI on pinned HTTPS and WSS connections', async () => {
     const observedServerNames: string[] = []
     const tlsServer = createHttpsServer(
-      { key: TLS_TEST_KEY, cert: TLS_TEST_CERT },
+      { key: tlsTestCredentials.key, cert: tlsTestCredentials.cert },
       (request, response) => {
         if (request.url === '/object_info') {
           response.end(JSON.stringify({ SecureNode: {} }))
@@ -136,7 +142,7 @@ describe('ComfyHttpCli fake endpoint integration', () => {
     const options = {
       remote: true,
       retryBaseDelayMs: 0,
-      tlsCa: TLS_TEST_CERT,
+      tlsCa: tlsTestCredentials.cert,
       resolveHostname: async () => [{ address: '127.0.0.1', family: 4 as const }]
     }
     try {
@@ -172,7 +178,10 @@ describe('ComfyHttpCli fake endpoint integration', () => {
 
   it('keeps WSS hostname verification and SNI enabled independently of HTTPS requests', async () => {
     const observedServerNames: string[] = []
-    const tlsServer = createHttpsServer({ key: TLS_TEST_KEY, cert: TLS_TEST_CERT })
+    const tlsServer = createHttpsServer({
+      key: tlsTestCredentials.key,
+      cert: tlsTestCredentials.cert
+    })
     tlsServer.on('secureConnection', (socket) => {
       if (typeof socket.servername === 'string') observedServerNames.push(socket.servername)
     })
@@ -186,7 +195,7 @@ describe('ComfyHttpCli fake endpoint integration', () => {
       remote: true,
       networkRetries: 0,
       retryBaseDelayMs: 0,
-      tlsCa: TLS_TEST_CERT,
+      tlsCa: tlsTestCredentials.cert,
       resolveHostname: async () => [{ address: '127.0.0.1', family: 4 as const }]
     }
     try {
