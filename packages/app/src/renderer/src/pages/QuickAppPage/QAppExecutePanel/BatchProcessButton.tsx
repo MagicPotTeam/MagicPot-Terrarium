@@ -341,9 +341,10 @@ const BatchProcessButton = ({
               {t('qapp.batch.cancel')}
             </Button>
           )}
-          {status.state !== 'running' && status.failed > 0 && (
-            <Button onClick={() => void retryFailed()}>{t('qapp.batch.retry')}</Button>
-          )}
+          {status.state !== 'running' &&
+            (status.failed > 0 || status.pending > 0 || status.state === 'error') && (
+              <Button onClick={() => void retryFailed()}>{t('qapp.batch.retry')}</Button>
+            )}
           {status.state !== 'running' && status.sourceDir && (
             <Button onClick={() => setStatus(EMPTY_STATUS)}>{t('qapp.batch.new')}</Button>
           )}

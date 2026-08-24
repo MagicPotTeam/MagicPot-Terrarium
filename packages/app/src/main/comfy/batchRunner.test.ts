@@ -323,6 +323,58 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     expect(manifest.items['deleted.jpg']).toBeUndefined()
   })
 
+  it('never follows a corrupted manifest output path outside the output folder', async () => {
+    const sourceDir = await createTempDir()
+    const protectedPath = path.join(sourceDir, 'protected.png')
+    await fs.writeFile(path.join(sourceDir, 'current.jpg'), 'source')
+    await fs.writeFile(protectedPath, validPng)
+    const manifestDir = path.join(`${sourceDir}.output`, '.magicpot-batch')
+    await fs.mkdir(manifestDir, { recursive: true })
+    await fs.writeFile(
+      path.join(manifestDir, 'manifest.json'),
+      JSON.stringify({
+        version: 2,
+        sourceDir,
+        outputDir: `${sourceDir}.output`,
+        planFingerprint: 'old',
+        updatedAt: Date.now(),
+        items: {
+          'deleted.jpg': {
+            relativePath: 'deleted.jpg',
+            size: 1,
+            mtimeMs: 1,
+            sha256: 'old',
+            planFingerprint: 'old',
+            status: 'success',
+            outputRelativePath: '../protected.png',
+            updatedAt: Date.now()
+          }
+        }
+      })
+    )
+    const fakeClient = {
+      probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
+      objectInfo: async () => objectInfo(),
+      uploadImage: async () => ({ filename: 'upload.png', subfolder: '', type: 'input' }),
+      prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => promptId,
+      history: async (promptId: string) => ({
+        [promptId]: {
+          outputs: {
+            '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
+          },
+          status: { status_str: 'success', completed: true, messages: [] }
+        }
+      }),
+      view: async () => new Uint8Array(validPng)
+    } as unknown as ComfyBatchHttpClient
+
+    await new ComfyBatchRunner(request(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    }).run()
+
+    expect(await fs.readFile(protectedPath)).toEqual(validPng)
+  })
+
   it('retry mode rescans and reruns failed, added, changed, and missing-output items', async () => {
     const sourceDir = await createTempDir()
     await Promise.all([

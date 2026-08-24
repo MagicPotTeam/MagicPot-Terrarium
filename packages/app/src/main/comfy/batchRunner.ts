@@ -250,6 +250,24 @@ export async function hasValidPngFile(filename: string): Promise<boolean> {
   }
 }
 
+function isSafeOutputRelativePath(value: unknown): value is string {
+  if (typeof value !== 'string' || !value || path.isAbsolute(value)) return false
+  const normalized = path.normalize(value)
+  return (
+    normalized !== '..' &&
+    !normalized.startsWith(`..${path.sep}`) &&
+    path.extname(normalized).toLowerCase() === '.png'
+  )
+}
+
+function resolveManifestOutputPath(outputDir: string, relativePath: unknown): string | null {
+  if (!isSafeOutputRelativePath(relativePath)) return null
+  const resolvedOutputDir = path.resolve(outputDir)
+  const candidate = path.resolve(resolvedOutputDir, relativePath)
+  const relation = path.relative(resolvedOutputDir, candidate)
+  return relation && !relation.startsWith('..') && !path.isAbsolute(relation) ? candidate : null
+}
+
 async function readManifest(sourceDir: string): Promise<ComfyBatchManifest | null> {
   try {
     const parsed = JSON.parse(await fs.readFile(getComfyBatchManifestPath(sourceDir), 'utf8'))
@@ -616,7 +634,8 @@ export class ComfyBatchRunner {
     const currentSourcePaths = new Set(sources.map((source) => source.relativePath))
     for (const [relativePath, item] of Object.entries(this.manifest.items)) {
       if (currentSourcePaths.has(relativePath)) continue
-      await fs.rm(path.join(outputDir, item.outputRelativePath), { force: true })
+      const staleOutputPath = resolveManifestOutputPath(outputDir, item.outputRelativePath)
+      if (staleOutputPath) await fs.rm(staleOutputPath, { force: true })
       delete this.manifest.items[relativePath]
     }
 
@@ -721,12 +740,13 @@ export class ComfyBatchRunner {
     const workflow = cloneWorkflow(this.request.workflow)
     bindUploadedImage(workflow, this.imageInputBinding, uploadedValue(uploaded))
     const requestedPromptId = randomUUID()
+    const clientId = `magicpot-batch-${this.jobId}-${requestedPromptId}`
     let promptId: string = requestedPromptId
     this.activePrompts.set(promptId, runtime.client)
     try {
       promptId = await runtime.client.prompt(
         workflow,
-        `magicpot-batch-${this.jobId}`,
+        clientId,
         requestedPromptId,
         this.abortController.signal
       )
@@ -735,13 +755,20 @@ export class ComfyBatchRunner {
         this.activePrompts.set(promptId, runtime.client)
       }
     } catch (error) {
-      const recovered = await runtime.client.waitForPromptAdmission(
+      const recovery = await runtime.client.waitForPromptAdmission(
         requestedPromptId,
-        this.abortController.signal
+        this.abortController.signal,
+        5_000,
+        clientId
       )
-      if (!recovered) {
+      if (!recovery.admitted) {
         this.activePrompts.delete(requestedPromptId)
         throw error
+      }
+      promptId = recovery.promptId
+      if (promptId !== requestedPromptId) {
+        this.activePrompts.delete(requestedPromptId)
+        this.activePrompts.set(promptId, runtime.client)
       }
     }
     try {

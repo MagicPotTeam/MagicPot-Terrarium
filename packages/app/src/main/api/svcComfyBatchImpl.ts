@@ -192,7 +192,9 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       const previous = this.jobs.get(req.jobId)
       if (!previous) throw new Error(`Batch job not found: ${req.jobId}`)
       const status = previous.runner.status
-      if (status.failed === 0) throw new Error('No failed batch items to retry')
+      if (status.failed === 0 && status.pending === 0 && status.state !== 'error') {
+        throw new Error('No unfinished batch items to retry')
+      }
       return { status: this.launch(previous.request) }
     })
 

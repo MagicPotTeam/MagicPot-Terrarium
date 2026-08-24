@@ -132,6 +132,10 @@ export class ComfyBatchHttpClient {
     return this.consume(pathname, init, options, async (response) => (await response.json()) as T)
   }
 
+  private noContent(pathname: string, init: RequestInit = {}, options: RequestOptions = {}) {
+    return this.consume(pathname, init, options, async () => undefined)
+  }
+
   async probe(): Promise<{ endpoint: 'system_stats' | 'queue'; latencyMs: number }> {
     const startedAt = Date.now()
     try {
@@ -212,54 +216,74 @@ export class ComfyBatchHttpClient {
     })
   }
 
-  async promptAdmission(promptId: string, signal?: AbortSignal): Promise<boolean> {
+  async promptAdmission(
+    promptId: string,
+    signal?: AbortSignal,
+    clientId?: string
+  ): Promise<{ admitted: boolean; promptId: string }> {
     const history = await this.history(promptId, signal)
-    if (history[promptId]) return true
+    if (history[promptId]) return { admitted: true, promptId }
     const queue = await this.json<{
       queue_running?: unknown[][]
       queue_pending?: unknown[][]
     }>('/queue', {}, { signal })
-    return [...(queue.queue_running || []), ...(queue.queue_pending || [])].some(
-      (item) => item[1] === promptId
-    )
+    const items = [...(queue.queue_running || []), ...(queue.queue_pending || [])]
+    const exact = items.find((item) => item[1] === promptId)
+    if (exact) return { admitted: true, promptId }
+    if (clientId) {
+      const byClient = items.filter(
+        (item) =>
+          typeof item[1] === 'string' &&
+          item[3] !== null &&
+          typeof item[3] === 'object' &&
+          (item[3] as { client_id?: unknown }).client_id === clientId
+      )
+      if (byClient.length === 1) return { admitted: true, promptId: String(byClient[0][1]) }
+    }
+    return { admitted: false, promptId }
   }
 
   async waitForPromptAdmission(
     promptId: string,
     signal?: AbortSignal,
-    timeoutMs = 5_000
-  ): Promise<boolean> {
+    timeoutMs = 5_000,
+    clientId?: string
+  ): Promise<{ admitted: boolean; promptId: string }> {
     const deadline = Date.now() + Math.max(0, timeoutMs)
     while (!signal?.aborted && Date.now() < deadline) {
       try {
-        if (await this.promptAdmission(promptId, signal)) return true
+        const admission = await this.promptAdmission(promptId, signal, clientId)
+        if (admission.admitted) return admission
       } catch {
         // Retry admission lookup until the short ambiguity window expires.
       }
       await new Promise((resolve) => setTimeout(resolve, 200))
     }
     if (signal?.aborted) throw new Error('Batch cancelled')
-    return false
+    return { admitted: false, promptId }
   }
 
   async cancelPrompt(promptId: string): Promise<void> {
-    await this.json(
-      '/queue',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ delete: [promptId] })
-      },
-      { retry: false }
-    )
-    await this.json(
-      '/interrupt',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt_id: promptId })
-      },
-      { retry: false }
-    )
+    const [queued, running] = await Promise.allSettled([
+      this.noContent(
+        '/queue',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ delete: [promptId] })
+        },
+        { retry: false }
+      ),
+      this.noContent(
+        '/interrupt',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt_id: promptId })
+        },
+        { retry: false }
+      )
+    ])
+    if (queued.status === 'rejected' && running.status === 'rejected') throw queued.reason
   }
 }

@@ -68,7 +68,38 @@ describe('ComfyBatchHttpClient retry and boundary behavior', () => {
       )
     const client = new ComfyBatchHttpClient('http://127.0.0.1:8188', fetchMock as typeof fetch)
 
-    await expect(client.promptAdmission('known-prompt-id')).resolves.toBe(true)
+    await expect(client.promptAdmission('known-prompt-id')).resolves.toEqual({
+      admitted: true,
+      promptId: 'known-prompt-id'
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('recovers a server-minted prompt id through the unique submission client id', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({}, { status: 200 }))
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            queue_running: [],
+            queue_pending: [[1, 'server-prompt-id', {}, { client_id: 'submission-client' }]]
+          },
+          { status: 200 }
+        )
+      )
+    const client = new ComfyBatchHttpClient('http://127.0.0.1:8188', fetchMock as typeof fetch)
+
+    await expect(
+      client.waitForPromptAdmission('requested-prompt-id', undefined, 100, 'submission-client')
+    ).resolves.toEqual({ admitted: true, promptId: 'server-prompt-id' })
+  })
+
+  it('cancels queue and running work even when both endpoints return empty bodies', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }))
+    const client = new ComfyBatchHttpClient('http://127.0.0.1:8188', fetchMock as typeof fetch)
+
+    await expect(client.cancelPrompt('known-prompt-id')).resolves.toBeUndefined()
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
