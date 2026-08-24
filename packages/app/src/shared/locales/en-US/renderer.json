@@ -820,8 +820,7 @@
       "select_source": "Choose source image folder",
       "cancel_sent": "Batch cancellation requested",
       "source": "Source",
-      "output": "Output",
-      "comfy_not_ready": "ComfyUI is not ready yet."
+      "output": "Output"
     }
   },
   "chat": {

@@ -26,7 +26,6 @@ import { useTranslation } from 'react-i18next'
 import { useQAppContext } from '../components/QAppContext'
 
 type BatchProcessButtonProps = {
-  isConnected: boolean
   imageInputSlot: string
   outputNodeIds?: string[]
   buildWorkflow: () => Promise<Workflow> | Workflow
@@ -53,7 +52,6 @@ const newProfile = (): ComfyBatchProfile => ({
 })
 
 const BatchProcessButton = ({
-  isConnected,
   imageInputSlot,
   outputNodeIds,
   buildWorkflow,
@@ -118,7 +116,6 @@ const BatchProcessButton = ({
 
   const start = useCallback(async () => {
     try {
-      if (!isConnected) throw new Error(t('qapp.batch.comfy_not_ready'))
       if (!(await validate())) return
       if (!currentQAppKey) throw new Error('Quick App key is missing')
       if (!outputNodeIds?.length) throw new Error('Quick App outputNodeIds must not be empty')
@@ -145,7 +142,6 @@ const BatchProcessButton = ({
     buildWorkflow,
     currentQAppKey,
     imageInputSlot,
-    isConnected,
     notifyError,
     outputNodeIds,
     profiles,
@@ -179,12 +175,7 @@ const BatchProcessButton = ({
 
   return (
     <>
-      <Button
-        variant="outlined"
-        startIcon={<FolderOpen />}
-        disabled={!isConnected}
-        onClick={() => setOpen(true)}
-      >
+      <Button variant="outlined" startIcon={<FolderOpen />} onClick={() => setOpen(true)}>
         {t('qapp.batch.button')}
       </Button>
       <Dialog

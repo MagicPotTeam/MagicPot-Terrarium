@@ -89,8 +89,13 @@ export class ComfyBatchHttpClient {
     return new URL(pathname.replace(/^\/+/, ''), this.baseUrl)
   }
 
-  private async request(pathname: string, init: RequestInit = {}, options: RequestOptions = {}) {
-    const execute = async (): Promise<Response> => {
+  private async consume<T>(
+    pathname: string,
+    init: RequestInit,
+    options: RequestOptions,
+    read: (response: Response) => Promise<T>
+  ): Promise<T> {
+    const execute = async (): Promise<T> => {
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
       const relayAbort = (): void => controller.abort()
@@ -110,7 +115,7 @@ export class ComfyBatchHttpClient {
             response.status
           )
         }
-        return response
+        return await read(response)
       } catch (error) {
         if (error instanceof ComfyBatchHttpError) throw error
         if (options.signal?.aborted) throw new Error('Batch cancelled')
@@ -123,18 +128,17 @@ export class ComfyBatchHttpClient {
     return options.retry === false ? execute() : withNetworkRetry(execute)
   }
 
-  private async json<T>(pathname: string, init: RequestInit = {}, options: RequestOptions = {}) {
-    const response = await this.request(pathname, init, options)
-    return (await response.json()) as T
+  private json<T>(pathname: string, init: RequestInit = {}, options: RequestOptions = {}) {
+    return this.consume(pathname, init, options, async (response) => (await response.json()) as T)
   }
 
   async probe(): Promise<{ endpoint: 'system_stats' | 'queue'; latencyMs: number }> {
     const startedAt = Date.now()
     try {
-      await this.request('/system_stats', {}, { retry: false, timeoutMs: 8_000 })
+      await this.json('/system_stats', {}, { retry: false, timeoutMs: 8_000 })
       return { endpoint: 'system_stats', latencyMs: Date.now() - startedAt }
     } catch {
-      await this.request('/queue', {}, { retry: false, timeoutMs: 8_000 })
+      await this.json('/queue', {}, { retry: false, timeoutMs: 8_000 })
       return { endpoint: 'queue', latencyMs: Date.now() - startedAt }
     }
   }
@@ -192,19 +196,54 @@ export class ComfyBatchHttpClient {
       subfolder: file.subfolder || '',
       type: file.type || ''
     })
-    const response = await this.request(`/view?${query.toString()}`, {}, { signal })
-    const contentType = String(response.headers.get('content-type') || '')
-      .split(';', 1)[0]
-      .trim()
-      .toLowerCase()
-    if (contentType && contentType !== 'image/png' && contentType !== 'application/octet-stream') {
-      throw new Error(`ComfyUI output must be PNG, got ${contentType}`)
+    return this.consume(`/view?${query.toString()}`, {}, { signal }, async (response) => {
+      const contentType = String(response.headers.get('content-type') || '')
+        .split(';', 1)[0]
+        .trim()
+        .toLowerCase()
+      if (
+        contentType &&
+        contentType !== 'image/png' &&
+        contentType !== 'application/octet-stream'
+      ) {
+        throw new Error(`ComfyUI output must be PNG, got ${contentType}`)
+      }
+      return new Uint8Array(await response.arrayBuffer())
+    })
+  }
+
+  async promptAdmission(promptId: string, signal?: AbortSignal): Promise<boolean> {
+    const history = await this.history(promptId, signal)
+    if (history[promptId]) return true
+    const queue = await this.json<{
+      queue_running?: unknown[][]
+      queue_pending?: unknown[][]
+    }>('/queue', {}, { signal })
+    return [...(queue.queue_running || []), ...(queue.queue_pending || [])].some(
+      (item) => item[1] === promptId
+    )
+  }
+
+  async waitForPromptAdmission(
+    promptId: string,
+    signal?: AbortSignal,
+    timeoutMs = 5_000
+  ): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs)
+    while (!signal?.aborted && Date.now() < deadline) {
+      try {
+        if (await this.promptAdmission(promptId, signal)) return true
+      } catch {
+        // Retry admission lookup until the short ambiguity window expires.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200))
     }
-    return new Uint8Array(await response.arrayBuffer())
+    if (signal?.aborted) throw new Error('Batch cancelled')
+    return false
   }
 
   async cancelPrompt(promptId: string): Promise<void> {
-    await this.request(
+    await this.json(
       '/queue',
       {
         method: 'POST',
@@ -213,7 +252,7 @@ export class ComfyBatchHttpClient {
       },
       { retry: false }
     )
-    await this.request(
+    await this.json(
       '/interrupt',
       {
         method: 'POST',

@@ -56,6 +56,46 @@ describe('ComfyBatchHttpClient retry and boundary behavior', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('finds an ambiguously submitted prompt in the pending queue', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({}, { status: 200 }))
+      .mockResolvedValueOnce(
+        Response.json(
+          { queue_running: [], queue_pending: [[1, 'known-prompt-id']] },
+          { status: 200 }
+        )
+      )
+    const client = new ComfyBatchHttpClient('http://127.0.0.1:8188', fetchMock as typeof fetch)
+
+    await expect(client.promptAdmission('known-prompt-id')).resolves.toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps caller cancellation attached while a response body is still loading', async () => {
+    const controller = new AbortController()
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      return new Response(
+        new ReadableStream({
+          start(streamController) {
+            init?.signal?.addEventListener(
+              'abort',
+              () => streamController.error(new DOMException('Aborted', 'AbortError')),
+              { once: true }
+            )
+          }
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    })
+    const client = new ComfyBatchHttpClient('http://127.0.0.1:8188', fetchMock as typeof fetch)
+
+    const pending = client.objectInfo(controller.signal)
+    await Promise.resolve()
+    controller.abort()
+    await expect(pending).rejects.toThrow(/cancelled/i)
+  })
+
   it('does not retry an upload whose submit result is unknown', async () => {
     const fetchMock = vi.fn().mockRejectedValue(new TypeError('unknown upload result'))
     vi.stubGlobal('fetch', fetchMock)

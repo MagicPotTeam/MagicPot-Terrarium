@@ -717,8 +717,7 @@
       "select_source": "选择源图片目录",
       "cancel_sent": "批处理取消请求已发送",
       "source": "原目录",
-      "output": "输出目录",
-      "comfy_not_ready": "ComfyUI 尚未就绪。"
+      "output": "输出目录"
     }
   },
   "chat": {

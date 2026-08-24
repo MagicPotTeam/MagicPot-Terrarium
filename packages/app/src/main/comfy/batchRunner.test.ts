@@ -283,6 +283,46 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     await expect(fs.stat(`${sourceDir}.output`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('removes stale outputs and manifest entries for deleted sources', async () => {
+    const sourceDir = await createTempDir()
+    const sourcePath = path.join(sourceDir, 'deleted.jpg')
+    await fs.writeFile(sourcePath, 'source')
+    const fakeClient = {
+      probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
+      objectInfo: async () => objectInfo(),
+      uploadImage: async () => ({ filename: 'upload.png', subfolder: '', type: 'input' }),
+      prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => promptId,
+      history: async (promptId: string) => ({
+        [promptId]: {
+          outputs: {
+            '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
+          },
+          status: { status_str: 'success', completed: true, messages: [] }
+        }
+      }),
+      view: async () => new Uint8Array(validPng)
+    } as unknown as ComfyBatchHttpClient
+
+    await new ComfyBatchRunner(request(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    }).run()
+    const outputPath = path.join(`${sourceDir}.output`, 'deleted.png')
+    await fs.rm(sourcePath)
+    await fs.writeFile(path.join(sourceDir, 'remaining.jpg'), 'source')
+    await new ComfyBatchRunner(request(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    }).run()
+
+    await expect(fs.stat(outputPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    const manifest = JSON.parse(
+      await fs.readFile(
+        path.join(`${sourceDir}.output`, '.magicpot-batch', 'manifest.json'),
+        'utf8'
+      )
+    ) as { items: Record<string, unknown> }
+    expect(manifest.items['deleted.jpg']).toBeUndefined()
+  })
+
   it('retry mode rescans and reruns failed, added, changed, and missing-output items', async () => {
     const sourceDir = await createTempDir()
     await Promise.all([

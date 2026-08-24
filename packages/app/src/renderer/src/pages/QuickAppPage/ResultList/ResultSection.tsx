@@ -49,7 +49,6 @@ export default function ResultSection({ isDesignMode = false }: ResultSectionPro
             />
             {!isDesignMode && qAppCfg?.batchProcess?.enabled && (
               <BatchProcessButton
-                isConnected={isConnected}
                 imageInputSlot={qAppCfg.batchProcess.imageInputSlot}
                 outputNodeIds={qAppCfg.outputNodeIds}
                 validate={validate}

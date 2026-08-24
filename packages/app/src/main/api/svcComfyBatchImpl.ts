@@ -36,18 +36,6 @@ const IDLE_STATUS: ComfyBatchStatus = {
   failedFiles: []
 }
 
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>
-    return `{${Object.keys(record)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
-      .join(',')}}`
-  }
-  return JSON.stringify(value)
-}
-
 type JobRecord = {
   request: StartComfyBatchReq
   runner: ComfyBatchRunner
@@ -92,9 +80,23 @@ function configuredProfiles(): ComfyBatchProfile[] {
 export class ComfyBatchSvcImpl implements ComfyBatchSvc {
   private jobs = new Map<string, JobRecord>()
   private latestJobId: string | undefined
+  private operationQueue: Promise<void> = Promise.resolve()
 
   private async persistProfiles(profiles: ComfyBatchProfile[]): Promise<void> {
     await saveConfig({ comfy_batch_profiles: profiles })
+  }
+
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operationQueue.then(operation, operation)
+    this.operationQueue = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
+  }
+
+  private activeJob(): JobRecord | undefined {
+    return [...this.jobs.values()].find((record) => record.runner.status.state === 'running')
   }
 
   private rememberJob(record: JobRecord): void {
@@ -159,22 +161,24 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     }
   }
 
-  start = async (req: StartComfyBatchReq): Promise<StartComfyBatchResp> => {
-    const active = [...this.jobs.values()].find(
-      (record) => record.runner.status.state === 'running'
-    )
-    if (active) throw new Error('Another ComfyUI batch is already running')
-    const selected = await new QAppFSCli().getQApp(req.qAppKey)
-    if (
-      selected.cfg.batchProcess?.enabled !== true ||
-      selected.cfg.batchProcess.imageInputSlot !== req.imageInputSlot ||
-      stableJson(selected.workflow) !== stableJson(req.workflow) ||
-      stableJson(selected.cfg.outputNodeIds || []) !== stableJson(req.outputNodeIds)
-    ) {
-      throw new Error('Quick App batch plan changed; reopen the Quick App and try again')
-    }
-    return { status: this.launch(req) }
-  }
+  start = async (req: StartComfyBatchReq): Promise<StartComfyBatchResp> =>
+    this.serialize(async () => {
+      if (this.activeJob()) throw new Error('Another ComfyUI batch is already running')
+      const selected = await new QAppFSCli().getQApp(req.qAppKey)
+      const selectedOutputIds = selected.cfg.outputNodeIds || []
+      const requestedOutputIds = req.outputNodeIds || []
+      const outputBindingsMatch =
+        selectedOutputIds.length === requestedOutputIds.length &&
+        selectedOutputIds.every((nodeId) => requestedOutputIds.includes(nodeId))
+      if (
+        selected.cfg.batchProcess?.enabled !== true ||
+        selected.cfg.batchProcess.imageInputSlot !== req.imageInputSlot ||
+        !outputBindingsMatch
+      ) {
+        throw new Error('Quick App batch bindings changed; reopen the Quick App and try again')
+      }
+      return { status: this.launch(req) }
+    })
 
   status = async (req: GetComfyBatchStatusReq): Promise<GetComfyBatchStatusResp> => {
     const jobId = req.jobId || this.latestJobId
@@ -182,14 +186,15 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     return { status: record?.runner.status || { ...IDLE_STATUS } }
   }
 
-  retryFailed = async (req: RetryFailedComfyBatchReq): Promise<RetryFailedComfyBatchResp> => {
-    const previous = this.jobs.get(req.jobId)
-    if (!previous) throw new Error(`Batch job not found: ${req.jobId}`)
-    const status = previous.runner.status
-    if (status.state === 'running') throw new Error('Cannot retry a running batch job')
-    if (status.failed === 0) throw new Error('No failed batch items to retry')
-    return { status: this.launch(previous.request) }
-  }
+  retryFailed = async (req: RetryFailedComfyBatchReq): Promise<RetryFailedComfyBatchResp> =>
+    this.serialize(async () => {
+      if (this.activeJob()) throw new Error('Another ComfyUI batch is already running')
+      const previous = this.jobs.get(req.jobId)
+      if (!previous) throw new Error(`Batch job not found: ${req.jobId}`)
+      const status = previous.runner.status
+      if (status.failed === 0) throw new Error('No failed batch items to retry')
+      return { status: this.launch(previous.request) }
+    })
 
   cancel = async (req: CancelComfyBatchReq): Promise<CancelComfyBatchResp> => {
     const record = this.jobs.get(req.jobId)

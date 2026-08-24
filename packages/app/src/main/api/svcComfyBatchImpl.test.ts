@@ -50,6 +50,9 @@ function status(jobId: string, state: ComfyBatchStatus['state']): ComfyBatchStat
   }
 }
 
+let releaseQAppLookup: (() => void) | undefined
+let delayQAppLookup = false
+
 describe('ComfyBatchSvcImpl live status', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -67,18 +70,30 @@ describe('ComfyBatchSvcImpl live status', () => {
     } as Config)
     vi.mocked(configModule.saveConfig).mockResolvedValue(undefined)
     vi.mocked(buildEnvModule.getBuildEnv).mockReturnValue(DEFAULT_BUILD_ENV)
+    delayQAppLookup = false
+    releaseQAppLookup = undefined
     vi.mocked(QAppFSCli).mockImplementation(function MockQAppFs() {
       return {
-        getQApp: async () => ({
-          cfg: {
-            icon: '',
-            inputs: [],
-            outputNodeIds: request.outputNodeIds,
-            batchProcess: { enabled: true, imageInputSlot: request.imageInputSlot }
-          },
-          workflow: request.workflow,
-          manifest: { name: 'qapp', version: '1.0.0' }
-        })
+        getQApp: async () => {
+          if (delayQAppLookup) {
+            await new Promise<void>((resolve) => {
+              releaseQAppLookup = resolve
+            })
+          }
+          return {
+            cfg: {
+              icon: '',
+              inputs: [],
+              outputNodeIds: request.outputNodeIds,
+              batchProcess: { enabled: true, imageInputSlot: request.imageInputSlot }
+            },
+            workflow: {
+              ...request.workflow,
+              '1': { ...request.workflow['1'], inputs: { image: 'template' } }
+            },
+            manifest: { name: 'qapp', version: '1.0.0' }
+          }
+        }
       } as never
     })
   })
@@ -115,6 +130,41 @@ describe('ComfyBatchSvcImpl live status', () => {
     })
     await expect(svc.start(request)).rejects.toThrow(/already running/i)
 
+    current = { ...current, state: 'completed', running: 0 }
+    resolveRun(current)
+    await runPromise
+  })
+
+  it('serializes concurrent starts around asynchronous Quick App validation', async () => {
+    let current = status('job-1', 'idle')
+    let resolveRun!: (value: ComfyBatchStatus) => void
+    const runPromise = new Promise<ComfyBatchStatus>((resolve) => {
+      resolveRun = resolve
+    })
+    const runner = {
+      jobId: 'job-1',
+      get status() {
+        return current
+      },
+      startingStatus: vi.fn(() => {
+        current = status('job-1', 'running')
+        return current
+      }),
+      run: vi.fn(() => runPromise),
+      cancel: vi.fn()
+    }
+    vi.mocked(ComfyBatchRunner).mockImplementation(function MockRunner() {
+      return runner as never
+    })
+    delayQAppLookup = true
+    const svc = new ComfyBatchSvcImpl()
+    const first = svc.start(request)
+    const second = svc.start(request)
+    await vi.waitFor(() => expect(releaseQAppLookup).toBeTypeOf('function'))
+    releaseQAppLookup?.()
+
+    await expect(first).resolves.toMatchObject({ status: { state: 'running' } })
+    await expect(second).rejects.toThrow(/already running/i)
     current = { ...current, state: 'completed', running: 0 }
     resolveRun(current)
     await runPromise

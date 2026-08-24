@@ -568,10 +568,7 @@ export class ComfyBatchRunner {
     for (const [promptId, client] of this.activePrompts) {
       void client.cancelPrompt(promptId).catch(() => undefined)
     }
-    if (this.statusValue.state === 'running') {
-      this.statusValue.state = 'cancelled'
-      this.emit()
-    }
+    this.emit()
   }
 
   private emit(): void {
@@ -615,6 +612,13 @@ export class ComfyBatchRunner {
     this.manifest.sourceDir = sourceDir
     this.manifest.outputDir = outputDir
     this.manifest.planFingerprint = planFingerprint
+
+    const currentSourcePaths = new Set(sources.map((source) => source.relativePath))
+    for (const [relativePath, item] of Object.entries(this.manifest.items)) {
+      if (currentSourcePaths.has(relativePath)) continue
+      await fs.rm(path.join(outputDir, item.outputRelativePath), { force: true })
+      delete this.manifest.items[relativePath]
+    }
 
     this.queue = []
     let skipped = 0
@@ -717,7 +721,8 @@ export class ComfyBatchRunner {
     const workflow = cloneWorkflow(this.request.workflow)
     bindUploadedImage(workflow, this.imageInputBinding, uploadedValue(uploaded))
     const requestedPromptId = randomUUID()
-    let promptId: string
+    let promptId: string = requestedPromptId
+    this.activePrompts.set(promptId, runtime.client)
     try {
       promptId = await runtime.client.prompt(
         workflow,
@@ -725,16 +730,20 @@ export class ComfyBatchRunner {
         requestedPromptId,
         this.abortController.signal
       )
+      if (promptId !== requestedPromptId) {
+        this.activePrompts.delete(requestedPromptId)
+        this.activePrompts.set(promptId, runtime.client)
+      }
     } catch (error) {
-      try {
-        const recovered = await runtime.client.history(requestedPromptId)
-        if (!recovered[requestedPromptId]) throw error
-        promptId = requestedPromptId
-      } catch {
+      const recovered = await runtime.client.waitForPromptAdmission(
+        requestedPromptId,
+        this.abortController.signal
+      )
+      if (!recovered) {
+        this.activePrompts.delete(requestedPromptId)
         throw error
       }
     }
-    this.activePrompts.set(promptId, runtime.client)
     try {
       const history = await waitForHistory(runtime.client, promptId, this.abortController.signal)
       const output = selectBoundOutputImage(history, this.request.outputNodeIds)
