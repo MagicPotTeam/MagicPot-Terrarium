@@ -10,6 +10,7 @@ import { api } from '@renderer/utils/windowUtils'
 import { useComfyProcess } from '@renderer/store/hooks/comfyProcess'
 import { useLocation } from 'react-router-dom'
 import { isServerStreamingError } from '@shared/api/apiUtils/streaming'
+import { detectManagedComfyProcess } from '@renderer/components/managedComfyDetectionCoordinator'
 import { useTranslation } from 'react-i18next'
 import { useTheme } from '@mui/material/styles'
 
@@ -63,7 +64,7 @@ const TerminalPage: React.FC = () => {
 
     let startedProcessStream = false
     try {
-      const { pid } = await api().svcHyper.comfyPortDetect({})
+      const { pid } = await detectManagedComfyProcess(() => api().svcHyper.comfyPortDetect({}))
       if (pid !== 0) {
         if (pid !== state.pid) {
           setPid(pid)

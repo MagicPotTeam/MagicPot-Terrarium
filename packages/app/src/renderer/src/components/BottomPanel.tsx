@@ -22,6 +22,7 @@ import { api } from '@renderer/utils/windowUtils'
 import { useComfyProcess } from '@renderer/store/hooks/comfyProcess'
 import { MAX_COMFY_OUTPUT_LINES } from '@renderer/store/slices/comfyProcess'
 import { joinBoundedLogLines } from './comfyLogRendering'
+import { detectManagedComfyProcess } from './managedComfyDetectionCoordinator'
 import { isServerStreamingError } from '@shared/api/apiUtils/streaming'
 import type { CanvasTargetAssetMetadata } from '@shared/canvasTarget'
 import type {
@@ -950,7 +951,7 @@ const ComfyUIPanel: React.FC = () => {
 
     let startedProcessStream = false
     try {
-      const { pid } = await api().svcHyper.comfyPortDetect({})
+      const { pid } = await detectManagedComfyProcess(() => api().svcHyper.comfyPortDetect({}))
       if (pid !== 0) {
         if (pid !== state.pid) {
           setPid(pid)

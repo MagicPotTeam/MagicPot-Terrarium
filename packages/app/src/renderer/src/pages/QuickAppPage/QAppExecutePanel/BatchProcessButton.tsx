@@ -1,4 +1,4 @@
-import { Add, Delete, FolderOpen, Science } from '@mui/icons-material'
+import { FolderOpen } from '@mui/icons-material'
 import {
   Box,
   Button,
@@ -6,24 +6,24 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  FormControlLabel,
   LinearProgress,
   Stack,
-  Switch,
-  TextField,
   Typography
 } from '@mui/material'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { api } from '@renderer/utils/windowUtils'
-import type {
-  ComfyBatchProfile,
-  ComfyBatchStatus,
-  ComfyBatchProbeResult
-} from '@shared/api/svcComfyBatch'
+import type { ComfyBatchStatus } from '@shared/api/svcComfyBatch'
 import type { Workflow } from '@shared/comfy/types'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useSyncExternalStore, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQAppContext } from '../components/QAppContext'
+import ComfyBatchProfileEditor from './ComfyBatchProfileEditor'
+import {
+  getComfyBatchProfileSnapshot,
+  isComfyBatchProfileSnapshotLoaded,
+  setComfyBatchProfileSnapshot,
+  subscribeComfyBatchProfiles
+} from './comfyBatchProfileState'
 
 type BatchProcessButtonProps = {
   imageInputSlot: string
@@ -43,14 +43,6 @@ const EMPTY_STATUS: ComfyBatchStatus = {
   failedFiles: []
 }
 
-const newProfile = (): ComfyBatchProfile => ({
-  id: globalThis.crypto?.randomUUID?.() || `comfy-${Date.now()}`,
-  name: 'ComfyUI',
-  baseUrl: 'http://127.0.0.1:8188',
-  enabled: true,
-  maxConcurrency: 1
-})
-
 const BatchProcessButton = ({
   imageInputSlot,
   outputNodeIds,
@@ -62,21 +54,31 @@ const BatchProcessButton = ({
   const { notifyError, notifyInfo } = useMessage()
   const [open, setOpen] = useState(false)
   const [status, setStatus] = useState<ComfyBatchStatus>(EMPTY_STATUS)
-  const [profiles, setProfiles] = useState<ComfyBatchProfile[]>([])
-  const [probeResults, setProbeResults] = useState<Record<string, ComfyBatchProbeResult>>({})
+  const [profilesLoading, setProfilesLoading] = useState(false)
+  const [profilesEditing, setProfilesEditing] = useState(false)
+  const profiles = useSyncExternalStore(
+    subscribeComfyBatchProfiles,
+    getComfyBatchProfileSnapshot,
+    getComfyBatchProfileSnapshot
+  )
 
   const loadProfiles = useCallback(async () => {
     try {
+      setProfilesLoading(true)
       const result = await api().svcComfyBatch.listProfiles({})
-      setProfiles(result.profiles)
+      setComfyBatchProfileSnapshot(result.profiles)
+      setProfilesEditing(false)
     } catch (error) {
+      setProfilesEditing(true)
       notifyError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setProfilesLoading(false)
     }
   }, [notifyError])
 
   useEffect(() => {
-    if (open && profiles.length === 0) void loadProfiles()
-  }, [loadProfiles, open, profiles.length])
+    if (open) void loadProfiles()
+  }, [loadProfiles, open])
 
   useEffect(() => {
     if (!open || status.state !== 'running' || !status.jobId) return
@@ -91,35 +93,13 @@ const BatchProcessButton = ({
     return () => window.clearInterval(timer)
   }, [open, status.jobId, status.state])
 
-  const probeProfile = useCallback(async (profile: ComfyBatchProfile) => {
-    try {
-      const result = await api().svcComfyBatch.probeProfile({ baseUrl: profile.baseUrl })
-      setProbeResults((current) => ({ ...current, [profile.id]: result.result }))
-    } catch (error) {
-      setProbeResults((current) => ({
-        ...current,
-        [profile.id]: {
-          ok: false,
-          baseUrl: profile.baseUrl,
-          latencyMs: 0,
-          error: error instanceof Error ? error.message : String(error)
-        }
-      }))
-    }
-  }, [])
-
-  const updateProfile = useCallback((id: string, patch: Partial<ComfyBatchProfile>) => {
-    setProfiles((current) =>
-      current.map((profile) => (profile.id === id ? { ...profile, ...patch } : profile))
-    )
-  }, [])
-
   const start = useCallback(async () => {
     try {
       if (!(await validate())) return
       if (!currentQAppKey) throw new Error('Quick App key is missing')
       if (!outputNodeIds?.length) throw new Error('Quick App outputNodeIds must not be empty')
-      await api().svcComfyBatch.replaceProfiles({ profiles })
+      const saved = await api().svcComfyBatch.replaceProfiles({ profiles })
+      setComfyBatchProfileSnapshot(saved.profiles)
       const selection = await api().svcDialog.showOpenDialog({
         title: t('qapp.batch.select_source'),
         properties: ['openDirectory']
@@ -190,92 +170,24 @@ const BatchProcessButton = ({
             {status.state !== 'running' && !status.sourceDir && (
               <Stack spacing={1.5}>
                 <Typography variant="subtitle2">{t('qapp.batch.instances')}</Typography>
-                {profiles.map((profile) => {
-                  const probe = probeResults[profile.id]
-                  return (
-                    <Stack
-                      key={profile.id}
-                      direction={{ xs: 'column', md: 'row' }}
-                      spacing={1}
-                      alignItems={{ md: 'center' }}
-                    >
-                      <FormControlLabel
-                        control={
-                          <Switch
-                            checked={profile.enabled}
-                            onChange={(_, enabled) => updateProfile(profile.id, { enabled })}
-                          />
-                        }
-                        label={t('qapp.batch.enabled')}
-                      />
-                      <TextField
-                        size="small"
-                        label={t('qapp.batch.name')}
-                        value={profile.name}
-                        onChange={(event) =>
-                          updateProfile(profile.id, { name: event.target.value })
-                        }
-                        sx={{ minWidth: 130 }}
-                      />
-                      <TextField
-                        size="small"
-                        label={t('qapp.batch.url')}
-                        value={profile.baseUrl}
-                        onChange={(event) =>
-                          updateProfile(profile.id, { baseUrl: event.target.value })
-                        }
-                        sx={{ flex: 1, minWidth: 240 }}
-                      />
-                      <TextField
-                        size="small"
-                        type="number"
-                        label={t('qapp.batch.concurrency')}
-                        value={profile.maxConcurrency}
-                        slotProps={{ htmlInput: { min: 1, max: 32 } }}
-                        onChange={(event) =>
-                          updateProfile(profile.id, {
-                            maxConcurrency: Math.max(1, Number(event.target.value) || 1)
-                          })
-                        }
-                        sx={{ width: 90 }}
-                      />
-                      <Button startIcon={<Science />} onClick={() => void probeProfile(profile)}>
-                        {t('qapp.batch.test')}
-                      </Button>
-                      <Button
-                        color="error"
-                        onClick={() =>
-                          setProfiles((current) => current.filter((item) => item.id !== profile.id))
-                        }
-                      >
-                        <Delete />
-                      </Button>
-                      {probe && (
-                        <Typography
-                          variant="caption"
-                          color={probe.ok ? 'success.main' : 'error.main'}
-                        >
-                          {probe.ok ? `${probe.latencyMs} ms` : probe.error}
-                        </Typography>
-                      )}
-                    </Stack>
-                  )
-                })}
-                <Stack direction="row" spacing={1}>
-                  <Button
-                    startIcon={<Add />}
-                    onClick={() => setProfiles((items) => [...items, newProfile()])}
-                  >
-                    {t('qapp.batch.add_instance')}
-                  </Button>
-                  <Button
-                    variant="contained"
-                    disabled={profiles.every((profile) => !profile.enabled)}
-                    onClick={() => void start()}
-                  >
-                    {t('qapp.batch.start')}
-                  </Button>
-                </Stack>
+                <ComfyBatchProfileEditor
+                  profiles={profiles}
+                  onProfilesChange={setComfyBatchProfileSnapshot}
+                  onEditingChange={setProfilesEditing}
+                />
+                <Button
+                  variant="contained"
+                  disabled={
+                    profilesLoading ||
+                    profilesEditing ||
+                    !isComfyBatchProfileSnapshotLoaded() ||
+                    profiles.every((profile) => !profile.enabled)
+                  }
+                  onClick={() => void start()}
+                  sx={{ alignSelf: 'flex-start' }}
+                >
+                  {t('qapp.batch.start')}
+                </Button>
                 <Typography variant="caption" color="text.secondary">
                   {t('qapp.batch.output_hint')}
                 </Typography>

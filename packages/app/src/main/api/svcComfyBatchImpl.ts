@@ -56,10 +56,6 @@ function normalizeProfile(profile: ComfyBatchProfile): ComfyBatchProfile {
   }
 }
 
-function savedProfiles(): ComfyBatchProfile[] {
-  return (getConfig().comfy_batch_profiles ?? []).map(normalizeProfile)
-}
-
 function defaultProfile(): ComfyBatchProfile {
   const config = getConfig()
   const baseUrl = new ConfigUtils(config, getBuildEnv(), path).getComfyUIOrigin()
@@ -73,8 +69,12 @@ function defaultProfile(): ComfyBatchProfile {
 }
 
 function configuredProfiles(): ComfyBatchProfile[] {
-  const profiles = savedProfiles()
-  return profiles.length ? profiles : [defaultProfile()]
+  const config = getConfig()
+  const configured = config.comfy_batch_profiles
+  if (!Array.isArray(configured)) {
+    return [defaultProfile()]
+  }
+  return configured.map(normalizeProfile)
 }
 
 export class ComfyBatchSvcImpl implements ComfyBatchSvc {
@@ -137,7 +137,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       throw new Error('ComfyUI profile ids must be unique')
     }
     await this.persistProfiles(profiles)
-    return { profiles: profiles.length ? profiles : [defaultProfile()] }
+    return { profiles }
   }
 
   probeProfile = async (req: ProbeComfyBatchProfileReq): Promise<ProbeComfyBatchProfileResp> => {

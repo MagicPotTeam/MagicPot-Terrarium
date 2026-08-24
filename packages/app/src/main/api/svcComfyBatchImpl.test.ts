@@ -98,6 +98,23 @@ describe('ComfyBatchSvcImpl live status', () => {
     })
   })
 
+  it('keeps an explicitly empty profile list instead of regenerating a mode-dependent default', async () => {
+    vi.mocked(configModule.getConfig).mockReturnValue({
+      ...DEFAULT_CONFIG,
+      use_remote_comfyui: true,
+      remote_comfyui_config: {
+        ...DEFAULT_CONFIG.remote_comfyui_config,
+        comfyui_origin: 'https://remote.example.com:9443'
+      },
+      comfy_batch_profiles: []
+    } as Config)
+    const svc = new ComfyBatchSvcImpl()
+
+    await expect(svc.listProfiles({})).resolves.toEqual({ profiles: [] })
+    await expect(svc.replaceProfiles({ profiles: [] })).resolves.toEqual({ profiles: [] })
+    expect(configModule.saveConfig).toHaveBeenCalledWith({ comfy_batch_profiles: [] })
+  })
+
   it('returns a running job immediately and exposes live runner progress', async () => {
     let current = status('job-1', 'idle')
     let resolveRun!: (value: ComfyBatchStatus) => void

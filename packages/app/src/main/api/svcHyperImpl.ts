@@ -69,6 +69,7 @@ const LEGACY_MANAGER_CHANNEL_URLS = new Set([
 const COMFY_HTTP_CHECK_TIMEOUT_MS = 2500
 const COMFY_HTTP_EXISTING_PROCESS_ATTEMPTS = 10
 const COMFY_HTTP_EXISTING_PROCESS_INTERVAL_MS = 500
+let managedComfyStartup: Promise<void> | null = null
 const WINDOWS_RESERVED_FILE_NAMES = new Set([
   'con',
   'prn',
@@ -387,6 +388,23 @@ export class HyperSvcImpl implements HyperSvc {
     _req: StartComfyUIReq,
     resp: ServerStreaming<StartComfyUIResp>
   ): Promise<void> {
+    if (managedComfyStartup) {
+      resp.onData({
+        pid: 0,
+        command: 'comfyui',
+        status: 'running',
+        logLine: '[comfyui] startup is already in progress'
+      })
+      return managedComfyStartup
+    }
+
+    managedComfyStartup = this.startManagedComfyUI(resp).finally(() => {
+      managedComfyStartup = null
+    })
+    return managedComfyStartup
+  }
+
+  private async startManagedComfyUI(resp: ServerStreaming<StartComfyUIResp>): Promise<void> {
     let pid = 0
     let command = ''
 
@@ -414,11 +432,11 @@ export class HyperSvcImpl implements HyperSvc {
     const buildEnv = getBuildEnv()
     const configUtils = new ConfigUtils(config, buildEnv, path)
 
-    const [comfyUIDirRaw, confyUIDirAvailable] = configUtils.getComfyUIDir()
+    const [comfyUIDirRaw, confyUIDirAvailable] = configUtils.getManagedComfyUIDir()
     if (!confyUIDirAvailable) {
       logError('comfyUIDir is not available')
     }
-    const [pythonCmdRaw, pythonCmdAvailable] = configUtils.getPythonCmd()
+    const [pythonCmdRaw, pythonCmdAvailable] = configUtils.getManagedPythonCmd()
     if (!pythonCmdAvailable) {
       logError('pythonCmd is not available')
     }
@@ -437,7 +455,7 @@ export class HyperSvcImpl implements HyperSvc {
       : path.join(appRoot, pythonCmdRaw)
 
     const comfyMain = path.join(comfyUIDir, 'main.py')
-    const comfyArgs = configUtils.getComfyUIArgs()
+    const comfyArgs = configUtils.getManagedComfyUIArgs()
 
     // 检测是否是 ComfyUI-aki-v2
     // 从日志看，使用 python\python.exe 也能正常启动，所以统一不使用 -s 参数
@@ -461,7 +479,7 @@ export class HyperSvcImpl implements HyperSvc {
     logInfo('comfyMain: ' + comfyMain)
     logInfo('comfyArgs: ' + comfyArgs)
 
-    const comfyPort = configUtils.getComfyUIPort()
+    const comfyPort = configUtils.getManagedComfyUIPort()
     const existingPid = comfyPort
       ? await this.comfyPortDetect({})
           .then((result) => result.pid)
@@ -576,7 +594,7 @@ export class HyperSvcImpl implements HyperSvc {
     const buildEnv = getBuildEnv()
     const configUtils = new ConfigUtils(config, buildEnv, path)
 
-    const comfyPort = configUtils.getComfyUIPort()
+    const comfyPort = configUtils.getManagedComfyUIPort()
     if (comfyPort === '') {
       throw new Error('can not get comfy port from config')
     }

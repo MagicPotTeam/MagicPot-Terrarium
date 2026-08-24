@@ -11,6 +11,7 @@ import { DndProvider } from 'react-dnd'
 import { getAppDndManager } from './utils/dndManager'
 import ComfyLogBridge from './components/ComfyLogBridge'
 import ManagedComfyProcessBridge from './components/ManagedComfyProcessBridge'
+import { detectManagedComfyProcess } from './components/managedComfyDetectionCoordinator'
 import MagicAgentApprovalCenter from './components/MagicAgentApprovalCenter'
 import { useComfyEventCallback } from './hooks/useComfyEvent'
 import { handleComfyExecutionActivityEvent } from './utils/comfyExecutionActivity'
@@ -154,7 +155,7 @@ function shouldAutoStartLocalComfyUIInThisRuntime(): boolean {
 function AutoStartLocalComfyUI(): null {
   const { isReady, config, configUtils } = useConfig()
   const { state, setPid, setIsRunning, setIsManaged, addOutput } = useComfyProcess()
-  const comfyCommandAvailable = configUtils.isComfyUICommandAvailable()
+  const comfyCommandAvailable = configUtils.isManagedComfyUICommandAvailable()
 
   useEffect(() => {
     if (!isReady || hasHandledInitialComfyAutoStart) {
@@ -183,7 +184,7 @@ function AutoStartLocalComfyUI(): null {
     const startLocalComfyUI = async () => {
       let startedProcessStream = false
       try {
-        const { pid } = await api().svcHyper.comfyPortDetect({})
+        const { pid } = await detectManagedComfyProcess(() => api().svcHyper.comfyPortDetect({}))
         if (cancelled) {
           return
         }

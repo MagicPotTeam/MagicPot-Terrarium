@@ -136,6 +136,36 @@ describe('ConfigUtils ComfyUI paths', () => {
     )
   })
 
+  it('keeps managed local launch settings available while the active API is remote', () => {
+    const configUtils = new ConfigUtils(
+      createConfig({
+        use_remote_comfyui: true,
+        local_comfyui_config: { comfyui_port: '8288' },
+        remote_comfyui_config: {
+          comfyui_origin: 'https://remote.example.com:9443',
+          mapping_comfyui_dir: ''
+        }
+      }),
+      createBuildEnv(),
+      path
+    )
+
+    expect(configUtils.getComfyUIOrigin()).toBe('https://remote.example.com:9443')
+    expect(configUtils.getComfyUIDir()).toEqual(['', false])
+    expect(configUtils.getPythonCmd()).toEqual(['', false])
+    expect(configUtils.getManagedComfyUIDir()).toEqual([
+      path.join('/app-root', 'vendor/comfyui/ComfyUI'),
+      true
+    ])
+    expect(configUtils.getManagedPythonCmd()).toEqual([
+      path.join('/app-root', 'vendor/comfyui/python_embeded/python.exe'),
+      true
+    ])
+    expect(configUtils.getManagedComfyUIPort()).toBe('8288')
+    expect(configUtils.getManagedComfyUIArgs()).toEqual(['--port', '8288'])
+    expect(configUtils.isManagedComfyUICommandAvailable()).toBe(true)
+  })
+
   it('keeps bare Python commands in pure builds and resolves path-like commands', () => {
     const bareCommandUtils = new ConfigUtils(
       createConfig({

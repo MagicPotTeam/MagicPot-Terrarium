@@ -24,7 +24,7 @@ vi.mock('@renderer/hooks/useConfig', () => ({
       use_remote_comfyui: bridgeState.useRemoteComfyui
     },
     configUtils: {
-      isComfyUICommandAvailable: () => bridgeState.comfyCommandAvailable
+      isManagedComfyUICommandAvailable: () => bridgeState.comfyCommandAvailable
     }
   })
 }))
@@ -114,6 +114,25 @@ describe('ManagedComfyProcessBridge', () => {
     expect(setIsManagedMock).not.toHaveBeenCalled()
     expect(setIsRunningMock).not.toHaveBeenCalled()
     expect(addOutputMock).not.toHaveBeenCalled()
+  })
+
+  it('attaches to the managed local process while remote API mode is enabled', async () => {
+    bridgeState.useRemoteComfyui = true
+    comfyPortDetectMock.mockResolvedValue({ pid: 2468 })
+    connectSubProcessMock.mockImplementation(
+      async (
+        _req: { pid: number },
+        resp: { onData: (data: { pid: number; logLine: string }) => void }
+      ) => {
+        resp.onData({ pid: 2468, logLine: '[comfyui] ready' })
+      }
+    )
+
+    render(<ManagedComfyProcessBridge />)
+
+    await waitFor(() => expect(connectSubProcessMock).toHaveBeenCalledTimes(1))
+    expect(setPidMock).toHaveBeenCalledWith(2468)
+    expect(setIsManagedMock).toHaveBeenCalledWith(true)
   })
 
   it('does nothing when no existing local ComfyUI process is detected', async () => {

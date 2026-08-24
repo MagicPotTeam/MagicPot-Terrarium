@@ -89,6 +89,42 @@ export class ConfigUtils {
     return this.path.join(this.getAppRootDir(), value)
   }
 
+  // 本机由 MagicPot 管理的 ComfyUI 启动配置始终来自 local_comfyui_config，
+  // 与当前工作流连接的是本地还是远程 API 无关。
+  getManagedComfyUIDir(): [string, boolean] {
+    const embeddedComfyuiDir = this.resolveLocalDirectoryPath(
+      this.buildEnv?.embeddedDefaults.comfyuiDir || ''
+    )
+    const comfyuiDir =
+      this.resolveLocalDirectoryPath(this.config.local_comfyui_config.comfyui_dir) ||
+      embeddedComfyuiDir
+    return [comfyuiDir, comfyuiDir !== '']
+  }
+
+  getManagedPythonCmd(): [string, boolean] {
+    const embeddedPythonCmd = this.resolveLocalCommandPath(
+      this.buildEnv?.embeddedDefaults.pythonCmd || ''
+    )
+    const pythonCmd =
+      this.resolveLocalCommandPath(this.config.local_comfyui_config.python_cmd) || embeddedPythonCmd
+    return [pythonCmd, pythonCmd !== '']
+  }
+
+  getManagedComfyUIPort(): string {
+    return this.config.local_comfyui_config.comfyui_port || '8188'
+  }
+
+  getManagedComfyUIArgs(): string[] {
+    if (this.config.local_comfyui_config.comfyui_args.length > 0) {
+      return this.config.local_comfyui_config.comfyui_args
+    }
+    return [
+      ...(this.buildEnv?.embeddedDefaults.comfyuiArgs || []),
+      '--port',
+      this.getManagedComfyUIPort()
+    ]
+  }
+
   // return [comfyui_dir, available]
   // 1. 使用本地 ComfyUI ，未设置 comfyui_dir 且非 Embedded  -> 不可用
   // 2. 使用本地 ComfyUI ，未设置 comfyui_dir 且 Embedded -> embeddedComfyuiDir
@@ -96,13 +132,7 @@ export class ConfigUtils {
   // 4. 使用远程 ComfyUI ，未设置 mapping_comfyui_dir -> 不可用
   // 5. 使用远程 ComfyUI ，设置了 mapping_comfyui_dir -> mapping_comfyui_dir
   getComfyUIDir(): [string, boolean] {
-    // 始终优先使用 embeddedDefaults（ComfyUI 已嵌入源代码）
-    const embeddedComfyuiDir = this.resolveLocalDirectoryPath(
-      this.buildEnv?.embeddedDefaults.comfyuiDir || ''
-    )
-    const localComfyUIDir =
-      this.resolveLocalDirectoryPath(this.config.local_comfyui_config.comfyui_dir) ||
-      embeddedComfyuiDir
+    const [localComfyUIDir] = this.getManagedComfyUIDir()
     const remoteComfyUIDir = this.config.remote_comfyui_config.mapping_comfyui_dir
     const comfyuiDir = this.config.use_remote_comfyui ? remoteComfyUIDir : localComfyUIDir
     return [comfyuiDir, comfyuiDir !== '']
@@ -117,13 +147,7 @@ export class ConfigUtils {
     if (this.config.use_remote_comfyui) {
       return ['', false]
     }
-    // 始终优先使用 embeddedDefaults（Python 环境已嵌入源代码）
-    const embeddedPythonCmd = this.resolveLocalCommandPath(
-      this.buildEnv?.embeddedDefaults.pythonCmd || ''
-    )
-    const pythonCmd =
-      this.resolveLocalCommandPath(this.config.local_comfyui_config.python_cmd) || embeddedPythonCmd
-    return [pythonCmd, pythonCmd !== '']
+    return this.getManagedPythonCmd()
   }
 
   getComfyUIPort(): string {
@@ -281,6 +305,14 @@ export class ConfigUtils {
 
   getAutomationSchemeDir(): string {
     return this.path.join(this.buildEnv.pathMap.data, AUTOMATION_SCHEME_DEFINITION_DIR_NAME)
+  }
+
+  isManagedComfyUICommandAvailable(): boolean {
+    return (
+      this.getManagedComfyUIArgs().length > 0 &&
+      this.getManagedComfyUIDir()[1] &&
+      this.getManagedPythonCmd()[1]
+    )
   }
 
   // 本地 ComfyUI 的目录设置都已完成

@@ -12,7 +12,23 @@ const translations: Record<string, string> = {
   'environment.comfy_mode_info_desc': 'ComfyUI mode description',
   'environment.comfy_mode_label': 'Use Remote ComfyUI',
   'environment.remote_comfyui_title': 'Remote ComfyUI Settings',
-  'environment.remote_comfyui_origin_label': 'Remote ComfyUI Origin'
+  'environment.remote_comfyui_origin_label': 'Remote ComfyUI Origin',
+  'environment.setup_title': 'Environment Setup',
+  'environment.python_cmd_label': 'Python Command',
+  'environment.comfy_dir_label': 'ComfyUI Directory',
+  'environment.comfy_port_label': 'ComfyUI Port',
+  'environment.comfy_args_label': 'ComfyUI Arguments',
+  'environment.comfy_batch_profiles_title': 'Batch ComfyUI Instances',
+  'environment.comfy_batch_profiles_desc': 'Separate batch endpoints',
+  'qapp.batch.enabled': 'Enabled',
+  'qapp.batch.name': 'Name',
+  'qapp.batch.url': 'URL',
+  'qapp.batch.concurrency': 'Concurrency',
+  'qapp.batch.test': 'Test',
+  'qapp.batch.add_instance': 'Add instance',
+  'qapp.batch.save_instances': 'Save instances',
+  'qapp.batch.delete_instance': 'Delete instance',
+  'qapp.batch.saved': 'Saved'
 }
 
 const apiMock = {
@@ -33,6 +49,21 @@ const apiMock = {
   },
   svcShell: {
     openPath: vi.fn()
+  },
+  svcComfyBatch: {
+    listProfiles: vi.fn().mockResolvedValue({
+      profiles: [
+        {
+          id: 'remote-1',
+          name: 'Remote GPU',
+          baseUrl: 'https://comfy.example.com',
+          enabled: true,
+          maxConcurrency: 2
+        }
+      ]
+    }),
+    replaceProfiles: vi.fn().mockImplementation(async ({ profiles }) => ({ profiles })),
+    probeProfile: vi.fn()
   }
 }
 
@@ -186,5 +217,14 @@ describe('PanelEnvironment', () => {
       remoteSection.compareDocumentPosition(proxySection) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
     expect(screen.getAllByText('Remote ComfyUI Origin').length).toBeGreaterThan(0)
+    expect(screen.getByRole('heading', { name: 'Environment Setup' })).toBeTruthy()
+    expect(screen.getAllByText('Python Command').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('ComfyUI Directory').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('ComfyUI Port').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('ComfyUI Arguments').length).toBeGreaterThan(0)
+    expect(screen.getByRole('heading', { name: 'Batch ComfyUI Instances' })).toBeTruthy()
+    expect(await screen.findByDisplayValue('https://comfy.example.com')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Add instance' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Save instances' })).toBeTruthy()
   })
 })
