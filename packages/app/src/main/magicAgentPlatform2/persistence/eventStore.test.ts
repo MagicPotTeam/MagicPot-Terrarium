@@ -528,6 +528,65 @@ describe('MagicAgentEventStore', () => {
     expect(() => store.checkpoint('BAD' as 'FULL')).toThrow(TypeError)
   })
 
+  it('finds an exact resource mutation by its global key regardless of chain length', () => {
+    const store = open()
+    let revision = store.mutateResource({
+      operation: 'create',
+      kind: 'run',
+      id: 'long-chain',
+      idempotencyKey: 'target-key',
+      state: { value: 0 },
+      createdAt: 1000,
+      event: event(0, { streamId: 'resource-stream' })
+    }).resource.revision
+    for (let start = 1; start <= 1001; start += 100) {
+      const inputs = Array.from({ length: Math.min(100, 1002 - start) }, (_, offset) => {
+        const index = start + offset
+        return {
+          operation: 'update' as const,
+          kind: 'run' as const,
+          id: 'long-chain',
+          idempotencyKey: `later-key-${index}`,
+          expectedRevision: revision + offset,
+          state: { value: index },
+          createdAt: 1000 + index,
+          event: event(index, { streamId: 'resource-stream' })
+        }
+      })
+      revision = store.mutateResourcesBatch(inputs).at(-1)!.resource.revision
+    }
+
+    expect(store.findResourceMutation('run', 'long-chain', 'target-key')).toMatchObject({
+      idempotencyKey: 'target-key',
+      operation: 'create',
+      resource: { kind: 'run', id: 'long-chain', revision: 0, state: { value: 0 } }
+    })
+    expect(store.findResourceMutation('run', 'different-resource', 'target-key')).toBeUndefined()
+    expect(store.findResourceMutation('session', 'long-chain', 'target-key')).toBeUndefined()
+  })
+
+  it('fails closed when an exact keyed resource mutation row is corrupt', () => {
+    const store = open()
+    store.mutateResource({
+      operation: 'create',
+      kind: 'run',
+      id: 'corrupt-resource',
+      idempotencyKey: 'corrupt-key',
+      state: { value: 1 },
+      createdAt: 1000,
+      event: event(0, { streamId: 'corrupt-stream' })
+    })
+    const db = new DatabaseSync(databasePath)
+    db.prepare(
+      'UPDATE resource_mutations SET command_json = \'{"operation":"broken"}\' WHERE idempotency_key = ?'
+    ).run('corrupt-key')
+    db.close()
+
+    expect(() => store.findResourceMutation('run', 'corrupt-resource', 'corrupt-key')).toThrow(
+      CorruptEventStoreError
+    )
+  })
+
   it('supports FULL and TRUNCATE checkpoints', () => {
     const store = open()
     store.appendBatch([event(0)])

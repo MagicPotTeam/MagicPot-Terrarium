@@ -1,13 +1,16 @@
 import type { Api } from '@shared/api'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import type { Config } from '@shared/config/config'
-import type { FileItem, Workflow } from '@shared/comfy/types'
-import { fileItemToValue } from '@shared/comfy/funcs'
+import type { Workflow } from '@shared/comfy/types'
 import type { QAppCfg, QAppCfgAuto, QAppCfgInput, QAppCfgInputLLMAPI } from '@shared/qApp/cfgTypes'
 import type { ResultItem } from '@shared/qApp/resultTypes'
 import { getJsonPath, setJsonPath } from '@shared/utils/jsonPath'
 import type { JsonDict, JsonValue } from '@shared/utils/utilTypes'
 import { valueIsJsonDict } from '@shared/utils/utilTypes'
+import {
+  buildDeferredComfyFileValue,
+  buildDeferredComfyImageValue
+} from '@renderer/utils/deferredComfyInput'
 import { guessMimeTypeFromFileName } from '@renderer/utils/fileDisplay'
 import { findQAppApiProfile } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/qAppApiProfiles'
 import {
@@ -236,32 +239,25 @@ const fileNameFromAttachment = (
   return `${fallback}${expectedExtension}`
 }
 
-const readAttachmentBytes = async (attachment: ChatAttachment): Promise<Uint8Array> => {
+const buildDeferredAttachmentValue = async (
+  attachment: ChatAttachment,
+  fallbackName: string,
+  expectedExtension: string,
+  fallbackMimeType: string
+): Promise<string> => {
   const response = await fetch(attachment.url)
   if (!response.ok) {
     throw new Error(`Failed to read attachment (${response.status})`)
   }
-  return new Uint8Array(await response.arrayBuffer())
-}
-
-const uploadAttachmentForQApp = async (
-  api: Pick<Api, 'svcComfy'>,
-  attachment: ChatAttachment,
-  fallbackName: string,
-  expectedExtension: string
-): Promise<FileItem> => {
-  const image = await readAttachmentBytes(attachment)
-  const fileName = fileNameFromAttachment(attachment, fallbackName, expectedExtension)
-  const uploadResult = await api.svcComfy.uploadImage({
-    fileItem: { filename: fileName, type: 'input' },
-    image
-  })
-
-  if (!uploadResult.filename) {
-    throw new Error(`QuickApp upload did not return a filename for ${fileName}.`)
-  }
-
-  return uploadResult
+  const blob = await response.blob()
+  const file = new File(
+    [blob],
+    fileNameFromAttachment(attachment, fallbackName, expectedExtension),
+    { type: attachment.mimeType?.trim() || blob.type || fallbackMimeType }
+  )
+  return attachment.type === 'image'
+    ? await buildDeferredComfyImageValue(file, fallbackMimeType)
+    : await buildDeferredComfyFileValue(file, fallbackMimeType)
 }
 
 const pickAttachmentForSource = (
@@ -402,13 +398,13 @@ const applyImageInput = async (
     throw new Error(buildMissingAssignedMediaMessage('image', assignment))
   }
 
-  const uploadResult = await uploadAttachmentForQApp(
-    options.api,
+  const deferredValue = await buildDeferredAttachmentValue(
     attachment,
     `target-qapp-image-${imageIndex + 1}`,
-    '.png'
+    '.png',
+    'image/png'
   )
-  setJsonPath(slot, workflowJson, fileItemToValue(uploadResult))
+  setJsonPath(slot, workflowJson, deferredValue)
 }
 
 const applyVideoInput = async (
@@ -432,13 +428,13 @@ const applyVideoInput = async (
     throw new Error(buildMissingAssignedMediaMessage('video', assignment))
   }
 
-  const uploadResult = await uploadAttachmentForQApp(
-    options.api,
+  const deferredValue = await buildDeferredAttachmentValue(
     attachment,
     `target-qapp-video-${videoIndex + 1}`,
-    '.mp4'
+    '.mp4',
+    'video/mp4'
   )
-  setJsonPath(slot, workflowJson, fileItemToValue(uploadResult))
+  setJsonPath(slot, workflowJson, deferredValue)
 }
 
 const applyStructuredInputAssignment = (

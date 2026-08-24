@@ -123,6 +123,144 @@ export type ReadLoraTriggerWordsNativeResp = {
   nativeAvailable: boolean
 }
 
+export const BATCH_MANIFEST_VERSION = 1 as const
+
+export type BatchImageFile = {
+  relativePath: string
+  absolutePath: string
+  size: number
+  mtimeMs: number
+}
+
+export type BatchScanError = {
+  relativePath: string
+  message: string
+}
+
+export type ScanBatchImagesReq = {
+  sourceRoot: string
+}
+
+export type ScanBatchImagesResp = {
+  images: BatchImageFile[]
+  errors: BatchScanError[]
+}
+
+export type BatchSourceFingerprint = {
+  size: number
+  mtimeMs: number
+}
+
+export type BatchItemStatus = 'pending' | 'running' | 'succeeded' | 'failed'
+
+export type BatchAttemptRecord = {
+  startedAt: string
+  finishedAt?: string
+  error?: string
+}
+
+export type BatchManifestItem = {
+  relativeInputPath: string
+  outputRelativePath: string
+  sourceFingerprint: BatchSourceFingerprint
+  status: BatchItemStatus
+  quickAppId?: string
+  quickAppRevision?: string
+  attempts: BatchAttemptRecord[]
+}
+
+export type BatchManifest = {
+  version: typeof BATCH_MANIFEST_VERSION
+  sourceRoot: string
+  createdAt: string
+  updatedAt: string
+  items: BatchManifestItem[]
+}
+
+export type BatchWorkspacePaths = {
+  sourceRoot: string
+  workRoot: string
+  outputRoot: string
+  metadataRoot: string
+  stagingRoot: string
+  manifestPath: string
+}
+
+export type PrepareBatchWorkspaceReq = {
+  sourceRoot: string
+  /** Must be explicitly accepted by the folder-picker UI before sibling roots are created. */
+  userAuthorized: true
+}
+
+export type PrepareBatchWorkspaceResp = {
+  paths: BatchWorkspacePaths
+  manifest: BatchManifest
+  images: BatchImageFile[]
+  skippedRelativePaths: string[]
+  scanErrors: BatchScanError[]
+}
+
+export type ReadBatchManifestReq = {
+  sourceRoot: string
+}
+
+export type ReadBatchManifestResp = {
+  manifest: BatchManifest | null
+  manifestPath: string
+}
+
+export type WriteBatchManifestReq = {
+  sourceRoot: string
+  manifest: BatchManifest
+}
+
+export type WriteBatchManifestResp = {
+  manifestPath: string
+}
+
+export type ReadBatchSourceImageReq = {
+  sourceRoot: string
+  relativeInputPath: string
+  sourceFingerprint: BatchSourceFingerprint
+}
+
+export type ReadBatchSourceImageResp = {
+  image: Uint8Array
+  filename: string
+}
+
+export type CommitBatchPngReq = {
+  sourceRoot: string
+  relativeInputPath: string
+  sourceFingerprint: BatchSourceFingerprint
+  image: Uint8Array
+}
+
+export type CommitBatchPngResp = {
+  outputRelativePath: string
+  outputPath: string
+}
+
+export type RemoveBatchStagingArtifactsReq = {
+  sourceRoot: string
+  relativeInputPath: string
+}
+
+export type RemoveBatchStagingArtifactsResp = {
+  removedPaths: string[]
+}
+
+export type FailBatchItemReq = {
+  sourceRoot: string
+  relativeInputPath: string
+  errorLog: string
+}
+
+export type FailBatchItemResp = {
+  errorLogPath: string
+  removedOutputPaths: string[]
+}
+
 export const MAX_READ_FILE_SLICE_BYTES = 16 * 1024 * 1024
 export const MAX_FULL_FILE_BYTES = 256 * 1024 * 1024
 export const MAX_TEXT_FILE_BYTES = 8 * 1024 * 1024
@@ -256,6 +394,107 @@ const validateWriteTextFileReq = (value: unknown): WriteTextFileReq => {
   }
 }
 
+const requireRelativePath = (value: unknown, method: string, field: string): string => {
+  const relativePath = requireNonEmptyString(value, method, field).replace(/\\/g, '/')
+  const segments = relativePath.split('/')
+  if (
+    relativePath.startsWith('/') ||
+    /^[a-zA-Z]:/.test(relativePath) ||
+    segments.some(
+      (segment) => !segment || segment === '.' || segment === '..' || segment.includes('\0')
+    )
+  ) {
+    return validationError(method, field, 'Expected a safe relative path without traversal')
+  }
+  return relativePath
+}
+
+const validateSourceRootReq =
+  <T extends { sourceRoot: string }>(method: string) =>
+  (value: unknown): T => {
+    const req = requireRecord(value, method)
+    return { sourceRoot: requireNonEmptyString(req.sourceRoot, method, 'sourceRoot') } as T
+  }
+
+const validatePrepareBatchWorkspaceReq = (value: unknown): PrepareBatchWorkspaceReq => {
+  const method = 'prepareBatchWorkspace'
+  const req = requireRecord(value, method)
+  if (req.userAuthorized !== true) {
+    return validationError(method, 'userAuthorized', 'Expected explicit user authorization')
+  }
+  return {
+    sourceRoot: requireNonEmptyString(req.sourceRoot, method, 'sourceRoot'),
+    userAuthorized: true
+  }
+}
+
+const validateWriteBatchManifestReq = (value: unknown): WriteBatchManifestReq => {
+  const method = 'writeBatchManifest'
+  const req = requireRecord(value, method)
+  if (!isRecord(req.manifest) || req.manifest.version !== BATCH_MANIFEST_VERSION) {
+    return validationError(
+      method,
+      'manifest',
+      `Expected batch manifest version ${BATCH_MANIFEST_VERSION}`
+    )
+  }
+  return {
+    sourceRoot: requireNonEmptyString(req.sourceRoot, method, 'sourceRoot'),
+    manifest: req.manifest as BatchManifest
+  }
+}
+
+const validateBatchSourceFingerprint = (value: unknown, method: string): BatchSourceFingerprint => {
+  const fingerprint = requireRecord(value, method)
+  const size = fingerprint.size
+  const mtimeMs = fingerprint.mtimeMs
+  if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0)
+    return validationError(method, 'sourceFingerprint.size', 'Expected a non-negative integer')
+  if (typeof mtimeMs !== 'number' || !Number.isFinite(mtimeMs) || mtimeMs < 0)
+    return validationError(method, 'sourceFingerprint.mtimeMs', 'Expected a non-negative number')
+  return { size, mtimeMs }
+}
+
+const validateReadBatchSourceImageReq = (value: unknown): ReadBatchSourceImageReq => {
+  const method = 'readBatchSourceImage'
+  const req = requireRecord(value, method)
+  return {
+    sourceRoot: requireNonEmptyString(req.sourceRoot, method, 'sourceRoot'),
+    relativeInputPath: requireRelativePath(req.relativeInputPath, method, 'relativeInputPath'),
+    sourceFingerprint: validateBatchSourceFingerprint(req.sourceFingerprint, method)
+  }
+}
+
+const validateCommitBatchPngReq = (value: unknown): CommitBatchPngReq => {
+  const method = 'commitBatchPng'
+  const req = requireRecord(value, method)
+  return {
+    sourceRoot: requireNonEmptyString(req.sourceRoot, method, 'sourceRoot'),
+    relativeInputPath: requireRelativePath(req.relativeInputPath, method, 'relativeInputPath'),
+    sourceFingerprint: validateBatchSourceFingerprint(req.sourceFingerprint, method),
+    image: requireUint8Array(req.image, method, 'image')
+  }
+}
+
+const validateRemoveBatchStagingArtifactsReq = (value: unknown): RemoveBatchStagingArtifactsReq => {
+  const method = 'removeBatchStagingArtifacts'
+  const req = requireRecord(value, method)
+  return {
+    sourceRoot: requireNonEmptyString(req.sourceRoot, method, 'sourceRoot'),
+    relativeInputPath: requireRelativePath(req.relativeInputPath, method, 'relativeInputPath')
+  }
+}
+
+const validateFailBatchItemReq = (value: unknown): FailBatchItemReq => {
+  const method = 'failBatchItem'
+  const req = requireRecord(value, method)
+  return {
+    sourceRoot: requireNonEmptyString(req.sourceRoot, method, 'sourceRoot'),
+    relativeInputPath: requireRelativePath(req.relativeInputPath, method, 'relativeInputPath'),
+    errorLog: requireNonEmptyString(req.errorLog, method, 'errorLog')
+  }
+}
+
 const validateReadFileSliceReq = (value: unknown): ReadFileSliceReq => {
   const method = 'readFileSlice'
   const req = requireRecord(value, method)
@@ -284,6 +523,16 @@ export type FsSvc = {
   readFileFromPath(req: ReadFileFromPathReq): Promise<ReadFileFromPathResp>
   readFileSlice(req: ReadFileSliceReq): Promise<ReadFileSliceResp>
   writeTextFile(req: WriteTextFileReq): Promise<WriteTextFileResp>
+  scanBatchImages(req: ScanBatchImagesReq): Promise<ScanBatchImagesResp>
+  prepareBatchWorkspace(req: PrepareBatchWorkspaceReq): Promise<PrepareBatchWorkspaceResp>
+  readBatchManifest(req: ReadBatchManifestReq): Promise<ReadBatchManifestResp>
+  writeBatchManifest(req: WriteBatchManifestReq): Promise<WriteBatchManifestResp>
+  readBatchSourceImage(req: ReadBatchSourceImageReq): Promise<ReadBatchSourceImageResp>
+  commitBatchPng(req: CommitBatchPngReq): Promise<CommitBatchPngResp>
+  removeBatchStagingArtifacts(
+    req: RemoveBatchStagingArtifactsReq
+  ): Promise<RemoveBatchStagingArtifactsResp>
+  failBatchItem(req: FailBatchItemReq): Promise<FailBatchItemResp>
   readLoraTriggerWordsNative(
     req: ReadLoraTriggerWordsNativeReq
   ): Promise<ReadLoraTriggerWordsNativeResp>
@@ -327,6 +576,38 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
   writeTextFile: {
     type: 'unary',
     request: validateWriteTextFileReq
+  },
+  scanBatchImages: {
+    type: 'unary',
+    request: validateSourceRootReq<ScanBatchImagesReq>('scanBatchImages')
+  },
+  prepareBatchWorkspace: {
+    type: 'unary',
+    request: validatePrepareBatchWorkspaceReq
+  },
+  readBatchManifest: {
+    type: 'unary',
+    request: validateSourceRootReq<ReadBatchManifestReq>('readBatchManifest')
+  },
+  writeBatchManifest: {
+    type: 'unary',
+    request: validateWriteBatchManifestReq
+  },
+  readBatchSourceImage: {
+    type: 'unary',
+    request: validateReadBatchSourceImageReq
+  },
+  commitBatchPng: {
+    type: 'unary',
+    request: validateCommitBatchPngReq
+  },
+  removeBatchStagingArtifacts: {
+    type: 'unary',
+    request: validateRemoveBatchStagingArtifactsReq
+  },
+  failBatchItem: {
+    type: 'unary',
+    request: validateFailBatchItemReq
   },
   readLoraTriggerWordsNative: {
     type: 'unary'

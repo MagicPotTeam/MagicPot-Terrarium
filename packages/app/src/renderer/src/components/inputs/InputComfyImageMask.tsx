@@ -1,10 +1,18 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { InputProps } from './InputProps'
 import { api } from '@renderer/utils/windowUtils'
-import { FileItem } from '@shared/comfy/types'
+import {
+  buildDeferredComfyImageValue,
+  buildDeferredComfyMaskValue,
+  getDeferredComfyLocalPreview
+} from '@renderer/utils/deferredComfyInput'
 import MaskEditor from '../ImageCanvas/MaskEditor'
 import ModalLayout from '../ModalLayout'
-import { fileItemToValue, valueToFileItem } from '@shared/comfy/funcs'
+import { valueToFileItem } from '@shared/comfy/funcs'
+import {
+  getDeferredComfyFileDisplayName,
+  isDeferredComfyInputValue
+} from '@shared/comfy/deferredImages'
 import BaseInputComfyImage from './BaseInputComfyImage'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { useTranslation } from 'react-i18next'
@@ -53,38 +61,53 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
   const [isLoading, setIsLoading] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const previewUrlRef = useRef<string | null>(null)
+  const selectionRequestIdRef = useRef(0)
+  const latestValueRef = useRef(value)
+  const latestOnChangeRef = useRef(onChange)
   const [modalOpen, setModalOpen] = useState(false)
 
   const replacePreviewUrl = useCallback((nextUrl: string | null) => {
     const previousUrl = previewUrlRef.current
     previewUrlRef.current = nextUrl
     setPreviewUrl(nextUrl)
-    if (previousUrl && previousUrl !== nextUrl) {
+    if (previousUrl?.startsWith('blob:') && previousUrl !== nextUrl) {
       URL.revokeObjectURL(previousUrl)
     }
   }, [])
 
   // 同步外部 value 变化到 internalValue
   useEffect(() => {
+    selectionRequestIdRef.current += 1
+    latestValueRef.current = value
     setInternalValue((prev) => (prev === value ? prev : value))
+    setIsLoading(false)
+    setModalOpen(false)
   }, [value])
+
+  useEffect(() => {
+    latestOnChangeRef.current = onChange
+  }, [onChange])
+
+  const commitValue = useCallback((nextValue: string) => {
+    setInternalValue((current) => (current === nextValue ? current : nextValue))
+    if (latestValueRef.current !== nextValue) {
+      latestValueRef.current = nextValue
+      latestOnChangeRef.current(nextValue)
+    }
+  }, [])
 
   const { notifyError } = useMessage()
   const { t } = useTranslation()
 
   const doUpload = async (file: File) => {
+    const requestId = ++selectionRequestIdRef.current
     setIsLoading(true)
     try {
-      const arrayBuffer = await file.arrayBuffer()
-      const uint8 = new Uint8Array(arrayBuffer)
-      const res: FileItem = await api().svcComfy.uploadImage({
-        fileItem: { filename: file.name, type: 'input' },
-        image: uint8
-      })
-      const uploadedName = fileItemToValue(res)
-      setInternalValue(uploadedName)
-      onChange(uploadedName)
+      const deferredValue = await buildDeferredComfyImageValue(file)
+      if (selectionRequestIdRef.current !== requestId) return
+      commitValue(deferredValue)
     } catch (error) {
+      if (selectionRequestIdRef.current !== requestId) return
       console.error('[InputComfyImageMask] Upload failed:', error)
       notifyError(
         t('input.image.load_failed', {
@@ -92,16 +115,17 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
         })
       )
     } finally {
-      setIsLoading(false)
+      if (selectionRequestIdRef.current === requestId) setIsLoading(false)
     }
   }
 
   const handleClear = useCallback(() => {
+    selectionRequestIdRef.current += 1
+    setIsLoading(false)
     setModalOpen(false)
-    setInternalValue('')
-    onChange('')
+    commitValue('')
     replacePreviewUrl(null)
-  }, [onChange, replacePreviewUrl])
+  }, [commitValue, replacePreviewUrl])
 
   useEffect(() => {
     let active = true
@@ -111,10 +135,23 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
         return
       }
       try {
-        const res = await api().svcComfy.getView(valueToFileItem(internalValue))
+        const localPreview = await getDeferredComfyLocalPreview(internalValue)
         if (!active) return
-        const image: Uint8Array = res.result
-        const blob = new Blob([image as BlobPart], { type: 'image/*' })
+        if (localPreview?.dataUrl) {
+          replacePreviewUrl(localPreview.dataUrl)
+          return
+        }
+        const image: Uint8Array = localPreview?.bytes
+          ? localPreview.bytes
+          : isDeferredComfyInputValue(internalValue)
+            ? (() => {
+                throw new Error('Deferred Comfy input is unavailable.')
+              })()
+            : (await api().svcComfy.getView(valueToFileItem(internalValue))).result
+        if (!active) return
+        const blob = new Blob([image as BlobPart], {
+          type: localPreview?.mimeType || 'image/*'
+        })
         const url = URL.createObjectURL(blob)
         if (!active) {
           URL.revokeObjectURL(url)
@@ -135,34 +172,39 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
 
   useEffect(
     () => () => {
+      selectionRequestIdRef.current += 1
       const url = previewUrlRef.current
       previewUrlRef.current = null
-      if (url) URL.revokeObjectURL(url)
+      if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
     },
     []
   )
 
   const doUploadMask = async (maskCanvas: HTMLCanvasElement) => {
-    console.log('doUploadMask', maskCanvas)
-    console.log('maskCanvas.toDataURL length', maskCanvas.toDataURL().length)
+    const requestId = ++selectionRequestIdRef.current
+    const originalValue = latestValueRef.current
     setIsLoading(true)
     try {
       const blob = await drawMaskBlob(maskCanvas)
-      const res: FileItem = await api().svcComfy.uploadMask({
-        fileItem: {
-          filename: 'clipspace-mask-' + Date.now() + '.png',
-          type: 'input',
-          subfolder: 'clipspace'
-        },
-        mask: new Uint8Array(await blob.arrayBuffer()),
-        original_ref: valueToFileItem(internalValue)
+      const deferredValue = await buildDeferredComfyMaskValue({
+        blob,
+        fileName: `clipspace-mask-${Date.now()}.png`,
+        originalValue
       })
-      const uploadedName = fileItemToValue(res)
-      setInternalValue(uploadedName)
-      onChange(uploadedName)
+      if (selectionRequestIdRef.current !== requestId) return
+      commitValue(deferredValue)
+    } catch (error) {
+      if (selectionRequestIdRef.current !== requestId) return
+      notifyError(
+        t('input.image.load_failed', {
+          error: error instanceof Error ? error.message : String(error)
+        })
+      )
     } finally {
-      setIsLoading(false)
-      setModalOpen(false)
+      if (selectionRequestIdRef.current === requestId) {
+        setIsLoading(false)
+        setModalOpen(false)
+      }
     }
   }
 
@@ -171,7 +213,7 @@ const InputComfyImageMask: React.FC<InputComfyImageMaskProps> = ({
       label={label}
       Icon={Icon}
       placeholder={placeholder}
-      internalValue={internalValue}
+      internalValue={getDeferredComfyFileDisplayName(internalValue)}
       isLoading={isLoading}
       previewUrl={previewUrl}
       doUpload={doUpload}

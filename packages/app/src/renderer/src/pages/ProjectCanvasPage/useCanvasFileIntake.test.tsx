@@ -935,9 +935,18 @@ describe('useCanvasFileIntake', () => {
     const sourceFile = new File(['generated-image'], 'generated.png', { type: 'image/png' })
     render(<FileIntakeHarness addTextToCanvas={vi.fn()} addImageToCanvas={addImageToCanvas} />)
 
+    const routeBearingFileItem = {
+      filename: sourceFile.name,
+      subfolder: 'immutable',
+      type: 'output',
+      instanceId: 'gpu-drop',
+      instanceRouteId: 'route-drop-opaque',
+      instanceOrigin: 'https://captured-drop.example/',
+      instanceKind: 'remote'
+    } as const
     const quickAppPayload = JSON.stringify({
       objectUrl: 'blob:quickapp-result-owned-elsewhere',
-      fileItem: { filename: sourceFile.name },
+      fileItem: routeBearingFileItem,
       sourceWidth: 1024,
       sourceHeight: 768
     })
@@ -962,6 +971,7 @@ describe('useCanvasFileIntake', () => {
       expect.objectContaining({
         sourceFile,
         fileName: sourceFile.name,
+        fileItem: routeBearingFileItem,
         sourceWidthHint: 1024,
         sourceHeightHint: 768
       })

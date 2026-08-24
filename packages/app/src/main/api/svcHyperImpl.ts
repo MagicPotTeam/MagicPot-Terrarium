@@ -414,14 +414,21 @@ export class HyperSvcImpl implements HyperSvc {
     const buildEnv = getBuildEnv()
     const configUtils = new ConfigUtils(config, buildEnv, path)
 
-    const [comfyUIDirRaw, confyUIDirAvailable] = configUtils.getComfyUIDir()
-    if (!confyUIDirAvailable) {
-      logError('comfyUIDir is not available')
-    }
-    const [pythonCmdRaw, pythonCmdAvailable] = configUtils.getPythonCmd()
-    if (!pythonCmdAvailable) {
-      logError('pythonCmd is not available')
-    }
+    const isEmbedded = buildEnv.env.buildMode === 'embedded'
+    const embeddedComfyUIDir = buildEnv.embeddedDefaults.comfyuiDir
+    const embeddedPythonCmd = buildEnv.embeddedDefaults.pythonCmd
+    const [configuredComfyUIDir, configuredComfyUIDirAvailable] = configUtils.getComfyUIDir()
+    const [configuredPythonCmd, configuredPythonCmdAvailable] = configUtils.getPythonCmd()
+    const comfyUIDirRaw = isEmbedded ? embeddedComfyUIDir : configuredComfyUIDir
+    const pythonCmdRaw = isEmbedded ? embeddedPythonCmd : configuredPythonCmd
+    const confyUIDirAvailable = isEmbedded
+      ? Boolean(embeddedComfyUIDir.trim())
+      : configuredComfyUIDirAvailable
+    const pythonCmdAvailable = isEmbedded
+      ? Boolean(embeddedPythonCmd.trim())
+      : configuredPythonCmdAvailable
+    if (!confyUIDirAvailable) logError('comfyUIDir is not available')
+    if (!pythonCmdAvailable) logError('pythonCmd is not available')
 
     if (!confyUIDirAvailable || !pythonCmdAvailable) {
       return
@@ -437,7 +444,12 @@ export class HyperSvcImpl implements HyperSvc {
       : path.join(appRoot, pythonCmdRaw)
 
     const comfyMain = path.join(comfyUIDir, 'main.py')
-    const comfyArgs = configUtils.getComfyUIArgs()
+    const embeddedPort = config.local_comfyui_config.comfyui_port || '8188'
+    const comfyArgs = isEmbedded
+      ? config.local_comfyui_config.comfyui_args.length > 0
+        ? [...config.local_comfyui_config.comfyui_args]
+        : [...buildEnv.embeddedDefaults.comfyuiArgs, '--port', embeddedPort]
+      : configUtils.getComfyUIArgs()
 
     // 检测是否是 ComfyUI-aki-v2
     // 从日志看，使用 python\python.exe 也能正常启动，所以统一不使用 -s 参数
@@ -461,7 +473,7 @@ export class HyperSvcImpl implements HyperSvc {
     logInfo('comfyMain: ' + comfyMain)
     logInfo('comfyArgs: ' + comfyArgs)
 
-    const comfyPort = configUtils.getComfyUIPort()
+    const comfyPort = isEmbedded ? embeddedPort : configUtils.getComfyUIPort()
     const existingPid = comfyPort
       ? await this.comfyPortDetect({})
           .then((result) => result.pid)

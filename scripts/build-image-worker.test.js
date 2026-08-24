@@ -55,6 +55,20 @@ describe('build-image-worker', () => {
     )
   })
 
+  it('honors an explicit cargo target directory for long Windows workspaces', () => {
+    const paths = getImageWorkerBuildPaths({
+      repoRoot: 'C:/very/long/repo',
+      platform: 'win32',
+      arch: 'x64',
+      cargoTargetDir: 'C:/mp-cargo/image-worker'
+    })
+
+    expect(normalizePath(paths.cargoTargetDir)).toBe('C:/mp-cargo/image-worker')
+    expect(normalizePath(paths.sourceBinaryPath)).toBe(
+      'C:/mp-cargo/image-worker/release/canvas-thumbnail-sidecar.exe'
+    )
+  })
+
   it('copies the release binary to runtime assets and chmods it on non-Windows', () => {
     const repoRoot = createTempRepo()
     const paths = getImageWorkerBuildPaths({ repoRoot, platform: 'linux', arch: 'x64' })

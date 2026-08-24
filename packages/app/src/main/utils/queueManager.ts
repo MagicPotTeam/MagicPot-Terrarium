@@ -66,6 +66,7 @@ export class QueueManager<T> {
   private intervalId: NodeJS.Timeout | null = null
   private isRunning: boolean = false
   private isExecuting: boolean = false
+  private executionPromise: Promise<void> | null = null
 
   constructor(
     private source: QueueSource<T>,
@@ -89,21 +90,26 @@ export class QueueManager<T> {
 
     this.isExecuting = true
 
-    console.log('[QueueManager] loop: processing item:', summarizeQueueItemForLog(item))
-    const startAt = Date.now()
-    try {
-      const result = await this.execute(item)
-      this.source.done(result)
-    } catch (error) {
-      if (shouldLogQueueError(error)) {
-        console.error('[QueueManager] loop: error:', error)
+    const execution = (async (): Promise<void> => {
+      console.log('[QueueManager] loop: processing item:', summarizeQueueItemForLog(item))
+      const startAt = Date.now()
+      try {
+        const result = await this.execute(item)
+        this.source.done(result)
+      } catch (error) {
+        if (shouldLogQueueError(error)) {
+          console.error('[QueueManager] loop: error:', error)
+        }
+        this.source.error(item, error)
+      } finally {
+        const endAt = Date.now()
+        console.log('[QueueManager] loop: time cost:', endAt - startAt, 'ms')
+        this.isExecuting = false
+        this.executionPromise = null
       }
-      this.source.error(item, error)
-    } finally {
-      const endAt = Date.now()
-      console.log('[QueueManager] loop: time cost:', endAt - startAt, 'ms')
-      this.isExecuting = false
-    }
+    })()
+    this.executionPromise = execution
+    await execution
   }
 
   start(): void {
@@ -133,6 +139,11 @@ export class QueueManager<T> {
     }
 
     console.log('[QueueManager] stop: stopped')
+  }
+
+  async drain(): Promise<void> {
+    this.stop()
+    await this.executionPromise
   }
 
   isQueueRunning(): boolean {

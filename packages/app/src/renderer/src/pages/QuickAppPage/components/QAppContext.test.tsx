@@ -4,7 +4,6 @@ import { Fragment, createElement } from 'react'
 
 const notifyErrorMock = vi.fn()
 const comfyGetViewMock = vi.fn()
-const comfyUploadImageMock = vi.fn()
 const qAppGetQAppCfgMock = vi.fn()
 
 vi.mock('@renderer/hooks/useMessage', () => ({
@@ -16,8 +15,7 @@ vi.mock('@renderer/hooks/useMessage', () => ({
 vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
     svcComfy: {
-      getView: comfyGetViewMock,
-      uploadImage: comfyUploadImageMock
+      getView: comfyGetViewMock
     },
     svcQApp: {
       getQAppCfg: qAppGetQAppCfgMock
@@ -36,6 +34,7 @@ import {
   useQAppInputState
 } from './QAppContext'
 import { encodeDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
+import { fileItemToValue } from '@shared/comfy/funcs'
 
 const InputStateProbe = ({ formKey, defaultValue }: { formKey: string; defaultValue: string }) => {
   const [value, setValue] = useQAppInputState(formKey, defaultValue)
@@ -68,6 +67,11 @@ const ObjectInputStateProbe = ({ width, height }: SizeValue) => {
     { 'data-testid': 'object-probe-value' },
     `${value.width}x${value.height}`
   )
+}
+
+const RouteEnvelopeProbe = () => {
+  const [value] = useQAppInputState<Record<string, unknown>>('route-envelope', {})
+  return createElement('div', { 'data-testid': 'route-envelope-value' }, JSON.stringify(value))
 }
 
 const FormStateValueProbe = ({ formKey }: { formKey: string }) => {
@@ -173,7 +177,6 @@ describe('QAppContext cache helpers', () => {
   beforeEach(() => {
     notifyErrorMock.mockClear()
     comfyGetViewMock.mockReset()
-    comfyUploadImageMock.mockReset()
     qAppGetQAppCfgMock.mockReset()
     clearCachedQAppState()
   })
@@ -243,7 +246,6 @@ describe('useQAppInputState', () => {
   beforeEach(() => {
     notifyErrorMock.mockClear()
     comfyGetViewMock.mockReset()
-    comfyUploadImageMock.mockReset()
     qAppGetQAppCfgMock.mockReset()
     clearCachedQAppState()
   })
@@ -308,6 +310,78 @@ describe('useQAppInputState', () => {
     expect(screen.getByTestId('object-probe-value').textContent).toBe('768x1024')
   })
 
+  it('round-trips a route-bearing FileItem envelope through localStorage restoration', () => {
+    const envelope = {
+      version: 1,
+      kind: 'comfy-output',
+      fileItem: {
+        filename: 'generated.png',
+        subfolder: 'immutable',
+        type: 'output',
+        instanceId: 'gpu-qapp',
+        instanceRouteId: 'route-qapp-opaque',
+        instanceOrigin: 'https://captured-qapp.example/',
+        instanceKind: 'remote'
+      }
+    }
+    localStorage.setItem('qapp.formState.v1.demo', JSON.stringify({ 'route-envelope': envelope }))
+
+    render(
+      <QAppContextProvider qAppKey="demo" skipServerFetch={true}>
+        <RouteEnvelopeProbe />
+      </QAppContextProvider>
+    )
+
+    expect(JSON.parse(screen.getByTestId('route-envelope-value').textContent || '{}')).toEqual(
+      envelope
+    )
+    expect(JSON.parse(localStorage.getItem('qapp.formState.v1.demo') || '{}')).toEqual({
+      'route-envelope': envelope
+    })
+    expect(comfyGetViewMock).not.toHaveBeenCalled()
+  })
+
+  it('restores a production FileItem envelope and forwards its complete route to getView', async () => {
+    const routeBearingFileItem = {
+      filename: 'generated.png',
+      subfolder: 'immutable',
+      type: 'output' as const,
+      instanceId: 'gpu-qapp-view',
+      instanceRouteId: 'route-qapp-view-opaque',
+      instanceOrigin: 'https://captured-qapp-view.example/',
+      instanceKind: 'remote' as const
+    }
+    const encodedValue = fileItemToValue(routeBearingFileItem)
+    localStorage.setItem(
+      'qapp.formState.v1.demo',
+      JSON.stringify({ '1.inputs.image': encodedValue })
+    )
+    comfyGetViewMock.mockResolvedValue({ result: new Uint8Array([1, 2, 3]) })
+    restoreGlobalQAppCache({
+      demo: {
+        cfg: {
+          inputs: [{ label: 'Reference', component: 'InputComfyImage', slot: '1.inputs.image' }]
+        },
+        workflow: { '1': { inputs: { image: encodedValue } } },
+        formState: {}
+      }
+    })
+
+    render(
+      <QAppContextProvider qAppKey="demo" skipServerFetch={true}>
+        <FormStateValueProbe formKey="1.inputs.image" />
+      </QAppContextProvider>
+    )
+    fireEvent(
+      window,
+      new CustomEvent('qapp:fillParams', {
+        detail: { workflow: { '1': { inputs: { image: encodedValue } } } }
+      })
+    )
+
+    await waitFor(() => expect(comfyGetViewMock).toHaveBeenCalledWith(routeBearingFileItem))
+  })
+
   it('writes user-entered quick app input values to persistent storage', () => {
     render(
       <QAppContextProvider qAppKey="demo" skipServerFetch={true}>
@@ -364,7 +438,6 @@ describe('useQAppInputState', () => {
       expect(screen.getByTestId('form-state-value').textContent).toBe(deferredValue)
     })
     expect(comfyGetViewMock).not.toHaveBeenCalled()
-    expect(comfyUploadImageMock).not.toHaveBeenCalled()
   })
 
   it('does not downgrade a blank scoped fill-param dispatch to a global fill', async () => {
@@ -691,7 +764,6 @@ describe('QAppContext submit identity', () => {
   beforeEach(() => {
     notifyErrorMock.mockClear()
     comfyGetViewMock.mockReset()
-    comfyUploadImageMock.mockReset()
     qAppGetQAppCfgMock.mockReset()
     clearCachedQAppState()
   })

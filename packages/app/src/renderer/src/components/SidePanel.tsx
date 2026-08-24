@@ -105,6 +105,7 @@ import {
   isBuiltinDuplicateCheckQApp
 } from '../pages/QuickAppPage/duplicateCheck/builtin'
 import { isBuiltinVideoGenerationQApp } from '../pages/QuickAppPage/videoGeneration/builtin'
+import MultiComfyBatchButton from '../pages/QuickAppPage/QAppExecutePanel/MultiComfyBatchButton'
 
 const QAppMenu = lazy(() => import('../pages/QuickAppPage/components/QAppMenu'))
 const QAppPanel = lazy(() => import('../pages/QuickAppPage/QAppExecutePanel/QAppInputPanel'))
@@ -491,6 +492,7 @@ const useLegacyQAppRunner = (projectId?: string) => {
     submitClientId,
     submitSessionKey
   } = useQAppContext()
+  const [hasEnabledInstance, setHasEnabledInstance] = useState(false)
   const {
     state: { isConnected, isRunning },
     setIsRunning,
@@ -498,6 +500,13 @@ const useLegacyQAppRunner = (projectId?: string) => {
     setErrorPromptStatus
   } = useComfyStatus()
   const { notifySuccess, notifyError } = useMessage()
+
+  useEffect(() => {
+    void api()
+      .svcComfyBatch.listInstances({})
+      .then((profiles) => setHasEnabledInstance(profiles.some((profile) => profile.state.enabled)))
+      .catch(() => setHasEnabledInstance(false))
+  }, [])
 
   const summarizeGeneratedResults = (resultItems: ResultItem[]) => {
     let imageCount = 0
@@ -520,7 +529,7 @@ const useLegacyQAppRunner = (projectId?: string) => {
       return
     }
 
-    if (!isConnected) {
+    if (!isConnected && !hasEnabledInstance) {
       notifyError('ComfyUI is not connected')
       return
     }
@@ -617,6 +626,7 @@ const useLegacyQAppRunner = (projectId?: string) => {
     buildWorkflow,
     buildSubmitExtraData,
     currentQAppKey,
+    hasEnabledInstance,
     isConnected,
     notifyError,
     notifySuccess,
@@ -638,6 +648,12 @@ const InlineQAppParams: React.FC<{
   onRunReady: (runner: () => Promise<void>, isRunning: boolean) => void
 }> = ({ projectId, onRunReady }) => {
   const { run, isRunning } = useSharedQAppRunner(projectId)
+  const { currentQAppKey, qAppCfg, validate, validateBatch, buildWorkflow } = useQAppContext()
+  const batchProcess = qAppCfg?.batchProcess
+  const imageInputSlot =
+    batchProcess?.enabled === true
+      ? (batchProcess.batchImageInputSlot ?? batchProcess.imageInputSlot)
+      : undefined
 
   useEffect(() => {
     onRunReady(run, isRunning)
@@ -656,6 +672,25 @@ const InlineQAppParams: React.FC<{
       <Suspense fallback={<LoadingFallback />}>
         <QAppPanel fallback={<CircularProgress size={24} />} />
       </Suspense>
+      {imageInputSlot && validate && buildWorkflow && qAppCfg?.outputNodeIds?.length === 1 && (
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          flexWrap="wrap"
+          sx={{ mt: 1.5, pt: 1.5, borderTop: (theme) => `1px solid ${theme.palette.divider}` }}
+        >
+          <MultiComfyBatchButton
+            currentQAppKey={currentQAppKey}
+            imageInputSlot={imageInputSlot}
+            outputNodeIds={qAppCfg.outputNodeIds}
+            buildWorkflow={buildWorkflow}
+            validateBatch={validateBatch}
+            batchWorkflow={batchProcess?.batchWorkflow}
+            batchImageInputSlot={batchProcess?.batchImageInputSlot}
+          />
+        </Stack>
+      )}
     </Box>
   )
 }

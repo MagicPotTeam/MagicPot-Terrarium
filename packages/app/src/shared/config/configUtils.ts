@@ -42,7 +42,6 @@ export class ConfigUtils {
   private isUsingDevelopmentEmbeddedComfyDataDir(): boolean {
     return (
       this.buildEnv.env.build === 'development' &&
-      !this.config.use_remote_comfyui &&
       !this.config.local_comfyui_config.comfyui_dir.trim() &&
       Boolean(this.buildEnv.embeddedDefaults.comfyuiDir)
     )
@@ -103,6 +102,9 @@ export class ConfigUtils {
     const localComfyUIDir =
       this.resolveLocalDirectoryPath(this.config.local_comfyui_config.comfyui_dir) ||
       embeddedComfyuiDir
+    if (embeddedComfyuiDir) {
+      return [localComfyUIDir, true]
+    }
     const remoteComfyUIDir = this.config.remote_comfyui_config.mapping_comfyui_dir
     const comfyuiDir = this.config.use_remote_comfyui ? remoteComfyUIDir : localComfyUIDir
     return [comfyuiDir, comfyuiDir !== '']

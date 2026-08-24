@@ -1,6 +1,7 @@
 import { ApiDefSheet } from './apiUtils/serviceDefSheet'
 import { AdobeBridgeSvc, adobeBridgeSvcDef } from './svcAdobeBridge'
 import { ComfySvc, comfySvcDef } from './svcComfy'
+import { ComfyBatchSvc, comfyBatchSvcDef } from './svcComfyBatch'
 import { CanvasThumbnailSvc, canvasThumbnailSvcDef } from './svcCanvasThumbnail'
 import { ProjectTraceSvc, projectTraceSvcDef } from './svcProjectTrace'
 import { TargetSchemeSvc, targetSchemeSvcDef } from './svcTargetScheme'
@@ -31,6 +32,7 @@ export type BaseApi = {
   svcTargetScheme: TargetSchemeSvc
   svcCustomSkill: CustomSkillSvc
   svcComfy: ComfySvc
+  svcComfyBatch: ComfyBatchSvc
   svcCanvasThumbnail: CanvasThumbnailSvc
   svcProjectTrace: ProjectTraceSvc
   svcPysssss: PysssssSvc
@@ -58,6 +60,7 @@ export const apiDef: ApiDefSheet<Api> = {
   svcTargetScheme: targetSchemeSvcDef,
   svcCustomSkill: customSkillSvcDef,
   svcComfy: comfySvcDef,
+  svcComfyBatch: comfyBatchSvcDef,
   svcCanvasThumbnail: canvasThumbnailSvcDef,
   svcProjectTrace: projectTraceSvcDef,
   svcPysssss: pysssssSvcDef,

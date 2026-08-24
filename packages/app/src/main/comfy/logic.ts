@@ -12,8 +12,48 @@ const HISTORY_TIMEOUT: number | null = null // 默认不超时，直到 ComfyUI 
 // Wrapper for ComfyHttpCli
 // 定义这个类型的目的是用我们内部的 Queue 逻辑接管 ComfyHttpCli 的请求
 export type ComfyCliWrapper = {
-  history: (promptId: string) => Promise<ComfyHistoryResp>
-  view: (meta: FileItem) => Promise<Uint8Array>
+  history: (promptId: string, signal?: AbortSignal) => Promise<ComfyHistoryResp>
+  view: (meta: FileItem, signal?: AbortSignal) => Promise<Uint8Array>
+}
+
+const abortReason = (signal: AbortSignal): unknown =>
+  signal.reason ?? Object.assign(new Error('Operation was aborted.'), { name: 'AbortError' })
+
+const raceAbort = async <T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> => {
+  if (!signal) return await promise
+  if (signal.aborted) throw abortReason(signal)
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      cleanup()
+      reject(abortReason(signal))
+    }
+    const cleanup = (): void => signal.removeEventListener('abort', onAbort)
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (result) => {
+        cleanup()
+        resolve(result)
+      },
+      (error) => {
+        cleanup()
+        reject(error)
+      }
+    )
+  })
+}
+
+const delay = async (milliseconds: number, signal?: AbortSignal): Promise<void> => {
+  if (!signal) {
+    await sleep(milliseconds)
+    return
+  }
+  await raceAbort(
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, milliseconds)
+      signal.addEventListener('abort', () => clearTimeout(timer), { once: true })
+    }),
+    signal
+  )
 }
 
 // 等待 ComfyUI 生成 prompt_id 的执行
@@ -23,21 +63,20 @@ export async function waitPromptId(
   promptId: string,
   timeout: number | null = HISTORY_TIMEOUT,
   poll: number = HISTORY_POLL_MS,
-  shouldCancel?: () => boolean
+  shouldCancel?: () => boolean,
+  signal?: AbortSignal
 ): Promise<ComfyHistory> {
   const startTime = Date.now()
   const hasTimeout = typeof timeout === 'number' && Number.isFinite(timeout) && timeout > 0
   while (!hasTimeout || Date.now() - startTime < timeout) {
-    // 检查是否应该取消
+    if (signal?.aborted) throw abortReason(signal)
     if (shouldCancel && shouldCancel()) {
-      throw new Error(`Task ${promptId} was cancelled`)
+      throw Object.assign(new Error(`Task ${promptId} was cancelled`), { name: 'AbortError' })
     }
 
-    const history = await httpCli.history(promptId)
-    if (history && history[promptId] && history[promptId].outputs) {
-      return history[promptId]
-    }
-    await sleep(poll)
+    const history = await raceAbort(httpCli.history(promptId, signal), signal)
+    if (history?.[promptId]?.outputs) return history[promptId]
+    await delay(poll, signal)
   }
   // 超时不是 ComfyUI 内置，这里伪造一个
   return {

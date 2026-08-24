@@ -18,12 +18,10 @@ import { shell } from 'electron'
 import { exec, execFile } from 'child_process'
 import { promisify } from 'util'
 import * as os from 'os'
-import { getQueue } from '../queue/taskQueue'
-import { ComfyHttpCli } from '../comfy/http'
+import { addTask, cancelTask, getQueue, getTask } from '../queue/taskQueue'
 import { getJsonPath, setJsonPath } from '@shared/utils/jsonPath'
-import { Workflow, FileItem } from '@shared/comfy/types'
-import { fileItemToValue } from '@shared/comfy/funcs'
-import { waitPromptId, ComfyCliWrapper } from '../comfy/logic'
+import { Workflow, type ComfyHistory } from '@shared/comfy/types'
+import { encodeDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
 import * as crypto from 'crypto'
 import * as zlib from 'zlib'
 import { readTestUiEnv, resolveTestArtifactPath, resolveTestUiPolicy } from '../testUiPolicy'
@@ -45,33 +43,42 @@ const buildPhotoshopJavaScriptAppleScript = (jsxScript: string): string =>
     'end tell'
   ].join('\n')
 
-const runAppleScript = (appleScript: string, timeout = 10000) =>
-  execFileAsync('osascript', ['-e', appleScript], { timeout })
+const runAppleScript = (appleScript: string, timeout = 10000, signal?: AbortSignal) =>
+  execFileAsync('osascript', ['-e', appleScript], { timeout, signal })
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const PNG_IEND_CHUNK = Buffer.from([
   0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
 ])
 
-const hasCompletePngSignatureAndIend = async (filePath: string): Promise<boolean> => {
+const hasCompletePngSignatureAndIend = async (
+  filePath: string,
+  signal?: AbortSignal
+): Promise<boolean> => {
   let handle: fs.FileHandle | null = null
   try {
+    signal?.throwIfAborted()
     handle = await fs.open(filePath, 'r')
+    signal?.throwIfAborted()
     const stats = await handle.stat()
+    signal?.throwIfAborted()
     if (stats.size < PNG_SIGNATURE.length + PNG_IEND_CHUNK.length) {
       return false
     }
 
     const signature = Buffer.alloc(PNG_SIGNATURE.length)
     const signatureRead = await handle.read(signature, 0, signature.length, 0)
+    signal?.throwIfAborted()
     if (signatureRead.bytesRead !== signature.length || !signature.equals(PNG_SIGNATURE)) {
       return false
     }
 
     const iend = Buffer.alloc(PNG_IEND_CHUNK.length)
     const iendRead = await handle.read(iend, 0, iend.length, stats.size - iend.length)
+    signal?.throwIfAborted()
     return iendRead.bytesRead === iend.length && iend.equals(PNG_IEND_CHUNK)
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason
     return false
   } finally {
     if (handle) {
@@ -82,23 +89,46 @@ const hasCompletePngSignatureAndIend = async (filePath: string): Promise<boolean
 
 const waitForCompletePhotoshopPngExport = async (
   outputPath: string,
-  timeoutMs = 10000
+  timeoutMs = 10000,
+  signal?: AbortSignal
 ): Promise<void> => {
   let waitTime = 10
   const startTime = Date.now()
 
   while (Date.now() - startTime < timeoutMs) {
-    if (await hasCompletePngSignatureAndIend(outputPath)) {
+    signal?.throwIfAborted()
+    if (await hasCompletePngSignatureAndIend(outputPath, signal)) {
       return
     }
 
-    await new Promise((resolve) => setTimeout(resolve, waitTime))
+    await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(signal.reason)
+        return
+      }
+      const timer = setTimeout(done, waitTime)
+      const onAbort = (): void => {
+        clearTimeout(timer)
+        cleanup()
+        reject(signal?.reason)
+      }
+      function cleanup(): void {
+        signal?.removeEventListener('abort', onAbort)
+      }
+      function done(): void {
+        cleanup()
+        resolve()
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
     waitTime = Math.min(waitTime * 1.5, 200)
   }
+  signal?.throwIfAborted()
 
   let sizeDetails = ''
   try {
     const stats = await fs.stat(outputPath)
+    signal?.throwIfAborted()
     sizeDetails = ` Last observed size: ${stats.size} bytes.`
   } catch {
     sizeDetails = ' The file does not exist.'
@@ -120,6 +150,188 @@ const getPhotoshopTempDir = async (): Promise<string> => {
   return tempDir
 }
 
+const PHOTOSHOP_DEFERRED_INPUT_DIR = 'qapp-input-images'
+const PHOTOSHOP_TASK_POLL_INTERVAL_MS = 100
+const PHOTOSHOP_TASK_TIMEOUT_MS = 30 * 60 * 1000
+const PHOTOSHOP_CANCEL_TIMEOUT_MS = 5000
+const PHOTOSHOP_EXECUTION_DRAIN_TIMEOUT_MS = 5000
+const PHOTOSHOP_EXPORT_QUARANTINE_TIMEOUT_MS = 5000
+const PHOTOSHOP_LATE_CLEANUP_DELAYS_MS = [0, 1000, 20_000, 60_000] as const
+
+const persistPhotoshopRealtimeInput = async (
+  fileName: string,
+  image: Uint8Array
+): Promise<string> => {
+  const requestedName = path.basename(fileName.trim())
+  const requestedExtension = path.extname(requestedName)
+  const extension = /^\.[a-zA-Z0-9]{1,10}$/.test(requestedExtension) ? requestedExtension : '.png'
+  const requestedBaseName = requestedExtension
+    ? requestedName.slice(0, -requestedExtension.length)
+    : requestedName
+  const baseName =
+    requestedBaseName
+      .replace(/[^a-zA-Z0-9._-]+/g, '-')
+      .replace(/^[-.]+|[-.]+$/g, '')
+      .slice(0, 80) || 'photoshop-input'
+  const outputDir = path.join(app.getPath('userData'), PHOTOSHOP_DEFERRED_INPUT_DIR)
+  await fs.mkdir(outputDir, { recursive: true })
+  const durableFileName = `${baseName}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}${extension}`
+  const fullPath = path.join(outputDir, durableFileName)
+  await fs.writeFile(fullPath, Buffer.from(image))
+  return encodeDeferredComfyImageInputValue({
+    fileName: requestedName || durableFileName,
+    mimeType: 'image/png',
+    filePath: fullPath,
+    sizeBytes: image.byteLength
+  })
+}
+
+const abortError = (): Error => {
+  const error = new Error('Photoshop realtime generation was stopped')
+  error.name = 'AbortError'
+  return error
+}
+
+const throwIfAborted = (signal: AbortSignal): void => {
+  if (signal.aborted) throw signal.reason ?? abortError()
+}
+
+const raceWithTimeout = async <T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string
+): Promise<T> =>
+  await new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs)
+    promise.then(
+      (value) => {
+        clearTimeout(timeout)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timeout)
+        reject(error)
+      }
+    )
+  })
+
+const cancelPhotoshopTaskBounded = async (taskId: string, context: string): Promise<void> => {
+  try {
+    await raceWithTimeout(
+      cancelTask(taskId),
+      PHOTOSHOP_CANCEL_TIMEOUT_MS,
+      `Timed out cancelling Photoshop realtime task ${taskId}`
+    )
+  } catch (error) {
+    console.error(`[Realtime Generation] Failed to cancel ${context} task ${taskId}:`, error)
+  }
+}
+
+const schedulePhotoshopTempCleanup = (filePath: string): void => {
+  for (const delayMs of PHOTOSHOP_LATE_CLEANUP_DELAYS_MS) {
+    const timer = setTimeout(() => void fs.unlink(filePath).catch(() => {}), delayMs)
+    timer.unref?.()
+  }
+}
+
+// Serialize every public and realtime Photoshop export bridge operation. The tail always settles so a
+// failed caller cannot poison later exports, while callers still receive their own operation result.
+let photoshopExportOperationTail: Promise<void> = Promise.resolve()
+const withPhotoshopExportOperationLock = async <T>(operation: () => Promise<T>): Promise<T> => {
+  const previous = photoshopExportOperationTail
+  let release!: () => void
+  photoshopExportOperationTail = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await previous.catch(() => {})
+  try {
+    return await operation()
+  } finally {
+    release()
+  }
+}
+
+const racePhotoshopAbort = async <T>(promise: Promise<T>, signal: AbortSignal): Promise<T> => {
+  throwIfAborted(signal)
+  return await new Promise<T>((resolve, reject) => {
+    const cleanup = (): void => signal.removeEventListener('abort', onAbort)
+    const onAbort = (): void => {
+      cleanup()
+      reject(signal.reason ?? abortError())
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => {
+        cleanup()
+        resolve(value)
+      },
+      (error) => {
+        cleanup()
+        reject(error)
+      }
+    )
+  })
+}
+
+const waitForPollInterval = (signal: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(abortError())
+      return
+    }
+    const timeout = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, PHOTOSHOP_TASK_POLL_INTERVAL_MS)
+    const onAbort = (): void => {
+      clearTimeout(timeout)
+      signal.removeEventListener('abort', onAbort)
+      reject(abortError())
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+
+export const waitForQueuedPhotoshopTask = async (
+  taskId: string,
+  signal: AbortSignal,
+  timeoutMs = PHOTOSHOP_TASK_TIMEOUT_MS
+): Promise<{ history: ComfyHistory; promptId: string }> => {
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    throwIfAborted(signal)
+    // Read authoritative state before evaluating the deadline. A task that completed in the final
+    // polling window must be consumed instead of being discarded as a timeout and resubmitted.
+    const [status, task] = getTask(taskId)
+    if (status === 'completed') {
+      if (!task.result)
+        throw new Error(`Photoshop realtime task completed without a result: ${taskId}`)
+      const promptId = task.prompt_id || task.result.prompt?.[1]
+      if (typeof promptId !== 'string' || !promptId) {
+        throw new Error(`Photoshop realtime task completed without a Comfy prompt id: ${taskId}`)
+      }
+      return { history: task.result, promptId }
+    }
+    if (status === 'error') {
+      throw new Error(`Photoshop realtime task failed: ${taskId}`)
+    }
+    if (status === 'unknown') {
+      throw new Error(
+        `Photoshop realtime task submission is ambiguous and requires manual resolution: ${taskId}`
+      )
+    }
+    if (status === 'cancelled' || status === 'cancelling') {
+      throw abortError()
+    }
+    if (status === null || task === null) {
+      throw new Error(`Photoshop realtime task disappeared: ${taskId}`)
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`Photoshop realtime task timed out: ${taskId}`)
+    }
+    await waitForPollInterval(signal)
+  }
+}
+
 // Realtime generation state.
 let realtimeGenerationInterval: NodeJS.Timeout | null = null
 let realtimeGenerationConfig: {
@@ -130,8 +342,29 @@ let realtimeGenerationConfig: {
 } | null = null
 // Hash of the last input image, used to detect changes.
 let lastInputImageHash: string | null = null
-// Whether a realtime generation job is currently in flight.
-let isExecutingRealtimeGeneration: boolean = false
+// Session epoch and in-flight task state prevent stopped sessions from publishing late results.
+let realtimeGenerationEpoch = 0
+let currentRealtimeTaskId: string | null = null
+let currentRealtimeAbortController: AbortController | null = null
+let currentRealtimeExecution: Promise<void> | null = null
+// The underlying Photoshop export/load is tracked separately from its abort race. A new session may
+// not start another export until the previous underlying operation has actually settled.
+let currentPhotoshopExportSettlement: Promise<void> | null = null
+// Serialize lifecycle calls so concurrent start/start and start/stop transitions cannot interleave.
+let realtimeLifecycleTail: Promise<void> = Promise.resolve()
+const withRealtimeLifecycleLock = async <T>(operation: () => Promise<T>): Promise<T> => {
+  const previous = realtimeLifecycleTail
+  let release!: () => void
+  realtimeLifecycleTail = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await previous.catch(() => {})
+  try {
+    return await operation()
+  } finally {
+    release()
+  }
+}
 // Most recently loaded image metadata for the renderer.
 let latestLoadedImage: {
   imageValue: string
@@ -390,58 +623,89 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
    */
   loadImageFromPhotoshop = async (
     req: LoadImageFromPhotoshopReq
-  ): Promise<LoadImageFromPhotoshopResp> => {
+  ): Promise<LoadImageFromPhotoshopResp> =>
+    withPhotoshopExportOperationLock(() => this.loadImageFromPhotoshopInternal(req))
+
+  private async loadRealtimeImageFromPhotoshop(
+    req: LoadImageFromPhotoshopReq,
+    signal: AbortSignal
+  ): Promise<LoadImageFromPhotoshopResp> {
+    return await withPhotoshopExportOperationLock(() =>
+      this.loadImageFromPhotoshopInternal(req, signal)
+    )
+  }
+
+  private async loadImageFromPhotoshopInternal(
+    req: LoadImageFromPhotoshopReq,
+    signal?: AbortSignal
+  ): Promise<LoadImageFromPhotoshopResp> {
+    signal?.throwIfAborted()
     const platform = os.platform()
     const tempDir = await getPhotoshopTempDir()
-    const timestamp = Date.now()
-    const outputPath = path.join(tempDir, `photoshop-export-${timestamp}.png`)
+    signal?.throwIfAborted()
+    const exportNonce = crypto.randomUUID()
+    let outputPath = path.join(tempDir, `photoshop-export-${exportNonce}.png`)
+    const cleanupPaths = new Set<string>([outputPath])
 
     try {
       if (platform === 'win32') {
         // Prefer file export on Windows to avoid clipboard PNG corruption.
         // Keep clipboard export as a compatibility fallback for edge cases.
-        await this.exportFromPhotoshopWindowsWithFallback(outputPath)
+        outputPath = await this.exportFromPhotoshopWindowsWithFallback(outputPath, signal)
+        cleanupPaths.add(outputPath)
       } else if (platform === 'darwin') {
         // macOS: use AppleScript to execute Photoshop JavaScript.
-        await this.exportFromPhotoshopMac(outputPath)
+        await this.exportFromPhotoshopMac(outputPath, signal)
       } else {
         throw new Error('Direct Photoshop reads are only supported on Windows and macOS.')
       }
 
       // Wait for Photoshop to finish writing the PNG before the renderer builds a preview.
       // A non-empty file can still be incomplete on slow restarts or large documents.
-      await waitForCompletePhotoshopPngExport(outputPath)
+      await waitForCompletePhotoshopPngExport(outputPath, 10000, signal)
 
       // Read the exported image file.
-      const imageData = await fs.readFile(outputPath)
-      const fileName = `photoshop-export-${timestamp}.png`
-
-      // Clean up the temporary file asynchronously so the response is not blocked.
-      fs.unlink(outputPath).catch(() => {
-        // Ignore cleanup failures because the export already succeeded.
-      })
+      const imageData = await fs.readFile(outputPath, signal ? { signal } : undefined)
+      signal?.throwIfAborted()
+      const fileName = path.basename(outputPath)
 
       return {
         image: new Uint8Array(imageData),
         fileName
       }
     } catch (error) {
+      if (signal?.aborted) throw signal.reason
       console.error('Failed to load image from Photoshop:', error)
       throw new Error(
         `Unable to read an image from Photoshop. Make sure Photoshop is running and a document is open.\nError details: ${error instanceof Error ? error.message : String(error)}`
       )
+    } finally {
+      for (const cleanupPath of cleanupPaths) schedulePhotoshopTempCleanup(cleanupPath)
     }
   }
 
-  private async exportFromPhotoshopWindowsWithFallback(outputPath: string): Promise<void> {
+  private async exportFromPhotoshopWindowsWithFallback(
+    directOutputPath: string,
+    signal?: AbortSignal
+  ): Promise<string> {
     try {
-      await this.exportFromPhotoshopWindows(outputPath)
+      await this.exportFromPhotoshopWindows(directOutputPath, signal)
+      return directOutputPath
     } catch (directExportError) {
+      if (signal?.aborted) throw signal.reason
       console.warn(
         '[Photoshop] Direct file export failed, falling back to clipboard export:',
         directExportError
       )
-      await this.exportFromPhotoshopWindowsViaClipboard(outputPath)
+      const fallbackOutputPath = path.join(
+        path.dirname(directOutputPath),
+        `photoshop-export-fallback-${crypto.randomUUID()}.png`
+      )
+      await this.exportFromPhotoshopWindowsViaClipboard(fallbackOutputPath, signal)
+      // A dispatched direct export may still write late. It uses a separate path and therefore cannot
+      // overwrite the authoritative fallback bytes selected by this invocation.
+      schedulePhotoshopTempCleanup(directOutputPath)
+      return fallbackOutputPath
     }
   }
 
@@ -497,9 +761,8 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
       '}'
     ].join('\n')
 
-    const timestamp = Date.now()
     const tempDir = await getPhotoshopTempDir()
-    const psScriptPath = path.join(tempDir, `ps-export-direct-${timestamp}.ps1`)
+    const psScriptPath = path.join(tempDir, `ps-export-direct-${crypto.randomUUID()}.ps1`)
     const psScriptWithBOM = '\uFEFF' + psScript
     await fs.writeFile(psScriptPath, psScriptWithBOM, 'utf8')
 
@@ -533,7 +796,10 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
    * Windows: read an image from Photoshop through the clipboard bridge.
    * Read the selection when one exists, otherwise read the whole document.
    */
-  private async exportFromPhotoshopWindowsViaClipboard(outputPath: string): Promise<void> {
+  private async exportFromPhotoshopWindowsViaClipboard(
+    outputPath: string,
+    signal?: AbortSignal
+  ): Promise<void> {
     // Use Photoshop JavaScript here because COM copy has edge cases with locked backgrounds.
     const jsxScript = [
       'try {',
@@ -591,9 +857,9 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
       '}'
     ].join('\n')
 
-    const timestamp = Date.now()
+    const clipboardNonce = crypto.randomUUID()
     const tempDir = await getPhotoshopTempDir()
-    const jsxScriptPath = path.join(tempDir, `ps-clipboard-${timestamp}.jsx`)
+    const jsxScriptPath = path.join(tempDir, `ps-clipboard-${clipboardNonce}.jsx`)
     await fs.writeFile(jsxScriptPath, jsxScript, 'utf8')
 
     // Use PowerShell to ask Photoshop to execute the JavaScript payload.
@@ -619,7 +885,7 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
       '}'
     ].join('\n')
 
-    const psScriptPath = path.join(tempDir, `ps-clipboard-${timestamp}.ps1`)
+    const psScriptPath = path.join(tempDir, `ps-clipboard-${clipboardNonce}.ps1`)
     const psScriptWithBOM = '\uFEFF' + psScript
     await fs.writeFile(psScriptPath, psScriptWithBOM, 'utf8')
 
@@ -629,7 +895,8 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
 
       const { stdout, stderr } = await execAsync(command, {
         timeout: 10000,
-        maxBuffer: 10 * 1024 * 1024
+        maxBuffer: 10 * 1024 * 1024,
+        signal
       })
 
       if (stdout) {
@@ -642,7 +909,27 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
       }
 
       // Give the clipboard a brief moment to update before reading it.
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      await new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason)
+          return
+        }
+        const timer = setTimeout(done, 100)
+        const onAbort = (): void => {
+          clearTimeout(timer)
+          cleanup()
+          reject(signal?.reason)
+        }
+        function cleanup(): void {
+          signal?.removeEventListener('abort', onAbort)
+        }
+        function done(): void {
+          cleanup()
+          resolve()
+        }
+        signal?.addEventListener('abort', onAbort, { once: true })
+      })
+      signal?.throwIfAborted()
 
       // Read the image from the clipboard.
       const clipboardImage = clipboard.readImage()
@@ -652,7 +939,8 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
 
       // Save the clipboard image as PNG.
       const pngBuffer = clipboardImage.toPNG()
-      await fs.writeFile(outputPath, pngBuffer)
+      await fs.writeFile(outputPath, pngBuffer, signal ? { signal } : undefined)
+      signal?.throwIfAborted()
       console.log('[Photoshop] Saved image from clipboard to:', outputPath)
     } finally {
       // Clean up temporary files.
@@ -674,7 +962,10 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
    * Export the selection when one exists, otherwise export the whole document.
    * @deprecated Prefer exportFromPhotoshopWindowsViaClipboard to avoid window flashing.
    */
-  private async exportFromPhotoshopWindows(outputPath: string): Promise<void> {
+  private async exportFromPhotoshopWindows(
+    outputPath: string,
+    signal?: AbortSignal
+  ): Promise<void> {
     // Normalize the path for Photoshop JavaScript by using forward slashes.
     const normalizedPath = outputPath.replace(/\\/g, '/')
 
@@ -774,9 +1065,8 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
     ].join('\n')
 
     // Save the JavaScript payload to a temporary file.
-    const timestamp = Date.now()
     const tempDir = await getPhotoshopTempDir()
-    const jsxScriptPath = path.join(tempDir, `ps-export-${timestamp}.jsx`)
+    const jsxScriptPath = path.join(tempDir, `ps-export-${crypto.randomUUID()}.jsx`)
     await fs.writeFile(jsxScriptPath, jsxScript, 'utf8')
 
     // Use stat to confirm that the file was created successfully.
@@ -825,7 +1115,7 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
 
       // Save the PowerShell payload to a temporary file.
       // Use UTF-8 with BOM so Windows PowerShell reads the file reliably.
-      const psScriptPath = path.join(tempDir, `ps-script-${timestamp}.ps1`)
+      const psScriptPath = path.join(tempDir, `ps-script-${crypto.randomUUID()}.ps1`)
       const psScriptWithBOM = '\uFEFF' + psScript // Prefix with a UTF-8 BOM.
       await fs.writeFile(psScriptPath, psScriptWithBOM, 'utf8')
 
@@ -856,7 +1146,8 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
 
         const { stdout, stderr } = await execAsync(command, {
           timeout: 15000, // 15 seconds is enough for the export command in normal cases.
-          maxBuffer: 10 * 1024 * 1024 // 10MB
+          maxBuffer: 10 * 1024 * 1024, // 10MB
+          signal
         })
 
         if (stdout) {
@@ -889,7 +1180,7 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
    * macOS: export the current document by running Photoshop JavaScript through AppleScript.
    * Export the selection when one exists, otherwise export the whole document.
    */
-  private async exportFromPhotoshopMac(outputPath: string): Promise<void> {
+  private async exportFromPhotoshopMac(outputPath: string, signal?: AbortSignal): Promise<void> {
     // Escape special characters in the output path.
     const escapedPath = outputPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
     const jsxScript = [
@@ -981,7 +1272,11 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
     ].join('\n')
 
     // Use osascript to invoke Photoshop.
-    const { stderr } = await runAppleScript(buildPhotoshopJavaScriptAppleScript(jsxScript))
+    const { stderr } = await runAppleScript(
+      buildPhotoshopJavaScriptAppleScript(jsxScript),
+      10000,
+      signal
+    )
 
     if (stderr) {
       throw new Error(stderr)
@@ -990,6 +1285,7 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
     // Confirm that the export file was created.
     try {
       await fs.access(outputPath)
+      signal?.throwIfAborted()
     } catch {
       throw new Error('Photoshop export failed: file was not created')
     }
@@ -1006,7 +1302,7 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
     }
 
     const pngBuffer = clipboardImage.toPNG()
-    const fileName = `photoshop-clipboard-${Date.now()}.png`
+    const fileName = `photoshop-clipboard-${crypto.randomUUID()}.png`
 
     return {
       image: new Uint8Array(pngBuffer),
@@ -1019,63 +1315,98 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
    */
   startRealtimeGeneration = async (
     req: StartRealtimeGenerationReq
-  ): Promise<StartRealtimeGenerationResp> => {
-    try {
-      // If realtime generation is already running, stop it before restarting.
-      if (realtimeGenerationInterval) {
-        this.stopRealtimeGeneration({})
+  ): Promise<StartRealtimeGenerationResp> =>
+    withRealtimeLifecycleLock(async () => {
+      try {
+        // Fully stop and drain the old session before installing the replacement session.
+        await this.stopRealtimeGenerationUnlocked({})
+
+        // Parse the workflow template.
+        const workflowTemplate: Workflow = JSON.parse(req.workflowTemplate)
+        const pollInterval = req.pollInterval || 2000
+
+        // Persist the runtime configuration.
+        realtimeGenerationConfig = {
+          workflowTemplate,
+          imageInputSlot: req.imageInputSlot,
+          outputNodeIds: req.outputNodeIds,
+          pollInterval
+        }
+
+        // Reset the last image hash so the first pass always runs.
+        lastInputImageHash = null
+        const epoch = ++realtimeGenerationEpoch
+        // Clear cached renderer data.
+        latestLoadedImage = null
+        latestGeneratedResult = null
+
+        if (currentPhotoshopExportSettlement) {
+          try {
+            await raceWithTimeout(
+              currentPhotoshopExportSettlement,
+              PHOTOSHOP_EXPORT_QUARANTINE_TIMEOUT_MS,
+              'A previous Photoshop export is still running; realtime generation remains quarantined.'
+            )
+          } catch (error) {
+            realtimeGenerationConfig = null
+            throw error
+          }
+        }
+
+        // Start the polling loop.
+        this.startRealtimeGenerationLoop(epoch)
+
+        return {
+          success: true
+        }
+      } catch (error) {
+        console.error('Failed to start realtime generation:', error)
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error)
+        }
       }
-
-      // Parse the workflow template.
-      const workflowTemplate: Workflow = JSON.parse(req.workflowTemplate)
-      const pollInterval = req.pollInterval || 2000
-
-      // Persist the runtime configuration.
-      realtimeGenerationConfig = {
-        workflowTemplate,
-        imageInputSlot: req.imageInputSlot,
-        outputNodeIds: req.outputNodeIds,
-        pollInterval
-      }
-
-      // Reset the last image hash so the first pass always runs.
-      lastInputImageHash = null
-      // Reset the execution guard.
-      isExecutingRealtimeGeneration = false
-      // Clear cached renderer data.
-      latestLoadedImage = null
-      latestGeneratedResult = null
-
-      // Start the polling loop.
-      this.startRealtimeGenerationLoop()
-
-      return {
-        success: true
-      }
-    } catch (error) {
-      console.error('Failed to start realtime generation:', error)
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : String(error)
-      }
-    }
-  }
+    })
 
   /**
    * Stop realtime generation.
    */
   stopRealtimeGeneration = async (
     req: StopRealtimeGenerationReq
-  ): Promise<StopRealtimeGenerationResp> => {
-    if (realtimeGenerationInterval) {
-      clearInterval(realtimeGenerationInterval)
-      realtimeGenerationInterval = null
-      realtimeGenerationConfig = null
-      lastInputImageHash = null // Reset the last image hash.
-      isExecutingRealtimeGeneration = false // Reset the execution guard.
-      latestLoadedImage = null // Clear cached renderer data.
-      latestGeneratedResult = null // Clear cached renderer data.
+  ): Promise<StopRealtimeGenerationResp> =>
+    withRealtimeLifecycleLock(() => this.stopRealtimeGenerationUnlocked(req))
+
+  private async stopRealtimeGenerationUnlocked(
+    req: StopRealtimeGenerationReq
+  ): Promise<StopRealtimeGenerationResp> {
+    ++realtimeGenerationEpoch
+    if (realtimeGenerationInterval) clearInterval(realtimeGenerationInterval)
+    realtimeGenerationInterval = null
+    realtimeGenerationConfig = null
+    lastInputImageHash = null
+    latestLoadedImage = null
+    latestGeneratedResult = null
+
+    const taskId = currentRealtimeTaskId
+    currentRealtimeAbortController?.abort()
+    if (taskId) await cancelPhotoshopTaskBounded(taskId, 'active')
+    if (currentRealtimeExecution) {
+      try {
+        await raceWithTimeout(
+          currentRealtimeExecution.catch(() => {}),
+          PHOTOSHOP_EXECUTION_DRAIN_TIMEOUT_MS,
+          'Timed out draining the stopped Photoshop realtime execution'
+        )
+      } catch (error) {
+        // The epoch is already invalidated. Leave the old execution quarantined from publication and
+        // return rather than allowing a broken queue or mock to block lifecycle calls forever.
+        console.error('[Realtime Generation] Failed to drain stopped execution:', error)
+      }
     }
+    currentRealtimeTaskId = null
+    currentRealtimeAbortController = null
+    currentRealtimeExecution = null
+
     return {
       success: true
     }
@@ -1109,33 +1440,37 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
   /**
    * Start the realtime generation loop.
    */
-  private startRealtimeGenerationLoop(): void {
+  private startRealtimeGenerationLoop(epoch: number): void {
     if (realtimeGenerationInterval) {
       return
     }
 
     realtimeGenerationInterval = setInterval(async () => {
       try {
-        if (!realtimeGenerationConfig) {
-          return
-        }
+        if (!realtimeGenerationConfig || epoch !== realtimeGenerationEpoch) return
 
         // Skip this tick if a generation job is already running.
-        if (isExecutingRealtimeGeneration) {
-          return
-        }
+        if (currentRealtimeExecution) return
 
         // Check the queue state first.
         const queueState = getQueue()
-        const hasRunningOrPending = queueState.running.length > 0 || queueState.pending.length > 0
+        const hasCapacityBlockingTask =
+          queueState.running.length > 0 ||
+          queueState.pending.length > 0 ||
+          queueState.cancelling.length > 0 ||
+          queueState.unknown.length > 0
 
-        if (hasRunningOrPending) {
-          // Skip this tick while other work is running or queued.
+        if (hasCapacityBlockingTask) {
+          // Unknown/cancelling work still owns logical ComfyUI capacity. Do not enqueue behind an
+          // unresolved task merely because it is absent from the running/pending presentation lists.
           return
         }
 
         // The queue is idle, so run realtime generation now.
-        await this.executeRealtimeGeneration()
+        const execution = this.executeRealtimeGeneration(epoch)
+        currentRealtimeExecution = execution
+        await execution
+        if (currentRealtimeExecution === execution) currentRealtimeExecution = null
       } catch (error) {
         console.error('[Realtime Generation] Execution failed:', error)
         // Keep the loop alive and try again on the next tick.
@@ -1143,32 +1478,63 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
     }, realtimeGenerationConfig?.pollInterval || 2000)
   }
 
+  private publishCompletedRealtimeTask(args: {
+    history: ComfyHistory
+    promptId: string
+    outputNodeIds: string[]
+    imageHash: string
+    epoch: number
+    signal: AbortSignal
+  }): boolean {
+    const { history, promptId, outputNodeIds, imageHash, epoch, signal } = args
+    if (epoch !== realtimeGenerationEpoch || signal.aborted) return false
+    if (history.status.status_str === 'error') return false
+    const hasOutputImages = outputNodeIds.some((nodeId) => history.outputs[nodeId]?.images?.length)
+    // An authoritative completion always locks the input hash, including empty output sets.
+    lastInputImageHash = imageHash
+    if (!hasOutputImages) {
+      console.warn('[Realtime Generation] No output images were produced.')
+      return false
+    }
+    latestGeneratedResult = { promptId, history, outputNodeIds }
+    return true
+  }
+
   /**
    * Run one realtime generation pass.
    */
-  private async executeRealtimeGeneration(): Promise<void> {
-    if (!realtimeGenerationConfig) {
-      return
-    }
-
-    // Guard against re-entrant execution.
-    if (isExecutingRealtimeGeneration) {
-      return
-    }
-
-    // Mark execution as in progress.
-    isExecutingRealtimeGeneration = true
-
-    const { workflowTemplate, imageInputSlot, outputNodeIds } = realtimeGenerationConfig
+  private async executeRealtimeGeneration(epoch: number): Promise<void> {
+    const config = realtimeGenerationConfig
+    if (!config || epoch !== realtimeGenerationEpoch) return
+    const abortController = new AbortController()
+    currentRealtimeAbortController = abortController
+    const { signal } = abortController
+    const { workflowTemplate, imageInputSlot, outputNodeIds } = config
+    let queuedTaskId: string | null = null
+    let attemptImageHash: string | null = null
 
     try {
       // 1. Read the current image from Photoshop.
       console.log('[Realtime Generation] Reading image from Photoshop...')
-      const psImage = await this.loadImageFromPhotoshop({})
+      const underlyingExport = this.loadRealtimeImageFromPhotoshop({}, signal)
+      const exportSettlement = underlyingExport.then(
+        () => undefined,
+        () => undefined
+      )
+      currentPhotoshopExportSettlement = exportSettlement
+      void exportSettlement.finally(() => {
+        if (currentPhotoshopExportSettlement === exportSettlement) {
+          currentPhotoshopExportSettlement = null
+        }
+      })
+      const psImage = await racePhotoshopAbort(underlyingExport, signal)
+      throwIfAborted(signal)
+      if (epoch !== realtimeGenerationEpoch) return
 
       // 1.5 Compute a stable hash of the PNG payload and compare it to the last run.
       // Only hash core PNG chunks (IHDR + IDAT) so metadata changes do not trigger reruns.
       const imageHash = this.calculateImageHash(psImage.image)
+      attemptImageHash = imageHash
       const imageSize = psImage.image.length
 
       // Try to extract image dimensions from the PNG header for debug logging.
@@ -1190,8 +1556,6 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
 
       if (lastInputImageHash === imageHash) {
         console.log('[Realtime Generation] Input image is unchanged; skipping generation.')
-        // Clear the execution guard so the next poll can run.
-        isExecutingRealtimeGeneration = false
         return
       }
 
@@ -1203,76 +1567,57 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
         console.log(`[Realtime Generation] First image load. Hash: ${imageHash}`)
       }
 
-      lastInputImageHash = imageHash
       console.log('[Realtime Generation] Starting generation...')
 
-      // 2. Upload the image to ComfyUI.
-      console.log('[Realtime Generation] Uploading image to ComfyUI...')
-      const cli = new ComfyHttpCli()
-      const fileItem = await cli.uploadImage(
-        { filename: psImage.fileName, type: 'input' },
-        psImage.image
+      // 2. Persist a deferred input. The task queue uploads it only after acquiring a destination
+      // lease, so preprocessing, upload, submission, polling, and output routing stay on one host.
+      console.log('[Realtime Generation] Persisting deferred image input...')
+      const imageValue = await racePhotoshopAbort(
+        persistPhotoshopRealtimeInput(psImage.fileName, psImage.image),
+        signal
       )
 
-      if (!fileItem.filename) {
-        throw new Error('Failed to upload image')
-      }
-
-      // 2.5 Cache the loaded image metadata for renderer updates.
-      const imageValue = fileItemToValue(fileItem)
-      // Convert array-style values to JSON so the renderer always receives a string.
-      const imageValueStr = typeof imageValue === 'string' ? imageValue : JSON.stringify(imageValue)
+      // 2.5 Cache the durable deferred value for renderer updates.
+      throwIfAborted(signal)
+      if (epoch !== realtimeGenerationEpoch) return
       latestLoadedImage = {
-        imageValue: imageValueStr,
+        imageValue,
         imageInputSlot
       }
 
-      // 3. Build the workflow by cloning the template and injecting the image input.
+      // 3. Build the workflow by cloning the template and injecting the deferred image input.
       const workflow: Workflow = JSON.parse(JSON.stringify(workflowTemplate))
       setJsonPath(imageInputSlot, workflow, imageValue)
 
-      // 4. Submit the workflow.
-      console.log('[Realtime Generation] Submitting workflow...')
-      const { prompt_id } = await cli.prompt({
-        prompt: workflow,
-        client_id: crypto.randomUUID()
+      // 4. Submit through the ordinary queue. It is the sole authority for instance leasing,
+      // submission ambiguity, cancellation, and immutable output-route capture.
+      console.log('[Realtime Generation] Queueing workflow...')
+      const taskId = addTask({
+        id: '',
+        type: 'comfy_prompt',
+        client_id: crypto.randomUUID(),
+        created_at: Date.now(),
+        prompt_id: null,
+        payload: workflow,
+        result: null
       })
+      queuedTaskId = taskId
+      currentRealtimeTaskId = taskId
 
-      // 5. Wait for generation to complete.
+      // 5. Wait for the queue's authoritative terminal result.
       console.log('[Realtime Generation] Waiting for generation to complete...')
-      const cliWrapper: ComfyCliWrapper = {
-        history: (promptId) => cli.history(promptId),
-        view: (meta) => cli.view(meta)
-      }
+      const { history: result, promptId } = await waitForQueuedPhotoshopTask(taskId, signal)
+      if (epoch !== realtimeGenerationEpoch || signal.aborted) return
 
-      const result = await waitPromptId(cliWrapper, prompt_id)
-
-      if (result.status.status_str === 'error') {
-        console.error('[Realtime Generation] Generation failed:', result.status)
-        return
-      }
-
-      // 5.5 Cache the generated result for renderer updates.
-      latestGeneratedResult = {
-        promptId: prompt_id,
-        history: result,
-        outputNodeIds
-      }
-
-      // 6. Collect the generated images.
       console.log('[Realtime Generation] Collecting generated images...')
-      const outputImages: FileItem[] = []
-      for (const nodeId of outputNodeIds) {
-        const nodeOutput = result.outputs[nodeId]
-        if (nodeOutput?.images) {
-          outputImages.push(...nodeOutput.images)
-        }
-      }
-
-      if (outputImages.length === 0) {
-        console.warn('[Realtime Generation] No output images were produced.')
-        return
-      }
+      this.publishCompletedRealtimeTask({
+        history: result,
+        promptId,
+        outputNodeIds,
+        imageHash,
+        epoch,
+        signal
+      })
 
       // 7. No need to re-read Photoshop after generation completes.
       // The input image was already read and hashed before the upload.
@@ -1281,11 +1626,67 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
 
       console.log('[Realtime Generation] Completed.')
     } catch (error) {
-      console.error('[Realtime Generation] Execution failed:', error)
+      const wasAborted = error instanceof Error && error.name === 'AbortError'
+      if (!wasAborted && queuedTaskId) {
+        let authoritativeTerminal = false
+        let publishedCompletion = false
+        try {
+          let [taskStatus, task] = getTask(queuedTaskId)
+          if (taskStatus === 'pending' || taskStatus === 'running' || taskStatus === 'cancelling') {
+            await cancelPhotoshopTaskBounded(queuedTaskId, 'timed-out/non-terminal')
+            ;[taskStatus, task] = getTask(queuedTaskId)
+          }
+          if (
+            taskStatus === 'completed' &&
+            task?.result &&
+            attemptImageHash &&
+            epoch === realtimeGenerationEpoch &&
+            !signal.aborted
+          ) {
+            const promptId = task.prompt_id || task.result.prompt?.[1]
+            if (typeof promptId === 'string' && promptId) {
+              publishedCompletion = this.publishCompletedRealtimeTask({
+                history: task.result,
+                promptId,
+                outputNodeIds,
+                imageHash: attemptImageHash,
+                epoch,
+                signal
+              })
+              // Empty successful output also authoritatively locks the hash in the publish helper.
+              authoritativeTerminal = true
+            }
+          } else if (taskStatus === 'error' || taskStatus === 'cancelled') {
+            authoritativeTerminal = true
+          }
+        } catch (reconciliationError) {
+          console.error(
+            `[Realtime Generation] Failed to reconcile task ${queuedTaskId}:`,
+            reconciliationError
+          )
+        } finally {
+          if (
+            attemptImageHash &&
+            epoch === realtimeGenerationEpoch &&
+            !signal.aborted &&
+            !authoritativeTerminal &&
+            !publishedCompletion
+          ) {
+            // Once submission exists, any state that cannot be authoritatively classified must be
+            // fail-closed. This prevents the next tick from duplicating a possibly-live remote task.
+            lastInputImageHash = attemptImageHash
+          }
+        }
+      }
+      if (!wasAborted) {
+        console.error('[Realtime Generation] Execution failed:', error)
+      }
       // Swallow the error so the polling loop can keep running.
     } finally {
-      // Always clear the execution guard.
-      isExecutingRealtimeGeneration = false
+      if (currentRealtimeAbortController === abortController) {
+        currentRealtimeAbortController = null
+      }
+      if (currentRealtimeTaskId === queuedTaskId) currentRealtimeTaskId = null
     }
   }
 

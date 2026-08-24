@@ -213,6 +213,7 @@ describe('resolveDroppedAgentImageDataUrl', () => {
     await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
       src: 'blob:qapp-image',
       fileName: 'result.png',
+      fileItem: { filename: 'result.png', type: 'output' },
       sizeBytes: 10,
       sourceWidthHint: undefined,
       sourceHeightHint: undefined,

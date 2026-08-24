@@ -43,10 +43,29 @@ export type GetHistoryReq = {
 // dict<prompt_id, { outputs: ComfyOutputMeta[] }>
 export type GetHistoryResp = ComfyHistoryResp
 
+export type GetTaskStateReq = { prompt_id: string }
+export type GetTaskStateResp = {
+  status:
+    'pending' | 'running' | 'cancelling' | 'unknown' | 'completed' | 'cancelled' | 'error' | null
+  promptId: string | null
+  submissionState?: 'prepared' | 'submitted' | 'unknown'
+  requiresManualIntervention?: boolean
+  cancelRequested?: boolean
+}
+
+export type ResolveTaskSubmissionReq = {
+  prompt_id: string
+  outcome: 'not-submitted' | 'submitted' | 'cancelled'
+  comfyPromptId?: string
+}
+export type ResolveTaskSubmissionResp = GetTaskStateResp
+
 export type UploadImageReq = {
   fileItem: FileItem
   // TODO: Content-Type
   image: Uint8Array
+  /** Explicit registered instance affinity. Omit only for the legacy configured endpoint. */
+  instanceId?: string
 }
 export type UploadImageResp = FileItem
 
@@ -55,6 +74,8 @@ export type UploadMaskReq = {
   // TODO: Content-Type
   mask: Uint8Array
   original_ref: FileItem
+  /** Explicit registered instance affinity. Omit only for the legacy configured endpoint. */
+  instanceId?: string
 }
 export type UploadMaskResp = FileItem
 
@@ -64,7 +85,17 @@ export type GetViewResp = {
   result: Uint8Array
 }
 
-export type ImportOutputImageReq = { filename: string; subfolder?: string; type: 'output' }
+export type ImportOutputImageReq = {
+  filename: string
+  subfolder?: string
+  type: 'output'
+  instanceId?: string
+  /** Opaque immutable route captured by the main process. */
+  instanceRouteId?: string
+  /** Legacy consistency metadata; never a routing authority. */
+  instanceOrigin?: string
+  instanceKind?: 'local' | 'remote'
+}
 export type ImportOutputImageResp = {
   reference: MediaReference
   localMediaUrl: string
@@ -171,6 +202,8 @@ export type ComfySvc = {
    * @param req
    */
   getHistory(req: GetHistoryReq): Promise<GetHistoryResp>
+  getTaskState(req: GetTaskStateReq): Promise<GetTaskStateResp>
+  resolveTaskSubmission(req: ResolveTaskSubmissionReq): Promise<ResolveTaskSubmissionResp>
   /**
    * 上传图片
    * @param req
@@ -239,6 +272,12 @@ export const comfySvcDef: ServiceDefSheet<ComfySvc> = {
     type: 'unary'
   },
   getHistory: {
+    type: 'unary'
+  },
+  getTaskState: {
+    type: 'unary'
+  },
+  resolveTaskSubmission: {
     type: 'unary'
   },
   uploadImage: {

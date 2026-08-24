@@ -6,6 +6,9 @@ import {
   areProjectCanvasWebGLItemReconcileSnapshotsEqual,
   buildProjectCanvasWebGLItemReconcileSnapshot,
   createProjectCanvasWebGLResidentTextureByteTracker,
+  buildProjectCanvasWebGLItemLookup,
+  getProjectCanvasWebGLRenderResolution,
+  shouldSampleProjectCanvasWebGLError,
   insertProjectCanvasWebGLPriorityQueueEntry,
   refreshProjectCanvasWebGLPriorityQueuePriorities,
   reprioritizeProjectCanvasWebGLPriorityQueueEntry,
@@ -16,6 +19,40 @@ const queueIds = (queue: readonly ProjectCanvasWebGLPriorityQueueEntry[]) =>
   queue.map((entry) => entry.itemId)
 
 describe('projectCanvasWebGLImageLayerRuntime', () => {
+  it('caps normal and low-power render resolution while allowing explicit overrides', () => {
+    expect(getProjectCanvasWebGLRenderResolution({ devicePixelRatio: 3 })).toBe(1.5)
+    expect(getProjectCanvasWebGLRenderResolution({ devicePixelRatio: 1.25 })).toBe(1.25)
+    expect(getProjectCanvasWebGLRenderResolution({ devicePixelRatio: 3, lowPower: true })).toBe(1)
+    expect(
+      getProjectCanvasWebGLRenderResolution({
+        devicePixelRatio: 3,
+        lowPower: true,
+        resolutionOverride: 2
+      })
+    ).toBe(2)
+  })
+
+  it('samples WebGL errors on the first render and then at the configured interval', () => {
+    expect(
+      [1, 2, 3, 4, 5, 6].filter((count) => shouldSampleProjectCanvasWebGLError(count, 3))
+    ).toEqual([1, 3, 6])
+  })
+
+  it('falls back to the default WebGL error sampling interval for non-finite values', () => {
+    expect(shouldSampleProjectCanvasWebGLError(2, Number.NaN)).toBe(false)
+    expect(shouldSampleProjectCanvasWebGLError(120, Number.POSITIVE_INFINITY)).toBe(true)
+  })
+
+  it('builds item lookup maps and id sets in one pass', () => {
+    const first = { id: 'first', value: 1 }
+    const second = { id: 'second', value: 2 }
+    const lookup = buildProjectCanvasWebGLItemLookup([first, second])
+
+    expect(lookup.itemById.get('first')).toBe(first)
+    expect(lookup.itemById.get('second')).toBe(second)
+    expect([...lookup.itemIds]).toEqual(['first', 'second'])
+  })
+
   it('keeps priority queues in descending priority order as entries are inserted', () => {
     const queue: ProjectCanvasWebGLPriorityQueueEntry[] = []
 

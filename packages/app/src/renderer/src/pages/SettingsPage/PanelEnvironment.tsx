@@ -52,6 +52,7 @@ import { useAppSelector } from '@renderer/store'
 import FigmaBindingDialog from '@renderer/pages/ProjectCanvasPage/Dialogs/FigmaBindingDialog'
 import { loadCanvasItems, saveCanvasItems } from '@renderer/pages/ProjectCanvasPage/canvasStorage'
 import { getCanvasItemsBounds } from '@renderer/pages/ProjectCanvasPage/projectCanvasPageShared'
+import RemoteComfyInstanceManager from './components/RemoteComfyInstanceManager'
 import type {
   CanvasGroup,
   CanvasGroupBranch,
@@ -1027,51 +1028,11 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
   return (
     <Box sx={{ p: 3 }}>
       <>
-        <Box key="comfy_mode">
-          <SettingSection title={t('environment.comfy_mode_title')}>
-            <Alert severity="info">
-              <AlertTitle>{t('environment.comfy_mode_info_title')}</AlertTitle>
-              <Typography sx={{ whiteSpace: 'pre-line', wordBreak: 'break-all' }}>
-                {t('environment.comfy_mode_info_desc')}
-              </Typography>
-            </Alert>
-            <InputSwitch
-              label={t('environment.comfy_mode_label')}
-              value={settingsValue.use_remote_comfyui || false}
-              onChange={(value) => saveSettings({ use_remote_comfyui: value })}
-            />
+        <Box key="remote_comfyui">
+          <SettingSection title={t('environment.remote_comfyui_title')}>
+            <RemoteComfyInstanceManager />
           </SettingSection>
         </Box>
-
-        {settingsValue.use_remote_comfyui && (
-          <Box key="remote_comfyui">
-            <SettingSection title={t('environment.remote_comfyui_title')}>
-              <InputText
-                label={t('environment.remote_comfyui_origin_label')}
-                value={settingsValue.remote_comfyui_config.comfyui_origin}
-                onChange={(value) =>
-                  saveSettings({ remote_comfyui_config: { comfyui_origin: value } })
-                }
-                placeholder={t('environment.placeholder_remote_comfyui_origin')}
-                errorText={
-                  settingsValue.remote_comfyui_config.comfyui_origin.trim() === ''
-                    ? t('environment.err_remote_comfyui_origin_required')
-                    : undefined
-                }
-              />
-              <InputPath
-                label={t('environment.remote_comfyui_mapping_dir_label')}
-                value={settingsValue.remote_comfyui_config.mapping_comfyui_dir}
-                pathType="directory"
-                defaultTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) =>
-                  saveSettings({ remote_comfyui_config: { mapping_comfyui_dir: value } })
-                }
-                placeholder={t('environment.placeholder_remote_comfyui_mapping_dir')}
-              />
-            </SettingSection>
-          </Box>
-        )}
 
         <Box key="proxy_mode">
           <ProxyModeSection

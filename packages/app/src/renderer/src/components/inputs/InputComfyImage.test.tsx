@@ -8,7 +8,6 @@ import {
 
 const apiMocks = vi.hoisted(() => ({
   getView: vi.fn(),
-  uploadImage: vi.fn(),
   loadImageFromPhotoshop: vi.fn(),
   saveQAppInputImage: vi.fn(),
   readImageFromPath: vi.fn()
@@ -17,8 +16,7 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
     svcComfy: {
-      getView: apiMocks.getView,
-      uploadImage: apiMocks.uploadImage
+      getView: apiMocks.getView
     },
     svcPhotoshop: {
       loadImageFromPhotoshop: apiMocks.loadImageFromPhotoshop
@@ -61,7 +59,6 @@ describe('InputComfyImage', () => {
     notifyErrorMock.mockReset()
     notifySuccessMock.mockReset()
     apiMocks.getView.mockReset()
-    apiMocks.uploadImage.mockReset()
     apiMocks.loadImageFromPhotoshop.mockReset()
     apiMocks.saveQAppInputImage.mockReset()
     apiMocks.readImageFromPath.mockReset()
@@ -111,7 +108,7 @@ describe('InputComfyImage', () => {
       filename: 'folder-photo.png'
     })
     apiMocks.readImageFromPath.mockResolvedValue({
-      image: new Uint8Array([1, 2, 3]),
+      image: new Uint8Array(17).fill(1),
       filename: 'folder-photo.png'
     })
 
@@ -152,7 +149,6 @@ describe('InputComfyImage', () => {
       filePath: 'C:/MagicPot/qapp-input-images/folder-photo.png'
     })
     expect(deferredImage?.dataUrl).toBeUndefined()
-    expect(apiMocks.uploadImage).not.toHaveBeenCalled()
     expect(apiMocks.getView).not.toHaveBeenCalled()
     expect(notifyErrorMock).not.toHaveBeenCalled()
 
@@ -190,6 +186,27 @@ describe('InputComfyImage', () => {
     })
 
     expect(notifyErrorMock.mock.calls[0][0]).toBe(UNSUPPORTED_INTERNAL_FILE_DROP_MESSAGE)
+  })
+
+  it('renders a malformed reserved value as unavailable without Comfy filename fallback', async () => {
+    const malformed = 'MAGICPOT_DEFERRED_COMFY_IMAGE:%not-json [input]'
+    const onChange = vi.fn()
+
+    expect(() =>
+      render(
+        <InputComfyImage
+          label="Quick App Image"
+          value={malformed}
+          onChange={onChange}
+          placeholder="Drop an image"
+        />
+      )
+    ).not.toThrow()
+
+    await waitFor(() => expect(apiMocks.getView).not.toHaveBeenCalled())
+    expect(screen.queryByRole('img')).toBeNull()
+    expect(screen.queryByText(malformed)).toBeNull()
+    expect(onChange).not.toHaveBeenCalled()
   })
 
   it('preserves the selected value when preview loading fails', async () => {
@@ -323,5 +340,56 @@ describe('InputComfyImage', () => {
     unmount()
 
     expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:current-preview')
+  })
+
+  it('does not let an older asynchronous selection overwrite a newer controlled value', async () => {
+    let resolveSave!: (value: { success: true; fullPath: string; filename: string }) => void
+    apiMocks.saveQAppInputImage.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSave = resolve
+        })
+    )
+    apiMocks.getView.mockResolvedValue({ result: new Uint8Array([1, 2, 3]) })
+    const onChange = vi.fn()
+    const { rerender } = render(
+      <InputComfyImage
+        label="Quick App Image"
+        value=""
+        onChange={onChange}
+        placeholder="Drop an image"
+      />
+    )
+    const dropZone = screen.getByText('Drop an image').closest('[tabindex="0"]')
+    fireEvent.drop(dropZone as Element, {
+      dataTransfer: createDataTransfer({}, [
+        new File(['older'], 'older.png', { type: 'image/png' })
+      ])
+    })
+    await waitFor(() => expect(apiMocks.saveQAppInputImage).toHaveBeenCalledTimes(1))
+
+    rerender(
+      <InputComfyImage
+        label="Quick App Image"
+        value="newer.png"
+        onChange={onChange}
+        placeholder="Drop an image"
+      />
+    )
+    await waitFor(() =>
+      expect(apiMocks.getView).toHaveBeenCalledWith(
+        expect.objectContaining({ filename: 'newer.png' })
+      )
+    )
+
+    resolveSave({
+      success: true,
+      fullPath: 'C:/MagicPot/qapp-input-images/older.png',
+      filename: 'older.png'
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(onChange).not.toHaveBeenCalled()
   })
 })

@@ -12,6 +12,96 @@ describe('apiDef', () => {
     expect(apiDef.svcManagedMedia.ensureDerivative.request).toBeDefined()
   })
 
+  it('validates ComfyUI batch control and authorized start requests', () => {
+    expect(() =>
+      validateServiceValue({ batchId: '  ' }, apiDef.svcComfyBatch.getBatch.request)
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        {
+          sourceRoot: 'C:/photos',
+          userAuthorized: false,
+          workflow: {},
+          binding: { inputNodeId: '1', inputField: 'image', outputNodeId: '2' }
+        },
+        apiDef.svcComfyBatch.startBatch.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(
+      validateServiceValue(
+        {
+          sourceRoot: 'C:/photos',
+          userAuthorized: true,
+          workflow: {},
+          binding: { inputNodeId: '1', inputField: 'image', outputNodeId: '2' }
+        },
+        apiDef.svcComfyBatch.startBatch.request
+      )
+    ).toMatchObject({ userAuthorized: true, sourceRoot: 'C:/photos' })
+  })
+
+  it('rejects unsafe remote ComfyUI origins and unknown instance mutation fields', () => {
+    expect(() =>
+      validateServiceValue(
+        {
+          id: 'remote-private',
+          name: 'Private',
+          origin: 'http://169.254.169.254:8188/',
+          kind: 'remote',
+          maxConcurrency: 1,
+          enabled: true
+        },
+        apiDef.svcComfyBatch.putInstance.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        {
+          id: 'instance',
+          expectedRevision: 0,
+          patch: { enabled: true, unexpected: 'field' }
+        },
+        apiDef.svcComfyBatch.updateInstance.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        {
+          id: 'spoofed-local',
+          name: 'Spoofed local',
+          origin: 'http://127.0.0.1:8188/',
+          kind: 'local',
+          maxConcurrency: 1,
+          enabled: true
+        },
+        apiDef.svcComfyBatch.putInstance.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(() =>
+      validateServiceValue(
+        {
+          id: 'instance',
+          expectedRevision: 0,
+          patch: { kind: 'local' }
+        },
+        apiDef.svcComfyBatch.updateInstance.request
+      )
+    ).toThrow(ServiceValidationError)
+    expect(
+      validateServiceValue(
+        {
+          id: 'public-remote',
+          name: 'Public remote',
+          origin: 'https://comfy.example.com/',
+          kind: 'remote',
+          maxConcurrency: 1,
+          enabled: true
+        },
+        apiDef.svcComfyBatch.putInstance.request
+      )
+    ).toMatchObject({ kind: 'remote', origin: 'https://comfy.example.com/' })
+  })
+
   it('exposes the project canvas thumbnail service contract', () => {
     expect(apiDef.svcCanvasThumbnail).toBeDefined()
     expect(apiDef.svcCanvasThumbnail.getSourceFileMetadata.type).toBe('unary')

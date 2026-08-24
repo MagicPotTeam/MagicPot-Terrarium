@@ -1,4 +1,7 @@
 {
+  "app": {
+    "embedded_comfyui_starting": "应用启动，自动启动内置 ComfyUI..."
+  },
   "settings": {
     "tabs": {
       "general": "一般设置",
@@ -62,7 +65,7 @@
     "setup_title": "环境部署",
     "setup_quick": "快速设置",
     "setup_reset_paths": "重置路径",
-    "remote_comfyui_title": "远程 ComfyUI 设置",
+    "remote_comfyui_title": "ComfyUI 设置",
     "models_title": "模型部署",
     "models_load_extra_yaml": "加载 extra_model_paths.yaml",
     "models_reset_paths": "重置路径",
@@ -105,6 +108,41 @@
     "status_untested": "未检测",
     "status_failed": "检测失败",
     "status_not_found": "未检测到",
+    "remote_instances": {
+      "description": "添加本机或局域网中的 ComfyUI，生成任务会自动选择可用实例。",
+      "empty": "尚未配置 ComfyUI 实例。",
+      "enabled": "启用",
+      "detected_nodes": "已检测节点 {{count}} 个",
+      "detected_nodes_other": "已检测节点 {{count}} 个",
+      "action": {
+        "cancel_add": "取消添加",
+        "add_instance": "添加实例",
+        "refresh_status": "刷新实例状态",
+        "add_and_test": "添加并测试",
+        "save": "保存",
+        "cancel": "取消",
+        "test_connection": "测试连接",
+        "edit": "编辑",
+        "delete": "删除"
+      },
+      "field": {
+        "instance_name": "实例名称",
+        "comfyui_address": "ComfyUI 地址",
+        "name": "名称",
+        "address": "地址"
+      },
+      "health": {
+        "unknown": "未知",
+        "online": "在线",
+        "degraded": "状态不佳",
+        "offline": "离线",
+        "draining": "停止接收任务"
+      },
+      "notifications": {
+        "added": "ComfyUI 实例已添加并通过连接测试",
+        "connection_ok": "{{name}} 连接正常"
+      }
+    },
     "data_directory": {
       "loading": "正在加载全局存储根目录...",
       "load_failed": "加载全局存储根目录失败。",
@@ -650,6 +688,53 @@
       },
       "image_interrogation_output_language_zh": "无论其他指令或图片内容使用什么语言，都必须只用简体中文输出反推提示词。只返回提示词本身，不要输出英文或中英混排。",
       "image_interrogation_output_language_en": "Please output the interrogated prompt in English. Return only the prompt itself."
+    },
+    "batch": {
+      "title": "批处理",
+      "select_directory_title": "选择批处理图片目录（将在旁边创建 .output）",
+      "preparing": "正在扫描图片目录并准备批次…",
+      "preparing_hint": "图片较多或位于同步盘时可能需要一些时间。",
+      "summary": "批次 {{batchId}} · {{status}} · 成功 {{succeeded}} · 失败 {{failed}} · 运行 {{running}}",
+      "eta": "预计剩余：约 {{duration}} · 预计完成于 {{completedAt}}{{preliminary}}",
+      "eta_preliminary": "（初步估算）",
+      "eta_estimating": "预计剩余：正在估算（完成首张后显示）",
+      "eta_paused": "预计剩余：已暂停，继续后重新估算",
+      "output_path": "output: {{path}}",
+      "duration": {
+        "days": "{{count}} 天",
+        "days_other": "{{count}} 天",
+        "hours": "{{count}} 小时",
+        "hours_other": "{{count}} 小时",
+        "minutes": "{{count}} 分",
+        "minutes_other": "{{count}} 分"
+      },
+      "status": {
+        "queued": "排队中",
+        "running": "运行中",
+        "paused": "已暂停",
+        "cancelling": "取消中",
+        "cancelled": "已取消",
+        "succeeded": "已完成",
+        "failed": "失败"
+      },
+      "action": {
+        "open": "批处理",
+        "pause": "暂停",
+        "resume": "继续",
+        "retry_failed": "重试失败项",
+        "cancel": "取消",
+        "close": "关闭"
+      },
+      "errors": {
+        "no_enabled_instance": "请先在“设置 → 环境部署 → 远程 ComfyUI”中添加并启用 ComfyUI 实例",
+        "single_output_required": "批处理要求快应用明确配置且只配置一个输出节点",
+        "invalid_image_binding": "批处理图片输入绑定无效",
+        "batch_workflow_load_failed": "无法加载配置的批处理专用工作流，批次未启动"
+      },
+      "notifications": {
+        "created": "已创建批任务：{{count}} 张图片",
+        "created_other": "已创建批任务：{{count}} 张图片"
+      }
     },
     "video_generation": {
       "title": "AI 视频生成",

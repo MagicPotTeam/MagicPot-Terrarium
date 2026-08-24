@@ -3,8 +3,15 @@ import { Box, IconButton, Typography } from '@mui/material'
 import { MovieCreationOutlined, UploadOutlined } from '@mui/icons-material'
 import { InputProps } from './InputProps'
 import { api } from '@renderer/utils/windowUtils'
-import { FileItem } from '@shared/comfy/types'
-import { fileItemToValue, valueToFileItem } from '@shared/comfy/funcs'
+import {
+  buildDeferredComfyFileValue,
+  getDeferredComfyLocalPreview
+} from '@renderer/utils/deferredComfyInput'
+import {
+  getDeferredComfyFileDisplayName,
+  isDeferredComfyInputValue
+} from '@shared/comfy/deferredImages'
+import { valueToFileItem } from '@shared/comfy/funcs'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { guessMimeTypeFromFileName } from '@renderer/utils/fileDisplay'
 import { getDroppedVideoDropError, getDroppedVideoFile } from '@renderer/utils/droppedVideoUtils'
@@ -26,12 +33,15 @@ const InputComfyVideo: React.FC<InputComfyVideoProps> = ({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const fileInputRef = React.useRef<HTMLInputElement | null>(null)
   const previewRequestIdRef = useRef(0)
+  const selectionRequestIdRef = useRef(0)
   const previewUrlRef = useRef<string | null>(null)
+  const latestValueRef = useRef(value)
+  const latestOnChangeRef = useRef(onChange)
   const { notifyError } = useMessage()
 
   const updatePreviewUrl = useCallback((nextUrl: string | null) => {
     setPreviewUrl((prev) => {
-      if (prev && prev !== nextUrl) {
+      if (prev?.startsWith('blob:') && prev !== nextUrl) {
         URL.revokeObjectURL(prev)
       }
       previewUrlRef.current = nextUrl
@@ -41,17 +51,34 @@ const InputComfyVideo: React.FC<InputComfyVideoProps> = ({
 
   useEffect(
     () => () => {
-      if (previewUrlRef.current) {
+      selectionRequestIdRef.current += 1
+      previewRequestIdRef.current += 1
+      if (previewUrlRef.current?.startsWith('blob:')) {
         URL.revokeObjectURL(previewUrlRef.current)
-        previewUrlRef.current = null
       }
+      previewUrlRef.current = null
     },
     []
   )
 
   useEffect(() => {
+    selectionRequestIdRef.current += 1
+    latestValueRef.current = value
     setInternalValue((prev) => (prev === value ? prev : value))
+    setIsLoading(false)
   }, [value])
+
+  useEffect(() => {
+    latestOnChangeRef.current = onChange
+  }, [onChange])
+
+  const commitValue = useCallback((nextValue: string) => {
+    setInternalValue((current) => (current === nextValue ? current : nextValue))
+    if (latestValueRef.current !== nextValue) {
+      latestValueRef.current = nextValue
+      latestOnChangeRef.current(nextValue)
+    }
+  }, [])
 
   const doUpload = useCallback(
     async (file: File) => {
@@ -60,30 +87,23 @@ const InputComfyVideo: React.FC<InputComfyVideoProps> = ({
         return
       }
 
+      const requestId = ++selectionRequestIdRef.current
       setIsLoading(true)
       try {
-        const arrayBuffer = await file.arrayBuffer()
-        const uint8 = new Uint8Array(arrayBuffer)
-        const res: FileItem = await api().svcComfy.uploadImage({
-          fileItem: { filename: file.name, type: 'input' },
-          image: uint8
-        })
-        if (!res.filename) {
-          throw new Error('failed to upload video, response did not contain filename')
-        }
-        const uploadedName = fileItemToValue(res)
-        setInternalValue(uploadedName)
-        onChange(uploadedName)
+        const deferredValue = await buildDeferredComfyFileValue(file, 'video/mp4')
+        if (selectionRequestIdRef.current !== requestId) return
+        commitValue(deferredValue)
       } catch (error) {
+        if (selectionRequestIdRef.current !== requestId) return
         console.error('[InputComfyVideo] upload failed:', error)
         notifyError(
           `Video upload failed: ${error instanceof Error ? error.message : 'Check ComfyUI connectivity.'}`
         )
       } finally {
-        setIsLoading(false)
+        if (selectionRequestIdRef.current === requestId) setIsLoading(false)
       }
     },
-    [notifyError, onChange]
+    [commitValue, notifyError]
   )
 
   useEffect(() => {
@@ -97,11 +117,22 @@ const InputComfyVideo: React.FC<InputComfyVideoProps> = ({
 
     ;(async () => {
       try {
-        const res = await api().svcComfy.getView(valueToFileItem(internalValue))
+        const localPreview = await getDeferredComfyLocalPreview(internalValue)
         if (previewRequestIdRef.current !== requestId) return
-        const bytes = res.result
+        if (localPreview?.dataUrl) {
+          updatePreviewUrl(localPreview.dataUrl)
+          return
+        }
+        const bytes = localPreview?.bytes
+          ? localPreview.bytes
+          : isDeferredComfyInputValue(internalValue)
+            ? (() => {
+                throw new Error('Deferred Comfy input is unavailable.')
+              })()
+            : (await api().svcComfy.getView(valueToFileItem(internalValue))).result
+        if (previewRequestIdRef.current !== requestId) return
         const blob = new Blob([bytes as BlobPart], {
-          type: guessMimeTypeFromFileName(internalValue, 'video/mp4')
+          type: localPreview?.mimeType || guessMimeTypeFromFileName(internalValue, 'video/mp4')
         })
         createdUrl = URL.createObjectURL(blob)
         updatePreviewUrl(createdUrl)
@@ -202,7 +233,7 @@ const InputComfyVideo: React.FC<InputComfyVideoProps> = ({
         {previewUrl ? (
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
             <Typography variant="caption" color="text.secondary" noWrap title={internalValue}>
-              {internalValue}
+              {getDeferredComfyFileDisplayName(internalValue)}
             </Typography>
             <Box sx={{ width: '100%', borderRadius: 1, overflow: 'hidden', bgcolor: '#000' }}>
               <video

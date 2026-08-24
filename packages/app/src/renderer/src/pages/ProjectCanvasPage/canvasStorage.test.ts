@@ -947,7 +947,12 @@ describe('canvasStorage provenance metadata', () => {
         fileName: 'generated-image.png',
         fileItem: {
           filename: 'generated-image.png',
-          type: 'output'
+          type: 'output',
+          subfolder: 'immutable',
+          instanceId: 'gpu-original',
+          instanceRouteId: 'route-opaque-123',
+          instanceOrigin: 'https://captured.example/',
+          instanceKind: 'remote'
         }
       } as CanvasItem
     ]
@@ -958,13 +963,27 @@ describe('canvasStorage provenance metadata', () => {
     expect(fetchMock).toHaveBeenCalled()
     expect(getView).toHaveBeenCalledWith({
       filename: 'generated-image.png',
-      type: 'output'
+      type: 'output',
+      subfolder: 'immutable',
+      instanceId: 'gpu-original',
+      instanceRouteId: 'route-opaque-123',
+      instanceOrigin: 'https://captured.example/',
+      instanceKind: 'remote'
     })
     expect(restored.items).toHaveLength(1)
     expect(restored.items[0]).toMatchObject({
       id: 'image-comfy-1',
       type: 'image',
-      src: 'blob:restored-comfy-image'
+      src: 'blob:restored-comfy-image',
+      fileItem: {
+        filename: 'generated-image.png',
+        type: 'output',
+        subfolder: 'immutable',
+        instanceId: 'gpu-original',
+        instanceRouteId: 'route-opaque-123',
+        instanceOrigin: 'https://captured.example/',
+        instanceKind: 'remote'
+      }
     })
   })
 

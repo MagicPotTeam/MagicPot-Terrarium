@@ -30,6 +30,8 @@ const AUTOSAVE_CANVAS_FILENAME = PROJECT_CANVAS_FILENAME
 const AUTOSAVE_PROJECT_LIMIT = 8
 const PROJECT_ASSET_DIRNAME = 'assets'
 const PROJECT_CROPPABLE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
+const MISSING_PROJECT_CANVAS_FILE_TTL_MS = 60_000
+const missingProjectCanvasFiles = new Map<string, number>()
 
 // Serializable canvas items without DOM-only fields.
 type SerializableCanvasItem = Omit<CanvasItem, 'image'> & { image?: never }
@@ -222,10 +224,7 @@ type CanvasFileRestoreOptions = {
 }
 
 type BlobPersistableCanvasItem =
-  | CanvasImageItem
-  | CanvasModel3DItem
-  | CanvasVideoItem
-  | CanvasFileItem
+  CanvasImageItem | CanvasModel3DItem | CanvasVideoItem | CanvasFileItem
 
 type SerializableBlobPersistableCanvasItem = SerializableCanvasItem & {
   type: 'image' | 'model3d' | 'video' | 'file'
@@ -1060,8 +1059,24 @@ async function readCanvasItemsFromProjectFile(
     return null
   }
 
+  const missingCheckedAt = missingProjectCanvasFiles.get(canvasFullPath)
+  if (
+    missingCheckedAt !== undefined &&
+    Date.now() - missingCheckedAt < MISSING_PROJECT_CANVAS_FILE_TTL_MS
+  ) {
+    return null
+  }
+
   try {
+    if (typeof window.api.svcShell?.fileExistsBatch === 'function') {
+      const [exists] = await window.api.svcShell.fileExistsBatch([canvasFullPath])
+      if (!exists) {
+        missingProjectCanvasFiles.set(canvasFullPath, Date.now())
+        return null
+      }
+    }
     const { content } = await window.api.svcFs.readTextFile({ fullPath: canvasFullPath })
+    missingProjectCanvasFiles.delete(canvasFullPath)
     const parsed = JSON.parse(content) as CanvasFileData
     const canvasBaseDir =
       window.path && typeof window.path.dirname === 'function'
@@ -1074,6 +1089,7 @@ async function readCanvasItemsFromProjectFile(
     })
   } catch (error) {
     if (isMissingMirrorFileError(error)) {
+      missingProjectCanvasFiles.set(canvasFullPath, Date.now())
       return null
     }
 
@@ -1117,14 +1133,12 @@ async function loadBlobUrlMap(
           }
           scopedRequest.onsuccess = () => {
             scopedResult = scopedRequest.result as
-              | { data: ArrayBuffer; mimeType: string }
-              | undefined
+              { data: ArrayBuffer; mimeType: string } | undefined
             finish()
           }
           legacyRequest.onsuccess = () => {
             legacyResult = legacyRequest.result as
-              | { data: ArrayBuffer; mimeType: string }
-              | undefined
+              { data: ArrayBuffer; mimeType: string } | undefined
             finish()
           }
           scopedRequest.onerror = () =>

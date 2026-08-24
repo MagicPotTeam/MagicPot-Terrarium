@@ -3,6 +3,7 @@ import React from 'react'
 import SvgIcon from '@mui/material/SvgIcon'
 import type { SvgIconProps } from '@mui/material/SvgIcon'
 import type { AdobeBridgeTarget } from '@shared/api/svcAdobeBridge'
+import type { FileItem } from '@shared/comfy/types'
 import { getDownloadFileNameFromUrl, normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
 import {
   authorizeCanvasLocalMediaSourceUrl,
@@ -118,6 +119,7 @@ export type SendCanvasItemsToAgentOptions = {
 export type ResolvedDroppedAgentImageData = {
   src: string
   fileName?: string
+  fileItem?: FileItem
   sizeBytes?: number
   sourceFile?: Blob
   sourceWidthHint?: number
@@ -314,9 +316,7 @@ const IMAGE_DROP_FILE_NAME_PATTERN = /\.(png|jpe?g|webp|gif|bmp|svg)$/i
 type QuickAppImageDragPayload = {
   objectUrl?: unknown
   itemTypes?: unknown[]
-  fileItem?: {
-    filename?: unknown
-  }
+  fileItem?: FileItem
   attachments?: unknown[]
   sourceWidth?: unknown
   sourceHeight?: unknown
@@ -389,6 +389,7 @@ const resolveQuickAppImageDragData = (rawPayload: string): ResolvedDroppedAgentI
     return {
       src: normalizedSrc,
       fileName,
+      ...(payload.fileItem ? { fileItem: payload.fileItem } : {}),
       sizeBytes:
         typeof imageAttachment?.sizeBytes === 'number' && Number.isFinite(imageAttachment.sizeBytes)
           ? imageAttachment.sizeBytes
@@ -434,6 +435,7 @@ export async function resolveDroppedAgentImageDataUrl(
           Number.isFinite(droppedImageFile.size) && droppedImageFile.size >= 0
             ? droppedImageFile.size
             : undefined,
+        ...(quickAppImageData?.fileItem ? { fileItem: quickAppImageData.fileItem } : {}),
         sourceWidthHint: quickAppImageData?.sourceWidthHint,
         sourceHeightHint: quickAppImageData?.sourceHeightHint,
         sourceFile: droppedImageFile
@@ -456,6 +458,7 @@ export async function resolveDroppedAgentImageDataUrl(
         sizeBytes:
           quickAppImageData?.sizeBytes ??
           (hasUsableDroppedFileBytes ? droppedImageFile.size : undefined),
+        ...(quickAppImageData?.fileItem ? { fileItem: quickAppImageData.fileItem } : {}),
         sourceWidthHint: quickAppImageData?.sourceWidthHint,
         sourceHeightHint: quickAppImageData?.sourceHeightHint,
         sourceFile: hasUsableDroppedFileBytes ? droppedImageFile : undefined

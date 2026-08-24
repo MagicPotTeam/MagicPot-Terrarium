@@ -208,6 +208,7 @@
     "remark-gfm": "^4.0.1",
     "tencentcloud-sdk-nodejs-ai3d": "^4.1.197",
     "three": "^0.182.0",
+    "undici": "6.28.0",
     "use-image": "^1.1.4",
     "ws": "^8.21.0",
     "yaml": "^2.8.4",

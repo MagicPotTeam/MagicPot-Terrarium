@@ -10,6 +10,8 @@ import {
   ConnectWsResp,
   GetHistoryReq,
   GetHistoryResp,
+  GetTaskStateReq,
+  GetTaskStateResp,
   GetInstalledReq,
   GetInstalledResp,
   GetObjectInfoReq,
@@ -22,6 +24,8 @@ import {
   ImportOutputImageResp,
   PostPromptReq,
   PostPromptResp,
+  ResolveTaskSubmissionReq,
+  ResolveTaskSubmissionResp,
   SubmitWorkflowReq,
   SubmitWorkflowResp,
   UploadImageReq,
@@ -43,17 +47,18 @@ import {
   getQueue,
   getTask,
   getTaskByPromptId,
+  resolveTaskSubmission,
   Task
 } from '../queue/taskQueue'
 import { listenComfyEvent } from '../comfy/state'
 import { comfyEventToTaskEvent, extractPromptId, taskToComfyQueueItem } from '../queue/convert'
 import { sleep } from '@shared/utils/utilFuncs'
-import { ComfyQueueResp, Workflow } from '@shared/comfy/types'
-import { processWorkflowLoras } from '../comfy/loraBypass'
-import { normalizeExecutableWorkflow } from '@shared/comfy/funcs'
+import { ComfyQueueResp } from '@shared/comfy/types'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { getChatMediaDir } from '../llmProxy/chatMediaDir'
+import { getComfyInstanceClient, getComfyInstanceRegistry } from '../comfy/instancePool'
+import { getComfyOutputRouteStore } from '../comfy/outputRouteStore'
 import {
   DEFAULT_MANAGED_MEDIA_MAX_BYTES,
   importManagedMediaStream,
@@ -165,7 +170,47 @@ function resolveWorkflowClientId(req: SubmitWorkflowReq): string {
  */
 
 export class ComfySvcImpl implements ComfySvc {
-  private cli = () => new ComfyHttpCli()
+  private cli = (instanceId?: string) => {
+    if (!instanceId) return new ComfyHttpCli()
+    const profile = getComfyInstanceRegistry().get(instanceId)
+    if (!profile || profile.deleted || !profile.state.enabled) {
+      throw new Error(`ComfyUI instance is unavailable: ${instanceId}`)
+    }
+    return getComfyInstanceClient(profile.state)
+  }
+  private outputCli = (route: {
+    instanceId?: string
+    instanceRouteId?: string
+    instanceOrigin?: string
+    instanceKind?: 'local' | 'remote'
+  }) => {
+    if (route.instanceRouteId !== undefined) {
+      if (typeof route.instanceRouteId !== 'string' || !route.instanceRouteId.trim()) {
+        throw new Error('ComfyUI output route id is invalid')
+      }
+      const captured = getComfyOutputRouteStore().get(route.instanceRouteId)
+      if (!captured) throw new Error('ComfyUI output route is unavailable')
+      if (route.instanceId !== undefined && route.instanceId !== captured.instanceId) {
+        throw new Error('ComfyUI output route does not match its instance id')
+      }
+      if (route.instanceOrigin !== undefined && route.instanceOrigin !== captured.origin) {
+        throw new Error('ComfyUI output route does not match its captured origin')
+      }
+      if (route.instanceKind !== undefined && route.instanceKind !== captured.kind) {
+        throw new Error('ComfyUI output route does not match its captured kind')
+      }
+      return new ComfyHttpCli(undefined, undefined, {
+        origin: captured.origin,
+        remote: captured.kind === 'remote',
+        networkRetries: 3
+      })
+    }
+    if (route.instanceOrigin !== undefined || route.instanceKind !== undefined) {
+      throw new Error('ComfyUI output endpoint metadata requires an opaque route id')
+    }
+    if (route.instanceId) return this.cli(route.instanceId)
+    return this.cli()
+  }
   private watchQueueWarned = false
 
   //////////////////////
@@ -207,7 +252,7 @@ export class ComfySvcImpl implements ComfySvc {
     if (status === 'pending') {
       return {}
     }
-    if (status === 'cancelled') {
+    if (status === 'cancelled' || status === 'cancelling' || status === 'unknown') {
       return {}
     }
     // taskQueue 中已保证无论成功失败， result 一定存在
@@ -242,19 +287,66 @@ export class ComfySvcImpl implements ComfySvc {
     }
     return {}
   }
+  getTaskState = async (req: GetTaskStateReq): Promise<GetTaskStateResp> => {
+    const [status, task] = getTask(req.prompt_id)
+    return {
+      status,
+      promptId: task?.prompt_id ?? null,
+      ...(task?.submissionState === undefined ? {} : { submissionState: task.submissionState }),
+      ...(task?.requiresManualIntervention === undefined
+        ? {}
+        : { requiresManualIntervention: task.requiresManualIntervention }),
+      ...(task?.cancelRequested === undefined ? {} : { cancelRequested: task.cancelRequested })
+    }
+  }
+  resolveTaskSubmission = async (
+    req: ResolveTaskSubmissionReq
+  ): Promise<ResolveTaskSubmissionResp> => {
+    await resolveTaskSubmission(req.prompt_id, req.outcome, req.comfyPromptId)
+    return this.getTaskState({ prompt_id: req.prompt_id })
+  }
   uploadImage = async (req: UploadImageReq): Promise<UploadImageResp> => {
-    // 现在不另外保存输入图片，直接调用 ComfyUI 的 uploadImage 接口
-    const res = await this.cli().uploadImage(req.fileItem, req.image)
-    return res
+    if (!req.instanceId) return this.cli().uploadImage(req.fileItem, req.image)
+    const profile = getComfyInstanceRegistry().get(req.instanceId)
+    if (!profile || profile.deleted || !profile.state.enabled) {
+      throw new Error('ComfyUI upload instance is unavailable.')
+    }
+    const uploaded = await getComfyInstanceClient(profile.state).uploadImage(
+      req.fileItem,
+      req.image
+    )
+    const route = getComfyOutputRouteStore().capture(profile.state)
+    return {
+      ...uploaded,
+      instanceId: route.instanceId,
+      instanceRouteId: route.routeId,
+      instanceOrigin: route.origin,
+      instanceKind: route.kind
+    }
   }
   uploadMask = async (req: UploadMaskReq): Promise<UploadMaskResp> => {
-    // 现在不另外保存输入蒙版，直接调用 ComfyUI 的 uploadMask 接口
-    const res = await this.cli().uploadMask(req.fileItem, req.mask, req.original_ref)
-    return res
+    if (!req.instanceId) return this.cli().uploadMask(req.fileItem, req.mask, req.original_ref)
+    const profile = getComfyInstanceRegistry().get(req.instanceId)
+    if (!profile || profile.deleted || !profile.state.enabled) {
+      throw new Error('ComfyUI upload instance is unavailable.')
+    }
+    const uploaded = await getComfyInstanceClient(profile.state).uploadMask(
+      req.fileItem,
+      req.mask,
+      req.original_ref
+    )
+    const route = getComfyOutputRouteStore().capture(profile.state)
+    return {
+      ...uploaded,
+      instanceId: route.instanceId,
+      instanceRouteId: route.routeId,
+      instanceOrigin: route.origin,
+      instanceKind: route.kind
+    }
   }
   getView = async (req: GetViewReq): Promise<GetViewResp> => {
     // 现在不另外保存声称结果，这里直接访问 ComfyUI 的 view 接口
-    const res = await this.cli().view(req)
+    const res = await this.outputCli(req).view(req)
     return { result: res }
   }
   importOutputImage = async (req: ImportOutputImageReq): Promise<ImportOutputImageResp> => {
@@ -263,8 +355,10 @@ export class ComfySvcImpl implements ComfySvc {
     const subfolder = validateComfyOutputSubfolder(req.subfolder)
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), COMFY_OUTPUT_IMPORT_TIMEOUT_MS)
+    let response: Response | undefined
+    let importedStream: Readable | undefined
     try {
-      const response = await this.cli().viewResponse(
+      response = await this.outputCli(req).viewResponse(
         { filename, subfolder, type: 'output' },
         controller.signal
       )
@@ -301,12 +395,13 @@ export class ComfySvcImpl implements ComfySvc {
       const authorizedRoot = getChatMediaDir()
       // Global content-addressed storage is intentional. Session/lifecycle ownership lives in
       // persisted references, not renderer-provided directory isolation.
+      importedStream = Readable.fromWeb(
+        response.body as import('node:stream/web').ReadableStream<Uint8Array>
+      )
       const imported = await importManagedMediaStream(
         {
           chatMediaRoot: path.join(authorizedRoot, 'comfy-outputs', 'global'),
-          stream: Readable.fromWeb(
-            response.body as import('node:stream/web').ReadableStream<Uint8Array>
-          ),
+          stream: importedStream,
           mimeType,
           originalFileName: filename,
           provenance: { source: 'comfy-output', filename, subfolder, type: 'output' },
@@ -342,6 +437,8 @@ export class ComfySvcImpl implements ComfySvc {
     } finally {
       clearTimeout(timeout)
       controller.abort()
+      importedStream?.destroy()
+      await response?.body?.cancel().catch(() => undefined)
     }
   }
   connectWs = async (req: ConnectWsReq, resp: ServerStreaming<ConnectWsResp>): Promise<void> => {
@@ -374,19 +471,8 @@ export class ComfySvcImpl implements ComfySvc {
   submitWorkflow = async (req: SubmitWorkflowReq): Promise<SubmitWorkflowResp> => {
     const workflowClientId = resolveWorkflowClientId(req)
 
-    // 处理缺失的 LoRA：获取可用 LoRA 列表，绕过不存在的 LoRA 节点
-    let processedPrompt = normalizeExecutableWorkflow(req.prompt)
-    try {
-      const objectInfo = await this.cli().objectInfo()
-      const result = processWorkflowLoras(processedPrompt, objectInfo)
-      processedPrompt = result.workflow
-    } catch (error) {
-      console.warn('[submitWorkflow] Failed to process LoRA bypass:', error)
-      // 如果获取 objectInfo 失败，继续使用原始 prompt
-    }
-
     const res = await this.postPrompt({
-      prompt: processedPrompt,
+      prompt: req.prompt,
       client_id: workflowClientId,
       ...(req.cleanupAfterRun === true ? { cleanupAfterRun: true } : {}),
       extra_data: req.extra_data

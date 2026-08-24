@@ -121,6 +121,53 @@ describe('resolveDroppedAgentImageDataUrl', () => {
     })
   })
 
+  it('keeps the complete route-bearing FileItem when a matching dropped file is authorized', async () => {
+    const sourceFile = new File(['generated'], 'generated.png', { type: 'image/png' })
+    const routeBearingFileItem = {
+      filename: 'generated.png',
+      subfolder: 'immutable',
+      type: 'output' as const,
+      instanceId: 'remote-file',
+      instanceRouteId: 'route-file-opaque',
+      instanceOrigin: 'https://captured-file.example/',
+      instanceKind: 'remote' as const
+    }
+    const originalCreateObjectURL = URL.createObjectURL
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:authorized-generated-file')
+    })
+    try {
+      const dataTransfer = {
+        files: [sourceFile],
+        getData: (type: string) =>
+          type === 'application/x-qapp-image'
+            ? JSON.stringify({
+                objectUrl: 'blob:quickapp-result',
+                fileItem: routeBearingFileItem,
+                sourceWidth: 512,
+                sourceHeight: 384
+              })
+            : ''
+      } as unknown as Pick<DataTransfer, 'getData' | 'files'>
+
+      await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
+        src: 'blob:quickapp-result',
+        fileName: 'generated.png',
+        fileItem: routeBearingFileItem,
+        sizeBytes: sourceFile.size,
+        sourceWidthHint: 512,
+        sourceHeightHint: 384,
+        sourceFile
+      })
+    } finally {
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        value: originalCreateObjectURL
+      })
+    }
+  })
+
   it('prefers the internal quick-app image payload over placeholder files', async () => {
     const placeholderFile = new File(['x'], 'placeholder.png', { type: 'image/png' })
     const createObjectURL = vi.fn(() => 'blob:placeholder-file')
@@ -137,7 +184,13 @@ describe('resolveDroppedAgentImageDataUrl', () => {
           type === 'application/x-qapp-image'
             ? JSON.stringify({
                 objectUrl: 'blob:real-generated-image',
-                fileItem: { filename: 'generated.png' },
+                fileItem: {
+                  filename: 'generated.png',
+                  instanceRouteId: '11111111-1111-4111-8111-111111111111',
+                  instanceId: 'remote-a',
+                  instanceOrigin: 'https://comfy.example/',
+                  instanceKind: 'remote'
+                },
                 sourceWidth: 1024,
                 sourceHeight: 768
               })
@@ -147,6 +200,13 @@ describe('resolveDroppedAgentImageDataUrl', () => {
       await expect(resolveDroppedAgentImageDataUrl(dataTransfer)).resolves.toEqual({
         src: 'blob:real-generated-image',
         fileName: 'generated.png',
+        fileItem: {
+          filename: 'generated.png',
+          instanceRouteId: '11111111-1111-4111-8111-111111111111',
+          instanceId: 'remote-a',
+          instanceOrigin: 'https://comfy.example/',
+          instanceKind: 'remote'
+        },
         sizeBytes: undefined,
         sourceWidthHint: 1024,
         sourceHeightHint: 768
