@@ -100,10 +100,6 @@ export async function checkRequiredModels(
     return []
   }
 
-  if (config.use_remote_comfyui) {
-    return []
-  }
-
   const [comfyDir, available] = configUtils.getComfyUIDir()
   if (!available) {
     return []

@@ -80,6 +80,7 @@ type MockSpriteInstance = {
 type MockContainerInstance = {
   children: MockSpriteInstance[]
   sortableChildren: boolean
+  sortDirty: boolean
   position: MockPoint
   scale: MockPoint
   addChild: (child: MockSpriteInstance) => void
@@ -301,16 +302,19 @@ function installPixiMock() {
     class MockContainer implements MockContainerInstance {
       children: MockSpriteInstance[] = []
       sortableChildren = false
+      sortDirty = false
       position = createPoint()
       scale = createPoint(1, 1)
 
       addChild(child: MockSpriteInstance) {
         this.children.push(child)
         child.parent = this
+        this.sortDirty = this.sortableChildren
       }
 
       sortChildren() {
         this.children.sort((left, right) => left.zIndex - right.zIndex)
+        this.sortDirty = false
       }
     }
 
@@ -553,6 +557,45 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       backgroundAlpha: 0,
       clearBeforeRender: true
     })
+  })
+
+  it('caps normal DPR at 1.5, uses DPR 1 in low-power mode, and allows test overrides', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    setWindowDevicePixelRatio(3)
+
+    const first = render(
+      <ProjectCanvasWebGLImageLayer items={[]} {...TEST_STAGE_VIEWPORT_1280_720} />
+    )
+    await waitFor(() => expect(createdApplications).toHaveLength(1))
+    expect(createdApplications[0].initOptions?.resolution).toBe(1.5)
+    first.unmount()
+
+    render(
+      <ProjectCanvasWebGLImageLayer
+        items={[]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+        isPerformanceThrottled
+        renderResolutionOverride={2}
+      />
+    )
+    await waitFor(() => expect(createdApplications).toHaveLength(2))
+    expect(createdApplications[1].initOptions?.resolution).toBe(2)
+  })
+
+  it('uses DPR 1 when initialized in low-power mode', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    setWindowDevicePixelRatio(3)
+
+    render(
+      <ProjectCanvasWebGLImageLayer
+        items={[]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+        isPerformanceThrottled
+      />
+    )
+
+    await waitFor(() => expect(createdApplications).toHaveLength(1))
+    expect(createdApplications[0].initOptions?.resolution).toBe(1)
   })
 
   it('resizes the Pixi renderer when the stage size changes', async () => {
@@ -1437,7 +1480,39 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(event.defaultPrevented).toBe(true)
   }, 30000)
 
-  it('tears down the WebGL canvas and reports not-ready when WebGL reports a runtime error', async () => {
+  it('samples WebGL errors instead of probing after every render', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const item = createItem({ id: 'sampled-webgl-error' })
+    const { rerender } = render(
+      <ProjectCanvasWebGLImageLayer
+        items={[item]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+        webglErrorSampleInterval={1000}
+      />
+    )
+
+    await waitFor(() => {
+      expect(createdApplications).toHaveLength(1)
+      expect(createdApplications[0].renderer.gl.getError).toHaveBeenCalledTimes(1)
+      expect(getLiveSpriteByLabel(item.id)).not.toBeNull()
+    })
+
+    const app = createdApplications[0]
+    app.render.mockClear()
+    app.renderer.gl.getError.mockClear()
+
+    rerender(
+      <ProjectCanvasWebGLImageLayer
+        items={[{ ...item, x: item.x + 10 }]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+        webglErrorSampleInterval={1000}
+      />
+    )
+    await waitFor(() => expect(app.render).toHaveBeenCalled())
+    expect(app.renderer.gl.getError).not.toHaveBeenCalled()
+  })
+
+  it('tears down the WebGL canvas and reports not-ready when a sampled WebGL error occurs', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
     const readyCalls: boolean[] = []
@@ -1452,6 +1527,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           {...TEST_STAGE_VIEWPORT_1280_720}
           onReadyChange={(ready) => readyCalls.push(ready)}
           onResidentIdsChange={(residentIds) => residentIdsCalls.push(new Set(residentIds))}
+          webglErrorSampleInterval={1}
         />
       )
 
@@ -4421,6 +4497,29 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       vi.unstubAllGlobals()
     }
   }, 30000)
+
+  it('sorts only when z-order changes and clears Pixi sortDirty after the explicit sort', async () => {
+    const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
+    const first = createItem({ id: 'z-first', zIndex: 2 })
+    const second = createItem({ id: 'z-second', src: 'file:///z-second.png', zIndex: 1 })
+    const { rerender } = render(
+      <ProjectCanvasWebGLImageLayer items={[first, second]} {...TEST_STAGE_VIEWPORT_1280_720} />
+    )
+
+    await waitFor(() => {
+      expect(getLiveSpriteByLabel(first.id)).not.toBeNull()
+      expect(getLiveSpriteByLabel(second.id)).not.toBeNull()
+    })
+    const world = getLiveSpriteByLabel(first.id)?.parent
+    expect(world).not.toBeNull()
+    expect(world?.children.map((child) => child.label)).toEqual(['z-second', 'z-first'])
+    expect(world?.sortDirty).toBe(false)
+
+    rerender(
+      <ProjectCanvasWebGLImageLayer items={[first, second]} {...TEST_STAGE_VIEWPORT_1280_720} />
+    )
+    await waitFor(() => expect(world?.sortDirty).toBe(false))
+  })
 
   it('creates resident sprites in stable row-major order instead of center-out rings', async () => {
     const {

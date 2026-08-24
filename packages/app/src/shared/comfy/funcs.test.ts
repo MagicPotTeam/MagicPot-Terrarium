@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  fileItemToComfyInputValue,
   fileItemToValue,
   findNotInstalledNodeInfo,
   normalizeExecutableWorkflow,
@@ -34,6 +35,39 @@ describe('fileItemToValue', () => {
         subfolder: 'clipspace'
       })
     ).toEqual('clipspace/clipspace-mask-217369.89999961853.png [input]')
+  })
+
+  it.each([
+    'MAGICPOT_DEFERRED_COMFY_FILE:%not-json',
+    'MAGICPOT_DEFERRED_COMFY_FILE:%not-json [input]',
+    'MAGICPOT_DEFERRED_COMFY_MASK:%not-json [output]'
+  ])('rejects malformed reserved deferred value %s before legacy suffix parsing', (value) => {
+    expect(() => valueToFileItem(value)).toThrow('Invalid deferred Comfy input value.')
+  })
+
+  it.each([
+    '__magicpot_file_v1__:%not-json',
+    '__magicpot_file_v1__:%not-json [input]',
+    '__magicpot_file_v1__:%not-json [output]'
+  ])('rejects malformed MagicPot value %s before legacy suffix parsing', (value) => {
+    expect(() => valueToFileItem(value)).toThrow('Invalid MagicPot file persistence value.')
+  })
+
+  it('round-trips immutable route metadata without sending it to ComfyUI', () => {
+    const fileItem = {
+      filename: 'result.png',
+      subfolder: 'nested/output',
+      type: 'output',
+      format: 'image/png',
+      instanceId: 'gpu-a',
+      instanceRouteId: 'route-opaque',
+      instanceOrigin: 'https://captured.example/',
+      instanceKind: 'remote' as const
+    }
+    const value = fileItemToValue(fileItem)
+
+    expect(valueToFileItem(value)).toEqual(fileItem)
+    expect(fileItemToComfyInputValue(fileItem)).toBe('nested/output/result.png [output]')
   })
 })
 
@@ -86,6 +120,42 @@ describe('normalizeExecutableWorkflow', () => {
       '1': { class_type: 'LoadImage', inputs: { image: 'input.png' } },
       '5': { class_type: 'SaveImage', inputs: { images: ['1', 0] } }
     })
+  })
+
+  it('strips route-bearing persistence envelopes at the executable boundary', () => {
+    const persistedValue = fileItemToValue({
+      filename: 'result.png',
+      subfolder: 'nested/output',
+      type: 'output',
+      instanceId: 'gpu-a',
+      instanceRouteId: 'route-opaque',
+      instanceOrigin: 'https://captured.example/',
+      instanceKind: 'remote'
+    })
+    const workflow: Workflow = {
+      '1': { class_type: 'LoadImage', inputs: { image: persistedValue } }
+    }
+
+    expect(normalizeExecutableWorkflow(workflow)).toEqual({
+      '1': {
+        class_type: 'LoadImage',
+        inputs: { image: 'nested/output/result.png [output]' }
+      }
+    })
+    expect(workflow['1'].inputs.image).toBe(persistedValue)
+  })
+
+  it('rejects malformed route-bearing persistence envelopes at the executable boundary', () => {
+    const malformed = `${'__magicpot_file_v1__:'}${encodeURIComponent(
+      JSON.stringify({ filename: 'result.png', instanceRouteId: 'route-only' })
+    )}`
+    const workflow: Workflow = {
+      '1': { class_type: 'LoadImage', inputs: { image: malformed } }
+    }
+
+    expect(() => normalizeExecutableWorkflow(workflow)).toThrow(
+      'Invalid MagicPot file persistence value.'
+    )
   })
 
   it('removes Reroute nodes and reconnects downstream inputs to their source', () => {

@@ -82,7 +82,7 @@ describe('CalloutMissingModels', () => {
     vi.restoreAllMocks()
   })
 
-  it('ignores stale local missing-model checks after switching to remote ComfyUI', async () => {
+  it('keeps embedded missing-model checks active when the unified instance pool is enabled', async () => {
     const localCheck = createDeferred<boolean[]>()
     const fileExistsBatch = vi.fn(() => localCheck.promise)
     window.api = {
@@ -115,11 +115,11 @@ describe('CalloutMissingModels', () => {
       await localCheck.promise
     })
 
-    expect(screen.queryByText('ckpt_base.pth')).not.toBeInTheDocument()
-    expect(fileExistsBatch).toHaveBeenCalledTimes(1)
+    await screen.findByText('ckpt_base.pth')
+    expect(fileExistsBatch).toHaveBeenCalledTimes(2)
   })
 
-  it('clears an existing local missing-model card after switching to remote ComfyUI', async () => {
+  it('retains an existing embedded missing-model card when the unified instance pool is enabled', async () => {
     const fileExistsBatch = vi.fn(async () => [false])
     window.api = {
       svcShell: {
@@ -146,7 +146,7 @@ describe('CalloutMissingModels', () => {
     }
     rerender(<CalloutMissingModels requiredModels={requiredModels} />)
 
-    await waitFor(() => expect(screen.queryByText('ckpt_base.pth')).not.toBeInTheDocument())
-    expect(fileExistsBatch).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(screen.getByText('ckpt_base.pth')).toBeInTheDocument())
+    expect(fileExistsBatch).toHaveBeenCalledTimes(2)
   })
 })

@@ -30,7 +30,17 @@ function createHistory(): ComfyHistory {
         images: [{ filename: 'ComfyUI_temp_preview.png', subfolder: '', type: 'temp' }]
       },
       outputNode: {
-        images: [{ filename: 'ComfyUI_final.png', subfolder: '', type: 'output' }]
+        images: [
+          {
+            filename: 'ComfyUI_final.png',
+            subfolder: '',
+            type: 'output',
+            instanceId: 'gpu-a',
+            instanceRouteId: 'route-opaque',
+            instanceOrigin: 'https://captured.example/',
+            instanceKind: 'remote'
+          }
+        ]
       }
     },
     status: { status_str: 'success', completed: true, messages: [] }
@@ -111,7 +121,11 @@ describe('transformImage', () => {
     expect(importOutputImageMock).toHaveBeenCalledWith({
       filename: 'ComfyUI_final.png',
       subfolder: '',
-      type: 'output'
+      type: 'output',
+      instanceId: 'gpu-a',
+      instanceRouteId: 'route-opaque',
+      instanceOrigin: 'https://captured.example/',
+      instanceKind: 'remote'
     })
     expect(getViewMock).not.toHaveBeenCalled()
     expect(URL.createObjectURL).not.toHaveBeenCalled()
@@ -125,7 +139,15 @@ describe('transformImage', () => {
 
     expect(image.objectUrl).toBe('blob:image-result')
     expect(image.sourceBlob).toBeInstanceOf(Blob)
-    expect(getViewMock).toHaveBeenCalledOnce()
+    expect(getViewMock).toHaveBeenCalledWith({
+      filename: 'ComfyUI_final.png',
+      subfolder: '',
+      type: 'output',
+      instanceId: 'gpu-a',
+      instanceRouteId: 'route-opaque',
+      instanceOrigin: 'https://captured.example/',
+      instanceKind: 'remote'
+    })
   })
 
   it('tracks the fallback object URL for result teardown', async () => {

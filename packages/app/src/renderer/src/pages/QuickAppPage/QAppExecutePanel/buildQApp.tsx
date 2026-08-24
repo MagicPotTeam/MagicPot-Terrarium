@@ -29,6 +29,7 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
     const {
       currentQAppKey,
       setValidate,
+      setValidateBatch,
       setBuildWorkflow,
       setBuildSubmitExtraData,
       setSubmitClientId,
@@ -78,6 +79,31 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
       return true
     }, [comfyOrgApiKey, notifyError, requiresComfyOrgAuth, t])
 
+    const validateBatch = useCallback(
+      (imageInputSlot: string): boolean => {
+        const errorTexts: string[] = []
+
+        if (requiresComfyOrgAuth && !comfyOrgApiKey.trim()) {
+          errorTexts.push(t('qapp.comfy_org_api.validation_required'))
+        }
+        for (const autoRef of autoRefs.current) {
+          const errorText = autoRef.validate(workflowTemplate)
+          if (errorText) errorTexts.push(errorText)
+        }
+        for (const inputRef of inputRefs.current) {
+          if (inputRef.inputType === 'InputComfyImage' && inputRef.slot === imageInputSlot) continue
+          const errorText = inputRef.validate(workflowTemplate)
+          if (errorText) errorTexts.push(errorText)
+        }
+        if (errorTexts.length > 0) {
+          notifyError(errorTexts.join('\n'))
+          return false
+        }
+        return true
+      },
+      [comfyOrgApiKey, notifyError, requiresComfyOrgAuth, t]
+    )
+
     const buildWorkflow = useCallback((): Workflow => {
       const workflow = deepCopy(workflowTemplate)
       for (const autoRef of autoRefs.current) {
@@ -102,22 +128,30 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
     // create a render/effect/update loop. Stable wrappers keep the parent state
     // steady while still invoking the latest implementation.
     const validateRef = useRef(validate)
+    const validateBatchRef = useRef(validateBatch)
     const buildWorkflowRef = useRef(buildWorkflow)
     const buildSubmitExtraDataRef = useRef(buildSubmitExtraData)
     validateRef.current = validate
+    validateBatchRef.current = validateBatch
     buildWorkflowRef.current = buildWorkflow
     buildSubmitExtraDataRef.current = buildSubmitExtraData
 
     const stableValidate = useCallback((): boolean => validateRef.current(), [])
+    const stableValidateBatch = useCallback(
+      (imageInputSlot: string): boolean => validateBatchRef.current(imageInputSlot),
+      []
+    )
     const stableBuildWorkflow = useCallback((): Workflow => buildWorkflowRef.current(), [])
     const stableBuildSubmitExtraData = useCallback(() => buildSubmitExtraDataRef.current(), [])
 
     useEffect(() => {
       setValidate(stableValidate)
+      setValidateBatch(stableValidateBatch)
       setBuildWorkflow(stableBuildWorkflow)
       setBuildSubmitExtraData(stableBuildSubmitExtraData)
       return () => {
         setValidate(undefined)
+        setValidateBatch(undefined)
         setBuildWorkflow(undefined)
         setBuildSubmitExtraData(undefined)
       }
@@ -125,9 +159,11 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
       setBuildSubmitExtraData,
       setBuildWorkflow,
       setValidate,
+      setValidateBatch,
       stableBuildSubmitExtraData,
       stableBuildWorkflow,
-      stableValidate
+      stableValidate,
+      stableValidateBatch
     ])
 
     useEffect(() => {

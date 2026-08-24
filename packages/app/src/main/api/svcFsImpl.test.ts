@@ -2,10 +2,21 @@ import fs from 'fs'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+const PNG_BYTES = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64'
+)
+
 vi.mock('electron', () => ({
   app: {
     getAppPath: vi.fn(() => process.cwd()),
     getPath: vi.fn((name: string) => path.join(process.cwd(), '.magicpot-trash', name))
+  },
+  nativeImage: {
+    createFromBuffer: vi.fn((bytes: Buffer) => ({
+      isEmpty: () => bytes.length === 0,
+      toPNG: () => PNG_BYTES
+    }))
   }
 }))
 import {
@@ -266,6 +277,272 @@ describe('FsSvcImpl', () => {
       await expect(
         service.listFilesInFolder({ folderPath: path.join(testRoot, 'missing'), recursive: true })
       ).resolves.toEqual({ files: [] })
+    })
+  })
+
+  describe('batch filesystem transactions', () => {
+    it('recursively scans supported images, including legitimate work/output folders', async () => {
+      fs.mkdirSync(path.join(testRoot, 'nested'), { recursive: true })
+      fs.mkdirSync(path.join(testRoot, 'work'), { recursive: true })
+      fs.mkdirSync(path.join(testRoot, 'output'), { recursive: true })
+      fs.mkdirSync(path.join(testRoot, '.magicpot-batch'), { recursive: true })
+      fs.writeFileSync(path.join(testRoot, 'root.JPG'), 'jpg')
+      fs.writeFileSync(path.join(testRoot, 'nested', 'child.webp'), 'webp')
+      fs.writeFileSync(path.join(testRoot, 'nested', 'ignore.txt'), 'text')
+      fs.writeFileSync(path.join(testRoot, 'work', 'hidden.png'), 'png')
+      fs.writeFileSync(path.join(testRoot, 'output', 'hidden.png'), 'png')
+      fs.writeFileSync(path.join(testRoot, '.magicpot-batch', 'hidden.png'), 'png')
+
+      const result = await service.scanBatchImages({ sourceRoot: testRoot })
+      expect(result.errors).toEqual([])
+      expect(result.images.map((image) => image.relativePath)).toEqual([
+        'nested/child.webp',
+        'output/hidden.png',
+        'root.JPG',
+        'work/hidden.png'
+      ])
+      expect(result.images[0]).toMatchObject({
+        absolutePath: path.join(testRoot, 'nested', 'child.webp'),
+        size: 4,
+        mtimeMs: expect.any(Number)
+      })
+    })
+
+    it('rejects symbolic-link or junction source roots', async () => {
+      const realSourceRoot = path.join(testRoot, 'real-photos')
+      const linkedSourceRoot = path.join(testRoot, 'linked-photos')
+      fs.mkdirSync(realSourceRoot, { recursive: true })
+      fs.writeFileSync(path.join(realSourceRoot, 'image.jpg'), 'source')
+      try {
+        fs.symlinkSync(
+          realSourceRoot,
+          linkedSourceRoot,
+          process.platform === 'win32' ? 'junction' : 'dir'
+        )
+      } catch {
+        return
+      }
+
+      await expect(service.scanBatchImages({ sourceRoot: linkedSourceRoot })).rejects.toThrow(
+        /symbolic link|junction/i
+      )
+    })
+
+    it('rejects symbolic-link source images instead of following them', async () => {
+      const sourceRoot = path.join(testRoot, 'photos')
+      const outsideRoot = path.join(testRoot, 'outside')
+      fs.mkdirSync(sourceRoot, { recursive: true })
+      fs.mkdirSync(outsideRoot, { recursive: true })
+      const secretPath = path.join(outsideRoot, 'secret.jpg')
+      const linkedPath = path.join(sourceRoot, 'linked.jpg')
+      fs.writeFileSync(secretPath, 'secret')
+      try {
+        fs.symlinkSync(secretPath, linkedPath, 'file')
+      } catch {
+        return
+      }
+
+      await expect(service.scanBatchImages({ sourceRoot })).rejects.toThrow(
+        /symbolic link|junction/i
+      )
+    })
+
+    it('reads only a regular source file matching the scanned fingerprint', async () => {
+      const sourceRoot = path.join(testRoot, 'photos')
+      const imagePath = path.join(sourceRoot, 'image.jpg')
+      fs.mkdirSync(sourceRoot, { recursive: true })
+      fs.writeFileSync(imagePath, 'source')
+      const scanned = await service.scanBatchImages({ sourceRoot })
+      const image = scanned.images[0]
+
+      await expect(
+        service.readBatchSourceImage({
+          sourceRoot,
+          relativeInputPath: image.relativePath,
+          sourceFingerprint: { size: image.size, mtimeMs: image.mtimeMs }
+        })
+      ).resolves.toEqual({ image: new Uint8Array(Buffer.from('source')), filename: 'image.jpg' })
+
+      fs.writeFileSync(imagePath, 'changed-source')
+      await expect(
+        service.readBatchSourceImage({
+          sourceRoot,
+          relativeInputPath: image.relativePath,
+          sourceFingerprint: { size: image.size, mtimeMs: image.mtimeMs }
+        })
+      ).rejects.toThrow(/changed after scanning/i)
+    })
+
+    it('rejects a redirected output metadata directory', async () => {
+      const sourceRoot = path.join(testRoot, 'photos')
+      const outputRoot = `${sourceRoot}.output`
+      const outsideRoot = path.join(testRoot, 'outside-metadata')
+      fs.mkdirSync(sourceRoot, { recursive: true })
+      fs.writeFileSync(path.join(sourceRoot, 'image.jpg'), 'source')
+      fs.mkdirSync(outputRoot, { recursive: true })
+      fs.mkdirSync(outsideRoot, { recursive: true })
+      try {
+        fs.symlinkSync(
+          outsideRoot,
+          path.join(outputRoot, '.magicpot-batch'),
+          process.platform === 'win32' ? 'junction' : 'dir'
+        )
+      } catch {
+        return
+      }
+
+      await expect(
+        service.prepareBatchWorkspace({ sourceRoot, userAuthorized: true })
+      ).rejects.toThrow(/symbolic link|junction/i)
+      expect(fs.readdirSync(outsideRoot)).toEqual([])
+    })
+
+    it('rejects a symlinked aggregate errors.log without modifying its target', async () => {
+      const sourceRoot = path.join(testRoot, 'photos')
+      fs.mkdirSync(sourceRoot, { recursive: true })
+      fs.writeFileSync(path.join(sourceRoot, 'image.jpg'), 'source')
+      const prepared = await service.prepareBatchWorkspace({ sourceRoot, userAuthorized: true })
+      const outsideLog = path.join(testRoot, 'outside-errors.log')
+      fs.writeFileSync(outsideLog, 'sentinel')
+      try {
+        fs.symlinkSync(outsideLog, path.join(prepared.paths.metadataRoot, 'errors.log'), 'file')
+      } catch {
+        return
+      }
+
+      await expect(
+        service.appendBatchAggregateError({ sourceRoot, entry: 'must-not-escape\n' })
+      ).rejects.toThrow(/symbolic link|junction/i)
+      expect(fs.readFileSync(outsideLog, 'utf8')).toBe('sentinel')
+    })
+
+    it('stores metadata under output, migrates legacy work metadata, and resumes succeeded items', async () => {
+      const sourceRoot = path.join(testRoot, 'photos')
+      fs.mkdirSync(path.join(sourceRoot, 'nested'), { recursive: true })
+      fs.writeFileSync(path.join(sourceRoot, 'nested', 'image.jpg'), 'source')
+
+      const first = await service.prepareBatchWorkspace({ sourceRoot, userAuthorized: true })
+      expect(first.paths.workRoot).toBe(first.paths.outputRoot)
+      expect(first.paths.metadataRoot).toBe(path.join(first.paths.outputRoot, '.magicpot-batch'))
+      expect(fs.existsSync(`${sourceRoot}.work`)).toBe(false)
+      expect(fs.existsSync(path.join(first.paths.outputRoot, 'nested'))).toBe(true)
+      expect(fs.existsSync(path.join(first.paths.outputRoot, 'nested', 'image.jpg'))).toBe(false)
+      expect(fs.existsSync(first.paths.manifestPath)).toBe(true)
+
+      const manifest = structuredClone(first.manifest)
+      manifest.items[0].status = 'succeeded'
+      fs.writeFileSync(path.join(first.paths.outputRoot, 'nested', 'image.png'), PNG_BYTES)
+      await service.writeBatchManifest({ sourceRoot, manifest })
+      const legacyWorkRoot = `${sourceRoot}.work`
+      fs.mkdirSync(legacyWorkRoot, { recursive: true })
+      fs.renameSync(first.paths.metadataRoot, path.join(legacyWorkRoot, '.magicpot-batch'))
+
+      const resumed = await service.prepareBatchWorkspace({ sourceRoot, userAuthorized: true })
+      expect(resumed.skippedRelativePaths).toEqual(['nested/image.jpg'])
+      expect(resumed.manifest.items[0].status).toBe('succeeded')
+      expect(fs.existsSync(legacyWorkRoot)).toBe(false)
+      expect(fs.existsSync(resumed.paths.manifestPath)).toBe(true)
+      expect((await service.readBatchManifest({ sourceRoot })).manifest?.version).toBe(1)
+    })
+
+    it('requeues failed items and removes stale successful PNG output during preparation', async () => {
+      const sourceRoot = path.join(testRoot, 'photos')
+      fs.mkdirSync(sourceRoot, { recursive: true })
+      fs.writeFileSync(path.join(sourceRoot, 'image.jpg'), 'source')
+      const first = await service.prepareBatchWorkspace({ sourceRoot, userAuthorized: true })
+      const manifest = structuredClone(first.manifest)
+      manifest.items[0].status = 'failed'
+      fs.writeFileSync(path.join(first.paths.outputRoot, 'image.png'), PNG_BYTES)
+      await service.writeBatchManifest({ sourceRoot, manifest })
+
+      const resumed = await service.prepareBatchWorkspace({ sourceRoot, userAuthorized: true })
+
+      expect(resumed.manifest.items[0].status).toBe('pending')
+      expect(fs.existsSync(path.join(first.paths.outputRoot, 'image.png'))).toBe(false)
+      expect(fs.existsSync(`${sourceRoot}.work`)).toBe(false)
+      expect(fs.existsSync(path.join(first.paths.outputRoot, 'image.jpg'))).toBe(false)
+    })
+
+    it('atomically commits real PNG bytes beside output metadata without copying sources', async () => {
+      const sourceRoot = path.join(testRoot, 'photos')
+      fs.mkdirSync(path.join(sourceRoot, 'nested'), { recursive: true })
+      fs.writeFileSync(path.join(sourceRoot, 'nested', 'image.jpg'), 'source')
+      const prepared = await service.prepareBatchWorkspace({ sourceRoot, userAuthorized: true })
+      const fingerprint = prepared.manifest.items[0].sourceFingerprint
+
+      const committed = await service.commitBatchPng({
+        sourceRoot,
+        relativeInputPath: 'nested/image.jpg',
+        sourceFingerprint: fingerprint,
+        image: new Uint8Array(PNG_BYTES)
+      })
+
+      expect(committed.outputRelativePath).toBe('nested/image.png')
+      expect(fs.readFileSync(committed.outputPath).subarray(0, 8)).toEqual(PNG_BYTES.subarray(0, 8))
+      expect(fs.existsSync(path.join(prepared.paths.outputRoot, 'nested', 'image.jpg'))).toBe(false)
+      expect(fs.existsSync(`${sourceRoot}.work`)).toBe(false)
+      expect(
+        fs.existsSync(path.join(prepared.paths.metadataRoot, 'errors', 'nested', 'image.jpg.log'))
+      ).toBe(false)
+      expect(
+        fs
+          .readdirSync(path.join(prepared.paths.metadataRoot, 'staging'), { recursive: true })
+          .filter((entry) => path.extname(entry.toString()))
+      ).toEqual([])
+      expect(fs.readFileSync(path.join(sourceRoot, 'nested', 'image.jpg'), 'utf8')).toBe('source')
+    })
+
+    it('stores failed-item diagnostics under output metadata without creating work', async () => {
+      const sourceRoot = path.join(testRoot, 'photos')
+      fs.mkdirSync(path.join(sourceRoot, 'nested'), { recursive: true })
+      fs.writeFileSync(path.join(sourceRoot, 'nested', 'image.jpg'), 'source')
+      const prepared = await service.prepareBatchWorkspace({ sourceRoot, userAuthorized: true })
+      fs.writeFileSync(path.join(prepared.paths.outputRoot, 'nested', 'image.png'), PNG_BYTES)
+
+      const failed = await service.failBatchItem({
+        sourceRoot,
+        relativeInputPath: 'nested/image.jpg',
+        errorLog: 'diagnostic error'
+      })
+
+      expect(fs.existsSync(`${sourceRoot}.work`)).toBe(false)
+      expect(failed.errorLogPath).toBe(
+        path.join(prepared.paths.metadataRoot, 'errors', 'nested', 'image.jpg.log')
+      )
+      expect(fs.readFileSync(failed.errorLogPath, 'utf8')).toBe('diagnostic error')
+      expect(fs.existsSync(path.join(prepared.paths.outputRoot, 'nested', 'image.jpg'))).toBe(false)
+      expect(fs.existsSync(path.join(prepared.paths.outputRoot, 'nested', 'image.png'))).toBe(false)
+      expect(fs.readFileSync(path.join(sourceRoot, 'nested', 'image.jpg'), 'utf8')).toBe('source')
+    })
+
+    it('rejects output collisions and traversal at both service boundaries', async () => {
+      const sourceRoot = path.join(testRoot, 'photos')
+      fs.mkdirSync(sourceRoot, { recursive: true })
+      fs.writeFileSync(path.join(sourceRoot, 'cat.jpg'), 'jpg')
+      fs.writeFileSync(path.join(sourceRoot, 'cat.png'), PNG_BYTES)
+      await expect(
+        service.prepareBatchWorkspace({ sourceRoot, userAuthorized: true })
+      ).rejects.toThrow(/collision/i)
+
+      await expect(
+        service.commitBatchPng({
+          sourceRoot,
+          relativeInputPath: '../escape.jpg',
+          sourceFingerprint: { size: 3, mtimeMs: Date.now() },
+          image: new Uint8Array(PNG_BYTES)
+        })
+      ).rejects.toThrow(/traversal|relative path/i)
+      expect(() =>
+        validateServiceValue(
+          {
+            sourceRoot,
+            relativeInputPath: '..\\escape.jpg',
+            sourceFingerprint: { size: 3, mtimeMs: Date.now() },
+            image: new Uint8Array(PNG_BYTES)
+          },
+          fsSvcDef.commitBatchPng.request
+        )
+      ).toThrow(/relativeInputPath/)
     })
   })
 

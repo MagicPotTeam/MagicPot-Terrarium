@@ -1,4 +1,7 @@
 {
+  "app": {
+    "embedded_comfyui_starting": "App started. Starting the embedded ComfyUI automatically..."
+  },
   "settings": {
     "tabs": {
       "general": "General",
@@ -62,7 +65,7 @@
     "setup_title": "Environment Setup",
     "setup_quick": "Quick Setup",
     "setup_reset_paths": "Reset Paths",
-    "remote_comfyui_title": "Remote ComfyUI Settings",
+    "remote_comfyui_title": "ComfyUI Settings",
     "models_title": "Model Setup",
     "models_load_extra_yaml": "Load extra_model_paths.yaml",
     "models_reset_paths": "Reset Paths",
@@ -105,6 +108,41 @@
     "status_untested": "Not checked",
     "status_failed": "Detection failed",
     "status_not_found": "Not detected",
+    "remote_instances": {
+      "description": "Add ComfyUI instances on this computer or your local network. Generation jobs automatically select an available instance.",
+      "empty": "No ComfyUI instances configured.",
+      "enabled": "Enabled",
+      "detected_nodes": "Detected {{count}} node",
+      "detected_nodes_other": "Detected {{count}} nodes",
+      "action": {
+        "cancel_add": "Cancel Add",
+        "add_instance": "Add Instance",
+        "refresh_status": "Refresh Instance Status",
+        "add_and_test": "Add and Test",
+        "save": "Save",
+        "cancel": "Cancel",
+        "test_connection": "Test Connection",
+        "edit": "Edit",
+        "delete": "Delete"
+      },
+      "field": {
+        "instance_name": "Instance Name",
+        "comfyui_address": "ComfyUI Address",
+        "name": "Name",
+        "address": "Address"
+      },
+      "health": {
+        "unknown": "Unknown",
+        "online": "Online",
+        "degraded": "Degraded",
+        "offline": "Offline",
+        "draining": "Draining"
+      },
+      "notifications": {
+        "added": "The ComfyUI instance was added and passed the connection test.",
+        "connection_ok": "{{name}} is reachable."
+      }
+    },
     "data_directory": {
       "loading": "Loading global storage root...",
       "load_failed": "Failed to load the global storage root.",
@@ -753,6 +791,53 @@
       },
       "image_interrogation_output_language_zh": "Regardless of any other instruction or image content language, output the interrogated prompt only in Simplified Chinese. Return only the prompt itself. Do not output English or mixed Chinese-English text.",
       "image_interrogation_output_language_en": "Please output the interrogated prompt in English. Return only the prompt itself."
+    },
+    "batch": {
+      "title": "Batch Processing",
+      "select_directory_title": "Select the batch image directory (a sibling .output directory will be created)",
+      "preparing": "Scanning the image directory and preparing the batch…",
+      "preparing_hint": "This may take some time when there are many images or the directory is on a synced drive.",
+      "summary": "Batch {{batchId}} · {{status}} · Succeeded {{succeeded}} · Failed {{failed}} · Running {{running}}",
+      "eta": "Estimated remaining: about {{duration}} · Estimated completion at {{completedAt}}{{preliminary}}",
+      "eta_preliminary": " (preliminary estimate)",
+      "eta_estimating": "Estimated remaining: calculating (shown after the first image completes)",
+      "eta_paused": "Estimated remaining: paused; the estimate will be recalculated after resuming",
+      "output_path": "output: {{path}}",
+      "duration": {
+        "days": "{{count}} day",
+        "days_other": "{{count}} days",
+        "hours": "{{count}} hour",
+        "hours_other": "{{count}} hours",
+        "minutes": "{{count}} min",
+        "minutes_other": "{{count}} min"
+      },
+      "status": {
+        "queued": "Queued",
+        "running": "Running",
+        "paused": "Paused",
+        "cancelling": "Cancelling",
+        "cancelled": "Cancelled",
+        "succeeded": "Succeeded",
+        "failed": "Failed"
+      },
+      "action": {
+        "open": "Batch",
+        "pause": "Pause",
+        "resume": "Resume",
+        "retry_failed": "Retry Failed",
+        "cancel": "Cancel",
+        "close": "Close"
+      },
+      "errors": {
+        "no_enabled_instance": "Add and enable a ComfyUI instance in Settings → Environment → Remote ComfyUI first.",
+        "single_output_required": "Batch processing requires the Quick App to configure exactly one output node.",
+        "invalid_image_binding": "The batch image input binding is invalid.",
+        "batch_workflow_load_failed": "The configured batch workflow could not be loaded, so the batch was not started."
+      },
+      "notifications": {
+        "created": "Created a batch job for {{count}} image",
+        "created_other": "Created a batch job for {{count}} images"
+      }
     },
     "video_generation": {
       "title": "AI Video Generation",

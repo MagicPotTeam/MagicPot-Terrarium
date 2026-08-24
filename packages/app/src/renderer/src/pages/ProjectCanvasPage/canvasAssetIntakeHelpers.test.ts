@@ -367,7 +367,12 @@ describe('canvasAssetIntakeHelpers', () => {
       fileName: 'generated.png',
       fileItem: {
         filename: 'generated.png',
-        type: 'output'
+        type: 'output',
+        subfolder: 'immutable',
+        instanceId: 'gpu-intake',
+        instanceRouteId: 'route-intake-opaque',
+        instanceOrigin: 'https://captured-intake.example/',
+        instanceKind: 'remote'
       },
       x: 0,
       y: 0,
@@ -394,7 +399,8 @@ describe('canvasAssetIntakeHelpers', () => {
       id: 'image-generated-1',
       src: 'blob:recovered-comfy-image',
       sourceWidth: 640,
-      sourceHeight: 360
+      sourceHeight: 360,
+      fileItem: item.fileItem
     })
   })
 

@@ -813,6 +813,12 @@ export async function runWebglBenchmark() {
     assertNonIntrusiveWindowPlacement(windowPlacement, 'WebGL benchmark')
     const payload = {
       benchmarkImageCount: benchmarkImages.length,
+      baseline: {
+        capturedAt: new Date().toISOString(),
+        renderCount: baselineRenderCount,
+        spriteReconcilePassCount: baselineSpriteReconcilePassCount,
+        metrics: baselineMetrics
+      },
       windowPlacement,
       ...metrics,
       zoomedMetrics: cullingBenchmark.metrics,
@@ -829,11 +835,18 @@ export async function runWebglBenchmark() {
       interactionBenchmark
     }
 
-    await fs.writeFile(
-      path.join(artifactRoot, 'webgl-benchmark-report.json'),
-      JSON.stringify(payload, null, 2),
-      'utf8'
-    )
+    await Promise.all([
+      fs.writeFile(
+        path.join(artifactRoot, 'webgl-benchmark-baseline.json'),
+        JSON.stringify(payload.baseline, null, 2),
+        'utf8'
+      ),
+      fs.writeFile(
+        path.join(artifactRoot, 'webgl-benchmark-report.json'),
+        JSON.stringify(payload, null, 2),
+        'utf8'
+      )
+    ])
     console.log(JSON.stringify(payload, null, 2))
 
     if (

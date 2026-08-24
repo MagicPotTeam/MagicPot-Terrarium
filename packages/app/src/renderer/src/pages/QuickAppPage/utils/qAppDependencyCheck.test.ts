@@ -90,7 +90,7 @@ describe('qAppDependencyCheck', () => {
     expect(missing).toHaveLength(1)
   })
 
-  it('skips required model file checks in remote ComfyUI mode', async () => {
+  it('continues checking embedded required models when the unified instance pool is enabled', async () => {
     const fileExistsBatch = vi.fn(async () => [false])
     window.api = {
       svcShell: {
@@ -117,9 +117,11 @@ describe('qAppDependencyCheck', () => {
       { use_remote_comfyui: true }
     )
 
-    expect(missing).toEqual([])
-    expect(fileExistsBatch).not.toHaveBeenCalled()
-    expect(configUtils.getComfyUIDir).not.toHaveBeenCalled()
+    expect(missing).toHaveLength(1)
+    expect(fileExistsBatch).toHaveBeenCalledWith([
+      'C:\\MagicPot\\data\\runtime\\home\\.transparent-background\\ckpt_base.pth'
+    ])
+    expect(configUtils.getComfyUIDir).toHaveBeenCalledTimes(1)
   })
 
   it('keeps object_info node checks in remote ComfyUI mode', async () => {
@@ -166,9 +168,9 @@ describe('qAppDependencyCheck', () => {
       config: { use_remote_comfyui: true }
     })
 
-    expect(report.missingModels).toEqual([])
+    expect(report.missingModels).toHaveLength(1)
     expect(report.missingNodeClasses).toEqual(['RemoteOnlyCustomNode'])
     expect(hasBlockingQAppDependencyIssues(report)).toBe(true)
-    expect(fileExistsBatch).not.toHaveBeenCalled()
+    expect(fileExistsBatch).toHaveBeenCalledTimes(1)
   })
 })

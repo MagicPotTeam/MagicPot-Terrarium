@@ -1,6 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-
+import { parseDeferredComfyFileInputValue } from '@shared/comfy/deferredImages'
 import { runCanvasTargetQuickAppAction } from './canvasTargetQuickAppRuntime'
+
+const fsMocks = vi.hoisted(() => ({
+  saveQAppInputImage: vi.fn()
+}))
+
+vi.mock('@renderer/utils/windowUtils', () => ({
+  api: () => ({
+    svcFs: {
+      saveQAppInputImage: fsMocks.saveQAppInputImage
+    }
+  })
+}))
 
 vi.mock('../QuickAppPage/ResultList/resultTransformers', () => ({
   transformResults: vi.fn(async () => [])
@@ -23,27 +35,20 @@ const createImageFetch = (bytesByUrl: Record<string, number[]>) =>
   vi.fn(async (url: string) => {
     const bytes = bytesByUrl[url]
     if (!bytes) {
-      return {
-        ok: false,
-        status: 404,
-        arrayBuffer: async () => new ArrayBuffer(0)
-      }
+      return new Response(null, { status: 404 })
     }
-    return {
-      ok: true,
-      arrayBuffer: async () => Uint8Array.from(bytes).buffer
-    }
+    return new Response(Uint8Array.from(bytes), {
+      status: 200,
+      headers: { 'content-type': 'image/png' }
+    })
   })
 
 const createQuickAppApi = () => {
-  const uploadImage = vi.fn(
-    async ({ fileItem }: { fileItem: { filename: string }; image: Uint8Array }) => ({
-      filename: fileItem.filename,
-      subfolder: '',
-      type: 'input'
+  const submitWorkflow = vi.fn(
+    async (_request: { prompt: Record<string, { inputs: Record<string, string> }> }) => ({
+      prompt_id: 'prompt-1'
     })
   )
-  const submitWorkflow = vi.fn(async () => ({ prompt_id: 'prompt-1' }))
 
   return {
     api: {
@@ -62,6 +67,7 @@ const createQuickAppApi = () => {
           },
           workflow: {
             '1': {
+              class_type: 'LoadImage',
               inputs: {
                 image: ''
               }
@@ -73,11 +79,9 @@ const createQuickAppApi = () => {
         }))
       },
       svcComfy: {
-        uploadImage,
         submitWorkflow
       }
     },
-    uploadImage,
     submitWorkflow
   }
 }
@@ -85,15 +89,21 @@ const createQuickAppApi = () => {
 describe('canvasTargetQuickAppRuntime', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
+    fsMocks.saveQAppInputImage.mockReset()
+    fsMocks.saveQAppInputImage.mockResolvedValue({
+      success: true,
+      fullPath: 'C:/cache/stage-output.png',
+      filename: 'stage-output.png'
+    })
   })
 
-  it('uses resolved explicit stage media for QuickApp image input instead of the original source image', async () => {
+  it('submits resolved stage media as a deferred image value without pre-lease upload', async () => {
     const fetchMock = createImageFetch({
       'blob://source-original': [1, 2, 3],
       'blob://stage-output': [9, 8, 7]
     })
     vi.stubGlobal('fetch', fetchMock)
-    const { api, uploadImage } = createQuickAppApi()
+    const { api, submitWorkflow } = createQuickAppApi()
 
     await runCanvasTargetQuickAppAction({
       action: {
@@ -102,11 +112,7 @@ describe('canvasTargetQuickAppRuntime', () => {
         qAppKey: 'rembg',
         phase: 'after_model_stages',
         outputTarget: 'agent',
-        inputAssignments: [
-          {
-            sourceStageId: 'stage-element-split'
-          }
-        ]
+        inputAssignments: [{ sourceStageId: 'stage-element-split' }]
       },
       api: api as never,
       config: {} as never,
@@ -123,7 +129,8 @@ describe('canvasTargetQuickAppRuntime', () => {
           {
             type: 'image',
             url: 'blob://stage-output',
-            fileName: 'stage-output.png'
+            fileName: 'stage-output.png',
+            mimeType: 'image/png'
           }
         ]
       ]
@@ -131,15 +138,22 @@ describe('canvasTargetQuickAppRuntime', () => {
 
     expect(fetchMock).toHaveBeenCalledWith('blob://stage-output')
     expect(fetchMock).not.toHaveBeenCalledWith('blob://source-original')
-    expect(Array.from(uploadImage.mock.calls[0][0].image)).toEqual([9, 8, 7])
+    const submittedRequest = submitWorkflow.mock.calls[0]?.[0] as
+      { prompt: Record<string, { inputs: Record<string, string> }> } | undefined
+    const submittedValue = submittedRequest?.prompt['1']?.inputs.image
+    expect(parseDeferredComfyFileInputValue(submittedValue)).toMatchObject({
+      fileName: 'stage-output.png',
+      mimeType: 'image/png',
+      filePath: 'C:/cache/stage-output.png'
+    })
   })
 
-  it('does not fall back to the original source image when explicit QuickApp references are unresolved', async () => {
+  it('does not fall back to the original source image when explicit references are unresolved', async () => {
     const fetchMock = createImageFetch({
       'blob://source-original': [1, 2, 3]
     })
     vi.stubGlobal('fetch', fetchMock)
-    const { api, uploadImage, submitWorkflow } = createQuickAppApi()
+    const { api, submitWorkflow } = createQuickAppApi()
 
     await expect(
       runCanvasTargetQuickAppAction({
@@ -149,11 +163,7 @@ describe('canvasTargetQuickAppRuntime', () => {
           qAppKey: 'rembg',
           phase: 'after_model_stages',
           outputTarget: 'agent',
-          inputAssignments: [
-            {
-              sourceStageId: 'stage-element-split'
-            }
-          ]
+          inputAssignments: [{ sourceStageId: 'stage-element-split' }]
         },
         api: api as never,
         config: {} as never,
@@ -169,7 +179,6 @@ describe('canvasTargetQuickAppRuntime', () => {
     ).rejects.toThrow(/sourceStageId=stage-element-split.*no matching image attachment/)
 
     expect(fetchMock).not.toHaveBeenCalled()
-    expect(uploadImage).not.toHaveBeenCalled()
     expect(submitWorkflow).not.toHaveBeenCalled()
   })
 })

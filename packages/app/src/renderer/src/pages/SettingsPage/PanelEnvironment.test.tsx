@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import PanelEnvironment from './PanelEnvironment'
@@ -12,7 +12,15 @@ const translations: Record<string, string> = {
   'environment.comfy_mode_info_desc': 'ComfyUI mode description',
   'environment.comfy_mode_label': 'Use Remote ComfyUI',
   'environment.remote_comfyui_title': 'Remote ComfyUI Settings',
-  'environment.remote_comfyui_origin_label': 'Remote ComfyUI Origin'
+  'environment.remote_comfyui_origin_label': 'Remote ComfyUI Origin',
+  'environment.remote_instances.description': '统一管理 ComfyUI 实例',
+  'environment.remote_instances.action.add_instance': '添加实例',
+  'environment.remote_instances.action.refresh_status': '刷新状态',
+  'environment.remote_instances.action.cancel_add': '取消添加',
+  'environment.remote_instances.action.add_and_test': '添加并测试',
+  'environment.remote_instances.field.instance_name': '实例名称',
+  'environment.remote_instances.field.comfyui_address': 'ComfyUI 地址',
+  'environment.remote_instances.empty': '暂无实例'
 }
 
 const apiMock = {
@@ -23,6 +31,9 @@ const apiMock = {
   },
   svcDialog: {
     showOpenDialog: vi.fn()
+  },
+  svcComfyBatch: {
+    listInstances: vi.fn().mockResolvedValue([])
   },
   svcState: {
     getStorageLocations: vi.fn().mockResolvedValue({ locations: [] }),
@@ -155,7 +166,7 @@ describe('PanelEnvironment', () => {
     expect(screen.getByRole('heading', { name: 'Adobe 桥接' })).toBeTruthy()
   })
 
-  it('renders remote ComfyUI settings directly after the ComfyUI mode section', async () => {
+  it('renders the remote ComfyUI pool directly without a local/remote mode section', async () => {
     render(
       <PanelEnvironment
         settingsValue={{ ...DEFAULT_CONFIG, use_remote_comfyui: true }}
@@ -163,9 +174,6 @@ describe('PanelEnvironment', () => {
       />
     )
 
-    const comfyModeSection = (await screen.findByRole('heading', { name: 'ComfyUI Mode' })).closest(
-      'section'
-    )
     const remoteSection = (
       await screen.findByRole('heading', { name: 'Remote ComfyUI Settings' })
     ).closest('section')
@@ -173,18 +181,20 @@ describe('PanelEnvironment', () => {
       'section'
     )
 
-    expect(comfyModeSection).toBeTruthy()
     expect(remoteSection).toBeTruthy()
     expect(proxySection).toBeTruthy()
-    if (!comfyModeSection || !remoteSection || !proxySection) {
+    expect(screen.queryByRole('heading', { name: 'ComfyUI Mode' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Use Remote ComfyUI')).not.toBeInTheDocument()
+    if (!remoteSection || !proxySection) {
       throw new Error('Expected settings sections to render.')
     }
     expect(
-      comfyModeSection.compareDocumentPosition(remoteSection) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
-    expect(
       remoteSection.compareDocumentPosition(proxySection) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
-    expect(screen.getAllByText('Remote ComfyUI Origin').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Remote ComfyUI Origin')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('ComfyUI 地址')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '添加实例' }))
+    expect(screen.getByLabelText('ComfyUI 地址')).toBeInTheDocument()
+    expect(screen.queryByLabelText('最大并发')).not.toBeInTheDocument()
   })
 })

@@ -5,7 +5,7 @@ import { useComfyStatus } from '@renderer/store/hooks/comfyStatus'
 import { api } from '@renderer/utils/windowUtils'
 import { ComfyHistory, Workflow } from '@shared/comfy/types'
 import { ResultItem } from '@shared/qApp/resultTypes'
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { transformResults } from '../ResultList/resultTransformers'
 import { useTranslation } from 'react-i18next'
 import { useQAppContext } from '../components/QAppContext'
@@ -55,12 +55,20 @@ const SubmitWorkflowButton: React.FC<SubmitWorkflowButtonProps> = ({
     useQAppContext()
   const { notifySuccess, notifyError } = useMessage()
   const [status, setStatus] = useState<string>('')
+  const [hasEnabledInstance, setHasEnabledInstance] = useState(false)
   const {
     state: { isRunning },
     setIsRunning,
     appendResults,
     setErrorPromptStatus
   } = useComfyStatus()
+
+  useEffect(() => {
+    void api()
+      .svcComfyBatch.listInstances({})
+      .then((profiles) => setHasEnabledInstance(profiles.some((profile) => profile.state.enabled)))
+      .catch(() => setHasEnabledInstance(false))
+  }, [])
 
   const emitQuickAppTraceEvent = (
     traceStatus: ProjectTraceEventStatus,
@@ -202,7 +210,7 @@ const SubmitWorkflowButton: React.FC<SubmitWorkflowButtonProps> = ({
         size="large"
         fullWidth
         onClick={generateImage}
-        disabled={isRunning || !isConnected || isDesignMode}
+        disabled={isRunning || (!isConnected && !hasEnabledInstance) || isDesignMode}
         startIcon={isRunning ? <CircularProgress size={20} /> : <ImageIcon />}
         sx={{ height: 48 }}
       >

@@ -105,6 +105,14 @@ export type FileItem = {
   subfolder?: string
   type?: string
   format?: string
+  /** MagicPot-selected ComfyUI instance used to produce or host this file. */
+  instanceId?: string
+  /** Opaque main-process route handle captured when the file was produced. */
+  instanceRouteId?: string
+  /** Legacy consistency metadata. Never trusted as routing authority. */
+  instanceOrigin?: string
+  /** Legacy consistency metadata. Never trusted as routing authority. */
+  instanceKind?: 'local' | 'remote'
 }
 
 // 现在只处理 images

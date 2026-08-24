@@ -5,8 +5,9 @@ import { Workflow } from '@shared/comfy/types'
 import { QAppCfg, QAppCfgInput } from '@shared/qApp/cfgTypes'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { getJsonPath } from '@shared/utils/jsonPath'
-import { valueToFileItem, fileItemToValue } from '@shared/comfy/funcs'
-import { parseDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
+import { valueToFileItem } from '@shared/comfy/funcs'
+import { parseDeferredComfyFileInputValue } from '@shared/comfy/deferredImages'
+import { buildDeferredComfyImageValue } from '@renderer/utils/deferredComfyInput'
 import { JsonDict } from '@shared/utils/utilTypes'
 import {
   clearPendingQAppTaskPack,
@@ -23,11 +24,13 @@ type QAppContextType = {
   submitClientId?: string
   submitSessionKey?: string
   validate?: () => boolean
+  validateBatch?: (imageInputSlot: string) => boolean
   buildWorkflow?: () => Workflow
   buildSubmitExtraData?: () => JsonDict | undefined
   setSubmitClientId: (clientId: string | undefined) => void
   setSubmitSessionKey: (sessionKey: string | undefined) => void
   setValidate: (validate: (() => boolean) | undefined) => void
+  setValidateBatch: (validate: ((imageInputSlot: string) => boolean) | undefined) => void
   setBuildWorkflow: (buildWorkflow: (() => Workflow) | undefined) => void
   setBuildSubmitExtraData: (buildSubmitExtraData: (() => JsonDict | undefined) | undefined) => void
   formState: Map<string, unknown>
@@ -44,11 +47,13 @@ const QAppContext = createContext<QAppContextType>({
   submitClientId: undefined,
   submitSessionKey: undefined,
   validate: undefined,
+  validateBatch: undefined,
   buildWorkflow: undefined,
   buildSubmitExtraData: undefined,
   setSubmitClientId: () => {},
   setSubmitSessionKey: () => {},
   setValidate: () => {},
+  setValidateBatch: () => {},
   setBuildWorkflow: () => {},
   setBuildSubmitExtraData: () => {},
   formState: new Map(),
@@ -291,6 +296,9 @@ export const QAppContextProvider = ({
     return cached?.workflow ?? null
   })
   const [validate, setValidateInternal] = useState<(() => boolean) | undefined>(undefined)
+  const [validateBatch, setValidateBatchInternal] = useState<
+    ((imageInputSlot: string) => boolean) | undefined
+  >(undefined)
   const [buildWorkflow, setBuildWorkflowInternal] = useState<(() => Workflow) | undefined>(
     undefined
   )
@@ -407,14 +415,7 @@ export const QAppContextProvider = ({
           const file = new File([blob], source.fileName || `reference-${index + 1}.png`, {
             type: blob.type || 'image/png'
           })
-          const uploadRes = await api().svcComfy.uploadImage({
-            fileItem: { filename: file.name, type: 'input' },
-            image: new Uint8Array(await file.arrayBuffer())
-          })
-
-          if (uploadRes.filename) {
-            setFormStateValue(imageInput.slot, fileItemToValue(uploadRes))
-          }
+          setFormStateValue(imageInput.slot, await buildDeferredComfyImageValue(file))
         } catch (error) {
           console.warn('[QAppContext] failed to apply task-pack image:', error)
         }
@@ -459,12 +460,12 @@ export const QAppContextProvider = ({
                 // 如果值是字符串（文件名或延迟图片），设置到表单中。
                 // 延迟图片值包含原始图像数据，可直接恢复拖拽/加载时的图像；普通文件名再尝试从 ComfyUI 取回并重新上传。
                 if (typeof value === 'string' && value.trim()) {
-                  const deferredImage = parseDeferredComfyImageInputValue(value)
+                  const deferredImage = parseDeferredComfyFileInputValue(value)
                   console.log(`[fillParamsFromWorkflow] 设置图片原值 ${inputCfg.slot}:`, value)
                   setFormStateValue(inputCfg.slot, value)
 
                   if (!deferredImage) {
-                    // 然后异步尝试重新上传图片
+                    // 然后异步尝试取回图片并缓存为延迟输入
                     ;(async () => {
                       try {
                         const fileItem = valueToFileItem(value)
@@ -480,27 +481,17 @@ export const QAppContextProvider = ({
                           type: 'image/png'
                         })
 
-                        // 上传图片到ComfyUI
-                        const arrayBuffer = await file.arrayBuffer()
-                        const uint8 = new Uint8Array(arrayBuffer)
-                        const uploadRes = await api().svcComfy.uploadImage({
-                          fileItem: { filename: file.name, type: 'input' },
-                          image: uint8
-                        })
-
-                        if (uploadRes.filename) {
-                          // 使用新上传的图片值
-                          const newValue = fileItemToValue(uploadRes)
-                          console.log(
-                            `[fillParamsFromWorkflow] 图片上传成功，更新值 ${inputCfg.slot}:`,
-                            newValue
-                          )
-                          setFormStateValue(inputCfg.slot, newValue)
-                        }
+                        // Cache the image locally and defer the destination upload until submit.
+                        const newValue = await buildDeferredComfyImageValue(file)
+                        console.log(
+                          `[fillParamsFromWorkflow] 图片已缓存，更新值 ${inputCfg.slot}:`,
+                          newValue
+                        )
+                        setFormStateValue(inputCfg.slot, newValue)
                       } catch (error) {
-                        // 如果获取或上传失败，保持原值不变（已经在上面设置了）
+                        // 如果获取或缓存失败，保持原值不变（已经在上面设置了）
                         console.warn(
-                          `[fillParamsFromWorkflow] 无法重新上传图片 ${inputCfg.slot}:`,
+                          `[fillParamsFromWorkflow] 无法缓存图片 ${inputCfg.slot}:`,
                           error
                         )
                       }
@@ -852,6 +843,13 @@ export const QAppContextProvider = ({
     setValidateInternal((prev) => (prev === next ? prev : next))
   }, [])
 
+  const setValidateBatchFn = useCallback(
+    (next: ((imageInputSlot: string) => boolean) | undefined) => {
+      setValidateBatchInternal((prev) => (prev === next ? prev : next))
+    },
+    []
+  )
+
   const setBuildWorkflowFn = useCallback((next: (() => Workflow) | undefined) => {
     setBuildWorkflowInternal((prev) => (prev === next ? prev : next))
   }, [])
@@ -905,6 +903,7 @@ export const QAppContextProvider = ({
   const exposedQAppCfg = qAppKeyChangedDuringRender ? null : qAppCfg
   const exposedWorkflow = qAppKeyChangedDuringRender ? null : workflow
   const exposedValidate = qAppKeyChangedDuringRender ? undefined : validate
+  const exposedValidateBatch = qAppKeyChangedDuringRender ? undefined : validateBatch
   const exposedBuildWorkflow = qAppKeyChangedDuringRender ? undefined : buildWorkflow
   const exposedBuildSubmitExtraData = qAppKeyChangedDuringRender ? undefined : buildSubmitExtraData
   const exposedSubmitClientId = qAppKeyChangedDuringRender ? undefined : submitClientId
@@ -955,11 +954,13 @@ export const QAppContextProvider = ({
         submitClientId: exposedSubmitClientId,
         submitSessionKey: exposedSubmitSessionKey,
         validate: exposedValidate,
+        validateBatch: exposedValidateBatch,
         buildWorkflow: exposedBuildWorkflow,
         buildSubmitExtraData: exposedBuildSubmitExtraData,
         setSubmitClientId: setSubmitClientIdFn,
         setSubmitSessionKey: setSubmitSessionKeyFn,
         setValidate: setValidateFn,
+        setValidateBatch: setValidateBatchFn,
         setBuildWorkflow: setBuildWorkflowFn,
         setBuildSubmitExtraData: setBuildSubmitExtraDataFn,
         formState: exposedFormState,

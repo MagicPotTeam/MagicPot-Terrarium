@@ -10,7 +10,11 @@ import {
   type ManagedMediaCleanupScheduler
 } from './llmProxy/managedMediaCleanupScheduler'
 import { initializeAgentKernelRuntime, refreshAgentKernelRuntime } from './agentKernel/runtime'
+import { getComfyInstanceRegistry } from './comfy/instancePool'
+import { closeComfyOutputRouteStore } from './comfy/outputRouteStore'
+import { bootstrapManagedLocalComfyInstance } from './comfy/managedLocalInstance'
 import { initComfyStateListener, stopComfyStateListener } from './comfy/state'
+import { getBuildEnv } from './config/buildEnv'
 import { getConfig, initConfig, listenConfig } from './config/config'
 import { startLLMProxyServer, stopLLMProxyServer } from './llmProxy/server'
 import {
@@ -86,8 +90,12 @@ function syncLlmProxyServer(config: Config): void {
   }
 }
 
-function startBackgroundTasks(): void {
-  initTaskQueue().catch((error) => console.error('[App] TaskQueue init failed', error))
+async function startBackgroundTasks(
+  policyRuntime: ReturnType<typeof getAssistantTerminalPolicyRuntime>
+): Promise<void> {
+  // Hydration/reconciliation is a readiness prerequisite. Do not expose either renderer IPC or
+  // the Comfy event stream while durable ordinary jobs are still being reconstructed.
+  await initTaskQueue({ eventStore: policyRuntime.eventStore })
   initComfyStateListener()
   winController.initIpc()
   if (!managedMediaCleanupScheduler) {
@@ -102,6 +110,11 @@ function registerRuntimeServiceManager(
   listenConfig({
     id: 'runtime-service-manager',
     onEvent: async (config) => {
+      bootstrapManagedLocalComfyInstance({
+        config,
+        buildEnv: getBuildEnv(),
+        registry: getComfyInstanceRegistry()
+      })
       await refreshRuntimeServices(config, mcpPlatformEnv)
       syncLlmProxyServer(config)
     },
@@ -117,11 +130,26 @@ export async function beforeShow() {
 
   console.log('[App] beforeShow started')
 
-  await runLifecycleStep('Config initialized', () => initConfig())
+  const configInitialized = await runLifecycleStep('Config initialized', () => initConfig())
+  if (configInitialized) {
+    await runLifecycleStep('Managed local ComfyUI registry bootstrapped', () => {
+      bootstrapManagedLocalComfyInstance({
+        config: getConfig(),
+        buildEnv: getBuildEnv(),
+        registry: getComfyInstanceRegistry()
+      })
+    })
+  }
 
   console.log('[App] Launching background tasks...')
 
-  startBackgroundTasks()
+  const policyRuntime = getAssistantTerminalPolicyRuntime()
+  const backgroundTasksInitialized = await runLifecycleStep('Background tasks initialized', () =>
+    startBackgroundTasks(policyRuntime)
+  )
+  if (!backgroundTasksInitialized) {
+    throw new Error('Background task readiness failed; IPC was not exposed.')
+  }
 
   await runLifecycleStep('Runtime services synced', async () => {
     await syncRuntimeServices()
@@ -131,7 +159,6 @@ export async function beforeShow() {
 
   await runLifecycleStep('LLM server started', () => startLLMProxyServer())
   const platformService = new MagicAgentPlatformSvcImpl()
-  const policyRuntime = getAssistantTerminalPolicyRuntime()
   startProductionTriggerLifecycle({
     policyRuntime,
     service: platformService
@@ -202,6 +229,7 @@ export async function beforeQuit() {
   )
   await runLifecycleStep('Drive lifecycle stopped', () => closeProductionDriveLifecycle())
   await runLifecycleStep('Trigger lifecycle stopped', () => closeProductionTriggerLifecycle())
-  await runLifecycleStep('Policy runtime stopped', () => closeAssistantTerminalPolicyRuntime())
   await runLifecycleStep('Task queue cleanup finished', () => stopTaskQueue())
+  await runLifecycleStep('Policy runtime stopped', () => closeAssistantTerminalPolicyRuntime())
+  await runLifecycleStep('Comfy output route store closed', () => closeComfyOutputRouteStore())
 }

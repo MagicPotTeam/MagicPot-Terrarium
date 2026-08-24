@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComfyHistory, Workflow } from '@shared/comfy/types'
 import { encodeDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
+import { MagicAgentEventStore } from '../magicAgentPlatform2/persistence/eventStore'
 
 const { promptMock, uploadImageMock, freeMemoryMock, isRemoteComfyUIMock, waitPromptIdMock } =
   vi.hoisted(() => ({
-    promptMock: vi.fn(async (_req: unknown) => ({ prompt_id: 'comfy-prompt-1' })),
-    uploadImageMock: vi.fn(async (_fileItem: unknown, _image: unknown) => ({
+    promptMock: vi.fn(async (_req: unknown, _signal?: AbortSignal) => ({
+      prompt_id: 'comfy-prompt-1'
+    })),
+    uploadImageMock: vi.fn(async (_fileItem: unknown, _image: unknown, _signal?: AbortSignal) => ({
       filename: 'uploaded-input.png',
       type: 'input'
     })),
@@ -35,12 +38,16 @@ const { promptMock, uploadImageMock, freeMemoryMock, isRemoteComfyUIMock, waitPr
 vi.mock('../comfy/http', () => ({
   COMFY_PROCESS_TRANSPORT_CLIENT_ID: 'magicpot-main-test',
   ComfyHttpCli: class MockComfyHttpCli {
-    async prompt(req: unknown) {
-      return promptMock(req)
+    async objectInfo() {
+      return {}
     }
 
-    async uploadImage(fileItem: unknown, image: unknown) {
-      return uploadImageMock(fileItem, image)
+    async prompt(req: unknown, signal?: AbortSignal) {
+      return promptMock(req, signal)
+    }
+
+    async uploadImage(fileItem: unknown, image: unknown, signal?: AbortSignal) {
+      return uploadImageMock(fileItem, image, signal)
     }
 
     async interrupt() {
@@ -51,6 +58,28 @@ vi.mock('../comfy/http', () => ({
       return undefined
     }
 
+    async getQueue() {
+      return { queue_running: [], queue_pending: [] }
+    }
+
+    async history(promptId: string) {
+      return {
+        [promptId]: {
+          prompt: [0, promptId, {} as Workflow, { client_id: 'transport-client' }, []],
+          outputs: {},
+          status: {
+            status_str: 'error',
+            completed: true,
+            messages: [['execution_interrupted', { prompt_id: promptId, timestamp: 1 }] as never]
+          }
+        }
+      }
+    }
+
+    async historyAll() {
+      return {}
+    }
+
     async freeMemory(req?: unknown) {
       return freeMemoryMock(req)
     }
@@ -59,6 +88,46 @@ vi.mock('../comfy/http', () => ({
       return isRemoteComfyUIMock()
     }
   }
+}))
+
+vi.mock('../comfy/instancePool', () => ({
+  acquireComfyInstance: vi.fn(async () => ({
+    state: {
+      id: 'test-instance',
+      name: 'Test instance',
+      origin: 'https://test.example/',
+      kind: 'remote',
+      enabled: true,
+      maxConcurrency: 1,
+      tags: [],
+      capabilities: { tags: [], models: [], customNodes: [] },
+      health: { status: 'online' }
+    },
+    cli: {
+      objectInfo: vi.fn(async () => ({})),
+      prompt: promptMock,
+      uploadImage: uploadImageMock,
+      freeMemory: freeMemoryMock,
+      isRemoteComfyUI: isRemoteComfyUIMock,
+      cancel: vi.fn(async () => undefined),
+      interrupt: vi.fn(async () => undefined),
+      getQueue: vi.fn(async () => ({ queue_running: [], queue_pending: [] })),
+      history: vi.fn(async (promptId: string) => ({
+        [promptId]: {
+          prompt: [0, promptId, {} as Workflow, { client_id: 'transport-client' }, []],
+          outputs: {},
+          status: {
+            status_str: 'error',
+            completed: true,
+            messages: [['execution_interrupted', { prompt_id: promptId, timestamp: 1 }] as never]
+          }
+        }
+      })),
+      historyAll: vi.fn(async () => ({}))
+    },
+    release: vi.fn()
+  })),
+  retainRestoredComfyInstanceCapacity: vi.fn(() => vi.fn())
 }))
 
 vi.mock('../comfy/logic', () => ({
@@ -83,6 +152,7 @@ describe('taskQueue transport client', () => {
     const createdAt = 1710000000000
     const workflow = {} as Workflow
 
+    await taskQueue.initTaskQueue({ eventStore: new MagicAgentEventStore(':memory:') })
     const taskId = taskQueue.addTask({
       id: '',
       type: 'comfy_prompt',
@@ -94,14 +164,16 @@ describe('taskQueue transport client', () => {
     })
 
     try {
-      await taskQueue.initTaskQueue()
       await vi.advanceTimersByTimeAsync(1000)
 
-      expect(promptMock).toHaveBeenCalledWith({
-        prompt: workflow,
-        client_id: 'magicpot-main-test',
-        extra_data: undefined
-      })
+      expect(promptMock).toHaveBeenCalledWith(
+        {
+          prompt: workflow,
+          client_id: 'magicpot-main-test',
+          extra_data: { magicpot_task_id: taskId }
+        },
+        expect.any(AbortSignal)
+      )
 
       const [status, task] = taskQueue.getTask(taskId)
       expect(status).toBe('completed')
@@ -135,6 +207,7 @@ describe('taskQueue transport client', () => {
       }
     }
 
+    await taskQueue.initTaskQueue({ eventStore: new MagicAgentEventStore(':memory:') })
     const taskId = taskQueue.addTask({
       id: '',
       type: 'comfy_prompt',
@@ -146,7 +219,6 @@ describe('taskQueue transport client', () => {
     })
 
     try {
-      await taskQueue.initTaskQueue()
       await vi.advanceTimersByTimeAsync(1000)
 
       expect(uploadImageMock).toHaveBeenCalledTimes(1)
@@ -155,19 +227,22 @@ describe('taskQueue transport client', () => {
         type: 'input'
       })
       expect(Array.from(uploadImageMock.mock.calls[0][1] as Uint8Array)).toEqual([72, 105])
-      expect(promptMock).toHaveBeenCalledWith({
-        prompt: {
-          '1': {
-            class_type: 'LoadImage',
-            inputs: {
-              image: 'uploaded-input.png',
-              mask: 'uploaded-input.png'
+      expect(promptMock).toHaveBeenCalledWith(
+        {
+          prompt: {
+            '1': {
+              class_type: 'LoadImage',
+              inputs: {
+                image: 'uploaded-input.png',
+                mask: 'uploaded-input.png'
+              }
             }
-          }
+          },
+          client_id: 'magicpot-main-test',
+          extra_data: { magicpot_task_id: taskId }
         },
-        client_id: 'magicpot-main-test',
-        extra_data: undefined
-      })
+        expect.any(AbortSignal)
+      )
 
       const [status, task] = taskQueue.getTask(taskId)
       expect(status).toBe('completed')
@@ -183,6 +258,7 @@ describe('taskQueue transport client', () => {
     const taskQueue = await import('./taskQueue')
     const workflow = {} as Workflow
 
+    await taskQueue.initTaskQueue({ eventStore: new MagicAgentEventStore(':memory:') })
     const taskId = taskQueue.addTask({
       id: '',
       type: 'comfy_prompt',
@@ -195,7 +271,6 @@ describe('taskQueue transport client', () => {
     })
 
     try {
-      await taskQueue.initTaskQueue()
       await vi.advanceTimersByTimeAsync(1000)
 
       expect(freeMemoryMock).toHaveBeenCalledTimes(1)
@@ -212,6 +287,7 @@ describe('taskQueue transport client', () => {
     const taskQueue = await import('./taskQueue')
     const workflow = {} as Workflow
 
+    await taskQueue.initTaskQueue({ eventStore: new MagicAgentEventStore(':memory:') })
     const taskId = taskQueue.addTask({
       id: '',
       type: 'comfy_prompt',
@@ -224,7 +300,6 @@ describe('taskQueue transport client', () => {
     })
 
     try {
-      await taskQueue.initTaskQueue()
       await vi.advanceTimersByTimeAsync(1000)
 
       expect(freeMemoryMock).not.toHaveBeenCalled()
@@ -233,6 +308,34 @@ describe('taskQueue transport client', () => {
     } finally {
       await taskQueue.stopTaskQueue()
     }
+  })
+
+  it('does not resurrect an initialization that stop invalidates before start', async () => {
+    vi.resetModules()
+    const taskQueue = await import('./taskQueue')
+    let releaseStart!: () => void
+    const beforeStart = new Promise<void>((resolve) => {
+      releaseStart = resolve
+    })
+    const initialization = taskQueue.initTaskQueue({
+      eventStore: new MagicAgentEventStore(':memory:'),
+      beforeStart: () => beforeStart
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    const stopping = taskQueue.stopTaskQueue()
+    releaseStart()
+    await Promise.all([initialization, stopping])
+    expect(() =>
+      taskQueue.addTask({
+        id: '',
+        type: 'comfy_prompt',
+        client_id: 'c',
+        created_at: 1,
+        prompt_id: null,
+        payload: {} as Workflow,
+        result: null
+      })
+    ).toThrow('not ready')
   })
 
   it('marks tasks as cancelled when they are removed before execution completes', async () => {
@@ -275,6 +378,7 @@ describe('taskQueue transport client', () => {
         })
     )
 
+    await taskQueue.initTaskQueue({ eventStore: new MagicAgentEventStore(':memory:') })
     const taskId = taskQueue.addTask({
       id: '',
       type: 'comfy_prompt',
@@ -286,13 +390,12 @@ describe('taskQueue transport client', () => {
     })
 
     try {
-      await taskQueue.initTaskQueue()
       await vi.advanceTimersByTimeAsync(1000)
 
       const cancelled = await taskQueue.cancelTask(taskId)
       expect(cancelled).toBe(true)
 
-      await vi.advanceTimersByTimeAsync(10)
+      await vi.advanceTimersByTimeAsync(1_000)
 
       const [status] = taskQueue.getTask(taskId)
       expect(status).toBe('cancelled')

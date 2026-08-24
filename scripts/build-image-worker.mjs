@@ -12,13 +12,16 @@ const packagedBinaryBaseName = 'magicpot-image-worker'
 export function getImageWorkerBuildPaths({
   repoRoot = defaultRepoRoot,
   platform = process.platform,
-  arch = process.arch
+  arch = process.arch,
+  cargoTargetDir = process.env.MAGICPOT_IMAGE_WORKER_CARGO_TARGET_DIR
 } = {}) {
   const binaryExtension = platform === 'win32' ? '.exe' : ''
   const manifestPath = join(repoRoot, 'packages/canvas-thumbnail-sidecar/Cargo.toml')
-  const cargoTargetDir = join(repoRoot, '.cache/cargo-target/canvas-thumbnail-sidecar')
+  const resolvedCargoTargetDir = cargoTargetDir
+    ? resolve(repoRoot, cargoTargetDir)
+    : join(repoRoot, '.cache/cargo-target/canvas-thumbnail-sidecar')
   const sourceBinaryPath = join(
-    cargoTargetDir,
+    resolvedCargoTargetDir,
     'release',
     `${sidecarPackageName}${binaryExtension}`
   )
@@ -30,7 +33,7 @@ export function getImageWorkerBuildPaths({
 
   return {
     manifestPath,
-    cargoTargetDir,
+    cargoTargetDir: resolvedCargoTargetDir,
     sourceBinaryPath,
     outputDir,
     outputBinaryPath: join(outputDir, `${packagedBinaryBaseName}${binaryExtension}`)
@@ -64,19 +67,15 @@ export function buildImageWorker({
   console.log(`[image-worker] CARGO_TARGET_DIR: ${paths.cargoTargetDir}`)
   console.log(`[image-worker] package output: ${paths.outputBinaryPath}`)
 
-  const result = spawn(
-    'cargo',
-    ['build', '--release', '--manifest-path', paths.manifestPath],
-    {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        CARGO_TARGET_DIR: paths.cargoTargetDir
-      },
-      shell: false,
-      stdio: 'inherit'
-    }
-  )
+  const result = spawn('cargo', ['build', '--release', '--manifest-path', paths.manifestPath], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CARGO_TARGET_DIR: paths.cargoTargetDir
+    },
+    shell: false,
+    stdio: 'inherit'
+  })
 
   if (result.error) {
     throw new Error(`Failed to start cargo: ${result.error.message}`)

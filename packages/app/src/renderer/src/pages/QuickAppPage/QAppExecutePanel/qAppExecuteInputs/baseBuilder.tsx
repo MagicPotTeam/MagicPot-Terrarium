@@ -77,6 +77,8 @@ const baseQAppInputBuilder = <T extends JsonValue, InputType extends HaveSlotCfg
         ref,
         () => ({
           id,
+          slot,
+          inputType: args.inputType,
           modifyWorkflow: (workflow) => setJsonPath(slot, workflow, value),
           validate: (workflow) => validate(workflow, value)
         }),

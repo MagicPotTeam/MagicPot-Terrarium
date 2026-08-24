@@ -1198,7 +1198,7 @@ export function useCanvasFileIntake({
             internalImagePayload?.fileItem?.filename,
           sizeBytes: droppedAgentImage.sizeBytes ?? internalImageAttachment?.sizeBytes,
           promptId: internalImagePayload?.promptId,
-          fileItem: internalImagePayload?.fileItem,
+          fileItem: droppedAgentImage.fileItem ?? internalImagePayload?.fileItem,
           sourceWidthHint:
             droppedAgentImage.sourceWidthHint ??
             internalImageAttachment?.sourceWidth ??

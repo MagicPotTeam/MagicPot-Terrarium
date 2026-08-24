@@ -4,8 +4,12 @@ import { MovieCreationOutlined, UploadOutlined } from '@mui/icons-material'
 import { InputProps } from './InputProps'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { api } from '@renderer/utils/windowUtils'
-import { fileItemToValue, valueToFileItem } from '@shared/comfy/funcs'
-import { FileItem } from '@shared/comfy/types'
+import {
+  buildDeferredComfyImageValue,
+  getDeferredComfyLocalPreview
+} from '@renderer/utils/deferredComfyInput'
+import { valueToFileItem } from '@shared/comfy/funcs'
+import { isDeferredComfyInputValue } from '@shared/comfy/deferredImages'
 import { createVideoBoundaryFrameFiles } from '@renderer/pages/QuickAppPage/utils/videoBoundaryFrameFiles'
 import { formatQAppErrorMessage } from '@renderer/pages/QuickAppPage/hooks/useQAppRunner'
 
@@ -81,6 +85,7 @@ const InputVideoBoundaryFrames: React.FC<InputVideoBoundaryFramesProps> = ({
   const lastFramePreviewUrlRef = useRef<string | null>(null)
   const mountedRef = useRef(false)
   const videoOperationRef = useRef(0)
+  const latestOnChangeRef = useRef(onChange)
   const { notifyError, notifySuccess } = useMessage()
 
   useEffect(() => {
@@ -91,6 +96,15 @@ const InputVideoBoundaryFrames: React.FC<InputVideoBoundaryFramesProps> = ({
     }
   }, [])
 
+  useEffect(() => {
+    videoOperationRef.current += 1
+    setIsLoading(false)
+  }, [value])
+
+  useEffect(() => {
+    latestOnChangeRef.current = onChange
+  }, [onChange])
+
   const updatePreviewUrl = useCallback(
     async (
       imageValue: string,
@@ -99,7 +113,7 @@ const InputVideoBoundaryFrames: React.FC<InputVideoBoundaryFramesProps> = ({
       isCurrent: () => boolean
     ) => {
       const replacePreviewUrl = (nextPreviewUrl: string | null) => {
-        if (previewUrlRef.current) {
+        if (previewUrlRef.current?.startsWith('blob:')) {
           URL.revokeObjectURL(previewUrlRef.current)
         }
         previewUrlRef.current = nextPreviewUrl
@@ -112,9 +126,23 @@ const InputVideoBoundaryFrames: React.FC<InputVideoBoundaryFramesProps> = ({
       }
 
       try {
-        const response = await api().svcComfy.getView(valueToFileItem(imageValue))
+        const localPreview = await getDeferredComfyLocalPreview(imageValue)
+        if (localPreview?.dataUrl) {
+          if (!isCurrent()) return
+          replacePreviewUrl(localPreview.dataUrl)
+          return
+        }
+        const image = localPreview?.bytes
+          ? localPreview.bytes
+          : isDeferredComfyInputValue(imageValue)
+            ? (() => {
+                throw new Error('Deferred Comfy input is unavailable.')
+              })()
+            : (await api().svcComfy.getView(valueToFileItem(imageValue))).result
         if (!isCurrent()) return
-        const previewBlob = new Blob([response.result as BlobPart], { type: 'image/png' })
+        const previewBlob = new Blob([image as BlobPart], {
+          type: localPreview?.mimeType || 'image/png'
+        })
         const nextPreviewUrl = URL.createObjectURL(previewBlob)
         if (!isCurrent()) {
           URL.revokeObjectURL(nextPreviewUrl)
@@ -158,29 +186,17 @@ const InputVideoBoundaryFrames: React.FC<InputVideoBoundaryFramesProps> = ({
 
   useEffect(
     () => () => {
-      if (firstFramePreviewUrlRef.current) {
+      if (firstFramePreviewUrlRef.current?.startsWith('blob:')) {
         URL.revokeObjectURL(firstFramePreviewUrlRef.current)
-        firstFramePreviewUrlRef.current = null
       }
-      if (lastFramePreviewUrlRef.current) {
+      firstFramePreviewUrlRef.current = null
+      if (lastFramePreviewUrlRef.current?.startsWith('blob:')) {
         URL.revokeObjectURL(lastFramePreviewUrlRef.current)
-        lastFramePreviewUrlRef.current = null
       }
+      lastFramePreviewUrlRef.current = null
     },
     []
   )
-
-  const uploadFrameImage = useCallback(async (file: File): Promise<FileItem> => {
-    const image = new Uint8Array(await file.arrayBuffer())
-    const response = await api().svcComfy.uploadImage({
-      fileItem: { filename: file.name, type: 'input' },
-      image
-    })
-    if (!response.filename) {
-      throw new Error('failed to upload extracted frame')
-    }
-    return response
-  }, [])
 
   const processVideoFile = useCallback(
     async (file: File) => {
@@ -199,16 +215,16 @@ const InputVideoBoundaryFrames: React.FC<InputVideoBoundaryFramesProps> = ({
           throw new Error('failed to extract both first and last frames from the video')
         }
 
-        const [firstFrameItem, lastFrameItem] = await Promise.all([
-          uploadFrameImage(firstFrameFile),
-          uploadFrameImage(lastFrameFile)
+        const [firstFrameValue, lastFrameValue] = await Promise.all([
+          buildDeferredComfyImageValue(firstFrameFile),
+          buildDeferredComfyImageValue(lastFrameFile)
         ])
         if (!isCurrent()) return
 
-        onChange({
+        latestOnChangeRef.current({
           videoFileName: file.name,
-          firstFrameValue: fileItemToValue(firstFrameItem),
-          lastFrameValue: fileItemToValue(lastFrameItem)
+          firstFrameValue,
+          lastFrameValue
         })
         notifySuccess('已提取视频首尾帧')
       } catch (error) {
@@ -219,7 +235,7 @@ const InputVideoBoundaryFrames: React.FC<InputVideoBoundaryFramesProps> = ({
         if (isCurrent()) setIsLoading(false)
       }
     },
-    [notifyError, notifySuccess, onChange, uploadFrameImage]
+    [notifyError, notifySuccess]
   )
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {

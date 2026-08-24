@@ -14,10 +14,10 @@ import { FolderOpen } from '@mui/icons-material'
 import { api } from '@renderer/utils/windowUtils'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { useQAppContext } from '../components/QAppContext'
-import { Workflow, FileItem } from '@shared/comfy/types'
+import { Workflow } from '@shared/comfy/types'
 import { setJsonPath } from '@shared/utils/jsonPath'
 import { deepCopy } from '@shared/utils/utilTypes'
-import { fileItemToValue } from '@shared/comfy/funcs'
+import { encodeDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
 import { buildQAppSubmitWorkflowRequest } from '../utils/qAppSubmitWorkflow'
 import { resolveQAppSessionKey } from '../utils/qAppSessionIdentity'
 
@@ -168,20 +168,15 @@ const BatchProcessButton: React.FC<BatchProcessButtonProps> = ({
         // 6.1 Read image from disk
         const imageData = await api().svcFs.readImageFromPath({ fullPath: image.fullPath })
 
-        // 6.2 Upload to ComfyUI
-        const uploadResult: FileItem = await api().svcComfy.uploadImage({
-          fileItem: { filename: image.filename, type: 'input' },
-          image: imageData.image
-        })
-
-        if (!uploadResult.filename) {
-          throw new Error('上传图片失败')
-        }
-
-        // 6.3 Build workflow with uploaded image
+        // 6.2 Defer upload until taskQueue has acquired the destination lease.
         const workflow = deepCopy(baseWorkflow) as Workflow
-        const uploadedValue = fileItemToValue(uploadResult)
-        setJsonPath(effectiveImageInputSlot, workflow, uploadedValue)
+        const deferredValue = encodeDeferredComfyImageInputValue({
+          fileName: image.filename,
+          mimeType: 'image/png',
+          sizeBytes: imageData.image.byteLength,
+          filePath: image.fullPath
+        })
+        setJsonPath(effectiveImageInputSlot, workflow, deferredValue)
 
         // 5.4 Submit workflow
         const submitResult = await api().svcComfy.submitWorkflow(
@@ -215,11 +210,7 @@ const BatchProcessButton: React.FC<BatchProcessButtonProps> = ({
               const nodeOutput = outputs[nodeId]
               if (nodeOutput.images && nodeOutput.images.length > 0) {
                 const outputImage = nodeOutput.images[0]
-                const viewResult = await api().svcComfy.getView({
-                  filename: outputImage.filename,
-                  type: outputImage.type,
-                  subfolder: outputImage.subfolder
-                })
+                const viewResult = await api().svcComfy.getView(outputImage)
 
                 // Save with original filename
                 const ext = image.filename.includes('.')

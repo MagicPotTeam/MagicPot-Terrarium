@@ -2,6 +2,7 @@ import { Stack } from '@mui/material'
 import ResultList from './ResultList'
 import SubmitWorkflowButton from '../QAppExecutePanel/SubmitWorkflowButton'
 import RealtimeGenerationSwitch from '../QAppExecutePanel/RealtimeGenerationSwitch'
+import MultiComfyBatchButton from '../QAppExecutePanel/MultiComfyBatchButton'
 import { useComfyStatus } from '@renderer/store/hooks/comfyStatus'
 import { useQAppContext } from '../components/QAppContext'
 
@@ -14,7 +15,7 @@ type ResultSectionProps = {
  * 包含生成按钮和结果列表
  */
 export default function ResultSection({ isDesignMode = false }: ResultSectionProps) {
-  const { qAppCfg, validate, buildWorkflow } = useQAppContext()
+  const { currentQAppKey, qAppCfg, validate, validateBatch, buildWorkflow } = useQAppContext()
   const {
     state: { isConnected }
   } = useComfyStatus()
@@ -46,6 +47,19 @@ export default function ResultSection({ isDesignMode = false }: ResultSectionPro
               validate={validate}
               buildWorkflow={buildWorkflow}
             />
+            {!isDesignMode && qAppCfg?.batchProcess?.enabled && (
+              <MultiComfyBatchButton
+                currentQAppKey={currentQAppKey}
+                imageInputSlot={
+                  qAppCfg.batchProcess.batchImageInputSlot ?? qAppCfg.batchProcess.imageInputSlot
+                }
+                outputNodeIds={qAppCfg.outputNodeIds}
+                buildWorkflow={buildWorkflow}
+                validateBatch={validateBatch}
+                batchWorkflow={qAppCfg.batchProcess.batchWorkflow}
+                batchImageInputSlot={qAppCfg.batchProcess.batchImageInputSlot}
+              />
+            )}
           </Stack>
           {buildWorkflow && (
             <RealtimeGenerationSwitch

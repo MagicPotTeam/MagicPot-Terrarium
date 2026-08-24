@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Workflow } from '@shared/comfy/types'
+import { encodeDeferredComfyFileInputValue } from '@shared/comfy/deferredImages'
+import { fileItemToValue } from '@shared/comfy/funcs'
 import { COMFY_EVENT_CLIENT_ID_ALL } from '@shared/api/svcComfy'
+import { ComfyHttpCli } from '../comfy/http'
+import { closeComfyOutputRouteStore, getComfyOutputRouteStore } from '../comfy/outputRouteStore'
 
 const {
   addTaskMock,
@@ -11,6 +15,8 @@ const {
   getTaskByPromptIdMock,
   listenComfyEventMock,
   importManagedMediaStreamMock,
+  instanceRegistryGetMock,
+  getComfyInstanceClientMock,
   emitComfyEvent,
   resetComfyTestState,
   setTaskPromptOwner
@@ -43,6 +49,8 @@ const {
       }
     ),
     importManagedMediaStreamMock: vi.fn(),
+    instanceRegistryGetMock: vi.fn(),
+    getComfyInstanceClientMock: vi.fn(),
     emitComfyEvent: (event: unknown) => {
       activeListener?.onEvent(event)
     },
@@ -83,6 +91,11 @@ vi.mock('../config/buildEnv', () => ({
   }))
 }))
 
+vi.mock('../comfy/instancePool', () => ({
+  getComfyInstanceRegistry: vi.fn(() => ({ get: instanceRegistryGetMock })),
+  getComfyInstanceClient: getComfyInstanceClientMock
+}))
+
 vi.mock('../comfy/loraBypass', () => ({
   processWorkflowLoras: vi.fn((workflow: Workflow) => ({
     workflow
@@ -95,7 +108,8 @@ vi.mock('../queue/taskQueue', () => ({
   cancelTaskByPromptId: cancelTaskByPromptIdMock,
   getQueue: getQueueMock,
   getTask: getTaskMock,
-  getTaskByPromptId: getTaskByPromptIdMock
+  getTaskByPromptId: getTaskByPromptIdMock,
+  resolveTaskSubmission: vi.fn()
 }))
 
 vi.mock('../comfy/state', () => ({
@@ -124,12 +138,203 @@ import { ComfySvcImpl } from './svcComfyImpl'
 
 describe('ComfySvcImpl', () => {
   beforeEach(() => {
+    closeComfyOutputRouteStore()
     vi.clearAllMocks()
     resetComfyTestState()
   })
 
   afterEach(() => {
+    closeComfyOutputRouteStore()
     vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  describe('registered instance routing', () => {
+    it('rejects endpoint metadata without an instance id', async () => {
+      const svc = new ComfySvcImpl()
+
+      await expect(
+        svc.getView({
+          filename: 'result.png',
+          subfolder: '',
+          type: 'output',
+          instanceOrigin: 'http://127.0.0.1:8188/',
+          instanceKind: 'local'
+        })
+      ).rejects.toThrow('metadata requires an opaque route id')
+      expect(getComfyInstanceClientMock).not.toHaveBeenCalled()
+    })
+
+    it('uses a captured opaque route after the registry entry is edited, disabled, or deleted', async () => {
+      const route = getComfyOutputRouteStore().capture({
+        id: 'gpu-route',
+        origin: 'https://captured.example/',
+        kind: 'remote'
+      })
+      instanceRegistryGetMock.mockReturnValue({
+        deleted: true,
+        state: {
+          id: 'gpu-route',
+          origin: 'https://replacement.example/',
+          kind: 'remote',
+          enabled: false
+        }
+      })
+      const view = vi.spyOn(ComfyHttpCli.prototype, 'view').mockImplementation(async function (
+        this: ComfyHttpCli
+      ) {
+        expect((this as unknown as { configuredOrigin?: string }).configuredOrigin).toBe(
+          'https://captured.example/'
+        )
+        return new Uint8Array([1, 2, 3])
+      })
+      const svc = new ComfySvcImpl()
+
+      await expect(
+        svc.getView({
+          filename: 'result.png',
+          subfolder: '',
+          type: 'output',
+          instanceId: 'gpu-route',
+          instanceRouteId: route.routeId
+        })
+      ).resolves.toEqual({ result: new Uint8Array([1, 2, 3]) })
+      expect(view).toHaveBeenCalledTimes(1)
+      expect(instanceRegistryGetMock).not.toHaveBeenCalled()
+      expect(getComfyInstanceClientMock).not.toHaveBeenCalled()
+    })
+
+    it('uses the captured endpoint for imports after the registry identity changes', async () => {
+      const route = getComfyOutputRouteStore().capture({
+        id: 'gpu-import',
+        origin: 'https://captured-import.example/',
+        kind: 'remote'
+      })
+      instanceRegistryGetMock.mockReturnValue({
+        deleted: false,
+        state: {
+          id: 'gpu-import',
+          origin: 'https://replacement.example/',
+          kind: 'local',
+          enabled: false
+        }
+      })
+      const viewResponse = vi
+        .spyOn(ComfyHttpCli.prototype, 'viewResponse')
+        .mockImplementation(async function (this: ComfyHttpCli) {
+          expect((this as unknown as { configuredOrigin?: string }).configuredOrigin).toBe(
+            'https://captured-import.example/'
+          )
+          return new Response(new Uint8Array([1, 2, 3]), {
+            headers: { 'content-type': 'image/png' }
+          })
+        })
+      const reference = {
+        version: 1,
+        kind: 'managed',
+        relativePath: 'ab/hash.png',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 3,
+        mimeType: 'image/png',
+        originalFileName: 'result.png'
+      }
+      importManagedMediaStreamMock.mockResolvedValue({
+        reference,
+        localMediaUrl: 'local-media:/managed'
+      })
+      const svc = new ComfySvcImpl()
+
+      await expect(
+        svc.importOutputImage({
+          filename: 'result.png',
+          subfolder: '',
+          type: 'output',
+          instanceId: 'gpu-import',
+          instanceRouteId: route.routeId
+        })
+      ).resolves.toMatchObject({ reference, localMediaUrl: 'local-media:/managed' })
+      expect(viewResponse).toHaveBeenCalledTimes(1)
+      expect(instanceRegistryGetMock).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      {
+        name: 'unknown handle',
+        route: { instanceRouteId: 'route-forged' },
+        expected: 'route is unavailable'
+      },
+      {
+        name: 'empty handle',
+        route: { instanceRouteId: '' },
+        expected: 'route id is invalid'
+      },
+      {
+        name: 'forged instance id',
+        route: { instanceId: 'other-instance' },
+        expected: 'does not match its instance id'
+      },
+      {
+        name: 'forged origin',
+        route: { instanceOrigin: 'https://forged.example/' },
+        expected: 'does not match its captured origin'
+      },
+      {
+        name: 'forged kind',
+        route: { instanceKind: 'local' as const },
+        expected: 'does not match its captured kind'
+      }
+    ])('fails closed for $name before view or import fetches', async ({ route, expected }) => {
+      const captured = getComfyOutputRouteStore().capture({
+        id: 'gpu-closed',
+        origin: 'https://captured-closed.example/',
+        kind: 'remote'
+      })
+      const view = vi.spyOn(ComfyHttpCli.prototype, 'view')
+      const viewResponse = vi.spyOn(ComfyHttpCli.prototype, 'viewResponse')
+      const descriptor = {
+        filename: 'result.png',
+        subfolder: '',
+        type: 'output' as const,
+        instanceRouteId: captured.routeId,
+        ...route
+      }
+      const svc = new ComfySvcImpl()
+
+      await expect(svc.getView(descriptor)).rejects.toThrow(expected)
+      await expect(svc.importOutputImage(descriptor)).rejects.toThrow(expected)
+      expect(view).not.toHaveBeenCalled()
+      expect(viewResponse).not.toHaveBeenCalled()
+      expect(importManagedMediaStreamMock).not.toHaveBeenCalled()
+    })
+
+    it('rejects view and import access through a disabled legacy instance route', async () => {
+      instanceRegistryGetMock.mockReturnValue({
+        deleted: false,
+        state: {
+          id: 'disabled-gpu',
+          enabled: false
+        }
+      })
+      const svc = new ComfySvcImpl()
+
+      await expect(
+        svc.getView({
+          filename: 'result.png',
+          subfolder: '',
+          type: 'output',
+          instanceId: 'disabled-gpu'
+        })
+      ).rejects.toThrow('instance is unavailable')
+      await expect(
+        svc.importOutputImage({
+          filename: 'result.png',
+          subfolder: '',
+          type: 'output',
+          instanceId: 'disabled-gpu'
+        })
+      ).rejects.toThrow('instance is unavailable')
+      expect(getComfyInstanceClientMock).not.toHaveBeenCalled()
+    })
   })
 
   describe('importOutputImage', () => {
@@ -465,7 +670,7 @@ describe('ComfySvcImpl', () => {
       randomUuidSpy.mockRestore()
     })
 
-    it('strips UI-only nodes before posting the prompt to ComfyUI', async () => {
+    it('preserves deferred, routed, malformed-reserved, and history values in the durable task payload', async () => {
       const svc = new ComfySvcImpl()
       ;(
         svc as unknown as { cli: () => { objectInfo: () => Promise<Record<string, unknown>> } }
@@ -478,49 +683,109 @@ describe('ComfySvcImpl', () => {
         prompt_id: 'prompt-4'
       })
 
-      await svc.submitWorkflow({
-        prompt: {
-          '10': {
-            class_type: 'SeedVR2VideoUpscaler',
-            inputs: {
-              image: ['31', 0]
-            }
-          },
-          '18': {
-            class_type: 'Note',
-            inputs: {
-              value: 'Enable to upscale alpha/mask channel along with RGB channel.'
-            }
-          },
-          '31': {
-            class_type: 'LoadImage',
-            inputs: {
-              image: 'input.png'
-            }
+      const deferredValue = encodeDeferredComfyFileInputValue({
+        fileName: 'clip.mp4',
+        mimeType: 'video/mp4',
+        sizeBytes: 10,
+        filePath: 'C:/cache/clip.mp4'
+      })
+      const routedValue = fileItemToValue({
+        filename: 'result.png',
+        type: 'output',
+        instanceId: 'gpu-a',
+        instanceRouteId: 'route-a',
+        instanceOrigin: 'https://gpu.example/',
+        instanceKind: 'remote'
+      })
+      const malformedReservedValue = 'MAGICPOT_DEFERRED_COMFY_FILE:%not-json'
+      const prompt = {
+        '10': {
+          class_type: 'SeedVR2VideoUpscaler',
+          inputs: {
+            image: ['31', 0]
           }
         },
-        clientId: 'renderer-qapp'
-      })
+        '18': {
+          class_type: 'Note',
+          inputs: {
+            value: 'Enable to upscale alpha/mask channel along with RGB channel.'
+          }
+        },
+        '31': {
+          class_type: 'LoadImage',
+          inputs: {
+            image: routedValue,
+            original: deferredValue,
+            malformed: malformedReservedValue
+          }
+        }
+      } satisfies Workflow
+
+      await svc.submitWorkflow({ prompt, clientId: 'renderer-qapp' })
 
       expect(postPromptSpy).toHaveBeenCalledWith({
-        prompt: {
-          '10': {
-            class_type: 'SeedVR2VideoUpscaler',
-            inputs: {
-              image: ['31', 0]
-            }
-          },
-          '31': {
-            class_type: 'LoadImage',
-            inputs: {
-              image: 'input.png'
-            }
-          }
-        },
+        prompt,
         client_id: 'renderer-qapp',
         extra_data: undefined
       })
+      expect(postPromptSpy.mock.calls[0][0].prompt).toBe(prompt)
+      expect(postPromptSpy.mock.calls[0][0].prompt['31'].inputs).toEqual({
+        image: routedValue,
+        original: deferredValue,
+        malformed: malformedReservedValue
+      })
     })
+    it('passes the original workflow unchanged into addTask before lease-time materialization', async () => {
+      const deferredValue = encodeDeferredComfyFileInputValue({
+        fileName: 'clip.mp4',
+        mimeType: 'video/mp4',
+        sizeBytes: 10,
+        filePath: 'C:/cache/clip.mp4'
+      })
+      const malformedReservedValue = 'MAGICPOT_DEFERRED_COMFY_FILE:%not-json'
+      const prompt = {
+        '1': {
+          class_type: 'LoadVideo',
+          inputs: {
+            video: deferredValue,
+            original: deferredValue,
+            malformed: malformedReservedValue
+          }
+        },
+        '2': {
+          class_type: 'Note',
+          inputs: { value: 'history metadata remains durable' }
+        }
+      } satisfies Workflow
+      const svc = new ComfySvcImpl()
+
+      await expect(
+        svc.submitWorkflow({ prompt, clientId: 'renderer-qapp', extra_data: { source: 'test' } })
+      ).resolves.toEqual({ prompt_id: 'task-queued' })
+
+      expect(addTaskMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'comfy_prompt',
+          client_id: 'renderer-qapp',
+          payload: prompt,
+          extra_data: { source: 'test' }
+        })
+      )
+      const calls = addTaskMock.mock.calls as unknown as Array<[{ payload: Workflow }]>
+      const task = calls.at(-1)?.[0]
+      expect(task).toBeDefined()
+      expect(task?.payload).toBe(prompt)
+      expect(task?.payload['1'].inputs).toEqual({
+        video: deferredValue,
+        original: deferredValue,
+        malformed: malformedReservedValue
+      })
+      expect(task?.payload['2']).toEqual({
+        class_type: 'Note',
+        inputs: { value: 'history metadata remains durable' }
+      })
+    })
+
     it('requests ComfyUI memory cleanup when requested by the caller', async () => {
       const svc = new ComfySvcImpl()
       ;(

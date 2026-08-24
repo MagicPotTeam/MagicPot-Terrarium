@@ -628,6 +628,24 @@ export class MagicAgentEventStore {
     return this.getResource(kind, id, { includeDeleted: true })?.revision
   }
 
+  findResourceMutation(
+    kind: ResourceKind,
+    id: string,
+    idempotencyKey: string
+  ): StoredResourceMutation | undefined {
+    this.assertOpen()
+    requireInputString(kind, 'kind')
+    requireInputString(id, 'id')
+    requireInputString(idempotencyKey, 'idempotencyKey')
+    const row = this.adapter.get(
+      'SELECT * FROM resource_mutations WHERE idempotency_key = ?',
+      idempotencyKey
+    )
+    if (!row) return undefined
+    const mutation = readStoredMutation(this.adapter, row)
+    return mutation.resource.kind === kind && mutation.resource.id === id ? mutation : undefined
+  }
+
   listResourceMutations(
     kind: ResourceKind,
     id: string,

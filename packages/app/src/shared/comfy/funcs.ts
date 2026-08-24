@@ -1,4 +1,5 @@
 import { JsonPath, parseJsonPath } from '@shared/utils/jsonPath'
+import { isDeferredComfyInputValue } from './deferredImages'
 import { ObjectInfoMap, FileItem, Workflow, WorkflowInputRef, WorkflowInputValue } from './types'
 
 /**
@@ -29,6 +30,49 @@ export function findFieldOptions(objectInfos: ObjectInfoMap, cls: string, field:
 }
 
 const fileWithMaskPattern = /^(.+)\s+\[(.+)\]$/ // e.g. "clipspace/clipspace-mask-217369.89999961853.png [input]"
+export const MAGICPOT_FILE_ITEM_VALUE_PREFIX = '__magicpot_file_v1__:'
+
+export const isMagicPotFileItemValue = (value: string): boolean =>
+  value.startsWith(MAGICPOT_FILE_ITEM_VALUE_PREFIX)
+
+export const decodeMagicPotFileItemValue = (value: string): FileItem | null => {
+  if (!isMagicPotFileItemValue(value)) return null
+  try {
+    const parsed = JSON.parse(
+      decodeURIComponent(value.slice(MAGICPOT_FILE_ITEM_VALUE_PREFIX.length))
+    ) as Record<string, unknown>
+    const filename = typeof parsed.filename === 'string' ? parsed.filename.trim() : ''
+    if (!filename || filename.includes('\\') || filename.includes('\u0000')) return null
+    const fileItem: FileItem = { filename }
+    for (const key of [
+      'subfolder',
+      'type',
+      'format',
+      'instanceId',
+      'instanceRouteId',
+      'instanceOrigin',
+      'instanceKind'
+    ] as const) {
+      const field = parsed[key]
+      if (typeof field === 'string' && field.trim()) fileItem[key] = field.trim() as never
+    }
+    if (
+      fileItem.instanceKind !== undefined &&
+      !['local', 'remote'].includes(fileItem.instanceKind)
+    ) {
+      return null
+    }
+    if (
+      fileItem.instanceRouteId &&
+      (!fileItem.instanceId || !fileItem.instanceOrigin || !fileItem.instanceKind)
+    ) {
+      return null
+    }
+    return fileItem
+  } catch {
+    return null
+  }
+}
 /**
  * For Load Image node, parse File Item from input value
  * input value would be:
@@ -40,13 +84,21 @@ const fileWithMaskPattern = /^(.+)\s+\[(.+)\]$/ // e.g. "clipspace/clipspace-mas
  *    file item would be { filename: "clipspace-mask-217369.89999961853.png", type: "input", subfolder: "clipspace" }
  */
 export const valueToFileItem = (value: string): FileItem => {
+  if (isMagicPotFileItemValue(value)) {
+    const encoded = decodeMagicPotFileItemValue(value)
+    if (encoded) return encoded
+    throw new Error('Invalid MagicPot file persistence value.')
+  }
+  if (isDeferredComfyInputValue(value)) {
+    throw new Error('Invalid deferred Comfy input value.')
+  }
   const match = value.match(fileWithMaskPattern)
   if (match) {
     const fullPath = match[1]
     const type = match[2]
     const pathParts = fullPath.split('/')
     const filename = pathParts[pathParts.length - 1]
-    const subfolder = pathParts.length > 1 ? pathParts[0] : undefined
+    const subfolder = pathParts.length > 1 ? pathParts.slice(0, -1).join('/') : undefined
 
     return {
       filename,
@@ -62,11 +114,23 @@ export const valueToFileItem = (value: string): FileItem => {
  * @param fileItem
  * @returns
  */
+export const fileItemToComfyInputValue = (fileItem: FileItem): string => {
+  const filename = fileItem.filename ?? ''
+  const fullPath = fileItem.subfolder ? `${fileItem.subfolder}/${filename}` : filename
+  const type = fileItem.type ?? 'input'
+  return fileItem.subfolder || type !== 'input' ? `${fullPath} [${type}]` : fullPath
+}
+
 export const fileItemToValue = (fileItem: FileItem): string => {
-  if (fileItem.subfolder) {
-    return `${fileItem.subfolder}/${fileItem.filename} [input]`
+  if (
+    fileItem.instanceRouteId ||
+    fileItem.instanceId ||
+    fileItem.instanceOrigin ||
+    fileItem.instanceKind
+  ) {
+    return `${MAGICPOT_FILE_ITEM_VALUE_PREFIX}${encodeURIComponent(JSON.stringify(fileItem))}`
   }
-  return fileItem.filename ?? ''
+  return fileItemToComfyInputValue(fileItem)
 }
 
 /**
@@ -239,6 +303,13 @@ export function normalizeExecutableWorkflow(workflow: Workflow): Workflow {
         if (resolvedInputRef) {
           inputs[inputName] = resolvedInputRef
         }
+        continue
+      }
+
+      if (typeof inputValue === 'string' && isMagicPotFileItemValue(inputValue)) {
+        const fileItem = decodeMagicPotFileItemValue(inputValue)
+        if (!fileItem) throw new Error('Invalid MagicPot file persistence value.')
+        inputs[inputName] = fileItemToComfyInputValue(fileItem)
         continue
       }
 

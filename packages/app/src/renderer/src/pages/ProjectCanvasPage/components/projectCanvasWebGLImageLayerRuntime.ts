@@ -4,6 +4,53 @@ export type ProjectCanvasWebGLPriorityQueueEntry = {
   priority: number
 }
 
+export const PROJECT_CANVAS_WEBGL_DEFAULT_RENDER_RESOLUTION_CAP = 1.5
+export const PROJECT_CANVAS_WEBGL_LOW_POWER_RENDER_RESOLUTION_CAP = 1
+export const PROJECT_CANVAS_WEBGL_DEFAULT_ERROR_SAMPLE_INTERVAL = 120
+
+export function getProjectCanvasWebGLRenderResolution(
+  options: {
+    devicePixelRatio?: number
+    lowPower?: boolean
+    resolutionOverride?: number
+  } = {}
+) {
+  const override = options.resolutionOverride
+  if (typeof override === 'number' && Number.isFinite(override) && override > 0) {
+    return override
+  }
+
+  const devicePixelRatio =
+    typeof options.devicePixelRatio === 'number' && Number.isFinite(options.devicePixelRatio)
+      ? options.devicePixelRatio
+      : 1
+  const cap = options.lowPower
+    ? PROJECT_CANVAS_WEBGL_LOW_POWER_RENDER_RESOLUTION_CAP
+    : PROJECT_CANVAS_WEBGL_DEFAULT_RENDER_RESOLUTION_CAP
+  return Math.min(cap, Math.max(1, devicePixelRatio))
+}
+
+export function shouldSampleProjectCanvasWebGLError(
+  renderCount: number,
+  sampleInterval = PROJECT_CANVAS_WEBGL_DEFAULT_ERROR_SAMPLE_INTERVAL
+) {
+  const normalizedInterval =
+    Number.isFinite(sampleInterval) && sampleInterval > 0
+      ? Math.max(1, Math.floor(sampleInterval))
+      : PROJECT_CANVAS_WEBGL_DEFAULT_ERROR_SAMPLE_INTERVAL
+  return renderCount === 1 || renderCount % normalizedInterval === 0
+}
+
+export function buildProjectCanvasWebGLItemLookup<T extends { id: string }>(items: readonly T[]) {
+  const itemById = new Map<string, T>()
+  const itemIds = new Set<string>()
+  for (const item of items) {
+    itemById.set(item.id, item)
+    itemIds.add(item.id)
+  }
+  return { itemById, itemIds }
+}
+
 const getProjectCanvasWebGLQueueInsertIndex = <T extends ProjectCanvasWebGLPriorityQueueEntry>(
   queue: readonly T[],
   priority: number

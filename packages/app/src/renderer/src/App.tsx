@@ -1,5 +1,5 @@
 // packages/app/src/renderer/src/App.tsx
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { HashRouter } from 'react-router-dom'
 import Layout from './components/Layout'
 import CanvasProjectDropBridge from './components/CanvasProjectDropBridge'
@@ -14,8 +14,7 @@ import ManagedComfyProcessBridge from './components/ManagedComfyProcessBridge'
 import MagicAgentApprovalCenter from './components/MagicAgentApprovalCenter'
 import { useComfyEventCallback } from './hooks/useComfyEvent'
 import { handleComfyExecutionActivityEvent } from './utils/comfyExecutionActivity'
-let hasHandledInitialComfyAutoStart = false
-let hasStartedInitialComfyAutoStart = false
+import { useTranslation } from 'react-i18next'
 const appDndManager = getAppDndManager()
 
 type IdleDeadline = {
@@ -139,54 +138,37 @@ function DeferredComfyStartupBridges(): React.JSX.Element | null {
       <ComfyExecutionActivityBridge />
       <ComfyLogBridge />
       <ManagedComfyProcessBridge />
-      <AutoStartLocalComfyUI />
+      <AutoStartEmbeddedComfyUI />
     </>
   )
 }
 
-function shouldAutoStartLocalComfyUIInThisRuntime(): boolean {
-  const configuredValue = import.meta.env.VITE_MAGICPOT_AUTO_START_COMFYUI
-  if (configuredValue === 'true') return true
-  if (configuredValue === 'false') return false
-  return !import.meta.env.DEV
-}
-
-function AutoStartLocalComfyUI(): null {
-  const { isReady, config, configUtils } = useConfig()
+function AutoStartEmbeddedComfyUI(): null {
+  const { t } = useTranslation()
+  const { isReady, buildEnv, configUtils } = useConfig()
   const { state, setPid, setIsRunning, setIsManaged, addOutput } = useComfyProcess()
-  const comfyCommandAvailable = configUtils.isComfyUICommandAvailable()
+  const attemptedRef = useRef(false)
 
   useEffect(() => {
-    if (!isReady || hasHandledInitialComfyAutoStart) {
+    if (!isReady || attemptedRef.current) return
+    const bundledRuntimeAvailable =
+      buildEnv.env.buildMode === 'embedded' &&
+      Boolean(buildEnv.embeddedDefaults.comfyuiDir.trim()) &&
+      Boolean(buildEnv.embeddedDefaults.pythonCmd.trim()) &&
+      buildEnv.embeddedDefaults.comfyuiArgs.length > 0
+    if (!bundledRuntimeAvailable || !configUtils.isComfyUICommandAvailable() || state.isRunning) {
+      attemptedRef.current = true
       return
     }
 
-    if (
-      config.use_remote_comfyui ||
-      !comfyCommandAvailable ||
-      state.isRunning ||
-      !shouldAutoStartLocalComfyUIInThisRuntime()
-    ) {
-      hasHandledInitialComfyAutoStart = true
-      return
-    }
-
-    if (hasStartedInitialComfyAutoStart) {
-      return
-    }
-
-    hasHandledInitialComfyAutoStart = true
-    hasStartedInitialComfyAutoStart = true
-
+    attemptedRef.current = true
     let cancelled = false
 
-    const startLocalComfyUI = async () => {
+    const startEmbeddedComfyUI = async () => {
       let startedProcessStream = false
       try {
         const { pid } = await api().svcHyper.comfyPortDetect({})
-        if (cancelled) {
-          return
-        }
+        if (cancelled) return
         if (pid !== 0) {
           setPid(pid)
           setIsManaged(false)
@@ -198,20 +180,13 @@ function AutoStartLocalComfyUI(): null {
         startedProcessStream = true
         setIsManaged(true)
         setIsRunning(true)
-        addOutput('应用启动，自动启动 ComfyUI...')
-
+        addOutput(t('app.embedded_comfyui_starting'))
         await api().svcHyper.startComfyUI(
           {},
           {
             onData: (data) => {
-              if (cancelled) {
-                return
-              }
-              if (data.pid !== 0) {
-                setPid(data.pid)
-              }
-
-              // ComfyUI 启动完成后通知其他组件刷新
+              if (cancelled) return
+              if (data.pid !== 0) setPid(data.pid)
               if (data.logLine?.includes('To see the GUI go to')) {
                 window.dispatchEvent(new CustomEvent('comfyui:ready'))
               }
@@ -219,35 +194,32 @@ function AutoStartLocalComfyUI(): null {
           }
         )
       } catch (error: unknown) {
-        if (cancelled) {
-          return
-        }
-        if (isServerStreamingError(error)) {
-          addOutput('ERROR> ' + (error as Error).message)
-        } else {
-          addOutput('ERROR> ' + String(error))
-        }
+        if (cancelled) return
+        addOutput(
+          'ERROR> ' + (isServerStreamingError(error) ? (error as Error).message : String(error))
+        )
       } finally {
-        if (!cancelled && startedProcessStream) {
-          setIsRunning(false)
-        }
+        if (!cancelled && startedProcessStream) setIsRunning(false)
       }
     }
 
-    void startLocalComfyUI()
-
+    void startEmbeddedComfyUI()
     return () => {
       cancelled = true
     }
   }, [
+    addOutput,
+    buildEnv.embeddedDefaults.comfyuiArgs,
+    buildEnv.embeddedDefaults.comfyuiDir,
+    buildEnv.embeddedDefaults.pythonCmd,
+    buildEnv.env.buildMode,
+    configUtils,
     isReady,
-    config.use_remote_comfyui,
-    comfyCommandAvailable,
-    state.isRunning,
-    setPid,
-    setIsRunning,
     setIsManaged,
-    addOutput
+    setIsRunning,
+    setPid,
+    state.isRunning,
+    t
   ])
 
   return null
