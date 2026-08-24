@@ -206,18 +206,5 @@ export type QAppCfg = {
      * 批量处理时会自动替换这个 slot 的值为待处理的图片
      */
     imageInputSlot: JsonPath
-    /**
-     * 批量处理专用工作流文件名（可选）
-     * 如果指定，批量处理时会使用这个工作流而不是默认工作流
-     * 这对于需要编译时间的工作流很有用（如 TorchCompile）
-     * 文件名相对于当前快应用所在目录
-     */
-    batchWorkflow?: string
-    /**
-     * 批量工作流中图片输入的 JSON Path（可选）
-     * 如果 batchWorkflow 使用了不同的节点 ID，需要指定这个字段
-     * 如果未指定，将使用 imageInputSlot
-     */
-    batchImageInputSlot?: JsonPath
   }
 }

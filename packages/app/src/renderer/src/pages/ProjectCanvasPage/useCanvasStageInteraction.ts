@@ -271,9 +271,8 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
         y: stagePosRef.current.y + dy
       }
       syncCanvasRuntimeViewport()
-      applyViewportChange(stagePosRef.current, stageScaleRef.current)
     },
-    [applyViewportChange, lastPanPosRef, stagePosRef, stageScaleRef, syncCanvasRuntimeViewport]
+    [lastPanPosRef, stagePosRef, syncCanvasRuntimeViewport]
   )
 
   const scheduleViewportCommit = useCallback(() => {
@@ -285,13 +284,12 @@ export function useCanvasStageInteraction(options: UseCanvasStageInteractionOpti
       viewportCommitFrameRef.current = null
       const pos = stagePosRef.current
       const scale = stageScaleRef.current
-      syncCanvasRuntimeViewport()
       // Drive viewport-layer DOM transforms imperatively – zero React setState on the hot path.
       // React state (setStagePos / setStageScale) is synced only once when interaction ends
       // via flushPendingViewportCommit, eliminating per-frame reconciliation overhead.
       applyViewportChange(pos, scale)
     })
-  }, [applyViewportChange, stagePosRef, stageScaleRef, syncCanvasRuntimeViewport])
+  }, [applyViewportChange, stagePosRef, stageScaleRef])
 
   const applyWheelZoom = useCallback(
     (pointer: { x: number; y: number }, deltaY: number) => {

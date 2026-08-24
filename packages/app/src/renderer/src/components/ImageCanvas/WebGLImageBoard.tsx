@@ -48,10 +48,16 @@ function getContentBounds(items: WebGLImageBoardItem[]): ContentBounds | null {
     return null
   }
 
-  const minX = Math.min(...items.map((item) => item.x))
-  const minY = Math.min(...items.map((item) => item.y))
-  const maxX = Math.max(...items.map((item) => item.x + item.width))
-  const maxY = Math.max(...items.map((item) => item.y + item.height))
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  for (const item of items) {
+    minX = Math.min(minX, item.x)
+    minY = Math.min(minY, item.y)
+    maxX = Math.max(maxX, item.x + item.width)
+    maxY = Math.max(maxY, item.y + item.height)
+  }
   const width = maxX - minX
   const height = maxY - minY
 

@@ -1,6 +1,7 @@
 // shared/config/config.ts
 
 import type { JsonValue } from '@shared/utils/utilTypes'
+import type { ComfyBatchProfile } from '@shared/api/svcComfyBatch'
 import {
   DEFAULT_DUPLICATE_CHECK_SETTINGS,
   type DuplicateCheckSettings
@@ -333,6 +334,7 @@ type ConfigShape = {
   config_version: '>1.0.53'
   client_id: string
   use_remote_comfyui: boolean
+  comfy_batch_profiles?: ComfyBatchProfile[]
 
   local_comfyui_config: {
     python_cmd: string
@@ -490,6 +492,7 @@ export const DEFAULT_CONFIG: Config = {
   config_version: '>1.0.53',
   client_id: crypto.randomUUID(),
   use_remote_comfyui: false,
+  comfy_batch_profiles: [],
   local_comfyui_config: {
     python_cmd: '',
     comfyui_dir: '',

@@ -723,7 +723,7 @@ describe('ProjectCanvasImageInteractionOverlay', () => {
     expect(onDragEnd).toHaveBeenCalledWith('image-1', 140, 170, expect.any(Object))
   })
 
-  it('emits drag previews immediately so the WebGL image body follows the frame', () => {
+  it('batches drag previews once per frame and flushes the latest transform on pointerup', () => {
     const rafCallbacks = new Map<number, FrameRequestCallback>()
     let rafId = 0
     const requestAnimationFrameSpy = vi
@@ -785,9 +785,18 @@ describe('ProjectCanvasImageInteractionOverlay', () => {
       fireEvent.pointerMove(window, { pointerId: 15, clientX: 150, clientY: 190 })
       fireEvent.pointerMove(window, { pointerId: 15, clientX: 180, clientY: 210 })
 
-      expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(baselineRafCallCount)
+      expect((overlay as HTMLElement).style.transform).toContain('translate3d(170px, 190px, 0)')
+      expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(baselineRafCallCount + 1)
+      expect(rafCallbacks.size).toBe(1)
+      expect(onPreviewChange).not.toHaveBeenCalled()
+
+      const firstFrame = rafCallbacks.entries().next().value
+      expect(firstFrame).toBeDefined()
+      rafCallbacks.delete(firstFrame![0])
+      firstFrame![1](16)
+
       expect(rafCallbacks.size).toBe(0)
-      expect(onPreviewChange).toHaveBeenCalledTimes(2)
+      expect(onPreviewChange).toHaveBeenCalledTimes(1)
       expect(onPreviewChange).toHaveBeenLastCalledWith('image-1', {
         x: 170,
         y: 190,
@@ -798,23 +807,29 @@ describe('ProjectCanvasImageInteractionOverlay', () => {
         rotation: 0
       })
 
-      fireEvent.pointerUp(window, { pointerId: 15, clientX: 180, clientY: 210 })
+      fireEvent.pointerMove(window, { pointerId: 15, clientX: 200, clientY: 230 })
+      fireEvent.pointerMove(window, { pointerId: 15, clientX: 220, clientY: 250 })
 
-      expect(cancelAnimationFrameSpy.mock.calls.length).toBeGreaterThanOrEqual(
-        baselineCancelRafCallCount
-      )
+      expect((overlay as HTMLElement).style.transform).toContain('translate3d(210px, 230px, 0)')
+      expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(baselineRafCallCount + 2)
+      expect(rafCallbacks.size).toBe(1)
+      expect(onPreviewChange).toHaveBeenCalledTimes(1)
+
+      fireEvent.pointerUp(window, { pointerId: 15, clientX: 220, clientY: 250 })
+
+      expect(cancelAnimationFrameSpy.mock.calls.length).toBeGreaterThan(baselineCancelRafCallCount)
       expect(rafCallbacks.size).toBe(0)
       expect(onPreviewChange).toHaveBeenCalledTimes(2)
       expect(onPreviewChange).toHaveBeenLastCalledWith('image-1', {
-        x: 170,
-        y: 190,
+        x: 210,
+        y: 230,
         width: 200,
         height: 120,
         scaleX: 1,
         scaleY: 1,
         rotation: 0
       })
-      expect(onDragEnd).toHaveBeenCalledWith('image-1', 170, 190, expect.any(Object))
+      expect(onDragEnd).toHaveBeenCalledWith('image-1', 210, 230, expect.any(Object))
       expect(syncListener).not.toHaveBeenCalled()
     } finally {
       window.removeEventListener('canvas-sync-image-1', syncListener)

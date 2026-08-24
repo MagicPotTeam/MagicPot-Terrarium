@@ -19,6 +19,10 @@ import {
 } from '../canvasSpatialIndex'
 import { getCanvasItemBounds } from '../projectCanvasPageShared'
 import { useCanvasSpatialIndexLifecycle } from '../useCanvasSpatialIndexLifecycle'
+import {
+  isProjectCanvasAdaptiveQualityEnabled,
+  resolveProjectCanvasRenderDpr
+} from '../canvasRenderQuality'
 
 export type ProjectCanvasCanvas2DFallbackLayerHandle = {
   syncItemPreview: (itemId: string, preview: ProjectCanvasImagePreview | null) => void
@@ -377,6 +381,7 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
       visibilityIndex: currentVisibilityIndex,
       selectedIds: currentSelectedIds,
       stageSize: currentStageSize,
+      isPerformanceThrottled: currentIsPerformanceThrottled,
       maxDevicePixelRatio: currentMaxDpr,
       maxBackingPixels: currentMaxBackingPixels,
       overscanPx: currentOverscanPx,
@@ -389,7 +394,14 @@ const ProjectCanvasCanvas2DFallbackLayer = forwardRef<
     }
     const cssWidth = Math.max(1, Math.round(cssSize.width || 1))
     const cssHeight = Math.max(1, Math.round(cssSize.height || 1))
-    const dpr = getSafeDevicePixelRatio(currentMaxDpr, currentMaxBackingPixels, {
+    const adaptiveQualityActive =
+      isProjectCanvasAdaptiveQualityEnabled() &&
+      (currentIsPerformanceThrottled || viewportInteractingRef.current)
+    const qualityMaxDpr = resolveProjectCanvasRenderDpr(
+      currentMaxDpr,
+      adaptiveQualityActive ? 'interactive' : 'full'
+    )
+    const dpr = getSafeDevicePixelRatio(qualityMaxDpr, currentMaxBackingPixels, {
       width: cssWidth,
       height: cssHeight
     })
