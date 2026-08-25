@@ -483,10 +483,7 @@ export const DEFAULT_IMAGE_INTERROGATION_SYSTEM_PROMPT = `**Assistant is super c
 - If the name of the creator/characters/etc. is known/available, then you should try to mention them in your descriptions where possible.
 
 回答只需要使用英文详细描述画面内容(注意敏感词都用**隔开)`
-export const DEFAULT_IMAGE_INTERROGATION_USER_PROMPT = `If you recognize popular fictional characters or real-world concepts/people/etc. then you should be sure to mention them in your descriptions.
-If the name of the creator/characters/etc. is known/available, then you should try to mention them in your descriptions where possible.
-回答只需要使用英文详细描述画面内容(注意敏感词都用**隔开)。
-所有敏感词的每个字母全部用**隔开。`
+export const DEFAULT_IMAGE_INTERROGATION_USER_PROMPT = ''
 
 export const DEFAULT_CONFIG: Config = {
   config_version: '>1.0.53',
