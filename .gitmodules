@@ -41,3 +41,9 @@
 [submodule "vendor/comfyui/comfyui_data/custom_nodes/z-tipo-extension"]
 	path = vendor/comfyui/comfyui_data/custom_nodes/z-tipo-extension
 	url = https://github.com/KohakuBlueleaf/z-tipo-extension.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-RGB-White-Matte"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-RGB-White-Matte
+	url = https://github.com/172908710/ComfyUI-RGB-White-Matte.git
+[submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-RMBG"]
+	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-RMBG
+	url = https://github.com/1038lab/ComfyUI-RMBG.git
