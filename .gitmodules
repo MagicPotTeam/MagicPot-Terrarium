@@ -33,7 +33,8 @@
 	url = https://github.com/Fannovel16/comfyui_controlnet_aux.git
 [submodule "vendor/comfyui/comfyui_data/custom_nodes/comfyui_LLM_party"]
 	path = vendor/comfyui/comfyui_data/custom_nodes/comfyui_LLM_party
-	url = https://github.com/heshengtao/comfyui_LLM_party.git
+	url = https://github.com/172908710/comfyui_LLM_party.git
+	branch = fix/llm-api-hard-fail
 [submodule "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI_smZNodes"]
 	path = vendor/comfyui/comfyui_data/custom_nodes/ComfyUI_smZNodes
 	url = https://github.com/shiimizu/ComfyUI_smZNodes.git
