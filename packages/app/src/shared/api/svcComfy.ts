@@ -20,15 +20,23 @@ export type CustomNodeInfo = {
 }
 export type GetInstalledResp = Record<string, CustomNodeInfo>
 
-export type GetObjectInfoReq = {}
+export type GetObjectInfoReq = {
+  /** Prefer an instance that can execute this workflow when using the pool. */
+  workflow?: Workflow
+}
 export type GetObjectInfoResp = ObjectInfoMap
 
 export type GetQueueReq = {}
-export type GetQueueResp = ComfyQueueResp
+/** Internal task queue state plus the most recent terminal errors. */
+export type GetQueueResp = ComfyQueueResp & {
+  queue_error?: QueueItem[]
+}
 
 export type PostPromptReq = {
   prompt: Workflow
   client_id: string
+  /** Optional stable id used to recover an ambiguous network submission. */
+  prompt_id?: string
   /** Optional: request a ComfyUI cache/model cleanup once this prompt has completed. */
   cleanupAfterRun?: boolean
   extra_data?: JsonDict

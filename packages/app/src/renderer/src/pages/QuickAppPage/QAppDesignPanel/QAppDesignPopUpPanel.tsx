@@ -24,6 +24,7 @@ import DsnRequiredModels from './qAppDesignInputs/DsnRequiredModels'
 import { ButtonAddAutoItem } from './ButtonAddAutoItem'
 import { ButtonAddInputItem } from './ButtonAddInputItem'
 import DsnOutput from './qAppDesignInputs/DsnOutput'
+import DsnBatchProcess from './qAppDesignInputs/DsnBatchProcess'
 import { qAppDesignAutoMap, qAppDesignInputMap, qAppDesignMetaMap } from './qAppDesignInputs'
 import { QAppDesignComponent } from './qAppDesignInputs/types'
 import {
@@ -115,6 +116,11 @@ export const QAppDesignPopUpPanel = ({
   setOutputNodeIds,
   isSpecifyOutput,
   setIsSpecifyOutput,
+  isBatchProcessEnabled,
+  setIsBatchProcessEnabled,
+  batchImageInputSlot,
+  batchImageInputSlots,
+  setBatchImageInputSlot,
   handleSetAutoItemValue,
   handleDeleteAutoItem,
   handleSetInputItemValue,
@@ -137,6 +143,13 @@ export const QAppDesignPopUpPanel = ({
     autoItems: autoItems.map((i) => ({ component: i.component, value: i.value })),
     inputItems: inputItems.map((i) => ({ component: i.component, value: i.value })),
     outputNodeIds: isSpecifyOutput ? outputNodeIds : undefined,
+    batchProcess:
+      batchImageInputSlot || isBatchProcessEnabled
+        ? {
+            enabled: isBatchProcessEnabled,
+            ...(batchImageInputSlot ? { imageInputSlot: batchImageInputSlot } : {})
+          }
+        : undefined,
     selectedCategory
   })
 
@@ -370,8 +383,7 @@ export const QAppDesignPopUpPanel = ({
                                 buildEnv={buildEnv}
                                 value={
                                   designItem.value as QAppCfgAllComponentTypeMap[
-                                    | 'Section'
-                                    | 'Description']
+                                    'Section' | 'Description']
                                 }
                                 setValue={designItem.setValue}
                                 onDelete={designItem.onDelete}
@@ -457,6 +469,15 @@ export const QAppDesignPopUpPanel = ({
                   setValue={setOutputNodeIds}
                   enabled={isSpecifyOutput}
                   setEnabled={setIsSpecifyOutput}
+                />
+                <Typography variant="h6">{t('qapp.design.batch_process_title')}</Typography>
+                <DsnBatchProcess
+                  enabled={isBatchProcessEnabled}
+                  setEnabled={setIsBatchProcessEnabled}
+                  imageInputSlot={batchImageInputSlot}
+                  imageInputSlots={batchImageInputSlots}
+                  setImageInputSlot={setBatchImageInputSlot}
+                  outputNodeIds={isSpecifyOutput ? outputNodeIds : []}
                 />
               </Stack>
             </DragDropContext>

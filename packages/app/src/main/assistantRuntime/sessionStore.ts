@@ -1675,32 +1675,32 @@ export class AssistantSessionStore {
     }))
   }
 
+  private async getSessions(route?: AssistantRoute): Promise<AssistantSessionRecord[]> {
+    if (!route) return this.listSessions()
+    const session = await this.getSession(route)
+    return session ? [session] : []
+  }
+
   async listEvents(limit = 100, route?: AssistantRoute): Promise<AssistantRunEvent[]> {
-    const sessions = route
-      ? [await this.getSession(route)].filter(Boolean)
-      : await this.listSessions()
-    return (sessions as AssistantSessionRecord[])
+    const sessions = await this.getSessions(route)
+    return sessions
       .flatMap((session) => session.eventLog)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, Math.max(1, limit))
   }
 
   async listArtifacts(limit = 100, route?: AssistantRoute): Promise<AssistantArtifactRef[]> {
-    const sessions = route
-      ? [await this.getSession(route)].filter(Boolean)
-      : await this.listSessions()
-    return (sessions as AssistantSessionRecord[])
+    const sessions = await this.getSessions(route)
+    return sessions
       .flatMap((session) => session.artifacts)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, Math.max(1, limit))
   }
 
   async getRun(runId: string, route?: AssistantRoute): Promise<AssistantRunRecord | null> {
-    const sessions = route
-      ? [await this.getSession(route)].filter(Boolean)
-      : await this.listSessions()
+    const sessions = await this.getSessions(route)
 
-    for (const session of sessions as AssistantSessionRecord[]) {
+    for (const session of sessions) {
       const run = session.runs.find((item) => item.runId === runId)
       if (run) return run
     }
@@ -1709,10 +1709,8 @@ export class AssistantSessionStore {
   }
 
   async listRuns(limit = 100, route?: AssistantRoute): Promise<AssistantRunRecord[]> {
-    const sessions = route
-      ? [await this.getSession(route)].filter(Boolean)
-      : await this.listSessions()
-    return (sessions as AssistantSessionRecord[])
+    const sessions = await this.getSessions(route)
+    return sessions
       .flatMap((session) => session.runs)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, Math.max(1, limit))
@@ -1742,11 +1740,9 @@ export class AssistantSessionStore {
   }
 
   async getRunTrace(runId: string, route?: AssistantRoute): Promise<AssistantRunTrace | null> {
-    const sessions = route
-      ? [await this.getSession(route)].filter(Boolean)
-      : await this.listSessions()
+    const sessions = await this.getSessions(route)
 
-    for (const session of sessions as AssistantSessionRecord[]) {
+    for (const session of sessions) {
       const run = session.runs.find((item) => item.runId === runId)
       if (!run) continue
 
@@ -1922,11 +1918,8 @@ export class AssistantSessionStore {
       return null
     }
 
-    const sessions = options?.route
-      ? [await this.getSession(options.route)].filter(Boolean)
-      : await this.listSessions()
-    const typedSessions = sessions as AssistantSessionRecord[]
-    const allRuns = typedSessions.flatMap((session) => session.runs)
+    const sessions = await this.getSessions(options?.route)
+    const allRuns = sessions.flatMap((session) => session.runs)
     const runIds = new Set(workflowRecord.runIds)
     const workflowRuns = sortWorkflowRuns(allRuns.filter((run) => runIds.has(run.runId)))
 
@@ -1954,11 +1947,11 @@ export class AssistantSessionStore {
         : [workflowRuns[0], ...workflowRuns.slice(-(Math.max(2, runLimit) - 1))].filter(
             (run, index, array) => array.findIndex((item) => item.runId === run.runId) === index
           )
-    const recentEvents = typedSessions
+    const recentEvents = sessions
       .flatMap((session) => session.eventLog.filter((event) => runIds.has(event.runId)))
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, Math.max(1, eventLimit))
-    const recentArtifacts = typedSessions
+    const recentArtifacts = sessions
       .flatMap((session) => session.artifacts.filter((artifact) => runIds.has(artifact.runId)))
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, Math.max(1, artifactLimit))
@@ -1978,12 +1971,10 @@ export class AssistantSessionStore {
     route?: AssistantRoute
     runId?: string
   }): Promise<AssistantAuditTimelineEntry[]> {
-    const sessions = options?.route
-      ? [await this.getSession(options.route)].filter(Boolean)
-      : await this.listSessions()
+    const sessions = await this.getSessions(options?.route)
     const runId = String(options?.runId || '').trim()
 
-    const timeline = (sessions as AssistantSessionRecord[]).flatMap((session) => {
+    const timeline = sessions.flatMap((session) => {
       const runStatusById = new Map(session.runs.map((item) => [item.runId, item.status]))
       const runById = new Map(session.runs.map((item) => [item.runId, item]))
 
@@ -2066,13 +2057,10 @@ export class AssistantSessionStore {
     limit?: number
     route?: AssistantRoute
   }): Promise<AssistantOpsStatus> {
-    const sessions = options?.route
-      ? [await this.getSession(options.route)].filter(Boolean)
-      : await this.listSessions()
-    const typedSessions = sessions as AssistantSessionRecord[]
-    const runs = typedSessions.flatMap((session) => session.runs)
-    const events = typedSessions.flatMap((session) => session.eventLog)
-    const artifacts = typedSessions.flatMap((session) => session.artifacts)
+    const sessions = await this.getSessions(options?.route)
+    const runs = sessions.flatMap((session) => session.runs)
+    const events = sessions.flatMap((session) => session.eventLog)
+    const artifacts = sessions.flatMap((session) => session.artifacts)
     const queueDelays = runs
       .map((run) => computeQueueDelayMs(run))
       .filter((value): value is number => value !== undefined)
@@ -2081,7 +2069,7 @@ export class AssistantSessionStore {
       .filter((value): value is number => value !== undefined)
 
     const channels = [
-      ...typedSessions
+      ...sessions
         .reduce((map, session) => {
           const existing =
             map.get(session.route.channel) ||
@@ -2158,7 +2146,7 @@ export class AssistantSessionStore {
     return {
       generatedAt: Date.now(),
       ...(options?.route ? { route: normalizeAssistantRoute(options.route) } : {}),
-      sessionCount: typedSessions.length,
+      sessionCount: sessions.length,
       runCount,
       eventCount: events.length,
       artifactCount: artifacts.length,

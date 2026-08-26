@@ -20,7 +20,7 @@ export const GoToConnectComfyAPIButton = ({ afterClick }: GoToConnectComfyAPIBut
       color="inherit"
       size="small"
       onClick={() => {
-        if (configUtils.isComfyUICommandAvailable()) {
+        if (configUtils.isManagedComfyUICommandAvailable()) {
           dispatch(setBottomPanelTab('comfyui'))
         } else {
           navigate('/settings', { state: { tab: 'environment' } })

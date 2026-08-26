@@ -103,7 +103,7 @@ export type Workflow = {
 export type FileItem = {
   filename?: string
   subfolder?: string
-  type?: string
+  type?: 'input' | 'output' | 'temp' | string
   format?: string
 }
 

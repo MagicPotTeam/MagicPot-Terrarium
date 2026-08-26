@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, copyFileSync, rmSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, copyFileSync, rmSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -11,6 +11,11 @@ const crateDir = join(
 )
 const outDir = join(repoRoot, 'packages/app/src/renderer/public/wasm/canvas_spatial_index')
 const pkgDir = join(crateDir, 'pkg')
+const generatedFileNames = [
+  'canvas_spatial_index.js',
+  'canvas_spatial_index_bg.wasm',
+  'canvas_spatial_index.d.ts'
+]
 
 const run = (command, args, options = {}) => {
   const result = spawnSync(command, args, {
@@ -44,15 +49,16 @@ run(
   { cwd: crateDir }
 )
 
+rmSync(outDir, { recursive: true, force: true })
 mkdirSync(outDir, { recursive: true })
-for (const fileName of readdirSync(pkgDir)) {
-  if (
-    fileName === 'canvas_spatial_index.js' ||
-    fileName === 'canvas_spatial_index_bg.wasm' ||
-    fileName === 'canvas_spatial_index.d.ts'
-  ) {
-    copyFileSync(join(pkgDir, fileName), join(outDir, fileName))
+for (const fileName of generatedFileNames) {
+  const sourcePath = join(pkgDir, fileName)
+  if (!existsSync(sourcePath)) {
+    console.error(`[canvas-spatial-index-wasm] expected generated file not found: ${sourcePath}`)
+    process.exit(1)
   }
+
+  copyFileSync(sourcePath, join(outDir, fileName))
 }
 
 console.log(`[canvas-spatial-index-wasm] wrote ${outDir}`)

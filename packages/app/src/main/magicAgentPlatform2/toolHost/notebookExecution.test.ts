@@ -185,14 +185,22 @@ function controlCall(
   }
 }
 
+function createHost(
+  t: ReturnType<typeof setup>,
+  options: Pick<ConstructorParameters<typeof NotebookExecutionCoordinator>[2], 'auditSink'> = {}
+) {
+  return new NotebookExecutionCoordinator(t.auth, t.boundary, {
+    workspaceRoot: t.root,
+    provenance,
+    ...options
+  })
+}
+
 describe('NotebookExecutionCoordinator', () => {
   it('durably replays active and no-op interrupt receipts', async () => {
     const t = setup()
     const stop = vi.spyOn(t.boundary, 'stop')
-    const host = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-      workspaceRoot: t.root,
-      provenance
-    })
+    const host = createHost(t)
     const started = await executeCall(t, host)
     const active = controlCall(
       t,
@@ -209,20 +217,14 @@ describe('NotebookExecutionCoordinator', () => {
     const noopReceipt = await host.interrupt(noop.input)
     expect(noopReceipt.state).toBe('completed-not-applied')
     expect((await host.interrupt(noop.input)).executionId).toBe(noopReceipt.executionId)
-    const recovered = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-      workspaceRoot: t.root,
-      provenance
-    })
+    const recovered = createHost(t)
     expect((await recovered.interrupt(noop.input)).executionId).toBe(noopReceipt.executionId)
     expect(stop).toHaveBeenCalledTimes(1)
   })
 
   it('invalidates on restart, replays its generation, rejects policy tampering, and owns process stop', async () => {
     const t = setup()
-    const host = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-      workspaceRoot: t.root,
-      provenance
-    })
+    const host = createHost(t)
     await executeCall(t, host)
     const restart = controlCall(t, host, 'notebook.restart', 'restart-once')
     const receipt = await host.restart(restart.input)
@@ -235,10 +237,7 @@ describe('NotebookExecutionCoordinator', () => {
     ).rejects.toThrow('Policy request does not match')
 
     const owned = setup()
-    const ownedHost = new NotebookExecutionCoordinator(owned.auth, owned.boundary, {
-      workspaceRoot: owned.root,
-      provenance
-    })
+    const ownedHost = createHost(owned)
     const started = await executeCall(owned, ownedHost)
     const wrong = controlCall(owned, ownedHost, 'notebook.interrupt', 'wrong', started.executionId)
     await expect(ownedHost.interrupt({ ...wrong.input, routeKey: 'other' })).rejects.toThrow()
@@ -262,10 +261,7 @@ describe('NotebookExecutionCoordinator', () => {
       })}\n`
     )
     const before = readFileSync(t.file)
-    const host = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-      workspaceRoot: t.root,
-      provenance
-    })
+    const host = createHost(t)
     const started = await executeCall(t, host)
     t.complete()
     expect(
@@ -303,10 +299,7 @@ describe('NotebookExecutionCoordinator', () => {
         ]
       })}\n`
     )
-    const host = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-      workspaceRoot: t.root,
-      provenance
-    })
+    const host = createHost(t)
     const started = await executeCall(t, host)
     t.complete()
     expect(
@@ -322,10 +315,7 @@ describe('NotebookExecutionCoordinator', () => {
     const failed = setup(
       `${JSON.stringify({ protocol: 'magicpot-notebook-result.v1', status: 'error', cells: [], error: secret })}\n`
     )
-    const failedHost = new NotebookExecutionCoordinator(failed.auth, failed.boundary, {
-      workspaceRoot: failed.root,
-      provenance
-    })
+    const failedHost = createHost(failed)
     const failedStarted = await executeCall(failed, failedHost)
     failed.complete()
     const status = failedHost.status({
@@ -340,10 +330,7 @@ describe('NotebookExecutionCoordinator', () => {
 
   it('orders cells, shares globals within one invocation, and atomically applies final expression output', async () => {
     const t = setup()
-    const host = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-      workspaceRoot: t.root,
-      provenance
-    })
+    const host = createHost(t)
     const expected = sha(readFileSync(t.file))
     const request = host.createPolicyRequest({
       target: 'notebook.execute-all',
@@ -380,10 +367,7 @@ describe('NotebookExecutionCoordinator', () => {
   })
   it('is idempotent and rejects concurrent execution', async () => {
     const t = setup()
-    const host = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-      workspaceRoot: t.root,
-      provenance
-    })
+    const host = createHost(t)
     const expected = sha(readFileSync(t.file))
     const request = host.createPolicyRequest({
       target: 'notebook.execute-all',
@@ -413,10 +397,7 @@ describe('NotebookExecutionCoordinator', () => {
   it('does not commit partial outputs on protocol error and reconciles crashes without rerun', async () => {
     const t = setup('{bad\n')
     const before = readFileSync(t.file)
-    const host = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-      workspaceRoot: t.root,
-      provenance
-    })
+    const host = createHost(t)
     const expected = sha(before)
     const request = host.createPolicyRequest({
       target: 'notebook.execute-all',
@@ -447,10 +428,7 @@ describe('NotebookExecutionCoordinator', () => {
       }).state
     ).toBe('failed')
     expect(readFileSync(t.file)).toEqual(before)
-    const recovered = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-      workspaceRoot: t.root,
-      provenance
-    })
+    const recovered = createHost(t)
     expect(
       recovered.status({
         routeKey: 'r',
@@ -484,11 +462,7 @@ describe('NotebookExecutionCoordinator', () => {
     const databasePath = path.join(t.root, 'events.sqlite')
     const store = new MagicAgentEventStore(databasePath)
     stores.push(store)
-    const host = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-      workspaceRoot: t.root,
-      provenance,
-      auditSink: store
-    })
+    const host = createHost(t, { auditSink: store })
     const expectedSha256 = sha(readFileSync(t.file))
     const request = host.createPolicyRequest({
       target: 'notebook.execute-all',
@@ -556,10 +530,7 @@ describe('NotebookExecutionCoordinator', () => {
         truncateSync(artifact, 16 * 1024 * 1024 + 1)
       }
       const before = readFileSync(t.file)
-      const host = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-        workspaceRoot: t.root,
-        provenance
-      })
+      const host = createHost(t)
       const expectedSha256 = sha(before)
       const request = host.createPolicyRequest({
         target: 'notebook.execute-all',
@@ -601,10 +572,7 @@ describe('NotebookExecutionCoordinator', () => {
 
   it('marks successful results completed-not-applied after stale CAS', async () => {
     const t = setup()
-    const host = new NotebookExecutionCoordinator(t.auth, t.boundary, {
-      workspaceRoot: t.root,
-      provenance
-    })
+    const host = createHost(t)
     const expected = sha(readFileSync(t.file))
     const request = host.createPolicyRequest({
       target: 'notebook.execute-all',

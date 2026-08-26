@@ -55,10 +55,12 @@ import {
   useQAppContext
 } from '../pages/QuickAppPage/components/QAppContext'
 import { useQAppRunner as useSharedQAppRunner } from '../pages/QuickAppPage/hooks/useQAppRunner'
-import { ResultItem } from '@shared/qApp/resultTypes'
-import { transformResults } from '../pages/QuickAppPage/ResultList/resultTransformers'
-import { dispatchQAppResultsToCanvas } from '../pages/QuickAppPage/utils/qAppCanvasDispatch'
-import { normalizeQAppErrorMessage } from '../pages/QuickAppPage/utils/qAppErrorMessage'
+import { normalizeQAppBatchConfig } from '@shared/qApp/batchConfig'
+import {
+  openComfyBatchCenter,
+  toggleComfyBatchCenter,
+  useComfyBatchJobs
+} from '../pages/QuickAppPage/QAppExecutePanel/comfyBatchJobState'
 import { buildHy3dProfileId } from '../pages/ChatPage/chatPageShared'
 import { buildAssistantMessageFromResult } from '../pages/ChatPage/chatMessageUtils'
 import { requestChatCompletion } from '../pages/ChatPage/chatRequestUtils'
@@ -66,8 +68,6 @@ import {
   persistCurrentQAppKey,
   readCurrentQAppKey
 } from '../pages/QuickAppPage/utils/qAppSelectionStorage'
-import { buildQAppSubmitWorkflowRequest } from '../pages/QuickAppPage/utils/qAppSubmitWorkflow'
-import { resolveQAppSessionKey } from '../pages/QuickAppPage/utils/qAppSessionIdentity'
 import {
   getQueueItemDisplayLabel,
   getQueueItemProgress,
@@ -108,41 +108,14 @@ import { isBuiltinVideoGenerationQApp } from '../pages/QuickAppPage/videoGenerat
 
 const QAppMenu = lazy(() => import('../pages/QuickAppPage/components/QAppMenu'))
 const QAppPanel = lazy(() => import('../pages/QuickAppPage/QAppExecutePanel/QAppInputPanel'))
+const BatchProcessButton = lazy(
+  () => import('../pages/QuickAppPage/QAppExecutePanel/BatchProcessButton')
+)
 const VideoGenerationWorkspace = lazy(
   () => import('../pages/QuickAppPage/videoGeneration/VideoGenerationWorkspace')
 )
 const ModelPage = lazy(() => import('../pages/FileBrowserPage/ModelPage'))
 const VIDEO_GENERATION_INLINE_RESULT_PROMPT_ID = 'builtin-video-generation-inline'
-
-/*
-type QuickAppCategory = 'image' | 'model3d' | 'video' | 'inspection'
-const QUICK_APP_CATEGORY_LABELS: Record<QuickAppCategory, string> = {
-  image: '图像',
-  model3d: '3D',
-  video: '视频'
-}
-
-const QUICK_APP_CATEGORY_ICONS: Record<QuickAppCategory, React.ReactNode> = {
-  image: <ImageOutlinedIcon sx={{ fontSize: 14 }} />,
-  model3d: <ViewInArIcon sx={{ fontSize: 14 }} />,
-  video: <MovieOutlinedIcon sx={{ fontSize: 14 }} />
-}
-
-const QUICK_APP_CATEGORY_DISPLAY_LABELS: Record<QuickAppCategory, string> = {
-  image: '图像',
-  model3d: '3D',
-  video: '视频',
-  inspection: '检查'
-}
-
-const QUICK_APP_CATEGORY_DISPLAY_ICONS: Record<QuickAppCategory, React.ReactNode> = {
-  image: <ImageOutlinedIcon sx={{ fontSize: 14 }} />,
-  model3d: <ViewInArIcon sx={{ fontSize: 14 }} />,
-  video: <MovieOutlinedIcon sx={{ fontSize: 14 }} />,
-  inspection: <FactCheckOutlinedIcon sx={{ fontSize: 14 }} />
-}
-
-*/
 
 type QuickAppCategory = 'image' | 'model3d' | 'video' | 'inspection'
 const QUICK_APP_CATEGORIES: QuickAppCategory[] = ['image', 'model3d', 'video', 'inspection']
@@ -475,169 +448,25 @@ const LoadingFallback: React.FC = () => (
   </Box>
 )
 
-// Kept temporarily to avoid risky large-file churn while the shared runner is rolled out.
-
-const scopeResultItemsToProject = (resultItems: ResultItem[], projectId?: string): ResultItem[] =>
-  projectId ? resultItems.map((item) => ({ ...item, projectId })) : resultItems
-
-const useLegacyQAppRunner = (projectId?: string) => {
-  const { t } = useTranslation()
-  const {
-    validate,
-    buildWorkflow,
-    buildSubmitExtraData,
-    qAppCfg,
-    currentQAppKey,
-    submitClientId,
-    submitSessionKey
-  } = useQAppContext()
-  const {
-    state: { isConnected, isRunning },
-    setIsRunning,
-    appendResults,
-    setErrorPromptStatus
-  } = useComfyStatus()
-  const { notifySuccess, notifyError } = useMessage()
-
-  const summarizeGeneratedResults = (resultItems: ResultItem[]) => {
-    let imageCount = 0
-    let videoCount = 0
-
-    for (const item of resultItems) {
-      if (item.type === 'image') imageCount += 1
-      if (item.type === 'video') videoCount += 1
-    }
-
-    const parts: string[] = []
-    if (imageCount > 0) parts.push(`${imageCount} images`)
-    if (videoCount > 0) parts.push(`${videoCount} videos`)
-    return parts.join(', ')
-  }
-
-  const run = useCallback(async () => {
-    if (!validate || !buildWorkflow) {
-      notifyError('Quick App is not fully loaded yet')
-      return
-    }
-
-    if (!isConnected) {
-      notifyError('ComfyUI is not connected')
-      return
-    }
-
-    try {
-      if (!(await validate())) return
-
-      setIsRunning(true)
-
-      const workflow = await buildWorkflow()
-      const { prompt_id } = await api().svcComfy.submitWorkflow(
-        buildQAppSubmitWorkflowRequest({
-          prompt: workflow,
-          qAppKey: currentQAppKey,
-          clientId: submitClientId,
-          sessionKey: resolveQAppSessionKey({
-            qAppKey: currentQAppKey,
-            projectId,
-            submitSessionKey
-          }),
-          extraData: buildSubmitExtraData?.()
-        })
-      )
-
-      setIsRunning(false)
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = await new Promise<any>((resolve, reject) => {
-        api()
-          .svcComfy.waitPromptId(
-            { prompt_id },
-            {
-              onData: (data) => {
-                resolve(data[prompt_id])
-              }
-            }
-          )
-          .catch(reject)
-      })
-
-      if (result.status.status_str === 'error') {
-        setErrorPromptStatus(prompt_id, result.status)
-
-        for (const message of result.status.messages) {
-          if (message[0] === 'prompt_error') {
-            notifyError(
-              `${t('quickapp.generate.error')}: ${normalizeQAppErrorMessage(message[1].error.message)}`
-            )
-          }
-
-          if (message[0] === 'execution_error') {
-            notifyError(
-              `${t('quickapp.generate.error')}: ${normalizeQAppErrorMessage(message[1].exception_message)}`
-            )
-          }
-        }
-
-        return
-      }
-
-      const resultItems = await transformResults(prompt_id, result, qAppCfg?.outputNodeIds)
-
-      if (!resultItems || resultItems.length === 0) {
-        notifyError('工作流执行完成，但没有生成任何输出。请检查工作流配置是否正确。')
-        return
-      }
-
-      const scopedResultItems = scopeResultItemsToProject(resultItems, projectId)
-      appendResults(scopedResultItems)
-
-      const canvasDispatchCounts = dispatchQAppResultsToCanvas(scopedResultItems, projectId)
-
-      const summary = summarizeGeneratedResults(resultItems)
-      if (canvasDispatchCounts.totalCount > 0) {
-        notifySuccess(
-          summary
-            ? `跑完喽，已将 ${summary} 放进参考区。`
-            : `跑完喽，已生成 ${resultItems.length} 个结果。`
-        )
-      } else {
-        notifySuccess(
-          summary
-            ? `工作流执行完成，已生成 ${summary}。`
-            : `工作流执行完成，已生成 ${resultItems.length} 个结果。`
-        )
-      }
-
-      console.log(`${t('quickapp.generate.complete')} - 生成了 ${resultItems.length} 个结果`)
-    } finally {
-      setIsRunning(false)
-    }
-  }, [
-    appendResults,
-    buildWorkflow,
-    buildSubmitExtraData,
-    currentQAppKey,
-    isConnected,
-    notifyError,
-    notifySuccess,
-    projectId,
-    qAppCfg,
-    setErrorPromptStatus,
-    setIsRunning,
-    submitClientId,
-    submitSessionKey,
-    t,
-    validate
-  ])
-
-  return { run, isRunning }
-}
-
 const InlineQAppParams: React.FC<{
   projectId?: string
   onRunReady: (runner: () => Promise<void>, isRunning: boolean) => void
 }> = ({ projectId, onRunReady }) => {
   const { run, isRunning } = useSharedQAppRunner(projectId)
+  const { qAppCfg, workflow, validate, buildWorkflow } = useQAppContext()
+  const objectInfos = useAppSelector((state) => state.comfyStatus.objectInfos)
+  const normalizedBatch =
+    qAppCfg && workflow ? normalizeQAppBatchConfig(qAppCfg, workflow, objectInfos) : undefined
+  const effectiveQAppCfg = normalizedBatch?.cfg ?? qAppCfg
+  const effectiveOutputNodeIds = normalizedBatch?.outputNodeIds ?? effectiveQAppCfg?.outputNodeIds
+  const effectiveImageInputSlot = effectiveQAppCfg?.batchProcess?.imageInputSlot
+  const canShowBatchProcess = Boolean(
+    validate &&
+    buildWorkflow &&
+    effectiveQAppCfg?.batchProcess?.enabled === true &&
+    effectiveImageInputSlot &&
+    effectiveOutputNodeIds?.length
+  )
 
   useEffect(() => {
     onRunReady(run, isRunning)
@@ -656,6 +485,18 @@ const InlineQAppParams: React.FC<{
       <Suspense fallback={<LoadingFallback />}>
         <QAppPanel fallback={<CircularProgress size={24} />} />
       </Suspense>
+      {canShowBatchProcess && effectiveImageInputSlot && validate && buildWorkflow && (
+        <Box sx={{ mt: 1.5 }}>
+          <Suspense fallback={null}>
+            <BatchProcessButton
+              imageInputSlot={effectiveImageInputSlot}
+              outputNodeIds={effectiveOutputNodeIds}
+              validate={validate}
+              buildWorkflow={buildWorkflow}
+            />
+          </Suspense>
+        </Box>
+      )}
     </Box>
   )
 }
@@ -1404,6 +1245,10 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
   const activeSidePanel = useAppSelector((s) => s.layout.activeSidePanel)
   const { notifySuccess, notifyError } = useMessage()
   const { t, i18n } = useTranslation()
+  const { jobs: batchJobs } = useComfyBatchJobs()
+  const activeBatchJobs = batchJobs.filter(
+    (job) => job.state === 'queued' || job.state === 'running'
+  )
   const qt = useCallback(
     (key: string, fallback: string) => getLocalizedFallbackText(t, i18n.language, key, fallback),
     [i18n.language, t]
@@ -1460,6 +1305,8 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
     queueState.queue_running.length +
     queueState.queue_pending.length +
     queueState.queue_error.length
+  const hasActiveBatchJobs = activeBatchJobs.length > 0
+  const headerQueueCount = hasActiveBatchJobs ? activeBatchJobs.length : totalQueue
   const { visible: visibleQuickAppCategories, overflow: overflowQuickAppCategories } =
     getQuickAppCategoryLayout(quickAppCategoryAvailableWidth)
   const isQuickAppOverflowMenuOpen = Boolean(quickAppOverflowAnchorEl)
@@ -1495,7 +1342,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
       const queueBadgeWidth =
         measuredQueueBadgeWidth > 0
           ? measuredQueueBadgeWidth
-          : totalQueue > 0
+          : headerQueueCount > 0
             ? QUICK_APP_HEADER_QUEUE_BADGE_FALLBACK_WIDTH
             : 0
       const actionsWidth =
@@ -1513,7 +1360,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
     })
 
     return () => window.cancelAnimationFrame(frame)
-  }, [activeSidePanel, i18n.language, totalQueue, width])
+  }, [activeSidePanel, headerQueueCount, i18n.language, width])
 
   useEffect(() => {
     const handleSwitchQApp = (event: Event) => {
@@ -1908,11 +1755,48 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
               )}
             </Box>
           )}
-          {isQuickApp && totalQueue > 0 && (
-            <Tooltip title={queueExpanded ? queueText.collapse : queueText.expand} arrow>
+          {isQuickApp && headerQueueCount > 0 && (
+            <Tooltip
+              title={
+                hasActiveBatchJobs
+                  ? t('qapp.batch.open_jobs', {
+                      defaultValue: 'Open batch jobs'
+                    })
+                  : queueExpanded
+                    ? queueText.collapse
+                    : queueText.expand
+              }
+              arrow
+            >
               <Box
                 ref={quickAppQueueBadgeRef}
-                onClick={() => setQueueExpanded((value) => !value)}
+                role="button"
+                tabIndex={0}
+                aria-label={
+                  hasActiveBatchJobs
+                    ? t('qapp.batch.open_jobs', {
+                        defaultValue: 'Open batch jobs'
+                      })
+                    : queueExpanded
+                      ? queueText.collapse
+                      : queueText.expand
+                }
+                onClick={() => {
+                  if (hasActiveBatchJobs) {
+                    toggleComfyBatchCenter()
+                  } else {
+                    setQueueExpanded((value) => !value)
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return
+                  event.preventDefault()
+                  if (hasActiveBatchJobs) {
+                    toggleComfyBatchCenter()
+                  } else {
+                    setQueueExpanded((value) => !value)
+                  }
+                }}
                 sx={(theme) => ({
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -1968,7 +1852,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
                   }
                 })}
               >
-                {totalQueue}
+                {headerQueueCount}
               </Box>
             </Tooltip>
           )}
@@ -2012,6 +1896,11 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
             boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.02)'
           })}
         >
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 0.75 }}>
+            <Button size="small" onClick={openComfyBatchCenter} sx={{ minHeight: 24, py: 0 }}>
+              {qt('qapp.batch.open_jobs', 'Open task center')}
+            </Button>
+          </Box>
           {queueState.queue_running.length > 0 && (
             <Box sx={{ mb: 1.5 }}>
               <Box
@@ -2116,7 +2005,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
                         </Typography>
                       </Box>
                       <LinearProgress
-                        variant={itemProgress === null ? 'indeterminate' : 'determinate'}
+                        variant="determinate"
                         value={(itemProgress ?? 0) * 100}
                         sx={{
                           mt: 0.85,
@@ -2124,7 +2013,8 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
                           borderRadius: 999,
                           bgcolor: 'rgba(148,163,184,0.18)',
                           '& .MuiLinearProgress-bar': {
-                            borderRadius: 999
+                            borderRadius: 999,
+                            transition: 'none'
                           }
                         }}
                       />

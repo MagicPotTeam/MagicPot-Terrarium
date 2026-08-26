@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { PolicyRequest } from '../../../shared/magicAgentPlatform2/policy'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import { MagicAgentPolicyAuthorizationService } from '../policy'
 import type { PersistentTriggerState } from './persistentTriggerStore'
@@ -66,6 +67,22 @@ const setup = (effect: 'allow' | 'deny') => {
   return service
 }
 
+const createGrantProvider =
+  (service: MagicAgentPolicyAuthorizationService, grantIdFor: (request: PolicyRequest) => string) =>
+  async (request: PolicyRequest) => {
+    const grantId = grantIdFor(request)
+    const grant = service.createApprovalGrant({
+      grantId,
+      request,
+      approvedBy: { kind: 'user', id: 'approver-1' },
+      issuedAt: 1000,
+      expiresAt: 2000,
+      maxUses: 1,
+      idempotencyKey: grantId
+    })
+    return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
+  }
+
 describe('production trigger executor', () => {
   it('maps agent target and uses only the trusted route resolver', async () => {
     const service = setup('allow')
@@ -73,18 +90,7 @@ describe('production trigger executor', () => {
     const resolveTrustedRoute = vi.fn(() => ({ trusted: true }))
     const executor = new ProductionTriggerExecutor({
       authorizationService: service,
-      grantProvider: vi.fn(async (request) => {
-        const grant = service.createApprovalGrant({
-          grantId: 'grant-1',
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: 1000,
-          expiresAt: 2000,
-          maxUses: 1,
-          idempotencyKey: 'grant-1'
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      }),
+      grantProvider: createGrantProvider(service, () => 'grant-1'),
       resolveTrustedRoute,
       dispatch: { runAgent, runGraph: vi.fn() },
       now: () => 1000
@@ -121,18 +127,7 @@ describe('production trigger executor', () => {
     const runAgent = vi.fn(async (input) => input)
     const executor = new ProductionTriggerExecutor({
       authorizationService: service,
-      grantProvider: async (request) => {
-        const grant = service.createApprovalGrant({
-          grantId: 'occurrence-grant',
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: 1000,
-          expiresAt: 2000,
-          maxUses: 1,
-          idempotencyKey: 'occurrence-grant'
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      },
+      grantProvider: createGrantProvider(service, () => 'occurrence-grant'),
       resolveTrustedRoute: () => ({ trusted: true }),
       dispatch: { runAgent, runGraph: vi.fn() },
       now: () => 1000
@@ -182,18 +177,7 @@ describe('production trigger executor', () => {
     const runGraph = vi.fn(async (input) => input)
     const executor = new ProductionTriggerExecutor({
       authorizationService: service,
-      grantProvider: vi.fn(async (request) => {
-        const grant = service.createApprovalGrant({
-          grantId: 'grant-1',
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: 1000,
-          expiresAt: 2000,
-          maxUses: 1,
-          idempotencyKey: 'grant-1'
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      }),
+      grantProvider: createGrantProvider(service, () => 'grant-1'),
       resolveTrustedRoute: () => ({ route: 'trusted' }),
       dispatch: { runAgent: vi.fn(), runGraph },
       now: () => 1000
@@ -232,18 +216,7 @@ describe('production trigger executor', () => {
     const dispatchError = new Error('dispatch secret output')
     const executor = new ProductionTriggerExecutor({
       authorizationService: service,
-      grantProvider: async (request) => {
-        const grant = service.createApprovalGrant({
-          grantId: 'fail-grant',
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: 1000,
-          expiresAt: 2000,
-          maxUses: 1,
-          idempotencyKey: 'fail-grant'
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      },
+      grantProvider: createGrantProvider(service, () => 'fail-grant'),
       resolveTrustedRoute: () => ({}),
       dispatch: {
         runAgent: vi.fn(async () => {
@@ -271,18 +244,7 @@ describe('production trigger executor', () => {
     })
     const executor = new ProductionTriggerExecutor({
       authorizationService: service,
-      grantProvider: vi.fn(async (request) => {
-        const grant = service.createApprovalGrant({
-          grantId: 'success-grant',
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: 1000,
-          expiresAt: 2000,
-          maxUses: 1,
-          idempotencyKey: 'success-grant'
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      }),
+      grantProvider: createGrantProvider(service, () => 'success-grant'),
       resolveTrustedRoute: () => ({}),
       dispatch: { runAgent: vi.fn(async () => 'raw result'), runGraph: vi.fn() },
       outcomes,
@@ -302,18 +264,7 @@ describe('production trigger executor', () => {
     })
     const executor = new ProductionTriggerExecutor({
       authorizationService: service,
-      grantProvider: vi.fn(async (request) => {
-        const grant = service.createApprovalGrant({
-          grantId: 'terminal-fail-grant',
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: 1000,
-          expiresAt: 2000,
-          maxUses: 1,
-          idempotencyKey: 'terminal-fail-grant'
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      }),
+      grantProvider: createGrantProvider(service, () => 'terminal-fail-grant'),
       resolveTrustedRoute: () => ({}),
       dispatch: {
         runAgent: vi.fn(async () => {
@@ -337,18 +288,7 @@ describe('production trigger executor', () => {
     const outcomes = new TriggerExecutionOutcomeStore(eventStore)
     const executor = new ProductionTriggerExecutor({
       authorizationService: service,
-      grantProvider: vi.fn(async (request) => {
-        const grant = service.createApprovalGrant({
-          grantId: `grant-${Math.random()}`,
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: 1000,
-          expiresAt: 2000,
-          maxUses: 1,
-          idempotencyKey: `grant-${Math.random()}`
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      }),
+      grantProvider: createGrantProvider(service, () => `grant-${Math.random()}`),
       resolveTrustedRoute: () => ({}),
       dispatch: { runAgent: vi.fn(async () => 'ok'), runGraph: vi.fn() },
       outcomes,

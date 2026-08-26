@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Workflow } from '@shared/comfy/types'
 import { COMFY_EVENT_CLIENT_ID_ALL } from '@shared/api/svcComfy'
+import type { ComfyHttpCli } from '../comfy/http'
+import type { TaskQueueState } from '../queue/taskQueue'
+import { ComfySvcImpl } from './svcComfyImpl'
 
 const {
   addTaskMock,
@@ -11,6 +14,8 @@ const {
   getTaskByPromptIdMock,
   listenComfyEventMock,
   importManagedMediaStreamMock,
+  poolGetObjectInfoMock,
+  poolOrderedInstancesMock,
   emitComfyEvent,
   resetComfyTestState,
   setTaskPromptOwner
@@ -26,10 +31,11 @@ const {
     addTaskMock: vi.fn(() => 'task-queued'),
     cancelTaskMock: vi.fn(async () => true),
     cancelTaskByPromptIdMock: vi.fn(async () => true),
-    getQueueMock: vi.fn(() => ({
+    getQueueMock: vi.fn((): TaskQueueState => ({
       running: [],
       pending: [],
       completed: [],
+      cancelled: [],
       error: []
     })),
     getTaskMock: vi.fn(() => [null, null] as const),
@@ -43,6 +49,8 @@ const {
       }
     ),
     importManagedMediaStreamMock: vi.fn(),
+    poolGetObjectInfoMock: vi.fn(async () => ({ KSampler: {} })),
+    poolOrderedInstancesMock: vi.fn(async () => []),
     emitComfyEvent: (event: unknown) => {
       activeListener?.onEvent(event)
     },
@@ -102,6 +110,13 @@ vi.mock('../comfy/state', () => ({
   listenComfyEvent: listenComfyEventMock
 }))
 
+vi.mock('../comfy/comfyInstancePool', () => ({
+  getComfyInstancePool: () => ({
+    getObjectInfo: poolGetObjectInfoMock,
+    orderedAvailableInstances: poolOrderedInstancesMock
+  })
+}))
+
 vi.mock('../llmProxy/chatMediaDir', () => ({
   getChatMediaDir: vi.fn(() => 'C:/media')
 }))
@@ -120,7 +135,14 @@ vi.mock('../llmProxy/managedMediaStore', () => ({
   }
 }))
 
-import { ComfySvcImpl } from './svcComfyImpl'
+type TestComfyCli = Partial<Pick<ComfyHttpCli, 'objectInfo' | 'viewResponse'>>
+
+const setComfyCli = (svc: ComfySvcImpl, cli: TestComfyCli): void => {
+  ;(svc as unknown as { cli: () => TestComfyCli }).cli = () => cli
+}
+
+const setObjectInfoMock = (svc: ComfySvcImpl): void =>
+  setComfyCli(svc, { objectInfo: vi.fn().mockResolvedValue({}) })
 
 describe('ComfySvcImpl', () => {
   beforeEach(() => {
@@ -140,9 +162,7 @@ describe('ComfySvcImpl', () => {
           headers: { 'content-type': 'image/png; charset=binary' }
         })
       )
-      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
-        viewResponse
-      })
+      setComfyCli(svc, { viewResponse })
       const reference = {
         version: 1,
         kind: 'managed',
@@ -204,9 +224,7 @@ describe('ComfySvcImpl', () => {
     ])('rejects unsafe filename %s before fetching', async (filename) => {
       const svc = new ComfySvcImpl()
       const viewResponse = vi.fn()
-      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
-        viewResponse
-      })
+      setComfyCli(svc, { viewResponse })
       await expect(svc.importOutputImage({ filename, type: 'output' })).rejects.toThrow(
         'Invalid ComfyUI output filename'
       )
@@ -218,9 +236,7 @@ describe('ComfySvcImpl', () => {
       async (subfolder) => {
         const svc = new ComfySvcImpl()
         const viewResponse = vi.fn()
-        ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
-          viewResponse
-        })
+        setComfyCli(svc, { viewResponse })
         await expect(
           svc.importOutputImage({ filename: 'x.png', subfolder, type: 'output' })
         ).rejects.toThrow('Invalid ComfyUI output subfolder')
@@ -235,9 +251,7 @@ describe('ComfySvcImpl', () => {
         .mockResolvedValue(
           new Response(null, { status: 302, headers: { location: 'https://other.test/x.png' } })
         )
-      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
-        viewResponse
-      })
+      setComfyCli(svc, { viewResponse })
 
       await expect(svc.importOutputImage({ filename: 'x.png', type: 'output' })).rejects.toThrow(
         'redirect rejected'
@@ -254,9 +268,7 @@ describe('ComfySvcImpl', () => {
         .fn()
         .mockResolvedValueOnce(new Response('no', { status: 502 }))
         .mockResolvedValueOnce(new Response('html', { headers: { 'content-type': 'text/html' } }))
-      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
-        viewResponse
-      })
+      setComfyCli(svc, { viewResponse })
       await expect(svc.importOutputImage({ filename: 'x.png', type: 'output' })).rejects.toThrow(
         'HTTP 502'
       )
@@ -272,9 +284,7 @@ describe('ComfySvcImpl', () => {
           headers: { 'content-type': 'image/png', 'content-length': '1025' }
         })
       )
-      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
-        viewResponse
-      })
+      setComfyCli(svc, { viewResponse })
       await expect(svc.importOutputImage({ filename: 'x.png', type: 'output' })).rejects.toThrow(
         'byte limit'
       )
@@ -301,9 +311,7 @@ describe('ComfySvcImpl', () => {
         .mockResolvedValueOnce(
           new Response(stalledBody, { headers: { 'content-type': 'image/png' } })
         )
-      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
-        viewResponse
-      })
+      setComfyCli(svc, { viewResponse })
       importManagedMediaStreamMock
         .mockRejectedValueOnce(
           Object.assign(new Error('Managed media exceeds byte limit'), {
@@ -353,9 +361,7 @@ describe('ComfySvcImpl', () => {
         .mockResolvedValueOnce(
           new Response(new Uint8Array([1]), { headers: { 'content-type': 'image/png' } })
         )
-      ;(svc as unknown as { cli: () => { viewResponse: typeof viewResponse } }).cli = () => ({
-        viewResponse
-      })
+      setComfyCli(svc, { viewResponse })
       importManagedMediaStreamMock.mockResolvedValueOnce({
         reference: { version: 1, kind: 'managed', relativePath: 'x', sha256: 'a'.repeat(64) },
         localMediaUrl: 'local-media:/managed'
@@ -381,15 +387,47 @@ describe('ComfySvcImpl', () => {
     })
   })
 
+  describe('getObjectInfo', () => {
+    it('uses the shared ComfyUI instance pool', async () => {
+      const svc = new ComfySvcImpl()
+      poolGetObjectInfoMock.mockResolvedValueOnce({ CheckpointLoaderSimple: {} } as never)
+
+      await expect(svc.getObjectInfo({})).resolves.toEqual({ CheckpointLoaderSimple: {} })
+      expect(poolGetObjectInfoMock).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('getQueue', () => {
+    it('includes recent internal task errors for the unified task center', async () => {
+      getQueueMock.mockReturnValueOnce({
+        running: [],
+        pending: [],
+        completed: [],
+        cancelled: [],
+        error: [
+          {
+            id: 'task-error',
+            type: 'comfy_prompt',
+            client_id: 'client-1',
+            created_at: 1_735_000_000_000,
+            prompt_id: 'prompt-error',
+            payload: {},
+            result: null
+          }
+        ]
+      })
+
+      const result = await new ComfySvcImpl().getQueue({})
+
+      expect(result.queue_error).toHaveLength(1)
+      expect(result.queue_error?.[0]?.[1]).toBe('task-error')
+    })
+  })
+
   describe('submitWorkflow', () => {
     it('falls back to the shared session key when no explicit client id is provided', async () => {
       const svc = new ComfySvcImpl()
-      ;(
-        svc as unknown as { cli: () => { objectInfo: () => Promise<Record<string, unknown>> } }
-      ).cli = () =>
-        ({
-          objectInfo: vi.fn().mockResolvedValue({})
-        }) as never
+      setObjectInfoMock(svc)
 
       const postPromptSpy = vi.spyOn(svc, 'postPrompt').mockResolvedValue({
         prompt_id: 'prompt-1'
@@ -410,12 +448,7 @@ describe('ComfySvcImpl', () => {
 
     it('prefers an explicit client id over the session key fallback', async () => {
       const svc = new ComfySvcImpl()
-      ;(
-        svc as unknown as { cli: () => { objectInfo: () => Promise<Record<string, unknown>> } }
-      ).cli = () =>
-        ({
-          objectInfo: vi.fn().mockResolvedValue({})
-        }) as never
+      setObjectInfoMock(svc)
 
       const postPromptSpy = vi.spyOn(svc, 'postPrompt').mockResolvedValue({
         prompt_id: 'prompt-2'
@@ -437,12 +470,7 @@ describe('ComfySvcImpl', () => {
 
     it('uses an anonymous workflow-scoped client id instead of config.client_id when identity is missing', async () => {
       const svc = new ComfySvcImpl()
-      ;(
-        svc as unknown as { cli: () => { objectInfo: () => Promise<Record<string, unknown>> } }
-      ).cli = () =>
-        ({
-          objectInfo: vi.fn().mockResolvedValue({})
-        }) as never
+      setObjectInfoMock(svc)
 
       const postPromptSpy = vi.spyOn(svc, 'postPrompt').mockResolvedValue({
         prompt_id: 'prompt-3'
@@ -467,12 +495,7 @@ describe('ComfySvcImpl', () => {
 
     it('strips UI-only nodes before posting the prompt to ComfyUI', async () => {
       const svc = new ComfySvcImpl()
-      ;(
-        svc as unknown as { cli: () => { objectInfo: () => Promise<Record<string, unknown>> } }
-      ).cli = () =>
-        ({
-          objectInfo: vi.fn().mockResolvedValue({})
-        }) as never
+      setObjectInfoMock(svc)
 
       const postPromptSpy = vi.spyOn(svc, 'postPrompt').mockResolvedValue({
         prompt_id: 'prompt-4'
@@ -523,12 +546,7 @@ describe('ComfySvcImpl', () => {
     })
     it('requests ComfyUI memory cleanup when requested by the caller', async () => {
       const svc = new ComfySvcImpl()
-      ;(
-        svc as unknown as { cli: () => { objectInfo: () => Promise<Record<string, unknown>> } }
-      ).cli = () =>
-        ({
-          objectInfo: vi.fn().mockResolvedValue({})
-        }) as never
+      setObjectInfoMock(svc)
 
       const postPromptSpy = vi.spyOn(svc, 'postPrompt').mockResolvedValue({
         prompt_id: 'prompt-cleanup'

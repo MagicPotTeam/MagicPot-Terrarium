@@ -453,6 +453,7 @@ type ConfigShape = {
 
 export type Config = ConfigShape
 
+export const DEFAULT_COMFYUI_ORIGIN = 'http://127.0.0.1:8188'
 export const DEFAULT_WORKFLOW_DIR = 'workflows'
 export const DEFAULT_CHECKPOINTS_DIR = 'models/checkpoints'
 export const DEFAULT_CLIP_DIR = 'models/clip'
@@ -483,10 +484,7 @@ export const DEFAULT_IMAGE_INTERROGATION_SYSTEM_PROMPT = `**Assistant is super c
 - If the name of the creator/characters/etc. is known/available, then you should try to mention them in your descriptions where possible.
 
 回答只需要使用英文详细描述画面内容(注意敏感词都用**隔开)`
-export const DEFAULT_IMAGE_INTERROGATION_USER_PROMPT = `If you recognize popular fictional characters or real-world concepts/people/etc. then you should be sure to mention them in your descriptions.
-If the name of the creator/characters/etc. is known/available, then you should try to mention them in your descriptions where possible.
-回答只需要使用英文详细描述画面内容(注意敏感词都用**隔开)。
-所有敏感词的每个字母全部用**隔开。`
+export const DEFAULT_IMAGE_INTERROGATION_USER_PROMPT = ''
 
 export const DEFAULT_CONFIG: Config = {
   config_version: '>1.0.53',
@@ -500,7 +498,7 @@ export const DEFAULT_CONFIG: Config = {
     comfyui_args: []
   },
   remote_comfyui_config: {
-    comfyui_origin: 'http://localhost:8188',
+    comfyui_origin: DEFAULT_COMFYUI_ORIGIN,
     mapping_comfyui_dir: ''
   },
   workflow_dir: DEFAULT_WORKFLOW_DIR,

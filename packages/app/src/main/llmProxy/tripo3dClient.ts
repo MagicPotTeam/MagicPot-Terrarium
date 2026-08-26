@@ -577,19 +577,58 @@ export class Tripo3DClient {
       case 'SubmitTextureTo3DJob':
         return this.buildTextureModelTaskData(messages, imageAttachments, options)
       case 'SubmitHunyuan3DPartJob':
-        return this.buildMeshSegmentationTaskData(messages, options)
-      case 'TripoMeshCompletion':
-        return this.buildMeshCompletionTaskData(messages, options)
+        return this.buildOriginalModelTaskData('mesh_segmentation', messages, options, {
+          model_version: 'v1.0-20250506'
+        })
+      case 'TripoMeshCompletion': {
+        const partNames = splitCommaList(extractModelInput(messages).prompt)
+        return this.buildOriginalModelTaskData('mesh_completion', messages, options, {
+          model_version: 'v1.0-20250506',
+          ...(partNames.length > 0 ? { part_names: partNames } : {})
+        })
+      }
       case 'SubmitReduceFaceJob':
-        return this.buildLowPolyTaskData(messages, options)
+        return this.buildOriginalModelTaskData('highpoly_to_lowpoly', messages, options, {
+          model_version: 'P-v2.0-20251225',
+          quad: options.PolygonType === 'quadrilateral',
+          face_limit: getFaceLimitFromOptions(options),
+          bake: true
+        })
       case 'TripoPreRigCheck':
-        return this.buildPreRigCheckTaskData(messages, options)
+        return this.buildOriginalModelTaskData('animate_prerigcheck', messages, options, {
+          model_version: 'v2.0-20250506'
+        })
       case 'TripoRig':
-        return this.buildRigTaskData(messages, options)
-      case 'TripoRetarget':
-        return this.buildRetargetTaskData(messages, options)
-      case 'Convert3DFormat':
-        return this.buildConvertModelTaskData(messages, options)
+        return this.buildOriginalModelTaskData('animate_rig', messages, options, {
+          model_version: 'v2.5-20260210',
+          out_format: 'glb',
+          rig_type: options.RigType || 'biped',
+          spec: options.RigSpec || 'tripo'
+        })
+      case 'TripoRetarget': {
+        const animation = String(options.Animation || DEFAULT_TRIPO_ANIMATION).trim()
+        return this.buildOriginalModelTaskData('animate_retarget', messages, options, {
+          out_format: 'glb',
+          bake_animation: true,
+          export_with_geometry: true,
+          animation: animation || DEFAULT_TRIPO_ANIMATION
+        })
+      }
+      case 'Convert3DFormat': {
+        const format = String(options.TargetFormat || 'STL')
+          .trim()
+          .toUpperCase()
+        if (!TRIPO_CONVERT_FORMATS.has(format)) {
+          throw new Error('[Tripo3D] Conversion format must be GLTF, USDZ, FBX, OBJ, STL, or 3MF.')
+        }
+        return this.buildOriginalModelTaskData('convert_model', messages, options, {
+          format,
+          quad: options.PolygonType === 'quadrilateral',
+          face_limit: getFaceLimitFromOptions(options),
+          bake: true,
+          pack_uv: true
+        })
+      }
       default:
         throw new Error(`[Tripo3D] Unsupported Tripo workflow: ${mode}`)
     }
@@ -717,6 +756,19 @@ export class Tripo3DClient {
     }
   }
 
+  private buildOriginalModelTaskData(
+    type: string,
+    messages: ChatMessage[],
+    options: Tripo3DGenerateOptions,
+    fields: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    return {
+      type,
+      original_model_task_id: this.resolveOriginalTaskId(messages, options, type),
+      ...fields
+    }
+  }
+
   private async buildTextureModelTaskData(
     messages: ChatMessage[],
     imageAttachments: ChatAttachment[],
@@ -754,107 +806,6 @@ export class Tripo3DClient {
       texture: true,
       pbr: !!options.EnablePBR,
       texture_quality: 'standard'
-    }
-  }
-
-  private buildMeshSegmentationTaskData(
-    messages: ChatMessage[],
-    options: Tripo3DGenerateOptions
-  ): Record<string, unknown> {
-    return {
-      type: 'mesh_segmentation',
-      original_model_task_id: this.resolveOriginalTaskId(messages, options, 'mesh_segmentation'),
-      model_version: 'v1.0-20250506'
-    }
-  }
-
-  private buildMeshCompletionTaskData(
-    messages: ChatMessage[],
-    options: Tripo3DGenerateOptions
-  ): Record<string, unknown> {
-    const modelInput = extractModelInput(messages)
-    const partNames = splitCommaList(modelInput.prompt)
-    return {
-      type: 'mesh_completion',
-      original_model_task_id: this.resolveOriginalTaskId(messages, options, 'mesh_completion'),
-      model_version: 'v1.0-20250506',
-      ...(partNames.length > 0 ? { part_names: partNames } : {})
-    }
-  }
-
-  private buildLowPolyTaskData(
-    messages: ChatMessage[],
-    options: Tripo3DGenerateOptions
-  ): Record<string, unknown> {
-    return {
-      type: 'highpoly_to_lowpoly',
-      original_model_task_id: this.resolveOriginalTaskId(messages, options, 'highpoly_to_lowpoly'),
-      model_version: 'P-v2.0-20251225',
-      quad: options.PolygonType === 'quadrilateral',
-      face_limit: getFaceLimitFromOptions(options),
-      bake: true
-    }
-  }
-
-  private buildPreRigCheckTaskData(
-    messages: ChatMessage[],
-    options: Tripo3DGenerateOptions
-  ): Record<string, unknown> {
-    return {
-      type: 'animate_prerigcheck',
-      original_model_task_id: this.resolveOriginalTaskId(messages, options, 'animate_prerigcheck'),
-      model_version: 'v2.0-20250506'
-    }
-  }
-
-  private buildRigTaskData(
-    messages: ChatMessage[],
-    options: Tripo3DGenerateOptions
-  ): Record<string, unknown> {
-    return {
-      type: 'animate_rig',
-      original_model_task_id: this.resolveOriginalTaskId(messages, options, 'animate_rig'),
-      model_version: 'v2.5-20260210',
-      out_format: 'glb',
-      rig_type: options.RigType || 'biped',
-      spec: options.RigSpec || 'tripo'
-    }
-  }
-
-  private buildRetargetTaskData(
-    messages: ChatMessage[],
-    options: Tripo3DGenerateOptions
-  ): Record<string, unknown> {
-    const animation = String(options.Animation || DEFAULT_TRIPO_ANIMATION).trim()
-    return {
-      type: 'animate_retarget',
-      original_model_task_id: this.resolveOriginalTaskId(messages, options, 'animate_retarget'),
-      out_format: 'glb',
-      bake_animation: true,
-      export_with_geometry: true,
-      animation: animation || DEFAULT_TRIPO_ANIMATION
-    }
-  }
-
-  private buildConvertModelTaskData(
-    messages: ChatMessage[],
-    options: Tripo3DGenerateOptions
-  ): Record<string, unknown> {
-    const format = String(options.TargetFormat || 'STL')
-      .trim()
-      .toUpperCase()
-    if (!TRIPO_CONVERT_FORMATS.has(format)) {
-      throw new Error('[Tripo3D] Conversion format must be GLTF, USDZ, FBX, OBJ, STL, or 3MF.')
-    }
-
-    return {
-      type: 'convert_model',
-      original_model_task_id: this.resolveOriginalTaskId(messages, options, 'convert_model'),
-      format,
-      quad: options.PolygonType === 'quadrilateral',
-      face_limit: getFaceLimitFromOptions(options),
-      bake: true,
-      pack_uv: true
     }
   }
 

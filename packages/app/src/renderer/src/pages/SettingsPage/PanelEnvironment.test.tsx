@@ -7,12 +7,24 @@ import PanelEnvironment from './PanelEnvironment'
 const translations: Record<string, string> = {
   'llm.proxy_mode_title': '魔壶代理模式',
   'llm.proxy_mode_desc': '魔壶代理模式说明',
-  'environment.comfy_mode_title': 'ComfyUI Mode',
-  'environment.comfy_mode_info_title': 'ComfyUI Mode',
-  'environment.comfy_mode_info_desc': 'ComfyUI mode description',
-  'environment.comfy_mode_label': 'Use Remote ComfyUI',
-  'environment.remote_comfyui_title': 'Remote ComfyUI Settings',
-  'environment.remote_comfyui_origin_label': 'Remote ComfyUI Origin'
+  'environment.comfyui_title': 'ComfyUI Settings',
+  'environment.comfyui_desc': 'Unified ComfyUI endpoint',
+  'environment.comfy_batch_profiles_title': 'ComfyUI Instances',
+  'environment.setup_title': 'Environment Setup',
+  'environment.python_cmd_label': 'Python Command',
+  'environment.comfy_dir_label': 'ComfyUI Directory',
+  'environment.comfy_port_label': 'ComfyUI Port',
+  'environment.comfy_args_label': 'ComfyUI Arguments',
+  'environment.comfy_batch_profiles_desc': 'Separate ComfyUI endpoints',
+  'qapp.batch.enabled': 'Enabled',
+  'qapp.batch.name': 'Name',
+  'qapp.batch.url': 'ComfyUI Endpoint',
+  'qapp.batch.concurrency': 'Concurrency',
+  'qapp.batch.test': 'Test',
+  'qapp.batch.add_instance': 'Add instance',
+  'qapp.batch.save_instances': 'Save instances',
+  'qapp.batch.delete_instance': 'Delete instance',
+  'qapp.batch.saved': 'Saved'
 }
 
 const apiMock = {
@@ -33,6 +45,21 @@ const apiMock = {
   },
   svcShell: {
     openPath: vi.fn()
+  },
+  svcComfyBatch: {
+    listProfiles: vi.fn().mockResolvedValue({
+      profiles: [
+        {
+          id: 'remote-1',
+          name: 'Remote GPU',
+          baseUrl: 'https://comfy.example.com',
+          enabled: true,
+          maxConcurrency: 2
+        }
+      ]
+    }),
+    replaceProfiles: vi.fn().mockImplementation(async ({ profiles }) => ({ profiles })),
+    probeProfile: vi.fn()
   }
 }
 
@@ -155,7 +182,7 @@ describe('PanelEnvironment', () => {
     expect(screen.getByRole('heading', { name: 'Adobe 桥接' })).toBeTruthy()
   })
 
-  it('renders remote ComfyUI settings directly after the ComfyUI mode section', async () => {
+  it('renders unified ComfyUI settings and batch profiles without a mode switch', async () => {
     render(
       <PanelEnvironment
         settingsValue={{ ...DEFAULT_CONFIG, use_remote_comfyui: true }}
@@ -163,28 +190,30 @@ describe('PanelEnvironment', () => {
       />
     )
 
-    const comfyModeSection = (await screen.findByRole('heading', { name: 'ComfyUI Mode' })).closest(
+    const comfySection = (await screen.findByRole('heading', { name: 'ComfyUI Settings' })).closest(
       'section'
     )
-    const remoteSection = (
-      await screen.findByRole('heading', { name: 'Remote ComfyUI Settings' })
-    ).closest('section')
     const proxySection = (await screen.findByRole('heading', { name: '魔壶代理模式' })).closest(
       'section'
     )
 
-    expect(comfyModeSection).toBeTruthy()
-    expect(remoteSection).toBeTruthy()
+    expect(comfySection).toBeTruthy()
     expect(proxySection).toBeTruthy()
-    if (!comfyModeSection || !remoteSection || !proxySection) {
+    if (!comfySection || !proxySection) {
       throw new Error('Expected settings sections to render.')
     }
     expect(
-      comfyModeSection.compareDocumentPosition(remoteSection) & Node.DOCUMENT_POSITION_FOLLOWING
+      comfySection.compareDocumentPosition(proxySection) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
-    expect(
-      remoteSection.compareDocumentPosition(proxySection) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
-    expect(screen.getAllByText('Remote ComfyUI Origin').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('ComfyUI Endpoint').length).toBeGreaterThan(0)
+    expect(await screen.findByRole('heading', { name: 'Environment Setup' })).toBeTruthy()
+    expect(screen.getAllByText('Python Command').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('ComfyUI Directory').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('ComfyUI Port').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('ComfyUI Arguments').length).toBeGreaterThan(0)
+    expect(screen.getByRole('heading', { name: 'ComfyUI Instances' })).toBeTruthy()
+    expect(await screen.findByDisplayValue('https://comfy.example.com')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Add instance' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'ComfyUI Mode' })).toBeNull()
   })
 })

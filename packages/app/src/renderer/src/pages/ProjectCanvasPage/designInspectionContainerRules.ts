@@ -31,6 +31,107 @@ import type {
   WidthNormalizableItemSummary
 } from './designInspectionStructureTypes'
 
+type CountMetadata = { count: number; firstIndex: number }
+
+function findDominantKey<T, K extends string | number>(
+  items: readonly T[],
+  getKey: (item: T) => K
+): K | null {
+  const counts = new Map<K, CountMetadata>()
+  for (const [index, item] of items.entries()) {
+    const key = getKey(item)
+    const existing = counts.get(key)
+    if (existing) {
+      existing.count += 1
+    } else {
+      counts.set(key, { count: 1, firstIndex: index })
+    }
+  }
+  return (
+    [...counts.entries()].sort((left, right) => {
+      const [, leftMeta] = left
+      const [, rightMeta] = right
+      if (rightMeta.count !== leftMeta.count) {
+        return rightMeta.count - leftMeta.count
+      }
+      return leftMeta.firstIndex - rightMeta.firstIndex
+    })[0]?.[0] ?? null
+  )
+}
+
+type BodyMetaValueColumnPair = {
+  container: WidthNormalizableItemSummary
+  valueItems: TitleTextItemSummary[]
+  rightInset: number
+  rowCount: number
+}
+
+function resolveBodyMetaValueColumnPairs(
+  items: DesignInspectionItemSummary[],
+  hasFooterActions: boolean
+): BodyMetaValueColumnPair[] {
+  const rolesWithBodyMeta = resolveStructuredContainerTextRoles(items).flatMap((role) => {
+    if (role.rows.length < 4) return []
+
+    const bodyRow = role.rows[1]
+    const trailingRows = role.rows.slice(2)
+    const lastTrailingRow = trailingRows[trailingRows.length - 1]
+    if (
+      !bodyRow ||
+      bodyRow.length !== 1 ||
+      trailingRows.length < 2 ||
+      (hasFooterActions
+        ? !lastTrailingRow || lastTrailingRow.length < 2
+        : lastTrailingRow?.length !== 1)
+    ) {
+      return []
+    }
+
+    const candidateRows = trailingRows.slice(0, -1)
+    if (candidateRows.length < 1 || !candidateRows.every((row) => row.length === 2)) return []
+
+    const labelItems = candidateRows.map((row) => row[0])
+    const valueItems = candidateRows.map((row) => row[row.length - 1])
+    const columnGaps = candidateRows.map(([labelItem, valueItem]) =>
+      roundMetric(valueItem.bounds.x - (labelItem.bounds.x + labelItem.bounds.width))
+    )
+    if (columnGaps.some((gap) => gap <= SPACING_TOLERANCE_PX)) return []
+
+    const labelLeftInsets = labelItems.map((item) =>
+      roundMetric(item.bounds.x - role.container.bounds.x)
+    )
+    const valueRightInsets = valueItems.map((item) =>
+      roundMetric(
+        role.container.bounds.x + role.container.bounds.width - (item.bounds.x + item.bounds.width)
+      )
+    )
+    const labelLeftInsetSpread = Math.max(...labelLeftInsets) - Math.min(...labelLeftInsets)
+    const valueRightInsetSpread = Math.max(...valueRightInsets) - Math.min(...valueRightInsets)
+    if (
+      labelLeftInsetSpread > SPACING_TOLERANCE_PX ||
+      valueRightInsetSpread > SPACING_TOLERANCE_PX
+    ) {
+      return []
+    }
+
+    return [
+      {
+        container: role.container,
+        valueItems,
+        rightInset: roundMetric(median(valueRightInsets)),
+        rowCount: candidateRows.length
+      }
+    ]
+  })
+
+  if (rolesWithBodyMeta.length < 3) return []
+  const dominantRowCount = findDominantKey(rolesWithBodyMeta, (pair) => pair.rowCount)
+  if (typeof dominantRowCount !== 'number') return []
+
+  const comparable = rolesWithBodyMeta.filter((pair) => pair.rowCount === dominantRowCount)
+  return comparable.length >= 3 ? comparable : []
+}
+
 export function resolveContainerTitleInsetPairs(
   items: DesignInspectionItemSummary[]
 ): ContainerTitleInsetPair[] {
@@ -118,28 +219,7 @@ export function resolveContainerMetaBlockValueColumnPairs(
 
   if (rolesWithMetaBlocks.length < 3) return []
 
-  const metaRowCountEntries = [...rolesWithMetaBlocks].reduce((counts, pair, index) => {
-    const key = pair.rowCount
-    const existing = counts.get(key)
-    if (existing) {
-      existing.count += 1
-      return counts
-    }
-    counts.set(key, {
-      count: 1,
-      firstIndex: index
-    })
-    return counts
-  }, new Map<number, { count: number; firstIndex: number }>())
-  const dominantMetaRowCount =
-    [...metaRowCountEntries.entries()].sort((left, right) => {
-      const [, leftMeta] = left
-      const [, rightMeta] = right
-      if (rightMeta.count !== leftMeta.count) {
-        return rightMeta.count - leftMeta.count
-      }
-      return leftMeta.firstIndex - rightMeta.firstIndex
-    })[0]?.[0] ?? null
+  const dominantMetaRowCount = findDominantKey(rolesWithMetaBlocks, (pair) => pair.rowCount)
 
   if (typeof dominantMetaRowCount !== 'number') return []
 
@@ -155,192 +235,13 @@ export function resolveContainerMetaBlockValueColumnPairs(
 export function resolveContainerBodyMetaValueColumnPairs(
   items: DesignInspectionItemSummary[]
 ): ContainerBodyMetaValueColumnPair[] {
-  const rolesWithBodyMetaBlocks = resolveStructuredContainerTextRoles(items).flatMap((role) => {
-    if (role.rows.length < 4) return []
-
-    const bodyRow = role.rows[1]
-    const trailingRows = role.rows.slice(2)
-    const lastTrailingRow = trailingRows[trailingRows.length - 1]
-
-    if (
-      !bodyRow ||
-      bodyRow.length !== 1 ||
-      trailingRows.length < 2 ||
-      lastTrailingRow?.length !== 1
-    ) {
-      return []
-    }
-
-    const candidateRows = trailingRows.slice(0, -1)
-    if (candidateRows.length < 1 || !candidateRows.every((row) => row.length === 2)) return []
-
-    const labelItems = candidateRows.map((row) => row[0])
-    const valueItems = candidateRows.map((row) => row[row.length - 1])
-    const columnGaps = candidateRows.map(([labelItem, valueItem]) =>
-      roundMetric(valueItem.bounds.x - (labelItem.bounds.x + labelItem.bounds.width))
-    )
-    if (columnGaps.some((gap) => gap <= SPACING_TOLERANCE_PX)) return []
-
-    const labelLeftInsets = labelItems.map((item) =>
-      roundMetric(item.bounds.x - role.container.bounds.x)
-    )
-    const valueRightInsets = valueItems.map((item) =>
-      roundMetric(
-        role.container.bounds.x + role.container.bounds.width - (item.bounds.x + item.bounds.width)
-      )
-    )
-    const labelLeftInsetSpread = Math.max(...labelLeftInsets) - Math.min(...labelLeftInsets)
-    const valueRightInsetSpread = Math.max(...valueRightInsets) - Math.min(...valueRightInsets)
-
-    if (
-      labelLeftInsetSpread > SPACING_TOLERANCE_PX ||
-      valueRightInsetSpread > SPACING_TOLERANCE_PX
-    ) {
-      return []
-    }
-
-    return [
-      {
-        container: role.container,
-        valueItems,
-        rightInset: roundMetric(median(valueRightInsets)),
-        rowCount: candidateRows.length
-      }
-    ]
-  })
-
-  if (rolesWithBodyMetaBlocks.length < 3) return []
-
-  const metaRowCountEntries = [...rolesWithBodyMetaBlocks].reduce((counts, pair, index) => {
-    const key = pair.rowCount
-    const existing = counts.get(key)
-    if (existing) {
-      existing.count += 1
-      return counts
-    }
-    counts.set(key, {
-      count: 1,
-      firstIndex: index
-    })
-    return counts
-  }, new Map<number, { count: number; firstIndex: number }>())
-  const dominantMetaRowCount =
-    [...metaRowCountEntries.entries()].sort((left, right) => {
-      const [, leftMeta] = left
-      const [, rightMeta] = right
-      if (rightMeta.count !== leftMeta.count) {
-        return rightMeta.count - leftMeta.count
-      }
-      return leftMeta.firstIndex - rightMeta.firstIndex
-    })[0]?.[0] ?? null
-
-  if (typeof dominantMetaRowCount !== 'number') return []
-
-  const comparableBodyMetaBlocks = rolesWithBodyMetaBlocks.filter(
-    (pair) => pair.rowCount === dominantMetaRowCount
-  )
-
-  if (comparableBodyMetaBlocks.length < 3) return []
-
-  return comparableBodyMetaBlocks
+  return resolveBodyMetaValueColumnPairs(items, false)
 }
 
 export function resolveContainerBodyMetaFooterActionValueColumnPairs(
   items: DesignInspectionItemSummary[]
 ): ContainerBodyMetaFooterActionValueColumnPair[] {
-  const rolesWithBodyMetaFooterActions = resolveStructuredContainerTextRoles(items).flatMap(
-    (role) => {
-      if (role.rows.length < 4) return []
-
-      const bodyRow = role.rows[1]
-      const trailingRows = role.rows.slice(2)
-      const footerActionRow = trailingRows[trailingRows.length - 1]
-
-      if (
-        !bodyRow ||
-        bodyRow.length !== 1 ||
-        trailingRows.length < 2 ||
-        !footerActionRow ||
-        footerActionRow.length < 2
-      ) {
-        return []
-      }
-
-      const candidateRows = trailingRows.slice(0, -1)
-      if (candidateRows.length < 1 || !candidateRows.every((row) => row.length === 2)) return []
-
-      const labelItems = candidateRows.map((row) => row[0])
-      const valueItems = candidateRows.map((row) => row[row.length - 1])
-      const columnGaps = candidateRows.map(([labelItem, valueItem]) =>
-        roundMetric(valueItem.bounds.x - (labelItem.bounds.x + labelItem.bounds.width))
-      )
-      if (columnGaps.some((gap) => gap <= SPACING_TOLERANCE_PX)) return []
-
-      const labelLeftInsets = labelItems.map((item) =>
-        roundMetric(item.bounds.x - role.container.bounds.x)
-      )
-      const valueRightInsets = valueItems.map((item) =>
-        roundMetric(
-          role.container.bounds.x +
-            role.container.bounds.width -
-            (item.bounds.x + item.bounds.width)
-        )
-      )
-      const labelLeftInsetSpread = Math.max(...labelLeftInsets) - Math.min(...labelLeftInsets)
-      const valueRightInsetSpread = Math.max(...valueRightInsets) - Math.min(...valueRightInsets)
-
-      if (
-        labelLeftInsetSpread > SPACING_TOLERANCE_PX ||
-        valueRightInsetSpread > SPACING_TOLERANCE_PX
-      ) {
-        return []
-      }
-
-      return [
-        {
-          container: role.container,
-          valueItems,
-          rightInset: roundMetric(median(valueRightInsets)),
-          rowCount: candidateRows.length
-        }
-      ]
-    }
-  )
-
-  if (rolesWithBodyMetaFooterActions.length < 3) return []
-
-  const metaRowCountEntries = [...rolesWithBodyMetaFooterActions].reduce((counts, pair, index) => {
-    const key = pair.rowCount
-    const existing = counts.get(key)
-    if (existing) {
-      existing.count += 1
-      return counts
-    }
-    counts.set(key, {
-      count: 1,
-      firstIndex: index
-    })
-    return counts
-  }, new Map<number, { count: number; firstIndex: number }>())
-  const dominantMetaRowCount =
-    [...metaRowCountEntries.entries()].sort((left, right) => {
-      const [, leftMeta] = left
-      const [, rightMeta] = right
-      if (rightMeta.count !== leftMeta.count) {
-        return rightMeta.count - leftMeta.count
-      }
-      return leftMeta.firstIndex - rightMeta.firstIndex
-    })[0]?.[0] ?? null
-
-  if (typeof dominantMetaRowCount !== 'number') return []
-
-  const comparableBodyMetaFooterActions = rolesWithBodyMetaFooterActions.filter(
-    (pair) => pair.rowCount === dominantMetaRowCount
-  )
-
-  if (comparableBodyMetaFooterActions.length < 3) return []
-
-  return comparableBodyMetaFooterActions
+  return resolveBodyMetaValueColumnPairs(items, true)
 }
 
 export function resolveContainerBadgeStackSpacingPairs(
@@ -399,28 +300,7 @@ export function resolveContainerBadgeStackSpacingPairs(
 
   if (rolesWithBadgeStacks.length < 3) return []
 
-  const badgeRowCountEntries = [...rolesWithBadgeStacks].reduce((counts, pair, index) => {
-    const key = pair.rowCount
-    const existing = counts.get(key)
-    if (existing) {
-      existing.count += 1
-      return counts
-    }
-    counts.set(key, {
-      count: 1,
-      firstIndex: index
-    })
-    return counts
-  }, new Map<number, { count: number; firstIndex: number }>())
-  const dominantBadgeRowCount =
-    [...badgeRowCountEntries.entries()].sort((left, right) => {
-      const [, leftMeta] = left
-      const [, rightMeta] = right
-      if (rightMeta.count !== leftMeta.count) {
-        return rightMeta.count - leftMeta.count
-      }
-      return leftMeta.firstIndex - rightMeta.firstIndex
-    })[0]?.[0] ?? null
+  const dominantBadgeRowCount = findDominantKey(rolesWithBadgeStacks, (pair) => pair.rowCount)
 
   if (typeof dominantBadgeRowCount !== 'number') return []
 
@@ -456,28 +336,7 @@ export function resolveContainerTailBadgeStackSpacingPairs(
 
   if (rolesWithTailBadgeStacks.length < 3) return []
 
-  const badgeRowCountEntries = [...rolesWithTailBadgeStacks].reduce((counts, pair, index) => {
-    const key = pair.rowCount
-    const existing = counts.get(key)
-    if (existing) {
-      existing.count += 1
-      return counts
-    }
-    counts.set(key, {
-      count: 1,
-      firstIndex: index
-    })
-    return counts
-  }, new Map<number, { count: number; firstIndex: number }>())
-  const dominantBadgeRowCount =
-    [...badgeRowCountEntries.entries()].sort((left, right) => {
-      const [, leftMeta] = left
-      const [, rightMeta] = right
-      if (rightMeta.count !== leftMeta.count) {
-        return rightMeta.count - leftMeta.count
-      }
-      return leftMeta.firstIndex - rightMeta.firstIndex
-    })[0]?.[0] ?? null
+  const dominantBadgeRowCount = findDominantKey(rolesWithTailBadgeStacks, (pair) => pair.rowCount)
 
   if (typeof dominantBadgeRowCount !== 'number') return []
 
@@ -537,28 +396,10 @@ export function resolveContainerBadgeStackFooterActionSpacingPairs(
 
   if (rolesWithBadgeStacks.length < 3) return []
 
-  const badgeShapeEntries = [...rolesWithBadgeStacks].reduce((counts, pair, index) => {
-    const key = `${pair.rowCount}:${pair.footerRowCount}`
-    const existing = counts.get(key)
-    if (existing) {
-      existing.count += 1
-      return counts
-    }
-    counts.set(key, {
-      count: 1,
-      firstIndex: index
-    })
-    return counts
-  }, new Map<string, { count: number; firstIndex: number }>())
-  const dominantBadgeShape =
-    [...badgeShapeEntries.entries()].sort((left, right) => {
-      const [, leftMeta] = left
-      const [, rightMeta] = right
-      if (rightMeta.count !== leftMeta.count) {
-        return rightMeta.count - leftMeta.count
-      }
-      return leftMeta.firstIndex - rightMeta.firstIndex
-    })[0]?.[0] ?? null
+  const dominantBadgeShape = findDominantKey(
+    rolesWithBadgeStacks,
+    (pair) => `${pair.rowCount}:${pair.footerRowCount}`
+  )
 
   if (!dominantBadgeShape) return []
 
@@ -621,28 +462,10 @@ export function resolveContainerChipGroupRowSpacingPairs(
 
   if (rolesWithChipGroups.length < 3) return []
 
-  const chipShapeEntries = [...rolesWithChipGroups].reduce((counts, pair, index) => {
-    const key = `${pair.rowCount}:${pair.columnCount}`
-    const existing = counts.get(key)
-    if (existing) {
-      existing.count += 1
-      return counts
-    }
-    counts.set(key, {
-      count: 1,
-      firstIndex: index
-    })
-    return counts
-  }, new Map<string, { count: number; firstIndex: number }>())
-  const dominantChipShape =
-    [...chipShapeEntries.entries()].sort((left, right) => {
-      const [, leftMeta] = left
-      const [, rightMeta] = right
-      if (rightMeta.count !== leftMeta.count) {
-        return rightMeta.count - leftMeta.count
-      }
-      return leftMeta.firstIndex - rightMeta.firstIndex
-    })[0]?.[0] ?? null
+  const dominantChipShape = findDominantKey(
+    rolesWithChipGroups,
+    (pair) => `${pair.rowCount}:${pair.columnCount}`
+  )
 
   if (!dominantChipShape) return []
 
@@ -712,28 +535,10 @@ export function resolveContainerChipGroupFooterActionRowSpacingPairs(
 
   if (rolesWithChipGroups.length < 3) return []
 
-  const chipShapeEntries = [...rolesWithChipGroups].reduce((counts, pair, index) => {
-    const key = `${pair.rowCount}:${pair.columnCount}:${pair.footerRowCount}`
-    const existing = counts.get(key)
-    if (existing) {
-      existing.count += 1
-      return counts
-    }
-    counts.set(key, {
-      count: 1,
-      firstIndex: index
-    })
-    return counts
-  }, new Map<string, { count: number; firstIndex: number }>())
-  const dominantChipShape =
-    [...chipShapeEntries.entries()].sort((left, right) => {
-      const [, leftMeta] = left
-      const [, rightMeta] = right
-      if (rightMeta.count !== leftMeta.count) {
-        return rightMeta.count - leftMeta.count
-      }
-      return leftMeta.firstIndex - rightMeta.firstIndex
-    })[0]?.[0] ?? null
+  const dominantChipShape = findDominantKey(
+    rolesWithChipGroups,
+    (pair) => `${pair.rowCount}:${pair.columnCount}:${pair.footerRowCount}`
+  )
 
   if (!dominantChipShape) return []
 
@@ -843,28 +648,10 @@ export function resolveContainerFooterRowSpacingPairs(
 
   if (rolesWithFooterRows.length < 3) return []
 
-  const footerRowCountEntries = [...rolesWithFooterRows].reduce((counts, role, index) => {
-    const key = role.footerRow.length
-    const existing = counts.get(key)
-    if (existing) {
-      existing.count += 1
-      return counts
-    }
-    counts.set(key, {
-      count: 1,
-      firstIndex: index
-    })
-    return counts
-  }, new Map<number, { count: number; firstIndex: number }>())
-  const dominantFooterRowCount =
-    [...footerRowCountEntries.entries()].sort((left, right) => {
-      const [, leftMeta] = left
-      const [, rightMeta] = right
-      if (rightMeta.count !== leftMeta.count) {
-        return rightMeta.count - leftMeta.count
-      }
-      return leftMeta.firstIndex - rightMeta.firstIndex
-    })[0]?.[0] ?? null
+  const dominantFooterRowCount = findDominantKey(
+    rolesWithFooterRows,
+    (role) => role.footerRow.length
+  )
 
   if (typeof dominantFooterRowCount !== 'number') return []
 
@@ -894,29 +681,5 @@ export function resolveContainerFooterRowSpacingPairs(
 export function resolveDominantCornerShape(
   items: InspectableRectangularAnnotationSummary[]
 ): RectangularCornerShape | null {
-  if (items.length === 0) return null
-
-  const counts = new Map<RectangularCornerShape, { count: number; firstIndex: number }>()
-  items.forEach((item, index) => {
-    const existing = counts.get(item.shape)
-    if (existing) {
-      existing.count += 1
-      return
-    }
-    counts.set(item.shape, {
-      count: 1,
-      firstIndex: index
-    })
-  })
-
-  const dominantEntry = [...counts.entries()].sort((left, right) => {
-    const [, leftMeta] = left
-    const [, rightMeta] = right
-    if (rightMeta.count !== leftMeta.count) {
-      return rightMeta.count - leftMeta.count
-    }
-    return leftMeta.firstIndex - rightMeta.firstIndex
-  })[0]
-
-  return dominantEntry?.[0] ?? null
+  return findDominantKey(items, (item) => item.shape)
 }

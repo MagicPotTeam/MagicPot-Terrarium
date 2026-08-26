@@ -4,6 +4,7 @@ vi.mock('node:fs', async (importActual) => importActual())
 import { join } from 'node:path'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
+import type { PolicyRequest } from '../../../shared/magicAgentPlatform2/policy'
 import { PersistentTriggerStore } from './persistentTriggerStore'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import { MagicAgentPolicyAuthorizationService } from '../policy'
@@ -65,6 +66,26 @@ const setup = (effect: 'allow' | 'deny') => {
   return { eventStore, authorization }
 }
 
+const createGrantProvider =
+  (
+    authorization: MagicAgentPolicyAuthorizationService,
+    issuedAt: number,
+    grantIdFor: (request: PolicyRequest) => string = (request) => `g-${request.requestId}`
+  ) =>
+  async (request: PolicyRequest) => {
+    const grantId = grantIdFor(request)
+    const grant = authorization.createApprovalGrant({
+      grantId,
+      request,
+      approvedBy: { kind: 'user', id: 'approver-1' },
+      issuedAt,
+      expiresAt: issuedAt + 1000,
+      maxUses: 1,
+      idempotencyKey: grantId
+    })
+    return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
+  }
+
 describe('production trigger runtime', () => {
   it('owns store/executor/scheduler and has idempotent start/stop', async () => {
     const { eventStore, authorization } = setup('deny')
@@ -92,18 +113,7 @@ describe('production trigger runtime', () => {
       eventStore,
       authorization,
       service: { runAgent, runGraph: vi.fn() },
-      grantProvider: vi.fn(async (request) => {
-        const grant = authorization.createApprovalGrant({
-          grantId: 'runtime-grant-1',
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: 1000,
-          expiresAt: 2000,
-          maxUses: 1,
-          idempotencyKey: 'runtime-grant-1'
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      }),
+      grantProvider: createGrantProvider(authorization, 1000, () => 'runtime-grant-1'),
       routeResolver: () => ({ trusted: true }),
       now: () => 1000,
       pollInterval: 60_000
@@ -236,18 +246,7 @@ describe('production trigger runtime', () => {
       eventStore: secondStore,
       authorization: secondAuth,
       service: { runAgent, runGraph: vi.fn() },
-      grantProvider: vi.fn(async (request) => {
-        const grant = secondAuth.createApprovalGrant({
-          grantId: 'runtime-recovery-grant',
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: now,
-          expiresAt: now + 1000,
-          maxUses: 1,
-          idempotencyKey: 'runtime-recovery-grant'
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      }),
+      grantProvider: createGrantProvider(secondAuth, now, () => 'runtime-recovery-grant'),
       routeResolver: () => ({ trusted: true }),
       now: () => now
     })
@@ -268,18 +267,11 @@ describe('production trigger runtime manual occurrences', () => {
       eventStore,
       authorization,
       service: { runAgent, runGraph: vi.fn() },
-      grantProvider: async (request) => {
-        const grant = authorization.createApprovalGrant({
-          grantId: `manual-${request.requestId}`,
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: 1000,
-          expiresAt: 2000,
-          maxUses: 1,
-          idempotencyKey: `manual-${request.requestId}`
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      },
+      grantProvider: createGrantProvider(
+        authorization,
+        1000,
+        (request) => `manual-${request.requestId}`
+      ),
       routeResolver: () => ({ trusted: true }),
       now: () => 1000,
       pollInterval: 60_000
@@ -353,18 +345,11 @@ describe('production trigger runtime manual occurrences', () => {
       eventStore,
       authorization,
       service: { runAgent, runGraph: vi.fn() },
-      grantProvider: async (request) => {
-        const grant = authorization.createApprovalGrant({
-          grantId: `drive-state-grant:${request.requestId}`,
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: now,
-          expiresAt: now + 1000,
-          maxUses: 1,
-          idempotencyKey: `drive-state-grant:${request.requestId}`
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      },
+      grantProvider: createGrantProvider(
+        authorization,
+        now,
+        (request) => `drive-state-grant:${request.requestId}`
+      ),
       routeResolver: () => ({ trusted: true }),
       now: () => now,
       pollInterval: 60_000
@@ -427,18 +412,11 @@ describe('production trigger runtime manual occurrences', () => {
       eventStore,
       authorization,
       service: { runAgent, runGraph: vi.fn() },
-      grantProvider: async (request) => {
-        const grant = authorization.createApprovalGrant({
-          grantId: `cron-grant:${request.requestId}`,
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: now,
-          expiresAt: now + 1000,
-          maxUses: 1,
-          idempotencyKey: `cron-grant:${request.requestId}`
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      },
+      grantProvider: createGrantProvider(
+        authorization,
+        now,
+        (request) => `cron-grant:${request.requestId}`
+      ),
       routeResolver: () => ({ trusted: true }),
       now: () => now,
       pollInterval: 60_000
@@ -480,18 +458,11 @@ describe('production trigger runtime manual occurrences', () => {
       eventStore,
       authorization,
       service: { runAgent, runGraph: vi.fn() },
-      grantProvider: async (request) => {
-        const grant = authorization.createApprovalGrant({
-          grantId: `calendar-grant:${request.requestId}`,
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: now,
-          expiresAt: now + 1000,
-          maxUses: 1,
-          idempotencyKey: `calendar-grant:${request.requestId}`
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      },
+      grantProvider: createGrantProvider(
+        authorization,
+        now,
+        (request) => `calendar-grant:${request.requestId}`
+      ),
       routeResolver: () => ({ trusted: true }),
       now: () => now,
       pollInterval: 60_000
@@ -531,18 +502,7 @@ describe('production trigger runtime manual occurrences', () => {
       eventStore,
       authorization,
       service: { runAgent, runGraph: vi.fn() },
-      grantProvider: async (request) => {
-        const grant = authorization.createApprovalGrant({
-          grantId: `g-${request.requestId}`,
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: 1000,
-          expiresAt: 2000,
-          maxUses: 1,
-          idempotencyKey: `g-${request.requestId}`
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      },
+      grantProvider: createGrantProvider(authorization, 1000),
       routeResolver: () => ({ trusted: true }),
       now: () => 1000,
       bootId: 'production-boot',
@@ -638,18 +598,7 @@ describe('production trigger runtime manual occurrences', () => {
       eventStore,
       authorization,
       service: { runAgent, runGraph: vi.fn() },
-      grantProvider: async (request) => {
-        const grant = authorization.createApprovalGrant({
-          grantId: `g-${request.requestId}`,
-          request,
-          approvedBy: { kind: 'user', id: 'approver-1' },
-          issuedAt: 1000,
-          expiresAt: 2000,
-          maxUses: 1,
-          idempotencyKey: `g-${request.requestId}`
-        })
-        return { grantId: grant.grant.grantId, expectedGrantUseCount: grant.grant.useCount }
-      },
+      grantProvider: createGrantProvider(authorization, 1000),
       routeResolver: () => ({ trusted: true }),
       now: () => 1000,
       pollInterval: 60_000

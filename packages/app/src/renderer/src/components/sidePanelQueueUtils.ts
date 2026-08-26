@@ -30,9 +30,7 @@ export const getQueueItemDisplayLabel = (item: QueueItem): string => {
   return formatQueueTimestamp(item[3]?.created_at) ?? `${item[1].substring(0, 8)}...`
 }
 
-const MAX_RUNNING_PROGRESS = 0.99
-const clampRunningProgress = (value: number): number =>
-  Math.min(MAX_RUNNING_PROGRESS, Math.max(0, value))
+const clampRunningProgress = (value: number): number => Math.min(1, Math.max(0, value))
 
 export const getQueueItemProgress = (
   animationStates: QueueAnimationStates,

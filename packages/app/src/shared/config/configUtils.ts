@@ -1,5 +1,6 @@
 import {
   DEFAULT_CHECKPOINTS_DIR,
+  DEFAULT_COMFYUI_ORIGIN,
   DEFAULT_CLIP_DIR,
   DEFAULT_CONTROLNET_DIR,
   DEFAULT_DIFFUSION_MODELS_DIR,
@@ -13,8 +14,21 @@ import {
 import type { Config } from './config'
 import { BuildEnv } from './buildEnv'
 import { BuiltInPath } from '@shared/utils/utilWindow'
-import { parsePortFromOrigin } from '@shared/utils/utilFuncs'
 import { AUTOMATION_SCHEME_DEFINITION_DIR_NAME } from '@shared/automationScheme'
+
+function isLocalComfyUIHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase()
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1'
+}
+
+function isLegacyLocalDefaultOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin.includes('://') ? origin : `http://${origin}`)
+    return url.protocol === 'http:' && isLocalComfyUIHostname(url.hostname) && url.port === ''
+  } catch {
+    return false
+  }
+}
 
 /**
  * 用于统一配置计算字段的逻辑
@@ -42,7 +56,6 @@ export class ConfigUtils {
   private isUsingDevelopmentEmbeddedComfyDataDir(): boolean {
     return (
       this.buildEnv.env.build === 'development' &&
-      !this.config.use_remote_comfyui &&
       !this.config.local_comfyui_config.comfyui_dir.trim() &&
       Boolean(this.buildEnv.embeddedDefaults.comfyuiDir)
     )
@@ -89,35 +102,19 @@ export class ConfigUtils {
     return this.path.join(this.getAppRootDir(), value)
   }
 
-  // return [comfyui_dir, available]
-  // 1. 使用本地 ComfyUI ，未设置 comfyui_dir 且非 Embedded  -> 不可用
-  // 2. 使用本地 ComfyUI ，未设置 comfyui_dir 且 Embedded -> embeddedComfyuiDir
-  // 3. 使用本地 ComfyUI ，设置了 comfyui_dir -> comfyui_dir
-  // 4. 使用远程 ComfyUI ，未设置 mapping_comfyui_dir -> 不可用
-  // 5. 使用远程 ComfyUI ，设置了 mapping_comfyui_dir -> mapping_comfyui_dir
-  getComfyUIDir(): [string, boolean] {
-    // 始终优先使用 embeddedDefaults（ComfyUI 已嵌入源代码）
+  // 本机由 MagicPot 管理的 ComfyUI 启动配置始终来自 local_comfyui_config，
+  // 与当前工作流连接的是本地还是远程 API 无关。
+  getManagedComfyUIDir(): [string, boolean] {
     const embeddedComfyuiDir = this.resolveLocalDirectoryPath(
       this.buildEnv?.embeddedDefaults.comfyuiDir || ''
     )
-    const localComfyUIDir =
+    const comfyuiDir =
       this.resolveLocalDirectoryPath(this.config.local_comfyui_config.comfyui_dir) ||
       embeddedComfyuiDir
-    const remoteComfyUIDir = this.config.remote_comfyui_config.mapping_comfyui_dir
-    const comfyuiDir = this.config.use_remote_comfyui ? remoteComfyUIDir : localComfyUIDir
     return [comfyuiDir, comfyuiDir !== '']
   }
 
-  // return [python_cmd, available]
-  // 1. 使用远程 ComfyUI -> 不可用
-  // 2. 使用本地 ComfyUI ，未设置 python_cmd 且非 Embedded -> 不可用
-  // 3. 使用本地 ComfyUI ，未设置 python_cmd 且 Embedded -> embeddedPythonCmd
-  // 4. 使用本地 ComfyUI ，设置了 python_cmd -> python_cmd
-  getPythonCmd(): [string, boolean] {
-    if (this.config.use_remote_comfyui) {
-      return ['', false]
-    }
-    // 始终优先使用 embeddedDefaults（Python 环境已嵌入源代码）
+  getManagedPythonCmd(): [string, boolean] {
     const embeddedPythonCmd = this.resolveLocalCommandPath(
       this.buildEnv?.embeddedDefaults.pythonCmd || ''
     )
@@ -126,21 +123,59 @@ export class ConfigUtils {
     return [pythonCmd, pythonCmd !== '']
   }
 
+  getManagedComfyUIPort(): string {
+    const configuredPort = this.config.local_comfyui_config.comfyui_port.trim()
+    if (configuredPort !== '') {
+      return configuredPort
+    }
+
+    const configuredOrigin = this.config.remote_comfyui_config.comfyui_origin.trim()
+    try {
+      const url = new URL(
+        configuredOrigin.includes('://')
+          ? configuredOrigin
+          : `http://${configuredOrigin || DEFAULT_COMFYUI_ORIGIN}`
+      )
+      if (isLocalComfyUIHostname(url.hostname) && url.port) {
+        return url.port
+      }
+    } catch {
+      // Keep the managed default when the configured API origin is invalid.
+    }
+    return '8188'
+  }
+
+  getManagedComfyUIArgs(): string[] {
+    if (this.config.local_comfyui_config.comfyui_args.length > 0) {
+      return this.config.local_comfyui_config.comfyui_args
+    }
+    return [
+      ...(this.buildEnv?.embeddedDefaults.comfyuiArgs || []),
+      '--port',
+      this.getManagedComfyUIPort()
+    ]
+  }
+
+  // Return the locally managed ComfyUI directory when available. A mapped directory
+  // is retained as a compatibility fallback for installations configured before the
+  // unified endpoint model.
+  getComfyUIDir(): [string, boolean] {
+    const [localComfyUIDir] = this.getManagedComfyUIDir()
+    const mappedComfyUIDir = this.config.remote_comfyui_config.mapping_comfyui_dir.trim()
+    const comfyuiDir = mappedComfyUIDir || localComfyUIDir
+    return [comfyuiDir, comfyuiDir !== '']
+  }
+
+  // Return the managed Python command independently of the configured API endpoint.
+  getPythonCmd(): [string, boolean] {
+    return this.getManagedPythonCmd()
+  }
+
   getComfyUIPort(): string {
-    if (this.config.use_remote_comfyui) {
-      return parsePortFromOrigin(this.config.remote_comfyui_config.comfyui_origin)
-    }
-    const port = this.config.local_comfyui_config.comfyui_port
-    if (port === '') {
-      return '8188'
-    }
-    return port
+    return this.getManagedComfyUIPort()
   }
 
   getComfyUIArgs(): string[] {
-    if (this.config.use_remote_comfyui) {
-      return []
-    }
     if (this.config.local_comfyui_config.comfyui_args.length > 0) {
       return this.config.local_comfyui_config.comfyui_args
     }
@@ -151,12 +186,22 @@ export class ConfigUtils {
   }
 
   getComfyUIOrigin(): string {
-    if (this.config.use_remote_comfyui) {
-      return this.config.remote_comfyui_config.comfyui_origin
+    const configuredOrigin = this.config.remote_comfyui_config.comfyui_origin.trim()
+    if (!configuredOrigin) {
+      return DEFAULT_COMFYUI_ORIGIN
     }
 
-    const port = this.getComfyUIPort()
-    return `http://localhost:${port}`
+    // Older local configurations stored the API origin as localhost:8188 and
+    // kept a custom port in local_comfyui_config. Preserve that setup while
+    // using the unified origin field for all new configurations.
+    if (
+      isLegacyLocalDefaultOrigin(configuredOrigin) &&
+      this.config.local_comfyui_config.comfyui_port.trim() !== '' &&
+      this.config.local_comfyui_config.comfyui_port.trim() !== '8188'
+    ) {
+      return `http://127.0.0.1:${this.config.local_comfyui_config.comfyui_port.trim()}`
+    }
+    return configuredOrigin
   }
 
   getPortablePythonHomeDir(): string {
@@ -234,11 +279,10 @@ export class ConfigUtils {
   }
 
   /**
-   * @returns QApp 目录，指向项目根目录的 qApps 文件夹（可被 git 跟踪）
+   * @returns 用户可写的 QApp 目录，位于 Electron userData/Data/qApps。
+   *          开发环境与内置 QApp 的 packages/qapps 目录是两个不同来源。
    */
   getQAppDir(): string {
-    // 始终使用项目根目录的 qApps 文件夹（开发环境是 process.cwd()，生产环境是 resources 的父目录）
-    // 即用户请求的 Local/Programs/magicpot 目录下
     return this.path.join(this.buildEnv.pathMap.data, 'qApps')
   }
 
@@ -283,6 +327,14 @@ export class ConfigUtils {
     return this.path.join(this.buildEnv.pathMap.data, AUTOMATION_SCHEME_DEFINITION_DIR_NAME)
   }
 
+  isManagedComfyUICommandAvailable(): boolean {
+    return (
+      this.getManagedComfyUIArgs().length > 0 &&
+      this.getManagedComfyUIDir()[1] &&
+      this.getManagedPythonCmd()[1]
+    )
+  }
+
   // 本地 ComfyUI 的目录设置都已完成
   isComfyUIDirAvailable(): boolean {
     const [comfyuiDir, available] = this.getComfyUIDir()
@@ -297,8 +349,7 @@ export class ConfigUtils {
 
   // 启动 ComfyUI 命令的必要设置都已完成
   isComfyUICommandAvailable(): boolean {
-    const comfyUIArgsAvailable = this.getComfyUIArgs().length > 0
-    return comfyUIArgsAvailable && this.isComfyUIDirAvailable() && this.isPythonCmdAvailable()
+    return this.isManagedComfyUICommandAvailable()
   }
 
   // 连接到 ComfyUI API 的必要设置都已完成

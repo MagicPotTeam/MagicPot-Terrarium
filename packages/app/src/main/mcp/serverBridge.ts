@@ -65,6 +65,12 @@ const toolOutputSchema = {
   metadata: z.record(z.string(), z.unknown()).optional()
 }
 
+const READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true
+} as const
+
 const toRoute = (args: {
   channel: string
   scopeType: 'dm' | 'group'
@@ -250,11 +256,7 @@ export const createMagicPotMcpServer = ({
       description: 'Describe the current chat session and task state for a route.',
       inputSchema: routeSchema,
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) => {
       const result = await getAssistantRuntime().callTool(
@@ -272,11 +274,7 @@ export const createMagicPotMcpServer = ({
       description: 'Return the latest persisted session summary for a route.',
       inputSchema: routeSchema,
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) => toJsonToolResponse(await getAssistantRuntime().getSessionSummary(toRoute(args)))
   )
@@ -287,11 +285,7 @@ export const createMagicPotMcpServer = ({
       description: 'Return the full persisted session record for a route.',
       inputSchema: routeSchema,
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) => toJsonToolResponse(await getAssistantRuntime().getSession(toRoute(args)))
   )
@@ -305,11 +299,7 @@ export const createMagicPotMcpServer = ({
         runId: z.string().describe('Chat run id.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) =>
       toJsonToolResponse(await getAssistantRuntime().getRun(args.runId, toRoute(args)))
@@ -324,11 +314,7 @@ export const createMagicPotMcpServer = ({
         runId: z.string().describe('Chat run id.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) =>
       toJsonToolResponse(await getAssistantRuntime().getRunTrace(args.runId, toRoute(args)))
@@ -344,11 +330,7 @@ export const createMagicPotMcpServer = ({
         runId: z.string().describe('Chat run id.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) =>
       toJsonToolResponse(await getAssistantRuntime().getRunLineage(args.runId, toRoute(args)))
@@ -390,11 +372,7 @@ export const createMagicPotMcpServer = ({
         limit: z.number().int().min(1).max(100).optional().describe('Max number of events.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) =>
       toJsonToolResponse({
@@ -412,11 +390,7 @@ export const createMagicPotMcpServer = ({
         limit: z.number().int().min(1).max(100).optional().describe('Max number of entries.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) =>
       toJsonToolResponse({
@@ -443,11 +417,7 @@ export const createMagicPotMcpServer = ({
           .describe('Max number of recent runs to include.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) =>
       toJsonToolResponse(
@@ -492,11 +462,7 @@ export const createMagicPotMcpServer = ({
       description: 'Return retention limits and current store usage for a route.',
       inputSchema: routeSchema,
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) => {
       const result = await getAssistantRuntime().callTool(toRoute(args), 'limits.status', {})
@@ -518,11 +484,7 @@ export const createMagicPotMcpServer = ({
           .describe('Max number of workspace aggregates to return.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) =>
       toJsonToolResponse({
@@ -545,11 +507,7 @@ export const createMagicPotMcpServer = ({
           .describe('Max number of workflow records to return.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) =>
       toJsonToolResponse({
@@ -568,11 +526,7 @@ export const createMagicPotMcpServer = ({
         workspaceId: z.string().min(1).describe('Workspace id to inspect.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) => {
       const workspace = await getAssistantRuntime().getWorkspace(args.workspaceId, { runLimit: 20 })
@@ -616,11 +570,7 @@ export const createMagicPotMcpServer = ({
           .describe('Max number of artifacts to include.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) => {
       const workflow = await getAssistantRuntime().getWorkflow(
@@ -684,11 +634,7 @@ export const createMagicPotMcpServer = ({
           .describe('Max number of task-group records to return.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) =>
       toJsonToolResponse({
@@ -715,11 +661,7 @@ export const createMagicPotMcpServer = ({
           .describe('Max number of runs to include.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) => {
       const workflow = await getAssistantRuntime().getTaskGroup(
@@ -778,11 +720,7 @@ export const createMagicPotMcpServer = ({
       description: 'Return the stored workspace and desktop context snapshot for a route.',
       inputSchema: routeSchema,
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) => {
       const result = await getAssistantRuntime().callTool(toRoute(args), 'workspace.context', {})
@@ -836,11 +774,7 @@ export const createMagicPotMcpServer = ({
       description: 'Return recent stored memory for a route.',
       inputSchema: routeSchema,
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) => {
       const result = await getAssistantRuntime().callTool(toRoute(args), 'memory.recent', {})
@@ -857,11 +791,7 @@ export const createMagicPotMcpServer = ({
         limit: z.number().int().min(1).max(20).optional().describe('Max number of runs to return.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) => {
       const result = await getAssistantRuntime().callTool(toRoute(args), 'runs.list', {
@@ -886,11 +816,7 @@ export const createMagicPotMcpServer = ({
           .describe('Max number of artifacts to return.')
       },
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async (args) => {
       const result = await getAssistantRuntime().callTool(toRoute(args), 'artifacts.list', {
@@ -907,11 +833,7 @@ export const createMagicPotMcpServer = ({
         'Describe current MCP client connections and the local MagicPot MCP server state.',
       inputSchema: {},
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async () => {
       const status = await getMcpRuntimeStatus(resolveConfig())
@@ -928,11 +850,7 @@ export const createMagicPotMcpServer = ({
       description: 'List the unified MagicPot app catalog snapshot.',
       inputSchema: {},
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async () => toJsonToolResponse(await getAppCatalogSnapshot())
   )
@@ -943,11 +861,7 @@ export const createMagicPotMcpServer = ({
       description: 'List the read-only tool catalog exposed by the MCP bridge.',
       inputSchema: {},
       outputSchema: toolOutputSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true
-      }
+      annotations: READ_ONLY_TOOL_ANNOTATIONS
     },
     async () =>
       toJsonToolResponse({

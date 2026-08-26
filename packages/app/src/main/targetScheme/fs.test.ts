@@ -25,18 +25,23 @@ const pathExists = async (targetPath: string): Promise<boolean> =>
 describe('TargetSchemeFSCli', () => {
   const tempRoots: string[] = []
 
+  const createTempRoot = async (label: string) => {
+    const tempRoot = await createNodeTestArtifactDir(label)
+    tempRoots.push(tempRoot)
+    await fs.rm(tempRoot, { recursive: true, force: true })
+    return tempRoot
+  }
+
   afterEach(async () => {
     await Promise.all(tempRoots.map((root) => fs.rm(root, { recursive: true, force: true })))
     tempRoots.length = 0
   })
 
   it('migrates legacy target scheme files into the preferred userData directory', async () => {
-    const tempRoot = await createNodeTestArtifactDir('target-scheme')
-    tempRoots.push(tempRoot)
+    const tempRoot = await createTempRoot('target-scheme')
 
     const legacyDir = path.join(tempRoot, 'workspace', 'customChecks')
     const dataDir = path.join(tempRoot, 'userData')
-    await fs.rm(tempRoot, { recursive: true, force: true })
     await fs.mkdir(legacyDir, { recursive: true })
 
     const scheme: TargetScheme = {
@@ -73,13 +78,11 @@ describe('TargetSchemeFSCli', () => {
   })
 
   it('merges legacy scheme files even when the preferred directory already has newer entries', async () => {
-    const tempRoot = await createNodeTestArtifactDir('target-scheme-mixed-state')
-    tempRoots.push(tempRoot)
+    const tempRoot = await createTempRoot('target-scheme-mixed-state')
 
     const legacyDir = path.join(tempRoot, 'workspace', 'customChecks')
     const dataDir = path.join(tempRoot, 'userData')
     const preferredDir = path.join(dataDir, 'targetSchemes')
-    await fs.rm(tempRoot, { recursive: true, force: true })
     await fs.mkdir(legacyDir, { recursive: true })
     await fs.mkdir(preferredDir, { recursive: true })
 
@@ -135,13 +138,11 @@ describe('TargetSchemeFSCli', () => {
   })
 
   it('removes userData legacy sources after migration so deleted schemes do not reappear', async () => {
-    const tempRoot = await createNodeTestArtifactDir('target-scheme-userdata-migration')
-    tempRoots.push(tempRoot)
+    const tempRoot = await createTempRoot('target-scheme-userdata-migration')
 
     const dataDir = path.join(tempRoot, 'userData')
     const legacyDir = path.join(dataDir, 'automationSchemes')
     const preferredDir = path.join(dataDir, 'targetSchemes')
-    await fs.rm(tempRoot, { recursive: true, force: true })
     await fs.mkdir(legacyDir, { recursive: true })
 
     const scheme: TargetScheme = {
@@ -178,13 +179,11 @@ describe('TargetSchemeFSCli', () => {
   })
 
   it('removes stale userData legacy duplicates before deleting preferred schemes', async () => {
-    const tempRoot = await createNodeTestArtifactDir('target-scheme-userdata-stale-legacy')
-    tempRoots.push(tempRoot)
+    const tempRoot = await createTempRoot('target-scheme-userdata-stale-legacy')
 
     const dataDir = path.join(tempRoot, 'userData')
     const legacyDir = path.join(dataDir, 'automationSchemes')
     const preferredDir = path.join(dataDir, 'targetSchemes')
-    await fs.rm(tempRoot, { recursive: true, force: true })
     await fs.mkdir(legacyDir, { recursive: true })
     await fs.mkdir(preferredDir, { recursive: true })
 
@@ -224,11 +223,9 @@ describe('TargetSchemeFSCli', () => {
   })
 
   it('persists and sorts history targets by last run time', async () => {
-    const tempRoot = await createNodeTestArtifactDir('target-history')
-    tempRoots.push(tempRoot)
+    const tempRoot = await createTempRoot('target-history')
 
     const dataDir = path.join(tempRoot, 'userData')
-    await fs.rm(tempRoot, { recursive: true, force: true })
     await fs.mkdir(dataDir, { recursive: true })
 
     const buildEnv: BuildEnv = {
@@ -271,11 +268,9 @@ describe('TargetSchemeFSCli', () => {
   })
 
   it('deletes a persisted history target', async () => {
-    const tempRoot = await createNodeTestArtifactDir('target-history-delete')
-    tempRoots.push(tempRoot)
+    const tempRoot = await createTempRoot('target-history-delete')
 
     const dataDir = path.join(tempRoot, 'userData')
-    await fs.rm(tempRoot, { recursive: true, force: true })
     await fs.mkdir(dataDir, { recursive: true })
 
     const buildEnv: BuildEnv = {

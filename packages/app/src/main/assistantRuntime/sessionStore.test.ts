@@ -22,6 +22,8 @@ describe('AssistantSessionStore', () => {
   let tempDir = ''
   let filePath = ''
 
+  const createStore = () => new AssistantSessionStore(filePath)
+
   beforeEach(async () => {
     tempDir = await createNodeTestArtifactDir('assistant-session-store')
     buildDataDirRef.current = tempDir
@@ -52,7 +54,7 @@ describe('AssistantSessionStore', () => {
     await fs.writeFile(filePath, source, 'utf8')
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'migrate' }
 
-    const first = new AssistantSessionStore(filePath)
+    const first = createStore()
     expect((await first.getSession(route))?.messageEntries?.[0].attributionQuality).toBe(
       'legacy-approximate'
     )
@@ -60,7 +62,7 @@ describe('AssistantSessionStore', () => {
     const migrated = await fs.readFile(filePath, 'utf8')
     expect(JSON.parse(migrated).version).toBe(4)
 
-    const second = new AssistantSessionStore(filePath)
+    const second = createStore()
     await second.getSession(route)
     expect(await fs.readFile(filePath, 'utf8')).toBe(migrated)
     expect((await fs.readdir(tempDir)).filter((name) => name.endsWith('.bak'))).toEqual([
@@ -71,7 +73,7 @@ describe('AssistantSessionStore', () => {
   it('fails closed on malformed/future files without replacing the source', async () => {
     for (const source of ['{broken', JSON.stringify({ version: 5, sessions: [] })]) {
       await fs.writeFile(filePath, source, 'utf8')
-      const store = new AssistantSessionStore(filePath)
+      const store = createStore()
       await expect(
         store.getSession({ channel: 'generic', scopeType: 'dm', scopeId: 'closed' })
       ).rejects.toThrow()
@@ -96,7 +98,7 @@ describe('AssistantSessionStore', () => {
     const renameSpy = vi
       .spyOn(fs, 'rename')
       .mockRejectedValueOnce(new Error('migration rename failed'))
-    const store = new AssistantSessionStore(filePath)
+    const store = createStore()
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'rollback' }
     await expect(store.getSession(route)).rejects.toThrow('migration rename failed')
     expect(await fs.readFile(filePath, 'utf8')).toBe(source)
@@ -136,7 +138,7 @@ describe('AssistantSessionStore', () => {
       'utf8'
     )
 
-    const store = new AssistantSessionStore(filePath)
+    const store = createStore()
     const session = await store.getSession({
       channel: 'generic',
       scopeType: 'dm',
@@ -166,7 +168,7 @@ describe('AssistantSessionStore', () => {
   })
 
   it('preserves the previous file and cleans up the temp file when an atomic persist fails', async () => {
-    const store = new AssistantSessionStore(filePath)
+    const store = createStore()
     const route = {
       channel: 'generic',
       scopeType: 'dm' as const,
@@ -194,7 +196,7 @@ describe('AssistantSessionStore', () => {
   })
 
   it('persists runs, events, artifacts, and summaries in the v2 store', async () => {
-    const store = new AssistantSessionStore(filePath)
+    const store = createStore()
     const route = {
       channel: 'generic',
       scopeType: 'group' as const,
@@ -465,7 +467,7 @@ describe('AssistantSessionStore', () => {
   })
 
   it('derives run lineage from persisted parent and root relationships', async () => {
-    const store = new AssistantSessionStore(filePath)
+    const store = createStore()
     const route = {
       channel: 'generic',
       scopeType: 'dm' as const,
@@ -549,7 +551,7 @@ describe('AssistantSessionStore', () => {
   })
 
   it('derives workflow summaries and inspection views from persisted run roots', async () => {
-    const store = new AssistantSessionStore(filePath)
+    const store = createStore()
     const route = {
       channel: 'generic',
       scopeType: 'dm' as const,
@@ -670,7 +672,7 @@ describe('AssistantSessionStore', () => {
   })
 
   it('persists explicit workflow records alongside session data', async () => {
-    const store = new AssistantSessionStore(filePath)
+    const store = createStore()
     const route = {
       channel: 'generic',
       scopeType: 'dm' as const,
@@ -734,7 +736,7 @@ describe('AssistantSessionStore', () => {
       ])
     )
 
-    const reloadedStore = new AssistantSessionStore(filePath)
+    const reloadedStore = createStore()
     const workflows = await reloadedStore.listWorkflowSummaries({ limit: 10, route })
     expect(workflows).toEqual(
       expect.arrayContaining([
@@ -795,7 +797,7 @@ describe('AssistantSessionStore', () => {
       'utf8'
     )
 
-    const store = new AssistantSessionStore(filePath)
+    const store = createStore()
     const retentionBefore = await store.getRetentionState()
     const pruneResult = await store.pruneSessions(Date.now() - 24 * 60 * 60 * 1000)
     const sessions = await store.listSessions()
@@ -812,7 +814,7 @@ describe('AssistantSessionStore', () => {
   it('forks at persisted event position with remapped bounded state and independent reload', async () => {
     const sourceRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'fork-source' }
     const targetRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'fork-target' }
-    const store = new AssistantSessionStore(filePath)
+    const store = createStore()
     const workspace = getAssistantWorkspaceState(sourceRoute)
     const run1 = {
       runId: 'run-1',
@@ -897,7 +899,7 @@ describe('AssistantSessionStore', () => {
     expect(result.session.artifacts[0].artifactId).not.toBe('artifact-1')
     expect(result.lineage.idMap.runs['run-1']).toBe(result.session.runs[0].runId)
     expect(result.lineage.warning).toContain('not rolled back')
-    const reloaded = new AssistantSessionStore(filePath)
+    const reloaded = createStore()
     expect((await reloaded.getSession(targetRoute))?.lineage).toEqual(result.lineage)
     await reloaded.appendEvents(targetRoute, [
       { ...result.forkCreatedEvent, eventId: 'target-future' }
@@ -922,7 +924,7 @@ describe('AssistantSessionStore', () => {
       scopeType: 'dm' as const,
       scopeId: 'fork-lifecycle-final'
     }
-    const store = new AssistantSessionStore(filePath)
+    const store = createStore()
     const workspace = getAssistantWorkspaceState(sourceRoute)
     const sessionKey = 'generic:dm:fork-lifecycle-source'
     const runningRun = {
@@ -1046,7 +1048,7 @@ describe('AssistantSessionStore', () => {
     expect(final.session.artifacts[0].artifactId).not.toBe(artifact.artifactId)
     expect(JSON.stringify(await store.getSession(sourceRoute))).toBe(sourceBefore)
 
-    const reloaded = new AssistantSessionStore(filePath)
+    const reloaded = createStore()
     expect((await reloaded.getSession(earlyTarget))?.runs[0].status).toBe('running')
     expect((await reloaded.getSession(earlyTarget))?.artifacts).toEqual([])
     expect((await reloaded.getSession(finalTarget))?.lineage).toEqual(final.lineage)
@@ -1055,7 +1057,7 @@ describe('AssistantSessionStore', () => {
   it('rejects same/existing targets and missing events', async () => {
     const source = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'fork-errors-source' }
     const target = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'fork-errors-target' }
-    const store = new AssistantSessionStore(filePath)
+    const store = createStore()
     await store.appendEvents(source, [
       {
         eventId: 'exists',

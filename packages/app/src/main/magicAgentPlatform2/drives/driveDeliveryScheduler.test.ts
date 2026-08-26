@@ -3,6 +3,11 @@ import { MagicAgentEventStore } from '../persistence/eventStore'
 import { DriveDeliveryScheduler } from './driveDeliveryScheduler'
 import { PersistentDriveStore } from './persistentDriveStore'
 
+const createMemoryStore = () => {
+  const eventStore = new MagicAgentEventStore(':memory:')
+  return { eventStore, store: new PersistentDriveStore(eventStore) }
+}
+
 const createDrive = (store: PersistentDriveStore, id: string, priority = 1) =>
   store.create({
     drive: {
@@ -21,9 +26,8 @@ const createDrive = (store: PersistentDriveStore, id: string, priority = 1) =>
 
 describe('DriveDeliveryScheduler', () => {
   it('claims and acknowledges delivery through a single-flight worker', async () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
+    const { eventStore, store } = createMemoryStore()
     try {
-      const store = new PersistentDriveStore(eventStore)
       createDrive(store, 'drive-low', 1)
       createDrive(store, 'drive-high', 10)
       const deliver = vi.fn(async () => undefined)
@@ -44,9 +48,8 @@ describe('DriveDeliveryScheduler', () => {
   })
 
   it('retries failures and dead-letters after the configured max attempts', async () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
+    const { eventStore, store } = createMemoryStore()
     try {
-      const store = new PersistentDriveStore(eventStore)
       createDrive(store, 'drive-fail')
       let now = 10
       let token = 0
@@ -82,9 +85,8 @@ describe('DriveDeliveryScheduler', () => {
   })
 
   it('settles successful delivery at the latest revision after progress is reported', async () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
+    const { eventStore, store } = createMemoryStore()
     try {
-      const store = new PersistentDriveStore(eventStore)
       createDrive(store, 'drive-progress')
       let now = 10
       const scheduler = new DriveDeliveryScheduler({
@@ -122,9 +124,8 @@ describe('DriveDeliveryScheduler', () => {
   })
 
   it('settles failed delivery at the latest revision after progress is reported', async () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
+    const { eventStore, store } = createMemoryStore()
     try {
-      const store = new PersistentDriveStore(eventStore)
       createDrive(store, 'drive-progress-fail')
       let now = 10
       const scheduler = new DriveDeliveryScheduler({
@@ -170,9 +171,8 @@ describe('DriveDeliveryScheduler', () => {
   ] as const)(
     'does not settle %s delivery after unrelated state changes with the same lease',
     async (_label, deliveryFails) => {
-      const eventStore = new MagicAgentEventStore(':memory:')
+      const { eventStore, store } = createMemoryStore()
       try {
-        const store = new PersistentDriveStore(eventStore)
         createDrive(store, `drive-state-${deliveryFails ? 'fail' : 'ack'}`)
         const driveId = `drive-state-${deliveryFails ? 'fail' : 'ack'}`
         let now = 10
@@ -209,9 +209,8 @@ describe('DriveDeliveryScheduler', () => {
   )
 
   it('does not settle delivery after its lease is replaced', async () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
+    const { eventStore, store } = createMemoryStore()
     try {
-      const store = new PersistentDriveStore(eventStore)
       createDrive(store, 'drive-lease-lost')
       let now = 10
       const scheduler = new DriveDeliveryScheduler({

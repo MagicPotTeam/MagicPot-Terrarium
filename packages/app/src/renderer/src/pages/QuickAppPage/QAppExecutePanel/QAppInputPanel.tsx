@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo } from 'react'
+import { Stack } from '@mui/material'
 import { PanelProps } from './PanelProps'
 import { useMessage } from '@renderer/hooks/useMessage'
 import buildQApp from './buildQApp'
@@ -75,7 +76,11 @@ const QAppPanel: React.FC<QAppPanelProps> = ({ fallback, isDesignMode }) => {
     return null
   }
 
-  return <Panel {...panelProps} />
+  return (
+    <Stack spacing={1.5}>
+      <Panel {...panelProps} />
+    </Stack>
+  )
 }
 
 export default QAppPanel

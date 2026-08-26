@@ -14,7 +14,6 @@ import {
   parseAllNodeIdAndField
 } from '@shared/comfy/funcs'
 import InputSelect from '@renderer/components/inputs/InputSelect'
-import { useMessage } from '@renderer/hooks/useMessage'
 import { useTranslation } from 'react-i18next'
 
 type NodeOption = { label: string; value: string }
@@ -80,7 +79,6 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
   allowNodeCondition
 }) => {
   const { t } = useTranslation()
-  const { notifyWarning } = useMessage()
   const [defaultNodeId, defaultField] = useMemo(
     () => (value ? nodeIdAndFieldFallback(value, workflow) : ['', '']),
     [value, workflow]
@@ -207,7 +205,7 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
           }
         ]
       }
-      notifyWarning(`未能从 ComfyUI 获得节点 ${nodeId} 的输入字段信息`)
+      // 节点没有可用字段时保持空选项；不要在渲染期间反复弹出全局错误提示。
       return []
     }
     const fieldOptions = allAllowedFieldWithNodeId.map(({ field }) => {
@@ -217,7 +215,7 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
       }
     })
     return fieldOptions
-  }, [nodeId, workflow, allAllowedNodeIdAndField, mode, notifyWarning, defaultNodeId, defaultField])
+  }, [nodeId, workflow, allAllowedNodeIdAndField, mode, defaultNodeId, defaultField])
 
   const [field, setField] = useState<string>(() => {
     if (defaultField) {

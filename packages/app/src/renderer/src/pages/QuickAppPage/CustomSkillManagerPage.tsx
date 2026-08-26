@@ -814,12 +814,6 @@ const CustomSkillManagerPage: React.FC = () => {
     }
   }
 
-  const handleCreateSkill = () => {
-    // kept for legacy reference or direct triggers if any, though replaced by inline creation
-  }
-
-  const canConfirmCreateSkill = false
-
   const handleTransformSelectedSkill = useCallback(
     (
       transform: (skill: CustomSkill) => CustomSkill,

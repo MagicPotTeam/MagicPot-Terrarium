@@ -11,6 +11,12 @@ const jsonResponse = (value: unknown, init: ResponseInit = {}) =>
     }
   })
 
+const createTripoClient = (fetchImpl: unknown, baseUrl = 'https://api.tripo3d.ai/v2/openapi') =>
+  new Tripo3DClient('tripo-key', baseUrl, {
+    fetchImpl: fetchImpl as typeof fetch,
+    pollIntervalMs: 0
+  })
+
 describe('Tripo3DClient', () => {
   it('submits a text-to-model task and formats the completed model link', async () => {
     const fetchMock = vi
@@ -32,10 +38,7 @@ describe('Tripo3DClient', () => {
         })
       )
 
-    const client = new Tripo3DClient('tripo-key', 'https://api.tripo3d.ai', {
-      fetchImpl: fetchMock as unknown as typeof fetch,
-      pollIntervalMs: 0
-    })
+    const client = createTripoClient(fetchMock, 'https://api.tripo3d.ai')
 
     const content = await client.generateFromMessages(
       [{ role: 'user', content: 'a small ceramic cat' }],
@@ -107,10 +110,7 @@ describe('Tripo3DClient', () => {
         })
       )
 
-    const client = new Tripo3DClient('tripo-key', baseUrl, {
-      fetchImpl: fetchMock as unknown as typeof fetch,
-      pollIntervalMs: 0
-    })
+    const client = createTripoClient(fetchMock, baseUrl)
 
     await client.generateFromMessages(
       [{ role: 'user', content: 'a small ceramic cat' }],
@@ -146,10 +146,7 @@ describe('Tripo3DClient', () => {
         })
       )
 
-    const client = new Tripo3DClient('tripo-key', 'https://api.tripo3d.ai/v2/openapi', {
-      fetchImpl: fetchMock as unknown as typeof fetch,
-      pollIntervalMs: 0
-    })
+    const client = createTripoClient(fetchMock)
 
     const content = await client.generateFromMessages(
       [
@@ -219,10 +216,7 @@ describe('Tripo3DClient', () => {
           }
         })
       )
-    const client = new Tripo3DClient('tripo-key', 'https://api.tripo3d.ai/v2/openapi', {
-      fetchImpl: fetchMock as unknown as typeof fetch,
-      pollIntervalMs: 0
-    })
+    const client = createTripoClient(fetchMock)
 
     const content = await client.generateFromMessages(
       [{ role: 'user', content: 'https://example.com/model.glb\nweathered bronze' }],
@@ -273,10 +267,7 @@ describe('Tripo3DClient', () => {
             }
           })
         )
-      const client = new Tripo3DClient('tripo-key', 'https://api.tripo3d.ai/v2/openapi', {
-        fetchImpl: fetchMock as unknown as typeof fetch,
-        pollIntervalMs: 0
-      })
+      const client = createTripoClient(fetchMock)
 
       await client.generateFromMessages(
         [{ role: 'user', content: `${content}\nweathered bronze` }],
@@ -312,10 +303,7 @@ describe('Tripo3DClient', () => {
           }
         })
       )
-    const client = new Tripo3DClient('tripo-key', 'https://api.tripo3d.ai/v2/openapi', {
-      fetchImpl: fetchMock as unknown as typeof fetch,
-      pollIntervalMs: 0
-    })
+    const client = createTripoClient(fetchMock)
 
     const content = await client.generateFromMessages(
       [{ role: 'user', content: 'a clean front view of a stylized robot' }],

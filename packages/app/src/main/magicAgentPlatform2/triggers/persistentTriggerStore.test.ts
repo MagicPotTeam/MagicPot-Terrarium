@@ -137,11 +137,8 @@ describe('PersistentTriggerStore', () => {
   })
 
   it('recovers expired claims after reopening the durable store', () => {
-    const directory = join(tmpdir(), `magic-agent-trigger-${Date.now()}-${Math.random()}`)
-    mkdirSync(directory, { recursive: true })
-    roots.push(directory)
-    const databasePath = join(directory, 'events.db')
-    const first = createStore(databasePath)
+    const first = createStore()
+    const { databasePath } = first
     first.triggers.create(
       {
         id: 'recoverable',
@@ -357,11 +354,8 @@ describe('PersistentTriggerStore', () => {
   })
 
   it('coalesces run-once backlog without schedule drift across reopen', () => {
-    const directory = join(tmpdir(), `magic-agent-trigger-${Date.now()}-${Math.random()}`)
-    mkdirSync(directory, { recursive: true })
-    roots.push(directory)
-    const databasePath = join(directory, 'events.db')
-    const first = createStore(databasePath)
+    const first = createStore()
+    const { databasePath } = first
     first.triggers.create(
       {
         id: 'run-once',
@@ -391,11 +385,8 @@ describe('PersistentTriggerStore', () => {
   })
 
   it('limits catch-up, preserves occurrence order, and converges after restart', () => {
-    const directory = join(tmpdir(), `magic-agent-trigger-${Date.now()}-${Math.random()}`)
-    mkdirSync(directory, { recursive: true })
-    roots.push(directory)
-    const databasePath = join(directory, 'events.db')
-    const first = createStore(databasePath)
+    const first = createStore()
+    const { databasePath } = first
     first.triggers.create(
       {
         id: 'catch-up',
@@ -817,11 +808,8 @@ describe('PersistentTriggerStore create caller idempotency', () => {
     eventStore.close()
   })
   it('replays caller create after SQLite reopen', () => {
-    const directory = join(tmpdir(), `magic-agent-trigger-${Date.now()}-${Math.random()}`)
-    mkdirSync(directory, { recursive: true })
-    roots.push(directory)
-    const databasePath = join(directory, 'events.db')
-    const firstStore = createStore(databasePath)
+    const firstStore = createStore()
+    const { databasePath } = firstStore
     const first = firstStore.triggers.create(trigger(), 10, 'caller-reopen')
     firstStore.eventStore.close()
     const reopened = createStore(databasePath)

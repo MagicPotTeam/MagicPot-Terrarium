@@ -74,6 +74,18 @@ export const conditionFieldImageUpload = (
   return objInfoField[1]?.['image_upload'] === true
 }
 
+/**
+ * Only keep nodes that expose at least one ComfyUI image-upload field.
+ * Connected inputs such as CLIP/CONDITIONING are not valid batch image slots.
+ */
+export const conditionNodeHasImageUploadField = (objInfoNode: ObjectInfo) => {
+  const fields = [
+    ...Object.values(objInfoNode.input?.required ?? {}),
+    ...Object.values(objInfoNode.input?.optional ?? {})
+  ]
+  return fields.some((field) => conditionFieldImageUpload(objInfoNode, field))
+}
+
 export const conditionFieldVideoUpload = (
   objectInfos: ObjectInfo,
   objInfoField: ObjectInfoInputField
@@ -205,5 +217,8 @@ export const conditionNodeLLMAPI = (objInfoNode: ObjectInfo) => {
  * @returns
  */
 export const conditionNodeIsOutputNode = (objInfoNode: ObjectInfo) => {
-  return objInfoNode?.output_node === true
+  return (
+    objInfoNode?.output_node === true ||
+    objInfoNode?.output?.some((outputType) => outputType === 'IMAGE') === true
+  )
 }

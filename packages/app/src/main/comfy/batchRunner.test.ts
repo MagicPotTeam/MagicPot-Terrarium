@@ -1,7 +1,12 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
-import type { ComfyBatchProfile, StartComfyBatchReq } from '@shared/api/svcComfyBatch'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type {
+  ComfyBatchItemTiming,
+  ComfyBatchProfile,
+  ComfyBatchStatus,
+  StartComfyBatchReq
+} from '@shared/api/svcComfyBatch'
 import type { ObjectInfoMap, Workflow } from '@shared/comfy/types'
 import {
   assertNoComfyBatchOutputCollisions,
@@ -13,8 +18,10 @@ import {
   LeastLoadRoundRobinScheduler,
   atomicCommitPng,
   isValidPng,
-  validateComfyBatchBindings
+  validateComfyBatchBindings,
+  NO_RUNTIME_RETRY_WINDOW_MS
 } from './batchRunner'
+import { ComfyBatchHttpError } from './batchHttp'
 import type { ComfyBatchHttpClient } from './batchHttp'
 
 const temporaryDirectories: string[] = []
@@ -37,13 +44,23 @@ afterEach(async () => {
 
 const profile = (id: string): ComfyBatchProfile => ({
   id,
-  name: id,
   baseUrl: `http://${id}.example`,
   enabled: true,
   maxConcurrency: 1
 })
 
 type Runtime = { profile: ComfyBatchProfile; inflight: number; id: string }
+
+type EtaRunnerInternals = {
+  statusValue: ComfyBatchStatus
+  recentItems: ComfyBatchItemTiming[]
+  runtimes: Array<{
+    profile: ComfyBatchProfile
+    inflight: number
+    compatible: boolean
+    available: boolean
+  }>
+}
 
 function runtime(id: string, inflight = 0): Runtime {
   return { profile: profile(id), inflight, id }
@@ -63,6 +80,26 @@ function objectInfo(): ObjectInfoMap {
     SaveImage: { output_node: true, output: [] }
   }
 }
+
+type FakeComfyClientOverrides = Partial<
+  Pick<ComfyBatchHttpClient, 'probe' | 'objectInfo' | 'uploadImage' | 'prompt' | 'history' | 'view'>
+>
+
+const createFakeComfyClient = (overrides: FakeComfyClientOverrides = {}): ComfyBatchHttpClient =>
+  ({
+    probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
+    objectInfo: async () => objectInfo(),
+    uploadImage: async () => ({ filename: 'upload.png', subfolder: '', type: 'input' as const }),
+    prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => promptId,
+    history: async (promptId: string) => ({
+      [promptId]: {
+        outputs: { '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] } },
+        status: { status_str: 'success', completed: true, messages: [] }
+      }
+    }),
+    view: async () => new Uint8Array(validPng),
+    ...overrides
+  }) as unknown as ComfyBatchHttpClient
 
 describe('Comfy batch paths and discovery', () => {
   it('uses only the adjacent .output directory and preserves relative image paths', async () => {
@@ -92,6 +129,91 @@ describe('Comfy batch paths and discovery', () => {
         { absolutePath: '/tmp/a.webp', relativePath: 'a.webp', size: 1, mtimeMs: 1, sha256: 'b' }
       ])
     ).toThrow(/collision/i)
+  })
+})
+
+describe('Comfy batch ETA', () => {
+  const configureRunnerForEta = (runner: ComfyBatchRunner, runtimeCount: number): void => {
+    const internals = runner as unknown as EtaRunnerInternals
+    internals.statusValue = {
+      ...internals.statusValue,
+      state: 'running',
+      total: 100,
+      pending: 96,
+      running: 4,
+      startedAt: Date.now()
+    }
+    internals.recentItems.push({
+      relativePath: 'done.png',
+      durationMs: 1_000,
+      startedAt: Date.now() - 1_000,
+      finishedAt: Date.now(),
+      attempt: 1,
+      state: 'success'
+    })
+    internals.runtimes = Array.from({ length: runtimeCount }, (_, index) => ({
+      profile: profile(`eta-${index}`),
+      inflight: 1,
+      compatible: true,
+      available: true
+    }))
+  }
+
+  it('reduces ETA when the same work is spread across four one-slot instances', () => {
+    const request = {
+      sourceDir: '/tmp/source',
+      qAppKey: 'eta-test',
+      workflow: {},
+      imageInputSlot: '$.1.inputs.image',
+      outputNodeIds: ['2']
+    } satisfies StartComfyBatchReq
+    const oneInstanceRunner = new ComfyBatchRunner(request, [profile('one')])
+    const fourInstanceRunner = new ComfyBatchRunner(request, [profile('one')])
+
+    configureRunnerForEta(oneInstanceRunner, 1)
+    configureRunnerForEta(fourInstanceRunner, 4)
+
+    expect(oneInstanceRunner.status.etaMs).toBe(100_000)
+    expect(fourInstanceRunner.status.etaMs).toBe(25_000)
+  })
+
+  it('uses observed throughput when four instances do not scale linearly', () => {
+    const request = {
+      sourceDir: '/tmp/source',
+      qAppKey: 'eta-throughput-test',
+      workflow: {},
+      imageInputSlot: '$.1.inputs.image',
+      outputNodeIds: ['2']
+    } satisfies StartComfyBatchReq
+    const runner = new ComfyBatchRunner(request, [profile('one')])
+    const internals = runner as unknown as EtaRunnerInternals
+    const observationStart = Date.now() - 4_000
+    internals.statusValue = {
+      ...internals.statusValue,
+      state: 'running',
+      total: 100,
+      pending: 96,
+      running: 4,
+      startedAt: observationStart
+    }
+    internals.recentItems.push(
+      ...Array.from({ length: 4 }, (_, index) => ({
+        relativePath: `done-${index}.png`,
+        durationMs: 1_000,
+        startedAt: observationStart + index * 1_000,
+        finishedAt: observationStart + (index + 1) * 1_000,
+        attempt: 1,
+        state: 'success' as const
+      }))
+    )
+    internals.runtimes = Array.from({ length: 4 }, (_, index) => ({
+      profile: profile(`throughput-${index}`),
+      inflight: 1,
+      compatible: true,
+      available: true
+    }))
+
+    expect(runner.status.etaMs).toBe(100_000)
   })
 })
 
@@ -130,6 +252,12 @@ describe('Comfy batch dispatch and output binding', () => {
         LoadImage: { input: { required: { image: ['STRING', {}] } }, output: ['IMAGE'] }
       })
     ).toThrow(/image upload field/i)
+    expect(() =>
+      validateComfyBatchBindings(workflow, '$.1.inputs.image', ['2'], {
+        ...objectInfo(),
+        SaveImage: { output_node: false, output: ['LATENT'] }
+      })
+    ).toThrow(/output-producing/i)
   })
 
   it('validates complete PNG structure and rejects corrupt commits', async () => {
@@ -159,19 +287,32 @@ describe('Comfy batch dispatch and output binding', () => {
     expect(scheduler.pick(runtimes)?.profile.id).toBe('b')
   })
 
-  it('requires one unique type=output image from bound nodes', () => {
+  it('keeps one extra item queued for a single-slot instance', () => {
+    const scheduler = new LeastLoadRoundRobinScheduler<Runtime>()
+    const instance = runtime('single-slot', 1)
+
+    expect(scheduler.pick([instance])?.profile.id).toBe('single-slot')
+    instance.inflight = 2
+    expect(scheduler.pick([instance])).toBeNull()
+  })
+
+  it('accepts one unique saved or preview image from bound nodes', () => {
     const baseImage = { filename: 'result.png', subfolder: '', type: 'output' }
     expect(
       selectBoundOutputImage(
         {
           outputs: {
-            '9': { images: [{ ...baseImage, type: 'temp' }, baseImage] },
+            '9': { images: [baseImage] },
             '10': { images: [{ filename: 'other.png', subfolder: '', type: 'output' }] }
           }
         },
         ['9']
       )
     ).toEqual(baseImage)
+    const previewImage = { filename: 'preview.png', subfolder: '', type: 'temp' }
+    expect(selectBoundOutputImage({ outputs: { '9': { images: [previewImage] } } }, ['9'])).toEqual(
+      previewImage
+    )
     expect(() =>
       selectBoundOutputImage(
         {
@@ -184,6 +325,10 @@ describe('Comfy batch dispatch and output binding', () => {
 })
 
 describe('ComfyBatchRunner resume and retry semantics', () => {
+  it('waits for a slow-starting ComfyUI before failing the batch', () => {
+    expect(NO_RUNTIME_RETRY_WINDOW_MS).toBeGreaterThanOrEqual(60_000)
+  })
+
   const workflow: Workflow = {
     '1': { class_type: 'LoadImage', inputs: { image: '' } },
     '2': { class_type: 'SaveImage', inputs: {} }
@@ -201,32 +346,22 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     const sourceDir = await createTempDir()
     await fs.writeFile(path.join(sourceDir, 'source.jpg'), 'source')
     let promptCalls = 0
-    const png = validPng
-    const fakeClient = {
-      probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
-      objectInfo: async () => objectInfo(),
+    const fakeClient = createFakeComfyClient({
       uploadImage: async () => ({ name: 'upload.png', subfolder: '', type: 'input' as const }),
       prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
         promptCalls += 1
         return promptId
-      },
-      history: async (promptId: string) => ({
-        [promptId]: {
-          outputs: {
-            '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
-          },
-          status: { status_str: 'success', completed: true, messages: [] }
-        }
-      }),
-      view: async () => new Uint8Array(png)
-    } as unknown as ComfyBatchHttpClient
+      }
+    })
 
     const first = new ComfyBatchRunner(request(sourceDir), [profile('one')], {
       createClient: () => fakeClient
     })
     const firstStatus = await first.run()
     expect(firstStatus).toMatchObject({ state: 'completed', success: 1, failed: 0, skipped: 0 })
-    expect(await fs.readFile(`${sourceDir}.output/source.png`)).toEqual(png)
+    expect(isValidPng(new Uint8Array(await fs.readFile(`${sourceDir}.output/source.png`)))).toBe(
+      true
+    )
     expect(promptCalls).toBe(1)
 
     const second = new ComfyBatchRunner(request(sourceDir), [profile('one')], {
@@ -243,24 +378,12 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     await fs.writeFile(sourcePath, 'before')
     const originalMtime = (await fs.stat(sourcePath)).mtime
     let promptCalls = 0
-    const fakeClient = {
-      probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
-      objectInfo: async () => objectInfo(),
-      uploadImage: async () => ({ filename: 'upload.png', subfolder: '', type: 'input' }),
+    const fakeClient = createFakeComfyClient({
       prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
         promptCalls += 1
         return promptId
-      },
-      history: async (promptId: string) => ({
-        [promptId]: {
-          outputs: {
-            '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
-          },
-          status: { status_str: 'success', completed: true, messages: [] }
-        }
-      }),
-      view: async () => new Uint8Array(validPng)
-    } as unknown as ComfyBatchHttpClient
+      }
+    })
 
     await new ComfyBatchRunner(request(sourceDir), [profile('one')], {
       createClient: () => fakeClient
@@ -287,21 +410,7 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     const sourceDir = await createTempDir()
     const sourcePath = path.join(sourceDir, 'deleted.jpg')
     await fs.writeFile(sourcePath, 'source')
-    const fakeClient = {
-      probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
-      objectInfo: async () => objectInfo(),
-      uploadImage: async () => ({ filename: 'upload.png', subfolder: '', type: 'input' }),
-      prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => promptId,
-      history: async (promptId: string) => ({
-        [promptId]: {
-          outputs: {
-            '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
-          },
-          status: { status_str: 'success', completed: true, messages: [] }
-        }
-      }),
-      view: async () => new Uint8Array(validPng)
-    } as unknown as ComfyBatchHttpClient
+    const fakeClient = createFakeComfyClient()
 
     await new ComfyBatchRunner(request(sourceDir), [profile('one')], {
       createClient: () => fakeClient
@@ -352,21 +461,7 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
         }
       })
     )
-    const fakeClient = {
-      probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
-      objectInfo: async () => objectInfo(),
-      uploadImage: async () => ({ filename: 'upload.png', subfolder: '', type: 'input' }),
-      prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => promptId,
-      history: async (promptId: string) => ({
-        [promptId]: {
-          outputs: {
-            '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
-          },
-          status: { status_str: 'success', completed: true, messages: [] }
-        }
-      }),
-      view: async () => new Uint8Array(validPng)
-    } as unknown as ComfyBatchHttpClient
+    const fakeClient = createFakeComfyClient()
 
     await new ComfyBatchRunner(request(sourceDir), [profile('one')], {
       createClient: () => fakeClient
@@ -384,6 +479,7 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
       fs.writeFile(path.join(sourceDir, 'missing.jpg'), 'missing')
     ])
     const calls: string[] = []
+    const sourceByPromptId = new Map<string, string>()
     let failFailedItem = true
     const fakeClient = {
       probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
@@ -397,19 +493,35 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
         const source = ['failed', 'stable', 'changed', 'missing', 'added'].find((name) =>
           uploaded.includes(name)
         )
-        if (source) calls.push(source)
+        if (source) {
+          calls.push(source)
+          sourceByPromptId.set(promptId, source)
+        }
         return promptId
       },
-      history: async (promptId: string) => ({
-        [promptId]: {
-          outputs: {
-            '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
-          },
-          status: { status_str: 'success', completed: true, messages: [] }
+      history: async (promptId: string) => {
+        if (failFailedItem && sourceByPromptId.get(promptId) === 'failed') {
+          return {
+            [promptId]: {
+              outputs: {},
+              status: {
+                status_str: 'error',
+                completed: true,
+                messages: [['execution_error', { exception_message: 'first failure' }]]
+              }
+            }
+          }
         }
-      }),
+        return {
+          [promptId]: {
+            outputs: {
+              '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
+            },
+            status: { status_str: 'success', completed: true, messages: [] }
+          }
+        }
+      },
       view: async () => {
-        if (failFailedItem && calls.at(-1) === 'failed') throw new Error('first failure')
         return new Uint8Array(validPng)
       }
     } as unknown as ComfyBatchHttpClient
@@ -424,7 +536,12 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     const first = new ComfyBatchRunner(request(sourceDir), [profile('one')], {
       createClient: () => fakeClient
     })
-    expect(await first.run()).toMatchObject({ success: 3, failed: 1 })
+    expect(await first.run()).toMatchObject({
+      state: 'error',
+      success: 3,
+      failed: 1,
+      error: 'first failure'
+    })
 
     calls.length = 0
     failFailedItem = false
@@ -439,6 +556,87 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
 
     expect(retryStatus).toMatchObject({ state: 'completed', success: 4, skipped: 1, failed: 0 })
     expect(calls.sort()).toEqual(['added', 'changed', 'failed', 'missing'])
+  })
+
+  it('keeps the concrete item failure reason in the final batch status', async () => {
+    const sourceDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'source.jpg'), 'source')
+    const failureReason = 'No compatible ComfyUI instance is available'
+    const fakeClient = {
+      probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
+      objectInfo: async () => objectInfo(),
+      uploadImage: async () => {
+        throw new Error(failureReason)
+      }
+    } as unknown as ComfyBatchHttpClient
+
+    const result = await new ComfyBatchRunner(request(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    }).run()
+
+    expect(result).toMatchObject({ state: 'error', failed: 1, error: failureReason })
+  })
+
+  it('discovers a profile added while the first item is blocked', async () => {
+    const sourceDir = await createTempDir()
+    await Promise.all([
+      fs.writeFile(path.join(sourceDir, 'first.jpg'), 'first'),
+      fs.writeFile(path.join(sourceDir, 'second.jpg'), 'second'),
+      fs.writeFile(path.join(sourceDir, 'third.jpg'), 'third')
+    ])
+    const calls: string[] = []
+    let profiles = [profile('one')]
+    let releaseInitial!: () => void
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseInitial = resolve
+    })
+    let blockedPromptCount = 0
+    const clientFor = (id: string) => {
+      const client = {
+        probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
+        objectInfo: async () => objectInfo(),
+        uploadImage: async (_filename: string, bytes: Uint8Array) => ({
+          filename: `${id}-${new TextDecoder().decode(bytes)}.png`,
+          subfolder: '',
+          type: 'input' as const
+        }),
+        prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
+          calls.push(id)
+          if (id === 'one' && blockedPromptCount < 2) {
+            blockedPromptCount += 1
+            await firstBlocked
+          }
+          return promptId
+        },
+        history: async (promptId: string) => ({
+          [promptId]: {
+            outputs: {
+              '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
+            },
+            status: { status_str: 'success', completed: true, messages: [] }
+          }
+        }),
+        view: async () => new Uint8Array(validPng)
+      } as unknown as ComfyBatchHttpClient
+      return client
+    }
+
+    const runner = new ComfyBatchRunner(request(sourceDir), profiles, {
+      getProfiles: () => profiles,
+      createClient: (baseUrl) => clientFor(baseUrl.includes('two') ? 'two' : 'one')
+    })
+    const runPromise = runner.run()
+    await vi.waitFor(() => expect(blockedPromptCount).toBe(2))
+    profiles = [profile('one'), profile('two')]
+    // Let the supervisor observe the changed profile fingerprint before the
+    // first runtime is released; this proves the new profile is usable in a
+    // subsequent dispatch round rather than relying on initial probing.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    releaseInitial()
+    const result = await runPromise
+
+    expect(result).toMatchObject({ state: 'completed', success: 3, failed: 0 })
+    expect(calls).toContain('two')
   })
 
   it('switches to only one other compatible instance after a Comfy execution failure', async () => {
@@ -489,5 +687,162 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
 
     expect(status).toMatchObject({ state: 'completed', success: 1, failed: 0 })
     expect(calls).toEqual(['first', 'second'])
+  })
+
+  it('rediscovers another instance when it becomes available after the active one closes', async () => {
+    const sourceDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'source.jpg'), 'source')
+    let secondReady = false
+    const calls: string[] = []
+    const clientFor = (id: string) =>
+      ({
+        probe: async () => {
+          if (id === 'second' && !secondReady) {
+            throw new ComfyBatchHttpError('connect ECONNREFUSED', true)
+          }
+          return { endpoint: 'system_stats' as const, latencyMs: 1 }
+        },
+        objectInfo: async () => objectInfo(),
+        uploadImage: async () => ({ name: `${id}.png`, subfolder: '', type: 'input' as const }),
+        prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
+          calls.push(id)
+          return promptId
+        },
+        history: async (promptId: string) => {
+          if (id === 'first') {
+            secondReady = true
+            throw new ComfyBatchHttpError('connect ECONNREFUSED', true)
+          }
+          return {
+            [promptId]: {
+              outputs: {
+                '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
+              },
+              status: { status_str: 'success', completed: true, messages: [] }
+            }
+          }
+        },
+        view: async () => new Uint8Array(validPng)
+      }) as unknown as ComfyBatchHttpClient
+
+    const runner = new ComfyBatchRunner(request(sourceDir), [profile('first'), profile('second')], {
+      createClient: (baseUrl) => clientFor(baseUrl.includes('first') ? 'first' : 'second')
+    })
+    const status = await runner.run()
+
+    expect(status).toMatchObject({ state: 'completed', success: 1, failed: 0 })
+    expect(calls).toEqual(['first', 'second'])
+  })
+
+  it('switches away from an instance that returns an HTML 404 endpoint error', async () => {
+    const sourceDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'source.jpg'), 'source')
+    const calls: string[] = []
+    const clientFor = (id: string) =>
+      ({
+        probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
+        objectInfo: async () => objectInfo(),
+        uploadImage: async () => ({ name: `${id}.png`, subfolder: '', type: 'input' as const }),
+        prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
+          calls.push(id)
+          return promptId
+        },
+        history: async (promptId: string) => {
+          if (id === 'first') {
+            throw new ComfyBatchHttpError(
+              'ComfyUI HTTP 404: <!DOCTYPE html><html><title>Not Found</title></html>',
+              false,
+              404
+            )
+          }
+          return {
+            [promptId]: {
+              outputs: {
+                '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
+              },
+              status: { status_str: 'success', completed: true, messages: [] }
+            }
+          }
+        },
+        view: async () => new Uint8Array(validPng)
+      }) as unknown as ComfyBatchHttpClient
+
+    const runner = new ComfyBatchRunner(request(sourceDir), [profile('first'), profile('second')], {
+      createClient: (baseUrl) => clientFor(baseUrl.includes('first') ? 'first' : 'second')
+    })
+    const status = await runner.run()
+
+    expect(status).toMatchObject({ state: 'completed', success: 1, failed: 0 })
+    expect(calls).toEqual(['first', 'second'])
+  })
+
+  it('requeues failed items while the batch is running without duplicating other work', async () => {
+    const sourceDir = await createTempDir()
+    await Promise.all(
+      ['first.jpg', 'second.jpg', 'third.jpg', 'fourth.jpg'].map((filename) =>
+        fs.writeFile(path.join(sourceDir, filename), filename)
+      )
+    )
+    let historyCalls = 0
+    let releaseSecond!: () => void
+    const secondAndThirdBlocked = new Promise<void>((resolve) => {
+      releaseSecond = resolve
+    })
+    const processedPaths: string[] = []
+    const sourceByPromptId = new Map<string, string>()
+    const fakeClient = {
+      probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
+      objectInfo: async () => objectInfo(),
+      uploadImage: async (_filename: string, bytes: Uint8Array) => ({
+        filename: new TextDecoder().decode(bytes),
+        subfolder: '',
+        type: 'input' as const
+      }),
+      prompt: async (submittedWorkflow: Workflow, _clientId: string, promptId: string) => {
+        sourceByPromptId.set(
+          promptId,
+          String(submittedWorkflow['1'].inputs.image).replace(/ \[input\]$/, '')
+        )
+        return promptId
+      },
+      history: async (promptId: string) => {
+        historyCalls += 1
+        processedPaths.push(sourceByPromptId.get(promptId) || '')
+        if (historyCalls === 1) throw new Error('first attempt failed')
+        if (historyCalls === 2 || historyCalls === 3) {
+          await secondAndThirdBlocked
+        }
+        return {
+          [promptId]: {
+            outputs: {
+              '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
+            },
+            status: { status_str: 'success', completed: true, messages: [] }
+          }
+        }
+      },
+      view: async () => new Uint8Array(validPng)
+    } as unknown as ComfyBatchHttpClient
+
+    const runner = new ComfyBatchRunner(request(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    })
+    const runPromise = runner.run()
+    await vi.waitFor(() =>
+      expect(runner.status).toMatchObject({ failed: 1, running: 2, pending: 1 })
+    )
+
+    expect(runner.retryFailedItems()).toMatchObject({ failed: 0, pending: 2, running: 2 })
+    releaseSecond()
+    const status = await runPromise
+
+    expect(status).toMatchObject({ state: 'completed', total: 4, success: 4, failed: 0 })
+    expect(processedPaths).toHaveLength(5)
+    expect(processedPaths.filter((relativePath) => relativePath === 'first.jpg')).toHaveLength(2)
+    expect(processedPaths.filter((relativePath) => relativePath !== 'first.jpg').sort()).toEqual([
+      'fourth.jpg',
+      'second.jpg',
+      'third.jpg'
+    ])
   })
 })

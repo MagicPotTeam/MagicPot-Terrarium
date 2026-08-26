@@ -3,6 +3,7 @@ import { COMFY_PROCESS_TRANSPORT_CLIENT_ID, ComfyHttpCli } from './http'
 import { JsonDict } from '@shared/utils/utilTypes'
 import { EventCenter, EventListener } from '../utils/eventCenter'
 import { ComfyEvent, isComfyEvent } from '@shared/comfy/events'
+import { getConfiguredComfyProfiles } from './comfyInstancePool'
 
 /**
  * 通过 WebSocket 监听 ComfyUI 状态
@@ -17,152 +18,201 @@ type ComfyState = {
   lastMessage: JsonDict | null
 }
 
+type ComfySocketConnection = {
+  baseUrl: string
+  ws: WebSocket | null
+  generation: number
+  reconnectTimer: NodeJS.Timeout | null
+  reconnectAttempts: number
+  wsErrorLogged: boolean
+}
+
 class ComfyStateManager {
-  // isWatching 不等于 connected：
-  // 启动但由于网络等问题连接失败时，isWatching 为 true ，connected 为 false
-
-  private isWatching: boolean = false // 是否正在监听状态
-  private connected: boolean = false // 是否成功连接到 ComfyUI
-
-  private ws: WebSocket | null = null
-  private wsGeneration: number = 0
-  private wsErrorLogged: boolean = false
+  // isWatching 不等于 connected：启动但由于网络等问题连接失败时，isWatching 为 true。
+  // 普通快应用可能被实例池分配到任意端点，因此这里为每个已启用端点维护一个 socket。
+  private isWatching = false
+  private sockets = new Map<string, ComfySocketConnection>()
 
   private comfyState: ComfyState = {
     lastMessage: null
   }
 
-  // 自动重连相关属性
-  private reconnectTimer: NodeJS.Timeout | null = null
-  private reconnectAttempts: number = 0
-  private readonly baseReconnectInterval: number = 1000 // 1 second base interval
-  private readonly maxReconnectInterval: number = 30000 // Max 30 seconds
+  private readonly baseReconnectInterval = 1000
+  private readonly maxReconnectInterval = 30000
 
-  // Calculate reconnect delay using exponential backoff
-  private getReconnectDelay(): number {
-    const delay = Math.min(
-      this.baseReconnectInterval * Math.pow(2, this.reconnectAttempts),
+  private getReconnectDelay(connection: ComfySocketConnection): number {
+    return Math.min(
+      this.baseReconnectInterval * Math.pow(2, connection.reconnectAttempts),
       this.maxReconnectInterval
     )
-    return delay
   }
 
-  connect: () => void = () => {
-    if (!this.isWatching || this.ws) {
-      return
+  private configuredBaseUrls(): string[] {
+    try {
+      return Array.from(
+        new Set(
+          getConfiguredComfyProfiles()
+            .filter((profile) => profile.enabled !== false)
+            .map((profile) => profile.baseUrl)
+            .filter((baseUrl) => typeof baseUrl === 'string' && baseUrl.trim())
+        )
+      )
+    } catch {
+      return []
     }
+  }
 
-    const generation = ++this.wsGeneration
+  private connectProfile(baseUrl: string): void {
+    if (!this.isWatching) return
+
+    let connection = this.sockets.get(baseUrl)
+    if (!connection) {
+      connection = {
+        baseUrl,
+        ws: null,
+        generation: 0,
+        reconnectTimer: null,
+        reconnectAttempts: 0,
+        wsErrorLogged: false
+      }
+      this.sockets.set(baseUrl, connection)
+    }
+    if (connection.ws) return
+
+    const generation = ++connection.generation
     const ws = new ComfyHttpCli(undefined, undefined, {
+      baseUrl,
       clientId: COMFY_PROCESS_TRANSPORT_CLIENT_ID
     }).connect()
-    this.ws = ws
+    connection.ws = ws
 
     ws.onmessage = (evt) => {
-      if (generation !== this.wsGeneration || ws !== this.ws) {
+      if (
+        generation !== connection?.generation ||
+        ws !== connection?.ws ||
+        this.sockets.get(baseUrl) !== connection
+      ) {
         return
       }
       try {
         const data = JSON.parse(evt.data as string) as JsonDict
-        if (data.type === 'crystools.monitor') {
-          // 太多太烦，直接丢掉
-          return
-        }
-        console.log('[ComfyUI State] received', data)
-        this.comfyState.lastMessage = data
+        if (data.type === 'crystools.monitor') return
 
+        console.log(`[ComfyUI State] received (${baseUrl})`, data)
+        this.comfyState.lastMessage = data
         if (isComfyEvent(data)) {
-          /**
-           * 这里做的是全局的 Event 统一接收处理，在一些更底层更直接与 ComfyUI 打交道的地方会用到，
-           * e.g. taskQueue 中等待获取结果，
-           * 需要原版的 ComfyUI Event ，拿到真正的 prompt_id
-           */
+          // 保留原始 prompt_id，转换为内部任务 ID 由 svcComfy.connectWs 统一完成。
           eventCenter.emit(data)
         }
-      } catch (e) {
-        console.error('[ComfyUI State] error', e)
+      } catch (error) {
+        console.error('[ComfyUI State] error', error)
       }
     }
 
     ws.onopen = () => {
-      if (generation !== this.wsGeneration || ws !== this.ws || !this.isWatching) {
+      if (
+        generation !== connection?.generation ||
+        ws !== connection?.ws ||
+        this.sockets.get(baseUrl) !== connection ||
+        !this.isWatching
+      ) {
         return
       }
-      this.connected = true
-      this.reconnectAttempts = 0 // 连接成功后重置重连次数
-      console.log('[ComfyUI State] connected')
+      connection.reconnectAttempts = 0
+      connection.wsErrorLogged = false
+      console.log(`[ComfyUI State] connected (${baseUrl})`)
     }
 
     ws.onclose = () => {
-      if (generation !== this.wsGeneration || ws !== this.ws) {
+      if (
+        generation !== connection?.generation ||
+        ws !== connection?.ws ||
+        this.sockets.get(baseUrl) !== connection
+      ) {
         return
       }
-      this.ws = null
-      this.connected = false
-      console.log('[ComfyUI State] disconnected')
-
-      // 如果正在监听状态，尝试自动重连
-      if (this.isWatching) {
-        this.scheduleReconnect()
-      }
+      connection.ws = null
+      console.log(`[ComfyUI State] disconnected (${baseUrl})`)
+      if (this.isWatching) this.scheduleReconnect(connection)
     }
 
     ws.onerror = () => {
-      if (generation !== this.wsGeneration || ws !== this.ws) {
+      if (
+        generation !== connection?.generation ||
+        ws !== connection?.ws ||
+        this.sockets.get(baseUrl) !== connection
+      ) {
         return
       }
-      if (!this.wsErrorLogged) {
-        console.warn('[ComfyUI State] WebSocket 错误（ComfyUI 可能未启动），后续不再重复提示')
-        this.wsErrorLogged = true
+      if (!connection.wsErrorLogged) {
+        console.warn(`[ComfyUI State] WebSocket 错误（${baseUrl} 可能未启动），后续不再重复提示`)
+        connection.wsErrorLogged = true
       }
     }
   }
 
-  private scheduleReconnect: () => void = () => {
-    if (!this.isWatching) {
-      return
-    }
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer)
-    }
+  private scheduleReconnect(connection: ComfySocketConnection): void {
+    if (!this.isWatching || connection.reconnectTimer) return
 
-    const generation = this.wsGeneration
-    const delay = this.getReconnectDelay()
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null
-      if (!this.isWatching || generation !== this.wsGeneration) {
+    const generation = connection.generation
+    const delay = this.getReconnectDelay(connection)
+    connection.reconnectTimer = setTimeout(() => {
+      connection.reconnectTimer = null
+      if (
+        !this.isWatching ||
+        this.sockets.get(connection.baseUrl) !== connection ||
+        generation !== connection.generation
+      ) {
         return
       }
       if (eventCenter.isEmpty()) {
-        // 静默：避免日志刷屏
-        // console.debug('[ComfyUI State] 没有监听者，空转')
-        this.scheduleReconnect()
+        this.scheduleReconnect(connection)
         return
       }
 
-      this.reconnectAttempts++
-
-      if (!this.wsErrorLogged) {
-        console.log(`[ComfyUI State] 尝试重连 (${this.reconnectAttempts})，${delay}ms 后重试`)
+      connection.reconnectAttempts++
+      if (!connection.wsErrorLogged) {
+        console.log(
+          `[ComfyUI State] 尝试重连 (${connection.baseUrl}, ${connection.reconnectAttempts})，${delay}ms 后重试`
+        )
       }
-      this.connect()
+      this.connectProfile(connection.baseUrl)
     }, delay)
   }
 
-  disconnect: () => void = () => {
-    // 先让当前 socket 的所有回调失效，close() 即使同步触发 onclose 也不会安排重连。
-    this.wsGeneration++
-
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = null
+  private syncProfiles(): void {
+    const baseUrls = this.configuredBaseUrls()
+    const configured = new Set(baseUrls)
+    for (const [baseUrl, connection] of this.sockets) {
+      if (configured.has(baseUrl)) continue
+      this.disconnectProfile(baseUrl, connection)
     }
+    baseUrls.forEach((baseUrl) => this.connectProfile(baseUrl))
+  }
 
-    const ws = this.ws
-    this.ws = null
+  private disconnectProfile(baseUrl: string, connection = this.sockets.get(baseUrl)): void {
+    if (!connection) return
+    connection.generation++
+    if (connection.reconnectTimer) {
+      clearTimeout(connection.reconnectTimer)
+      connection.reconnectTimer = null
+    }
+    const ws = connection.ws
+    connection.ws = null
     ws?.close()
-    this.connected = false
-    this.reconnectAttempts = 0
+    this.sockets.delete(baseUrl)
+  }
+
+  connect: () => void = () => {
+    if (!this.isWatching) return
+    this.syncProfiles()
+  }
+
+  disconnect: () => void = () => {
+    for (const [baseUrl, connection] of this.sockets) {
+      this.disconnectProfile(baseUrl, connection)
+    }
+    this.sockets.clear()
   }
 
   start: () => void = () => {

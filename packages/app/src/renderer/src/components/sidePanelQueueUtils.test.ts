@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
 import type { QueueItem } from '@shared/comfy/types'
+import { describe, expect, it } from 'vitest'
 import {
   formatQueueTimestamp,
   getQueueItemDisplayLabel,
@@ -31,10 +31,11 @@ describe('sidePanelQueueUtils', () => {
     expect(getQueueItemDisplayLabel(createQueueItem('prompt-abcdef12'))).toBe('prompt-a...')
   })
 
-  it('normalizes per-item queue progress', () => {
+  it('keeps the exact reported queue progress, clamped only to the valid range', () => {
     expect(getQueueItemProgress({ 'prompt-1': { value: 2, max: 4 } }, 'prompt-1')).toBe(0.5)
-    expect(getQueueItemProgress({ 'prompt-1': { value: 4, max: 4 } }, 'prompt-1')).toBe(0.99)
-    expect(getQueueItemProgress({ 'prompt-1': { value: 5, max: 4 } }, 'prompt-1')).toBe(0.99)
+    expect(getQueueItemProgress({ 'prompt-1': { value: 4, max: 4 } }, 'prompt-1')).toBe(1)
+    expect(getQueueItemProgress({ 'prompt-1': { value: 5, max: 4 } }, 'prompt-1')).toBe(1)
+    expect(getQueueItemProgress({ 'prompt-1': { value: -1, max: 4 } }, 'prompt-1')).toBe(0)
     expect(getQueueItemProgress({ 'prompt-1': { value: 1, max: 0 } }, 'prompt-1')).toBeNull()
     expect(getQueueItemProgress({}, 'missing')).toBeNull()
   })

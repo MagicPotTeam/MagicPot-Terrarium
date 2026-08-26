@@ -20,6 +20,7 @@ vi.mock('../config/buildEnv', () => ({
 
 import { AssistantSessionStore } from './sessionStore'
 import { AssistantToolRegistry } from './toolRegistry'
+import { getAssistantSessionKey } from './types'
 import { getAssistantTerminalPolicyRuntime } from '../magicAgentPlatform2/productionRuntime'
 import { ProjectTraceFSCli } from '../projectTrace/fs'
 import {
@@ -32,6 +33,46 @@ import {
 describe('AssistantToolRegistry', () => {
   let tempDir = ''
   let store: AssistantSessionStore
+
+  type ToolCallContext = Parameters<AssistantToolRegistry['callTool']>[2]
+
+  const createToolContext = (
+    route: ToolCallContext['route'],
+    taskState: ToolCallContext['taskState'],
+    overrides: Partial<ToolCallContext> = {}
+  ): ToolCallContext => ({
+    config: DEFAULT_CONFIG,
+    route,
+    sessionStore: store,
+    taskState,
+    ...overrides
+  })
+
+  const createTaskState = (
+    route: ToolCallContext['route'],
+    overrides: Partial<ToolCallContext['taskState']> = {}
+  ): ToolCallContext['taskState'] => ({
+    sessionKey: getAssistantSessionKey(route),
+    running: false,
+    queuedCount: 0,
+    updatedAt: Date.now(),
+    ...overrides
+  })
+
+  const createWorkspaceToolContext = (
+    route: ToolCallContext['route'],
+    taskState: ToolCallContext['taskState'],
+    workspace: ReturnType<typeof getAssistantWorkspaceState>,
+    overrides: Partial<ToolCallContext> = {}
+  ): ToolCallContext =>
+    createToolContext(route, taskState, {
+      workspaceMemoryFile: workspace.memoryFile,
+      workspaceTaskContextFile: workspace.taskContextFile,
+      workspaceContextFile: workspace.contextFile,
+      workspacePinnedContextFile: workspace.pinnedContextFile,
+      workspaceMetaFile: workspace.workspaceMetaFile,
+      ...overrides
+    })
 
   beforeEach(async () => {
     tempDir = await createNodeTestArtifactDir('chat-tool-registry')
@@ -74,17 +115,7 @@ describe('AssistantToolRegistry', () => {
       config,
       project,
       route,
-      context: {
-        config,
-        route,
-        sessionStore: store,
-        taskState: {
-          sessionKey: 'generic:dm:trace-tooling',
-          running: false,
-          queuedCount: 0,
-          updatedAt: 1
-        }
-      }
+      context: createToolContext(route, createTaskState(route, { updatedAt: 1 }), { config })
     }
   }
 
@@ -220,382 +251,52 @@ describe('AssistantToolRegistry', () => {
       toolCalls: [{ toolName: 'session.status' }]
     })
 
-    const taskState = {
-      sessionKey: 'generic:dm:tooling-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
+    const callTool = (name: string, args: Record<string, unknown>) =>
+      registry.callTool(name, args, createWorkspaceToolContext(route, taskState, workspace))
 
-    const addPinned = await registry.callTool(
-      'context.pinned',
-      {
-        action: 'add',
-        text: 'Prefer CSV exports for tabular results.'
-      },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile
-      }
-    )
-    const pinned = await registry.callTool(
-      'context.pinned',
-      {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile
-      }
-    )
-    const status = await registry.callTool(
-      'session.status',
-      {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const sessionSummary = await registry.callTool(
-      'session.summary',
-      {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile
-      }
-    )
-    const sessionHistory = await registry.callTool(
-      'session.history',
-      { limit: 2 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile
-      }
-    )
-    const sessionsList = await registry.callTool(
-      'sessions.list',
-      { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile
-      }
-    )
-    const workspacesList = await registry.callTool(
-      'workspaces.list',
-      { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile
-      }
-    )
-    const workspaceInspect = await registry.callTool(
-      'workspace.inspect',
-      { workspaceId: workspace.workspaceId, runLimit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile
-      }
-    )
-    const events = await registry.callTool(
-      'events.list',
-      { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile
-      }
-    )
-    const memory = await registry.callTool(
-      'memory.recent',
-      {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const workspaceContext = await registry.callTool(
-      'workspace.context',
-      {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile
-      }
-    )
-    const workspaceAttach = await registry.callTool(
-      'workspace.attach',
-      {
-        workspaceId: workspace.workspaceId,
-        accessMode: 'shared',
-        title: 'Shared Tool Workspace',
-        description: 'Shared tool-facing metadata.',
-        sharedNote: 'Prefer stable CSV exports.'
-      },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile,
-        workspaceMetaFile: workspace.workspaceMetaFile
-      }
-    )
-    const workspaceContextAfterAttach = await registry.callTool(
-      'workspace.context',
-      {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile,
-        workspaceMetaFile: workspace.workspaceMetaFile
-      }
-    )
-    const mcpStatus = await registry.callTool(
-      'mcp.status',
-      {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState
-      }
-    )
-    const runs = await registry.callTool(
-      'runs.list',
-      { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const run = await registry.callTool(
-      'runs.get',
-      { runId: 'run-1' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const runInspect = await registry.callTool(
-      'run.inspect',
-      { runId: 'run-1' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const workflowInspect = await registry.callTool(
-      'workflow.inspect',
-      { workflowId: 'run-1', runLimit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const taskGroupInspect = await registry.callTool(
-      'task.group.inspect',
-      { taskGroupId: 'task-group-1', runLimit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const runTrace = await registry.callTool(
-      'run.trace',
-      { runId: 'run-1' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const runLineage = await registry.callTool(
-      'run.lineage',
-      { runId: 'run-1' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const artifacts = await registry.callTool(
-      'artifacts.list',
-      { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const artifact = await registry.callTool(
-      'artifacts.get',
-      { artifactId: 'artifact-1' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const auditTimeline = await registry.callTool(
-      'audit.timeline',
-      { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const opsStatus = await registry.callTool(
-      'ops.status',
-      { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const limitsStatus = await registry.callTool(
-      'limits.status',
-      {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile
-      }
-    )
-    const cleanup = await registry.callTool(
-      'session.cleanup',
-      { mode: 'clear' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile
-      }
-    )
+    const addPinned = await callTool('context.pinned', {
+      action: 'add',
+      text: 'Prefer CSV exports for tabular results.'
+    })
+    const pinned = await callTool('context.pinned', {})
+    const status = await callTool('session.status', {})
+    const sessionSummary = await callTool('session.summary', {})
+    const sessionHistory = await callTool('session.history', { limit: 2 })
+    const sessionsList = await callTool('sessions.list', { limit: 5 })
+    const workspacesList = await callTool('workspaces.list', { limit: 5 })
+    const workspaceInspect = await callTool('workspace.inspect', {
+      workspaceId: workspace.workspaceId,
+      runLimit: 5
+    })
+    const events = await callTool('events.list', { limit: 5 })
+    const memory = await callTool('memory.recent', {})
+    const workspaceContext = await callTool('workspace.context', {})
+    const workspaceAttach = await callTool('workspace.attach', {
+      workspaceId: workspace.workspaceId,
+      accessMode: 'shared',
+      title: 'Shared Tool Workspace',
+      description: 'Shared tool-facing metadata.',
+      sharedNote: 'Prefer stable CSV exports.'
+    })
+    const workspaceContextAfterAttach = await callTool('workspace.context', {})
+    const mcpStatus = await callTool('mcp.status', {})
+    const runs = await callTool('runs.list', { limit: 5 })
+    const run = await callTool('runs.get', { runId: 'run-1' })
+    const runInspect = await callTool('run.inspect', { runId: 'run-1' })
+    const workflowInspect = await callTool('workflow.inspect', { workflowId: 'run-1', runLimit: 5 })
+    const taskGroupInspect = await callTool('task.group.inspect', {
+      taskGroupId: 'task-group-1',
+      runLimit: 5
+    })
+    const runTrace = await callTool('run.trace', { runId: 'run-1' })
+    const runLineage = await callTool('run.lineage', { runId: 'run-1' })
+    const artifacts = await callTool('artifacts.list', { limit: 5 })
+    const artifact = await callTool('artifacts.get', { artifactId: 'artifact-1' })
+    const auditTimeline = await callTool('audit.timeline', { limit: 5 })
+    const opsStatus = await callTool('ops.status', { limit: 5 })
+    const limitsStatus = await callTool('limits.status', {})
+    const cleanup = await callTool('session.cleanup', { mode: 'clear' })
 
     expect(registry.listTools().map((tool) => tool.name)).toEqual(
       expect.arrayContaining([
@@ -782,14 +483,10 @@ describe('AssistantToolRegistry', () => {
     const status = await registry.callTool(
       'session.status',
       {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
 
     expect(status.content).toContain('Session: generic:group:task-room:thread:thread-1')
@@ -847,33 +544,14 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'tooling-2'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:tooling-2',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
 
     const result = await registry.callTool(
       'mcp.echo.echo',
       { message: 'hello' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState
-      }
+      createToolContext(route, taskState)
     )
-    const mcpStatus = await registry.callTool(
-      'mcp.status',
-      {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState
-      }
-    )
+    const mcpStatus = await registry.callTool('mcp.status', {}, createToolContext(route, taskState))
 
     expect(registry.listTools().map((tool) => tool.name)).toContain('mcp.echo.echo')
     expect(mcpClientManager.callToolByAlias).toHaveBeenCalledWith(
@@ -899,36 +577,17 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'tooling-3'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:tooling-3',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
 
     await expect(
-      registry.callTool(
-        'workspace.inspect',
-        {},
-        {
-          config: DEFAULT_CONFIG,
-          route,
-          sessionStore: store,
-          taskState
-        }
-      )
+      registry.callTool('workspace.inspect', {}, createToolContext(route, taskState))
     ).rejects.toThrow('Invalid input for tool "workspace.inspect": input.workspaceId is required.')
 
     await expect(
       registry.callTool(
         'sessions.list',
         { limit: 'many' as unknown as number },
-        {
-          config: DEFAULT_CONFIG,
-          route,
-          sessionStore: store,
-          taskState
-        }
+        createToolContext(route, taskState)
       )
     ).rejects.toThrow('Invalid input for tool "sessions.list": input.limit must be an integer.')
 
@@ -939,16 +598,7 @@ describe('AssistantToolRegistry', () => {
     })
 
     await expect(
-      registry.callTool(
-        'task.group.cancel',
-        {},
-        {
-          config: DEFAULT_CONFIG,
-          route,
-          sessionStore: store,
-          taskState
-        }
-      )
+      registry.callTool('task.group.cancel', {}, createToolContext(route, taskState))
     ).rejects.toThrow('Invalid input for tool "task.group.cancel": input.taskGroupId is required.')
   })
 
@@ -959,12 +609,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'terminal-disabled-1'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:terminal-disabled-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
 
     await expect(
       registry.callTool(
@@ -975,12 +620,7 @@ describe('AssistantToolRegistry', () => {
           confirm: true,
           cwd: tempDir
         },
-        {
-          config: DEFAULT_CONFIG,
-          route,
-          sessionStore: store,
-          taskState
-        }
+        createToolContext(route, taskState)
       )
     ).rejects.toThrow('agent.terminal.run is disabled')
   })
@@ -992,12 +632,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'terminal-confirm-1'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:terminal-confirm-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
     const config = {
       ...DEFAULT_CONFIG,
       download_dir: tempDir,
@@ -1015,14 +650,11 @@ describe('AssistantToolRegistry', () => {
         confirm: false,
         cwd: tempDir
       },
-      {
+      createToolContext(route, taskState, {
         config,
-        route,
-        sessionStore: store,
-        taskState,
         terminalApproval: (request) =>
           getAssistantTerminalPolicyRuntime().createTrustedApproval(request)
-      }
+      })
     )
     expect(JSON.parse(result.content).authorizationId).toBeTypeOf('string')
   })
@@ -1034,12 +666,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'terminal-deny-1'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:terminal-deny-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
     const config = {
       ...DEFAULT_CONFIG,
       download_dir: tempDir,
@@ -1058,12 +685,7 @@ describe('AssistantToolRegistry', () => {
           confirm: true,
           cwd: tempDir
         },
-        {
-          config,
-          route,
-          sessionStore: store,
-          taskState
-        }
+        createToolContext(route, taskState, { config })
       )
     ).rejects.toThrow('command is not allowlisted')
 
@@ -1076,12 +698,7 @@ describe('AssistantToolRegistry', () => {
           confirm: true,
           cwd: tempDir
         },
-        {
-          config,
-          route,
-          sessionStore: store,
-          taskState
-        }
+        createToolContext(route, taskState, { config })
       )
     ).rejects.toThrow('only allows git status, git diff, or git log')
   })
@@ -1093,12 +710,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'terminal-path-escape-1'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:terminal-path-escape-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
     const config: Config = {
       ...DEFAULT_CONFIG,
       download_dir: tempDir,
@@ -1142,12 +754,7 @@ describe('AssistantToolRegistry', () => {
             confirm: true,
             cwd: tempDir
           },
-          {
-            config,
-            route,
-            sessionStore: store,
-            taskState
-          }
+          createToolContext(route, taskState, { config })
         )
       ).rejects.toThrow('agent.terminal.run could not resolve git without using a shell.')
     } finally {
@@ -1164,12 +771,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'terminal-allow-1'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:terminal-allow-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
     const config = {
       ...DEFAULT_CONFIG,
       download_dir: tempDir,
@@ -1191,12 +793,7 @@ describe('AssistantToolRegistry', () => {
           timeoutMs: 5000,
           maxOutputChars: 1000
         },
-        {
-          config,
-          route,
-          sessionStore: store,
-          taskState
-        }
+        createToolContext(route, taskState, { config })
       )
       const payload = JSON.parse(result.content)
 
@@ -1218,12 +815,7 @@ describe('AssistantToolRegistry', () => {
     }
     const defaultWorkspace = getAssistantWorkspaceState(route)
     const sharedWorkspace = getAssistantWorkspaceState(route, 'workspace-shared-tooling-detach')
-    const taskState = {
-      sessionKey: 'generic:dm:tooling-detach-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
 
     await registry.callTool(
       'workspace.attach',
@@ -1232,48 +824,18 @@ describe('AssistantToolRegistry', () => {
         title: 'Shared Tooling Workspace',
         description: 'Shared workspace used by multiple routes.'
       },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: defaultWorkspace.memoryFile,
-        workspaceTaskContextFile: defaultWorkspace.taskContextFile,
-        workspaceContextFile: defaultWorkspace.contextFile,
-        workspacePinnedContextFile: defaultWorkspace.pinnedContextFile,
-        workspaceMetaFile: defaultWorkspace.workspaceMetaFile
-      }
+      createWorkspaceToolContext(route, taskState, defaultWorkspace)
     )
 
     const detachResult = await registry.callTool(
       'workspace.detach',
       {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: sharedWorkspace.memoryFile,
-        workspaceTaskContextFile: sharedWorkspace.taskContextFile,
-        workspaceContextFile: sharedWorkspace.contextFile,
-        workspacePinnedContextFile: sharedWorkspace.pinnedContextFile,
-        workspaceMetaFile: sharedWorkspace.workspaceMetaFile
-      }
+      createWorkspaceToolContext(route, taskState, sharedWorkspace)
     )
     const archivedWorkspace = await registry.callTool(
       'workspace.inspect',
       { workspaceId: sharedWorkspace.workspaceId, runLimit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
-        workspaceMemoryFile: defaultWorkspace.memoryFile,
-        workspaceTaskContextFile: defaultWorkspace.taskContextFile,
-        workspaceContextFile: defaultWorkspace.contextFile,
-        workspacePinnedContextFile: defaultWorkspace.pinnedContextFile,
-        workspaceMetaFile: defaultWorkspace.workspaceMetaFile
-      }
+      createWorkspaceToolContext(route, taskState, defaultWorkspace)
     )
 
     expect(detachResult.content).toContain('"detached": true')
@@ -1300,18 +862,9 @@ describe('AssistantToolRegistry', () => {
       scopeId: 'tooling-private-guest-1'
     }
     const ownerWorkspace = getAssistantWorkspaceState(ownerRoute)
-    const ownerTaskState = {
-      sessionKey: 'generic:dm:tooling-private-owner-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
-    const guestTaskState = {
-      sessionKey: 'generic:dm:tooling-private-guest-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const guestWorkspace = getAssistantWorkspaceState(guestRoute)
+    const ownerTaskState = createTaskState(ownerRoute)
+    const guestTaskState = createTaskState(guestRoute)
 
     await registry.callTool(
       'workspace.attach',
@@ -1319,17 +872,7 @@ describe('AssistantToolRegistry', () => {
         workspaceId: ownerWorkspace.workspaceId,
         accessMode: 'private'
       },
-      {
-        config: DEFAULT_CONFIG,
-        route: ownerRoute,
-        sessionStore: store,
-        taskState: ownerTaskState,
-        workspaceMemoryFile: ownerWorkspace.memoryFile,
-        workspaceTaskContextFile: ownerWorkspace.taskContextFile,
-        workspaceContextFile: ownerWorkspace.contextFile,
-        workspacePinnedContextFile: ownerWorkspace.pinnedContextFile,
-        workspaceMetaFile: ownerWorkspace.workspaceMetaFile
-      }
+      createWorkspaceToolContext(ownerRoute, ownerTaskState, ownerWorkspace)
     )
 
     await expect(
@@ -1338,17 +881,7 @@ describe('AssistantToolRegistry', () => {
         {
           workspaceId: ownerWorkspace.workspaceId
         },
-        {
-          config: DEFAULT_CONFIG,
-          route: guestRoute,
-          sessionStore: store,
-          taskState: guestTaskState,
-          workspaceMemoryFile: getAssistantWorkspaceState(guestRoute).memoryFile,
-          workspaceTaskContextFile: getAssistantWorkspaceState(guestRoute).taskContextFile,
-          workspaceContextFile: getAssistantWorkspaceState(guestRoute).contextFile,
-          workspacePinnedContextFile: getAssistantWorkspaceState(guestRoute).pinnedContextFile,
-          workspaceMetaFile: getAssistantWorkspaceState(guestRoute).workspaceMetaFile
-        }
+        createWorkspaceToolContext(guestRoute, guestTaskState, guestWorkspace)
       )
     ).rejects.toThrow(/private to generic:dm:tooling-private-owner-1/i)
 
@@ -1358,34 +891,14 @@ describe('AssistantToolRegistry', () => {
         workspaceId: ownerWorkspace.workspaceId,
         accessMode: 'shared'
       },
-      {
-        config: DEFAULT_CONFIG,
-        route: ownerRoute,
-        sessionStore: store,
-        taskState: ownerTaskState,
-        workspaceMemoryFile: ownerWorkspace.memoryFile,
-        workspaceTaskContextFile: ownerWorkspace.taskContextFile,
-        workspaceContextFile: ownerWorkspace.contextFile,
-        workspacePinnedContextFile: ownerWorkspace.pinnedContextFile,
-        workspaceMetaFile: ownerWorkspace.workspaceMetaFile
-      }
+      createWorkspaceToolContext(ownerRoute, ownerTaskState, ownerWorkspace)
     )
     const guestAttach = await registry.callTool(
       'workspace.attach',
       {
         workspaceId: ownerWorkspace.workspaceId
       },
-      {
-        config: DEFAULT_CONFIG,
-        route: guestRoute,
-        sessionStore: store,
-        taskState: guestTaskState,
-        workspaceMemoryFile: getAssistantWorkspaceState(guestRoute).memoryFile,
-        workspaceTaskContextFile: getAssistantWorkspaceState(guestRoute).taskContextFile,
-        workspaceContextFile: getAssistantWorkspaceState(guestRoute).contextFile,
-        workspacePinnedContextFile: getAssistantWorkspaceState(guestRoute).pinnedContextFile,
-        workspaceMetaFile: getAssistantWorkspaceState(guestRoute).workspaceMetaFile
-      }
+      createWorkspaceToolContext(guestRoute, guestTaskState, guestWorkspace)
     )
 
     expect(sharedWorkspace.content).toContain('"accessMode": "shared"')
@@ -1406,18 +919,9 @@ describe('AssistantToolRegistry', () => {
       scopeId: 'tooling-govern-guest-1'
     }
     const ownerWorkspace = getAssistantWorkspaceState(ownerRoute)
-    const ownerTaskState = {
-      sessionKey: 'generic:dm:tooling-govern-owner-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
-    const guestTaskState = {
-      sessionKey: 'generic:dm:tooling-govern-guest-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const guestWorkspace = getAssistantWorkspaceState(guestRoute)
+    const ownerTaskState = createTaskState(ownerRoute)
+    const guestTaskState = createTaskState(guestRoute)
 
     await registry.callTool(
       'workspace.attach',
@@ -1425,17 +929,7 @@ describe('AssistantToolRegistry', () => {
         workspaceId: ownerWorkspace.workspaceId,
         accessMode: 'private'
       },
-      {
-        config: DEFAULT_CONFIG,
-        route: ownerRoute,
-        sessionStore: store,
-        taskState: ownerTaskState,
-        workspaceMemoryFile: ownerWorkspace.memoryFile,
-        workspaceTaskContextFile: ownerWorkspace.taskContextFile,
-        workspaceContextFile: ownerWorkspace.contextFile,
-        workspacePinnedContextFile: ownerWorkspace.pinnedContextFile,
-        workspaceMetaFile: ownerWorkspace.workspaceMetaFile
-      }
+      createWorkspaceToolContext(ownerRoute, ownerTaskState, ownerWorkspace)
     )
 
     const sharedResult = await registry.callTool(
@@ -1444,17 +938,7 @@ describe('AssistantToolRegistry', () => {
         action: 'share',
         workspaceId: ownerWorkspace.workspaceId
       },
-      {
-        config: DEFAULT_CONFIG,
-        route: ownerRoute,
-        sessionStore: store,
-        taskState: ownerTaskState,
-        workspaceMemoryFile: ownerWorkspace.memoryFile,
-        workspaceTaskContextFile: ownerWorkspace.taskContextFile,
-        workspaceContextFile: ownerWorkspace.contextFile,
-        workspacePinnedContextFile: ownerWorkspace.pinnedContextFile,
-        workspaceMetaFile: ownerWorkspace.workspaceMetaFile
-      }
+      createWorkspaceToolContext(ownerRoute, ownerTaskState, ownerWorkspace)
     )
 
     await registry.callTool(
@@ -1462,17 +946,7 @@ describe('AssistantToolRegistry', () => {
       {
         workspaceId: ownerWorkspace.workspaceId
       },
-      {
-        config: DEFAULT_CONFIG,
-        route: guestRoute,
-        sessionStore: store,
-        taskState: guestTaskState,
-        workspaceMemoryFile: getAssistantWorkspaceState(guestRoute).memoryFile,
-        workspaceTaskContextFile: getAssistantWorkspaceState(guestRoute).taskContextFile,
-        workspaceContextFile: getAssistantWorkspaceState(guestRoute).contextFile,
-        workspacePinnedContextFile: getAssistantWorkspaceState(guestRoute).pinnedContextFile,
-        workspaceMetaFile: getAssistantWorkspaceState(guestRoute).workspaceMetaFile
-      }
+      createWorkspaceToolContext(guestRoute, guestTaskState, guestWorkspace)
     )
 
     await expect(
@@ -1482,17 +956,7 @@ describe('AssistantToolRegistry', () => {
           action: 'privatize',
           workspaceId: ownerWorkspace.workspaceId
         },
-        {
-          config: DEFAULT_CONFIG,
-          route: guestRoute,
-          sessionStore: store,
-          taskState: guestTaskState,
-          workspaceMemoryFile: getAssistantWorkspaceState(guestRoute).memoryFile,
-          workspaceTaskContextFile: getAssistantWorkspaceState(guestRoute).taskContextFile,
-          workspaceContextFile: getAssistantWorkspaceState(guestRoute).contextFile,
-          workspacePinnedContextFile: getAssistantWorkspaceState(guestRoute).pinnedContextFile,
-          workspaceMetaFile: getAssistantWorkspaceState(guestRoute).workspaceMetaFile
-        }
+        createWorkspaceToolContext(guestRoute, guestTaskState, guestWorkspace)
       )
     ).rejects.toThrow(/Only the workspace owner/i)
 
@@ -1508,6 +972,7 @@ describe('AssistantToolRegistry', () => {
       scopeId: 'resume-tool-1'
     }
     const workspace = getAssistantWorkspaceState(route)
+    const taskState = createTaskState(route, { updatedAt: 1 })
     const resumeRun = vi.fn(async () => ({
       runId: 'run-resumed-1',
       sessionKey: 'generic:dm:resume-tool-1',
@@ -1524,23 +989,9 @@ describe('AssistantToolRegistry', () => {
         runId: 'run-failed-1',
         async: true
       },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState: {
-          sessionKey: 'generic:dm:resume-tool-1',
-          running: false,
-          queuedCount: 0,
-          updatedAt: 1
-        },
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile,
-        workspaceMetaFile: workspace.workspaceMetaFile,
+      createWorkspaceToolContext(route, taskState, workspace, {
         resumeRun
-      }
+      })
     )
 
     expect(resumeRun).toHaveBeenCalledWith(route, 'run-failed-1', {
@@ -1564,6 +1015,7 @@ describe('AssistantToolRegistry', () => {
       scopeId: 'workflow-resume-tool-1'
     }
     const workspace = getAssistantWorkspaceState(route)
+    const taskState = createTaskState(route, { updatedAt: 1 })
     const resumeWorkflow = vi.fn(async () => ({
       runId: 'run-workflow-resumed-1',
       sessionKey: 'generic:dm:workflow-resume-tool-1',
@@ -1580,23 +1032,9 @@ describe('AssistantToolRegistry', () => {
         workflowId: 'run-root-1',
         async: true
       },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState: {
-          sessionKey: 'generic:dm:workflow-resume-tool-1',
-          running: false,
-          queuedCount: 0,
-          updatedAt: 1
-        },
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile,
-        workspaceMetaFile: workspace.workspaceMetaFile,
+      createWorkspaceToolContext(route, taskState, workspace, {
         resumeWorkflow
-      }
+      })
     )
 
     expect(resumeWorkflow).toHaveBeenCalledWith('run-root-1', route, {
@@ -1937,6 +1375,7 @@ describe('AssistantToolRegistry', () => {
       threadId: 'thread-1'
     }
     const workspace = getAssistantWorkspaceState(route)
+    const retryTaskState = createTaskState(route, { running: true, updatedAt: 1 })
     const resumeRun = vi.fn(async () => ({
       runId: 'run-retried-1',
       sessionKey: 'generic:group:retry-replay-room:thread:thread-1',
@@ -2027,23 +1466,9 @@ describe('AssistantToolRegistry', () => {
         taskGroupId: 'task-group-replay-1',
         async: true
       },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState: {
-          sessionKey: 'generic:group:retry-replay-room:thread:thread-1',
-          running: true,
-          queuedCount: 0,
-          updatedAt: 1
-        },
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile,
-        workspaceMetaFile: workspace.workspaceMetaFile,
+      createWorkspaceToolContext(route, retryTaskState, workspace, {
         resumeTaskGroup
-      }
+      })
     )
     const runRetry = await registry.callTool(
       'run.retry',
@@ -2051,46 +1476,18 @@ describe('AssistantToolRegistry', () => {
         runId: 'run-replay-1',
         async: true
       },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState: {
-          sessionKey: 'generic:group:retry-replay-room:thread:thread-1',
-          running: true,
-          queuedCount: 0,
-          updatedAt: 1
-        },
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile,
-        workspaceMetaFile: workspace.workspaceMetaFile,
+      createWorkspaceToolContext(route, retryTaskState, workspace, {
         resumeRun
-      }
+      })
     )
     const replay = await registry.callTool(
       'run.replay',
       {
         runId: 'run-replay-1'
       },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState: {
-          sessionKey: 'generic:group:retry-replay-room:thread:thread-1',
-          running: true,
-          queuedCount: 0,
-          updatedAt: 1
-        },
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile,
-        workspaceMetaFile: workspace.workspaceMetaFile,
+      createWorkspaceToolContext(route, retryTaskState, workspace, {
         resumeRun
-      }
+      })
     )
 
     expect(resumeTaskGroup).toHaveBeenCalledWith(route, 'task-group-replay-1', {

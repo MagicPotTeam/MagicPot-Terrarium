@@ -2,11 +2,20 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { getBuildEnvMock, getConfigMock, showSaveDialogMock, getPathMock } = vi.hoisted(() => ({
+const {
+  getBuildEnvMock,
+  getConfigMock,
+  showSaveDialogMock,
+  getPathMock,
+  spawnSubProcessMock,
+  ensureVcRedistInstalledMock
+} = vi.hoisted(() => ({
   getBuildEnvMock: vi.fn(),
   getConfigMock: vi.fn(),
   showSaveDialogMock: vi.fn(),
-  getPathMock: vi.fn(() => 'C:/downloads')
+  getPathMock: vi.fn(() => 'C:/downloads'),
+  spawnSubProcessMock: vi.fn(),
+  ensureVcRedistInstalledMock: vi.fn()
 }))
 
 vi.mock('electron', () => ({
@@ -30,7 +39,7 @@ vi.mock('../config/config', () => ({
 vi.mock('../subprocess/subprocess', () => ({
   connectSubProcess: vi.fn(),
   killSubProcess: vi.fn(),
-  spawnSubProcess: vi.fn()
+  spawnSubProcess: spawnSubProcessMock
 }))
 
 vi.mock('../comfy/fs', () => ({
@@ -42,7 +51,7 @@ vi.mock('../config/portablePaths', () => ({
 }))
 
 vi.mock('../system/vcRedist', () => ({
-  ensureVcRedistInstalled: vi.fn()
+  ensureVcRedistInstalled: ensureVcRedistInstalledMock
 }))
 
 vi.mock('../config/fastSettingTemplates', () => ({
@@ -52,6 +61,7 @@ vi.mock('../config/fastSettingTemplates', () => ({
 
 import {
   HyperSvcImpl,
+  createProcessLoggers,
   migrateLegacyAssistantImageFile,
   sanitizeSaveImageFileName
 } from './svcHyperImpl'
@@ -97,6 +107,63 @@ const windowsBuildEnv = {
   }
 }
 
+describe('createProcessLoggers', () => {
+  it('prefixes messages and emits matching process statuses', () => {
+    const onData = vi.fn()
+    const logInfoSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const logErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { logInfo, logError } = createProcessLoggers(
+      '[test] ',
+      (status, logLine) => ({ status, logLine }),
+      onData
+    )
+
+    try {
+      logInfo('ready')
+      logError('failed')
+    } finally {
+      logInfoSpy.mockRestore()
+      logErrorSpy.mockRestore()
+    }
+
+    expect(onData).toHaveBeenNthCalledWith(1, { status: 'running', logLine: '[test] ready' })
+    expect(onData).toHaveBeenNthCalledWith(2, { status: 'error', logLine: '[test] failed' })
+  })
+})
+
+describe('HyperSvcImpl.startComfyUI', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    getConfigMock.mockReturnValue(baseConfig)
+    getBuildEnvMock.mockReturnValue(windowsBuildEnv)
+    ensureVcRedistInstalledMock.mockResolvedValue('already-installed')
+  })
+
+  it('shares one in-flight managed startup across concurrent calls', async () => {
+    const svc = new HyperSvcImpl()
+    vi.spyOn(svc, 'comfyPortDetect').mockResolvedValue({ pid: 0 })
+    let resolveSpawn: (() => void) | undefined
+    spawnSubProcessMock.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSpawn = resolve
+        })
+    )
+    const firstOnData = vi.fn()
+    const secondOnData = vi.fn()
+
+    const first = svc.startComfyUI({}, { onData: firstOnData })
+    const second = svc.startComfyUI({}, { onData: secondOnData })
+
+    await vi.waitFor(() => expect(spawnSubProcessMock).toHaveBeenCalledTimes(1))
+    expect(secondOnData).toHaveBeenCalledWith(
+      expect.objectContaining({ logLine: '[comfyui] startup is already in progress' })
+    )
+    resolveSpawn?.()
+    await Promise.all([first, second])
+  })
+})
+
 describe('HyperSvcImpl.comfyPortDetect', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -122,6 +189,26 @@ describe('HyperSvcImpl.comfyPortDetect', () => {
       command: 'cmd',
       args: ['/c', 'netstat -ano -p tcp']
     })
+  })
+
+  it('uses the managed local port while the active ComfyUI API is remote', async () => {
+    getConfigMock.mockReturnValue({
+      ...baseConfig,
+      use_remote_comfyui: true,
+      local_comfyui_config: { ...baseConfig.local_comfyui_config, comfyui_port: '8288' },
+      remote_comfyui_config: {
+        ...baseConfig.remote_comfyui_config,
+        comfyui_origin: 'https://remote.example.com:9443'
+      }
+    })
+    const svc = new HyperSvcImpl()
+    const runCommandSync = vi.spyOn(svc, 'runCommandSync').mockResolvedValue({
+      stdOut: '  TCP    0.0.0.0:8288           0.0.0.0:0              LISTENING       60005',
+      stdErr: ''
+    })
+
+    await expect(svc.comfyPortDetect({})).resolves.toEqual({ pid: 60005 })
+    expect(runCommandSync).toHaveBeenCalledTimes(1)
   })
 
   it('returns the pid for a Windows TCP listener on the ComfyUI port', async () => {

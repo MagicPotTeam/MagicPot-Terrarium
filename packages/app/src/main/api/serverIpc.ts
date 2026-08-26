@@ -28,12 +28,22 @@ import type { ManagedMediaCleanupScheduler } from '../llmProxy/managedMediaClean
 import { getChatMediaDir } from '../llmProxy/chatMediaDir'
 
 export const createServer = (managedMediaCleanupScheduler?: ManagedMediaCleanupScheduler): Api => {
+  const comfyBatch = new ComfyBatchSvcImpl()
+  const resumeRecoveredJobs = (
+    comfyBatch as ComfyBatchSvcImpl & { resumeRecoveredJobs?: () => Promise<void> }
+  ).resumeRecoveredJobs
+  if (typeof resumeRecoveredJobs === 'function') {
+    void resumeRecoveredJobs.call(comfyBatch).catch((error) => {
+      console.error('[serverIpc] Failed to resume recovered ComfyUI batch jobs:', error)
+    })
+  }
+
   const baseApi: BaseApi = {
     svcAdobeBridge: new AdobeBridgeSvcImpl(),
     svcState: new StateSvcImpl(),
     svcHyper: new HyperSvcImpl(),
     svcComfy: new ComfySvcImpl(),
-    svcComfyBatch: new ComfyBatchSvcImpl(),
+    svcComfyBatch: comfyBatch,
     svcQApp: new QAppSvcImpl(),
     svcTargetScheme: new TargetSchemeSvcImpl(),
     svcProjectTrace: new ProjectTraceSvcImpl(),

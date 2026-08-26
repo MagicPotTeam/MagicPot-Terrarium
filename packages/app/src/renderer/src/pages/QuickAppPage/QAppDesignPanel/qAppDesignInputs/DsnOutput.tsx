@@ -47,7 +47,9 @@ const NodeSlotItem = memo<NodeSlotItemProps>(
             workflow={workflow}
             objectInfos={objectInfos}
             mode="node"
-            allowNodeCondition={conditionNodeIsOutputNode}
+            allowNodeCondition={(objInfoNode) =>
+              conditionNodeIsOutputNode(objInfoNode) || (objInfoNode.output?.length ?? 0) > 0
+            }
           />
         </Box>
         <Box>
@@ -89,20 +91,41 @@ const DsnOutput = ({
 
   // nodeSlots 更新时触发 setValue
   useEffect(() => {
-    console.log('nodeSlots', nodeSlots)
-    setValue(nodeSlots.map((nodeSlot) => nodeSlot.nodeSlot.split('$.')[1]))
-  }, [nodeSlots, setValue])
+    const nextValue = Array.from(
+      new Set(
+        nodeSlots
+          .map((nodeSlot) => nodeSlot.nodeSlot.match(/^\$\.([^.[\]]+)$/)?.[1] || '')
+          .filter((nodeId) => Boolean(nodeId && workflow[nodeId]))
+      )
+    )
+    setValue(nextValue)
+  }, [nodeSlots, setValue, workflow])
+
+  useEffect(() => {
+    const nextValue = Array.from(new Set((value || []).filter((nodeId) => workflow[nodeId])))
+    setNodeSlots((prev) => {
+      const currentValue = prev
+        .map((nodeSlot) => nodeSlot.nodeSlot.match(/^\$\.([^.[\]]+)$/)?.[1] || '')
+        .filter(Boolean)
+      if (JSON.stringify(currentValue) === JSON.stringify(nextValue)) return prev
+      return nextValue.map((nodeSlot) => ({
+        id: crypto.randomUUID(),
+        nodeSlot: `$.${nodeSlot}`
+      }))
+    })
+  }, [value, workflow])
 
   const addNodeSlot = useCallback((nodeSlot: string) => {
-    console.log('addNodeSlot', nodeSlot)
-    setNodeSlots((prev) => [...prev, { id: crypto.randomUUID(), nodeSlot: `$.${nodeSlot}` }])
+    if (!nodeSlot) return
+    setNodeSlots((prev) => {
+      if (prev.some((item) => item.nodeSlot === `$.${nodeSlot}`)) return prev
+      return [...prev, { id: crypto.randomUUID(), nodeSlot: `$.${nodeSlot}` }]
+    })
   }, [])
   const removeNodeSlot = useCallback((id: string) => {
-    console.log('removeNodeSlot', id)
     setNodeSlots((prev) => prev.filter((nodeSlot) => nodeSlot.id !== id))
   }, [])
   const setNodeSlot = useCallback((id: string, newNodeSlot: string) => {
-    console.log('setNodeSlot', id, newNodeSlot)
     setNodeSlots((prev) =>
       prev.map((nodeSlot) =>
         nodeSlot.id === id ? { ...nodeSlot, nodeSlot: newNodeSlot } : nodeSlot
@@ -131,7 +154,21 @@ const DsnOutput = ({
                 onRemove={removeNodeSlot}
               />
             ))}
-            <Button variant="text" size="large" color="inherit" onClick={() => addNodeSlot('')}>
+            <Button
+              variant="text"
+              size="large"
+              color="inherit"
+              onClick={() => {
+                const firstOutput = Object.entries(workflow).find(([nodeId, node]) => {
+                  const info = objectInfos[node.class_type]
+                  return (
+                    (conditionNodeIsOutputNode(info) || (info?.output?.length ?? 0) > 0) &&
+                    !value.includes(nodeId)
+                  )
+                })
+                addNodeSlot(firstOutput?.[0] || '')
+              }}
+            >
               <AddOutlined />
             </Button>
           </Stack>

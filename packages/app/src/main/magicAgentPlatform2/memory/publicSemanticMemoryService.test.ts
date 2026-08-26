@@ -8,14 +8,18 @@ const route = { channel: 'test', scopeType: 'dm' as const, scopeId: 'user-1', se
 const actor = { kind: 'user' as const, id: 'user-1' }
 const stores: SqliteSemanticMemoryStore[] = []
 
+const createMemoryCore = () => {
+  const store = new SqliteSemanticMemoryStore(':memory:')
+  stores.push(store)
+  return { store, core: new SemanticMemoryService(store) }
+}
+
 describe('PublicSemanticMemoryService', () => {
   afterEach(() => {
     while (stores.length) stores.pop()!.close()
   })
   it('authorizes before searching, isolates session scope, and projects no content or provenance', async () => {
-    const store = new SqliteSemanticMemoryStore(':memory:')
-    stores.push(store)
-    const core = new SemanticMemoryService(store)
+    const { core } = createMemoryCore()
     const sessionId = 'test:dm:user-1'
     const content = 'private launch phrase'
     await core.upsert({
@@ -62,9 +66,7 @@ describe('PublicSemanticMemoryService', () => {
   })
 
   it('exposes only a bounded always-redacted preview and allowlisted provenance after authorization', async () => {
-    const store = new SqliteSemanticMemoryStore(':memory:')
-    stores.push(store)
-    const core = new SemanticMemoryService(store)
+    const { core } = createMemoryCore()
     const sessionId = 'test:dm:user-1'
     const content = `prefix password=hunter123 https://alice:secret@example.com/?token=urlsecret ${'x'.repeat(700)}`
     const hash = crypto.createHash('sha256').update(content).digest('hex')
@@ -113,9 +115,7 @@ describe('PublicSemanticMemoryService', () => {
   })
 
   it('returns no record or preview when inspect route does not own the memory', async () => {
-    const store = new SqliteSemanticMemoryStore(':memory:')
-    stores.push(store)
-    const core = new SemanticMemoryService(store)
+    const { core } = createMemoryCore()
     const content = 'private'
     await core.upsert({
       id: 'other',
@@ -141,10 +141,9 @@ describe('PublicSemanticMemoryService', () => {
   })
 
   it('rejects non-user-owned routes and validates every session-set route', async () => {
-    const store = new SqliteSemanticMemoryStore(':memory:')
-    stores.push(store)
+    const { core } = createMemoryCore()
     const service = new PublicSemanticMemoryService({
-      memory: new SemanticMemoryService(store),
+      memory: core,
       authorize: vi.fn()
     })
     await expect(
@@ -164,10 +163,9 @@ describe('PublicSemanticMemoryService', () => {
   })
 
   it('authorizes a mutation before touching storage', async () => {
-    const store = new SqliteSemanticMemoryStore(':memory:')
-    stores.push(store)
+    const { store, core } = createMemoryCore()
     const service = new PublicSemanticMemoryService({
-      memory: new SemanticMemoryService(store),
+      memory: core,
       authorize: () => {
         throw new Error('denied')
       }

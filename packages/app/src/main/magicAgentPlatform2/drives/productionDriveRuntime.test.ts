@@ -27,6 +27,21 @@ const drive = {
   links: []
 }
 
+const completedRun = (runId: string, timestamp: number) => ({
+  runId,
+  agentId: 'agent-1',
+  status: 'completed' as const,
+  content: '',
+  messages: [],
+  toolCalls: [],
+  events: [],
+  createdAt: timestamp,
+  updatedAt: timestamp,
+  startedAt: timestamp,
+  finishedAt: timestamp,
+  metadata: {}
+})
+
 describe('Production Drive runtime/lifecycle/commands', () => {
   it('recovers an expired pending delivery after SQLite reopen and acknowledges once', async () => {
     const root = mkdtempSync(join(tmpdir(), 'drive-runtime-restart-'))
@@ -48,20 +63,7 @@ describe('Production Drive runtime/lifecycle/commands', () => {
       firstStore.close()
 
       const reopenedStore = new MagicAgentEventStore(databasePath)
-      const runAgent = vi.fn(async () => ({
-        runId: 'restart-run',
-        agentId: 'agent-1',
-        status: 'completed' as const,
-        content: '',
-        messages: [],
-        toolCalls: [],
-        events: [],
-        createdAt: 15,
-        updatedAt: 15,
-        startedAt: 15,
-        finishedAt: 15,
-        metadata: {}
-      }))
+      const runAgent = vi.fn(async () => completedRun('restart-run', 15))
       const reopened = new ProductionDriveRuntime({
         eventStore: reopenedStore,
         deliver: createProductionDriveDelivery({ runAgent }),
@@ -83,20 +85,7 @@ describe('Production Drive runtime/lifecycle/commands', () => {
   it('runs durable claim through the real production runAgent adapter and acknowledges', async () => {
     const eventStore = new MagicAgentEventStore(':memory:')
     try {
-      const runAgent = vi.fn(async () => ({
-        runId: 'run-delivery',
-        agentId: 'agent-1',
-        status: 'completed' as const,
-        content: '',
-        messages: [],
-        toolCalls: [],
-        events: [],
-        createdAt: 1,
-        updatedAt: 1,
-        startedAt: 1,
-        finishedAt: 1,
-        metadata: {}
-      }))
+      const runAgent = vi.fn(async () => completedRun('run-delivery', 1))
       const runtime = new ProductionDriveRuntime({
         eventStore,
         deliver: createProductionDriveDelivery({ runAgent }),
@@ -125,20 +114,8 @@ describe('Production Drive runtime/lifecycle/commands', () => {
 
   it('delivers an explicit agent target through the public Policy-gated runAgent path', async () => {
     const runAgent = vi.fn(
-      async (_request: import('@shared/api/svcMagicAgentPlatform').MagicAgentPlatformRunReq) => ({
-        runId: 'run-1',
-        agentId: 'agent-1',
-        status: 'completed' as const,
-        content: '',
-        messages: [],
-        toolCalls: [],
-        events: [],
-        createdAt: 1,
-        updatedAt: 1,
-        startedAt: 1,
-        finishedAt: 1,
-        metadata: {}
-      })
+      async (_request: import('@shared/api/svcMagicAgentPlatform').MagicAgentPlatformRunReq) =>
+        completedRun('run-1', 1)
     )
     const deliver = createProductionDriveDelivery({ runAgent })
     await deliver({

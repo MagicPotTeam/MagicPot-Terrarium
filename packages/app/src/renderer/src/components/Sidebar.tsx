@@ -82,9 +82,11 @@ const SidebarInner: React.FC = () => {
   const navigate = useNavigate()
   const { configUtils, config } = useConfig()
   const { t } = useTranslation()
-  const comfyuiDirAvailable = configUtils.isComfyUIDirAvailable()
-  const pythonCmdAvailable = configUtils.isPythonCmdAvailable()
-  const comfyUICommandAvailable = configUtils.isComfyUICommandAvailable()
+  const activeComfyUIDirAvailable = configUtils.isComfyUIDirAvailable()
+  const activePythonCmdAvailable = configUtils.isPythonCmdAvailable()
+  const managedComfyUIDirAvailable = configUtils.getManagedComfyUIDir()[1]
+  const managedPythonCmdAvailable = configUtils.getManagedPythonCmd()[1]
+  const comfyUICommandAvailable = configUtils.isManagedComfyUICommandAvailable()
   const isRemoteLLMMode = config?.use_remote_llm || false
 
   const currentPage = getIdByPath(location.pathname)
@@ -117,8 +119,16 @@ const SidebarInner: React.FC = () => {
         <List sx={{ pt: 1 }}>
           <TransitionGroup>
             {menuItems
-              .filter((item) => comfyuiDirAvailable || !item.onlyWhenComfyUIDirAvailable)
-              .filter((item) => pythonCmdAvailable || !item.onlyWhenPythonCmdAvailable)
+              .filter((item) => {
+                const availability =
+                  item.id === 'comfyui' ? managedComfyUIDirAvailable : activeComfyUIDirAvailable
+                return availability || !item.onlyWhenComfyUIDirAvailable
+              })
+              .filter((item) => {
+                const availability =
+                  item.id === 'comfyui' ? managedPythonCmdAvailable : activePythonCmdAvailable
+                return availability || !item.onlyWhenPythonCmdAvailable
+              })
               .filter((item) => comfyUICommandAvailable || !item.onlyWhenComfyUICommandAvailable)
               .filter((item) => !isRemoteLLMMode || !item.hideWhenRemoteLLM)
               .map((item) => {

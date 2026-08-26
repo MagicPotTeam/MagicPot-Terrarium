@@ -1,15 +1,22 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import { PersistentRuntimeChannelStore } from './persistentRuntimeChannelStore'
 
+const eventStores: MagicAgentEventStore[] = []
+
+afterEach(() => {
+  for (const events of eventStores.splice(0)) events.close()
+})
+
 const setup = () => {
   const events = new MagicAgentEventStore(':memory:')
+  eventStores.push(events)
   return { events, store: new PersistentRuntimeChannelStore(events) }
 }
 
 describe('PersistentRuntimeChannelStore', () => {
   it('rejects changed membership idempotent input after durable join', () => {
-    const { events, store } = setup()
+    const { store } = setup()
     const channel = store.createChannel({
       channel: {
         id: 'durable-membership',
@@ -37,11 +44,10 @@ describe('PersistentRuntimeChannelStore', () => {
     expect(() =>
       store.join({ ...command, member: { ...command.member, agentInstanceId: 'changed-agent' } })
     ).toThrow(/revision|idempotency|event conflict/i)
-    events.close()
   })
 
   it('rejects non-canonical Graph wake routes', () => {
-    const { events, store } = setup()
+    const { store } = setup()
     const channel = store.createChannel({
       channel: { id: 'route-channel', name: 'Route', mode: 'queue', capacity: 1, members: [] },
       createdAt: 1,
@@ -66,11 +72,10 @@ describe('PersistentRuntimeChannelStore', () => {
         idempotencyKey: 'graph'
       })
     ).toThrow()
-    events.close()
   })
 
   it('rejects Graph membership without a complete wake request', () => {
-    const { events, store } = setup()
+    const { store } = setup()
     const channel = store.createChannel({
       channel: { id: 'graph-channel', name: 'Graph', mode: 'queue', capacity: 1, members: [] },
       createdAt: 1,
@@ -85,11 +90,10 @@ describe('PersistentRuntimeChannelStore', () => {
         idempotencyKey: 'graph'
       })
     ).toThrow(/graphWakeRequest/)
-    events.close()
   })
 
   it('replays publish exactly and rejects changed idempotent input', () => {
-    const { events, store } = setup()
+    const { store } = setup()
     let channel = store.createChannel({
       channel: { id: 'replay', name: 'Replay', mode: 'queue', capacity: 2, members: [] },
       createdAt: 1,
@@ -119,11 +123,10 @@ describe('PersistentRuntimeChannelStore', () => {
     expect(() =>
       store.publish({ ...command, message: { ...command.message, priority: 2 } })
     ).toThrow(/idempotency|event conflict/i)
-    events.close()
   })
 
   it('enforces point-to-point cardinality', () => {
-    const { events, store } = setup()
+    const { store } = setup()
     let channel = store.createChannel({
       channel: { id: 'p2p', name: 'Direct', mode: 'point-to-point', capacity: 2, members: [] },
       createdAt: 1,
@@ -151,11 +154,10 @@ describe('PersistentRuntimeChannelStore', () => {
         idempotencyKey: 'three'
       })
     ).toThrow(/exactly two/)
-    events.close()
   })
 
   it('tracks broadcast acknowledgement independently per consumer', () => {
-    const { events, store } = setup()
+    const { store } = setup()
     let channel = store.createChannel({
       channel: { id: 'broadcast', name: 'Broadcast', mode: 'broadcast', capacity: 2, members: [] },
       createdAt: 1,
@@ -205,11 +207,10 @@ describe('PersistentRuntimeChannelStore', () => {
       idempotencyKey: 'two'
     })
     expect(two.state.acknowledgedAt).toBe(7)
-    events.close()
   })
 
   it('uses lease and token fencing for queue claims and permits expiry reclaim', () => {
-    const { events, store } = setup()
+    const { store } = setup()
     let channel = store.createChannel({
       channel: { id: 'queue', name: 'Queue', mode: 'queue', capacity: 2, members: [] },
       createdAt: 1,
@@ -280,11 +281,10 @@ describe('PersistentRuntimeChannelStore', () => {
         idempotencyKey: 'ack'
       }).state.acknowledgedAt
     ).toBe(17)
-    events.close()
   })
 
   it('persists membership, priority ordering, acknowledgement and expiry', () => {
-    const { events, store } = setup()
+    const { store } = setup()
     let channel = store.createChannel({
       channel: { id: 'channel-1', name: 'Work', mode: 'queue', capacity: 3, members: [] },
       createdAt: 1,
@@ -350,11 +350,10 @@ describe('PersistentRuntimeChannelStore', () => {
       idempotencyKey: 'ack'
     })
     expect(store.listPending(channel.id, 9).map((message) => message.id)).toEqual(['low'])
-    events.close()
   })
 
   it('enforces membership roles and capacity backpressure', () => {
-    const { events, store } = setup()
+    const { store } = setup()
     let channel = store.createChannel({
       channel: {
         id: 'channel-1',
@@ -418,6 +417,5 @@ describe('PersistentRuntimeChannelStore', () => {
         idempotencyKey: 'two'
       })
     ).toThrow(/backpressure/)
-    events.close()
   })
 })

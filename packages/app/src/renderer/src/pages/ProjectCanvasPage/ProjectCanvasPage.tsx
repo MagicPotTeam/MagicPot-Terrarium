@@ -240,9 +240,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     const tab = state.layout.openTabs.find((t: any) => t.id === canvasId)
     return tab?.label || 'Project'
   })
-  const { isCanvasPerformanceThrottled } = useComfyExecutionActivity({
-    useRemoteComfyui: config.use_remote_comfyui
-  })
+  const { isCanvasPerformanceThrottled } = useComfyExecutionActivity()
 
   const {
     activeOcrHover,
@@ -367,85 +365,6 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     }
   }, [tool, closeMessage])
 
-  /*
-  const promptForCanvasTaggingExportDir = useCallback(async (): Promise<string | null> => {
-    const storageKey = `canvas.tagging.exportDir.${canvasId}`
-    try {
-      const cachedDir = localStorage.getItem(storageKey)?.trim()
-      if (cachedDir) {
-        return cachedDir
-      }
-    } catch {
-      // Ignore storage read errors and fall back to dialog selection.
-    }
-
-    const dialogResult = await api().svcDialog.showOpenDialog({
-      title: isChineseUi
-        ? '选择打标 sidecar 导出目录'
-        : 'Select a tagging sidecar export directory',
-      properties: ['openDirectory', 'createDirectory', 'promptToCreate']
-    })
-
-    const selectedPath = dialogResult.filePaths?.[0]
-    if (dialogResult.canceled || !selectedPath) {
-      return null
-    }
-
-    try {
-      localStorage.setItem(storageKey, selectedPath)
-    } catch {
-      // Ignore storage write failures.
-    }
-
-    return selectedPath
-  }, [canvasId, isChineseUi])
-
-  const handleExportCanvasTaggingSidecars = useCallback(
-    async (targetItems: CanvasItem[]) => {
-      const taggableItems = filterCanvasConstraintAnnotations(targetItems).filter(
-        (item) => item.tagging
-      )
-
-      if (!taggableItems.length) {
-        notifyWarning(
-          isChineseUi
-            ? '当前选择中还没有可导出的打标结果。'
-            : 'No tagging results are available for the current selection.'
-        )
-        return
-      }
-
-      const exportDir = await promptForCanvasTaggingExportDir()
-      if (!exportDir) {
-        return
-      }
-
-      const sidecarEntries = buildCanvasTaggingSidecarEntries(taggableItems)
-      const encoder = new TextEncoder()
-
-      for (const entry of sidecarEntries) {
-        await api().svcHyper.saveImageToDir({
-          data: encoder.encode(entry.textContent),
-          fileName: entry.textFileName,
-          dir: exportDir
-        })
-        await api().svcHyper.saveImageToDir({
-          data: encoder.encode(entry.jsonContent),
-          fileName: entry.jsonFileName,
-          dir: exportDir
-        })
-      }
-
-      notifySuccess(
-        isChineseUi
-          ? `已导出 ${sidecarEntries.length} 组打标 sidecar。`
-          : `Exported ${sidecarEntries.length} tagging sidecar pairs.`
-      )
-    },
-    [isChineseUi, notifySuccess, notifyWarning, promptForCanvasTaggingExportDir]
-  )
-
-  */
   const [imageContextMenu, setImageContextMenu] = useState<{
     mouseX: number
     mouseY: number

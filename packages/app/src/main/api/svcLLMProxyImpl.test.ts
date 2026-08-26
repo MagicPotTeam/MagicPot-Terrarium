@@ -125,6 +125,37 @@ const mockConfig = (overrides: Partial<Config>): void => {
   } as Config)
 }
 
+const mockAgentProfile = (): void => {
+  mockConfig({
+    llm_config: {
+      ...DEFAULT_CONFIG.llm_config,
+      api_profiles: [
+        {
+          id: 'agent-profile',
+          model_name: 'Agent Model',
+          base_url: 'https://agent.example/v1',
+          api_key: 'agent-key'
+        }
+      ]
+    }
+  })
+}
+
+const mockHunyuanCredentials = (
+  overrides: Partial<NonNullable<Config['aigc3d_config']>> = {}
+): void => {
+  mockConfig({
+    aigc3d_config: {
+      ...DEFAULT_CONFIG.aigc3d_config!,
+      tencent_secret_id: 'secret-id',
+      tencent_secret_key: 'secret-key',
+      api_region: 'ap-shanghai',
+      cos_region: 'ap-guangzhou',
+      ...overrides
+    }
+  })
+}
+
 describe('createElectronRequestFetch', () => {
   it('writes large JSON bodies through Electron ClientRequest and maps the response', async () => {
     const requestEvents = new EventEmitter()
@@ -214,19 +245,7 @@ describe('LLMProxySvcImpl', () => {
     })
     vi.mocked(cliFromProfile).mockReturnValue(undefined as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
     const resp = await svc.chat({
@@ -311,19 +330,7 @@ describe('LLMProxySvcImpl', () => {
       id: 'test-profile-list',
       transformListedProfiles
     })
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const profiles = await new LLMProxySvcImpl().listProfiles({})
 
@@ -682,19 +689,7 @@ describe('LLMProxySvcImpl', () => {
     const agentChat = vi.fn().mockResolvedValue('agent response')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const controller = new AbortController()
     const svc = new LLMProxySvcImpl()
@@ -731,19 +726,7 @@ describe('LLMProxySvcImpl', () => {
     })
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
     const original = svc.chat({
@@ -786,19 +769,7 @@ describe('LLMProxySvcImpl', () => {
     )
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
     const original = svc.chat({
@@ -833,19 +804,7 @@ describe('LLMProxySvcImpl', () => {
       .mockResolvedValueOnce('second response')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
     const request = {
@@ -874,19 +833,7 @@ describe('LLMProxySvcImpl', () => {
     )
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const [abortSender, abortReceiver] = newAbortHandler()
     const onData = vi.fn()
@@ -932,19 +879,7 @@ describe('LLMProxySvcImpl', () => {
     )
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const [abortSender, abortReceiver] = newAbortHandler()
     const onData = vi.fn()
@@ -1006,19 +941,7 @@ describe('LLMProxySvcImpl', () => {
     )
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
     const pending = svc.chat({
@@ -1155,19 +1078,7 @@ describe('LLMProxySvcImpl', () => {
       }
     ])
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
     const resp = await svc.chat({
@@ -1199,19 +1110,7 @@ describe('LLMProxySvcImpl', () => {
     const agentChat = vi.fn().mockResolvedValue('{"summary":"ready"}')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
     const resp = await svc.chat({
@@ -1244,19 +1143,7 @@ describe('LLMProxySvcImpl', () => {
     const agentChat = vi.fn().mockResolvedValue('{"toolName":"mcp.github.pulls.list","args":{}}')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     listToolsMock.mockReturnValue([
       {
@@ -1436,19 +1323,7 @@ describe('LLMProxySvcImpl', () => {
     const agentChat = vi.fn().mockResolvedValue('agent response')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
     const resp = await svc.chat({
@@ -1477,19 +1352,7 @@ describe('LLMProxySvcImpl', () => {
     const agentChat = vi.fn().mockResolvedValue('agent response')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
     const resp = await svc.chat({
@@ -1518,19 +1381,7 @@ describe('LLMProxySvcImpl', () => {
     const agentChat = vi.fn().mockResolvedValue('agent response')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
     await svc.chat({
@@ -1567,19 +1418,7 @@ describe('LLMProxySvcImpl', () => {
     const agentChat = vi.fn().mockResolvedValue('{"summary":"ok"}')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
     const resp = await svc.chat({
@@ -1608,19 +1447,7 @@ describe('LLMProxySvcImpl', () => {
     const agentChat = vi.fn().mockResolvedValue('{"summary":1}')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
 
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'agent-profile',
-            model_name: 'Agent Model',
-            base_url: 'https://agent.example/v1',
-            api_key: 'agent-key'
-          }
-        ]
-      }
-    })
+    mockAgentProfile()
 
     const svc = new LLMProxySvcImpl()
 
@@ -2968,15 +2795,7 @@ describe('LLMProxySvcImpl', () => {
   it('passes the configured Tencent region into Hunyuan3D requests', async () => {
     generateFromMessagesMock.mockResolvedValue('[Generated 3D Model](https://example.com/cup.glb)')
 
-    mockConfig({
-      aigc3d_config: {
-        ...DEFAULT_CONFIG.aigc3d_config!,
-        tencent_secret_id: 'secret-id',
-        tencent_secret_key: 'secret-key',
-        api_region: 'ap-shanghai',
-        cos_region: 'ap-guangzhou'
-      }
-    })
+    mockHunyuanCredentials()
 
     const svc = new LLMProxySvcImpl()
     const resp = await svc.chat({
@@ -3007,14 +2826,9 @@ describe('LLMProxySvcImpl', () => {
   it('trims configured Tencent credentials before constructing the Hunyuan3D client', async () => {
     generateFromMessagesMock.mockResolvedValue('[Generated 3D Model](https://example.com/cup.glb)')
 
-    mockConfig({
-      aigc3d_config: {
-        ...DEFAULT_CONFIG.aigc3d_config!,
-        tencent_secret_id: '  secret-id  ',
-        tencent_secret_key: '\nsecret-key\t',
-        api_region: 'ap-shanghai',
-        cos_region: 'ap-guangzhou'
-      }
+    mockHunyuanCredentials({
+      tencent_secret_id: '  secret-id  ',
+      tencent_secret_key: '\nsecret-key\t'
     })
 
     const svc = new LLMProxySvcImpl()
@@ -3037,15 +2851,7 @@ describe('LLMProxySvcImpl', () => {
       '[Generated OBJ Package.zip](https://example.com/cup.zip)'
     )
 
-    mockConfig({
-      aigc3d_config: {
-        ...DEFAULT_CONFIG.aigc3d_config!,
-        tencent_secret_id: 'secret-id',
-        tencent_secret_key: 'secret-key',
-        api_region: 'ap-shanghai',
-        cos_region: 'ap-guangzhou'
-      }
-    })
+    mockHunyuanCredentials()
 
     const svc = new LLMProxySvcImpl()
     await svc.chat({
@@ -3070,15 +2876,7 @@ describe('LLMProxySvcImpl', () => {
       '[Generated OBJ Package.zip](https://example.com/cup.zip)'
     )
 
-    mockConfig({
-      aigc3d_config: {
-        ...DEFAULT_CONFIG.aigc3d_config!,
-        tencent_secret_id: 'secret-id',
-        tencent_secret_key: 'secret-key',
-        api_region: 'ap-shanghai',
-        cos_region: 'ap-guangzhou'
-      }
-    })
+    mockHunyuanCredentials()
 
     const svc = new LLMProxySvcImpl()
     await svc.chat({
@@ -3101,15 +2899,7 @@ describe('LLMProxySvcImpl', () => {
   it('uses ap-guangzhou when neither Tencent API region nor COS region is configured', async () => {
     generateFromMessagesMock.mockResolvedValue('[Generated 3D Model](https://example.com/cup.glb)')
 
-    mockConfig({
-      aigc3d_config: {
-        ...DEFAULT_CONFIG.aigc3d_config!,
-        tencent_secret_id: 'secret-id',
-        tencent_secret_key: 'secret-key',
-        api_region: '',
-        cos_region: ''
-      }
-    })
+    mockHunyuanCredentials({ api_region: '', cos_region: '' })
 
     const svc = new LLMProxySvcImpl()
     await svc.chat({
@@ -3129,15 +2919,7 @@ describe('LLMProxySvcImpl', () => {
   it('does not reuse the COS region when a dedicated Tencent API region is not configured', async () => {
     generateFromMessagesMock.mockResolvedValue('[Generated 3D Model](https://example.com/cup.glb)')
 
-    mockConfig({
-      aigc3d_config: {
-        ...DEFAULT_CONFIG.aigc3d_config!,
-        tencent_secret_id: 'secret-id',
-        tencent_secret_key: 'secret-key',
-        api_region: '',
-        cos_region: 'ap-singapore'
-      }
-    })
+    mockHunyuanCredentials({ api_region: '', cos_region: 'ap-singapore' })
 
     const svc = new LLMProxySvcImpl()
     await svc.chat({

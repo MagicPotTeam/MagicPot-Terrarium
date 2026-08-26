@@ -7,7 +7,10 @@ import type {
   DesignInspectionRuleSource,
   DesignInspectionSelectionBounds
 } from '@shared/designInspection'
-import { createDesignInspectionId, roundDesignInspectionMetric } from './designInspectionCommon'
+import {
+  createDesignInspectionId,
+  roundDesignInspectionMetric as roundMetric
+} from './designInspectionCommon'
 import type { CanvasFileItem, CanvasGroup, CanvasItem } from './types'
 
 export type DesignInspectionBoundsResolver = (
@@ -28,10 +31,6 @@ type BuildDesignInspectionContextPackOptions = {
 const DEFAULT_TASK =
   'Inspect the selected canvas items with structure-first checks and propose only MagicPot-internal fixes for typography, spacing, alignment, radius consistency, simple geometry cleanup, and editable file-node content updates when reviewer notes explicitly request copy changes.'
 
-function roundMetric(value: number): number {
-  return roundDesignInspectionMetric(value)
-}
-
 function toSelectionBounds(item: CanvasItem): DesignInspectionSelectionBounds {
   return {
     x: roundMetric(item.x),
@@ -42,19 +41,15 @@ function toSelectionBounds(item: CanvasItem): DesignInspectionSelectionBounds {
 }
 
 function getCanvasItemTextContent(item: CanvasItem): string | undefined {
-  if (item.type === 'text') {
-    return item.text?.trim() || undefined
-  }
-
-  if (item.type === 'annotation') {
-    return item.text?.trim() || item.label?.trim() || undefined
-  }
-
-  if (item.type === 'file') {
-    return item.previewText?.trim() || item.content?.trim() || undefined
-  }
-
-  return undefined
+  const values =
+    item.type === 'text'
+      ? [item.text]
+      : item.type === 'annotation'
+        ? [item.text, item.label]
+        : item.type === 'file'
+          ? [item.previewText, item.content]
+          : []
+  return values.map((value) => value?.trim()).find(Boolean)
 }
 
 function summarizeCanvasItemProvenanceForInspection(
@@ -99,12 +94,7 @@ export function summarizeCanvasItemForInspection(
           ? item.fontSize
           : undefined,
     fontFamily: item.type === 'text' ? item.fontFamily : undefined,
-    fontWeight:
-      item.type === 'text'
-        ? item.fontWeight
-        : item.type === 'annotation'
-          ? item.fontWeight
-          : undefined,
+    fontWeight: item.type === 'text' || item.type === 'annotation' ? item.fontWeight : undefined,
     fill: item.type === 'text' ? item.fill : undefined,
     stroke: item.type === 'annotation' ? item.stroke : undefined,
     label: item.type === 'annotation' ? item.label : undefined,

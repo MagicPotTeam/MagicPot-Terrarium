@@ -120,9 +120,7 @@ type StageRefLike = {
 
 const stopCanvasToolbarPointerPropagation = (
   event:
-    | React.MouseEvent<HTMLElement>
-    | React.PointerEvent<HTMLElement>
-    | React.TouchEvent<HTMLElement>
+    React.MouseEvent<HTMLElement> | React.PointerEvent<HTMLElement> | React.TouchEvent<HTMLElement>
 ) => {
   event.stopPropagation()
   event.nativeEvent.stopImmediatePropagation?.()
@@ -130,11 +128,7 @@ const stopCanvasToolbarPointerPropagation = (
 
 type SelectionToolbarKind = 'blob' | 'file' | 'group' | 'image' | 'multi' | 'textlike'
 type GroupChipPlacement =
-  | 'above-toolbar'
-  | 'below-toolbar'
-  | 'default'
-  | 'left-of-toolbar'
-  | 'right-of-toolbar'
+  'above-toolbar' | 'below-toolbar' | 'default' | 'left-of-toolbar' | 'right-of-toolbar'
 type GroupChipLayout = {
   contentWidth: number
   height: number
@@ -1826,7 +1820,6 @@ export default function ProjectCanvasPageSelectionOverlays({
         selectionActionStackPosition={multiSelectionLayout.selectionActionStackPosition}
         stagePos={stagePos}
         stageScale={stageScale}
-        legacyEnabled={legacySelectionToolbarEnabled}
         groupCreateLabel={groupCreateLabel}
         onDragSelectedItems={(itemsToDrag, dataTransfer) => {
           const objectUrl = getQuickCanvasItemsImageUrl(itemsToDrag)

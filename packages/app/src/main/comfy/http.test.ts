@@ -80,6 +80,35 @@ describe('ComfyHttpCli', () => {
     expect(options).toEqual({ signal: undefined, redirect: 'manual' })
   })
 
+  it('preserves an instance profile base path for regular API calls', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(Response.json({}, { status: 200 }))
+    const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never, {
+      baseUrl: 'https://example.test/autodl/comfy/'
+    })
+
+    await cli.objectInfo()
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      'https://example.test/autodl/comfy/object_info'
+    )
+  })
+
+  it('sends a stable prompt id for admission recovery', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(Response.json({ prompt_id: 'server-prompt' }, { status: 200 }))
+    const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never)
+
+    await expect(
+      cli.prompt({ prompt: {} as never, client_id: 'transport', prompt_id: 'requested-prompt' })
+    ).resolves.toEqual({ prompt_id: 'server-prompt' })
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit
+    expect(JSON.parse(String(init.body))).toMatchObject({ prompt_id: 'requested-prompt' })
+  })
+
   it.each(['file:///tmp/comfy', 'ftp://example.test', 'http://user:secret@example.test'])(
     'rejects an unsafe ComfyUI base URL %s',
     async (origin) => {

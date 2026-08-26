@@ -31,6 +31,7 @@ import {
   Typography,
   Tooltip,
   CircularProgress,
+  LinearProgress,
   Dialog,
   InputBase,
   Stack
@@ -344,13 +345,19 @@ const CascadingMenuItem = memo(
       if (event.type === 'progress') {
         const { value, max } = event.data
         if (max && max > 0) {
-          setProgress((value ?? 0) / max)
+          setProgress(Math.min(1, Math.max(0, (value ?? 0) / max)))
         }
       }
       if (event.type === 'executed' || event.type === 'execution_error') {
         setProgress(0)
       }
     }, [])
+
+    useEffect(() => {
+      if (!isRunning) {
+        setProgress(0)
+      }
+    }, [isRunning])
 
     const isStickyActive = !isDirectory && isSelected && !!renderExpandedContent
 
@@ -521,6 +528,7 @@ const CascadingMenuItem = memo(
                     p: 0.5,
                     flexShrink: 0,
                     ml: 0.5,
+                    mr: 0.5,
                     color: canCancelRun ? '#fff' : '#7E73FD',
                     bgcolor: canCancelRun ? '#d32f2f' : '#ffffff',
                     borderRadius: 1,
@@ -558,6 +566,20 @@ const CascadingMenuItem = memo(
             )}
           </Box>
         </StyledMenuItem>
+        {!isDirectory && isSelected && isRunning && (
+          <LinearProgress
+            variant={progress > 0 ? 'determinate' : 'indeterminate'}
+            value={progress * 100}
+            aria-label="quick app progress"
+            sx={{
+              position: 'relative',
+              zIndex: 2,
+              height: 3,
+              borderRadius: 0,
+              '& .MuiLinearProgress-bar': { transition: 'transform 0.2s linear' }
+            }}
+          />
+        )}
         {isDirectory && (
           <Collapse in={isExpanded} timeout={80} unmountOnExit>
             <Box sx={{ ml: 1, borderLeft: 1, borderColor: 'divider' }}>
@@ -687,7 +709,6 @@ export default function QAppMenu({
   const dispatch = useAppDispatch()
   const openTabs = useAppSelector((s) => s.layout.openTabs)
   const activeTabId = useAppSelector((s) => s.layout.activeTabId)
-  // const { configUtils } = useConfig() // 如果不需要 openFolder 按钮，可以注释掉
 
   const initialCachedQAppItems = useMemo(() => readCachedQAppItems(), [])
   const [isLoading, setIsLoading] = useState(initialCachedQAppItems.length === 0)
@@ -959,8 +980,7 @@ export default function QAppMenu({
 
   const { config, buildEnv } = useConfig()
   const configRef = useRef(config)
-  const remoteComfyEnabled = config?.use_remote_comfyui ?? false
-  const remoteComfyOrigin = config?.remote_comfyui_config?.comfyui_origin ?? ''
+  const useRemoteLlm = config?.use_remote_llm ?? false
   const remoteLlmOrigin = config?.remote_llm_server_config?.server_origin ?? ''
   const packageVersion = buildEnv.env.packageVersion || '0.0.0'
 
@@ -985,38 +1005,33 @@ export default function QAppMenu({
       setQAppItems(localItems)
       setIsLoading(false)
 
-      // 如果启用了远程 ComfyUI，在后台拉取并合并
-      if (remoteComfyEnabled) {
-        if (remoteComfyOrigin) {
-          // 从远程 LLM 服务获取快应用（使用 LLM 服务端口而非 ComfyUI 端口）
-          if (remoteLlmOrigin) {
-            fetchRemoteQAppList(remoteLlmOrigin, configRef.current)
-              .then((remoteItems) => {
-                if (requestId !== refreshRequestIdRef.current) {
-                  return
-                }
-                if (remoteItems.length > 0) {
-                  setQAppItems((prev) => {
-                    const filtered = prev.filter((item) => item.key !== '~remote')
-                    return [
-                      ...filtered,
-                      {
-                        key: '~remote',
-                        name: '服务端快应用',
-                        isBuiltin: false,
-                        isDirectory: true,
-                        isRemote: true,
-                        children: remoteItems
-                      }
-                    ]
-                  })
-                }
+      // 如果配置了远程 LLM 服务，在后台拉取并合并服务端快应用。
+      if (useRemoteLlm && remoteLlmOrigin) {
+        fetchRemoteQAppList(remoteLlmOrigin, configRef.current)
+          .then((remoteItems) => {
+            if (requestId !== refreshRequestIdRef.current) {
+              return
+            }
+            if (remoteItems.length > 0) {
+              setQAppItems((prev) => {
+                const filtered = prev.filter((item) => item.key !== '~remote')
+                return [
+                  ...filtered,
+                  {
+                    key: '~remote',
+                    name: '服务端快应用',
+                    isBuiltin: false,
+                    isDirectory: true,
+                    isRemote: true,
+                    children: remoteItems
+                  }
+                ]
               })
-              .catch((err) => {
-                console.error('[QAppMenu] 后台服务拉取失败:', err)
-              })
-          }
-        }
+            }
+          })
+          .catch((err) => {
+            console.error('[QAppMenu] 后台服务拉取失败:', err)
+          })
       }
     } catch (error) {
       if (requestId !== refreshRequestIdRef.current) {
@@ -1026,7 +1041,7 @@ export default function QAppMenu({
       notifyErrorRef.current(tRef.current('qapp.menu.load_failed'))
       setIsLoading(false)
     }
-  }, [remoteComfyEnabled, remoteComfyOrigin, remoteLlmOrigin])
+  }, [remoteLlmOrigin, useRemoteLlm])
 
   useEffect(() => {
     refreshTabs()
@@ -1297,15 +1312,8 @@ export default function QAppMenu({
         await refreshTabs()
         setCurrentQAppKey(name)
         notifySuccess(`Imported "${name}"`)
-        /*
-        notifySuccess(`已导入快应用「${name}」`)
-        */
       } catch (err) {
         notifyError('Quick App import failed')
-        /*
-        console.error('[QApp] 导入失败:', err)
-        notifyError('导入快应用失败')
-        */
       }
     },
     [notifyError, notifySuccess, packageVersion, refreshTabs, setCurrentQAppKey]
@@ -1504,9 +1512,6 @@ export default function QAppMenu({
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
       notifySuccess(`Exported "${data.name}"`)
-      /*
-      notifySuccess(`已导出「${data.name}」`)
-      */
     } catch (err) {
       console.error('[QApp] 导出失败:', err)
       notifyError('导出失败')
@@ -1619,8 +1624,6 @@ export default function QAppMenu({
             </Tooltip>
           )}
         </Box>
-
-        {/* Shipped video qapps removed */}
 
         <List sx={{ position: 'relative', p: 0 }}>
           {isLoading

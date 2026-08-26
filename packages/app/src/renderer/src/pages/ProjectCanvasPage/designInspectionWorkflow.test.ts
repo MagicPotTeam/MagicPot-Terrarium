@@ -104,6 +104,53 @@ function createAnnotationItem(
   }
 }
 
+type DesignInspectionContextPackInput = Parameters<typeof buildDesignInspectionContextPack>[0]
+
+type TextItemSpec = readonly [id: string, x: number, y: number, overrides?: Partial<CanvasTextItem>]
+type CardItemSpec = readonly [id: string, x: number, y: number, width?: number, height?: number]
+
+function createTextItems(specs: readonly TextItemSpec[]): CanvasTextItem[] {
+  return specs.map(([id, x, y, overrides]) => createTextItem(id, { x, y, ...overrides }))
+}
+
+function createCompactTextItem(
+  id: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): CanvasTextItem {
+  return createTextItem(id, { x, y, width, height, fontSize: 16, fontWeight: 'normal' })
+}
+
+function createCardItem(
+  id: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): CanvasAnnotationItem {
+  return createAnnotationItem(id, { shape: 'rounded-rect', x, y, width, height })
+}
+
+function createCardItems(specs: readonly CardItemSpec[]): CanvasAnnotationItem[] {
+  return specs.map(([id, x, y, width = 220, height = 120]) =>
+    createCardItem(id, x, y, width, height)
+  )
+}
+
+function buildContextPack(
+  input: Omit<DesignInspectionContextPackInput, 'task' | 'groups' | 'snapshotDataUrl'> &
+    Partial<Pick<DesignInspectionContextPackInput, 'task' | 'groups' | 'snapshotDataUrl'>>
+) {
+  return buildDesignInspectionContextPack({
+    task: 'Inspect the selected cards.',
+    groups: [],
+    snapshotDataUrl: null,
+    ...input
+  })
+}
+
 describe('designInspectionWorkflow', () => {
   it('builds a structure-first context pack with documents, references, rules, and fallback signals', () => {
     const items: CanvasItem[] = [
@@ -131,8 +178,7 @@ describe('designInspectionWorkflow', () => {
       })
     ]
 
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       projectId: 'canvas-1',
       projectName: 'MagicPot Demo',
       targetItems: items,
@@ -204,7 +250,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('preserves the actual file editability flag in context-pack documents', () => {
-    const contextPack = buildDesignInspectionContextPack({
+    const contextPack = buildContextPack({
       task: 'Inspect the selected docs.',
       targetItems: [
         createFileItem('readonly-brief', {
@@ -212,9 +258,7 @@ describe('designInspectionWorkflow', () => {
           previewText: 'Preview only',
           content: undefined
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     expect(contextPack.documents).toEqual([
@@ -227,21 +271,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts typography, alignment, and spacing fixes from structured canvas data', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createTextItem('title-1', { x: 40, y: 40 }),
-        createTextItem('title-2', {
-          x: 56,
-          y: 112,
-          fontSize: 18,
-          fontFamily: 'Arial',
-          fontWeight: 'normal'
-        }),
-        createTextItem('title-3', { x: 44, y: 196, fontSize: 24 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createTextItems([
+        ['title-1', 40, 40],
+        ['title-2', 56, 112, { fontSize: 18, fontFamily: 'Arial', fontWeight: 'normal' }],
+        ['title-3', 44, 196, { fontSize: 24 }]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -256,15 +291,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts radius fixes from structured annotation corner styles', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', { shape: 'rounded-rect', x: 40, y: 40 }),
         createAnnotationItem('card-2', { shape: 'rect', x: 40, y: 168 }),
         createAnnotationItem('card-3', { shape: 'rounded-rect', x: 40, y: 296 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -289,8 +321,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('adds source-aware provenance narrative to the structure-first proposal when selection origins are known', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createTextItem('title-1', {
           x: 40,
@@ -312,9 +343,7 @@ describe('designInspectionWorkflow', () => {
             sourceFileName: 'headline-options.md'
           }
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -331,36 +360,15 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-title inset fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
+        createCardItem('card-1', 40, 40, 220, 120),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 200,
-          width: 220,
-          height: 120
-        }),
+        createCardItem('card-2', 40, 200, 220, 120),
         createTextItem('title-2', { x: 84, y: 228, width: 120, height: 32 }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 360,
-          width: 220,
-          height: 120
-        }),
+        createCardItem('card-3', 40, 360, 220, 120),
         createTextItem('title-3', { x: 64, y: 380, width: 120, height: 32 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -403,36 +411,15 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-title centerline fixes when center alignment is more stable than left or right insets', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
+        createCardItem('card-1', 40, 40, 220, 120),
         createTextItem('title-1', { x: 110, y: 60, width: 80, height: 32 }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 200,
-          width: 220,
-          height: 120
-        }),
+        createCardItem('card-2', 40, 200, 220, 120),
         createTextItem('title-2', { x: 80, y: 220, width: 120, height: 32 }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 360,
-          width: 220,
-          height: 120
-        }),
+        createCardItem('card-3', 40, 360, 220, 120),
         createTextItem('title-3', { x: 70, y: 380, width: 160, height: 32 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -463,63 +450,21 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-header meta right inset fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-1', 40, 40, 220, 160),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
-        createTextItem('meta-1', {
-          x: 204,
-          y: 60,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
+        createCompactTextItem('meta-1', 204, 60, 36, 20),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 240,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-2', 40, 240, 220, 160),
         createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
-        createTextItem('meta-2', {
-          x: 184,
-          y: 260,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
+        createCompactTextItem('meta-2', 184, 260, 36, 20),
         createTextItem('body-2', { x: 64, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 440,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-3', 40, 440, 220, 160),
         createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
-        createTextItem('meta-3', {
-          x: 204,
-          y: 460,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
+        createCompactTextItem('meta-3', 204, 460, 36, 20),
         createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -550,63 +495,21 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('still drafts body inset fixes when cards include a separate header meta text', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-1', 40, 40, 220, 160),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
-        createTextItem('meta-1', {
-          x: 204,
-          y: 60,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
+        createCompactTextItem('meta-1', 204, 60, 36, 20),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 240,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-2', 40, 240, 220, 160),
         createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
-        createTextItem('meta-2', {
-          x: 204,
-          y: 260,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
+        createCompactTextItem('meta-2', 204, 260, 36, 20),
         createTextItem('body-2', { x: 84, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 440,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-3', 40, 440, 220, 160),
         createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
-        createTextItem('meta-3', {
-          x: 204,
-          y: 460,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
+        createCompactTextItem('meta-3', 204, 460, 36, 20),
         createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -637,156 +540,30 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card meta-block value-column fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 180
-        }),
+        createCardItem('card-1', 40, 40, 220, 180),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
-        createTextItem('label-a-1', {
-          x: 64,
-          y: 104,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-1', {
-          x: 184,
-          y: 104,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('label-b-1', {
-          x: 64,
-          y: 136,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-b-1', {
-          x: 192,
-          y: 136,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-1', {
-          x: 64,
-          y: 188,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 240,
-          width: 220,
-          height: 180
-        }),
+        createCompactTextItem('label-a-1', 64, 104, 60, 20),
+        createCompactTextItem('value-a-1', 184, 104, 56, 20),
+        createCompactTextItem('label-b-1', 64, 136, 72, 20),
+        createCompactTextItem('value-b-1', 192, 136, 48, 20),
+        createCompactTextItem('footer-1', 64, 188, 80, 20),
+        createCardItem('card-2', 40, 240, 220, 180),
         createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
-        createTextItem('label-a-2', {
-          x: 64,
-          y: 304,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-2', {
-          x: 164,
-          y: 304,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('label-b-2', {
-          x: 64,
-          y: 336,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-b-2', {
-          x: 172,
-          y: 336,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-2', {
-          x: 64,
-          y: 388,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 440,
-          width: 220,
-          height: 180
-        }),
+        createCompactTextItem('label-a-2', 64, 304, 60, 20),
+        createCompactTextItem('value-a-2', 164, 304, 56, 20),
+        createCompactTextItem('label-b-2', 64, 336, 72, 20),
+        createCompactTextItem('value-b-2', 172, 336, 48, 20),
+        createCompactTextItem('footer-2', 64, 388, 80, 20),
+        createCardItem('card-3', 40, 440, 220, 180),
         createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
-        createTextItem('label-a-3', {
-          x: 64,
-          y: 504,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-3', {
-          x: 184,
-          y: 504,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('label-b-3', {
-          x: 64,
-          y: 536,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-b-3', {
-          x: 192,
-          y: 536,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-3', {
-          x: 64,
-          y: 588,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('label-a-3', 64, 504, 60, 20),
+        createCompactTextItem('value-a-3', 184, 504, 56, 20),
+        createCompactTextItem('label-b-3', 64, 536, 72, 20),
+        createCompactTextItem('value-b-3', 192, 536, 48, 20),
+        createCompactTextItem('footer-3', 64, 588, 80, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -820,111 +597,27 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card badge-stack spacing fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 220
-        }),
+        createCardItem('card-1', 40, 40, 220, 220),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-1', {
-          x: 64,
-          y: 144,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-1', {
-          x: 64,
-          y: 176,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-1', {
-          x: 64,
-          y: 228,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 240,
-          width: 220,
-          height: 220
-        }),
+        createCompactTextItem('badge-a-1', 64, 144, 72, 20),
+        createCompactTextItem('badge-b-1', 64, 176, 84, 20),
+        createCompactTextItem('footer-1', 64, 228, 80, 20),
+        createCardItem('card-2', 40, 240, 220, 220),
         createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-2', {
-          x: 64,
-          y: 344,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-2', {
-          x: 64,
-          y: 388,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-2', {
-          x: 64,
-          y: 428,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 440,
-          width: 220,
-          height: 220
-        }),
+        createCompactTextItem('badge-a-2', 64, 344, 72, 20),
+        createCompactTextItem('badge-b-2', 64, 388, 84, 20),
+        createCompactTextItem('footer-2', 64, 428, 80, 20),
+        createCardItem('card-3', 40, 440, 220, 220),
         createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-3', {
-          x: 64,
-          y: 544,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-3', {
-          x: 64,
-          y: 576,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-3', {
-          x: 64,
-          y: 628,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('badge-a-3', 64, 544, 72, 20),
+        createCompactTextItem('badge-b-3', 64, 576, 84, 20),
+        createCompactTextItem('footer-3', 64, 628, 80, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -961,135 +654,30 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card badge-stack spacing fixes above footer action rows', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 240
-        }),
+        createCardItem('card-1', 40, 40, 220, 240),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-1', {
-          x: 64,
-          y: 144,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-1', {
-          x: 64,
-          y: 176,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-a-1', {
-          x: 64,
-          y: 228,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-1', {
-          x: 112,
-          y: 228,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 300,
-          width: 220,
-          height: 240
-        }),
+        createCompactTextItem('badge-a-1', 64, 144, 72, 20),
+        createCompactTextItem('badge-b-1', 64, 176, 84, 20),
+        createCompactTextItem('button-a-1', 64, 228, 36, 20),
+        createCompactTextItem('button-b-1', 112, 228, 36, 20),
+        createCardItem('card-2', 40, 300, 220, 240),
         createTextItem('title-2', { x: 64, y: 320, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 364, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-2', {
-          x: 64,
-          y: 404,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-2', {
-          x: 64,
-          y: 448,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-a-2', {
-          x: 64,
-          y: 488,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-2', {
-          x: 128,
-          y: 488,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 560,
-          width: 220,
-          height: 240
-        }),
+        createCompactTextItem('badge-a-2', 64, 404, 72, 20),
+        createCompactTextItem('badge-b-2', 64, 448, 84, 20),
+        createCompactTextItem('button-a-2', 64, 488, 36, 20),
+        createCompactTextItem('button-b-2', 128, 488, 36, 20),
+        createCardItem('card-3', 40, 560, 220, 240),
         createTextItem('title-3', { x: 64, y: 580, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 624, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-3', {
-          x: 64,
-          y: 664,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-3', {
-          x: 64,
-          y: 696,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-a-3', {
-          x: 64,
-          y: 748,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-3', {
-          x: 112,
-          y: 748,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('badge-a-3', 64, 664, 72, 20),
+        createCompactTextItem('badge-b-3', 64, 696, 84, 20),
+        createCompactTextItem('button-a-3', 64, 748, 36, 20),
+        createCompactTextItem('button-b-3', 112, 748, 36, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -1122,87 +710,24 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts tail badge-stack spacing fixes when cards end with stacked badges', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 220
-        }),
+        createCardItem('card-1', 40, 40, 220, 220),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-1', {
-          x: 64,
-          y: 144,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-1', {
-          x: 64,
-          y: 176,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 260,
-          width: 220,
-          height: 220
-        }),
+        createCompactTextItem('badge-a-1', 64, 144, 72, 20),
+        createCompactTextItem('badge-b-1', 64, 176, 84, 20),
+        createCardItem('card-2', 40, 260, 220, 220),
         createTextItem('title-2', { x: 64, y: 280, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 324, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-2', {
-          x: 64,
-          y: 364,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-2', {
-          x: 64,
-          y: 404,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 480,
-          width: 220,
-          height: 220
-        }),
+        createCompactTextItem('badge-a-2', 64, 364, 72, 20),
+        createCompactTextItem('badge-b-2', 64, 404, 84, 20),
+        createCardItem('card-3', 40, 480, 220, 220),
         createTextItem('title-3', { x: 64, y: 500, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 544, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-3', {
-          x: 64,
-          y: 584,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-3', {
-          x: 64,
-          y: 616,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('badge-a-3', 64, 584, 72, 20),
+        createCompactTextItem('badge-b-3', 64, 616, 84, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -1243,207 +768,39 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts multi-column chip-group spacing fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 300,
-          height: 240
-        }),
+        createCardItem('card-1', 40, 40, 300, 240),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-1', {
-          x: 64,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-1', {
-          x: 124,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-1', {
-          x: 184,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-1', {
-          x: 64,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-e-1', {
-          x: 124,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-f-1', {
-          x: 184,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-1', {
-          x: 64,
-          y: 228,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 300,
-          width: 300,
-          height: 240
-        }),
+        createCompactTextItem('chip-a-1', 64, 144, 48, 20),
+        createCompactTextItem('chip-b-1', 124, 144, 48, 20),
+        createCompactTextItem('chip-c-1', 184, 144, 48, 20),
+        createCompactTextItem('chip-d-1', 64, 176, 48, 20),
+        createCompactTextItem('chip-e-1', 124, 176, 48, 20),
+        createCompactTextItem('chip-f-1', 184, 176, 48, 20),
+        createCompactTextItem('footer-1', 64, 228, 80, 20),
+        createCardItem('card-2', 40, 300, 300, 240),
         createTextItem('title-2', { x: 64, y: 320, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 364, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-2', {
-          x: 64,
-          y: 404,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-2', {
-          x: 132,
-          y: 404,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-2', {
-          x: 200,
-          y: 404,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-2', {
-          x: 64,
-          y: 436,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-e-2', {
-          x: 132,
-          y: 436,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-f-2', {
-          x: 200,
-          y: 436,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-2', {
-          x: 64,
-          y: 488,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 560,
-          width: 300,
-          height: 240
-        }),
+        createCompactTextItem('chip-a-2', 64, 404, 48, 20),
+        createCompactTextItem('chip-b-2', 132, 404, 48, 20),
+        createCompactTextItem('chip-c-2', 200, 404, 48, 20),
+        createCompactTextItem('chip-d-2', 64, 436, 48, 20),
+        createCompactTextItem('chip-e-2', 132, 436, 48, 20),
+        createCompactTextItem('chip-f-2', 200, 436, 48, 20),
+        createCompactTextItem('footer-2', 64, 488, 80, 20),
+        createCardItem('card-3', 40, 560, 300, 240),
         createTextItem('title-3', { x: 64, y: 580, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 624, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-3', {
-          x: 64,
-          y: 664,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-3', {
-          x: 124,
-          y: 664,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-3', {
-          x: 184,
-          y: 664,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-3', {
-          x: 64,
-          y: 696,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-e-3', {
-          x: 124,
-          y: 696,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-f-3', {
-          x: 184,
-          y: 696,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-3', {
-          x: 64,
-          y: 748,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('chip-a-3', 64, 664, 48, 20),
+        createCompactTextItem('chip-b-3', 124, 664, 48, 20),
+        createCompactTextItem('chip-c-3', 184, 664, 48, 20),
+        createCompactTextItem('chip-d-3', 64, 696, 48, 20),
+        createCompactTextItem('chip-e-3', 124, 696, 48, 20),
+        createCompactTextItem('chip-f-3', 184, 696, 48, 20),
+        createCompactTextItem('footer-3', 64, 748, 80, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -1494,239 +851,43 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft footer-action-ending chip-group fixes when footer action-row counts differ', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 300,
-          height: 264
-        }),
+        createCardItem('card-1', 40, 40, 300, 264),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-1', {
-          x: 64,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-1', {
-          x: 124,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-1', {
-          x: 184,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-1', {
-          x: 64,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-e-1', {
-          x: 124,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-f-1', {
-          x: 184,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-primary-1', {
-          x: 64,
-          y: 228,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-1', {
-          x: 140,
-          y: 228,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 300,
-          height: 264
-        }),
+        createCompactTextItem('chip-a-1', 64, 144, 48, 20),
+        createCompactTextItem('chip-b-1', 124, 144, 48, 20),
+        createCompactTextItem('chip-c-1', 184, 144, 48, 20),
+        createCompactTextItem('chip-d-1', 64, 176, 48, 20),
+        createCompactTextItem('chip-e-1', 124, 176, 48, 20),
+        createCompactTextItem('chip-f-1', 184, 176, 48, 20),
+        createCompactTextItem('button-primary-1', 64, 228, 64, 20),
+        createCompactTextItem('button-secondary-1', 140, 228, 76, 20),
+        createCardItem('card-2', 40, 320, 300, 264),
         createTextItem('title-2', { x: 64, y: 340, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 384, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-2', {
-          x: 64,
-          y: 424,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-2', {
-          x: 136,
-          y: 424,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-2', {
-          x: 208,
-          y: 424,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-2', {
-          x: 64,
-          y: 456,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-e-2', {
-          x: 136,
-          y: 456,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-f-2', {
-          x: 208,
-          y: 456,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-primary-2', {
-          x: 64,
-          y: 508,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-2', {
-          x: 140,
-          y: 508,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-tertiary-2', {
-          x: 228,
-          y: 508,
-          width: 52,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 600,
-          width: 300,
-          height: 264
-        }),
+        createCompactTextItem('chip-a-2', 64, 424, 48, 20),
+        createCompactTextItem('chip-b-2', 136, 424, 48, 20),
+        createCompactTextItem('chip-c-2', 208, 424, 48, 20),
+        createCompactTextItem('chip-d-2', 64, 456, 48, 20),
+        createCompactTextItem('chip-e-2', 136, 456, 48, 20),
+        createCompactTextItem('chip-f-2', 208, 456, 48, 20),
+        createCompactTextItem('button-primary-2', 64, 508, 64, 20),
+        createCompactTextItem('button-secondary-2', 140, 508, 76, 20),
+        createCompactTextItem('button-tertiary-2', 228, 508, 52, 20),
+        createCardItem('card-3', 40, 600, 300, 264),
         createTextItem('title-3', { x: 64, y: 620, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 664, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-3', {
-          x: 64,
-          y: 704,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-3', {
-          x: 124,
-          y: 704,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-3', {
-          x: 184,
-          y: 704,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-3', {
-          x: 64,
-          y: 736,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-e-3', {
-          x: 124,
-          y: 736,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-f-3', {
-          x: 184,
-          y: 736,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-primary-3', {
-          x: 64,
-          y: 788,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-3', {
-          x: 140,
-          y: 788,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('chip-a-3', 64, 704, 48, 20),
+        createCompactTextItem('chip-b-3', 124, 704, 48, 20),
+        createCompactTextItem('chip-c-3', 184, 704, 48, 20),
+        createCompactTextItem('chip-d-3', 64, 736, 48, 20),
+        createCompactTextItem('chip-e-3', 124, 736, 48, 20),
+        createCompactTextItem('chip-f-3', 184, 736, 48, 20),
+        createCompactTextItem('button-primary-3', 64, 788, 64, 20),
+        createCompactTextItem('button-secondary-3', 140, 788, 76, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -1746,231 +907,42 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts footer-action-ending chip-group spacing fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 300,
-          height: 264
-        }),
+        createCardItem('card-1', 40, 40, 300, 264),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-1', {
-          x: 64,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-1', {
-          x: 124,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-1', {
-          x: 184,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-1', {
-          x: 64,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-e-1', {
-          x: 124,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-f-1', {
-          x: 184,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-primary-1', {
-          x: 64,
-          y: 228,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-1', {
-          x: 140,
-          y: 228,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 300,
-          height: 264
-        }),
+        createCompactTextItem('chip-a-1', 64, 144, 48, 20),
+        createCompactTextItem('chip-b-1', 124, 144, 48, 20),
+        createCompactTextItem('chip-c-1', 184, 144, 48, 20),
+        createCompactTextItem('chip-d-1', 64, 176, 48, 20),
+        createCompactTextItem('chip-e-1', 124, 176, 48, 20),
+        createCompactTextItem('chip-f-1', 184, 176, 48, 20),
+        createCompactTextItem('button-primary-1', 64, 228, 64, 20),
+        createCompactTextItem('button-secondary-1', 140, 228, 76, 20),
+        createCardItem('card-2', 40, 320, 300, 264),
         createTextItem('title-2', { x: 64, y: 340, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 384, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-2', {
-          x: 64,
-          y: 424,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-2', {
-          x: 136,
-          y: 424,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-2', {
-          x: 208,
-          y: 424,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-2', {
-          x: 64,
-          y: 456,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-e-2', {
-          x: 136,
-          y: 456,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-f-2', {
-          x: 208,
-          y: 456,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-primary-2', {
-          x: 64,
-          y: 508,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-2', {
-          x: 140,
-          y: 508,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 600,
-          width: 300,
-          height: 264
-        }),
+        createCompactTextItem('chip-a-2', 64, 424, 48, 20),
+        createCompactTextItem('chip-b-2', 136, 424, 48, 20),
+        createCompactTextItem('chip-c-2', 208, 424, 48, 20),
+        createCompactTextItem('chip-d-2', 64, 456, 48, 20),
+        createCompactTextItem('chip-e-2', 136, 456, 48, 20),
+        createCompactTextItem('chip-f-2', 208, 456, 48, 20),
+        createCompactTextItem('button-primary-2', 64, 508, 64, 20),
+        createCompactTextItem('button-secondary-2', 140, 508, 76, 20),
+        createCardItem('card-3', 40, 600, 300, 264),
         createTextItem('title-3', { x: 64, y: 620, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 664, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-3', {
-          x: 64,
-          y: 704,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-3', {
-          x: 124,
-          y: 704,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-3', {
-          x: 184,
-          y: 704,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-3', {
-          x: 64,
-          y: 736,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-e-3', {
-          x: 124,
-          y: 736,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-f-3', {
-          x: 184,
-          y: 736,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-primary-3', {
-          x: 64,
-          y: 788,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-3', {
-          x: 140,
-          y: 788,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('chip-a-3', 64, 704, 48, 20),
+        createCompactTextItem('chip-b-3', 124, 704, 48, 20),
+        createCompactTextItem('chip-c-3', 184, 704, 48, 20),
+        createCompactTextItem('chip-d-3', 64, 736, 48, 20),
+        createCompactTextItem('chip-e-3', 124, 736, 48, 20),
+        createCompactTextItem('chip-f-3', 184, 736, 48, 20),
+        createCompactTextItem('button-primary-3', 64, 788, 64, 20),
+        createCompactTextItem('button-secondary-3', 140, 788, 76, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2031,159 +1003,33 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts body-plus-meta value-column fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 220
-        }),
+        createCardItem('card-1', 40, 40, 220, 220),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('label-a-1', {
-          x: 64,
-          y: 144,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-1', {
-          x: 184,
-          y: 144,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('label-b-1', {
-          x: 64,
-          y: 176,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-b-1', {
-          x: 192,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-1', {
-          x: 64,
-          y: 228,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 280,
-          width: 220,
-          height: 220
-        }),
+        createCompactTextItem('label-a-1', 64, 144, 60, 20),
+        createCompactTextItem('value-a-1', 184, 144, 56, 20),
+        createCompactTextItem('label-b-1', 64, 176, 72, 20),
+        createCompactTextItem('value-b-1', 192, 176, 48, 20),
+        createCompactTextItem('footer-1', 64, 228, 80, 20),
+        createCardItem('card-2', 40, 280, 220, 220),
         createTextItem('title-2', { x: 64, y: 300, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 344, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('label-a-2', {
-          x: 64,
-          y: 384,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-2', {
-          x: 164,
-          y: 384,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('label-b-2', {
-          x: 64,
-          y: 416,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-b-2', {
-          x: 172,
-          y: 416,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-2', {
-          x: 64,
-          y: 468,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 520,
-          width: 220,
-          height: 220
-        }),
+        createCompactTextItem('label-a-2', 64, 384, 60, 20),
+        createCompactTextItem('value-a-2', 164, 384, 56, 20),
+        createCompactTextItem('label-b-2', 64, 416, 72, 20),
+        createCompactTextItem('value-b-2', 172, 416, 48, 20),
+        createCompactTextItem('footer-2', 64, 468, 80, 20),
+        createCardItem('card-3', 40, 520, 220, 220),
         createTextItem('title-3', { x: 64, y: 540, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 584, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('label-a-3', {
-          x: 64,
-          y: 624,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-3', {
-          x: 184,
-          y: 624,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('label-b-3', {
-          x: 64,
-          y: 656,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-b-3', {
-          x: 192,
-          y: 656,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-3', {
-          x: 64,
-          y: 708,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('label-a-3', 64, 624, 60, 20),
+        createCompactTextItem('value-a-3', 184, 624, 56, 20),
+        createCompactTextItem('label-b-3', 64, 656, 72, 20),
+        createCompactTextItem('value-b-3', 192, 656, 48, 20),
+        createCompactTextItem('footer-3', 64, 708, 80, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2213,111 +1059,27 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft body-plus-meta-with-footer-action value-column fixes for a nearby single-footer shape', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 220
-        }),
+        createCardItem('card-1', 40, 40, 220, 220),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('label-a-1', {
-          x: 64,
-          y: 144,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-1', {
-          x: 184,
-          y: 144,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-1', {
-          x: 64,
-          y: 188,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 280,
-          width: 220,
-          height: 220
-        }),
+        createCompactTextItem('label-a-1', 64, 144, 60, 20),
+        createCompactTextItem('value-a-1', 184, 144, 56, 20),
+        createCompactTextItem('footer-1', 64, 188, 80, 20),
+        createCardItem('card-2', 40, 280, 220, 220),
         createTextItem('title-2', { x: 64, y: 300, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 344, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('label-a-2', {
-          x: 64,
-          y: 384,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-2', {
-          x: 164,
-          y: 384,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-2', {
-          x: 64,
-          y: 428,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 520,
-          width: 220,
-          height: 220
-        }),
+        createCompactTextItem('label-a-2', 64, 384, 60, 20),
+        createCompactTextItem('value-a-2', 164, 384, 56, 20),
+        createCompactTextItem('footer-2', 64, 428, 80, 20),
+        createCardItem('card-3', 40, 520, 220, 220),
         createTextItem('title-3', { x: 64, y: 540, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 584, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('label-a-3', {
-          x: 64,
-          y: 624,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-3', {
-          x: 184,
-          y: 624,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-3', {
-          x: 64,
-          y: 668,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('label-a-3', 64, 624, 60, 20),
+        createCompactTextItem('value-a-3', 184, 624, 56, 20),
+        createCompactTextItem('footer-3', 64, 668, 80, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2335,183 +1097,36 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts body-plus-meta-with-footer-action value-column fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 224
-        }),
+        createCardItem('card-1', 40, 40, 220, 224),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('label-a-1', {
-          x: 64,
-          y: 144,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-1', {
-          x: 184,
-          y: 144,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('label-b-1', {
-          x: 64,
-          y: 176,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-b-1', {
-          x: 192,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-primary-1', {
-          x: 64,
-          y: 232,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-1', {
-          x: 140,
-          y: 232,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 300,
-          width: 220,
-          height: 224
-        }),
+        createCompactTextItem('label-a-1', 64, 144, 60, 20),
+        createCompactTextItem('value-a-1', 184, 144, 56, 20),
+        createCompactTextItem('label-b-1', 64, 176, 72, 20),
+        createCompactTextItem('value-b-1', 192, 176, 48, 20),
+        createCompactTextItem('button-primary-1', 64, 232, 64, 20),
+        createCompactTextItem('button-secondary-1', 140, 232, 76, 20),
+        createCardItem('card-2', 40, 300, 220, 224),
         createTextItem('title-2', { x: 64, y: 320, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 364, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('label-a-2', {
-          x: 64,
-          y: 404,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-2', {
-          x: 164,
-          y: 404,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('label-b-2', {
-          x: 64,
-          y: 436,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-b-2', {
-          x: 176,
-          y: 436,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-primary-2', {
-          x: 64,
-          y: 492,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-2', {
-          x: 152,
-          y: 492,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 560,
-          width: 220,
-          height: 224
-        }),
+        createCompactTextItem('label-a-2', 64, 404, 60, 20),
+        createCompactTextItem('value-a-2', 164, 404, 56, 20),
+        createCompactTextItem('label-b-2', 64, 436, 72, 20),
+        createCompactTextItem('value-b-2', 176, 436, 48, 20),
+        createCompactTextItem('button-primary-2', 64, 492, 64, 20),
+        createCompactTextItem('button-secondary-2', 152, 492, 76, 20),
+        createCardItem('card-3', 40, 560, 220, 224),
         createTextItem('title-3', { x: 64, y: 580, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 624, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('label-a-3', {
-          x: 64,
-          y: 664,
-          width: 60,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-a-3', {
-          x: 184,
-          y: 664,
-          width: 56,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('label-b-3', {
-          x: 64,
-          y: 696,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('value-b-3', {
-          x: 192,
-          y: 696,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-primary-3', {
-          x: 64,
-          y: 752,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-3', {
-          x: 140,
-          y: 752,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('label-a-3', 64, 664, 60, 20),
+        createCompactTextItem('value-a-3', 184, 664, 56, 20),
+        createCompactTextItem('label-b-3', 64, 696, 72, 20),
+        createCompactTextItem('value-b-3', 192, 696, 48, 20),
+        createCompactTextItem('button-primary-3', 64, 752, 64, 20),
+        createCompactTextItem('button-secondary-3', 140, 752, 76, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2550,87 +1165,24 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft badge-stack spacing fixes when cards include only one middle tag row', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 188
-        }),
+        createCardItem('card-1', 40, 40, 220, 188),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-1', {
-          x: 64,
-          y: 144,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-1', {
-          x: 64,
-          y: 196,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 240,
-          width: 220,
-          height: 188
-        }),
+        createCompactTextItem('badge-a-1', 64, 144, 72, 20),
+        createCompactTextItem('footer-1', 64, 196, 80, 20),
+        createCardItem('card-2', 40, 240, 220, 188),
         createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-2', {
-          x: 64,
-          y: 344,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-2', {
-          x: 64,
-          y: 396,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 440,
-          width: 220,
-          height: 188
-        }),
+        createCompactTextItem('badge-a-2', 64, 344, 72, 20),
+        createCompactTextItem('footer-2', 64, 396, 80, 20),
+        createCardItem('card-3', 40, 440, 220, 188),
         createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-3', {
-          x: 64,
-          y: 544,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-3', {
-          x: 64,
-          y: 596,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('badge-a-3', 64, 544, 72, 20),
+        createCompactTextItem('footer-3', 64, 596, 80, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2647,111 +1199,27 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft badge-stack-above-action-row fixes when cards include only one badge row', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 200
-        }),
+        createCardItem('card-1', 40, 40, 220, 200),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-1', {
-          x: 64,
-          y: 144,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-a-1', {
-          x: 64,
-          y: 184,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-1', {
-          x: 112,
-          y: 184,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 260,
-          width: 220,
-          height: 200
-        }),
+        createCompactTextItem('badge-a-1', 64, 144, 72, 20),
+        createCompactTextItem('button-a-1', 64, 184, 36, 20),
+        createCompactTextItem('button-b-1', 112, 184, 36, 20),
+        createCardItem('card-2', 40, 260, 220, 200),
         createTextItem('title-2', { x: 64, y: 280, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 324, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-2', {
-          x: 64,
-          y: 364,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-a-2', {
-          x: 64,
-          y: 404,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-2', {
-          x: 128,
-          y: 404,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 480,
-          width: 220,
-          height: 200
-        }),
+        createCompactTextItem('badge-a-2', 64, 364, 72, 20),
+        createCompactTextItem('button-a-2', 64, 404, 36, 20),
+        createCompactTextItem('button-b-2', 128, 404, 36, 20),
+        createCardItem('card-3', 40, 480, 220, 200),
         createTextItem('title-3', { x: 64, y: 500, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 544, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-3', {
-          x: 64,
-          y: 584,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-a-3', {
-          x: 64,
-          y: 624,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-3', {
-          x: 112,
-          y: 624,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('badge-a-3', 64, 584, 72, 20),
+        createCompactTextItem('button-a-3', 64, 624, 36, 20),
+        createCompactTextItem('button-b-3', 112, 624, 36, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2768,143 +1236,31 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft badge-stack-above-action-row fixes when footer action-row counts differ', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 240
-        }),
+        createCardItem('card-1', 40, 40, 220, 240),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-1', {
-          x: 64,
-          y: 144,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-1', {
-          x: 64,
-          y: 176,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-a-1', {
-          x: 64,
-          y: 228,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-1', {
-          x: 112,
-          y: 228,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 300,
-          width: 220,
-          height: 240
-        }),
+        createCompactTextItem('badge-a-1', 64, 144, 72, 20),
+        createCompactTextItem('badge-b-1', 64, 176, 84, 20),
+        createCompactTextItem('button-a-1', 64, 228, 36, 20),
+        createCompactTextItem('button-b-1', 112, 228, 36, 20),
+        createCardItem('card-2', 40, 300, 220, 240),
         createTextItem('title-2', { x: 64, y: 320, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 364, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-2', {
-          x: 64,
-          y: 404,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-2', {
-          x: 64,
-          y: 448,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-a-2', {
-          x: 64,
-          y: 488,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-2', {
-          x: 112,
-          y: 488,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-c-2', {
-          x: 160,
-          y: 488,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 560,
-          width: 220,
-          height: 240
-        }),
+        createCompactTextItem('badge-a-2', 64, 404, 72, 20),
+        createCompactTextItem('badge-b-2', 64, 448, 84, 20),
+        createCompactTextItem('button-a-2', 64, 488, 36, 20),
+        createCompactTextItem('button-b-2', 112, 488, 36, 20),
+        createCompactTextItem('button-c-2', 160, 488, 36, 20),
+        createCardItem('card-3', 40, 560, 220, 240),
         createTextItem('title-3', { x: 64, y: 580, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 624, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('badge-a-3', {
-          x: 64,
-          y: 664,
-          width: 72,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('badge-b-3', {
-          x: 64,
-          y: 696,
-          width: 84,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-a-3', {
-          x: 64,
-          y: 748,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-3', {
-          x: 112,
-          y: 748,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('badge-a-3', 64, 664, 72, 20),
+        createCompactTextItem('badge-b-3', 64, 696, 84, 20),
+        createCompactTextItem('button-a-3', 64, 748, 36, 20),
+        createCompactTextItem('button-b-3', 112, 748, 36, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2923,159 +1279,33 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft multi-column chip-group fixes for two-column rows', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 300,
-          height: 220
-        }),
+        createCardItem('card-1', 40, 40, 300, 220),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-1', {
-          x: 64,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-1', {
-          x: 124,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-1', {
-          x: 64,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-1', {
-          x: 124,
-          y: 176,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-1', {
-          x: 64,
-          y: 228,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 300,
-          width: 300,
-          height: 220
-        }),
+        createCompactTextItem('chip-a-1', 64, 144, 48, 20),
+        createCompactTextItem('chip-b-1', 124, 144, 48, 20),
+        createCompactTextItem('chip-c-1', 64, 176, 48, 20),
+        createCompactTextItem('chip-d-1', 124, 176, 48, 20),
+        createCompactTextItem('footer-1', 64, 228, 80, 20),
+        createCardItem('card-2', 40, 300, 300, 220),
         createTextItem('title-2', { x: 64, y: 320, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 364, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-2', {
-          x: 64,
-          y: 404,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-2', {
-          x: 132,
-          y: 404,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-2', {
-          x: 64,
-          y: 436,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-2', {
-          x: 132,
-          y: 436,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-2', {
-          x: 64,
-          y: 488,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 560,
-          width: 300,
-          height: 220
-        }),
+        createCompactTextItem('chip-a-2', 64, 404, 48, 20),
+        createCompactTextItem('chip-b-2', 132, 404, 48, 20),
+        createCompactTextItem('chip-c-2', 64, 436, 48, 20),
+        createCompactTextItem('chip-d-2', 132, 436, 48, 20),
+        createCompactTextItem('footer-2', 64, 488, 80, 20),
+        createCardItem('card-3', 40, 560, 300, 220),
         createTextItem('title-3', { x: 64, y: 580, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 624, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-3', {
-          x: 64,
-          y: 664,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-3', {
-          x: 124,
-          y: 664,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-3', {
-          x: 64,
-          y: 696,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-d-3', {
-          x: 124,
-          y: 696,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-3', {
-          x: 64,
-          y: 748,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('chip-a-3', 64, 664, 48, 20),
+        createCompactTextItem('chip-b-3', 124, 664, 48, 20),
+        createCompactTextItem('chip-c-3', 64, 696, 48, 20),
+        createCompactTextItem('chip-d-3', 124, 696, 48, 20),
+        createCompactTextItem('footer-3', 64, 748, 80, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3095,135 +1325,30 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft multi-column chip-group fixes when cards include only one chip row', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 300,
-          height: 188
-        }),
+        createCardItem('card-1', 40, 40, 300, 188),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-1', {
-          x: 64,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-1', {
-          x: 124,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-1', {
-          x: 184,
-          y: 144,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-1', {
-          x: 64,
-          y: 196,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 240,
-          width: 300,
-          height: 188
-        }),
+        createCompactTextItem('chip-a-1', 64, 144, 48, 20),
+        createCompactTextItem('chip-b-1', 124, 144, 48, 20),
+        createCompactTextItem('chip-c-1', 184, 144, 48, 20),
+        createCompactTextItem('footer-1', 64, 196, 80, 20),
+        createCardItem('card-2', 40, 240, 300, 188),
         createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 304, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-2', {
-          x: 64,
-          y: 344,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-2', {
-          x: 132,
-          y: 344,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-2', {
-          x: 200,
-          y: 344,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-2', {
-          x: 64,
-          y: 396,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 440,
-          width: 300,
-          height: 188
-        }),
+        createCompactTextItem('chip-a-2', 64, 344, 48, 20),
+        createCompactTextItem('chip-b-2', 132, 344, 48, 20),
+        createCompactTextItem('chip-c-2', 200, 344, 48, 20),
+        createCompactTextItem('footer-2', 64, 396, 80, 20),
+        createCardItem('card-3', 40, 440, 300, 188),
         createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 504, width: 160, height: 28, fontWeight: 'normal' }),
-        createTextItem('chip-a-3', {
-          x: 64,
-          y: 544,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-b-3', {
-          x: 124,
-          y: 544,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('chip-c-3', {
-          x: 184,
-          y: 544,
-          width: 48,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('footer-3', {
-          x: 64,
-          y: 596,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('chip-a-3', 64, 544, 48, 20),
+        createCompactTextItem('chip-b-3', 124, 544, 48, 20),
+        createCompactTextItem('chip-c-3', 184, 544, 48, 20),
+        createCompactTextItem('footer-3', 64, 596, 80, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3243,39 +1368,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-body inset fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-1', 40, 40, 220, 160),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 240,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-2', 40, 240, 220, 160),
         createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
         createTextItem('body-2', { x: 84, y: 316, width: 140, height: 28, fontWeight: 'normal' }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 440,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-3', 40, 440, 220, 160),
         createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3321,39 +1425,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft body-gap fixes when title heights vary but title-to-body spacing stays consistent', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 180
-        }),
+        createCardItem('card-1', 40, 40, 220, 180),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28 }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 260,
-          width: 220,
-          height: 180
-        }),
+        createCardItem('card-2', 40, 260, 220, 180),
         createTextItem('title-2', { x: 64, y: 280, width: 120, height: 56 }),
         createTextItem('body-2', { x: 64, y: 348, width: 140, height: 28 }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 480,
-          width: 220,
-          height: 180
-        }),
+        createCardItem('card-3', 40, 480, 220, 180),
         createTextItem('title-3', { x: 64, y: 500, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 544, width: 140, height: 28 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3369,63 +1452,21 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-footer bottom inset fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-1', 40, 40, 220, 160),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('footer-1', {
-          x: 64,
-          y: 168,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 240,
-          width: 220,
-          height: 160
-        }),
+        createCompactTextItem('footer-1', 64, 168, 80, 20),
+        createCardItem('card-2', 40, 240, 220, 160),
         createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('footer-2', {
-          x: 64,
-          y: 356,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 440,
-          width: 220,
-          height: 160
-        }),
+        createCompactTextItem('footer-2', 64, 356, 80, 20),
+        createCardItem('card-3', 40, 440, 220, 160),
         createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('footer-3', {
-          x: 64,
-          y: 568,
-          width: 80,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('footer-3', 64, 568, 80, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3452,87 +1493,24 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-footer action-row spacing fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-1', 40, 40, 220, 160),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('button-primary-1', {
-          x: 64,
-          y: 168,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-1', {
-          x: 140,
-          y: 168,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 240,
-          width: 220,
-          height: 160
-        }),
+        createCompactTextItem('button-primary-1', 64, 168, 64, 20),
+        createCompactTextItem('button-secondary-1', 140, 168, 76, 20),
+        createCardItem('card-2', 40, 240, 220, 160),
         createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('button-primary-2', {
-          x: 64,
-          y: 368,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-2', {
-          x: 160,
-          y: 368,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 440,
-          width: 220,
-          height: 160
-        }),
+        createCompactTextItem('button-primary-2', 64, 368, 64, 20),
+        createCompactTextItem('button-secondary-2', 160, 368, 76, 20),
+        createCardItem('card-3', 40, 440, 220, 160),
         createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('button-primary-3', {
-          x: 64,
-          y: 568,
-          width: 64,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-secondary-3', {
-          x: 140,
-          y: 568,
-          width: 76,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('button-primary-3', 64, 568, 64, 20),
+        createCompactTextItem('button-secondary-3', 140, 568, 76, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3564,111 +1542,27 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-footer three-item action-row spacing fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 160
-        }),
+        createCardItem('card-1', 40, 40, 220, 160),
         createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
         createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('button-a-1', {
-          x: 64,
-          y: 168,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-1', {
-          x: 112,
-          y: 168,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-c-1', {
-          x: 160,
-          y: 168,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 240,
-          width: 220,
-          height: 160
-        }),
+        createCompactTextItem('button-a-1', 64, 168, 36, 20),
+        createCompactTextItem('button-b-1', 112, 168, 36, 20),
+        createCompactTextItem('button-c-1', 160, 168, 36, 20),
+        createCardItem('card-2', 40, 240, 220, 160),
         createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
         createTextItem('body-2', { x: 64, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('button-a-2', {
-          x: 64,
-          y: 368,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-2', {
-          x: 128,
-          y: 368,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-c-2', {
-          x: 192,
-          y: 368,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 440,
-          width: 220,
-          height: 160
-        }),
+        createCompactTextItem('button-a-2', 64, 368, 36, 20),
+        createCompactTextItem('button-b-2', 128, 368, 36, 20),
+        createCompactTextItem('button-c-2', 192, 368, 36, 20),
+        createCardItem('card-3', 40, 440, 220, 160),
         createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' }),
-        createTextItem('button-a-3', {
-          x: 64,
-          y: 568,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-b-3', {
-          x: 112,
-          y: 568,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        }),
-        createTextItem('button-c-3', {
-          x: 160,
-          y: 568,
-          width: 36,
-          height: 20,
-          fontSize: 16,
-          fontWeight: 'normal'
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCompactTextItem('button-a-3', 64, 568, 36, 20),
+        createCompactTextItem('button-b-3', 112, 568, 36, 20),
+        createCompactTextItem('button-c-3', 160, 568, 36, 20)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3700,15 +1594,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts centerline fixes for a text stack when center alignment is more stable than left or right edges', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createTextItem('title-1', { x: 80, y: 40, width: 120, height: 48 }),
-        createTextItem('title-2', { x: 40, y: 128, width: 200, height: 48 }),
-        createTextItem('title-3', { x: 86, y: 216, width: 120, height: 48 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createTextItems([
+        ['title-1', 80, 40, { width: 120, height: 48 }],
+        ['title-2', 40, 128, { width: 200, height: 48 }],
+        ['title-3', 86, 216, { width: 120, height: 48 }]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3734,15 +1625,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts geometry fixes for inconsistent block widths inside a stack', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', { shape: 'rounded-rect', x: 40, y: 40, width: 220 }),
         createAnnotationItem('card-2', { shape: 'rounded-rect', x: 40, y: 168, width: 320 }),
         createAnnotationItem('card-3', { shape: 'rounded-rect', x: 40, y: 296, width: 220 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3765,33 +1653,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts geometry fixes for inconsistent block heights inside a stack', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 220,
-          height: 200
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 400,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCardItem('card-1', 40, 40, 220, 120),
+        createCardItem('card-2', 40, 180, 220, 200),
+        createCardItem('card-3', 40, 400, 220, 120)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3816,33 +1683,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts right-edge alignment fixes for a stack when right bounds are more consistent than left bounds', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 80,
-          y: 180,
-          width: 180,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCardItem('card-1', 40, 40, 220, 120),
+        createCardItem('card-2', 80, 180, 180, 120),
+        createCardItem('card-3', 40, 320, 220, 120)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3867,15 +1713,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts horizontal row fixes for top alignment and spacing from structured geometry', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', { shape: 'rounded-rect', x: 40, y: 40, width: 220 }),
         createAnnotationItem('card-2', { shape: 'rounded-rect', x: 280, y: 56, width: 220 }),
         createAnnotationItem('card-3', { shape: 'rounded-rect', x: 548, y: 44, width: 220 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3899,33 +1742,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts geometry fixes for inconsistent block heights inside a row', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 200
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCardItem('card-1', 40, 40, 220, 120),
+        createCardItem('card-2', 280, 40, 220, 200),
+        createCardItem('card-3', 520, 40, 220, 120)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3950,33 +1772,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts bottom-edge alignment fixes for a row when bottom bounds are more consistent than top bounds', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 20,
-          width: 220,
-          height: 140
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCardItem('card-1', 40, 40, 220, 120),
+        createCardItem('card-2', 280, 20, 220, 140),
+        createCardItem('card-3', 520, 40, 220, 120)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4001,15 +1802,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts middle-line fixes for a text row when middle alignment is more stable than top or bottom edges', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createTextItem('title-1', { x: 40, y: 80, width: 80, height: 40 }),
-        createTextItem('title-2', { x: 160, y: 40, width: 80, height: 120 }),
-        createTextItem('title-3', { x: 280, y: 92, width: 80, height: 40 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createTextItems([
+        ['title-1', 40, 80, { width: 80, height: 40 }],
+        ['title-2', 160, 40, { width: 80, height: 120 }],
+        ['title-3', 280, 92, { width: 80, height: 40 }]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4035,33 +1833,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts geometry fixes for inconsistent block widths inside a row', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 300,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 600,
-          y: 40,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCardItem('card-1', 40, 40, 220, 120),
+        createCardItem('card-2', 280, 40, 300, 120),
+        createCardItem('card-3', 600, 40, 220, 120)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4086,40 +1863,13 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts grid size fixes for inconsistent 2x2 card dimensions', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 260,
-          height: 160
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 180,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCardItem('card-1', 40, 40, 220, 120),
+        createCardItem('card-2', 280, 40, 220, 120),
+        createCardItem('card-3', 40, 180, 260, 160),
+        createCardItem('card-4', 280, 180, 220, 120)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4144,40 +1894,13 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts grid alignment fixes for drifting column centers and row middles', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 214,
-          height: 114
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 44,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 44,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 180,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCardItem('card-1', 40, 40, 214, 114),
+        createCardItem('card-2', 280, 44, 220, 120),
+        createCardItem('card-3', 44, 180, 220, 120),
+        createCardItem('card-4', 280, 180, 220, 120)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4219,54 +1942,15 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts 2x3 grid gutter fixes when one row compresses or stretches internal column gaps', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 284,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 518,
-          y: 180,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 220, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 520, 40, 220, 120],
+        ['card-4', 40, 180, 220, 120],
+        ['card-5', 284, 180, 220, 120],
+        ['card-6', 518, 180, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4300,40 +1984,13 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft 2x3 grid gutter fixes for 2x2 selections', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 180,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+        createCardItem('card-1', 40, 40, 220, 120),
+        createCardItem('card-2', 280, 40, 220, 120),
+        createCardItem('card-3', 40, 180, 220, 120),
+        createCardItem('card-4', 280, 180, 220, 120)
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4353,54 +2010,15 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft 2x3 grid gutter fixes when column anchors already drift beyond tolerance', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 288,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 518,
-          y: 180,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 220, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 520, 40, 220, 120],
+        ['card-4', 40, 180, 220, 120],
+        ['card-5', 288, 180, 220, 120],
+        ['card-6', 518, 180, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4420,75 +2038,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts 3-column multi-row matrix gutter fixes when one row drifts inside otherwise stable tracks', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 288,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 526,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 220, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 520, 40, 220, 120],
+        ['card-4', 40, 180, 220, 120],
+        ['card-5', 288, 180, 220, 120],
+        ['card-6', 526, 180, 220, 120],
+        ['card-7', 40, 320, 220, 120],
+        ['card-8', 280, 320, 220, 120],
+        ['card-9', 520, 320, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4530,75 +2091,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft 3-column multi-row matrix gutter fixes when the row is a whole-track centerline drift', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 52,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 292,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 532,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 220, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 520, 40, 220, 120],
+        ['card-4', 52, 180, 220, 120],
+        ['card-5', 292, 180, 220, 120],
+        ['card-6', 532, 180, 220, 120],
+        ['card-7', 40, 320, 220, 120],
+        ['card-8', 280, 320, 220, 120],
+        ['card-9', 520, 320, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4618,96 +2122,21 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts 3-column multi-row matrix row-rhythm fixes when one later row drifts off the dominant vertical step', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-10', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 472,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-11', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 472,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-12', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 472,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 220, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 520, 40, 220, 120],
+        ['card-4', 40, 180, 220, 120],
+        ['card-5', 280, 180, 220, 120],
+        ['card-6', 520, 180, 220, 120],
+        ['card-7', 40, 320, 220, 120],
+        ['card-8', 280, 320, 220, 120],
+        ['card-9', 520, 320, 220, 120],
+        ['card-10', 40, 472, 220, 120],
+        ['card-11', 280, 472, 220, 120],
+        ['card-12', 520, 472, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4738,96 +2167,21 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft 3-column multi-row matrix row-rhythm fixes for ambiguous split-step matrices', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 192,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 192,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 192,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 332,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 332,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 332,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-10', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 484,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-11', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 484,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-12', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 484,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 220, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 520, 40, 220, 120],
+        ['card-4', 40, 192, 220, 120],
+        ['card-5', 280, 192, 220, 120],
+        ['card-6', 520, 192, 220, 120],
+        ['card-7', 40, 332, 220, 120],
+        ['card-8', 280, 332, 220, 120],
+        ['card-9', 520, 332, 220, 120],
+        ['card-10', 40, 484, 220, 120],
+        ['card-11', 280, 484, 220, 120],
+        ['card-12', 520, 484, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4847,75 +2201,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts broader variable-width matrix left-track fixes when the exact helper is skipped', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 180,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 260,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 560,
-          y: 40,
-          width: 180,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 200,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 274,
-          y: 180,
-          width: 240,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 560,
-          y: 180,
-          width: 200,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 160,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 260,
-          y: 320,
-          width: 260,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 560,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 180, 120],
+        ['card-2', 260, 40, 220, 120],
+        ['card-3', 560, 40, 180, 120],
+        ['card-4', 40, 180, 200, 120],
+        ['card-5', 274, 180, 240, 120],
+        ['card-6', 560, 180, 200, 120],
+        ['card-7', 40, 320, 160, 120],
+        ['card-8', 260, 320, 260, 120],
+        ['card-9', 560, 320, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4947,75 +2244,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft broader variable-width matrix left-track fixes for exact uniform-width matrices', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 292,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 532,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 220, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 520, 40, 220, 120],
+        ['card-4', 40, 180, 220, 120],
+        ['card-5', 292, 180, 220, 120],
+        ['card-6', 532, 180, 220, 120],
+        ['card-7', 40, 320, 220, 120],
+        ['card-8', 280, 320, 220, 120],
+        ['card-9', 520, 320, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5032,75 +2272,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts broader variable-width matrix right-track fixes when right anchors are more stable than left or center', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 180,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 560,
-          y: 40,
-          width: 180,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 200,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 274,
-          y: 180,
-          width: 240,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 560,
-          y: 180,
-          width: 200,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 160,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 220,
-          y: 320,
-          width: 280,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 560,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 180, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 560, 40, 180, 120],
+        ['card-4', 40, 180, 200, 120],
+        ['card-5', 274, 180, 240, 120],
+        ['card-6', 560, 180, 200, 120],
+        ['card-7', 40, 320, 160, 120],
+        ['card-8', 220, 320, 280, 120],
+        ['card-9', 560, 320, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5133,75 +2316,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft broader variable-width matrix right-track fixes for exact uniform-width matrices', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 294,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 220, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 520, 40, 220, 120],
+        ['card-4', 40, 180, 220, 120],
+        ['card-5', 294, 180, 220, 120],
+        ['card-6', 520, 180, 220, 120],
+        ['card-7', 40, 320, 220, 120],
+        ['card-8', 280, 320, 220, 120],
+        ['card-9', 520, 320, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5218,75 +2344,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts broader variable-width matrix center-track fixes when shared centers are more stable than left or right anchors', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 180,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 560,
-          y: 40,
-          width: 180,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 200,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 282,
-          y: 180,
-          width: 240,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 560,
-          y: 180,
-          width: 200,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 160,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 260,
-          y: 320,
-          width: 260,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 560,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 180, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 560, 40, 180, 120],
+        ['card-4', 40, 180, 200, 120],
+        ['card-5', 282, 180, 240, 120],
+        ['card-6', 560, 180, 200, 120],
+        ['card-7', 40, 320, 160, 120],
+        ['card-8', 260, 320, 260, 120],
+        ['card-9', 560, 320, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5324,75 +2393,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft broader variable-width matrix center-track fixes for exact uniform-width matrices', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 294,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 220, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 520, 40, 220, 120],
+        ['card-4', 40, 180, 220, 120],
+        ['card-5', 294, 180, 220, 120],
+        ['card-6', 520, 180, 220, 120],
+        ['card-7', 40, 320, 220, 120],
+        ['card-8', 280, 320, 220, 120],
+        ['card-9', 520, 320, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5409,75 +2421,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts mixed-anchor row-drift fixes when one variable-width matrix row slides horizontally as a whole', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 180,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 600,
-          y: 40,
-          width: 180,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 52,
-          y: 180,
-          width: 200,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 282,
-          y: 180,
-          width: 240,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 592,
-          y: 180,
-          width: 200,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 160,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 260,
-          y: 320,
-          width: 260,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 560,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 180, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 600, 40, 180, 120],
+        ['card-4', 52, 180, 200, 120],
+        ['card-5', 282, 180, 240, 120],
+        ['card-6', 592, 180, 200, 120],
+        ['card-7', 40, 320, 160, 120],
+        ['card-8', 260, 320, 260, 120],
+        ['card-9', 560, 320, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5521,75 +2476,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft mixed-anchor row-drift fixes when the row does not move as one coherent horizontal offset', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 180,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 600,
-          y: 40,
-          width: 180,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 52,
-          y: 180,
-          width: 200,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 270,
-          y: 180,
-          width: 240,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 592,
-          y: 180,
-          width: 200,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 160,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 260,
-          y: 320,
-          width: 260,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 560,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 180, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 600, 40, 180, 120],
+        ['card-4', 52, 180, 200, 120],
+        ['card-5', 270, 180, 240, 120],
+        ['card-6', 592, 180, 200, 120],
+        ['card-7', 40, 320, 160, 120],
+        ['card-8', 260, 320, 260, 120],
+        ['card-9', 560, 320, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5620,75 +2518,18 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts 3-column multi-row matrix centerline fixes for drifting block centers', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 52,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 292,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 532,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-7', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-8', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 320,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-9', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 320,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 220, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 520, 40, 220, 120],
+        ['card-4', 52, 180, 220, 120],
+        ['card-5', 292, 180, 220, 120],
+        ['card-6', 532, 180, 220, 120],
+        ['card-7', 40, 320, 220, 120],
+        ['card-8', 280, 320, 220, 120],
+        ['card-9', 520, 320, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5715,54 +2556,15 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft 3-column multi-row matrix centerline fixes for exact 2x3 grids', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [
-        createAnnotationItem('card-1', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-2', {
-          shape: 'rounded-rect',
-          x: 280,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-3', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 40,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-4', {
-          shape: 'rounded-rect',
-          x: 40,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-5', {
-          shape: 'rounded-rect',
-          x: 296,
-          y: 180,
-          width: 220,
-          height: 120
-        }),
-        createAnnotationItem('card-6', {
-          shape: 'rounded-rect',
-          x: 520,
-          y: 180,
-          width: 220,
-          height: 120
-        })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: createCardItems([
+        ['card-1', 40, 40, 220, 120],
+        ['card-2', 280, 40, 220, 120],
+        ['card-3', 520, 40, 220, 120],
+        ['card-4', 40, 180, 220, 120],
+        ['card-5', 296, 180, 220, 120],
+        ['card-6', 520, 180, 220, 120]
+      ])
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5778,8 +2580,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('keeps structural actions intact when the agent rewrites only the narrative fields', async () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createTextItem('title-1', {
           x: 40,
@@ -5802,9 +2603,7 @@ describe('designInspectionWorkflow', () => {
             notes: 'Imported copy variant for review.'
           }
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
     const draftProposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const agentVersion = {
@@ -5884,11 +2683,8 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('accepts editable file content suggestions only when reviewer notes explicitly request copy updates', async () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [createFileItem('brief-1')],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: [createFileItem('brief-1')]
     })
     const draftProposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const llmProxy = {
@@ -5948,11 +2744,8 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('accepts editable file content suggestions when reviewer notes request copy updates in Chinese', async () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [createFileItem('brief-1')],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: [createFileItem('brief-1')]
     })
     const draftProposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const llmProxy = {
@@ -6002,11 +2795,8 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('ignores file content suggestions when reviewer notes do not explicitly request copy updates', async () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [createFileItem('brief-1')],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: [createFileItem('brief-1')]
     })
     const draftProposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const llmProxy = {
@@ -6048,11 +2838,8 @@ describe('designInspectionWorkflow', () => {
       }),
       createTextItem('title-3', { x: 44, y: 196 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const approval: DesignInspectionApproval = {
@@ -6196,11 +2983,8 @@ describe('designInspectionWorkflow', () => {
       }),
       createTextItem('title-3', { x: 44, y: 196 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const textStyleActionId = proposal.actions.find(
@@ -6239,11 +3023,8 @@ describe('designInspectionWorkflow', () => {
       createAnnotationItem('card-2', { shape: 'rounded-rect', x: 280, y: 56, width: 220 }),
       createAnnotationItem('card-3', { shape: 'rounded-rect', x: 548, y: 44, width: 220 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const rowActionIds = proposal.actions
@@ -6283,36 +3064,15 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved card-title inset actions by restoring consistent title padding', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
+      createCardItem('card-1', 40, 40, 220, 120),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 200,
-        width: 220,
-        height: 120
-      }),
+      createCardItem('card-2', 40, 200, 220, 120),
       createTextItem('title-2', { x: 84, y: 228, width: 120, height: 32 }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 360,
-        width: 220,
-        height: 120
-      }),
+      createCardItem('card-3', 40, 360, 220, 120),
       createTextItem('title-3', { x: 64, y: 380, width: 120, height: 32 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6355,36 +3115,15 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved card-title centerline actions by restoring centered title alignment', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
+      createCardItem('card-1', 40, 40, 220, 120),
       createTextItem('title-1', { x: 110, y: 60, width: 80, height: 32 }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 200,
-        width: 220,
-        height: 120
-      }),
+      createCardItem('card-2', 40, 200, 220, 120),
       createTextItem('title-2', { x: 80, y: 220, width: 120, height: 32 }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 360,
-        width: 220,
-        height: 120
-      }),
+      createCardItem('card-3', 40, 360, 220, 120),
       createTextItem('title-3', { x: 70, y: 380, width: 160, height: 32 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6425,36 +3164,15 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved card-title centerline actions by restoring consistent title centering', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
+      createCardItem('card-1', 40, 40, 220, 120),
       createTextItem('title-1', { x: 110, y: 60, width: 80, height: 32 }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 200,
-        width: 220,
-        height: 120
-      }),
+      createCardItem('card-2', 40, 200, 220, 120),
       createTextItem('title-2', { x: 80, y: 220, width: 120, height: 32 }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 360,
-        width: 220,
-        height: 120
-      }),
+      createCardItem('card-3', 40, 360, 220, 120),
       createTextItem('title-3', { x: 70, y: 380, width: 160, height: 32 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6495,39 +3213,18 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved card-body inset actions by restoring consistent body padding', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 160
-      }),
+      createCardItem('card-1', 40, 40, 220, 160),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
       createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 240,
-        width: 220,
-        height: 160
-      }),
+      createCardItem('card-2', 40, 240, 220, 160),
       createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
       createTextItem('body-2', { x: 84, y: 316, width: 140, height: 28, fontWeight: 'normal' }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 440,
-        width: 220,
-        height: 160
-      }),
+      createCardItem('card-3', 40, 440, 220, 160),
       createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6574,63 +3271,21 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved card-footer inset actions by restoring consistent footer padding', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 160
-      }),
+      createCardItem('card-1', 40, 40, 220, 160),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
       createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('footer-1', {
-        x: 64,
-        y: 168,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 240,
-        width: 220,
-        height: 160
-      }),
+      createCompactTextItem('footer-1', 64, 168, 80, 20),
+      createCardItem('card-2', 40, 240, 220, 160),
       createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
       createTextItem('body-2', { x: 64, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('footer-2', {
-        x: 64,
-        y: 360,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 440,
-        width: 220,
-        height: 160
-      }),
+      createCompactTextItem('footer-2', 64, 360, 80, 20),
+      createCardItem('card-3', 40, 440, 220, 160),
       createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('footer-3', {
-        x: 64,
-        y: 568,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      })
+      createCompactTextItem('footer-3', 64, 568, 80, 20)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6677,87 +3332,24 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved card-footer action-row spacing actions by restoring consistent button gaps', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 160
-      }),
+      createCardItem('card-1', 40, 40, 220, 160),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
       createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('button-primary-1', {
-        x: 64,
-        y: 168,
-        width: 64,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-secondary-1', {
-        x: 140,
-        y: 168,
-        width: 76,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 240,
-        width: 220,
-        height: 160
-      }),
+      createCompactTextItem('button-primary-1', 64, 168, 64, 20),
+      createCompactTextItem('button-secondary-1', 140, 168, 76, 20),
+      createCardItem('card-2', 40, 240, 220, 160),
       createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
       createTextItem('body-2', { x: 64, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('button-primary-2', {
-        x: 64,
-        y: 368,
-        width: 64,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-secondary-2', {
-        x: 160,
-        y: 368,
-        width: 76,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 440,
-        width: 220,
-        height: 160
-      }),
+      createCompactTextItem('button-primary-2', 64, 368, 64, 20),
+      createCompactTextItem('button-secondary-2', 160, 368, 76, 20),
+      createCardItem('card-3', 40, 440, 220, 160),
       createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('button-primary-3', {
-        x: 64,
-        y: 568,
-        width: 64,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-secondary-3', {
-        x: 140,
-        y: 568,
-        width: 76,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      })
+      createCompactTextItem('button-primary-3', 64, 568, 64, 20),
+      createCompactTextItem('button-secondary-3', 140, 568, 76, 20)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6802,111 +3394,27 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved card-footer three-item action-row spacing actions by restoring consistent button gaps', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 160
-      }),
+      createCardItem('card-1', 40, 40, 220, 160),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
       createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('button-a-1', {
-        x: 64,
-        y: 168,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-b-1', {
-        x: 112,
-        y: 168,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-c-1', {
-        x: 160,
-        y: 168,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 240,
-        width: 220,
-        height: 160
-      }),
+      createCompactTextItem('button-a-1', 64, 168, 36, 20),
+      createCompactTextItem('button-b-1', 112, 168, 36, 20),
+      createCompactTextItem('button-c-1', 160, 168, 36, 20),
+      createCardItem('card-2', 40, 240, 220, 160),
       createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
       createTextItem('body-2', { x: 64, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('button-a-2', {
-        x: 64,
-        y: 368,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-b-2', {
-        x: 128,
-        y: 368,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-c-2', {
-        x: 192,
-        y: 368,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 440,
-        width: 220,
-        height: 160
-      }),
+      createCompactTextItem('button-a-2', 64, 368, 36, 20),
+      createCompactTextItem('button-b-2', 128, 368, 36, 20),
+      createCompactTextItem('button-c-2', 192, 368, 36, 20),
+      createCardItem('card-3', 40, 440, 220, 160),
       createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('button-a-3', {
-        x: 64,
-        y: 568,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-b-3', {
-        x: 112,
-        y: 568,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-c-3', {
-        x: 160,
-        y: 568,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      })
+      createCompactTextItem('button-a-3', 64, 568, 36, 20),
+      createCompactTextItem('button-b-3', 112, 568, 36, 20),
+      createCompactTextItem('button-c-3', 160, 568, 36, 20)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6954,63 +3462,21 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved card-header meta inset actions by restoring consistent right padding', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 160
-      }),
+      createCardItem('card-1', 40, 40, 220, 160),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
-      createTextItem('meta-1', {
-        x: 204,
-        y: 60,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
+      createCompactTextItem('meta-1', 204, 60, 36, 20),
       createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 240,
-        width: 220,
-        height: 160
-      }),
+      createCardItem('card-2', 40, 240, 220, 160),
       createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
-      createTextItem('meta-2', {
-        x: 184,
-        y: 260,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
+      createCompactTextItem('meta-2', 184, 260, 36, 20),
       createTextItem('body-2', { x: 64, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 440,
-        width: 220,
-        height: 160
-      }),
+      createCardItem('card-3', 40, 440, 220, 160),
       createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
-      createTextItem('meta-3', {
-        x: 204,
-        y: 460,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
+      createCompactTextItem('meta-3', 204, 460, 36, 20),
       createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7055,156 +3521,30 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved card meta-block value-column actions by restoring consistent right padding', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 180
-      }),
+      createCardItem('card-1', 40, 40, 220, 180),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
-      createTextItem('label-a-1', {
-        x: 64,
-        y: 104,
-        width: 60,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-a-1', {
-        x: 184,
-        y: 104,
-        width: 56,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('label-b-1', {
-        x: 64,
-        y: 136,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-b-1', {
-        x: 192,
-        y: 136,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-1', {
-        x: 64,
-        y: 188,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 240,
-        width: 220,
-        height: 180
-      }),
+      createCompactTextItem('label-a-1', 64, 104, 60, 20),
+      createCompactTextItem('value-a-1', 184, 104, 56, 20),
+      createCompactTextItem('label-b-1', 64, 136, 72, 20),
+      createCompactTextItem('value-b-1', 192, 136, 48, 20),
+      createCompactTextItem('footer-1', 64, 188, 80, 20),
+      createCardItem('card-2', 40, 240, 220, 180),
       createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
-      createTextItem('label-a-2', {
-        x: 64,
-        y: 304,
-        width: 60,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-a-2', {
-        x: 164,
-        y: 304,
-        width: 56,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('label-b-2', {
-        x: 64,
-        y: 336,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-b-2', {
-        x: 172,
-        y: 336,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-2', {
-        x: 64,
-        y: 388,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 440,
-        width: 220,
-        height: 180
-      }),
+      createCompactTextItem('label-a-2', 64, 304, 60, 20),
+      createCompactTextItem('value-a-2', 164, 304, 56, 20),
+      createCompactTextItem('label-b-2', 64, 336, 72, 20),
+      createCompactTextItem('value-b-2', 172, 336, 48, 20),
+      createCompactTextItem('footer-2', 64, 388, 80, 20),
+      createCardItem('card-3', 40, 440, 220, 180),
       createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
-      createTextItem('label-a-3', {
-        x: 64,
-        y: 504,
-        width: 60,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-a-3', {
-        x: 184,
-        y: 504,
-        width: 56,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('label-b-3', {
-        x: 64,
-        y: 536,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-b-3', {
-        x: 192,
-        y: 536,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-3', {
-        x: 64,
-        y: 588,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      })
+      createCompactTextItem('label-a-3', 64, 504, 60, 20),
+      createCompactTextItem('value-a-3', 184, 504, 56, 20),
+      createCompactTextItem('label-b-3', 64, 536, 72, 20),
+      createCompactTextItem('value-b-3', 192, 536, 48, 20),
+      createCompactTextItem('footer-3', 64, 588, 80, 20)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7262,183 +3602,36 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved footer-action-ending value-column actions by moving only drifting value items', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 224
-      }),
+      createCardItem('card-1', 40, 40, 220, 224),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
       createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('label-a-1', {
-        x: 64,
-        y: 144,
-        width: 60,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-a-1', {
-        x: 184,
-        y: 144,
-        width: 56,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('label-b-1', {
-        x: 64,
-        y: 176,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-b-1', {
-        x: 192,
-        y: 176,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-primary-1', {
-        x: 64,
-        y: 232,
-        width: 64,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-secondary-1', {
-        x: 140,
-        y: 232,
-        width: 76,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 300,
-        width: 220,
-        height: 224
-      }),
+      createCompactTextItem('label-a-1', 64, 144, 60, 20),
+      createCompactTextItem('value-a-1', 184, 144, 56, 20),
+      createCompactTextItem('label-b-1', 64, 176, 72, 20),
+      createCompactTextItem('value-b-1', 192, 176, 48, 20),
+      createCompactTextItem('button-primary-1', 64, 232, 64, 20),
+      createCompactTextItem('button-secondary-1', 140, 232, 76, 20),
+      createCardItem('card-2', 40, 300, 220, 224),
       createTextItem('title-2', { x: 64, y: 320, width: 120, height: 32 }),
       createTextItem('body-2', { x: 64, y: 364, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('label-a-2', {
-        x: 64,
-        y: 404,
-        width: 60,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-a-2', {
-        x: 164,
-        y: 404,
-        width: 56,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('label-b-2', {
-        x: 64,
-        y: 436,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-b-2', {
-        x: 176,
-        y: 436,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-primary-2', {
-        x: 64,
-        y: 492,
-        width: 64,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-secondary-2', {
-        x: 152,
-        y: 492,
-        width: 76,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 560,
-        width: 220,
-        height: 224
-      }),
+      createCompactTextItem('label-a-2', 64, 404, 60, 20),
+      createCompactTextItem('value-a-2', 164, 404, 56, 20),
+      createCompactTextItem('label-b-2', 64, 436, 72, 20),
+      createCompactTextItem('value-b-2', 176, 436, 48, 20),
+      createCompactTextItem('button-primary-2', 64, 492, 64, 20),
+      createCompactTextItem('button-secondary-2', 152, 492, 76, 20),
+      createCardItem('card-3', 40, 560, 220, 224),
       createTextItem('title-3', { x: 64, y: 580, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 624, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('label-a-3', {
-        x: 64,
-        y: 664,
-        width: 60,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-a-3', {
-        x: 184,
-        y: 664,
-        width: 56,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('label-b-3', {
-        x: 64,
-        y: 696,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-b-3', {
-        x: 192,
-        y: 696,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-primary-3', {
-        x: 64,
-        y: 752,
-        width: 64,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-secondary-3', {
-        x: 140,
-        y: 752,
-        width: 76,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      })
+      createCompactTextItem('label-a-3', 64, 664, 60, 20),
+      createCompactTextItem('value-a-3', 184, 664, 56, 20),
+      createCompactTextItem('label-b-3', 64, 696, 72, 20),
+      createCompactTextItem('value-b-3', 192, 696, 48, 20),
+      createCompactTextItem('button-primary-3', 64, 752, 64, 20),
+      createCompactTextItem('button-secondary-3', 140, 752, 76, 20)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7501,111 +3694,27 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved card badge-stack spacing actions by restoring consistent vertical rhythm', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 220
-      }),
+      createCardItem('card-1', 40, 40, 220, 220),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
       createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('badge-a-1', {
-        x: 64,
-        y: 144,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('badge-b-1', {
-        x: 64,
-        y: 176,
-        width: 84,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-1', {
-        x: 64,
-        y: 228,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 240,
-        width: 220,
-        height: 220
-      }),
+      createCompactTextItem('badge-a-1', 64, 144, 72, 20),
+      createCompactTextItem('badge-b-1', 64, 176, 84, 20),
+      createCompactTextItem('footer-1', 64, 228, 80, 20),
+      createCardItem('card-2', 40, 240, 220, 220),
       createTextItem('title-2', { x: 64, y: 260, width: 120, height: 32 }),
       createTextItem('body-2', { x: 64, y: 304, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('badge-a-2', {
-        x: 64,
-        y: 344,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('badge-b-2', {
-        x: 64,
-        y: 388,
-        width: 84,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-2', {
-        x: 64,
-        y: 428,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 440,
-        width: 220,
-        height: 220
-      }),
+      createCompactTextItem('badge-a-2', 64, 344, 72, 20),
+      createCompactTextItem('badge-b-2', 64, 388, 84, 20),
+      createCompactTextItem('footer-2', 64, 428, 80, 20),
+      createCardItem('card-3', 40, 440, 220, 220),
       createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('badge-a-3', {
-        x: 64,
-        y: 544,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('badge-b-3', {
-        x: 64,
-        y: 576,
-        width: 84,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-3', {
-        x: 64,
-        y: 628,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      })
+      createCompactTextItem('badge-a-3', 64, 544, 72, 20),
+      createCompactTextItem('badge-b-3', 64, 576, 84, 20),
+      createCompactTextItem('footer-3', 64, 628, 80, 20)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7656,87 +3765,24 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved tail badge-stack actions without moving title or body', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 220
-      }),
+      createCardItem('card-1', 40, 40, 220, 220),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
       createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('badge-a-1', {
-        x: 64,
-        y: 144,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('badge-b-1', {
-        x: 64,
-        y: 176,
-        width: 84,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 260,
-        width: 220,
-        height: 220
-      }),
+      createCompactTextItem('badge-a-1', 64, 144, 72, 20),
+      createCompactTextItem('badge-b-1', 64, 176, 84, 20),
+      createCardItem('card-2', 40, 260, 220, 220),
       createTextItem('title-2', { x: 64, y: 280, width: 120, height: 32 }),
       createTextItem('body-2', { x: 64, y: 324, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('badge-a-2', {
-        x: 64,
-        y: 364,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('badge-b-2', {
-        x: 64,
-        y: 404,
-        width: 84,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 480,
-        width: 220,
-        height: 220
-      }),
+      createCompactTextItem('badge-a-2', 64, 364, 72, 20),
+      createCompactTextItem('badge-b-2', 64, 404, 84, 20),
+      createCardItem('card-3', 40, 480, 220, 220),
       createTextItem('title-3', { x: 64, y: 500, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 544, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('badge-a-3', {
-        x: 64,
-        y: 584,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('badge-b-3', {
-        x: 64,
-        y: 616,
-        width: 84,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      })
+      createCompactTextItem('badge-a-3', 64, 584, 72, 20),
+      createCompactTextItem('badge-b-3', 64, 616, 84, 20)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7784,135 +3830,30 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved badge-stack-above-action-row actions without moving the footer buttons', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 240
-      }),
+      createCardItem('card-1', 40, 40, 220, 240),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
       createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('badge-a-1', {
-        x: 64,
-        y: 144,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('badge-b-1', {
-        x: 64,
-        y: 176,
-        width: 84,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-a-1', {
-        x: 64,
-        y: 228,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-b-1', {
-        x: 112,
-        y: 228,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 300,
-        width: 220,
-        height: 240
-      }),
+      createCompactTextItem('badge-a-1', 64, 144, 72, 20),
+      createCompactTextItem('badge-b-1', 64, 176, 84, 20),
+      createCompactTextItem('button-a-1', 64, 228, 36, 20),
+      createCompactTextItem('button-b-1', 112, 228, 36, 20),
+      createCardItem('card-2', 40, 300, 220, 240),
       createTextItem('title-2', { x: 64, y: 320, width: 120, height: 32 }),
       createTextItem('body-2', { x: 64, y: 364, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('badge-a-2', {
-        x: 64,
-        y: 404,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('badge-b-2', {
-        x: 64,
-        y: 448,
-        width: 84,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-a-2', {
-        x: 64,
-        y: 488,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-b-2', {
-        x: 128,
-        y: 488,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 560,
-        width: 220,
-        height: 240
-      }),
+      createCompactTextItem('badge-a-2', 64, 404, 72, 20),
+      createCompactTextItem('badge-b-2', 64, 448, 84, 20),
+      createCompactTextItem('button-a-2', 64, 488, 36, 20),
+      createCompactTextItem('button-b-2', 128, 488, 36, 20),
+      createCardItem('card-3', 40, 560, 220, 240),
       createTextItem('title-3', { x: 64, y: 580, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 624, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('badge-a-3', {
-        x: 64,
-        y: 664,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('badge-b-3', {
-        x: 64,
-        y: 696,
-        width: 84,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-a-3', {
-        x: 64,
-        y: 748,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-b-3', {
-        x: 112,
-        y: 748,
-        width: 36,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      })
+      createCompactTextItem('badge-a-3', 64, 664, 72, 20),
+      createCompactTextItem('badge-b-3', 64, 696, 84, 20),
+      createCompactTextItem('button-a-3', 64, 748, 36, 20),
+      createCompactTextItem('button-b-3', 112, 748, 36, 20)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7966,207 +3907,39 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved multi-column chip-group actions without moving title, body, or footer', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 300,
-        height: 240
-      }),
+      createCardItem('card-1', 40, 40, 300, 240),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
       createTextItem('body-1', { x: 64, y: 104, width: 160, height: 28, fontWeight: 'normal' }),
-      createTextItem('chip-a-1', {
-        x: 64,
-        y: 144,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-b-1', {
-        x: 124,
-        y: 144,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-c-1', {
-        x: 184,
-        y: 144,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-d-1', {
-        x: 64,
-        y: 176,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-e-1', {
-        x: 124,
-        y: 176,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-f-1', {
-        x: 184,
-        y: 176,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-1', {
-        x: 64,
-        y: 228,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 300,
-        width: 300,
-        height: 240
-      }),
+      createCompactTextItem('chip-a-1', 64, 144, 48, 20),
+      createCompactTextItem('chip-b-1', 124, 144, 48, 20),
+      createCompactTextItem('chip-c-1', 184, 144, 48, 20),
+      createCompactTextItem('chip-d-1', 64, 176, 48, 20),
+      createCompactTextItem('chip-e-1', 124, 176, 48, 20),
+      createCompactTextItem('chip-f-1', 184, 176, 48, 20),
+      createCompactTextItem('footer-1', 64, 228, 80, 20),
+      createCardItem('card-2', 40, 300, 300, 240),
       createTextItem('title-2', { x: 64, y: 320, width: 120, height: 32 }),
       createTextItem('body-2', { x: 64, y: 364, width: 160, height: 28, fontWeight: 'normal' }),
-      createTextItem('chip-a-2', {
-        x: 64,
-        y: 404,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-b-2', {
-        x: 132,
-        y: 404,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-c-2', {
-        x: 200,
-        y: 404,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-d-2', {
-        x: 64,
-        y: 436,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-e-2', {
-        x: 132,
-        y: 436,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-f-2', {
-        x: 200,
-        y: 436,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-2', {
-        x: 64,
-        y: 488,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 560,
-        width: 300,
-        height: 240
-      }),
+      createCompactTextItem('chip-a-2', 64, 404, 48, 20),
+      createCompactTextItem('chip-b-2', 132, 404, 48, 20),
+      createCompactTextItem('chip-c-2', 200, 404, 48, 20),
+      createCompactTextItem('chip-d-2', 64, 436, 48, 20),
+      createCompactTextItem('chip-e-2', 132, 436, 48, 20),
+      createCompactTextItem('chip-f-2', 200, 436, 48, 20),
+      createCompactTextItem('footer-2', 64, 488, 80, 20),
+      createCardItem('card-3', 40, 560, 300, 240),
       createTextItem('title-3', { x: 64, y: 580, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 624, width: 160, height: 28, fontWeight: 'normal' }),
-      createTextItem('chip-a-3', {
-        x: 64,
-        y: 664,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-b-3', {
-        x: 124,
-        y: 664,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-c-3', {
-        x: 184,
-        y: 664,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-d-3', {
-        x: 64,
-        y: 696,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-e-3', {
-        x: 124,
-        y: 696,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-f-3', {
-        x: 184,
-        y: 696,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-3', {
-        x: 64,
-        y: 748,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      })
+      createCompactTextItem('chip-a-3', 64, 664, 48, 20),
+      createCompactTextItem('chip-b-3', 124, 664, 48, 20),
+      createCompactTextItem('chip-c-3', 184, 664, 48, 20),
+      createCompactTextItem('chip-d-3', 64, 696, 48, 20),
+      createCompactTextItem('chip-e-3', 124, 696, 48, 20),
+      createCompactTextItem('chip-f-3', 184, 696, 48, 20),
+      createCompactTextItem('footer-3', 64, 748, 80, 20)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -8234,231 +4007,42 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved footer-action-ending chip-group actions without moving body or footer buttons', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 300,
-        height: 264
-      }),
+      createCardItem('card-1', 40, 40, 300, 264),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
       createTextItem('body-1', { x: 64, y: 104, width: 160, height: 28, fontWeight: 'normal' }),
-      createTextItem('chip-a-1', {
-        x: 64,
-        y: 144,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-b-1', {
-        x: 124,
-        y: 144,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-c-1', {
-        x: 184,
-        y: 144,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-d-1', {
-        x: 64,
-        y: 176,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-e-1', {
-        x: 124,
-        y: 176,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-f-1', {
-        x: 184,
-        y: 176,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-primary-1', {
-        x: 64,
-        y: 228,
-        width: 64,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-secondary-1', {
-        x: 140,
-        y: 228,
-        width: 76,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 320,
-        width: 300,
-        height: 264
-      }),
+      createCompactTextItem('chip-a-1', 64, 144, 48, 20),
+      createCompactTextItem('chip-b-1', 124, 144, 48, 20),
+      createCompactTextItem('chip-c-1', 184, 144, 48, 20),
+      createCompactTextItem('chip-d-1', 64, 176, 48, 20),
+      createCompactTextItem('chip-e-1', 124, 176, 48, 20),
+      createCompactTextItem('chip-f-1', 184, 176, 48, 20),
+      createCompactTextItem('button-primary-1', 64, 228, 64, 20),
+      createCompactTextItem('button-secondary-1', 140, 228, 76, 20),
+      createCardItem('card-2', 40, 320, 300, 264),
       createTextItem('title-2', { x: 64, y: 340, width: 120, height: 32 }),
       createTextItem('body-2', { x: 64, y: 384, width: 160, height: 28, fontWeight: 'normal' }),
-      createTextItem('chip-a-2', {
-        x: 64,
-        y: 424,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-b-2', {
-        x: 136,
-        y: 424,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-c-2', {
-        x: 208,
-        y: 424,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-d-2', {
-        x: 64,
-        y: 456,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-e-2', {
-        x: 136,
-        y: 456,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-f-2', {
-        x: 208,
-        y: 456,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-primary-2', {
-        x: 64,
-        y: 508,
-        width: 64,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-secondary-2', {
-        x: 140,
-        y: 508,
-        width: 76,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 600,
-        width: 300,
-        height: 264
-      }),
+      createCompactTextItem('chip-a-2', 64, 424, 48, 20),
+      createCompactTextItem('chip-b-2', 136, 424, 48, 20),
+      createCompactTextItem('chip-c-2', 208, 424, 48, 20),
+      createCompactTextItem('chip-d-2', 64, 456, 48, 20),
+      createCompactTextItem('chip-e-2', 136, 456, 48, 20),
+      createCompactTextItem('chip-f-2', 208, 456, 48, 20),
+      createCompactTextItem('button-primary-2', 64, 508, 64, 20),
+      createCompactTextItem('button-secondary-2', 140, 508, 76, 20),
+      createCardItem('card-3', 40, 600, 300, 264),
       createTextItem('title-3', { x: 64, y: 620, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 664, width: 160, height: 28, fontWeight: 'normal' }),
-      createTextItem('chip-a-3', {
-        x: 64,
-        y: 704,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-b-3', {
-        x: 124,
-        y: 704,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-c-3', {
-        x: 184,
-        y: 704,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-d-3', {
-        x: 64,
-        y: 736,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-e-3', {
-        x: 124,
-        y: 736,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('chip-f-3', {
-        x: 184,
-        y: 736,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-primary-3', {
-        x: 64,
-        y: 788,
-        width: 64,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('button-secondary-3', {
-        x: 140,
-        y: 788,
-        width: 76,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      })
+      createCompactTextItem('chip-a-3', 64, 704, 48, 20),
+      createCompactTextItem('chip-b-3', 124, 704, 48, 20),
+      createCompactTextItem('chip-c-3', 184, 704, 48, 20),
+      createCompactTextItem('chip-d-3', 64, 736, 48, 20),
+      createCompactTextItem('chip-e-3', 124, 736, 48, 20),
+      createCompactTextItem('chip-f-3', 184, 736, 48, 20),
+      createCompactTextItem('button-primary-3', 64, 788, 64, 20),
+      createCompactTextItem('button-secondary-3', 140, 788, 76, 20)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -8527,159 +4111,33 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved body-plus-meta value-column actions by restoring a shared right column', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 220
-      }),
+      createCardItem('card-1', 40, 40, 220, 220),
       createTextItem('title-1', { x: 64, y: 60, width: 120, height: 32 }),
       createTextItem('body-1', { x: 64, y: 104, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('label-a-1', {
-        x: 64,
-        y: 144,
-        width: 60,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-a-1', {
-        x: 184,
-        y: 144,
-        width: 56,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('label-b-1', {
-        x: 64,
-        y: 176,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-b-1', {
-        x: 192,
-        y: 176,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-1', {
-        x: 64,
-        y: 228,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 280,
-        width: 220,
-        height: 220
-      }),
+      createCompactTextItem('label-a-1', 64, 144, 60, 20),
+      createCompactTextItem('value-a-1', 184, 144, 56, 20),
+      createCompactTextItem('label-b-1', 64, 176, 72, 20),
+      createCompactTextItem('value-b-1', 192, 176, 48, 20),
+      createCompactTextItem('footer-1', 64, 228, 80, 20),
+      createCardItem('card-2', 40, 280, 220, 220),
       createTextItem('title-2', { x: 64, y: 300, width: 120, height: 32 }),
       createTextItem('body-2', { x: 64, y: 344, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('label-a-2', {
-        x: 64,
-        y: 384,
-        width: 60,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-a-2', {
-        x: 164,
-        y: 384,
-        width: 56,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('label-b-2', {
-        x: 64,
-        y: 416,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-b-2', {
-        x: 172,
-        y: 416,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-2', {
-        x: 64,
-        y: 468,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 520,
-        width: 220,
-        height: 220
-      }),
+      createCompactTextItem('label-a-2', 64, 384, 60, 20),
+      createCompactTextItem('value-a-2', 164, 384, 56, 20),
+      createCompactTextItem('label-b-2', 64, 416, 72, 20),
+      createCompactTextItem('value-b-2', 172, 416, 48, 20),
+      createCompactTextItem('footer-2', 64, 468, 80, 20),
+      createCardItem('card-3', 40, 520, 220, 220),
       createTextItem('title-3', { x: 64, y: 540, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 584, width: 140, height: 28, fontWeight: 'normal' }),
-      createTextItem('label-a-3', {
-        x: 64,
-        y: 624,
-        width: 60,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-a-3', {
-        x: 184,
-        y: 624,
-        width: 56,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('label-b-3', {
-        x: 64,
-        y: 656,
-        width: 72,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('value-b-3', {
-        x: 192,
-        y: 656,
-        width: 48,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      }),
-      createTextItem('footer-3', {
-        x: 64,
-        y: 708,
-        width: 80,
-        height: 20,
-        fontSize: 16,
-        fontWeight: 'normal'
-      })
+      createCompactTextItem('label-a-3', 64, 624, 60, 20),
+      createCompactTextItem('value-a-3', 184, 624, 56, 20),
+      createCompactTextItem('label-b-3', 64, 656, 72, 20),
+      createCompactTextItem('value-b-3', 192, 656, 48, 20),
+      createCompactTextItem('footer-3', 64, 708, 80, 20)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -8744,11 +4202,8 @@ describe('designInspectionWorkflow', () => {
       createTextItem('title-2', { x: 40, y: 128, width: 200, height: 48 }),
       createTextItem('title-3', { x: 86, y: 216, width: 120, height: 48 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -8786,11 +4241,8 @@ describe('designInspectionWorkflow', () => {
       createTextItem('title-2', { x: 160, y: 40, width: 80, height: 120 }),
       createTextItem('title-3', { x: 280, y: 92, width: 80, height: 40 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -8824,33 +4276,12 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved geometry actions by normalizing row heights', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 40,
-        width: 220,
-        height: 200
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 520,
-        y: 40,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 220, 120),
+      createCardItem('card-2', 280, 40, 220, 200),
+      createCardItem('card-3', 520, 40, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const heightActionIds = proposal.actions
@@ -8883,33 +4314,12 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved geometry actions by normalizing row widths', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 40,
-        width: 300,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 600,
-        y: 40,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 220, 120),
+      createCardItem('card-2', 280, 40, 300, 120),
+      createCardItem('card-3', 600, 40, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const widthActionIds = proposal.actions
@@ -8942,33 +4352,12 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved alignment actions by normalizing stack right edges', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 80,
-        y: 180,
-        width: 180,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 320,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 220, 120),
+      createCardItem('card-2', 80, 180, 180, 120),
+      createCardItem('card-3', 40, 320, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -9006,40 +4395,13 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved grid size actions by normalizing 2x2 card dimensions', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 180,
-        width: 260,
-        height: 160
-      }),
-      createAnnotationItem('card-4', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 180,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 220, 120),
+      createCardItem('card-2', 280, 40, 220, 120),
+      createCardItem('card-3', 40, 180, 260, 160),
+      createCardItem('card-4', 280, 180, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const sizeActionIds = proposal.actions
@@ -9073,40 +4435,13 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved grid alignment actions by recentering drifting cards', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 214,
-        height: 114
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 44,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 44,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-4', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 180,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 214, 114),
+      createCardItem('card-2', 280, 44, 220, 120),
+      createCardItem('card-3', 44, 180, 220, 120),
+      createCardItem('card-4', 280, 180, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const alignmentActionIds = proposal.actions
@@ -9144,54 +4479,15 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved 2x3 grid gutter actions by restoring the drifting row spacing only', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 520,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-4', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-5', {
-        shape: 'rounded-rect',
-        x: 284,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-6', {
-        shape: 'rounded-rect',
-        x: 518,
-        y: 180,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 220, 120),
+      createCardItem('card-2', 280, 40, 220, 120),
+      createCardItem('card-3', 520, 40, 220, 120),
+      createCardItem('card-4', 40, 180, 220, 120),
+      createCardItem('card-5', 284, 180, 220, 120),
+      createCardItem('card-6', 518, 180, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const gutterActionIds = proposal.actions
@@ -9246,75 +4542,18 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved 3-column multi-row matrix actions by re-centering drifting blocks only', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 520,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-4', {
-        shape: 'rounded-rect',
-        x: 52,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-5', {
-        shape: 'rounded-rect',
-        x: 292,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-6', {
-        shape: 'rounded-rect',
-        x: 532,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-7', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 320,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-8', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 320,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-9', {
-        shape: 'rounded-rect',
-        x: 520,
-        y: 320,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 220, 120),
+      createCardItem('card-2', 280, 40, 220, 120),
+      createCardItem('card-3', 520, 40, 220, 120),
+      createCardItem('card-4', 52, 180, 220, 120),
+      createCardItem('card-5', 292, 180, 220, 120),
+      createCardItem('card-6', 532, 180, 220, 120),
+      createCardItem('card-7', 40, 320, 220, 120),
+      createCardItem('card-8', 280, 320, 220, 120),
+      createCardItem('card-9', 520, 320, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const centerActionIds = proposal.actions
@@ -9369,75 +4608,18 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved 3-column multi-row matrix gutter actions by restoring the drifting row spacing only', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 520,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-4', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-5', {
-        shape: 'rounded-rect',
-        x: 288,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-6', {
-        shape: 'rounded-rect',
-        x: 526,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-7', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 320,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-8', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 320,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-9', {
-        shape: 'rounded-rect',
-        x: 520,
-        y: 320,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 220, 120),
+      createCardItem('card-2', 280, 40, 220, 120),
+      createCardItem('card-3', 520, 40, 220, 120),
+      createCardItem('card-4', 40, 180, 220, 120),
+      createCardItem('card-5', 288, 180, 220, 120),
+      createCardItem('card-6', 526, 180, 220, 120),
+      createCardItem('card-7', 40, 320, 220, 120),
+      createCardItem('card-8', 280, 320, 220, 120),
+      createCardItem('card-9', 520, 320, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const gutterActionIds = proposal.actions
@@ -9488,96 +4670,21 @@ describe('designInspectionWorkflow', () => {
 
   it('applies approved 3-column multi-row matrix row-rhythm actions by restoring the drifting row top only', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 520,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-4', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-5', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-6', {
-        shape: 'rounded-rect',
-        x: 520,
-        y: 180,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-7', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 320,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-8', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 320,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-9', {
-        shape: 'rounded-rect',
-        x: 520,
-        y: 320,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-10', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 472,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-11', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 472,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-12', {
-        shape: 'rounded-rect',
-        x: 520,
-        y: 472,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 220, 120),
+      createCardItem('card-2', 280, 40, 220, 120),
+      createCardItem('card-3', 520, 40, 220, 120),
+      createCardItem('card-4', 40, 180, 220, 120),
+      createCardItem('card-5', 280, 180, 220, 120),
+      createCardItem('card-6', 520, 180, 220, 120),
+      createCardItem('card-7', 40, 320, 220, 120),
+      createCardItem('card-8', 280, 320, 220, 120),
+      createCardItem('card-9', 520, 320, 220, 120),
+      createCardItem('card-10', 40, 472, 220, 120),
+      createCardItem('card-11', 280, 472, 220, 120),
+      createCardItem('card-12', 520, 472, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const rowRhythmActionIds = proposal.actions
@@ -9630,75 +4737,18 @@ describe('designInspectionWorkflow', () => {
 
   it('applies broader variable-width matrix left-track actions by restoring the drifting column anchor only', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 180,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 260,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 560,
-        y: 40,
-        width: 180,
-        height: 120
-      }),
-      createAnnotationItem('card-4', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 180,
-        width: 200,
-        height: 120
-      }),
-      createAnnotationItem('card-5', {
-        shape: 'rounded-rect',
-        x: 274,
-        y: 180,
-        width: 240,
-        height: 120
-      }),
-      createAnnotationItem('card-6', {
-        shape: 'rounded-rect',
-        x: 560,
-        y: 180,
-        width: 200,
-        height: 120
-      }),
-      createAnnotationItem('card-7', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 320,
-        width: 160,
-        height: 120
-      }),
-      createAnnotationItem('card-8', {
-        shape: 'rounded-rect',
-        x: 260,
-        y: 320,
-        width: 260,
-        height: 120
-      }),
-      createAnnotationItem('card-9', {
-        shape: 'rounded-rect',
-        x: 560,
-        y: 320,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 180, 120),
+      createCardItem('card-2', 260, 40, 220, 120),
+      createCardItem('card-3', 560, 40, 180, 120),
+      createCardItem('card-4', 40, 180, 200, 120),
+      createCardItem('card-5', 274, 180, 240, 120),
+      createCardItem('card-6', 560, 180, 200, 120),
+      createCardItem('card-7', 40, 320, 160, 120),
+      createCardItem('card-8', 260, 320, 260, 120),
+      createCardItem('card-9', 560, 320, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const leftTrackActionIds = proposal.actions
@@ -9735,75 +4785,18 @@ describe('designInspectionWorkflow', () => {
 
   it('applies broader variable-width matrix right-track actions by restoring the drifting right anchor only', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 180,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 560,
-        y: 40,
-        width: 180,
-        height: 120
-      }),
-      createAnnotationItem('card-4', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 180,
-        width: 200,
-        height: 120
-      }),
-      createAnnotationItem('card-5', {
-        shape: 'rounded-rect',
-        x: 274,
-        y: 180,
-        width: 240,
-        height: 120
-      }),
-      createAnnotationItem('card-6', {
-        shape: 'rounded-rect',
-        x: 560,
-        y: 180,
-        width: 200,
-        height: 120
-      }),
-      createAnnotationItem('card-7', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 320,
-        width: 160,
-        height: 120
-      }),
-      createAnnotationItem('card-8', {
-        shape: 'rounded-rect',
-        x: 220,
-        y: 320,
-        width: 280,
-        height: 120
-      }),
-      createAnnotationItem('card-9', {
-        shape: 'rounded-rect',
-        x: 560,
-        y: 320,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 180, 120),
+      createCardItem('card-2', 280, 40, 220, 120),
+      createCardItem('card-3', 560, 40, 180, 120),
+      createCardItem('card-4', 40, 180, 200, 120),
+      createCardItem('card-5', 274, 180, 240, 120),
+      createCardItem('card-6', 560, 180, 200, 120),
+      createCardItem('card-7', 40, 320, 160, 120),
+      createCardItem('card-8', 220, 320, 280, 120),
+      createCardItem('card-9', 560, 320, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const rightTrackActionIds = proposal.actions
@@ -9840,75 +4833,18 @@ describe('designInspectionWorkflow', () => {
 
   it('applies broader variable-width matrix center-track actions by restoring the drifting column center only', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 180,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 560,
-        y: 40,
-        width: 180,
-        height: 120
-      }),
-      createAnnotationItem('card-4', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 180,
-        width: 200,
-        height: 120
-      }),
-      createAnnotationItem('card-5', {
-        shape: 'rounded-rect',
-        x: 282,
-        y: 180,
-        width: 240,
-        height: 120
-      }),
-      createAnnotationItem('card-6', {
-        shape: 'rounded-rect',
-        x: 560,
-        y: 180,
-        width: 200,
-        height: 120
-      }),
-      createAnnotationItem('card-7', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 320,
-        width: 160,
-        height: 120
-      }),
-      createAnnotationItem('card-8', {
-        shape: 'rounded-rect',
-        x: 260,
-        y: 320,
-        width: 260,
-        height: 120
-      }),
-      createAnnotationItem('card-9', {
-        shape: 'rounded-rect',
-        x: 560,
-        y: 320,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 180, 120),
+      createCardItem('card-2', 280, 40, 220, 120),
+      createCardItem('card-3', 560, 40, 180, 120),
+      createCardItem('card-4', 40, 180, 200, 120),
+      createCardItem('card-5', 282, 180, 240, 120),
+      createCardItem('card-6', 560, 180, 200, 120),
+      createCardItem('card-7', 40, 320, 160, 120),
+      createCardItem('card-8', 260, 320, 260, 120),
+      createCardItem('card-9', 560, 320, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const centerTrackActionIds = proposal.actions
@@ -9945,75 +4881,18 @@ describe('designInspectionWorkflow', () => {
 
   it('applies mixed-anchor row-drift actions by shifting the whole row without disturbing other rows', () => {
     const items: CanvasItem[] = [
-      createAnnotationItem('card-1', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 40,
-        width: 180,
-        height: 120
-      }),
-      createAnnotationItem('card-2', {
-        shape: 'rounded-rect',
-        x: 280,
-        y: 40,
-        width: 220,
-        height: 120
-      }),
-      createAnnotationItem('card-3', {
-        shape: 'rounded-rect',
-        x: 600,
-        y: 40,
-        width: 180,
-        height: 120
-      }),
-      createAnnotationItem('card-4', {
-        shape: 'rounded-rect',
-        x: 52,
-        y: 180,
-        width: 200,
-        height: 120
-      }),
-      createAnnotationItem('card-5', {
-        shape: 'rounded-rect',
-        x: 282,
-        y: 180,
-        width: 240,
-        height: 120
-      }),
-      createAnnotationItem('card-6', {
-        shape: 'rounded-rect',
-        x: 592,
-        y: 180,
-        width: 200,
-        height: 120
-      }),
-      createAnnotationItem('card-7', {
-        shape: 'rounded-rect',
-        x: 40,
-        y: 320,
-        width: 160,
-        height: 120
-      }),
-      createAnnotationItem('card-8', {
-        shape: 'rounded-rect',
-        x: 260,
-        y: 320,
-        width: 260,
-        height: 120
-      }),
-      createAnnotationItem('card-9', {
-        shape: 'rounded-rect',
-        x: 560,
-        y: 320,
-        width: 220,
-        height: 120
-      })
+      createCardItem('card-1', 40, 40, 180, 120),
+      createCardItem('card-2', 280, 40, 220, 120),
+      createCardItem('card-3', 600, 40, 180, 120),
+      createCardItem('card-4', 52, 180, 200, 120),
+      createCardItem('card-5', 282, 180, 240, 120),
+      createCardItem('card-6', 592, 180, 200, 120),
+      createCardItem('card-7', 40, 320, 160, 120),
+      createCardItem('card-8', 260, 320, 260, 120),
+      createCardItem('card-9', 560, 320, 220, 120)
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const rowDriftActionIds = proposal.actions
@@ -10066,11 +4945,8 @@ describe('designInspectionWorkflow', () => {
       createAnnotationItem('card-2', { shape: 'rect', x: 40, y: 168 }),
       createAnnotationItem('card-3', { shape: 'rounded-rect', x: 40, y: 296 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const radiusActionIds = proposal.actions

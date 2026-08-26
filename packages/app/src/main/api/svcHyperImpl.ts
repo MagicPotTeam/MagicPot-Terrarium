@@ -69,6 +69,30 @@ const LEGACY_MANAGER_CHANNEL_URLS = new Set([
 const COMFY_HTTP_CHECK_TIMEOUT_MS = 2500
 const COMFY_HTTP_EXISTING_PROCESS_ATTEMPTS = 10
 const COMFY_HTTP_EXISTING_PROCESS_INTERVAL_MS = 500
+let managedComfyStartup: Promise<void> | null = null
+
+type ProcessLogStatus = 'running' | 'error'
+
+export function createProcessLoggers<T>(
+  prefix: string,
+  build: (status: ProcessLogStatus, logLine: string) => T,
+  onData: (data: T) => void
+): { logInfo: (message: string) => void; logError: (message: string) => void } {
+  const write = (
+    status: ProcessLogStatus,
+    message: string,
+    logger: (line: string) => void
+  ): void => {
+    const logLine = `${prefix}${message}`
+    logger(logLine)
+    onData(build(status, logLine))
+  }
+  return {
+    logInfo: (message) => write('running', message, (line) => console.log(line)),
+    logError: (message) => write('error', message, (line) => console.error(line))
+  }
+}
+
 const WINDOWS_RESERVED_FILE_NAMES = new Set([
   'con',
   'prn',
@@ -387,38 +411,40 @@ export class HyperSvcImpl implements HyperSvc {
     _req: StartComfyUIReq,
     resp: ServerStreaming<StartComfyUIResp>
   ): Promise<void> {
+    if (managedComfyStartup) {
+      resp.onData({
+        pid: 0,
+        command: 'comfyui',
+        status: 'running',
+        logLine: '[comfyui] startup is already in progress'
+      })
+      return managedComfyStartup
+    }
+
+    managedComfyStartup = this.startManagedComfyUI(resp).finally(() => {
+      managedComfyStartup = null
+    })
+    return managedComfyStartup
+  }
+
+  private async startManagedComfyUI(resp: ServerStreaming<StartComfyUIResp>): Promise<void> {
     let pid = 0
     let command = ''
-
-    const logInfo = (msg: string) => {
-      console.log('[comfyui] ' + msg)
-      resp.onData({
-        pid,
-        command,
-        status: 'running',
-        logLine: '[comfyui] ' + msg
-      })
-    }
-
-    const logError = (msg: string) => {
-      console.error('[comfyui] ' + msg)
-      resp.onData({
-        pid,
-        command,
-        status: 'error',
-        logLine: '[comfyui] ' + msg
-      })
-    }
+    const { logInfo, logError } = createProcessLoggers(
+      '[comfyui] ',
+      (status, logLine) => ({ pid, command, status, logLine }),
+      resp.onData
+    )
 
     const config = getConfig()
     const buildEnv = getBuildEnv()
     const configUtils = new ConfigUtils(config, buildEnv, path)
 
-    const [comfyUIDirRaw, confyUIDirAvailable] = configUtils.getComfyUIDir()
+    const [comfyUIDirRaw, confyUIDirAvailable] = configUtils.getManagedComfyUIDir()
     if (!confyUIDirAvailable) {
       logError('comfyUIDir is not available')
     }
-    const [pythonCmdRaw, pythonCmdAvailable] = configUtils.getPythonCmd()
+    const [pythonCmdRaw, pythonCmdAvailable] = configUtils.getManagedPythonCmd()
     if (!pythonCmdAvailable) {
       logError('pythonCmd is not available')
     }
@@ -437,7 +463,7 @@ export class HyperSvcImpl implements HyperSvc {
       : path.join(appRoot, pythonCmdRaw)
 
     const comfyMain = path.join(comfyUIDir, 'main.py')
-    const comfyArgs = configUtils.getComfyUIArgs()
+    const comfyArgs = configUtils.getManagedComfyUIArgs()
 
     // 检测是否是 ComfyUI-aki-v2
     // 从日志看，使用 python\python.exe 也能正常启动，所以统一不使用 -s 参数
@@ -461,7 +487,7 @@ export class HyperSvcImpl implements HyperSvc {
     logInfo('comfyMain: ' + comfyMain)
     logInfo('comfyArgs: ' + comfyArgs)
 
-    const comfyPort = configUtils.getComfyUIPort()
+    const comfyPort = configUtils.getManagedComfyUIPort()
     const existingPid = comfyPort
       ? await this.comfyPortDetect({})
           .then((result) => result.pid)
@@ -576,7 +602,7 @@ export class HyperSvcImpl implements HyperSvc {
     const buildEnv = getBuildEnv()
     const configUtils = new ConfigUtils(config, buildEnv, path)
 
-    const comfyPort = configUtils.getComfyUIPort()
+    const comfyPort = configUtils.getManagedComfyUIPort()
     if (comfyPort === '') {
       throw new Error('can not get comfy port from config')
     }
@@ -684,28 +710,11 @@ export class HyperSvcImpl implements HyperSvc {
   ): Promise<void> => {
     let pid = 0
     const command = req.command + ' ' + req.args.join(' ')
-
-    const logInfo = (msg: string) => {
-      console.log(`[${req.name}] ` + msg)
-      resp.onData({
-        pid,
-        name: req.name,
-        command: command,
-        status: 'running',
-        logLine: `[${req.name}] ` + msg
-      })
-    }
-
-    const logError = (msg: string) => {
-      console.error(`[${req.name}] ` + msg)
-      resp.onData({
-        pid,
-        name: req.name,
-        command: command,
-        status: 'error',
-        logLine: `[${req.name}] ` + msg
-      })
-    }
+    const { logInfo, logError } = createProcessLoggers(
+      `[${req.name}] `,
+      (status, logLine) => ({ pid, name: req.name, command, status, logLine }),
+      resp.onData
+    )
 
     logInfo('start process...')
 
@@ -752,26 +761,11 @@ export class HyperSvcImpl implements HyperSvc {
     resp: ServerStreaming<ConnectSubProcessResp>
   ): Promise<void> {
     const pid = req.pid
-
-    const logInfo = (msg: string) => {
-      console.log('[comfyui] ' + msg)
-      resp.onData({
-        pid,
-        command: 'comfyui',
-        status: 'running',
-        logLine: '[comfyui] ' + msg
-      })
-    }
-
-    const logError = (msg: string) => {
-      console.error('[comfyui] ' + msg)
-      resp.onData({
-        pid,
-        command: 'comfyui',
-        status: 'error',
-        logLine: '[comfyui] ' + msg
-      })
-    }
+    const { logInfo, logError } = createProcessLoggers(
+      '[comfyui] ',
+      (status, logLine) => ({ pid, command: 'comfyui', status, logLine }),
+      resp.onData
+    )
 
     await connectSubProcess({
       pid: req.pid,

@@ -11,7 +11,10 @@ import { DndProvider } from 'react-dnd'
 import { getAppDndManager } from './utils/dndManager'
 import ComfyLogBridge from './components/ComfyLogBridge'
 import ManagedComfyProcessBridge from './components/ManagedComfyProcessBridge'
+import { detectManagedComfyProcess } from './components/managedComfyDetectionCoordinator'
 import MagicAgentApprovalCenter from './components/MagicAgentApprovalCenter'
+import ComfyBatchJobCenter from './components/ComfyBatchJobCenter'
+import { ensureComfyBatchJobStore } from './pages/QuickAppPage/QAppExecutePanel/comfyBatchJobState'
 import { useComfyEventCallback } from './hooks/useComfyEvent'
 import { handleComfyExecutionActivityEvent } from './utils/comfyExecutionActivity'
 let hasHandledInitialComfyAutoStart = false
@@ -152,21 +155,16 @@ function shouldAutoStartLocalComfyUIInThisRuntime(): boolean {
 }
 
 function AutoStartLocalComfyUI(): null {
-  const { isReady, config, configUtils } = useConfig()
+  const { isReady, configUtils } = useConfig()
   const { state, setPid, setIsRunning, setIsManaged, addOutput } = useComfyProcess()
-  const comfyCommandAvailable = configUtils.isComfyUICommandAvailable()
+  const comfyCommandAvailable = configUtils.isManagedComfyUICommandAvailable()
 
   useEffect(() => {
     if (!isReady || hasHandledInitialComfyAutoStart) {
       return
     }
 
-    if (
-      config.use_remote_comfyui ||
-      !comfyCommandAvailable ||
-      state.isRunning ||
-      !shouldAutoStartLocalComfyUIInThisRuntime()
-    ) {
+    if (!comfyCommandAvailable || state.isRunning || !shouldAutoStartLocalComfyUIInThisRuntime()) {
       hasHandledInitialComfyAutoStart = true
       return
     }
@@ -183,7 +181,7 @@ function AutoStartLocalComfyUI(): null {
     const startLocalComfyUI = async () => {
       let startedProcessStream = false
       try {
-        const { pid } = await api().svcHyper.comfyPortDetect({})
+        const { pid } = await detectManagedComfyProcess(() => api().svcHyper.comfyPortDetect({}))
         if (cancelled) {
           return
         }
@@ -241,7 +239,6 @@ function AutoStartLocalComfyUI(): null {
     }
   }, [
     isReady,
-    config.use_remote_comfyui,
     comfyCommandAvailable,
     state.isRunning,
     setPid,
@@ -258,13 +255,22 @@ function ComfyExecutionActivityBridge(): null {
   return null
 }
 
+function ComfyBatchJobStoreBridge(): null {
+  useEffect(() => {
+    ensureComfyBatchJobStore()
+  }, [])
+  return null
+}
+
 function App(): React.JSX.Element {
   return (
     <DndProvider manager={appDndManager}>
       <HashRouter>
         <DeferredComfyStartupBridges />
         <CanvasProjectDropBridge />
+        <ComfyBatchJobStoreBridge />
         <MagicAgentApprovalCenter />
+        <ComfyBatchJobCenter />
         <Layout />
       </HashRouter>
     </DndProvider>

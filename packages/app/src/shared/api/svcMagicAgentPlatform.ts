@@ -633,13 +633,7 @@ export type MagicAgentPlatformToolCallResp = {
 }
 
 export type MagicAgentPlatformRunStatus =
-  | 'pending'
-  | 'running'
-  | 'completed'
-  | 'failed'
-  | 'aborted'
-  | 'timeout'
-  | 'permission_denied'
+  'pending' | 'running' | 'completed' | 'failed' | 'aborted' | 'timeout' | 'permission_denied'
 
 export type MagicAgentPlatformRunEvent = {
   eventId: string
@@ -832,11 +826,7 @@ export type MagicAgentPlatformSessionDiffResp = Readonly<{
   rightSessionKey: string
   relationship: Readonly<{
     relationship:
-      | 'same'
-      | 'left-forked-from-right'
-      | 'right-forked-from-left'
-      | 'related-forks'
-      | 'unrelated'
+      'same' | 'left-forked-from-right' | 'right-forked-from-left' | 'related-forks' | 'unrelated'
     commonSourceSessionKey?: string
   }>
   dimensions: Readonly<
@@ -2138,6 +2128,19 @@ const exact = (value: unknown, label: string, fields: readonly string[]) => {
     if (!fields.includes(field)) throw issue(field, 'Unexpected field')
   return req
 }
+
+const validateGrantOptions = (data: Record<string, unknown>) => ({
+  ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
+  ...(data.expectedGrantUseCount === undefined
+    ? {}
+    : {
+        expectedGrantUseCount: requireNonNegativeInteger(
+          data.expectedGrantUseCount,
+          'expectedGrantUseCount'
+        )
+      })
+})
+
 const validateGetAgentInstanceReq = (value: unknown): MagicAgentPlatformGetAgentInstanceReq => ({
   instanceId: requireString(
     exact(value, 'getAgentInstance', ['instanceId']).instanceId,
@@ -2172,15 +2175,7 @@ const validateCreateRuntimeChannelReq = (
     },
     createdAt: requireFiniteNumber(data.createdAt, 'createdAt'),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 
@@ -2209,15 +2204,7 @@ const validateJoinRuntimeChannelReq = (value: unknown): MagicAgentPlatformJoinRu
     },
     joinedAt: requireFiniteNumber(data.joinedAt, 'joinedAt'),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 const validateLeaveRuntimeChannelReq = (
@@ -2238,15 +2225,7 @@ const validateLeaveRuntimeChannelReq = (
     memberId: requireString(data.memberId, 'memberId'),
     leftAt: requireFiniteNumber(data.leftAt, 'leftAt'),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 
@@ -2280,15 +2259,7 @@ const validateWireRuntimeChannelReq = (value: unknown): MagicAgentPlatformWireRu
       maxHops: requireNonNegativeInteger(wire.maxHops, 'wire.maxHops')
     },
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 const validateUnwireRuntimeChannelReq = (
@@ -2307,15 +2278,7 @@ const validateUnwireRuntimeChannelReq = (
     expectedRevision: requireNonNegativeInteger(data.expectedRevision, 'expectedRevision'),
     removedAt: requireFiniteNumber(data.removedAt, 'removedAt'),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 
@@ -2362,15 +2325,7 @@ const validatePublishRuntimeChannelMessageReq = (
       'expectedChannelRevision'
     ),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 
@@ -2394,15 +2349,7 @@ const validateClaimRuntimeChannelMessageReq = (
     claimedAt: requireFiniteNumber(data.claimedAt, 'claimedAt'),
     leaseMs: requireFiniteNumber(data.leaseMs, 'leaseMs'),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 const validateAcknowledgeRuntimeChannelMessageReq = (
@@ -2425,15 +2372,7 @@ const validateAcknowledgeRuntimeChannelMessageReq = (
     acknowledgedAt: requireFiniteNumber(data.acknowledgedAt, 'acknowledgedAt'),
     token: requireString(data.token, 'token'),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 
@@ -2455,15 +2394,7 @@ const validateCreateTeamReq = (value: unknown): MagicAgentPlatformCreateTeamReq 
       createdAt: requireFiniteNumber(team.createdAt, 'team.createdAt')
     },
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 const validateAddTeamMemberReq = (value: unknown): MagicAgentPlatformAddTeamMemberReq => {
@@ -2488,15 +2419,7 @@ const validateAddTeamMemberReq = (value: unknown): MagicAgentPlatformAddTeamMemb
       joinedAt: requireFiniteNumber(member.joinedAt, 'member.joinedAt')
     },
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 const validateReplaceTeamReq = (value: unknown): MagicAgentPlatformReplaceTeamReq => {
@@ -2529,15 +2452,7 @@ const validateReplaceTeamReq = (value: unknown): MagicAgentPlatformReplaceTeamRe
       }
     }),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 const validateTeamLifecycleReq = (value: unknown): MagicAgentPlatformTeamLifecycleReq => {
@@ -2576,15 +2491,7 @@ const validateRemoveTeamReq = (value: unknown): MagicAgentPlatformRemoveTeamReq 
     expectedRevision: requireNonNegativeInteger(data.expectedRevision, 'expectedRevision'),
     removedAt: requireFiniteNumber(data.removedAt, 'removedAt'),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 const validateRemoveTeamMemberReq = (value: unknown): MagicAgentPlatformRemoveTeamMemberReq => {
@@ -2603,15 +2510,7 @@ const validateRemoveTeamMemberReq = (value: unknown): MagicAgentPlatformRemoveTe
     memberId: requireString(data.memberId, 'memberId'),
     removedAt: requireFiniteNumber(data.removedAt, 'removedAt'),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 
@@ -2629,15 +2528,7 @@ const validateCreateRootAgentInstanceReq = (
     instance: validateAgentInstanceState(req.instance),
     createdAt: requireFiniteNumber(req.createdAt, 'createdAt'),
     idempotencyKey: requireString(req.idempotencyKey, 'idempotencyKey'),
-    ...(req.grantId === undefined ? {} : { grantId: requireString(req.grantId, 'grantId') }),
-    ...(req.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            req.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(req)
   }
 }
 const validateCreateChildAgentInstanceReq = (
@@ -2667,15 +2558,7 @@ const validateCreateChildAgentInstanceReq = (
     instance: child,
     createdAt: requireFiniteNumber(req.createdAt, 'createdAt'),
     idempotencyKey: requireString(req.idempotencyKey, 'idempotencyKey'),
-    ...(req.grantId === undefined ? {} : { grantId: requireString(req.grantId, 'grantId') }),
-    ...(req.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            req.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(req)
   }
 }
 const validateStartAgentInstanceReq = (value: unknown): MagicAgentPlatformStartAgentInstanceReq => {
@@ -2692,15 +2575,7 @@ const validateStartAgentInstanceReq = (value: unknown): MagicAgentPlatformStartA
     expectedRevision: requireNonNegativeInteger(req.expectedRevision, 'expectedRevision'),
     request: validateRunAgentReq(req.request),
     idempotencyKey: requireString(req.idempotencyKey, 'idempotencyKey'),
-    ...(req.grantId === undefined ? {} : { grantId: requireString(req.grantId, 'grantId') }),
-    ...(req.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            req.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(req)
   }
 }
 const configReq = (
@@ -2727,15 +2602,7 @@ const configReq = (
     ...(includeVersion
       ? { configVersion: requireString(data.configVersion, 'configVersion') }
       : {}),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 const validateCreateAgentConfigVersionReq = (
@@ -2848,15 +2715,7 @@ const validateCreateAgentConfigVersionReq = (
       createdAt: requireFiniteNumber(config.createdAt, 'config.createdAt')
     },
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 
@@ -2889,15 +2748,7 @@ const validatePauseAgentInstanceReq = (value: unknown): MagicAgentPlatformPauseA
     instanceId: requireString(data.instanceId, 'instanceId'),
     expectedRevision: requireNonNegativeInteger(data.expectedRevision, 'expectedRevision'),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 const validateResumeAgentInstanceReq = (value: unknown): MagicAgentPlatformResumeAgentInstanceReq =>
@@ -2948,15 +2799,7 @@ const validateReplaceAgentInstanceReq = (
     configVersion: requireString(data.configVersion, 'configVersion'),
     replacedAt: requireFiniteNumber(data.replacedAt, 'replacedAt'),
     idempotencyKey: requireString(data.idempotencyKey, 'idempotencyKey'),
-    ...(data.grantId === undefined ? {} : { grantId: requireString(data.grantId, 'grantId') }),
-    ...(data.expectedGrantUseCount === undefined
-      ? {}
-      : {
-          expectedGrantUseCount: requireNonNegativeInteger(
-            data.expectedGrantUseCount,
-            'expectedGrantUseCount'
-          )
-        })
+    ...validateGrantOptions(data)
   }
 }
 const validateRemoveAgentInstanceReq = (

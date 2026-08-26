@@ -47,17 +47,22 @@ const createScheme = (id: string, updatedAt = '2026-04-12T00:00:00.000Z'): Autom
 describe('AutomationSchemeFSCli', () => {
   const tempRoots: string[] = []
 
+  const createTempRoot = async (label: string) => {
+    const tempRoot = await createNodeTestArtifactDir(label)
+    tempRoots.push(tempRoot)
+    await fs.rm(tempRoot, { recursive: true, force: true })
+    return tempRoot
+  }
+
   afterEach(async () => {
     await Promise.all(tempRoots.map((root) => fs.rm(root, { recursive: true, force: true })))
     tempRoots.length = 0
   })
 
   it('writes schemes into the independent definition directory and suffix', async () => {
-    const tempRoot = await createNodeTestArtifactDir('automation-scheme-save')
-    tempRoots.push(tempRoot)
+    const tempRoot = await createTempRoot('automation-scheme-save')
 
     const dataDir = path.join(tempRoot, 'userData')
-    await fs.rm(tempRoot, { recursive: true, force: true })
     await fs.mkdir(dataDir, { recursive: true })
 
     const scheme = createScheme('automation-1')
@@ -82,12 +87,10 @@ describe('AutomationSchemeFSCli', () => {
   })
 
   it('does not import legacy .check.json files from customChecks', async () => {
-    const tempRoot = await createNodeTestArtifactDir('automation-scheme-check-legacy')
-    tempRoots.push(tempRoot)
+    const tempRoot = await createTempRoot('automation-scheme-check-legacy')
 
     const legacyDir = path.join(tempRoot, 'workspace', 'customChecks')
     const dataDir = path.join(tempRoot, 'userData')
-    await fs.rm(tempRoot, { recursive: true, force: true })
     await fs.mkdir(legacyDir, { recursive: true })
 
     const scheme = createScheme('automation-check-legacy')
@@ -114,12 +117,10 @@ describe('AutomationSchemeFSCli', () => {
   })
 
   it('does not import legacy .automation.json files from the old automationSchemes directory', async () => {
-    const tempRoot = await createNodeTestArtifactDir('automation-scheme-automation-legacy')
-    tempRoots.push(tempRoot)
+    const tempRoot = await createTempRoot('automation-scheme-automation-legacy')
 
     const legacyDir = path.join(tempRoot, 'userData', 'automationSchemes')
     const dataDir = path.join(tempRoot, 'userData')
-    await fs.rm(tempRoot, { recursive: true, force: true })
     await fs.mkdir(legacyDir, { recursive: true })
 
     const scheme = createScheme('automation-json-legacy')
@@ -146,13 +147,11 @@ describe('AutomationSchemeFSCli', () => {
   })
 
   it('lists only the independent definition directory when legacy files also exist', async () => {
-    const tempRoot = await createNodeTestArtifactDir('automation-scheme-mixed-state')
-    tempRoots.push(tempRoot)
+    const tempRoot = await createTempRoot('automation-scheme-mixed-state')
 
     const legacyDir = path.join(tempRoot, 'workspace', 'customChecks')
     const dataDir = path.join(tempRoot, 'userData')
     const definitionDir = path.join(dataDir, AUTOMATION_SCHEME_DEFINITION_DIR_NAME)
-    await fs.rm(tempRoot, { recursive: true, force: true })
     await fs.mkdir(legacyDir, { recursive: true })
     await fs.mkdir(definitionDir, { recursive: true })
 

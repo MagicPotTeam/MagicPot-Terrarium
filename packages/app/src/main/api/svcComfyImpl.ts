@@ -35,6 +35,7 @@ import {
 } from '@shared/api/svcComfy'
 import { ComfyEvent } from '@shared/comfy/events'
 import { ComfyHttpCli } from '../comfy/http'
+import { getComfyInstancePool } from '../comfy/comfyInstancePool'
 import { ComfyCliWrapper, waitPromptId } from '../comfy/logic'
 import {
   addTask,
@@ -158,6 +159,128 @@ function resolveWorkflowClientId(req: SubmitWorkflowReq): string {
   return `magicpot-workflow-${crypto.randomUUID()}`
 }
 
+function isComfyEndpointFailure(error: unknown): boolean {
+  if (error instanceof TypeError) return true
+  if (!(error instanceof Error)) return false
+  return /(?:fetch failed|network|econn|etimedout|socket|timed? ?out|http(?: error)?!?(?: status)?\s*[:=]?\s*(?:404|408|425|429|5\d\d))/iu.test(
+    error.message
+  )
+}
+
+async function importOutputImageFromCli(
+  cli: ComfyHttpCli,
+  filename: string,
+  subfolder: string
+): Promise<ImportOutputImageResp> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), COMFY_OUTPUT_IMPORT_TIMEOUT_MS)
+  try {
+    const response = await cli.viewResponse(
+      { filename, subfolder, type: 'output' },
+      controller.signal
+    )
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error('ComfyUI view redirect rejected')
+    }
+    if (!response.ok) throw new Error(`ComfyUI view failed with HTTP ${response.status}`)
+    const mimeType = String(response.headers.get('content-type') || '')
+      .split(';', 1)[0]
+      .trim()
+      .toLowerCase()
+    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mimeType)) {
+      throw new ManagedMediaImportError(
+        'MANAGED_MEDIA_UNSUPPORTED',
+        'ComfyUI view returned an unsupported image type'
+      )
+    }
+    const contentLengthHeader = response.headers.get('content-length')
+    const contentLength = contentLengthHeader == null ? null : Number(contentLengthHeader)
+    if (
+      contentLengthHeader != null &&
+      (!/^\d+$/u.test(contentLengthHeader) || !Number.isSafeInteger(contentLength))
+    ) {
+      throw new ManagedMediaImportError(
+        'MANAGED_MEDIA_INVALID',
+        'ComfyUI view returned an invalid content length'
+      )
+    }
+    if (contentLength != null && contentLength > DEFAULT_MANAGED_MEDIA_MAX_BYTES) {
+      controller.abort()
+      throw new Error(`ComfyUI output exceeds the ${DEFAULT_MANAGED_MEDIA_MAX_BYTES} byte limit`)
+    }
+    if (!response.body) throw new Error('ComfyUI view returned an empty body')
+    const authorizedRoot = getChatMediaDir()
+    // Global content-addressed storage is intentional. Session/lifecycle ownership lives in
+    // persisted references, not renderer-provided directory isolation.
+    const imported = await importManagedMediaStream(
+      {
+        chatMediaRoot: path.join(authorizedRoot, 'comfy-outputs', 'global'),
+        stream: Readable.fromWeb(
+          response.body as import('node:stream/web').ReadableStream<Uint8Array>
+        ),
+        mimeType,
+        originalFileName: filename,
+        provenance: { source: 'comfy-output', filename, subfolder, type: 'output' },
+        maxBytes: DEFAULT_MANAGED_MEDIA_MAX_BYTES,
+        signal: controller.signal
+      },
+      { authorizedRoot }
+    )
+    const importedReference = imported.reference
+    const importedMimeType = importedReference.mimeType
+    const importedSizeBytes = importedReference.sizeBytes
+    const importedFileName = importedReference.originalFileName
+    if (
+      typeof importedMimeType !== 'string' ||
+      !importedMimeType ||
+      !Number.isSafeInteger(importedSizeBytes) ||
+      (importedSizeBytes ?? -1) < 0 ||
+      typeof importedFileName !== 'string' ||
+      !importedFileName
+    ) {
+      throw new ManagedMediaImportError(
+        'MANAGED_MEDIA_INVALID',
+        'Imported ComfyUI output metadata is invalid'
+      )
+    }
+    return {
+      reference: importedReference,
+      localMediaUrl: imported.localMediaUrl,
+      mimeType: importedMimeType,
+      sizeBytes: importedSizeBytes as number,
+      fileName: importedFileName
+    }
+  } finally {
+    clearTimeout(timeout)
+    controller.abort()
+  }
+}
+
+async function withComfyInstanceFailover<T>(
+  operation: (cli: ComfyHttpCli) => Promise<T>
+): Promise<T> {
+  const pool = getComfyInstancePool()
+  const instances = await pool.orderedAvailableInstances()
+  if (instances.length === 0) {
+    throw new Error('No compatible ComfyUI instance is available')
+  }
+  let lastError: unknown = null
+  for (const instance of instances) {
+    try {
+      const result = await operation(instance.client)
+      // Keep a subsequent queued prompt on the instance that received an
+      // eagerly uploaded input image or mask.
+      pool.preferBaseUrl?.(instance.profile.baseUrl)
+      return result
+    } catch (error) {
+      lastError = error
+      if (!isComfyEndpointFailure(error)) throw error
+      pool.invalidate()
+    }
+  }
+  throw lastError || new Error('ComfyUI request failed')
+}
+
 /**
  * 这个类大概率会被其他地方复用，
  * 要注意所有方法都用箭头函数的方式实现，
@@ -165,8 +288,13 @@ function resolveWorkflowClientId(req: SubmitWorkflowReq): string {
  */
 
 export class ComfySvcImpl implements ComfySvc {
-  private cli = () => new ComfyHttpCli()
+  private readonly defaultCli = () => new ComfyHttpCli()
+  private cli = this.defaultCli
   private watchQueueWarned = false
+
+  private usesInstancePool(): boolean {
+    return this.cli === this.defaultCli
+  }
 
   //////////////////////
   // 以下为一比一仿真的 ComfyUI API
@@ -177,15 +305,20 @@ export class ComfySvcImpl implements ComfySvc {
     return res
   }
   getObjectInfo = async (req: GetObjectInfoReq): Promise<GetObjectInfoResp> => {
-    // 为了保证 getObjectInfo 的返回值与 ComfyUI 的返回值一致，这里直接调用 ComfyUI 的 getObjectInfo 接口
-    const res = await this.cli().objectInfo()
+    const res = this.usesInstancePool()
+      ? await getComfyInstancePool().getObjectInfo(req.workflow)
+      : await this.cli().objectInfo()
     return res
   }
   getQueue = async (req: GetQueueReq): Promise<GetQueueResp> => {
     const queueState = getQueue()
+    const errorLength = queueState.error.length
     return {
       queue_running: queueState.running.map((task, index) => taskToComfyQueueItem(task, index)),
-      queue_pending: queueState.pending.map((task, index) => taskToComfyQueueItem(task, index))
+      queue_pending: queueState.pending.map((task, index) => taskToComfyQueueItem(task, index)),
+      queue_error: queueState.error
+        .slice(errorLength > 3 ? errorLength - 3 : 0)
+        .map((task, index) => taskToComfyQueueItem(task, index))
     }
   }
   postPrompt = async (req: PostPromptReq): Promise<PostPromptResp> => {
@@ -243,106 +376,53 @@ export class ComfySvcImpl implements ComfySvc {
     return {}
   }
   uploadImage = async (req: UploadImageReq): Promise<UploadImageResp> => {
-    // 现在不另外保存输入图片，直接调用 ComfyUI 的 uploadImage 接口
-    const res = await this.cli().uploadImage(req.fileItem, req.image)
+    const res = this.usesInstancePool()
+      ? await withComfyInstanceFailover((cli) => cli.uploadImage(req.fileItem, req.image))
+      : await this.cli().uploadImage(req.fileItem, req.image)
     return res
   }
   uploadMask = async (req: UploadMaskReq): Promise<UploadMaskResp> => {
-    // 现在不另外保存输入蒙版，直接调用 ComfyUI 的 uploadMask 接口
-    const res = await this.cli().uploadMask(req.fileItem, req.mask, req.original_ref)
+    const res = this.usesInstancePool()
+      ? await withComfyInstanceFailover((cli) =>
+          cli.uploadMask(req.fileItem, req.mask, req.original_ref)
+        )
+      : await this.cli().uploadMask(req.fileItem, req.mask, req.original_ref)
     return res
   }
   getView = async (req: GetViewReq): Promise<GetViewResp> => {
-    // 现在不另外保存声称结果，这里直接访问 ComfyUI 的 view 接口
-    const res = await this.cli().view(req)
+    const res = this.usesInstancePool()
+      ? await withComfyInstanceFailover((cli) => cli.view(req))
+      : await this.cli().view(req)
     return { result: res }
   }
   importOutputImage = async (req: ImportOutputImageReq): Promise<ImportOutputImageResp> => {
     if (!req || req.type !== 'output') throw new Error('ComfyUI output type must be output')
     const filename = validateComfyOutputFilename(req.filename)
     const subfolder = validateComfyOutputSubfolder(req.subfolder)
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), COMFY_OUTPUT_IMPORT_TIMEOUT_MS)
-    try {
-      const response = await this.cli().viewResponse(
-        { filename, subfolder, type: 'output' },
-        controller.signal
-      )
-      if (response.status >= 300 && response.status < 400) {
-        throw new Error('ComfyUI view redirect rejected')
-      }
-      if (!response.ok) throw new Error(`ComfyUI view failed with HTTP ${response.status}`)
-      const mimeType = String(response.headers.get('content-type') || '')
-        .split(';', 1)[0]
-        .trim()
-        .toLowerCase()
-      if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mimeType)) {
-        throw new ManagedMediaImportError(
-          'MANAGED_MEDIA_UNSUPPORTED',
-          'ComfyUI view returned an unsupported image type'
-        )
-      }
-      const contentLengthHeader = response.headers.get('content-length')
-      const contentLength = contentLengthHeader == null ? null : Number(contentLengthHeader)
-      if (
-        contentLengthHeader != null &&
-        (!/^\d+$/u.test(contentLengthHeader) || !Number.isSafeInteger(contentLength))
-      ) {
-        throw new ManagedMediaImportError(
-          'MANAGED_MEDIA_INVALID',
-          'ComfyUI view returned an invalid content length'
-        )
-      }
-      if (contentLength != null && contentLength > DEFAULT_MANAGED_MEDIA_MAX_BYTES) {
-        controller.abort()
-        throw new Error(`ComfyUI output exceeds the ${DEFAULT_MANAGED_MEDIA_MAX_BYTES} byte limit`)
-      }
-      if (!response.body) throw new Error('ComfyUI view returned an empty body')
-      const authorizedRoot = getChatMediaDir()
-      // Global content-addressed storage is intentional. Session/lifecycle ownership lives in
-      // persisted references, not renderer-provided directory isolation.
-      const imported = await importManagedMediaStream(
-        {
-          chatMediaRoot: path.join(authorizedRoot, 'comfy-outputs', 'global'),
-          stream: Readable.fromWeb(
-            response.body as import('node:stream/web').ReadableStream<Uint8Array>
-          ),
-          mimeType,
-          originalFileName: filename,
-          provenance: { source: 'comfy-output', filename, subfolder, type: 'output' },
-          maxBytes: DEFAULT_MANAGED_MEDIA_MAX_BYTES,
-          signal: controller.signal
-        },
-        { authorizedRoot }
-      )
-      const importedReference = imported.reference
-      const importedMimeType = importedReference.mimeType
-      const importedSizeBytes = importedReference.sizeBytes
-      const importedFileName = importedReference.originalFileName
-      if (
-        typeof importedMimeType !== 'string' ||
-        !importedMimeType ||
-        !Number.isSafeInteger(importedSizeBytes) ||
-        (importedSizeBytes ?? -1) < 0 ||
-        typeof importedFileName !== 'string' ||
-        !importedFileName
-      ) {
-        throw new ManagedMediaImportError(
-          'MANAGED_MEDIA_INVALID',
-          'Imported ComfyUI output metadata is invalid'
-        )
-      }
-      return {
-        reference: importedReference,
-        localMediaUrl: imported.localMediaUrl,
-        mimeType: importedMimeType,
-        sizeBytes: importedSizeBytes as number,
-        fileName: importedFileName
-      }
-    } finally {
-      clearTimeout(timeout)
-      controller.abort()
+    if (!this.usesInstancePool()) {
+      return importOutputImageFromCli(this.cli(), filename, subfolder)
     }
+
+    const pool = getComfyInstancePool()
+    const instances = await pool.orderedAvailableInstances()
+    if (instances.length === 0) {
+      throw new Error('No compatible ComfyUI instance is available')
+    }
+    let lastError: unknown = null
+    for (const instance of instances) {
+      try {
+        const result = await importOutputImageFromCli(instance.client, filename, subfolder)
+        pool.preferBaseUrl?.(instance.profile.baseUrl)
+        return result
+      } catch (error) {
+        lastError = error
+        if (error instanceof ManagedMediaImportError || !isComfyEndpointFailure(error)) {
+          throw error
+        }
+        pool.invalidate()
+      }
+    }
+    throw lastError || new Error('ComfyUI output import failed')
   }
   connectWs = async (req: ConnectWsReq, resp: ServerStreaming<ConnectWsResp>): Promise<void> => {
     const requestedClientId = normalizeComfyEventClientId(req.client_id)
@@ -377,7 +457,9 @@ export class ComfySvcImpl implements ComfySvc {
     // 处理缺失的 LoRA：获取可用 LoRA 列表，绕过不存在的 LoRA 节点
     let processedPrompt = normalizeExecutableWorkflow(req.prompt)
     try {
-      const objectInfo = await this.cli().objectInfo()
+      const objectInfo = this.usesInstancePool()
+        ? await getComfyInstancePool().getObjectInfo()
+        : await this.cli().objectInfo()
       const result = processWorkflowLoras(processedPrompt, objectInfo)
       processedPrompt = result.workflow
     } catch (error) {

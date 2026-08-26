@@ -25,6 +25,10 @@ vi.mock('./components/CanvasProjectDropBridge', () => ({
   default: () => null
 }))
 
+vi.mock('./components/ComfyBatchJobCenter', () => ({
+  default: () => null
+}))
+
 vi.mock('./components/Layout', () => ({
   default: () => <div data-testid="app-shell">App shell</div>
 }))
@@ -69,7 +73,7 @@ vi.mock('./hooks/useConfig', () => ({
       use_remote_comfyui: false
     },
     configUtils: {
-      isComfyUICommandAvailable: () => true
+      isManagedComfyUICommandAvailable: () => true
     }
   })
 }))
