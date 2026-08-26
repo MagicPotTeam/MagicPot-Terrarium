@@ -91,6 +91,14 @@ const completedAgentRun = (
   finishedAt: 2
 })
 
+const graphToolResult = (toolName: string, content: string) => ({
+  ok: true,
+  toolName,
+  source: 'magicAgentRuntime' as const,
+  status: 'ok' as const,
+  content
+})
+
 describe('MagicAgentGraphRuntime', () => {
   it('lists and inspects built-in team definitions', () => {
     const runtime = new MagicAgentGraphRuntime()
@@ -388,13 +396,7 @@ describe('MagicAgentGraphRuntime', () => {
       }
     ]
     graph.entryNodeIds = ['patch']
-    const callTool = vi.fn(async (request) => ({
-      ok: true,
-      toolName: request.name,
-      source: 'magicAgentRuntime' as const,
-      status: 'ok' as const,
-      content: 'patched'
-    }))
+    const callTool = vi.fn(async (request) => graphToolResult(request.name, 'patched'))
     const runtime = new MagicAgentGraphRuntime([], { callTool })
     runtime.create({ graph, route: testRoute })
 
@@ -506,13 +508,9 @@ describe('MagicAgentGraphRuntime', () => {
     const runAgent = vi.fn(async (req) =>
       completedAgentRun(req, `agent:${req.agentId}:${req.text}`)
     )
-    const callTool = vi.fn(async (req) => ({
-      ok: true,
-      toolName: req.name,
-      source: 'magicAgentRuntime' as const,
-      status: 'ok' as const,
-      content: `tool:${req.name}:${String(req.args?.input || '')}`
-    }))
+    const callTool = vi.fn(async (req) =>
+      graphToolResult(req.name, `tool:${req.name}:${String(req.args?.input || '')}`)
+    )
     const runtime = new MagicAgentGraphRuntime([], { runAgent, callTool })
     runtime.create({
       route: testRoute,
@@ -687,13 +685,9 @@ describe('MagicAgentGraphRuntime', () => {
     const runAgent = vi.fn(async (req) =>
       completedAgentRun(req, `agent:${req.agentId}:${req.text}`)
     )
-    const callTool = vi.fn(async (req) => ({
-      ok: true,
-      toolName: req.name,
-      source: 'magicAgentRuntime' as const,
-      status: 'ok' as const,
-      content: `tool:${req.name}:${String(req.args?.input || '')}`
-    }))
+    const callTool = vi.fn(async (req) =>
+      graphToolResult(req.name, `tool:${req.name}:${String(req.args?.input || '')}`)
+    )
     const runtime = new MagicAgentGraphRuntime([], { runAgent, callTool })
     runtime.create({
       route: testRoute,
