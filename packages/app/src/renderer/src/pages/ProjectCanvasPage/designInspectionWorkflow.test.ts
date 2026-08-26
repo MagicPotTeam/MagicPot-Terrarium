@@ -104,6 +104,20 @@ function createAnnotationItem(
   }
 }
 
+type DesignInspectionContextPackInput = Parameters<typeof buildDesignInspectionContextPack>[0]
+
+function buildContextPack(
+  input: Omit<DesignInspectionContextPackInput, 'task' | 'groups' | 'snapshotDataUrl'> &
+    Partial<Pick<DesignInspectionContextPackInput, 'task' | 'groups' | 'snapshotDataUrl'>>
+) {
+  return buildDesignInspectionContextPack({
+    task: 'Inspect the selected cards.',
+    groups: [],
+    snapshotDataUrl: null,
+    ...input
+  })
+}
+
 describe('designInspectionWorkflow', () => {
   it('builds a structure-first context pack with documents, references, rules, and fallback signals', () => {
     const items: CanvasItem[] = [
@@ -131,8 +145,7 @@ describe('designInspectionWorkflow', () => {
       })
     ]
 
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       projectId: 'canvas-1',
       projectName: 'MagicPot Demo',
       targetItems: items,
@@ -204,7 +217,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('preserves the actual file editability flag in context-pack documents', () => {
-    const contextPack = buildDesignInspectionContextPack({
+    const contextPack = buildContextPack({
       task: 'Inspect the selected docs.',
       targetItems: [
         createFileItem('readonly-brief', {
@@ -212,9 +225,7 @@ describe('designInspectionWorkflow', () => {
           previewText: 'Preview only',
           content: undefined
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     expect(contextPack.documents).toEqual([
@@ -227,8 +238,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts typography, alignment, and spacing fixes from structured canvas data', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createTextItem('title-1', { x: 40, y: 40 }),
         createTextItem('title-2', {
@@ -239,9 +249,7 @@ describe('designInspectionWorkflow', () => {
           fontWeight: 'normal'
         }),
         createTextItem('title-3', { x: 44, y: 196, fontSize: 24 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -256,15 +264,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts radius fixes from structured annotation corner styles', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', { shape: 'rounded-rect', x: 40, y: 40 }),
         createAnnotationItem('card-2', { shape: 'rect', x: 40, y: 168 }),
         createAnnotationItem('card-3', { shape: 'rounded-rect', x: 40, y: 296 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -289,8 +294,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('adds source-aware provenance narrative to the structure-first proposal when selection origins are known', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createTextItem('title-1', {
           x: 40,
@@ -312,9 +316,7 @@ describe('designInspectionWorkflow', () => {
             sourceFileName: 'headline-options.md'
           }
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -331,8 +333,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-title inset fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -358,9 +359,7 @@ describe('designInspectionWorkflow', () => {
           height: 120
         }),
         createTextItem('title-3', { x: 64, y: 380, width: 120, height: 32 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -403,8 +402,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-title centerline fixes when center alignment is more stable than left or right insets', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -430,9 +428,7 @@ describe('designInspectionWorkflow', () => {
           height: 120
         }),
         createTextItem('title-3', { x: 70, y: 380, width: 160, height: 32 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -463,8 +459,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-header meta right inset fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -517,9 +512,7 @@ describe('designInspectionWorkflow', () => {
           fontWeight: 'normal'
         }),
         createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -550,8 +543,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('still drafts body inset fixes when cards include a separate header meta text', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -604,9 +596,7 @@ describe('designInspectionWorkflow', () => {
           fontWeight: 'normal'
         }),
         createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -637,8 +627,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card meta-block value-column fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -784,9 +773,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -820,8 +807,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card badge-stack spacing fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -922,9 +908,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -961,8 +945,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card badge-stack spacing fixes above footer action rows', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -1087,9 +1070,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -1122,8 +1103,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts tail badge-stack spacing fixes when cards end with stacked badges', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -1200,9 +1180,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -1243,8 +1221,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts multi-column chip-group spacing fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -1441,9 +1418,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -1494,8 +1469,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft footer-action-ending chip-group fixes when footer action-row counts differ', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -1724,9 +1698,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -1746,8 +1718,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts footer-action-ending chip-group spacing fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -1968,9 +1939,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2031,8 +2000,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts body-plus-meta value-column fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -2181,9 +2149,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2213,8 +2179,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft body-plus-meta-with-footer-action value-column fixes for a nearby single-footer shape', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -2315,9 +2280,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2335,8 +2298,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts body-plus-meta-with-footer-action value-column fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -2509,9 +2471,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2550,8 +2510,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft badge-stack spacing fixes when cards include only one middle tag row', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -2628,9 +2587,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2647,8 +2604,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft badge-stack-above-action-row fixes when cards include only one badge row', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -2749,9 +2705,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2768,8 +2722,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft badge-stack-above-action-row fixes when footer action-row counts differ', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -2902,9 +2855,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -2923,8 +2874,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft multi-column chip-group fixes for two-column rows', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -3073,9 +3023,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3095,8 +3043,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft multi-column chip-group fixes when cards include only one chip row', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -3221,9 +3168,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3243,8 +3188,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-body inset fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -3273,9 +3217,7 @@ describe('designInspectionWorkflow', () => {
         }),
         createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3321,8 +3263,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft body-gap fixes when title heights vary but title-to-body spacing stays consistent', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -3351,9 +3292,7 @@ describe('designInspectionWorkflow', () => {
         }),
         createTextItem('title-3', { x: 64, y: 500, width: 120, height: 32 }),
         createTextItem('body-3', { x: 64, y: 544, width: 140, height: 28 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3369,8 +3308,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-footer bottom inset fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -3423,9 +3361,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3452,8 +3388,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-footer action-row spacing fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -3530,9 +3465,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3564,8 +3497,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts card-footer three-item action-row spacing fixes from structured container relationships', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -3666,9 +3598,7 @@ describe('designInspectionWorkflow', () => {
           fontSize: 16,
           fontWeight: 'normal'
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3700,15 +3630,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts centerline fixes for a text stack when center alignment is more stable than left or right edges', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createTextItem('title-1', { x: 80, y: 40, width: 120, height: 48 }),
         createTextItem('title-2', { x: 40, y: 128, width: 200, height: 48 }),
         createTextItem('title-3', { x: 86, y: 216, width: 120, height: 48 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3734,15 +3661,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts geometry fixes for inconsistent block widths inside a stack', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', { shape: 'rounded-rect', x: 40, y: 40, width: 220 }),
         createAnnotationItem('card-2', { shape: 'rounded-rect', x: 40, y: 168, width: 320 }),
         createAnnotationItem('card-3', { shape: 'rounded-rect', x: 40, y: 296, width: 220 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3765,8 +3689,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts geometry fixes for inconsistent block heights inside a stack', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -3789,9 +3712,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3816,8 +3737,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts right-edge alignment fixes for a stack when right bounds are more consistent than left bounds', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -3840,9 +3760,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3867,15 +3785,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts horizontal row fixes for top alignment and spacing from structured geometry', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', { shape: 'rounded-rect', x: 40, y: 40, width: 220 }),
         createAnnotationItem('card-2', { shape: 'rounded-rect', x: 280, y: 56, width: 220 }),
         createAnnotationItem('card-3', { shape: 'rounded-rect', x: 548, y: 44, width: 220 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3899,8 +3814,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts geometry fixes for inconsistent block heights inside a row', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -3923,9 +3837,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -3950,8 +3862,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts bottom-edge alignment fixes for a row when bottom bounds are more consistent than top bounds', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -3974,9 +3885,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4001,15 +3910,12 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts middle-line fixes for a text row when middle alignment is more stable than top or bottom edges', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createTextItem('title-1', { x: 40, y: 80, width: 80, height: 40 }),
         createTextItem('title-2', { x: 160, y: 40, width: 80, height: 120 }),
         createTextItem('title-3', { x: 280, y: 92, width: 80, height: 40 })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4035,8 +3941,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts geometry fixes for inconsistent block widths inside a row', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -4059,9 +3964,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4086,8 +3989,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts grid size fixes for inconsistent 2x2 card dimensions', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -4117,9 +4019,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4144,8 +4044,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts grid alignment fixes for drifting column centers and row middles', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -4175,9 +4074,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4219,8 +4116,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts 2x3 grid gutter fixes when one row compresses or stretches internal column gaps', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -4264,9 +4160,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4300,8 +4194,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft 2x3 grid gutter fixes for 2x2 selections', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -4331,9 +4224,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4353,8 +4244,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft 2x3 grid gutter fixes when column anchors already drift beyond tolerance', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -4398,9 +4288,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4420,8 +4308,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts 3-column multi-row matrix gutter fixes when one row drifts inside otherwise stable tracks', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -4486,9 +4373,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4530,8 +4415,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft 3-column multi-row matrix gutter fixes when the row is a whole-track centerline drift', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -4596,9 +4480,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4618,8 +4500,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts 3-column multi-row matrix row-rhythm fixes when one later row drifts off the dominant vertical step', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -4705,9 +4586,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4738,8 +4617,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft 3-column multi-row matrix row-rhythm fixes for ambiguous split-step matrices', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -4825,9 +4703,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4847,8 +4723,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts broader variable-width matrix left-track fixes when the exact helper is skipped', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -4913,9 +4788,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -4947,8 +4820,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft broader variable-width matrix left-track fixes for exact uniform-width matrices', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -5013,9 +4885,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5032,8 +4902,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts broader variable-width matrix right-track fixes when right anchors are more stable than left or center', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -5098,9 +4967,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5133,8 +5000,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft broader variable-width matrix right-track fixes for exact uniform-width matrices', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -5199,9 +5065,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5218,8 +5082,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts broader variable-width matrix center-track fixes when shared centers are more stable than left or right anchors', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -5284,9 +5147,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5324,8 +5185,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft broader variable-width matrix center-track fixes for exact uniform-width matrices', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -5390,9 +5250,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5409,8 +5267,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts mixed-anchor row-drift fixes when one variable-width matrix row slides horizontally as a whole', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -5475,9 +5332,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5521,8 +5376,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft mixed-anchor row-drift fixes when the row does not move as one coherent horizontal offset', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -5587,9 +5441,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5620,8 +5472,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('drafts 3-column multi-row matrix centerline fixes for drifting block centers', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -5686,9 +5537,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5715,8 +5564,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('does not draft 3-column multi-row matrix centerline fixes for exact 2x3 grids', () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createAnnotationItem('card-1', {
           shape: 'rounded-rect',
@@ -5760,9 +5608,7 @@ describe('designInspectionWorkflow', () => {
           width: 220,
           height: 120
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
 
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
@@ -5778,8 +5624,7 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('keeps structural actions intact when the agent rewrites only the narrative fields', async () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
+    const contextPack = buildContextPack({
       targetItems: [
         createTextItem('title-1', {
           x: 40,
@@ -5802,9 +5647,7 @@ describe('designInspectionWorkflow', () => {
             notes: 'Imported copy variant for review.'
           }
         })
-      ],
-      groups: [],
-      snapshotDataUrl: null
+      ]
     })
     const draftProposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const agentVersion = {
@@ -5884,11 +5727,8 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('accepts editable file content suggestions only when reviewer notes explicitly request copy updates', async () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [createFileItem('brief-1')],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: [createFileItem('brief-1')]
     })
     const draftProposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const llmProxy = {
@@ -5948,11 +5788,8 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('accepts editable file content suggestions when reviewer notes request copy updates in Chinese', async () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [createFileItem('brief-1')],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: [createFileItem('brief-1')]
     })
     const draftProposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const llmProxy = {
@@ -6002,11 +5839,8 @@ describe('designInspectionWorkflow', () => {
   })
 
   it('ignores file content suggestions when reviewer notes do not explicitly request copy updates', async () => {
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: [createFileItem('brief-1')],
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: [createFileItem('brief-1')]
     })
     const draftProposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const llmProxy = {
@@ -6048,11 +5882,8 @@ describe('designInspectionWorkflow', () => {
       }),
       createTextItem('title-3', { x: 44, y: 196 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const approval: DesignInspectionApproval = {
@@ -6196,11 +6027,8 @@ describe('designInspectionWorkflow', () => {
       }),
       createTextItem('title-3', { x: 44, y: 196 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const textStyleActionId = proposal.actions.find(
@@ -6239,11 +6067,8 @@ describe('designInspectionWorkflow', () => {
       createAnnotationItem('card-2', { shape: 'rounded-rect', x: 280, y: 56, width: 220 }),
       createAnnotationItem('card-3', { shape: 'rounded-rect', x: 548, y: 44, width: 220 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const rowActionIds = proposal.actions
@@ -6308,11 +6133,8 @@ describe('designInspectionWorkflow', () => {
       }),
       createTextItem('title-3', { x: 64, y: 380, width: 120, height: 32 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6380,11 +6202,8 @@ describe('designInspectionWorkflow', () => {
       }),
       createTextItem('title-3', { x: 70, y: 380, width: 160, height: 32 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6450,11 +6269,8 @@ describe('designInspectionWorkflow', () => {
       }),
       createTextItem('title-3', { x: 70, y: 380, width: 160, height: 32 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6523,11 +6339,8 @@ describe('designInspectionWorkflow', () => {
       createTextItem('title-3', { x: 64, y: 460, width: 120, height: 32 }),
       createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6626,11 +6439,8 @@ describe('designInspectionWorkflow', () => {
         fontWeight: 'normal'
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6753,11 +6563,8 @@ describe('designInspectionWorkflow', () => {
         fontWeight: 'normal'
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -6902,11 +6709,8 @@ describe('designInspectionWorkflow', () => {
         fontWeight: 'normal'
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7006,11 +6810,8 @@ describe('designInspectionWorkflow', () => {
       }),
       createTextItem('body-3', { x: 64, y: 504, width: 140, height: 28, fontWeight: 'normal' })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7200,11 +7001,8 @@ describe('designInspectionWorkflow', () => {
         fontWeight: 'normal'
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7434,11 +7232,8 @@ describe('designInspectionWorkflow', () => {
         fontWeight: 'normal'
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7601,11 +7396,8 @@ describe('designInspectionWorkflow', () => {
         fontWeight: 'normal'
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7732,11 +7524,8 @@ describe('designInspectionWorkflow', () => {
         fontWeight: 'normal'
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -7908,11 +7697,8 @@ describe('designInspectionWorkflow', () => {
         fontWeight: 'normal'
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -8162,11 +7948,8 @@ describe('designInspectionWorkflow', () => {
         fontWeight: 'normal'
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -8454,11 +8237,8 @@ describe('designInspectionWorkflow', () => {
         fontWeight: 'normal'
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -8675,11 +8455,8 @@ describe('designInspectionWorkflow', () => {
         fontWeight: 'normal'
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -8744,11 +8521,8 @@ describe('designInspectionWorkflow', () => {
       createTextItem('title-2', { x: 40, y: 128, width: 200, height: 48 }),
       createTextItem('title-3', { x: 86, y: 216, width: 120, height: 48 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -8786,11 +8560,8 @@ describe('designInspectionWorkflow', () => {
       createTextItem('title-2', { x: 160, y: 40, width: 80, height: 120 }),
       createTextItem('title-3', { x: 280, y: 92, width: 80, height: 40 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -8846,11 +8617,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const heightActionIds = proposal.actions
@@ -8905,11 +8673,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const widthActionIds = proposal.actions
@@ -8964,11 +8729,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const actionIds = proposal.actions
@@ -9035,11 +8797,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const sizeActionIds = proposal.actions
@@ -9102,11 +8861,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const alignmentActionIds = proposal.actions
@@ -9187,11 +8943,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const gutterActionIds = proposal.actions
@@ -9310,11 +9063,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const centerActionIds = proposal.actions
@@ -9433,11 +9183,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const gutterActionIds = proposal.actions
@@ -9573,11 +9320,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const rowRhythmActionIds = proposal.actions
@@ -9694,11 +9438,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const leftTrackActionIds = proposal.actions
@@ -9799,11 +9540,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const rightTrackActionIds = proposal.actions
@@ -9904,11 +9642,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const centerTrackActionIds = proposal.actions
@@ -10009,11 +9744,8 @@ describe('designInspectionWorkflow', () => {
         height: 120
       })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const rowDriftActionIds = proposal.actions
@@ -10066,11 +9798,8 @@ describe('designInspectionWorkflow', () => {
       createAnnotationItem('card-2', { shape: 'rect', x: 40, y: 168 }),
       createAnnotationItem('card-3', { shape: 'rounded-rect', x: 40, y: 296 })
     ]
-    const contextPack = buildDesignInspectionContextPack({
-      task: 'Inspect the selected cards.',
-      targetItems: items,
-      groups: [],
-      snapshotDataUrl: null
+    const contextPack = buildContextPack({
+      targetItems: items
     })
     const proposal = buildStructureFirstDesignInspectionProposal(contextPack)
     const radiusActionIds = proposal.actions
