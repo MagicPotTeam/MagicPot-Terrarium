@@ -1,28 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConfigUtils } from '@shared/config/configUtils'
-import type { BuiltInPath } from '@shared/utils/utilWindow'
 import {
   checkQAppDependencies,
   checkRequiredModels,
   hasBlockingQAppDependencyIssues,
   resolveRequiredModelPaths
 } from './qAppDependencyCheck'
-
-const pathApi = {
-  join: (first: string, ...args: string[]) => [first, ...args].filter(Boolean).join('\\'),
-  isAbsolute: (value: string) => /^[A-Z]:\\/i.test(value) || value.startsWith('/'),
-  normalize: (value: string) => value,
-  relative: (from: string, to: string) => to.replace(`${from}\\`, ''),
-  dirname: (value: string) => value.split('\\').slice(0, -1).join('\\'),
-  basename: (value: string) => value.split('\\').pop() || '',
-  extname: (value: string) => {
-    const base = value.split('\\').pop() || ''
-    const index = base.lastIndexOf('.')
-    return index >= 0 ? base.slice(index) : ''
-  },
-  format: () => '',
-  parse: () => ({})
-} satisfies BuiltInPath
+import { pathApi } from '../../../testUtils/pathApi'
 
 describe('qAppDependencyCheck', () => {
   const originalPath = window.path
@@ -90,7 +74,7 @@ describe('qAppDependencyCheck', () => {
     expect(missing).toHaveLength(1)
   })
 
-  it('skips required model file checks in remote ComfyUI mode', async () => {
+  it('checks required model files when the unified endpoint is configured', async () => {
     const fileExistsBatch = vi.fn(async () => [false])
     window.api = {
       svcShell: {
@@ -117,12 +101,12 @@ describe('qAppDependencyCheck', () => {
       { use_remote_comfyui: true }
     )
 
-    expect(missing).toEqual([])
-    expect(fileExistsBatch).not.toHaveBeenCalled()
-    expect(configUtils.getComfyUIDir).not.toHaveBeenCalled()
+    expect(missing).toHaveLength(1)
+    expect(fileExistsBatch).toHaveBeenCalled()
+    expect(configUtils.getComfyUIDir).toHaveBeenCalled()
   })
 
-  it('keeps object_info node checks in remote ComfyUI mode', async () => {
+  it('keeps object_info node checks with a non-local endpoint', async () => {
     const fileExistsBatch = vi.fn(async () => [false])
     window.api = {
       svcShell: {
@@ -166,9 +150,9 @@ describe('qAppDependencyCheck', () => {
       config: { use_remote_comfyui: true }
     })
 
-    expect(report.missingModels).toEqual([])
+    expect(report.missingModels).toHaveLength(1)
     expect(report.missingNodeClasses).toEqual(['RemoteOnlyCustomNode'])
     expect(hasBlockingQAppDependencyIssues(report)).toBe(true)
-    expect(fileExistsBatch).not.toHaveBeenCalled()
+    expect(fileExistsBatch).toHaveBeenCalled()
   })
 })

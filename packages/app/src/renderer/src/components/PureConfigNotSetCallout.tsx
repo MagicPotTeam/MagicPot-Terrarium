@@ -1,6 +1,6 @@
 import { Alert, AlertTitle, Link, Typography } from '@mui/material'
 import { useConfig } from '@renderer/hooks/useConfig'
-import { BUILD_MODE_NAME } from '@shared/config/viteEnv'
+import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
 
 type PureConfigNotSetCalloutProps = {
@@ -11,45 +11,26 @@ const PureConfigNotSetCallout: React.FC<PureConfigNotSetCalloutProps> = ({
   needNavigate = true
 }: PureConfigNotSetCalloutProps) => {
   const navigate = useNavigate()
-  const { config, configUtils } = useConfig()
-  const comfyuiDirAvailable = configUtils.isComfyUIDirAvailable()
-  const pythonCmdAvailable = configUtils.isPythonCmdAvailable()
+  const { t } = useTranslation()
+  const { configUtils } = useConfig()
+  const comfyuiApiAvailable = configUtils.isComfyUIAPIAvailable()
 
-  if (config.use_remote_comfyui) {
+  if (comfyuiApiAvailable) {
     return null
   }
 
-  if (comfyuiDirAvailable && pythonCmdAvailable) {
-    return null
-  }
-
-  const notSetItem = [
-    {
-      label: ' ComfyUI 路径',
-      available: comfyuiDirAvailable
-    },
-    {
-      label: ' Python 路径',
-      available: pythonCmdAvailable
-    }
-  ]
+  const notSetItem = t('environment.err_comfyui_origin_required')
 
   return (
     <Alert severity="warning">
       <AlertTitle>配置未完成</AlertTitle>
-      <Typography>
-        你正在使用{BUILD_MODE_NAME}，且未在配置中设置
-        {notSetItem.map((item) => item.label).join('与')}
-        ，无法正常使用。
-      </Typography>
+      <Typography>{notSetItem}</Typography>
       {needNavigate && (
         <Typography>
-          请在“设置”中设置。{' '}
-          {
-            <Link onClick={() => navigate('/settings', { state: { tab: 'environment' } })}>
-              前往设置
-            </Link>
-          }
+          {t('environment.go_to_settings')}{' '}
+          <Link onClick={() => navigate('/settings', { state: { tab: 'environment' } })}>
+            {t('environment.go_to_settings_link')}
+          </Link>
         </Typography>
       )}
     </Alert>

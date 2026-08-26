@@ -1,13 +1,14 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import type { AbortSender } from '@shared/api/apiUtils/abortHandler'
 import { isServerStreamingError } from '@shared/api/apiUtils/streaming'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useComfyProcess } from '@renderer/store/hooks/comfyProcess'
 import { api, hasManagedComfyStartupApi } from '@renderer/utils/windowUtils'
+import { detectManagedComfyProcess } from './managedComfyDetectionCoordinator'
 
 export default function ManagedComfyProcessBridge(): null {
-  const { isReady, config, configUtils } = useConfig()
+  const { isReady, configUtils } = useConfig()
   const { state, setPid, setIsRunning, setIsManaged, addOutput } = useComfyProcess()
   const managedComfyStartupApiAvailable = hasManagedComfyStartupApi()
   const hasAttemptedInitialAttachRef = useRef(false)
@@ -21,14 +22,13 @@ export default function ManagedComfyProcessBridge(): null {
     }
   }, [])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isReady || hasAttemptedInitialAttachRef.current) {
       return
     }
 
     if (
-      config.use_remote_comfyui ||
-      !configUtils.isComfyUICommandAvailable() ||
+      !configUtils.isManagedComfyUICommandAvailable() ||
       !managedComfyStartupApiAvailable ||
       state.pid !== 0
     ) {
@@ -41,7 +41,7 @@ export default function ManagedComfyProcessBridge(): null {
       let confirmedManagedAttach = false
 
       try {
-        const { pid } = await api().svcHyper.comfyPortDetect({})
+        const { pid } = await detectManagedComfyProcess(() => api().svcHyper.comfyPortDetect({}))
         if (isUnmountedRef.current || pid === 0) {
           return
         }
@@ -90,7 +90,6 @@ export default function ManagedComfyProcessBridge(): null {
     void attachManagedComfyProcess()
   }, [
     isReady,
-    config.use_remote_comfyui,
     configUtils,
     managedComfyStartupApiAvailable,
     state.pid,

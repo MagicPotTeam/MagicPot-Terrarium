@@ -959,8 +959,7 @@ export default function QAppMenu({
 
   const { config, buildEnv } = useConfig()
   const configRef = useRef(config)
-  const remoteComfyEnabled = config?.use_remote_comfyui ?? false
-  const remoteComfyOrigin = config?.remote_comfyui_config?.comfyui_origin ?? ''
+  const useRemoteLlm = config?.use_remote_llm ?? false
   const remoteLlmOrigin = config?.remote_llm_server_config?.server_origin ?? ''
   const packageVersion = buildEnv.env.packageVersion || '0.0.0'
 
@@ -985,38 +984,33 @@ export default function QAppMenu({
       setQAppItems(localItems)
       setIsLoading(false)
 
-      // 如果启用了远程 ComfyUI，在后台拉取并合并
-      if (remoteComfyEnabled) {
-        if (remoteComfyOrigin) {
-          // 从远程 LLM 服务获取快应用（使用 LLM 服务端口而非 ComfyUI 端口）
-          if (remoteLlmOrigin) {
-            fetchRemoteQAppList(remoteLlmOrigin, configRef.current)
-              .then((remoteItems) => {
-                if (requestId !== refreshRequestIdRef.current) {
-                  return
-                }
-                if (remoteItems.length > 0) {
-                  setQAppItems((prev) => {
-                    const filtered = prev.filter((item) => item.key !== '~remote')
-                    return [
-                      ...filtered,
-                      {
-                        key: '~remote',
-                        name: '服务端快应用',
-                        isBuiltin: false,
-                        isDirectory: true,
-                        isRemote: true,
-                        children: remoteItems
-                      }
-                    ]
-                  })
-                }
+      // 如果配置了远程 LLM 服务，在后台拉取并合并服务端快应用。
+      if (useRemoteLlm && remoteLlmOrigin) {
+        fetchRemoteQAppList(remoteLlmOrigin, configRef.current)
+          .then((remoteItems) => {
+            if (requestId !== refreshRequestIdRef.current) {
+              return
+            }
+            if (remoteItems.length > 0) {
+              setQAppItems((prev) => {
+                const filtered = prev.filter((item) => item.key !== '~remote')
+                return [
+                  ...filtered,
+                  {
+                    key: '~remote',
+                    name: '服务端快应用',
+                    isBuiltin: false,
+                    isDirectory: true,
+                    isRemote: true,
+                    children: remoteItems
+                  }
+                ]
               })
-              .catch((err) => {
-                console.error('[QAppMenu] 后台服务拉取失败:', err)
-              })
-          }
-        }
+            }
+          })
+          .catch((err) => {
+            console.error('[QAppMenu] 后台服务拉取失败:', err)
+          })
       }
     } catch (error) {
       if (requestId !== refreshRequestIdRef.current) {
@@ -1026,7 +1020,7 @@ export default function QAppMenu({
       notifyErrorRef.current(tRef.current('qapp.menu.load_failed'))
       setIsLoading(false)
     }
-  }, [remoteComfyEnabled, remoteComfyOrigin, remoteLlmOrigin])
+  }, [remoteLlmOrigin, useRemoteLlm])
 
   useEffect(() => {
     refreshTabs()

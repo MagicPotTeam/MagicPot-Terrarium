@@ -137,7 +137,7 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
   const configUtilsRef = useRef(configUtils)
   const requiredModelsRef = useRef(requiredModels)
   const refreshVersionRef = useRef(0)
-  const lastRemoteModeRef = useRef(config.use_remote_comfyui)
+  const lastOriginRef = useRef(configUtils.getComfyUIOrigin())
   configRef.current = config
   configUtilsRef.current = configUtils
   requiredModelsRef.current = requiredModels
@@ -154,7 +154,7 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
   const refreshMissingModels = useCallback(async () => {
     const refreshVersion = refreshVersionRef.current + 1
     refreshVersionRef.current = refreshVersion
-    const requestRemoteMode = configRef.current.use_remote_comfyui
+    const requestOrigin = configUtilsRef.current.getComfyUIOrigin()
     const requestRequiredModels = requiredModels
 
     if (!requiredModels || requiredModels.length === 0) {
@@ -176,7 +176,7 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
     if (
       isMountedRef.current &&
       refreshVersion === refreshVersionRef.current &&
-      requestRemoteMode === configRef.current.use_remote_comfyui &&
+      requestOrigin === configUtilsRef.current.getComfyUIOrigin() &&
       requestRequiredModels === requiredModelsRef.current
     ) {
       setMissingModels(nextMissingModels)
@@ -210,12 +210,13 @@ export const CalloutMissingModels = ({ requiredModels }: CalloutMissingModelsPro
   }, [downloadSnapshot.settledVersion, refreshMissingModels])
 
   useEffect(() => {
-    if (lastRemoteModeRef.current === config.use_remote_comfyui) {
+    const nextOrigin = configUtils.getComfyUIOrigin()
+    if (lastOriginRef.current === nextOrigin) {
       return
     }
-    lastRemoteModeRef.current = config.use_remote_comfyui
+    lastOriginRef.current = nextOrigin
     void refreshMissingModels()
-  }, [config.use_remote_comfyui, refreshMissingModels])
+  }, [configUtils, refreshMissingModels])
 
   if (missingModels.length === 0) {
     return null

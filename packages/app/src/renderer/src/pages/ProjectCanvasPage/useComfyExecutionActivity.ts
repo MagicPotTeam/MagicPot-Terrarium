@@ -6,13 +6,9 @@ import {
   type ComfyExecutionActivitySnapshot
 } from '../../utils/comfyExecutionActivity'
 
-export type UseComfyExecutionActivityOptions = {
-  useRemoteComfyui?: boolean
-}
+export type UseComfyExecutionActivityOptions = Record<string, never>
 
-export function useComfyExecutionActivity({
-  useRemoteComfyui = false
-}: UseComfyExecutionActivityOptions = {}) {
+export function useComfyExecutionActivity() {
   const [comfyExecutionActivity, setComfyExecutionActivity] =
     useState<ComfyExecutionActivitySnapshot>(() => getComfyExecutionActivitySnapshot())
 
@@ -37,8 +33,8 @@ export function useComfyExecutionActivity({
   }, [])
 
   const isCanvasPerformanceThrottled = useMemo(
-    () => !useRemoteComfyui && comfyExecutionActivity.active,
-    [comfyExecutionActivity.active, useRemoteComfyui]
+    () => comfyExecutionActivity.active,
+    [comfyExecutionActivity.active]
   )
 
   return {

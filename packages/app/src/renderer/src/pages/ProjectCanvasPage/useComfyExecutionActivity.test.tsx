@@ -28,7 +28,7 @@ describe('useComfyExecutionActivity', () => {
   })
 
   it('tracks activity change events and reports local canvas throttling', () => {
-    const { result } = renderHook(() => useComfyExecutionActivity({ useRemoteComfyui: false }))
+    const { result } = renderHook(() => useComfyExecutionActivity())
 
     act(() => {
       window.dispatchEvent(
@@ -50,8 +50,8 @@ describe('useComfyExecutionActivity', () => {
     expect(result.current.isCanvasPerformanceThrottled).toBe(true)
   })
 
-  it('does not throttle the canvas when remote ComfyUI is enabled', () => {
-    const { result } = renderHook(() => useComfyExecutionActivity({ useRemoteComfyui: true }))
+  it('throttles the canvas for activity from the configured ComfyUI endpoint', () => {
+    const { result } = renderHook(() => useComfyExecutionActivity())
 
     act(() => {
       window.dispatchEvent(
@@ -62,7 +62,7 @@ describe('useComfyExecutionActivity', () => {
     })
 
     expect(result.current.comfyExecutionActivity.active).toBe(true)
-    expect(result.current.isCanvasPerformanceThrottled).toBe(false)
+    expect(result.current.isCanvasPerformanceThrottled).toBe(true)
   })
 
   it('falls back to the current snapshot when an event has no detail', () => {

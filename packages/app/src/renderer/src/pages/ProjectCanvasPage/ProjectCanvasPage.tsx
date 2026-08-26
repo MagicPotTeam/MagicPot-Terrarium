@@ -240,9 +240,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     const tab = state.layout.openTabs.find((t: any) => t.id === canvasId)
     return tab?.label || 'Project'
   })
-  const { isCanvasPerformanceThrottled } = useComfyExecutionActivity({
-    useRemoteComfyui: config.use_remote_comfyui
-  })
+  const { isCanvasPerformanceThrottled } = useComfyExecutionActivity()
 
   const {
     activeOcrHover,

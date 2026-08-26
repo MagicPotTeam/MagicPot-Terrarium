@@ -1,6 +1,7 @@
 import { Alert, AlertTitle, Link, Typography } from '@mui/material'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useNavigate } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 type RemoteConfigNotSetCalloutProps = {
   needNavigate?: boolean
 }
@@ -9,12 +10,9 @@ const RemoteConfigNotSetCallout: React.FC<RemoteConfigNotSetCalloutProps> = ({
   needNavigate = true
 }: RemoteConfigNotSetCalloutProps) => {
   const navigate = useNavigate()
-  const { config, configUtils } = useConfig()
+  const { t } = useTranslation()
+  const { configUtils } = useConfig()
   const originAvailable = configUtils.isComfyUIAPIAvailable()
-
-  if (!config.use_remote_comfyui) {
-    return null
-  }
 
   if (originAvailable) {
     return null
@@ -22,16 +20,14 @@ const RemoteConfigNotSetCallout: React.FC<RemoteConfigNotSetCalloutProps> = ({
 
   return (
     <Alert severity="warning">
-      <AlertTitle>配置未完成</AlertTitle>
-      <Typography>你正在使用远程 ComfyUI，但未设置 ComfyUI 的地址，无法正常使用。</Typography>
+      <AlertTitle>{t('environment.comfyui_not_configured_title')}</AlertTitle>
+      <Typography>{t('environment.err_comfyui_origin_required')}</Typography>
       {needNavigate && (
         <Typography>
-          请在“设置”中设置。{' '}
-          {
-            <Link onClick={() => navigate('/settings', { state: { tab: 'environment' } })}>
-              前往设置
-            </Link>
-          }
+          {t('environment.go_to_settings')}{' '}
+          <Link onClick={() => navigate('/settings', { state: { tab: 'environment' } })}>
+            {t('environment.go_to_settings_link')}
+          </Link>
         </Typography>
       )}
     </Alert>
