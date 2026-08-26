@@ -132,8 +132,9 @@ export class ConfigUtils {
     const configuredOrigin = this.config.remote_comfyui_config.comfyui_origin.trim()
     try {
       const url = new URL(
-        configuredOrigin || DEFAULT_COMFYUI_ORIGIN,
-        configuredOrigin.includes('://') ? undefined : 'http://'
+        configuredOrigin.includes('://')
+          ? configuredOrigin
+          : `http://${configuredOrigin || DEFAULT_COMFYUI_ORIGIN}`
       )
       if (isLocalComfyUIHostname(url.hostname) && url.port) {
         return url.port
