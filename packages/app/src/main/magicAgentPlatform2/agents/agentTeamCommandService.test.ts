@@ -31,6 +31,23 @@ const setup = () => {
   }
 }
 
+const createAgentState = (id: string, definitionId = id) => ({
+  id,
+  name: id,
+  definitionId,
+  depth: 0,
+  configVersion: 'v1',
+  status: 'created' as const,
+  limits: {
+    maxChildren: 1,
+    maxDepth: 1,
+    maxConcurrency: 1,
+    maxRuntimeMs: 1,
+    allowedToolNames: [],
+    workspaceRoots: []
+  }
+})
+
 describe('AgentTeamCommandService', () => {
   it('allows the creating or leader Agent to administer its Team and rejects other Agents', async () => {
     const { service, events } = setup()
@@ -214,24 +231,8 @@ describe('AgentTeamCommandService', () => {
       team: { ...team, ownerId: owner.id, createdBy: owner },
       idempotencyKey: 'create'
     })
-    const agentState = (id: string) => ({
-      id,
-      name: id,
-      definitionId: id,
-      depth: 0,
-      configVersion: 'v1',
-      status: 'created' as const,
-      limits: {
-        maxChildren: 1,
-        maxDepth: 1,
-        maxConcurrency: 1,
-        maxRuntimeMs: 1,
-        allowedToolNames: [],
-        workspaceRoots: []
-      }
-    })
-    agents.create({ instance: agentState('agent-z'), createdAt: 2, idempotencyKey: 'z' })
-    agents.create({ instance: agentState('agent-a'), createdAt: 2, idempotencyKey: 'a' })
+    agents.create({ instance: createAgentState('agent-z'), createdAt: 2, idempotencyKey: 'z' })
+    agents.create({ instance: createAgentState('agent-a'), createdAt: 2, idempotencyKey: 'a' })
     let current = teams.addMember({
       teamId: team.id,
       expectedRevision: created.revision,
@@ -298,24 +299,16 @@ describe('AgentTeamCommandService', () => {
       team: { ...team, ownerId: owner.id, createdBy: owner },
       idempotencyKey: 'rc'
     })
-    const state = (id: string) => ({
-      id,
-      name: id,
-      definitionId: `old-${id}`,
-      depth: 0,
-      configVersion: 'v1',
-      status: 'created' as const,
-      limits: {
-        maxChildren: 1,
-        maxDepth: 1,
-        maxConcurrency: 1,
-        maxRuntimeMs: 1,
-        allowedToolNames: [],
-        workspaceRoots: []
-      }
+    agents.create({
+      instance: createAgentState('agent-z', 'old-agent-z'),
+      createdAt: 2,
+      idempotencyKey: 'raz'
     })
-    agents.create({ instance: state('agent-z'), createdAt: 2, idempotencyKey: 'raz' })
-    agents.create({ instance: state('agent-a'), createdAt: 2, idempotencyKey: 'raa' })
+    agents.create({
+      instance: createAgentState('agent-a', 'old-agent-a'),
+      createdAt: 2,
+      idempotencyKey: 'raa'
+    })
     let current = teams.addMember({
       teamId: team.id,
       expectedRevision: created.revision,
