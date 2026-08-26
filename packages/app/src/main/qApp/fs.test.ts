@@ -75,6 +75,11 @@ function mockConfigAndEnv(): void {
   } as unknown as BuildEnv)
 }
 
+async function ensureQAppDirs(fsp: typeof import('node:fs/promises')): Promise<void> {
+  await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
+  await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+}
+
 async function writeBundle(
   baseDir: string,
   key: string,
@@ -117,8 +122,7 @@ describe('QAppFSCli with memfs', () => {
   describe('listQAppKeys', () => {
     it('returns an empty list when both sources are empty', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       const cli = new QAppFSCli()
       await expect(cli.listQAppKeys()).resolves.toEqual([])
@@ -126,8 +130,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('scans nested user qApps and only includes complete pairs', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
       await fsp.mkdir(path.join(USER_QAPPS_DIR, 'A/B'), { recursive: true })
       await fsp.writeFile(path.join(USER_QAPPS_DIR, 'A/B', 'X.prompt.json'), JSON.stringify({}))
       await fsp.writeFile(
@@ -150,8 +153,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('prefers userData overrides over bundled qApps', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       await writeBundle(
         BUILTIN_QAPPS_DIR,
@@ -177,8 +179,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('merges userData overrides into bundled folders without hiding bundled siblings', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       await writeBundle(
         BUILTIN_QAPPS_DIR,
@@ -218,8 +219,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('migrates legacy root qApps with non-builtin manifests into userData', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       await writeBundle(
         BUILTIN_QAPPS_DIR,
@@ -243,8 +243,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('reads bundled qApps as read-only sources', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       await writeBundle(
         BUILTIN_QAPPS_DIR,
@@ -262,8 +261,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('prefers explicit manifest categories over heuristic workflow signals', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       await writeBundle(
         BUILTIN_QAPPS_DIR,
@@ -304,8 +302,7 @@ describe('QAppFSCli with memfs', () => {
   describe('getQApp', () => {
     it('reads user qApps from userData', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       const key = 'foo/bar'
       await writeBundle(
@@ -325,8 +322,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('prefers userData overrides over bundled qApps', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       const key = 'dup/app'
       await writeBundle(
@@ -351,8 +347,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('throws when the workflow is invalid', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       const key = 'inv/not-valid'
       await fsp.mkdir(path.join(USER_QAPPS_DIR, 'inv'), { recursive: true })
@@ -526,8 +521,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('deletes userData bundles without touching bundled qApps', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       const key = 'pairapp'
       await writeBundle(
@@ -548,8 +542,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('deletes bundled-only qApps from the bundled qApp directory', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       const key = 'builtin-only/app'
       await writeBundle(
@@ -570,8 +563,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('rejects deleting missing qApps', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       const cli = new QAppFSCli()
       await expect(cli.deleteQApp('missing/app')).rejects.toThrow('not found')
@@ -591,8 +583,7 @@ describe('QAppFSCli with memfs', () => {
       { key: path.join('a', 'b'), name: 'b2' }
     ])('renames userData directories: $key -> $name', async ({ key, name }) => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       const cli = new QAppFSCli()
       const oldDir = path.join(USER_QAPPS_DIR, key)
@@ -612,8 +603,7 @@ describe('QAppFSCli with memfs', () => {
       { key: path.join('folder', 'App1'), name: 'AppNew' }
     ])('renames userData bundles: $key -> $name', async ({ key, name }) => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       const cli = new QAppFSCli()
       await writeBundle(USER_QAPPS_DIR, key, minimalQAppCfg(), minimalWorkflow())
@@ -663,8 +653,7 @@ describe('QAppFSCli with memfs', () => {
 
     it('rejects renaming bundled-only qApps', async () => {
       const fsp = await import('node:fs/promises')
-      await fsp.mkdir(BUILTIN_QAPPS_DIR, { recursive: true })
-      await fsp.mkdir(USER_QAPPS_DIR, { recursive: true })
+      await ensureQAppDirs(fsp)
 
       const key = 'builtin-only/App1'
       await writeBundle(
