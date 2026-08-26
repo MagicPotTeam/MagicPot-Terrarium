@@ -206,7 +206,7 @@ describe('PanelEnvironment', () => {
       comfySection.compareDocumentPosition(proxySection) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
     expect(screen.getAllByText('ComfyUI Endpoint').length).toBeGreaterThan(0)
-    expect(screen.getByRole('heading', { name: 'Environment Setup' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'Environment Setup' })).toBeTruthy()
     expect(screen.getAllByText('Python Command').length).toBeGreaterThan(0)
     expect(screen.getAllByText('ComfyUI Directory').length).toBeGreaterThan(0)
     expect(screen.getAllByText('ComfyUI Port').length).toBeGreaterThan(0)
