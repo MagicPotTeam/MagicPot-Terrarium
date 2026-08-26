@@ -115,17 +115,7 @@ describe('AssistantToolRegistry', () => {
       config,
       project,
       route,
-      context: {
-        config,
-        route,
-        sessionStore: store,
-        taskState: {
-          sessionKey: 'generic:dm:trace-tooling',
-          running: false,
-          queuedCount: 0,
-          updatedAt: 1
-        }
-      }
+      context: createToolContext(route, createTaskState(route, { updatedAt: 1 }), { config })
     }
   }
 
@@ -802,28 +792,14 @@ describe('AssistantToolRegistry', () => {
     const taskState = createTaskState(route)
 
     await expect(
-      registry.callTool(
-        'workspace.inspect',
-        {},
-        {
-          config: DEFAULT_CONFIG,
-          route,
-          sessionStore: store,
-          taskState
-        }
-      )
+      registry.callTool('workspace.inspect', {}, createToolContext(route, taskState))
     ).rejects.toThrow('Invalid input for tool "workspace.inspect": input.workspaceId is required.')
 
     await expect(
       registry.callTool(
         'sessions.list',
         { limit: 'many' as unknown as number },
-        {
-          config: DEFAULT_CONFIG,
-          route,
-          sessionStore: store,
-          taskState
-        }
+        createToolContext(route, taskState)
       )
     ).rejects.toThrow('Invalid input for tool "sessions.list": input.limit must be an integer.')
 
@@ -834,16 +810,7 @@ describe('AssistantToolRegistry', () => {
     })
 
     await expect(
-      registry.callTool(
-        'task.group.cancel',
-        {},
-        {
-          config: DEFAULT_CONFIG,
-          route,
-          sessionStore: store,
-          taskState
-        }
-      )
+      registry.callTool('task.group.cancel', {}, createToolContext(route, taskState))
     ).rejects.toThrow('Invalid input for tool "task.group.cancel": input.taskGroupId is required.')
   })
 
@@ -865,12 +832,7 @@ describe('AssistantToolRegistry', () => {
           confirm: true,
           cwd: tempDir
         },
-        {
-          config: DEFAULT_CONFIG,
-          route,
-          sessionStore: store,
-          taskState
-        }
+        createToolContext(route, taskState)
       )
     ).rejects.toThrow('agent.terminal.run is disabled')
   })
@@ -900,14 +862,11 @@ describe('AssistantToolRegistry', () => {
         confirm: false,
         cwd: tempDir
       },
-      {
+      createToolContext(route, taskState, {
         config,
-        route,
-        sessionStore: store,
-        taskState,
         terminalApproval: (request) =>
           getAssistantTerminalPolicyRuntime().createTrustedApproval(request)
-      }
+      })
     )
     expect(JSON.parse(result.content).authorizationId).toBeTypeOf('string')
   })
@@ -938,12 +897,7 @@ describe('AssistantToolRegistry', () => {
           confirm: true,
           cwd: tempDir
         },
-        {
-          config,
-          route,
-          sessionStore: store,
-          taskState
-        }
+        createToolContext(route, taskState, { config })
       )
     ).rejects.toThrow('command is not allowlisted')
 
@@ -956,12 +910,7 @@ describe('AssistantToolRegistry', () => {
           confirm: true,
           cwd: tempDir
         },
-        {
-          config,
-          route,
-          sessionStore: store,
-          taskState
-        }
+        createToolContext(route, taskState, { config })
       )
     ).rejects.toThrow('only allows git status, git diff, or git log')
   })
@@ -1017,12 +966,7 @@ describe('AssistantToolRegistry', () => {
             confirm: true,
             cwd: tempDir
           },
-          {
-            config,
-            route,
-            sessionStore: store,
-            taskState
-          }
+          createToolContext(route, taskState, { config })
         )
       ).rejects.toThrow('agent.terminal.run could not resolve git without using a shell.')
     } finally {
@@ -1061,12 +1005,7 @@ describe('AssistantToolRegistry', () => {
           timeoutMs: 5000,
           maxOutputChars: 1000
         },
-        {
-          config,
-          route,
-          sessionStore: store,
-          taskState
-        }
+        createToolContext(route, taskState, { config })
       )
       const payload = JSON.parse(result.content)
 
