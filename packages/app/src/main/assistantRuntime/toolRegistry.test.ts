@@ -33,6 +33,20 @@ describe('AssistantToolRegistry', () => {
   let tempDir = ''
   let store: AssistantSessionStore
 
+  type ToolCallContext = Parameters<AssistantToolRegistry['callTool']>[2]
+
+  const createToolContext = (
+    route: ToolCallContext['route'],
+    taskState: ToolCallContext['taskState'],
+    overrides: Partial<ToolCallContext> = {}
+  ): ToolCallContext => ({
+    config: DEFAULT_CONFIG,
+    route,
+    sessionStore: store,
+    taskState,
+    ...overrides
+  })
+
   beforeEach(async () => {
     tempDir = await createNodeTestArtifactDir('chat-tool-registry')
     buildDataDirRef.current = tempDir
@@ -233,152 +247,108 @@ describe('AssistantToolRegistry', () => {
         action: 'add',
         text: 'Prefer CSV exports for tabular results.'
       },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile
-      }
+      })
     )
     const pinned = await registry.callTool(
       'context.pinned',
       {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile
-      }
+      })
     )
     const status = await registry.callTool(
       'session.status',
       {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const sessionSummary = await registry.callTool(
       'session.summary',
       {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile
-      }
+      })
     )
     const sessionHistory = await registry.callTool(
       'session.history',
       { limit: 2 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile
-      }
+      })
     )
     const sessionsList = await registry.callTool(
       'sessions.list',
       { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile
-      }
+      })
     )
     const workspacesList = await registry.callTool(
       'workspaces.list',
       { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile
-      }
+      })
     )
     const workspaceInspect = await registry.callTool(
       'workspace.inspect',
       { workspaceId: workspace.workspaceId, runLimit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile
-      }
+      })
     )
     const events = await registry.callTool(
       'events.list',
       { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile
-      }
+      })
     )
     const memory = await registry.callTool(
       'memory.recent',
       {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const workspaceContext = await registry.callTool(
       'workspace.context',
       {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile
-      }
+      })
     )
     const workspaceAttach = await registry.callTool(
       'workspace.attach',
@@ -389,212 +359,143 @@ describe('AssistantToolRegistry', () => {
         description: 'Shared tool-facing metadata.',
         sharedNote: 'Prefer stable CSV exports.'
       },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile,
         workspaceMetaFile: workspace.workspaceMetaFile
-      }
+      })
     )
     const workspaceContextAfterAttach = await registry.callTool(
       'workspace.context',
       {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile,
         workspaceMetaFile: workspace.workspaceMetaFile
-      }
+      })
     )
-    const mcpStatus = await registry.callTool(
-      'mcp.status',
-      {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState
-      }
-    )
+    const mcpStatus = await registry.callTool('mcp.status', {}, createToolContext(route, taskState))
     const runs = await registry.callTool(
       'runs.list',
       { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const run = await registry.callTool(
       'runs.get',
       { runId: 'run-1' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const runInspect = await registry.callTool(
       'run.inspect',
       { runId: 'run-1' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const workflowInspect = await registry.callTool(
       'workflow.inspect',
       { workflowId: 'run-1', runLimit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const taskGroupInspect = await registry.callTool(
       'task.group.inspect',
       { taskGroupId: 'task-group-1', runLimit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const runTrace = await registry.callTool(
       'run.trace',
       { runId: 'run-1' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const runLineage = await registry.callTool(
       'run.lineage',
       { runId: 'run-1' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const artifacts = await registry.callTool(
       'artifacts.list',
       { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const artifact = await registry.callTool(
       'artifacts.get',
       { artifactId: 'artifact-1' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const auditTimeline = await registry.callTool(
       'audit.timeline',
       { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const opsStatus = await registry.callTool(
       'ops.status',
       { limit: 5 },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const limitsStatus = await registry.callTool(
       'limits.status',
       {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
     const cleanup = await registry.callTool(
       'session.cleanup',
       { mode: 'clear' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceTaskContextFile: workspace.taskContextFile,
         workspaceContextFile: workspace.contextFile,
         workspacePinnedContextFile: workspace.pinnedContextFile
-      }
+      })
     )
 
     expect(registry.listTools().map((tool) => tool.name)).toEqual(
@@ -782,14 +683,10 @@ describe('AssistantToolRegistry', () => {
     const status = await registry.callTool(
       'session.status',
       {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState,
+      createToolContext(route, taskState, {
         workspaceMemoryFile: workspace.memoryFile,
         workspaceContextFile: workspace.contextFile
-      }
+      })
     )
 
     expect(status.content).toContain('Session: generic:group:task-room:thread:thread-1')
@@ -857,23 +754,9 @@ describe('AssistantToolRegistry', () => {
     const result = await registry.callTool(
       'mcp.echo.echo',
       { message: 'hello' },
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState
-      }
+      createToolContext(route, taskState)
     )
-    const mcpStatus = await registry.callTool(
-      'mcp.status',
-      {},
-      {
-        config: DEFAULT_CONFIG,
-        route,
-        sessionStore: store,
-        taskState
-      }
-    )
+    const mcpStatus = await registry.callTool('mcp.status', {}, createToolContext(route, taskState))
 
     expect(registry.listTools().map((tool) => tool.name)).toContain('mcp.echo.echo')
     expect(mcpClientManager.callToolByAlias).toHaveBeenCalledWith(
