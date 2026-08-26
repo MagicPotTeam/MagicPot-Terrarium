@@ -170,6 +170,14 @@ type AssistantToolHandler = (
 const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 
+const jsonToolResult = (
+  value: unknown,
+  metadata: Record<string, unknown> | undefined = isPlainRecord(value) ? value : undefined
+): AssistantToolCallResult => ({
+  content: JSON.stringify(value, null, 2),
+  ...(metadata ? { metadata } : {})
+})
+
 const validateValueAgainstToolSchema = (
   value: unknown,
   schema: unknown,
@@ -1801,25 +1809,12 @@ const inspectRunRecord = async (
 
   const session = await context.sessionStore.getSession(context.route)
   const run = session?.runs.find((item) => item.runId === runId) || null
-
-  return {
-    content: JSON.stringify(
-      {
-        sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
-        runId,
-        found: Boolean(run),
-        run
-      },
-      null,
-      2
-    ),
-    metadata: {
-      sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
-      runId,
-      found: Boolean(run),
-      run
-    }
-  }
+  return jsonToolResult({
+    sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
+    runId,
+    found: Boolean(run),
+    run
+  })
 }
 
 const buildSessionStatusToolResult: AssistantToolHandler = async (_args, context) => {
@@ -1977,10 +1972,7 @@ const runPythonTool = async (
     ...approval
   }
   const result = target === 'python.run' ? await host.run(input) : await host.background(input)
-  return {
-    content: JSON.stringify(result, null, 2),
-    metadata: result as unknown as Record<string, unknown>
-  }
+  return jsonToolResult(result)
 }
 
 const toolHandlers: Record<string, AssistantToolHandler> = {
@@ -2019,20 +2011,10 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
         }
       : null
 
-    return {
-      content: JSON.stringify(
-        {
-          summary,
-          taskState: summarizeTaskState(context.taskState)
-        },
-        null,
-        2
-      ),
-      metadata: {
-        summary,
-        taskState: summarizeTaskState(context.taskState)
-      }
-    }
+    return jsonToolResult({
+      summary,
+      taskState: summarizeTaskState(context.taskState)
+    })
   },
   'session.history': async (args, context) => {
     const limit = clampToolLimit(args.limit, 20, 1, 100)
@@ -2064,24 +2046,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
   'events.list': async (args, context) => {
     const limit = clampToolLimit(args.limit, 20, 1, 100)
     const events = await context.sessionStore.listEvents(limit, context.route)
-    return {
-      content: JSON.stringify(
-        {
-          sessionKey: getAssistantSessionKey(context.route),
-          limit,
-          eventCount: events.length,
-          events
-        },
-        null,
-        2
-      ),
-      metadata: {
-        sessionKey: getAssistantSessionKey(context.route),
-        limit,
-        eventCount: events.length,
-        events
-      }
-    }
+    return jsonToolResult({
+      sessionKey: getAssistantSessionKey(context.route),
+      limit,
+      eventCount: events.length,
+      events
+    })
   },
   'agent.terminal.run': async (args, context) => {
     const contextSnapshot = context.workspaceReusableContext?.contextSnapshot
@@ -2123,10 +2093,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       ...(approval ?? {})
     })
 
-    return {
-      content: JSON.stringify(result, null, 2),
-      metadata: result as unknown as Record<string, unknown>
-    }
+    return jsonToolResult(result)
   },
   'python.run': async (args, context) => runPythonTool('python.run', args, context),
   'python.background': async (args, context) => runPythonTool('python.background', args, context),
@@ -2172,10 +2139,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       maxLogBytes: typeof args.maxLogBytes === 'number' ? args.maxLogBytes : undefined,
       ...approval
     })
-    return {
-      content: JSON.stringify(result, null, 2),
-      metadata: result as unknown as Record<string, unknown>
-    }
+    return jsonToolResult(result)
   },
   'commands.status': async (args, context) => {
     const result = getCommandJobHost(context).status({
@@ -2183,10 +2147,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       routeKey: JSON.stringify(context.route),
       sessionId: getAssistantSessionKey(context.route)
     })
-    return {
-      content: JSON.stringify(result, null, 2),
-      metadata: result as unknown as Record<string, unknown>
-    }
+    return jsonToolResult(result)
   },
   'commands.read': async (args, context) => {
     const result = getCommandJobHost(context).read({
@@ -2197,10 +2158,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       cursor: args.cursor as number | undefined,
       maxBytes: args.maxBytes as number | undefined
     })
-    return {
-      content: JSON.stringify(result, null, 2),
-      metadata: result as unknown as Record<string, unknown>
-    }
+    return jsonToolResult(result)
   },
   'commands.stop': async (args, context) => {
     const result = await getCommandJobHost(context).stop({
@@ -2208,10 +2166,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       routeKey: JSON.stringify(context.route),
       sessionId: getAssistantSessionKey(context.route)
     })
-    return {
-      content: JSON.stringify(result, null, 2),
-      metadata: result as unknown as Record<string, unknown>
-    }
+    return jsonToolResult(result)
   },
   'session.cleanup': async (args, context) => {
     getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
@@ -2244,10 +2199,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
         ...pruneResult
       }
 
-      return {
-        content: JSON.stringify(payload, null, 2),
-        metadata: payload
-      }
+      return jsonToolResult(payload)
     }
 
     const existing = await context.sessionStore.getSession(context.route)
@@ -2261,56 +2213,29 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       retention: await context.sessionStore.getRetentionState()
     }
 
-    return {
-      content: JSON.stringify(payload, null, 2),
-      metadata: payload
-    }
+    return jsonToolResult(payload)
   },
   'sessions.list': async (args, context) => {
     const limit = clampToolLimit(args.limit, 10, 1, 50)
     const allSessions = await context.sessionStore.listSessionSummaries()
     const sessions = allSessions.slice(0, limit)
-    return {
-      content: JSON.stringify(
-        {
-          limit,
-          returnedCount: sessions.length,
-          sessionCount: allSessions.length,
-          sessions
-        },
-        null,
-        2
-      ),
-      metadata: {
-        limit,
-        returnedCount: sessions.length,
-        sessionCount: allSessions.length,
-        sessions
-      }
-    }
+    return jsonToolResult({
+      limit,
+      returnedCount: sessions.length,
+      sessionCount: allSessions.length,
+      sessions
+    })
   },
   'workspaces.list': async (args, context) => {
     const limit = clampToolLimit(args.limit, 10, 1, 50)
     const allWorkspaces = await context.sessionStore.listWorkspaceSummaries()
     const workspaces = allWorkspaces.slice(0, limit)
-    return {
-      content: JSON.stringify(
-        {
-          limit,
-          returnedCount: workspaces.length,
-          workspaceCount: allWorkspaces.length,
-          workspaces
-        },
-        null,
-        2
-      ),
-      metadata: {
-        limit,
-        returnedCount: workspaces.length,
-        workspaceCount: allWorkspaces.length,
-        workspaces
-      }
-    }
+    return jsonToolResult({
+      limit,
+      returnedCount: workspaces.length,
+      workspaceCount: allWorkspaces.length,
+      workspaces
+    })
   },
   'workflows.list': async (args, context) => {
     const limit = clampToolLimit(args.limit, 10, 1, 50)
@@ -2319,24 +2244,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       route: context.route
     })
     const workflows = allWorkflows.slice(0, limit)
-    return {
-      content: JSON.stringify(
-        {
-          limit,
-          returnedCount: workflows.length,
-          workflowCount: allWorkflows.length,
-          workflows
-        },
-        null,
-        2
-      ),
-      metadata: {
-        limit,
-        returnedCount: workflows.length,
-        workflowCount: allWorkflows.length,
-        workflows
-      }
-    }
+    return jsonToolResult({
+      limit,
+      returnedCount: workflows.length,
+      workflowCount: allWorkflows.length,
+      workflows
+    })
   },
   'workspace.inspect': async (args, context) => {
     const workspaceId = String(args.workspaceId || '')
@@ -2348,22 +2261,11 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
 
     const runLimit = clampToolLimit(args.runLimit, 20, 1, 100)
     const workspace = await context.sessionStore.getWorkspaceInspection(workspaceId, { runLimit })
-    return {
-      content: JSON.stringify(
-        {
-          workspaceId,
-          found: Boolean(workspace),
-          workspace
-        },
-        null,
-        2
-      ),
-      metadata: {
-        workspaceId,
-        found: Boolean(workspace),
-        workspace
-      }
-    }
+    return jsonToolResult({
+      workspaceId,
+      found: Boolean(workspace),
+      workspace
+    })
   },
   'workflow.inspect': async (args, context) => {
     const workflowId = String(args.workflowId || '')
@@ -2387,24 +2289,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
           runLimit
         })
       : null
-    return {
-      content: JSON.stringify(
-        {
-          workflowId,
-          found: Boolean(workflow),
-          workspaceInspection,
-          workflow
-        },
-        null,
-        2
-      ),
-      metadata: {
-        workflowId,
-        found: Boolean(workflow),
-        workspaceInspection,
-        workflow
-      }
-    }
+    return jsonToolResult({
+      workflowId,
+      found: Boolean(workflow),
+      workspaceInspection,
+      workflow
+    })
   },
   'workflow.resume': async (args, context) => {
     getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
@@ -2428,22 +2318,11 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       async: asyncMode
     })
 
-    return {
-      content: JSON.stringify(
-        {
-          resumedFromWorkflowId: workflowId,
-          accepted: asyncMode,
-          result
-        },
-        null,
-        2
-      ),
-      metadata: {
-        resumedFromWorkflowId: workflowId,
-        accepted: asyncMode,
-        result
-      }
-    }
+    return jsonToolResult({
+      resumedFromWorkflowId: workflowId,
+      accepted: asyncMode,
+      result
+    })
   },
   'project.trace.list': async (args, context) => {
     const project = readProjectTraceProjectRef(args.project)
@@ -2458,10 +2337,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       traces: limitedTraces
     }
 
-    return {
-      content: JSON.stringify(payload, null, 2),
-      metadata: payload
-    }
+    return jsonToolResult(payload)
   },
   'project.trace.read': async (args, context) => {
     const project = readProjectTraceProjectRef(args.project)
@@ -2474,10 +2350,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       trace
     }
 
-    return {
-      content: JSON.stringify(payload, null, 2),
-      metadata: payload
-    }
+    return jsonToolResult(payload)
   },
   'project.trace.references': async (args, context) => {
     const project = readProjectTraceProjectRef(args.project)
@@ -2507,10 +2380,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       references
     }
 
-    return {
-      content: JSON.stringify(payload, null, 2),
-      metadata: payload
-    }
+    return jsonToolResult(payload)
   },
   'project.trace.replay': async (args, context) => {
     const project = readProjectTraceProjectRef(args.project)
@@ -2525,10 +2395,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       markdownLimit
     })
 
-    return {
-      content: JSON.stringify(payload, null, 2),
-      metadata: payload
-    }
+    return jsonToolResult(payload)
   },
   'project.trace.verify': async (args, context) => {
     const project = readProjectTraceProjectRef(args.project)
@@ -2559,10 +2426,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       eventSummaries: normalizeProjectTraceVerificationEvents(args.eventSummaries)
     })
 
-    return {
-      content: JSON.stringify(payload, null, 2),
-      metadata: payload
-    }
+    return jsonToolResult(payload)
   },
   'task.group.list': async (args, context) => {
     const limit = clampToolLimit(args.limit, 10, 1, 50)
@@ -2573,24 +2437,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       })
     ).filter((workflow) => Boolean(workflow.taskGroup))
     const taskGroups = allTaskGroups.slice(0, limit)
-    return {
-      content: JSON.stringify(
-        {
-          limit,
-          returnedCount: taskGroups.length,
-          taskGroupCount: allTaskGroups.length,
-          taskGroups
-        },
-        null,
-        2
-      ),
-      metadata: {
-        limit,
-        returnedCount: taskGroups.length,
-        taskGroupCount: allTaskGroups.length,
-        taskGroups
-      }
-    }
+    return jsonToolResult({
+      limit,
+      returnedCount: taskGroups.length,
+      taskGroupCount: allTaskGroups.length,
+      taskGroups
+    })
   },
   'task.group.inspect': async (args, context) => {
     const taskGroupId = String(args.taskGroupId || '')
@@ -2621,26 +2473,13 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
           runLimit
         })
       : null
-    return {
-      content: JSON.stringify(
-        {
-          taskGroupId,
-          found: Boolean(taskGroup),
-          taskGroup,
-          workspaceInspection,
-          workflow
-        },
-        null,
-        2
-      ),
-      metadata: {
-        taskGroupId,
-        found: Boolean(taskGroup),
-        taskGroup,
-        workspaceInspection,
-        workflow
-      }
-    }
+    return jsonToolResult({
+      taskGroupId,
+      found: Boolean(taskGroup),
+      taskGroup,
+      workspaceInspection,
+      workflow
+    })
   },
   'task.group.start': async (args, context) => {
     const taskGroupId = String(args.taskGroupId || '')
@@ -2658,10 +2497,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       ...(typeof args.title === 'string' ? { title: args.title } : {}),
       ...(typeof args.description === 'string' ? { description: args.description } : {})
     })
-    return {
-      content: JSON.stringify({ taskGroupId, taskGroup }, null, 2),
-      metadata: { taskGroupId, taskGroup }
-    }
+    return jsonToolResult({ taskGroupId, taskGroup })
   },
   'task.group.progress': async (args, context) => {
     const taskGroupId = String(args.taskGroupId || '')
@@ -2681,10 +2517,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       ...(Number.isFinite(Number(args.total)) ? { total: Number(args.total) } : {}),
       ...(Number.isFinite(Number(args.percent)) ? { percent: Number(args.percent) } : {})
     })
-    return {
-      content: JSON.stringify({ taskGroupId, taskGroup }, null, 2),
-      metadata: { taskGroupId, taskGroup }
-    }
+    return jsonToolResult({ taskGroupId, taskGroup })
   },
   'task.group.approve': async (args, context) => {
     const taskGroupId = String(args.taskGroupId || '')
@@ -2701,10 +2534,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       taskGroupId,
       ...(typeof args.approvedBy === 'string' ? { approvedBy: args.approvedBy } : {})
     })
-    return {
-      content: JSON.stringify({ taskGroupId, taskGroup }, null, 2),
-      metadata: { taskGroupId, taskGroup }
-    }
+    return jsonToolResult({ taskGroupId, taskGroup })
   },
   'task.group.export': async (args, context) => {
     const taskGroupId = String(args.taskGroupId || '')
@@ -2742,10 +2572,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
           ...(taskGroup.exportedAt ? { exportedAt: taskGroup.exportedAt } : {})
         }
       : null
-    return {
-      content: JSON.stringify({ taskGroupId, taskGroup, exportBundle }, null, 2),
-      metadata: { taskGroupId, taskGroup, exportBundle }
-    }
+    return jsonToolResult({ taskGroupId, taskGroup, exportBundle })
   },
   'task.group.cancel': async (args, context) => {
     getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
@@ -2767,10 +2594,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     const taskGroup = await context.cancelTaskGroup(context.route, {
       taskGroupId
     })
-    return {
-      content: JSON.stringify({ taskGroupId, taskGroup }, null, 2),
-      metadata: { taskGroupId, taskGroup }
-    }
+    return jsonToolResult({ taskGroupId, taskGroup })
   },
   'task.group.resume': async (args, context) => {
     getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
@@ -2792,22 +2616,11 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     const result = await context.resumeTaskGroup(context.route, taskGroupId, {
       async: typeof args.async === 'boolean' ? args.async : false
     })
-    return {
-      content: JSON.stringify(
-        {
-          resumedFromTaskGroupId: taskGroupId,
-          accepted: typeof args.async === 'boolean' ? args.async : false,
-          result
-        },
-        null,
-        2
-      ),
-      metadata: {
-        resumedFromTaskGroupId: taskGroupId,
-        accepted: typeof args.async === 'boolean' ? args.async : false,
-        result
-      }
-    }
+    return jsonToolResult({
+      resumedFromTaskGroupId: taskGroupId,
+      accepted: typeof args.async === 'boolean' ? args.async : false,
+      result
+    })
   },
   'task.group.retry': async (args, context) => {
     getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
@@ -2829,22 +2642,11 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     const result = await context.resumeTaskGroup(context.route, taskGroupId, {
       async: typeof args.async === 'boolean' ? args.async : false
     })
-    return {
-      content: JSON.stringify(
-        {
-          retriedFromTaskGroupId: taskGroupId,
-          accepted: typeof args.async === 'boolean' ? args.async : false,
-          result
-        },
-        null,
-        2
-      ),
-      metadata: {
-        retriedFromTaskGroupId: taskGroupId,
-        accepted: typeof args.async === 'boolean' ? args.async : false,
-        result
-      }
-    }
+    return jsonToolResult({
+      retriedFromTaskGroupId: taskGroupId,
+      accepted: typeof args.async === 'boolean' ? args.async : false,
+      result
+    })
   },
   'workspace.attach': async (args, context) => {
     getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
@@ -2888,22 +2690,11 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       runLimit: 20
     })
 
-    return {
-      content: JSON.stringify(
-        {
-          workspaceId,
-          attached: true,
-          workspace: workspaceInspection
-        },
-        null,
-        2
-      ),
-      metadata: {
-        workspaceId,
-        attached: true,
-        workspace: workspaceInspection
-      }
-    }
+    return jsonToolResult({
+      workspaceId,
+      attached: true,
+      workspace: workspaceInspection
+    })
   },
   'workspace.detach': async (_args, context) => {
     getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
@@ -2946,24 +2737,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       ? await context.sessionStore.getWorkspaceInspection(currentWorkspaceId, { runLimit: 20 })
       : undefined
 
-    return {
-      content: JSON.stringify(
-        {
-          detached,
-          previousWorkspaceId: currentWorkspaceId,
-          workspace: workspaceInspection,
-          ...(previousWorkspace ? { previousWorkspace } : {})
-        },
-        null,
-        2
-      ),
-      metadata: {
-        detached,
-        previousWorkspaceId: currentWorkspaceId,
-        workspace: workspaceInspection,
-        ...(previousWorkspace ? { previousWorkspace } : {})
-      }
-    }
+    return jsonToolResult({
+      detached,
+      previousWorkspaceId: currentWorkspaceId,
+      workspace: workspaceInspection,
+      ...(previousWorkspace ? { previousWorkspace } : {})
+    })
   },
   'workspace.manage': async (args, context) => {
     getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
@@ -2993,22 +2772,11 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       runLimit: 20
     })
 
-    return {
-      content: JSON.stringify(
-        {
-          workspaceId,
-          action,
-          workspace: workspaceInspection
-        },
-        null,
-        2
-      ),
-      metadata: {
-        workspaceId,
-        action,
-        workspace: workspaceInspection
-      }
-    }
+    return jsonToolResult({
+      workspaceId,
+      action,
+      workspace: workspaceInspection
+    })
   },
   'workspace.context': async (_args, context) => {
     const workspaceId =
@@ -3022,10 +2790,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       ...(workspaceId ? { workspaceId } : {}),
       ...(workspaceSummary ? { workspaceSummary } : {})
     }
-    return {
-      content: JSON.stringify(payload, null, 2),
-      metadata: payload
-    }
+    return jsonToolResult(payload)
   },
   'memory.recent': async (_args, context) => ({
     content: context.workspaceMemoryPreview || 'No memory has been stored for this session yet.'
@@ -3072,24 +2837,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     }
 
     const trace = await context.sessionStore.getRunTrace(runId, context.route)
-    return {
-      content: JSON.stringify(
-        {
-          sessionKey: getAssistantSessionKey(context.route),
-          runId,
-          found: Boolean(trace),
-          trace
-        },
-        null,
-        2
-      ),
-      metadata: {
-        sessionKey: getAssistantSessionKey(context.route),
-        runId,
-        found: Boolean(trace),
-        trace
-      }
-    }
+    return jsonToolResult({
+      sessionKey: getAssistantSessionKey(context.route),
+      runId,
+      found: Boolean(trace),
+      trace
+    })
   },
   'run.lineage': async (args, context) => {
     const runId = String(args.runId || '')
@@ -3100,24 +2853,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     }
 
     const lineage = await context.sessionStore.getRunLineage(runId, context.route)
-    return {
-      content: JSON.stringify(
-        {
-          sessionKey: getAssistantSessionKey(context.route),
-          runId,
-          found: Boolean(lineage),
-          lineage
-        },
-        null,
-        2
-      ),
-      metadata: {
-        sessionKey: getAssistantSessionKey(context.route),
-        runId,
-        found: Boolean(lineage),
-        lineage
-      }
-    }
+    return jsonToolResult({
+      sessionKey: getAssistantSessionKey(context.route),
+      runId,
+      found: Boolean(lineage),
+      lineage
+    })
   },
   'run.replay': async (args, context) => {
     const runId = String(args.runId || '')
@@ -3142,24 +2883,12 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       ...(suggestedRetryTool ? { suggestedRetryTool } : {})
     }
 
-    return {
-      content: JSON.stringify(
-        {
-          sessionKey: getAssistantSessionKey(context.route),
-          runId,
-          found: replayable,
-          replay
-        },
-        null,
-        2
-      ),
-      metadata: {
-        sessionKey: getAssistantSessionKey(context.route),
-        runId,
-        found: replayable,
-        replay
-      }
-    }
+    return jsonToolResult({
+      sessionKey: getAssistantSessionKey(context.route),
+      runId,
+      found: replayable,
+      replay
+    })
   },
   'run.resume': async (args, context) => {
     getAssistantTerminalPolicyRuntime().authorizeAssistantMutation({
@@ -3181,22 +2910,11 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     const result = await context.resumeRun(context.route, runId, {
       async: Boolean(args.async)
     })
-    return {
-      content: JSON.stringify(
-        {
-          resumedFromRunId: runId,
-          accepted: Boolean(args.async),
-          result
-        },
-        null,
-        2
-      ),
-      metadata: {
-        resumedFromRunId: runId,
-        accepted: Boolean(args.async),
-        result
-      }
-    }
+    return jsonToolResult({
+      resumedFromRunId: runId,
+      accepted: Boolean(args.async),
+      result
+    })
   },
   'run.retry': async (args, context) => {
     const runId = String(args.runId || '')
@@ -3212,22 +2930,11 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     const result = await context.resumeRun(context.route, runId, {
       async: Boolean(args.async)
     })
-    return {
-      content: JSON.stringify(
-        {
-          retriedFromRunId: runId,
-          accepted: Boolean(args.async),
-          result
-        },
-        null,
-        2
-      ),
-      metadata: {
-        retriedFromRunId: runId,
-        accepted: Boolean(args.async),
-        result
-      }
-    }
+    return jsonToolResult({
+      retriedFromRunId: runId,
+      accepted: Boolean(args.async),
+      result
+    })
   },
   'artifacts.list': async (args, context) => {
     const limit = clampToolLimit(args.limit, 5, 1, 20)
@@ -3251,31 +2958,16 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     const session = await context.sessionStore.getSession(context.route)
     const artifact = session?.artifacts.find((item) => item.artifactId === artifactId) || null
 
-    return {
-      content: JSON.stringify(
-        {
-          sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
-          artifactId,
-          found: Boolean(artifact),
-          artifact
-        },
-        null,
-        2
-      ),
-      metadata: {
-        sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
-        artifactId,
-        found: Boolean(artifact),
-        artifact
-      }
-    }
+    return jsonToolResult({
+      sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
+      artifactId,
+      found: Boolean(artifact),
+      artifact
+    })
   },
   'limits.status': async (_args, context) => {
     const payload = await summarizeStoreLimits(context)
-    return {
-      content: JSON.stringify(payload, null, 2),
-      metadata: payload
-    }
+    return jsonToolResult(payload)
   },
   'audit.timeline': async (args, context) => {
     const limit = clampToolLimit(args.limit, 20, 1, 100)
@@ -3293,10 +2985,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       timeline
     }
 
-    return {
-      content: JSON.stringify(payload, null, 2),
-      metadata: payload
-    }
+    return jsonToolResult(payload)
   },
   'ops.status': async (args, context) => {
     const limit = clampToolLimit(args.limit, 5, 1, 20)
@@ -3308,10 +2997,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       global: await context.sessionStore.getOpsStatus({ limit })
     }
 
-    return {
-      content: JSON.stringify(payload, null, 2),
-      metadata: payload
-    }
+    return jsonToolResult(payload)
   }
 }
 
@@ -3436,10 +3122,7 @@ export class AssistantToolRegistry {
       else if (normalizedName === 'git.add')
         output = await host.add(common as Parameters<GitToolHost['add']>[0])
       else output = await host.commit(common as Parameters<GitToolHost['commit']>[0])
-      return {
-        content: JSON.stringify(output, null, 2),
-        metadata: output as Record<string, unknown>
-      }
+      return jsonToolResult(output)
     }
 
     if (
@@ -3465,16 +3148,10 @@ export class AssistantToolRegistry {
           path: pathValue,
           executionId: typeof args.executionId === 'string' ? args.executionId : undefined
         })
-        return {
-          content: JSON.stringify(output, null, 2),
-          metadata: output as unknown as Record<string, unknown>
-        }
+        return jsonToolResult(output)
       }
       const target = normalizedName as
-        | 'notebook.execute-cell'
-        | 'notebook.execute-all'
-        | 'notebook.interrupt'
-        | 'notebook.restart'
+        'notebook.execute-cell' | 'notebook.execute-all' | 'notebook.interrupt' | 'notebook.restart'
       const request = host.createPolicyRequest({
         target,
         origin: context.toolPolicyOrigin ?? 'assistant',
@@ -3535,10 +3212,7 @@ export class AssistantToolRegistry {
           ...common,
           executionId: typeof args.executionId === 'string' ? args.executionId : undefined
         })
-      return {
-        content: JSON.stringify(output, null, 2),
-        metadata: output as unknown as Record<string, unknown>
-      }
+      return jsonToolResult(output)
     }
 
     if (
@@ -3608,10 +3282,7 @@ export class AssistantToolRegistry {
         output = await host.convert(common as Parameters<NotebookToolHost['convert']>[0])
       else
         output = await host.clearOutputs(common as Parameters<NotebookToolHost['clearOutputs']>[0])
-      return {
-        content: JSON.stringify(output, null, 2),
-        metadata: output as Record<string, unknown>
-      }
+      return jsonToolResult(output)
     }
 
     if (
@@ -3716,10 +3387,7 @@ export class AssistantToolRegistry {
           common as Parameters<FilesToolHost['snapshotRestore']>[0]
         )
       else output = await host.jsonRead(common as Parameters<FilesToolHost['jsonRead']>[0])
-      return {
-        content: JSON.stringify(output, null, 2),
-        metadata: output as Record<string, unknown>
-      }
+      return jsonToolResult(output)
     }
 
     const toolDefinition = this.listTools().find(
@@ -3731,10 +3399,7 @@ export class AssistantToolRegistry {
 
     if (normalizedName === 'mcp.status') {
       const status = await getMcpRuntimeStatus(context.config, this.mcpClientManager)
-      return {
-        content: JSON.stringify(status, null, 2),
-        metadata: status as unknown as Record<string, unknown>
-      }
+      return jsonToolResult(status)
     }
 
     const handler = Object.prototype.hasOwnProperty.call(toolHandlers, normalizedName)
