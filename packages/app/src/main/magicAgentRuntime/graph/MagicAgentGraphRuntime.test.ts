@@ -344,13 +344,7 @@ describe('MagicAgentGraphRuntime', () => {
     }
     const runtime = new MagicAgentGraphRuntime([], {
       runEventStore: eventStore,
-      callTool: async (request) => ({
-        ok: true,
-        toolName: request.name,
-        source: 'magicAgentRuntime',
-        status: 'ok',
-        content: 'raw-tool-result'
-      })
+      callTool: async (request) => graphToolResult(request.name, 'raw-tool-result')
     })
     runtime.create({ graph, route: testRoute })
 
