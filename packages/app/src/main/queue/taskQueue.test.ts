@@ -206,7 +206,7 @@ describe('taskQueue transport client', () => {
     }
   })
 
-  it('skips automatic ComfyUI memory cleanup for remote ComfyUI', async () => {
+  it('requests ComfyUI memory cleanup for any configured endpoint', async () => {
     vi.resetModules()
     isRemoteComfyUIMock.mockReturnValue(true)
     const taskQueue = await import('./taskQueue')
@@ -227,7 +227,7 @@ describe('taskQueue transport client', () => {
       await taskQueue.initTaskQueue()
       await vi.advanceTimersByTimeAsync(1000)
 
-      expect(freeMemoryMock).not.toHaveBeenCalled()
+      expect(freeMemoryMock).toHaveBeenCalled()
       const [status] = taskQueue.getTask(taskId)
       expect(status).toBe('completed')
     } finally {

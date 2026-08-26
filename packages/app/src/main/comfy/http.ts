@@ -54,8 +54,9 @@ export class ComfyHttpCli {
     return origin.href
   }
 
+  /** @deprecated ComfyUI endpoints are no longer selected by a mode flag. */
   isRemoteComfyUI(): boolean {
-    return this.config.use_remote_comfyui === true
+    return false
   }
 
   private async get<RESP>(path: string): Promise<RESP> {
