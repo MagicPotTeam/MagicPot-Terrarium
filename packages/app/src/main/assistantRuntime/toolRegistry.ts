@@ -2021,27 +2021,14 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     const session = await context.sessionStore.getSession(context.route)
     const messages = session?.messages.slice(-limit) || []
 
-    return {
-      content: JSON.stringify(
-        {
-          sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
-          route: context.route,
-          messageCount: session?.messages.length || 0,
-          limit,
-          returnedCount: messages.length,
-          messages
-        },
-        null,
-        2
-      ),
-      metadata: {
-        sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
-        messageCount: session?.messages.length || 0,
-        limit,
-        returnedCount: messages.length,
-        messages
-      }
-    }
+    return jsonToolResult({
+      sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
+      route: context.route,
+      messageCount: session?.messages.length || 0,
+      limit,
+      returnedCount: messages.length,
+      messages
+    })
   },
   'events.list': async (args, context) => {
     const limit = clampToolLimit(args.limit, 20, 1, 100)
@@ -2818,13 +2805,10 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
   'runs.list': async (args, context) => {
     const limit = clampToolLimit(args.limit, 5, 1, 20)
     const session = await context.sessionStore.getSession(context.route)
-    return {
-      content: JSON.stringify((session?.runs || []).slice(-limit).reverse(), null, 2),
-      metadata: {
-        sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
-        limit
-      }
-    }
+    return jsonToolResult((session?.runs || []).slice(-limit).reverse(), {
+      sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
+      limit
+    })
   },
   'runs.get': inspectRunRecord,
   'run.inspect': inspectRunRecord,
@@ -2939,13 +2923,10 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
   'artifacts.list': async (args, context) => {
     const limit = clampToolLimit(args.limit, 5, 1, 20)
     const session = await context.sessionStore.getSession(context.route)
-    return {
-      content: JSON.stringify((session?.artifacts || []).slice(-limit).reverse(), null, 2),
-      metadata: {
-        sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
-        limit
-      }
-    }
+    return jsonToolResult((session?.artifacts || []).slice(-limit).reverse(), {
+      sessionKey: session?.sessionKey || getAssistantSessionKey(context.route),
+      limit
+    })
   },
   'artifacts.get': async (args, context) => {
     const artifactId = String(args.artifactId || '')
