@@ -98,6 +98,11 @@ const request = {
   allowedToolNames: ['read', 'write']
 }
 
+const incrementingClock = () => {
+  let now = 10
+  return () => now++
+}
+
 describe('ProductionAgentInstanceLifecycleService', () => {
   it('classifies activation expansion as high-risk and reduction/equivalent as low-risk', () => {
     const { eventStore, created } = setup()
@@ -506,10 +511,7 @@ describe('ProductionAgentInstanceLifecycleService', () => {
         })
         return completedRun()
       },
-      (() => {
-        let now = 10
-        return () => now++
-      })()
+      incrementingClock()
     )
     await service.start({
       instanceId: created.id,
@@ -547,10 +549,7 @@ describe('ProductionAgentInstanceLifecycleService', () => {
         })
         return completedRun()
       },
-      (() => {
-        let now = 10
-        return () => now++
-      })()
+      incrementingClock()
     )
     await service.start({
       instanceId: created.id,
@@ -828,10 +827,7 @@ describe('ProductionAgentInstanceLifecycleService', () => {
       store,
       allowedAuthorization,
       run,
-      (() => {
-        let now = 10
-        return () => now++
-      })()
+      incrementingClock()
     )
     await service.start({
       instanceId: created.id,
@@ -882,10 +878,7 @@ describe('ProductionAgentInstanceLifecycleService', () => {
       store,
       allowedAuthorization,
       run,
-      (() => {
-        let now = 10
-        return () => now++
-      })()
+      incrementingClock()
     )
     await service.start({
       instanceId: created.id,
