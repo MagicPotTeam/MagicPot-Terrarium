@@ -69,7 +69,7 @@ vi.mock('./hooks/useConfig', () => ({
       use_remote_comfyui: false
     },
     configUtils: {
-      isComfyUICommandAvailable: () => true
+      isManagedComfyUICommandAvailable: () => true
     }
   })
 }))
