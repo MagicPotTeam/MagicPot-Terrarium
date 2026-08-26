@@ -18,6 +18,8 @@ The script writes the generated web-target bundle to:
 packages/app/src/renderer/public/wasm/canvas_spatial_index/
 ```
 
+After a successful build, the output directory is replaced with exactly the three files below so stale generated assets cannot survive a regeneration.
+
 Expected generated files:
 
 - `canvas_spatial_index.js`

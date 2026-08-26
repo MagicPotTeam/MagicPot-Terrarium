@@ -138,6 +138,13 @@ function truncateText(value?: string | null): string | undefined {
   return `${value.slice(0, TRACE_TEXT_LIMIT)}...`
 }
 
+function snapshotTextField<K extends PropertyKey, T extends Record<K, string>>(
+  value: T,
+  key: K
+): T {
+  return { ...value, [key]: truncateText(value[key]) || '' }
+}
+
 function snapshotArtifact(artifact: DesignInspectionArtifact): Pick<
   DesignInspectionArtifact,
   'type' | 'label' | 'mimeType'
@@ -168,30 +175,11 @@ function snapshotSelectionItem(item: DesignInspectionItemSummary): DesignInspect
   }
 }
 
-function snapshotDocument(
-  document: DesignInspectionDocumentSummary
-): DesignInspectionDocumentSummary {
-  return {
-    ...document,
-    previewText: truncateText(document.previewText) || ''
-  }
-}
-
-function snapshotFallbackSignal(
-  signal: DesignInspectionFallbackSignal
-): DesignInspectionFallbackSignal {
-  return {
-    ...signal,
-    content: truncateText(signal.content) || ''
-  }
-}
-
-function snapshotRule(rule: DesignInspectionRuleSource): DesignInspectionRuleSource {
-  return {
-    ...rule,
-    content: truncateText(rule.content) || ''
-  }
-}
+const snapshotDocument = (document: DesignInspectionDocumentSummary) =>
+  snapshotTextField(document, 'previewText')
+const snapshotFallbackSignal = (signal: DesignInspectionFallbackSignal) =>
+  snapshotTextField(signal, 'content')
+const snapshotRule = (rule: DesignInspectionRuleSource) => snapshotTextField(rule, 'content')
 
 function snapshotAction(action: DesignInspectionAction): DesignInspectionAction {
   if (action.type !== 'update-file-content') return action
@@ -279,44 +267,29 @@ function snapshotExecutionResult(
   }
 }
 
-function formatApprovalStatusSummary(status: DesignInspectionApprovalStatus): string {
-  switch (status) {
-    case 'approved':
-      return 'approved'
-    case 'rejected':
-      return 'rejected'
-    case 'retry_requested':
-      return 'retry requested'
-    default:
-      return 'pending'
-  }
-}
+const traceStatusLabels = {
+  approval: {
+    pending: 'pending',
+    approved: 'approved',
+    rejected: 'rejected',
+    retry_requested: 'retry requested'
+  },
+  execution: { success: 'completed', partial: 'partially completed', failed: 'failed' },
+  executionUi: { success: '已完成', partial: '部分完成', failed: '失败' }
+} as const
 
-function formatExecutionStatusSummary(status: DesignInspectionExecutionStatus): string {
-  switch (status) {
-    case 'success':
-      return 'completed'
-    case 'partial':
-      return 'partially completed'
-    case 'failed':
-      return 'failed'
-    default:
-      return status
-  }
-}
+const formatApprovalStatusSummary = (status: DesignInspectionApprovalStatus): string =>
+  traceStatusLabels.approval[status] ?? 'pending'
 
-function compareTimelineEntries(
+const formatExecutionStatusSummary = (status: DesignInspectionExecutionStatus): string =>
+  traceStatusLabels.execution[status] ?? status
+
+const compareTimelineEntries = (
   left: DesignInspectionTraceTimelineEntry,
   right: DesignInspectionTraceTimelineEntry
-): number {
-  const leftTime = new Date(left.at).getTime()
-  const rightTime = new Date(right.at).getTime()
-
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-    return leftTime - rightTime
-  }
-
-  return 0
+): number => {
+  const difference = new Date(left.at).getTime() - new Date(right.at).getTime()
+  return Number.isFinite(difference) ? difference : 0
 }
 
 function getTimelineEntryKey(entry: DesignInspectionTraceTimelineEntry): string {
@@ -336,17 +309,12 @@ function getTimelineEntryKey(entry: DesignInspectionTraceTimelineEntry): string 
 function dedupeTimelineEntries(
   entries: DesignInspectionTraceTimelineEntry[]
 ): DesignInspectionTraceTimelineEntry[] {
-  const seen = new Set<string>()
-  const nextEntries: DesignInspectionTraceTimelineEntry[] = []
-
+  const unique = new Map<string, DesignInspectionTraceTimelineEntry>()
   for (const entry of [...entries].sort(compareTimelineEntries)) {
     const key = getTimelineEntryKey(entry)
-    if (seen.has(key)) continue
-    seen.add(key)
-    nextEntries.push(entry)
+    if (!unique.has(key)) unique.set(key, entry)
   }
-
-  return nextEntries
+  return [...unique.values()]
 }
 
 function buildTraceTimelineEntries(options: {
@@ -425,16 +393,14 @@ function normalizeSelectedActionIds(
   approvedActions?: string[]
 ): string[] {
   const proposalActionIds = proposalActions.map((action) => action.id)
-
-  if (Array.isArray(selectedActionIds)) {
-    return proposalActionIds.filter((actionId) => selectedActionIds.includes(actionId))
-  }
-
-  if (Array.isArray(approvedActions) && approvedActions.length > 0) {
-    return proposalActionIds.filter((actionId) => approvedActions.includes(actionId))
-  }
-
-  return proposalActionIds
+  const selected = Array.isArray(selectedActionIds)
+    ? selectedActionIds
+    : Array.isArray(approvedActions) && approvedActions.length > 0
+      ? approvedActions
+      : undefined
+  return selected
+    ? proposalActionIds.filter((actionId) => selected.includes(actionId))
+    : proposalActionIds
 }
 
 function normalizeTraceRecord(record: DesignInspectionTraceRecord): DesignInspectionTraceRecord {
@@ -462,18 +428,8 @@ function getDesignInspectionTraceStorageKey(canvasId: string): string {
   return `canvas.designInspectionTrace.${canvasId}`
 }
 
-function formatExecutionStatusLabel(status: DesignInspectionExecutionStatus): string {
-  switch (status) {
-    case 'success':
-      return '已完成'
-    case 'partial':
-      return '部分完成'
-    case 'failed':
-      return '失败'
-    default:
-      return status
-  }
-}
+const formatExecutionStatusLabel = (status: DesignInspectionExecutionStatus): string =>
+  traceStatusLabels.executionUi[status] ?? status
 
 function readTraceRecords(canvasId: string): DesignInspectionTraceRecord[] {
   try {

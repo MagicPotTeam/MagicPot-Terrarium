@@ -76,14 +76,6 @@ import type {
 const MemoizedProjectCanvasPageStageScene = React.memo(ProjectCanvasPageStageScene)
 const IMAGE_BATCH_IMPORT_PREPARING_DISPLAY_WEIGHT = 0.35
 
-type BrowserEyeDropperConstructor = new () => {
-  open: () => Promise<{ sRGBHex: string }>
-}
-
-type BrowserWindowWithEyeDropper = Window & {
-  EyeDropper?: BrowserEyeDropperConstructor
-}
-
 function clampImageBatchImportRatio(value: number) {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(1, value))
@@ -926,9 +918,7 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
           onOpenTextureImportFromContextMenu: handleOpenTextureImportFromContextMenu
         }}
         colorPopoversProps={{
-          legacyAnnotationPaletteOpen: Boolean(colorPickerAnchor) && selectedIds.size < 0,
           annotationWheelOpen: Boolean(colorPickerAnchor),
-          legacyBackgroundPaletteOpen: Boolean(bgColorPickerAnchor) && items.length < 0,
           backgroundWheelOpen: Boolean(bgColorPickerAnchor),
           colorPickerAnchor,
           bgColorPickerAnchor,
@@ -954,40 +944,7 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
               )
             }
           },
-          onUseEyeDropper: async () => {
-            const EyeDropper = (window as BrowserWindowWithEyeDropper).EyeDropper
-            if (!EyeDropper) {
-              notifyError(
-                isChineseUi
-                  ? '\u5f53\u524d\u73af\u5883\u4e0d\u652f\u6301\u7cfb\u7edf\u53d6\u8272\u5668\u3002'
-                  : 'The system eye dropper is not supported in this environment.'
-              )
-              return
-            }
-            try {
-              const eyeDropper = new EyeDropper()
-              const result = await eyeDropper.open()
-              const color = result.sRGBHex
-              setBgCustomColor(color)
-              setAnnotationColor(color)
-              setInlineTextEdit((prev) => (prev ? { ...prev, fill: color } : null))
-              if (selectedIds.size > 0) {
-                setItemsWithHistory(
-                  (prev) =>
-                    prev.map((item) => {
-                      if (!selectedIds.has(item.id)) return item
-                      if (item.type === 'annotation') return { ...item, stroke: color }
-                      if (item.type === 'text') return { ...item, fill: color }
-                      return item
-                    }) as CanvasItem[]
-                )
-              }
-            } catch {
-              // The native eye dropper throws when the user cancels.
-            }
-          },
           onSelectAnnotationStrokeWidth: (size) => setAnnotationStrokeWidth(size),
-          onDraftBackgroundCustomColor: (color) => setBgCustomColor(color),
           onSelectBackgroundColor: (color) => {
             setBgCustomColor(color)
             handleBgColorChange(color)

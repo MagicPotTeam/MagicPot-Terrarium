@@ -87,6 +87,14 @@ function groupByTarget<T>(items: readonly T[], getTarget: (item: T) => number): 
   return groups
 }
 
+function appendGroupedActions<T>(
+  actions: DesignInspectionAction[],
+  groups: ReadonlyMap<number, T[]>,
+  createAction: (target: number, items: T[]) => Omit<DesignInspectionAction, 'id'>
+): string[] {
+  return Array.from(groups, ([target, items]) => appendAction(actions, createAction(target, items)))
+}
+
 export function buildStructureFirstDesignInspectionProposal(
   contextPack: DesignInspectionContextPack
 ): DesignInspectionProposal {
@@ -217,13 +225,14 @@ export function buildStructureFirstDesignInspectionProposal(
       centerSpread + ALIGNMENT_TOLERANCE_PX < Math.min(leftSpread, rightSpread)
 
     if (preferTitleCenterAlignment) {
-      const actionIds: string[] = []
-      const actionGroups = groupByTarget(offPatternCenterPairs, (pair) =>
-        roundMetric(pair.container.bounds.x + pair.container.bounds.width / 2 + targetCenterOffset)
-      )
-
-      for (const [targetCenterX, pairs] of actionGroups.entries()) {
-        const actionId = appendAction(actions, {
+      const actionIds = appendGroupedActions(
+        actions,
+        groupByTarget(offPatternCenterPairs, (pair) =>
+          roundMetric(
+            pair.container.bounds.x + pair.container.bounds.width / 2 + targetCenterOffset
+          )
+        ),
+        (targetCenterX, pairs) => ({
           type: 'align-center',
           title: 'Align card titles to a shared centerline',
           description:
@@ -234,8 +243,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Card titles will organize around one centerline instead of drifting around the shared axis.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'alignment',
@@ -258,13 +266,12 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (!preferTitleCenterAlignment && offPatternLeftInsetPairs.length > 0) {
-      const actionIds: string[] = []
-      const actionGroups = groupByTarget(offPatternLeftInsetPairs, (pair) =>
-        roundMetric(pair.container.bounds.x + targetLeftInset)
-      )
-
-      for (const [targetX, pairs] of actionGroups.entries()) {
-        const actionId = appendAction(actions, {
+      const actionIds = appendGroupedActions(
+        actions,
+        groupByTarget(offPatternLeftInsetPairs, (pair) =>
+          roundMetric(pair.container.bounds.x + targetLeftInset)
+        ),
+        (targetX, pairs) => ({
           type: 'align-left',
           title: 'Align card titles to a consistent left inset',
           description:
@@ -275,8 +282,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Card titles will return to the same internal text column instead of drifting horizontally within related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -301,13 +307,12 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternTopInsetPairs.length > 0) {
-      const actionIds: string[] = []
-      const actionGroups = groupByTarget(offPatternTopInsetPairs, (pair) =>
-        roundMetric(pair.container.bounds.y + targetTopInset)
-      )
-
-      for (const [targetY, pairs] of actionGroups.entries()) {
-        const actionId = appendAction(actions, {
+      const actionIds = appendGroupedActions(
+        actions,
+        groupByTarget(offPatternTopInsetPairs, (pair) =>
+          roundMetric(pair.container.bounds.y + targetTopInset)
+        ),
+        (targetY, pairs) => ({
           type: 'align-top',
           title: 'Align card titles to a consistent top inset',
           description:
@@ -318,8 +323,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Card titles will return to the same internal top-inset rhythm instead of drifting vertically across related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -346,13 +350,12 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternRightInsetPairs.length > 0) {
-      const actionIds: string[] = []
-      const actionGroups = groupByTarget(offPatternRightInsetPairs, (pair) =>
-        roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
-      )
-
-      for (const [targetRightX, pairs] of actionGroups.entries()) {
-        const actionId = appendAction(actions, {
+      const actionIds = appendGroupedActions(
+        actions,
+        groupByTarget(offPatternRightInsetPairs, (pair) =>
+          roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
+        ),
+        (targetRightX, pairs) => ({
           type: 'align-right',
           title: 'Align card header trailing text to a consistent right inset',
           description:
@@ -363,8 +366,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Trailing header status, date, or tag text will return to consistent right-side padding instead of shifting across related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -391,13 +393,12 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternMetaBlocks.length > 0) {
-      const actionIds: string[] = []
-      const actionGroups = groupByTarget(offPatternMetaBlocks, (pair) =>
-        roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
-      )
-
-      for (const [targetRightX, pairs] of actionGroups.entries()) {
-        const actionId = appendAction(actions, {
+      const actionIds = appendGroupedActions(
+        actions,
+        groupByTarget(offPatternMetaBlocks, (pair) =>
+          roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
+        ),
+        (targetRightX, pairs) => ({
           type: 'align-right',
           title: 'Align card info value column to a consistent right inset',
           description:
@@ -408,8 +409,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Value columns inside card info blocks will return to consistent right-side padding instead of shifting across related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -436,13 +436,12 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternBodyMetaBlocks.length > 0) {
-      const actionIds: string[] = []
-      const actionGroups = groupByTarget(offPatternBodyMetaBlocks, (pair) =>
-        roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
-      )
-
-      for (const [targetRightX, pairs] of actionGroups.entries()) {
-        const actionId = appendAction(actions, {
+      const actionIds = appendGroupedActions(
+        actions,
+        groupByTarget(offPatternBodyMetaBlocks, (pair) =>
+          roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
+        ),
+        (targetRightX, pairs) => ({
           type: 'align-right',
           title: 'Align post-body info value column to a consistent right inset',
           description:
@@ -453,8 +452,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Post-body info value columns will return to consistent right-side padding instead of shifting across related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -481,13 +479,12 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternBodyMetaFooterActions.length > 0) {
-      const actionIds: string[] = []
-      const actionGroups = groupByTarget(offPatternBodyMetaFooterActions, (pair) =>
-        roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
-      )
-
-      for (const [targetRightX, pairs] of actionGroups.entries()) {
-        const actionId = appendAction(actions, {
+      const actionIds = appendGroupedActions(
+        actions,
+        groupByTarget(offPatternBodyMetaFooterActions, (pair) =>
+          roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
+        ),
+        (targetRightX, pairs) => ({
           type: 'align-right',
           title: 'Align pre-action info value column to a consistent right inset',
           description:
@@ -498,8 +495,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'The value column before bottom actions will return to consistent right-side padding instead of shifting across related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -526,10 +522,8 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternBadgeStacks.length > 0) {
-      const actionIds: string[] = []
-
-      for (const pair of offPatternBadgeStacks) {
-        const actionId = appendAction(actions, {
+      const actionIds = offPatternBadgeStacks.map((pair) =>
+        appendAction(actions, {
           type: 'distribute-vertical-spacing',
           title: 'Normalize card label stack vertical spacing',
           description:
@@ -543,8 +537,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Label stacks inside cards will return to a consistent vertical rhythm instead of varying across related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -571,10 +564,8 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternBadgeStacks.length > 0) {
-      const actionIds: string[] = []
-
-      for (const pair of offPatternBadgeStacks) {
-        const actionId = appendAction(actions, {
+      const actionIds = offPatternBadgeStacks.map((pair) =>
+        appendAction(actions, {
           type: 'distribute-vertical-spacing',
           title: 'Normalize trailing card label stack vertical spacing',
           description:
@@ -588,8 +579,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Trailing card label stacks will return to a consistent vertical rhythm instead of varying across related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -616,10 +606,8 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternBadgeStacks.length > 0) {
-      const actionIds: string[] = []
-
-      for (const pair of offPatternBadgeStacks) {
-        const actionId = appendAction(actions, {
+      const actionIds = offPatternBadgeStacks.map((pair) =>
+        appendAction(actions, {
           type: 'distribute-vertical-spacing',
           title: 'Normalize label stack spacing above card buttons',
           description:
@@ -633,8 +621,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Label stacks above card button rows will return to a consistent vertical rhythm instead of varying across related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -775,10 +762,8 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternTrailingBadgeStacks.length > 0) {
-      const actionIds: string[] = []
-
-      for (const pair of offPatternTrailingBadgeStacks) {
-        const actionId = appendAction(actions, {
+      const actionIds = offPatternTrailingBadgeStacks.map((pair) =>
+        appendAction(actions, {
           type: 'distribute-vertical-spacing',
           title: 'Normalize no-footer card trailing label stack spacing',
           description:
@@ -792,8 +777,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Trailing label stacks in cards without footer anchors will return to a consistent vertical rhythm instead of varying across related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -820,13 +804,12 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternLeftInsetPairs.length > 0) {
-      const actionIds: string[] = []
-      const actionGroups = groupByTarget(offPatternLeftInsetPairs, (pair) =>
-        roundMetric(pair.container.bounds.x + targetLeftInset)
-      )
-
-      for (const [targetX, pairs] of actionGroups.entries()) {
-        const actionId = appendAction(actions, {
+      const actionIds = appendGroupedActions(
+        actions,
+        groupByTarget(offPatternLeftInsetPairs, (pair) =>
+          roundMetric(pair.container.bounds.x + targetLeftInset)
+        ),
+        (targetX, pairs) => ({
           type: 'align-left',
           title: 'Align card body to a consistent left inset',
           description:
@@ -837,8 +820,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Card body text will return to the same internal text column instead of drifting horizontally within related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -863,13 +845,12 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternVerticalGapPairs.length > 0) {
-      const actionIds: string[] = []
-      const actionGroups = groupByTarget(offPatternVerticalGapPairs, (pair) =>
-        roundMetric(pair.title.bounds.y + pair.title.bounds.height + targetVerticalGap)
-      )
-
-      for (const [targetY, pairs] of actionGroups.entries()) {
-        const actionId = appendAction(actions, {
+      const actionIds = appendGroupedActions(
+        actions,
+        groupByTarget(offPatternVerticalGapPairs, (pair) =>
+          roundMetric(pair.title.bounds.y + pair.title.bounds.height + targetVerticalGap)
+        ),
+        (targetY, pairs) => ({
           type: 'align-top',
           title: 'Normalize vertical gap between card title and body',
           description:
@@ -880,8 +861,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Titles and body text inside cards will return to a consistent vertical hierarchy instead of uneven spacing.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -908,13 +888,12 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternBottomInsetPairs.length > 0) {
-      const actionIds: string[] = []
-      const actionGroups = groupByTarget(offPatternBottomInsetPairs, (pair) =>
-        roundMetric(pair.container.bounds.y + pair.container.bounds.height - targetBottomInset)
-      )
-
-      for (const [targetBottomY, pairs] of actionGroups.entries()) {
-        const actionId = appendAction(actions, {
+      const actionIds = appendGroupedActions(
+        actions,
+        groupByTarget(offPatternBottomInsetPairs, (pair) =>
+          roundMetric(pair.container.bounds.y + pair.container.bounds.height - targetBottomInset)
+        ),
+        (targetBottomY, pairs) => ({
           type: 'align-bottom',
           title: 'Align card footer to a consistent bottom inset',
           description:
@@ -925,8 +904,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Card footers will return to consistent bottom padding instead of drifting vertically across related cards.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',
@@ -951,10 +929,8 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (offPatternFooterRows.length > 0) {
-      const actionIds: string[] = []
-
-      for (const pair of offPatternFooterRows) {
-        const actionId = appendAction(actions, {
+      const actionIds = offPatternFooterRows.map((pair) =>
+        appendAction(actions, {
           type: 'distribute-horizontal-spacing',
           title: 'Normalize card footer action-row horizontal spacing',
           description:
@@ -968,8 +944,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'Action text in card footers will return to a consistent horizontal rhythm, avoiding one card with buttons that are too loose or too tight.'
         })
-        actionIds.push(actionId)
-      }
+      )
 
       appendIssue(issues, {
         category: 'spacing',

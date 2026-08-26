@@ -391,12 +391,38 @@ function createItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
   }
 }
 
+function createNamedItem(id: string, overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
+  return createItem({
+    id,
+    src: `file:///${id}.png`,
+    fileName: `${id}.png`,
+    ...overrides
+  })
+}
+
+function createSizedNamedItem(
+  id: string,
+  width: number,
+  height: number,
+  sourceWidth: number,
+  sourceHeight: number,
+  imageWidth: number,
+  imageHeight: number,
+  overrides: Partial<CanvasImageItem> = {}
+): CanvasImageItem {
+  return createNamedItem(id, {
+    width,
+    height,
+    sourceWidth,
+    sourceHeight,
+    image: createImage(imageWidth, imageHeight),
+    ...overrides
+  })
+}
+
 function createItems(count: number): CanvasImageItem[] {
   return Array.from({ length: count }, (_, index) =>
-    createItem({
-      id: `image-${index + 1}`,
-      src: `file:///image-${index + 1}.png`,
-      fileName: `image-${index + 1}.png`,
+    createNamedItem(`image-${index + 1}`, {
       x: (index % 12) * 24,
       y: Math.floor(index / 12) * 24,
       zIndex: index
@@ -956,14 +982,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('re-sorts sprites when an item z-index changes', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const firstItem = createItem({ id: 'image-1', zIndex: 1 })
-    const secondItem = createItem({
-      id: 'image-2',
-      src: 'file:///image-2.png',
-      fileName: 'image-2.png',
-      x: 48,
-      y: 60,
-      zIndex: 2
-    })
+    const secondItem = createNamedItem('image-2', { x: 48, y: 60, zIndex: 2 })
     const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
     const onMetricsChange = (metrics: ProjectCanvasWebGLRuntimeMetrics) => {
       metricsCalls.push(metrics)
@@ -1040,22 +1059,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
   it('keeps sprite order deterministic for equal zIndex items', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
-    const firstItem = createItem({
-      id: 'image-equal-first',
-      src: 'file:///image-equal-first.png',
-      fileName: 'image-equal-first.png',
-      x: 80,
-      y: 96,
-      zIndex: 5
-    })
-    const secondItem = createItem({
-      id: 'image-equal-second',
-      src: 'file:///image-equal-second.png',
-      fileName: 'image-equal-second.png',
-      x: 80,
-      y: 96,
-      zIndex: 5
-    })
+    const firstItem = createNamedItem('image-equal-first', { x: 80, y: 96, zIndex: 5 })
+    const secondItem = createNamedItem('image-equal-second', { x: 80, y: 96, zIndex: 5 })
 
     render(
       <ProjectCanvasWebGLImageLayer
@@ -1279,13 +1284,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const residentIdsCalls: Set<string>[] = []
     const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
     const visibleItem = createItem({ id: 'image-visible', x: 24, y: 36 })
-    const farItem = createItem({
-      id: 'image-far',
-      src: 'file:///image-far.png',
-      fileName: 'image-far.png',
-      x: 4800,
-      y: 3600
-    })
+    const farItem = createNamedItem('image-far', { x: 4800, y: 3600 })
 
     render(
       <ProjectCanvasWebGLImageLayer
@@ -1333,13 +1332,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
   it('keeps selected images resident even when they sit just outside the viewport budget', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const residentIdsCalls: Set<string>[] = []
-    const selectedEdgeItem = createItem({
-      id: 'image-selected-edge',
-      src: 'file:///image-selected-edge.png',
-      fileName: 'image-selected-edge.png',
-      x: 1700,
-      y: 48
-    })
+    const selectedEdgeItem = createNamedItem('image-selected-edge', { x: 1700, y: 48 })
 
     render(
       <ProjectCanvasWebGLImageLayer
@@ -1362,11 +1355,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
   it('does not reconcile the WebGL layer when selected id contents are unchanged', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
-    const selectedItem = createItem({
-      id: 'image-selected-stable',
-      src: 'file:///image-selected-stable.png',
-      fileName: 'image-selected-stable.png'
-    })
+    const selectedItem = createNamedItem('image-selected-stable')
     const stableItems = [selectedItem]
 
     const { rerender } = render(
@@ -1421,10 +1410,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const selectedItems = Array.from(
       { length: PROJECT_CANVAS_WEBGL_SELECTED_RESIDENT_LIMIT + 1 },
       (_, index) =>
-        createItem({
-          id: `image-selected-large-${index + 1}`,
-          src: `file:///image-selected-large-${index + 1}.png`,
-          fileName: `image-selected-large-${index + 1}.png`,
+        createNamedItem(`image-selected-large-${index + 1}`, {
           x: 5000 + index * 320,
           y: 5000,
           zIndex: index
@@ -1771,13 +1757,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
     const residentIdsCalls: Set<string>[] = []
     const visibleItem = createItem({ id: 'image-visible', x: 24, y: 36 })
-    const farItem = createItem({
-      id: 'image-far',
-      src: 'file:///image-far.png',
-      fileName: 'image-far.png',
-      x: 4800,
-      y: 3600
-    })
+    const farItem = createNamedItem('image-far', { x: 4800, y: 3600 })
 
     render(
       <ProjectCanvasWebGLImageLayer
@@ -1819,13 +1799,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       residentIdsCalls.push(new Set(residentIds))
     }
     const visibleItem = createItem({ id: 'image-visible-interacting', x: 24, y: 36 })
-    const farItem = createItem({
-      id: 'image-far-interacting',
-      src: 'file:///image-far-interacting.png',
-      fileName: 'image-far-interacting.png',
-      x: 4800,
-      y: 3600
-    })
+    const farItem = createNamedItem('image-far-interacting', { x: 4800, y: 3600 })
     const { rerender } = render(
       <ProjectCanvasWebGLImageLayer
         ref={ref}
@@ -1943,13 +1917,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       residentIdsCalls.push(new Set(residentIds))
     }
     const visibleItem = createItem({ id: 'image-visible-queued', x: 24, y: 36 })
-    const farItem = createItem({
-      id: 'image-far-queued',
-      src: 'file:///image-far-queued.png',
-      fileName: 'image-far-queued.png',
-      x: 4800,
-      y: 3600
-    })
+    const farItem = createNamedItem('image-far-queued', { x: 4800, y: 3600 })
     const stableItems = [visibleItem, farItem]
 
     vi.useFakeTimers()
@@ -2009,10 +1977,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       Math.floor(Math.sqrt(PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES / 4)) - 16
     const expectedTextureBytes = largeTextureSide * largeTextureSide * 4
     const largeVisibleItems = Array.from({ length: 7 }, (_, index) =>
-      createItem({
-        id: `image-large-${index + 1}`,
-        src: `file:///image-large-${index + 1}.png`,
-        fileName: `image-large-${index + 1}.png`,
+      createNamedItem(`image-large-${index + 1}`, {
         x: index * 24,
         y: index * 18,
         image: createImage(largeTextureSide, largeTextureSide)
@@ -2059,10 +2024,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
     const residentIdsCalls: Set<string>[] = []
     const metricsCalls: ProjectCanvasWebGLRuntimeMetrics[] = []
-    const rotatedEdgeItem = createItem({
-      id: 'image-rotated-edge',
-      src: 'file:///image-rotated-edge.png',
-      fileName: 'image-rotated-edge.png',
+    const rotatedEdgeItem = createNamedItem('image-rotated-edge', {
       x: -450,
       y: 260,
       width: 120,
@@ -2122,10 +2084,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         ...item,
         image: undefined as unknown as HTMLImageElement
       }))
-      const offscreenSrcOnlyItem = createItem({
-        id: 'image-offscreen-src-only',
-        src: 'file:///image-offscreen-src-only.png',
-        fileName: 'image-offscreen-src-only.png',
+      const offscreenSrcOnlyItem = createNamedItem('image-offscreen-src-only', {
         x: 10000,
         y: 10000,
         image: undefined as unknown as HTMLImageElement
@@ -2336,18 +2295,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     try {
       render(
         <ProjectCanvasWebGLImageLayer
-          items={[
-            createItem({
-              id: 'image-hires',
-              src: 'file:///image-hires.png',
-              fileName: 'image-hires.png',
-              width: 4096,
-              height: 4096,
-              sourceWidth: 4096,
-              sourceHeight: 4096,
-              image: createImage(1024, 1024)
-            })
-          ]}
+          items={[createSizedNamedItem('image-hires', 4096, 4096, 4096, 4096, 1024, 1024)]}
           {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={2}
         />
@@ -2449,16 +2397,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       render(
         <ProjectCanvasWebGLImageLayer
           items={[
-            createItem({
-              id: 'image-mid-zoom-preview',
-              src: 'file:///image-mid-zoom-preview.png',
-              fileName: 'image-mid-zoom-preview.png',
-              width: 4096,
-              height: 4096,
-              sourceWidth: 4096,
-              sourceHeight: 4096,
-              image: createImage(1024, 1024)
-            })
+            createSizedNamedItem('image-mid-zoom-preview', 4096, 4096, 4096, 4096, 1024, 1024)
           ]}
           {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={0.5}
@@ -2496,18 +2435,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     try {
       render(
         <ProjectCanvasWebGLImageLayer
-          items={[
-            createItem({
-              id: 'image-mid-zoom-hidpi',
-              src: 'file:///image-mid-zoom-hidpi.png',
-              fileName: 'image-mid-zoom-hidpi.png',
-              width: 4096,
-              height: 4096,
-              sourceWidth: 4096,
-              sourceHeight: 4096,
-              image: createImage(1024, 1024)
-            })
-          ]}
+          items={[createSizedNamedItem('image-mid-zoom-hidpi', 4096, 4096, 4096, 4096, 1024, 1024)]}
           {...TEST_STAGE_VIEWPORT_1280_720}
           stageScale={0.5}
         />
@@ -2609,16 +2537,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
     try {
-      const item = createItem({
-        id: 'image-hires-interacting',
-        src: 'file:///image-hires-interacting.png',
-        fileName: 'image-hires-interacting.png',
-        width: 4096,
-        height: 4096,
-        sourceWidth: 4096,
-        sourceHeight: 4096,
-        image: createImage(1024, 1024)
-      })
+      const item = createSizedNamedItem(
+        'image-hires-interacting',
+        4096,
+        4096,
+        4096,
+        4096,
+        1024,
+        1024
+      )
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
@@ -2685,16 +2612,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
     try {
-      const item = createItem({
-        id: 'image-hires-loads-during-interaction',
-        src: 'file:///image-hires-loads-during-interaction.png',
-        fileName: 'image-hires-loads-during-interaction.png',
-        width: 4096,
-        height: 4096,
-        sourceWidth: 4096,
-        sourceHeight: 4096,
-        image: createImage(1024, 1024)
-      })
+      const item = createSizedNamedItem(
+        'image-hires-loads-during-interaction',
+        4096,
+        4096,
+        4096,
+        4096,
+        1024,
+        1024
+      )
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
@@ -2838,42 +2764,36 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
     try {
-      const centerItem = createItem({
-        id: 'image-upgrade-center',
-        src: 'file:///image-upgrade-center.png',
-        fileName: 'image-upgrade-center.png',
-        x: 260,
-        y: 120,
-        width: 2048,
-        height: 2048,
-        sourceWidth: 2048,
-        sourceHeight: 2048,
-        image: createImage(512, 512)
-      })
-      const edgeItem = createItem({
-        id: 'image-upgrade-edge',
-        src: 'file:///image-upgrade-edge.png',
-        fileName: 'image-upgrade-edge.png',
-        x: 760,
-        y: 320,
-        width: 2048,
-        height: 2048,
-        sourceWidth: 2048,
-        sourceHeight: 2048,
-        image: createImage(512, 512)
-      })
-      const selectedItem = createItem({
-        id: 'image-upgrade-selected',
-        src: 'file:///image-upgrade-selected.png',
-        fileName: 'image-upgrade-selected.png',
-        x: 3200,
-        y: 2400,
-        width: 2048,
-        height: 2048,
-        sourceWidth: 2048,
-        sourceHeight: 2048,
-        image: createImage(512, 512)
-      })
+      const centerItem = createSizedNamedItem(
+        'image-upgrade-center',
+        2048,
+        2048,
+        2048,
+        2048,
+        512,
+        512,
+        { x: 260, y: 120 }
+      )
+      const edgeItem = createSizedNamedItem(
+        'image-upgrade-edge',
+        2048,
+        2048,
+        2048,
+        2048,
+        512,
+        512,
+        { x: 760, y: 320 }
+      )
+      const selectedItem = createSizedNamedItem(
+        'image-upgrade-selected',
+        2048,
+        2048,
+        2048,
+        2048,
+        512,
+        512,
+        { x: 3200, y: 2400 }
+      )
 
       render(
         <ProjectCanvasWebGLImageLayer
@@ -2927,28 +2847,25 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
     try {
-      const unselectedItem = createItem({
-        id: 'image-overview-unselected',
-        src: 'file:///image-overview-unselected.png',
-        fileName: 'image-overview-unselected.png',
-        width: 4096,
-        height: 4096,
-        sourceWidth: 4096,
-        sourceHeight: 4096,
-        image: createImage(512, 512)
-      })
-      const selectedItem = createItem({
-        id: 'image-overview-selected',
-        src: 'file:///image-overview-selected.png',
-        fileName: 'image-overview-selected.png',
-        x: 5000,
-        y: 4000,
-        width: 4096,
-        height: 4096,
-        sourceWidth: 4096,
-        sourceHeight: 4096,
-        image: createImage(512, 512)
-      })
+      const unselectedItem = createSizedNamedItem(
+        'image-overview-unselected',
+        4096,
+        4096,
+        4096,
+        4096,
+        512,
+        512
+      )
+      const selectedItem = createSizedNamedItem(
+        'image-overview-selected',
+        4096,
+        4096,
+        4096,
+        4096,
+        512,
+        512,
+        { x: 5000, y: 4000 }
+      )
 
       render(
         <ProjectCanvasWebGLImageLayer
@@ -3001,10 +2918,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
     try {
       const denseItems = Array.from({ length: 128 }, (_, index) =>
-        createItem({
-          id: `image-dense-mid-zoom-${index + 1}`,
-          src: `file:///image-dense-mid-zoom-${index + 1}.png`,
-          fileName: `image-dense-mid-zoom-${index + 1}.png`,
+        createNamedItem(`image-dense-mid-zoom-${index + 1}`, {
           x: (index % 16) * 64,
           y: Math.floor(index / 16) * 64,
           width: 4096,
@@ -3088,10 +3002,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         updatedAt: '2026-05-02T00:00:00.000Z'
       }
 
-      return createItem({
-        id: `image-thumbnail-priority-${index}`,
-        src: `file:///image-thumbnail-priority-${index}.png`,
-        fileName: `image-thumbnail-priority-${index}.png`,
+      return createNamedItem(`image-thumbnail-priority-${index}`, {
         x: (index - 1) * 200,
         y: 0,
         width: 800,
@@ -3381,15 +3292,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
 
     try {
       const { sourceIdentity, thumbnailSet } = createThumbnailSetFixture()
-      const item = createItem({
-        id: 'image-thumbnail-lod',
-        src: 'file:///image-thumbnail-lod.png',
-        fileName: 'image-thumbnail-lod.png',
-        width: 3200,
-        height: 1600,
-        sourceWidth: 4096,
-        sourceHeight: 2048,
-        image: createImage(192, 96),
+      const item = createSizedNamedItem('image-thumbnail-lod', 3200, 1600, 4096, 2048, 192, 96, {
         sourceIdentity,
         thumbnailSet
       })
@@ -3451,18 +3354,16 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const { sourceIdentity, thumbnailSet } = createThumbnailSetFixture(
         'canvas-thumbnail-scroll-defer-test'
       )
-      const item = createItem({
-        id: 'image-thumbnail-scroll-defer',
-        src: 'file:///image-thumbnail-scroll-defer.png',
-        fileName: 'image-thumbnail-scroll-defer.png',
-        width: 3200,
-        height: 1600,
-        sourceWidth: 4096,
-        sourceHeight: 2048,
-        image: createImage(192, 96),
-        sourceIdentity,
-        thumbnailSet
-      })
+      const item = createSizedNamedItem(
+        'image-thumbnail-scroll-defer',
+        3200,
+        1600,
+        4096,
+        2048,
+        192,
+        96,
+        { sourceIdentity, thumbnailSet }
+      )
 
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
@@ -3528,18 +3429,16 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         'canvas-thumbnail-dense-budget-test',
         { square: true }
       )
-      const focusedItem = createItem({
-        id: 'image-thumbnail-budgeted',
-        src: 'file:///image-thumbnail-budgeted.png',
-        fileName: 'image-thumbnail-budgeted.png',
-        width: 3200,
-        height: 3200,
-        sourceWidth: 4096,
-        sourceHeight: 4096,
-        image: createImage(192, 192),
-        sourceIdentity,
-        thumbnailSet
-      })
+      const focusedItem = createSizedNamedItem(
+        'image-thumbnail-budgeted',
+        3200,
+        3200,
+        4096,
+        4096,
+        192,
+        192,
+        { sourceIdentity, thumbnailSet }
+      )
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[focusedItem]}
@@ -3569,10 +3468,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       )
 
       const denseFillers = Array.from({ length: 256 }, (_, index) =>
-        createItem({
-          id: `image-thumbnail-budget-filler-${index + 1}`,
-          src: `file:///image-thumbnail-budget-filler-${index + 1}.png`,
-          fileName: `image-thumbnail-budget-filler-${index + 1}.png`,
+        createNamedItem(`image-thumbnail-budget-filler-${index + 1}`, {
           x: ((index + 1) % 16) * 40,
           y: Math.floor((index + 1) / 16) * 40,
           width: 3200,
@@ -3632,16 +3528,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
     try {
-      const item = createItem({
-        id: 'image-cached-source-overview',
-        src: 'file:///image-cached-source-overview.png',
-        fileName: 'image-cached-source-overview.png',
-        width: 4096,
-        height: 4096,
-        sourceWidth: 4096,
-        sourceHeight: 4096,
-        image: createImage(512, 512)
-      })
+      const item = createSizedNamedItem(
+        'image-cached-source-overview',
+        4096,
+        4096,
+        4096,
+        4096,
+        512,
+        512
+      )
 
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
@@ -3791,16 +3686,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
     try {
-      const item = createItem({
-        id: 'image-upgrade-decode-fail',
-        src: 'file:///image-upgrade-decode-fail.png',
-        fileName: 'image-upgrade-decode-fail.png',
-        width: 4096,
-        height: 4096,
-        sourceWidth: 4096,
-        sourceHeight: 4096,
-        image: createImage(1024, 1024)
-      })
+      const item = createSizedNamedItem(
+        'image-upgrade-decode-fail',
+        4096,
+        4096,
+        4096,
+        4096,
+        1024,
+        1024
+      )
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
@@ -3876,16 +3770,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
     try {
-      const item = createItem({
-        id: 'image-upgrade-fail',
-        src: 'file:///image-upgrade-fail.png',
-        fileName: 'image-upgrade-fail.png',
-        width: 4096,
-        height: 4096,
-        sourceWidth: 4096,
-        sourceHeight: 4096,
-        image: createImage(1024, 1024)
-      })
+      const item = createSizedNamedItem('image-upgrade-fail', 4096, 4096, 4096, 4096, 1024, 1024)
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
@@ -4298,16 +4183,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
     try {
-      const item = createItem({
-        id: 'image-over-budget-upgrade',
-        src: 'file:///image-over-budget-upgrade.png',
-        fileName: 'image-over-budget-upgrade.png',
-        width: 1024,
-        height: 1024,
-        sourceWidth: 20000,
-        sourceHeight: 20000,
-        image: createImage(1024, 1024)
-      })
+      const item = createSizedNamedItem(
+        'image-over-budget-upgrade',
+        1024,
+        1024,
+        20000,
+        20000,
+        1024,
+        1024
+      )
       const { rerender } = render(
         <ProjectCanvasWebGLImageLayer
           items={[item]}
@@ -4402,10 +4286,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
     try {
-      const item = createItem({
-        id: 'image-first-giant',
-        src: 'file:///image-first-giant.png',
-        fileName: 'image-first-giant.png',
+      const item = createNamedItem('image-first-giant', {
         image: undefined as unknown as HTMLImageElement
       })
 
@@ -4462,10 +4343,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
 
     try {
-      const failedItem = createItem({
-        id: 'image-broken',
-        src: 'file:///image-broken.png',
-        fileName: 'image-broken.png',
+      const failedItem = createNamedItem('image-broken', {
         image: undefined as unknown as HTMLImageElement
       })
       const { rerender } = render(
@@ -4552,10 +4430,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     const orderedItems = Array.from(
       { length: PROJECT_CANVAS_WEBGL_SPRITE_RECONCILE_BATCH_SIZE * 3 },
       (_, index) =>
-        createItem({
-          id: `image-row-major-${index + 1}`,
-          src: `file:///image-row-major-${index + 1}.png`,
-          fileName: `image-row-major-${index + 1}.png`,
+        createNamedItem(`image-row-major-${index + 1}`, {
           x: (index % 6) * 96,
           y: Math.floor(index / 6) * 72,
           width: 80,
