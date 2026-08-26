@@ -3088,6 +3088,13 @@ export class AssistantRuntime {
     const taskGroupId = cleanString(segments[0], 120) || taskGroupIdFallback
     const callUnrestrictedTool = (toolName: string, args: Record<string, unknown>) =>
       this.callTool(normalizedRoute, toolName, args, { allowedToolNames: null })
+    const taskReply = async (content: string) =>
+      buildSystemReplyResult(
+        normalizedRoute,
+        await this.getSessionMessageCount(normalizedRoute),
+        content,
+        { taskState }
+      )
 
     if (subcommand === 'list' || subcommand === 'status') {
       const toolResult = await callUnrestrictedTool('task.group.list', { limit: 10 })
@@ -3096,9 +3103,7 @@ export class AssistantRuntime {
       }>(toolResult.content)
       const taskGroups = Array.isArray(payload?.taskGroups) ? payload.taskGroups : []
 
-      return buildSystemReplyResult(
-        normalizedRoute,
-        await this.getSessionMessageCount(normalizedRoute),
+      return taskReply(
         [
           `Task status: ${getAssistantSessionKey(normalizedRoute)}`,
           `Running: ${taskState.running ? 'yes' : 'no'}`,
@@ -3113,18 +3118,14 @@ export class AssistantRuntime {
             ? 'Task groups:'
             : 'No task-group workflows recorded for this route yet.',
           ...taskGroups.map((summary, index) => formatTaskGroupSummaryLine(summary, index))
-        ].join('\n'),
-        { taskState }
+        ].join('\n')
       )
     }
 
     if (subcommand === 'inspect') {
       if (!taskGroupId) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          'Usage: /task inspect <taskGroupId>\nAlias: /task-group inspect <taskGroupId>',
-          { taskState }
+        return taskReply(
+          'Usage: /task inspect <taskGroupId>\nAlias: /task-group inspect <taskGroupId>'
         )
       }
 
@@ -3138,37 +3139,24 @@ export class AssistantRuntime {
       }>(toolResult.content)
       const inspection = payload?.workflow || null
       if (!inspection || !payload?.taskGroup) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          `Task group not found: ${taskGroupId}`,
-          { taskState }
-        )
+        return taskReply(`Task group not found: ${taskGroupId}`)
       }
       const workspaceInspection = await this.getWorkspace(inspection.workspaceId, {
         runLimit: 10
       })
 
-      return buildSystemReplyResult(
-        normalizedRoute,
-        await this.getSessionMessageCount(normalizedRoute),
+      return taskReply(
         formatTaskGroupInspectionLikeLines({
           ...inspection,
           taskGroup: payload.taskGroup,
           workspaceInspection
-        }).join('\n'),
-        { taskState }
+        }).join('\n')
       )
     }
 
     if (subcommand === 'start') {
       if (!taskGroupId) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          'Usage: /task start <taskGroupId> | <title> | <description>',
-          { taskState }
-        )
+        return taskReply('Usage: /task start <taskGroupId> | <title> | <description>')
       }
 
       const toolResult = await callUnrestrictedTool('task.group.start', {
@@ -3181,17 +3169,10 @@ export class AssistantRuntime {
         exportBundle?: Record<string, unknown> | null
       }>(toolResult.content)
       if (!payload?.taskGroup) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          `Task group not found: ${taskGroupId}`,
-          { taskState }
-        )
+        return taskReply(`Task group not found: ${taskGroupId}`)
       }
 
-      return buildSystemReplyResult(
-        normalizedRoute,
-        await this.getSessionMessageCount(normalizedRoute),
+      return taskReply(
         [
           `Task group started: ${payload.taskGroup.taskGroupId}`,
           `Status: ${payload.taskGroup.status}`,
@@ -3202,18 +3183,14 @@ export class AssistantRuntime {
           ...(payload.taskGroup.workspaceRunId
             ? [`Workspace run: ${payload.taskGroup.workspaceRunId}`]
             : [])
-        ].join('\n'),
-        { taskState }
+        ].join('\n')
       )
     }
 
     if (subcommand === 'progress') {
       if (!taskGroupId) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          'Usage: /task progress <taskGroupId> | <label> | <completed> | <total> | <percent>',
-          { taskState }
+        return taskReply(
+          'Usage: /task progress <taskGroupId> | <label> | <completed> | <total> | <percent>'
         )
       }
 
@@ -3229,17 +3206,10 @@ export class AssistantRuntime {
         exportBundle?: Record<string, unknown> | null
       }>(toolResult.content)
       if (!payload?.taskGroup) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          `Task group not found: ${taskGroupId}`,
-          { taskState }
-        )
+        return taskReply(`Task group not found: ${taskGroupId}`)
       }
 
-      return buildSystemReplyResult(
-        normalizedRoute,
-        await this.getSessionMessageCount(normalizedRoute),
+      return taskReply(
         formatTaskGroupInspectionLikeLines({
           workflowId: payload.taskGroup.taskGroupId,
           root: {
@@ -3255,19 +3225,13 @@ export class AssistantRuntime {
           eventCount: 0,
           artifactCount: 0,
           taskGroup: payload.taskGroup
-        }).join('\n'),
-        { taskState }
+        }).join('\n')
       )
     }
 
     if (subcommand === 'approve') {
       if (!taskGroupId) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          'Usage: /task approve <taskGroupId> | <approvedBy>',
-          { taskState }
-        )
+        return taskReply('Usage: /task approve <taskGroupId> | <approvedBy>')
       }
 
       const toolResult = await callUnrestrictedTool('task.group.approve', {
@@ -3279,17 +3243,10 @@ export class AssistantRuntime {
         exportBundle?: Record<string, unknown> | null
       }>(toolResult.content)
       if (!payload?.taskGroup) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          `Task group not found: ${taskGroupId}`,
-          { taskState }
-        )
+        return taskReply(`Task group not found: ${taskGroupId}`)
       }
 
-      return buildSystemReplyResult(
-        normalizedRoute,
-        await this.getSessionMessageCount(normalizedRoute),
+      return taskReply(
         [
           `Task group approved: ${payload.taskGroup.taskGroupId}`,
           `Status: ${payload.taskGroup.status}`,
@@ -3297,18 +3254,14 @@ export class AssistantRuntime {
           ...(payload.taskGroup.approvedAt
             ? [`Approved: ${new Date(payload.taskGroup.approvedAt).toLocaleString()}`]
             : [])
-        ].join('\n'),
-        { taskState }
+        ].join('\n')
       )
     }
 
     if (subcommand === 'export') {
       if (!taskGroupId) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          'Usage: /task export <taskGroupId> | <exportTarget> | <artifactId,artifactId>',
-          { taskState }
+        return taskReply(
+          'Usage: /task export <taskGroupId> | <exportTarget> | <artifactId,artifactId>'
         )
       }
 
@@ -3328,17 +3281,10 @@ export class AssistantRuntime {
         exportBundle?: Record<string, unknown> | null
       }>(toolResult.content)
       if (!payload?.taskGroup) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          `Task group not found: ${taskGroupId}`,
-          { taskState }
-        )
+        return taskReply(`Task group not found: ${taskGroupId}`)
       }
 
-      return buildSystemReplyResult(
-        normalizedRoute,
-        await this.getSessionMessageCount(normalizedRoute),
+      return taskReply(
         [
           `Task group exported: ${payload.taskGroup.taskGroupId}`,
           `Status: ${payload.taskGroup.status}`,
@@ -3349,19 +3295,13 @@ export class AssistantRuntime {
             ? [`Export artifacts: ${payload.taskGroup.exportArtifactIds.join(', ')}`]
             : []),
           ...(payload.exportBundle ? ['Export bundle: ready'] : [])
-        ].join('\n'),
-        { taskState }
+        ].join('\n')
       )
     }
 
     if (subcommand === 'cancel') {
       if (!taskGroupId) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          'Usage: /task cancel <taskGroupId>',
-          { taskState }
-        )
+        return taskReply('Usage: /task cancel <taskGroupId>')
       }
 
       const toolResult = await callUnrestrictedTool('task.group.cancel', { taskGroupId })
@@ -3369,33 +3309,20 @@ export class AssistantRuntime {
         taskGroup?: AssistantTaskGroupState | null
       }>(toolResult.content)
       if (!payload?.taskGroup) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          `Task group not found: ${taskGroupId}`,
-          { taskState }
-        )
+        return taskReply(`Task group not found: ${taskGroupId}`)
       }
 
-      return buildSystemReplyResult(
-        normalizedRoute,
-        await this.getSessionMessageCount(normalizedRoute),
+      return taskReply(
         [
           `Task group cancelled: ${payload.taskGroup.taskGroupId}`,
           `Status: ${payload.taskGroup.status}`
-        ].join('\n'),
-        { taskState }
+        ].join('\n')
       )
     }
 
     if (subcommand === 'resume') {
       if (!taskGroupId) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          'Usage: /task resume <taskGroupId>',
-          { taskState }
-        )
+        return taskReply('Usage: /task resume <taskGroupId>')
       }
 
       const toolResult = await callUnrestrictedTool('task.group.resume', {
@@ -3406,27 +3333,19 @@ export class AssistantRuntime {
         result?: AssistantRuntimeResult
       }>(toolResult.content)
 
-      return buildSystemReplyResult(
-        normalizedRoute,
-        await this.getSessionMessageCount(normalizedRoute),
+      return taskReply(
         [
           `Task group resumed: ${taskGroupId}`,
           ...(payload?.result?.runId ? [`Run: ${payload.result.runId}`] : []),
           ...(payload?.result?.status ? [`Status: ${payload.result.status}`] : []),
           ...(payload?.result?.reply?.content ? [`Reply: ${payload.result.reply.content}`] : [])
-        ].join('\n'),
-        { taskState }
+        ].join('\n')
       )
     }
 
     if (subcommand === 'retry') {
       if (!taskGroupId) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          'Usage: /task retry <taskGroupId>',
-          { taskState }
-        )
+        return taskReply('Usage: /task retry <taskGroupId>')
       }
 
       const toolResult = await callUnrestrictedTool('task.group.retry', {
@@ -3437,27 +3356,19 @@ export class AssistantRuntime {
         result?: AssistantRuntimeResult
       }>(toolResult.content)
 
-      return buildSystemReplyResult(
-        normalizedRoute,
-        await this.getSessionMessageCount(normalizedRoute),
+      return taskReply(
         [
           `Task group retried: ${taskGroupId}`,
           ...(payload?.result?.runId ? [`Run: ${payload.result.runId}`] : []),
           ...(payload?.result?.status ? [`Status: ${payload.result.status}`] : []),
           ...(payload?.result?.reply?.content ? [`Reply: ${payload.result.reply.content}`] : [])
-        ].join('\n'),
-        { taskState }
+        ].join('\n')
       )
     }
 
     if (subcommand === 'replay') {
       if (!taskGroupId) {
-        return buildSystemReplyResult(
-          normalizedRoute,
-          await this.getSessionMessageCount(normalizedRoute),
-          'Usage: /task replay <taskGroupId>',
-          { taskState }
-        )
+        return taskReply('Usage: /task replay <taskGroupId>')
       }
 
       const workflow =
@@ -3490,9 +3401,7 @@ export class AssistantRuntime {
       const suggestedRetryTool =
         payload?.replay?.suggestedRetryTool || (latestResumeEligibleRunId ? 'run.retry' : undefined)
 
-      return buildSystemReplyResult(
-        normalizedRoute,
-        await this.getSessionMessageCount(normalizedRoute),
+      return taskReply(
         [
           `Task group replay: ${taskGroupId}`,
           `Replay run: ${replayRunId}`,
@@ -3504,21 +3413,17 @@ export class AssistantRuntime {
             : []),
           ...(payload?.replay?.replayable === false ? ['Replayable: no'] : ['Replayable: yes']),
           ...(suggestedRetryTool ? [`Retry tool: ${suggestedRetryTool}`] : [])
-        ].join('\n'),
-        { taskState }
+        ].join('\n')
       )
     }
 
-    return buildSystemReplyResult(
-      normalizedRoute,
-      await this.getSessionMessageCount(normalizedRoute),
+    return taskReply(
       [
         'Usage: /task [status | list | inspect <taskGroupId> | start <taskGroupId> | <title> | <description> | progress <taskGroupId> | <label> | <completed> | <total> | <percent> | approve <taskGroupId> | <approvedBy> | export <taskGroupId> | <exportTarget> | <artifactId,artifactId> | cancel <taskGroupId> | resume <taskGroupId> | retry <taskGroupId> | replay <taskGroupId>]',
         'Alias: /task-group ...',
         'Alias: /tasks',
         'Alias: /task-status'
-      ].join('\n'),
-      { taskState }
+      ].join('\n')
     )
   }
 
