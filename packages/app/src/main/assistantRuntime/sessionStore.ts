@@ -1971,12 +1971,10 @@ export class AssistantSessionStore {
     route?: AssistantRoute
     runId?: string
   }): Promise<AssistantAuditTimelineEntry[]> {
-    const sessions = options?.route
-      ? [await this.getSession(options.route)].filter(Boolean)
-      : await this.listSessions()
+    const sessions = await this.getSessions(options?.route)
     const runId = String(options?.runId || '').trim()
 
-    const timeline = (sessions as AssistantSessionRecord[]).flatMap((session) => {
+    const timeline = sessions.flatMap((session) => {
       const runStatusById = new Map(session.runs.map((item) => [item.runId, item.status]))
       const runById = new Map(session.runs.map((item) => [item.runId, item]))
 
@@ -2059,13 +2057,10 @@ export class AssistantSessionStore {
     limit?: number
     route?: AssistantRoute
   }): Promise<AssistantOpsStatus> {
-    const sessions = options?.route
-      ? [await this.getSession(options.route)].filter(Boolean)
-      : await this.listSessions()
-    const typedSessions = sessions as AssistantSessionRecord[]
-    const runs = typedSessions.flatMap((session) => session.runs)
-    const events = typedSessions.flatMap((session) => session.eventLog)
-    const artifacts = typedSessions.flatMap((session) => session.artifacts)
+    const sessions = await this.getSessions(options?.route)
+    const runs = sessions.flatMap((session) => session.runs)
+    const events = sessions.flatMap((session) => session.eventLog)
+    const artifacts = sessions.flatMap((session) => session.artifacts)
     const queueDelays = runs
       .map((run) => computeQueueDelayMs(run))
       .filter((value): value is number => value !== undefined)
@@ -2074,7 +2069,7 @@ export class AssistantSessionStore {
       .filter((value): value is number => value !== undefined)
 
     const channels = [
-      ...typedSessions
+      ...sessions
         .reduce((map, session) => {
           const existing =
             map.get(session.route.channel) ||
@@ -2151,7 +2146,7 @@ export class AssistantSessionStore {
     return {
       generatedAt: Date.now(),
       ...(options?.route ? { route: normalizeAssistantRoute(options.route) } : {}),
-      sessionCount: typedSessions.length,
+      sessionCount: sessions.length,
       runCount,
       eventCount: events.length,
       artifactCount: artifacts.length,
