@@ -77,9 +77,8 @@ describe('PersistentDriveStore', () => {
   })
 
   it('creates, queries, and exactly replays a caller-idempotent Drive', () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
+    const { eventStore, store } = fileStore(':memory:')
     try {
-      const store = new PersistentDriveStore(eventStore)
       const input = { drive: drive(), createdAt: 10, idempotencyKey: 'create-drive' }
       const first = store.create(input)
       expect(store.get('drive-1')).toEqual(first)
@@ -124,9 +123,8 @@ describe('PersistentDriveStore', () => {
   })
 
   it('transitions and transfers with durable replay and lifecycle guards', () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
+    const { eventStore, store } = fileStore(':memory:')
     try {
-      const store = new PersistentDriveStore(eventStore)
       store.create({ drive: drive(), createdAt: 10, idempotencyKey: 'create-drive' })
       const waitingInput = {
         driveId: 'drive-1',
@@ -181,9 +179,8 @@ describe('PersistentDriveStore', () => {
   })
 
   it('reports durable progress with safe evidence links and replay', () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
+    const { eventStore, store } = fileStore(':memory:')
     try {
-      const store = new PersistentDriveStore(eventStore)
       store.create({ drive: drive(), createdAt: 10, idempotencyKey: 'create-drive' })
       const input = {
         driveId: 'drive-1',
@@ -220,9 +217,8 @@ describe('PersistentDriveStore', () => {
   })
 
   it('claims, retries, acknowledges, and dead-letters deliveries with lease fencing', () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
+    const { eventStore, store } = fileStore(':memory:')
     try {
-      const store = new PersistentDriveStore(eventStore)
       store.create({ drive: drive(), createdAt: 10, idempotencyKey: 'create-drive' })
       const first = store.claimDelivery({
         now: 20,
@@ -310,9 +306,8 @@ describe('PersistentDriveStore', () => {
   })
 
   it('updates compatibility links with replay and terminal guards', () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
+    const { eventStore, store } = fileStore(':memory:')
     try {
-      const store = new PersistentDriveStore(eventStore)
       store.create({ drive: drive(), createdAt: 10, idempotencyKey: 'create-drive' })
       const input = {
         driveId: 'drive-1',
@@ -344,9 +339,8 @@ describe('PersistentDriveStore', () => {
   })
 
   it('rejects invalid initial lifecycle and link invariants', () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
+    const { eventStore, store } = fileStore(':memory:')
     try {
-      const store = new PersistentDriveStore(eventStore)
       expect(() =>
         store.create({
           drive: { ...drive(), status: 'completed' },
