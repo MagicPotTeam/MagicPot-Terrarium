@@ -56,6 +56,7 @@ export type ComfyBatchStatus = {
   submittedAt?: number
   elapsedMs?: number
   averageItemMs?: number
+  throughputPerSecond?: number
   etaMs?: number
   queuePosition?: number
   recentItems?: ComfyBatchItemTiming[]

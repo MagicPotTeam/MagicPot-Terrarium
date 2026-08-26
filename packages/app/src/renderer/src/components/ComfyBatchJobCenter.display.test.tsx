@@ -1,11 +1,11 @@
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { ThemeProvider } from '@mui/material'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ComfyBatchStatus } from '@shared/api/svcComfyBatch'
 import { theme } from '@renderer/theme'
 import ComfyBatchJobCenter from './ComfyBatchJobCenter'
 
-const status: ComfyBatchStatus = {
+const status = {
   jobId: 'job-1',
   state: 'running',
   sourceDir: 'source',
@@ -15,13 +15,15 @@ const status: ComfyBatchStatus = {
   skipped: 3,
   running: 1,
   pending: 4,
-  failedFiles: []
-}
+  failedFiles: [],
+  throughputPerSecond: 0.7,
+  etaMs: 5_000
+} as ComfyBatchStatus
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, options?: { count?: number }) =>
-      `${key}:${options?.count === undefined ? '' : options.count}`
+    t: (key: string, options?: { count?: number; rate?: string }) =>
+      `${key}:${options?.count ?? options?.rate ?? ''}`
   })
 }))
 
@@ -47,6 +49,10 @@ vi.mock('../pages/QuickAppPage/QAppExecutePanel/comfyBatchJobState', () => ({
   })
 }))
 
+afterEach(() => {
+  vi.useRealTimers()
+})
+
 describe('ComfyBatchJobCenter success display', () => {
   it('folds skipped items into success and hides skipped metrics', () => {
     render(
@@ -57,5 +63,28 @@ describe('ComfyBatchJobCenter success display', () => {
 
     expect(screen.getByText('qapp.batch.success:5')).toBeInTheDocument()
     expect(screen.queryByText('qapp.batch.skipped:3')).not.toBeInTheDocument()
+  })
+
+  it('shows throughput and ticks the remaining estimate down locally', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-27T00:00:00.000Z'))
+
+    render(
+      <ThemeProvider theme={theme}>
+        <ComfyBatchJobCenter />
+      </ThemeProvider>
+    )
+
+    expect(screen.getByText('qapp.batch.throughput:')).toBeInTheDocument()
+    expect(screen.getByText('qapp.batch.throughput_value:0.70')).toBeInTheDocument()
+    expect(screen.getByText('qapp.batch.eta:')).toBeInTheDocument()
+    expect(screen.getByText('5s')).toBeInTheDocument()
+
+    act(() => {
+      vi.advanceTimersByTime(1_000)
+    })
+
+    expect(screen.getByText('4s')).toBeInTheDocument()
+    vi.useRealTimers()
   })
 })

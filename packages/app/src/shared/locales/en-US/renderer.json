@@ -853,6 +853,8 @@
       "queue_position": "Queue position {{position}}",
       "elapsed": "Elapsed time",
       "average_item": "Average per item",
+      "throughput": "Live throughput",
+      "throughput_value": "{{rate}} items/s",
       "eta": "Estimated remaining",
       "calculating": "Calculating…",
       "state_idle": "Idle",

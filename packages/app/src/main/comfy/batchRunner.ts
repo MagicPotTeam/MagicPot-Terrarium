@@ -776,17 +776,20 @@ export class ComfyBatchRunner {
         item.finishedAt >= item.startedAt
     )
     let etaMs = capacityEtaMs
+    let throughputPerSecond: number | undefined
     if (throughputSamples.length >= MIN_ETA_THROUGHPUT_SAMPLES) {
       const observationStart = Math.min(...throughputSamples.map((item) => item.startedAt))
       const observationEnd = Math.max(...throughputSamples.map((item) => item.finishedAt))
       const observationMs = Math.max(1, observationEnd - observationStart)
       const observedThroughputPerMs = throughputSamples.length / observationMs
+      throughputPerSecond = observedThroughputPerMs * 1_000
       etaMs = remainingItems > 0 ? remainingItems / observedThroughputPerMs : 0
     }
     return {
       ...this.statusValue,
       elapsedMs,
       averageItemMs,
+      throughputPerSecond,
       etaMs,
       recentItems: [...this.recentItems],
       runningItems: [...this.runningItems.values()],

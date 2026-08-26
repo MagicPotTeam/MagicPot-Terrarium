@@ -16,7 +16,7 @@ import {
   Typography
 } from '@mui/material'
 import type { ComfyBatchJobState, ComfyBatchStatus } from '@shared/api/svcComfyBatch'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMessage } from '@renderer/hooks/useMessage'
 import {
@@ -39,6 +39,59 @@ const formatDuration = (value: number | undefined, calculating: string, _empty: 
   if (minutes < 60) return `${minutes}m ${remainder}s`
   const hours = Math.floor(minutes / 60)
   return `${hours}h ${minutes % 60}m`
+}
+
+const formatThroughput = (
+  value: number | undefined,
+  calculating: string,
+  format: (rate: string) => string
+): string => {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return calculating
+  return format(value.toFixed(2))
+}
+
+type EtaAnchor = {
+  etaMs: number
+  syncedAt: number
+  syncKey: string
+}
+
+const useSmoothEta = (status: ComfyBatchStatus): number | undefined => {
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  const anchorRef = useRef<EtaAnchor | undefined>(undefined)
+  const syncKey = [
+    status.jobId || '',
+    status.state,
+    status.etaMs ?? 'none',
+    status.pending,
+    status.running,
+    status.success,
+    status.failed
+  ].join(':')
+
+  useEffect(() => {
+    if (
+      status.etaMs === undefined ||
+      !Number.isFinite(status.etaMs) ||
+      status.etaMs < 0 ||
+      status.state === 'completed' ||
+      status.state === 'cancelled'
+    ) {
+      anchorRef.current = undefined
+      return
+    }
+    anchorRef.current = { etaMs: status.etaMs, syncedAt: Date.now(), syncKey }
+  }, [status.etaMs, status.state, syncKey])
+
+  useEffect(() => {
+    if (status.state !== 'running') return
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1_000)
+    return () => window.clearInterval(interval)
+  }, [status.state])
+
+  const anchor = anchorRef.current
+  if (!anchor || anchor.syncKey !== syncKey) return status.etaMs
+  return Math.max(0, anchor.etaMs - (nowMs - anchor.syncedAt))
 }
 
 const stateColor = (
@@ -256,6 +309,7 @@ const ComfyBatchJobDetails = ({
   onRetry
 }: ComfyBatchJobDetailsProps): React.JSX.Element => {
   const { t } = useTranslation()
+  const smoothEtaMs = useSmoothEta(status)
   const jobId = status.jobId || ''
   const canRetry =
     status.state === 'error' || status.failed > 0 || status.pending > 0 || status.running > 0
@@ -284,11 +338,19 @@ const ComfyBatchJobDetails = ({
             value={formatDuration(status.averageItemMs, t('qapp.batch.calculating'), '—')}
           />
           <MetricRow
+            label={t('qapp.batch.throughput')}
+            value={formatThroughput(
+              status.throughputPerSecond,
+              t('qapp.batch.calculating'),
+              (rate) => t('qapp.batch.throughput_value', { rate })
+            )}
+          />
+          <MetricRow
             label={t('qapp.batch.eta')}
             value={
               status.state === 'completed' || status.state === 'cancelled'
                 ? '—'
-                : formatDuration(status.etaMs, t('qapp.batch.calculating'), '—')
+                : formatDuration(smoothEtaMs, t('qapp.batch.calculating'), '—')
             }
           />
           {status.sourceDir && (
