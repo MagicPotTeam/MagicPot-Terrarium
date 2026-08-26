@@ -16,7 +16,6 @@ const status = {
   running: 1,
   pending: 4,
   failedFiles: [],
-  throughputPerSecond: 0.7,
   etaMs: 5_000
 } as ComfyBatchStatus
 
@@ -76,7 +75,7 @@ describe('ComfyBatchJobCenter success display', () => {
     )
 
     expect(screen.getByText('qapp.batch.throughput:')).toBeInTheDocument()
-    expect(screen.getByText('qapp.batch.throughput_value:0.70')).toBeInTheDocument()
+    expect(screen.getByText('qapp.batch.throughput_value:1.00')).toBeInTheDocument()
     expect(screen.getByText('qapp.batch.eta:')).toBeInTheDocument()
     expect(screen.getByText('5s')).toBeInTheDocument()
 

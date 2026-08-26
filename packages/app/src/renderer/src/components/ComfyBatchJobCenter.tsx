@@ -50,24 +50,9 @@ const formatThroughput = (
   return format(value.toFixed(2))
 }
 
-type EtaAnchor = {
-  etaMs: number
-  syncedAt: number
-  syncKey: string
-}
-
 const useSmoothEta = (status: ComfyBatchStatus): number | undefined => {
   const [nowMs, setNowMs] = useState(() => Date.now())
-  const anchorRef = useRef<EtaAnchor | undefined>(undefined)
-  const syncKey = [
-    status.jobId || '',
-    status.state,
-    status.etaMs ?? 'none',
-    status.pending,
-    status.running,
-    status.success,
-    status.failed
-  ].join(':')
+  const etaStartedAt = useRef<number | undefined>(undefined)
 
   useEffect(() => {
     if (
@@ -77,11 +62,11 @@ const useSmoothEta = (status: ComfyBatchStatus): number | undefined => {
       status.state === 'completed' ||
       status.state === 'cancelled'
     ) {
-      anchorRef.current = undefined
+      etaStartedAt.current = undefined
       return
     }
-    anchorRef.current = { etaMs: status.etaMs, syncedAt: Date.now(), syncKey }
-  }, [status.etaMs, status.state, syncKey])
+    etaStartedAt.current = Date.now()
+  }, [status.etaMs, status.state, status.pending, status.running, status.success, status.failed])
 
   useEffect(() => {
     if (status.state !== 'running') return
@@ -89,9 +74,15 @@ const useSmoothEta = (status: ComfyBatchStatus): number | undefined => {
     return () => window.clearInterval(interval)
   }, [status.state])
 
-  const anchor = anchorRef.current
-  if (!anchor || anchor.syncKey !== syncKey) return status.etaMs
-  return Math.max(0, anchor.etaMs - (nowMs - anchor.syncedAt))
+  if (status.etaMs === undefined || etaStartedAt.current === undefined) return status.etaMs
+  return Math.max(0, status.etaMs - (nowMs - etaStartedAt.current))
+}
+
+const getThroughputPerSecond = (status: ComfyBatchStatus): number | undefined => {
+  const remainingItems = status.pending + status.running
+  return status.etaMs && status.etaMs > 0 && remainingItems > 0
+    ? (remainingItems * 1_000) / status.etaMs
+    : undefined
 }
 
 const stateColor = (
@@ -340,7 +331,7 @@ const ComfyBatchJobDetails = ({
           <MetricRow
             label={t('qapp.batch.throughput')}
             value={formatThroughput(
-              status.throughputPerSecond,
+              getThroughputPerSecond(status),
               t('qapp.batch.calculating'),
               (rate) => t('qapp.batch.throughput_value', { rate })
             )}

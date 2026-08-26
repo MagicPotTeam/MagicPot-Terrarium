@@ -212,7 +212,6 @@ describe('Comfy batch ETA', () => {
     }))
 
     expect(runner.status.etaMs).toBe(100_000)
-    expect(runner.status.throughputPerSecond).toBe(1)
   })
 })
 
