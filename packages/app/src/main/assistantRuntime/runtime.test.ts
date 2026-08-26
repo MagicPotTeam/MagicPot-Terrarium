@@ -60,13 +60,21 @@ describe('AssistantRuntime', () => {
     }
   })
 
-  it('forwards runtime inference limits to the LLM chat service', async () => {
-    const chat = vi.fn(async (_req: LLMChatReq): Promise<LLMChatResp> => ({ content: 'bounded' }))
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
+  type RuntimeOverrides = Omit<
+    ConstructorParameters<typeof AssistantRuntime>[0],
+    'sessionStore' | 'configProvider'
+  >
+
+  const createRuntime = (overrides: RuntimeOverrides = {}) =>
+    new AssistantRuntime({
+      ...overrides,
       sessionStore: store,
       configProvider: createConfig
     })
+
+  it('forwards runtime inference limits to the LLM chat service', async () => {
+    const chat = vi.fn(async (_req: LLMChatReq): Promise<LLMChatResp> => ({ content: 'bounded' }))
+    const runtime = createRuntime({ chatService: { chat } })
     await runtime.handleMessage({
       route: { channel: 'generic', scopeType: 'dm', scopeId: 'inference' },
       text: 'hello',
@@ -86,11 +94,7 @@ describe('AssistantRuntime', () => {
       return { content: `reply-${requests.length}` }
     })
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'telegram', scopeType: 'dm' as const, scopeId: '42' }
 
@@ -125,11 +129,7 @@ describe('AssistantRuntime', () => {
       return { content: `reply-${requests.length}` }
     })
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'telegram', scopeType: 'dm' as const, scopeId: '99' }
 
@@ -151,11 +151,7 @@ describe('AssistantRuntime', () => {
       return { content: `reply-${requests.length}` }
     })
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'telegram', scopeType: 'dm' as const, scopeId: 'mode-1' }
 
@@ -183,17 +179,11 @@ describe('AssistantRuntime', () => {
   })
 
   it('lists stored sessions for external channel management', async () => {
-    const chat = vi.fn(
-      async (req: LLMChatReq): Promise<LLMChatResp> => ({
-        content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
-      })
-    )
+    const chat = vi.fn(async (req: LLMChatReq): Promise<LLMChatResp> => ({
+      content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const dmRoute = { channel: 'telegram', scopeType: 'dm' as const, scopeId: '42' }
     const groupRoute = {
@@ -233,11 +223,7 @@ describe('AssistantRuntime', () => {
         })
     )
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'telegram', scopeType: 'dm' as const, scopeId: '777' }
     const firstPromise = runtime.handleMessage({ route, text: 'first message' })
@@ -267,11 +253,7 @@ describe('AssistantRuntime', () => {
   it('handles built-in commands through the shared runtime', async () => {
     const chat = vi.fn(async (): Promise<LLMChatResp> => ({ content: 'reply' }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = {
       channel: 'generic',
@@ -407,17 +389,11 @@ describe('AssistantRuntime', () => {
   })
 
   it('routes task-group aliases through workflow summary and task-group control surfaces', async () => {
-    const chat = vi.fn(
-      async (req: LLMChatReq): Promise<LLMChatResp> => ({
-        content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
-      })
-    )
+    const chat = vi.fn(async (req: LLMChatReq): Promise<LLMChatResp> => ({
+      content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = {
       channel: 'generic',
@@ -524,11 +500,7 @@ describe('AssistantRuntime', () => {
 
   it('clears a session through the cleanup command and reports retention state', async () => {
     const chat = vi.fn(async (): Promise<LLMChatResp> => ({ content: 'reply' }))
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'cleanup-1' }
 
@@ -545,18 +517,12 @@ describe('AssistantRuntime', () => {
   })
 
   it('records run metadata, artifacts, and tool calls for each session', async () => {
-    const chat = vi.fn(
-      async (): Promise<LLMChatResp> => ({
-        content: 'artifact reply',
-        imageUrl: 'file:///tmp/generated-report.png'
-      })
-    )
+    const chat = vi.fn(async (): Promise<LLMChatResp> => ({
+      content: 'artifact reply',
+      imageUrl: 'file:///tmp/generated-report.png'
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'workspace-1' }
 
@@ -609,17 +575,11 @@ describe('AssistantRuntime', () => {
   })
 
   it('honors tool allowlists for direct /tool execution', async () => {
-    const chat = vi.fn(
-      async (): Promise<LLMChatResp> => ({
-        content: 'unused'
-      })
-    )
+    const chat = vi.fn(async (): Promise<LLMChatResp> => ({
+      content: 'unused'
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'tool-allowlist-1' }
 
@@ -637,17 +597,11 @@ describe('AssistantRuntime', () => {
   })
 
   it('allows direct /tool execution when the tool is present in the allowlist', async () => {
-    const chat = vi.fn(
-      async (): Promise<LLMChatResp> => ({
-        content: 'unused'
-      })
-    )
+    const chat = vi.fn(async (): Promise<LLMChatResp> => ({
+      content: 'unused'
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'tool-allowlist-2' }
 
@@ -680,11 +634,7 @@ describe('AssistantRuntime', () => {
           }
     })
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'artifact-context-1' }
 
@@ -707,11 +657,7 @@ describe('AssistantRuntime', () => {
       }
     })
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'pins-1' }
 
@@ -756,11 +702,7 @@ describe('AssistantRuntime', () => {
         })
     )
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'cancel-1' }
     const resultPromise = runtime.handleMessage({
@@ -792,11 +734,7 @@ describe('AssistantRuntime', () => {
           resolveChat = resolve
         })
     )
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
     const controller = new AbortController()
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'external-cancel-1' }
     const resultPromise = runtime.handleMessage({
@@ -871,10 +809,8 @@ describe('AssistantRuntime', () => {
     }
 
     const chat = vi.fn(async (): Promise<LLMChatResp> => ({ content: 'should not be used' }))
-    const runtime = new AssistantRuntime({
+    const runtime = createRuntime({
       chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig,
       toolRegistry: new SlowToolRegistry()
     })
 
@@ -896,17 +832,11 @@ describe('AssistantRuntime', () => {
 
   it('broadcasts route-scoped runtime events to subscribers', async () => {
     const events: string[] = []
-    const chat = vi.fn(
-      async (): Promise<LLMChatResp> => ({
-        content: 'subscriber reply'
-      })
-    )
+    const chat = vi.fn(async (): Promise<LLMChatResp> => ({
+      content: 'subscriber reply'
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'stream-1' }
     const unsubscribe = runtime.subscribeEvents(route, (event) => {
@@ -924,17 +854,11 @@ describe('AssistantRuntime', () => {
   })
 
   it('accepts asynchronous submissions and completes them in the background', async () => {
-    const chat = vi.fn(
-      async (): Promise<LLMChatResp> => ({
-        content: 'async reply'
-      })
-    )
+    const chat = vi.fn(async (): Promise<LLMChatResp> => ({
+      content: 'async reply'
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'async-1' }
     const accepted = await runtime.submitMessage({
@@ -961,11 +885,7 @@ describe('AssistantRuntime', () => {
       throw new Error('async failure')
     })
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'async-failed-1' }
     const accepted = await runtime.submitMessage({
@@ -1000,11 +920,7 @@ describe('AssistantRuntime', () => {
         })
     )
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'async-cancel-1' }
     const accepted = await runtime.submitMessage({
@@ -1038,11 +954,7 @@ describe('AssistantRuntime', () => {
       }
     })
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'resume-failed-1' }
     const failedAccepted = await runtime.submitMessage({
@@ -1095,17 +1007,11 @@ describe('AssistantRuntime', () => {
   })
 
   it('rejects resume control for completed runs', async () => {
-    const chat = vi.fn(
-      async (): Promise<LLMChatResp> => ({
-        content: 'completed'
-      })
-    )
+    const chat = vi.fn(async (): Promise<LLMChatResp> => ({
+      content: 'completed'
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'resume-completed-1' }
     const completed = await runtime.handleMessage({
@@ -1119,17 +1025,11 @@ describe('AssistantRuntime', () => {
   })
 
   it('creates follow-up runs with lineage metadata and a stable workspace identity', async () => {
-    const chat = vi.fn(
-      async (req: LLMChatReq): Promise<LLMChatResp> => ({
-        content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
-      })
-    )
+    const chat = vi.fn(async (req: LLMChatReq): Promise<LLMChatResp> => ({
+      content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'lineage-1' }
     const first = await runtime.handleMessage({
@@ -1193,17 +1093,11 @@ describe('AssistantRuntime', () => {
   })
 
   it('lists and inspects persisted workflow records aggregated from run lineage for a route', async () => {
-    const chat = vi.fn(
-      async (req: LLMChatReq): Promise<LLMChatResp> => ({
-        content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
-      })
-    )
+    const chat = vi.fn(async (req: LLMChatReq): Promise<LLMChatResp> => ({
+      content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'workflow-command-1' }
     const first = await runtime.handleMessage({
@@ -1243,11 +1137,7 @@ describe('AssistantRuntime', () => {
       }
     })
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'workflow-resume-1' }
     const failedAccepted = await runtime.submitMessage({
@@ -1286,11 +1176,7 @@ describe('AssistantRuntime', () => {
       }
     })
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'attach-1' }
     const attached = await runtime.attachWorkspace(route, 'workspace-shared-attach', {
@@ -1320,17 +1206,11 @@ describe('AssistantRuntime', () => {
   })
 
   it('keeps private workspaces route-scoped until the owner explicitly shares them', async () => {
-    const chat = vi.fn(
-      async (req: LLMChatReq): Promise<LLMChatResp> => ({
-        content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
-      })
-    )
+    const chat = vi.fn(async (req: LLMChatReq): Promise<LLMChatResp> => ({
+      content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const ownerRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'private-owner-1' }
     const guestRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'private-guest-1' }
@@ -1365,17 +1245,11 @@ describe('AssistantRuntime', () => {
   })
 
   it('does not rebind a route when private attach validation fails', async () => {
-    const chat = vi.fn(
-      async (req: LLMChatReq): Promise<LLMChatResp> => ({
-        content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
-      })
-    )
+    const chat = vi.fn(async (req: LLMChatReq): Promise<LLMChatResp> => ({
+      content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const ownerRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'private-owner-2' }
     const guestRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'private-guest-2' }
@@ -1402,17 +1276,11 @@ describe('AssistantRuntime', () => {
   })
 
   it('applies explicit workspace governance actions for the workspace owner', async () => {
-    const chat = vi.fn(
-      async (req: LLMChatReq): Promise<LLMChatResp> => ({
-        content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
-      })
-    )
+    const chat = vi.fn(async (req: LLMChatReq): Promise<LLMChatResp> => ({
+      content: `reply:${req.messages[req.messages.length - 1]?.content || ''}`
+    }))
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const ownerRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'govern-owner-1' }
     const guestRoute = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'govern-guest-1' }
@@ -1480,11 +1348,7 @@ describe('AssistantRuntime', () => {
       }
     })
 
-    const runtime = new AssistantRuntime({
-      chatService: { chat },
-      sessionStore: store,
-      configProvider: createConfig
-    })
+    const runtime = createRuntime({ chatService: { chat } })
 
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'detach-1' }
     await runtime.attachWorkspace(route, 'workspace-shared-detach', {
@@ -1532,7 +1396,7 @@ describe('AssistantRuntime', () => {
         createdAt: 1
       }
     ])
-    const runtime = new AssistantRuntime({ sessionStore: store, configProvider: createConfig })
+    const runtime = createRuntime()
     const result = await runtime.forkSessionAtEvent(source, 'runtime-fork-event', target)
     expect(result.session.sessionKey).toBe('generic:dm:runtime-fork-target')
     expect(result.forkCreatedEvent.type).toBe('fork-created')
