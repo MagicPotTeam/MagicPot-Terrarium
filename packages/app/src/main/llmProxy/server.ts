@@ -881,14 +881,42 @@ const resolveLlmProxyAccessIdentity = (
   return matched || null
 }
 
+const writeJsonResponse = (
+  res: http.ServerResponse,
+  statusCode: number,
+  body: unknown,
+  headers: http.OutgoingHttpHeaders = {}
+): void => {
+  res.writeHead(statusCode, { 'Content-Type': 'application/json', ...headers })
+  res.end(JSON.stringify(body))
+}
+
 const writeUnauthorizedLlmProxyResponse = (res: http.ServerResponse): void => {
-  res.writeHead(401, { 'Content-Type': 'application/json' })
-  res.end(
-    JSON.stringify({
-      error:
-        'Unauthorized LLM proxy request. Provide Authorization: Bearer <token>, X-MagicPot-Proxy-Token, or legacy X-MagicPot-Bot-Secret/X-Bot-Secret.'
+  writeJsonResponse(res, 401, {
+    error:
+      'Unauthorized LLM proxy request. Provide Authorization: Bearer <token>, X-MagicPot-Proxy-Token, or legacy X-MagicPot-Bot-Secret/X-Bot-Secret.'
+  })
+}
+
+const requireProxyAccess = (
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  activity?: Parameters<typeof recordLlmProxyAccessUsage>[1]['activity'],
+  profileId?: string
+): LlmProxyConfiguredAccessToken | undefined => {
+  const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
+  if (!accessIdentity) {
+    writeUnauthorizedLlmProxyResponse(res)
+    return undefined
+  }
+  if (activity) {
+    recordLlmProxyAccessUsage(accessIdentity, {
+      activity,
+      requesterAddress: getRequesterAddress(req),
+      profileId
     })
-  )
+  }
+  return accessIdentity
 }
 
 const resolveInternalToolRequestAccess = (
@@ -968,6 +996,22 @@ const getMcpServerPath = () => cleanString(getConfig().mcp_config?.server?.path)
 const getLocalMcpAuthToken = () =>
   cleanString(getConfig().mcp_config?.server?.auth_token) ||
   cleanString(getConfig().chat_config?.webhook_secret)
+
+const authorizeMcpRequest = (
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: ReturnType<typeof getConfig>
+): boolean => {
+  if (!config.mcp_config?.server?.enabled) {
+    writeJsonResponse(res, 404, { error: 'MCP server is disabled.' })
+    return false
+  }
+  if (!isLocalSecretRequestAuthorized(req.headers, getLocalMcpAuthToken())) {
+    writeJsonResponse(res, 401, buildMcpJsonRpcError(null, -32001, 'Unauthorized MCP request.'))
+    return false
+  }
+  return true
+}
 
 const normalizeAssistantRouteInput = (value: {
   channel?: string
@@ -1258,8 +1302,7 @@ const handleProxyChatRequest = async ({
           message: result.content
         }
       : result
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify(responseBody))
+    writeJsonResponse(res, 200, responseBody)
   } catch (error) {
     if (abortBridge.signal.aborted || isAbortError(error)) {
       return
@@ -1369,40 +1412,24 @@ export function startLLMProxyServer(): void {
     try {
       // Health check.
       if ((pathname === '/api/status' || pathname === '/api/bot/status') && req.method === 'GET') {
-        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
-        if (!accessIdentity) {
-          writeUnauthorizedLlmProxyResponse(res)
-          return
-        }
-        recordLlmProxyAccessUsage(accessIdentity, {
-          activity: 'status',
-          requesterAddress: getRequesterAddress(req)
-        })
+        const accessIdentity = requireProxyAccess(req, res, 'status')
+        if (!accessIdentity) return
         const status = await getLLMProxySvc().serverStatus({})
         const responseBody = buildProxyStatusCompatibilityPayload(
           status,
           getConfig(),
           pathname === '/api/bot/status' ? '/api/bot/status' : undefined
         )
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(responseBody))
+        writeJsonResponse(res, 200, responseBody)
         return
       }
 
       // List available profiles.
       if (pathname === '/api/profiles' && req.method === 'GET') {
-        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
-        if (!accessIdentity) {
-          writeUnauthorizedLlmProxyResponse(res)
-          return
-        }
-        recordLlmProxyAccessUsage(accessIdentity, {
-          activity: 'profiles',
-          requesterAddress: getRequesterAddress(req)
-        })
+        const accessIdentity = requireProxyAccess(req, res, 'profiles')
+        if (!accessIdentity) return
         const profiles = await getLLMProxySvc().listProfiles({})
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(buildProxyProfilesCompatibilityPayload(profiles)))
+        writeJsonResponse(res, 200, buildProxyProfilesCompatibilityPayload(profiles))
         return
       }
 
@@ -1410,58 +1437,34 @@ export function startLLMProxyServer(): void {
 
       // List server-side quick apps.
       if (pathname === '/api/qapps/list' && req.method === 'GET') {
-        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
-        if (!accessIdentity) {
-          writeUnauthorizedLlmProxyResponse(res)
-          return
-        }
-        recordLlmProxyAccessUsage(accessIdentity, {
-          activity: 'qapp-list',
-          requesterAddress: getRequesterAddress(req)
-        })
+        const accessIdentity = requireProxyAccess(req, res, 'qapp-list')
+        if (!accessIdentity) return
         const { QAppFSCli } = await import('../qApp/fs')
         const qAppFSCli = new QAppFSCli()
         const qApps = await qAppFSCli.listQAppKeys()
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ qApps }))
+        writeJsonResponse(res, 200, { qApps })
         return
       }
 
       // Read the config and workflow for a specific server-side quick app.
       if (pathname === '/api/qapps/get' && req.method === 'GET') {
-        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
-        if (!accessIdentity) {
-          writeUnauthorizedLlmProxyResponse(res)
-          return
-        }
-        recordLlmProxyAccessUsage(accessIdentity, {
-          activity: 'qapp-get',
-          requesterAddress: getRequesterAddress(req)
-        })
+        const accessIdentity = requireProxyAccess(req, res, 'qapp-get')
+        if (!accessIdentity) return
         const key = url.searchParams.get('key')
         if (!key) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Missing key parameter' }))
+          writeJsonResponse(res, 400, { error: 'Missing key parameter' })
           return
         }
         const { QAppFSCli } = await import('../qApp/fs')
         const qAppFSCli = new QAppFSCli()
         const { cfg, workflow, manifest } = await qAppFSCli.getQApp(key)
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ cfg, workflow, manifest }))
+        writeJsonResponse(res, 200, { cfg, workflow, manifest })
         return
       }
 
       if (pathname === '/api/apps/catalog' && req.method === 'GET') {
-        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
-        if (!accessIdentity) {
-          writeUnauthorizedLlmProxyResponse(res)
-          return
-        }
-        recordLlmProxyAccessUsage(accessIdentity, {
-          activity: 'profiles',
-          requesterAddress: getRequesterAddress(req)
-        })
+        const accessIdentity = requireProxyAccess(req, res, 'profiles')
+        if (!accessIdentity) return
         const config = getConfig()
         let runtimeStatus: Awaited<ReturnType<typeof getMcpRuntimeStatus>> | null = null
         try {
@@ -1470,8 +1473,7 @@ export function startLLMProxyServer(): void {
           console.warn('[LLMProxyServer] Failed to collect runtime-enriched app catalog:', error)
         }
         const snapshot = buildMagicPotAppCatalogSnapshot(config, { runtimeStatus })
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(snapshot))
+        writeJsonResponse(res, 200, snapshot)
         return
       }
 
@@ -1479,8 +1481,7 @@ export function startLLMProxyServer(): void {
 
       // 410 - the legacy proxy-status endpoint has been removed.
       if (pathname === '/api/proxy-status') {
-        res.writeHead(410, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'HTTP Proxy feature has been removed' }))
+        writeJsonResponse(res, 410, { error: 'HTTP Proxy feature has been removed' })
         return
       }
 
@@ -1552,21 +1553,14 @@ export function startLLMProxyServer(): void {
 
       // 鑱婂ぉ璇锋眰
       if (pathname === '/api/canvas/sync' && req.method === 'POST') {
-        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
-        if (!accessIdentity) {
-          writeUnauthorizedLlmProxyResponse(res)
-          return
-        }
+        if (!requireProxyAccess(req, res)) return
         req.resume()
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(
-          JSON.stringify({
-            ok: true,
-            mirrored: false,
-            error: CANVAS_SYNC_REMOVED_ERROR,
-            hint: 'Canvas mirroring is no longer available. Attach required files to the chat request instead.'
-          })
-        )
+        writeJsonResponse(res, 200, {
+          ok: true,
+          mirrored: false,
+          error: CANVAS_SYNC_REMOVED_ERROR,
+          hint: 'Canvas mirroring is no longer available. Attach required files to the chat request instead.'
+        })
         return
       }
 
@@ -1574,13 +1568,10 @@ export function startLLMProxyServer(): void {
         const config = getConfig()
         const toolAccess = resolveInternalToolRequestAccess(req.headers, config)
         if (!toolAccess) {
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(
-            JSON.stringify({
-              error:
-                'Unauthorized tool request. Provide Authorization: Bearer <token> or a configured internal tool secret.'
-            })
-          )
+          writeJsonResponse(res, 401, {
+            error:
+              'Unauthorized tool request. Provide Authorization: Bearer <token> or a configured internal tool secret.'
+          })
           return
         }
 
@@ -1595,8 +1586,7 @@ export function startLLMProxyServer(): void {
         }>(req)
 
         if (!cleanString(reqData.scopeId) || !cleanString(reqData.toolName)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Missing scopeId or toolName.' }))
+          writeJsonResponse(res, 400, { error: 'Missing scopeId or toolName.' })
           return
         }
 
@@ -1619,17 +1609,13 @@ export function startLLMProxyServer(): void {
           }
         )
 
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ result: buildSafeToolResponseResult(result) }))
+        writeJsonResponse(res, 200, { result: buildSafeToolResponseResult(result) })
         return
       }
 
       if (pathname === '/api/chat' && req.method === 'POST') {
-        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
-        if (!accessIdentity) {
-          writeUnauthorizedLlmProxyResponse(res)
-          return
-        }
+        const accessIdentity = requireProxyAccess(req, res)
+        if (!accessIdentity) return
         const reqData = await readJsonRequestBody<{
           messages: ChatMessage[]
           route?: AssistantRouteInput
@@ -1645,11 +1631,8 @@ export function startLLMProxyServer(): void {
       }
 
       if (LEGACY_CHAT_ENDPOINTS.has(pathname) && req.method === 'POST') {
-        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
-        if (!accessIdentity) {
-          writeUnauthorizedLlmProxyResponse(res)
-          return
-        }
+        const accessIdentity = requireProxyAccess(req, res)
+        if (!accessIdentity) return
         const parsedBody = await readJsonRequestBody<unknown>(req, { allowEmpty: true })
         const rawRequest = isRecord(parsedBody) ? parsedBody : {}
         const reqData = normalizeLegacyChatRequest(rawRequest)
@@ -1668,8 +1651,7 @@ export function startLLMProxyServer(): void {
           })
         }
         if (reqData.messages.length === 0) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Missing message content or messages.' }))
+          writeJsonResponse(res, 400, { error: 'Missing message content or messages.' })
           return
         }
         await handleProxyChatRequest({
@@ -1684,11 +1666,8 @@ export function startLLMProxyServer(): void {
       }
       // OpenAI-compatible endpoint: /v1/chat/completions
       if (pathname === '/v1/chat/completions' && req.method === 'POST') {
-        const accessIdentity = resolveLlmProxyAccessIdentity(req.headers)
-        if (!accessIdentity) {
-          writeUnauthorizedLlmProxyResponse(res)
-          return
-        }
+        const accessIdentity = requireProxyAccess(req, res)
+        if (!accessIdentity) return
         const reqData = await readJsonRequestBody<{
           model?: string
           messages: Array<{
@@ -1804,8 +1783,7 @@ export function startLLMProxyServer(): void {
           if (reqData.stream) {
             headers['X-MagicPot-Stream-Fallback'] = 'non-stream-json'
           }
-          res.writeHead(200, headers)
-          res.end(JSON.stringify(response))
+          writeJsonResponse(res, 200, response, headers)
         } catch (error) {
           if (abortBridge.signal.aborted || isAbortError(error)) {
             return
@@ -1818,27 +1796,16 @@ export function startLLMProxyServer(): void {
       }
       if (pathname === getConfiguredMcpLegacySsePath()) {
         const config = getConfig()
-        if (!config.mcp_config?.server?.enabled) {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'MCP server is disabled.' }))
-          return
-        }
-
-        if (!isLocalSecretRequestAuthorized(req.headers, getLocalMcpAuthToken())) {
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(buildMcpJsonRpcError(null, -32001, 'Unauthorized MCP request.')))
-          return
-        }
+        if (!authorizeMcpRequest(req, res, config)) return
 
         if (req.method !== 'GET') {
-          res.writeHead(405, { 'Content-Type': 'application/json' })
-          res.end(
-            JSON.stringify(
-              buildMcpJsonRpcError(
-                null,
-                -32000,
-                'Legacy SSE MCP transport only accepts GET on the SSE endpoint.'
-              )
+          writeJsonResponse(
+            res,
+            405,
+            buildMcpJsonRpcError(
+              null,
+              -32000,
+              'Legacy SSE MCP transport only accepts GET on the SSE endpoint.'
             )
           )
           return
@@ -1853,27 +1820,16 @@ export function startLLMProxyServer(): void {
 
       if (pathname === getConfiguredMcpLegacySseMessagePath()) {
         const config = getConfig()
-        if (!config.mcp_config?.server?.enabled) {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'MCP server is disabled.' }))
-          return
-        }
-
-        if (!isLocalSecretRequestAuthorized(req.headers, getLocalMcpAuthToken())) {
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(buildMcpJsonRpcError(null, -32001, 'Unauthorized MCP request.')))
-          return
-        }
+        if (!authorizeMcpRequest(req, res, config)) return
 
         if (req.method !== 'POST') {
-          res.writeHead(405, { 'Content-Type': 'application/json' })
-          res.end(
-            JSON.stringify(
-              buildMcpJsonRpcError(
-                null,
-                -32000,
-                'Legacy SSE MCP transport only accepts POST on the message endpoint.'
-              )
+          writeJsonResponse(
+            res,
+            405,
+            buildMcpJsonRpcError(
+              null,
+              -32000,
+              'Legacy SSE MCP transport only accepts POST on the message endpoint.'
             )
           )
           return
@@ -1891,17 +1847,7 @@ export function startLLMProxyServer(): void {
 
       if (pathname === getMcpServerPath()) {
         const config = getConfig()
-        if (!config.mcp_config?.server?.enabled) {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'MCP server is disabled.' }))
-          return
-        }
-
-        if (!isLocalSecretRequestAuthorized(req.headers, getLocalMcpAuthToken())) {
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(buildMcpJsonRpcError(null, -32001, 'Unauthorized MCP request.')))
-          return
-        }
+        if (!authorizeMcpRequest(req, res, config)) return
 
         const parsedBody =
           req.method === 'POST'
@@ -1918,18 +1864,14 @@ export function startLLMProxyServer(): void {
       }
 
       // 404
-      res.writeHead(404, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: 'Not Found', path: pathname }))
+      writeJsonResponse(res, 404, { error: 'Not Found', path: pathname })
     } catch (error) {
       console.error('[LLMProxyServer] Error:', error)
       if (res.headersSent || res.destroyed) return
       const statusCode = error instanceof HttpRequestError ? error.statusCode : 500
-      res.writeHead(statusCode, { 'Content-Type': 'application/json' })
-      res.end(
-        JSON.stringify({
-          error: error instanceof HttpRequestError ? error.message : 'Internal server error.'
-        })
-      )
+      writeJsonResponse(res, statusCode, {
+        error: error instanceof HttpRequestError ? error.message : 'Internal server error.'
+      })
     }
   })
 
