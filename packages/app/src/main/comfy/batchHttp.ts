@@ -65,6 +65,14 @@ type RequestOptions = {
   signal?: AbortSignal
 }
 
+export function createComfyJsonPostInit(body: unknown): RequestInit {
+  return {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }
+}
+
 function isRedirectStatus(status: number): boolean {
   return status >= 300 && status < 400
 }
@@ -179,11 +187,7 @@ export class ComfyBatchHttpClient {
   ): Promise<string> {
     const response = await this.json<{ prompt_id?: string }>(
       '/prompt',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: workflow, client_id: clientId, prompt_id: promptId })
-      },
+      createComfyJsonPostInit({ prompt: workflow, client_id: clientId, prompt_id: promptId }),
       { signal, retry: false }
     )
     if (!response.prompt_id) throw new Error('ComfyUI prompt response has no prompt_id')
@@ -265,24 +269,10 @@ export class ComfyBatchHttpClient {
 
   async cancelPrompt(promptId: string): Promise<void> {
     const [queued, running] = await Promise.allSettled([
-      this.noContent(
-        '/queue',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ delete: [promptId] })
-        },
-        { retry: false }
-      ),
-      this.noContent(
-        '/interrupt',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt_id: promptId })
-        },
-        { retry: false }
-      )
+      this.noContent('/queue', createComfyJsonPostInit({ delete: [promptId] }), { retry: false }),
+      this.noContent('/interrupt', createComfyJsonPostInit({ prompt_id: promptId }), {
+        retry: false
+      })
     ])
     if (queued.status === 'rejected' && running.status === 'rejected') throw queued.reason
   }

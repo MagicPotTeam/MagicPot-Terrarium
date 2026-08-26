@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ComfyBatchHttpClient, COMFY_BATCH_MAX_NETWORK_ATTEMPTS } from './batchHttp'
+import {
+  ComfyBatchHttpClient,
+  COMFY_BATCH_MAX_NETWORK_ATTEMPTS,
+  createComfyJsonPostInit
+} from './batchHttp'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -7,6 +11,14 @@ afterEach(() => {
 })
 
 describe('ComfyBatchHttpClient retry and boundary behavior', () => {
+  it('builds the same JSON POST request shape used by ComfyUI endpoints', () => {
+    expect(createComfyJsonPostInit({ prompt_id: 'known-prompt-id' })).toEqual({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"prompt_id":"known-prompt-id"}'
+    })
+  })
+
   it('allows at most three retries after the first idempotent read attempt', async () => {
     const fetchMock = vi.fn().mockRejectedValue(new TypeError('network down'))
     vi.stubGlobal('fetch', fetchMock)
