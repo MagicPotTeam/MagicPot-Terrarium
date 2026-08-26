@@ -4,10 +4,8 @@ import { app } from 'electron'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
 import type {
   GraphV2NodeDescriptor,
-  MagicAgentInstanceState,
   PolicyJsonRecord,
-  PolicyJsonValue,
-  RuntimeChannelState
+  PolicyJsonValue
 } from '@shared/magicAgentPlatform2'
 import {
   createGraphToolPolicyRequest,
@@ -133,35 +131,27 @@ import {
   MAGIC_AGENT_TRUSTED_AGENT_STUDIO_ROUTE,
   type MagicAgentGraphCreateRequest,
   type MagicAgentGraphDefinition,
-  type MagicAgentGraphPendingInputRecord,
   type MagicAgentGraphRunResult,
   type MagicAgentGraphRunPublicEvent,
   type MagicAgentGraphRunStreamEvent
 } from '@shared/magicAgent'
-
-const projectPublicPendingInput = (
-  pendingInput: MagicAgentGraphRunResult['pendingInput']
-): MagicAgentGraphPendingInputRecord | undefined =>
-  pendingInput
-    ? {
-        pendingInputId: pendingInput.pendingInputId,
-        nodeId: pendingInput.nodeId,
-        revision: pendingInput.revision,
-        status: pendingInput.status,
-        createdAt: pendingInput.createdAt,
-        updatedAt: pendingInput.updatedAt
-      }
-    : undefined
-
-const projectPublicGraphRun = (run: MagicAgentGraphRunResult): MagicAgentGraphRunResult => ({
-  ...run,
-  ...(run.pendingInput ? { pendingInput: projectPublicPendingInput(run.pendingInput) } : {})
-})
-import type {
-  MagicAgentInstalledPackage,
-  MagicAgentPackageAgentDefinition,
-  MagicAgentPackageInspection
-} from '@shared/magicAgentRuntime'
+import {
+  agentInstanceResourceDto,
+  assertPackagePathApproved,
+  composeSystemPrompt,
+  driveResourceDto,
+  isPathLikePackageIdentifier,
+  mergeAgentDefinitions,
+  packageAgentToPlatformAgent,
+  projectPublicGraphRun,
+  redactInstalledPackage,
+  redactLocalPathFragments,
+  redactPackageInspection,
+  resolvePackageAgentAllowedToolNames,
+  runtimeChannelResourceDto,
+  runtimeChannelWireResourceDto,
+  triggerResourceDto
+} from './magicAgentPlatformUtils'
 import {
   getMagicAgentPlatformAdapter,
   type MagicAgentPlatformAdapter,
@@ -197,7 +187,6 @@ import {
   authorizeMagicAgentApprovalRenderer,
   authorizeMagicAgentTrustedRoute
 } from '../magicAgentRuntime/trustedRouteBinding'
-import { isMagicAgentPlatformDeniedToolName } from '../magicAgentRuntime/toolPolicy'
 
 export type MagicAgentPlatformRouteAuthorizer = (
   route: AgentRouteLike,
@@ -242,164 +231,6 @@ const resolveDefaultGraphStoreRoot = (): string =>
 const resolveDefaultGraphRunStoreRoot = (): string =>
   path.join(resolveDefaultUserDataRoot(), 'magic-agent-platform', 'graph-runs')
 
-const redactInstalledPackage = (installed: MagicAgentInstalledPackage) => {
-  const { sourcePath: _sourcePath, packagePath: _packagePath, ...safeInstalled } = installed
-  return safeInstalled
-}
-
-const WINDOWS_ABSOLUTE_PATH_FRAGMENT = /[A-Za-z]:[\\/][^\r\n;,'"`)]+/g
-const POSIX_ABSOLUTE_PATH_FRAGMENT = /(^|[\s'"`])\/[^\r\n;,'"`)]+/g
-
-const redactLocalPathFragments = (message: string): string =>
-  message
-    .replace(WINDOWS_ABSOLUTE_PATH_FRAGMENT, '[redacted path]')
-    .replace(POSIX_ABSOLUTE_PATH_FRAGMENT, '$1[redacted path]')
-
-const redactValidationIssue = <T extends { path: string; message: string }>(issue: T): T => ({
-  ...issue,
-  message: redactLocalPathFragments(issue.message)
-})
-
-const redactPackageValidation = (validation: MagicAgentPackageInspection['validation']) => {
-  if (validation.ok) {
-    return {
-      ...validation,
-      warnings: validation.warnings.map(redactValidationIssue)
-    }
-  }
-  return {
-    ...validation,
-    errors: validation.errors.map(redactValidationIssue),
-    warnings: validation.warnings.map(redactValidationIssue)
-  }
-}
-
-const redactPackageInspection = (
-  inspection: MagicAgentPackageInspection
-): MagicAgentPlatformPackageScanResp => {
-  const {
-    manifestPath: _manifestPath,
-    packagePath: _packagePath,
-    installed,
-    ...safeInspection
-  } = inspection
-  return {
-    ...safeInspection,
-    validation: redactPackageValidation(inspection.validation),
-    ...(installed ? { installed: redactInstalledPackage(installed) } : {})
-  }
-}
-
-const packageAgentToPlatformAgent = (
-  agent: MagicAgentPackageAgentDefinition
-): MagicAgentPlatformAgentDefinition => ({
-  id: agent.id,
-  name: agent.name,
-  ...(agent.description ? { description: agent.description } : {}),
-  ...(agent.systemPrompt ? { systemPrompt: agent.systemPrompt } : {}),
-  ...(agent.toolNames !== undefined ? { toolNames: agent.toolNames } : {}),
-  ...(agent.maxToolIterations !== undefined ? { maxToolIterations: agent.maxToolIterations } : {}),
-  ...(agent.profileId ? { profileId: agent.profileId } : {})
-})
-
-const mergeAgentDefinitions = (
-  runtimeAgents: MagicAgentPlatformAgentDefinition[],
-  packageAgents: MagicAgentPlatformAgentDefinition[]
-): MagicAgentPlatformAgentDefinition[] => {
-  const agentsById = new Map<string, MagicAgentPlatformAgentDefinition>()
-  for (const agent of runtimeAgents) {
-    agentsById.set(agent.id, agent)
-  }
-  for (const agent of packageAgents) {
-    if (agentsById.has(agent.id)) {
-      throw new Error(`Duplicate MagicAgent id from installed package: ${agent.id}`)
-    }
-    agentsById.set(agent.id, agent)
-  }
-  return [...agentsById.values()].sort((left, right) => left.id.localeCompare(right.id))
-}
-
-const cleanSystemPrompt = (value: string | null | undefined): string => String(value || '').trim()
-
-const composeSystemPrompt = (
-  agentSystemPrompt: string | null | undefined,
-  requestSystemPrompt: string | null | undefined
-): string | undefined => {
-  const agentPrompt = cleanSystemPrompt(agentSystemPrompt)
-  const requestPrompt = cleanSystemPrompt(requestSystemPrompt)
-  if (!agentPrompt) {
-    return requestPrompt || undefined
-  }
-  if (!requestPrompt || requestPrompt === agentPrompt) {
-    return agentPrompt
-  }
-  return `${agentPrompt}\n\n${requestPrompt}`
-}
-
-const resolvePackageAgentAllowedToolNames = (
-  requested: MagicAgentPlatformRunReq['allowedToolNames'],
-  packageToolNames: MagicAgentPlatformAgentDefinition['toolNames']
-): MagicAgentPlatformRunReq['allowedToolNames'] => {
-  if (requested === undefined) {
-    return undefined
-  }
-  if (!Array.isArray(requested)) {
-    return requested
-  }
-  if (!Array.isArray(packageToolNames)) {
-    return requested
-  }
-
-  const packageToolNameSet = new Set(
-    packageToolNames
-      .map((toolName) => normalizeMagicPotToolName(toolName))
-      .filter((toolName) => Boolean(toolName) && !isMagicAgentPlatformDeniedToolName(toolName))
-  )
-  return [
-    ...new Set(requested.map((toolName) => normalizeMagicPotToolName(toolName)).filter(Boolean))
-  ].filter((toolName) => packageToolNameSet.has(toolName))
-}
-
-const normalizePathSeparators = (input: string): string => input.replace(/\\/g, '/')
-
-const isPathLikePackageIdentifier = (value: string): boolean =>
-  path.isAbsolute(value) ||
-  value.includes('/') ||
-  value.includes('\\') ||
-  value === '.' ||
-  value.startsWith('..')
-
-const assertPackagePathApproved = (
-  packageStore: MagicAgentPackageStore,
-  packageDir: string
-): string => {
-  const resolvedRoot = path.resolve(packageStore.getPackageRoot())
-  const resolvedPackageDir = path.resolve(packageDir)
-  const relative = normalizePathSeparators(path.relative(resolvedRoot, resolvedPackageDir))
-  if (
-    relative === '' ||
-    (!relative.startsWith('../') && relative !== '..' && !path.isAbsolute(relative))
-  ) {
-    return resolvedPackageDir
-  }
-
-  throw new Error('MagicAgent package paths must be under the configured package root.')
-}
-
-const triggerResourceDto = (resource: {
-  id: string
-  revision: number
-  state: unknown
-  createdAt: number
-  updatedAt: number
-}) => ({
-  id: resource.id,
-  revision: resource.revision,
-  state: resource.state,
-  createdAt: resource.createdAt,
-  updatedAt: resource.updatedAt
-})
-
 const agentInstanceLifecycle = () => {
   const lifecycle = getProductionAgentInstanceLifecycle()
   if (!lifecycle) throw new Error('Production Agent instance lifecycle is not running.')
@@ -419,68 +250,6 @@ const driveCommands = () => {
   if (!lifecycle) throw new Error('Production Drive runtime is unavailable.')
   return lifecycle.commands
 }
-
-const agentInstanceResourceDto = (resource: {
-  id: string
-  revision: number
-  state: MagicAgentInstanceState
-  createdAt: number
-  updatedAt: number
-}): import('@shared/api/svcMagicAgentPlatform').MagicAgentPlatformAgentInstanceResource => ({
-  id: resource.id,
-  revision: resource.revision,
-  state: resource.state,
-  createdAt: resource.createdAt,
-  updatedAt: resource.updatedAt
-})
-const runtimeChannelWireResourceDto = (resource: {
-  id: string
-  revision: number
-  state: import('@shared/magicAgentPlatform2').RuntimeChannelWireState
-  createdAt: number
-  updatedAt: number
-}) => ({
-  id: resource.id,
-  revision: resource.revision,
-  state: resource.state,
-  createdAt: resource.createdAt,
-  updatedAt: resource.updatedAt
-})
-
-const runtimeChannelResourceDto = (resource: {
-  id: string
-  revision: number
-  state: RuntimeChannelState
-  createdAt: number
-  updatedAt: number
-}): import('@shared/api/svcMagicAgentPlatform').MagicAgentPlatformRuntimeChannelResource => ({
-  id: resource.id,
-  revision: resource.revision,
-  state: {
-    id: resource.state.id,
-    name: resource.state.name,
-    mode: resource.state.mode,
-    capacity: resource.state.capacity,
-    members: resource.state.members.map((member) => ({
-      memberId: member.memberId,
-      ...(member.agentInstanceId ? { agentInstanceId: member.agentInstanceId } : {}),
-      ...(member.graphTargetId ? { graphTargetId: member.graphTargetId } : {}),
-      ...(member.graphWakeRequest
-        ? {
-            graphWakeRequest: {
-              graphId: member.graphWakeRequest.graphId,
-              route: member.graphWakeRequest.route
-            }
-          }
-        : {}),
-      role: member.role,
-      joinedAt: member.joinedAt
-    }))
-  },
-  createdAt: resource.createdAt,
-  updatedAt: resource.updatedAt
-})
-const driveResourceDto = triggerResourceDto
 
 const triggerCommands = () => {
   const lifecycle = getProductionTriggerLifecycle()
