@@ -20,6 +20,7 @@ vi.mock('../config/buildEnv', () => ({
 
 import { AssistantSessionStore } from './sessionStore'
 import { AssistantToolRegistry } from './toolRegistry'
+import { getAssistantSessionKey } from './types'
 import { getAssistantTerminalPolicyRuntime } from '../magicAgentPlatform2/productionRuntime'
 import { ProjectTraceFSCli } from '../projectTrace/fs'
 import {
@@ -44,6 +45,17 @@ describe('AssistantToolRegistry', () => {
     route,
     sessionStore: store,
     taskState,
+    ...overrides
+  })
+
+  const createTaskState = (
+    route: ToolCallContext['route'],
+    overrides: Partial<ToolCallContext['taskState']> = {}
+  ): ToolCallContext['taskState'] => ({
+    sessionKey: getAssistantSessionKey(route),
+    running: false,
+    queuedCount: 0,
+    updatedAt: Date.now(),
     ...overrides
   })
 
@@ -234,12 +246,7 @@ describe('AssistantToolRegistry', () => {
       toolCalls: [{ toolName: 'session.status' }]
     })
 
-    const taskState = {
-      sessionKey: 'generic:dm:tooling-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
 
     const addPinned = await registry.callTool(
       'context.pinned',
@@ -744,12 +751,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'tooling-2'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:tooling-2',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
 
     const result = await registry.callTool(
       'mcp.echo.echo',
@@ -782,12 +784,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'tooling-3'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:tooling-3',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
 
     await expect(
       registry.callTool(
@@ -842,12 +839,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'terminal-disabled-1'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:terminal-disabled-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
 
     await expect(
       registry.callTool(
@@ -875,12 +867,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'terminal-confirm-1'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:terminal-confirm-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
     const config = {
       ...DEFAULT_CONFIG,
       download_dir: tempDir,
@@ -917,12 +904,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'terminal-deny-1'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:terminal-deny-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
     const config = {
       ...DEFAULT_CONFIG,
       download_dir: tempDir,
@@ -976,12 +958,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'terminal-path-escape-1'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:terminal-path-escape-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
     const config: Config = {
       ...DEFAULT_CONFIG,
       download_dir: tempDir,
@@ -1047,12 +1024,7 @@ describe('AssistantToolRegistry', () => {
       scopeType: 'dm' as const,
       scopeId: 'terminal-allow-1'
     }
-    const taskState = {
-      sessionKey: 'generic:dm:terminal-allow-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
     const config = {
       ...DEFAULT_CONFIG,
       download_dir: tempDir,
@@ -1101,12 +1073,7 @@ describe('AssistantToolRegistry', () => {
     }
     const defaultWorkspace = getAssistantWorkspaceState(route)
     const sharedWorkspace = getAssistantWorkspaceState(route, 'workspace-shared-tooling-detach')
-    const taskState = {
-      sessionKey: 'generic:dm:tooling-detach-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const taskState = createTaskState(route)
 
     await registry.callTool(
       'workspace.attach',
@@ -1183,18 +1150,8 @@ describe('AssistantToolRegistry', () => {
       scopeId: 'tooling-private-guest-1'
     }
     const ownerWorkspace = getAssistantWorkspaceState(ownerRoute)
-    const ownerTaskState = {
-      sessionKey: 'generic:dm:tooling-private-owner-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
-    const guestTaskState = {
-      sessionKey: 'generic:dm:tooling-private-guest-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const ownerTaskState = createTaskState(ownerRoute)
+    const guestTaskState = createTaskState(guestRoute)
 
     await registry.callTool(
       'workspace.attach',
@@ -1289,18 +1246,8 @@ describe('AssistantToolRegistry', () => {
       scopeId: 'tooling-govern-guest-1'
     }
     const ownerWorkspace = getAssistantWorkspaceState(ownerRoute)
-    const ownerTaskState = {
-      sessionKey: 'generic:dm:tooling-govern-owner-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
-    const guestTaskState = {
-      sessionKey: 'generic:dm:tooling-govern-guest-1',
-      running: false,
-      queuedCount: 0,
-      updatedAt: Date.now()
-    }
+    const ownerTaskState = createTaskState(ownerRoute)
+    const guestTaskState = createTaskState(guestRoute)
 
     await registry.callTool(
       'workspace.attach',
