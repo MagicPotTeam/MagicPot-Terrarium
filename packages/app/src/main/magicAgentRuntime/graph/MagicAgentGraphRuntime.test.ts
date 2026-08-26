@@ -75,6 +75,22 @@ const createTestGraph = (graphId = 'test.graph'): MagicAgentGraphDefinition => (
   ]
 })
 
+const completedAgentRun = (
+  req: { agentId?: string; text?: string },
+  content: string,
+  message = content
+) => ({
+  runId: `agent-run-${req.agentId}`,
+  agentId: req.agentId || 'unknown',
+  status: 'completed' as const,
+  content,
+  messages: [{ role: 'assistant' as const, content: message }],
+  toolCalls: [],
+  events: [],
+  startedAt: 1,
+  finishedAt: 2
+})
+
 describe('MagicAgentGraphRuntime', () => {
   it('lists and inspects built-in team definitions', () => {
     const runtime = new MagicAgentGraphRuntime()
@@ -487,17 +503,9 @@ describe('MagicAgentGraphRuntime', () => {
   })
 
   it('uses requested output ids as execution goals', async () => {
-    const runAgent = vi.fn(async (req) => ({
-      runId: `agent-run-${req.agentId}`,
-      agentId: req.agentId || 'unknown',
-      status: 'completed' as const,
-      content: `agent:${req.agentId}:${req.text}`,
-      messages: [{ role: 'assistant' as const, content: `agent:${req.agentId}:${req.text}` }],
-      toolCalls: [],
-      events: [],
-      startedAt: 1,
-      finishedAt: 2
-    }))
+    const runAgent = vi.fn(async (req) =>
+      completedAgentRun(req, `agent:${req.agentId}:${req.text}`)
+    )
     const callTool = vi.fn(async (req) => ({
       ok: true,
       toolName: req.name,
@@ -676,17 +684,9 @@ describe('MagicAgentGraphRuntime', () => {
   })
 
   it('executes agent and tool nodes with fail-closed graph tool allowlists', async () => {
-    const runAgent = vi.fn(async (req) => ({
-      runId: `agent-run-${req.agentId}`,
-      agentId: req.agentId || 'unknown',
-      status: 'completed' as const,
-      content: `agent:${req.agentId}:${req.text}`,
-      messages: [{ role: 'assistant' as const, content: `agent:${req.agentId}:${req.text}` }],
-      toolCalls: [],
-      events: [],
-      startedAt: 1,
-      finishedAt: 2
-    }))
+    const runAgent = vi.fn(async (req) =>
+      completedAgentRun(req, `agent:${req.agentId}:${req.text}`)
+    )
     const callTool = vi.fn(async (req) => ({
       ok: true,
       toolName: req.name,
@@ -826,17 +826,13 @@ describe('MagicAgentGraphRuntime', () => {
   })
 
   it('skips inactive conditional branches and uses real source node output', async () => {
-    const runAgent = vi.fn(async (req) => ({
-      runId: `agent-run-${req.agentId}`,
-      agentId: req.agentId || 'unknown',
-      status: 'completed' as const,
-      content: req.agentId === 'planner-agent' ? 'NO_GO' : `unexpected:${req.agentId}`,
-      messages: [{ role: 'assistant' as const, content: 'NO_GO' }],
-      toolCalls: [],
-      events: [],
-      startedAt: 1,
-      finishedAt: 2
-    }))
+    const runAgent = vi.fn(async (req) =>
+      completedAgentRun(
+        req,
+        req.agentId === 'planner-agent' ? 'NO_GO' : `unexpected:${req.agentId}`,
+        'NO_GO'
+      )
+    )
     const runtime = new MagicAgentGraphRuntime([], { runAgent })
     runtime.create({
       route: testRoute,
@@ -921,17 +917,7 @@ describe('MagicAgentGraphRuntime', () => {
   })
 
   it('fails when a required channel is not delivered', async () => {
-    const runAgent = vi.fn(async (req) => ({
-      runId: `agent-run-${req.agentId}`,
-      agentId: req.agentId || 'unknown',
-      status: 'completed' as const,
-      content: 'NO_GO',
-      messages: [{ role: 'assistant' as const, content: 'NO_GO' }],
-      toolCalls: [],
-      events: [],
-      startedAt: 1,
-      finishedAt: 2
-    }))
+    const runAgent = vi.fn(async (req) => completedAgentRun(req, 'NO_GO'))
     const runtime = new MagicAgentGraphRuntime([], { runAgent })
     runtime.create({
       route: testRoute,
@@ -1358,17 +1344,7 @@ describe('MagicAgentGraphRuntime', () => {
   })
 
   it('fails oversized graph input before executing graph nodes', async () => {
-    const runAgent = vi.fn(async (req) => ({
-      runId: `agent-run-${req.agentId}`,
-      agentId: req.agentId || 'unknown',
-      status: 'completed' as const,
-      content: 'should not run',
-      messages: [{ role: 'assistant' as const, content: 'should not run' }],
-      toolCalls: [],
-      events: [],
-      startedAt: 1,
-      finishedAt: 2
-    }))
+    const runAgent = vi.fn(async (req) => completedAgentRun(req, 'should not run'))
     const runtime = new MagicAgentGraphRuntime([], { runAgent, policy: { maxInputChars: 5 } })
     runtime.create({ graph: createTestGraph('test.input-limit'), route: testRoute })
 
@@ -1391,17 +1367,7 @@ describe('MagicAgentGraphRuntime', () => {
   it('bounds events, node output, final output, and retained runs per session', async () => {
     let timestamp = 1_700_000_100_000
     vi.spyOn(Date, 'now').mockImplementation(() => timestamp++)
-    const runAgent = vi.fn(async (req) => ({
-      runId: `agent-run-${req.agentId}`,
-      agentId: req.agentId || 'unknown',
-      status: 'completed' as const,
-      content: 'x'.repeat(100),
-      messages: [{ role: 'assistant' as const, content: 'x'.repeat(100) }],
-      toolCalls: [],
-      events: [],
-      startedAt: 1,
-      finishedAt: 2
-    }))
+    const runAgent = vi.fn(async (req) => completedAgentRun(req, 'x'.repeat(100)))
     const runtime = new MagicAgentGraphRuntime([], {
       runAgent,
       policy: {
