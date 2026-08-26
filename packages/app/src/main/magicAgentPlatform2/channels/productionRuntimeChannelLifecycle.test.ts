@@ -8,14 +8,22 @@ const createAllowAuthorization = () =>
     consumeExecutionPermit: vi.fn()
   }) as never
 
+const createLifecycle = (
+  eventStore: MagicAgentEventStore,
+  now: () => number = () => 20,
+  pollIntervalMs?: number
+) =>
+  new ProductionRuntimeChannelLifecycle({
+    eventStore,
+    authorization: createAllowAuthorization(),
+    now,
+    ...(pollIntervalMs === undefined ? {} : { pollIntervalMs })
+  })
+
 describe('ProductionRuntimeChannelLifecycle', () => {
   it('recovers target-published forwarding whose outcome was not committed', () => {
     const events = new MagicAgentEventStore(':memory:')
-    const lifecycle = new ProductionRuntimeChannelLifecycle({
-      eventStore: events,
-      authorization: { authorize: vi.fn(), consumeExecutionPermit: vi.fn() } as never,
-      now: () => 20
-    })
+    const lifecycle = createLifecycle(events)
     let source = lifecycle.store.createChannel({
       channel: { id: 'sr', name: 'S', mode: 'queue', capacity: 2, members: [] },
       createdAt: 1,
@@ -98,12 +106,7 @@ describe('ProductionRuntimeChannelLifecycle', () => {
   it('polls due forwarding retries and stops polling on close', () => {
     vi.useFakeTimers()
     const events = new MagicAgentEventStore(':memory:')
-    const lifecycle = new ProductionRuntimeChannelLifecycle({
-      eventStore: events,
-      authorization: { authorize: vi.fn(), consumeExecutionPermit: vi.fn() } as never,
-      now: () => 100,
-      pollIntervalMs: 50
-    })
+    const lifecycle = createLifecycle(events, () => 100, 50)
     const retry = vi.spyOn(lifecycle, 'retryForwarding')
     lifecycle.start()
     expect(retry).toHaveBeenCalledWith(100)
@@ -120,12 +123,7 @@ describe('ProductionRuntimeChannelLifecycle', () => {
 
   it('continues forwarding across multiple hops', () => {
     const events = new MagicAgentEventStore(':memory:')
-    const authorization = createAllowAuthorization()
-    const lifecycle = new ProductionRuntimeChannelLifecycle({
-      eventStore: events,
-      authorization,
-      now: () => 20
-    })
+    const lifecycle = createLifecycle(events)
     for (const id of ['a', 'b', 'c']) {
       const channel = lifecycle.store.createChannel({
         channel: { id, name: id, mode: 'queue', capacity: 3, members: [] },
@@ -186,13 +184,8 @@ describe('ProductionRuntimeChannelLifecycle', () => {
 
   it('persists target backpressure failure and retries after capacity recovers', () => {
     const events = new MagicAgentEventStore(':memory:')
-    const authorization = createAllowAuthorization()
     let now = 10
-    const lifecycle = new ProductionRuntimeChannelLifecycle({
-      eventStore: events,
-      authorization,
-      now: () => now
-    })
+    const lifecycle = createLifecycle(events, () => now)
     let source = lifecycle.store.createChannel({
       channel: { id: 's', name: 'S', mode: 'queue', capacity: 2, members: [] },
       createdAt: 1,
@@ -279,12 +272,7 @@ describe('ProductionRuntimeChannelLifecycle', () => {
 
   it('forwards a committed message across a durable wire and emits target wakeup', () => {
     const events = new MagicAgentEventStore(':memory:')
-    const authorization = createAllowAuthorization()
-    const lifecycle = new ProductionRuntimeChannelLifecycle({
-      eventStore: events,
-      authorization,
-      now: () => 20
-    })
+    const lifecycle = createLifecycle(events)
     let source = lifecycle.store.createChannel({
       channel: { id: 'source', name: 'Source', mode: 'queue', capacity: 2, members: [] },
       createdAt: 1,
@@ -361,13 +349,8 @@ describe('ProductionRuntimeChannelLifecycle', () => {
 
   it('emits wakeups after publish and re-emits pending work on recovery', () => {
     const events = new MagicAgentEventStore(':memory:')
-    const authorization = createAllowAuthorization()
     let now = 10
-    const lifecycle = new ProductionRuntimeChannelLifecycle({
-      eventStore: events,
-      authorization,
-      now: () => now
-    })
+    const lifecycle = createLifecycle(events, () => now)
     let channel = lifecycle.store.createChannel({
       channel: { id: 'channel', name: 'Channel', mode: 'queue', capacity: 2, members: [] },
       createdAt: 1,
