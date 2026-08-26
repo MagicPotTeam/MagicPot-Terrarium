@@ -2,6 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import { ProductionRuntimeChannelLifecycle } from './productionRuntimeChannelLifecycle'
 
+const createAllowAuthorization = () =>
+  ({
+    authorize: vi.fn(() => ({ status: 'authorized', permit: { token: 'permit' } })),
+    consumeExecutionPermit: vi.fn()
+  }) as never
+
 describe('ProductionRuntimeChannelLifecycle', () => {
   it('recovers target-published forwarding whose outcome was not committed', () => {
     const events = new MagicAgentEventStore(':memory:')
@@ -114,10 +120,7 @@ describe('ProductionRuntimeChannelLifecycle', () => {
 
   it('continues forwarding across multiple hops', () => {
     const events = new MagicAgentEventStore(':memory:')
-    const authorization = {
-      authorize: vi.fn(() => ({ status: 'authorized', permit: { token: 'permit' } })),
-      consumeExecutionPermit: vi.fn()
-    } as never
+    const authorization = createAllowAuthorization()
     const lifecycle = new ProductionRuntimeChannelLifecycle({
       eventStore: events,
       authorization,
@@ -183,10 +186,7 @@ describe('ProductionRuntimeChannelLifecycle', () => {
 
   it('persists target backpressure failure and retries after capacity recovers', () => {
     const events = new MagicAgentEventStore(':memory:')
-    const authorization = {
-      authorize: vi.fn(() => ({ status: 'authorized', permit: { token: 'permit' } })),
-      consumeExecutionPermit: vi.fn()
-    } as never
+    const authorization = createAllowAuthorization()
     let now = 10
     const lifecycle = new ProductionRuntimeChannelLifecycle({
       eventStore: events,
@@ -279,10 +279,7 @@ describe('ProductionRuntimeChannelLifecycle', () => {
 
   it('forwards a committed message across a durable wire and emits target wakeup', () => {
     const events = new MagicAgentEventStore(':memory:')
-    const authorization = {
-      authorize: vi.fn(() => ({ status: 'authorized', permit: { token: 'permit' } })),
-      consumeExecutionPermit: vi.fn()
-    } as never
+    const authorization = createAllowAuthorization()
     const lifecycle = new ProductionRuntimeChannelLifecycle({
       eventStore: events,
       authorization,
@@ -364,10 +361,7 @@ describe('ProductionRuntimeChannelLifecycle', () => {
 
   it('emits wakeups after publish and re-emits pending work on recovery', () => {
     const events = new MagicAgentEventStore(':memory:')
-    const authorization = {
-      authorize: vi.fn(() => ({ status: 'authorized', permit: { token: 'permit' } })),
-      consumeExecutionPermit: vi.fn()
-    } as never
+    const authorization = createAllowAuthorization()
     let now = 10
     const lifecycle = new ProductionRuntimeChannelLifecycle({
       eventStore: events,
