@@ -61,6 +61,7 @@ vi.mock('../config/fastSettingTemplates', () => ({
 
 import {
   HyperSvcImpl,
+  createProcessLoggers,
   migrateLegacyAssistantImageFile,
   sanitizeSaveImageFileName
 } from './svcHyperImpl'
@@ -105,6 +106,30 @@ const windowsBuildEnv = {
     comfyuiArgs: ['--enable-cors-header', '--listen']
   }
 }
+
+describe('createProcessLoggers', () => {
+  it('prefixes messages and emits matching process statuses', () => {
+    const onData = vi.fn()
+    const logInfoSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const logErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { logInfo, logError } = createProcessLoggers(
+      '[test] ',
+      (status, logLine) => ({ status, logLine }),
+      onData
+    )
+
+    try {
+      logInfo('ready')
+      logError('failed')
+    } finally {
+      logInfoSpy.mockRestore()
+      logErrorSpy.mockRestore()
+    }
+
+    expect(onData).toHaveBeenNthCalledWith(1, { status: 'running', logLine: '[test] ready' })
+    expect(onData).toHaveBeenNthCalledWith(2, { status: 'error', logLine: '[test] failed' })
+  })
+})
 
 describe('HyperSvcImpl.startComfyUI', () => {
   beforeEach(() => {
