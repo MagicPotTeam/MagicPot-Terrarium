@@ -60,6 +60,33 @@ import type {
   ThreeColumnMatrixRowSpacingPair
 } from './designInspectionStructureRules'
 
+function appendAction(
+  actions: DesignInspectionAction[],
+  action: Omit<DesignInspectionAction, 'id'>
+): string {
+  const id = createDesignInspectionId('design-action')
+  actions.push({ id, ...action } as DesignInspectionAction)
+  return id
+}
+
+function appendIssue(
+  issues: DesignInspectionIssue[],
+  issue: Omit<DesignInspectionIssue, 'id'>
+): void {
+  issues.push({ id: createDesignInspectionId('design-issue'), ...issue })
+}
+
+function groupByTarget<T>(items: readonly T[], getTarget: (item: T) => number): Map<number, T[]> {
+  const groups = new Map<number, T[]>()
+  for (const item of items) {
+    const target = getTarget(item)
+    const existing = groups.get(target)
+    if (existing) existing.push(item)
+    else groups.set(target, [item])
+  }
+  return groups
+}
+
 export function buildStructureFirstDesignInspectionProposal(
   contextPack: DesignInspectionContextPack
 ): DesignInspectionProposal {
@@ -99,9 +126,7 @@ export function buildStructureFirstDesignInspectionProposal(
       : []
 
     if (primaryStyle && targetItems.length > 0) {
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'normalize-text-style',
         title: 'Normalize text style to the selection primary style',
         description:
@@ -117,8 +142,7 @@ export function buildStructureFirstDesignInspectionProposal(
         expectedImpact:
           'Text styling returns to one coherent system instead of scattered local overrides.'
       })
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'typography',
         severity: 'warning',
         title: 'Selected text nodes use inconsistent typography',
@@ -141,11 +165,9 @@ export function buildStructureFirstDesignInspectionProposal(
       : []
 
     if (dominantCornerShape && targetItems.length > 0) {
-      const actionId = createDesignInspectionId('design-action')
       const normalizedShapeLabel =
         dominantCornerShape === 'rounded-rect' ? 'rounded corners' : 'square corners'
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'normalize-annotation-corner-style',
         title: 'Normalize selected card corner style',
         description:
@@ -158,8 +180,7 @@ export function buildStructureFirstDesignInspectionProposal(
         expectedImpact:
           'These rectangular annotations will read as one intentional card system instead of mixing square and rounded corners.'
       })
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'radius',
         severity: 'warning',
         title: 'Rectangular annotation cards use mixed corner styles',
@@ -197,24 +218,12 @@ export function buildStructureFirstDesignInspectionProposal(
 
     if (preferTitleCenterAlignment) {
       const actionIds: string[] = []
-      const actionGroups = new Map<number, ContainerTitleInsetPair[]>()
-
-      for (const pair of offPatternCenterPairs) {
-        const targetCenterX = roundMetric(
-          pair.container.bounds.x + pair.container.bounds.width / 2 + targetCenterOffset
-        )
-        const existing = actionGroups.get(targetCenterX)
-        if (existing) {
-          existing.push(pair)
-        } else {
-          actionGroups.set(targetCenterX, [pair])
-        }
-      }
+      const actionGroups = groupByTarget(offPatternCenterPairs, (pair) =>
+        roundMetric(pair.container.bounds.x + pair.container.bounds.width / 2 + targetCenterOffset)
+      )
 
       for (const [targetCenterX, pairs] of actionGroups.entries()) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-center',
           title: 'Align card titles to a shared centerline',
           description:
@@ -228,8 +237,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Card titles are not aligned to a shared centerline',
@@ -251,22 +259,12 @@ export function buildStructureFirstDesignInspectionProposal(
 
     if (!preferTitleCenterAlignment && offPatternLeftInsetPairs.length > 0) {
       const actionIds: string[] = []
-      const actionGroups = new Map<number, ContainerTitleInsetPair[]>()
-
-      for (const pair of offPatternLeftInsetPairs) {
-        const targetX = roundMetric(pair.container.bounds.x + targetLeftInset)
-        const existing = actionGroups.get(targetX)
-        if (existing) {
-          existing.push(pair)
-        } else {
-          actionGroups.set(targetX, [pair])
-        }
-      }
+      const actionGroups = groupByTarget(offPatternLeftInsetPairs, (pair) =>
+        roundMetric(pair.container.bounds.x + targetLeftInset)
+      )
 
       for (const [targetX, pairs] of actionGroups.entries()) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-left',
           title: 'Align card titles to a consistent left inset',
           description:
@@ -280,8 +278,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Card title left insets are inconsistent',
@@ -305,22 +302,12 @@ export function buildStructureFirstDesignInspectionProposal(
 
     if (offPatternTopInsetPairs.length > 0) {
       const actionIds: string[] = []
-      const actionGroups = new Map<number, ContainerTitleInsetPair[]>()
-
-      for (const pair of offPatternTopInsetPairs) {
-        const targetY = roundMetric(pair.container.bounds.y + targetTopInset)
-        const existing = actionGroups.get(targetY)
-        if (existing) {
-          existing.push(pair)
-        } else {
-          actionGroups.set(targetY, [pair])
-        }
-      }
+      const actionGroups = groupByTarget(offPatternTopInsetPairs, (pair) =>
+        roundMetric(pair.container.bounds.y + targetTopInset)
+      )
 
       for (const [targetY, pairs] of actionGroups.entries()) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-top',
           title: 'Align card titles to a consistent top inset',
           description:
@@ -334,8 +321,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Card title top insets are inconsistent',
@@ -361,24 +347,12 @@ export function buildStructureFirstDesignInspectionProposal(
 
     if (offPatternRightInsetPairs.length > 0) {
       const actionIds: string[] = []
-      const actionGroups = new Map<number, ContainerHeaderMetaInsetPair[]>()
-
-      for (const pair of offPatternRightInsetPairs) {
-        const targetRightX = roundMetric(
-          pair.container.bounds.x + pair.container.bounds.width - targetRightInset
-        )
-        const existing = actionGroups.get(targetRightX)
-        if (existing) {
-          existing.push(pair)
-        } else {
-          actionGroups.set(targetRightX, [pair])
-        }
-      }
+      const actionGroups = groupByTarget(offPatternRightInsetPairs, (pair) =>
+        roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
+      )
 
       for (const [targetRightX, pairs] of actionGroups.entries()) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-right',
           title: 'Align card header trailing text to a consistent right inset',
           description:
@@ -392,8 +366,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Card header trailing text right inset is inconsistent',
@@ -419,24 +392,12 @@ export function buildStructureFirstDesignInspectionProposal(
 
     if (offPatternMetaBlocks.length > 0) {
       const actionIds: string[] = []
-      const actionGroups = new Map<number, ContainerMetaBlockValueColumnPair[]>()
-
-      for (const pair of offPatternMetaBlocks) {
-        const targetRightX = roundMetric(
-          pair.container.bounds.x + pair.container.bounds.width - targetRightInset
-        )
-        const existing = actionGroups.get(targetRightX)
-        if (existing) {
-          existing.push(pair)
-        } else {
-          actionGroups.set(targetRightX, [pair])
-        }
-      }
+      const actionGroups = groupByTarget(offPatternMetaBlocks, (pair) =>
+        roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
+      )
 
       for (const [targetRightX, pairs] of actionGroups.entries()) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-right',
           title: 'Align card info value column to a consistent right inset',
           description:
@@ -450,8 +411,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Card info value column right inset is inconsistent',
@@ -477,24 +437,12 @@ export function buildStructureFirstDesignInspectionProposal(
 
     if (offPatternBodyMetaBlocks.length > 0) {
       const actionIds: string[] = []
-      const actionGroups = new Map<number, ContainerBodyMetaValueColumnPair[]>()
-
-      for (const pair of offPatternBodyMetaBlocks) {
-        const targetRightX = roundMetric(
-          pair.container.bounds.x + pair.container.bounds.width - targetRightInset
-        )
-        const existing = actionGroups.get(targetRightX)
-        if (existing) {
-          existing.push(pair)
-        } else {
-          actionGroups.set(targetRightX, [pair])
-        }
-      }
+      const actionGroups = groupByTarget(offPatternBodyMetaBlocks, (pair) =>
+        roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
+      )
 
       for (const [targetRightX, pairs] of actionGroups.entries()) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-right',
           title: 'Align post-body info value column to a consistent right inset',
           description:
@@ -508,8 +456,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Post-body info value column right inset is inconsistent',
@@ -535,24 +482,12 @@ export function buildStructureFirstDesignInspectionProposal(
 
     if (offPatternBodyMetaFooterActions.length > 0) {
       const actionIds: string[] = []
-      const actionGroups = new Map<number, ContainerBodyMetaFooterActionValueColumnPair[]>()
-
-      for (const pair of offPatternBodyMetaFooterActions) {
-        const targetRightX = roundMetric(
-          pair.container.bounds.x + pair.container.bounds.width - targetRightInset
-        )
-        const existing = actionGroups.get(targetRightX)
-        if (existing) {
-          existing.push(pair)
-        } else {
-          actionGroups.set(targetRightX, [pair])
-        }
-      }
+      const actionGroups = groupByTarget(offPatternBodyMetaFooterActions, (pair) =>
+        roundMetric(pair.container.bounds.x + pair.container.bounds.width - targetRightInset)
+      )
 
       for (const [targetRightX, pairs] of actionGroups.entries()) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-right',
           title: 'Align pre-action info value column to a consistent right inset',
           description:
@@ -566,8 +501,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Pre-action info value column right inset is inconsistent',
@@ -595,9 +529,7 @@ export function buildStructureFirstDesignInspectionProposal(
       const actionIds: string[] = []
 
       for (const pair of offPatternBadgeStacks) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'distribute-vertical-spacing',
           title: 'Normalize card label stack vertical spacing',
           description:
@@ -614,8 +546,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Card label stack vertical spacing is inconsistent',
@@ -643,9 +574,7 @@ export function buildStructureFirstDesignInspectionProposal(
       const actionIds: string[] = []
 
       for (const pair of offPatternBadgeStacks) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'distribute-vertical-spacing',
           title: 'Normalize trailing card label stack vertical spacing',
           description:
@@ -662,8 +591,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Trailing card label stack vertical spacing is inconsistent',
@@ -691,9 +619,7 @@ export function buildStructureFirstDesignInspectionProposal(
       const actionIds: string[] = []
 
       for (const pair of offPatternBadgeStacks) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'distribute-vertical-spacing',
           title: 'Normalize label stack spacing above card buttons',
           description:
@@ -710,8 +636,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Label stack vertical spacing above card buttons is inconsistent',
@@ -740,9 +665,7 @@ export function buildStructureFirstDesignInspectionProposal(
 
       for (const pair of offPatternChipGroups) {
         for (const row of pair.rows) {
-          const actionId = createDesignInspectionId('design-action')
-          actions.push({
-            id: actionId,
+          const actionId = appendAction(actions, {
             type: 'distribute-horizontal-spacing',
             title: 'Normalize card multi-column label spacing',
             description:
@@ -772,8 +695,7 @@ export function buildStructureFirstDesignInspectionProposal(
         )
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Card multi-column label spacing is inconsistent',
@@ -801,9 +723,7 @@ export function buildStructureFirstDesignInspectionProposal(
 
       for (const pair of offPatternChipGroups) {
         for (const row of pair.rows) {
-          const actionId = createDesignInspectionId('design-action')
-          actions.push({
-            id: actionId,
+          const actionId = appendAction(actions, {
             type: 'distribute-horizontal-spacing',
             title: 'Normalize multi-column label spacing above card buttons',
             description:
@@ -833,8 +753,7 @@ export function buildStructureFirstDesignInspectionProposal(
         )
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Multi-column label spacing above card buttons is inconsistent',
@@ -859,9 +778,7 @@ export function buildStructureFirstDesignInspectionProposal(
       const actionIds: string[] = []
 
       for (const pair of offPatternTrailingBadgeStacks) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'distribute-vertical-spacing',
           title: 'Normalize no-footer card trailing label stack spacing',
           description:
@@ -878,8 +795,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'No-footer trailing label stack vertical spacing is inconsistent',
@@ -905,22 +821,12 @@ export function buildStructureFirstDesignInspectionProposal(
 
     if (offPatternLeftInsetPairs.length > 0) {
       const actionIds: string[] = []
-      const actionGroups = new Map<number, ContainerBodyInsetPair[]>()
-
-      for (const pair of offPatternLeftInsetPairs) {
-        const targetX = roundMetric(pair.container.bounds.x + targetLeftInset)
-        const existing = actionGroups.get(targetX)
-        if (existing) {
-          existing.push(pair)
-        } else {
-          actionGroups.set(targetX, [pair])
-        }
-      }
+      const actionGroups = groupByTarget(offPatternLeftInsetPairs, (pair) =>
+        roundMetric(pair.container.bounds.x + targetLeftInset)
+      )
 
       for (const [targetX, pairs] of actionGroups.entries()) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-left',
           title: 'Align card body to a consistent left inset',
           description:
@@ -934,8 +840,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Card body left inset is inconsistent',
@@ -959,24 +864,12 @@ export function buildStructureFirstDesignInspectionProposal(
 
     if (offPatternVerticalGapPairs.length > 0) {
       const actionIds: string[] = []
-      const actionGroups = new Map<number, ContainerBodyInsetPair[]>()
-
-      for (const pair of offPatternVerticalGapPairs) {
-        const targetY = roundMetric(
-          pair.title.bounds.y + pair.title.bounds.height + targetVerticalGap
-        )
-        const existing = actionGroups.get(targetY)
-        if (existing) {
-          existing.push(pair)
-        } else {
-          actionGroups.set(targetY, [pair])
-        }
-      }
+      const actionGroups = groupByTarget(offPatternVerticalGapPairs, (pair) =>
+        roundMetric(pair.title.bounds.y + pair.title.bounds.height + targetVerticalGap)
+      )
 
       for (const [targetY, pairs] of actionGroups.entries()) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-top',
           title: 'Normalize vertical gap between card title and body',
           description:
@@ -990,8 +883,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Vertical gap between card title and body is inconsistent',
@@ -1017,24 +909,12 @@ export function buildStructureFirstDesignInspectionProposal(
 
     if (offPatternBottomInsetPairs.length > 0) {
       const actionIds: string[] = []
-      const actionGroups = new Map<number, ContainerFooterInsetPair[]>()
-
-      for (const pair of offPatternBottomInsetPairs) {
-        const targetBottomY = roundMetric(
-          pair.container.bounds.y + pair.container.bounds.height - targetBottomInset
-        )
-        const existing = actionGroups.get(targetBottomY)
-        if (existing) {
-          existing.push(pair)
-        } else {
-          actionGroups.set(targetBottomY, [pair])
-        }
-      }
+      const actionGroups = groupByTarget(offPatternBottomInsetPairs, (pair) =>
+        roundMetric(pair.container.bounds.y + pair.container.bounds.height - targetBottomInset)
+      )
 
       for (const [targetBottomY, pairs] of actionGroups.entries()) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-bottom',
           title: 'Align card footer to a consistent bottom inset',
           description:
@@ -1048,8 +928,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Card footer bottom inset is inconsistent',
@@ -1075,9 +954,7 @@ export function buildStructureFirstDesignInspectionProposal(
       const actionIds: string[] = []
 
       for (const pair of offPatternFooterRows) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'distribute-horizontal-spacing',
           title: 'Normalize card footer action-row horizontal spacing',
           description:
@@ -1094,8 +971,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds.push(actionId)
       }
 
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'spacing',
         severity: 'warning',
         title: 'Card footer action-row spacing is inconsistent',
@@ -1183,9 +1059,7 @@ export function buildStructureFirstDesignInspectionProposal(
       centerSpread + ALIGNMENT_TOLERANCE_PX < Math.min(leftSpread, rightSpread)
 
     if (preferCenterAlignment) {
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'align-center',
         title: 'Align vertical stack to a shared centerline',
         description:
@@ -1196,8 +1070,7 @@ export function buildStructureFirstDesignInspectionProposal(
         expectedImpact:
           'This column will read as arranged around one axis instead of drifting around a shared centerline.'
       })
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Selected vertical stack is not center-aligned',
@@ -1213,9 +1086,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds: [actionId]
       })
     } else if (!preferRightAlignment && misalignedItems.length > 0) {
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'align-left',
         title: 'Align vertical stack to a shared left edge',
         description:
@@ -1226,8 +1097,7 @@ export function buildStructureFirstDesignInspectionProposal(
         expectedImpact:
           'This column will read as a clear vertical arrangement instead of a group of blocks drifting horizontally.'
       })
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Selected vertical stack left edges are inconsistent',
@@ -1242,9 +1112,7 @@ export function buildStructureFirstDesignInspectionProposal(
     }
 
     if (typeof targetWidth === 'number' && offPatternWidthItems.length > 0) {
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'normalize-item-width',
         title: 'Normalize card widths in vertical stack',
         description:
@@ -1257,8 +1125,7 @@ export function buildStructureFirstDesignInspectionProposal(
         expectedImpact:
           'This column will read as a unified card column instead of mixing different block widths.'
       })
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'geometry',
         severity: 'warning',
         title: 'Block widths in the selected vertical stack are inconsistent',
@@ -1279,9 +1146,7 @@ export function buildStructureFirstDesignInspectionProposal(
       )
 
       if (offPatternHeightItems.length > 0) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'normalize-item-height',
           title: 'Normalize card heights in vertical stack',
           description:
@@ -1294,8 +1159,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'This column will read as a unified card column instead of mixing different block heights.'
         })
-        issues.push({
-          id: createDesignInspectionId('design-issue'),
+        appendIssue(issues, {
           category: 'geometry',
           severity: 'warning',
           title: 'Block heights in the selected vertical stack are inconsistent',
@@ -1312,9 +1176,7 @@ export function buildStructureFirstDesignInspectionProposal(
     }
 
     if (!preferCenterAlignment && preferRightAlignment) {
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'align-right',
         title: 'Align vertical stack to a shared right edge',
         description:
@@ -1325,8 +1187,7 @@ export function buildStructureFirstDesignInspectionProposal(
         expectedImpact:
           'This column will read as a clear right-aligned arrangement instead of drifting around the right edge.'
       })
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Selected vertical stack right edges are inconsistent',
@@ -1350,9 +1211,7 @@ export function buildStructureFirstDesignInspectionProposal(
 
       if (gaps.length >= 2 && gapDelta > SPACING_TOLERANCE_PX) {
         const targetGap = roundMetric(median(gaps))
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'distribute-vertical-spacing',
           title: 'Normalize vertical stack spacing',
           description:
@@ -1365,8 +1224,7 @@ export function buildStructureFirstDesignInspectionProposal(
           },
           expectedImpact: 'Vertical spacing will be more rhythmic and easier to scan quickly.'
         })
-        issues.push({
-          id: createDesignInspectionId('design-issue'),
+        appendIssue(issues, {
           category: 'spacing',
           severity: 'warning',
           title: 'Vertical spacing is inconsistent',
@@ -1395,9 +1253,7 @@ export function buildStructureFirstDesignInspectionProposal(
     )
 
     if (sizeCandidates.length >= 4 && offPatternSizeItems.length > 0) {
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'normalize-item-size',
         title: 'Normalize selected grid card sizes',
         description:
@@ -1411,8 +1267,7 @@ export function buildStructureFirstDesignInspectionProposal(
         expectedImpact:
           'The grid will read as an intentional equal-size card matrix instead of mixing multiple sizes.'
       })
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'geometry',
         severity: 'warning',
         title: 'Grid item sizes are inconsistent',
@@ -1458,9 +1313,7 @@ export function buildStructureFirstDesignInspectionProposal(
 
         if (misalignedItems.length === 0) continue
 
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-center',
           title: `Align ${column.label} to a shared centerline`,
           description:
@@ -1483,8 +1336,7 @@ export function buildStructureFirstDesignInspectionProposal(
       }
 
       if (centerAlignedActionIds.length > 0) {
-        issues.push({
-          id: createDesignInspectionId('design-issue'),
+        appendIssue(issues, {
           category: 'alignment',
           severity: 'warning',
           title: 'Grid columns are not center-aligned',
@@ -1511,9 +1363,7 @@ export function buildStructureFirstDesignInspectionProposal(
 
         if (misalignedItems.length === 0) continue
 
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-middle',
           title: `Align ${row.label} to a shared middle line`,
           description:
@@ -1536,8 +1386,7 @@ export function buildStructureFirstDesignInspectionProposal(
       }
 
       if (middleAlignedActionIds.length > 0) {
-        issues.push({
-          id: createDesignInspectionId('design-issue'),
+        appendIssue(issues, {
           category: 'alignment',
           severity: 'warning',
           title: 'Grid rows are not middle-aligned',
@@ -1604,9 +1453,7 @@ export function buildStructureFirstDesignInspectionProposal(
           const evidence: string[] = []
 
           for (const row of offPatternRows) {
-            const actionId = createDesignInspectionId('design-action')
-            actions.push({
-              id: actionId,
+            const actionId = appendAction(actions, {
               type: 'distribute-horizontal-spacing',
               title: 'Normalize 2x3 grid horizontal spacing',
               description:
@@ -1631,8 +1478,7 @@ export function buildStructureFirstDesignInspectionProposal(
             )
           }
 
-          issues.push({
-            id: createDesignInspectionId('design-issue'),
+          appendIssue(issues, {
             category: 'spacing',
             severity: 'warning',
             title: '2x3 grid row column spacing is inconsistent',
@@ -1784,9 +1630,7 @@ export function buildStructureFirstDesignInspectionProposal(
             const transition = matrixRowRhythmTransitions.find(
               (candidate) => candidate.index === row.index
             )
-            const actionId = createDesignInspectionId('design-action')
-            actions.push({
-              id: actionId,
+            const actionId = appendAction(actions, {
               type: 'align-top',
               title: 'Normalize three-column matrix vertical rhythm',
               description:
@@ -1810,8 +1654,7 @@ export function buildStructureFirstDesignInspectionProposal(
             )
           }
 
-          issues.push({
-            id: createDesignInspectionId('design-issue'),
+          appendIssue(issues, {
             category: 'spacing',
             severity: 'warning',
             title: 'Three-column multi-row matrix vertical rhythm is inconsistent',
@@ -1861,9 +1704,7 @@ export function buildStructureFirstDesignInspectionProposal(
         const evidence: string[] = []
 
         for (const row of offPatternRows) {
-          const actionId = createDesignInspectionId('design-action')
-          actions.push({
-            id: actionId,
+          const actionId = appendAction(actions, {
             type: 'distribute-horizontal-spacing',
             title: 'Normalize three-column matrix horizontal spacing',
             description:
@@ -1889,8 +1730,7 @@ export function buildStructureFirstDesignInspectionProposal(
           )
         }
 
-        issues.push({
-          id: createDesignInspectionId('design-issue'),
+        appendIssue(issues, {
           category: 'spacing',
           severity: 'warning',
           title: 'Three-column multi-row matrix row column spacing is inconsistent',
@@ -1917,9 +1757,7 @@ export function buildStructureFirstDesignInspectionProposal(
 
       if (misalignedItems.length === 0 || column.length - misalignedItems.length < 2) continue
 
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'align-center',
         title: `${columnLabels[columnIndex]} to a shared centerline`,
         description:
@@ -1945,8 +1783,7 @@ export function buildStructureFirstDesignInspectionProposal(
     }
 
     if (centerlineActionIds.length > 0) {
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Three-column matrix column centerlines are inconsistent',
@@ -2108,9 +1945,7 @@ export function buildStructureFirstDesignInspectionProposal(
           }
 
           const rowLabel = `Row ${rowIndex + 1} of the variable-width three-column matrix`
-          const actionId = createDesignInspectionId('design-action')
-          actions.push({
-            id: actionId,
+          const actionId = appendAction(actions, {
             type: 'shift-horizontal',
             title: `${rowLabel} returns to the established mixed column anchors`,
             description:
@@ -2157,9 +1992,7 @@ export function buildStructureFirstDesignInspectionProposal(
         leftMisalignedItems.length > 0 &&
         stat.leftAlignedCount >= 2
       ) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-left',
           title: `${stat.label} to a shared left track`,
           description:
@@ -2190,9 +2023,7 @@ export function buildStructureFirstDesignInspectionProposal(
         centerMisalignedItems.length > 0 &&
         stat.centerAlignedCount >= 2
       ) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'align-center',
           title: `${stat.label} to a shared centerline`,
           description:
@@ -2226,9 +2057,7 @@ export function buildStructureFirstDesignInspectionProposal(
         continue
       }
 
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'align-right',
         title: `${stat.label} to a shared right track`,
         description:
@@ -2254,8 +2083,7 @@ export function buildStructureFirstDesignInspectionProposal(
     }
 
     if (rowShiftActionIds.length > 0) {
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Variable-width three-column matrix row drifts across mixed anchors',
@@ -2268,8 +2096,7 @@ export function buildStructureFirstDesignInspectionProposal(
     }
 
     if (leftActionIds.length > 0) {
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Variable-width three-column matrix left column track is inconsistent',
@@ -2282,8 +2109,7 @@ export function buildStructureFirstDesignInspectionProposal(
     }
 
     if (centerActionIds.length > 0) {
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Variable-width three-column matrix column centerline is inconsistent',
@@ -2296,8 +2122,7 @@ export function buildStructureFirstDesignInspectionProposal(
     }
 
     if (rightActionIds.length > 0) {
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Variable-width three-column matrix right column track is inconsistent',
@@ -2385,9 +2210,7 @@ export function buildStructureFirstDesignInspectionProposal(
       middleSpread + ALIGNMENT_TOLERANCE_PX < Math.min(topSpread, bottomSpread)
 
     if (preferMiddleAlignment) {
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'align-middle',
         title: 'Align horizontal row to a shared middle line',
         description:
@@ -2398,8 +2221,7 @@ export function buildStructureFirstDesignInspectionProposal(
         expectedImpact:
           'This row will read as a band arranged around one middle line instead of drifting vertically around the shared axis.'
       })
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Selected horizontal row is not middle-aligned',
@@ -2417,9 +2239,7 @@ export function buildStructureFirstDesignInspectionProposal(
         actionIds: [actionId]
       })
     } else if (!preferBottomAlignment && misalignedItems.length > 0) {
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'align-top',
         title: 'Align horizontal row to a shared top edge',
         description:
@@ -2430,8 +2250,7 @@ export function buildStructureFirstDesignInspectionProposal(
         expectedImpact:
           'This row will read as a clear horizontal band instead of a group of cards drifting vertically.'
       })
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Selected horizontal row top edges are inconsistent',
@@ -2454,9 +2273,7 @@ export function buildStructureFirstDesignInspectionProposal(
 
       if (gaps.length >= 2 && gapDelta > SPACING_TOLERANCE_PX) {
         const targetGap = roundMetric(median(gaps))
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'distribute-horizontal-spacing',
           title: 'Normalize horizontal row spacing',
           description:
@@ -2469,8 +2286,7 @@ export function buildStructureFirstDesignInspectionProposal(
           },
           expectedImpact: 'Horizontal spacing will be more rhythmic and easier to scan quickly.'
         })
-        issues.push({
-          id: createDesignInspectionId('design-issue'),
+        appendIssue(issues, {
           category: 'spacing',
           severity: 'warning',
           title: 'Horizontal spacing is inconsistent',
@@ -2492,9 +2308,7 @@ export function buildStructureFirstDesignInspectionProposal(
       )
 
       if (offPatternWidthItems.length > 0) {
-        const actionId = createDesignInspectionId('design-action')
-        actions.push({
-          id: actionId,
+        const actionId = appendAction(actions, {
           type: 'normalize-item-width',
           title: 'Normalize card widths in horizontal row',
           description:
@@ -2507,8 +2321,7 @@ export function buildStructureFirstDesignInspectionProposal(
           expectedImpact:
             'This row will read as a unified card band instead of mixing different block widths.'
         })
-        issues.push({
-          id: createDesignInspectionId('design-issue'),
+        appendIssue(issues, {
           category: 'geometry',
           severity: 'warning',
           title: 'Block widths in the selected horizontal row are inconsistent',
@@ -2525,9 +2338,7 @@ export function buildStructureFirstDesignInspectionProposal(
     }
 
     if (typeof targetHeight === 'number' && offPatternHeightItems.length > 0) {
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'normalize-item-height',
         title: 'Normalize card heights in horizontal row',
         description:
@@ -2540,8 +2351,7 @@ export function buildStructureFirstDesignInspectionProposal(
         expectedImpact:
           'This row will read as a unified card band instead of mixing different block heights.'
       })
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'geometry',
         severity: 'warning',
         title: 'Block heights in the selected horizontal row are inconsistent',
@@ -2557,9 +2367,7 @@ export function buildStructureFirstDesignInspectionProposal(
     }
 
     if (!preferMiddleAlignment && preferBottomAlignment) {
-      const actionId = createDesignInspectionId('design-action')
-      actions.push({
-        id: actionId,
+      const actionId = appendAction(actions, {
         type: 'align-bottom',
         title: 'Align horizontal row to a shared bottom edge',
         description:
@@ -2570,8 +2378,7 @@ export function buildStructureFirstDesignInspectionProposal(
         expectedImpact:
           'This row will read as a clear bottom-aligned arrangement instead of drifting around the bottom edge.'
       })
-      issues.push({
-        id: createDesignInspectionId('design-issue'),
+      appendIssue(issues, {
         category: 'alignment',
         severity: 'warning',
         title: 'Selected horizontal row bottom edges are inconsistent',
