@@ -2,30 +2,9 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import { getProductionTriggerLifecycle } from '../magicAgentPlatform2/triggers/productionTriggerLifecycle'
 import type { ExternalTriggerEvent } from '../magicAgentPlatform2/triggers/externalEventTriggerSource'
 import type {
-  MagicAgentPlatformCreateChildAgentInstanceReq,
-  MagicAgentPlatformCreateRootAgentInstanceReq,
-  MagicAgentPlatformJoinRuntimeChannelReq,
-  MagicAgentPlatformLeaveRuntimeChannelReq,
-  MagicAgentPlatformUnwireRuntimeChannelReq,
-  MagicAgentPlatformWireRuntimeChannelReq,
-  MagicAgentPlatformAcknowledgeRuntimeChannelMessageReq,
-  MagicAgentPlatformClaimRuntimeChannelMessageReq,
   MagicAgentPlatformGetRuntimeChannelWireReq,
   MagicAgentPlatformGetRuntimeChannelReq,
   MagicAgentPlatformGetAgentInstanceReq,
-  MagicAgentPlatformRemoveAgentInstanceReq,
-  MagicAgentPlatformStartAgentInstanceReq,
-  MagicAgentPlatformStopAgentInstanceReq,
-  MagicAgentPlatformCreateDriveReq,
-  MagicAgentPlatformGetDriveReq,
-  MagicAgentPlatformReportDriveProgressReq,
-  MagicAgentPlatformTransitionDriveReq,
-  MagicAgentPlatformRetryDriveDeliveryReq,
-  MagicAgentPlatformTransferDriveReq,
-  MagicAgentPlatformSetDriveLinksReq,
-  MagicAgentPlatformCreateTriggerReq,
-  MagicAgentPlatformGetTriggerReq,
-  MagicAgentPlatformManualFireTriggerReq,
   MagicAgentPlatformGraphRunAttachReq,
   MagicAgentPlatformGraphRunReq,
   MagicAgentPlatformGraphV2GetPublishedReq,
@@ -39,8 +18,7 @@ import type {
   MagicAgentPlatformSessionExportReq,
   MagicAgentPlatformSessionDiffReq,
   MagicAgentPlatformRunReq,
-  MagicAgentPlatformTriggerControlReq,
-  MagicAgentPlatformUpdateTriggerReq
+  MagicAgentPlatformTriggerControlReq
 } from '@shared/api/svcMagicAgentPlatform'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
@@ -103,6 +81,71 @@ const validateExternalEvent = (value: unknown): ExternalTriggerEvent => {
   )
     throw new Error('trigger.emit payloadDigest must be SHA-256 hex.')
   return payload as unknown as ExternalTriggerEvent
+}
+
+const channelMutationMethods = {
+  'channel.publish': 'publishRuntimeChannelMessage',
+  'channel.claim': 'claimRuntimeChannelMessage',
+  'channel.ack': 'acknowledgeRuntimeChannelMessage',
+  'channel.create': 'createRuntimeChannel',
+  'channel.join': 'joinRuntimeChannel',
+  'channel.leave': 'leaveRuntimeChannel',
+  'channel.wire': 'wireRuntimeChannel',
+  'channel.unwire': 'unwireRuntimeChannel'
+} as const
+
+const teamMethods = {
+  'team.create': 'createTeam',
+  'team.remove': 'removeTeam',
+  'team.member.add': 'addTeamMember',
+  'team.member.remove': 'removeTeamMember',
+  'team.replace': 'replaceTeam',
+  'team.start': 'startTeam',
+  'team.pause': 'pauseTeam',
+  'team.resume': 'resumeTeam',
+  'team.stop': 'stopTeam'
+} as const
+
+const agentInstanceInvocationMethods = {
+  'agentInstance.createRoot': 'createRootAgentInstance',
+  'agentInstance.createChild': 'createChildAgentInstance',
+  'agentInstance.start': 'startAgentInstance',
+  'agentInstance.stop': 'stopAgentInstance',
+  'agentInstance.remove': 'removeAgentInstance'
+} as const
+
+const directServiceMethods = {
+  'drive.list': { method: 'listDrives', emptyPayload: true },
+  'drive.get': { method: 'getDrive' },
+  'drive.create': { method: 'createDrive' },
+  'drive.transition': { method: 'transitionDrive' },
+  'drive.retryDelivery': { method: 'retryDelivery' },
+  'drive.transfer': { method: 'transferDrive' },
+  'drive.setLinks': { method: 'setDriveLinks' },
+  'drive.reportProgress': { method: 'reportDriveProgress' },
+  'trigger.list': { method: 'listTriggers', emptyPayload: true },
+  'trigger.get': { method: 'getTrigger' },
+  'trigger.create': { method: 'createTrigger' },
+  'trigger.update': { method: 'updateTrigger' },
+  'trigger.manualFire': { method: 'manualFireTrigger' }
+} as const
+
+const hasPayloadField = (payload: unknown, field: string): boolean =>
+  Boolean(payload && typeof payload === 'object' && field in payload)
+
+const dispatchServiceMethod = async (
+  service: object,
+  method: string,
+  payload: unknown,
+  invocation?: ServiceInvocationContext
+): Promise<MagicAgentSdkGatewayResponse> => {
+  const serviceMethod = (service as unknown as Record<string, (...args: unknown[]) => unknown>)[
+    method
+  ]
+  return {
+    status: 200,
+    body: await serviceMethod.apply(service, invocation ? [payload, invocation] : [payload])
+  }
 }
 
 export class MagicAgentSdkGateway {
@@ -625,90 +668,12 @@ export class MagicAgentSdkGateway {
         }
         return { status: 200, body }
       }
-      if (request.method === 'channel.publish') {
-        if (request.payload && typeof request.payload === 'object' && 'actor' in request.payload)
-          throw new Error('channel.publish actor is derived from authenticated credentials.')
-        return {
-          status: 200,
-          body: await this.service.publishRuntimeChannelMessage(
-            request.payload as never,
-            invocation
-          )
-        }
-      }
-      if (request.method === 'channel.claim') {
-        if (request.payload && typeof request.payload === 'object' && 'actor' in request.payload)
-          throw new Error('channel.claim actor is derived from authenticated credentials.')
-        return {
-          status: 200,
-          body: await this.service.claimRuntimeChannelMessage(
-            request.payload as MagicAgentPlatformClaimRuntimeChannelMessageReq,
-            invocation
-          )
-        }
-      }
-      if (request.method === 'channel.ack') {
-        if (request.payload && typeof request.payload === 'object' && 'actor' in request.payload)
-          throw new Error('channel.ack actor is derived from authenticated credentials.')
-        return {
-          status: 200,
-          body: await this.service.acknowledgeRuntimeChannelMessage(
-            request.payload as MagicAgentPlatformAcknowledgeRuntimeChannelMessageReq,
-            invocation
-          )
-        }
-      }
-      if (request.method === 'channel.create') {
-        if (request.payload && typeof request.payload === 'object' && 'actor' in request.payload)
-          throw new Error('channel.create actor is derived from authenticated credentials.')
-        return {
-          status: 200,
-          body: await this.service.createRuntimeChannel(request.payload as never, invocation)
-        }
-      }
-      if (request.method === 'channel.join') {
-        if (request.payload && typeof request.payload === 'object' && 'actor' in request.payload)
-          throw new Error('channel.join actor is derived from authenticated credentials.')
-        return {
-          status: 200,
-          body: await this.service.joinRuntimeChannel(
-            request.payload as MagicAgentPlatformJoinRuntimeChannelReq,
-            invocation
-          )
-        }
-      }
-      if (request.method === 'channel.leave') {
-        if (request.payload && typeof request.payload === 'object' && 'actor' in request.payload)
-          throw new Error('channel.leave actor is derived from authenticated credentials.')
-        return {
-          status: 200,
-          body: await this.service.leaveRuntimeChannel(
-            request.payload as MagicAgentPlatformLeaveRuntimeChannelReq,
-            invocation
-          )
-        }
-      }
-      if (request.method === 'channel.wire') {
-        if (request.payload && typeof request.payload === 'object' && 'actor' in request.payload)
-          throw new Error('channel.wire actor is derived from authenticated credentials.')
-        return {
-          status: 200,
-          body: await this.service.wireRuntimeChannel(
-            request.payload as MagicAgentPlatformWireRuntimeChannelReq,
-            invocation
-          )
-        }
-      }
-      if (request.method === 'channel.unwire') {
-        if (request.payload && typeof request.payload === 'object' && 'actor' in request.payload)
-          throw new Error('channel.unwire actor is derived from authenticated credentials.')
-        return {
-          status: 200,
-          body: await this.service.unwireRuntimeChannel(
-            request.payload as MagicAgentPlatformUnwireRuntimeChannelReq,
-            invocation
-          )
-        }
+      const channelMethod =
+        channelMutationMethods[request.method as keyof typeof channelMutationMethods]
+      if (channelMethod) {
+        if (hasPayloadField(request.payload, 'actor'))
+          throw new Error(`${request.method} actor is derived from authenticated credentials.`)
+        return await dispatchServiceMethod(this.service, channelMethod, request.payload, invocation)
       }
       if (request.method === 'channel.wire.list')
         return { status: 200, body: await this.service.listRuntimeChannelWires() }
@@ -728,17 +693,8 @@ export class MagicAgentSdkGateway {
             request.payload as MagicAgentPlatformGetRuntimeChannelReq
           )
         }
-      if (
-        request.method === 'team.create' ||
-        request.method === 'team.remove' ||
-        request.method === 'team.member.add' ||
-        request.method === 'team.member.remove' ||
-        request.method === 'team.replace' ||
-        request.method === 'team.start' ||
-        request.method === 'team.pause' ||
-        request.method === 'team.resume' ||
-        request.method === 'team.stop'
-      ) {
+      const teamMethod = teamMethods[request.method as keyof typeof teamMethods]
+      if (teamMethod) {
         if (
           request.payload &&
           typeof request.payload === 'object' &&
@@ -754,25 +710,7 @@ export class MagicAgentSdkGateway {
               'addedBy' in request.payload.member))
         )
           throw new Error('Team authority is derived from trusted configuration.')
-        const method =
-          request.method === 'team.create'
-            ? this.service.createTeam
-            : request.method === 'team.remove'
-              ? this.service.removeTeam
-              : request.method === 'team.member.add'
-                ? this.service.addTeamMember
-                : request.method === 'team.member.remove'
-                  ? this.service.removeTeamMember
-                  : request.method === 'team.replace'
-                    ? this.service.replaceTeam
-                    : request.method === 'team.start'
-                      ? this.service.startTeam
-                      : request.method === 'team.pause'
-                        ? this.service.pauseTeam
-                        : request.method === 'team.resume'
-                          ? this.service.resumeTeam
-                          : this.service.stopTeam
-        return { status: 200, body: await method(request.payload as never, invocation) }
+        return await dispatchServiceMethod(this.service, teamMethod, request.payload, invocation)
       }
       if (request.method === 'agentInstance.replace') {
         if (request.payload && typeof request.payload === 'object' && 'actor' in request.payload)
@@ -837,115 +775,25 @@ export class MagicAgentSdkGateway {
             request.payload as MagicAgentPlatformGetAgentInstanceReq
           )
         }
-      if (request.method === 'agentInstance.createRoot')
-        return {
-          status: 200,
-          body: await this.service.createRootAgentInstance(
-            request.payload as MagicAgentPlatformCreateRootAgentInstanceReq,
-            invocation
-          )
-        }
-      if (request.method === 'agentInstance.createChild')
-        return {
-          status: 200,
-          body: await this.service.createChildAgentInstance(
-            request.payload as MagicAgentPlatformCreateChildAgentInstanceReq,
-            invocation
-          )
-        }
-      if (request.method === 'agentInstance.start')
-        return {
-          status: 200,
-          body: await this.service.startAgentInstance(
-            request.payload as MagicAgentPlatformStartAgentInstanceReq,
-            invocation
-          )
-        }
-      if (request.method === 'agentInstance.stop')
-        return {
-          status: 200,
-          body: await this.service.stopAgentInstance(
-            request.payload as MagicAgentPlatformStopAgentInstanceReq,
-            invocation
-          )
-        }
-      if (request.method === 'agentInstance.remove')
-        return {
-          status: 200,
-          body: await this.service.removeAgentInstance(
-            request.payload as MagicAgentPlatformRemoveAgentInstanceReq,
-            invocation
-          )
-        }
-      if (request.method === 'drive.list')
-        return { status: 200, body: await this.service.listDrives({}) }
-      if (request.method === 'drive.get')
-        return {
-          status: 200,
-          body: await this.service.getDrive(request.payload as MagicAgentPlatformGetDriveReq)
-        }
-      if (request.method === 'drive.create')
-        return {
-          status: 200,
-          body: await this.service.createDrive(request.payload as MagicAgentPlatformCreateDriveReq)
-        }
-      if (request.method === 'drive.transition')
-        return {
-          status: 200,
-          body: await this.service.transitionDrive(
-            request.payload as MagicAgentPlatformTransitionDriveReq
-          )
-        }
-      if (request.method === 'drive.retryDelivery')
-        return {
-          status: 200,
-          body: await this.service.retryDelivery(
-            request.payload as MagicAgentPlatformRetryDriveDeliveryReq
-          )
-        }
+      const agentInstanceMethod =
+        agentInstanceInvocationMethods[
+          request.method as keyof typeof agentInstanceInvocationMethods
+        ]
+      if (agentInstanceMethod)
+        return await dispatchServiceMethod(
+          this.service,
+          agentInstanceMethod,
+          request.payload,
+          invocation
+        )
 
-      if (request.method === 'drive.transfer')
-        return {
-          status: 200,
-          body: await this.service.transferDrive(
-            request.payload as MagicAgentPlatformTransferDriveReq
-          )
-        }
-      if (request.method === 'drive.setLinks')
-        return {
-          status: 200,
-          body: await this.service.setDriveLinks(
-            request.payload as MagicAgentPlatformSetDriveLinksReq
-          )
-        }
-      if (request.method === 'drive.reportProgress')
-        return {
-          status: 200,
-          body: await this.service.reportDriveProgress(
-            request.payload as MagicAgentPlatformReportDriveProgressReq
-          )
-        }
-      if (request.method === 'trigger.list')
-        return { status: 200, body: await this.service.listTriggers({}) }
-      if (request.method === 'trigger.get')
-        return {
-          status: 200,
-          body: await this.service.getTrigger(request.payload as MagicAgentPlatformGetTriggerReq)
-        }
-      if (request.method === 'trigger.create')
-        return {
-          status: 200,
-          body: await this.service.createTrigger(
-            request.payload as MagicAgentPlatformCreateTriggerReq
-          )
-        }
-      if (request.method === 'trigger.update')
-        return {
-          status: 200,
-          body: await this.service.updateTrigger(
-            request.payload as MagicAgentPlatformUpdateTriggerReq
-          )
-        }
+      const directMethod = directServiceMethods[request.method as keyof typeof directServiceMethods]
+      if (directMethod)
+        return await dispatchServiceMethod(
+          this.service,
+          directMethod.method,
+          directMethod.emptyPayload ? {} : request.payload
+        )
       const controls = {
         'trigger.enable': this.service.enableTrigger,
         'trigger.disable': this.service.disableTrigger,
@@ -958,13 +806,6 @@ export class MagicAgentSdkGateway {
           status: 200,
           body: await controls[request.method as keyof typeof controls](
             request.payload as MagicAgentPlatformTriggerControlReq
-          )
-        }
-      if (request.method === 'trigger.manualFire')
-        return {
-          status: 200,
-          body: await this.service.manualFireTrigger(
-            request.payload as MagicAgentPlatformManualFireTriggerReq
           )
         }
       if (request.method === 'trigger.emit') {
