@@ -394,7 +394,6 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
   const { notifyError, notifyInfo, notifySuccess, notifyWarning } = useMessage()
   const { buildEnv } = useConfig()
   const buildMode = buildEnv.env.buildMode
-  // const { t } = useI18n()
   const { t, i18n } = useTranslation()
   const isChineseUi = i18n.language?.toLowerCase().startsWith('zh') ?? true
   const text = useCallback(

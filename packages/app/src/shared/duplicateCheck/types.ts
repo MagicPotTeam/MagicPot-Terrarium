@@ -106,23 +106,6 @@ export const DEFAULT_DUPLICATE_CHECK_SETTINGS: DuplicateCheckSettings = {
 export const DEFAULT_DUPLICATE_CHECK_MODEL_MEAN = [0.5, 0.5, 0.5]
 export const DEFAULT_DUPLICATE_CHECK_MODEL_STD = [0.5, 0.5, 0.5]
 
-/*
-export const createEmptyDuplicateCheckVisualModel = (): DuplicateCheckVisualModelConfig => ({
-  id: crypto.randomUUID(),
-  name: '新视觉模型',
-  modelPath: '',
-  inputSize: 224,
-  inputName: '',
-  outputName: '',
-  embeddingDim: 0,
-  normalizeEmbedding: true,
-  mean: [...DEFAULT_DUPLICATE_CHECK_MODEL_MEAN],
-  std: [...DEFAULT_DUPLICATE_CHECK_MODEL_STD],
-  defaultThreshold: DUPLICATE_CHECK_THRESHOLD_PRESETS.balanced.visualSimilarity,
-  enabled: true
-})
-*/
-
 export const createEmptyDuplicateCheckVisualModel = (): DuplicateCheckVisualModelConfig => ({
   id: crypto.randomUUID(),
   name: '\u65b0\u89c6\u89c9\u6a21\u578b',

@@ -1,7 +1,6 @@
 import { ResultItemType } from '@shared/qApp/resultTypes'
 import transformImage from './transformImage'
 import transformVideo from './transformVideo'
-import transformTexts from './transformTexts'
 import transformText from './transformText'
 import { ResultTransformer } from './types'
 import { ComfyHistory, Outputs } from '@shared/comfy/types'
@@ -9,7 +8,6 @@ import { ComfyHistory, Outputs } from '@shared/comfy/types'
 export const resultTransformers: ResultTransformer<ResultItemType>[] = [
   transformImage,
   transformVideo,
-  // transformTexts
   transformText
 ]
 
