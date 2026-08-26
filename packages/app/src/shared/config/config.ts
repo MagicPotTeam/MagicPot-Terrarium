@@ -453,6 +453,7 @@ type ConfigShape = {
 
 export type Config = ConfigShape
 
+export const DEFAULT_COMFYUI_ORIGIN = 'http://127.0.0.1:8188'
 export const DEFAULT_WORKFLOW_DIR = 'workflows'
 export const DEFAULT_CHECKPOINTS_DIR = 'models/checkpoints'
 export const DEFAULT_CLIP_DIR = 'models/clip'
@@ -497,7 +498,7 @@ export const DEFAULT_CONFIG: Config = {
     comfyui_args: []
   },
   remote_comfyui_config: {
-    comfyui_origin: 'http://localhost:8188',
+    comfyui_origin: DEFAULT_COMFYUI_ORIGIN,
     mapping_comfyui_dir: ''
   },
   workflow_dir: DEFAULT_WORKFLOW_DIR,

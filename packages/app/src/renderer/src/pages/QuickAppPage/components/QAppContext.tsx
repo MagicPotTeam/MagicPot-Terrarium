@@ -15,6 +15,10 @@ import {
   type QAppApplyTaskPackDetail
 } from '../utils/qAppTaskPackBridge'
 
+export type QAppValidationOptions = {
+  skipImageInputSlots?: string[]
+}
+
 type QAppContextType = {
   qAppCfg: QAppCfg | null
   workflow: Workflow | null
@@ -22,7 +26,7 @@ type QAppContextType = {
   setWorkflow: React.Dispatch<React.SetStateAction<Workflow | null>>
   submitClientId?: string
   submitSessionKey?: string
-  validate?: () => boolean
+  validate?: (options?: QAppValidationOptions) => boolean
   buildWorkflow?: () => Workflow
   buildSubmitExtraData?: () => JsonDict | undefined
   setSubmitClientId: (clientId: string | undefined) => void

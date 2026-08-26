@@ -354,7 +354,10 @@ const QAppDesignPanel: React.FC = () => {
     configRef.current = config
   }, [config])
 
-  const designState = useQAppDesignState(setQAppCfg, globalWorkflow, qAppCfg)
+  const {
+    state: { objectInfos }
+  } = useComfyStatus()
+  const designState = useQAppDesignState(setQAppCfg, globalWorkflow, qAppCfg, objectInfos)
   const qAppCategoryOptions = useMemo(() => getQAppCategoryOptions(t), [t])
 
   const displayQAppList = useMemo(
@@ -365,10 +368,6 @@ const QAppDesignPanel: React.FC = () => {
       })),
     [qAppList]
   )
-
-  const {
-    state: { objectInfos }
-  } = useComfyStatus()
 
   // ----------------------------------------------------------------
   // 加载列表 (核心修复：增加 silent 参数)
@@ -430,13 +429,16 @@ const QAppDesignPanel: React.FC = () => {
   // ----------------------------------------------------------------
   // 打开文件夹
   // ----------------------------------------------------------------
+  // 打开应用实际扫描的统一目录。
   const handleOpenFolder = () => {
     const dirPath = configUtils.getBuiltinQAppDir()
     if (!dirPath) {
       notifyError(t('qapp.design.err_no_qapp_dir'))
       return
     }
-    api().svcShell.openPath(dirPath)
+    void Promise.resolve(api().svcShell.openPath(dirPath)).catch((error) => {
+      console.error(`[QAppDesignPanel] 打开快应用目录失败: ${dirPath}`, error)
+    })
   }
 
   const applyImportedWorkflow = useCallback(
@@ -445,7 +447,7 @@ const QAppDesignPanel: React.FC = () => {
 
       setWorkflow(resolved.workflow)
       setQAppCfg(resolved.cfg)
-      designState.loadFromCfg(resolved.cfg)
+      designState.loadFromCfg(resolved.cfg, resolved.workflow)
       setDesignQAppKey(undefined)
       setDesignQAppCategory(getQAppDesignCategory(undefined, resolved.cfg, resolved.workflow))
 
@@ -502,7 +504,7 @@ const QAppDesignPanel: React.FC = () => {
 
       setWorkflow(resolved.workflow)
       setQAppCfg(resolved.cfg)
-      designState.loadFromCfg(resolved.cfg)
+      designState.loadFromCfg(resolved.cfg, resolved.workflow)
       setDesignQAppKey(undefined)
       setDesignQAppCategory(getQAppDesignCategory(undefined, resolved.cfg, resolved.workflow))
 
@@ -526,7 +528,7 @@ const QAppDesignPanel: React.FC = () => {
         const res = await api().svcQApp.getQAppCfg({ key })
         setQAppCfg(res.cfg)
         setWorkflow(res.workflow)
-        designState.loadFromCfg(res.cfg)
+        designState.loadFromCfg(res.cfg, res.workflow)
         setDesignQAppKey(key)
         setDesignQAppCategory(
           getQAppDesignCategory(key, res.cfg, res.workflow, res.manifest?.category)

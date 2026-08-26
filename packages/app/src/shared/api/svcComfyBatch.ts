@@ -3,7 +3,6 @@ import type { ServiceDefSheet } from './apiUtils/serviceDefSheet'
 
 export type ComfyBatchProfile = {
   id: string
-  name: string
   baseUrl: string
   enabled: boolean
   maxConcurrency: number
@@ -17,7 +16,24 @@ export type ComfyBatchProbeResult = {
   error?: string
 }
 
-export type ComfyBatchJobState = 'idle' | 'running' | 'completed' | 'cancelled' | 'error'
+export type ComfyBatchJobState = 'idle' | 'queued' | 'running' | 'completed' | 'cancelled' | 'error'
+
+export type ComfyBatchItemTiming = {
+  relativePath: string
+  durationMs: number
+  startedAt: number
+  finishedAt: number
+  profileId?: string
+  attempt: number
+  state: 'success' | 'failed'
+}
+
+export type ComfyBatchRunningItem = {
+  relativePath: string
+  startedAt: number
+  profileId: string
+  attempt: number
+}
 
 export type ComfyBatchStatus = {
   jobId?: string
@@ -36,6 +52,14 @@ export type ComfyBatchStatus = {
   failedFiles: string[]
   startedAt?: number
   finishedAt?: number
+  submittedAt?: number
+  elapsedMs?: number
+  averageItemMs?: number
+  etaMs?: number
+  queuePosition?: number
+  recentItems?: ComfyBatchItemTiming[]
+  runningItems?: ComfyBatchRunningItem[]
+  lastItem?: ComfyBatchItemTiming
 }
 
 export type StartComfyBatchReq = {
@@ -49,6 +73,8 @@ export type StartComfyBatchReq = {
 export type StartComfyBatchResp = { status: ComfyBatchStatus }
 export type GetComfyBatchStatusReq = { jobId?: string }
 export type GetComfyBatchStatusResp = { status: ComfyBatchStatus }
+export type ListComfyBatchJobsReq = Record<string, never>
+export type ListComfyBatchJobsResp = { jobs: ComfyBatchStatus[] }
 export type RetryFailedComfyBatchReq = { jobId: string }
 export type RetryFailedComfyBatchResp = { status: ComfyBatchStatus }
 export type CancelComfyBatchReq = { jobId: string }
@@ -67,6 +93,7 @@ export type ComfyBatchSvc = {
   probeProfile(req: ProbeComfyBatchProfileReq): Promise<ProbeComfyBatchProfileResp>
   start(req: StartComfyBatchReq): Promise<StartComfyBatchResp>
   status(req: GetComfyBatchStatusReq): Promise<GetComfyBatchStatusResp>
+  listJobs(req: ListComfyBatchJobsReq): Promise<ListComfyBatchJobsResp>
   retryFailed(req: RetryFailedComfyBatchReq): Promise<RetryFailedComfyBatchResp>
   cancel(req: CancelComfyBatchReq): Promise<CancelComfyBatchResp>
 }
@@ -77,6 +104,7 @@ export const comfyBatchSvcDef: ServiceDefSheet<ComfyBatchSvc> = {
   probeProfile: { type: 'unary' },
   start: { type: 'unary' },
   status: { type: 'unary' },
+  listJobs: { type: 'unary' },
   retryFailed: { type: 'unary' },
   cancel: { type: 'unary' }
 }

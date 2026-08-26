@@ -10,7 +10,7 @@ import { useMessage } from '@renderer/hooks/useMessage'
 import { CalloutNodeNotInstalled } from '../components/CalloutNodeNotInstalled'
 import { CalloutMissingModels } from '../components/CalloutMissingModels'
 import { CalloutComfyAPINotAvailable } from '../components/CalloutComfyAPINotAvailable'
-import { useQAppContext, useQAppInputState } from '../components/QAppContext'
+import { QAppValidationOptions, useQAppContext, useQAppInputState } from '../components/QAppContext'
 import { useTranslation } from 'react-i18next'
 import {
   buildComfyOrgExtraData,
@@ -52,31 +52,36 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
       [currentQAppKey]
     )
 
-    const validate = useCallback((): boolean => {
-      const errorTexts: string[] = []
+    const validate = useCallback(
+      (options: QAppValidationOptions = {}): boolean => {
+        const errorTexts: string[] = []
 
-      if (requiresComfyOrgAuth && !comfyOrgApiKey.trim()) {
-        errorTexts.push(t('qapp.comfy_org_api.validation_required'))
-      }
+        if (requiresComfyOrgAuth && !comfyOrgApiKey.trim()) {
+          errorTexts.push(t('qapp.comfy_org_api.validation_required'))
+        }
 
-      for (const autoRef of autoRefs.current) {
-        const errorText = autoRef.validate(workflowTemplate)
-        if (errorText) {
-          errorTexts.push(errorText)
+        for (const autoRef of autoRefs.current) {
+          const errorText = autoRef.validate(workflowTemplate)
+          if (errorText) {
+            errorTexts.push(errorText)
+          }
         }
-      }
-      for (const inputRef of inputRefs.current) {
-        const errorText = inputRef.validate(workflowTemplate)
-        if (errorText) {
-          errorTexts.push(errorText)
+        const skippedImageSlots = new Set(options.skipImageInputSlots || [])
+        for (const inputRef of inputRefs.current) {
+          if (inputRef.slot && skippedImageSlots.has(inputRef.slot)) continue
+          const errorText = inputRef.validate(workflowTemplate)
+          if (errorText) {
+            errorTexts.push(errorText)
+          }
         }
-      }
-      if (errorTexts.length > 0) {
-        notifyError(errorTexts.join('\n'))
-        return false
-      }
-      return true
-    }, [comfyOrgApiKey, notifyError, requiresComfyOrgAuth, t])
+        if (errorTexts.length > 0) {
+          notifyError(errorTexts.join('\n'))
+          return false
+        }
+        return true
+      },
+      [comfyOrgApiKey, notifyError, requiresComfyOrgAuth, t]
+    )
 
     const buildWorkflow = useCallback((): Workflow => {
       const workflow = deepCopy(workflowTemplate)
@@ -108,7 +113,10 @@ const buildQApp = (cfg: QAppCfg, workflowTemplate: Workflow): React.FC<PanelProp
     buildWorkflowRef.current = buildWorkflow
     buildSubmitExtraDataRef.current = buildSubmitExtraData
 
-    const stableValidate = useCallback((): boolean => validateRef.current(), [])
+    const stableValidate = useCallback(
+      (options: QAppValidationOptions = {}): boolean => validateRef.current(options),
+      []
+    )
     const stableBuildWorkflow = useCallback((): Workflow => buildWorkflowRef.current(), [])
     const stableBuildSubmitExtraData = useCallback(() => buildSubmitExtraDataRef.current(), [])
 

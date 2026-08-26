@@ -6,9 +6,17 @@ import QuestionTooltip from '../QuestionTooltip'
 
 type InputSwitchProps = InputProps<boolean> & {
   label: string
+  disabled?: boolean
 }
 
-const InputSwitch: React.FC<InputSwitchProps> = ({ value, label, onChange, Icon, tooltip }) => {
+const InputSwitch: React.FC<InputSwitchProps> = ({
+  value,
+  label,
+  onChange,
+  Icon,
+  tooltip,
+  disabled = false
+}) => {
   const theme = useTheme()
   const isLight = theme.palette.mode === 'light'
 
@@ -54,6 +62,7 @@ const InputSwitch: React.FC<InputSwitchProps> = ({ value, label, onChange, Icon,
         control={
           <Switch
             checked={!!value}
+            disabled={disabled}
             onChange={(e) => onChange(e.target.checked)}
             inputProps={{ 'aria-label': label }}
           />

@@ -11,6 +11,7 @@ import React from 'react'
 
 export type ExeInputRef = {
   id: string
+  slot?: string
   modifyWorkflow: (workflow: Workflow) => void
   validate: (workflow: Workflow) => string // 返回错误信息, 如果没有错误则返回空字符串
 }

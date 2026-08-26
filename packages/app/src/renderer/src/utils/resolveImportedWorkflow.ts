@@ -4,6 +4,7 @@ import { convertGuiWorkflowToPrompt, isGuiWorkflow } from '@shared/comfy/guiWork
 import { isWorkflow } from '@shared/comfy/typeGuards'
 import { ObjectInfoMap, Workflow } from '@shared/comfy/types'
 import { QAppCfg } from '@shared/qApp/cfgTypes'
+import { normalizeQAppBatchConfig } from '@shared/qApp/batchConfig'
 import { api } from './windowUtils'
 
 type ResolveImportedWorkflowOptions = {
@@ -115,9 +116,11 @@ export async function resolveImportedWorkflow(
     }
   }
 
+  const normalizedBatch = normalizeQAppBatchConfig(cfg, workflow, objectInfos ?? {})
+
   return {
     workflow,
-    cfg,
+    cfg: normalizedBatch.cfg,
     isAppMode,
     warnings
   }

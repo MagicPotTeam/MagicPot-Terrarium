@@ -2,12 +2,14 @@ import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type {
+  ComfyBatchItemTiming,
   ComfyBatchProfile,
+  ComfyBatchRunningItem,
   ComfyBatchStatus,
   StartComfyBatchReq
 } from '@shared/api/svcComfyBatch'
 import type { ComfyHistory, FileItem, ObjectInfoMap, Workflow } from '@shared/comfy/types'
-import { ComfyBatchHttpClient } from './batchHttp'
+import { ComfyBatchHttpClient, ComfyBatchHttpError } from './batchHttp'
 
 export const COMFY_BATCH_IMAGE_EXTENSIONS = new Set([
   '.png',
@@ -23,6 +25,10 @@ const PNG_SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a,
 const MANIFEST_VERSION = 2
 const HISTORY_POLL_MS = 400
 const HISTORY_TIMEOUT_MS = 24 * 60 * 60 * 1000
+const SUPERVISOR_WAIT_MS = 100
+const PROFILE_REFRESH_INTERVAL_MS = 5_000
+const PROFILE_RETRY_INTERVAL_MS = 250
+export const NO_RUNTIME_RETRY_WINDOW_MS = 5_000
 
 export type BatchSourceFile = {
   absolutePath: string
@@ -59,6 +65,7 @@ type InstanceRuntime = {
   client: ComfyBatchHttpClient
   inflight: number
   compatible: boolean
+  available: boolean
 }
 
 type PendingBatchItem = {
@@ -242,6 +249,132 @@ export function isValidPng(bytes: Uint8Array): boolean {
   return false
 }
 
+export type ComfyBatchOutputMetadata = {
+  sourceSha256: string
+  planFingerprint: string
+}
+
+const BATCH_PNG_TEXT_KEY = 'MagicPotBatch'
+
+function makePngChunk(type: string, data: Uint8Array): Uint8Array {
+  const typeBytes = new TextEncoder().encode(type)
+  const crcInput = new Uint8Array(typeBytes.length + data.length)
+  crcInput.set(typeBytes)
+  crcInput.set(data, typeBytes.length)
+  const chunk = new Uint8Array(12 + data.length)
+  chunk.set(
+    Uint8Array.from([
+      (data.length >>> 24) & 0xff,
+      (data.length >>> 16) & 0xff,
+      (data.length >>> 8) & 0xff,
+      data.length & 0xff
+    ])
+  )
+  chunk.set(typeBytes, 4)
+  chunk.set(data, 8)
+  const crc = pngCrc32(crcInput, 0, crcInput.length)
+  chunk.set(
+    Uint8Array.from([(crc >>> 24) & 0xff, (crc >>> 16) & 0xff, (crc >>> 8) & 0xff, crc & 0xff]),
+    8 + data.length
+  )
+  return chunk
+}
+
+function addBatchPngMetadata(bytes: Uint8Array, metadata: ComfyBatchOutputMetadata): Uint8Array {
+  if (!isValidPng(bytes)) throw new Error('ComfyUI output is not a valid PNG')
+  const text = new TextEncoder().encode(`${BATCH_PNG_TEXT_KEY}\0${JSON.stringify(metadata)}`)
+  let offset = PNG_SIGNATURE.length
+  while (offset <= bytes.length - 12) {
+    const dataLength = readUint32Be(bytes, offset)
+    const nextOffset = offset + 12 + dataLength
+    if (chunkType(bytes, offset + 4) === 'IEND') {
+      const chunk = makePngChunk('tEXt', text)
+      const result = new Uint8Array(bytes.length + chunk.length)
+      result.set(bytes.slice(0, offset))
+      result.set(chunk, offset)
+      result.set(bytes.slice(offset), offset + chunk.length)
+      return result
+    }
+    offset = nextOffset
+  }
+  throw new Error('PNG is missing IEND')
+}
+
+function readBatchPngMetadata(bytes: Uint8Array): ComfyBatchOutputMetadata | null {
+  if (!isValidPng(bytes)) return null
+  let offset = PNG_SIGNATURE.length
+  while (offset <= bytes.length - 12) {
+    const dataLength = readUint32Be(bytes, offset)
+    const dataOffset = offset + 8
+    const nextOffset = offset + 12 + dataLength
+    if (chunkType(bytes, offset + 4) === 'tEXt') {
+      const data = new TextDecoder().decode(bytes.slice(dataOffset, dataOffset + dataLength))
+      const separator = data.indexOf('\0')
+      if (separator >= 0 && data.slice(0, separator) === BATCH_PNG_TEXT_KEY) {
+        try {
+          const parsed = JSON.parse(data.slice(separator + 1)) as Partial<ComfyBatchOutputMetadata>
+          if (
+            typeof parsed.sourceSha256 === 'string' &&
+            typeof parsed.planFingerprint === 'string'
+          ) {
+            return parsed as ComfyBatchOutputMetadata
+          }
+        } catch {
+          return null
+        }
+      }
+    }
+    if (chunkType(bytes, offset + 4) === 'IEND') break
+    offset = nextOffset
+  }
+  return null
+}
+
+async function hasMatchingBatchPngFile(
+  filename: string,
+  metadata: ComfyBatchOutputMetadata
+): Promise<boolean> {
+  try {
+    const actual = readBatchPngMetadata(new Uint8Array(await fs.readFile(filename)))
+    return (
+      actual?.sourceSha256 === metadata.sourceSha256 &&
+      actual.planFingerprint === metadata.planFingerprint
+    )
+  } catch {
+    return false
+  }
+}
+
+async function findGeneratedBatchOutputs(outputDir: string): Promise<string[]> {
+  const result: string[] = []
+  const visit = async (directory: string, relativeDirectory = ''): Promise<void> => {
+    let entries
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (entry.name === '.magicpot-batch') continue
+      const absolutePath = path.join(directory, entry.name)
+      const relativePath = path.join(relativeDirectory, entry.name)
+      if (entry.isDirectory()) {
+        await visit(absolutePath, relativePath)
+        continue
+      }
+      if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.png') continue
+      try {
+        const metadata = readBatchPngMetadata(new Uint8Array(await fs.readFile(absolutePath)))
+        if (metadata) result.push(relativePath)
+      } catch {
+        // Ignore files that are not complete batch outputs.
+      }
+    }
+  }
+  await visit(outputDir)
+  return result
+}
+
 export async function hasValidPngFile(filename: string): Promise<boolean> {
   try {
     return isValidPng(new Uint8Array(await fs.readFile(filename)))
@@ -331,9 +464,14 @@ async function atomicWriteFile(filename: string, bytes: Uint8Array | string): Pr
   }
 }
 
-export async function atomicCommitPng(filename: string, bytes: Uint8Array): Promise<void> {
-  if (!isValidPng(bytes)) throw new Error('ComfyUI output is not a valid PNG')
-  await atomicWriteFile(filename, bytes)
+export async function atomicCommitPng(
+  filename: string,
+  bytes: Uint8Array,
+  metadata?: ComfyBatchOutputMetadata
+): Promise<void> {
+  const committedBytes = metadata ? addBatchPngMetadata(bytes, metadata) : bytes
+  if (!isValidPng(committedBytes)) throw new Error('ComfyUI output is not a valid PNG')
+  await atomicWriteFile(filename, committedBytes)
 }
 
 async function writeManifest(manifest: ComfyBatchManifest): Promise<void> {
@@ -426,7 +564,8 @@ export function validateComfyBatchBindings(
       const outputInfo = objectInfo[outputNode.class_type]
       if (
         !outputInfo ||
-        (outputInfo.output_node !== true && (outputInfo.output?.length ?? 0) === 0)
+        (outputInfo.output_node !== true &&
+          !outputInfo.output?.some((outputType) => outputType === 'IMAGE'))
       ) {
         throw new Error(`Configured output node is not an output-producing node: ${outputNodeId}`)
       }
@@ -447,12 +586,13 @@ export function selectBoundOutputImage(
   if (!outputNodeIds.length) throw new Error('Quick App outputNodeIds must not be empty')
   const images = outputNodeIds.flatMap((nodeId) => history.outputs?.[nodeId]?.images || [])
   const outputImages = images.filter(
-    (item): item is FileItem & { filename: string } => item?.type === 'output' && !!item.filename
+    (item): item is FileItem & { filename: string } =>
+      (item?.type === 'output' || item?.type === 'temp') && !!item.filename
   )
   if (outputImages.length !== 1) {
     throw new Error(
       outputImages.length === 0
-        ? 'No type=output image was produced by the bound output nodes'
+        ? 'No output or preview image was produced by the bound output nodes'
         : 'Expected exactly one image from the bound output nodes'
     )
   }
@@ -460,7 +600,7 @@ export function selectBoundOutputImage(
 }
 
 export class LeastLoadRoundRobinScheduler<
-  T extends { inflight: number; profile: { maxConcurrency: number } }
+  T extends { inflight: number; profile: { maxConcurrency: number; enabled?: boolean } }
 > {
   private cursor = 0
 
@@ -468,7 +608,11 @@ export class LeastLoadRoundRobinScheduler<
     if (!instances.length) return null
     const available = instances.filter(
       (instance) =>
-        !excluded.has(instance) && instance.inflight < Math.max(1, instance.profile.maxConcurrency)
+        !excluded.has(instance) &&
+        instance.profile.enabled !== false &&
+        ('available' in instance ? instance.available !== false : true) &&
+        ('compatible' in instance ? instance.compatible !== false : true) &&
+        instance.inflight < Math.max(1, instance.profile.maxConcurrency)
     )
     if (!available.length) return null
     const ratios = available.map(
@@ -498,6 +642,25 @@ function uploadedValue(file: FileItem): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function isRetryableInstanceError(error: unknown): boolean {
+  if (error instanceof ComfyExecutionError) return true
+  if (error instanceof ComfyBatchHttpError) return error.retryable
+  if (error instanceof DOMException && error.name === 'AbortError') return true
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase()
+    return (
+      message.includes('timeout') ||
+      message.includes('timed out') ||
+      message.includes('network') ||
+      message.includes('connection') ||
+      message.includes('fetch failed') ||
+      message.includes('econn') ||
+      message.includes('socket')
+    )
+  }
+  return false
 }
 
 async function waitForHistory(
@@ -532,10 +695,12 @@ async function waitForHistory(
 export type ComfyBatchRunnerOptions = {
   createClient?: (baseUrl: string) => ComfyBatchHttpClient
   onStatus?: (status: ComfyBatchStatus) => void
+  jobId?: string
+  getProfiles?: () => ComfyBatchProfile[]
 }
 
 export class ComfyBatchRunner {
-  readonly jobId = randomUUID()
+  readonly jobId: string
   readonly abortController = new AbortController()
   private manifest!: ComfyBatchManifest
   private imageInputBinding!: ImageInputBinding
@@ -545,6 +710,12 @@ export class ComfyBatchRunner {
   private manifestWriteQueue: Promise<void> = Promise.resolve()
   private readonly createClient: (baseUrl: string) => ComfyBatchHttpClient
   private readonly activePrompts = new Map<string, ComfyBatchHttpClient>()
+  private readonly runningItems = new Map<string, ComfyBatchRunningItem>()
+  private readonly recentItems: ComfyBatchItemTiming[] = []
+  private readonly itemAttempts = new Map<string, number>()
+  private runtimeRefreshPromise: Promise<void> | undefined
+  private lastProfileFingerprint = ''
+  private lastProfileRefreshAt = 0
   private statusValue: ComfyBatchStatus
 
   constructor(
@@ -552,6 +723,7 @@ export class ComfyBatchRunner {
     private readonly profiles: ComfyBatchProfile[],
     private readonly options: ComfyBatchRunnerOptions = {}
   ) {
+    this.jobId = options.jobId || randomUUID()
     this.createClient = options.createClient ?? ((baseUrl) => new ComfyBatchHttpClient(baseUrl))
     this.statusValue = {
       jobId: this.jobId,
@@ -570,7 +742,24 @@ export class ComfyBatchRunner {
   }
 
   get status(): ComfyBatchStatus {
-    return { ...this.statusValue, failedFiles: [...this.statusValue.failedFiles] }
+    const now = Date.now()
+    const startedAt = this.statusValue.startedAt
+    const elapsedMs = startedAt ? (this.statusValue.finishedAt || now) - startedAt : undefined
+    const measuredItems = this.recentItems
+    const totalMeasuredMs = measuredItems.reduce((sum, item) => sum + item.durationMs, 0)
+    const averageItemMs = measuredItems.length ? totalMeasuredMs / measuredItems.length : undefined
+    const remainingItems = Math.max(0, this.statusValue.pending + this.statusValue.running)
+    const etaMs = averageItemMs !== undefined ? averageItemMs * remainingItems : undefined
+    return {
+      ...this.statusValue,
+      elapsedMs,
+      averageItemMs,
+      etaMs,
+      recentItems: [...this.recentItems],
+      runningItems: [...this.runningItems.values()],
+      lastItem: this.recentItems.at(-1),
+      failedFiles: [...this.statusValue.failedFiles]
+    }
   }
 
   startingStatus(): ComfyBatchStatus {
@@ -597,6 +786,154 @@ export class ComfyBatchRunner {
     const write = this.manifestWriteQueue.then(() => writeManifest(this.manifest))
     this.manifestWriteQueue = write.catch(() => undefined)
     return write
+  }
+
+  private currentProfiles(): ComfyBatchProfile[] {
+    return this.options.getProfiles?.() ?? this.profiles
+  }
+
+  private profileKey(profile: ComfyBatchProfile): string {
+    return JSON.stringify([profile.id, profile.baseUrl])
+  }
+
+  private async probeCompatibleRuntimes(profiles: ComfyBatchProfile[]): Promise<{
+    runtimes: InstanceRuntime[]
+    failedKeys: Set<string>
+    incompatibleKeys: Set<string>
+  }> {
+    // Disabled profiles are configuration, not endpoints. In particular, do
+    // not probe them during a refresh (and never create a runtime for them).
+    const enabledProfiles = profiles.filter((profile) => profile.enabled !== false)
+    if (!enabledProfiles.length) {
+      return { runtimes: [], failedKeys: new Set(), incompatibleKeys: new Set() }
+    }
+    const probes = await Promise.allSettled(
+      enabledProfiles.map(async (profile) => {
+        const client = this.createClient(profile.baseUrl)
+        await client.probe()
+        const objectInfo = await client.objectInfo(this.abortController.signal)
+        if (!hasCompatibleNodeClasses(this.request.workflow, objectInfo)) {
+          return { profile, client, inflight: 0, compatible: false as const, available: false }
+        }
+        validateComfyBatchBindings(
+          this.request.workflow,
+          this.request.imageInputSlot,
+          this.request.outputNodeIds,
+          objectInfo
+        )
+        return { profile, client, inflight: 0, compatible: true as const, available: true }
+      })
+    )
+    const runtimes: InstanceRuntime[] = []
+    const failedKeys = new Set<string>()
+    const incompatibleKeys = new Set<string>()
+    probes.forEach((probe, index) => {
+      const profile = enabledProfiles[index]
+      const key = this.profileKey(profile)
+      if (probe.status === 'fulfilled') {
+        if (probe.value.compatible) runtimes.push(probe.value)
+        else incompatibleKeys.add(key)
+      } else {
+        // A transient endpoint/object-info failure must not evict a runtime
+        // that was already admitted and known to be healthy.
+        failedKeys.add(key)
+      }
+    })
+    return { runtimes, failedKeys, incompatibleKeys }
+  }
+
+  private async refreshProfilesIfNeeded(force = false): Promise<void> {
+    const profiles = this.currentProfiles()
+    const fingerprint = stableJson(profiles)
+    const now = Date.now()
+    if (
+      !force &&
+      fingerprint === this.lastProfileFingerprint &&
+      now - this.lastProfileRefreshAt < PROFILE_REFRESH_INTERVAL_MS
+    ) {
+      return
+    }
+    if (this.runtimeRefreshPromise) return this.runtimeRefreshPromise
+    this.runtimeRefreshPromise = (async () => {
+      const {
+        runtimes: probed,
+        failedKeys,
+        incompatibleKeys
+      } = await this.probeCompatibleRuntimes(profiles)
+      const configuredByKey = new Map(
+        profiles.map((profile) => [this.profileKey(profile), profile])
+      )
+      const existingByKey = new Map(
+        this.runtimes.map((runtime) => [this.profileKey(runtime.profile), runtime])
+      )
+      const probedByKey = new Map(
+        probed.map((runtime) => [this.profileKey(runtime.profile), runtime])
+      )
+      const nextByKey = new Map<string, InstanceRuntime>()
+
+      for (const profile of profiles) {
+        const key = this.profileKey(profile)
+        const existing = existingByKey.get(key)
+        if (profile.enabled === false) {
+          // An in-flight task may finish on a disabled endpoint, but it must
+          // not receive any newly scheduled work.
+          if (existing && existing.inflight > 0) {
+            existing.profile = { ...profile, enabled: false }
+            existing.compatible = false
+            existing.available = false
+            nextByKey.set(key, existing)
+          }
+          continue
+        }
+
+        const probedRuntime = probedByKey.get(key)
+        if (probedRuntime) {
+          if (existing) {
+            existing.profile = profile
+            existing.compatible = true
+            existing.available = true
+            nextByKey.set(key, existing)
+          } else {
+            nextByKey.set(key, probedRuntime)
+          }
+          continue
+        }
+
+        if (existing && failedKeys.has(key)) {
+          // Keep an in-flight task attached to its old client so it can drain,
+          // but quarantine the runtime for new work until a later probe passes.
+          existing.profile = profile
+          existing.compatible = false
+          existing.available = false
+          if (existing.inflight > 0) nextByKey.set(key, existing)
+        } else if (existing && incompatibleKeys.has(key) && existing.inflight > 0) {
+          // Compatibility is a real configuration change, so finish admitted
+          // work but do not admit more to this runtime.
+          existing.profile = { ...profile, enabled: false }
+          existing.compatible = false
+          existing.available = false
+          nextByKey.set(key, existing)
+        }
+      }
+
+      // Removed profiles and profiles whose URL/id changed are retained only
+      // long enough for already admitted work to drain, and are never reused.
+      for (const [key, existing] of existingByKey) {
+        if (configuredByKey.has(key) || existing.inflight <= 0) continue
+        existing.profile = { ...existing.profile, enabled: false }
+        existing.compatible = false
+        nextByKey.set(key, existing)
+      }
+
+      this.runtimes = [...nextByKey.values()]
+      this.lastProfileFingerprint = fingerprint
+      this.lastProfileRefreshAt = Date.now()
+    })()
+    try {
+      await this.runtimeRefreshPromise
+    } finally {
+      this.runtimeRefreshPromise = undefined
+    }
   }
 
   private async initialize(): Promise<void> {
@@ -638,6 +975,14 @@ export class ComfyBatchRunner {
       if (staleOutputPath) await fs.rm(staleOutputPath, { force: true })
       delete this.manifest.items[relativePath]
     }
+    const expectedOutputPaths = new Set(
+      sources.map((source) => getComfyBatchOutputRelativePath(source.relativePath))
+    )
+    for (const generatedOutput of await findGeneratedBatchOutputs(outputDir)) {
+      if (!expectedOutputPaths.has(generatedOutput)) {
+        await fs.rm(path.join(outputDir, generatedOutput), { force: true })
+      }
+    }
 
     this.queue = []
     let skipped = 0
@@ -645,15 +990,21 @@ export class ComfyBatchRunner {
       const outputRelativePath = getComfyBatchOutputRelativePath(source.relativePath)
       const outputPath = path.join(outputDir, outputRelativePath)
       const previousItem = this.manifest.items[source.relativePath]
-      const unchangedSuccess =
+      const outputIsComplete = await hasValidPngFile(outputPath)
+      const outputHasCurrentMarker = await hasMatchingBatchPngFile(outputPath, {
+        sourceSha256: source.sha256,
+        planFingerprint
+      })
+      const legacySuccess =
         previousItem?.status === 'success' &&
         previousItem.size === source.size &&
         previousItem.mtimeMs === source.mtimeMs &&
         previousItem.sha256 === source.sha256 &&
         previousItem.planFingerprint === planFingerprint &&
-        previousItem.outputRelativePath === outputRelativePath &&
-        (await hasValidPngFile(outputPath))
+        previousItem.outputRelativePath === outputRelativePath
+      const unchangedSuccess = outputIsComplete && (outputHasCurrentMarker || legacySuccess)
       if (unchangedSuccess) {
+        if (previousItem?.status === 'success') delete this.manifest.items[source.relativePath]
         skipped += 1
         continue
       }
@@ -680,34 +1031,10 @@ export class ComfyBatchRunner {
     this.emit()
     if (!this.queue.length) return
 
-    const enabled = this.profiles.filter((profile) => profile.enabled)
-    if (!enabled.length) throw new Error('No enabled ComfyUI batch profiles')
-    const probes = await Promise.allSettled(
-      enabled.map(async (profile) => {
-        const client = this.createClient(profile.baseUrl)
-        await client.probe()
-        const objectInfo = await client.objectInfo(this.abortController.signal)
-        const compatible = hasCompatibleNodeClasses(this.request.workflow, objectInfo)
-        if (compatible) {
-          validateComfyBatchBindings(
-            this.request.workflow,
-            this.request.imageInputSlot,
-            this.request.outputNodeIds,
-            objectInfo
-          )
-        }
-        return {
-          profile,
-          client,
-          inflight: 0,
-          compatible
-        }
-      })
-    )
-    this.runtimes = probes.flatMap((probe) => (probe.status === 'fulfilled' ? [probe.value] : []))
-    this.runtimes = this.runtimes.filter((runtime) => runtime.compatible)
-    if (!this.runtimes.length)
-      throw new Error('No enabled ComfyUI instance supports all workflow nodes')
+    // Runtime availability is retried by the supervisor. Do not fail
+    // initialization on a transient probe outage; otherwise a job can never
+    // reach the bounded no-runtime policy below.
+    await this.refreshProfilesIfNeeded(true)
   }
 
   private async readVerifiedSource(item: PendingBatchItem): Promise<Uint8Array> {
@@ -775,69 +1102,222 @@ export class ComfyBatchRunner {
       const history = await waitForHistory(runtime.client, promptId, this.abortController.signal)
       const output = selectBoundOutputImage(history, this.request.outputNodeIds)
       const outputBytes = await runtime.client.view(output, this.abortController.signal)
-      await atomicCommitPng(item.outputPath, outputBytes)
+      await atomicCommitPng(item.outputPath, outputBytes, {
+        sourceSha256: item.source.sha256,
+        planFingerprint: this.manifest.planFingerprint
+      })
     } finally {
       this.activePrompts.delete(promptId)
     }
   }
 
-  private async processItem(item: PendingBatchItem): Promise<void> {
+  private async recordItemFailure(
+    item: PendingBatchItem,
+    error: unknown,
+    context?: { runtime?: InstanceRuntime; startedAt?: number; attempt?: number }
+  ): Promise<void> {
+    const message = errorMessage(error)
+    await fs.rm(item.outputPath, { force: true }).catch(() => undefined)
+    this.manifest.items[item.source.relativePath] = {
+      relativePath: item.source.relativePath,
+      size: item.source.size,
+      mtimeMs: item.source.mtimeMs,
+      sha256: item.source.sha256,
+      planFingerprint: this.manifest.planFingerprint,
+      status: 'failed',
+      outputRelativePath: item.outputRelativePath,
+      error: message,
+      updatedAt: Date.now()
+    }
+    await this.persistManifest()
+    this.statusValue.failed += 1
+    this.statusValue.failedFiles.push(item.source.relativePath)
+    const finishedAt = Date.now()
+    const startedAt = context?.startedAt ?? finishedAt
+    const timing: ComfyBatchItemTiming = {
+      relativePath: item.source.relativePath,
+      durationMs: Math.max(0, finishedAt - startedAt),
+      startedAt,
+      finishedAt,
+      profileId: context?.runtime?.profile.id,
+      attempt: context?.attempt ?? (this.itemAttempts.get(item.source.relativePath) || 1),
+      state: 'failed'
+    }
+    this.recentItems.push(timing)
+    if (this.recentItems.length > 100) this.recentItems.shift()
+  }
+
+  private async processItem(
+    item: PendingBatchItem,
+    initialRuntime?: InstanceRuntime
+  ): Promise<void> {
     const tried = new Set<InstanceRuntime>()
-    let executionSwitches = 0
-    while (true) {
-      const runtime = this.scheduler.pick(this.runtimes, tried)
-      if (!runtime) throw new Error('No compatible ComfyUI instance is available')
-      tried.add(runtime)
-      runtime.inflight += 1
+    let runtime = initialRuntime
+    let noRuntimeSince: number | undefined
+    while (!this.abortController.signal.aborted) {
+      if (!runtime) {
+        try {
+          await this.refreshProfilesIfNeeded()
+        } catch {
+          // A failed refresh is transient; keep retrying while the item is
+          // still pending instead of converting the whole job to an error.
+        }
+        runtime = this.scheduler.pick(this.runtimes, tried) ?? undefined
+        if (!runtime) {
+          tried.clear()
+          runtime = this.scheduler.pick(this.runtimes) ?? undefined
+        }
+        if (!runtime) {
+          const configured = this.currentProfiles().some((profile) => profile.enabled !== false)
+          noRuntimeSince ??= Date.now()
+          if (!configured || Date.now() - noRuntimeSince >= NO_RUNTIME_RETRY_WINDOW_MS) {
+            await this.recordItemFailure(item, 'No compatible ComfyUI instance is available')
+            return
+          }
+          await new Promise((resolve) => setTimeout(resolve, SUPERVISOR_WAIT_MS))
+          continue
+        }
+        noRuntimeSince = undefined
+      }
+
+      const activeRuntime = runtime
+      tried.add(activeRuntime)
+      const attempt = (this.itemAttempts.get(item.source.relativePath) || 0) + 1
+      this.itemAttempts.set(item.source.relativePath, attempt)
+      const startedAt = Date.now()
+      this.runningItems.set(item.source.relativePath, {
+        relativePath: item.source.relativePath,
+        startedAt,
+        profileId: activeRuntime.profile.id,
+        attempt
+      })
+      activeRuntime.inflight += 1
       this.statusValue.running += 1
       this.emit()
       try {
-        await this.runOneOnInstance(item, runtime)
-        this.manifest.items[item.source.relativePath] = {
-          relativePath: item.source.relativePath,
-          size: item.source.size,
-          mtimeMs: item.source.mtimeMs,
-          sha256: item.source.sha256,
-          planFingerprint: this.manifest.planFingerprint,
-          status: 'success',
-          outputRelativePath: item.outputRelativePath,
-          updatedAt: Date.now()
-        }
+        await this.runOneOnInstance(item, activeRuntime)
+        delete this.manifest.items[item.source.relativePath]
         await this.persistManifest()
         this.statusValue.success += 1
+        const finishedAt = Date.now()
+        const timing: ComfyBatchItemTiming = {
+          relativePath: item.source.relativePath,
+          durationMs: finishedAt - startedAt,
+          startedAt,
+          finishedAt,
+          profileId: activeRuntime.profile.id,
+          attempt,
+          state: 'success'
+        }
+        this.recentItems.push(timing)
+        if (this.recentItems.length > 100) this.recentItems.shift()
         return
       } catch (error) {
-        if (
-          error instanceof ComfyExecutionError &&
-          executionSwitches < 1 &&
-          this.runtimes.some((candidate) => !tried.has(candidate))
-        ) {
-          executionSwitches += 1
-          continue
+        if (this.abortController.signal.aborted) return
+        if (isRetryableInstanceError(error)) {
+          const hasUntriedRuntime = this.runtimes.some(
+            (candidate) => candidate !== activeRuntime && !tried.has(candidate)
+          )
+          if (hasUntriedRuntime) {
+            runtime = undefined
+            continue
+          }
         }
-        const message = errorMessage(error)
-        await fs.rm(item.outputPath, { force: true }).catch(() => undefined)
-        this.manifest.items[item.source.relativePath] = {
-          relativePath: item.source.relativePath,
-          size: item.source.size,
-          mtimeMs: item.source.mtimeMs,
-          sha256: item.source.sha256,
-          planFingerprint: this.manifest.planFingerprint,
-          status: 'failed',
-          outputRelativePath: item.outputRelativePath,
-          error: message,
-          updatedAt: Date.now()
-        }
-        await this.persistManifest()
-        this.statusValue.failed += 1
-        this.statusValue.failedFiles.push(item.source.relativePath)
+        await this.recordItemFailure(item, error, {
+          runtime: activeRuntime,
+          startedAt,
+          attempt
+        })
         return
       } finally {
-        runtime.inflight -= 1
+        this.runningItems.delete(item.source.relativePath)
+        activeRuntime.inflight -= 1
         this.statusValue.running -= 1
         this.emit()
       }
     }
+  }
+
+  private async failPendingItems(nextIndex: number, message: string): Promise<number> {
+    for (let index = nextIndex; index < this.queue.length; index += 1) {
+      if (this.abortController.signal.aborted) return index
+      await this.recordItemFailure(this.queue[index], message)
+      this.statusValue.pending = Math.max(0, this.statusValue.pending - 1)
+    }
+    return this.queue.length
+  }
+
+  private async supervise(): Promise<void> {
+    let nextIndex = 0
+    const workers = new Set<Promise<void>>()
+    let noRuntimeSince: number | undefined
+    let lastSupervisorRefreshAt = 0
+    while (
+      !this.abortController.signal.aborted &&
+      (nextIndex < this.queue.length || workers.size > 0)
+    ) {
+      if (Date.now() - lastSupervisorRefreshAt >= PROFILE_RETRY_INTERVAL_MS) {
+        try {
+          await this.refreshProfilesIfNeeded()
+        } catch {
+          // Profile probes are best effort. Existing runtimes remain usable.
+        }
+        lastSupervisorRefreshAt = Date.now()
+      }
+
+      while (!this.abortController.signal.aborted && nextIndex < this.queue.length) {
+        const runtime = this.scheduler.pick(this.runtimes)
+        if (!runtime) break
+        const item = this.queue[nextIndex]
+        nextIndex += 1
+        this.statusValue.pending = Math.max(0, this.statusValue.pending - 1)
+        const task = this.processItem(item, runtime).catch(async (error) => {
+          // processItem normally records item-level failures itself. Keep this
+          // boundary as a last-resort guard for bookkeeping or unexpected
+          // errors, but do not let one worker terminate supervision.
+          if (!this.abortController.signal.aborted) {
+            await this.recordItemFailure(item, error)
+          }
+        })
+        workers.add(task)
+        void task.then(
+          () => workers.delete(task),
+          () => workers.delete(task)
+        )
+      }
+
+      if (!workers.size && nextIndex < this.queue.length) {
+        const hasConfiguredProfile = this.currentProfiles().some(
+          (profile) => profile.enabled !== false
+        )
+        const hasUsableRuntime = this.runtimes.some(
+          (runtime) => runtime.compatible && runtime.available && runtime.profile.enabled !== false
+        )
+        noRuntimeSince ??= Date.now()
+        if (!hasConfiguredProfile) {
+          nextIndex = await this.failPendingItems(nextIndex, 'No enabled ComfyUI batch profiles')
+          break
+        }
+        if (!hasUsableRuntime && Date.now() - noRuntimeSince >= NO_RUNTIME_RETRY_WINDOW_MS) {
+          nextIndex = await this.failPendingItems(
+            nextIndex,
+            'No compatible ComfyUI instance is available'
+          )
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, SUPERVISOR_WAIT_MS))
+        continue
+      }
+      noRuntimeSince = undefined
+      if (workers.size) {
+        await Promise.race([
+          ...workers,
+          new Promise((resolve) => setTimeout(resolve, SUPERVISOR_WAIT_MS))
+        ])
+      }
+    }
+    await Promise.allSettled(workers)
+    this.statusValue.pending = Math.max(0, this.queue.length - nextIndex)
   }
 
   async run(): Promise<ComfyBatchStatus> {
@@ -845,25 +1325,9 @@ export class ComfyBatchRunner {
     this.emit()
     try {
       await this.initialize()
-      const workerCount = Math.max(
-        1,
-        this.runtimes.reduce((sum, runtime) => sum + Math.max(1, runtime.profile.maxConcurrency), 0)
-      )
-      let nextIndex = 0
-      const workers = Array.from({ length: workerCount }, async () => {
-        while (!this.abortController.signal.aborted) {
-          const index = nextIndex
-          const item = this.queue[index]
-          if (!item) break
-          nextIndex += 1
-          this.statusValue.pending = Math.max(0, this.statusValue.pending - 1)
-          await this.processItem(item)
-        }
-      })
-      await Promise.all(workers)
+      await this.supervise()
       await this.manifestWriteQueue
       this.statusValue.state = this.abortController.signal.aborted ? 'cancelled' : 'completed'
-      this.statusValue.pending = Math.max(0, this.queue.length - nextIndex)
       this.statusValue.finishedAt = Date.now()
       this.emit()
       return this.status

@@ -1,4 +1,4 @@
-﻿/* eslint-disable react/prop-types */
+/* eslint-disable react/prop-types */
 // packages/app/src/renderer/src/pages/SettingsPage/PanelEnvironment.tsx
 import {
   Box,
@@ -16,7 +16,6 @@ import { PanelProps } from './PanelProps'
 import SettingSection from './components/SettingSection'
 import EnvironmentInfo from './components/EnvironmentInfo'
 import DataStorageInfo from './components/DataStorageInfo'
-import PureConfigNotSetCallout from '@renderer/components/PureConfigNotSetCallout'
 import InputPath from '@renderer/components/inputs/InputPath'
 import { ConfigUtils } from '@shared/config/configUtils'
 import {
@@ -38,20 +37,26 @@ import InputText from '@renderer/components/inputs/InputText'
 import { splitSpace } from '@shared/utils/utilFuncs'
 import { FastSettingTemplate } from '@shared/api/svcHyper'
 import type { LlmProxyAccessUsageSnapshot } from '@shared/api/svcState'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import { api } from '@renderer/utils/windowUtils'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { DropdownButton } from '@renderer/components/DropdownButton'
 import { FastSettingErrorModal } from './components/FastSettingErrorModal'
 import { DeepPartial } from '@shared/utils/utilTypes'
 import InputSwitch from '@renderer/components/inputs/InputSwitch'
-import RemoteConfigNotSetCallout from '@renderer/components/RemoteConfigNotSetCallout'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { useTranslation } from 'react-i18next'
 import { useAppSelector } from '@renderer/store'
 import FigmaBindingDialog from '@renderer/pages/ProjectCanvasPage/Dialogs/FigmaBindingDialog'
 import { loadCanvasItems, saveCanvasItems } from '@renderer/pages/ProjectCanvasPage/canvasStorage'
 import { getCanvasItemsBounds } from '@renderer/pages/ProjectCanvasPage/projectCanvasPageShared'
+import ComfyBatchProfileEditor from '../QuickAppPage/QAppExecutePanel/ComfyBatchProfileEditor'
+import {
+  getComfyBatchProfileSnapshot,
+  isComfyBatchProfileSnapshotLoaded,
+  setComfyBatchProfileSnapshot,
+  subscribeComfyBatchProfiles
+} from '../QuickAppPage/QAppExecutePanel/comfyBatchProfileState'
 import type {
   CanvasGroup,
   CanvasGroupBranch,
@@ -399,6 +404,7 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
   )
 
   const configUtils = new ConfigUtils(settingsValue, buildEnv, window.path)
+
   const appRootDir = buildEnv.pathMap.file
 
   const toEmbeddedRelativePath = (value: string): string => {
@@ -428,6 +434,26 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
     'resolve' | 'bind' | 'sync' | 'check' | null
   >(null)
   const [figmaBindingError, setFigmaBindingError] = useState<string | null>(null)
+  const comfyBatchProfiles = useSyncExternalStore(
+    subscribeComfyBatchProfiles,
+    getComfyBatchProfileSnapshot,
+    getComfyBatchProfileSnapshot
+  )
+  useEffect(() => {
+    if (isComfyBatchProfileSnapshotLoaded()) return
+    let cancelled = false
+    void api()
+      .svcComfyBatch.listProfiles({})
+      .then(({ profiles }) => {
+        if (!cancelled) setComfyBatchProfileSnapshot(profiles)
+      })
+      .catch((error) => {
+        if (!cancelled) notifyError(error instanceof Error ? error.message : String(error))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [notifyError])
   const lastActiveProjectId = useAppSelector((state) => state.layout.lastActiveProjectId)
   const openTabs = useAppSelector((state) => state.layout.openTabs)
   const [renderDeferredSections, setRenderDeferredSections] = useState(false)
@@ -1027,51 +1053,23 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
   return (
     <Box sx={{ p: 3 }}>
       <>
-        <Box key="comfy_mode">
-          <SettingSection title={t('environment.comfy_mode_title')}>
-            <Alert severity="info">
-              <AlertTitle>{t('environment.comfy_mode_info_title')}</AlertTitle>
-              <Typography sx={{ whiteSpace: 'pre-line', wordBreak: 'break-all' }}>
-                {t('environment.comfy_mode_info_desc')}
-              </Typography>
-            </Alert>
-            <InputSwitch
-              label={t('environment.comfy_mode_label')}
-              value={settingsValue.use_remote_comfyui || false}
-              onChange={(value) => saveSettings({ use_remote_comfyui: value })}
+        <Box key="comfy_batch_profiles">
+          <SettingSection title={t('environment.comfyui_title')}>
+            <Typography variant="body2" color="text.secondary">
+              {t('environment.comfyui_desc')}
+            </Typography>
+            <Typography variant="h6" sx={{ mt: 2 }}>
+              {t('environment.comfy_batch_profiles_title')}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {t('environment.comfy_batch_profiles_desc')}
+            </Typography>
+            <ComfyBatchProfileEditor
+              profiles={comfyBatchProfiles}
+              onProfilesChange={setComfyBatchProfileSnapshot}
             />
           </SettingSection>
         </Box>
-
-        {settingsValue.use_remote_comfyui && (
-          <Box key="remote_comfyui">
-            <SettingSection title={t('environment.remote_comfyui_title')}>
-              <InputText
-                label={t('environment.remote_comfyui_origin_label')}
-                value={settingsValue.remote_comfyui_config.comfyui_origin}
-                onChange={(value) =>
-                  saveSettings({ remote_comfyui_config: { comfyui_origin: value } })
-                }
-                placeholder={t('environment.placeholder_remote_comfyui_origin')}
-                errorText={
-                  settingsValue.remote_comfyui_config.comfyui_origin.trim() === ''
-                    ? t('environment.err_remote_comfyui_origin_required')
-                    : undefined
-                }
-              />
-              <InputPath
-                label={t('environment.remote_comfyui_mapping_dir_label')}
-                value={settingsValue.remote_comfyui_config.mapping_comfyui_dir}
-                pathType="directory"
-                defaultTo={configUtils.getComfyUIDir()[0]}
-                onChange={(value) =>
-                  saveSettings({ remote_comfyui_config: { mapping_comfyui_dir: value } })
-                }
-                placeholder={t('environment.placeholder_remote_comfyui_mapping_dir')}
-              />
-            </SettingSection>
-          </Box>
-        )}
 
         <Box key="proxy_mode">
           <ProxyModeSection
@@ -1198,129 +1196,127 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
               </SettingSection>
             </Box>
 
-            <Box key="pure_config_not_set">
-              <PureConfigNotSetCallout needNavigate={false} />
-            </Box>
-
-            <Box key="remote_config_not_set">
-              <RemoteConfigNotSetCallout needNavigate={false} />
-            </Box>
-
             <Box key="data_storage">
               <SettingSection title={t('environment.storage_root_title')}>
                 <DataStorageInfo />
               </SettingSection>
             </Box>
 
-            {!settingsValue.use_remote_comfyui && (
-              <Box key="monitor">
-                <SettingSection title={t('environment.monitor_title')}>
-                  <EnvironmentInfo />
-                </SettingSection>
-              </Box>
-            )}
+            <Box key="monitor">
+              <SettingSection title={t('environment.monitor_title')}>
+                <EnvironmentInfo />
+              </SettingSection>
+            </Box>
 
-            {!settingsValue.use_remote_comfyui && (
-              <Box key="setup">
-                <SettingSection
-                  title={t('environment.setup_title')}
-                  action={
-                    <Stack direction="row" spacing={1}>
-                      <DropdownButton
-                        variant="outlined"
-                        size="small"
-                        startIcon={<CodeIcon />}
-                        buttonChildren={t('environment.setup_quick')}
-                      >
-                        {({ handleClose }) =>
-                          fastSettingTemplates.map((template) => (
-                            <MenuItem
-                              key={template.key}
-                              onClick={() => {
-                                handleFastSetting(template.key)
-                                handleClose()
-                              }}
-                            >
-                              {template.name}
-                            </MenuItem>
-                          ))
-                        }
-                      </DropdownButton>
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        startIcon={<RefreshIcon />}
-                        onClick={handleResetAllPaths}
-                      >
-                        {t('environment.setup_reset_paths')}
-                      </Button>
-                    </Stack>
+            <Box key="setup">
+              <SettingSection
+                title={t('environment.setup_title')}
+                action={
+                  <Stack direction="row" spacing={1}>
+                    <DropdownButton
+                      variant="outlined"
+                      size="small"
+                      startIcon={<CodeIcon />}
+                      buttonChildren={t('environment.setup_quick')}
+                    >
+                      {({ handleClose }) =>
+                        fastSettingTemplates.map((template) => (
+                          <MenuItem
+                            key={template.key}
+                            onClick={() => {
+                              handleFastSetting(template.key)
+                              handleClose()
+                            }}
+                          >
+                            {template.name}
+                          </MenuItem>
+                        ))
+                      }
+                    </DropdownButton>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      startIcon={<RefreshIcon />}
+                      onClick={handleResetAllPaths}
+                    >
+                      {t('environment.setup_reset_paths')}
+                    </Button>
+                  </Stack>
+                }
+              >
+                <InputPath
+                  label={t('environment.python_cmd_label')}
+                  value={settingsValue.local_comfyui_config.python_cmd.trim()}
+                  Icon={CodeIcon}
+                  pathType="file"
+                  defaultTo={configUtils.getManagedPythonCmd()[0]}
+                  onChange={(value) =>
+                    saveSettings({
+                      local_comfyui_config: { python_cmd: toEmbeddedRelativePath(value) }
+                    })
                   }
-                >
-                  <InputPath
-                    label={t('environment.python_cmd_label')}
-                    value={settingsValue.local_comfyui_config.python_cmd.trim()}
-                    Icon={CodeIcon}
-                    pathType="file"
-                    defaultTo={configUtils.getPythonCmd()[0]}
-                    onChange={(value) =>
-                      saveSettings({
-                        local_comfyui_config: { python_cmd: toEmbeddedRelativePath(value) }
-                      })
-                    }
-                    placeholder={
-                      configUtils.getPythonCmd()[0] || t('environment.placeholder_python')
-                    }
-                    errorText={
-                      !configUtils.isPythonCmdAvailable()
-                        ? t('environment.err_pure_need_python')
-                        : undefined
-                    }
-                  />
+                  placeholder={
+                    configUtils.getManagedPythonCmd()[0] || t('environment.placeholder_python')
+                  }
+                  errorText={
+                    !configUtils.getManagedPythonCmd()[1]
+                      ? t('environment.err_pure_need_python')
+                      : undefined
+                  }
+                />
 
-                  <InputPath
-                    label={t('environment.comfy_dir_label')}
-                    value={settingsValue.local_comfyui_config.comfyui_dir.trim()}
-                    Icon={FolderIcon}
-                    pathType="directory"
-                    defaultTo={configUtils.getComfyUIDir()[0]}
-                    onChange={(value) =>
-                      saveSettings({
-                        local_comfyui_config: { comfyui_dir: toEmbeddedRelativePath(value) }
-                      })
-                    }
-                    placeholder={
-                      configUtils.getComfyUIDir()[0] || t('environment.placeholder_comfy')
-                    }
-                    errorText={
-                      !configUtils.isComfyUIDirAvailable()
-                        ? t('environment.err_pure_need_comfy')
-                        : undefined
-                    }
-                  />
+                <InputPath
+                  label={t('environment.comfy_dir_label')}
+                  value={settingsValue.local_comfyui_config.comfyui_dir.trim()}
+                  Icon={FolderIcon}
+                  pathType="directory"
+                  defaultTo={configUtils.getManagedComfyUIDir()[0]}
+                  onChange={(value) =>
+                    saveSettings({
+                      local_comfyui_config: { comfyui_dir: toEmbeddedRelativePath(value) }
+                    })
+                  }
+                  placeholder={
+                    configUtils.getManagedComfyUIDir()[0] || t('environment.placeholder_comfy')
+                  }
+                  errorText={
+                    !configUtils.getManagedComfyUIDir()[1]
+                      ? t('environment.err_pure_need_comfy')
+                      : undefined
+                  }
+                />
 
-                  <InputText
-                    label={t('environment.comfy_port_label')}
-                    value={settingsValue.local_comfyui_config.comfyui_port}
-                    Icon={CodeIcon}
-                    onChange={(value) =>
-                      saveSettings({ local_comfyui_config: { comfyui_port: value } })
-                    }
-                    placeholder={configUtils.getComfyUIPort()}
-                  />
+                <InputText
+                  label={t('environment.comfy_port_label')}
+                  value={settingsValue.local_comfyui_config.comfyui_port}
+                  Icon={CodeIcon}
+                  onChange={(value) => {
+                    const nextPort = value.trim()
+                    saveSettings({
+                      local_comfyui_config: { comfyui_port: value },
+                      ...(nextPort
+                        ? {
+                            remote_comfyui_config: {
+                              comfyui_origin: `http://127.0.0.1:${nextPort}`
+                            }
+                          }
+                        : {})
+                    })
+                  }}
+                  placeholder={configUtils.getManagedComfyUIPort()}
+                />
 
-                  <InputText
-                    label={t('environment.comfy_args_label')}
-                    value={settingsValue.local_comfyui_config.comfyui_args?.join(' ') || ''}
-                    Icon={CodeIcon}
-                    onChange={(value) =>
-                      saveSettings({ local_comfyui_config: { comfyui_args: splitSpace(value) } })
-                    }
-                    placeholder={configUtils.getComfyUIArgs().join(' ')}
-                  />
-                </SettingSection>
-              </Box>
-            )}
+                <InputText
+                  label={t('environment.comfy_args_label')}
+                  value={settingsValue.local_comfyui_config.comfyui_args?.join(' ') || ''}
+                  Icon={CodeIcon}
+                  onChange={(value) =>
+                    saveSettings({ local_comfyui_config: { comfyui_args: splitSpace(value) } })
+                  }
+                  placeholder={configUtils.getManagedComfyUIArgs().join(' ')}
+                />
+              </SettingSection>
+            </Box>
 
             {configUtils.isComfyUIDirAvailable() && (
               <Box key="models">

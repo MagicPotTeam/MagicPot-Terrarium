@@ -56,6 +56,11 @@ import {
 } from '../pages/QuickAppPage/components/QAppContext'
 import { useQAppRunner as useSharedQAppRunner } from '../pages/QuickAppPage/hooks/useQAppRunner'
 import { ResultItem } from '@shared/qApp/resultTypes'
+import { normalizeQAppBatchConfig } from '@shared/qApp/batchConfig'
+import {
+  toggleComfyBatchCenter,
+  useComfyBatchJobs
+} from '../pages/QuickAppPage/QAppExecutePanel/comfyBatchJobState'
 import { transformResults } from '../pages/QuickAppPage/ResultList/resultTransformers'
 import { dispatchQAppResultsToCanvas } from '../pages/QuickAppPage/utils/qAppCanvasDispatch'
 import { normalizeQAppErrorMessage } from '../pages/QuickAppPage/utils/qAppErrorMessage'
@@ -108,6 +113,9 @@ import { isBuiltinVideoGenerationQApp } from '../pages/QuickAppPage/videoGenerat
 
 const QAppMenu = lazy(() => import('../pages/QuickAppPage/components/QAppMenu'))
 const QAppPanel = lazy(() => import('../pages/QuickAppPage/QAppExecutePanel/QAppInputPanel'))
+const BatchProcessButton = lazy(
+  () => import('../pages/QuickAppPage/QAppExecutePanel/BatchProcessButton')
+)
 const VideoGenerationWorkspace = lazy(
   () => import('../pages/QuickAppPage/videoGeneration/VideoGenerationWorkspace')
 )
@@ -638,6 +646,20 @@ const InlineQAppParams: React.FC<{
   onRunReady: (runner: () => Promise<void>, isRunning: boolean) => void
 }> = ({ projectId, onRunReady }) => {
   const { run, isRunning } = useSharedQAppRunner(projectId)
+  const { qAppCfg, workflow, validate, buildWorkflow } = useQAppContext()
+  const objectInfos = useAppSelector((state) => state.comfyStatus.objectInfos)
+  const normalizedBatch =
+    qAppCfg && workflow ? normalizeQAppBatchConfig(qAppCfg, workflow, objectInfos) : undefined
+  const effectiveQAppCfg = normalizedBatch?.cfg ?? qAppCfg
+  const effectiveOutputNodeIds = normalizedBatch?.outputNodeIds ?? effectiveQAppCfg?.outputNodeIds
+  const effectiveImageInputSlot = effectiveQAppCfg?.batchProcess?.imageInputSlot
+  const canShowBatchProcess = Boolean(
+    validate &&
+    buildWorkflow &&
+    effectiveQAppCfg?.batchProcess?.enabled === true &&
+    effectiveImageInputSlot &&
+    effectiveOutputNodeIds?.length
+  )
 
   useEffect(() => {
     onRunReady(run, isRunning)
@@ -656,6 +678,18 @@ const InlineQAppParams: React.FC<{
       <Suspense fallback={<LoadingFallback />}>
         <QAppPanel fallback={<CircularProgress size={24} />} />
       </Suspense>
+      {canShowBatchProcess && effectiveImageInputSlot && validate && buildWorkflow && (
+        <Box sx={{ mt: 1.5 }}>
+          <Suspense fallback={null}>
+            <BatchProcessButton
+              imageInputSlot={effectiveImageInputSlot}
+              outputNodeIds={effectiveOutputNodeIds}
+              validate={validate}
+              buildWorkflow={buildWorkflow}
+            />
+          </Suspense>
+        </Box>
+      )}
     </Box>
   )
 }
@@ -1404,6 +1438,10 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
   const activeSidePanel = useAppSelector((s) => s.layout.activeSidePanel)
   const { notifySuccess, notifyError } = useMessage()
   const { t, i18n } = useTranslation()
+  const { jobs: batchJobs } = useComfyBatchJobs()
+  const activeBatchJobs = batchJobs.filter(
+    (job) => job.state === 'queued' || job.state === 'running'
+  )
   const qt = useCallback(
     (key: string, fallback: string) => getLocalizedFallbackText(t, i18n.language, key, fallback),
     [i18n.language, t]
@@ -1460,6 +1498,8 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
     queueState.queue_running.length +
     queueState.queue_pending.length +
     queueState.queue_error.length
+  const hasActiveBatchJobs = activeBatchJobs.length > 0
+  const headerQueueCount = hasActiveBatchJobs ? activeBatchJobs.length : totalQueue
   const { visible: visibleQuickAppCategories, overflow: overflowQuickAppCategories } =
     getQuickAppCategoryLayout(quickAppCategoryAvailableWidth)
   const isQuickAppOverflowMenuOpen = Boolean(quickAppOverflowAnchorEl)
@@ -1495,7 +1535,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
       const queueBadgeWidth =
         measuredQueueBadgeWidth > 0
           ? measuredQueueBadgeWidth
-          : totalQueue > 0
+          : headerQueueCount > 0
             ? QUICK_APP_HEADER_QUEUE_BADGE_FALLBACK_WIDTH
             : 0
       const actionsWidth =
@@ -1513,7 +1553,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
     })
 
     return () => window.cancelAnimationFrame(frame)
-  }, [activeSidePanel, i18n.language, totalQueue, width])
+  }, [activeSidePanel, headerQueueCount, i18n.language, width])
 
   useEffect(() => {
     const handleSwitchQApp = (event: Event) => {
@@ -1908,11 +1948,48 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
               )}
             </Box>
           )}
-          {isQuickApp && totalQueue > 0 && (
-            <Tooltip title={queueExpanded ? queueText.collapse : queueText.expand} arrow>
+          {isQuickApp && headerQueueCount > 0 && (
+            <Tooltip
+              title={
+                hasActiveBatchJobs
+                  ? t('qapp.batch.open_jobs', {
+                      defaultValue: 'Open batch jobs'
+                    })
+                  : queueExpanded
+                    ? queueText.collapse
+                    : queueText.expand
+              }
+              arrow
+            >
               <Box
                 ref={quickAppQueueBadgeRef}
-                onClick={() => setQueueExpanded((value) => !value)}
+                role="button"
+                tabIndex={0}
+                aria-label={
+                  hasActiveBatchJobs
+                    ? t('qapp.batch.open_jobs', {
+                        defaultValue: 'Open batch jobs'
+                      })
+                    : queueExpanded
+                      ? queueText.collapse
+                      : queueText.expand
+                }
+                onClick={() => {
+                  if (hasActiveBatchJobs) {
+                    toggleComfyBatchCenter()
+                  } else {
+                    setQueueExpanded((value) => !value)
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return
+                  event.preventDefault()
+                  if (hasActiveBatchJobs) {
+                    toggleComfyBatchCenter()
+                  } else {
+                    setQueueExpanded((value) => !value)
+                  }
+                }}
                 sx={(theme) => ({
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -1968,7 +2045,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
                   }
                 })}
               >
-                {totalQueue}
+                {headerQueueCount}
               </Box>
             </Tooltip>
           )}
@@ -2116,7 +2193,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
                         </Typography>
                       </Box>
                       <LinearProgress
-                        variant={itemProgress === null ? 'indeterminate' : 'determinate'}
+                        variant="determinate"
                         value={(itemProgress ?? 0) * 100}
                         sx={{
                           mt: 0.85,
@@ -2124,7 +2201,8 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
                           borderRadius: 999,
                           bgcolor: 'rgba(148,163,184,0.18)',
                           '& .MuiLinearProgress-bar': {
-                            borderRadius: 999
+                            borderRadius: 999,
+                            transition: 'none'
                           }
                         }}
                       />

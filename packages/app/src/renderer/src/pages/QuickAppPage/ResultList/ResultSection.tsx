@@ -1,10 +1,12 @@
 import { Stack } from '@mui/material'
 import ResultList from './ResultList'
+import { normalizeQAppBatchConfig } from '@shared/qApp/batchConfig'
 import SubmitWorkflowButton from '../QAppExecutePanel/SubmitWorkflowButton'
 import RealtimeGenerationSwitch from '../QAppExecutePanel/RealtimeGenerationSwitch'
 import BatchProcessButton from '../QAppExecutePanel/BatchProcessButton'
 import { useComfyStatus } from '@renderer/store/hooks/comfyStatus'
 import { useQAppContext } from '../components/QAppContext'
+import { useAppSelector } from '@renderer/store'
 
 type ResultSectionProps = {
   isDesignMode?: boolean
@@ -15,12 +17,29 @@ type ResultSectionProps = {
  * 包含生成按钮和结果列表
  */
 export default function ResultSection({ isDesignMode = false }: ResultSectionProps) {
-  const { qAppCfg, validate, buildWorkflow } = useQAppContext()
+  const { qAppCfg, workflow, validate, buildWorkflow } = useQAppContext()
+  const objectInfos = useAppSelector((state) => state.comfyStatus.objectInfos)
   const {
     state: { isConnected }
   } = useComfyStatus()
 
+  // Older QApps may have the image/output bindings configured but no
+  // batchProcess block yet. Derive the effective bindings from the same
+  // source of truth used by the designer so those apps get the default batch
+  // action as well.
+  const normalizedBatch =
+    qAppCfg && workflow ? normalizeQAppBatchConfig(qAppCfg, workflow, objectInfos) : undefined
+  const effectiveQAppCfg = normalizedBatch?.cfg ?? qAppCfg
+  const effectiveOutputNodeIds = normalizedBatch?.outputNodeIds ?? effectiveQAppCfg?.outputNodeIds
+  const effectiveImageInputSlot = effectiveQAppCfg?.batchProcess?.imageInputSlot
+
   const showButton = validate && buildWorkflow
+  const showBatchProcess =
+    !isDesignMode &&
+    Boolean(validate && buildWorkflow) &&
+    effectiveQAppCfg?.batchProcess?.enabled === true &&
+    Boolean(effectiveImageInputSlot) &&
+    Boolean(effectiveOutputNodeIds?.length)
 
   return (
     <Stack spacing={3}>
@@ -47,10 +66,10 @@ export default function ResultSection({ isDesignMode = false }: ResultSectionPro
               validate={validate}
               buildWorkflow={buildWorkflow}
             />
-            {!isDesignMode && qAppCfg?.batchProcess?.enabled && (
+            {showBatchProcess && effectiveImageInputSlot && (
               <BatchProcessButton
-                imageInputSlot={qAppCfg.batchProcess.imageInputSlot}
-                outputNodeIds={qAppCfg.outputNodeIds}
+                imageInputSlot={effectiveImageInputSlot}
+                outputNodeIds={effectiveOutputNodeIds}
                 validate={validate}
                 buildWorkflow={buildWorkflow}
               />
