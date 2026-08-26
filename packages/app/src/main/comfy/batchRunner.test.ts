@@ -1,7 +1,12 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ComfyBatchProfile, StartComfyBatchReq } from '@shared/api/svcComfyBatch'
+import type {
+  ComfyBatchItemTiming,
+  ComfyBatchProfile,
+  ComfyBatchStatus,
+  StartComfyBatchReq
+} from '@shared/api/svcComfyBatch'
 import type { ObjectInfoMap, Workflow } from '@shared/comfy/types'
 import {
   assertNoComfyBatchOutputCollisions,
@@ -43,6 +48,17 @@ const profile = (id: string): ComfyBatchProfile => ({
 })
 
 type Runtime = { profile: ComfyBatchProfile; inflight: number; id: string }
+
+type EtaRunnerInternals = {
+  statusValue: ComfyBatchStatus
+  recentItems: ComfyBatchItemTiming[]
+  runtimes: Array<{
+    profile: ComfyBatchProfile
+    inflight: number
+    compatible: boolean
+    available: boolean
+  }>
+}
 
 function runtime(id: string, inflight = 0): Runtime {
   return { profile: profile(id), inflight, id }
@@ -91,6 +107,52 @@ describe('Comfy batch paths and discovery', () => {
         { absolutePath: '/tmp/a.webp', relativePath: 'a.webp', size: 1, mtimeMs: 1, sha256: 'b' }
       ])
     ).toThrow(/collision/i)
+  })
+})
+
+describe('Comfy batch ETA', () => {
+  const configureRunnerForEta = (runner: ComfyBatchRunner, runtimeCount: number): void => {
+    const internals = runner as unknown as EtaRunnerInternals
+    internals.statusValue = {
+      ...internals.statusValue,
+      state: 'running',
+      total: 100,
+      pending: 96,
+      running: 4,
+      startedAt: Date.now()
+    }
+    internals.recentItems.push({
+      relativePath: 'done.png',
+      durationMs: 1_000,
+      startedAt: Date.now() - 1_000,
+      finishedAt: Date.now(),
+      attempt: 1,
+      state: 'success'
+    })
+    internals.runtimes = Array.from({ length: runtimeCount }, (_, index) => ({
+      profile: profile(`eta-${index}`),
+      inflight: 1,
+      compatible: true,
+      available: true
+    }))
+  }
+
+  it('reduces ETA when the same work is spread across four one-slot instances', () => {
+    const request = {
+      sourceDir: '/tmp/source',
+      qAppKey: 'eta-test',
+      workflow: {},
+      imageInputSlot: '$.1.inputs.image',
+      outputNodeIds: ['2']
+    } satisfies StartComfyBatchReq
+    const oneInstanceRunner = new ComfyBatchRunner(request, [profile('one')])
+    const fourInstanceRunner = new ComfyBatchRunner(request, [profile('one')])
+
+    configureRunnerForEta(oneInstanceRunner, 1)
+    configureRunnerForEta(fourInstanceRunner, 4)
+
+    expect(oneInstanceRunner.status.etaMs).toBe(100_000)
+    expect(fourInstanceRunner.status.etaMs).toBe(25_000)
   })
 })
 

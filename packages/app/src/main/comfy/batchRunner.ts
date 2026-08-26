@@ -749,7 +749,14 @@ export class ComfyBatchRunner {
     const totalMeasuredMs = measuredItems.reduce((sum, item) => sum + item.durationMs, 0)
     const averageItemMs = measuredItems.length ? totalMeasuredMs / measuredItems.length : undefined
     const remainingItems = Math.max(0, this.statusValue.pending + this.statusValue.running)
-    const etaMs = averageItemMs !== undefined ? averageItemMs * remainingItems : undefined
+    // Estimate wall-clock time in waves across currently usable instance slots.
+    // Keep a one-slot fallback while runtime probing is still in progress.
+    const availableConcurrency = this.runtimes.reduce((sum, runtime) => {
+      if (!runtime.compatible || !runtime.available || runtime.profile.enabled === false) return sum
+      return sum + Math.max(1, runtime.profile.maxConcurrency)
+    }, 0)
+    const estimatedBatches = Math.ceil(remainingItems / Math.max(1, availableConcurrency))
+    const etaMs = averageItemMs !== undefined ? averageItemMs * estimatedBatches : undefined
     return {
       ...this.statusValue,
       elapsedMs,
