@@ -80,6 +80,8 @@ export type RetryFailedComfyBatchReq = { jobId: string }
 export type RetryFailedComfyBatchResp = { status: ComfyBatchStatus }
 export type CancelComfyBatchReq = { jobId: string }
 export type CancelComfyBatchResp = { status: ComfyBatchStatus }
+export type DismissComfyBatchReq = { jobId: string }
+export type DismissComfyBatchResp = { status: ComfyBatchStatus }
 
 export type ListComfyBatchProfilesReq = Record<string, never>
 export type ListComfyBatchProfilesResp = { profiles: ComfyBatchProfile[] }
@@ -97,6 +99,7 @@ export type ComfyBatchSvc = {
   listJobs(req: ListComfyBatchJobsReq): Promise<ListComfyBatchJobsResp>
   retryFailed(req: RetryFailedComfyBatchReq): Promise<RetryFailedComfyBatchResp>
   cancel(req: CancelComfyBatchReq): Promise<CancelComfyBatchResp>
+  dismiss(req: DismissComfyBatchReq): Promise<DismissComfyBatchResp>
 }
 
 export const comfyBatchSvcDef: ServiceDefSheet<ComfyBatchSvc> = {
@@ -107,5 +110,6 @@ export const comfyBatchSvcDef: ServiceDefSheet<ComfyBatchSvc> = {
   status: { type: 'unary' },
   listJobs: { type: 'unary' },
   retryFailed: { type: 'unary' },
-  cancel: { type: 'unary' }
+  cancel: { type: 'unary' },
+  dismiss: { type: 'unary' }
 }

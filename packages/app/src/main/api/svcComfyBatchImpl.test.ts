@@ -382,6 +382,91 @@ describe('ComfyBatchSvcImpl live status', () => {
     })
   })
 
+  it('permanently removes a dismissed terminal job from the persisted store', async () => {
+    const storePath = path.join(dataDir, 'comfy-batch-jobs.json')
+    await fs.writeFile(
+      storePath,
+      JSON.stringify({
+        version: 2,
+        latestJobId: 'dismissed-job',
+        nextSequence: 2,
+        jobs: [
+          {
+            request,
+            status: {
+              ...status('dismissed-job', 'error'),
+              sourceDir: request.sourceDir,
+              total: 1,
+              failed: 1,
+              failedFiles: ['failed.png'],
+              error: '1 batch item(s) failed',
+              finishedAt: Date.now()
+            },
+            submittedAt: 10,
+            sequence: 1
+          }
+        ]
+      }),
+      'utf8'
+    )
+
+    const svc = new ComfyBatchSvcImpl()
+    const dismiss = (
+      svc as unknown as {
+        dismiss: (req: { jobId: string }) => Promise<{ status: ComfyBatchStatus }>
+      }
+    ).dismiss
+
+    await expect(dismiss({ jobId: 'dismissed-job' })).resolves.toMatchObject({
+      status: { jobId: 'dismissed-job', state: 'error' }
+    })
+    expect((await svc.listJobs({})).jobs).toEqual([])
+
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      jobs: Array<{ status: ComfyBatchStatus }>
+    }
+    expect(persisted.jobs).toEqual([])
+
+    const restored = await new ComfyBatchSvcImpl().listJobs({})
+    expect(restored.jobs).toEqual([])
+  })
+
+  it('does not dismiss a queued or running job', async () => {
+    const storePath = path.join(dataDir, 'comfy-batch-jobs.json')
+    await fs.writeFile(
+      storePath,
+      JSON.stringify({
+        version: 2,
+        latestJobId: 'active-job',
+        nextSequence: 2,
+        jobs: [
+          {
+            request,
+            status: {
+              ...status('active-job', 'running'),
+              sourceDir: request.sourceDir,
+              total: 1,
+              running: 1
+            },
+            submittedAt: 10,
+            sequence: 1,
+            runActive: true
+          }
+        ]
+      }),
+      'utf8'
+    )
+
+    const svc = new ComfyBatchSvcImpl()
+
+    await expect(
+      (svc as unknown as { dismiss: (req: { jobId: string }) => Promise<unknown> }).dismiss({
+        jobId: 'active-job'
+      })
+    ).rejects.toThrow(/queued or running/i)
+    expect((await svc.listJobs({})).jobs).toHaveLength(1)
+  })
+
   it('rejects retry while running and keeps cancellation durable', async () => {
     let resolveRun!: (value: ComfyBatchStatus) => void
     vi.mocked(ComfyBatchRunner).mockImplementation(
@@ -431,4 +516,5 @@ describe('ComfyBatchSvcImpl live status', () => {
       ])
     )
   })
+
 })

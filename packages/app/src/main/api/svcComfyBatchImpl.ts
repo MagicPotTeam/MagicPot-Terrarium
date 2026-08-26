@@ -7,6 +7,8 @@ import type {
   ComfyBatchProfile,
   ComfyBatchStatus,
   ComfyBatchSvc,
+  DismissComfyBatchReq,
+  DismissComfyBatchResp,
   GetComfyBatchStatusReq,
   GetComfyBatchStatusResp,
   ListComfyBatchProfilesReq,
@@ -368,6 +370,16 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
   private removeFromQueue(jobId: string): void {
     this.jobQueue = this.jobQueue.filter((candidate) => candidate !== jobId)
     this.updateQueuePositions()
+  }
+
+  private forgetJob(jobId: string): void {
+    this.jobs.delete(jobId)
+    this.removeFromQueue(jobId)
+    if (this.latestJobId !== jobId) return
+    const newest = [...this.jobs.values()].sort(
+      (left, right) => right.sequence - left.sequence || right.submittedAt - left.submittedAt
+    )[0]
+    this.latestJobId = newest?.status.jobId
   }
 
   private updateQueuePositions(): void {
@@ -985,6 +997,25 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       const snapshot = cloneJson(previous.request)
       await this.validateRequestBindings(snapshot)
       return { status: await this.enqueue(snapshot, req.jobId) }
+    })
+
+  dismiss = async (req: DismissComfyBatchReq): Promise<DismissComfyBatchResp> =>
+    this.serialize(async () => {
+      await this.ensureRestored()
+      const record = this.jobs.get(req.jobId)
+      if (!record) throw new Error(`Batch job not found: ${req.jobId}`)
+      const current = this.liveStatus(record)
+      if (
+        current.state === 'queued' ||
+        current.state === 'running' ||
+        (record.runActive && !isTerminalState(current.state))
+      ) {
+        throw new Error('Cannot dismiss a queued or running batch job')
+      }
+
+      this.forgetJob(req.jobId)
+      await this.persistJobs()
+      return { status: current }
     })
 
   cancel = async (req: CancelComfyBatchReq): Promise<CancelComfyBatchResp> =>

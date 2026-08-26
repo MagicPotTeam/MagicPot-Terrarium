@@ -25,6 +25,7 @@ let initialized = false
 let pollTimer: number | undefined
 let requestInFlight: Promise<ComfyBatchStatus[]> | undefined
 const listeners = new Set<() => void>()
+const dismissedJobIds = new Set<string>()
 
 const hasActiveJobs = (jobs: ComfyBatchStatus[]): boolean =>
   jobs.some((job) => job.state === 'queued' || job.state === 'running')
@@ -33,6 +34,11 @@ const sortJobs = (jobs: ComfyBatchStatus[]): ComfyBatchStatus[] =>
   [...jobs]
     .filter((job) => Boolean(job.jobId) && job.state !== 'cancelled')
     .sort((left, right) => (right.submittedAt || 0) - (left.submittedAt || 0))
+
+export const filterDismissedComfyBatchJobs = (
+  jobs: ComfyBatchStatus[],
+  dismissedIds: ReadonlySet<string>
+): ComfyBatchStatus[] => sortJobs(jobs).filter((job) => !dismissedIds.has(job.jobId || ''))
 
 const clearPollTimer = (): void => {
   if (pollTimer === undefined || typeof window === 'undefined') return
@@ -79,7 +85,7 @@ const mergeJob = (job: ComfyBatchStatus): void => {
   if (!job.jobId) return
   const jobs = snapshot.jobs.filter((candidate) => candidate.jobId !== job.jobId)
   jobs.push(job)
-  setSnapshot({ jobs: sortJobs(jobs), error: undefined })
+  setSnapshot({ jobs: filterDismissedComfyBatchJobs(jobs, dismissedJobIds), error: undefined })
 }
 
 export const refreshComfyBatchJobs = async (): Promise<ComfyBatchStatus[]> => {
@@ -94,7 +100,10 @@ export const refreshComfyBatchJobs = async (): Promise<ComfyBatchStatus[]> => {
 
     try {
       const result = await api().svcComfyBatch.listJobs({})
-      const jobs = sortJobs(Array.isArray(result.jobs) ? result.jobs : [])
+      const jobs = filterDismissedComfyBatchJobs(
+        Array.isArray(result.jobs) ? result.jobs : [],
+        dismissedJobIds
+      )
       const selectedJobId = jobs.some((job) => job.jobId === snapshot.selectedJobId)
         ? snapshot.selectedJobId
         : undefined
@@ -172,6 +181,22 @@ export const toggleComfyBatchCenter = (): void => {
 
 export const closeComfyBatchJobDetails = (): void => {
   setSnapshot({ detailOpen: false })
+}
+
+export const dismissComfyBatchJob = (jobId: string): void => {
+  if (!jobId) return
+  dismissedJobIds.add(jobId)
+  const selected = snapshot.selectedJobId === jobId
+  setSnapshot({
+    jobs: filterDismissedComfyBatchJobs(snapshot.jobs, dismissedJobIds),
+    ...(selected ? { selectedJobId: undefined, detailOpen: false } : {})
+  })
+}
+
+export const removeComfyBatchJob = async (jobId: string): Promise<ComfyBatchStatus> => {
+  const result = await api().svcComfyBatch.dismiss({ jobId })
+  dismissComfyBatchJob(jobId)
+  return result.status
 }
 
 export const cancelComfyBatchJob = async (jobId: string): Promise<ComfyBatchStatus> => {
