@@ -31,6 +31,12 @@ const PROFILE_RETRY_INTERVAL_MS = 250
 // A few completions are needed before wall-clock throughput is more reliable
 // than the configured slot count. During warm-up, keep using the capacity
 // estimate so the ETA does not jump around based on one unusually fast/slow item.
+// Keep one extra prompt queued behind the configured execution slots for each
+// instance. ComfyUI can take a noticeable amount of time to accept the next
+// prompt; this small admission window prevents a GPU from going idle while the
+// client is waiting for the previous request to leave the HTTP/WebSocket boundary.
+const COMFY_BATCH_QUEUE_HEADROOM = 1
+
 export const NO_RUNTIME_RETRY_WINDOW_MS = 5_000
 
 export type BatchSourceFile = {
@@ -615,7 +621,8 @@ export class LeastLoadRoundRobinScheduler<
         instance.profile.enabled !== false &&
         ('available' in instance ? instance.available !== false : true) &&
         ('compatible' in instance ? instance.compatible !== false : true) &&
-        instance.inflight < Math.max(1, instance.profile.maxConcurrency)
+        instance.inflight <
+          Math.max(1, instance.profile.maxConcurrency) + COMFY_BATCH_QUEUE_HEADROOM
     )
     if (!available.length) return null
     const ratios = available.map(

@@ -5,6 +5,7 @@ export type ComfyBatchProfile = {
   id: string
   baseUrl: string
   enabled: boolean
+  /** Number of prompts ComfyUI may execute concurrently for this instance. */
   maxConcurrency: number
 }
 

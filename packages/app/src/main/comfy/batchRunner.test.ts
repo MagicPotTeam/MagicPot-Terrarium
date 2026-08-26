@@ -265,6 +265,15 @@ describe('Comfy batch dispatch and output binding', () => {
     expect(scheduler.pick(runtimes)?.profile.id).toBe('b')
   })
 
+  it('keeps one extra item queued for a single-slot instance', () => {
+    const scheduler = new LeastLoadRoundRobinScheduler<Runtime>()
+    const instance = runtime('single-slot', 1)
+
+    expect(scheduler.pick([instance])?.profile.id).toBe('single-slot')
+    instance.inflight = 2
+    expect(scheduler.pick([instance])).toBeNull()
+  })
+
   it('accepts one unique saved or preview image from bound nodes', () => {
     const baseImage = { filename: 'result.png', subfolder: '', type: 'output' }
     expect(
@@ -496,6 +505,7 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
       fs.writeFile(path.join(sourceDir, 'missing.jpg'), 'missing')
     ])
     const calls: string[] = []
+    const sourceByPromptId = new Map<string, string>()
     let failFailedItem = true
     const fakeClient = {
       probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
@@ -509,19 +519,35 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
         const source = ['failed', 'stable', 'changed', 'missing', 'added'].find((name) =>
           uploaded.includes(name)
         )
-        if (source) calls.push(source)
+        if (source) {
+          calls.push(source)
+          sourceByPromptId.set(promptId, source)
+        }
         return promptId
       },
-      history: async (promptId: string) => ({
-        [promptId]: {
-          outputs: {
-            '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
-          },
-          status: { status_str: 'success', completed: true, messages: [] }
+      history: async (promptId: string) => {
+        if (failFailedItem && sourceByPromptId.get(promptId) === 'failed') {
+          return {
+            [promptId]: {
+              outputs: {},
+              status: {
+                status_str: 'error',
+                completed: true,
+                messages: [['execution_error', { exception_message: 'first failure' }]]
+              }
+            }
+          }
         }
-      }),
+        return {
+          [promptId]: {
+            outputs: {
+              '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
+            },
+            status: { status_str: 'success', completed: true, messages: [] }
+          }
+        }
+      },
       view: async () => {
-        if (failFailedItem && calls.at(-1) === 'failed') throw new Error('first failure')
         return new Uint8Array(validPng)
       }
     } as unknown as ComfyBatchHttpClient
@@ -562,15 +588,16 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     const sourceDir = await createTempDir()
     await Promise.all([
       fs.writeFile(path.join(sourceDir, 'first.jpg'), 'first'),
-      fs.writeFile(path.join(sourceDir, 'second.jpg'), 'second')
+      fs.writeFile(path.join(sourceDir, 'second.jpg'), 'second'),
+      fs.writeFile(path.join(sourceDir, 'third.jpg'), 'third')
     ])
     const calls: string[] = []
     let profiles = [profile('one')]
-    let releaseFirst!: () => void
+    let releaseInitial!: () => void
     const firstBlocked = new Promise<void>((resolve) => {
-      releaseFirst = resolve
+      releaseInitial = resolve
     })
-    let firstPrompt = true
+    let blockedPromptCount = 0
     const clientFor = (id: string) => {
       const client = {
         probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
@@ -582,8 +609,8 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
         }),
         prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
           calls.push(id)
-          if (id === 'one' && firstPrompt) {
-            firstPrompt = false
+          if (id === 'one' && blockedPromptCount < 2) {
+            blockedPromptCount += 1
             await firstBlocked
           }
           return promptId
@@ -606,16 +633,16 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
       createClient: (baseUrl) => clientFor(baseUrl.includes('two') ? 'two' : 'one')
     })
     const runPromise = runner.run()
-    await vi.waitFor(() => expect(calls).toEqual(['one']))
+    await vi.waitFor(() => expect(blockedPromptCount).toBe(2))
     profiles = [profile('one'), profile('two')]
     // Let the supervisor observe the changed profile fingerprint before the
     // first runtime is released; this proves the new profile is usable in a
     // subsequent dispatch round rather than relying on initial probing.
     await new Promise((resolve) => setTimeout(resolve, 300))
-    releaseFirst()
+    releaseInitial()
     const result = await runPromise
 
-    expect(result).toMatchObject({ state: 'completed', success: 2, failed: 0 })
+    expect(result).toMatchObject({ state: 'completed', success: 3, failed: 0 })
     expect(calls).toContain('two')
   })
 
