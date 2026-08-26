@@ -92,10 +92,9 @@ const StatusMetrics = ({ status }: StatusMetricsProps): React.JSX.Element => {
     <Stack direction="row" spacing={2} useFlexGap flexWrap="wrap">
       <Typography>{t('qapp.batch.total', { count: status.total })}</Typography>
       <Typography color="success.main">
-        {t('qapp.batch.success', { count: status.success })}
+        {t('qapp.batch.success', { count: status.success + status.skipped })}
       </Typography>
       <Typography color="error.main">{t('qapp.batch.failed', { count: status.failed })}</Typography>
-      <Typography>{t('qapp.batch.skipped', { count: status.skipped })}</Typography>
       <Typography>{t('qapp.batch.running', { count: status.running })}</Typography>
       <Typography>{t('qapp.batch.pending', { count: status.pending })}</Typography>
     </Stack>
