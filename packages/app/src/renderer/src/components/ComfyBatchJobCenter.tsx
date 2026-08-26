@@ -7,6 +7,7 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  IconButton,
   LinearProgress,
   List,
   ListItem,
@@ -15,19 +16,30 @@ import {
   Stack,
   Typography
 } from '@mui/material'
+import { Close as CloseIcon } from '@mui/icons-material'
 import type { ComfyBatchJobState, ComfyBatchStatus } from '@shared/api/svcComfyBatch'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useComfyEventCallback } from '@renderer/hooks/useComfyEvent'
 import { useMessage } from '@renderer/hooks/useMessage'
 import {
   cancelComfyBatchJob,
+  cancelComfyQueueTask,
+  clearComfyTaskProgress,
   closeComfyBatchCenter,
   closeComfyBatchJobDetails,
   openComfyBatchJob,
+  removeComfyBatchJob,
   refreshComfyBatchJobs,
   retryComfyBatchJob,
+  updateComfyTaskProgress,
   useComfyBatchJobs
 } from '../pages/QuickAppPage/QAppExecutePanel/comfyBatchJobState'
+import {
+  getComfySingleTaskEntries,
+  type ComfySingleTaskEntry
+} from '../pages/QuickAppPage/QAppExecutePanel/comfyTaskQueueUtils'
+import { getQueueItemDisplayLabel } from './sidePanelQueueUtils'
 
 const formatDuration = (value: number | undefined, calculating: string, _empty: string): string => {
   if (value === undefined || !Number.isFinite(value) || value < 0) return calculating
@@ -160,9 +172,15 @@ const ComfyBatchJobCenter = ({
     centerOpen,
     detailOpen,
     loading,
-    error
+    error,
+    queue,
+    progressByPromptId
   } = useComfyBatchJobs()
   const jobs = useMemo(() => allJobs.filter((job) => job.state !== 'cancelled'), [allJobs])
+  const singleTasks = useMemo(
+    () => getComfySingleTaskEntries(queue, progressByPromptId),
+    [progressByPromptId, queue]
+  )
   const selectedJob = useMemo(
     () => jobs.find((job) => job.jobId === selectedJobId),
     [jobs, selectedJobId]
@@ -193,9 +211,49 @@ const ComfyBatchJobCenter = ({
     [notifyError]
   )
 
+  const remove = useCallback(
+    async (jobId: string) => {
+      try {
+        await cancelComfyBatchJob(jobId)
+        await removeComfyBatchJob(jobId)
+      } catch (caught) {
+        notifyError(caught instanceof Error ? caught.message : String(caught))
+      }
+    },
+    [notifyError]
+  )
+
   const closeCenter = useCallback(() => closeComfyBatchCenter(), [])
   const closeDetails = useCallback(() => closeComfyBatchJobDetails(), [])
   const refresh = useCallback(() => void refreshComfyBatchJobs(), [])
+
+  const cancelSingleTask = useCallback(
+    async (promptId: string) => {
+      try {
+        await cancelComfyQueueTask(promptId)
+        notifyInfo(t('qapp.batch.single_cancel_sent'))
+      } catch (caught) {
+        notifyError(caught instanceof Error ? caught.message : String(caught))
+      }
+    },
+    [notifyError, notifyInfo, t]
+  )
+
+  useComfyEventCallback((event) => {
+    if (event.type === 'progress') {
+      updateComfyTaskProgress(event.data.prompt_id, event.data.value, event.data.max)
+      return
+    }
+
+    if (
+      event.type === 'executed' ||
+      event.type === 'execution_success' ||
+      event.type === 'execution_error' ||
+      event.type === 'execution_interrupted'
+    ) {
+      clearComfyTaskProgress(event.data.prompt_id)
+    }
+  }, [])
 
   if (!open || !centerOpen) return null
 
@@ -211,7 +269,7 @@ const ComfyBatchJobCenter = ({
                 {error}
               </Typography>
             )}
-            {jobs.length === 0 && !loading ? (
+            {jobs.length === 0 && singleTasks.length === 0 && !loading ? (
               <Typography color="text.secondary">{t('qapp.batch.no_jobs')}</Typography>
             ) : (
               <List disablePadding>
@@ -219,10 +277,11 @@ const ComfyBatchJobCenter = ({
                   const jobId = job.jobId || ''
                   const progress = getProgress(job)
                   return (
-                    <ListItem key={jobId} disablePadding divider>
+                    <ListItem key={jobId} disablePadding divider sx={{ position: 'relative' }}>
                       <ListItemButton
                         selected={jobId === selectedJobId}
                         onClick={() => showDetails(jobId)}
+                        sx={{ pr: 6 }}
                       >
                         <ListItemText
                           primary={
@@ -261,9 +320,29 @@ const ComfyBatchJobCenter = ({
                           }
                         />
                       </ListItemButton>
+                      <IconButton
+                        size="small"
+                        aria-label={t('qapp.batch.cancel_and_remove')}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void remove(jobId)
+                        }}
+                        sx={{
+                          position: 'absolute',
+                          top: 8,
+                          right: 8,
+                          zIndex: 1,
+                          color: 'text.secondary'
+                        }}
+                      >
+                        <CloseIcon fontSize="small" />
+                      </IconButton>
                     </ListItem>
                   )
                 })}
+                {singleTasks.map((task) => (
+                  <ComfySingleTaskRow key={task.id} task={task} onCancel={cancelSingleTask} />
+                ))}
               </List>
             )}
           </Stack>
@@ -288,6 +367,67 @@ const ComfyBatchJobCenter = ({
   )
 }
 
+type ComfySingleTaskRowProps = {
+  task: ComfySingleTaskEntry
+  onCancel: (promptId: string) => Promise<void>
+}
+
+const ComfySingleTaskRow = ({ task, onCancel }: ComfySingleTaskRowProps): React.JSX.Element => {
+  const { t } = useTranslation()
+  const hasProgress = task.progress !== null
+  const progress = hasProgress ? task.progress! * 100 : 0
+  const progressVariant = task.state === 'running' && !hasProgress ? 'indeterminate' : 'determinate'
+
+  return (
+    <ListItem disablePadding divider sx={{ position: 'relative' }}>
+      <ListItemText
+        sx={{ px: 2, py: 1, pr: 6 }}
+        primary={
+          <Stack direction="row" spacing={1} alignItems="center" useFlexGap>
+            <Typography variant="body2" noWrap sx={{ maxWidth: '55%' }}>
+              {t('qapp.batch.single_task')} · {getQueueItemDisplayLabel(task.item)}
+            </Typography>
+            <Chip
+              size="small"
+              color={stateColor(task.state)}
+              label={t(stateLabelKey(task.state))}
+            />
+          </Stack>
+        }
+        secondary={
+          <Stack spacing={0.5} sx={{ mt: 0.75 }}>
+            <LinearProgress
+              variant={progressVariant}
+              value={progress}
+              aria-label={t('qapp.batch.single_task_progress')}
+            />
+            <Typography variant="caption" color="text.secondary">
+              {hasProgress ? `${Math.round(progress)}%` : t(stateLabelKey(task.state))}
+            </Typography>
+          </Stack>
+        }
+      />
+      <IconButton
+        size="small"
+        aria-label={t('qapp.batch.cancel_single_task')}
+        onClick={(event) => {
+          event.stopPropagation()
+          void onCancel(task.id)
+        }}
+        sx={{
+          position: 'absolute',
+          top: 8,
+          right: 8,
+          zIndex: 1,
+          color: 'text.secondary'
+        }}
+      >
+        <CloseIcon fontSize="small" />
+      </IconButton>
+    </ListItem>
+  )
+}
+
 type ComfyBatchJobDetailsProps = {
   status: ComfyBatchStatus
   onCancel: (jobId: string) => Promise<void>
@@ -303,7 +443,9 @@ const ComfyBatchJobDetails = ({
   const smoothEtaMs = useSmoothEta(status)
   const jobId = status.jobId || ''
   const canRetry =
-    status.state === 'error' || status.failed > 0 || status.pending > 0 || status.running > 0
+    status.state === 'error' ||
+    status.failed > 0 ||
+    (status.state !== 'running' && status.pending > 0)
   return (
     <>
       <DialogTitle>{t('qapp.batch.detail_title')}</DialogTitle>

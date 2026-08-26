@@ -4,6 +4,7 @@ import path from 'node:path'
 import { ComfyHistory, Workflow, WorkflowInputValue } from '@shared/comfy/types'
 import { QueueManager, QueueSource } from '../utils/queueManager'
 import { COMFY_PROCESS_TRANSPORT_CLIENT_ID, ComfyHttpCli } from '../comfy/http'
+import { getComfyInstancePool, type ComfyPoolInstance } from '../comfy/comfyInstancePool'
 import { waitPromptId } from '../comfy/logic'
 import { deepCopy, JsonDict, JsonValue } from '@shared/utils/utilTypes'
 import { isComfyPostError } from '../comfy/error'
@@ -12,6 +13,7 @@ import { isPromptError } from '@shared/comfy/error'
 import { parseDeferredComfyImageInputValue } from '@shared/comfy/deferredImages'
 import { fileItemToValue } from '@shared/comfy/funcs'
 import { readTestUiEnv, resolveTestArtifactPath, resolveTestUiPolicy } from '../testUiPolicy'
+import { findTaskInBuckets } from './taskMemorySourceUtils'
 
 const MAX_RETAINED_TASKS_PER_STATUS = 200
 
@@ -24,6 +26,8 @@ export type Task = {
   payload: Workflow
   extra_data?: JsonDict
   cleanupAfterRun?: boolean
+  /** Base URL selected by the instance pool while the task is running. */
+  comfyInstanceBaseUrl?: string
   result: ComfyHistory | null
 }
 
@@ -341,51 +345,26 @@ class TaskMemorySource implements QueueSource<Task> {
     return this.pendingTasks.length
   }
 
+  private findTask(predicate: (task: Task) => boolean): [TaskStatus, Task] | [null, null] {
+    const [status, task] = findTaskInBuckets<Task, TaskStatus>(
+      [
+        ['completed', this.completedTasks],
+        ['cancelled', this.cancelledTasks],
+        ['running', this.runningTask ? [this.runningTask] : []],
+        ['pending', this.pendingTasks],
+        ['error', this.errorTasks]
+      ],
+      predicate
+    )
+    return status === null || task === null ? [null, null] : [status, deepCopyTask(task)]
+  }
+
   getTask(id: string): [TaskStatus, Task] | [null, null] {
-    const completedTask = this.completedTasks.find((task) => task.id === id)
-    if (completedTask) {
-      return ['completed', deepCopyTask(completedTask)]
-    }
-    const cancelledTask = this.cancelledTasks.find((task) => task.id === id)
-    if (cancelledTask) {
-      return ['cancelled', deepCopyTask(cancelledTask)]
-    }
-    if (this.runningTask && this.runningTask.id === id) {
-      return ['running', deepCopyTask(this.runningTask)]
-    }
-    const pendingTask = this.pendingTasks.find((task) => task.id === id)
-    if (pendingTask) {
-      return ['pending', deepCopyTask(pendingTask)]
-    }
-    const errorTask = this.errorTasks.find((task) => task.id === id)
-    if (errorTask) {
-      return ['error', deepCopyTask(errorTask)]
-    }
-    return [null, null]
+    return this.findTask((task) => task.id === id)
   }
 
   getTaskByPromptId(promptId: string): [TaskStatus, Task] | [null, null] {
-    const completedTask = this.completedTasks.find((task) => task.prompt_id === promptId)
-    if (completedTask) {
-      return ['completed', deepCopyTask(completedTask)]
-    }
-    const cancelledTask = this.cancelledTasks.find((task) => task.prompt_id === promptId)
-    if (cancelledTask) {
-      return ['cancelled', deepCopyTask(cancelledTask)]
-    }
-    const runningTask = this.runningTask?.prompt_id === promptId ? this.runningTask : null
-    if (runningTask) {
-      return ['running', deepCopyTask(runningTask)]
-    }
-    const pendingTask = this.pendingTasks.find((task) => task.prompt_id === promptId)
-    if (pendingTask) {
-      return ['pending', deepCopyTask(pendingTask)]
-    }
-    const errorTask = this.errorTasks.find((task) => task.prompt_id === promptId)
-    if (errorTask) {
-      return ['error', deepCopyTask(errorTask)]
-    }
-    return [null, null]
+    return this.findTask((task) => task.prompt_id === promptId)
   }
 
   getQueue(): TaskQueueState {
@@ -399,86 +378,43 @@ class TaskMemorySource implements QueueSource<Task> {
   }
 
   updateTaskPromptId(task: Task, promptId: string): Task {
-    if (this.runningTask && this.runningTask.id === task.id) {
-      this.runningTask.prompt_id = promptId
-      return this.runningTask
+    const [, target] = findTaskInBuckets<Task, TaskStatus>(
+      [
+        ['running', this.runningTask ? [this.runningTask] : []],
+        ['pending', this.pendingTasks],
+        ['completed', this.completedTasks],
+        ['error', this.errorTasks]
+      ],
+      (candidate) => candidate.id === task.id
+    )
+    if (!target) return task
+    target.prompt_id = promptId
+    return target
+  }
+
+  private cancelTaskWhere(predicate: (task: Task) => boolean): boolean {
+    for (const tasks of [this.pendingTasks, this.errorTasks]) {
+      const index = tasks.findIndex(predicate)
+      if (index === -1) continue
+      const [task] = tasks.splice(index, 1)
+      if (task) this.retainTerminalTask(this.cancelledTasks, task)
+      return true
     }
 
-    const pendingTask = this.pendingTasks.find((t) => t.id === task.id)
-    if (pendingTask) {
-      pendingTask.prompt_id = promptId
-      return pendingTask
+    if (this.runningTask && predicate(this.runningTask)) {
+      this.retainTerminalTask(this.cancelledTasks, this.runningTask)
+      this.runningTask = null
+      return true
     }
-
-    const completedTask = this.completedTasks.find((t) => t.id === task.id)
-    if (completedTask) {
-      completedTask.prompt_id = promptId
-      return completedTask
-    }
-
-    const errorTask = this.errorTasks.find((t) => t.id === task.id)
-    if (errorTask) {
-      errorTask.prompt_id = promptId
-      return errorTask
-    }
-
-    return task
+    return false
   }
 
   cancelTask(id: string): boolean {
-    const pendingIndex = this.pendingTasks.findIndex((task) => task.id === id)
-    if (pendingIndex !== -1) {
-      const [task] = this.pendingTasks.splice(pendingIndex, 1)
-      if (task) {
-        this.retainTerminalTask(this.cancelledTasks, task)
-      }
-      return true
-    }
-
-    const errorIndex = this.errorTasks.findIndex((task) => task.id === id)
-    if (errorIndex !== -1) {
-      const [task] = this.errorTasks.splice(errorIndex, 1)
-      if (task) {
-        this.retainTerminalTask(this.cancelledTasks, task)
-      }
-      return true
-    }
-
-    if (this.runningTask && this.runningTask.id === id) {
-      this.retainTerminalTask(this.cancelledTasks, this.runningTask)
-      this.runningTask = null
-      return true
-    }
-
-    return false
+    return this.cancelTaskWhere((task) => task.id === id)
   }
 
   cancelTaskByPromptId(promptId: string): boolean {
-    const pendingIndex = this.pendingTasks.findIndex((task) => task.prompt_id === promptId)
-    if (pendingIndex !== -1) {
-      const [task] = this.pendingTasks.splice(pendingIndex, 1)
-      if (task) {
-        this.retainTerminalTask(this.cancelledTasks, task)
-      }
-      return true
-    }
-
-    const errorIndex = this.errorTasks.findIndex((task) => task.prompt_id === promptId)
-    if (errorIndex !== -1) {
-      const [task] = this.errorTasks.splice(errorIndex, 1)
-      if (task) {
-        this.retainTerminalTask(this.cancelledTasks, task)
-      }
-      return true
-    }
-
-    if (this.runningTask && this.runningTask.prompt_id === promptId) {
-      this.retainTerminalTask(this.cancelledTasks, this.runningTask)
-      this.runningTask = null
-      return true
-    }
-
-    return false
+    return this.cancelTaskWhere((task) => task.prompt_id === promptId)
   }
 }
 
@@ -494,48 +430,162 @@ async function cleanupComfyMemoryAfterRun(task: Task, cli: ComfyHttpCli): Promis
   }
 }
 
-async function executeTask(task: Task): Promise<Task> {
-  const cli = new ComfyHttpCli()
-  try {
-    console.log(`[TaskQueue] ${task.id} processing task:`, summarizeTaskForLog(task))
-    const { promptWorkflow, historyWorkflow } = await uploadDeferredComfyImagesInWorkflow(
-      task.payload,
-      cli
+class RetryableComfyInstanceError extends Error {
+  constructor(readonly cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause))
+    this.name = 'RetryableComfyInstanceError'
+  }
+}
+
+const isRetryableComfyEndpointError = (error: unknown): boolean => {
+  if (isComfyPostError(error)) {
+    return (
+      error.status === 404 ||
+      error.status === 408 ||
+      error.status === 425 ||
+      error.status === 429 ||
+      error.status >= 500
     )
-    task.payload = promptWorkflow
+  }
+  if (error instanceof TypeError) return true
+  if (!(error instanceof Error)) return false
+  return /(?:fetch failed|network|econn|etimedout|socket|timed? ?out|http(?: error)?!?(?: status)?\s*[:=]?\s*(?:404|408|425|429|5\d\d))/iu.test(
+    error.message
+  )
+}
+
+const isDefinitivelyUnreachableComfyInstance = (error: unknown): boolean => {
+  let current: unknown = error
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    if (current instanceof Error || typeof current === 'object') {
+      const record = current as { code?: unknown; message?: unknown; cause?: unknown }
+      const code = String(record.code || '')
+      const message = String(record.message || '')
+      if (
+        /(?:ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|EAI_AGAIN|ERR_CONNECTION_REFUSED)/iu.test(
+          `${code} ${message}`
+        )
+      ) {
+        return true
+      }
+      current = record.cause
+      continue
+    }
+    break
+  }
+  return false
+}
+
+const waitForAdmissionAfterSubmitFailure = async (
+  cli: ComfyHttpCli,
+  promptId: string
+): Promise<{ admitted: boolean; promptId: string }> => {
+  if (typeof cli.waitForPromptAdmission !== 'function') {
+    return { admitted: false, promptId }
+  }
+  return cli.waitForPromptAdmission(promptId, undefined, 5_000, COMFY_PROCESS_TRANSPORT_CLIENT_ID)
+}
+
+async function executeTaskOnInstance(
+  task: Task,
+  instance: ComfyPoolInstance,
+  requestedPromptId: string
+): Promise<{ task: Task; cli: ComfyHttpCli }> {
+  const cli = instance.client
+  task.comfyInstanceBaseUrl = instance.profile.baseUrl
+  let promptWorkflow: Workflow
+  let historyWorkflow: Workflow
+  try {
+    const uploaded = await uploadDeferredComfyImagesInWorkflow(task.payload, cli)
+    promptWorkflow = uploaded.promptWorkflow
+    historyWorkflow = uploaded.historyWorkflow
+  } catch (error) {
+    if (isRetryableComfyEndpointError(error)) {
+      throw new RetryableComfyInstanceError(error)
+    }
+    throw error
+  }
+
+  let promptId: string
+  try {
     const res = await cli.prompt({
       prompt: promptWorkflow,
       // Keep a single ComfyUI transport client so the shared main-process
       // WebSocket listener continues to receive task progress events.
       client_id: COMFY_PROCESS_TRANSPORT_CLIENT_ID,
+      prompt_id: requestedPromptId,
       extra_data: task.extra_data
     })
-    console.log(`[TaskQueue] ${task.id} prompt result:`, summarizePromptResultForLog(res))
-    task = taskSource.updateTaskPromptId(task, res.prompt_id)
-
-    const [currentStatus] = taskSource.getTask(task.id)
-    if (currentStatus !== 'running') {
-      throw new TaskCancelledError(`Task ${task.id} was cancelled`)
+    promptId = res.prompt_id
+  } catch (error) {
+    if (!isRetryableComfyEndpointError(error)) throw error
+    if (isDefinitivelyUnreachableComfyInstance(error)) {
+      throw new RetryableComfyInstanceError(error)
     }
-
-    const result = await waitPromptId(cli, res.prompt_id, undefined, undefined, () => {
-      const [status] = taskSource.getTask(task.id)
-      return status !== 'running'
-    })
-
-    const [finalStatus] = taskSource.getTask(task.id)
-    if (finalStatus !== 'running') {
-      throw new TaskCancelledError(`Task ${task.id} was cancelled during execution`)
+    const admission = await waitForAdmissionAfterSubmitFailure(cli, requestedPromptId)
+    if (admission.admitted) {
+      promptId = admission.promptId
+    } else {
+      throw new RetryableComfyInstanceError(error)
     }
+  }
 
-    const normalizedResult = rewriteTaskResultPromptMeta(task, result, historyWorkflow)
+  console.log(
+    `[TaskQueue] ${task.id} prompt result:`,
+    summarizePromptResultForLog({ prompt_id: promptId })
+  )
+  task.payload = promptWorkflow
+  task = taskSource.updateTaskPromptId(task, promptId)
 
-    console.log(`[TaskQueue] ${task.id} result:`, summarizeTaskResultForLog(normalizedResult))
-    if (isTaskResultError(normalizedResult)) {
-      throw normalizedResult
+  const [currentStatus] = taskSource.getTask(task.id)
+  if (currentStatus !== 'running') {
+    throw new TaskCancelledError(`Task ${task.id} was cancelled`)
+  }
+
+  const result = await waitPromptId(cli, promptId, undefined, undefined, () => {
+    const [status] = taskSource.getTask(task.id)
+    return status !== 'running'
+  })
+
+  const [finalStatus] = taskSource.getTask(task.id)
+  if (finalStatus !== 'running') {
+    throw new TaskCancelledError(`Task ${task.id} was cancelled during execution`)
+  }
+
+  const normalizedResult = rewriteTaskResultPromptMeta(task, result, historyWorkflow)
+  console.log(`[TaskQueue] ${task.id} result:`, summarizeTaskResultForLog(normalizedResult))
+  if (isTaskResultError(normalizedResult)) {
+    throw normalizedResult
+  }
+  task.result = normalizedResult
+  return { task, cli }
+}
+
+async function executeTask(task: Task): Promise<Task> {
+  const pool = getComfyInstancePool()
+  let selectedCli: ComfyHttpCli | null = null
+  try {
+    console.log(`[TaskQueue] ${task.id} processing task:`, summarizeTaskForLog(task))
+    const instances = await pool.orderedAvailableInstances(false, task.payload)
+    if (instances.length === 0) {
+      throw new Error('No compatible ComfyUI instance is available')
     }
-    task.result = normalizedResult
-    return task
+    const requestedPromptId = task.prompt_id || crypto.randomUUID()
+    let lastRetryableError: unknown = null
+    for (const instance of instances) {
+      selectedCli = instance.client
+      try {
+        const result = await executeTaskOnInstance(task, instance, requestedPromptId)
+        pool.preferBaseUrl?.(instance.profile.baseUrl)
+        return result.task
+      } catch (error) {
+        if (!(error instanceof RetryableComfyInstanceError)) throw error
+        lastRetryableError = error.cause
+        task.comfyInstanceBaseUrl = undefined
+        pool.invalidate()
+      }
+    }
+    throw lastRetryableError || new Error('No compatible ComfyUI instance is available')
   } catch (error) {
     if (isComfyPostError(error) && isPromptError(error.payload)) {
       const err: TaskResultError = {
@@ -564,22 +614,28 @@ async function executeTask(task: Task): Promise<Task> {
       }
       throw err
     }
-    if (isTaskResultError(error)) {
-      throw error
-    }
-    if (isTaskCancelledError(error)) {
+    if (isTaskResultError(error) || isTaskCancelledError(error)) {
       throw error
     }
 
     console.error(`[TaskQueue] ${task.id} unknown error:`, error)
     throw error
   } finally {
-    await cleanupComfyMemoryAfterRun(task, cli)
+    if (selectedCli) {
+      await cleanupComfyMemoryAfterRun(task, selectedCli)
+    }
   }
 }
 
 const taskSource: TaskMemorySource = new TaskMemorySource()
 const taskQueue: QueueManager<Task> = new QueueManager<Task>(taskSource, executeTask)
+
+const createTaskCli = (task?: Task): ComfyHttpCli =>
+  new ComfyHttpCli(
+    undefined,
+    undefined,
+    task?.comfyInstanceBaseUrl ? { baseUrl: task.comfyInstanceBaseUrl } : undefined
+  )
 
 export async function initTaskQueue() {
   taskQueue.start()
@@ -614,7 +670,7 @@ export async function cancelTask(id: string): Promise<boolean> {
   if (found && status === 'running') {
     void (async () => {
       try {
-        const cli = new ComfyHttpCli()
+        const cli = createTaskCli(task)
         const cancelTasks = [cli.interrupt()]
 
         if (promptId) {
@@ -643,7 +699,7 @@ export async function cancelTaskByPromptId(promptId: string): Promise<boolean> {
   if (found && status === 'running') {
     void (async () => {
       try {
-        const cli = new ComfyHttpCli()
+        const cli = createTaskCli(task)
         const cancelTasks = [
           cli.interrupt().catch((error) => {
             console.error(`[TaskQueue] 中断任务失败: ${promptId}`, error)

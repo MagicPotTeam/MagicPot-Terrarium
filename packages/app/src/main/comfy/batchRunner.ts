@@ -31,13 +31,16 @@ const PROFILE_RETRY_INTERVAL_MS = 250
 // A few completions are needed before wall-clock throughput is more reliable
 // than the configured slot count. During warm-up, keep using the capacity
 // estimate so the ETA does not jump around based on one unusually fast/slow item.
+const MIN_ETA_THROUGHPUT_SAMPLES = 3
 // Keep one extra prompt queued behind the configured execution slots for each
 // instance. ComfyUI can take a noticeable amount of time to accept the next
 // prompt; this small admission window prevents a GPU from going idle while the
 // client is waiting for the previous request to leave the HTTP/WebSocket boundary.
 const COMFY_BATCH_QUEUE_HEADROOM = 1
-
-export const NO_RUNTIME_RETRY_WINDOW_MS = 5_000
+// Embedded ComfyUI can take well over a minute to load custom nodes and expose
+// /object_info. Keep the batch pending during that startup window instead of
+// converting every source image into a permanent failure.
+export const NO_RUNTIME_RETRY_WINDOW_MS = 120_000
 
 export type BatchSourceFile = {
   absolutePath: string
@@ -656,7 +659,12 @@ function errorMessage(error: unknown): string {
 
 function isRetryableInstanceError(error: unknown): boolean {
   if (error instanceof ComfyExecutionError) return true
-  if (error instanceof ComfyBatchHttpError) return error.retryable
+  if (error instanceof ComfyBatchHttpError) {
+    // A reverse proxy or a stale AutoDL port can answer ComfyUI requests with
+    // an HTML 404 page. Treat that as an instance failure so another profile
+    // gets a chance instead of converting every item into a permanent error.
+    return error.retryable || error.status === 404
+  }
   if (error instanceof DOMException && error.name === 'AbortError') return true
   if (error instanceof Error) {
     const message = error.message.toLowerCase()
@@ -723,10 +731,12 @@ export class ComfyBatchRunner {
   private readonly runningItems = new Map<string, ComfyBatchRunningItem>()
   private readonly recentItems: ComfyBatchItemTiming[] = []
   private readonly itemAttempts = new Map<string, number>()
+  private readonly retryQueuedPaths = new Set<string>()
   private runtimeRefreshPromise: Promise<void> | undefined
   private lastProfileFingerprint = ''
   private lastProfileRefreshAt = 0
   private statusValue: ComfyBatchStatus
+  private nextQueueIndex = 0
 
   constructor(
     private readonly request: StartComfyBatchReq,
@@ -1164,6 +1174,9 @@ export class ComfyBatchRunner {
     }
     await this.persistManifest()
     this.statusValue.failed += 1
+    // Keep the first concrete failure reason so the job detail can explain
+    // why the batch failed instead of replacing it with only an item count.
+    this.statusValue.error ??= message
     this.statusValue.failedFiles.push(item.source.relativePath)
     const finishedAt = Date.now()
     const startedAt = context?.startedAt ?? finishedAt
@@ -1184,6 +1197,7 @@ export class ComfyBatchRunner {
     item: PendingBatchItem,
     initialRuntime?: InstanceRuntime
   ): Promise<void> {
+    this.retryQueuedPaths.delete(item.source.relativePath)
     const tried = new Set<InstanceRuntime>()
     let runtime = initialRuntime
     let noRuntimeSince: number | undefined
@@ -1248,9 +1262,23 @@ export class ComfyBatchRunner {
       } catch (error) {
         if (this.abortController.signal.aborted) return
         if (isRetryableInstanceError(error)) {
-          const hasUntriedRuntime = this.runtimes.some(
+          let hasUntriedRuntime = this.runtimes.some(
             (candidate) => candidate !== activeRuntime && !tried.has(candidate)
           )
+          if (!hasUntriedRuntime) {
+            // The fallback may have been unavailable during the last probe. A
+            // connection failure is the signal to refresh all profiles now so
+            // an instance that just came online can take over this item.
+            try {
+              await this.refreshProfilesIfNeeded(true)
+            } catch {
+              // Keep the failed runtime error as the item result if the
+              // fallback probe itself is unavailable.
+            }
+            hasUntriedRuntime = this.runtimes.some(
+              (candidate) => candidate !== activeRuntime && !tried.has(candidate)
+            )
+          }
           if (hasUntriedRuntime) {
             runtime = undefined
             continue
@@ -1271,6 +1299,34 @@ export class ComfyBatchRunner {
     }
   }
 
+  retryFailedItems(): ComfyBatchStatus {
+    if (this.statusValue.state !== 'running') {
+      throw new Error('Cannot retry a batch that is not running')
+    }
+
+    const failedPaths = [...new Set(this.statusValue.failedFiles)].filter(
+      (relativePath) => !this.retryQueuedPaths.has(relativePath)
+    )
+    const retryItems = failedPaths
+      .map((relativePath) =>
+        this.queue.find((candidate) => candidate.source.relativePath === relativePath)
+      )
+      .filter((item): item is PendingBatchItem => Boolean(item))
+    if (!retryItems.length) return this.status
+
+    retryItems.forEach((item) => this.retryQueuedPaths.add(item.source.relativePath))
+    this.queue.splice(this.nextQueueIndex, 0, ...retryItems)
+    const retriedPaths = new Set(retryItems.map((item) => item.source.relativePath))
+    this.statusValue.failed = Math.max(0, this.statusValue.failed - retryItems.length)
+    this.statusValue.failedFiles = this.statusValue.failedFiles.filter(
+      (relativePath) => !retriedPaths.has(relativePath)
+    )
+    this.statusValue.pending += retryItems.length
+    this.statusValue.error = undefined
+    this.emit()
+    return this.status
+  }
+
   private async failPendingItems(nextIndex: number, message: string): Promise<number> {
     for (let index = nextIndex; index < this.queue.length; index += 1) {
       if (this.abortController.signal.aborted) return index
@@ -1281,13 +1337,13 @@ export class ComfyBatchRunner {
   }
 
   private async supervise(): Promise<void> {
-    let nextIndex = 0
+    this.nextQueueIndex = 0
     const workers = new Set<Promise<void>>()
     let noRuntimeSince: number | undefined
     let lastSupervisorRefreshAt = 0
     while (
       !this.abortController.signal.aborted &&
-      (nextIndex < this.queue.length || workers.size > 0)
+      (this.nextQueueIndex < this.queue.length || workers.size > 0)
     ) {
       if (Date.now() - lastSupervisorRefreshAt >= PROFILE_RETRY_INTERVAL_MS) {
         try {
@@ -1298,11 +1354,11 @@ export class ComfyBatchRunner {
         lastSupervisorRefreshAt = Date.now()
       }
 
-      while (!this.abortController.signal.aborted && nextIndex < this.queue.length) {
+      while (!this.abortController.signal.aborted && this.nextQueueIndex < this.queue.length) {
         const runtime = this.scheduler.pick(this.runtimes)
         if (!runtime) break
-        const item = this.queue[nextIndex]
-        nextIndex += 1
+        const item = this.queue[this.nextQueueIndex]
+        this.nextQueueIndex += 1
         this.statusValue.pending = Math.max(0, this.statusValue.pending - 1)
         const task = this.processItem(item, runtime).catch(async (error) => {
           // processItem normally records item-level failures itself. Keep this
@@ -1319,7 +1375,7 @@ export class ComfyBatchRunner {
         )
       }
 
-      if (!workers.size && nextIndex < this.queue.length) {
+      if (!workers.size && this.nextQueueIndex < this.queue.length) {
         const hasConfiguredProfile = this.currentProfiles().some(
           (profile) => profile.enabled !== false
         )
@@ -1328,12 +1384,15 @@ export class ComfyBatchRunner {
         )
         noRuntimeSince ??= Date.now()
         if (!hasConfiguredProfile) {
-          nextIndex = await this.failPendingItems(nextIndex, 'No enabled ComfyUI batch profiles')
+          this.nextQueueIndex = await this.failPendingItems(
+            this.nextQueueIndex,
+            'No enabled ComfyUI batch profiles'
+          )
           break
         }
         if (!hasUsableRuntime && Date.now() - noRuntimeSince >= NO_RUNTIME_RETRY_WINDOW_MS) {
-          nextIndex = await this.failPendingItems(
-            nextIndex,
+          this.nextQueueIndex = await this.failPendingItems(
+            this.nextQueueIndex,
             'No compatible ComfyUI instance is available'
           )
           break
@@ -1350,7 +1409,7 @@ export class ComfyBatchRunner {
       }
     }
     await Promise.allSettled(workers)
-    this.statusValue.pending = Math.max(0, this.queue.length - nextIndex)
+    this.statusValue.pending = Math.max(0, this.queue.length - this.nextQueueIndex)
   }
 
   async run(): Promise<ComfyBatchStatus> {

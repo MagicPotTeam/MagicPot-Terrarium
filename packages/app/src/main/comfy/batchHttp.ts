@@ -1,4 +1,5 @@
 import type { ComfyHistoryResp, FileItem, ObjectInfoMap, Workflow } from '@shared/comfy/types'
+import type { ComfyQueueResp } from '@shared/comfy/types'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 export const COMFY_BATCH_MAX_NETWORK_ATTEMPTS = 4
@@ -71,6 +72,50 @@ export function createComfyJsonPostInit(body: unknown): RequestInit {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   }
+}
+
+export type ComfyPromptQueue = Partial<ComfyQueueResp>
+
+export function resolvePromptAdmission(
+  promptId: string,
+  history: Record<string, unknown>,
+  queue: ComfyPromptQueue,
+  clientId?: string
+): { admitted: boolean; promptId: string } {
+  if (history[promptId]) return { admitted: true, promptId }
+  const items = [...(queue.queue_running || []), ...(queue.queue_pending || [])]
+  if (items.some((item) => item[1] === promptId)) return { admitted: true, promptId }
+  const byClient =
+    clientId &&
+    items.filter(
+      (item) =>
+        typeof item[1] === 'string' &&
+        typeof item[3] === 'object' &&
+        item[3] !== null &&
+        (item[3] as { client_id?: unknown }).client_id === clientId
+    )
+  return byClient?.length === 1
+    ? { admitted: true, promptId: String(byClient[0][1]) }
+    : { admitted: false, promptId }
+}
+
+export async function waitForPromptAdmission(
+  check: () => Promise<{ admitted: boolean; promptId: string }>,
+  promptId: string,
+  signal?: AbortSignal,
+  timeoutMs = 5_000,
+  cancelledMessage = 'Batch cancelled'
+): Promise<{ admitted: boolean; promptId: string }> {
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  while (!signal?.aborted && Date.now() < deadline) {
+    const admission = await Promise.resolve()
+      .then(check)
+      .catch(() => undefined)
+    if (admission?.admitted) return admission
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  if (signal?.aborted) throw new Error(cancelledMessage)
+  return { admitted: false, promptId }
 }
 
 function isRedirectStatus(status: number): boolean {
@@ -226,25 +271,8 @@ export class ComfyBatchHttpClient {
     clientId?: string
   ): Promise<{ admitted: boolean; promptId: string }> {
     const history = await this.history(promptId, signal)
-    if (history[promptId]) return { admitted: true, promptId }
-    const queue = await this.json<{
-      queue_running?: unknown[][]
-      queue_pending?: unknown[][]
-    }>('/queue', {}, { signal })
-    const items = [...(queue.queue_running || []), ...(queue.queue_pending || [])]
-    const exact = items.find((item) => item[1] === promptId)
-    if (exact) return { admitted: true, promptId }
-    if (clientId) {
-      const byClient = items.filter(
-        (item) =>
-          typeof item[1] === 'string' &&
-          item[3] !== null &&
-          typeof item[3] === 'object' &&
-          (item[3] as { client_id?: unknown }).client_id === clientId
-      )
-      if (byClient.length === 1) return { admitted: true, promptId: String(byClient[0][1]) }
-    }
-    return { admitted: false, promptId }
+    const queue = await this.json<ComfyPromptQueue>('/queue', {}, { signal })
+    return resolvePromptAdmission(promptId, history, queue, clientId)
   }
 
   async waitForPromptAdmission(
@@ -253,18 +281,12 @@ export class ComfyBatchHttpClient {
     timeoutMs = 5_000,
     clientId?: string
   ): Promise<{ admitted: boolean; promptId: string }> {
-    const deadline = Date.now() + Math.max(0, timeoutMs)
-    while (!signal?.aborted && Date.now() < deadline) {
-      try {
-        const admission = await this.promptAdmission(promptId, signal, clientId)
-        if (admission.admitted) return admission
-      } catch {
-        // Retry admission lookup until the short ambiguity window expires.
-      }
-      await new Promise((resolve) => setTimeout(resolve, 200))
-    }
-    if (signal?.aborted) throw new Error('Batch cancelled')
-    return { admitted: false, promptId }
+    return waitForPromptAdmission(
+      () => this.promptAdmission(promptId, signal, clientId),
+      promptId,
+      signal,
+      timeoutMs
+    )
   }
 
   async cancelPrompt(promptId: string): Promise<void> {

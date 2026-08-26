@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Workflow } from '@shared/comfy/types'
 import { COMFY_EVENT_CLIENT_ID_ALL } from '@shared/api/svcComfy'
 import type { ComfyHttpCli } from '../comfy/http'
+import type { TaskQueueState } from '../queue/taskQueue'
 import { ComfySvcImpl } from './svcComfyImpl'
 
 const {
@@ -13,6 +14,8 @@ const {
   getTaskByPromptIdMock,
   listenComfyEventMock,
   importManagedMediaStreamMock,
+  poolGetObjectInfoMock,
+  poolOrderedInstancesMock,
   emitComfyEvent,
   resetComfyTestState,
   setTaskPromptOwner
@@ -28,10 +31,11 @@ const {
     addTaskMock: vi.fn(() => 'task-queued'),
     cancelTaskMock: vi.fn(async () => true),
     cancelTaskByPromptIdMock: vi.fn(async () => true),
-    getQueueMock: vi.fn(() => ({
+    getQueueMock: vi.fn((): TaskQueueState => ({
       running: [],
       pending: [],
       completed: [],
+      cancelled: [],
       error: []
     })),
     getTaskMock: vi.fn(() => [null, null] as const),
@@ -45,6 +49,8 @@ const {
       }
     ),
     importManagedMediaStreamMock: vi.fn(),
+    poolGetObjectInfoMock: vi.fn(async () => ({ KSampler: {} })),
+    poolOrderedInstancesMock: vi.fn(async () => []),
     emitComfyEvent: (event: unknown) => {
       activeListener?.onEvent(event)
     },
@@ -102,6 +108,13 @@ vi.mock('../queue/taskQueue', () => ({
 
 vi.mock('../comfy/state', () => ({
   listenComfyEvent: listenComfyEventMock
+}))
+
+vi.mock('../comfy/comfyInstancePool', () => ({
+  getComfyInstancePool: () => ({
+    getObjectInfo: poolGetObjectInfoMock,
+    orderedAvailableInstances: poolOrderedInstancesMock
+  })
 }))
 
 vi.mock('../llmProxy/chatMediaDir', () => ({
@@ -371,6 +384,43 @@ describe('ComfySvcImpl', () => {
         message: 'Imported ComfyUI output metadata is invalid'
       })
       expect(String(invalidReference)).not.toContain('relativePath')
+    })
+  })
+
+  describe('getObjectInfo', () => {
+    it('uses the shared ComfyUI instance pool', async () => {
+      const svc = new ComfySvcImpl()
+      poolGetObjectInfoMock.mockResolvedValueOnce({ CheckpointLoaderSimple: {} } as never)
+
+      await expect(svc.getObjectInfo({})).resolves.toEqual({ CheckpointLoaderSimple: {} })
+      expect(poolGetObjectInfoMock).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('getQueue', () => {
+    it('includes recent internal task errors for the unified task center', async () => {
+      getQueueMock.mockReturnValueOnce({
+        running: [],
+        pending: [],
+        completed: [],
+        cancelled: [],
+        error: [
+          {
+            id: 'task-error',
+            type: 'comfy_prompt',
+            client_id: 'client-1',
+            created_at: 1_735_000_000_000,
+            prompt_id: 'prompt-error',
+            payload: {},
+            result: null
+          }
+        ]
+      })
+
+      const result = await new ComfySvcImpl().getQueue({})
+
+      expect(result.queue_error).toHaveLength(1)
+      expect(result.queue_error?.[0]?.[1]).toBe('task-error')
     })
   })
 

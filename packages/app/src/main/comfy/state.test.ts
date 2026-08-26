@@ -11,7 +11,7 @@ type MockSocket = {
   close: ReturnType<typeof vi.fn>
 }
 
-const { comfyHttpCliCtor, connectMock, sockets } = vi.hoisted(() => {
+const { comfyHttpCliCtor, connectMock, sockets, profilesMock } = vi.hoisted(() => {
   const sockets: MockSocket[] = []
   const connectMock = vi.fn(() => {
     const socket: MockSocket = {
@@ -27,12 +27,17 @@ const { comfyHttpCliCtor, connectMock, sockets } = vi.hoisted(() => {
   const comfyHttpCliCtor = vi.fn(function MockComfyHttpCli() {
     return { connect: connectMock }
   })
-  return { comfyHttpCliCtor, connectMock, sockets }
+  const profilesMock = vi.fn()
+  return { comfyHttpCliCtor, connectMock, sockets, profilesMock }
 })
 
 vi.mock('./http', () => ({
   COMFY_PROCESS_TRANSPORT_CLIENT_ID: 'test-client',
   ComfyHttpCli: comfyHttpCliCtor
+}))
+
+vi.mock('./comfyInstancePool', () => ({
+  getConfiguredComfyProfiles: profilesMock
 }))
 
 import {
@@ -55,6 +60,10 @@ describe('ComfyStateManager websocket lifecycle', () => {
     comfyHttpCliCtor.mockClear()
     connectMock.mockClear()
     sockets.length = 0
+    profilesMock.mockReset()
+    profilesMock.mockReturnValue([
+      { id: 'default', baseUrl: 'http://127.0.0.1:8188/', enabled: true, maxConcurrency: 1 }
+    ])
   })
 
   afterEach(() => {
@@ -69,6 +78,28 @@ describe('ComfyStateManager websocket lifecycle', () => {
     expect(comfyHttpCliCtor).toHaveBeenCalledTimes(1)
     expect(connectMock).toHaveBeenCalledTimes(1)
     expect(sockets).toHaveLength(1)
+  })
+
+  it('forwards progress events from every configured ComfyUI instance', () => {
+    profilesMock.mockReturnValue([
+      { id: 'first', baseUrl: 'http://127.0.0.1:8188/', enabled: true, maxConcurrency: 1 },
+      { id: 'second', baseUrl: 'http://127.0.0.1:8189/', enabled: true, maxConcurrency: 1 }
+    ])
+    const listener = vi.fn()
+    listenComfyEvent({ id: 'multi-instance-progress-listener', onEvent: listener, onEnd: vi.fn() })
+
+    initComfyStateListener()
+
+    expect(comfyHttpCliCtor).toHaveBeenCalledTimes(2)
+    expect(sockets).toHaveLength(2)
+
+    const progress = {
+      type: 'progress',
+      data: { prompt_id: 'task-2', value: 3, max: 10 }
+    }
+    sockets[1].onmessage?.({ data: JSON.stringify(progress) })
+
+    expect(listener).toHaveBeenCalledWith(progress)
   })
 
   it('creates only one reconnect timer and ignores callbacks from the replaced socket', () => {

@@ -30,6 +30,7 @@ import { getBuildEnv } from '../config/buildEnv'
 import { getConfig, saveConfig } from '../config/config'
 import { ComfyBatchHttpClient, normalizeComfyBatchBaseUrl } from '../comfy/batchHttp'
 import { ComfyBatchRunner, getComfyBatchOutputDir } from '../comfy/batchRunner'
+import { getComfyInstancePool } from '../comfy/comfyInstancePool'
 import { QAppFSCli } from '../qApp/fs'
 
 const IDLE_STATUS: ComfyBatchStatus = {
@@ -934,6 +935,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       throw new Error('ComfyUI profile ids must be unique')
     }
     await this.persistProfiles(profiles)
+    getComfyInstancePool().invalidate()
     return { profiles }
   }
 
@@ -983,6 +985,13 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       if (!previous) throw new Error(`Batch job not found: ${req.jobId}`)
       if (previous.invalid) throw new Error('Malformed persisted batch job cannot be retried')
       const status = this.liveStatus(previous)
+      if (previous.runActive && previous.runner) {
+        if (status.failed <= 0) throw new Error('No failed batch items to retry')
+        const retryStatus = previous.runner.retryFailedItems()
+        this.setRecordStatus(previous, retryStatus)
+        await this.persistJobs()
+        return { status: this.liveStatus(previous) }
+      }
       if (previous.runActive || status.state === 'queued' || status.state === 'running') {
         throw new Error('Cannot retry a queued or running batch job')
       }
@@ -996,7 +1005,15 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       }
       const snapshot = cloneJson(previous.request)
       await this.validateRequestBindings(snapshot)
-      return { status: await this.enqueue(snapshot, req.jobId) }
+      const retryStatus = await this.enqueue(snapshot, req.jobId)
+
+      // A retry is a continuation of the failed batch, not a second history
+      // entry that should remain visible beside it. The new descriptor is
+      // durable before we remove the previous terminal record, so a failure
+      // during cleanup cannot lose the retry job itself.
+      this.forgetJob(req.jobId)
+      await this.persistJobs()
+      return { status: retryStatus }
     })
 
   dismiss = async (req: DismissComfyBatchReq): Promise<DismissComfyBatchResp> =>

@@ -30,6 +30,10 @@ vi.mock('@renderer/hooks/useMessage', () => ({
   useMessage: () => ({ notifyError: vi.fn(), notifyInfo: vi.fn() })
 }))
 
+vi.mock('@renderer/hooks/useComfyEvent', () => ({
+  useComfyEventCallback: () => undefined
+}))
+
 vi.mock('../pages/QuickAppPage/QAppExecutePanel/comfyBatchJobState', () => ({
   cancelComfyBatchJob: vi.fn(),
   closeComfyBatchCenter: vi.fn(),
@@ -38,8 +42,13 @@ vi.mock('../pages/QuickAppPage/QAppExecutePanel/comfyBatchJobState', () => ({
   openComfyBatchJob: vi.fn(),
   refreshComfyBatchJobs: vi.fn(),
   retryComfyBatchJob: vi.fn(),
+  updateComfyTaskProgress: vi.fn(),
+  clearComfyTaskProgress: vi.fn(),
+  cancelComfyQueueTask: vi.fn(),
   useComfyBatchJobs: () => ({
     jobs: [status],
+    queue: { queue_running: [], queue_pending: [], queue_error: [] },
+    progressByPromptId: {},
     selectedJobId: 'job-1',
     centerOpen: true,
     detailOpen: true,

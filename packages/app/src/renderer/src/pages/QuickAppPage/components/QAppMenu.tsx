@@ -31,6 +31,7 @@ import {
   Typography,
   Tooltip,
   CircularProgress,
+  LinearProgress,
   Dialog,
   InputBase,
   Stack
@@ -344,13 +345,19 @@ const CascadingMenuItem = memo(
       if (event.type === 'progress') {
         const { value, max } = event.data
         if (max && max > 0) {
-          setProgress((value ?? 0) / max)
+          setProgress(Math.min(1, Math.max(0, (value ?? 0) / max)))
         }
       }
       if (event.type === 'executed' || event.type === 'execution_error') {
         setProgress(0)
       }
     }, [])
+
+    useEffect(() => {
+      if (!isRunning) {
+        setProgress(0)
+      }
+    }, [isRunning])
 
     const isStickyActive = !isDirectory && isSelected && !!renderExpandedContent
 
@@ -521,6 +528,7 @@ const CascadingMenuItem = memo(
                     p: 0.5,
                     flexShrink: 0,
                     ml: 0.5,
+                    mr: 0.5,
                     color: canCancelRun ? '#fff' : '#7E73FD',
                     bgcolor: canCancelRun ? '#d32f2f' : '#ffffff',
                     borderRadius: 1,
@@ -558,6 +566,20 @@ const CascadingMenuItem = memo(
             )}
           </Box>
         </StyledMenuItem>
+        {!isDirectory && isSelected && isRunning && (
+          <LinearProgress
+            variant={progress > 0 ? 'determinate' : 'indeterminate'}
+            value={progress * 100}
+            aria-label="quick app progress"
+            sx={{
+              position: 'relative',
+              zIndex: 2,
+              height: 3,
+              borderRadius: 0,
+              '& .MuiLinearProgress-bar': { transition: 'transform 0.2s linear' }
+            }}
+          />
+        )}
         {isDirectory && (
           <Collapse in={isExpanded} timeout={80} unmountOnExit>
             <Box sx={{ ml: 1, borderLeft: 1, borderColor: 'divider' }}>
@@ -687,7 +709,6 @@ export default function QAppMenu({
   const dispatch = useAppDispatch()
   const openTabs = useAppSelector((s) => s.layout.openTabs)
   const activeTabId = useAppSelector((s) => s.layout.activeTabId)
-  // const { configUtils } = useConfig() // 如果不需要 openFolder 按钮，可以注释掉
 
   const initialCachedQAppItems = useMemo(() => readCachedQAppItems(), [])
   const [isLoading, setIsLoading] = useState(initialCachedQAppItems.length === 0)
@@ -1291,15 +1312,8 @@ export default function QAppMenu({
         await refreshTabs()
         setCurrentQAppKey(name)
         notifySuccess(`Imported "${name}"`)
-        /*
-        notifySuccess(`已导入快应用「${name}」`)
-        */
       } catch (err) {
         notifyError('Quick App import failed')
-        /*
-        console.error('[QApp] 导入失败:', err)
-        notifyError('导入快应用失败')
-        */
       }
     },
     [notifyError, notifySuccess, packageVersion, refreshTabs, setCurrentQAppKey]
@@ -1498,9 +1512,6 @@ export default function QAppMenu({
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
       notifySuccess(`Exported "${data.name}"`)
-      /*
-      notifySuccess(`已导出「${data.name}」`)
-      */
     } catch (err) {
       console.error('[QApp] 导出失败:', err)
       notifyError('导出失败')
@@ -1613,8 +1624,6 @@ export default function QAppMenu({
             </Tooltip>
           )}
         </Box>
-
-        {/* Shipped video qapps removed */}
 
         <List sx={{ position: 'relative', p: 0 }}>
           {isLoading

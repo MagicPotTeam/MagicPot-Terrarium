@@ -226,9 +226,9 @@ export const useQAppRunner = (projectId?: string) => {
 
   const runDependencyPreflight = useCallback(async (): Promise<boolean> => {
     let latestObjectInfos = objectInfos
-    if (isConnected && Object.keys(latestObjectInfos || {}).length === 0) {
+    if (isConnected && (workflow || Object.keys(latestObjectInfos || {}).length === 0)) {
       try {
-        latestObjectInfos = await api().svcComfy.getObjectInfo({})
+        latestObjectInfos = await api().svcComfy.getObjectInfo({ workflow: workflow ?? undefined })
         setObjectInfos(latestObjectInfos)
       } catch (error) {
         console.warn('[qAppDependencyPreflight] failed to refresh object info:', error)
@@ -363,8 +363,6 @@ export const useQAppRunner = (projectId?: string) => {
           qAppKey: currentQAppKey || '',
           projectId
         })
-
-        setIsRunning(false)
 
         const result = await waitForQAppPromptResult(api().svcComfy, prompt_id)
         await processPromptResult(prompt_id, result)

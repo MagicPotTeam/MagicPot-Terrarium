@@ -467,6 +467,65 @@ describe('ComfyBatchSvcImpl live status', () => {
     expect((await svc.listJobs({})).jobs).toHaveLength(1)
   })
 
+  it('replaces the terminal failure record when retrying unfinished items', async () => {
+    const storePath = path.join(dataDir, 'comfy-batch-jobs.json')
+    await fs.writeFile(
+      storePath,
+      JSON.stringify({
+        version: 2,
+        latestJobId: 'failed-job',
+        nextSequence: 2,
+        jobs: [
+          {
+            request,
+            status: {
+              ...status('failed-job', 'error'),
+              sourceDir: request.sourceDir,
+              total: 1,
+              failed: 1,
+              failedFiles: ['failed.png'],
+              error: '1 batch item(s) failed',
+              finishedAt: Date.now()
+            },
+            submittedAt: 10,
+            sequence: 1
+          }
+        ]
+      }),
+      'utf8'
+    )
+
+    vi.mocked(ComfyBatchRunner).mockImplementation(
+      function MockRetryRunner(_request, _profiles, options) {
+        const jobId = options?.jobId || 'retry-job'
+        return {
+          jobId,
+          get status() {
+            return status(jobId, 'running')
+          },
+          startingStatus: vi.fn(() => status(jobId, 'running')),
+          run: vi.fn(async () => ({ ...status(jobId, 'completed'), success: 1 })),
+          cancel: vi.fn()
+        } as never
+      }
+    )
+
+    const svc = new ComfyBatchSvcImpl()
+    const retry = await svc.retryFailed({ jobId: 'failed-job' })
+    expect(retry.status.jobId).not.toBe('failed-job')
+
+    const jobs = await svc.listJobs({})
+    expect(jobs.jobs.map((job) => job.jobId)).not.toContain('failed-job')
+    expect(jobs.jobs.map((job) => job.jobId)).toContain(retry.status.jobId)
+
+    await vi.waitFor(async () => {
+      const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+        jobs: Array<{ status: ComfyBatchStatus }>
+      }
+      expect(persisted.jobs.map((job) => job.status.jobId)).not.toContain('failed-job')
+    })
+  })
+
   it('rejects retry while running and keeps cancellation durable', async () => {
     let resolveRun!: (value: ComfyBatchStatus) => void
     vi.mocked(ComfyBatchRunner).mockImplementation(
@@ -496,7 +555,7 @@ describe('ComfyBatchSvcImpl live status', () => {
     const started = await svc.start(request)
     await vi.waitFor(() => expect(ComfyBatchRunner).toHaveBeenCalled())
     await expect(svc.retryFailed({ jobId: started.status.jobId! })).rejects.toThrow(
-      /queued or running/i
+      /no failed batch items/i
     )
     const cancelled = await svc.cancel({ jobId: started.status.jobId! })
     expect(cancelled.status.state).toBe('cancelled')
@@ -517,4 +576,57 @@ describe('ComfyBatchSvcImpl live status', () => {
     )
   })
 
+  it('requeues failed items on the active runner instead of creating a second job', async () => {
+    let resolveRun!: (value: ComfyBatchStatus) => void
+    let current!: ComfyBatchStatus
+    let retryFailedItems!: ReturnType<typeof vi.fn>
+    vi.mocked(ComfyBatchRunner).mockImplementation(
+      function MockRunner(_request, _profiles, options) {
+        const jobId = options?.jobId || 'running-job'
+        current = {
+          ...status(jobId, 'running'),
+          total: 3,
+          failed: 1,
+          pending: 1,
+          running: 1,
+          failedFiles: ['first.jpg']
+        }
+        const runPromise = new Promise<ComfyBatchStatus>((resolve) => {
+          resolveRun = resolve
+        })
+        retryFailedItems = vi.fn(() => {
+          current = { ...current, failed: 0, pending: 2, failedFiles: [] }
+          return current
+        })
+        return {
+          jobId,
+          get status() {
+            return current
+          },
+          startingStatus: vi.fn(() => current),
+          run: vi.fn(() => runPromise),
+          retryFailedItems,
+          cancel: vi.fn()
+        } as never
+      }
+    )
+
+    const svc = new ComfyBatchSvcImpl()
+    const started = await svc.start(request)
+    await vi.waitFor(() => expect(ComfyBatchRunner).toHaveBeenCalled())
+
+    const retry = await svc.retryFailed({ jobId: started.status.jobId! })
+    expect(retry.status).toMatchObject({
+      jobId: started.status.jobId,
+      state: 'running',
+      failed: 0,
+      pending: 2
+    })
+    expect(retryFailedItems).toHaveBeenCalledTimes(1)
+
+    resolveRun({ ...current, state: 'completed', running: 0, pending: 0, finishedAt: Date.now() })
+    await vi.waitFor(async () => {
+      expect((await svc.status({ jobId: started.status.jobId! })).status.state).toBe('completed')
+    })
+  })
 })

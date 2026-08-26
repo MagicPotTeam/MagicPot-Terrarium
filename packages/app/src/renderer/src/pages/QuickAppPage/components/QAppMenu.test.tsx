@@ -403,6 +403,21 @@ describe('QAppMenu', () => {
     expect(onRunClick).toHaveBeenCalledWith('alpha')
   })
 
+  it('shows a progress bar for a running quick app before the first progress event', async () => {
+    renderRunnableMenu(true)
+
+    expect(await screen.findByRole('progressbar')).toBeTruthy()
+  })
+
+  it('keeps the run button inset from the clipped menu edge', async () => {
+    renderRunnableMenu(false)
+
+    const playIcon = await screen.findByTestId('PlayArrowIcon')
+    const runButton = playIcon.closest('button')
+
+    expect(runButton).toHaveStyle({ marginRight: '4px' })
+  })
+
   it('restores the matching Hunyuan3D quick app and parameters from an internal 3d drag', async () => {
     const paramsEvents: Array<{ apiAction?: string; texturePrompt?: string; modelUrl?: string }> =
       []

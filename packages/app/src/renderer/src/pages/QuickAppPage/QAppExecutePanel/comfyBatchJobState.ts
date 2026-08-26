@@ -1,11 +1,22 @@
 import { useSyncExternalStore } from 'react'
+import type { GetQueueResp } from '@shared/api/svcComfy'
 import type { ComfyBatchStatus } from '@shared/api/svcComfyBatch'
+import type { QueueAnimationStates } from '@renderer/components/sidePanelQueueUtils'
 import { api } from '@renderer/utils/windowUtils'
 
 const POLL_INTERVAL_MS = 850
+const IDLE_POLL_INTERVAL_MS = 2_000
+
+const EMPTY_QUEUE: GetQueueResp = {
+  queue_running: [],
+  queue_pending: [],
+  queue_error: []
+}
 
 type ComfyBatchJobStoreSnapshot = {
   jobs: ComfyBatchStatus[]
+  queue: GetQueueResp
+  progressByPromptId: QueueAnimationStates
   selectedJobId?: string
   centerOpen: boolean
   detailOpen: boolean
@@ -15,6 +26,8 @@ type ComfyBatchJobStoreSnapshot = {
 
 const EMPTY_SNAPSHOT: ComfyBatchJobStoreSnapshot = {
   jobs: [],
+  queue: EMPTY_QUEUE,
+  progressByPromptId: {},
   centerOpen: false,
   detailOpen: false,
   loading: false
@@ -29,6 +42,17 @@ const dismissedJobIds = new Set<string>()
 
 const hasActiveJobs = (jobs: ComfyBatchStatus[]): boolean =>
   jobs.some((job) => job.state === 'queued' || job.state === 'running')
+
+const hasActiveQueue = (queue: GetQueueResp): boolean =>
+  queue.queue_running.length > 0 || queue.queue_pending.length > 0
+
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error)
+
+const getPollInterval = (): number =>
+  hasActiveJobs(snapshot.jobs) || hasActiveQueue(snapshot.queue)
+    ? POLL_INTERVAL_MS
+    : IDLE_POLL_INTERVAL_MS
 
 const sortJobs = (jobs: ComfyBatchStatus[]): ComfyBatchStatus[] =>
   [...jobs]
@@ -51,8 +75,7 @@ const schedulePoll = (): void => {
     pollTimer !== undefined ||
     requestInFlight ||
     listeners.size === 0 ||
-    typeof window === 'undefined' ||
-    !hasActiveJobs(snapshot.jobs)
+    typeof window === 'undefined'
   ) {
     return
   }
@@ -60,11 +83,11 @@ const schedulePoll = (): void => {
   pollTimer = window.setTimeout(() => {
     pollTimer = undefined
     void refreshComfyBatchJobs()
-  }, POLL_INTERVAL_MS)
+  }, getPollInterval())
 }
 
 const syncPolling = (): void => {
-  if (hasActiveJobs(snapshot.jobs) && listeners.size > 0) {
+  if (listeners.size > 0) {
     schedulePoll()
   } else {
     clearPollTimer()
@@ -98,32 +121,65 @@ export const refreshComfyBatchJobs = async (): Promise<ComfyBatchStatus[]> => {
       error: undefined
     })
 
-    try {
-      const result = await api().svcComfyBatch.listJobs({})
-      const jobs = filterDismissedComfyBatchJobs(
-        Array.isArray(result.jobs) ? result.jobs : [],
+    const [batchResult, queueResult] = await Promise.allSettled([
+      Promise.resolve().then(() => api().svcComfyBatch.listJobs({})),
+      Promise.resolve().then(() => api().svcComfy.getQueue({}))
+    ])
+
+    let jobs = snapshot.jobs
+    let queue = snapshot.queue
+    const errors: string[] = []
+
+    if (batchResult.status === 'fulfilled') {
+      jobs = filterDismissedComfyBatchJobs(
+        Array.isArray(batchResult.value.jobs) ? batchResult.value.jobs : [],
         dismissedJobIds
       )
-      const selectedJobId = jobs.some((job) => job.jobId === snapshot.selectedJobId)
-        ? snapshot.selectedJobId
-        : undefined
-      setSnapshot({
-        jobs,
-        selectedJobId,
-        detailOpen: selectedJobId ? snapshot.detailOpen : false,
-        loading: false,
-        error: undefined
-      })
-      return jobs
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      setSnapshot({ loading: false, error: message })
-      return snapshot.jobs
-    } finally {
-      requestInFlight = undefined
-      syncPolling()
+    } else {
+      errors.push(errorMessage(batchResult.reason))
     }
-  })()
+
+    if (queueResult.status === 'fulfilled') {
+      queue = {
+        queue_running: Array.isArray(queueResult.value.queue_running)
+          ? queueResult.value.queue_running
+          : [],
+        queue_pending: Array.isArray(queueResult.value.queue_pending)
+          ? queueResult.value.queue_pending
+          : [],
+        queue_error: Array.isArray(queueResult.value.queue_error)
+          ? queueResult.value.queue_error
+          : []
+      }
+    } else {
+      errors.push(errorMessage(queueResult.reason))
+    }
+
+    const selectedJobId = jobs.some((job) => job.jobId === snapshot.selectedJobId)
+      ? snapshot.selectedJobId
+      : undefined
+    const queueIds = new Set(
+      [...queue.queue_running, ...queue.queue_pending, ...(queue.queue_error || [])].map((item) =>
+        String(item[1] || '')
+      )
+    )
+    const progressByPromptId = Object.fromEntries(
+      Object.entries(snapshot.progressByPromptId).filter(([promptId]) => queueIds.has(promptId))
+    )
+    setSnapshot({
+      jobs,
+      queue,
+      progressByPromptId,
+      selectedJobId,
+      detailOpen: selectedJobId ? snapshot.detailOpen : false,
+      loading: false,
+      error: errors.length === 2 ? errors.join(' · ') : undefined
+    })
+    return jobs
+  })().finally(() => {
+    requestInFlight = undefined
+    syncPolling()
+  })
   requestInFlight = currentRequest
   return currentRequest
 }
@@ -154,6 +210,30 @@ export const useComfyBatchJobs = (): ComfyBatchJobStoreSnapshot =>
 export const upsertComfyBatchJob = (job: ComfyBatchStatus): void => {
   mergeJob(job)
   ensureComfyBatchJobStore()
+}
+
+export const updateComfyTaskProgress = (promptId: string, value?: number, max?: number): void => {
+  const id = String(promptId || '').trim()
+  if (!id) return
+  setSnapshot({
+    progressByPromptId: {
+      ...snapshot.progressByPromptId,
+      [id]: { value, max }
+    }
+  })
+}
+
+export const clearComfyTaskProgress = (promptId: string): void => {
+  const id = String(promptId || '').trim()
+  if (!id || !(id in snapshot.progressByPromptId)) return
+  const next = { ...snapshot.progressByPromptId }
+  delete next[id]
+  setSnapshot({ progressByPromptId: next })
+}
+
+export const cancelComfyQueueTask = async (promptId: string): Promise<void> => {
+  await api().svcComfy.cancelQueueItem({ prompt_id: promptId })
+  await refreshComfyBatchJobs()
 }
 
 export const openComfyBatchCenter = (): void => {
@@ -208,8 +288,18 @@ export const cancelComfyBatchJob = async (jobId: string): Promise<ComfyBatchStat
 
 export const retryComfyBatchJob = async (jobId: string): Promise<ComfyBatchStatus> => {
   const result = await api().svcComfyBatch.retryFailed({ jobId })
-  await refreshComfyBatchJobs()
+  // Seed the local store before refreshing so a transient refresh failure does
+  // not lose the newly-created retry descriptor.
   mergeJob(result.status)
+  await refreshComfyBatchJobs()
+  // The backend replaces the terminal source record with the retry job. Keep
+  // the details view attached to that new descriptor instead of leaving the
+  // UI pointing at the deleted failed job.
+  setSnapshot({
+    centerOpen: true,
+    detailOpen: true,
+    selectedJobId: result.status.jobId
+  })
   return result.status
 }
 
