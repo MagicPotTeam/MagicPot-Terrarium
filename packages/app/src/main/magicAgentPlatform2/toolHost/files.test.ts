@@ -59,6 +59,17 @@ function setup() {
   return { root, authorization }
 }
 
+function createFilesHost(
+  authorization: MagicAgentPolicyAuthorizationService,
+  root: string,
+  onAudit?: (evidence: FilesToolAuditEvidence) => void | Promise<void>
+) {
+  return FilesToolHost.create(authorization, {
+    allowedRoots: [root],
+    ...(onAudit ? { onAudit } : {})
+  })
+}
+
 function call<TInput extends Record<string, unknown>>(
   tool: 'files.read' | 'files.glob' | 'files.grep' | 'files.json.read',
   input: TInput,
@@ -205,12 +216,7 @@ describe('FilesToolHost bounded media reads', () => {
   it('keeps text compatibility and reads magic-verified images without auditing payloads', async () => {
     const { root, authorization } = setup()
     const audits: FilesToolAuditEvidence[] = []
-    const host = await FilesToolHost.create(authorization, {
-      allowedRoots: [root],
-      onAudit: (audit) => {
-        audits.push(audit)
-      }
-    })
+    const host = await createFilesHost(authorization, root, (audit) => audits.push(audit))
     writeFileSync(path.join(root, 'plain.txt'), 'legacy text')
     const text = await host.read(call('files.read', { path: 'plain.txt' }, authorization) as never)
     expect(text).toMatchObject({
@@ -262,12 +268,7 @@ describe('FilesToolHost bounded media reads', () => {
   it('extracts bounded PDF metadata and Flate text with redaction and truthful indicators', async () => {
     const { root, authorization } = setup()
     const audits: FilesToolAuditEvidence[] = []
-    const host = await FilesToolHost.create(authorization, {
-      allowedRoots: [root],
-      onAudit: (audit) => {
-        audits.push(audit)
-      }
-    })
+    const host = await createFilesHost(authorization, root, (audit) => audits.push(audit))
     writeFileSync(
       path.join(root, 'safe.pdf'),
       pdfWithStream('token=supersecret hello', {
@@ -698,12 +699,7 @@ describe('FilesToolHost writable slice', () => {
     const { root, authorization } = writeSetup()
     writeFileSync(path.join(root, 'secret.txt'), 'super-secret')
     const evidence: FilesToolAuditEvidence[] = []
-    const host = await FilesToolHost.create(authorization, {
-      allowedRoots: [root],
-      onAudit: (item) => {
-        evidence.push(item)
-      }
-    })
+    const host = await createFilesHost(authorization, root, (item) => evidence.push(item))
     const controller = new AbortController()
     controller.abort()
     await expect(
@@ -1072,12 +1068,7 @@ describe('FilesToolHost writable slice', () => {
     const { root, authorization } = writeSetup()
     writeFileSync(path.join(root, 'note.txt'), 'original')
     const evidence: FilesToolAuditEvidence[] = []
-    const host = await FilesToolHost.create(authorization, {
-      allowedRoots: [root],
-      onAudit: (item) => {
-        evidence.push(item)
-      }
-    })
+    const host = await createFilesHost(authorization, root, (item) => evidence.push(item))
     const rename = vi
       .spyOn(fs, 'rename')
       .mockRejectedValueOnce(Object.assign(new Error('injected rename failure'), { code: 'EIO' }))
@@ -1125,12 +1116,7 @@ describe('FilesToolHost writable slice', () => {
     const authorize = vi.spyOn(authorization, 'authorize')
     const consume = vi.spyOn(authorization, 'consumeExecutionPermit')
     const evidence: FilesToolAuditEvidence[] = []
-    const host = await FilesToolHost.create(authorization, {
-      allowedRoots: [root],
-      onAudit: (item) => {
-        evidence.push(item)
-      }
-    })
+    const host = await createFilesHost(authorization, root, (item) => evidence.push(item))
     const controller = new AbortController()
     controller.abort()
     await expect(
@@ -1260,12 +1246,7 @@ describe('FilesToolHost focused file discovery tools', () => {
       ).toThrow(PermitConsumedError)
       return consumed
     }) as typeof authorization.consumeExecutionPermit
-    const host = await FilesToolHost.create(authorization, {
-      allowedRoots: [root],
-      onAudit: (item) => {
-        evidence.push(item)
-      }
-    })
+    const host = await createFilesHost(authorization, root, (item) => evidence.push(item))
     await host.grep(call('files.grep', { query: 'needle' }, authorization))
     expect(JSON.stringify(evidence)).not.toContain('do-not-audit')
     const controller = new AbortController()
