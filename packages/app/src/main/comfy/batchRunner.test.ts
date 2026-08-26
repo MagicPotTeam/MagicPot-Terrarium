@@ -435,7 +435,12 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     const first = new ComfyBatchRunner(request(sourceDir), [profile('one')], {
       createClient: () => fakeClient
     })
-    expect(await first.run()).toMatchObject({ success: 3, failed: 1 })
+    expect(await first.run()).toMatchObject({
+      state: 'error',
+      success: 3,
+      failed: 1,
+      error: '1 batch item(s) failed'
+    })
 
     calls.length = 0
     failFailedItem = false

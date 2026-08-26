@@ -746,6 +746,7 @@
       "no_jobs": "暂无批处理任务",
       "refresh": "刷新",
       "progress_summary": "已完成 {{finished}} / {{total}}",
+      "processed_summary": "已处理 {{finished}} / {{total}}",
       "queue_position": "队列位置 {{position}}",
       "elapsed": "总耗时",
       "average_item": "平均每项耗时",

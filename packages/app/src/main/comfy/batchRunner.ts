@@ -1327,7 +1327,21 @@ export class ComfyBatchRunner {
       await this.initialize()
       await this.supervise()
       await this.manifestWriteQueue
-      this.statusValue.state = this.abortController.signal.aborted ? 'cancelled' : 'completed'
+      if (this.abortController.signal.aborted) {
+        this.statusValue.state = 'cancelled'
+      } else if (
+        this.statusValue.failed > 0 ||
+        this.statusValue.pending > 0 ||
+        this.statusValue.running > 0
+      ) {
+        // The batch loop can finish processing every item while some items
+        // still failed. Do not report that outcome as a green success: the
+        // failure-only manifest is precisely what the user must retry.
+        this.statusValue.state = 'error'
+        this.statusValue.error ??= `${this.statusValue.failed} batch item(s) failed`
+      } else {
+        this.statusValue.state = 'completed'
+      }
       this.statusValue.finishedAt = Date.now()
       this.emit()
       return this.status

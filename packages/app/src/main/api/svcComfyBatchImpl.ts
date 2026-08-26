@@ -112,6 +112,24 @@ function isTerminalState(state: ComfyBatchStatus['state']): boolean {
   return state === 'completed' || state === 'cancelled' || state === 'error'
 }
 
+function normalizeCompletedStatus(status: ComfyBatchStatus): ComfyBatchStatus {
+  if (
+    status.state !== 'completed' ||
+    (status.failed <= 0 && status.pending <= 0 && status.running <= 0)
+  ) {
+    return status
+  }
+  return {
+    ...status,
+    state: 'error',
+    error:
+      status.error ||
+      (status.failed > 0
+        ? `${status.failed} batch item(s) failed`
+        : 'Batch ended before all items were processed')
+  }
+}
+
 function isValidStartRequest(value: unknown): value is StartComfyBatchReq {
   if (!isRecord(value)) return false
   return (
@@ -293,7 +311,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         base = record.status
       }
     }
-    const status: ComfyBatchStatus = {
+    const status: ComfyBatchStatus = normalizeCompletedStatus({
       ...base,
       jobId: record.status.jobId,
       sourceDir: base.sourceDir ?? record.status.sourceDir,
@@ -301,7 +319,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       qAppKey: base.qAppKey ?? record.status.qAppKey,
       submittedAt: record.submittedAt,
       failedFiles: [...(base.failedFiles || [])]
-    }
+    })
     if (record.cancelRequested) {
       status.state = 'cancelled'
       status.error = undefined
@@ -558,7 +576,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
             // Keep a malformed descriptor recoverable without deriving a path.
           }
         }
-        const status: ComfyBatchStatus = {
+        const restoredStatus: ComfyBatchStatus = {
           ...rawStatus,
           jobId,
           state,
@@ -593,9 +611,16 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
             ? { finishedAt: rawStatus.finishedAt }
             : {})
         }
+        const normalizedStatus = normalizeCompletedStatus(restoredStatus)
+        if (
+          normalizedStatus.state !== restoredStatus.state ||
+          normalizedStatus.error !== restoredStatus.error
+        ) {
+          migrated = true
+        }
         const record: JobRecord = {
           request,
-          status,
+          status: normalizedStatus,
           submittedAt,
           sequence,
           cancelRequested,

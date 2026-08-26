@@ -345,6 +345,43 @@ describe('ComfyBatchSvcImpl live status', () => {
     )
   })
 
+  it('does not expose a completed state when persisted items failed', async () => {
+    const storePath = path.join(dataDir, 'comfy-batch-jobs.json')
+    await fs.writeFile(
+      storePath,
+      JSON.stringify({
+        version: 2,
+        latestJobId: 'partial-job',
+        nextSequence: 2,
+        jobs: [
+          {
+            request,
+            status: {
+              ...status('partial-job', 'completed'),
+              total: 4,
+              success: 1,
+              failed: 3,
+              pending: 0,
+              running: 0,
+              finishedAt: Date.now()
+            },
+            submittedAt: 10,
+            sequence: 1
+          }
+        ]
+      }),
+      'utf8'
+    )
+
+    const jobs = await new ComfyBatchSvcImpl().listJobs({})
+    expect(jobs.jobs[0]).toMatchObject({
+      state: 'error',
+      success: 1,
+      failed: 3,
+      error: '3 batch item(s) failed'
+    })
+  })
+
   it('rejects retry while running and keeps cancellation durable', async () => {
     let resolveRun!: (value: ComfyBatchStatus) => void
     vi.mocked(ComfyBatchRunner).mockImplementation(

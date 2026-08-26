@@ -849,6 +849,7 @@
       "no_jobs": "No batch jobs",
       "refresh": "Refresh",
       "progress_summary": "{{finished}} / {{total}} finished",
+      "processed_summary": "{{finished}} / {{total}} processed",
       "queue_position": "Queue position {{position}}",
       "elapsed": "Elapsed time",
       "average_item": "Average per item",

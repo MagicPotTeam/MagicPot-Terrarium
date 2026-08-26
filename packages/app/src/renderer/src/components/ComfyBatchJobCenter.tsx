@@ -198,10 +198,18 @@ const ComfyBatchJobCenter = ({
                             <Stack spacing={0.5} sx={{ mt: 0.75 }}>
                               <LinearProgress variant="determinate" value={progress} />
                               <Typography variant="caption" color="text.secondary">
-                                {t('qapp.batch.progress_summary', {
-                                  finished: job.success + job.failed + job.skipped,
-                                  total: job.total
-                                })}
+                                {t(
+                                  job.state === 'error' || job.failed > 0
+                                    ? 'qapp.batch.processed_summary'
+                                    : 'qapp.batch.progress_summary',
+                                  {
+                                    finished: job.success + job.failed + job.skipped,
+                                    total: job.total
+                                  }
+                                )}
+                                {job.failed > 0
+                                  ? ` · ${t('qapp.batch.failed', { count: job.failed })}`
+                                  : ''}
                                 {job.state === 'queued' && job.queuePosition
                                   ? ` · ${t('qapp.batch.queue_position', { position: job.queuePosition })}`
                                   : ''}
