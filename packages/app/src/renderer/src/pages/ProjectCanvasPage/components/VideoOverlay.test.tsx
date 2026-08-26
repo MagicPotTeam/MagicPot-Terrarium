@@ -45,6 +45,13 @@ function createVideoItem(): CanvasVideoItem {
   }
 }
 
+function createLocalMediaVideoItem(): CanvasVideoItem {
+  return {
+    ...createVideoItem(),
+    src: 'local-media:///C:/demo/projectCanvasSampleVideo.webm'
+  }
+}
+
 function createCanvasContainerRef(): React.RefObject<HTMLDivElement | null> {
   const element = document.createElement('div')
   Object.defineProperty(element, 'getBoundingClientRect', {
@@ -198,6 +205,24 @@ describe('VideoOverlay', () => {
 
     expect(container.querySelector('video')).toBeNull()
     expect(getByTestId('video-poster-video-1')).toBeInTheDocument()
+  })
+
+  it('loads exportable video frames with anonymous CORS', () => {
+    const { container } = render(
+      <VideoOverlay
+        canvasContainerRef={createCanvasContainerRef()}
+        item={createLocalMediaVideoItem()}
+        budgetMode="active-playing"
+        isSelected={false}
+        stagePos={{ x: 0, y: 0 }}
+        stageScale={1}
+        onSelect={vi.fn()}
+        onDragEnd={vi.fn()}
+        onUpdateItem={vi.fn()}
+      />
+    )
+
+    expect(container.querySelector('video')).toHaveAttribute('crossorigin', 'anonymous')
   })
 
   it('does not auto-play poster-frame videos on hover', () => {

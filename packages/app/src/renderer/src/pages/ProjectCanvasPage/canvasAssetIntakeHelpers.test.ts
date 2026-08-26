@@ -146,10 +146,10 @@ describe('canvasAssetIntakeHelpers', () => {
     vi.restoreAllMocks()
   })
 
-  it('does not force CORS mode for local media image loads', async () => {
+  it('uses anonymous CORS mode for local media image loads', async () => {
     await loadImageFromSrc('local-media:///C:/demo/reference.png')
 
-    expect(lastMockImage?.crossOrigin).not.toBe('anonymous')
+    expect(lastMockImage?.crossOrigin).toBe('anonymous')
   })
 
   it('uses anonymous CORS for remote image loads', async () => {

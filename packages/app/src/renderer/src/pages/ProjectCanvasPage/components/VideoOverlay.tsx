@@ -12,6 +12,11 @@ import { useTranslation } from 'react-i18next'
 import type { CanvasVideoItem } from '../types'
 import type { ProjectCanvasVideoBudgetMode } from '../projectCanvasRenderBoundary'
 
+function shouldUseAnonymousCrossOrigin(src: string): boolean {
+  const normalized = src.trim()
+  return /^local-media:\/\//i.test(normalized) || !/^(data:|blob:|file:\/\/)/i.test(normalized)
+}
+
 type CanvasPoint = {
   x: number
   y: number
@@ -608,6 +613,7 @@ const VideoOverlay: React.FC<VideoOverlayProps> = ({
             <video
               ref={videoRef}
               src={item.src}
+              crossOrigin={shouldUseAnonymousCrossOrigin(item.src) ? 'anonymous' : undefined}
               style={{
                 width: '100%',
                 height: '100%',
