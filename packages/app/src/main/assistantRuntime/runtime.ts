@@ -2218,8 +2218,7 @@ export class AssistantRuntime {
         const attachMatch = normalizedCommandArgs?.match(/^(\S+)(?:\s+(private|shared))?$/i)
         const workspaceId = cleanString(attachMatch?.[1], 120)
         const accessMode = cleanString(attachMatch?.[2], 20)?.toLowerCase() as
-          | AssistantWorkspaceAccessMode
-          | undefined
+          AssistantWorkspaceAccessMode | undefined
         if (!workspaceId) {
           return buildSystemReplyResult(
             normalizedRoute,
@@ -3087,18 +3086,11 @@ export class AssistantRuntime {
       (await this.listWorkflows(1, normalizedRoute))[0]?.workflowId ||
       ''
     const taskGroupId = cleanString(segments[0], 120) || taskGroupIdFallback
+    const callUnrestrictedTool = (toolName: string, args: Record<string, unknown>) =>
+      this.callTool(normalizedRoute, toolName, args, { allowedToolNames: null })
 
     if (subcommand === 'list' || subcommand === 'status') {
-      const toolResult = await this.callTool(
-        normalizedRoute,
-        'task.group.list',
-        {
-          limit: 10
-        },
-        {
-          allowedToolNames: null
-        }
-      )
+      const toolResult = await callUnrestrictedTool('task.group.list', { limit: 10 })
       const payload = parseJsonToolResult<{
         taskGroups?: AssistantWorkflowSummary[]
       }>(toolResult.content)
@@ -3136,17 +3128,10 @@ export class AssistantRuntime {
         )
       }
 
-      const toolResult = await this.callTool(
-        normalizedRoute,
-        'task.group.inspect',
-        {
-          taskGroupId,
-          runLimit: 10
-        },
-        {
-          allowedToolNames: null
-        }
-      )
+      const toolResult = await callUnrestrictedTool('task.group.inspect', {
+        taskGroupId,
+        runLimit: 10
+      })
       const payload = parseJsonToolResult<{
         taskGroup?: AssistantTaskGroupState | null
         workflow?: AssistantWorkflowInspection | null
@@ -3186,18 +3171,11 @@ export class AssistantRuntime {
         )
       }
 
-      const toolResult = await this.callTool(
-        normalizedRoute,
-        'task.group.start',
-        {
-          taskGroupId,
-          ...(segments[1] ? { title: segments[1] } : {}),
-          ...(segments[2] ? { description: segments[2] } : {})
-        },
-        {
-          allowedToolNames: null
-        }
-      )
+      const toolResult = await callUnrestrictedTool('task.group.start', {
+        taskGroupId,
+        ...(segments[1] ? { title: segments[1] } : {}),
+        ...(segments[2] ? { description: segments[2] } : {})
+      })
       const payload = parseJsonToolResult<{
         taskGroup?: AssistantTaskGroupState | null
         exportBundle?: Record<string, unknown> | null
@@ -3239,20 +3217,13 @@ export class AssistantRuntime {
         )
       }
 
-      const toolResult = await this.callTool(
-        normalizedRoute,
-        'task.group.progress',
-        {
-          taskGroupId,
-          ...(segments[1] ? { label: segments[1] } : {}),
-          ...(Number.isFinite(Number(segments[2])) ? { completed: Number(segments[2]) } : {}),
-          ...(Number.isFinite(Number(segments[3])) ? { total: Number(segments[3]) } : {}),
-          ...(Number.isFinite(Number(segments[4])) ? { percent: Number(segments[4]) } : {})
-        },
-        {
-          allowedToolNames: null
-        }
-      )
+      const toolResult = await callUnrestrictedTool('task.group.progress', {
+        taskGroupId,
+        ...(segments[1] ? { label: segments[1] } : {}),
+        ...(Number.isFinite(Number(segments[2])) ? { completed: Number(segments[2]) } : {}),
+        ...(Number.isFinite(Number(segments[3])) ? { total: Number(segments[3]) } : {}),
+        ...(Number.isFinite(Number(segments[4])) ? { percent: Number(segments[4]) } : {})
+      })
       const payload = parseJsonToolResult<{
         taskGroup?: AssistantTaskGroupState | null
         exportBundle?: Record<string, unknown> | null
@@ -3299,17 +3270,10 @@ export class AssistantRuntime {
         )
       }
 
-      const toolResult = await this.callTool(
-        normalizedRoute,
-        'task.group.approve',
-        {
-          taskGroupId,
-          ...(segments[1] ? { approvedBy: segments[1] } : {})
-        },
-        {
-          allowedToolNames: null
-        }
-      )
+      const toolResult = await callUnrestrictedTool('task.group.approve', {
+        taskGroupId,
+        ...(segments[1] ? { approvedBy: segments[1] } : {})
+      })
       const payload = parseJsonToolResult<{
         taskGroup?: AssistantTaskGroupState | null
         exportBundle?: Record<string, unknown> | null
@@ -3354,18 +3318,11 @@ export class AssistantRuntime {
             .map((item) => cleanString(item, 120))
             .filter((item): item is string => Boolean(item))
         : undefined
-      const toolResult = await this.callTool(
-        normalizedRoute,
-        'task.group.export',
-        {
-          taskGroupId,
-          ...(segments[1] ? { exportTarget: segments[1] } : {}),
-          ...(exportArtifactIds ? { exportArtifactIds } : {})
-        },
-        {
-          allowedToolNames: null
-        }
-      )
+      const toolResult = await callUnrestrictedTool('task.group.export', {
+        taskGroupId,
+        ...(segments[1] ? { exportTarget: segments[1] } : {}),
+        ...(exportArtifactIds ? { exportArtifactIds } : {})
+      })
       const payload = parseJsonToolResult<{
         taskGroup?: AssistantTaskGroupState | null
         exportBundle?: Record<string, unknown> | null
@@ -3407,16 +3364,7 @@ export class AssistantRuntime {
         )
       }
 
-      const toolResult = await this.callTool(
-        normalizedRoute,
-        'task.group.cancel',
-        {
-          taskGroupId
-        },
-        {
-          allowedToolNames: null
-        }
-      )
+      const toolResult = await callUnrestrictedTool('task.group.cancel', { taskGroupId })
       const payload = parseJsonToolResult<{
         taskGroup?: AssistantTaskGroupState | null
       }>(toolResult.content)
@@ -3450,17 +3398,10 @@ export class AssistantRuntime {
         )
       }
 
-      const toolResult = await this.callTool(
-        normalizedRoute,
-        'task.group.resume',
-        {
-          taskGroupId,
-          async: segments[1]?.toLowerCase() === 'async' || segments[1]?.toLowerCase() === 'true'
-        },
-        {
-          allowedToolNames: null
-        }
-      )
+      const toolResult = await callUnrestrictedTool('task.group.resume', {
+        taskGroupId,
+        async: segments[1]?.toLowerCase() === 'async' || segments[1]?.toLowerCase() === 'true'
+      })
       const payload = parseJsonToolResult<{
         result?: AssistantRuntimeResult
       }>(toolResult.content)
@@ -3488,17 +3429,10 @@ export class AssistantRuntime {
         )
       }
 
-      const toolResult = await this.callTool(
-        normalizedRoute,
-        'task.group.retry',
-        {
-          taskGroupId,
-          async: segments[1]?.toLowerCase() === 'async' || segments[1]?.toLowerCase() === 'true'
-        },
-        {
-          allowedToolNames: null
-        }
-      )
+      const toolResult = await callUnrestrictedTool('task.group.retry', {
+        taskGroupId,
+        async: segments[1]?.toLowerCase() === 'async' || segments[1]?.toLowerCase() === 'true'
+      })
       const payload = parseJsonToolResult<{
         result?: AssistantRuntimeResult
       }>(toolResult.content)
@@ -3544,16 +3478,7 @@ export class AssistantRuntime {
         workflow?.rootRunId ||
         workflow?.taskGroup?.workspaceRunId ||
         taskGroupId
-      const toolResult = await this.callTool(
-        normalizedRoute,
-        'run.replay',
-        {
-          runId: replayRunId
-        },
-        {
-          allowedToolNames: null
-        }
-      )
+      const toolResult = await callUnrestrictedTool('run.replay', { runId: replayRunId })
       const payload = parseJsonToolResult<{
         replay?: {
           trace?: AssistantRunTrace | null
