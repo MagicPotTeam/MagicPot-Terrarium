@@ -154,6 +154,45 @@ describe('Comfy batch ETA', () => {
     expect(oneInstanceRunner.status.etaMs).toBe(100_000)
     expect(fourInstanceRunner.status.etaMs).toBe(25_000)
   })
+
+  it('uses observed throughput when four instances do not scale linearly', () => {
+    const request = {
+      sourceDir: '/tmp/source',
+      qAppKey: 'eta-throughput-test',
+      workflow: {},
+      imageInputSlot: '$.1.inputs.image',
+      outputNodeIds: ['2']
+    } satisfies StartComfyBatchReq
+    const runner = new ComfyBatchRunner(request, [profile('one')])
+    const internals = runner as unknown as EtaRunnerInternals
+    const observationStart = Date.now() - 4_000
+    internals.statusValue = {
+      ...internals.statusValue,
+      state: 'running',
+      total: 100,
+      pending: 96,
+      running: 4,
+      startedAt: observationStart
+    }
+    internals.recentItems.push(
+      ...Array.from({ length: 4 }, (_, index) => ({
+        relativePath: `done-${index}.png`,
+        durationMs: 1_000,
+        startedAt: observationStart + index * 1_000,
+        finishedAt: observationStart + (index + 1) * 1_000,
+        attempt: 1,
+        state: 'success' as const
+      }))
+    )
+    internals.runtimes = Array.from({ length: 4 }, (_, index) => ({
+      profile: profile(`throughput-${index}`),
+      inflight: 1,
+      compatible: true,
+      available: true
+    }))
+
+    expect(runner.status.etaMs).toBe(100_000)
+  })
 })
 
 describe('Comfy batch dispatch and output binding', () => {

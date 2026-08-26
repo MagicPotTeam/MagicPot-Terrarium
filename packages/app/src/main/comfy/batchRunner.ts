@@ -28,6 +28,9 @@ const HISTORY_TIMEOUT_MS = 24 * 60 * 60 * 1000
 const SUPERVISOR_WAIT_MS = 100
 const PROFILE_REFRESH_INTERVAL_MS = 5_000
 const PROFILE_RETRY_INTERVAL_MS = 250
+// A few completions are needed before wall-clock throughput is more reliable
+// than the configured slot count. During warm-up, keep using the capacity
+// estimate so the ETA does not jump around based on one unusually fast/slow item.
 export const NO_RUNTIME_RETRY_WINDOW_MS = 5_000
 
 export type BatchSourceFile = {
@@ -745,7 +748,9 @@ export class ComfyBatchRunner {
     const now = Date.now()
     const startedAt = this.statusValue.startedAt
     const elapsedMs = startedAt ? (this.statusValue.finishedAt || now) - startedAt : undefined
-    const measuredItems = this.recentItems
+    const measuredItems = this.recentItems.filter(
+      (item) => Number.isFinite(item.durationMs) && item.durationMs >= 0
+    )
     const totalMeasuredMs = measuredItems.reduce((sum, item) => sum + item.durationMs, 0)
     const averageItemMs = measuredItems.length ? totalMeasuredMs / measuredItems.length : undefined
     const remainingItems = Math.max(0, this.statusValue.pending + this.statusValue.running)
@@ -756,7 +761,21 @@ export class ComfyBatchRunner {
       return sum + Math.max(1, runtime.profile.maxConcurrency)
     }, 0)
     const estimatedBatches = Math.ceil(remainingItems / Math.max(1, availableConcurrency))
-    const etaMs = averageItemMs !== undefined ? averageItemMs * estimatedBatches : undefined
+    const capacityEtaMs = averageItemMs !== undefined ? averageItemMs * estimatedBatches : undefined
+    const throughputSamples = measuredItems.filter(
+      (item) =>
+        Number.isFinite(item.startedAt) &&
+        Number.isFinite(item.finishedAt) &&
+        item.finishedAt >= item.startedAt
+    )
+    let etaMs = capacityEtaMs
+    if (throughputSamples.length >= MIN_ETA_THROUGHPUT_SAMPLES) {
+      const observationStart = Math.min(...throughputSamples.map((item) => item.startedAt))
+      const observationEnd = Math.max(...throughputSamples.map((item) => item.finishedAt))
+      const observationMs = Math.max(1, observationEnd - observationStart)
+      const observedThroughputPerMs = throughputSamples.length / observationMs
+      etaMs = remainingItems > 0 ? remainingItems / observedThroughputPerMs : 0
+    }
     return {
       ...this.statusValue,
       elapsedMs,
