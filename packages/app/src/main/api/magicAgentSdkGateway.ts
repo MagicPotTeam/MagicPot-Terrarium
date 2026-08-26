@@ -792,7 +792,7 @@ export class MagicAgentSdkGateway {
         return await dispatchServiceMethod(
           this.service,
           directMethod.method,
-          directMethod.emptyPayload ? {} : request.payload
+          'emptyPayload' in directMethod ? {} : request.payload
         )
       const controls = {
         'trigger.enable': this.service.enableTrigger,
