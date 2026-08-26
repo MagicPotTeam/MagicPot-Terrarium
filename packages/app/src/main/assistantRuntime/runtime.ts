@@ -73,6 +73,7 @@ type AssistantRuntimeDeps = {
 }
 
 type AssistantToolCallRequest = Parameters<AssistantExecutionAdapter['callTool']>[2]
+type AssistantRuntimeWorkspace = ReturnType<typeof getAssistantWorkspaceState>
 
 type AssistantEventListener = (event: AssistantRunEvent) => void | Promise<void>
 
@@ -982,6 +983,29 @@ export class AssistantRuntime {
       existingWorkspace.workspaceId
 
     return getAssistantWorkspaceState(normalizedRoute, workspaceId)
+  }
+
+  private buildToolContext(
+    route: AssistantRoute,
+    workspace: AssistantRuntimeWorkspace,
+    taskState: AssistantTaskState,
+    overrides: Partial<AssistantToolCallRequest> = {}
+  ): AssistantToolCallRequest {
+    return {
+      config: this.configProvider(),
+      route,
+      sessionStore: this.sessionStore,
+      taskState,
+      workspaceMemoryFile: workspace.memoryFile,
+      workspaceTaskContextFile: workspace.taskContextFile,
+      workspaceContextFile: workspace.contextFile,
+      workspacePinnedContextFile: workspace.pinnedContextFile,
+      workspaceMetaFile: workspace.workspaceMetaFile,
+      workspaceRootDir: workspace.workspaceRootDir,
+      resumeRun: this.resumeRun.bind(this),
+      resumeWorkflow: this.resumeWorkflow.bind(this),
+      ...overrides
+    }
   }
 
   private async prepareSession(
@@ -1979,23 +2003,6 @@ export class AssistantRuntime {
         content,
         options
       )
-    const buildToolContext = (
-      overrides: Partial<AssistantToolCallRequest> = {}
-    ): AssistantToolCallRequest => ({
-      config: this.configProvider(),
-      route: normalizedRoute,
-      sessionStore: this.sessionStore,
-      taskState,
-      workspaceMemoryFile: workspace.memoryFile,
-      workspaceTaskContextFile: workspace.taskContextFile,
-      workspaceContextFile: workspace.contextFile,
-      workspacePinnedContextFile: workspace.pinnedContextFile,
-      workspaceMetaFile: workspace.workspaceMetaFile,
-      workspaceRootDir: workspace.workspaceRootDir,
-      resumeRun: this.resumeRun.bind(this),
-      resumeWorkflow: this.resumeWorkflow.bind(this),
-      ...overrides
-    })
 
     switch (normalizedCommand) {
       case 'new':
@@ -2051,7 +2058,7 @@ export class AssistantRuntime {
         const toolResult = await this.executionAdapter.callTool(
           MAGICPOT_SESSION_STATUS_TOOL_NAME,
           {},
-          buildToolContext()
+          this.buildToolContext(normalizedRoute, workspace, taskState)
         )
         return commandReply(toolResult.content, {
           taskState
@@ -2160,7 +2167,7 @@ export class AssistantRuntime {
         const toolResult = await this.executionAdapter.callTool(
           'workspace.context',
           {},
-          buildToolContext()
+          this.buildToolContext(normalizedRoute, workspace, taskState)
         )
         return commandReply(toolResult.content)
       }
@@ -2302,7 +2309,7 @@ export class AssistantRuntime {
         const toolResult = await this.executionAdapter.callTool(
           'context.pinned',
           { action: 'list' },
-          buildToolContext()
+          this.buildToolContext(normalizedRoute, workspace, taskState)
         )
         return commandReply(toolResult.content)
       }
@@ -2316,7 +2323,7 @@ export class AssistantRuntime {
             action: 'add',
             text: normalizedCommandArgs
           },
-          buildToolContext()
+          this.buildToolContext(normalizedRoute, workspace, taskState)
         )
         return commandReply(toolResult.content)
       }
@@ -2344,7 +2351,7 @@ export class AssistantRuntime {
         const toolResult = await this.executionAdapter.callTool(
           'context.pinned',
           toolArgs,
-          buildToolContext({
+          this.buildToolContext(normalizedRoute, workspace, taskState, {
             startTaskGroup: this.startTaskGroup.bind(this),
             progressTaskGroup: this.progressTaskGroup.bind(this),
             approveTaskGroup: this.approveTaskGroup.bind(this),
@@ -2702,25 +2709,14 @@ export class AssistantRuntime {
     return this.executionAdapter.callTool(
       name,
       args,
-      {
-        config: this.configProvider(),
-        route: normalizedRoute,
-        sessionStore: this.sessionStore,
-        taskState: this.getTaskState(normalizedRoute),
-        workspaceMemoryFile: workspace.memoryFile,
-        workspaceTaskContextFile: workspace.taskContextFile,
-        workspaceContextFile: workspace.contextFile,
-        workspacePinnedContextFile: workspace.pinnedContextFile,
-        workspaceMetaFile: workspace.workspaceMetaFile,
-        resumeRun: this.resumeRun.bind(this),
-        resumeWorkflow: this.resumeWorkflow.bind(this),
+      this.buildToolContext(normalizedRoute, workspace, this.getTaskState(normalizedRoute), {
         startTaskGroup: this.startTaskGroup.bind(this),
         progressTaskGroup: this.progressTaskGroup.bind(this),
         approveTaskGroup: this.approveTaskGroup.bind(this),
         exportTaskGroup: this.exportTaskGroup.bind(this),
         cancelTaskGroup: this.cancelTaskGroup.bind(this),
         resumeTaskGroup: this.resumeTaskGroup.bind(this)
-      },
+      }),
       options
     )
   }
