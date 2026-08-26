@@ -72,6 +72,8 @@ type AssistantRuntimeDeps = {
   toolRegistry?: AssistantToolRegistry
 }
 
+type AssistantToolCallRequest = Parameters<AssistantExecutionAdapter['callTool']>[2]
+
 type AssistantEventListener = (event: AssistantRunEvent) => void | Promise<void>
 
 type QueuedAssistantMessage = {
@@ -1977,6 +1979,23 @@ export class AssistantRuntime {
         content,
         options
       )
+    const buildToolContext = (
+      overrides: Partial<AssistantToolCallRequest> = {}
+    ): AssistantToolCallRequest => ({
+      config: this.configProvider(),
+      route: normalizedRoute,
+      sessionStore: this.sessionStore,
+      taskState,
+      workspaceMemoryFile: workspace.memoryFile,
+      workspaceTaskContextFile: workspace.taskContextFile,
+      workspaceContextFile: workspace.contextFile,
+      workspacePinnedContextFile: workspace.pinnedContextFile,
+      workspaceMetaFile: workspace.workspaceMetaFile,
+      workspaceRootDir: workspace.workspaceRootDir,
+      resumeRun: this.resumeRun.bind(this),
+      resumeWorkflow: this.resumeWorkflow.bind(this),
+      ...overrides
+    })
 
     switch (normalizedCommand) {
       case 'new':
@@ -2032,20 +2051,7 @@ export class AssistantRuntime {
         const toolResult = await this.executionAdapter.callTool(
           MAGICPOT_SESSION_STATUS_TOOL_NAME,
           {},
-          {
-            config: this.configProvider(),
-            route: normalizedRoute,
-            sessionStore: this.sessionStore,
-            taskState,
-            workspaceMemoryFile: workspace.memoryFile,
-            workspaceTaskContextFile: workspace.taskContextFile,
-            workspaceContextFile: workspace.contextFile,
-            workspacePinnedContextFile: workspace.pinnedContextFile,
-            workspaceMetaFile: workspace.workspaceMetaFile,
-            workspaceRootDir: workspace.workspaceRootDir,
-            resumeRun: this.resumeRun.bind(this),
-            resumeWorkflow: this.resumeWorkflow.bind(this)
-          }
+          buildToolContext()
         )
         return commandReply(toolResult.content, {
           taskState
@@ -2154,20 +2160,7 @@ export class AssistantRuntime {
         const toolResult = await this.executionAdapter.callTool(
           'workspace.context',
           {},
-          {
-            config: this.configProvider(),
-            route: normalizedRoute,
-            sessionStore: this.sessionStore,
-            taskState,
-            workspaceMemoryFile: workspace.memoryFile,
-            workspaceTaskContextFile: workspace.taskContextFile,
-            workspaceContextFile: workspace.contextFile,
-            workspacePinnedContextFile: workspace.pinnedContextFile,
-            workspaceMetaFile: workspace.workspaceMetaFile,
-            workspaceRootDir: workspace.workspaceRootDir,
-            resumeRun: this.resumeRun.bind(this),
-            resumeWorkflow: this.resumeWorkflow.bind(this)
-          }
+          buildToolContext()
         )
         return commandReply(toolResult.content)
       }
@@ -2309,20 +2302,7 @@ export class AssistantRuntime {
         const toolResult = await this.executionAdapter.callTool(
           'context.pinned',
           { action: 'list' },
-          {
-            config: this.configProvider(),
-            route: normalizedRoute,
-            sessionStore: this.sessionStore,
-            taskState,
-            workspaceMemoryFile: workspace.memoryFile,
-            workspaceTaskContextFile: workspace.taskContextFile,
-            workspaceContextFile: workspace.contextFile,
-            workspacePinnedContextFile: workspace.pinnedContextFile,
-            workspaceMetaFile: workspace.workspaceMetaFile,
-            workspaceRootDir: workspace.workspaceRootDir,
-            resumeRun: this.resumeRun.bind(this),
-            resumeWorkflow: this.resumeWorkflow.bind(this)
-          }
+          buildToolContext()
         )
         return commandReply(toolResult.content)
       }
@@ -2336,20 +2316,7 @@ export class AssistantRuntime {
             action: 'add',
             text: normalizedCommandArgs
           },
-          {
-            config: this.configProvider(),
-            route: normalizedRoute,
-            sessionStore: this.sessionStore,
-            taskState,
-            workspaceMemoryFile: workspace.memoryFile,
-            workspaceTaskContextFile: workspace.taskContextFile,
-            workspaceContextFile: workspace.contextFile,
-            workspacePinnedContextFile: workspace.pinnedContextFile,
-            workspaceMetaFile: workspace.workspaceMetaFile,
-            workspaceRootDir: workspace.workspaceRootDir,
-            resumeRun: this.resumeRun.bind(this),
-            resumeWorkflow: this.resumeWorkflow.bind(this)
-          }
+          buildToolContext()
         )
         return commandReply(toolResult.content)
       }
@@ -2374,26 +2341,18 @@ export class AssistantRuntime {
                   noteId: normalizedCommandArgs
                 }
 
-        const toolResult = await this.executionAdapter.callTool('context.pinned', toolArgs, {
-          config: this.configProvider(),
-          route: normalizedRoute,
-          sessionStore: this.sessionStore,
-          taskState,
-          workspaceMemoryFile: workspace.memoryFile,
-          workspaceTaskContextFile: workspace.taskContextFile,
-          workspaceContextFile: workspace.contextFile,
-          workspacePinnedContextFile: workspace.pinnedContextFile,
-          workspaceMetaFile: workspace.workspaceMetaFile,
-          workspaceRootDir: workspace.workspaceRootDir,
-          resumeRun: this.resumeRun.bind(this),
-          resumeWorkflow: this.resumeWorkflow.bind(this),
-          startTaskGroup: this.startTaskGroup.bind(this),
-          progressTaskGroup: this.progressTaskGroup.bind(this),
-          approveTaskGroup: this.approveTaskGroup.bind(this),
-          exportTaskGroup: this.exportTaskGroup.bind(this),
-          cancelTaskGroup: this.cancelTaskGroup.bind(this),
-          resumeTaskGroup: this.resumeTaskGroup.bind(this)
-        })
+        const toolResult = await this.executionAdapter.callTool(
+          'context.pinned',
+          toolArgs,
+          buildToolContext({
+            startTaskGroup: this.startTaskGroup.bind(this),
+            progressTaskGroup: this.progressTaskGroup.bind(this),
+            approveTaskGroup: this.approveTaskGroup.bind(this),
+            exportTaskGroup: this.exportTaskGroup.bind(this),
+            cancelTaskGroup: this.cancelTaskGroup.bind(this),
+            resumeTaskGroup: this.resumeTaskGroup.bind(this)
+          })
+        )
         return commandReply(toolResult.content)
       }
       case 'memory': {
