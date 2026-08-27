@@ -104,6 +104,19 @@ describe('ComfyHttpCli', () => {
     await expect(cli.objectInfo()).rejects.toThrow('HTTP error! status: 503')
   })
 
+  it('does not follow redirects from ComfyUI API requests', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://untrusted.example/object_info' }
+      })
+    )
+    const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never)
+
+    await expect(cli.objectInfo()).rejects.toThrow('HTTP error! status: 302')
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: 'manual' })
+  })
+
   it('sends a stable prompt id for admission recovery', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')

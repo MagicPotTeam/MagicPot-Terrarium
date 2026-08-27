@@ -69,7 +69,10 @@ export class ComfyHttpCli {
   }
 
   private request(path: string, init?: RequestInit): Promise<Response> {
-    return init ? fetch(this.url(path), init) : fetch(this.url(path))
+    return fetch(this.url(path), {
+      ...(init ?? {}),
+      redirect: 'manual'
+    })
   }
 
   /** @deprecated ComfyUI endpoints are no longer selected by a mode flag. */
