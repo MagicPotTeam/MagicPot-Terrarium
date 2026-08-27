@@ -5,10 +5,21 @@ import { describe, expect, it, vi } from 'vitest'
 const workflowPath = path.resolve(process.cwd(), '.github/workflows/nightly-bump-version.yml')
 const { readFileSync } = await vi.importActual<typeof import('node:fs')>('node:fs')
 const workflow = parse(readFileSync(workflowPath, 'utf8')) as {
+  concurrency?: {
+    group?: string
+    'cancel-in-progress'?: boolean
+  }
   jobs: Record<string, { needs?: string | string[] } | undefined>
 }
 
 describe('nightly bump workflow', () => {
+  it('serializes runs that share the release branch', () => {
+    expect(workflow.concurrency).toEqual({
+      group: 'nightly-bump-version',
+      'cancel-in-progress': false
+    })
+  })
+
   it('validates the bumped candidate without repeating master CI and build', () => {
     expect(workflow.jobs.ci).toBeUndefined()
     expect(workflow.jobs.build).toBeUndefined()
