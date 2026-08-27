@@ -236,6 +236,7 @@ jobs:
           set -euo pipefail
 
           PR_NUMBER=$(gh pr list \
+            --repo "${{ github.repository }}" \
             --base master \
             --head "$RELEASE_BRANCH" \
             --state open \
@@ -255,16 +256,19 @@ jobs:
 
           if [ -n "$PR_NUMBER" ]; then
             gh pr edit "$PR_NUMBER" \
+              --repo "${{ github.repository }}" \
               --title "${{ needs.bump-version.outputs.commit_message }}" \
               --body "$PR_BODY"
           else
             gh pr create \
+              --repo "${{ github.repository }}" \
               --base master \
               --head "$RELEASE_BRANCH" \
               --title "${{ needs.bump-version.outputs.commit_message }}" \
               --body "$PR_BODY"
 
             PR_NUMBER=$(gh pr list \
+              --repo "${{ github.repository }}" \
               --base master \
               --head "$RELEASE_BRANCH" \
               --state open \
