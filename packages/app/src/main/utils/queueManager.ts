@@ -116,8 +116,13 @@ export class QueueManager<T> {
     this.intervalId = setInterval(() => {
       void this.loop()
     }, this.intervalMs)
+    this.wake()
 
     console.log('[QueueManager] start: started')
+  }
+
+  wake(): void {
+    void this.loop()
   }
 
   stop(): void {

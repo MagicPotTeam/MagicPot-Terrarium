@@ -36,7 +36,7 @@ const createSource = (items: Item[]) => {
     error: vi.fn(),
     queueLength: () => pending.length
   }
-  return { source, done }
+  return { source, done, enqueue: (item: Item) => pending.push(item) }
 }
 
 const flushPromises = async (): Promise<void> => {
@@ -75,6 +75,23 @@ describe('QueueManager stop/start concurrency', () => {
     expect(done).toHaveBeenCalledWith(first)
     await vi.advanceTimersByTimeAsync(100)
     expect(execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('wakes immediately when a task arrives while the queue is running', async () => {
+    vi.useFakeTimers()
+    const item = { id: 'new-task' }
+    const { source, enqueue } = createSource([])
+    const execute = vi.fn(async (next: Item) => next)
+    const manager = new QueueManager(source, execute, 1_000)
+
+    manager.start()
+    enqueue(item)
+    manager.wake()
+    await flushPromises()
+
+    expect(execute).toHaveBeenCalledOnce()
+    expect(execute).toHaveBeenCalledWith(item)
+    manager.stop()
   })
 
   it('does not execute the active task again when restarted before it finishes', async () => {

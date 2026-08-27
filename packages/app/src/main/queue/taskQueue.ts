@@ -646,7 +646,9 @@ export async function stopTaskQueue() {
 }
 
 export function addTask(task: Task): string {
-  return taskSource.add(task)
+  const id = taskSource.add(task)
+  taskQueue.wake()
+  return id
 }
 
 export function getTask(id: string) {

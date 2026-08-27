@@ -425,6 +425,26 @@ describe('ComfySvcImpl', () => {
   })
 
   describe('submitWorkflow', () => {
+    it('submits workflows without LoRA nodes without waiting for object info', async () => {
+      const svc = new ComfySvcImpl()
+      const objectInfoMock = vi.fn().mockResolvedValue({})
+      setComfyCli(svc, { objectInfo: objectInfoMock })
+
+      const postPromptSpy = vi.spyOn(svc, 'postPrompt').mockResolvedValue({
+        prompt_id: 'prompt-no-lora'
+      })
+
+      await svc.submitWorkflow({
+        prompt: {
+          '1': { class_type: 'KSampler', inputs: {} }
+        },
+        clientId: 'renderer-qapp'
+      })
+
+      expect(objectInfoMock).not.toHaveBeenCalled()
+      expect(postPromptSpy).toHaveBeenCalledOnce()
+    })
+
     it('falls back to the shared session key when no explicit client id is provided', async () => {
       const svc = new ComfySvcImpl()
       setObjectInfoMock(svc)
