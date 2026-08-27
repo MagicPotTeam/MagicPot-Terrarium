@@ -95,6 +95,15 @@ describe('ComfyHttpCli', () => {
     )
   })
 
+  it('rejects failed GET responses instead of parsing error payloads as success', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      Response.json({ error: 'ComfyUI unavailable' }, { status: 503 })
+    )
+    const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never)
+
+    await expect(cli.objectInfo()).rejects.toThrow('HTTP error! status: 503')
+  })
+
   it('sends a stable prompt id for admission recovery', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')

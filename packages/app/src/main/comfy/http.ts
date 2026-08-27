@@ -79,6 +79,9 @@ export class ComfyHttpCli {
 
   private async get<RESP>(path: string, signal?: AbortSignal): Promise<RESP> {
     const response = await this.request(path, signal ? { signal } : undefined)
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
     return response.json() as Promise<RESP>
   }
 
