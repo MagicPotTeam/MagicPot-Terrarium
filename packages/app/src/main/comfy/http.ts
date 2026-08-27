@@ -61,6 +61,9 @@ export class ComfyHttpCli {
     ) {
       throw new Error('Invalid ComfyUI base URL')
     }
+    if (!origin.pathname.endsWith('/')) {
+      origin.pathname += '/'
+    }
     return origin.href
   }
 

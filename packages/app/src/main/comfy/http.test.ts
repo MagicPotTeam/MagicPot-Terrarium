@@ -95,6 +95,21 @@ describe('ComfyHttpCli', () => {
     )
   })
 
+  it('preserves a base path when the configured URL omits its trailing slash', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(Response.json({}, { status: 200 }))
+    const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never, {
+      baseUrl: 'https://example.test/autodl/comfy'
+    })
+
+    await cli.objectInfo()
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      'https://example.test/autodl/comfy/object_info'
+    )
+  })
+
   it('rejects failed GET responses instead of parsing error payloads as success', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       Response.json({ error: 'ComfyUI unavailable' }, { status: 503 })
