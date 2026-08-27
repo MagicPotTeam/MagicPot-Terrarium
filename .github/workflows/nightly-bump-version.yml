@@ -96,29 +96,8 @@ jobs:
             echo "release_mode=bump" >> "$GITHUB_OUTPUT"
           fi
 
-  ci:
-    needs: check-commits
-    if: needs.check-commits.outputs.release_mode == 'bump' || needs.check-commits.outputs.release_mode == 'initial'
-    permissions:
-      contents: read
-    uses: ./.github/workflows/call-ci.yml
-    with:
-      ref: refs/heads/master
-
-  build:
-    needs: check-commits
-    if: needs.check-commits.outputs.release_mode == 'bump' || needs.check-commits.outputs.release_mode == 'initial'
-    permissions:
-      contents: read
-    uses: ./.github/workflows/call-build.yml
-    with:
-      ref: refs/heads/master
-
   bump-version:
-    needs:
-      - check-commits
-      - ci
-      - build
+    needs: check-commits
     if: needs.check-commits.outputs.release_mode == 'bump' || needs.check-commits.outputs.release_mode == 'initial'
     runs-on: ubuntu-latest
     permissions:
