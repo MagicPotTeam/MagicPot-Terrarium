@@ -14,6 +14,7 @@ import { attachRendererDiagnostics } from './rendererDiagnostics'
 import { winController } from './winControls'
 import { attachWindowStatePersistence, readWindowState, type WindowState } from './windowState'
 import { normalizeAllowedExternalUrl } from './utils/externalUrl'
+import { isTrustedRendererNavigation } from './utils/rendererNavigation'
 import { authorizeScopedLocalMediaPath } from './localMediaAccess'
 import {
   registerMagicAgentTrustedRouteBinding,
@@ -177,6 +178,15 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
     if (!testUiPolicy.hideWindow) {
       showWindowForTestPolicy(mainWindow)
     }
+  })
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isTrustedRendererNavigation(url, trustedRendererUrl)) {
+      return
+    }
+
+    event.preventDefault()
+    console.warn('[App] blocked untrusted renderer navigation:', url)
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
