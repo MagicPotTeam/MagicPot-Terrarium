@@ -37,7 +37,6 @@ const llamaCppWheelSha256 =
 const transformersVersion = process.env.EMBEDDED_TRANSFORMERS_VERSION || '4.57.6'
 const huggingfaceHubVersion = process.env.EMBEDDED_HUGGINGFACE_HUB_VERSION || '0.36.2'
 const decoratorVersion = process.env.EMBEDDED_DECORATOR_VERSION || '4.4.2'
-const tipoKgenVersion = process.env.EMBEDDED_TIPO_KGEN_VERSION || '0.3.1'
 
 const skipTorch = process.env.EMBEDDED_SKIP_TORCH === '1'
 const skipSmoke = process.env.EMBEDDED_SKIP_SMOKE === '1'
@@ -225,7 +224,6 @@ function writeConstraints() {
       `transformers==${transformersVersion}`,
       `huggingface-hub==${huggingfaceHubVersion}`,
       `decorator==${decoratorVersion}`,
-      `tipo-kgen==${tipoKgenVersion}`,
       'numpy<2.5',
       ''
     ].join('\n')
@@ -373,14 +371,6 @@ async function ensureVerifiedLlamaCppWheel() {
 
 function installVerifiedLlamaCppWheel(wheelPath) {
   pip(['install', '--upgrade', '--force-reinstall', '--no-deps', wheelPath])
-}
-
-function verifyPinnedTipoRuntime() {
-  run(pythonExe(), [
-    '-s',
-    '-c',
-    `import importlib.metadata; import kgen; import llama_cpp; assert importlib.metadata.version('tipo-kgen') == '${tipoKgenVersion}'; assert importlib.metadata.version('llama-cpp-python') == '${llamaCppPythonVersion}'; info = llama_cpp.llama_print_system_info().decode(); print(info); assert 'AVX512 = 1' not in info, info`
-  ])
 }
 
 function installSmokeRuntimeExtras() {
@@ -640,8 +630,7 @@ async function main() {
             `llama-cpp-python==${llamaCppPythonVersion}`,
             `transformers==${transformersVersion}`,
             `huggingface-hub==${huggingfaceHubVersion}`,
-            `decorator==${decoratorVersion}`,
-            `tipo-kgen==${tipoKgenVersion}`
+            `decorator==${decoratorVersion}`
           ],
           requirementsMode,
           pruneRuntime,
@@ -677,7 +666,6 @@ async function main() {
   runPhase('install-requirements', () => installRequirements(constraintsPath))
   runPhase('install-smoke-extras', installSmokeRuntimeExtras)
   runPhase('install-verified-llama-cpp', () => installVerifiedLlamaCppWheel(llamaCppWheelPath))
-  runPhase('verify-tipo-runtime', verifyPinnedTipoRuntime)
   runPhase('prune-runtime', pruneEmbeddedRuntime)
   runPhase('remove-python-caches-before-smoke', removePythonCaches)
   runPhase('comfy-quick-test', smokeTest)

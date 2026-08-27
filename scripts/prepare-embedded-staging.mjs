@@ -15,6 +15,7 @@ const localComfyRepo = fs.existsSync(path.join(portableSrc, 'ComfyUI'))
 const comfyDst = path.join(stagingRoot, 'ComfyUI')
 const customNodesSrc = path.join(portableSrc, 'comfyui_data', 'custom_nodes')
 const customNodesDst = path.join(comfyDst, 'custom_nodes')
+const excludedCustomNodeNames = new Set(['z-tipo-extension'])
 
 const modelFileExtensions = new Set([
   '.safetensors',
@@ -89,6 +90,9 @@ function shouldSkipRepositoryMetadata(parts, fileName) {
 
 function shouldSkipCustomNodeSource(sourcePath, fileName) {
   const parts = pathParts(customNodesSrc, sourcePath)
+  if (parts.length > 0 && excludedCustomNodeNames.has(parts[0])) {
+    return true
+  }
   if (shouldSkipRepositoryMetadata(parts, fileName)) {
     return true
   }
