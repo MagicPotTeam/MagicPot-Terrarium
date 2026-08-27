@@ -132,18 +132,39 @@ export default function ComfyBatchProfileEditor({
                   />
                 }
                 label={
-                  <Typography variant="body2" color={probe?.ok ? 'success.main' : 'error.main'}>
+                  <Typography
+                    variant="body2"
+                    color={
+                      probe?.ok
+                        ? 'success.main'
+                        : probe?.ok === false
+                          ? 'error.main'
+                          : 'text.secondary'
+                    }
+                  >
                     {getComfyProfileStatusLabel(probe)}
                   </Typography>
                 }
               />
-              <TextField
-                size="small"
-                label={t('qapp.batch.url', profileText.url)}
-                value={profile.baseUrl}
-                onChange={(event) => updateProfile(profile.id, { baseUrl: event.target.value })}
-                sx={{ flex: 1, minWidth: 240 }}
-              />
+              <Stack spacing={0.25} sx={{ flex: 1, minWidth: 240 }}>
+                <TextField
+                  size="small"
+                  label={t('qapp.batch.url', profileText.url)}
+                  value={profile.baseUrl}
+                  onChange={(event) => updateProfile(profile.id, { baseUrl: event.target.value })}
+                  sx={{ width: '100%' }}
+                />
+                {probe && !probe.ok && probe.error ? (
+                  <Typography
+                    role="alert"
+                    variant="caption"
+                    color="error.main"
+                    sx={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}
+                  >
+                    {probe.error}
+                  </Typography>
+                ) : null}
+              </Stack>
               <TextField
                 size="small"
                 type="number"

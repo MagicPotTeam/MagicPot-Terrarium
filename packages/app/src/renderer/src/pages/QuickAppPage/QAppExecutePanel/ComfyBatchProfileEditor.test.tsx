@@ -76,4 +76,23 @@ describe('ComfyBatchProfileEditor', () => {
       baseUrl: profiles[1].baseUrl
     })
   })
+
+  it('renders a probe error below its address field', async () => {
+    const errorMessage = 'ComfyUI HTTP 404: endpoint not found'
+    apiMock.svcComfyBatch.probeProfile.mockRejectedValueOnce(new Error(errorMessage))
+    render(<ComfyBatchProfileEditor profiles={profiles} onProfilesChange={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test' }))
+
+    const error = await screen.findByRole('alert')
+    const address = screen.getByDisplayValue(profiles[0].baseUrl)
+    const concurrency = screen.getAllByRole('spinbutton', { name: 'Concurrency' })[0]
+    expect(concurrency).toBeTruthy()
+    expect(error).toHaveTextContent(errorMessage)
+    expect(screen.getAllByText(errorMessage)).toHaveLength(1)
+    expect(address.compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(
+      error.compareDocumentPosition(concurrency) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
 })

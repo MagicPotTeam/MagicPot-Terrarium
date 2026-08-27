@@ -227,19 +227,23 @@ describe('PanelEnvironment', () => {
     })
     render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={vi.fn()} />)
 
+    await screen.findByDisplayValue('https://comfy.example.com')
     fireEvent.click(await screen.findByRole('button', { name: 'Test' }))
 
     expect(await screen.findByRole('switch', { name: '7 ms' })).toBeTruthy()
     expect(screen.queryByText('Enabled')).toBeNull()
   })
 
-  it('shows probe errors beside the ComfyUI startup switch', async () => {
+  it('shows probe errors below the ComfyUI endpoint field', async () => {
     apiMock.svcComfyBatch.probeProfile.mockRejectedValueOnce(new Error('fetch failed'))
     render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={vi.fn()} />)
 
+    const endpoint = await screen.findByDisplayValue('https://comfy.example.com')
     fireEvent.click(await screen.findByRole('button', { name: 'Test' }))
 
-    expect(await screen.findByRole('switch', { name: 'fetch failed' })).toBeTruthy()
+    const error = await screen.findByText('fetch failed')
+    expect(endpoint.compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByRole('switch', { name: 'fetch failed' })).toBeNull()
     expect(screen.queryByText('Enabled')).toBeNull()
   })
 })

@@ -11,9 +11,7 @@ describe('Comfy batch profile status label', () => {
     expect(getComfyProfileStatusLabel({ ok: false, latencyMs: 0 })).toBe('')
   })
 
-  it('shows probe errors beside the startup switch', () => {
-    expect(getComfyProfileStatusLabel({ ok: false, latencyMs: 0, error: 'fetch failed' })).toBe(
-      'fetch failed'
-    )
+  it('keeps probe errors out of the startup switch status label', () => {
+    expect(getComfyProfileStatusLabel({ ok: false, latencyMs: 0, error: 'fetch failed' })).toBe('')
   })
 })
