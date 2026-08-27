@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import PanelEnvironment from './PanelEnvironment'
@@ -215,5 +215,31 @@ describe('PanelEnvironment', () => {
     expect(await screen.findByDisplayValue('https://comfy.example.com')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Add instance' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'ComfyUI Mode' })).toBeNull()
+  })
+
+  it('shows probe latency beside the ComfyUI startup switch instead of Enabled', async () => {
+    apiMock.svcComfyBatch.probeProfile.mockResolvedValueOnce({
+      result: {
+        ok: true,
+        baseUrl: 'https://comfy.example.com',
+        latencyMs: 7
+      }
+    })
+    render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Test' }))
+
+    expect(await screen.findByRole('switch', { name: '7 ms' })).toBeTruthy()
+    expect(screen.queryByText('Enabled')).toBeNull()
+  })
+
+  it('shows probe errors beside the ComfyUI startup switch', async () => {
+    apiMock.svcComfyBatch.probeProfile.mockRejectedValueOnce(new Error('fetch failed'))
+    render(<PanelEnvironment settingsValue={DEFAULT_CONFIG} saveSettings={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Test' }))
+
+    expect(await screen.findByRole('switch', { name: 'fetch failed' })).toBeTruthy()
+    expect(screen.queryByText('Enabled')).toBeNull()
   })
 })

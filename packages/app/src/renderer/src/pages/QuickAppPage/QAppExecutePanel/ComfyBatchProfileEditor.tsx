@@ -5,9 +5,9 @@ import { api } from '@renderer/utils/windowUtils'
 import type { ComfyBatchProfile, ComfyBatchProbeResult } from '@shared/api/svcComfyBatch'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { getComfyProfileStatusLabel } from './comfyBatchProfileDisplay'
 
 const profileText = {
-  enabled: 'Enabled',
   url: 'URL',
   concurrency: 'Concurrency',
   test: 'Test',
@@ -112,7 +112,11 @@ export default function ComfyBatchProfileEditor({
                     onChange={(_, enabled) => updateProfile(profile.id, { enabled })}
                   />
                 }
-                label={t('qapp.batch.enabled', profileText.enabled)}
+                label={
+                  <Typography variant="body2" color={probe?.ok ? 'success.main' : 'error.main'}>
+                    {getComfyProfileStatusLabel(probe)}
+                  </Typography>
+                }
               />
               <TextField
                 size="small"
@@ -147,11 +151,6 @@ export default function ComfyBatchProfileEditor({
                 <Delete />
               </Button>
             </Stack>
-            {probe && (
-              <Typography variant="caption" color={probe.ok ? 'success.main' : 'error.main'}>
-                {probe.ok ? `${probe.latencyMs} ms` : probe.error}
-              </Typography>
-            )}
           </Stack>
         )
       })}
