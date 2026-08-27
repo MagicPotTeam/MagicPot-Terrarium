@@ -1098,11 +1098,7 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
         },
         history: async (promptId: string) => {
           if (id === 'first') {
-            throw new ComfyBatchHttpError(
-              'ComfyUI HTTP 404: <!DOCTYPE html><html><title>Not Found</title></html>',
-              false,
-              404
-            )
+            throw new ComfyBatchHttpError('ComfyUI HTTP 404', false, 404)
           }
           return {
             [promptId]: {

@@ -161,9 +161,8 @@ export class ComfyBatchHttpClient {
         })
         requireSafeResponse(response)
         if (!response.ok) {
-          const detail = (await response.text().catch(() => '')).slice(0, 1000)
           throw new ComfyBatchHttpError(
-            `ComfyUI HTTP ${response.status}${detail ? `: ${detail}` : ''}`,
+            `ComfyUI HTTP ${response.status}`,
             isRetryableStatus(response.status),
             response.status
           )
