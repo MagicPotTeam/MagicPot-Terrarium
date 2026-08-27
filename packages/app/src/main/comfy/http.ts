@@ -242,7 +242,8 @@ export class ComfyHttpCli {
 
   connect(): WebSocket {
     const host = this.host()
-    const urlObj = new URL(`ws?clientId=${this.clientId}`, host)
+    const urlObj = new URL('ws', host)
+    urlObj.searchParams.set('clientId', this.clientId)
     const schema = urlObj.protocol === 'https:' ? 'wss:' : 'ws:'
     urlObj.protocol = schema
     const url = urlObj.href

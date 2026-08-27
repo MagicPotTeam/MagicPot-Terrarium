@@ -174,4 +174,15 @@ describe('ComfyHttpCli', () => {
     const firstConnectCall = webSocketCtor.mock.calls[0] as unknown[] | undefined
     expect(String(firstConnectCall?.[0] ?? '')).toContain('clientId=renderer-session')
   })
+
+  it('encodes special characters in websocket client ids', () => {
+    const clientId = 'renderer/session?slot=1&region=cn'
+    const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never, { clientId })
+
+    cli.connect()
+
+    const firstConnectCall = webSocketCtor.mock.calls[0] as unknown[] | undefined
+    const connectUrl = new URL(String(firstConnectCall?.[0] ?? ''))
+    expect(connectUrl.searchParams.get('clientId')).toBe(clientId)
+  })
 })
