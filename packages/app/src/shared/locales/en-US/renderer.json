@@ -137,7 +137,7 @@
       "projects_subdirectory": "Projects",
       "autosave_subdirectory": "Automatic exports"
     },
-    "comfyui_title": "ComfyUI Settings",
+    "comfyui_title": "ComfyUI",
     "comfyui_desc": "Configure the unified ComfyUI endpoint. The default is http://127.0.0.1:8188; add more endpoints below.",
     "comfyui_origin_label": "ComfyUI Endpoint",
     "comfyui_mapping_dir_label": "ComfyUI Mapping Directory",

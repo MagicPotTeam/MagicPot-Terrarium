@@ -3,9 +3,13 @@ import { Button, FormControlLabel, Stack, Switch, TextField, Typography } from '
 import { useMessage } from '@renderer/hooks/useMessage'
 import { api } from '@renderer/utils/windowUtils'
 import type { ComfyBatchProfile, ComfyBatchProbeResult } from '@shared/api/svcComfyBatch'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { getComfyProfileStatusLabel } from './comfyBatchProfileDisplay'
+import {
+  type ComfyBatchProfileProbeState,
+  useComfyBatchProfileProbe
+} from './comfyBatchProfileProbe'
 
 const profileText = {
   url: 'URL',
@@ -25,18 +29,43 @@ const newProfile = (): ComfyBatchProfile => ({
 type ComfyBatchProfileEditorProps = {
   profiles: ComfyBatchProfile[]
   onProfilesChange: (profiles: ComfyBatchProfile[]) => void
+  probeResults?: Record<string, ComfyBatchProbeResult>
+  isProbingAll?: boolean
+  onProbeAll?: () => void | Promise<void>
+  showTestButton?: boolean
+}
+
+export function ComfyBatchProfileTestButton({
+  isProbingAll,
+  onTest
+}: Pick<ComfyBatchProfileProbeState, 'isProbingAll'> & {
+  onTest: () => void | Promise<void>
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <Button startIcon={<Science />} onClick={() => void onTest()} disabled={isProbingAll}>
+      {t('qapp.batch.test', profileText.test)}
+    </Button>
+  )
 }
 
 export default function ComfyBatchProfileEditor({
   profiles,
-  onProfilesChange
+  onProfilesChange,
+  probeResults,
+  isProbingAll,
+  onProbeAll,
+  showTestButton
 }: ComfyBatchProfileEditorProps) {
   const { t } = useTranslation()
   const { notifyError } = useMessage()
-  const [probeResults, setProbeResults] = useState<Record<string, ComfyBatchProbeResult>>({})
-  const [isProbingAll, setIsProbingAll] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const saveRevisionRef = useRef(0)
+  const internalProbeState = useComfyBatchProfileProbe(profiles)
+  const displayedProbeResults = probeResults ?? internalProbeState.probeResults
+  const displayedIsProbingAll = isProbingAll ?? internalProbeState.isProbingAll
+  const probeAll = onProbeAll ?? internalProbeState.probeAllProfiles
 
   const autoSaveProfiles = useCallback(
     (nextProfiles: ComfyBatchProfile[]) => {
@@ -70,53 +99,15 @@ export default function ComfyBatchProfileEditor({
     [autoSaveProfiles, profiles]
   )
 
-  const probeProfile = useCallback(async (profile: ComfyBatchProfile) => {
-    try {
-      const result = await api().svcComfyBatch.probeProfile({ baseUrl: profile.baseUrl })
-      setProbeResults((current) => ({ ...current, [profile.id]: result.result }))
-    } catch (error) {
-      setProbeResults((current) => ({
-        ...current,
-        [profile.id]: {
-          ok: false,
-          baseUrl: profile.baseUrl,
-          latencyMs: 0,
-          error: error instanceof Error ? error.message : String(error)
-        }
-      }))
-    }
-  }, [])
-
-  const probeAllProfiles = useCallback(async () => {
-    setIsProbingAll(true)
-    try {
-      await Promise.all(profiles.map((profile) => probeProfile(profile)))
-    } finally {
-      setIsProbingAll(false)
-    }
-  }, [probeProfile, profiles])
-
-  useEffect(() => {
-    setProbeResults((current) =>
-      Object.fromEntries(
-        Object.entries(current).filter(([id]) => profiles.some((p) => p.id === id))
-      )
-    )
-  }, [profiles])
-
   return (
     <Stack spacing={1.5}>
-      <Stack direction="row" justifyContent="flex-end">
-        <Button
-          startIcon={<Science />}
-          onClick={() => void probeAllProfiles()}
-          disabled={isProbingAll}
-        >
-          {t('qapp.batch.test', profileText.test)}
-        </Button>
-      </Stack>
+      {showTestButton !== false ? (
+        <Stack direction="row" justifyContent="flex-end">
+          <ComfyBatchProfileTestButton isProbingAll={displayedIsProbingAll} onTest={probeAll} />
+        </Stack>
+      ) : null}
       {profiles.map((profile) => {
-        const probe = probeResults[profile.id]
+        const probe = displayedProbeResults[profile.id]
         return (
           <Stack key={profile.id} spacing={0.5}>
             <Stack

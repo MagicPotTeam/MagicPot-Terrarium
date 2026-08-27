@@ -7,7 +7,7 @@ import PanelEnvironment from './PanelEnvironment'
 const translations: Record<string, string> = {
   'llm.proxy_mode_title': '魔壶代理模式',
   'llm.proxy_mode_desc': '魔壶代理模式说明',
-  'environment.comfyui_title': 'ComfyUI Settings',
+  'environment.comfyui_title': 'ComfyUI',
   'environment.comfyui_desc': 'Unified ComfyUI endpoint',
   'environment.comfy_batch_profiles_title': 'ComfyUI Instances',
   'environment.setup_title': 'Environment Setup',
@@ -108,9 +108,20 @@ vi.mock('@renderer/store', () => ({
 }))
 
 vi.mock('./components/SettingSection', () => ({
-  default: ({ title, children }: { title?: ReactNode; children: ReactNode }) => (
+  default: ({
+    title,
+    action,
+    children
+  }: {
+    title?: ReactNode
+    action?: ReactNode
+    children: ReactNode
+  }) => (
     <section>
-      {title ? <h2>{title}</h2> : null}
+      <header>
+        {title ? <h2>{title}</h2> : null}
+        {action}
+      </header>
       {children}
     </section>
   )
@@ -190,9 +201,8 @@ describe('PanelEnvironment', () => {
       />
     )
 
-    const comfySection = (await screen.findByRole('heading', { name: 'ComfyUI Settings' })).closest(
-      'section'
-    )
+    const comfyHeading = await screen.findByRole('heading', { name: 'ComfyUI' })
+    const comfySection = comfyHeading.closest('section')
     const proxySection = (await screen.findByRole('heading', { name: '魔壶代理模式' })).closest(
       'section'
     )
@@ -206,6 +216,10 @@ describe('PanelEnvironment', () => {
       comfySection.compareDocumentPosition(proxySection) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
     expect(screen.getAllByText('ComfyUI Endpoint').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Unified ComfyUI endpoint')).toBeNull()
+    expect(screen.queryByText('Separate ComfyUI endpoints')).toBeNull()
+    const testButton = screen.getByRole('button', { name: 'Test' })
+    expect(comfyHeading.parentElement?.contains(testButton)).toBe(true)
     expect(await screen.findByRole('heading', { name: 'Environment Setup' })).toBeTruthy()
     expect(screen.getAllByText('Python Command').length).toBeGreaterThan(0)
     expect(screen.getAllByText('ComfyUI Directory').length).toBeGreaterThan(0)
