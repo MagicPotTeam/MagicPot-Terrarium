@@ -36,11 +36,11 @@ const SCAN_READ_CONCURRENCY = 4
 // than the configured slot count. During warm-up, keep using the capacity
 // estimate so the ETA does not jump around based on one unusually fast/slow item.
 const MIN_ETA_THROUGHPUT_SAMPLES = 3
-// Keep one extra prompt queued behind the configured execution slots for each
-// instance. ComfyUI can take a noticeable amount of time to accept the next
-// prompt; this small admission window prevents a GPU from going idle while the
-// client is waiting for the previous request to leave the HTTP/WebSocket boundary.
-const COMFY_BATCH_QUEUE_HEADROOM = 1
+// Admit up to twice the configured execution slots for each instance. ComfyUI
+// can take a noticeable amount of time to accept the next prompt; the doubled
+// admission window keeps a GPU busy while the client waits at the HTTP/WebSocket
+// boundary.
+const COMFY_BATCH_EXECUTION_MULTIPLIER = 2
 // Keep one additional item in the local read/upload preparation stage. This
 // lets a slow source drive or remote upload stay ahead of the GPU without
 // allowing an unbounded number of prepared buffers to accumulate.
@@ -946,7 +946,7 @@ export class LeastLoadRoundRobinScheduler<
         return false
       }
       const executionCapacity =
-        Math.max(1, instance.profile.maxConcurrency) + COMFY_BATCH_QUEUE_HEADROOM
+        Math.max(1, instance.profile.maxConcurrency) * COMFY_BATCH_EXECUTION_MULTIPLIER
       const admitted = instance.inflight + (instance.preparing || 0)
       // Only use the extra preparation slot while no prompt has reached
       // ComfyUI yet. Once execution is admitted, retain the original total

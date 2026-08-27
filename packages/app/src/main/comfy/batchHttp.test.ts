@@ -55,6 +55,21 @@ describe('ComfyBatchHttpClient retry and boundary behavior', () => {
     expect(JSON.parse(String(init.body))).toMatchObject({ prompt_id: 'known-prompt-id' })
   })
 
+  it('reports only the HTTP status for non-success responses', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('<!DOCTYPE html><html><h1>404 Not Found</h1></html>', {
+        status: 404,
+        headers: { 'content-type': 'text/html' }
+      })
+    )
+    const client = new ComfyBatchHttpClient('http://127.0.0.1:8188', fetchMock as typeof fetch)
+
+    const error = await client.objectInfo().catch((reason: unknown) => reason)
+
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe('ComfyUI HTTP 404')
+  })
+
   it('accepts the server prompt_id even when it differs from the client request value', async () => {
     const fetchMock = vi
       .fn()

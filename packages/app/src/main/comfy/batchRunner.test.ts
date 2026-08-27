@@ -425,12 +425,24 @@ describe('Comfy batch dispatch and output binding', () => {
     expect(scheduler.pick(runtimes)?.profile.id).toBe('b')
   })
 
-  it('keeps one extra item queued for a single-slot instance', () => {
+  it('allows doubled execution capacity for a single-slot instance', () => {
     const scheduler = new LeastLoadRoundRobinScheduler<Runtime>()
     const instance = runtime('single-slot', 1)
 
     expect(scheduler.pick([instance])?.profile.id).toBe('single-slot')
     instance.inflight = 2
+    expect(scheduler.pick([instance])).toBeNull()
+  })
+
+  it('allows twice the configured execution concurrency', () => {
+    const scheduler = new LeastLoadRoundRobinScheduler<Runtime>()
+    const instance = runtime('double-slot')
+    instance.profile.maxConcurrency = 2
+
+    for (let index = 0; index < 4; index += 1) {
+      expect(scheduler.pick([instance])).not.toBeNull()
+      instance.inflight += 1
+    }
     expect(scheduler.pick([instance])).toBeNull()
   })
 
@@ -1098,11 +1110,7 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
         },
         history: async (promptId: string) => {
           if (id === 'first') {
-            throw new ComfyBatchHttpError(
-              'ComfyUI HTTP 404: <!DOCTYPE html><html><title>Not Found</title></html>',
-              false,
-              404
-            )
+            throw new ComfyBatchHttpError('ComfyUI HTTP 404', false, 404)
           }
           return {
             [promptId]: {
