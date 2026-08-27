@@ -34,6 +34,7 @@ export default function ComfyBatchProfileEditor({
   const { t } = useTranslation()
   const { notifyError } = useMessage()
   const [probeResults, setProbeResults] = useState<Record<string, ComfyBatchProbeResult>>({})
+  const [isProbingAll, setIsProbingAll] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const saveRevisionRef = useRef(0)
 
@@ -86,6 +87,15 @@ export default function ComfyBatchProfileEditor({
     }
   }, [])
 
+  const probeAllProfiles = useCallback(async () => {
+    setIsProbingAll(true)
+    try {
+      await Promise.all(profiles.map((profile) => probeProfile(profile)))
+    } finally {
+      setIsProbingAll(false)
+    }
+  }, [probeProfile, profiles])
+
   useEffect(() => {
     setProbeResults((current) =>
       Object.fromEntries(
@@ -96,6 +106,15 @@ export default function ComfyBatchProfileEditor({
 
   return (
     <Stack spacing={1.5}>
+      <Stack direction="row" justifyContent="flex-end">
+        <Button
+          startIcon={<Science />}
+          onClick={() => void probeAllProfiles()}
+          disabled={isProbingAll}
+        >
+          {t('qapp.batch.test', profileText.test)}
+        </Button>
+      </Stack>
       {profiles.map((profile) => {
         const probe = probeResults[profile.id]
         return (
@@ -138,9 +157,6 @@ export default function ComfyBatchProfileEditor({
                 }
                 sx={{ width: 90 }}
               />
-              <Button startIcon={<Science />} onClick={() => void probeProfile(profile)}>
-                {t('qapp.batch.test', profileText.test)}
-              </Button>
               <Button
                 color="error"
                 aria-label={t('qapp.batch.delete_instance', profileText.delete)}
