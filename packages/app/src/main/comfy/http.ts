@@ -61,6 +61,9 @@ export class ComfyHttpCli {
     ) {
       throw new Error('Invalid ComfyUI base URL')
     }
+    if (!origin.pathname.endsWith('/')) {
+      origin.pathname += '/'
+    }
     return origin.href
   }
 
@@ -69,7 +72,10 @@ export class ComfyHttpCli {
   }
 
   private request(path: string, init?: RequestInit): Promise<Response> {
-    return init ? fetch(this.url(path), init) : fetch(this.url(path))
+    return fetch(this.url(path), {
+      ...(init ?? {}),
+      redirect: 'manual'
+    })
   }
 
   /** @deprecated ComfyUI endpoints are no longer selected by a mode flag. */
@@ -79,6 +85,9 @@ export class ComfyHttpCli {
 
   private async get<RESP>(path: string, signal?: AbortSignal): Promise<RESP> {
     const response = await this.request(path, signal ? { signal } : undefined)
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
     return response.json() as Promise<RESP>
   }
 
@@ -236,7 +245,8 @@ export class ComfyHttpCli {
 
   connect(): WebSocket {
     const host = this.host()
-    const urlObj = new URL(`ws?clientId=${this.clientId}`, host)
+    const urlObj = new URL('ws', host)
+    urlObj.searchParams.set('clientId', this.clientId)
     const schema = urlObj.protocol === 'https:' ? 'wss:' : 'ws:'
     urlObj.protocol = schema
     const url = urlObj.href

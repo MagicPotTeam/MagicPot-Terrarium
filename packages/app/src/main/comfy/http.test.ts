@@ -95,6 +95,43 @@ describe('ComfyHttpCli', () => {
     )
   })
 
+  it('preserves a base path when the configured URL omits its trailing slash', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(Response.json({}, { status: 200 }))
+    const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never, {
+      baseUrl: 'https://example.test/autodl/comfy'
+    })
+
+    await cli.objectInfo()
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      'https://example.test/autodl/comfy/object_info'
+    )
+  })
+
+  it('rejects failed GET responses instead of parsing error payloads as success', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      Response.json({ error: 'ComfyUI unavailable' }, { status: 503 })
+    )
+    const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never)
+
+    await expect(cli.objectInfo()).rejects.toThrow('HTTP error! status: 503')
+  })
+
+  it('does not follow redirects from ComfyUI API requests', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://untrusted.example/object_info' }
+      })
+    )
+    const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never)
+
+    await expect(cli.objectInfo()).rejects.toThrow('HTTP error! status: 302')
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: 'manual' })
+  })
+
   it('sends a stable prompt id for admission recovery', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')
@@ -151,5 +188,16 @@ describe('ComfyHttpCli', () => {
 
     const firstConnectCall = webSocketCtor.mock.calls[0] as unknown[] | undefined
     expect(String(firstConnectCall?.[0] ?? '')).toContain('clientId=renderer-session')
+  })
+
+  it('encodes special characters in websocket client ids', () => {
+    const clientId = 'renderer/session?slot=1&region=cn'
+    const cli = new ComfyHttpCli(testConfig as never, testBuildEnv as never, { clientId })
+
+    cli.connect()
+
+    const firstConnectCall = webSocketCtor.mock.calls[0] as unknown[] | undefined
+    const connectUrl = new URL(String(firstConnectCall?.[0] ?? ''))
+    expect(connectUrl.searchParams.get('clientId')).toBe(clientId)
   })
 })

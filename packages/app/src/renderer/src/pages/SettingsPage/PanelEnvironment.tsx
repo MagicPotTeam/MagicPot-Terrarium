@@ -50,7 +50,10 @@ import { useAppSelector } from '@renderer/store'
 import FigmaBindingDialog from '@renderer/pages/ProjectCanvasPage/Dialogs/FigmaBindingDialog'
 import { loadCanvasItems, saveCanvasItems } from '@renderer/pages/ProjectCanvasPage/canvasStorage'
 import { getCanvasItemsBounds } from '@renderer/pages/ProjectCanvasPage/projectCanvasPageShared'
-import ComfyBatchProfileEditor from '../QuickAppPage/QAppExecutePanel/ComfyBatchProfileEditor'
+import ComfyBatchProfileEditor, {
+  ComfyBatchProfileTestButton
+} from '../QuickAppPage/QAppExecutePanel/ComfyBatchProfileEditor'
+import { useComfyBatchProfileProbe } from '../QuickAppPage/QAppExecutePanel/comfyBatchProfileProbe'
 import {
   getComfyBatchProfileSnapshot,
   isComfyBatchProfileSnapshotLoaded,
@@ -438,6 +441,7 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
     getComfyBatchProfileSnapshot,
     getComfyBatchProfileSnapshot
   )
+  const comfyBatchProbe = useComfyBatchProfileProbe(comfyBatchProfiles)
   useEffect(() => {
     if (isComfyBatchProfileSnapshotLoaded()) return
     let cancelled = false
@@ -1053,19 +1057,24 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
     <Box sx={{ p: 3 }}>
       <>
         <Box key="comfy_batch_profiles">
-          <SettingSection title={t('environment.comfyui_title')}>
-            <Typography variant="body2" color="text.secondary">
-              {t('environment.comfyui_desc')}
-            </Typography>
+          <SettingSection
+            title={t('environment.comfyui_title')}
+            action={
+              <ComfyBatchProfileTestButton
+                isProbingAll={comfyBatchProbe.isProbingAll}
+                onTest={comfyBatchProbe.probeAllProfiles}
+              />
+            }
+          >
             <Typography variant="h6" sx={{ mt: 2 }}>
               {t('environment.comfy_batch_profiles_title')}
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              {t('environment.comfy_batch_profiles_desc')}
             </Typography>
             <ComfyBatchProfileEditor
               profiles={comfyBatchProfiles}
               onProfilesChange={setComfyBatchProfileSnapshot}
+              probeResults={comfyBatchProbe.probeResults}
+              isProbingAll={comfyBatchProbe.isProbingAll}
+              showTestButton={false}
             />
           </SettingSection>
         </Box>

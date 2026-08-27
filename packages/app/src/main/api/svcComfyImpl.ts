@@ -159,6 +159,9 @@ function resolveWorkflowClientId(req: SubmitWorkflowReq): string {
   return `magicpot-workflow-${crypto.randomUUID()}`
 }
 
+const workflowUsesLoraLoader = (workflow: Workflow): boolean =>
+  Object.values(workflow).some((node) => node.class_type === 'LoraLoader')
+
 function isComfyEndpointFailure(error: unknown): boolean {
   if (error instanceof TypeError) return true
   if (!(error instanceof Error)) return false
@@ -456,15 +459,17 @@ export class ComfySvcImpl implements ComfySvc {
 
     // 处理缺失的 LoRA：获取可用 LoRA 列表，绕过不存在的 LoRA 节点
     let processedPrompt = normalizeExecutableWorkflow(req.prompt)
-    try {
-      const objectInfo = this.usesInstancePool()
-        ? await getComfyInstancePool().getObjectInfo()
-        : await this.cli().objectInfo()
-      const result = processWorkflowLoras(processedPrompt, objectInfo)
-      processedPrompt = result.workflow
-    } catch (error) {
-      console.warn('[submitWorkflow] Failed to process LoRA bypass:', error)
-      // 如果获取 objectInfo 失败，继续使用原始 prompt
+    if (workflowUsesLoraLoader(processedPrompt)) {
+      try {
+        const objectInfo = this.usesInstancePool()
+          ? await getComfyInstancePool().getObjectInfo()
+          : await this.cli().objectInfo()
+        const result = processWorkflowLoras(processedPrompt, objectInfo)
+        processedPrompt = result.workflow
+      } catch (error) {
+        console.warn('[submitWorkflow] Failed to process LoRA bypass:', error)
+        // 如果获取 objectInfo 失败，继续使用原始 prompt
+      }
     }
 
     const res = await this.postPrompt({
