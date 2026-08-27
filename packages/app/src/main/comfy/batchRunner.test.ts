@@ -1,4 +1,6 @@
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
@@ -11,12 +13,15 @@ import type { ObjectInfoMap, Workflow } from '@shared/comfy/types'
 import {
   assertNoComfyBatchOutputCollisions,
   ComfyBatchRunner,
+  getComfyBatchInputDir,
   getComfyBatchOutputDir,
   getComfyBatchOutputRelativePath,
   selectBoundOutputImage,
   scanComfyBatchImages,
   LeastLoadRoundRobinScheduler,
   atomicCommitPng,
+  buildComfyBatchPlanFingerprint,
+  COMFY_BATCH_HISTORY_POLL_MS,
   isValidPng,
   validateComfyBatchBindings,
   NO_RUNTIME_RETRY_WINDOW_MS
@@ -35,6 +40,7 @@ async function createTempDir(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -81,6 +87,17 @@ function objectInfo(): ObjectInfoMap {
   }
 }
 
+const makeBatchRequest = (sourceDir: string): StartComfyBatchReq => ({
+  sourceDir,
+  qAppKey: 'batch-test',
+  workflow: {
+    '1': { class_type: 'LoadImage', inputs: { image: '' } },
+    '2': { class_type: 'SaveImage', inputs: {} }
+  },
+  imageInputSlot: '$.1.inputs.image',
+  outputNodeIds: ['2']
+})
+
 type FakeComfyClientOverrides = Partial<
   Pick<ComfyBatchHttpClient, 'probe' | 'objectInfo' | 'uploadImage' | 'prompt' | 'history' | 'view'>
 >
@@ -102,6 +119,11 @@ const createFakeComfyClient = (overrides: FakeComfyClientOverrides = {}): ComfyB
   }) as unknown as ComfyBatchHttpClient
 
 describe('Comfy batch paths and discovery', () => {
+  it('uses an adjacent input staging directory', async () => {
+    const sourceDir = await createTempDir()
+    expect(getComfyBatchInputDir(sourceDir)).toBe(`${sourceDir}.input`)
+  })
+
   it('uses only the adjacent .output directory and preserves relative image paths', async () => {
     const sourceDir = await createTempDir()
     await fs.mkdir(path.join(sourceDir, 'nested'))
@@ -129,6 +151,118 @@ describe('Comfy batch paths and discovery', () => {
         { absolutePath: '/tmp/a.webp', relativePath: 'a.webp', size: 1, mtimeMs: 1, sha256: 'b' }
       ])
     ).toThrow(/collision/i)
+  })
+
+  it('hashes multiple source images concurrently during discovery', async () => {
+    const sourceDir = await createTempDir()
+    await Promise.all(
+      ['first.jpg', 'second.jpg', 'third.jpg', 'fourth.jpg'].map((filename) =>
+        fs.writeFile(path.join(sourceDir, filename), filename)
+      )
+    )
+
+    let activeReads = 0
+    let maxActiveReads = 0
+    vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+      activeReads += 1
+      maxActiveReads = Math.max(maxActiveReads, activeReads)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      try {
+        return fsSync.readFileSync(args[0] as fsSync.PathLike, args[1] as never) as never
+      } finally {
+        activeReads -= 1
+      }
+    })
+
+    const sources = await scanComfyBatchImages(sourceDir)
+
+    expect(sources).toHaveLength(4)
+    expect(maxActiveReads).toBeGreaterThan(1)
+  })
+
+  it('checks each existing output PNG with one file read when resuming', async () => {
+    const sourceDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'source.jpg'), 'source')
+    const fakeClient = createFakeComfyClient()
+    await new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    }).run()
+
+    const outputPath = path.join(`${sourceDir}.output`, 'source.png')
+    let outputReads = 0
+    vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+      const candidate = typeof args[0] === 'string' ? args[0] : String(args[0])
+      if (path.resolve(candidate) === path.resolve(outputPath)) outputReads += 1
+      return fsSync.readFileSync(args[0] as fsSync.PathLike, args[1] as never) as never
+    })
+
+    const resumed = await new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    }).run()
+
+    expect(resumed).toMatchObject({ state: 'completed', skipped: 1, success: 0 })
+    expect(outputReads).toBe(1)
+  })
+
+  it('migrates an existing output without rerunning a legacy task', async () => {
+    const sourceDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'source.jpg'), 'source')
+    const request = makeBatchRequest(sourceDir)
+    const sourceSha256 = createHash('sha256').update('source').digest('hex')
+    await fs.mkdir(getComfyBatchOutputDir(sourceDir), { recursive: true })
+    await atomicCommitPng(path.join(getComfyBatchOutputDir(sourceDir), 'source.png'), validPng, {
+      sourceSha256,
+      planFingerprint: buildComfyBatchPlanFingerprint(request)
+    })
+    let promptCalls = 0
+    const fakeClient = createFakeComfyClient({
+      prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
+        promptCalls += 1
+        return promptId
+      }
+    })
+
+    const status = await new ComfyBatchRunner(request, [profile('one')], {
+      createClient: () => fakeClient
+    }).run()
+
+    expect(status).toMatchObject({ state: 'completed', skipped: 1, success: 0 })
+    expect(promptCalls).toBe(0)
+    await expect(fs.stat(path.join(sourceDir, 'source.jpg'))).resolves.toBeDefined()
+  })
+
+  it('keeps failed staged images for resume and does not reread the source image', async () => {
+    const sourceDir = await createTempDir()
+    const sourcePath = path.join(sourceDir, 'pending.jpg')
+    await fs.writeFile(sourcePath, 'source')
+    const failedClient = createFakeComfyClient({
+      uploadImage: async () => {
+        throw new Error('temporary failure')
+      }
+    })
+    const first = await new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+      createClient: () => failedClient
+    }).run()
+    expect(first).toMatchObject({ state: 'error', failed: 1 })
+
+    const inputPath = path.join(getComfyBatchInputDir(sourceDir), 'pending.jpg')
+    await expect(fs.stat(inputPath)).resolves.toBeDefined()
+
+    const reads: string[] = []
+    vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+      const candidate = typeof args[0] === 'string' ? args[0] : String(args[0])
+      reads.push(path.resolve(candidate))
+      return fsSync.readFileSync(args[0] as fsSync.PathLike, args[1] as never) as never
+    })
+    const successfulClient = createFakeComfyClient()
+    const resumed = await new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+      createClient: () => successfulClient
+    }).run()
+
+    expect(resumed).toMatchObject({ state: 'completed', success: 1, failed: 0 })
+    expect(reads).toContain(path.resolve(inputPath))
+    expect(reads).not.toContain(path.resolve(sourcePath))
+    await expect(fs.stat(inputPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
 
@@ -218,6 +352,10 @@ describe('Comfy batch ETA', () => {
 })
 
 describe('Comfy batch dispatch and output binding', () => {
+  it('polls ComfyUI history frequently enough to avoid GPU idle gaps', () => {
+    expect(COMFY_BATCH_HISTORY_POLL_MS).toBe(200)
+  })
+
   const workflow: Workflow = {
     '1': { class_type: 'LoadImage', inputs: { image: '' } },
     '2': { class_type: 'SaveImage', inputs: {} }
@@ -296,6 +434,35 @@ describe('Comfy batch dispatch and output binding', () => {
     expect(scheduler.pick([instance])).toBeNull()
   })
 
+  it('keeps one source-preparation slot ahead of the execution queue', async () => {
+    const sourceDir = await createTempDir()
+    await Promise.all(
+      ['first.jpg', 'second.jpg', 'third.jpg'].map((filename) =>
+        fs.writeFile(path.join(sourceDir, filename), filename)
+      )
+    )
+    let uploadStarted = 0
+    let releaseUploads!: () => void
+    const uploadsReleased = new Promise<void>((resolve) => {
+      releaseUploads = resolve
+    })
+    const fakeClient = createFakeComfyClient({
+      uploadImage: async () => {
+        uploadStarted += 1
+        await uploadsReleased
+        return { filename: 'upload.png', subfolder: '', type: 'input' as const }
+      }
+    })
+    const runner = new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    })
+    const runPromise = runner.run()
+
+    await vi.waitFor(() => expect(uploadStarted).toBe(3))
+    releaseUploads()
+    await expect(runPromise).resolves.toMatchObject({ state: 'completed', success: 3 })
+  })
+
   it('accepts one unique saved or preview image from bound nodes', () => {
     const baseImage = { filename: 'result.png', subfolder: '', type: 'output' }
     expect(
@@ -329,6 +496,166 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     expect(NO_RUNTIME_RETRY_WINDOW_MS).toBeGreaterThanOrEqual(60_000)
   })
 
+  it('dispatches to a ready instance before a slower profile finishes probing', async () => {
+    const sourceDir = await createTempDir()
+    await Promise.all([
+      fs.writeFile(path.join(sourceDir, 'first.jpg'), 'first'),
+      fs.writeFile(path.join(sourceDir, 'second.jpg'), 'second')
+    ])
+    const calls: string[] = []
+    let releaseSlowProbe!: () => void
+    const slowProbe = new Promise<void>((resolve) => {
+      releaseSlowProbe = resolve
+    })
+    let resolveFastPrompt!: () => void
+    const fastPromptStarted = new Promise<void>((resolve) => {
+      resolveFastPrompt = resolve
+    })
+    const clientFor = (id: string) =>
+      ({
+        probe: async () => {
+          if (id === 'slow') await slowProbe
+          return { endpoint: 'system_stats' as const, latencyMs: 1 }
+        },
+        objectInfo: async () => objectInfo(),
+        uploadImage: async () => ({
+          filename: `${id}.png`,
+          subfolder: '',
+          type: 'input' as const
+        }),
+        prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
+          calls.push(id)
+          if (id === 'fast') resolveFastPrompt()
+          return promptId
+        },
+        history: async (promptId: string) => ({
+          [promptId]: {
+            outputs: {
+              '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
+            },
+            status: { status_str: 'success', completed: true, messages: [] }
+          }
+        }),
+        view: async () => new Uint8Array(validPng)
+      }) as unknown as ComfyBatchHttpClient
+
+    const runner = new ComfyBatchRunner(request(sourceDir), [profile('fast'), profile('slow')], {
+      createClient: (baseUrl) => clientFor(baseUrl.includes('slow') ? 'slow' : 'fast')
+    })
+    const runPromise = runner.run()
+    const readyDispatch = await Promise.race([
+      fastPromptStarted.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2_000))
+    ])
+    releaseSlowProbe()
+
+    expect(readyDispatch).toBe(true)
+    await expect(runPromise).resolves.toMatchObject({ state: 'completed', success: 2, failed: 0 })
+    expect(calls).toContain('fast')
+  })
+
+  it('starts the first prompt before the whole source directory is prepared', async () => {
+    const sourceDir = await createTempDir()
+    await Promise.all([
+      fs.writeFile(path.join(sourceDir, 'first.jpg'), 'first'),
+      fs.writeFile(path.join(sourceDir, 'second.jpg'), 'second')
+    ])
+
+    let releaseWholeDirectoryCopy!: () => void
+    const wholeDirectoryCopy = new Promise<void>((resolve) => {
+      releaseWholeDirectoryCopy = resolve
+    })
+    vi.spyOn(fs, 'cp').mockImplementation(async (source, destination, options) => {
+      await wholeDirectoryCopy
+      fsSync.cpSync(source as string, destination as string, options as never)
+    })
+
+    let resolveFirstPrompt!: () => void
+    const firstPromptStarted = new Promise<void>((resolve) => {
+      resolveFirstPrompt = resolve
+    })
+    const fakeClient = createFakeComfyClient({
+      prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
+        resolveFirstPrompt()
+        return promptId
+      }
+    })
+
+    const runner = new ComfyBatchRunner(request(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    })
+    const runPromise = runner.run()
+    const firstPromptBeforeCopyRelease = await Promise.race([
+      firstPromptStarted.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250))
+    ])
+    releaseWholeDirectoryCopy()
+
+    await expect(runPromise).resolves.toMatchObject({
+      state: 'completed',
+      success: 2,
+      failed: 0
+    })
+    expect(firstPromptBeforeCopyRelease).toBe(true)
+  })
+
+  it('releases the execution slot before a slow output download completes', async () => {
+    const sourceDir = await createTempDir()
+    await Promise.all([
+      fs.writeFile(path.join(sourceDir, 'first.jpg'), 'first'),
+      fs.writeFile(path.join(sourceDir, 'second.jpg'), 'second'),
+      fs.writeFile(path.join(sourceDir, 'third.jpg'), 'third')
+    ])
+    const calls: string[] = []
+    let resolveThirdPrompt!: () => void
+    const thirdPromptStarted = new Promise<void>((resolve) => {
+      resolveThirdPrompt = resolve
+    })
+    let releaseViews!: () => void
+    const viewsReleased = new Promise<void>((resolve) => {
+      releaseViews = resolve
+    })
+    const fakeClient = {
+      probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
+      objectInfo: async () => objectInfo(),
+      uploadImage: async () => ({
+        filename: 'upload.png',
+        subfolder: '',
+        type: 'input' as const
+      }),
+      prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
+        calls.push(promptId)
+        if (calls.length === 3) resolveThirdPrompt()
+        return promptId
+      },
+      history: async (promptId: string) => ({
+        [promptId]: {
+          outputs: {
+            '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
+          },
+          status: { status_str: 'success', completed: true, messages: [] }
+        }
+      }),
+      view: async () => {
+        await viewsReleased
+        return new Uint8Array(validPng)
+      }
+    } as unknown as ComfyBatchHttpClient
+
+    const runner = new ComfyBatchRunner(request(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    })
+    const runPromise = runner.run()
+    const thirdStarted = await Promise.race([
+      thirdPromptStarted.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_000))
+    ])
+    releaseViews()
+
+    expect(thirdStarted).toBe(true)
+    await expect(runPromise).resolves.toMatchObject({ state: 'completed', success: 3, failed: 0 })
+  })
+
   const workflow: Workflow = {
     '1': { class_type: 'LoadImage', inputs: { image: '' } },
     '2': { class_type: 'SaveImage', inputs: {} }
@@ -359,6 +686,10 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     })
     const firstStatus = await first.run()
     expect(firstStatus).toMatchObject({ state: 'completed', success: 1, failed: 0, skipped: 0 })
+    await expect(fs.stat(path.join(sourceDir, 'source.jpg'))).resolves.toBeDefined()
+    await expect(fs.stat(getComfyBatchInputDir(sourceDir))).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
     expect(isValidPng(new Uint8Array(await fs.readFile(`${sourceDir}.output/source.png`)))).toBe(
       true
     )
@@ -582,18 +913,31 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     await Promise.all([
       fs.writeFile(path.join(sourceDir, 'first.jpg'), 'first'),
       fs.writeFile(path.join(sourceDir, 'second.jpg'), 'second'),
-      fs.writeFile(path.join(sourceDir, 'third.jpg'), 'third')
+      fs.writeFile(path.join(sourceDir, 'third.jpg'), 'third'),
+      fs.writeFile(path.join(sourceDir, 'fourth.jpg'), 'fourth'),
+      fs.writeFile(path.join(sourceDir, 'fifth.jpg'), 'fifth')
     ])
     const calls: string[] = []
     let profiles = [profile('one')]
+    let resolveTwoProbe!: () => void
+    const twoProbeStarted = new Promise<void>((resolve) => {
+      resolveTwoProbe = resolve
+    })
     let releaseInitial!: () => void
     const firstBlocked = new Promise<void>((resolve) => {
       releaseInitial = resolve
     })
+    let releaseOneHistory!: () => void
+    const oneHistoryReleased = new Promise<void>((resolve) => {
+      releaseOneHistory = resolve
+    })
     let blockedPromptCount = 0
     const clientFor = (id: string) => {
       const client = {
-        probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
+        probe: async () => {
+          if (id === 'two') resolveTwoProbe()
+          return { endpoint: 'system_stats' as const, latencyMs: 1 }
+        },
         objectInfo: async () => objectInfo(),
         uploadImage: async (_filename: string, bytes: Uint8Array) => ({
           filename: `${id}-${new TextDecoder().decode(bytes)}.png`,
@@ -608,14 +952,17 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
           }
           return promptId
         },
-        history: async (promptId: string) => ({
-          [promptId]: {
-            outputs: {
-              '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
-            },
-            status: { status_str: 'success', completed: true, messages: [] }
+        history: async (promptId: string) => {
+          await (id === 'one' ? oneHistoryReleased : Promise.resolve())
+          return {
+            [promptId]: {
+              outputs: {
+                '2': { images: [{ filename: 'result.png', subfolder: '', type: 'output' }] }
+              },
+              status: { status_str: 'success', completed: true, messages: [] }
+            }
           }
-        }),
+        },
         view: async () => new Uint8Array(validPng)
       } as unknown as ComfyBatchHttpClient
       return client
@@ -628,14 +975,16 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     const runPromise = runner.run()
     await vi.waitFor(() => expect(blockedPromptCount).toBe(2))
     profiles = [profile('one'), profile('two')]
-    // Let the supervisor observe the changed profile fingerprint before the
-    // first runtime is released; this proves the new profile is usable in a
-    // subsequent dispatch round rather than relying on initial probing.
-    await new Promise((resolve) => setTimeout(resolve, 300))
+    // Wait for the supervisor to observe the changed profile fingerprint
+    // before the first runtime is released; this proves the new profile is
+    // usable in a subsequent dispatch round rather than relying on timing.
+    await twoProbeStarted
     releaseInitial()
+    await vi.waitFor(() => expect(calls).toContain('two'))
+    releaseOneHistory()
     const result = await runPromise
 
-    expect(result).toMatchObject({ state: 'completed', success: 3, failed: 0 })
+    expect(result).toMatchObject({ state: 'completed', success: 5, failed: 0 })
     expect(calls).toContain('two')
   })
 
