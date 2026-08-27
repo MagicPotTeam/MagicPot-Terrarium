@@ -3,7 +3,7 @@
     {
       "name": "ComfyUI",
       "url": "https://github.com/Comfy-Org/ComfyUI.git",
-      "commit": "b963f4ad210a42841ab23dfc28a84143a0cce227",
+      "commit": "d8e7bbc9d586d95f758d6b0ed23d519088be578a",
       "relativePath": "vendor/comfyui/ComfyUI"
     },
     {
@@ -21,7 +21,7 @@
     {
       "name": "ComfyUI-Easy-Use",
       "url": "https://github.com/yolain/ComfyUI-Easy-Use.git",
-      "commit": "4de1ab3b66e48da916b6f263bacd001df53a2720",
+      "commit": "58e077a7435631301cf7443412515cf958e7f3d1",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use"
     },
     {
@@ -46,7 +46,7 @@
     {
       "name": "ComfyUI-Manager",
       "url": "https://github.com/Comfy-Org/ComfyUI-Manager.git",
-      "commit": "4f56cf3dfa7de5d8a8614dfe202ff8d613ba2244",
+      "commit": "f39cbd56fecae0b27a446c0cd450cd591f3a8bea",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager"
     },
     {
@@ -82,7 +82,7 @@
     {
       "name": "z-tipo-extension",
       "url": "https://github.com/KohakuBlueleaf/z-tipo-extension.git",
-      "commit": "67a443f5b4156a4c42746a3d272ea1bfcce00c95",
+      "commit": "6132862978021727284215bc2d5fe5257a872709",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/z-tipo-extension"
     }
   ]
