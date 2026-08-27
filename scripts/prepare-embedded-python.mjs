@@ -37,7 +37,7 @@ const llamaCppWheelSha256 =
 const transformersVersion = process.env.EMBEDDED_TRANSFORMERS_VERSION || '4.57.6'
 const huggingfaceHubVersion = process.env.EMBEDDED_HUGGINGFACE_HUB_VERSION || '0.36.2'
 const decoratorVersion = process.env.EMBEDDED_DECORATOR_VERSION || '4.4.2'
-const tipoKgenVersion = process.env.EMBEDDED_TIPO_KGEN_VERSION || '0.3.0'
+const tipoKgenVersion = process.env.EMBEDDED_TIPO_KGEN_VERSION || '0.3.1'
 
 const skipTorch = process.env.EMBEDDED_SKIP_TORCH === '1'
 const skipSmoke = process.env.EMBEDDED_SKIP_SMOKE === '1'
