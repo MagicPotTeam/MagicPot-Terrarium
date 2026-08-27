@@ -124,12 +124,10 @@ jobs:
     permissions:
       actions: read
       contents: write
-      pull-requests: write
     outputs:
       tag_name: ${{ steps.tag-version.outputs.tag_name }}
       release_name: ${{ steps.tag-version.outputs.release_name }}
       ref: ${{ steps.commit-version-bump.outputs.ref }}
-      pr_number: ${{ steps.open-pr.outputs.pr_number }}
       commit_message: ${{ steps.commit-version-bump.outputs.commit_message }}
     steps:
       - name: Checkout code
@@ -181,50 +179,6 @@ jobs:
           echo "commit_message=$COMMIT_MESSAGE" >> "$GITHUB_OUTPUT"
           echo "ref=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Create or update release PR
-        id: open-pr
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PR_NUMBER=$(gh pr list \
-            --base master \
-            --head "$RELEASE_BRANCH" \
-            --state open \
-            --json number \
-            --jq '.[0].number')
-
-          PR_BODY=$(cat <<EOF
-          Automated nightly release PR.
-
-          - Source branch: \`$RELEASE_BRANCH\`
-          - Release mode: \`${{ needs.check-commits.outputs.release_mode }}\`
-          - Triggered by: \`${{ github.workflow }}\`
-          - Run: \`${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\`
-          - Merge policy: this PR is merged only after the release package is built and uploaded successfully.
-          EOF
-          )
-
-          if [ -n "$PR_NUMBER" ]; then
-            gh pr edit "$PR_NUMBER" \
-              --title "${{ steps.commit-version-bump.outputs.commit_message }}" \
-              --body "$PR_BODY"
-          else
-            gh pr create \
-              --base master \
-              --head "$RELEASE_BRANCH" \
-              --title "${{ steps.commit-version-bump.outputs.commit_message }}" \
-              --body "$PR_BODY"
-
-            PR_NUMBER=$(gh pr list \
-              --base master \
-              --head "$RELEASE_BRANCH" \
-              --state open \
-              --json number \
-              --jq '.[0].number')
-          fi
-
-          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-
   candidate-ci:
     needs: bump-version
     if: needs.bump-version.result == 'success'
@@ -252,6 +206,74 @@ jobs:
     with:
       ref: ${{ needs.bump-version.outputs.ref }}
 
+  open-release-pr:
+    needs:
+      - check-commits
+      - bump-version
+      - candidate-ci
+      - candidate-build
+      - candidate-embedded
+      - release
+    if: >-
+      needs.bump-version.result == 'success' &&
+      needs.candidate-ci.result == 'success' &&
+      needs.candidate-build.result == 'success' &&
+      needs.candidate-embedded.result == 'success' &&
+      needs.release.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      pr_number: ${{ steps.open-pr.outputs.pr_number }}
+    steps:
+      - name: Create or update release PR
+        id: open-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER=$(gh pr list \
+            --base master \
+            --head "$RELEASE_BRANCH" \
+            --state open \
+            --json number \
+            --jq '.[0].number')
+
+          PR_BODY=$(cat <<EOF
+          Automated nightly release PR.
+
+          - Source branch: \`$RELEASE_BRANCH\`
+          - Release mode: \`${{ needs.check-commits.outputs.release_mode }}\`
+          - Triggered by: \`${{ github.workflow }}\`
+          - Run: \`${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\`
+          - Merge policy: this PR is created only after all candidate and release packages succeed.
+          EOF
+          )
+
+          if [ -n "$PR_NUMBER" ]; then
+            gh pr edit "$PR_NUMBER" \
+              --title "${{ needs.bump-version.outputs.commit_message }}" \
+              --body "$PR_BODY"
+          else
+            gh pr create \
+              --base master \
+              --head "$RELEASE_BRANCH" \
+              --title "${{ needs.bump-version.outputs.commit_message }}" \
+              --body "$PR_BODY"
+
+            PR_NUMBER=$(gh pr list \
+              --base master \
+              --head "$RELEASE_BRANCH" \
+              --state open \
+              --json number \
+              --jq '.[0].number')
+          fi
+
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
   release:
     needs:
       - bump-version
@@ -277,7 +299,10 @@ jobs:
     needs:
       - bump-version
       - release
-    if: needs.release.result == 'success'
+      - open-release-pr
+    if: >-
+      needs.release.result == 'success' &&
+      needs.open-release-pr.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -287,7 +312,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr merge "${{ needs.bump-version.outputs.pr_number }}" \
+          gh pr merge "${{ needs.open-release-pr.outputs.pr_number }}" \
             --repo "${{ github.repository }}" \
             --squash \
             --delete-branch=false \
