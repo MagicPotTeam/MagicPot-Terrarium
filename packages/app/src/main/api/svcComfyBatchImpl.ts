@@ -29,7 +29,12 @@ import { normalizeQAppBatchConfig } from '@shared/qApp/batchConfig'
 import { getBuildEnv } from '../config/buildEnv'
 import { getConfig, saveConfig } from '../config/config'
 import { ComfyBatchHttpClient, normalizeComfyBatchBaseUrl } from '../comfy/batchHttp'
-import { ComfyBatchRunner, getComfyBatchOutputDir } from '../comfy/batchRunner'
+import {
+  ComfyBatchRunner,
+  getComfyBatchOutputDir,
+  isValidComfyBatchRunKey,
+  validateComfyBatchBindings
+} from '../comfy/batchRunner'
 import { getComfyInstancePool } from '../comfy/comfyInstancePool'
 import { QAppFSCli } from '../qApp/fs'
 
@@ -46,6 +51,7 @@ const IDLE_STATUS: ComfyBatchStatus = {
 
 type JobRecord = {
   request: StartComfyBatchReq
+  runKey?: string
   runner?: ComfyBatchRunner
   status: ComfyBatchStatus
   submittedAt: number
@@ -59,6 +65,7 @@ type JobRecord = {
 
 type PersistedJob = {
   request?: StartComfyBatchReq
+  runKey?: string
   status?: ComfyBatchStatus
   submittedAt?: number
   sequence?: number
@@ -75,10 +82,16 @@ type PersistedStore = {
 }
 
 const JOB_STORE_FILENAME = 'comfy-batch-jobs.json'
-const JOB_STORE_VERSION = 2
+const JOB_STORE_VERSION = 3
 const MAX_RETAINED_JOBS = 50
-const BATCH_IMAGE_PLACEHOLDER = '__MAGICPOT_BATCH_IMAGE_SLOT__'
-const IMAGE_INPUT_SLOT_PATTERN = /^\$\.([^.[\]]+)\.inputs\.([^.[\]]+)$/
+
+function formatComfyBatchRunKey(timestamp: number): string {
+  const date = new Date(timestamp)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}${pad(
+    date.getHours()
+  )}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -158,42 +171,6 @@ function fallbackRequest(value: unknown): StartComfyBatchReq {
       ? input.outputNodeIds.filter((nodeId): nodeId is string => typeof nodeId === 'string')
       : []
   }
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize)
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.keys(value)
-        .sort()
-        .map((key) => [key, canonicalize(value[key])])
-    )
-  }
-  return value
-}
-
-function stableJson(value: unknown): string {
-  return JSON.stringify(canonicalize(value)) ?? 'null'
-}
-
-function parseImageInputSlot(slot: string): { nodeId: string; field: string } | undefined {
-  const match = IMAGE_INPUT_SLOT_PATTERN.exec(slot)
-  return match ? { nodeId: match[1], field: match[2] } : undefined
-}
-
-function workflowShape(
-  workflow: StartComfyBatchReq['workflow'],
-  imageInputSlot: string | undefined
-): string {
-  const normalized = cloneJson(workflow) as Record<string, { inputs?: Record<string, unknown> }>
-  const binding = imageInputSlot ? parseImageInputSlot(imageInputSlot) : undefined
-  if (binding) {
-    const node = normalized[binding.nodeId]
-    if (node?.inputs && Object.prototype.hasOwnProperty.call(node.inputs, binding.field)) {
-      node.inputs[binding.field] = BATCH_IMAGE_PLACEHOLDER
-    }
-  }
-  return stableJson(normalized)
 }
 
 function normalizeProfile(profile: ComfyBatchProfile): ComfyBatchProfile {
@@ -426,6 +403,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       .sort((left, right) => left.sequence - right.sequence || left.submittedAt - right.submittedAt)
       .map((record) => ({
         request: cloneJson(record.request),
+        runKey: record.runKey,
         status: this.liveStatus(record),
         submittedAt: record.submittedAt,
         sequence: record.sequence,
@@ -581,10 +559,19 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         if (!validRequest) malformed = true
         if (malformed) malformedCount += 1
 
+        const persistedRunKey = item.runKey
+        const runKey =
+          persistedRunKey === undefined
+            ? undefined
+            : isValidComfyBatchRunKey(persistedRunKey)
+              ? persistedRunKey
+              : undefined
+        if (persistedRunKey !== undefined && runKey === undefined) migrated = true
+
         let outputDir = typeof rawStatus.outputDir === 'string' ? rawStatus.outputDir : undefined
         if (!outputDir && request.sourceDir) {
           try {
-            outputDir = getComfyBatchOutputDir(request.sourceDir)
+            outputDir = getComfyBatchOutputDir(request.sourceDir, runKey)
           } catch {
             // Keep a malformed descriptor recoverable without deriving a path.
           }
@@ -633,6 +620,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         }
         const record: JobRecord = {
           request,
+          runKey,
           status: normalizedStatus,
           submittedAt,
           sequence,
@@ -711,9 +699,27 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     this.latestJobId = jobId
   }
 
-  private async enqueue(request: StartComfyBatchReq, retryOf?: string): Promise<ComfyBatchStatus> {
+  private allocateRunKey(timestamp: number): string {
+    const base = formatComfyBatchRunKey(timestamp)
+    const usedRunKeys = new Set(
+      [...this.jobs.values()]
+        .map((record) => record.runKey)
+        .filter((runKey): runKey is string => runKey !== undefined)
+    )
+    if (!usedRunKeys.has(base)) return base
+    let suffix = 2
+    while (usedRunKeys.has(`${base}-${suffix}`)) suffix += 1
+    return `${base}-${suffix}`
+  }
+
+  private async enqueue(
+    request: StartComfyBatchReq,
+    retryOf?: string,
+    runKey?: string
+  ): Promise<ComfyBatchStatus> {
     const snapshot = cloneJson(request)
     const now = Date.now()
+    const resolvedRunKey = runKey ?? (retryOf === undefined ? this.allocateRunKey(now) : undefined)
     const jobId = randomUUID()
     const previousNextSequence = this.nextSequence
     const sequence = this.nextSequence++
@@ -721,7 +727,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       jobId,
       state: 'queued',
       sourceDir: path.resolve(snapshot.sourceDir),
-      outputDir: getComfyBatchOutputDir(snapshot.sourceDir),
+      outputDir: getComfyBatchOutputDir(snapshot.sourceDir, resolvedRunKey),
       qAppKey: snapshot.qAppKey,
       total: 0,
       success: 0,
@@ -735,6 +741,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     }
     const record: JobRecord = {
       request: snapshot,
+      runKey: resolvedRunKey,
       runner: undefined,
       status,
       submittedAt: now,
@@ -780,6 +787,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       const profiles = configuredProfiles()
       runner = new ComfyBatchRunner(cloneJson(record.request), profiles, {
         jobId: nextId,
+        runKey: record.runKey,
         getProfiles: () => configuredProfiles(),
         onStatus: (status) => {
           // Do not allow a late runner callback to resurrect a cancelled or
@@ -895,13 +903,21 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       selectedOutputIds.every((nodeId) => requestedOutputIds.includes(nodeId))
     if (
       normalized.cfg.batchProcess?.enabled !== true ||
+      typeof selectedBatchSlot !== 'string' ||
       selectedBatchSlot !== request.imageInputSlot ||
-      !outputBindingsMatch ||
-      workflowShape(selected.workflow, selectedBatchSlot) !==
-        workflowShape(request.workflow, request.imageInputSlot)
+      !outputBindingsMatch
     ) {
       throw new Error('Quick App batch bindings changed; reopen the Quick App and try again')
     }
+
+    // The renderer builds the request from the current runtime inputs. Those
+    // inputs may legitimately change values or add dynamic nodes (for example
+    // the LoRA chain), so comparing the entire workflow with the saved QApp
+    // template rejects valid batch requests. Validate the persisted and
+    // runtime workflows' binding contracts instead, while allowing their
+    // runtime parameters to differ.
+    validateComfyBatchBindings(selected.workflow, selectedBatchSlot, selectedOutputIds)
+    validateComfyBatchBindings(request.workflow, request.imageInputSlot, requestedOutputIds)
   }
 
   private hasActiveRetry(sourceJobId: string): boolean {
@@ -1005,7 +1021,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       }
       const snapshot = cloneJson(previous.request)
       await this.validateRequestBindings(snapshot)
-      const retryStatus = await this.enqueue(snapshot, req.jobId)
+      const retryStatus = await this.enqueue(snapshot, req.jobId, previous.runKey)
 
       // A retry is a continuation of the failed batch, not a second history
       // entry that should remain visible beside it. The new descriptor is
