@@ -14,6 +14,7 @@ import {
   assertNoComfyBatchOutputCollisions,
   ComfyBatchRunner,
   getComfyBatchInputDir,
+  getComfyBatchManifestPath,
   getComfyBatchOutputDir,
   getComfyBatchOutputRelativePath,
   selectBoundOutputImage,
@@ -122,6 +123,28 @@ describe('Comfy batch paths and discovery', () => {
   it('uses an adjacent input staging directory', async () => {
     const sourceDir = await createTempDir()
     expect(getComfyBatchInputDir(sourceDir)).toBe(`${sourceDir}.input`)
+  })
+
+  it('suffixes all batch artifact paths with a valid run key', async () => {
+    const sourceDir = await createTempDir()
+    const runKey = '20260828213645'
+    expect(getComfyBatchInputDir(sourceDir, runKey)).toBe(`${sourceDir}.input.${runKey}`)
+    expect(getComfyBatchOutputDir(sourceDir, runKey)).toBe(`${sourceDir}.output.${runKey}`)
+    expect(getComfyBatchManifestPath(sourceDir, runKey)).toBe(
+      path.join(`${sourceDir}.output.${runKey}`, '.magicpot-batch', 'manifest.json')
+    )
+  })
+
+  it('rejects unsafe run keys before using them in a path', async () => {
+    const sourceDir = await createTempDir()
+    expect(() => getComfyBatchInputDir(sourceDir, '../escape')).toThrow(/run key/i)
+  })
+
+  it('uses the run key in the runner output status', async () => {
+    const sourceDir = await createTempDir()
+    const runKey = '20260828213645'
+    const runner = new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], { runKey })
+    expect(runner.status.outputDir).toBe(getComfyBatchOutputDir(sourceDir, runKey))
   })
 
   it('uses only the adjacent .output directory and preserves relative image paths', async () => {

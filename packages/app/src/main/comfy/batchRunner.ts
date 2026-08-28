@@ -51,6 +51,7 @@ const INPUT_MANIFEST_FILENAME = '.magicpot-batch-input.json'
 // /object_info. Keep the batch pending during that startup window instead of
 // converting every source image into a permanent failure.
 export const NO_RUNTIME_RETRY_WINDOW_MS = 120_000
+const COMFY_BATCH_RUN_KEY_PATTERN = /^\d{14}(?:-\d+)?$/
 
 export type BatchSourceFile = {
   absolutePath: string
@@ -123,24 +124,36 @@ export class ComfyExecutionError extends Error {
   }
 }
 
-export function getComfyBatchOutputDir(sourceDir: string): string {
+export function isValidComfyBatchRunKey(value: unknown): value is string {
+  return typeof value === 'string' && COMFY_BATCH_RUN_KEY_PATTERN.test(value)
+}
+
+function batchArtifactSuffix(runKey?: string): string {
+  if (runKey === undefined) return ''
+  if (!isValidComfyBatchRunKey(runKey)) {
+    throw new Error(`Invalid ComfyUI batch run key: ${runKey}`)
+  }
+  return `.${runKey}`
+}
+
+export function getComfyBatchOutputDir(sourceDir: string, runKey?: string): string {
   const resolved = path.resolve(sourceDir)
   const parsed = path.parse(resolved)
   if (resolved === parsed.root)
     throw new Error('A filesystem root cannot be used as a batch source')
-  return `${resolved}.output`
+  return `${resolved}.output${batchArtifactSuffix(runKey)}`
 }
 
-export function getComfyBatchInputDir(sourceDir: string): string {
+export function getComfyBatchInputDir(sourceDir: string, runKey?: string): string {
   const resolved = path.resolve(sourceDir)
   const parsed = path.parse(resolved)
   if (resolved === parsed.root)
     throw new Error('A filesystem root cannot be used as a batch source')
-  return `${resolved}.input`
+  return `${resolved}.input${batchArtifactSuffix(runKey)}`
 }
 
-export function getComfyBatchManifestPath(sourceDir: string): string {
-  return path.join(getComfyBatchOutputDir(sourceDir), '.magicpot-batch', 'manifest.json')
+export function getComfyBatchManifestPath(sourceDir: string, runKey?: string): string {
+  return path.join(getComfyBatchOutputDir(sourceDir, runKey), '.magicpot-batch', 'manifest.json')
 }
 
 export function getComfyBatchOutputRelativePath(relativeSourcePath: string): string {
@@ -727,9 +740,14 @@ function resolveManifestOutputPath(outputDir: string, relativePath: unknown): st
   return relation && !relation.startsWith('..') && !path.isAbsolute(relation) ? candidate : null
 }
 
-async function readManifest(sourceDir: string): Promise<ComfyBatchManifest | null> {
+async function readManifest(
+  sourceDir: string,
+  runKey?: string
+): Promise<ComfyBatchManifest | null> {
   try {
-    const parsed = JSON.parse(await fs.readFile(getComfyBatchManifestPath(sourceDir), 'utf8'))
+    const parsed = JSON.parse(
+      await fs.readFile(getComfyBatchManifestPath(sourceDir, runKey), 'utf8')
+    )
     if (parsed?.version !== MANIFEST_VERSION || typeof parsed.items !== 'object') return null
     return parsed as ComfyBatchManifest
   } catch {
@@ -1047,6 +1065,7 @@ export type ComfyBatchRunnerOptions = {
   onStatus?: (status: ComfyBatchStatus) => void
   jobId?: string
   getProfiles?: () => ComfyBatchProfile[]
+  runKey?: string
 }
 
 export class ComfyBatchRunner {
@@ -1087,7 +1106,7 @@ export class ComfyBatchRunner {
       jobId: this.jobId,
       state: 'idle',
       sourceDir: path.resolve(request.sourceDir),
-      outputDir: getComfyBatchOutputDir(request.sourceDir),
+      outputDir: getComfyBatchOutputDir(request.sourceDir, options.runKey),
       qAppKey: request.qAppKey,
       total: 0,
       success: 0,
@@ -1405,8 +1424,8 @@ export class ComfyBatchRunner {
       this.request.outputNodeIds
     )
     const sourceDir = path.resolve(this.request.sourceDir)
-    const outputDir = getComfyBatchOutputDir(sourceDir)
-    const inputDir = getComfyBatchInputDir(sourceDir)
+    const outputDir = getComfyBatchOutputDir(sourceDir, this.options.runKey)
+    const inputDir = getComfyBatchInputDir(sourceDir, this.options.runKey)
     this.inputDir = inputDir
     const planFingerprint = buildComfyBatchPlanFingerprint(this.request)
     this.statusValue.planFingerprint = planFingerprint
@@ -1484,7 +1503,7 @@ export class ComfyBatchRunner {
       )
     }
 
-    const previous = await readManifest(sourceDir)
+    const previous = await readManifest(sourceDir, this.options.runKey)
     if (!sources.length && !snapshotRelativePaths.length) {
       await fs.rm(inputDir, { recursive: true, force: true })
       throw new Error('No supported images were found in the selected folder')
