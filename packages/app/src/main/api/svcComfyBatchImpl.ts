@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { gzip, gunzip } from 'node:zlib'
+import { promisify } from 'node:util'
 import type {
   CancelComfyBatchReq,
   CancelComfyBatchResp,
@@ -82,8 +84,11 @@ type PersistedStore = {
 }
 
 const JOB_STORE_FILENAME = 'comfy-batch-jobs.json'
+const JOB_INDEX_FILENAME = 'comfy-batch-jobs.bin'
 const JOB_STORE_VERSION = 3
 const MAX_RETAINED_JOBS = 50
+const gzipAsync = promisify(gzip)
+const gunzipAsync = promisify(gunzip)
 
 function formatComfyBatchRunKey(timestamp: number): string {
   const date = new Date(timestamp)
@@ -226,14 +231,14 @@ async function replaceStoreFile(tempPath: string, filename: string): Promise<voi
   }
 }
 
-async function atomicWriteJson(filename: string, value: unknown): Promise<void> {
+async function atomicWriteBytes(filename: string, bytes: Uint8Array): Promise<void> {
   const directory = path.dirname(filename)
   await fs.mkdir(directory, { recursive: true })
   const tempPath = path.join(directory, `.${path.basename(filename)}.${randomUUID()}.tmp`)
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined
   try {
     handle = await fs.open(tempPath, 'wx')
-    await handle.writeFile(JSON.stringify(value), 'utf8')
+    await handle.writeFile(bytes)
     await handle.sync()
     await handle.close()
     handle = undefined
@@ -242,6 +247,10 @@ async function atomicWriteJson(filename: string, value: unknown): Promise<void> 
     await handle?.close().catch(() => undefined)
     await fs.rm(tempPath, { force: true }).catch(() => undefined)
   }
+}
+
+async function atomicWriteJson(filename: string, value: unknown): Promise<void> {
+  await atomicWriteBytes(filename, Buffer.from(JSON.stringify(value), 'utf8'))
 }
 
 export class ComfyBatchSvcImpl implements ComfyBatchSvc {
@@ -269,13 +278,20 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
   }
 
   private storePath(): string {
+    return path.join(getBuildEnv().pathMap.data, JOB_INDEX_FILENAME)
+  }
+
+  private legacyStorePath(): string {
     return path.join(getBuildEnv().pathMap.data, JOB_STORE_FILENAME)
   }
 
   private async preserveMalformedStore(filename: string): Promise<void> {
     try {
-      const backup = `${filename}.corrupt-${Date.now()}-${randomUUID()}.json`
-      await fs.copyFile(filename, backup)
+      // Keep the active data directory to a single JSON document (the
+      // per-batch manifest). Corrupt job indexes are recoverable backups,
+      // not additional active JSON stores.
+      const backup = `${filename}.corrupt-${Date.now()}-${randomUUID()}.bak`
+      await fs.rename(filename, backup)
       console.error(`[ComfyBatchSvcImpl] Preserved malformed job store at ${backup}`)
     } catch (error) {
       this.reportRestoreError(error)
@@ -417,12 +433,14 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     const write = this.storeWriteQueue.then(async () => {
       const filename = this.storePath()
       const records = this.snapshotPersistedJobs()
-      await atomicWriteJson(filename, {
+      const payload = {
         version: JOB_STORE_VERSION,
         latestJobId: this.latestJobId,
         nextSequence: this.nextSequence,
         jobs: records
-      })
+      }
+      const compressed = await gzipAsync(Buffer.from(JSON.stringify(payload), 'utf8'))
+      await atomicWriteBytes(filename, compressed)
     })
     this.storeWriteQueue = write.then(
       () => undefined,
@@ -447,22 +465,37 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     if (this.restorePromise) return this.restorePromise
     this.restorePromise = (async () => {
       let filename: string
+      let legacyFilename: string
       try {
         filename = this.storePath()
+        legacyFilename = this.legacyStorePath()
       } catch (error) {
         this.reportRestoreError(error)
         return
       }
 
       let rawText: string
+      let loadedFromLegacy = false
+      let sourceFilename = filename
       try {
-        rawText = await fs.readFile(filename, 'utf8')
+        rawText = (await gunzipAsync(await fs.readFile(filename))).toString('utf8')
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
           this.reportRestoreError(error)
           await this.preserveMalformedStore(filename)
+          return
         }
-        return
+        try {
+          rawText = await fs.readFile(legacyFilename, 'utf8')
+          loadedFromLegacy = true
+          sourceFilename = legacyFilename
+        } catch (legacyError) {
+          if ((legacyError as NodeJS.ErrnoException).code !== 'ENOENT') {
+            this.reportRestoreError(legacyError)
+            await this.preserveMalformedStore(legacyFilename)
+          }
+          return
+        }
       }
 
       let raw: unknown
@@ -470,13 +503,13 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         raw = JSON.parse(rawText) as PersistedStore
       } catch (error) {
         this.reportRestoreError(error)
-        await this.preserveMalformedStore(filename)
+        await this.preserveMalformedStore(sourceFilename)
         return
       }
       if (!isRecord(raw) || !Array.isArray(raw.jobs)) {
         const error = new Error('Job store does not contain a jobs array')
         this.reportRestoreError(error)
-        await this.preserveMalformedStore(filename)
+        await this.preserveMalformedStore(sourceFilename)
         return
       }
 
@@ -502,7 +535,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       const usedSequences = new Set<number>()
       let fallbackSequence = 1
       let malformedCount = 0
-      let migrated = raw.version !== JOB_STORE_VERSION
+      let migrated = loadedFromLegacy || raw.version !== JOB_STORE_VERSION
       for (const entry of entries) {
         let sequence = entry.sequence
         if (sequence === undefined || usedSequences.has(sequence)) {
@@ -549,6 +582,21 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         } else if (!isKnownJobState(rawState) && rawState !== undefined) {
           malformed = true
         }
+        const persistedFailedFiles = Array.isArray(rawStatus.failedFiles)
+          ? rawStatus.failedFiles.filter((file): file is string => typeof file === 'string')
+          : []
+        const persistedFailed = Math.max(
+          nonNegativeNumber(rawStatus.failed),
+          persistedFailedFiles.length
+        )
+        const hadItemFailures = persistedFailed > 0
+        if (hadItemFailures && recoveredState !== 'cancelled') {
+          // Legacy runners stopped after a bounded number of attempts. Those
+          // files still exist in the durable input queue, so restore the job
+          // as queued and let the new runner keep retrying them silently.
+          recoveredState = 'queued'
+          migrated = true
+        }
         const cancelRequested = item.cancelRequested === true
         const state: ComfyBatchStatus['state'] = validRequest
           ? cancelRequested
@@ -590,13 +638,24 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
           qAppKey: typeof rawStatus.qAppKey === 'string' ? rawStatus.qAppKey : request.qAppKey,
           total: nonNegativeNumber(rawStatus.total),
           success: nonNegativeNumber(rawStatus.success),
-          failed: nonNegativeNumber(rawStatus.failed),
+          failed: 0,
           skipped: nonNegativeNumber(rawStatus.skipped),
-          running: nonNegativeNumber(rawStatus.running),
-          pending: nonNegativeNumber(rawStatus.pending),
-          failedFiles: Array.isArray(rawStatus.failedFiles)
-            ? rawStatus.failedFiles.filter((file): file is string => typeof file === 'string')
-            : [],
+          running: 0,
+          pending:
+            state === 'queued'
+              ? nonNegativeNumber(rawStatus.pending) +
+                nonNegativeNumber(rawStatus.running) +
+                persistedFailed
+              : nonNegativeNumber(rawStatus.pending),
+          failedFiles: [],
+          error:
+            hadItemFailures || typeof rawStatus.error !== 'string' ? undefined : rawStatus.error,
+          finishedAt:
+            state === 'queued'
+              ? undefined
+              : typeof rawStatus.finishedAt === 'number'
+                ? rawStatus.finishedAt
+                : undefined,
           submittedAt,
           queuePosition: undefined,
           ...(malformed
@@ -654,10 +713,23 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         console.error(
           `[ComfyBatchSvcImpl] Ignored or repaired ${malformedCount} malformed job descriptor(s)`
         )
-        await this.preserveMalformedStore(filename)
+        await this.preserveMalformedStore(sourceFilename)
         migrated = true
       }
-      if (migrated) await this.persistBestEffort()
+      if (migrated) {
+        await this.persistBestEffort()
+      }
+      // A successful binary restore makes the binary index authoritative. If
+      // a previous interrupted migration left the legacy JSON beside it,
+      // archive that copy so there is never a second active global JSON store.
+      if (loadedFromLegacy || sourceFilename === filename) {
+        const migratedFilename = `${legacyFilename.replace(/\.json$/i, '')}.migrated-${Date.now()}-${randomUUID()}.bak`
+        await fs.rename(legacyFilename, migratedFilename).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            this.reportPersistenceError(error)
+          }
+        })
+      }
     })().catch((error) => {
       this.reportRestoreError(error)
     })

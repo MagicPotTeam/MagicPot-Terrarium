@@ -2,6 +2,10 @@ import type { ComfyHistoryResp, FileItem, ObjectInfoMap, Workflow } from '@share
 import type { ComfyQueueResp } from '@shared/comfy/types'
 
 const DEFAULT_TIMEOUT_MS = 30_000
+// Remote/custom-node instances can return a multi-megabyte object_info map.
+// Batch runtime discovery gets a longer single attempt so that response-body
+// transfer time does not turn a healthy endpoint into a false incompatibility.
+export const COMFY_BATCH_OBJECT_INFO_TIMEOUT_MS = 120_000
 export const COMFY_BATCH_MAX_NETWORK_ATTEMPTS = 4
 
 export class ComfyBatchHttpError extends Error {
@@ -64,6 +68,11 @@ type RequestOptions = {
   retry?: boolean
   timeoutMs?: number
   signal?: AbortSignal
+}
+
+export type ComfyObjectInfoOptions = {
+  retry?: boolean
+  timeoutMs?: number
 }
 
 export function createComfyJsonPostInit(body: unknown): RequestInit {
@@ -199,8 +208,8 @@ export class ComfyBatchHttpClient {
     }
   }
 
-  objectInfo(signal?: AbortSignal): Promise<ObjectInfoMap> {
-    return this.json('/object_info', {}, { signal })
+  objectInfo(signal?: AbortSignal, options: ComfyObjectInfoOptions = {}): Promise<ObjectInfoMap> {
+    return this.json('/object_info', {}, { signal, ...options })
   }
 
   async uploadImage(filename: string, image: Uint8Array, signal?: AbortSignal): Promise<FileItem> {

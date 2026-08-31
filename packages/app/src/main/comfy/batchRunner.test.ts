@@ -263,13 +263,27 @@ describe('Comfy batch paths and discovery', () => {
         throw new Error('temporary failure')
       }
     })
-    const first = await new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+    const firstRunner = new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
       createClient: () => failedClient
-    }).run()
-    expect(first).toMatchObject({ state: 'error', failed: 1 })
+    })
+    const firstPromise = firstRunner.run()
+    await vi.waitFor(() => expect(firstRunner.status.running).toBeGreaterThan(0))
+    firstRunner.cancel()
+    const first = await firstPromise
+    expect(first).toMatchObject({ state: 'cancelled', failed: 0, failedFiles: [] })
 
     const inputPath = path.join(getComfyBatchInputDir(sourceDir), 'pending.jpg')
     await expect(fs.stat(inputPath)).resolves.toBeDefined()
+    await expect(
+      fs.stat(path.join(getComfyBatchInputDir(sourceDir), '.magicpot-batch-input.json'))
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+    const checkpoint = JSON.parse(
+      await fs.readFile(getComfyBatchManifestPath(sourceDir), 'utf8')
+    ) as { version: number; sourceDir: string; outputDir: string; items: Record<string, unknown> }
+    expect(checkpoint.version).toBe(3)
+    expect(checkpoint.sourceDir).toBe(path.resolve(sourceDir))
+    expect(checkpoint.outputDir).toBe(getComfyBatchOutputDir(sourceDir))
+    expect(Object.keys(checkpoint)).not.toContain('relativePaths')
 
     const reads: string[] = []
     vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
@@ -286,6 +300,182 @@ describe('Comfy batch paths and discovery', () => {
     expect(reads).toContain(path.resolve(inputPath))
     expect(reads).not.toContain(path.resolve(sourcePath))
     await expect(fs.stat(inputPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('resumes from staged files without an input manifest', async () => {
+    const sourceDir = await createTempDir()
+    const inputDir = getComfyBatchInputDir(sourceDir)
+    await fs.writeFile(path.join(sourceDir, 'first.jpg'), 'first')
+    await fs.writeFile(path.join(sourceDir, 'second.jpg'), 'second')
+    await fs.mkdir(inputDir, { recursive: true })
+    await fs.copyFile(path.join(sourceDir, 'first.jpg'), path.join(inputDir, 'first.jpg'))
+    await fs.copyFile(path.join(sourceDir, 'second.jpg'), path.join(inputDir, 'second.jpg'))
+
+    let releaseSecondRead!: () => void
+    const secondReadBlocked = new Promise<void>((resolve) => {
+      releaseSecondRead = resolve
+    })
+    let firstPromptStarted!: () => void
+    const firstPrompt = new Promise<void>((resolve) => {
+      firstPromptStarted = resolve
+    })
+    vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+      const candidate = path.resolve(String(args[0]))
+      if (candidate === path.resolve(path.join(inputDir, 'second.jpg'))) await secondReadBlocked
+      return fsSync.readFileSync(args[0] as fsSync.PathLike, args[1] as never) as never
+    })
+    const fakeClient = createFakeComfyClient({
+      prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
+        firstPromptStarted()
+        return promptId
+      }
+    })
+
+    const runPromise = new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    }).run()
+    const startedBeforeWholeScan = await Promise.race([
+      firstPrompt.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250))
+    ])
+    releaseSecondRead()
+
+    expect(startedBeforeWholeScan).toBe(true)
+    await expect(runPromise).resolves.toMatchObject({ state: 'completed', success: 2 })
+  })
+
+  it('migrates a legacy input snapshot without restaging completed files', async () => {
+    const sourceDir = await createTempDir()
+    const request = makeBatchRequest(sourceDir)
+    const outputDir = getComfyBatchOutputDir(sourceDir)
+    const inputDir = getComfyBatchInputDir(sourceDir)
+    await Promise.all(
+      ['pending.jpg', 'done-a.jpg', 'done-b.jpg'].map((filename) =>
+        fs.writeFile(path.join(sourceDir, filename), filename)
+      )
+    )
+    await fs.mkdir(inputDir, { recursive: true })
+    await fs.copyFile(path.join(sourceDir, 'pending.jpg'), path.join(inputDir, 'pending.jpg'))
+    const planFingerprint = buildComfyBatchPlanFingerprint(request)
+    for (const filename of ['done-a.jpg', 'done-b.jpg']) {
+      const bytes = new Uint8Array(await fs.readFile(path.join(sourceDir, filename)))
+      await atomicCommitPng(path.join(outputDir, filename.replace(/\.jpg$/i, '.png')), validPng, {
+        sourceSha256: createHash('sha256').update(bytes).digest('hex'),
+        planFingerprint
+      })
+    }
+    await fs.writeFile(
+      path.join(inputDir, '.magicpot-batch-input.json'),
+      JSON.stringify({
+        version: 1,
+        sourceDir: path.resolve(sourceDir),
+        relativePaths: ['pending.jpg', 'done-a.jpg', 'done-b.jpg'],
+        files: [],
+        sourceMtimeMs: (await fs.stat(sourceDir)).mtimeMs,
+        createdAt: Date.now()
+      })
+    )
+    await fs.mkdir(path.join(outputDir, '.magicpot-batch'), { recursive: true })
+    await fs.writeFile(
+      getComfyBatchManifestPath(sourceDir),
+      JSON.stringify({
+        version: 2,
+        sourceDir: path.resolve(sourceDir),
+        outputDir,
+        planFingerprint,
+        updatedAt: Date.now(),
+        items: {}
+      })
+    )
+    let promptCalls = 0
+    const fakeClient = createFakeComfyClient({
+      prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
+        promptCalls += 1
+        return promptId
+      }
+    })
+
+    const status = await new ComfyBatchRunner(request, [profile('one')], {
+      createClient: () => fakeClient
+    }).run()
+
+    expect(status).toMatchObject({ state: 'completed', total: 3, success: 1, skipped: 2 })
+    expect(promptCalls).toBe(1)
+    await expect(fs.stat(path.join(inputDir, '.magicpot-batch-input.json'))).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+  })
+
+  it('stages the complete source queue before dispatching the first prompt', async () => {
+    const sourceDir = await createTempDir()
+    const inputDir = getComfyBatchInputDir(sourceDir)
+    await fs.writeFile(path.join(sourceDir, 'first.jpg'), 'first')
+    await fs.mkdir(path.join(sourceDir, 'nested'))
+    await fs.writeFile(path.join(sourceDir, 'nested', 'second.png'), 'second')
+
+    let stagedAtPrompt: string[] = []
+    let runPromise!: Promise<ComfyBatchStatus>
+    const promptStarted = new Promise<void>((resolve) => {
+      const fakeClient = createFakeComfyClient({
+        prompt: async (_workflow: Workflow, _clientId: string, promptId: string) => {
+          stagedAtPrompt = (await scanComfyBatchImages(inputDir)).map(
+            (source) => source.relativePath
+          )
+          resolve()
+          return promptId
+        }
+      })
+      const runner = new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+        createClient: () => fakeClient
+      })
+      runPromise = runner.run()
+    })
+
+    await promptStarted
+    expect(stagedAtPrompt).toEqual(['first.jpg', path.join('nested', 'second.png')])
+    await expect(fs.stat(path.join(sourceDir, 'first.jpg'))).resolves.toBeDefined()
+    await expect(fs.stat(path.join(sourceDir, 'nested', 'second.png'))).resolves.toBeDefined()
+    await expect(runPromise).resolves.toMatchObject({ state: 'completed', success: 2 })
+  })
+
+  it('automatically retries transient item failures without reporting them as failed', async () => {
+    const sourceDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'retry.jpg'), 'retry')
+    let uploadAttempts = 0
+    const fakeClient = createFakeComfyClient({
+      uploadImage: async () => {
+        uploadAttempts += 1
+        if (uploadAttempts === 1) throw new Error('temporary upload failure')
+        return { filename: 'upload.png', subfolder: '', type: 'input' as const }
+      }
+    })
+
+    const status = await new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    }).run()
+
+    expect(status).toMatchObject({ state: 'completed', success: 1, failed: 0, failedFiles: [] })
+    expect(uploadAttempts).toBe(2)
+  })
+
+  it('keeps retrying an item beyond the old attempt cap until it succeeds', async () => {
+    const sourceDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'eventually.jpg'), 'eventually')
+    let uploadAttempts = 0
+    const fakeClient = createFakeComfyClient({
+      uploadImage: async () => {
+        uploadAttempts += 1
+        if (uploadAttempts <= 5) throw new Error('temporary transport delay')
+        return { filename: 'upload.png', subfolder: '', type: 'input' as const }
+      }
+    })
+
+    const result = await new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    }).run()
+
+    expect(result).toMatchObject({ state: 'completed', success: 1, failed: 0, failedFiles: [] })
+    expect(uploadAttempts).toBe(6)
   })
 })
 
@@ -589,6 +779,55 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     expect(calls).toContain('fast')
   })
 
+  it('retries a local profile while a slow remote probe is still in flight', async () => {
+    const sourceDir = await createTempDir()
+    let localProbeAttempts = 0
+    let releaseRemoteObjectInfo!: () => void
+    const remoteObjectInfoBlocked = new Promise<void>((resolve) => {
+      releaseRemoteObjectInfo = resolve
+    })
+    const localClient = createFakeComfyClient({
+      probe: async () => {
+        localProbeAttempts += 1
+        if (localProbeAttempts === 1) throw new Error('local ComfyUI is still starting')
+        return { endpoint: 'system_stats' as const, latencyMs: 1 }
+      }
+    })
+    const remoteClient = createFakeComfyClient({
+      objectInfo: async () => {
+        await remoteObjectInfoBlocked
+        return objectInfo()
+      }
+    })
+    const runner = new ComfyBatchRunner(
+      makeBatchRequest(sourceDir),
+      [profile('local'), profile('remote')],
+      {
+        createClient: (baseUrl) => (baseUrl.includes('local') ? localClient : remoteClient)
+      }
+    )
+    const internals = runner as unknown as {
+      refreshProfilesIfNeeded: (force?: boolean) => Promise<void>
+      runtimes: Array<{ profile: ComfyBatchProfile }>
+    }
+
+    const initialRefresh = internals.refreshProfilesIfNeeded(true)
+    await vi.waitFor(() => expect(localProbeAttempts).toBe(1))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // A refresh must not be held hostage by the unresolved remote object_info
+    // request. The second local probe is what happens after an embedded
+    // ComfyUI finishes starting in the real batch supervisor.
+    await expect(internals.refreshProfilesIfNeeded(true)).resolves.toBeUndefined()
+    await vi.waitFor(() => expect(localProbeAttempts).toBe(2))
+    await vi.waitFor(() =>
+      expect(internals.runtimes.map(({ profile }) => profile.id)).toContain('local')
+    )
+
+    releaseRemoteObjectInfo()
+    await initialRefresh
+  })
+
   it('starts the first prompt before the whole source directory is prepared', async () => {
     const sourceDir = await createTempDir()
     await Promise.all([
@@ -846,7 +1085,7 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     ])
     const calls: string[] = []
     const sourceByPromptId = new Map<string, string>()
-    let failFailedItem = true
+    let failedAttemptsRemaining = 1
     const fakeClient = {
       probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
       objectInfo: async () => objectInfo(),
@@ -866,7 +1105,8 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
         return promptId
       },
       history: async (promptId: string) => {
-        if (failFailedItem && sourceByPromptId.get(promptId) === 'failed') {
+        if (failedAttemptsRemaining > 0 && sourceByPromptId.get(promptId) === 'failed') {
+          failedAttemptsRemaining -= 1
           return {
             [promptId]: {
               outputs: {},
@@ -903,14 +1143,13 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
       createClient: () => fakeClient
     })
     expect(await first.run()).toMatchObject({
-      state: 'error',
-      success: 3,
-      failed: 1,
-      error: 'first failure'
+      state: 'completed',
+      success: 4,
+      failed: 0,
+      skipped: 0
     })
 
     calls.length = 0
-    failFailedItem = false
     await fs.writeFile(path.join(sourceDir, 'changed.jpg'), 'changed')
     await fs.writeFile(path.join(sourceDir, 'added.jpg'), 'added')
     await fs.rm(path.join(`${sourceDir}.output`, 'missing.png'))
@@ -920,11 +1159,11 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
     })
     const retryStatus = await retry.run()
 
-    expect(retryStatus).toMatchObject({ state: 'completed', success: 4, skipped: 1, failed: 0 })
-    expect(calls.sort()).toEqual(['added', 'changed', 'failed', 'missing'])
+    expect(retryStatus).toMatchObject({ state: 'completed', success: 3, skipped: 2, failed: 0 })
+    expect(calls.sort()).toEqual(['added', 'changed', 'missing'])
   })
 
-  it('keeps the concrete item failure reason in the final batch status', async () => {
+  it('keeps item failure details out of the batch status while retrying', async () => {
     const sourceDir = await createTempDir()
     await fs.writeFile(path.join(sourceDir, 'source.jpg'), 'source')
     const failureReason = 'No compatible ComfyUI instance is available'
@@ -936,11 +1175,16 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
       }
     } as unknown as ComfyBatchHttpClient
 
-    const result = await new ComfyBatchRunner(request(sourceDir), [profile('one')], {
+    const runner = new ComfyBatchRunner(request(sourceDir), [profile('one')], {
       createClient: () => fakeClient
-    }).run()
+    })
+    const resultPromise = runner.run()
+    await vi.waitFor(() => expect(runner.status.running).toBeGreaterThan(0))
+    expect(runner.status).toMatchObject({ failed: 0, failedFiles: [] })
+    runner.cancel()
+    const result = await resultPromise
 
-    expect(result).toMatchObject({ state: 'error', failed: 1, error: failureReason })
+    expect(result).toMatchObject({ state: 'cancelled', failed: 0, failedFiles: [] })
   })
 
   it('discovers a profile added while the first item is blocked', async () => {
@@ -1163,13 +1407,13 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
         fs.writeFile(path.join(sourceDir, filename), filename)
       )
     )
-    let historyCalls = 0
     let releaseSecond!: () => void
     const secondAndThirdBlocked = new Promise<void>((resolve) => {
       releaseSecond = resolve
     })
     const processedPaths: string[] = []
     const sourceByPromptId = new Map<string, string>()
+    let firstAttemptFailuresRemaining = 5
     const fakeClient = {
       probe: async () => ({ endpoint: 'system_stats' as const, latencyMs: 1 }),
       objectInfo: async () => objectInfo(),
@@ -1186,10 +1430,13 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
         return promptId
       },
       history: async (promptId: string) => {
-        historyCalls += 1
-        processedPaths.push(sourceByPromptId.get(promptId) || '')
-        if (historyCalls === 1) throw new Error('first attempt failed')
-        if (historyCalls === 2 || historyCalls === 3) {
+        const relativePath = sourceByPromptId.get(promptId) || ''
+        processedPaths.push(relativePath)
+        if (relativePath === 'first.jpg' && firstAttemptFailuresRemaining > 0) {
+          firstAttemptFailuresRemaining -= 1
+          throw new Error('first attempt failed')
+        }
+        if (relativePath === 'second.jpg' || relativePath === 'third.jpg') {
           await secondAndThirdBlocked
         }
         return {
@@ -1208,17 +1455,23 @@ describe('ComfyBatchRunner resume and retry semantics', () => {
       createClient: () => fakeClient
     })
     const runPromise = runner.run()
-    await vi.waitFor(() =>
-      expect(runner.status).toMatchObject({ failed: 1, running: 2, pending: 1 })
+    await vi.waitFor(
+      () => {
+        expect(runner.status.failed).toBe(0)
+        expect(runner.status.running).toBeGreaterThan(0)
+        expect(
+          processedPaths.filter((relativePath) => relativePath === 'first.jpg')
+        ).not.toHaveLength(0)
+      },
+      { timeout: 5_000 }
     )
 
-    expect(runner.retryFailedItems()).toMatchObject({ failed: 0, pending: 2, running: 2 })
     releaseSecond()
     const status = await runPromise
 
     expect(status).toMatchObject({ state: 'completed', total: 4, success: 4, failed: 0 })
-    expect(processedPaths).toHaveLength(5)
-    expect(processedPaths.filter((relativePath) => relativePath === 'first.jpg')).toHaveLength(2)
+    expect(processedPaths).toHaveLength(9)
+    expect(processedPaths.filter((relativePath) => relativePath === 'first.jpg')).toHaveLength(6)
     expect(processedPaths.filter((relativePath) => relativePath !== 'first.jpg').sort()).toEqual([
       'fourth.jpg',
       'second.jpg',

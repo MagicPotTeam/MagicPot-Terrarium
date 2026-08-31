@@ -1,5 +1,4 @@
 import {
-  Box,
   Button,
   Chip,
   Dialog,
@@ -53,7 +52,7 @@ const formatDuration = (value: number | undefined, calculating: string, _empty: 
   return `${hours}h ${minutes % 60}m`
 }
 
-const formatThroughput = (
+const formatSecondsPerItem = (
   value: number | undefined,
   calculating: string,
   format: (rate: string) => string
@@ -90,10 +89,10 @@ const useSmoothEta = (status: ComfyBatchStatus): number | undefined => {
   return Math.max(0, status.etaMs - (nowMs - etaStartedAt.current))
 }
 
-const getThroughputPerSecond = (status: ComfyBatchStatus): number | undefined => {
+const getSecondsPerItem = (status: ComfyBatchStatus): number | undefined => {
   const remainingItems = status.pending + status.running
   return status.etaMs && status.etaMs > 0 && remainingItems > 0
-    ? (remainingItems * 1_000) / status.etaMs
+    ? status.etaMs / remainingItems / 1_000
     : undefined
 }
 
@@ -134,7 +133,7 @@ const stateLabelKey = (state: ComfyBatchJobState): string => {
 }
 
 const getProgress = (status: ComfyBatchStatus): number => {
-  const finished = status.success + status.failed + status.skipped
+  const finished = status.success + status.skipped
   return status.total > 0 ? Math.min(100, (finished / status.total) * 100) : 0
 }
 
@@ -150,7 +149,6 @@ const StatusMetrics = ({ status }: StatusMetricsProps): React.JSX.Element => {
       <Typography color="success.main">
         {t('qapp.batch.success', { count: status.success + status.skipped })}
       </Typography>
-      <Typography color="error.main">{t('qapp.batch.failed', { count: status.failed })}</Typography>
       <Typography>{t('qapp.batch.running', { count: status.running })}</Typography>
       <Typography>{t('qapp.batch.pending', { count: status.pending })}</Typography>
     </Stack>
@@ -305,13 +303,10 @@ const ComfyBatchJobCenter = ({
                                     ? 'qapp.batch.processed_summary'
                                     : 'qapp.batch.progress_summary',
                                   {
-                                    finished: job.success + job.failed + job.skipped,
+                                    finished: job.success + job.skipped,
                                     total: job.total
                                   }
                                 )}
-                                {job.failed > 0
-                                  ? ` · ${t('qapp.batch.failed', { count: job.failed })}`
-                                  : ''}
                                 {job.state === 'queued' && job.queuePosition
                                   ? ` · ${t('qapp.batch.queue_position', { position: job.queuePosition })}`
                                   : ''}
@@ -472,8 +467,8 @@ const ComfyBatchJobDetails = ({
           />
           <MetricRow
             label={t('qapp.batch.throughput')}
-            value={formatThroughput(
-              getThroughputPerSecond(status),
+            value={formatSecondsPerItem(
+              getSecondsPerItem(status),
               t('qapp.batch.calculating'),
               (rate) => t('qapp.batch.throughput_value', { rate })
             )}
@@ -493,15 +488,6 @@ const ComfyBatchJobDetails = ({
             <MetricRow label={t('qapp.batch.output')} value={status.outputDir} multiline />
           )}
           {status.error && <Typography color="error.main">{status.error}</Typography>}
-          {status.failedFiles.length > 0 && (
-            <Box sx={{ maxHeight: 140, overflow: 'auto' }}>
-              {status.failedFiles.map((filename) => (
-                <Typography key={filename} variant="caption" display="block" color="error.main">
-                  {filename}
-                </Typography>
-              ))}
-            </Box>
-          )}
         </Stack>
       </DialogContent>
       <DialogActions>

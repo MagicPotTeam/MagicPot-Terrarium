@@ -9,7 +9,11 @@ import type {
   StartComfyBatchReq
 } from '@shared/api/svcComfyBatch'
 import type { ComfyHistory, FileItem, ObjectInfoMap, Workflow } from '@shared/comfy/types'
-import { ComfyBatchHttpClient, ComfyBatchHttpError } from './batchHttp'
+import {
+  COMFY_BATCH_OBJECT_INFO_TIMEOUT_MS,
+  ComfyBatchHttpClient,
+  ComfyBatchHttpError
+} from './batchHttp'
 
 export const COMFY_BATCH_IMAGE_EXTENSIONS = new Set([
   '.png',
@@ -22,7 +26,7 @@ export const COMFY_BATCH_IMAGE_EXTENSIONS = new Set([
   '.tiff'
 ])
 const PNG_SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-const MANIFEST_VERSION = 2
+const MANIFEST_VERSION = 3
 export const COMFY_BATCH_HISTORY_POLL_MS = 200
 const HISTORY_TIMEOUT_MS = 24 * 60 * 60 * 1000
 const SUPERVISOR_WAIT_MS = 100
@@ -45,8 +49,11 @@ const COMFY_BATCH_EXECUTION_MULTIPLIER = 2
 // lets a slow source drive or remote upload stay ahead of the GPU without
 // allowing an unbounded number of prepared buffers to accumulate.
 const COMFY_BATCH_PREPARATION_HEADROOM = 1
-const INPUT_MANIFEST_VERSION = 1
-const INPUT_MANIFEST_FILENAME = '.magicpot-batch-input.json'
+// Item failures stay in the durable input queue and retry until they succeed
+// or the user cancels the batch. The delay is capped so a broken instance does
+// not create a hot loop while still recovering automatically when it returns.
+const COMFY_BATCH_RETRY_BASE_DELAY_MS = 50
+const COMFY_BATCH_RETRY_MAX_DELAY_MS = 1_000
 // Embedded ComfyUI can take well over a minute to load custom nodes and expose
 // /object_info. Keep the batch pending during that startup window instead of
 // converting every source image into a permanent failure.
@@ -84,21 +91,17 @@ export type ComfyBatchManifestItem = {
 }
 
 export type ComfyBatchManifest = {
-  version: 2
+  version: 2 | 3
   sourceDir: string
   outputDir: string
   planFingerprint: string
   updatedAt: number
   items: Record<string, ComfyBatchManifestItem>
-}
-
-type ComfyBatchInputManifest = {
-  version: 1
-  sourceDir: string
-  relativePaths: string[]
-  files?: ComfyBatchInputSnapshotFile[]
-  sourceMtimeMs?: number
-  createdAt: number
+  /** The input directory is the durable queue; this flag records its state. */
+  staging?: 'copying' | 'ready'
+  total?: number
+  completed?: number
+  skipped?: number
 }
 
 type InstanceRuntime = {
@@ -115,6 +118,11 @@ type PendingBatchItem = {
   outputPath: string
   outputRelativePath: string
   staged: boolean
+}
+
+type LegacyComfyBatchInputSnapshot = {
+  sourceDir: string
+  relativePaths: string[]
 }
 
 export class ComfyExecutionError extends Error {
@@ -169,10 +177,6 @@ export function getComfyBatchOutputRelativePath(relativeSourcePath: string): str
   return path.join(parsed.dir, `${parsed.name}.png`)
 }
 
-function getComfyBatchInputManifestPath(inputDir: string): string {
-  return path.join(inputDir, INPUT_MANIFEST_FILENAME)
-}
-
 async function hasDirectory(filename: string): Promise<boolean> {
   try {
     return (await fs.stat(filename)).isDirectory()
@@ -201,8 +205,6 @@ async function ensureComfyBatchInputDirectory(inputDir: string): Promise<boolean
     return false
   }
 }
-
-type ComfyBatchInputSnapshotFile = Pick<BatchSourceFile, 'relativePath' | 'size' | 'sha256'>
 
 type PreparedBatchSource = {
   bytes: Uint8Array
@@ -271,28 +273,24 @@ async function discoverComfyBatchImagePaths(
   return result
 }
 
-async function getBatchSourceMtime(sourceDir: string): Promise<number> {
-  return (await fs.stat(sourceDir)).mtimeMs
-}
-
-function parseComfyBatchInputManifest(value: unknown): ComfyBatchInputManifest | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const candidate = value as Partial<ComfyBatchInputManifest>
-  const files = Array.isArray(candidate.files)
-    ? candidate.files.filter(
-        (file): file is ComfyBatchInputSnapshotFile =>
-          Boolean(file) &&
-          typeof file === 'object' &&
-          typeof file.relativePath === 'string' &&
-          Number.isFinite(file.size) &&
-          typeof file.sha256 === 'string'
-      )
-    : undefined
-  if (
-    candidate.version !== INPUT_MANIFEST_VERSION ||
-    typeof candidate.sourceDir !== 'string' ||
-    !Array.isArray(candidate.relativePaths) ||
-    !candidate.relativePaths.every((relativePath) => {
+async function readLegacyComfyBatchInputSnapshot(
+  inputDir: string,
+  sourceDir: string
+): Promise<LegacyComfyBatchInputSnapshot | null> {
+  try {
+    const parsed = JSON.parse(
+      await fs.readFile(path.join(inputDir, '.magicpot-batch-input.json'), 'utf8')
+    ) as {
+      version?: unknown
+      sourceDir?: unknown
+      relativePaths?: unknown
+    }
+    if (parsed.version !== 1 || typeof parsed.sourceDir !== 'string') return null
+    if (path.resolve(parsed.sourceDir) !== path.resolve(sourceDir)) {
+      throw new Error(`Batch input belongs to a different source folder: ${inputDir}`)
+    }
+    if (!Array.isArray(parsed.relativePaths)) return null
+    const relativePaths = parsed.relativePaths.filter((relativePath): relativePath is string => {
       if (typeof relativePath !== 'string') return false
       try {
         getComfyBatchOutputRelativePath(relativePath)
@@ -301,92 +299,42 @@ function parseComfyBatchInputManifest(value: unknown): ComfyBatchInputManifest |
         return false
       }
     })
-  ) {
-    return null
-  }
-  return {
-    version: INPUT_MANIFEST_VERSION,
-    sourceDir: candidate.sourceDir,
-    relativePaths: [...new Set(candidate.relativePaths)],
-    ...(files ? { files } : {}),
-    ...(typeof candidate.sourceMtimeMs === 'number'
-      ? { sourceMtimeMs: candidate.sourceMtimeMs }
-      : {}),
-    createdAt: typeof candidate.createdAt === 'number' ? candidate.createdAt : Date.now()
-  }
-}
-
-async function readComfyBatchInputManifest(
-  inputDir: string
-): Promise<ComfyBatchInputManifest | null> {
-  try {
-    return parseComfyBatchInputManifest(
-      JSON.parse(await fs.readFile(getComfyBatchInputManifestPath(inputDir), 'utf8'))
-    )
-  } catch {
+    return { sourceDir: path.resolve(parsed.sourceDir), relativePaths: [...new Set(relativePaths)] }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Batch input belongs')) throw error
     return null
   }
 }
 
-async function writeComfyBatchInputManifest(
+/** Materialize the source snapshot as the durable filesystem queue. */
+async function stageComfyBatchInputs(
+  sources: BatchSourceFile[],
   inputDir: string,
-  sourceDir: string,
-  relativePaths: string[],
-  files?: ComfyBatchInputSnapshotFile[],
-  sourceMtimeMs?: number
-): Promise<void> {
-  await atomicWriteFile(
-    getComfyBatchInputManifestPath(inputDir),
-    JSON.stringify({
-      version: INPUT_MANIFEST_VERSION,
-      sourceDir,
-      relativePaths: [...new Set(relativePaths)],
-      ...(files ? { files } : {}),
-      ...(sourceMtimeMs !== undefined ? { sourceMtimeMs } : {}),
-      createdAt: Date.now()
-    } satisfies ComfyBatchInputManifest)
-  )
-}
-
-async function reconcileComfyBatchInput(
-  sourceDir: string,
-  inputDir: string,
-  previous: ComfyBatchInputManifest,
-  options: ComfyBatchScanOptions = {}
-): Promise<{ sources: BatchSourceFile[]; snapshotRelativePaths: string[] }> {
-  const currentSources = await scanComfyBatchImages(sourceDir, options)
-  const currentPaths = new Set(currentSources.map((source) => source.relativePath))
-
-  // A changed source-folder mtime is the explicit compatibility escape hatch
-  // for legacy tasks. Re-stage every current image so that additions,
-  // edits, deletions, and outputs removed between runs are all reconciled in
-  // one pass. The normal resume path below never reaches this source scan.
-  for (const source of currentSources) {
-    await copyComfyBatchInputFile(source, inputDir)
+  onProgress?: (staged: number, total: number) => void
+): Promise<BatchSourceFile[]> {
+  const stagedSources = await discoverComfyBatchImagePaths(inputDir)
+  const currentPaths = new Set(sources.map((source) => source.relativePath))
+  for (const staged of stagedSources) {
+    if (currentPaths.has(staged.relativePath)) continue
+    await fs.rm(resolveBatchInputPath(inputDir, staged.relativePath), { force: true })
   }
-
-  // A source deleted since the last run must no longer participate in output
-  // cleanup or future retries. Removing its staged copy is safe because the
-  // original source directory remains untouched.
-  for (const relativePath of previous.relativePaths) {
-    if (currentPaths.has(relativePath)) continue
-    await fs
-      .rm(resolveBatchInputPath(inputDir, relativePath), { force: true })
-      .catch(() => undefined)
+  const stagedPaths = new Set(stagedSources.map((source) => source.relativePath))
+  let nextIndex = 0
+  let stagedCount = stagedPaths.size
+  const copyNext = async (): Promise<void> => {
+    while (nextIndex < sources.length) {
+      const source = sources[nextIndex]
+      nextIndex += 1
+      if (stagedPaths.has(source.relativePath)) continue
+      await copyComfyBatchInputFile(source, inputDir)
+      stagedPaths.add(source.relativePath)
+      stagedCount += 1
+      onProgress?.(stagedCount, sources.length)
+    }
   }
-
-  const snapshotRelativePaths = currentSources.map((source) => source.relativePath)
-  await writeComfyBatchInputManifest(
-    inputDir,
-    sourceDir,
-    snapshotRelativePaths,
-    currentSources.map(({ relativePath, size, sha256 }) => ({ relativePath, size, sha256 })),
-    await getBatchSourceMtime(sourceDir)
-  )
-  return {
-    sources: await scanComfyBatchImages(inputDir, options),
-    snapshotRelativePaths
-  }
+  const workerCount = Math.min(4, Math.max(1, sources.length))
+  await Promise.all(Array.from({ length: workerCount }, () => copyNext()))
+  return discoverComfyBatchImagePaths(inputDir)
 }
 
 function normalizeCollisionKey(value: string): string {
@@ -473,26 +421,6 @@ async function readComfyBatchSourceFile(
     size: after.size,
     mtimeMs: after.mtimeMs,
     sha256: createHash('sha256').update(bytes).digest('hex')
-  }
-}
-
-async function scanComfyBatchSourceFile(
-  sourceDir: string,
-  relativePath: string
-): Promise<BatchSourceFile | null> {
-  const absolutePath = resolveBatchInputPath(sourceDir, relativePath)
-  try {
-    const stats = await fs.stat(absolutePath)
-    if (
-      !stats.isFile() ||
-      !COMFY_BATCH_IMAGE_EXTENSIONS.has(path.extname(relativePath).toLowerCase())
-    ) {
-      return null
-    }
-    return await readComfyBatchSourceFile(absolutePath, relativePath)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
-    throw error
   }
 }
 
@@ -748,7 +676,14 @@ async function readManifest(
     const parsed = JSON.parse(
       await fs.readFile(getComfyBatchManifestPath(sourceDir, runKey), 'utf8')
     )
-    if (parsed?.version !== MANIFEST_VERSION || typeof parsed.items !== 'object') return null
+    if (
+      ![2, MANIFEST_VERSION].includes(parsed?.version) ||
+      !parsed.items ||
+      typeof parsed.items !== 'object' ||
+      Array.isArray(parsed.items)
+    ) {
+      return null
+    }
     return parsed as ComfyBatchManifest
   } catch {
     return null
@@ -819,6 +754,7 @@ export async function atomicCommitPng(
 }
 
 async function writeManifest(manifest: ComfyBatchManifest): Promise<void> {
+  manifest.version = MANIFEST_VERSION
   manifest.updatedAt = Date.now()
   await atomicWriteFile(
     path.join(manifest.outputDir, '.magicpot-batch', 'manifest.json'),
@@ -1084,12 +1020,7 @@ export class ComfyBatchRunner {
   private readonly itemAttempts = new Map<string, number>()
   private readonly retryQueuedPaths = new Set<string>()
   private inputDir!: string
-  private inputSnapshotSourceDir = ''
-  private inputSnapshotSourceMtimeMs: number | undefined
-  private inputSnapshotRelativePaths: string[] = []
-  private readonly inputSnapshotFiles = new Map<string, ComfyBatchInputSnapshotFile>()
-  private inputSnapshotDirty = false
-  private runtimeRefreshPromise: Promise<void> | undefined
+  private readonly profileProbePromises = new Map<string, Promise<void>>()
   private lastProfileFingerprint = ''
   private lastProfileRefreshAt = 0
   private statusValue: ComfyBatchStatus
@@ -1188,28 +1119,6 @@ export class ComfyBatchRunner {
     return write
   }
 
-  private rememberInputSnapshotFile(source: BatchSourceFile): void {
-    if (!source.sha256 || source.size < 0 || source.mtimeMs < 0) return
-    this.inputSnapshotFiles.set(source.relativePath, {
-      relativePath: source.relativePath,
-      size: source.size,
-      sha256: source.sha256
-    })
-    this.inputSnapshotDirty = true
-  }
-
-  private async persistInputSnapshot(): Promise<void> {
-    if (!this.inputSnapshotDirty || !this.inputSnapshotSourceDir) return
-    await writeComfyBatchInputManifest(
-      this.inputDir,
-      this.inputSnapshotSourceDir,
-      this.inputSnapshotRelativePaths,
-      [...this.inputSnapshotFiles.values()],
-      this.inputSnapshotSourceMtimeMs
-    )
-    this.inputSnapshotDirty = false
-  }
-
   private currentProfiles(): ComfyBatchProfile[] {
     return this.options.getProfiles?.() ?? this.profiles
   }
@@ -1218,74 +1127,89 @@ export class ComfyBatchRunner {
     return JSON.stringify([profile.id, profile.baseUrl])
   }
 
-  private async probeCompatibleRuntimes(
-    profiles: ComfyBatchProfile[],
-    onProbe?: (runtime: InstanceRuntime) => void
-  ): Promise<{
-    runtimes: InstanceRuntime[]
-    failedKeys: Set<string>
-    incompatibleKeys: Set<string>
-  }> {
-    // Disabled profiles are configuration, not endpoints. In particular, do
-    // not probe them during a refresh (and never create a runtime for them).
-    const enabledProfiles = profiles.filter((profile) => profile.enabled !== false)
-    if (!enabledProfiles.length) {
-      return { runtimes: [], failedKeys: new Set(), incompatibleKeys: new Set() }
-    }
-    const probes = await Promise.allSettled(
-      enabledProfiles.map((profile) =>
-        (async () => {
-          const client = this.createClient(profile.baseUrl)
-          await client.probe()
-          const objectInfo = await client.objectInfo(this.abortController.signal)
-          if (!hasCompatibleNodeClasses(this.request.workflow, objectInfo)) {
-            return {
-              profile,
-              client,
-              inflight: 0,
-              preparing: 0,
-              compatible: false as const,
-              available: false
-            }
-          }
-          validateComfyBatchBindings(
-            this.request.workflow,
-            this.request.imageInputSlot,
-            this.request.outputNodeIds,
-            objectInfo
-          )
-          return {
-            profile,
-            client,
-            inflight: 0,
-            preparing: 0,
-            compatible: true as const,
-            available: true
-          }
-        })().then((runtime) => {
-          // Publish healthy profiles as soon as they are ready. A slow or
-          // offline profile must not delay work on an already-available one.
-          onProbe?.(runtime)
-          return runtime
-        })
-      )
+  private currentProfileForKey(key: string): ComfyBatchProfile | undefined {
+    return this.currentProfiles().find(
+      (profile) => profile.enabled !== false && this.profileKey(profile) === key
     )
-    const runtimes: InstanceRuntime[] = []
-    const failedKeys = new Set<string>()
-    const incompatibleKeys = new Set<string>()
-    probes.forEach((probe, index) => {
-      const profile = enabledProfiles[index]
-      const key = this.profileKey(profile)
-      if (probe.status === 'fulfilled') {
-        if (probe.value.compatible) runtimes.push(probe.value)
-        else incompatibleKeys.add(key)
-      } else {
-        // A transient endpoint/object-info failure must not evict a runtime
-        // that was already admitted and known to be healthy.
-        failedKeys.add(key)
-      }
+  }
+
+  private async probeProfile(profile: ComfyBatchProfile): Promise<InstanceRuntime> {
+    const client = this.createClient(profile.baseUrl)
+    await client.probe()
+    // object_info is a large response on remote/custom-node instances. Keep
+    // this slow request isolated to its profile and allow one bounded attempt
+    // instead of holding up the whole scheduler with repeated retries.
+    const objectInfo = await client.objectInfo(this.abortController.signal, {
+      timeoutMs: COMFY_BATCH_OBJECT_INFO_TIMEOUT_MS,
+      retry: false
     })
-    return { runtimes, failedKeys, incompatibleKeys }
+    if (!hasCompatibleNodeClasses(this.request.workflow, objectInfo)) {
+      return {
+        profile,
+        client,
+        inflight: 0,
+        preparing: 0,
+        compatible: false,
+        available: false
+      }
+    }
+    validateComfyBatchBindings(
+      this.request.workflow,
+      this.request.imageInputSlot,
+      this.request.outputNodeIds,
+      objectInfo
+    )
+    return {
+      profile,
+      client,
+      inflight: 0,
+      preparing: 0,
+      compatible: true,
+      available: true
+    }
+  }
+
+  private quarantineProfile(profile: ComfyBatchProfile): void {
+    const key = this.profileKey(profile)
+    const existingIndex = this.runtimes.findIndex(
+      (runtime) => this.profileKey(runtime.profile) === key
+    )
+    if (existingIndex < 0) return
+    const existing = this.runtimes[existingIndex]
+    // A transient endpoint/object-info failure must not interrupt work that
+    // was already admitted, but it must stop new items using that endpoint.
+    if (existing.inflight > 0) {
+      existing.profile = profile
+      existing.compatible = false
+      existing.available = false
+    } else {
+      this.runtimes.splice(existingIndex, 1)
+    }
+    this.emit()
+  }
+
+  private scheduleProfileProbe(profile: ComfyBatchProfile): void {
+    const key = this.profileKey(profile)
+    if (this.profileProbePromises.has(key)) return
+
+    const probePromise = (async () => {
+      try {
+        const probed = await this.probeProfile(profile)
+        const current = this.currentProfileForKey(key)
+        // A profile may be removed or disabled while its large object_info
+        // response is in flight. Never resurrect such a stale endpoint.
+        if (!current) return
+        probed.profile = current
+        this.publishProbedRuntime(probed)
+      } catch {
+        const current = this.currentProfileForKey(key)
+        if (current) this.quarantineProfile(current)
+      } finally {
+        this.profileProbePromises.delete(key)
+      }
+    })()
+    this.profileProbePromises.set(key, probePromise)
+    void probePromise.catch(() => undefined)
   }
 
   private publishProbedRuntime(probed: InstanceRuntime): void {
@@ -1329,89 +1253,49 @@ export class ComfyBatchRunner {
     ) {
       return
     }
-    if (this.runtimeRefreshPromise) return this.runtimeRefreshPromise
-    this.runtimeRefreshPromise = (async () => {
-      const {
-        runtimes: probed,
-        failedKeys,
-        incompatibleKeys
-      } = await this.probeCompatibleRuntimes(profiles, (runtime) =>
-        this.publishProbedRuntime(runtime)
-      )
-      const configuredByKey = new Map(
-        profiles.map((profile) => [this.profileKey(profile), profile])
-      )
-      const existingByKey = new Map(
-        this.runtimes.map((runtime) => [this.profileKey(runtime.profile), runtime])
-      )
-      const probedByKey = new Map(
-        probed.map((runtime) => [this.profileKey(runtime.profile), runtime])
-      )
-      const nextByKey = new Map<string, InstanceRuntime>()
 
-      for (const profile of profiles) {
-        const key = this.profileKey(profile)
-        const existing = existingByKey.get(key)
-        if (profile.enabled === false) {
-          // An in-flight task may finish on a disabled endpoint, but it must
-          // not receive any newly scheduled work.
-          if (existing && existing.inflight > 0) {
-            existing.profile = { ...profile, enabled: false }
-            existing.compatible = false
-            existing.available = false
-            nextByKey.set(key, existing)
-          }
-          continue
-        }
+    // Record the refresh immediately. Each profile now owns its own probe
+    // promise, so a slow remote response cannot prevent the next refresh from
+    // retrying a local ComfyUI that has just finished starting.
+    this.lastProfileFingerprint = fingerprint
+    this.lastProfileRefreshAt = now
 
-        const probedRuntime = probedByKey.get(key)
-        if (probedRuntime) {
-          if (existing) {
-            existing.profile = profile
-            existing.compatible = true
-            existing.available = true
-            nextByKey.set(key, existing)
-          } else {
-            nextByKey.set(key, probedRuntime)
-          }
-          continue
-        }
-
-        if (existing && failedKeys.has(key)) {
-          // Keep an in-flight task attached to its old client so it can drain,
-          // but quarantine the runtime for new work until a later probe passes.
-          existing.profile = profile
-          existing.compatible = false
-          existing.available = false
-          if (existing.inflight > 0) nextByKey.set(key, existing)
-        } else if (existing && incompatibleKeys.has(key) && existing.inflight > 0) {
-          // Compatibility is a real configuration change, so finish admitted
-          // work but do not admit more to this runtime.
-          existing.profile = { ...profile, enabled: false }
-          existing.compatible = false
-          existing.available = false
-          nextByKey.set(key, existing)
-        }
+    const configuredKeys = new Set(profiles.map((profile) => this.profileKey(profile)))
+    for (const profile of profiles) {
+      if (profile.enabled !== false) {
+        this.scheduleProfileProbe(profile)
+        continue
       }
+      const key = this.profileKey(profile)
+      const existingIndex = this.runtimes.findIndex(
+        (runtime) => this.profileKey(runtime.profile) === key
+      )
+      if (existingIndex < 0) continue
+      const existing = this.runtimes[existingIndex]
+      if (existing.inflight > 0) {
+        existing.profile = { ...profile, enabled: false }
+        existing.compatible = false
+        existing.available = false
+      } else {
+        this.runtimes.splice(existingIndex, 1)
+      }
+    }
 
-      // Removed profiles and profiles whose URL/id changed are retained only
-      // long enough for already admitted work to drain, and are never reused.
-      for (const [key, existing] of existingByKey) {
-        if (configuredByKey.has(key) || existing.inflight <= 0) continue
+    // Removed profiles and profiles whose URL/id changed are retained only
+    // long enough for already admitted work to drain, and are never reused.
+    for (let index = this.runtimes.length - 1; index >= 0; index -= 1) {
+      const existing = this.runtimes[index]
+      const key = this.profileKey(existing.profile)
+      if (configuredKeys.has(key)) continue
+      if (existing.inflight > 0) {
         existing.profile = { ...existing.profile, enabled: false }
         existing.compatible = false
-        nextByKey.set(key, existing)
+        existing.available = false
+      } else {
+        this.runtimes.splice(index, 1)
       }
-
-      this.runtimes = [...nextByKey.values()]
-      this.lastProfileFingerprint = fingerprint
-      this.lastProfileRefreshAt = Date.now()
-    })()
-    try {
-      await this.runtimeRefreshPromise
-    } finally {
-      this.runtimeRefreshPromise = undefined
     }
+    this.emit()
   }
 
   private async initialize(): Promise<void> {
@@ -1432,177 +1316,105 @@ export class ComfyBatchRunner {
     const sourceStats = await fs.stat(sourceDir)
     if (!sourceStats.isDirectory()) throw new Error('Batch source must be a directory')
 
+    const previous = await readManifest(sourceDir, this.options.runKey)
+    const previousPlanMatches = previous?.planFingerprint === planFingerprint
+    let inputWasCreated = await ensureComfyBatchInputDirectory(inputDir)
+    const legacyInputSnapshot = await readLegacyComfyBatchInputSnapshot(inputDir, sourceDir)
+    // Old releases wrote a second JSON file inside .input. It is no longer
+    // needed: the files on disk are the queue and the output manifest is the
+    // only checkpoint. Remove the legacy file during migration.
+    await fs
+      .rm(path.join(inputDir, '.magicpot-batch-input.json'), { force: true })
+      .catch(() => undefined)
+    if (previous && !previousPlanMatches) {
+      await fs.rm(inputDir, { recursive: true, force: true })
+      await ensureComfyBatchInputDirectory(inputDir)
+      inputWasCreated = true
+    }
+
+    this.manifest =
+      previous && previousPlanMatches
+        ? previous
+        : ({
+            version: MANIFEST_VERSION,
+            sourceDir,
+            outputDir,
+            planFingerprint,
+            updatedAt: Date.now(),
+            items: {},
+            completed: 0,
+            skipped: 0
+          } satisfies ComfyBatchManifest)
+    this.manifest.version = MANIFEST_VERSION
+    this.manifest.sourceDir = sourceDir
+    this.manifest.outputDir = outputDir
+    this.manifest.planFingerprint = planFingerprint
+
     const scanOptions: ComfyBatchScanOptions = {
       onProgress: ({ discovered }) => {
-        // Make discovery visible to the status poller while the input
-        // snapshot is being prepared. The callback intentionally does not
-        // emit per-file IPC updates; liveStatus reads these fields directly.
-        this.statusValue.total = discovered
+        this.statusValue.total = Math.max(this.statusValue.total, discovered)
         this.statusValue.pending = discovered
       }
     }
-    const createdInput = await ensureComfyBatchInputDirectory(inputDir)
-    let inputManifest = await readComfyBatchInputManifest(inputDir)
-    if (inputManifest && path.resolve(inputManifest.sourceDir) !== sourceDir) {
-      throw new Error(`Batch input belongs to a different source folder: ${inputDir}`)
+    const canUseLegacySnapshot = Boolean(previous && previousPlanMatches && legacyInputSnapshot)
+    const needsSourceSnapshot =
+      inputWasCreated ||
+      !previous ||
+      !previousPlanMatches ||
+      (previous.staging !== 'ready' && !canUseLegacySnapshot)
+    let sourceSnapshot: BatchSourceFile[] = []
+    let sources = await discoverComfyBatchImagePaths(inputDir)
+    const legacyRelativePaths = canUseLegacySnapshot ? legacyInputSnapshot?.relativePaths || [] : []
+    if (canUseLegacySnapshot) {
+      // The old manifest already captured the complete source snapshot. Keep
+      // it only long enough to migrate the counts; never write it back.
+      this.manifest.total = legacyRelativePaths.length
+      this.manifest.staging = 'ready'
+      this.manifest.skipped = Math.max(
+        this.manifest.skipped ?? 0,
+        legacyRelativePaths.length - sources.length
+      )
     }
-
-    let sources: BatchSourceFile[]
-    let snapshotRelativePaths: string[]
-    if (createdInput && !inputManifest) {
-      // A fresh batch only needs a path snapshot before work can start. Do
-      // not copy or hash every image up front; each worker stages and hashes
-      // its own item immediately before uploading it.
-      sources = await discoverComfyBatchImagePaths(sourceDir, scanOptions)
-      snapshotRelativePaths = sources.map((source) => source.relativePath)
-      inputManifest = {
-        version: INPUT_MANIFEST_VERSION,
-        sourceDir,
-        relativePaths: snapshotRelativePaths,
-        files: [],
-        sourceMtimeMs: sourceStats.mtimeMs,
-        createdAt: Date.now()
+    if (needsSourceSnapshot) {
+      sourceSnapshot = await discoverComfyBatchImagePaths(sourceDir, scanOptions)
+      if (!sourceSnapshot.length) {
+        await fs.rm(inputDir, { recursive: true, force: true })
+        throw new Error('No supported images were found in the selected folder')
       }
-      await writeComfyBatchInputManifest(
-        inputDir,
-        sourceDir,
-        snapshotRelativePaths,
-        [],
-        sourceStats.mtimeMs
-      )
-    } else if (
-      inputManifest?.sourceMtimeMs !== undefined &&
-      inputManifest.sourceMtimeMs !== sourceStats.mtimeMs
-    ) {
-      // The source folder changed structurally since the last run. Reconcile
-      // only then; normal resume scans the already bounded .input queue and
-      // never walks the potentially huge original folder.
-      const reconciled = await reconcileComfyBatchInput(
-        sourceDir,
-        inputDir,
-        inputManifest,
-        scanOptions
-      )
-      sources = reconciled.sources
-      snapshotRelativePaths = reconciled.snapshotRelativePaths
-    } else {
-      sources = await scanComfyBatchImages(inputDir, scanOptions)
-      snapshotRelativePaths = inputManifest?.relativePaths.length
-        ? inputManifest.relativePaths
-        : sources.map((source) => source.relativePath)
-      // Always refresh the input manifest after a crash or a legacy task that
-      // has an .input folder but no manifest. This records source-folder mtime
-      // for cheap change detection on the next resume.
-      await writeComfyBatchInputManifest(
-        inputDir,
-        sourceDir,
-        snapshotRelativePaths,
-        inputManifest?.files ??
-          sources.map(({ relativePath, size, sha256 }) => ({ relativePath, size, sha256 })),
-        sourceStats.mtimeMs
-      )
+      // A missing input directory means this is a fresh evaluation of the
+      // source (normally a new timestamped run). Do not carry counters from a
+      // completed queue into the new pass.
+      if (inputWasCreated) {
+        this.manifest.items = {}
+        this.manifest.completed = 0
+        this.manifest.skipped = 0
+      }
+      this.manifest.total = sourceSnapshot.length
+      this.manifest.staging = 'copying'
+      await this.persistManifest()
+      sources = await stageComfyBatchInputs(sourceSnapshot, inputDir, (staged, total) => {
+        this.statusValue.total = total
+        this.statusValue.pending = Math.max(0, total - staged)
+        this.emit()
+      })
+      this.manifest.staging = 'ready'
+      await this.persistManifest()
     }
 
-    const previous = await readManifest(sourceDir, this.options.runKey)
-    if (!sources.length && !snapshotRelativePaths.length) {
+    const snapshotRelativePaths = sourceSnapshot.length
+      ? sourceSnapshot.map((source) => source.relativePath)
+      : [
+          ...new Set([
+            ...sources.map((source) => source.relativePath),
+            ...legacyRelativePaths,
+            ...Object.keys(this.manifest.items)
+          ])
+        ]
+    if (!snapshotRelativePaths.length && !this.manifest.total) {
       await fs.rm(inputDir, { recursive: true, force: true })
       throw new Error('No supported images were found in the selected folder')
     }
 
-    const stagedSourcePaths = new Set(sources.map((source) => source.relativePath))
-    const inputFilesByPath = new Map(
-      (inputManifest?.files ?? []).map((file) => [file.relativePath, file] as const)
-    )
-    const recoveredSources: BatchSourceFile[] = []
-    const retainedSnapshotPaths: string[] = []
-    for (const relativePath of snapshotRelativePaths) {
-      if (stagedSourcePaths.has(relativePath)) {
-        retainedSnapshotPaths.push(relativePath)
-        continue
-      }
-
-      // A completed input image is normally gone from .input. Check only its
-      // source metadata and output marker here; hash the original source again
-      // only if the output is missing or invalid and must be retried.
-      const sourcePath = resolveBatchInputPath(sourceDir, relativePath)
-      let sourceExists = false
-      try {
-        sourceExists = (await fs.stat(sourcePath)).isFile()
-      } catch {
-        sourceExists = false
-      }
-      const outputRelativePath = getComfyBatchOutputRelativePath(relativePath)
-      const outputPath = path.join(outputDir, outputRelativePath)
-      if (!sourceExists) {
-        await fs.rm(outputPath, { force: true })
-        continue
-      }
-
-      const snapshotFile = inputFilesByPath.get(relativePath)
-      const previousItem = previous?.items[relativePath]
-      const outputInspection = await readBatchPngInspection(outputPath)
-      const expectedSha256 = snapshotFile?.sha256 ?? previousItem?.sha256
-      const expectedSize = snapshotFile?.size ?? previousItem?.size
-      const outputHasCurrentMarker =
-        outputInspection.metadata?.sourceSha256 === expectedSha256 &&
-        outputInspection.metadata?.planFingerprint === planFingerprint
-      const legacySuccess =
-        previousItem?.status === 'success' &&
-        previousItem.size === expectedSize &&
-        previousItem.sha256 === expectedSha256 &&
-        previousItem.planFingerprint === planFingerprint &&
-        previousItem.outputRelativePath === outputRelativePath
-      if (outputInspection.valid && (outputHasCurrentMarker || legacySuccess)) {
-        retainedSnapshotPaths.push(relativePath)
-        continue
-      }
-
-      const recovered = await scanComfyBatchSourceFile(sourceDir, relativePath)
-      if (!recovered) {
-        await fs.rm(outputPath, { force: true })
-        continue
-      }
-      await copyComfyBatchInputFile(recovered, inputDir)
-      recoveredSources.push(recovered)
-      retainedSnapshotPaths.push(relativePath)
-      inputFilesByPath.set(relativePath, {
-        relativePath,
-        size: recovered.size,
-        sha256: recovered.sha256
-      })
-    }
-    if (retainedSnapshotPaths.length !== snapshotRelativePaths.length || recoveredSources.length) {
-      snapshotRelativePaths = retainedSnapshotPaths
-      const retainedPathSet = new Set(snapshotRelativePaths)
-      sources = await scanComfyBatchImages(inputDir, scanOptions)
-      await writeComfyBatchInputManifest(
-        inputDir,
-        sourceDir,
-        snapshotRelativePaths,
-        [...inputFilesByPath.values()].filter((file) => retainedPathSet.has(file.relativePath)),
-        sourceStats.mtimeMs
-      )
-    }
-    this.inputSnapshotSourceDir = sourceDir
-    this.inputSnapshotSourceMtimeMs = sourceStats.mtimeMs
-    this.inputSnapshotRelativePaths = [...snapshotRelativePaths]
-    this.inputSnapshotFiles.clear()
-    const inputSnapshotPathSet = new Set(this.inputSnapshotRelativePaths)
-    for (const file of inputFilesByPath.values()) {
-      if (inputSnapshotPathSet.has(file.relativePath)) {
-        this.inputSnapshotFiles.set(file.relativePath, file)
-      }
-    }
-    for (const source of sources) {
-      if (source.sha256 && source.size >= 0 && source.mtimeMs >= 0) {
-        this.inputSnapshotFiles.set(source.relativePath, {
-          relativePath: source.relativePath,
-          size: source.size,
-          sha256: source.sha256
-        })
-      }
-    }
-    this.inputSnapshotDirty = false
     const sourceByPath = new Map(sources.map((source) => [source.relativePath, source]))
     assertNoComfyBatchOutputCollisions(
       snapshotRelativePaths.map(
@@ -1616,81 +1428,57 @@ export class ComfyBatchRunner {
           }
       )
     )
-    this.manifest =
-      previous ||
-      ({
-        version: MANIFEST_VERSION,
-        sourceDir,
-        outputDir,
-        planFingerprint,
-        updatedAt: Date.now(),
-        items: {}
-      } satisfies ComfyBatchManifest)
-    this.manifest.version = MANIFEST_VERSION
-    this.manifest.sourceDir = sourceDir
-    this.manifest.outputDir = outputDir
-    this.manifest.planFingerprint = planFingerprint
 
     const currentSourcePaths = new Set(snapshotRelativePaths)
     for (const [relativePath, item] of Object.entries(this.manifest.items)) {
+      // Version 3 no longer persists terminal item failures. A legacy failed
+      // entry is still represented by its file in the durable input queue and
+      // will be retried automatically after restart.
+      if (item.status === 'failed') {
+        delete this.manifest.items[relativePath]
+        continue
+      }
       if (currentSourcePaths.has(relativePath)) continue
       const staleOutputPath = resolveManifestOutputPath(outputDir, item.outputRelativePath)
       if (staleOutputPath) await fs.rm(staleOutputPath, { force: true })
       delete this.manifest.items[relativePath]
     }
-    const expectedOutputPaths = new Set(
-      snapshotRelativePaths.map((relativePath) => getComfyBatchOutputRelativePath(relativePath))
-    )
-    for (const generatedOutput of await findGeneratedBatchOutputs(outputDir, expectedOutputPaths)) {
-      if (!expectedOutputPaths.has(generatedOutput)) {
-        await fs.rm(path.join(outputDir, generatedOutput), { force: true })
+    if (sourceSnapshot.length) {
+      const expectedOutputPaths = new Set(
+        snapshotRelativePaths.map((relativePath) => getComfyBatchOutputRelativePath(relativePath))
+      )
+      for (const generatedOutput of await findGeneratedBatchOutputs(
+        outputDir,
+        expectedOutputPaths
+      )) {
+        if (!expectedOutputPaths.has(generatedOutput)) {
+          await fs.rm(path.join(outputDir, generatedOutput), { force: true })
+        }
       }
     }
 
-    this.queue = []
-    const pendingSourcePaths = new Set(sources.map((source) => source.relativePath))
-    let skipped = snapshotRelativePaths.filter(
-      (relativePath) => !pendingSourcePaths.has(relativePath)
-    ).length
-    for (const source of sources) {
+    this.queue = sources.map((source) => {
       const outputRelativePath = getComfyBatchOutputRelativePath(source.relativePath)
-      const outputPath = path.join(outputDir, outputRelativePath)
-      if (!source.sha256) {
-        // Fresh source files are discovered by path only. Their output marker
-        // can be evaluated after a worker has prepared the file and computed
-        // its hash, so they can enter the execution queue immediately.
-        this.queue.push({ source, outputPath, outputRelativePath, staged: false })
-        continue
+      return {
+        source,
+        outputPath: path.join(outputDir, outputRelativePath),
+        outputRelativePath,
+        staged: true
       }
-      const previousItem = this.manifest.items[source.relativePath]
-      const outputInspection = await readBatchPngInspection(outputPath)
-      const outputIsComplete = outputInspection.valid
-      const outputHasCurrentMarker =
-        outputInspection.metadata?.sourceSha256 === source.sha256 &&
-        outputInspection.metadata?.planFingerprint === planFingerprint
-      const legacySuccess =
-        previousItem?.status === 'success' &&
-        previousItem.size === source.size &&
-        previousItem.sha256 === source.sha256 &&
-        previousItem.planFingerprint === planFingerprint &&
-        previousItem.outputRelativePath === outputRelativePath
-      const unchangedSuccess = outputIsComplete && (outputHasCurrentMarker || legacySuccess)
-      if (unchangedSuccess) {
-        await fs.rm(source.absolutePath, { force: true }).catch(() => undefined)
-        if (previousItem?.status === 'success') delete this.manifest.items[source.relativePath]
-        skipped += 1
-        continue
-      }
-      await fs.rm(outputPath, { force: true })
-      this.queue.push({ source, outputPath, outputRelativePath, staged: true })
-    }
+    })
+    const priorCompleted = previousPlanMatches ? (this.manifest.completed ?? 0) : 0
+    const priorSkipped = previousPlanMatches ? (this.manifest.skipped ?? 0) : 0
+    const total = Math.max(
+      this.manifest.total ?? 0,
+      priorCompleted + priorSkipped + this.queue.length
+    )
     this.statusValue = {
       ...this.statusValue,
       state: 'running',
-      total: snapshotRelativePaths.length,
-      success: 0,
+      total,
+      success: priorCompleted,
       failed: 0,
-      skipped,
+      skipped: priorSkipped,
       running: 0,
       pending: this.queue.length,
       error: undefined,
@@ -1704,11 +1492,6 @@ export class ComfyBatchRunner {
     this.emit()
     if (!this.queue.length) return
 
-    // Runtime availability is retried by the supervisor. Do not fail
-    // initialization on a transient probe outage; otherwise a job can never
-    // reach the bounded no-runtime policy below.
-    // Runtime probing is best effort and may involve a slow/offline profile.
-    // Start it in the background so a ready instance can receive work now.
     void this.refreshProfilesIfNeeded(true).catch(() => undefined)
   }
 
@@ -1730,9 +1513,7 @@ export class ComfyBatchRunner {
       item.source.absolutePath = resolveBatchInputPath(this.inputDir, item.source.relativePath)
       item.staged = true
     }
-    const prepared = await this.readVerifiedSource(item)
-    this.rememberInputSnapshotFile(item.source)
-    return prepared
+    return this.readVerifiedSource(item)
   }
 
   private async readVerifiedSource(item: PendingBatchItem): Promise<PreparedBatchSource> {
@@ -1824,52 +1605,26 @@ export class ComfyBatchRunner {
         sourceSha256: item.source.sha256,
         planFingerprint: this.manifest.planFingerprint
       })
-      // The output is atomically committed and validated before removing the
-      // staged input. If cleanup fails, the marker lets the next resume skip
-      // the item safely.
-      await fs.rm(item.source.absolutePath, { force: true }).catch(() => undefined)
     } finally {
       this.activePrompts.delete(promptId)
     }
   }
 
-  private async recordItemFailure(
+  private async logItemRetry(
     item: PendingBatchItem,
     error: unknown,
     context?: { runtime?: InstanceRuntime; startedAt?: number; attempt?: number }
   ): Promise<void> {
     const message = errorMessage(error)
     await fs.rm(item.outputPath, { force: true }).catch(() => undefined)
-    this.manifest.items[item.source.relativePath] = {
-      relativePath: item.source.relativePath,
-      size: item.source.size,
-      mtimeMs: item.source.mtimeMs,
-      sha256: item.source.sha256,
-      planFingerprint: this.manifest.planFingerprint,
-      status: 'failed',
-      outputRelativePath: item.outputRelativePath,
-      error: message,
-      updatedAt: Date.now()
+    if (this.manifest.items[item.source.relativePath]?.status === 'failed') {
+      delete this.manifest.items[item.source.relativePath]
+      await this.persistManifest()
     }
-    await this.persistManifest()
-    this.statusValue.failed += 1
-    // Keep the first concrete failure reason so the job detail can explain
-    // why the batch failed instead of replacing it with only an item count.
-    this.statusValue.error ??= message
-    this.statusValue.failedFiles.push(item.source.relativePath)
-    const finishedAt = Date.now()
-    const startedAt = context?.startedAt ?? finishedAt
-    const timing: ComfyBatchItemTiming = {
-      relativePath: item.source.relativePath,
-      durationMs: Math.max(0, finishedAt - startedAt),
-      startedAt,
-      finishedAt,
-      profileId: context?.runtime?.profile.id,
-      attempt: context?.attempt ?? (this.itemAttempts.get(item.source.relativePath) || 1),
-      state: 'failed'
-    }
-    this.recentItems.push(timing)
-    if (this.recentItems.length > 100) this.recentItems.shift()
+    console.warn(
+      `[ComfyBatchRunner] Retrying ${item.source.relativePath} after attempt ${context?.attempt ?? this.itemAttempts.get(item.source.relativePath) ?? 1}` +
+        `${context?.runtime ? ` on ${context.runtime.profile.id}` : ''}: ${message}`
+    )
   }
 
   private async skipIfOutputCurrent(item: PendingBatchItem): Promise<boolean> {
@@ -1889,6 +1644,7 @@ export class ComfyBatchRunner {
 
     await fs.rm(item.source.absolutePath, { force: true }).catch(() => undefined)
     if (previousItem?.status === 'success') delete this.manifest.items[item.source.relativePath]
+    this.manifest.skipped = (this.manifest.skipped ?? 0) + 1
     this.statusValue.skipped += 1
     await this.persistManifest()
     this.emit()
@@ -1903,7 +1659,6 @@ export class ComfyBatchRunner {
     const tried = new Set<InstanceRuntime>()
     let runtime = initialRuntime
     let prepared: PreparedBatchSource | undefined
-    let noRuntimeSince: number | undefined
     while (!this.abortController.signal.aborted) {
       if (!runtime) {
         try {
@@ -1918,16 +1673,9 @@ export class ComfyBatchRunner {
           runtime = this.scheduler.pick(this.runtimes) ?? undefined
         }
         if (!runtime) {
-          const configured = this.currentProfiles().some((profile) => profile.enabled !== false)
-          noRuntimeSince ??= Date.now()
-          if (!configured || Date.now() - noRuntimeSince >= NO_RUNTIME_RETRY_WINDOW_MS) {
-            await this.recordItemFailure(item, 'No compatible ComfyUI instance is available')
-            return
-          }
           await new Promise((resolve) => setTimeout(resolve, SUPERVISOR_WAIT_MS))
           continue
         }
-        noRuntimeSince = undefined
       }
 
       const activeRuntime = runtime
@@ -1968,7 +1716,12 @@ export class ComfyBatchRunner {
           releaseExecutionSlot
         )
         delete this.manifest.items[item.source.relativePath]
+        this.manifest.completed = (this.manifest.completed ?? 0) + 1
         await this.persistManifest()
+        // Persist the completion counter before deleting the queue file. If
+        // the app is closed between these operations, the PNG marker causes a
+        // cheap skip on resume and the counters remain consistent.
+        await fs.rm(item.source.absolutePath, { force: true }).catch(() => undefined)
         this.statusValue.success += 1
         const finishedAt = Date.now()
         const timing: ComfyBatchItemTiming = {
@@ -1995,6 +1748,10 @@ export class ComfyBatchRunner {
             // an instance that just came online can take over this item.
             try {
               await this.refreshProfilesIfNeeded(true)
+              // Profile probes are published independently. Give fast
+              // fallbacks one event-loop turn to become visible without
+              // waiting for a slow remote object_info response.
+              await new Promise((resolve) => setTimeout(resolve, 0))
             } catch {
               // Keep the failed runtime error as the item result if the
               // fallback probe itself is unavailable.
@@ -2008,12 +1765,17 @@ export class ComfyBatchRunner {
             continue
           }
         }
-        await this.recordItemFailure(item, error, {
-          runtime: activeRuntime,
-          startedAt,
-          attempt
-        })
-        return
+        // Every item stays pending until it succeeds or the user cancels the
+        // batch. Do not expose transient or instance-specific failures in the
+        // job status; the durable input file remains the retry record.
+        const retryDelay = Math.min(
+          COMFY_BATCH_RETRY_MAX_DELAY_MS,
+          COMFY_BATCH_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1)
+        )
+        await this.logItemRetry(item, error, { runtime: activeRuntime, attempt })
+        if (isRetryableInstanceError(error)) runtime = undefined
+        await new Promise((resolve) => setTimeout(resolve, retryDelay))
+        continue
       } finally {
         if (!executionStarted) activeRuntime.preparing -= 1
         releaseExecutionSlot()
@@ -2052,19 +1814,9 @@ export class ComfyBatchRunner {
     return this.status
   }
 
-  private async failPendingItems(nextIndex: number, message: string): Promise<number> {
-    for (let index = nextIndex; index < this.queue.length; index += 1) {
-      if (this.abortController.signal.aborted) return index
-      await this.recordItemFailure(this.queue[index], message)
-      this.statusValue.pending = Math.max(0, this.statusValue.pending - 1)
-    }
-    return this.queue.length
-  }
-
   private async supervise(): Promise<void> {
     this.nextQueueIndex = 0
     const workers = new Set<Promise<void>>()
-    let noRuntimeSince: number | undefined
     let lastSupervisorRefreshAt = 0
     while (
       !this.abortController.signal.aborted &&
@@ -2084,11 +1836,14 @@ export class ComfyBatchRunner {
         this.nextQueueIndex += 1
         this.statusValue.pending = Math.max(0, this.statusValue.pending - 1)
         const task = this.processItem(item, runtime).catch(async (error) => {
-          // processItem normally records item-level failures itself. Keep this
-          // boundary as a last-resort guard for bookkeeping or unexpected
-          // errors, but do not let one worker terminate supervision.
+          // processItem normally catches item-level errors itself. If its
+          // bookkeeping unexpectedly throws, put the durable queue item back
+          // instead of converting it into a terminal failure.
           if (!this.abortController.signal.aborted) {
-            await this.recordItemFailure(item, error)
+            await this.logItemRetry(item, error).catch(() => undefined)
+            this.queue.splice(this.nextQueueIndex, 0, item)
+            this.statusValue.pending += 1
+            this.emit()
           }
         })
         workers.add(task)
@@ -2099,31 +1854,12 @@ export class ComfyBatchRunner {
       }
 
       if (!workers.size && this.nextQueueIndex < this.queue.length) {
-        const hasConfiguredProfile = this.currentProfiles().some(
-          (profile) => profile.enabled !== false
-        )
-        const hasUsableRuntime = this.runtimes.some(
-          (runtime) => runtime.compatible && runtime.available && runtime.profile.enabled !== false
-        )
-        noRuntimeSince ??= Date.now()
-        if (!hasConfiguredProfile) {
-          this.nextQueueIndex = await this.failPendingItems(
-            this.nextQueueIndex,
-            'No enabled ComfyUI batch profiles'
-          )
-          break
-        }
-        if (!hasUsableRuntime && Date.now() - noRuntimeSince >= NO_RUNTIME_RETRY_WINDOW_MS) {
-          this.nextQueueIndex = await this.failPendingItems(
-            this.nextQueueIndex,
-            'No compatible ComfyUI instance is available'
-          )
-          break
-        }
+        // No usable instance is also a retryable condition. Keep the queued
+        // files pending and continue probing until an instance becomes ready
+        // or the user cancels the batch.
         await new Promise((resolve) => setTimeout(resolve, SUPERVISOR_WAIT_MS))
         continue
       }
-      noRuntimeSince = undefined
       if (workers.size) {
         await Promise.race([
           ...workers,
@@ -2145,7 +1881,6 @@ export class ComfyBatchRunner {
     try {
       await this.initialize()
       await this.supervise()
-      await this.persistInputSnapshot()
       await this.manifestWriteQueue
       if (this.abortController.signal.aborted) {
         this.statusValue.state = 'cancelled'
@@ -2167,7 +1902,6 @@ export class ComfyBatchRunner {
       this.emit()
       return this.status
     } catch (error) {
-      await this.persistInputSnapshot().catch(() => undefined)
       this.statusValue.state = this.abortController.signal.aborted ? 'cancelled' : 'error'
       this.statusValue.error = errorMessage(error)
       this.statusValue.finishedAt = Date.now()
