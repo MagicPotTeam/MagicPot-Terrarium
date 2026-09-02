@@ -28,6 +28,16 @@ describe('ComfyBatchHttpClient retry and boundary behavior', () => {
     expect(fetchMock).toHaveBeenCalledTimes(COMFY_BATCH_MAX_NETWORK_ATTEMPTS)
   })
 
+  it('allows batch discovery to use one long object_info request', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('remote response stalled'))
+    const client = new ComfyBatchHttpClient('http://127.0.0.1:8188', fetchMock as typeof fetch)
+
+    await expect(
+      client.objectInfo(undefined, { timeoutMs: 120_000, retry: false })
+    ).rejects.toThrow('remote response stalled')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('preserves a forwarded base path for every ComfyUI endpoint', async () => {
     const urls: string[] = []
     const fetchMock = vi.fn(async (input: string | URL | Request) => {

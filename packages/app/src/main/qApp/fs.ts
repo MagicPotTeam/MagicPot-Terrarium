@@ -53,6 +53,8 @@ type QAppPaths = {
   manifestPath: string
 }
 
+const BUNDLED_QAPP_MATERIALIZATION_MARKER = '.qapps-bundled-index.json'
+
 type AtomicFile = {
   targetPath: string
   contents: string
@@ -138,14 +140,11 @@ export class QAppFSCli {
   }
 
   private async getReadableQAppSources(): Promise<QAppSource[]> {
-    // 内置与用户自定义 qApps 统一在同一目录（extraFiles 直接放到安装根目录）
+    // 内置 qApps are materialized into the writable directory before scanning so
+    // the renderer and file browser expose one unified qApps location.
     await this.prepareQAppStorage()
-    const builtinDir = await this.getBuiltinQAppDir()
     const writableDir = await this.getWritableQAppDir()
-    return [
-      { dir: builtinDir, isBuiltin: true },
-      { dir: writableDir, isBuiltin: false }
-    ]
+    return [{ dir: writableDir, isBuiltin: false }]
   }
 
   private getManifestPath(baseDir: string, key: string): string {
@@ -331,6 +330,77 @@ export class QAppFSCli {
     return (await exists(targetPaths.qAppPath)) && (await exists(targetPaths.workflowPath))
   }
 
+  private getBundledQAppMaterializationMarkerPath(writableDir: string): string {
+    return path.join(path.dirname(writableDir), BUNDLED_QAPP_MATERIALIZATION_MARKER)
+  }
+
+  private async readBundledQAppMaterializationKeys(writableDir: string): Promise<Set<string>> {
+    const markerPath = this.getBundledQAppMaterializationMarkerPath(writableDir)
+    try {
+      const raw = JSON.parse(stripBom(await fs.readFile(markerPath, 'utf8'))) as {
+        keys?: unknown
+      }
+      if (Array.isArray(raw.keys)) {
+        return new Set(raw.keys.filter((key): key is string => typeof key === 'string'))
+      }
+    } catch {
+      // Rebuild the marker when it is missing or invalid.
+    }
+
+    return new Set()
+  }
+
+  private async writeBundledQAppMaterializationKeys(
+    writableDir: string,
+    keys: Set<string>
+  ): Promise<void> {
+    const markerPath = this.getBundledQAppMaterializationMarkerPath(writableDir)
+    await fs.writeFile(
+      markerPath,
+      JSON.stringify({ keys: Array.from(keys).sort() }, null, 2),
+      'utf8'
+    )
+  }
+
+  private async materializeBundledQApps(
+    bundledDir: string,
+    relativeDir: string,
+    materializedKeys: Set<string>
+  ): Promise<void> {
+    const currentDir = relativeDir ? path.join(bundledDir, relativeDir) : bundledDir
+    const dirents = await fs.readdir(currentDir, { withFileTypes: true })
+    const fileNames = dirents.filter((dirent) => dirent.isFile()).map((dirent) => dirent.name)
+    const promptNames = new Set(
+      fileNames
+        .filter((name) => name.endsWith('.prompt.json'))
+        .map((name) => name.replace('.prompt.json', ''))
+    )
+    const qacfgNames = new Set(
+      fileNames
+        .filter((name) => name.endsWith('.qacfg.json'))
+        .map((name) => name.replace('.qacfg.json', ''))
+    )
+
+    for (const name of promptNames) {
+      if (!qacfgNames.has(name)) {
+        continue
+      }
+
+      const key = relativeDir ? `${relativeDir.split(path.sep).join('/')}/${name}` : name
+      if (!materializedKeys.has(key)) {
+        const copied = await this.copyQAppBundleToWritableDir(bundledDir, key)
+        if (copied) {
+          materializedKeys.add(key)
+        }
+      }
+    }
+
+    for (const dirent of await this.getDirectoryDirents(currentDir, dirents)) {
+      const subRelative = relativeDir ? path.join(relativeDir, dirent.name) : dirent.name
+      await this.materializeBundledQApps(bundledDir, subRelative, materializedKeys)
+    }
+  }
+
   private async removeQAppBundle(baseDir: string, key: string): Promise<void> {
     const { qAppPath, workflowPath, manifestPath } = this.getQAppPaths(baseDir, key)
     if (await exists(qAppPath)) {
@@ -387,8 +457,15 @@ export class QAppFSCli {
 
   private async prepareQAppStorage(): Promise<void> {
     const builtinDir = await this.getBuiltinQAppDir()
+    const writableDir = await this.getWritableQAppDir()
     await this.migrateLegacyQApps(builtinDir)
-    await this.getWritableQAppDir()
+
+    const materializedKeys = await this.readBundledQAppMaterializationKeys(writableDir)
+    const previousKeyCount = materializedKeys.size
+    await this.materializeBundledQApps(builtinDir, '', materializedKeys)
+    if (materializedKeys.size !== previousKeyCount || previousKeyCount === 0) {
+      await this.writeBundledQAppMaterializationKeys(writableDir, materializedKeys)
+    }
   }
 
   private async buildTree(

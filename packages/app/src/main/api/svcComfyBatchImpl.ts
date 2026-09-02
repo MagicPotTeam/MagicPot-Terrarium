@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { gzip, gunzip } from 'node:zlib'
+import { promisify } from 'node:util'
 import type {
   CancelComfyBatchReq,
   CancelComfyBatchResp,
@@ -29,7 +31,13 @@ import { normalizeQAppBatchConfig } from '@shared/qApp/batchConfig'
 import { getBuildEnv } from '../config/buildEnv'
 import { getConfig, saveConfig } from '../config/config'
 import { ComfyBatchHttpClient, normalizeComfyBatchBaseUrl } from '../comfy/batchHttp'
-import { ComfyBatchRunner, getComfyBatchOutputDir } from '../comfy/batchRunner'
+import {
+  type ComfyBatchUploadedInput,
+  ComfyBatchRunner,
+  getComfyBatchOutputDir,
+  isValidComfyBatchRunKey,
+  validateComfyBatchBindings
+} from '../comfy/batchRunner'
 import { getComfyInstancePool } from '../comfy/comfyInstancePool'
 import { QAppFSCli } from '../qApp/fs'
 
@@ -46,6 +54,7 @@ const IDLE_STATUS: ComfyBatchStatus = {
 
 type JobRecord = {
   request: StartComfyBatchReq
+  runKey?: string
   runner?: ComfyBatchRunner
   status: ComfyBatchStatus
   submittedAt: number
@@ -59,6 +68,7 @@ type JobRecord = {
 
 type PersistedJob = {
   request?: StartComfyBatchReq
+  runKey?: string
   status?: ComfyBatchStatus
   submittedAt?: number
   sequence?: number
@@ -75,10 +85,19 @@ type PersistedStore = {
 }
 
 const JOB_STORE_FILENAME = 'comfy-batch-jobs.json'
-const JOB_STORE_VERSION = 2
+const JOB_INDEX_FILENAME = 'comfy-batch-jobs.bin'
+const JOB_STORE_VERSION = 3
 const MAX_RETAINED_JOBS = 50
-const BATCH_IMAGE_PLACEHOLDER = '__MAGICPOT_BATCH_IMAGE_SLOT__'
-const IMAGE_INPUT_SLOT_PATTERN = /^\$\.([^.[\]]+)\.inputs\.([^.[\]]+)$/
+const gzipAsync = promisify(gzip)
+const gunzipAsync = promisify(gunzip)
+
+function formatComfyBatchRunKey(timestamp: number): string {
+  const date = new Date(timestamp)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}${pad(
+    date.getHours()
+  )}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -160,42 +179,6 @@ function fallbackRequest(value: unknown): StartComfyBatchReq {
   }
 }
 
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize)
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.keys(value)
-        .sort()
-        .map((key) => [key, canonicalize(value[key])])
-    )
-  }
-  return value
-}
-
-function stableJson(value: unknown): string {
-  return JSON.stringify(canonicalize(value)) ?? 'null'
-}
-
-function parseImageInputSlot(slot: string): { nodeId: string; field: string } | undefined {
-  const match = IMAGE_INPUT_SLOT_PATTERN.exec(slot)
-  return match ? { nodeId: match[1], field: match[2] } : undefined
-}
-
-function workflowShape(
-  workflow: StartComfyBatchReq['workflow'],
-  imageInputSlot: string | undefined
-): string {
-  const normalized = cloneJson(workflow) as Record<string, { inputs?: Record<string, unknown> }>
-  const binding = imageInputSlot ? parseImageInputSlot(imageInputSlot) : undefined
-  if (binding) {
-    const node = normalized[binding.nodeId]
-    if (node?.inputs && Object.prototype.hasOwnProperty.call(node.inputs, binding.field)) {
-      node.inputs[binding.field] = BATCH_IMAGE_PLACEHOLDER
-    }
-  }
-  return stableJson(normalized)
-}
-
 function normalizeProfile(profile: ComfyBatchProfile): ComfyBatchProfile {
   const id = String(profile.id || '').trim()
   if (!id) throw new Error('Profile id is required')
@@ -227,6 +210,43 @@ function configuredProfiles(): ComfyBatchProfile[] {
   return configured.map(normalizeProfile)
 }
 
+function normalizedComfyEndpoint(value: string): string | undefined {
+  try {
+    const url = new URL(value)
+    const hostname = url.hostname.toLowerCase()
+    const localHostname = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(hostname)
+      ? '127.0.0.1'
+      : hostname
+    const port = url.port || (url.protocol === 'https:' ? '443' : '80')
+    return `${url.protocol}//${localHostname}:${port}`
+  } catch {
+    return undefined
+  }
+}
+
+function createLocalComfyBatchInputCleaner():
+  ((input: ComfyBatchUploadedInput) => Promise<void>) | undefined {
+  const configUtils = new ConfigUtils(getConfig(), getBuildEnv(), path)
+  const [comfyUIDir, available] = configUtils.getManagedComfyUIDir()
+  if (!available) return undefined
+
+  const managedPort = configUtils.getManagedComfyUIPort()
+  const managedEndpoint = `http://127.0.0.1:${managedPort}`
+  const inputDir = path.resolve(path.join(comfyUIDir, 'input'))
+
+  return async ({ profile, file }: ComfyBatchUploadedInput): Promise<void> => {
+    if (normalizedComfyEndpoint(profile.baseUrl) !== managedEndpoint) return
+    if (file.type !== undefined && file.type !== 'input') return
+    if (file.subfolder) return
+
+    const filename = file.filename || ''
+    if (!filename.startsWith('magicpot-batch-') || path.basename(filename) !== filename) return
+    const candidate = path.resolve(inputDir, filename)
+    if (path.dirname(candidate) !== inputDir) return
+    await fs.rm(candidate, { force: true })
+  }
+}
+
 async function replaceStoreFile(tempPath: string, filename: string): Promise<void> {
   const attempts = process.platform === 'win32' ? 4 : 1
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -249,14 +269,14 @@ async function replaceStoreFile(tempPath: string, filename: string): Promise<voi
   }
 }
 
-async function atomicWriteJson(filename: string, value: unknown): Promise<void> {
+async function atomicWriteBytes(filename: string, bytes: Uint8Array): Promise<void> {
   const directory = path.dirname(filename)
   await fs.mkdir(directory, { recursive: true })
   const tempPath = path.join(directory, `.${path.basename(filename)}.${randomUUID()}.tmp`)
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined
   try {
     handle = await fs.open(tempPath, 'wx')
-    await handle.writeFile(JSON.stringify(value), 'utf8')
+    await handle.writeFile(bytes)
     await handle.sync()
     await handle.close()
     handle = undefined
@@ -265,6 +285,10 @@ async function atomicWriteJson(filename: string, value: unknown): Promise<void> 
     await handle?.close().catch(() => undefined)
     await fs.rm(tempPath, { force: true }).catch(() => undefined)
   }
+}
+
+async function atomicWriteJson(filename: string, value: unknown): Promise<void> {
+  await atomicWriteBytes(filename, Buffer.from(JSON.stringify(value), 'utf8'))
 }
 
 export class ComfyBatchSvcImpl implements ComfyBatchSvc {
@@ -292,13 +316,20 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
   }
 
   private storePath(): string {
+    return path.join(getBuildEnv().pathMap.data, JOB_INDEX_FILENAME)
+  }
+
+  private legacyStorePath(): string {
     return path.join(getBuildEnv().pathMap.data, JOB_STORE_FILENAME)
   }
 
   private async preserveMalformedStore(filename: string): Promise<void> {
     try {
-      const backup = `${filename}.corrupt-${Date.now()}-${randomUUID()}.json`
-      await fs.copyFile(filename, backup)
+      // Keep the active data directory to a single JSON document (the
+      // per-batch manifest). Corrupt job indexes are recoverable backups,
+      // not additional active JSON stores.
+      const backup = `${filename}.corrupt-${Date.now()}-${randomUUID()}.bak`
+      await fs.rename(filename, backup)
       console.error(`[ComfyBatchSvcImpl] Preserved malformed job store at ${backup}`)
     } catch (error) {
       this.reportRestoreError(error)
@@ -426,6 +457,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       .sort((left, right) => left.sequence - right.sequence || left.submittedAt - right.submittedAt)
       .map((record) => ({
         request: cloneJson(record.request),
+        runKey: record.runKey,
         status: this.liveStatus(record),
         submittedAt: record.submittedAt,
         sequence: record.sequence,
@@ -439,12 +471,14 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     const write = this.storeWriteQueue.then(async () => {
       const filename = this.storePath()
       const records = this.snapshotPersistedJobs()
-      await atomicWriteJson(filename, {
+      const payload = {
         version: JOB_STORE_VERSION,
         latestJobId: this.latestJobId,
         nextSequence: this.nextSequence,
         jobs: records
-      })
+      }
+      const compressed = await gzipAsync(Buffer.from(JSON.stringify(payload), 'utf8'))
+      await atomicWriteBytes(filename, compressed)
     })
     this.storeWriteQueue = write.then(
       () => undefined,
@@ -469,22 +503,37 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     if (this.restorePromise) return this.restorePromise
     this.restorePromise = (async () => {
       let filename: string
+      let legacyFilename: string
       try {
         filename = this.storePath()
+        legacyFilename = this.legacyStorePath()
       } catch (error) {
         this.reportRestoreError(error)
         return
       }
 
       let rawText: string
+      let loadedFromLegacy = false
+      let sourceFilename = filename
       try {
-        rawText = await fs.readFile(filename, 'utf8')
+        rawText = (await gunzipAsync(await fs.readFile(filename))).toString('utf8')
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
           this.reportRestoreError(error)
           await this.preserveMalformedStore(filename)
+          return
         }
-        return
+        try {
+          rawText = await fs.readFile(legacyFilename, 'utf8')
+          loadedFromLegacy = true
+          sourceFilename = legacyFilename
+        } catch (legacyError) {
+          if ((legacyError as NodeJS.ErrnoException).code !== 'ENOENT') {
+            this.reportRestoreError(legacyError)
+            await this.preserveMalformedStore(legacyFilename)
+          }
+          return
+        }
       }
 
       let raw: unknown
@@ -492,13 +541,13 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         raw = JSON.parse(rawText) as PersistedStore
       } catch (error) {
         this.reportRestoreError(error)
-        await this.preserveMalformedStore(filename)
+        await this.preserveMalformedStore(sourceFilename)
         return
       }
       if (!isRecord(raw) || !Array.isArray(raw.jobs)) {
         const error = new Error('Job store does not contain a jobs array')
         this.reportRestoreError(error)
-        await this.preserveMalformedStore(filename)
+        await this.preserveMalformedStore(sourceFilename)
         return
       }
 
@@ -524,7 +573,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       const usedSequences = new Set<number>()
       let fallbackSequence = 1
       let malformedCount = 0
-      let migrated = raw.version !== JOB_STORE_VERSION
+      let migrated = loadedFromLegacy || raw.version !== JOB_STORE_VERSION
       for (const entry of entries) {
         let sequence = entry.sequence
         if (sequence === undefined || usedSequences.has(sequence)) {
@@ -571,6 +620,21 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         } else if (!isKnownJobState(rawState) && rawState !== undefined) {
           malformed = true
         }
+        const persistedFailedFiles = Array.isArray(rawStatus.failedFiles)
+          ? rawStatus.failedFiles.filter((file): file is string => typeof file === 'string')
+          : []
+        const persistedFailed = Math.max(
+          nonNegativeNumber(rawStatus.failed),
+          persistedFailedFiles.length
+        )
+        const hadItemFailures = persistedFailed > 0
+        if (hadItemFailures && recoveredState !== 'cancelled') {
+          // Legacy runners stopped after a bounded number of attempts. Those
+          // files still exist in the durable input queue, so restore the job
+          // as queued and let the new runner keep retrying them silently.
+          recoveredState = 'queued'
+          migrated = true
+        }
         const cancelRequested = item.cancelRequested === true
         const state: ComfyBatchStatus['state'] = validRequest
           ? cancelRequested
@@ -581,10 +645,19 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         if (!validRequest) malformed = true
         if (malformed) malformedCount += 1
 
+        const persistedRunKey = item.runKey
+        const runKey =
+          persistedRunKey === undefined
+            ? undefined
+            : isValidComfyBatchRunKey(persistedRunKey)
+              ? persistedRunKey
+              : undefined
+        if (persistedRunKey !== undefined && runKey === undefined) migrated = true
+
         let outputDir = typeof rawStatus.outputDir === 'string' ? rawStatus.outputDir : undefined
         if (!outputDir && request.sourceDir) {
           try {
-            outputDir = getComfyBatchOutputDir(request.sourceDir)
+            outputDir = getComfyBatchOutputDir(request.sourceDir, runKey)
           } catch {
             // Keep a malformed descriptor recoverable without deriving a path.
           }
@@ -603,13 +676,24 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
           qAppKey: typeof rawStatus.qAppKey === 'string' ? rawStatus.qAppKey : request.qAppKey,
           total: nonNegativeNumber(rawStatus.total),
           success: nonNegativeNumber(rawStatus.success),
-          failed: nonNegativeNumber(rawStatus.failed),
+          failed: 0,
           skipped: nonNegativeNumber(rawStatus.skipped),
-          running: nonNegativeNumber(rawStatus.running),
-          pending: nonNegativeNumber(rawStatus.pending),
-          failedFiles: Array.isArray(rawStatus.failedFiles)
-            ? rawStatus.failedFiles.filter((file): file is string => typeof file === 'string')
-            : [],
+          running: 0,
+          pending:
+            state === 'queued'
+              ? nonNegativeNumber(rawStatus.pending) +
+                nonNegativeNumber(rawStatus.running) +
+                persistedFailed
+              : nonNegativeNumber(rawStatus.pending),
+          failedFiles: [],
+          error:
+            hadItemFailures || typeof rawStatus.error !== 'string' ? undefined : rawStatus.error,
+          finishedAt:
+            state === 'queued'
+              ? undefined
+              : typeof rawStatus.finishedAt === 'number'
+                ? rawStatus.finishedAt
+                : undefined,
           submittedAt,
           queuePosition: undefined,
           ...(malformed
@@ -633,6 +717,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         }
         const record: JobRecord = {
           request,
+          runKey,
           status: normalizedStatus,
           submittedAt,
           sequence,
@@ -666,10 +751,23 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         console.error(
           `[ComfyBatchSvcImpl] Ignored or repaired ${malformedCount} malformed job descriptor(s)`
         )
-        await this.preserveMalformedStore(filename)
+        await this.preserveMalformedStore(sourceFilename)
         migrated = true
       }
-      if (migrated) await this.persistBestEffort()
+      if (migrated) {
+        await this.persistBestEffort()
+      }
+      // A successful binary restore makes the binary index authoritative. If
+      // a previous interrupted migration left the legacy JSON beside it,
+      // archive that copy so there is never a second active global JSON store.
+      if (loadedFromLegacy || sourceFilename === filename) {
+        const migratedFilename = `${legacyFilename.replace(/\.json$/i, '')}.migrated-${Date.now()}-${randomUUID()}.bak`
+        await fs.rename(legacyFilename, migratedFilename).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            this.reportPersistenceError(error)
+          }
+        })
+      }
     })().catch((error) => {
       this.reportRestoreError(error)
     })
@@ -711,9 +809,27 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     this.latestJobId = jobId
   }
 
-  private async enqueue(request: StartComfyBatchReq, retryOf?: string): Promise<ComfyBatchStatus> {
+  private allocateRunKey(timestamp: number): string {
+    const base = formatComfyBatchRunKey(timestamp)
+    const usedRunKeys = new Set(
+      [...this.jobs.values()]
+        .map((record) => record.runKey)
+        .filter((runKey): runKey is string => runKey !== undefined)
+    )
+    if (!usedRunKeys.has(base)) return base
+    let suffix = 2
+    while (usedRunKeys.has(`${base}-${suffix}`)) suffix += 1
+    return `${base}-${suffix}`
+  }
+
+  private async enqueue(
+    request: StartComfyBatchReq,
+    retryOf?: string,
+    runKey?: string
+  ): Promise<ComfyBatchStatus> {
     const snapshot = cloneJson(request)
     const now = Date.now()
+    const resolvedRunKey = runKey ?? (retryOf === undefined ? this.allocateRunKey(now) : undefined)
     const jobId = randomUUID()
     const previousNextSequence = this.nextSequence
     const sequence = this.nextSequence++
@@ -721,7 +837,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       jobId,
       state: 'queued',
       sourceDir: path.resolve(snapshot.sourceDir),
-      outputDir: getComfyBatchOutputDir(snapshot.sourceDir),
+      outputDir: getComfyBatchOutputDir(snapshot.sourceDir, resolvedRunKey),
       qAppKey: snapshot.qAppKey,
       total: 0,
       success: 0,
@@ -735,6 +851,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     }
     const record: JobRecord = {
       request: snapshot,
+      runKey: resolvedRunKey,
       runner: undefined,
       status,
       submittedAt: now,
@@ -780,7 +897,9 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       const profiles = configuredProfiles()
       runner = new ComfyBatchRunner(cloneJson(record.request), profiles, {
         jobId: nextId,
+        runKey: record.runKey,
         getProfiles: () => configuredProfiles(),
+        deleteUploadedInput: createLocalComfyBatchInputCleaner(),
         onStatus: (status) => {
           // Do not allow a late runner callback to resurrect a cancelled or
           // already terminal job.
@@ -895,13 +1014,21 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       selectedOutputIds.every((nodeId) => requestedOutputIds.includes(nodeId))
     if (
       normalized.cfg.batchProcess?.enabled !== true ||
+      typeof selectedBatchSlot !== 'string' ||
       selectedBatchSlot !== request.imageInputSlot ||
-      !outputBindingsMatch ||
-      workflowShape(selected.workflow, selectedBatchSlot) !==
-        workflowShape(request.workflow, request.imageInputSlot)
+      !outputBindingsMatch
     ) {
       throw new Error('Quick App batch bindings changed; reopen the Quick App and try again')
     }
+
+    // The renderer builds the request from the current runtime inputs. Those
+    // inputs may legitimately change values or add dynamic nodes (for example
+    // the LoRA chain), so comparing the entire workflow with the saved QApp
+    // template rejects valid batch requests. Validate the persisted and
+    // runtime workflows' binding contracts instead, while allowing their
+    // runtime parameters to differ.
+    validateComfyBatchBindings(selected.workflow, selectedBatchSlot, selectedOutputIds)
+    validateComfyBatchBindings(request.workflow, request.imageInputSlot, requestedOutputIds)
   }
 
   private hasActiveRetry(sourceJobId: string): boolean {
@@ -1005,7 +1132,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       }
       const snapshot = cloneJson(previous.request)
       await this.validateRequestBindings(snapshot)
-      const retryStatus = await this.enqueue(snapshot, req.jobId)
+      const retryStatus = await this.enqueue(snapshot, req.jobId, previous.runKey)
 
       // A retry is a continuation of the failed batch, not a second history
       // entry that should remain visible beside it. The new descriptor is

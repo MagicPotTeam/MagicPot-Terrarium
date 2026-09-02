@@ -59,6 +59,11 @@ vi.mock('../pages/QuickAppPage/QAppExecutePanel/comfyBatchJobState', () => ({
 
 afterEach(() => {
   vi.useRealTimers()
+  Object.assign(status, {
+    pending: 4,
+    running: 1,
+    etaMs: 5_000
+  })
 })
 
 describe('ComfyBatchJobCenter success display', () => {
@@ -94,5 +99,21 @@ describe('ComfyBatchJobCenter success display', () => {
 
     expect(screen.getByText('4s')).toBeInTheDocument()
     vi.useRealTimers()
+  })
+
+  it('shows seconds per item for a slow batch instead of rounding throughput to zero', () => {
+    Object.assign(status, {
+      pending: 31,
+      running: 3,
+      etaMs: 13_440_000
+    })
+
+    render(
+      <ThemeProvider theme={theme}>
+        <ComfyBatchJobCenter />
+      </ThemeProvider>
+    )
+
+    expect(screen.getByText('qapp.batch.throughput_value:395.29')).toBeInTheDocument()
   })
 })

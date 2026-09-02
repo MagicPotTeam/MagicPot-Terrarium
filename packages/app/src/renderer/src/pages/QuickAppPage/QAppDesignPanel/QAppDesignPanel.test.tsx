@@ -397,7 +397,7 @@ describe('QAppDesignPanel', () => {
     ).toBeTruthy()
   })
 
-  it('opens the bundled qApps folder from the toolbar action', async () => {
+  it('opens the unified user qApps folder from the toolbar action', async () => {
     const { default: Tested } = await import('./QAppDesignPanel')
 
     render(
@@ -413,7 +413,7 @@ describe('QAppDesignPanel', () => {
     const openFolderButton = await screen.findByRole('button', { name: 'Open qApps Folder' })
     fireEvent.click(openFolderButton)
 
-    expect(openPathMock).toHaveBeenCalledWith('C:/fake/app-root/qApps')
+    expect(openPathMock).toHaveBeenCalledWith('C:/fake/user-data/qApps')
   })
 
   it('saves category changes from the quick app edit dialog', async () => {

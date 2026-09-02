@@ -4,8 +4,10 @@ import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import type { ComfyBatchStatus, StartComfyBatchReq } from '@shared/api/svcComfyBatch'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { gunzipSync } from 'node:zlib'
 import * as configModule from '../config/config'
 import * as buildEnvModule from '../config/buildEnv'
+import type { ComfyBatchRunnerOptions } from '../comfy/batchRunner'
 import { ComfyBatchRunner } from '../comfy/batchRunner'
 import { QAppFSCli } from '../qApp/fs'
 import { ComfyBatchSvcImpl } from './svcComfyBatchImpl'
@@ -50,6 +52,15 @@ function status(jobId: string, state: ComfyBatchStatus['state']): ComfyBatchStat
     running: state === 'running' ? 1 : 0,
     pending: 0,
     failedFiles: []
+  }
+}
+
+async function readPersistedStore(dataDir: string): Promise<{
+  jobs: Array<{ status: ComfyBatchStatus }>
+}> {
+  const bytes = await fs.readFile(path.join(dataDir, 'comfy-batch-jobs.bin'))
+  return JSON.parse(gunzipSync(bytes).toString('utf8')) as {
+    jobs: Array<{ status: ComfyBatchStatus }>
   }
 }
 
@@ -134,6 +145,61 @@ describe('ComfyBatchSvcImpl live status', () => {
     expect(configModule.saveConfig).toHaveBeenCalledWith({ comfy_batch_profiles: [] })
   })
 
+  it('passes a local ComfyUI input cleaner to the batch runner', async () => {
+    const comfyDir = path.join(dataDir, 'ComfyUI')
+    const inputDir = path.join(comfyDir, 'input')
+    await fs.mkdir(inputDir, { recursive: true })
+    const uploadedPath = path.join(inputDir, 'magicpot-batch-job-uuid.png')
+    await fs.writeFile(uploadedPath, 'uploaded')
+    vi.mocked(configModule.getConfig).mockReturnValue({
+      ...DEFAULT_CONFIG,
+      local_comfyui_config: {
+        ...DEFAULT_CONFIG.local_comfyui_config,
+        comfyui_dir: comfyDir,
+        comfyui_port: '8188'
+      },
+      comfy_batch_profiles: [
+        {
+          id: 'one',
+          baseUrl: 'http://127.0.0.1:8188',
+          enabled: true,
+          maxConcurrency: 1
+        }
+      ]
+    } as Config)
+
+    let capturedOptions: ComfyBatchRunnerOptions | undefined
+    const runnerStatus = status('runner-job', 'running')
+    vi.mocked(ComfyBatchRunner).mockImplementation(
+      function MockRunner(_request, _profiles, options) {
+        capturedOptions = options
+        return {
+          jobId: 'runner-job',
+          status: runnerStatus,
+          startingStatus: vi.fn(() => runnerStatus),
+          run: vi.fn(async () => ({ ...runnerStatus, state: 'completed', finishedAt: Date.now() })),
+          cancel: vi.fn()
+        } as never
+      }
+    )
+
+    const svc = new ComfyBatchSvcImpl()
+    await svc.start(request)
+    await vi.waitFor(() => expect(capturedOptions?.deleteUploadedInput).toBeTypeOf('function'))
+
+    await capturedOptions!.deleteUploadedInput!({
+      profile: {
+        id: 'one',
+        baseUrl: 'http://127.0.0.1:8188/',
+        enabled: true,
+        maxConcurrency: 1
+      },
+      file: { filename: 'magicpot-batch-job-uuid.png', subfolder: '', type: 'input' }
+    })
+
+    await expect(fs.stat(uploadedPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('accepts a legacy QApp with explicit image input and output bindings', async () => {
     const legacyWorkflow = {
       '1': { class_type: 'LoadImage', inputs: { image: 'template' } },
@@ -172,6 +238,42 @@ describe('ComfyBatchSvcImpl live status', () => {
     expect(result.status).toMatchObject({ state: 'queued' })
     expect(result.status.jobId).toEqual(expect.any(String))
     expect(ComfyBatchRunner).toHaveBeenCalled()
+  })
+
+  it('accepts a runtime LoRA workflow change while preserving batch bindings', async () => {
+    const runtimeWorkflow = {
+      ...request.workflow,
+      '3': {
+        class_type: 'LoraLoader',
+        inputs: {
+          lora_name: 'mmsh_building_krea2_lora_qinglong.safetensors',
+          strength_model: 1,
+          strength_clip: 1,
+          model: ['1', 0] as ['1', 0],
+          clip: ['1', 1] as ['1', 1]
+        }
+      }
+    }
+
+    const result = await new ComfyBatchSvcImpl().start({
+      ...request,
+      workflow: runtimeWorkflow
+    })
+
+    expect(result.status.state).toBe('queued')
+  })
+
+  it('rejects a runtime workflow that no longer contains the configured image input', async () => {
+    const runtimeWorkflow = {
+      '2': request.workflow['2']
+    }
+
+    await expect(
+      new ComfyBatchSvcImpl().start({
+        ...request,
+        workflow: runtimeWorkflow
+      })
+    ).rejects.toThrow(/imageInputSlot node does not exist/i)
   })
 
   it('queues a second start in FIFO order and exposes live runner progress', async () => {
@@ -229,6 +331,62 @@ describe('ComfyBatchSvcImpl live status', () => {
     expect(runners[1].startingStatus).toHaveBeenCalled()
     resolveRuns[1]({ ...status(second.status.jobId!, 'completed'), success: 1 })
     await vi.waitFor(() => expect(runners[1].run).toHaveBeenCalled())
+  })
+
+  it('gives repeated starts for one source distinct timestamped artifact paths', async () => {
+    const runnerOptions: Array<{ jobId?: string; runKey?: string }> = []
+    const resolveRuns: Array<(value: ComfyBatchStatus) => void> = []
+    vi.mocked(ComfyBatchRunner).mockImplementation(
+      function MockRunner(_request, _profiles, options) {
+        runnerOptions.push(options || {})
+        const jobId = options?.jobId || `runner-${runnerOptions.length}`
+        let current = status(jobId, 'idle')
+        let resolveRun!: (value: ComfyBatchStatus) => void
+        const runPromise = new Promise<ComfyBatchStatus>((resolve) => {
+          resolveRun = resolve
+        })
+        const runner = {
+          jobId,
+          get status() {
+            return current
+          },
+          startingStatus: vi.fn(() => {
+            current = status(jobId, 'running')
+            return current
+          }),
+          run: vi.fn(() => runPromise),
+          cancel: vi.fn()
+        }
+        resolveRuns.push((value) => {
+          current = value
+          resolveRun(value)
+        })
+        return runner as never
+      }
+    )
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1787924205000)
+
+    try {
+      const svc = new ComfyBatchSvcImpl()
+      const first = await svc.start(request)
+      const second = await svc.start(request)
+
+      expect(first.status.outputDir).toBe(
+        `${path.resolve(request.sourceDir)}.output.20260828213645`
+      )
+      expect(second.status.outputDir).toBe(
+        `${path.resolve(request.sourceDir)}.output.20260828213645-2`
+      )
+
+      await vi.waitFor(() => expect(runnerOptions).toHaveLength(1))
+      expect(runnerOptions[0].runKey).toBe('20260828213645')
+      resolveRuns[0]({ ...status(first.status.jobId!, 'completed'), success: 1 })
+      await vi.waitFor(() => expect(runnerOptions).toHaveLength(2))
+      expect(runnerOptions[1].runKey).toBe('20260828213645-2')
+      resolveRuns[1]({ ...status(second.status.jobId!, 'completed'), success: 1 })
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 
   it('rejects an explicitly disabled legacy-capable QApp', async () => {
@@ -315,7 +473,8 @@ describe('ComfyBatchSvcImpl live status', () => {
             request,
             status: { ...status('restored-running', 'running'), submittedAt: 10 },
             submittedAt: 10,
-            sequence: 1
+            sequence: 1,
+            runKey: '20260828213645'
           },
           {
             request: { ...request, sourceDir: '/tmp/queued' },
@@ -333,11 +492,10 @@ describe('ComfyBatchSvcImpl live status', () => {
     expect(jobs.jobs.map((job) => job.jobId)).toEqual(['restored-queued', 'restored-running'])
     expect(jobs.jobs.find((job) => job.jobId === 'restored-running')).toMatchObject({
       state: 'queued',
-      submittedAt: 10
+      submittedAt: 10,
+      outputDir: `${path.resolve(request.sourceDir)}.output.20260828213645`
     })
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      jobs: Array<{ status: ComfyBatchStatus }>
-    }
+    const persisted = await readPersistedStore(dataDir)
     expect(persisted.jobs).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ status: expect.objectContaining({ state: 'queued' }) })
@@ -345,7 +503,39 @@ describe('ComfyBatchSvcImpl live status', () => {
     )
   })
 
-  it('does not expose a completed state when persisted items failed', async () => {
+  it('migrates the legacy JSON store into a compressed binary job index', async () => {
+    const legacyPath = path.join(dataDir, 'comfy-batch-jobs.json')
+    const binaryPath = path.join(dataDir, 'comfy-batch-jobs.bin')
+    await fs.writeFile(
+      legacyPath,
+      JSON.stringify({
+        version: 3,
+        latestJobId: 'legacy-job',
+        nextSequence: 2,
+        jobs: [
+          {
+            request,
+            status: { ...status('legacy-job', 'queued'), submittedAt: 10 },
+            submittedAt: 10,
+            sequence: 1
+          }
+        ]
+      })
+    )
+
+    const svc = new ComfyBatchSvcImpl()
+    await expect(svc.listJobs({})).resolves.toEqual({
+      jobs: [expect.objectContaining({ jobId: 'legacy-job', state: 'queued' })]
+    })
+
+    await expect(fs.stat(binaryPath)).resolves.toBeTruthy()
+    await expect(fs.stat(legacyPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.readdir(dataDir)).resolves.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^comfy-batch-jobs\.migrated-.*\.bak$/)])
+    )
+  })
+
+  it('requeues persisted item failures without exposing a failed state', async () => {
     const storePath = path.join(dataDir, 'comfy-batch-jobs.json')
     await fs.writeFile(
       storePath,
@@ -375,10 +565,10 @@ describe('ComfyBatchSvcImpl live status', () => {
 
     const jobs = await new ComfyBatchSvcImpl().listJobs({})
     expect(jobs.jobs[0]).toMatchObject({
-      state: 'error',
+      state: 'queued',
       success: 1,
-      failed: 3,
-      error: '3 batch item(s) failed'
+      failed: 0,
+      failedFiles: []
     })
   })
 
@@ -397,9 +587,9 @@ describe('ComfyBatchSvcImpl live status', () => {
               ...status('dismissed-job', 'error'),
               sourceDir: request.sourceDir,
               total: 1,
-              failed: 1,
-              failedFiles: ['failed.png'],
-              error: '1 batch item(s) failed',
+              failed: 0,
+              failedFiles: [],
+              error: 'fatal batch error',
               finishedAt: Date.now()
             },
             submittedAt: 10,
@@ -422,9 +612,7 @@ describe('ComfyBatchSvcImpl live status', () => {
     })
     expect((await svc.listJobs({})).jobs).toEqual([])
 
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      jobs: Array<{ status: ComfyBatchStatus }>
-    }
+    const persisted = await readPersistedStore(dataDir)
     expect(persisted.jobs).toEqual([])
 
     const restored = await new ComfyBatchSvcImpl().listJobs({})
@@ -467,65 +655,6 @@ describe('ComfyBatchSvcImpl live status', () => {
     expect((await svc.listJobs({})).jobs).toHaveLength(1)
   })
 
-  it('replaces the terminal failure record when retrying unfinished items', async () => {
-    const storePath = path.join(dataDir, 'comfy-batch-jobs.json')
-    await fs.writeFile(
-      storePath,
-      JSON.stringify({
-        version: 2,
-        latestJobId: 'failed-job',
-        nextSequence: 2,
-        jobs: [
-          {
-            request,
-            status: {
-              ...status('failed-job', 'error'),
-              sourceDir: request.sourceDir,
-              total: 1,
-              failed: 1,
-              failedFiles: ['failed.png'],
-              error: '1 batch item(s) failed',
-              finishedAt: Date.now()
-            },
-            submittedAt: 10,
-            sequence: 1
-          }
-        ]
-      }),
-      'utf8'
-    )
-
-    vi.mocked(ComfyBatchRunner).mockImplementation(
-      function MockRetryRunner(_request, _profiles, options) {
-        const jobId = options?.jobId || 'retry-job'
-        return {
-          jobId,
-          get status() {
-            return status(jobId, 'running')
-          },
-          startingStatus: vi.fn(() => status(jobId, 'running')),
-          run: vi.fn(async () => ({ ...status(jobId, 'completed'), success: 1 })),
-          cancel: vi.fn()
-        } as never
-      }
-    )
-
-    const svc = new ComfyBatchSvcImpl()
-    const retry = await svc.retryFailed({ jobId: 'failed-job' })
-    expect(retry.status.jobId).not.toBe('failed-job')
-
-    const jobs = await svc.listJobs({})
-    expect(jobs.jobs.map((job) => job.jobId)).not.toContain('failed-job')
-    expect(jobs.jobs.map((job) => job.jobId)).toContain(retry.status.jobId)
-
-    await vi.waitFor(async () => {
-      const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-        jobs: Array<{ status: ComfyBatchStatus }>
-      }
-      expect(persisted.jobs.map((job) => job.status.jobId)).not.toContain('failed-job')
-    })
-  })
-
   it('rejects retry while running and keeps cancellation durable', async () => {
     let resolveRun!: (value: ComfyBatchStatus) => void
     vi.mocked(ComfyBatchRunner).mockImplementation(
@@ -563,9 +692,9 @@ describe('ComfyBatchSvcImpl live status', () => {
     await vi.waitFor(async () =>
       expect((await svc.status({ jobId: started.status.jobId! })).status.state).toBe('cancelled')
     )
-    const persisted = JSON.parse(
-      await fs.readFile(path.join(dataDir, 'comfy-batch-jobs.json'), 'utf8')
-    ) as { jobs: Array<{ status: ComfyBatchStatus; cancelRequested?: boolean }> }
+    const persisted = (await readPersistedStore(dataDir)) as {
+      jobs: Array<{ status: ComfyBatchStatus; cancelRequested?: boolean }>
+    }
     expect(persisted.jobs).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
