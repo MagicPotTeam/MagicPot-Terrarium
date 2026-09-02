@@ -49,11 +49,13 @@ const COMFY_BATCH_EXECUTION_MULTIPLIER = 2
 // lets a slow source drive or remote upload stay ahead of the GPU without
 // allowing an unbounded number of prepared buffers to accumulate.
 const COMFY_BATCH_PREPARATION_HEADROOM = 1
-// Item failures stay in the durable input queue and retry until they succeed
-// or the user cancels the batch. The delay is capped so a broken instance does
-// not create a hot loop while still recovering automatically when it returns.
+// Transport and availability failures stay in the durable input queue and retry
+// until they succeed or the user cancels the batch. The delay is capped so a
+// broken instance does not create a hot loop while still recovering automatically
+// when it returns. Permanent item failures are recorded and let the batch move on.
 const COMFY_BATCH_RETRY_BASE_DELAY_MS = 50
 const COMFY_BATCH_RETRY_MAX_DELAY_MS = 1_000
+const COMFY_BATCH_EXECUTION_RETRY_LIMIT = 3
 // Embedded ComfyUI can take well over a minute to load custom nodes and expose
 // /object_info. Keep the batch pending during that startup window instead of
 // converting every source image into a permanent failure.
@@ -972,6 +974,53 @@ function isRetryableInstanceError(error: unknown): boolean {
   return false
 }
 
+function isPermanentBatchError(error: unknown, attempt: number): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : ''
+  const permanentMessageHint = [
+    'no output or preview image was produced',
+    'expected exactly one image from the bound output nodes',
+    'comfyui output is not a valid png',
+    'png is missing iend',
+    'comfyui output must be png',
+    'comfyui upload response has no filename',
+    'comfyui prompt response has no prompt_id'
+  ].some((hint) => message.includes(hint))
+  if (permanentMessageHint) return true
+
+  if (error instanceof ComfyBatchHttpError) {
+    return !error.retryable && error.status !== 404
+  }
+
+  if (error instanceof ComfyExecutionError) {
+    const message = error.message.toLowerCase()
+    const permanentHint = [
+      'invalid workflow',
+      'invalid node',
+      'unknown node',
+      'validation',
+      'out of memory',
+      'out-of-memory',
+      'cuda',
+      'oom',
+      'does not exist',
+      'not found'
+    ].some((hint) => message.includes(hint))
+    return permanentHint || attempt >= COMFY_BATCH_EXECUTION_RETRY_LIMIT
+  }
+
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase()
+    if (message.includes('batch source image changed')) return true
+    if (message.includes('source image') && message.includes('missing')) return true
+  }
+
+  if (error && typeof error === 'object' && 'code' in error) {
+    return ['ENOENT', 'EISDIR', 'ENOTDIR'].includes(String(error.code))
+  }
+
+  return false
+}
+
 async function waitForHistory(
   client: ComfyBatchHttpClient,
   promptId: string,
@@ -1700,6 +1749,43 @@ export class ComfyBatchRunner {
     )
   }
 
+  private async recordItemFailure(
+    item: PendingBatchItem,
+    error: unknown,
+    context?: { runtime?: InstanceRuntime; startedAt?: number; attempt?: number }
+  ): Promise<void> {
+    const message = errorMessage(error)
+    await fs.rm(item.outputPath, { force: true }).catch(() => undefined)
+    this.manifest.items[item.source.relativePath] = {
+      relativePath: item.source.relativePath,
+      size: item.source.size,
+      mtimeMs: item.source.mtimeMs,
+      sha256: item.source.sha256,
+      planFingerprint: this.manifest.planFingerprint,
+      status: 'failed',
+      outputRelativePath: item.outputRelativePath,
+      error: message,
+      updatedAt: Date.now()
+    }
+    await this.persistManifest()
+    this.statusValue.failed += 1
+    this.statusValue.error ??= message
+    this.statusValue.failedFiles.push(item.source.relativePath)
+    const finishedAt = Date.now()
+    const startedAt = context?.startedAt ?? finishedAt
+    const timing: ComfyBatchItemTiming = {
+      relativePath: item.source.relativePath,
+      durationMs: Math.max(0, finishedAt - startedAt),
+      startedAt,
+      finishedAt,
+      profileId: context?.runtime?.profile.id,
+      attempt: context?.attempt ?? (this.itemAttempts.get(item.source.relativePath) || 1),
+      state: 'failed'
+    }
+    this.recentItems.push(timing)
+    if (this.recentItems.length > 100) this.recentItems.shift()
+  }
+
   private async skipIfOutputCurrent(item: PendingBatchItem): Promise<boolean> {
     const previousItem = this.manifest.items[item.source.relativePath]
     const outputInspection = await readBatchPngInspection(item.outputPath)
@@ -1811,6 +1897,7 @@ export class ComfyBatchRunner {
         return
       } catch (error) {
         if (this.abortController.signal.aborted) return
+        const permanentError = isPermanentBatchError(error, attempt)
         if (isRetryableInstanceError(error)) {
           let hasUntriedRuntime = this.runtimes.some(
             (candidate) => candidate !== activeRuntime && !tried.has(candidate)
@@ -1837,10 +1924,23 @@ export class ComfyBatchRunner {
             runtime = undefined
             continue
           }
+
+          if (permanentError) {
+            await this.recordItemFailure(item, error, {
+              runtime: activeRuntime,
+              startedAt,
+              attempt
+            })
+            return
+          }
+        } else if (permanentError) {
+          await this.recordItemFailure(item, error, {
+            runtime: activeRuntime,
+            startedAt,
+            attempt
+          })
+          return
         }
-        // Every item stays pending until it succeeds or the user cancels the
-        // batch. Do not expose transient or instance-specific failures in the
-        // job status; the durable input file remains the retry record.
         const retryDelay = Math.min(
           COMFY_BATCH_RETRY_MAX_DELAY_MS,
           COMFY_BATCH_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1)

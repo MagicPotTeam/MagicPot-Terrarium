@@ -545,6 +545,100 @@ describe('Comfy batch paths and discovery', () => {
     expect(result).toMatchObject({ state: 'completed', success: 1, failed: 0, failedFiles: [] })
     expect(uploadAttempts).toBe(6)
   })
+
+  it('records permanent ComfyUI execution errors instead of retrying forever', async () => {
+    const sourceDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'broken.jpg'), 'broken')
+    const fakeClient = createFakeComfyClient({
+      history: async (promptId: string) => ({
+        [promptId]: {
+          prompt: [0, promptId, {}, { client_id: 'test' }, []],
+          outputs: {},
+          status: {
+            status_str: 'error',
+            completed: true,
+            messages: [
+              [
+                'execution_error',
+                {
+                  prompt_id: promptId,
+                  timestamp: Date.now(),
+                  node_id: '1',
+                  node_type: 'LoadImage',
+                  executed: [],
+                  exception_message: 'invalid workflow node',
+                  exception_type: 'TestError',
+                  traceback: [],
+                  current_inputs: {},
+                  current_outputs: []
+                }
+              ]
+            ]
+          }
+        }
+      })
+    })
+    const runner = new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    })
+    const cancelTimer = setTimeout(() => runner.cancel(), 250)
+
+    const result = await runner.run()
+    clearTimeout(cancelTimer)
+
+    expect(result).toMatchObject({
+      state: 'error',
+      success: 0,
+      failed: 1,
+      failedFiles: ['broken.jpg']
+    })
+  })
+
+  it('records non-retryable ComfyUI HTTP errors instead of retrying forever', async () => {
+    const sourceDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'rejected.jpg'), 'rejected')
+    const fakeClient = createFakeComfyClient({
+      history: async () => {
+        throw new ComfyBatchHttpError('invalid prompt', false, 400)
+      }
+    })
+    const runner = new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    })
+    const cancelTimer = setTimeout(() => runner.cancel(), 250)
+
+    const result = await runner.run()
+    clearTimeout(cancelTimer)
+
+    expect(result).toMatchObject({
+      state: 'error',
+      success: 0,
+      failed: 1,
+      failedFiles: ['rejected.jpg']
+    })
+  })
+
+  it('records invalid ComfyUI output instead of retrying forever', async () => {
+    const sourceDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'invalid.jpg'), 'invalid')
+    const fakeClient = createFakeComfyClient({
+      view: async () => new Uint8Array([1, 2, 3])
+    })
+    const runner = new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
+      createClient: () => fakeClient
+    })
+    const cancelTimer = setTimeout(() => runner.cancel(), 250)
+
+    const result = await runner.run()
+    clearTimeout(cancelTimer)
+
+    expect(result).toMatchObject({
+      state: 'error',
+      success: 0,
+      failed: 1,
+      failedFiles: ['invalid.jpg']
+    })
+  })
 })
 
 describe('Comfy batch ETA', () => {
