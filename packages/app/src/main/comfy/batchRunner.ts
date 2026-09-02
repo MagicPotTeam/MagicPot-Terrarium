@@ -120,6 +120,11 @@ type PendingBatchItem = {
   staged: boolean
 }
 
+export type ComfyBatchUploadedInput = {
+  profile: ComfyBatchProfile
+  file: FileItem
+}
+
 type LegacyComfyBatchInputSnapshot = {
   sourceDir: string
   relativePaths: string[]
@@ -999,6 +1004,8 @@ async function waitForHistory(
 export type ComfyBatchRunnerOptions = {
   createClient?: (baseUrl: string) => ComfyBatchHttpClient
   onStatus?: (status: ComfyBatchStatus) => void
+  /** Remove a temporary file uploaded to a locally managed ComfyUI instance. */
+  deleteUploadedInput?: (input: ComfyBatchUploadedInput) => Promise<void>
   jobId?: string
   getProfiles?: () => ComfyBatchProfile[]
   runKey?: string
@@ -1019,6 +1026,7 @@ export class ComfyBatchRunner {
   private readonly recentItems: ComfyBatchItemTiming[] = []
   private readonly itemAttempts = new Map<string, number>()
   private readonly retryQueuedPaths = new Set<string>()
+  private readonly uploadedInputs = new Map<string, ComfyBatchUploadedInput>()
   private inputDir!: string
   private readonly profileProbePromises = new Map<string, Promise<void>>()
   private lastProfileFingerprint = ''
@@ -1111,6 +1119,61 @@ export class ComfyBatchRunner {
 
   private emit(): void {
     this.options.onStatus?.(this.status)
+  }
+
+  private uploadedInputKey(input: ComfyBatchUploadedInput): string {
+    return [
+      input.profile.id,
+      input.profile.baseUrl,
+      input.file.subfolder || '',
+      input.file.filename || ''
+    ].join('\u0000')
+  }
+
+  private trackUploadedInput(
+    profile: ComfyBatchProfile,
+    requestedFilename: string,
+    file: FileItem
+  ): void {
+    // ComfyUI should return the exact filename requested by the upload. If it
+    // does not, or places it in a subfolder, leave it alone rather than risk
+    // deleting a user-provided file.
+    if (
+      file.filename !== requestedFilename ||
+      Boolean(file.subfolder) ||
+      (file.type !== undefined && file.type !== 'input')
+    ) {
+      return
+    }
+    const input = { profile, file }
+    this.uploadedInputs.set(this.uploadedInputKey(input), input)
+  }
+
+  private async deleteTrackedUploadedInput(input: ComfyBatchUploadedInput): Promise<boolean> {
+    const deleteUploadedInput = this.options.deleteUploadedInput
+    if (!deleteUploadedInput) return true
+    try {
+      await deleteUploadedInput(input)
+      return true
+    } catch (error) {
+      console.warn(
+        `[ComfyBatchRunner] Failed to clean uploaded input ${input.file.filename || '<unknown>'}:`,
+        errorMessage(error)
+      )
+      return false
+    }
+  }
+
+  private async cleanupUploadedInput(input: ComfyBatchUploadedInput): Promise<void> {
+    if (await this.deleteTrackedUploadedInput(input)) {
+      this.uploadedInputs.delete(this.uploadedInputKey(input))
+    }
+  }
+
+  private async cleanupTrackedUploadedInputs(): Promise<void> {
+    for (const input of [...this.uploadedInputs.values()]) {
+      await this.cleanupUploadedInput(input)
+    }
   }
 
   private persistManifest(): Promise<void> {
@@ -1550,11 +1613,20 @@ export class ComfyBatchRunner {
     const bytes = prepared.bytes
     const extension = path.extname(item.source.relativePath).toLowerCase()
     const uploadName = `magicpot-batch-${this.jobId}-${randomUUID()}${extension || '.png'}`
+    // Track the requested name before awaiting the upload. ComfyUI may have
+    // written the file even when the HTTP request later times out, so a retry
+    // must still be able to remove that orphan once the batch completes.
+    this.trackUploadedInput(runtime.profile, uploadName, {
+      filename: uploadName,
+      subfolder: '',
+      type: 'input'
+    })
     const uploaded = await runtime.client.uploadImage(
       uploadName,
       bytes,
       this.abortController.signal
     )
+    this.trackUploadedInput(runtime.profile, uploadName, uploaded)
     const workflow = cloneWorkflow(this.request.workflow)
     bindUploadedImage(workflow, this.imageInputBinding, uploadedValue(uploaded))
     const requestedPromptId = randomUUID()
@@ -1605,6 +1677,7 @@ export class ComfyBatchRunner {
         sourceSha256: item.source.sha256,
         planFingerprint: this.manifest.planFingerprint
       })
+      await this.cleanupUploadedInput({ profile: runtime.profile, file: uploaded })
     } finally {
       this.activePrompts.delete(promptId)
     }
@@ -1897,6 +1970,7 @@ export class ComfyBatchRunner {
       } else {
         this.statusValue.state = 'completed'
         await this.cleanupCompletedInput()
+        await this.cleanupTrackedUploadedInputs()
       }
       this.statusValue.finishedAt = Date.now()
       this.emit()

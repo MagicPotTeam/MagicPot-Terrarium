@@ -7,6 +7,7 @@ import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import * as configModule from '../config/config'
 import * as buildEnvModule from '../config/buildEnv'
+import type { ComfyBatchRunnerOptions } from '../comfy/batchRunner'
 import { ComfyBatchRunner } from '../comfy/batchRunner'
 import { QAppFSCli } from '../qApp/fs'
 import { ComfyBatchSvcImpl } from './svcComfyBatchImpl'
@@ -142,6 +143,61 @@ describe('ComfyBatchSvcImpl live status', () => {
     })
     await expect(svc.replaceProfiles({ profiles: [] })).resolves.toEqual({ profiles: [] })
     expect(configModule.saveConfig).toHaveBeenCalledWith({ comfy_batch_profiles: [] })
+  })
+
+  it('passes a local ComfyUI input cleaner to the batch runner', async () => {
+    const comfyDir = path.join(dataDir, 'ComfyUI')
+    const inputDir = path.join(comfyDir, 'input')
+    await fs.mkdir(inputDir, { recursive: true })
+    const uploadedPath = path.join(inputDir, 'magicpot-batch-job-uuid.png')
+    await fs.writeFile(uploadedPath, 'uploaded')
+    vi.mocked(configModule.getConfig).mockReturnValue({
+      ...DEFAULT_CONFIG,
+      local_comfyui_config: {
+        ...DEFAULT_CONFIG.local_comfyui_config,
+        comfyui_dir: comfyDir,
+        comfyui_port: '8188'
+      },
+      comfy_batch_profiles: [
+        {
+          id: 'one',
+          baseUrl: 'http://127.0.0.1:8188',
+          enabled: true,
+          maxConcurrency: 1
+        }
+      ]
+    } as Config)
+
+    let capturedOptions: ComfyBatchRunnerOptions | undefined
+    const runnerStatus = status('runner-job', 'running')
+    vi.mocked(ComfyBatchRunner).mockImplementation(
+      function MockRunner(_request, _profiles, options) {
+        capturedOptions = options
+        return {
+          jobId: 'runner-job',
+          status: runnerStatus,
+          startingStatus: vi.fn(() => runnerStatus),
+          run: vi.fn(async () => ({ ...runnerStatus, state: 'completed', finishedAt: Date.now() })),
+          cancel: vi.fn()
+        } as never
+      }
+    )
+
+    const svc = new ComfyBatchSvcImpl()
+    await svc.start(request)
+    await vi.waitFor(() => expect(capturedOptions?.deleteUploadedInput).toBeTypeOf('function'))
+
+    await capturedOptions!.deleteUploadedInput!({
+      profile: {
+        id: 'one',
+        baseUrl: 'http://127.0.0.1:8188/',
+        enabled: true,
+        maxConcurrency: 1
+      },
+      file: { filename: 'magicpot-batch-job-uuid.png', subfolder: '', type: 'input' }
+    })
+
+    await expect(fs.stat(uploadedPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('accepts a legacy QApp with explicit image input and output bindings', async () => {

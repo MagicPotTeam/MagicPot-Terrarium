@@ -32,6 +32,7 @@ import { getBuildEnv } from '../config/buildEnv'
 import { getConfig, saveConfig } from '../config/config'
 import { ComfyBatchHttpClient, normalizeComfyBatchBaseUrl } from '../comfy/batchHttp'
 import {
+  type ComfyBatchUploadedInput,
   ComfyBatchRunner,
   getComfyBatchOutputDir,
   isValidComfyBatchRunKey,
@@ -207,6 +208,43 @@ function configuredProfiles(): ComfyBatchProfile[] {
     return [defaultProfile()]
   }
   return configured.map(normalizeProfile)
+}
+
+function normalizedComfyEndpoint(value: string): string | undefined {
+  try {
+    const url = new URL(value)
+    const hostname = url.hostname.toLowerCase()
+    const localHostname = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(hostname)
+      ? '127.0.0.1'
+      : hostname
+    const port = url.port || (url.protocol === 'https:' ? '443' : '80')
+    return `${url.protocol}//${localHostname}:${port}`
+  } catch {
+    return undefined
+  }
+}
+
+function createLocalComfyBatchInputCleaner():
+  ((input: ComfyBatchUploadedInput) => Promise<void>) | undefined {
+  const configUtils = new ConfigUtils(getConfig(), getBuildEnv(), path)
+  const [comfyUIDir, available] = configUtils.getManagedComfyUIDir()
+  if (!available) return undefined
+
+  const managedPort = configUtils.getManagedComfyUIPort()
+  const managedEndpoint = `http://127.0.0.1:${managedPort}`
+  const inputDir = path.resolve(path.join(comfyUIDir, 'input'))
+
+  return async ({ profile, file }: ComfyBatchUploadedInput): Promise<void> => {
+    if (normalizedComfyEndpoint(profile.baseUrl) !== managedEndpoint) return
+    if (file.type !== undefined && file.type !== 'input') return
+    if (file.subfolder) return
+
+    const filename = file.filename || ''
+    if (!filename.startsWith('magicpot-batch-') || path.basename(filename) !== filename) return
+    const candidate = path.resolve(inputDir, filename)
+    if (path.dirname(candidate) !== inputDir) return
+    await fs.rm(candidate, { force: true })
+  }
 }
 
 async function replaceStoreFile(tempPath: string, filename: string): Promise<void> {
@@ -861,6 +899,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         jobId: nextId,
         runKey: record.runKey,
         getProfiles: () => configuredProfiles(),
+        deleteUploadedInput: createLocalComfyBatchInputCleaner(),
         onStatus: (status) => {
           // Do not allow a late runner callback to resurrect a cancelled or
           // already terminal job.

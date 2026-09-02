@@ -13,6 +13,7 @@ import type { ObjectInfoMap, Workflow } from '@shared/comfy/types'
 import {
   assertNoComfyBatchOutputCollisions,
   ComfyBatchRunner,
+  type ComfyBatchRunnerOptions,
   getComfyBatchInputDir,
   getComfyBatchManifestPath,
   getComfyBatchOutputDir,
@@ -145,6 +146,73 @@ describe('Comfy batch paths and discovery', () => {
     const runKey = '20260828213645'
     const runner = new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], { runKey })
     expect(runner.status.outputDir).toBe(getComfyBatchOutputDir(sourceDir, runKey))
+  })
+
+  it('cleans the uploaded ComfyUI input after an item completes', async () => {
+    const sourceDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'source.jpg'), 'source')
+    const deleted: unknown[] = []
+    const fakeClient = createFakeComfyClient({
+      uploadImage: async (filename: string) => ({
+        filename,
+        subfolder: '',
+        type: 'input' as const
+      })
+    })
+
+    const runnerOptions = {
+      createClient: () => fakeClient,
+      deleteUploadedInput: async (input: unknown) => {
+        deleted.push(input)
+      }
+    } as unknown as ComfyBatchRunnerOptions
+
+    const status = await new ComfyBatchRunner(
+      makeBatchRequest(sourceDir),
+      [profile('one')],
+      runnerOptions
+    ).run()
+
+    expect(status).toMatchObject({ state: 'completed', success: 1 })
+    expect(deleted).toHaveLength(1)
+  })
+
+  it('cleans an upload that succeeded remotely before the client saw a retryable error', async () => {
+    const sourceDir = await createTempDir()
+    const remoteInputDir = await createTempDir()
+    await fs.writeFile(path.join(sourceDir, 'source.jpg'), 'source')
+    const deleted: string[] = []
+    let uploadAttempts = 0
+    const fakeClient = createFakeComfyClient({
+      uploadImage: async (filename: string) => {
+        await fs.writeFile(path.join(remoteInputDir, filename), 'uploaded')
+        uploadAttempts += 1
+        if (uploadAttempts === 1) {
+          throw new ComfyBatchHttpError('upload timed out', true)
+        }
+        return { filename, subfolder: '', type: 'input' as const }
+      }
+    })
+
+    const runnerOptions = {
+      createClient: () => fakeClient,
+      deleteUploadedInput: async ({ file }: { file: { filename?: string } }) => {
+        const filename = file.filename || ''
+        deleted.push(filename)
+        await fs.rm(path.join(remoteInputDir, filename), { force: true })
+      }
+    } as unknown as ComfyBatchRunnerOptions
+
+    const status = await new ComfyBatchRunner(
+      makeBatchRequest(sourceDir),
+      [profile('one')],
+      runnerOptions
+    ).run()
+
+    expect(status).toMatchObject({ state: 'completed', success: 1 })
+    expect(uploadAttempts).toBe(2)
+    expect(deleted).toHaveLength(2)
+    await expect(fs.readdir(remoteInputDir)).resolves.toEqual([])
   })
 
   it('uses only the adjacent .output directory and preserves relative image paths', async () => {
