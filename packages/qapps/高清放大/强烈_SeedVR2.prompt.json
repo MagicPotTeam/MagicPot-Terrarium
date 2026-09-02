@@ -6,7 +6,7 @@
       "blocks_to_swap": 36,
       "swap_io_components": false,
       "offload_device": "cpu",
-      "cache_model": false,
+      "cache_model": true,
       "attention_mode": "sdpa"
     },
     "class_type": "SeedVR2LoadDiTModel",

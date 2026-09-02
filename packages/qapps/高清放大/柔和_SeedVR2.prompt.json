@@ -20,7 +20,7 @@
   },
   "2": {
     "inputs": {
-      "image": "1 (1).png"
+      "image": "it_1_5_3.png"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -34,7 +34,7 @@
       "blocks_to_swap": 36,
       "swap_io_components": false,
       "offload_device": "cpu",
-      "cache_model": false,
+      "cache_model": true,
       "attention_mode": "sdpa"
     },
     "class_type": "SeedVR2LoadDiTModel",
@@ -44,7 +44,7 @@
   },
   "4": {
     "inputs": {
-      "seed": 42,
+      "seed": 666624155,
       "resolution": 4096,
       "max_resolution": 4096,
       "batch_size": 1,
