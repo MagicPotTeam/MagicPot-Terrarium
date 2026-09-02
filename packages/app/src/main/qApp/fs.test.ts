@@ -209,7 +209,7 @@ describe('QAppFSCli with memfs', () => {
       expect(sharedDir?.children).toHaveLength(2)
       expect(app?.isBuiltin).toBe(false)
       expect(app?.icon).toBe('user-app.png')
-      expect(other?.isBuiltin).toBe(true)
+      expect(other?.isBuiltin).toBe(false)
       expect(other?.icon).toBe('builtin-other.png')
     })
 
@@ -236,7 +236,7 @@ describe('QAppFSCli with memfs', () => {
       expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, 'Legacy/MoveMe.prompt.json'))).toBe(false)
     })
 
-    it('reads bundled qApps as read-only sources', async () => {
+    it('reads bundled qApps from the unified user directory', async () => {
       await ensureQAppDirs(fsp)
 
       await writeBundle(
@@ -250,7 +250,29 @@ describe('QAppFSCli with memfs', () => {
       const cli = new QAppFSCli()
       const items = await cli.listQAppKeys()
       const builtin = findItemByKey(items, 'Builtin/ReadOnly')
-      expect(builtin?.isBuiltin).toBe(true)
+      expect(builtin?.isBuiltin).toBe(false)
+    })
+
+    it('materializes bundled qApps into the unified user directory', async () => {
+      await ensureQAppDirs(fsp)
+
+      const key = 'Builtin/Unified'
+      await writeBundle(
+        BUILTIN_QAPPS_DIR,
+        key,
+        { icon: 'builtin.png', inputs: [] },
+        minimalWorkflow(),
+        JSON.stringify({ name: 'Unified', version: '1.0.0', source: 'builtin' }, null, 2)
+      )
+
+      const cli = new QAppFSCli()
+      const items = await cli.listQAppKeys()
+      const unified = findItemByKey(items, key)
+
+      expect(unified?.isBuiltin).toBe(false)
+      expect(fs.existsSync(path.join(USER_QAPPS_DIR, `${key}.qacfg.json`))).toBe(true)
+      expect(fs.existsSync(path.join(USER_QAPPS_DIR, `${key}.prompt.json`))).toBe(true)
+      expect(fs.existsSync(path.join(USER_QAPPS_DIR, `${key}.manifest.json`))).toBe(true)
     })
 
     it('prefers explicit manifest categories over heuristic workflow signals', async () => {
@@ -287,7 +309,7 @@ describe('QAppFSCli with memfs', () => {
       const items = await cli.listQAppKeys()
       const qapp = findItemByKey(items, '高清放大/柔和_SeedVR2')
 
-      expect(qapp?.isBuiltin).toBe(true)
+      expect(qapp?.isBuiltin).toBe(false)
       expect(qapp?.category).toBe('image')
     })
   })
@@ -526,7 +548,7 @@ describe('QAppFSCli with memfs', () => {
       expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.qacfg.json`))).toBe(false)
     })
 
-    it('deletes bundled-only qApps from the bundled qApp directory', async () => {
+    it('deletes bundled-only qApps from the unified user directory', async () => {
       await ensureQAppDirs(fsp)
 
       const key = 'builtin-only/app'
@@ -541,9 +563,14 @@ describe('QAppFSCli with memfs', () => {
       const cli = new QAppFSCli()
       await cli.deleteQApp(key)
 
-      expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.qacfg.json`))).toBe(false)
-      expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.prompt.json`))).toBe(false)
-      expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.manifest.json`))).toBe(false)
+      expect(fs.existsSync(path.join(USER_QAPPS_DIR, `${key}.qacfg.json`))).toBe(false)
+      expect(fs.existsSync(path.join(USER_QAPPS_DIR, `${key}.prompt.json`))).toBe(false)
+      expect(fs.existsSync(path.join(USER_QAPPS_DIR, `${key}.manifest.json`))).toBe(false)
+      expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.qacfg.json`))).toBe(true)
+      expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.prompt.json`))).toBe(true)
+      expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.manifest.json`))).toBe(true)
+      const itemsAfterDelete = await cli.listQAppKeys()
+      expect(findItemByKey(itemsAfterDelete, key)).toBeUndefined()
     })
 
     it('rejects deleting missing qApps', async () => {
@@ -632,7 +659,7 @@ describe('QAppFSCli with memfs', () => {
       )
     })
 
-    it('rejects renaming bundled-only qApps', async () => {
+    it('renames bundled-only qApps in the unified user directory', async () => {
       await ensureQAppDirs(fsp)
 
       const key = 'builtin-only/App1'
@@ -645,7 +672,11 @@ describe('QAppFSCli with memfs', () => {
       )
 
       const cli = new QAppFSCli()
-      await expect(cli.renameQApp(key, 'App2')).rejects.toThrow('read-only')
+      await cli.renameQApp(key, 'App2')
+
+      expect(fs.existsSync(path.join(USER_QAPPS_DIR, 'builtin-only/App2.qacfg.json'))).toBe(true)
+      expect(fs.existsSync(path.join(USER_QAPPS_DIR, 'builtin-only/App2.prompt.json'))).toBe(true)
+      expect(fs.existsSync(path.join(BUILTIN_QAPPS_DIR, `${key}.qacfg.json`))).toBe(true)
     })
   })
 })

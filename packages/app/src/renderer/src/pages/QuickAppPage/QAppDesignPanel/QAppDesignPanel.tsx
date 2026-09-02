@@ -429,9 +429,9 @@ const QAppDesignPanel: React.FC = () => {
   // ----------------------------------------------------------------
   // 打开文件夹
   // ----------------------------------------------------------------
-  // 打开应用实际扫描的统一目录。
+  // 打开应用实际读写的统一目录。
   const handleOpenFolder = () => {
-    const dirPath = configUtils.getBuiltinQAppDir()
+    const dirPath = configUtils.getQAppDir()
     if (!dirPath) {
       notifyError(t('qapp.design.err_no_qapp_dir'))
       return
