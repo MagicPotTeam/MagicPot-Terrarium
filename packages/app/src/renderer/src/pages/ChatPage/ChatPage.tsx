@@ -4493,7 +4493,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [currentSession, currentSessionId, resolveAvailableProfileId, sessions, setSessions]
   )
   const selectReasoningEffort = useCallback(
-    (effort: LLMReasoningEffort) => {
+    (effort: LLMReasoningEffort | undefined) => {
       if (!selectedReasoningProfileKey) {
         return
       }
