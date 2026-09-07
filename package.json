@@ -257,7 +257,7 @@
     "dmg-license": "^1.0.11"
   },
   "overrides": {
-    "@xmldom/xmldom": "0.8.13",
+    "@xmldom/xmldom": "0.8.15",
     "axios": {
       ".": "1.19.0",
       "form-data": "4.0.6"
@@ -268,7 +268,7 @@
       "ajv-formats": "3.0.1"
     },
     "cos-request": {
-      "qs": "6.15.2",
+      "qs": "6.16.0",
       "uuid": "11.1.1",
       "form-data": "2.5.6"
     },
@@ -278,19 +278,19 @@
     "eslint-plugin-react": {
       "es-iterator-helpers": "^1.2.1"
     },
+    "fast-uri": "3.1.6",
     "fast-xml-parser": "5.7.3",
     "follow-redirects": "1.16.0",
     "hono": "4.13.1",
     "ip-address": "10.4.0",
     "postcss": "8.5.26",
     "protobufjs": "7.6.5",
-    "qs": "6.15.2",
+    "qs": "6.16.0",
     "react-router": "7.18.2",
     "tencentcloud-sdk-nodejs-common": {
       "uuid": "11.1.1",
       "form-data": "3.0.5"
     },
-    "fast-uri": "3.1.5",
     "nanoid": "3.3.18",
     "body-parser": "2.3.0"
   },

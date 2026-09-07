@@ -371,18 +371,25 @@ describe('ComfyBatchSvcImpl live status', () => {
       const first = await svc.start(request)
       const second = await svc.start(request)
 
+      const expectedDate = new Date(1787924205000)
+      const pad = (value: number): string => String(value).padStart(2, '0')
+      const expectedRunKey = `${expectedDate.getFullYear()}${pad(
+        expectedDate.getMonth() + 1
+      )}${pad(expectedDate.getDate())}${pad(expectedDate.getHours())}${pad(
+        expectedDate.getMinutes()
+      )}${pad(expectedDate.getSeconds())}`
       expect(first.status.outputDir).toBe(
-        `${path.resolve(request.sourceDir)}.output.20260828213645`
+        `${path.resolve(request.sourceDir)}.output.${expectedRunKey}`
       )
       expect(second.status.outputDir).toBe(
-        `${path.resolve(request.sourceDir)}.output.20260828213645-2`
+        `${path.resolve(request.sourceDir)}.output.${expectedRunKey}-2`
       )
 
       await vi.waitFor(() => expect(runnerOptions).toHaveLength(1))
-      expect(runnerOptions[0].runKey).toBe('20260828213645')
+      expect(runnerOptions[0].runKey).toBe(expectedRunKey)
       resolveRuns[0]({ ...status(first.status.jobId!, 'completed'), success: 1 })
       await vi.waitFor(() => expect(runnerOptions).toHaveLength(2))
-      expect(runnerOptions[1].runKey).toBe('20260828213645-2')
+      expect(runnerOptions[1].runKey).toBe(`${expectedRunKey}-2`)
       resolveRuns[1]({ ...status(second.status.jobId!, 'completed'), success: 1 })
     } finally {
       nowSpy.mockRestore()
