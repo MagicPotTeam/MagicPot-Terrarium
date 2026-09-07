@@ -1,7 +1,38 @@
 import { describe, expect, it } from 'vitest'
-import { resolveChatProfileCapabilities } from './profileCapabilities'
+import {
+  resolveChatProfileCapabilities,
+  normalizeReasoningEffort,
+  getReasoningEffortLabel,
+  type LLMReasoningEffort
+} from './profileCapabilities'
 
 describe('resolveChatProfileCapabilities', () => {
+  // Generated opaque names: no release catalog to maintain when channels add models.
+  it.each([{ call_type: 'codex' }, { call_type: 'cliproxyapi' }, { auth_mode: 'codex_oauth' }])(
+    'offers reasoning controls independent of scanned model names: %j',
+    (connection) => {
+      const names = [
+        '',
+        ...Array.from({ length: 32 }, (_, index) => `vendor-${index}/模型 Alias:${index}+test`)
+      ]
+      for (const model_name of names) {
+        const capabilities = resolveChatProfileCapabilities({ ...connection, model_name })
+        expect(capabilities.reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+        expect(capabilities.reasoningEfforts).not.toContain('ultra')
+        expect(capabilities.defaultReasoningEffort).toBeUndefined()
+        expect(capabilities.contextWindowTokens).toBeUndefined()
+      }
+    }
+  )
+
+  it('migrates legacy Ultra to Max before validating supported levels or displaying labels', () => {
+    expect(normalizeReasoningEffort(' ULTRA ')).toBe('max')
+    expect(normalizeReasoningEffort('ultra', ['low', 'max'])).toBe('max')
+    expect(normalizeReasoningEffort('ultra', ['low', 'high'])).toBeUndefined()
+    expect(normalizeReasoningEffort('unrecognized')).toBeUndefined()
+    expect(getReasoningEffortLabel('ultra' as LLMReasoningEffort)).toBe('Max')
+  })
+
   it('does not expose reasoning controls for normal API key profiles', () => {
     const capabilities = resolveChatProfileCapabilities({
       model_name: 'gpt-5.5',
@@ -23,8 +54,8 @@ describe('resolveChatProfileCapabilities', () => {
       call_type: 'codex'
     })
 
-    expect(['medium', 'xhigh']).toContain(capabilities.defaultReasoningEffort)
-    expect(capabilities.reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh'])
+    expect(capabilities.defaultReasoningEffort).toBeUndefined()
+    expect(capabilities.reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
     expect(capabilities.contextWindowTokens).toBe(258_000)
   })
 

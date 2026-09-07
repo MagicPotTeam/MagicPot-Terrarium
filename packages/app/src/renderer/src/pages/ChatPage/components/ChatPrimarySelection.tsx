@@ -5,7 +5,11 @@ import BoltIcon from '@mui/icons-material/Bolt'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import CheckIcon from '@mui/icons-material/Check'
 import { useTranslation } from 'react-i18next'
-import { getReasoningEffortLabel, type LLMReasoningEffort } from '@shared/llm'
+import {
+  getReasoningEffortLabel,
+  normalizeReasoningEffort,
+  type LLMReasoningEffort
+} from '@shared/llm'
 
 export type ChatPrimarySelectionProfile = {
   id: string
@@ -22,7 +26,7 @@ type ChatPrimarySelectionProps = {
   selectedSkillLabel: string
   active?: boolean
   onSelectProfile: (profileId: string | null) => void
-  onSelectReasoningEffort?: (effort: LLMReasoningEffort) => void
+  onSelectReasoningEffort?: (effort: LLMReasoningEffort | undefined) => void
 }
 
 const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
@@ -62,8 +66,20 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
 
   const selectedProfile = availableProfiles.find((profile) => profile.id === selectedProfileId)
   const displayLabel = selectedProfile ? selectedProfile.model_name : 'No model'
-  const displayReasoningLabel = selectedReasoningEffort
-    ? getReasoningEffortLabel(selectedReasoningEffort)
+  // Legacy preferences/remote clients may still send Ultra; never render it as an option.
+  const reasoningEfforts = Array.from(
+    new Set(
+      availableReasoningEfforts
+        .map((effort) => normalizeReasoningEffort(effort))
+        .filter((effort): effort is LLMReasoningEffort => Boolean(effort))
+    )
+  )
+  const normalizedSelectedEffort = normalizeReasoningEffort(
+    selectedReasoningEffort,
+    reasoningEfforts
+  )
+  const displayReasoningLabel = normalizedSelectedEffort
+    ? getReasoningEffortLabel(normalizedSelectedEffort)
     : 'Default'
   const buildSelectorButtonSx = (theme: Theme) =>
     compact
@@ -163,10 +179,11 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
             sx={{ fontSize: compact ? 15 : 16, opacity: 0.7, ml: compact ? 0.25 : 1 }}
           />
         </Button>
-        {availableReasoningEfforts.length > 0 && onSelectReasoningEffort ? (
+        {reasoningEfforts.length > 0 && onSelectReasoningEffort ? (
           <Button
             size="small"
             onClick={handleOpenReasoning}
+            aria-label="Reasoning effort"
             sx={(theme) => buildReasoningButtonSx(theme)}
           >
             <Typography
@@ -277,11 +294,11 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
             Reasoning Effort
           </Typography>
         </Box>
-        {availableReasoningEfforts.map((effort) => {
-          const isSelected = effort === selectedReasoningEffort
+        {[undefined, ...reasoningEfforts].map((effort) => {
+          const isSelected = effort === normalizedSelectedEffort
           return (
             <MenuItem
-              key={effort}
+              key={effort ?? 'default'}
               onClick={() => {
                 onSelectReasoningEffort?.(effort)
                 handleCloseReasoning()
@@ -304,7 +321,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
             >
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 {isSelected ? <BoltIcon sx={{ fontSize: 16 }} /> : <Box sx={{ width: 16 }} />}
-                {getReasoningEffortLabel(effort)}
+                {effort ? getReasoningEffortLabel(effort) : 'Default'}
               </Box>
               {isSelected && <CheckIcon sx={{ fontSize: 16 }} />}
             </MenuItem>

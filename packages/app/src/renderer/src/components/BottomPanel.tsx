@@ -20,8 +20,9 @@ import {
 import { useTranslation } from 'react-i18next'
 import { api } from '@renderer/utils/windowUtils'
 import { useComfyProcess } from '@renderer/store/hooks/comfyProcess'
-import { MAX_COMFY_OUTPUT_LINES } from '@renderer/store/slices/comfyProcess'
-import { joinBoundedLogLines } from './comfyLogRendering'
+import { useAppLogs } from '@renderer/hooks/useAppLogs'
+import { normalizeLogBatch } from '@renderer/utils/logText'
+import VirtualLogViewport from './VirtualLogViewport'
 import { detectManagedComfyProcess } from './managedComfyDetectionCoordinator'
 import { isServerStreamingError } from '@shared/api/apiUtils/streaming'
 import type { CanvasTargetAssetMetadata } from '@shared/canvasTarget'
@@ -31,8 +32,6 @@ import type {
   DesignInspectionSelectionBounds
 } from '@shared/designInspection'
 
-const MAX_LOG_LINES = 1000
-const SCROLL_THRESHOLD = 20
 const ELEMENT_PANEL_MAX_RENDERED_CARDS = 60
 
 const ELEMENT_PANEL_COPY = {
@@ -835,50 +834,7 @@ const TerminalPanel: React.FC = () => {
   const { t } = useTranslation()
   const theme = useTheme()
   const consolePalette = getConsolePalette(theme.palette.mode as 'light' | 'dark')
-  const [lines, setLines] = useState<string[]>([])
-  const shouldAutoScroll = useRef(true)
-  const outputRef = useRef<HTMLPreElement>(null)
-
-  const scrollToBottom = useCallback(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight
-    }
-  }, [])
-
-  useEffect(() => {
-    if (shouldAutoScroll.current) scrollToBottom()
-  }, [lines, scrollToBottom])
-
-  useEffect(() => {
-    let unmounted = false
-    const start = async () => {
-      try {
-        await api().svcLog.watchAppLogs(
-          {},
-          {
-            onData: (data) => {
-              if (unmounted) return
-              const time = new Date(data.timestamp).toLocaleTimeString()
-              const prefix = data.level === 'error' ? 'ERR' : data.level === 'warn' ? 'WRN' : ''
-              const line = prefix ? `${time} ${prefix} ${data.message}` : `${time} ${data.message}`
-              setLines((prev) => {
-                const next = [...prev, line]
-                return next.length > MAX_LOG_LINES ? next.slice(-MAX_LOG_LINES) : next
-              })
-            }
-          }
-        )
-      } catch (error) {
-        if (!isServerStreamingError(error)) {
-          console.error('Watch logs failed:', error)
-        }
-      }
-    }
-    start()
-    return () => {
-      unmounted = true
-    }
-  }, [])
+  const { lines, firstIndex, generation, clear } = useAppLogs()
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -886,38 +842,21 @@ const TerminalPanel: React.FC = () => {
         <Tooltip title={t('terminal.clear')}>
           <IconButton
             size="small"
-            onClick={() => setLines([])}
+            onClick={clear}
+            aria-label={t('terminal.clear')}
             sx={{ p: 0.3, color: consolePalette.toolbarIcon, '&:hover': { color: '#f87171' } }}
           >
             <ClearIcon sx={{ fontSize: 14 }} />
           </IconButton>
         </Tooltip>
       </Box>
-
-      <pre
-        ref={outputRef}
-        onScroll={() => {
-          if (!outputRef.current) return
-          const { scrollTop, scrollHeight, clientHeight } = outputRef.current
-          shouldAutoScroll.current =
-            Math.abs(scrollTop + clientHeight - scrollHeight) < SCROLL_THRESHOLD
-        }}
-        style={{
-          flex: 1,
-          margin: 0,
-          padding: '4px 8px',
-          overflow: 'auto',
-          background: consolePalette.background,
-          color: consolePalette.text,
-          fontFamily: '"Cascadia Code", "Consolas", "Courier New", monospace',
-          fontSize: 13,
-          lineHeight: 1.5,
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-all'
-        }}
-      >
-        {lines.join('\n')}
-      </pre>
+      <VirtualLogViewport
+        lines={lines}
+        firstIndex={firstIndex}
+        generation={generation}
+        label={t('terminal.terminal_log')}
+        style={{ background: consolePalette.background, color: consolePalette.text }}
+      />
     </Box>
   )
 }
@@ -927,22 +866,8 @@ const ComfyUIPanel: React.FC = () => {
   const theme = useTheme()
   const consolePalette = getConsolePalette(theme.palette.mode as 'light' | 'dark')
   const { state, setPid, setIsRunning, setIsManaged, addOutput, clearOutput } = useComfyProcess()
-  const outputText = useMemo(
-    () => joinBoundedLogLines(state.output, MAX_COMFY_OUTPUT_LINES),
-    [state.output]
-  )
-  const shouldAutoScroll = useRef(true)
-  const outputRef = useRef<HTMLPreElement>(null)
-
-  const scrollToBottom = useCallback(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight
-    }
-  }, [])
-
-  useEffect(() => {
-    if (shouldAutoScroll.current) scrollToBottom()
-  }, [outputText, scrollToBottom])
+  // Also bound pre-fix state that may survive renderer HMR.
+  const lines = useMemo(() => normalizeLogBatch(state.output), [state.output])
 
   const handleStartServer = useCallback(async () => {
     if (state.isRunning) {
@@ -1064,37 +989,20 @@ const ComfyUIPanel: React.FC = () => {
           <IconButton
             size="small"
             onClick={clearOutput}
+            aria-label={t('terminal.clear')}
             sx={{ p: 0.3, color: consolePalette.toolbarIcon, '&:hover': { color: '#f87171' } }}
           >
             <ClearIcon sx={{ fontSize: 14 }} />
           </IconButton>
         </Tooltip>
       </Box>
-
-      <pre
-        ref={outputRef}
-        onScroll={() => {
-          if (!outputRef.current) return
-          const { scrollTop, scrollHeight, clientHeight } = outputRef.current
-          shouldAutoScroll.current =
-            Math.abs(scrollTop + clientHeight - scrollHeight) < SCROLL_THRESHOLD
-        }}
-        style={{
-          flex: 1,
-          margin: 0,
-          padding: '4px 8px',
-          overflow: 'auto',
-          background: consolePalette.background,
-          color: consolePalette.text,
-          fontFamily: '"Cascadia Code", "Consolas", "Courier New", monospace',
-          fontSize: 13,
-          lineHeight: 1.5,
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-all'
-        }}
-      >
-        {outputText}
-      </pre>
+      <VirtualLogViewport
+        lines={lines}
+        firstIndex={state.outputStart}
+        generation={state.outputGeneration}
+        label="ComfyUI logs"
+        style={{ background: consolePalette.background, color: consolePalette.text }}
+      />
     </Box>
   )
 }
@@ -1334,8 +1242,8 @@ const BottomPanel: React.FC<BottomPanelProps> = ({ height = BOTTOM_PANEL_DEFAULT
       <Box
         sx={{ flex: 1, overflow: 'hidden', minHeight: 0, display: 'flex', flexDirection: 'column' }}
       >
-        {activeTab === 'terminal' && <TerminalPanel />}
-        {activeTab === 'comfyui' && <ComfyUIPanel />}
+        {visible && activeTab === 'terminal' && <TerminalPanel />}
+        {visible && activeTab === 'comfyui' && <ComfyUIPanel />}
         {activeTab === 'elements' && <ElementInfoPanel />}
       </Box>
     </Box>

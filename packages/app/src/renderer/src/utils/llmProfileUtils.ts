@@ -37,7 +37,7 @@ const expandDiscoveredModelProfile = (
   return discoveredModelNames
     .map((modelName) => modelName.trim())
     .filter((modelName) => {
-      const key = modelName.toLowerCase()
+      const key = modelName
       if (!key || seen.has(key)) return false
       seen.add(key)
       return true
@@ -211,9 +211,7 @@ const extractRemoteLlmServerErrorDetail = (bodyText?: string): string | undefine
 
   try {
     const parsed = JSON.parse(normalized) as
-      | { error?: unknown; message?: unknown; detail?: unknown }
-      | null
-      | undefined
+      { error?: unknown; message?: unknown; detail?: unknown } | null | undefined
     const detail = [parsed?.error, parsed?.message, parsed?.detail].find(
       (value): value is string => typeof value === 'string' && value.trim().length > 0
     )
@@ -256,7 +254,8 @@ export const buildChatAvailableProfiles = (
 
 export const resolveAvailableChatProfileId = (
   availableProfiles: Array<Pick<LLMAPIProfile, 'id'>>,
-  profileId: string | null | undefined
+  profileId: string | null | undefined,
+  configuredProfiles: readonly Pick<LLMAPIProfile, 'id' | 'model_name'>[] = []
 ): string | null => {
   const baseProfileId = getBaseProfileId(profileId)
   if (!baseProfileId) {
@@ -264,11 +263,30 @@ export const resolveAvailableChatProfileId = (
   }
 
   if (availableProfiles.length === 0) {
-    return baseProfileId === HUNYUAN_3D_PROFILE_ID ? null : baseProfileId
+    return baseProfileId === HUNYUAN_3D_PROFILE_ID ? null : profileId || baseProfileId
   }
 
   if (profileId && availableProfiles.some((profile) => profile.id === profileId)) {
     return profileId
+  }
+
+  const hasBaseProfile = availableProfiles.some(
+    (profile) => getBaseProfileId(profile.id) === baseProfileId
+  )
+  if (hasBaseProfile && profileId?.startsWith(`${baseProfileId}::codex-model::`)) {
+    // Discovery can be pending, stale, or incomplete. Never silently change a saved
+    // thread model; the provider should report if that selected ID is unavailable.
+    return profileId
+  }
+  const configuredModel = configuredProfiles
+    .find((profile) => profile.id === baseProfileId)
+    ?.model_name?.trim()
+  if (
+    hasBaseProfile &&
+    configuredModel &&
+    availableProfiles.some((profile) => profile.id.startsWith(`${baseProfileId}::codex-model::`))
+  ) {
+    return buildDiscoveredModelProfileId(baseProfileId, configuredModel)
   }
 
   const baseProfile = availableProfiles.find((profile) => profile.id === baseProfileId)

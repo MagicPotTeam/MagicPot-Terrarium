@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ClaudeAPICli, GeminiAPICli, OpencodeZenAPICli, OpenAIAPICli } from './clients'
+import type { LLMReasoningEffort } from './profileCapabilities'
 
 describe('shared llm endpoint normalization', () => {
   afterEach(() => {
@@ -42,29 +43,38 @@ describe('shared llm endpoint normalization', () => {
     expect(requestBody.include).toEqual(['web_search_call.action.sources'])
   })
 
-  it('rewrites CLIProxy GPT-5.6 Ultra reasoning to the max wire value', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }]
+  it.each([undefined, 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])(
+    'sends the selected reasoning level for an opaque CLIProxy alias: %s',
+    async (effort) => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }]
+        })
       })
-    })
 
-    const client = new OpenAIAPICli('sk-test', 'https://example.test/v1', 'gpt-5.6-sol', {
-      apiMode: 'responses',
-      enableHostedTools: false,
-      reasoningProfile: { model_name: 'gpt-5.6-sol', call_type: 'cliproxyapi' },
-      fetchImpl: fetchMock
-    })
+      const modelName = `vendor/Custom:${effort ?? 'default'}+模型`
+      const client = new OpenAIAPICli('sk-test', 'https://example.test/v1', modelName, {
+        apiMode: 'responses',
+        enableHostedTools: false,
+        reasoningProfile: { model_name: modelName, call_type: 'cliproxyapi' },
+        fetchImpl: fetchMock
+      })
 
-    await client.chat({
-      messages: [{ role: 'user', content: 'hello' }],
-      reasoningEffort: 'ultra'
-    })
+      await client.chat({
+        messages: [{ role: 'user', content: 'hello' }],
+        // Simulate legacy clients as well as currently selectable levels.
+        reasoningEffort: effort as LLMReasoningEffort | undefined
+      })
 
-    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
-    expect(requestBody.reasoning).toEqual({ effort: 'max' })
-  })
+      const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+      expect(requestBody.model).toBe(modelName)
+      if (effort)
+        expect(requestBody.reasoning).toEqual({ effort: effort === 'ultra' ? 'max' : effort })
+      else expect(requestBody).not.toHaveProperty('reasoning')
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    }
+  )
 
   it('keeps local OpenAI-compatible gateways on /chat/completions', async () => {
     const fetchMock = vi.fn().mockResolvedValue({

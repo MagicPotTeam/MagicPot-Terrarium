@@ -284,6 +284,48 @@ describe('llmProfileUtils helpers', () => {
     expect(resolveAvailableChatProfileId([], 'gemini-pro')).toBe('gemini-pro')
   })
 
+  it('keeps selected model IDs while discovery is pending or the model is no longer listed', () => {
+    const selected = 'channel::codex-model::Team%2FModel'
+    expect(resolveAvailableChatProfileId([], selected)).toBe(selected)
+    expect(resolveAvailableChatProfileId([{ id: 'channel' }], selected)).toBe(selected)
+    expect(resolveAvailableChatProfileId([{ id: 'channel::codex-model::other' }], selected)).toBe(
+      selected
+    )
+    expect(resolveAvailableChatProfileId([{ id: 'other-channel' }], selected)).toBeNull()
+  })
+
+  it('prefers the saved channel model over the first scanned model', () => {
+    const available = [{ id: 'channel::codex-model::A' }, { id: 'channel::codex-model::B' }]
+    const configured = [{ id: 'channel', model_name: 'B' }]
+    expect(resolveAvailableChatProfileId(available, 'channel', configured)).toBe(
+      'channel::codex-model::B'
+    )
+    expect(resolveAvailableChatProfileId(available, 'channel::codex-model::A', configured)).toBe(
+      'channel::codex-model::A'
+    )
+    expect(
+      resolveAvailableChatProfileId(available, 'channel', [{ id: 'channel', model_name: '' }])
+    ).toBe('channel::codex-model::A')
+  })
+
+  it('keeps case-sensitive scanned aliases distinct', () => {
+    const config = createConfig()
+    config.llm_config.api_profiles = [
+      {
+        id: 'channel',
+        model_name: '',
+        base_url: 'https://proxy.example/v1',
+        api_key: 'test',
+        call_type: 'cliproxyapi'
+      }
+    ]
+    expect(
+      buildChatAvailableProfiles(config, [], {
+        channel: ['Team/Model', 'team/model', 'Team/Model']
+      }).map((profile) => profile.model_name)
+    ).toEqual(['Team/Model', 'team/model'])
+  })
+
   it('normalizes composite ids against the available profile list', () => {
     expect(resolveAvailableChatProfileId([{ id: 'foo' }], 'foo::variant')).toBe('foo')
     expect(

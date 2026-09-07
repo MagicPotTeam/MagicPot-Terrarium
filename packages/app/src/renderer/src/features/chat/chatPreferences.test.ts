@@ -31,6 +31,19 @@ describe('chatPreferences', () => {
     ).toEqual({ modelA: 'high', modelC: 'none' })
   })
 
+  it('migrates stored Ultra and lets Default clear only the selected preference', () => {
+    const restored = readStoredReasoningEffortMap(
+      'reasoning',
+      createStorage({
+        reasoning: JSON.stringify({ channel: ' ULTRA ', other: 'high' })
+      })
+    )
+    expect(restored).toEqual({ channel: 'max', other: 'high' })
+    expect(normalizeReasoningPreferenceMap({ ...restored, channel: undefined })).toEqual({
+      other: 'high'
+    })
+  })
+
   it('reads stored reasoning preferences defensively', () => {
     expect(
       readStoredReasoningEffortMap(

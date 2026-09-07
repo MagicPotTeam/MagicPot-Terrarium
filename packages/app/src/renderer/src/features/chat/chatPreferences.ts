@@ -7,7 +7,7 @@ import {
 } from '@shared/llm'
 
 export const normalizeReasoningPreferenceMap = (
-  value: Record<string, string | LLMReasoningEffort>
+  value: Record<string, string | null | undefined>
 ): Record<string, LLMReasoningEffort> =>
   Object.fromEntries(
     Object.entries(value)

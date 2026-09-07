@@ -37,9 +37,11 @@ describe('useChatProfiles', () => {
       id: 'codex-oauth',
       model_name: 'Codex OAuth',
       auth_mode: 'codex_oauth',
+      base_url: 'https://api.openai.com/v1',
+      api_key: '',
       call_type: 'codex'
     })
-    const discoverModelNames = vi.fn().mockResolvedValue(['gpt-5.2', 'gpt-5.1-codex'])
+    const discoverModelNames = vi.fn().mockResolvedValue(['scanned-model-a', 'scanned-model-b'])
     rendererHostExtensionApiV1.chat = { discoverModelNames }
 
     const config = buildConfig([profile])
@@ -51,13 +53,13 @@ describe('useChatProfiles', () => {
     expect(result.current.availableProfiles).toEqual([
       {
         ...profile,
-        id: 'codex-oauth::codex-model::gpt-5.2',
-        model_name: 'gpt-5.2'
+        id: 'codex-oauth::codex-model::scanned-model-a',
+        model_name: 'scanned-model-a'
       },
       {
         ...profile,
-        id: 'codex-oauth::codex-model::gpt-5.1-codex',
-        model_name: 'gpt-5.1-codex'
+        id: 'codex-oauth::codex-model::scanned-model-b',
+        model_name: 'scanned-model-b'
       }
     ])
   })
@@ -68,7 +70,7 @@ describe('useChatProfiles', () => {
       model_name: 'CLIProxyAPI',
       call_type: 'cliproxyapi'
     })
-    const discoverModelNames = vi.fn().mockResolvedValue(['claude-sonnet-4-5', 'gemini-2.5-pro'])
+    const discoverModelNames = vi.fn().mockResolvedValue(['provider-a-alias', 'provider-b-alias'])
     rendererHostExtensionApiV1.chat = { discoverModelNames }
 
     const config = buildConfig([profile])
@@ -80,15 +82,36 @@ describe('useChatProfiles', () => {
     expect(result.current.availableProfiles).toEqual([
       {
         ...profile,
-        id: 'cliproxyapi::codex-model::claude-sonnet-4-5',
-        model_name: 'claude-sonnet-4-5'
+        id: 'cliproxyapi::codex-model::provider-a-alias',
+        model_name: 'provider-a-alias'
       },
       {
         ...profile,
-        id: 'cliproxyapi::codex-model::gemini-2.5-pro',
-        model_name: 'gemini-2.5-pro'
+        id: 'cliproxyapi::codex-model::provider-b-alias',
+        model_name: 'provider-b-alias'
       }
     ])
+  })
+
+  it('exposes every scanned CLIProxy model as a selectable thread profile in scan order', async () => {
+    const profile = buildProfile({
+      id: 'dynamic-channel',
+      call_type: 'cliproxyapi',
+      model_name: ''
+    })
+    const names = Array.from(
+      { length: 32 },
+      (_, index) => `test-${(index * 13) % 32}/Alias:${index}+value`
+    )
+    rendererHostExtensionApiV1.chat = { discoverModelNames: vi.fn().mockResolvedValue(names) }
+    const config = buildConfig([profile])
+    const { result } = renderHook(() => useChatProfiles(config, true))
+
+    await waitFor(() => expect(result.current.availableProfiles).toHaveLength(names.length))
+    expect(result.current.availableProfiles.map((model) => model.model_name)).toEqual(names)
+    expect(result.current.availableProfiles.map((model) => model.id)).toEqual(
+      names.map((name) => `dynamic-channel::codex-model::${encodeURIComponent(name)}`)
+    )
   })
 
   it('keeps a regular profile when the renderer extension returns undefined', async () => {
@@ -108,9 +131,11 @@ describe('useChatProfiles', () => {
       id: 'codex-oauth',
       model_name: 'Codex OAuth',
       auth_mode: 'codex_oauth',
+      base_url: 'https://api.openai.com/v1',
+      api_key: '',
       call_type: 'codex'
     })
-    const discoverModelNames = vi.fn().mockResolvedValue(['gpt-5.2-codex'])
+    const discoverModelNames = vi.fn().mockResolvedValue(['retained-model'])
     rendererHostExtensionApiV1.chat = { discoverModelNames }
     const config = buildConfig([profile])
 
@@ -124,14 +149,18 @@ describe('useChatProfiles', () => {
       { initialProps: { activePane: 'a' } as { activePane: 'a' | 'b' } }
     )
 
-    const variantId = 'codex-oauth::codex-model::gpt-5.2-codex'
+    const variantId = 'codex-oauth::codex-model::retained-model'
     await waitFor(() => expect(result.current.paneA.availableProfiles[0]?.id).toBe(variantId))
 
-    act(() => rerender({ activePane: 'b' }))
+    await act(async () => {
+      rerender({ activePane: 'b' })
+    })
     await waitFor(() => expect(result.current.paneB.availableProfiles[0]?.id).toBe(variantId))
     expect(result.current.paneA.availableProfiles[0]?.id).toBe(variantId)
 
-    act(() => rerender({ activePane: 'a' }))
+    await act(async () => {
+      rerender({ activePane: 'a' })
+    })
     expect(result.current.paneA.availableProfiles[0]?.id).toBe(variantId)
   })
 

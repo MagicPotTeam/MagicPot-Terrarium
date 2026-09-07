@@ -426,7 +426,6 @@ export class OpenAIAPICli implements LLMCli {
         ? undefined
         : reasoningCapabilities.reasoningEfforts
     )
-    const wireReasoningEffort = reasoningEffort === 'ultra' ? 'max' : reasoningEffort
 
     const useImageGeneration = shouldUseOpenAIImageGeneration({
       messages: params.messages,
@@ -464,9 +463,9 @@ export class OpenAIAPICli implements LLMCli {
       })
     }
 
-    if (wireReasoningEffort) {
+    if (reasoningEffort) {
       requestBody.reasoning = {
-        effort: wireReasoningEffort
+        effort: reasoningEffort
       }
     }
 
@@ -528,8 +527,7 @@ export class OpenAIAPICli implements LLMCli {
     type Role = 'system' | 'user' | 'assistant'
     type TextMessage = { role: Role; content: string }
     type VisionContent =
-      | { type: 'text'; text: string }
-      | { type: 'image_url'; image_url: { url: string } }
+      { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
     type VisionMessage = { role: 'user'; content: VisionContent[] }
     type APIMessage = TextMessage | VisionMessage
 

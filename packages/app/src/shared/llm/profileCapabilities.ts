@@ -1,8 +1,7 @@
 import type { LLMDeployment, LLMProviderOption } from '@shared/config/config'
 import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 
-export type LLMReasoningEffort =
-  'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+export type LLMReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type ProviderAttachmentTransport =
   'file-id' | 'multipart' | 'accessible-url' | 'request-data-url'
@@ -43,12 +42,16 @@ const STANDARD_REASONING_CONTEXT_TOKENS = 400_000
 const RESERVED_OUTPUT_AND_BUFFER_TOKENS = 148_000
 const CONTEXT_BUDGET_RATIO = 0.65
 
-const GPT_5_5_REASONING_EFFORTS: LLMReasoningEffort[] = ['low', 'medium', 'high', 'xhigh']
-const GPT_5_4_REASONING_EFFORTS: LLMReasoningEffort[] = ['none', 'low', 'medium', 'high', 'xhigh']
-const GPT_5_PRO_REASONING_EFFORTS: LLMReasoningEffort[] = ['high']
-const GPT_5_4_PRO_REASONING_EFFORTS: LLMReasoningEffort[] = ['medium', 'high', 'xhigh']
-const GPT_5_1_REASONING_EFFORTS: LLMReasoningEffort[] = ['none', 'low', 'medium', 'high']
-const GPT_5_REASONING_EFFORTS: LLMReasoningEffort[] = ['minimal', 'low', 'medium', 'high']
+// These are Responses request controls, not a model support whitelist. Channels
+// decide which levels they accept; model IDs (including custom aliases) are opaque.
+export const getCodexReasoningCapabilities = (): Pick<
+  ChatProfileCapabilities,
+  'reasoningEfforts' | 'defaultReasoningEffort'
+> => ({
+  reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  // Unselected means channel default, so non-reasoning models receive no extra parameter.
+  defaultReasoningEffort: undefined
+})
 
 const normalizeAttachmentTransport = (
   value?: ProviderAttachmentTransport | string | null
@@ -146,11 +149,10 @@ const isCodexReasoningProfile = (profile?: ChatCapabilityProfile | null): boolea
     return true
   }
 
-  return (
-    String(profile.call_type || '')
-      .trim()
-      .toLowerCase() === 'codex'
-  )
+  const callType = String(profile.call_type || '')
+    .trim()
+    .toLowerCase()
+  return callType === 'codex' || callType === 'cliproxyapi'
 }
 
 const dedupeReasoningEfforts = (efforts: readonly LLMReasoningEffort[]): LLMReasoningEffort[] => {
@@ -165,7 +167,7 @@ const dedupeReasoningEfforts = (efforts: readonly LLMReasoningEffort[]): LLMReas
 }
 
 export const getReasoningEffortLabel = (effort: LLMReasoningEffort): string => {
-  switch (effort) {
+  switch (normalizeReasoningEffort(effort)) {
     case 'none':
       return 'None'
     case 'minimal':
@@ -180,8 +182,6 @@ export const getReasoningEffortLabel = (effort: LLMReasoningEffort): string => {
       return 'X-High'
     case 'max':
       return 'Max'
-    case 'ultra':
-      return 'Ultra'
     default:
       return effort
   }
@@ -218,51 +218,35 @@ export const resolveChatProfileCapabilities = (
   }
 
   const modelName = normalizeModelName(profile?.model_name)
-  let reasoningEfforts: LLMReasoningEffort[] = []
-  let defaultReasoningEffort: LLMReasoningEffort | undefined
+  const { reasoningEfforts, defaultReasoningEffort } = getCodexReasoningCapabilities()
   let contextWindowTokens: number | undefined
 
   if (modelName.startsWith('gpt-5.5')) {
-    reasoningEfforts = GPT_5_5_REASONING_EFFORTS
-    defaultReasoningEffort = 'medium'
     contextWindowTokens = GPT_5_5_CONTEXT_TOKENS
   } else if (modelName.startsWith('gpt-5.4-pro')) {
-    reasoningEfforts = GPT_5_4_PRO_REASONING_EFFORTS
-    defaultReasoningEffort = 'high'
     contextWindowTokens = GPT_5_4_LONG_CONTEXT_TOKENS
   } else if (modelName.startsWith('gpt-5.2-pro')) {
-    reasoningEfforts = GPT_5_4_PRO_REASONING_EFFORTS
-    defaultReasoningEffort = 'high'
     contextWindowTokens = STANDARD_REASONING_CONTEXT_TOKENS
   } else if (modelName.startsWith('gpt-5-pro')) {
-    reasoningEfforts = GPT_5_PRO_REASONING_EFFORTS
-    defaultReasoningEffort = 'high'
     contextWindowTokens = STANDARD_REASONING_CONTEXT_TOKENS
   } else if (modelName.startsWith('gpt-5.4')) {
-    reasoningEfforts = GPT_5_4_REASONING_EFFORTS
-    defaultReasoningEffort = 'none'
     contextWindowTokens =
       modelName.includes('-mini') || modelName.includes('-nano')
         ? STANDARD_REASONING_CONTEXT_TOKENS
         : GPT_5_4_LONG_CONTEXT_TOKENS
   } else if (modelName.startsWith('gpt-5.2')) {
-    reasoningEfforts = GPT_5_4_REASONING_EFFORTS
-    defaultReasoningEffort = 'none'
     contextWindowTokens = STANDARD_REASONING_CONTEXT_TOKENS
   } else if (modelName.startsWith('gpt-5.1')) {
-    reasoningEfforts = GPT_5_1_REASONING_EFFORTS
-    defaultReasoningEffort = 'none'
     contextWindowTokens = STANDARD_REASONING_CONTEXT_TOKENS
   } else if (modelName.startsWith('gpt-5')) {
-    reasoningEfforts = GPT_5_REASONING_EFFORTS
-    defaultReasoningEffort = 'medium'
     contextWindowTokens = STANDARD_REASONING_CONTEXT_TOKENS
   }
 
   const normalizedEfforts = dedupeReasoningEfforts(reasoningEfforts)
-  const normalizedDefaultReasoningEffort =
-    normalizeReasoningEffort(defaultReasoningEffort, normalizedEfforts) ||
-    normalizedEfforts[normalizedEfforts.length - 1]
+  const normalizedDefaultReasoningEffort = normalizeReasoningEffort(
+    defaultReasoningEffort,
+    normalizedEfforts
+  )
   const explicitContextTokens = resolveExplicitContextTokens(profile)
   const attachmentCapabilities = resolveAttachmentCapabilities(profile)
   const resolvedContextWindowTokens =
@@ -289,9 +273,11 @@ export const normalizeReasoningEffort = (
   effort: string | null | undefined,
   supportedEfforts?: readonly LLMReasoningEffort[]
 ): LLMReasoningEffort | undefined => {
-  const normalized = String(effort || '')
+  const legacyValue = String(effort || '')
     .trim()
     .toLowerCase()
+  // Migrate old preferences/requests to the canonical value; Ultra is not an option.
+  const normalized = legacyValue === 'ultra' ? 'max' : legacyValue
   const candidate =
     normalized === 'none' ||
     normalized === 'minimal' ||
@@ -299,8 +285,7 @@ export const normalizeReasoningEffort = (
     normalized === 'medium' ||
     normalized === 'high' ||
     normalized === 'xhigh' ||
-    normalized === 'max' ||
-    normalized === 'ultra'
+    normalized === 'max'
       ? (normalized as LLMReasoningEffort)
       : undefined
 
