@@ -2178,8 +2178,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const isAgentSkillSelected = selectedCustomSkill?.type === 'agent'
   const resolveAvailableProfileId = useCallback(
     (profileId: string | null | undefined): string | null =>
-      resolveAvailableChatProfileId(availableProfiles, profileId),
-    [availableProfiles]
+      resolveAvailableChatProfileId(
+        availableProfiles,
+        profileId,
+        config?.use_remote_llm ? [] : config?.llm_config?.api_profiles
+      ),
+    [availableProfiles, config?.use_remote_llm, config?.llm_config?.api_profiles]
   )
   const qappPromptSettings = useMemo(() => getQAppPromptSettings(config), [config])
   const resolveConfiguredProfileIdForSkill = useCallback(
