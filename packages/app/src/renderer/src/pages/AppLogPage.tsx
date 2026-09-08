@@ -56,7 +56,7 @@ const AppLogPage: React.FC = () => {
             generation={generation}
             tailRequest={tailRequest}
             label={t('terminal.terminal_log', 'Application logs')}
-            emptyText="日志监听已就绪..."
+            emptyText={t('terminal.empty_log', 'Log listener is ready...')}
             style={{ color: isLight ? '#1f2937' : '#c9d1d9' }}
             lineColor={(line) =>
               line.includes('[ERROR]')

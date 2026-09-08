@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Config, LLMAPIProfile } from '@shared/config/config'
-import { isRunnableProfile } from '@shared/llm'
 import { rendererHostExtensionApiV1 } from '@renderer/extensions/generatedRegistry'
 import {
   buildChatAvailableProfiles,
@@ -8,6 +7,7 @@ import {
   buildRemoteLlmServerHeaders,
   getRemoteLlmServerAccessToken,
   getRemoteLlmServerOrigin,
+  isChatProfileDiscoveryCandidate,
   normalizeRemoteLlmProfiles
 } from '@renderer/utils/llmProfileUtils'
 
@@ -72,7 +72,9 @@ export function useChatProfiles(config: Config, isReady: boolean, enabled: boole
 
   useEffect(() => {
     const generation = ++discoveryGenerationRef.current
-    const profiles = (config?.llm_config?.api_profiles || []).filter(isRunnableProfile)
+    const profiles = (config?.llm_config?.api_profiles || []).filter(
+      isChatProfileDiscoveryCandidate
+    )
     const profileIds = new Set(profiles.map((profile) => profile.id))
 
     // Configuration can change while this pane is inactive. Drop discoveries whose

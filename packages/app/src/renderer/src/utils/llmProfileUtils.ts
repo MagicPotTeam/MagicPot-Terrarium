@@ -20,7 +20,22 @@ export function resolveCompositeLlmProfile<
 
 export const DEFAULT_REMOTE_LLM_SERVER_ORIGIN = 'http://localhost:3721'
 
-const isConfiguredLocalProfile = (profile: LLMAPIProfile): boolean => isRunnableProfile(profile)
+export const isChatProfileDiscoveryCandidate = (profile: LLMAPIProfile): boolean => {
+  if (isRunnableProfile(profile)) {
+    return true
+  }
+
+  // OAuth and proxy-backed channels can discover their actual model before a
+  // concrete model name or API key is available to the generic profile check.
+  return (
+    Boolean(profile.base_url?.trim()) &&
+    (profile.auth_mode === 'codex_oauth' ||
+      profile.call_type === 'codex' ||
+      profile.call_type === 'cliproxyapi')
+  )
+}
+
+const isConfiguredLocalProfile = isChatProfileDiscoveryCandidate
 
 const buildDiscoveredModelProfileId = (profileId: string, modelName: string): string =>
   `${profileId.trim()}::codex-model::${encodeURIComponent(modelName.trim())}`

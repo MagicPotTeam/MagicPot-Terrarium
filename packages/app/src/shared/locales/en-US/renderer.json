@@ -434,6 +434,7 @@
     "btn_dismiss": "Dismiss",
     "pid_label": "PID",
     "terminal_log": "Terminal Log",
+    "empty_log": "Log listener is ready...",
     "clear": "Clear"
   },
   "contact": {
