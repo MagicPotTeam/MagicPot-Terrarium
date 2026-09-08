@@ -78,12 +78,6 @@
       "url": "https://github.com/shiimizu/ComfyUI_smZNodes.git",
       "commit": "9ef7c63acec6c09b2e8dfe26bbf9c9876857a004",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI_smZNodes"
-    },
-    {
-      "name": "z-tipo-extension",
-      "url": "https://github.com/KohakuBlueleaf/z-tipo-extension.git",
-      "commit": "6132862978021727284215bc2d5fe5257a872709",
-      "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/z-tipo-extension"
     }
   ]
 }

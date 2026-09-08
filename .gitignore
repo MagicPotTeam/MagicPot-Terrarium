@@ -28,7 +28,6 @@ config.json
 !/vendor/comfyui/comfyui_data/custom_nodes/ComfyUI_smZNodes
 !/vendor/comfyui/comfyui_data/custom_nodes/comfyui_LLM_party
 !/vendor/comfyui/comfyui_data/custom_nodes/comfyui_controlnet_aux
-!/vendor/comfyui/comfyui_data/custom_nodes/z-tipo-extension
 
 # ComfyUI junction directories (symlinks to comfyui_data/, fully ignored)
 /vendor/comfyui/ComfyUI/models
