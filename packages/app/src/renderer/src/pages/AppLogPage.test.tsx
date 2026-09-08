@@ -107,7 +107,7 @@ describe('AppLogPage stream lifecycle', () => {
     response.onData(log('queued before clear'))
     fireEvent.click(screen.getByRole('button', { name: '清空' }))
     flush()
-    expect(viewport.textContent).toBe('日志监听已就绪...')
+    expect(viewport.textContent).toBe('Log listener is ready...')
     response.onData(log('after clear'))
     flush()
     expect(viewport.textContent).toContain('after clear')
