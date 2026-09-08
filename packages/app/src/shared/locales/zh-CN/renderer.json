@@ -331,6 +331,7 @@
     "btn_dismiss": "忽略",
     "pid_label": "PID",
     "terminal_log": "终端日志",
+    "empty_log": "日志监听已就绪...",
     "clear": "清空"
   },
   "contact": {
