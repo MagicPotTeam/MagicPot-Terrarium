@@ -3,7 +3,7 @@
     {
       "name": "ComfyUI",
       "url": "https://github.com/Comfy-Org/ComfyUI.git",
-      "commit": "d8e7bbc9d586d95f758d6b0ed23d519088be578a",
+      "commit": "54e03f5367ebd8d96380e4cf02fa3084f7a7eca5",
       "relativePath": "vendor/comfyui/ComfyUI"
     },
     {
@@ -21,13 +21,13 @@
     {
       "name": "ComfyUI-Easy-Use",
       "url": "https://github.com/yolain/ComfyUI-Easy-Use.git",
-      "commit": "58e077a7435631301cf7443412515cf958e7f3d1",
+      "commit": "450b1ce4ce43b2280521c87f5fa388a898fb2ad2",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use"
     },
     {
       "name": "ComfyUI-Easy-Use-Frontend",
       "url": "https://github.com/yolain/ComfyUI-Easy-Use-Frontend.git",
-      "commit": "f33b8abdd7b2bc57bfebe9bdbdf68587d5676cd7",
+      "commit": "9e34002f61636df72ce6237350ac34fe090b2cd1",
       "parentRelativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Easy-Use/ComfyUI-Easy-Use-Frontend"
     },
@@ -40,13 +40,13 @@
     {
       "name": "ComfyUI-KJNodes",
       "url": "https://github.com/kijai/ComfyUI-KJNodes.git",
-      "commit": "3f20054214fec9f9234fd3841ae6f1e4287948f6",
+      "commit": "57105374f47d0fbb49c9c3926fb981702e0a4b5c",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-KJNodes"
     },
     {
       "name": "ComfyUI-Manager",
       "url": "https://github.com/Comfy-Org/ComfyUI-Manager.git",
-      "commit": "f39cbd56fecae0b27a446c0cd450cd591f3a8bea",
+      "commit": "f82970b7cb63ad44928308f980a1d38fda103cbb",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/ComfyUI-Manager"
     },
     {
@@ -64,7 +64,7 @@
     {
       "name": "comfyui_controlnet_aux",
       "url": "https://github.com/Fannovel16/comfyui_controlnet_aux.git",
-      "commit": "e8b689a513c3e6b63edc44066560ca5919c0576e",
+      "commit": "59b1fc411ede8623b2997855b8018f0b3b6cf49f",
       "relativePath": "vendor/comfyui/comfyui_data/custom_nodes/comfyui_controlnet_aux"
     },
     {
