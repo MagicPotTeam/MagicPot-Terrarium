@@ -180,7 +180,7 @@
     "express": "5.2.1",
     "express-rate-limit": "8.6.2",
     "gifenc": "^1.0.3",
-    "hono": "4.13.1",
+    "hono": "4.13.5",
     "i18next": "^25.5.3",
     "i18next-browser-languagedetector": "^8.2.0",
     "jose": "6.2.2",
@@ -250,7 +250,7 @@
     "ts-json-schema-generator": "^2.4.0",
     "typescript": "^5.8.3",
     "vite": "^7.3.3",
-    "vitest": "^4.1.8",
+    "vitest": "^5.0.0",
     "yauzl": "3.4.0"
   },
   "optionalDependencies": {
@@ -281,7 +281,7 @@
     "fast-uri": "3.1.6",
     "fast-xml-parser": "5.7.3",
     "follow-redirects": "1.16.0",
-    "hono": "4.13.1",
+    "hono": "4.13.5",
     "ip-address": "10.4.0",
     "postcss": "8.5.26",
     "protobufjs": "7.6.5",
