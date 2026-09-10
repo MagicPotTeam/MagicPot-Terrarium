@@ -94,5 +94,14 @@ describe('InputNodeSelect', () => {
     await waitFor(() => {
       expect(onChange).toHaveBeenLastCalledWith('$.35.inputs.unet_name')
     })
+
+    const listbox = screen.getByRole('listbox')
+    expect(listbox).toBeTruthy()
+
+    fireEvent.keyDown(nodeInput, { key: 'Enter', code: 'Enter' })
+
+    await waitFor(() => {
+      expect(screen.queryByRole('listbox')).toBeNull()
+    })
   })
 })

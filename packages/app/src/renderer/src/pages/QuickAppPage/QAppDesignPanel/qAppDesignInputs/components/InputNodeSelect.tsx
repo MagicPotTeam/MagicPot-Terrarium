@@ -242,6 +242,7 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
     () => selectedNodeOption?.label ?? ''
   )
   const [isNodeInputFocused, setIsNodeInputFocused] = useState(false)
+  const [isNodePopupOpen, setIsNodePopupOpen] = useState(false)
 
   const getNodeOptionByInput = useCallback(
     (inputValue: string): NodeOption | null => {
@@ -339,6 +340,9 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
           selectOnFocus
           value={selectedNodeOption}
           inputValue={nodeInputValue}
+          open={isNodePopupOpen}
+          onOpen={() => setIsNodePopupOpen(true)}
+          onClose={() => setIsNodePopupOpen(false)}
           options={nodeOptions}
           getOptionLabel={(option) => (typeof option === 'string' ? option : option.label)}
           isOptionEqualToValue={(option, value) => option.value === value.value}
@@ -395,10 +399,15 @@ const InputNodeSelect: React.FC<InputNodeSelectProps> = ({
                 }
               }}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && selectNodeByInput(nodeInputValue)) {
-                  event.preventDefault()
-                  setIsNodeInputFocused(false)
+                if (event.key !== 'Enter') {
+                  return
                 }
+
+                event.preventDefault()
+                event.stopPropagation()
+                selectNodeByInput(nodeInputValue)
+                setIsNodeInputFocused(false)
+                setIsNodePopupOpen(false)
               }}
             />
           )}
