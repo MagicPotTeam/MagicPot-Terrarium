@@ -174,7 +174,7 @@ describe('ComfyHttpCli', () => {
     expect(webSocketCtor).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({
-        perMessageDeflate: true
+        perMessageDeflate: false
       })
     )
   })

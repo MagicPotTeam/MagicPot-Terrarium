@@ -250,8 +250,10 @@ export class ComfyHttpCli {
     const schema = urlObj.protocol === 'https:' ? 'wss:' : 'ws:'
     urlObj.protocol = schema
     const url = urlObj.href
+    // Some remote ComfyUI reverse proxies accept the websocket handshake but
+    // immediately close connections that negotiate permessage-deflate.
     return new WebSocket(url, {
-      perMessageDeflate: true
+      perMessageDeflate: false
     })
   }
 
