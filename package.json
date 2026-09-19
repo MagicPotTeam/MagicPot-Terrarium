@@ -181,7 +181,7 @@
     "express": "5.2.1",
     "express-rate-limit": "8.6.2",
     "gifenc": "^1.0.3",
-    "hono": "4.13.1",
+    "hono": "4.13.8",
     "i18next": "^25.5.3",
     "i18next-browser-languagedetector": "^8.2.0",
     "jose": "6.2.2",
@@ -229,7 +229,7 @@
     "@types/ws": "^8.18.1",
     "@types/yauzl": "3.4.0",
     "@vitejs/plugin-react": "^4.7.0",
-    "@vitest/coverage-v8": "^4.1.8",
+    "@vitest/coverage-v8": "^4.1.11",
     "cross-env": "^10.0.0",
     "electron": "^41.10.3",
     "electron-builder": "^26.8.1",
@@ -251,19 +251,28 @@
     "ts-json-schema-generator": "^2.4.0",
     "typescript": "^5.8.3",
     "vite": "^7.3.3",
-    "vitest": "^4.1.8",
+    "vitest": "^4.1.11",
     "yauzl": "3.4.0"
   },
   "optionalDependencies": {
     "dmg-license": "^1.0.11"
   },
   "overrides": {
+    "@eslint/eslintrc": {
+      "js-yaml": "4.3.2"
+    },
     "@xmldom/xmldom": "0.8.15",
+    "app-builder-lib": {
+      "js-yaml": "4.3.2"
+    },
     "axios": {
       ".": "1.19.0",
       "form-data": "4.0.6"
     },
     "basic-ftp": "5.3.1",
+    "builder-util": {
+      "js-yaml": "4.3.2"
+    },
     "conf": {
       "ajv": "8.18.0",
       "ajv-formats": "3.0.1"
@@ -276,13 +285,19 @@
     "cosmiconfig": {
       "yaml": "1.10.3"
     },
+    "dmg-builder": {
+      "js-yaml": "4.3.2"
+    },
+    "electron-updater": {
+      "js-yaml": "4.3.2"
+    },
     "eslint-plugin-react": {
       "es-iterator-helpers": "^1.2.1"
     },
     "fast-uri": "3.1.6",
     "fast-xml-parser": "5.7.3",
     "follow-redirects": "1.16.0",
-    "hono": "4.13.1",
+    "hono": "4.13.8",
     "ip-address": "10.4.0",
     "postcss": "8.5.26",
     "protobufjs": "7.6.5",
