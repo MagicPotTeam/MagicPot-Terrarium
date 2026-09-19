@@ -1,6 +1,6 @@
 import React from 'react'
 import { act, render, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CanvasImageSourceIdentity, CanvasImageThumbnailSet } from '../canvasThumbnailTypes'
 import type { ProjectCanvasWebGLRuntimeMetrics } from '../projectCanvasWebGLRuntimeState'
 
@@ -64,6 +64,12 @@ type MockTextureInstance = {
   destroy: (destroySource?: boolean) => void
 }
 
+type MockTextureSource = {
+  destroyed: boolean
+  resource: unknown | null
+  gpuValid: boolean
+  unload: ReturnType<typeof vi.fn>
+}
 type MockSpriteInstance = {
   texture: MockTextureInstance
   position: MockPoint
@@ -114,6 +120,7 @@ let textureFromAlphaModes: unknown[] = []
 let textureScaleModeReadCount = 0
 let textureScaleModeWriteCount = 0
 let createdBaseTextures: MockTextureInstance[] = []
+let bitmapClosedWithLiveTexture: ImageBitmap[] = []
 const originalDevicePixelRatio = typeof window === 'undefined' ? 1 : window.devicePixelRatio
 
 type MockImageInstance = {
@@ -228,12 +235,19 @@ function installPixiMock() {
 
       destroy(destroySource?: boolean) {
         this.destroyed = true
-        this.destroySourceCalled = Boolean(destroySource)
+        this.destroySourceCalled = this.destroySourceCalled || Boolean(destroySource)
+        if (destroySource) {
+          const source = this.source as MockTextureSource
+          source.destroyed = true
+          ;(source.unload as unknown as () => void)()
+          source.resource = null
+        }
       }
 
       static from(input: HTMLImageElement | { resource?: HTMLImageElement; alphaMode?: unknown }) {
         const options = input as { resource?: HTMLImageElement; alphaMode?: unknown }
         const image = options.resource ?? (input as HTMLImageElement)
+        assertBitmapUploadable(image)
         const textureWidth = image.naturalWidth || image.width || 1
         textureFromWidths.push(textureWidth)
         textureFromAlphaModes.push(options.alphaMode)
@@ -244,8 +258,12 @@ function installPixiMock() {
         let scaleMode: 'nearest' | 'linear' = 'linear'
         const source = {
           destroyed: false,
+          resource: image as unknown | null,
+          gpuValid: false,
           unload: vi.fn(),
-          image,
+          get image() {
+            return this.resource
+          },
           alphaMode: options.alphaMode,
           get scaleMode() {
             textureScaleModeReadCount += 1
@@ -256,6 +274,9 @@ function installPixiMock() {
             scaleMode = value
           }
         }
+        source.unload.mockImplementation(() => {
+          source.gpuValid = false
+        })
 
         const texture = new MockTexture({
           source,
@@ -333,7 +354,20 @@ function installPixiMock() {
           CONTEXT_LOST_WEBGL: 37442
         }
       }
-      render = vi.fn()
+      render = vi.fn(() => {
+        createdSprites.forEach((sprite) => {
+          if (!sprite.destroyed && sprite.parent) {
+            const source = sprite.texture.source as MockTextureSource
+            if (source.destroyed) {
+              throw new Error('Pixi attempted to render a destroyed texture source.')
+            }
+            if (!source.gpuValid) {
+              assertBitmapUploadable(source.resource)
+              source.gpuValid = true
+            }
+          }
+        })
+      })
       destroy = vi.fn()
       initOptions?: Record<string, unknown>
 
@@ -369,6 +403,49 @@ function createImage(width: number, height: number) {
   Object.defineProperty(image, 'naturalWidth', { value: width })
   Object.defineProperty(image, 'naturalHeight', { value: height })
   return image
+}
+
+function assertBitmapUploadable(value: unknown) {
+  const image = value as ImageBitmap | undefined
+  if (typeof image?.close === 'function' && (image.width === 0 || image.height === 0)) {
+    throw new Error('Pixi attempted to upload a closed ImageBitmap.')
+  }
+}
+
+function createBitmap(width: number, height: number) {
+  let closed = false
+  const bitmap = {
+    get width() {
+      return closed ? 0 : width
+    },
+    get height() {
+      return closed ? 0 : height
+    },
+    close: vi.fn(() => {
+      if (
+        createdBaseTextures.some(
+          (texture) =>
+            !texture.destroyed && (texture.source as { image?: unknown }).image === bitmap
+        )
+      ) {
+        bitmapClosedWithLiveTexture.push(bitmap as ImageBitmap)
+      }
+      closed = true
+    })
+  }
+  return bitmap as ImageBitmap & { close: ReturnType<typeof vi.fn> }
+}
+
+function deferredBitmap() {
+  let resolve!: (bitmap: ImageBitmap) => void
+  const promise = new Promise<ImageBitmap>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
+function getTextureImage(sprite: MockSpriteInstance | null) {
+  return (sprite?.texture.source as { image?: unknown } | undefined)?.image
 }
 
 function createItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
@@ -478,8 +555,427 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     textureScaleModeReadCount = 0
     textureScaleModeWriteCount = 0
     createdBaseTextures = []
+    bitmapClosedWithLiveTexture = []
     setWindowDevicePixelRatio(originalDevicePixelRatio)
     installPixiMock()
+  })
+
+  describe('bitmap ownership', () => {
+    beforeEach(() => {
+      vi.stubGlobal('electronFile', {
+        resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path)
+      })
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => ({
+          ok: true,
+          status: 200,
+          blob: async () => new Blob(['image'], { type: 'image/png' })
+        }))
+      )
+    })
+
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+      expect(bitmapClosedWithLiveTexture).toEqual([])
+    })
+
+    const localSourceItem = (overrides: Partial<CanvasImageItem> = {}) =>
+      createItem({
+        src: 'local-media:///C:/images/bitmap.png',
+        sourceWidth: 640,
+        sourceHeight: 360,
+        image: undefined as unknown as HTMLImageElement,
+        ...overrides
+      })
+    const thumbnailItem = () => {
+      const fixture = createThumbnailSetFixture('bitmap-lifetime')
+      return localSourceItem({
+        ...fixture,
+        thumbnailSet: {
+          ...fixture.thumbnailSet,
+          levels: fixture.thumbnailSet.levels.map((level) => ({
+            ...level,
+            src: level.src.replace('thumb-lod', 'C:/thumb-lod')
+          }))
+        },
+        image: createBitmap(192, 96) as unknown as HTMLImageElement,
+        width: 3200,
+        height: 1600,
+        sourceWidth: 4096,
+        sourceHeight: 2048
+      })
+    }
+
+    it('keeps an initial local bitmap open until its texture is destroyed on unmount', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const bitmap = createBitmap(640, 360)
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(async () => bitmap)
+      )
+      const item = localSourceItem()
+      const { unmount } = render(<Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(bitmap))
+      expect(bitmap).not.toHaveProperty('naturalWidth')
+      expect(bitmap.close).not.toHaveBeenCalled()
+      unmount()
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
+      expect(bitmap.width).toBe(0)
+      expect(createdBaseTextures.every((texture) => texture.destroyed)).toBe(true)
+      expect(
+        createdBaseTextures.every((texture) => {
+          const source = texture.source as MockTextureSource
+          return source.destroyed && source.resource === null
+        })
+      ).toBe(true)
+    })
+
+    it.each(['initial', 'upgrade'])(
+      'bounds a narrow local %s decode below the byte limit',
+      async (mode) => {
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        const bitmap = createBitmap(4096, 16)
+        const decode = vi.fn(async () => bitmap)
+        vi.stubGlobal('createImageBitmap', decode)
+        const preview = createBitmap(128, 1)
+        const item = localSourceItem({
+          width: 8192,
+          height: 32,
+          sourceWidth: 8192,
+          sourceHeight: 32,
+          image: (mode === 'upgrade' ? preview : undefined) as unknown as HTMLImageElement
+        })
+        const { unmount } = render(<Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+        await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(bitmap))
+        expect(decode).toHaveBeenCalledExactlyOnceWith(expect.any(Blob), {
+          resizeWidth: 4096,
+          resizeHeight: 16,
+          resizeQuality: 'high',
+          premultiplyAlpha: 'none'
+        })
+        expect(bitmap.close).not.toHaveBeenCalled()
+        unmount()
+        expect(bitmap.close).toHaveBeenCalledTimes(1)
+        expect(preview.close).not.toHaveBeenCalled()
+      }
+    )
+
+    it.each(['initial', 'upgrade'])(
+      'closes the owned intermediate when actual %s dimensions require resizing',
+      async (mode) => {
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        const original = createBitmap(8192, 32)
+        const resized = createBitmap(4096, 16)
+        const decode = vi.fn().mockResolvedValueOnce(original).mockResolvedValueOnce(resized)
+        vi.stubGlobal('createImageBitmap', decode)
+        const preview = createBitmap(16, 1)
+        const item = localSourceItem({
+          width: 640,
+          height: 360,
+          image: (mode === 'upgrade' ? preview : undefined) as unknown as HTMLImageElement
+        })
+        const { unmount } = render(<Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+        await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(resized))
+        expect(decode).toHaveBeenNthCalledWith(2, original, {
+          resizeWidth: 4096,
+          resizeHeight: 16,
+          resizeQuality: 'high',
+          premultiplyAlpha: 'none'
+        })
+        expect(original.close).toHaveBeenCalledTimes(1)
+        expect(resized.close).not.toHaveBeenCalled()
+        expect(textureFromWidths).not.toContain(8192)
+        unmount()
+        expect(original.close).toHaveBeenCalledTimes(1)
+        expect(resized.close).toHaveBeenCalledTimes(1)
+        expect(preview.close).not.toHaveBeenCalled()
+      }
+    )
+
+    it.each(['unsupported', 'rejected'])(
+      'uses a bounded HTML fallback when ImageBitmap is %s',
+      async (failure) => {
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        const decode = vi.fn().mockRejectedValue(new Error('Unsupported bitmap format'))
+        vi.stubGlobal('createImageBitmap', failure === 'unsupported' ? undefined : decode)
+        const images: MockImageInstance[] = []
+        vi.stubGlobal(
+          'Image',
+          createMockImageClass({
+            width: 8192,
+            height: 32,
+            imageInstances: images,
+            onSetSrc: (image, src) => {
+              if (src === 'blob:bounded-html') {
+                image.naturalWidth = image.width = 4096
+                image.naturalHeight = image.height = 16
+              }
+              queueMicrotask(() => image.onload?.())
+            }
+          })
+        )
+        const drawImage = vi.fn()
+        vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+          drawImage
+        } as unknown as GPUCanvasContext)
+        vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((callback) =>
+          callback(new Blob(['resized']))
+        )
+        const revoke = vi.fn()
+        vi.stubGlobal(
+          'URL',
+          class extends URL {
+            static createObjectURL = vi.fn(() => 'blob:bounded-html')
+            static revokeObjectURL = revoke
+          }
+        )
+        const item = localSourceItem({ sourceWidth: 8192, sourceHeight: 32 })
+        const { unmount } = render(<Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+        await waitFor(() => expect(getLiveSpriteByLabel(item.id)?.texture.width).toBe(4096))
+        expect(images.map((image) => image.src)).toEqual([item.src, 'blob:bounded-html'])
+        expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(images[1])
+        expect(drawImage).toHaveBeenCalledWith(images[0], 0, 0, 4096, 16)
+        expect(revoke).toHaveBeenCalledWith('blob:bounded-html')
+        expect(textureFromWidths).not.toContain(8192)
+        unmount()
+      }
+    )
+
+    it.each(['source-unmount', 'source-stale', 'thumbnail-unmount', 'thumbnail-stale'])(
+      'closes a late bitmap exactly once after %s',
+      async (ending) => {
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        const pending = deferredBitmap()
+        const bitmap = createBitmap(1024, 512)
+        const decode = vi.fn(() => pending.promise)
+        vi.stubGlobal('createImageBitmap', decode)
+        const item = ending.startsWith('thumbnail') ? thumbnailItem() : localSourceItem()
+        const viewport = {
+          ...TEST_STAGE_VIEWPORT_1280_720,
+          stageScale: ending.startsWith('thumbnail') ? 0.15 : 1
+        }
+        const { unmount, rerender } = render(<Layer items={[item]} {...viewport} />)
+        await waitFor(() => expect(decode).toHaveBeenCalledTimes(1))
+        if (ending.endsWith('unmount')) unmount()
+        else
+          rerender(
+            <Layer
+              items={[createItem({ id: item.id, src: '', image: createImage(4096, 2048) })]}
+              {...viewport}
+            />
+          )
+        await act(async () => pending.resolve(bitmap))
+        await waitFor(() => expect(bitmap.close).toHaveBeenCalledTimes(1))
+        expect(
+          createdBaseTextures.some(
+            (texture) => (texture.source as { image?: unknown }).image === bitmap
+          )
+        ).toBe(false)
+        unmount()
+        expect(bitmap.close).toHaveBeenCalledTimes(1)
+      }
+    )
+
+    it.each(['unmount', 'stale', 'timeout'])(
+      'disposes both owned resize assets on late completion after %s',
+      async (ending) => {
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        const original = createBitmap(8192, 32)
+        const resized = createBitmap(4096, 16)
+        const pending = deferredBitmap()
+        const decode = vi
+          .fn()
+          .mockResolvedValueOnce(original)
+          .mockImplementationOnce(() => pending.promise)
+        vi.stubGlobal('createImageBitmap', decode)
+        let expire: (() => void) | undefined
+        const nativeSetTimeout = window.setTimeout.bind(window) as typeof window.setTimeout
+        vi.spyOn(window, 'setTimeout').mockImplementation(((handler, delay, ...args) => {
+          if (delay === 12_000 && typeof handler === 'function') expire = () => handler(...args)
+          return nativeSetTimeout(handler, delay, ...args)
+        }) as typeof window.setTimeout)
+        const item = localSourceItem()
+        const failed = vi.fn()
+        const { unmount, rerender } = render(
+          <Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} onFailedIdsChange={failed} />
+        )
+        await waitFor(() => expect(decode).toHaveBeenCalledTimes(2))
+        if (ending === 'unmount') unmount()
+        else if (ending === 'stale')
+          rerender(
+            <Layer
+              items={[createItem({ src: '' })]}
+              {...TEST_STAGE_VIEWPORT_1280_720}
+              onFailedIdsChange={failed}
+            />
+          )
+        else
+          act(() => {
+            expect(expire).toBeDefined()
+            expire?.()
+          })
+        // createImageBitmap cannot be cancelled; its input stays open until it settles.
+        expect(original.close).not.toHaveBeenCalled()
+        await act(async () => pending.resolve(resized))
+        await waitFor(() => expect(original.close).toHaveBeenCalledTimes(1))
+        expect(resized.close).toHaveBeenCalledTimes(1)
+        expect(textureFromWidths).not.toContain(4096)
+        if (ending === 'timeout') expect(failed).toHaveBeenLastCalledWith(new Set([item.id]))
+        unmount()
+        expect(original.close).toHaveBeenCalledTimes(1)
+        expect(resized.close).toHaveBeenCalledTimes(1)
+      }
+    )
+
+    it('retains a replaced thumbnail through deferred reconciliation and re-upload', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const first = createBitmap(1024, 512)
+      const second = createBitmap(2048, 1024)
+      const pending = deferredBitmap()
+      const decode = vi
+        .fn()
+        .mockResolvedValueOnce(first)
+        .mockImplementationOnce(() => pending.promise)
+      vi.stubGlobal('createImageBitmap', decode)
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const ready = vi.fn()
+      const item = thumbnailItem()
+      // Control both the image-version RAF and its interaction deadline. A real
+      // timer may commit the replacement before act() returns on a loaded host,
+      // which would skip the cache-replaced/old-texture-live state under test.
+      vi.useFakeTimers()
+      let unmountLayer: (() => void) | undefined
+      try {
+        const { unmount, rerender } = render(
+          <Layer
+            ref={ref}
+            items={[item]}
+            {...TEST_STAGE_VIEWPORT_1280_720}
+            stageScale={0.15}
+            onReadyChange={ready}
+          />
+        )
+        unmountLayer = unmount
+        await act(async () => {})
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(250)
+        })
+        expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(first)
+        const oldSprite = getLiveSpriteByLabel(item.id)!
+        rerender(
+          <Layer
+            ref={ref}
+            items={[item]}
+            {...TEST_STAGE_VIEWPORT_1280_720}
+            stageScale={0.3}
+            onReadyChange={ready}
+          />
+        )
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(250)
+        })
+        expect(decode).toHaveBeenCalledTimes(2)
+        act(() => ref.current?.setViewportInteracting(true))
+        await act(async () => pending.resolve(second))
+        expect(getLiveSpriteByLabel(item.id)).toBe(oldSprite)
+        expect(first.close).not.toHaveBeenCalled()
+        const source = oldSprite.texture.source as MockTextureSource
+        ;(source.unload as unknown as () => void)()
+        expect(source.resource).toBe(first)
+        expect(source.gpuValid).toBe(false)
+        act(() => ref.current?.syncViewport({ x: 1, y: 0 }, 0.3))
+        expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
+        expect(source.gpuValid).toBe(true)
+        expect(ready).toHaveBeenLastCalledWith(true)
+        act(() => ref.current?.setViewportInteracting(false))
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(250)
+        })
+        expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(second)
+        expect(first.close).toHaveBeenCalledTimes(1)
+        expect(second.close).not.toHaveBeenCalled()
+        unmount()
+        expect(second.close).toHaveBeenCalledTimes(1)
+        expect((item.image as unknown as ImageBitmap).close).not.toHaveBeenCalled()
+      } finally {
+        unmountLayer?.()
+        vi.useRealTimers()
+      }
+    })
+
+    it('retains the actual shared thumbnail input when its cache owner is pruned', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const first = createBitmap(1024, 512)
+      const second = createBitmap(1024, 512)
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second)
+      )
+      const a = thumbnailItem()
+      const b = {
+        ...a,
+        id: 'shared-thumbnail-b',
+        image: createBitmap(192, 96) as unknown as HTMLImageElement
+      }
+      const { unmount, rerender } = render(
+        <Layer items={[a, b]} {...TEST_STAGE_VIEWPORT_1280_720} stageScale={0.15} />
+      )
+      await waitFor(() => {
+        expect(getTextureImage(getLiveSpriteByLabel(a.id))).toBe(first)
+        expect(getTextureImage(getLiveSpriteByLabel(b.id))).toBe(first)
+      })
+      const sharedTexture = getLiveSpriteByLabel(a.id)!.texture
+      rerender(<Layer items={[b]} {...TEST_STAGE_VIEWPORT_1280_720} stageScale={0.15} />)
+      await waitFor(() => expect(getLiveSpriteByLabel(a.id)).toBeNull())
+      expect(getLiveSpriteByLabel(b.id)?.texture).toBe(sharedTexture)
+      expect(first.close).not.toHaveBeenCalled()
+      expect(second.close).not.toHaveBeenCalled()
+      expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
+      unmount()
+      expect(first.close).toHaveBeenCalledTimes(1)
+      expect(second.close).toHaveBeenCalledTimes(1)
+      expect((a.image as unknown as ImageBitmap).close).not.toHaveBeenCalled()
+      expect((b.image as unknown as ImageBitmap).close).not.toHaveBeenCalled()
+    })
+
+    it('does not cancel a shared source decode when only one pending consumer leaves', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const bitmap = createBitmap(640, 360)
+      const pending = deferredBitmap()
+      const decode = vi.fn(() => pending.promise)
+      vi.stubGlobal('createImageBitmap', decode)
+      const { sourceIdentity } = createThumbnailSetFixture('shared-source-bitmap')
+      const a = localSourceItem({ sourceIdentity })
+      const b = { ...a, id: 'shared-source-b' }
+      const { unmount, rerender } = render(
+        <Layer items={[a, b]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(1))
+      rerender(<Layer items={[b]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await act(async () => pending.resolve(bitmap))
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(b.id))).toBe(bitmap))
+      expect(bitmap.close).not.toHaveBeenCalled()
+      expect(decode).toHaveBeenCalledTimes(1)
+      unmount()
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
+    })
+
+    it('never closes a borrowed bitmap shared by provided sprites', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const bitmap = createBitmap(640, 360)
+      const a = createItem({ image: bitmap as unknown as HTMLImageElement, src: '' })
+      const b = { ...a, id: 'borrowed-b' }
+      const { unmount, rerender } = render(
+        <Layer items={[a, b]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(b.id))).toBe(bitmap))
+      rerender(<Layer items={[b]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      expect(bitmap.close).not.toHaveBeenCalled()
+      unmount()
+      expect(bitmap.close).not.toHaveBeenCalled()
+    })
   })
 
   it('shares one source texture across stable-source crops with independent decoded objects and destroys it after the final consumer leaves', async () => {
@@ -553,6 +1049,16 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect(getLiveSpriteByLabel(first.id)).not.toBeNull()
       expect(getLiveSpriteByLabel(second.id)).not.toBeNull()
     })
+    expect(createdBaseTextures).toHaveLength(1)
+  })
+
+  it('keeps Spatial Tile opt-in disabled while the ordinary image path remains active', async () => {
+    const { default: ProjectCanvasWebGLImageLayer, PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED } =
+      await import('./ProjectCanvasWebGLImageLayer')
+    expect(PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED).toBe(false)
+    const item = createSizedNamedItem('spatial-tile-disabled', 200, 120, 8192, 8192, 200, 120)
+    render(<ProjectCanvasWebGLImageLayer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+    await waitFor(() => expect(getLiveSpriteByLabel(item.id)).not.toBeNull())
     expect(createdBaseTextures).toHaveLength(1)
   })
 
@@ -1232,6 +1738,17 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       residentTextureBytes: 0,
       residentCandidateTextureBytes: 0,
       residentTextureBudgetBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
+      gpuTextureBytesTotal: 0,
+      decodedResidentBytes: 0,
+      encodedBlobBytes: 0,
+      tileResidentBytes: 0,
+      gpuUploadBytesInFlight: 0,
+      thumbnailJobs: 0,
+      sourceJobs: 0,
+      tileVisibleJobs: 0,
+      tilePrefetchJobs: 0,
+      resourceBudgetReservationCount: 0,
+      resourceBudgetEvictableReservationCount: 0,
       pendingImageCount: 0,
       spriteCount: 0,
       residentCandidateImageCount: 0,
@@ -1269,6 +1786,18 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       sourceUpgradeQueueCount: 0,
       thumbnailLoadQueueCount: 0,
       initialLoadQueueCount: 0,
+      tileEnabledItemCount: 0,
+      tileQueuedCount: 0,
+      tileRunningCount: 0,
+      tileCompletedCount: 0,
+      tileCancelledCount: 0,
+      tileDedupedCount: 0,
+      tileFailedCount: 0,
+      tileStaleDisposedCount: 0,
+      tileActiveCount: 0,
+      tileActiveAssetCount: 0,
+      tileDisposedAssetCount: 0,
+      tileDisposeErrorCount: 0,
       renderCount: firstMetrics.renderCount,
       lastRenderDurationMs: firstMetrics.lastRenderDurationMs,
       lastUpdateReason: 'initialize'

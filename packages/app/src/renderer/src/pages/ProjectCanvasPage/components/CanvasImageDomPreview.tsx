@@ -9,7 +9,7 @@ import { resolveCanvasImageLodDecision } from '../canvasImageLodPolicy'
 import { getCanvasImageAssetSize } from '../canvasImageAssetUtils'
 import {
   canReadCanvasLocalImageSource,
-  createCanvasLocalImageObjectUrl
+  createCanvasLocalImageObjectUrlHandle
 } from '../canvasLocalImageSource'
 
 type CanvasImageDomPreviewProps = {
@@ -180,14 +180,18 @@ export default function CanvasImageDomPreview({
 
     let cancelled = false
     let objectUrl: string | null = null
+    let revokeObjectUrl: (() => void) | null = null
     setMaterializedSource(null)
 
-    void createCanvasLocalImageObjectUrl(item.src, item.fileName).then((resolvedSrc) => {
-      objectUrl = resolvedSrc
+    void createCanvasLocalImageObjectUrlHandle(
+      item.src,
+      item.fileName,
+      `canvas-dom-preview:${item.id}`
+    ).then((handle) => {
+      objectUrl = handle?.url ?? null
+      revokeObjectUrl = handle?.revoke ?? null
       if (cancelled) {
-        if (objectUrl) {
-          URL.revokeObjectURL(objectUrl)
-        }
+        revokeObjectUrl?.()
         return
       }
 
@@ -200,9 +204,7 @@ export default function CanvasImageDomPreview({
 
     return () => {
       cancelled = true
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl)
-      }
+      revokeObjectUrl?.()
     }
   }, [item.fileName, item.src, shouldMaterializeLocalSource])
 

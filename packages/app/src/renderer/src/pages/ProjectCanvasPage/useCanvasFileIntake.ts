@@ -29,6 +29,7 @@ import { detectFileType, isModelArchiveFile } from './types'
 import { CANVAS_IMPORT_ACCEPT } from './canvasImportAccept'
 import type { CanvasFileItem, CanvasImageItem } from './types'
 import { getElectronCanvasFilePath, resolveCanvasImageFileSource } from './canvasLocalFileSource'
+import { releaseCanvasImageObjectUrl } from './canvasImageObjectUrlRegistry'
 import {
   buildCanvasImageSourceIdentity,
   buildCanvasSessionSourceIdentity
@@ -83,6 +84,7 @@ type AddImageToCanvasFn = (
     sourceWidthHint?: number
     sourceHeightHint?: number
     sourceFile?: Blob
+    canvasOwnedObjectUrl?: boolean
     sourceIdentity?: CanvasImageSourceIdentity
     thumbnailSet?: CanvasImageItem['thumbnailSet']
     reportBundleId?: CanvasImageItem['reportBundleId']
@@ -880,17 +882,24 @@ export function useCanvasFileIntake({
     })
   }, [])
 
-  const resolveImageFileSource = useCallback(
-    async (file: File) => resolveCanvasImageFileSource(file, readFileAsDataURL),
-    [readFileAsDataURL]
-  )
+  const sourceAbortRef = useRef(new AbortController())
+  const pendingSourceUrlsRef = useRef(new Set<string>())
+  useEffect(() => {
+    if (sourceAbortRef.current.signal.aborted) sourceAbortRef.current = new AbortController()
+    return () => {
+      sourceAbortRef.current.abort()
+      pendingSourceUrlsRef.current.forEach(releaseCanvasImageObjectUrl)
+      pendingSourceUrlsRef.current.clear()
+    }
+  }, [])
 
   const resolveImageFileSourceInput = useCallback(
-    async (file: File): Promise<CanvasImageSourceObject> => {
-      const [src, metadata] = await Promise.all([
-        resolveImageFileSource(file),
-        readCanvasImageBlobMetadata(file)
-      ])
+    async (
+      file: File,
+      signal = sourceAbortRef.current.signal
+    ): Promise<CanvasImageSourceObject> => {
+      signal.throwIfAborted()
+      const metadata = await readCanvasImageBlobMetadata(file)
       const thumbnailCacheRoot = await resolveCanvasThumbnailCacheRoot(canvasId)
       const sourceIdentity =
         (await resolveCanvasImageLocalSourceIdentity(file, thumbnailCacheRoot)) ??
@@ -900,11 +909,18 @@ export function useCanvasFileIntake({
           mimeType: file.type,
           fileName: file.name
         })
+      const src = await resolveCanvasImageFileSource(file, readFileAsDataURL, signal)
+      if (signal.aborted) {
+        if (src.startsWith('blob:')) releaseCanvasImageObjectUrl(src)
+        signal.throwIfAborted()
+      }
+      if (src.startsWith('blob:')) pendingSourceUrlsRef.current.add(src)
       const shouldRetainSourceFile = !/^(local-media|file):\/\//i.test(src.trim())
       const source: CanvasImageSourceObject = {
         src,
         fileName: file.name,
         sizeBytes: file.size,
+        ...(src.startsWith('blob:') ? { sourceUrlOwned: true } : {}),
         ...(shouldRetainSourceFile ? { sourceFile: file } : {}),
         ...(sourceIdentity ? { sourceIdentity } : {})
       }
@@ -919,7 +935,7 @@ export function useCanvasFileIntake({
 
       return source
     },
-    [canvasId, resolveImageFileSource]
+    [canvasId, readFileAsDataURL]
   )
 
   const resolveImageFileSourceInputs = useCallback(
@@ -928,6 +944,8 @@ export function useCanvasFileIntake({
       options: { reportProgress?: boolean } = {}
     ): Promise<CanvasImageSourceInput[]> => {
       const sources: CanvasImageSourceInput[] = []
+      const batchAbort = new AbortController()
+      const signal = AbortSignal.any([sourceAbortRef.current.signal, batchAbort.signal])
       const shouldReportProgress =
         options.reportProgress && files.length >= CANVAS_IMAGE_FILE_SOURCE_RESOLVE_BATCH_SIZE
       let processedCount = 0
@@ -940,30 +958,58 @@ export function useCanvasFileIntake({
           failed: 0
         })
       }
-      for (
-        let index = 0;
-        index < files.length;
-        index += CANVAS_IMAGE_FILE_SOURCE_RESOLVE_BATCH_SIZE
-      ) {
-        const batch = files.slice(index, index + CANVAS_IMAGE_FILE_SOURCE_RESOLVE_BATCH_SIZE)
-        const batchLength = batch.length
-        sources.push(...(await Promise.all(batch.map(resolveImageFileSourceInput))))
-        for (let batchIndex = 0; batchIndex < batchLength; batchIndex += 1) {
-          files[index + batchIndex] = undefined as unknown as File
+      try {
+        for (
+          let index = 0;
+          index < files.length;
+          index += CANVAS_IMAGE_FILE_SOURCE_RESOLVE_BATCH_SIZE
+        ) {
+          const batch = files.slice(index, index + CANVAS_IMAGE_FILE_SOURCE_RESOLVE_BATCH_SIZE)
+          const batchLength = batch.length
+          await Promise.all(
+            batch.map(async (file, batchIndex) => {
+              try {
+                const source = await resolveImageFileSourceInput(file, signal)
+                if (signal.aborted) {
+                  if (source.sourceUrlOwned) {
+                    pendingSourceUrlsRef.current.delete(source.src)
+                    releaseCanvasImageObjectUrl(source.src)
+                  }
+                  signal.throwIfAborted()
+                }
+                sources[index + batchIndex] = source
+              } catch (error) {
+                batchAbort.abort()
+                throw error
+              }
+            })
+          )
+          for (let batchIndex = 0; batchIndex < batchLength; batchIndex += 1) {
+            files[index + batchIndex] = undefined as unknown as File
+          }
+          batch.length = 0
+          processedCount += batchLength
+          if (shouldReportProgress) {
+            onImageBatchImportProgress?.({
+              phase: 'preparing',
+              total: files.length,
+              processed: processedCount,
+              imported: 0,
+              failed: 0
+            })
+          }
         }
-        batch.length = 0
-        processedCount += batchLength
-        if (shouldReportProgress) {
-          onImageBatchImportProgress?.({
-            phase: 'preparing',
-            total: files.length,
-            processed: processedCount,
-            imported: 0,
-            failed: 0
-          })
+        return sources
+      } catch (error) {
+        batchAbort.abort()
+        for (const source of sources) {
+          if (source && typeof source !== 'string' && source.sourceUrlOwned) {
+            pendingSourceUrlsRef.current.delete(source.src)
+            releaseCanvasImageObjectUrl(source.src)
+          }
         }
+        throw error
       }
-      return sources
     },
     [onImageBatchImportProgress, resolveImageFileSourceInput]
   )
@@ -1028,7 +1074,7 @@ export function useCanvasFileIntake({
 
       if (fileType === 'image' || file.type.startsWith('image/')) {
         const source = await resolveImageFileSourceInput(file)
-        await addImageToCanvas(source.src, {
+        const transferred = await addImageToCanvas(source.src, {
           clientX,
           clientY,
           fileName: file.name,
@@ -1036,10 +1082,12 @@ export function useCanvasFileIntake({
           hasAlpha: source.hasAlpha,
           sourceWidthHint: source.sourceWidthHint,
           sourceHeightHint: source.sourceHeightHint,
+          canvasOwnedObjectUrl: source.sourceUrlOwned,
           sourceFile: source.sourceFile,
           sourceIdentity: source.sourceIdentity,
           thumbnailSet: source.thumbnailSet
         })
+        if (transferred !== null) pendingSourceUrlsRef.current.delete(source.src)
         return
       }
 
@@ -1109,7 +1157,7 @@ export function useCanvasFileIntake({
           const sizeBytes = imageFile.size
           const source = await resolveImageFileSourceInput(imageFile)
           clearFileArrayReferences(imageFiles)
-          await addImageToCanvas(source.src, {
+          const transferred = await addImageToCanvas(source.src, {
             clientX,
             clientY,
             fileName,
@@ -1117,16 +1165,23 @@ export function useCanvasFileIntake({
             hasAlpha: source.hasAlpha,
             sourceWidthHint: source.sourceWidthHint,
             sourceHeightHint: source.sourceHeightHint,
+            canvasOwnedObjectUrl: source.sourceUrlOwned,
             sourceFile: source.sourceFile,
             sourceIdentity: source.sourceIdentity,
             thumbnailSet: source.thumbnailSet
           })
+          if (transferred !== null) pendingSourceUrlsRef.current.delete(source.src)
         } else {
           const imageSources = await resolveImageFileSourceInputs(imageFiles, {
             reportProgress: true
           })
           clearFileArrayReferences(imageFiles)
-          await addImagesToCanvas(imageSources, { clientX, clientY })
+          const transferred = await addImagesToCanvas(imageSources, { clientX, clientY })
+          if (transferred !== null && (!Array.isArray(transferred) || transferred.length > 0)) {
+            for (const source of imageSources) {
+              if (typeof source !== 'string') pendingSourceUrlsRef.current.delete(source.src)
+            }
+          }
         }
       }
 
@@ -1514,15 +1569,27 @@ export function useCanvasFileIntake({
       if (pastedImageSources.length > 0) {
         if (pastedImageSources.length === 1) {
           const source = pastedImageSources[0]
-          await addImageToCanvas(typeof source === 'string' ? source : source.src, {
-            fileName: typeof source === 'string' ? undefined : source.fileName,
-            sizeBytes: typeof source === 'string' ? undefined : source.sizeBytes,
-            sourceFile: typeof source === 'string' ? undefined : source.sourceFile,
-            sourceIdentity: typeof source === 'string' ? undefined : source.sourceIdentity,
-            ...pastePoint
-          })
+          const transferred = await addImageToCanvas(
+            typeof source === 'string' ? source : source.src,
+            {
+              fileName: typeof source === 'string' ? undefined : source.fileName,
+              sizeBytes: typeof source === 'string' ? undefined : source.sizeBytes,
+              sourceFile: typeof source === 'string' ? undefined : source.sourceFile,
+              canvasOwnedObjectUrl: typeof source === 'string' ? undefined : source.sourceUrlOwned,
+              sourceIdentity: typeof source === 'string' ? undefined : source.sourceIdentity,
+              ...pastePoint
+            }
+          )
+          if (transferred !== null && typeof source !== 'string') {
+            pendingSourceUrlsRef.current.delete(source.src)
+          }
         } else {
-          await addImagesToCanvas(pastedImageSources, pastePoint ?? undefined)
+          const transferred = await addImagesToCanvas(pastedImageSources, pastePoint ?? undefined)
+          if (transferred !== null && (!Array.isArray(transferred) || transferred.length > 0)) {
+            for (const source of pastedImageSources) {
+              if (typeof source !== 'string') pendingSourceUrlsRef.current.delete(source.src)
+            }
+          }
         }
         return true
       }
@@ -1582,15 +1649,28 @@ export function useCanvasFileIntake({
 
           if (imageSources.length === 1) {
             const source = imageSources[0]
-            await addImageToCanvas(typeof source === 'string' ? source : source.src, {
-              fileName: typeof source === 'string' ? undefined : source.fileName,
-              sizeBytes: typeof source === 'string' ? undefined : source.sizeBytes,
-              sourceFile: typeof source === 'string' ? undefined : source.sourceFile,
-              sourceIdentity: typeof source === 'string' ? undefined : source.sourceIdentity,
-              ...pastePoint
-            })
+            const transferred = await addImageToCanvas(
+              typeof source === 'string' ? source : source.src,
+              {
+                fileName: typeof source === 'string' ? undefined : source.fileName,
+                sizeBytes: typeof source === 'string' ? undefined : source.sizeBytes,
+                sourceFile: typeof source === 'string' ? undefined : source.sourceFile,
+                canvasOwnedObjectUrl:
+                  typeof source === 'string' ? undefined : source.sourceUrlOwned,
+                sourceIdentity: typeof source === 'string' ? undefined : source.sourceIdentity,
+                ...pastePoint
+              }
+            )
+            if (transferred !== null && typeof source !== 'string') {
+              pendingSourceUrlsRef.current.delete(source.src)
+            }
           } else if (imageSources.length > 1) {
-            await addImagesToCanvas(imageSources, pastePoint ?? undefined)
+            const transferred = await addImagesToCanvas(imageSources, pastePoint ?? undefined)
+            if (transferred !== null && (!Array.isArray(transferred) || transferred.length > 0)) {
+              for (const source of imageSources) {
+                if (typeof source !== 'string') pendingSourceUrlsRef.current.delete(source.src)
+              }
+            }
           }
           return true
         }
@@ -1681,13 +1761,15 @@ export function useCanvasFileIntake({
         })
 
         const source = await resolveImageFileSourceInput(file)
-        await addImageToCanvas(source.src, {
+        const transferred = await addImageToCanvas(source.src, {
           fileName: file.name,
           sizeBytes: file.size,
           sourceFile: source.sourceFile,
+          canvasOwnedObjectUrl: source.sourceUrlOwned,
           sourceIdentity: source.sourceIdentity,
           ...pastePoint
         })
+        if (transferred !== null) pendingSourceUrlsRef.current.delete(source.src)
         return true
       }
 

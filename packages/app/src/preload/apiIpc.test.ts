@@ -7,7 +7,8 @@ const CANVAS_THUMBNAIL_METHODS = [
   'readThumbnailManifest',
   'writeThumbnailSet',
   'generateThumbnailSet',
-  'createNativeThumbnail'
+  'createNativeThumbnail',
+  'createNativeRegion'
 ] as const
 
 const { invokeMock, postMessageMock } = vi.hoisted(() => ({

@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react'
-import { render, waitFor } from '@testing-library/react'
+import { cleanup, render, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -21,6 +21,16 @@ import type { CanvasImageSourceInput } from './canvasAssetIntakeHelpers'
 import { buildProjectCanvasRenderableItems } from './projectCanvasRenderBoundary'
 import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 import type { CanvasGroup, CanvasImageItem, CanvasItem } from './types'
+import {
+  canvasImageObjectUrlRegistry,
+  createCanvasImageObjectUrlHandle
+} from './canvasImageObjectUrlRegistry'
+import { resolveCanvasImageFileSource } from './canvasLocalFileSource'
+const thumbnailOverride = vi.fn()
+const officePreview = vi.fn()
+vi.mock('./officePreviewUtils', () => ({
+  resolveOfficeFileNodeData: (...args: unknown[]) => officePreview(...args)
+}))
 
 const importCanvasFileMock = vi.fn()
 const materializePsdFileMock = vi.fn()
@@ -49,6 +59,12 @@ vi.mock('./canvasAssetIntakeHelpers', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./canvasAssetIntakeHelpers')>()
   return {
     ...actual,
+    resolveCanvasImageThumbnailDisplayAsset: (args: unknown) =>
+      thumbnailOverride.getMockImplementation()
+        ? thumbnailOverride(args)
+        : actual.resolveCanvasImageThumbnailDisplayAsset(
+            args as Parameters<typeof actual.resolveCanvasImageThumbnailDisplayAsset>[0]
+          ),
     hydrateCanvasImageItemForCanvas: (args: unknown) => hydrateCanvasImageItemForCanvasMock(args)
   }
 })
@@ -261,6 +277,10 @@ function SingleImageHarness({
 }
 
 afterEach(() => {
+  cleanup()
+  canvasImageObjectUrlRegistry.revokeAll()
+  canvasImageObjectUrlRegistry.setMaxCount(128)
+  thumbnailOverride.mockReset()
   vi.unstubAllGlobals()
   vi.clearAllMocks()
 })
@@ -337,7 +357,7 @@ describe('useCanvasAssetIntake', () => {
     expect(revokeObjectUrl).toHaveBeenCalledWith('blob:psd-unique')
   })
 
-  it('keeps PSD object URLs after successful canvas adoption', async () => {
+  it('keeps PSD object URLs after adoption and releases them once on unmount', async () => {
     const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
     const onComplete = vi.fn()
     materializePsdFileMock.mockResolvedValue({
@@ -353,10 +373,17 @@ describe('useCanvasAssetIntake', () => {
       return itemOrArgs
     })
 
-    render(<PsdImportHarness onComplete={onComplete} />)
+    const { unmount } = render(<PsdImportHarness onComplete={onComplete} />)
 
     await waitFor(() => expect(onComplete).toHaveBeenCalled())
     expect(revokeObjectUrl).not.toHaveBeenCalled()
+    expect(onComplete.mock.calls[0][0][0]).toMatchObject({
+      src: 'blob:psd-adopted',
+      sourceUrlOwned: true
+    })
+    unmount()
+    expect(revokeObjectUrl).toHaveBeenCalledExactlyOnceWith('blob:psd-adopted')
+    expect(canvasImageObjectUrlRegistry.getMetrics().activeCount).toBe(0)
   })
 
   it('limits batch image preprocessing concurrency and preserves source order', async () => {
@@ -1931,5 +1958,297 @@ describe('useCanvasAssetIntake', () => {
     })
 
     expect(canvasStorage.rememberCanvasSaveTargetPath).not.toHaveBeenCalled()
+  })
+
+  describe('canvas intake ownership regressions', () => {
+    let urlId = 0
+    function setup() {
+      const create = vi
+        .spyOn(URL, 'createObjectURL')
+        .mockImplementation(() => `blob:owned-regression-${++urlId}`)
+      const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      vi.stubGlobal('Image', function () {
+        const image = document.createElement('img')
+        Object.defineProperties(image, {
+          naturalWidth: { value: 32 },
+          naturalHeight: { value: 24 },
+          src: { set: () => queueMicrotask(() => image.onload?.(new Event('load'))) }
+        })
+        return image
+      })
+      thumbnailOverride.mockResolvedValue(null)
+      const setItemsWithHistory = vi.fn()
+      const hook = renderHook(() =>
+        useCanvasAssetIntake({
+          nextZIndexRef: { current: 1 },
+          setItemsWithHistory,
+          setGroups: vi.fn(),
+          setGroupBranches: vi.fn(),
+          setSelectedIds: vi.fn(),
+          setTool: vi.fn(),
+          notifyError: vi.fn(),
+          notifyWarning: vi.fn(),
+          notifySuccess: vi.fn()
+        })
+      )
+      return { ...hook, create, revoke, setItemsWithHistory }
+    }
+
+    it.each([false, true])(
+      'prevents late sibling allocations after rejection (unmount=%s)',
+      async (unmount) => {
+        const test = setup()
+        canvasImageObjectUrlRegistry.setMaxCount(1)
+        let resolveAuthorization!: (value: string | null) => void
+        authorizeCanvasLocalMediaSourceUrlMock.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              resolveAuthorization = resolve
+            })
+        )
+        const pending = test.result.current.addImagesToCanvas([
+          { src: 'blob:borrowed-a', sourceFile: new Blob(['a']) },
+          { src: 'blob:borrowed-b', sourceFile: new Blob(['b']) },
+          { src: 'blob:borrowed-c', sourceFile: new File(['c'], 'c.png') }
+        ])
+        await expect(pending).rejects.toThrow('budget exhausted')
+        expect(test.create).toHaveBeenCalledTimes(1)
+        expect(test.revoke).toHaveBeenCalledTimes(1)
+        if (unmount) test.unmount()
+        resolveAuthorization(null)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(test.create).toHaveBeenCalledTimes(1)
+        expect(test.revoke).toHaveBeenCalledTimes(1)
+        expect(canvasImageObjectUrlRegistry.getMetrics().activeCount).toBe(0)
+        expect(test.setItemsWithHistory).not.toHaveBeenCalled()
+      }
+    )
+
+    it('cancels normalization on unmount before deferred authorization completes', async () => {
+      const test = setup()
+      canvasImageObjectUrlRegistry.setMaxCount(1)
+      let resolveAuthorization!: (value: string | null) => void
+      authorizeCanvasLocalMediaSourceUrlMock.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveAuthorization = resolve
+          })
+      )
+      const pending = test.result.current.addImagesToCanvas([
+        { src: 'blob:borrowed-a', sourceFile: new Blob(['a']) },
+        { src: 'blob:borrowed-c', sourceFile: new File(['c'], 'c.png') }
+      ])
+      await waitFor(() => expect(test.create).toHaveBeenCalledTimes(1))
+      test.unmount()
+      resolveAuthorization(null)
+      await expect(pending).resolves.toEqual([])
+      expect(test.create).toHaveBeenCalledTimes(1)
+      expect(test.revoke).toHaveBeenCalledTimes(1)
+      expect(canvasImageObjectUrlRegistry.getMetrics().activeCount).toBe(0)
+    })
+
+    it.each(['single-cold', 'single-warm', 'batch-cold', 'batch-warm'])(
+      'reuses transferred sources at capacity: %s',
+      async (mode) => {
+        const test = setup()
+        canvasImageObjectUrlRegistry.setMaxCount(1)
+        const sourceFile = new File(['png'], 'owned.png', { type: 'image/png' })
+        const src = await resolveCanvasImageFileSource(sourceFile, vi.fn())
+        const sourceIdentity = buildCanvasImageSourceIdentity({
+          canonicalPath: 'C:/owned.png',
+          sizeBytes: 3,
+          lastModifiedMs: 1
+        })!
+        if (mode.endsWith('warm'))
+          thumbnailOverride.mockResolvedValue({ image: document.createElement('img') })
+        const source = {
+          src,
+          sourceFile,
+          sourceUrlOwned: true,
+          fileName: sourceFile.name,
+          sourceIdentity,
+          sourceWidthHint: 32,
+          sourceHeightHint: 24
+        }
+        const items = mode.startsWith('single')
+          ? [
+              await test.result.current.addImageToCanvas(src, {
+                ...source,
+                canvasOwnedObjectUrl: true
+              })
+            ]
+          : await test.result.current.addImagesToCanvas([source])
+        expect(items[0]).toMatchObject({ src, sourceUrlOwned: true, sourceFile })
+        expect(test.create).toHaveBeenCalledTimes(1)
+        expect(test.revoke).not.toHaveBeenCalled()
+        test.unmount()
+        expect(test.revoke).toHaveBeenCalledExactlyOnceWith(src)
+        expect(canvasImageObjectUrlRegistry.getMetrics().activeCount).toBe(0)
+      }
+    )
+
+    it('does not release another intake lease during repeated managed-promotion cleanup', async () => {
+      const test = setup()
+      canvasImageObjectUrlRegistry.setMaxCount(1)
+      const other = renderHook(() =>
+        useCanvasAssetIntake({
+          nextZIndexRef: { current: 1 },
+          setItemsWithHistory: vi.fn(),
+          setGroups: vi.fn(),
+          setGroupBranches: vi.fn(),
+          setSelectedIds: vi.fn(),
+          setTool: vi.fn(),
+          notifyError: vi.fn(),
+          notifyWarning: vi.fn(),
+          notifySuccess: vi.fn()
+        })
+      )
+      const sourceFile = new File(['png'], 'shared.png', { type: 'image/png' })
+      const src = await resolveCanvasImageFileSource(sourceFile, vi.fn())
+      const source = { src, sourceFile, fileName: sourceFile.name, sourceUrlOwned: true }
+      await test.result.current.addImageToCanvas(src, { ...source, canvasOwnedObjectUrl: true })
+      const originalApi = window.api
+      Object.defineProperty(window, 'api', {
+        configurable: true,
+        value: {
+          svcManagedMedia: {
+            importDataUrl: vi.fn().mockResolvedValue({
+              localMediaUrl: 'local-media:///managed/shared.png',
+              reference: { relativePath: 'shared.png' }
+            })
+          }
+        }
+      })
+      try {
+        const items = await other.result.current.addImagesToCanvas([source])
+        expect(items).toHaveLength(1)
+        expect(items[0].src).toBe('local-media:///managed/shared.png')
+        other.unmount()
+        expect(test.revoke).not.toHaveBeenCalled()
+        expect(canvasImageObjectUrlRegistry.getMetrics().activeCount).toBe(1)
+        test.unmount()
+        expect(test.revoke).toHaveBeenCalledExactlyOnceWith(src)
+      } finally {
+        Object.defineProperty(window, 'api', { configurable: true, value: originalApi })
+      }
+    })
+
+    it.each([false, true])(
+      'releases resolver-owned URLs on managed import (failure=%s)',
+      async (failure) => {
+        const test = setup()
+        const originalApi = window.api
+        const importDataUrl = failure
+          ? vi.fn().mockRejectedValue(new Error('managed failed'))
+          : vi.fn().mockResolvedValue({
+              localMediaUrl: 'local-media:///managed/owned.png',
+              reference: { relativePath: 'owned.png' }
+            })
+        Object.defineProperty(window, 'api', {
+          configurable: true,
+          value: { svcManagedMedia: { importDataUrl } }
+        })
+        try {
+          const sourceFile = new File(['png'], 'owned.png', { type: 'image/png' })
+          const src = await resolveCanvasImageFileSource(sourceFile, vi.fn())
+          const item = await test.result.current.addImageToCanvas(src, {
+            sourceFile,
+            fileName: sourceFile.name,
+            canvasOwnedObjectUrl: true
+          })
+          if (failure) expect(item).toBeNull()
+          else {
+            expect(item?.src).toBe('local-media:///managed/owned.png')
+            expect(item).not.toHaveProperty('sourceUrlOwned')
+          }
+          expect(test.revoke).toHaveBeenCalledExactlyOnceWith(src)
+          test.unmount()
+          expect(test.revoke).toHaveBeenCalledTimes(1)
+        } finally {
+          Object.defineProperty(window, 'api', { configurable: true, value: originalApi })
+        }
+      }
+    )
+
+    it('clears transferred ownership on authorization without revoking borrowed QuickApp URLs', async () => {
+      const test = setup()
+      const sourceFile = new File(['png'], 'owned.png', { type: 'image/png' })
+      const src = createCanvasImageObjectUrlHandle('authorization', sourceFile)!.url
+      authorizeCanvasLocalMediaSourceUrlMock.mockResolvedValue(
+        'local-media:///authorized/owned.png'
+      )
+      const items = await test.result.current.addImagesToCanvas([
+        { src, sourceFile, sourceUrlOwned: true },
+        { src: 'blob:quickapp-borrowed', sourceFile }
+      ])
+      expect(items).toHaveLength(2)
+      items.forEach((item) => expect(item).not.toHaveProperty('sourceUrlOwned'))
+      test.unmount()
+      expect(test.revoke).toHaveBeenCalledExactlyOnceWith(src)
+    })
+
+    it.each(['ordinary', 'ocr'])(
+      'tracks %s file URLs and leaves OCR source URLs borrowed',
+      async (kind) => {
+        const test = setup()
+        officePreview.mockResolvedValue({
+          mimeType: 'text/plain',
+          fileKind: 'text',
+          previewText: 'text',
+          previewImages: [],
+          previewSheets: []
+        })
+        const file = new File(['text'], 'result.txt', { type: 'text/plain' })
+        const items =
+          kind === 'ordinary'
+            ? [await test.result.current.addFileToCanvas(file)]
+            : await test.result.current.addOcrResultToCanvas({
+                file,
+                ocrResult: {
+                  kind: 'text',
+                  sourceImageUrl: 'blob:ocr-borrowed',
+                  boxes: [],
+                  text: 'text'
+                }
+              })
+        const item = items.find((item) => item?.type === 'file')
+        expect(item).toMatchObject({ sourceUrlOwned: true })
+        test.unmount()
+        expect(test.revoke).toHaveBeenCalledTimes(1)
+        expect(test.revoke).not.toHaveBeenCalledWith('blob:ocr-borrowed')
+      }
+    )
+    it('keeps 3000 source-only imports outside authorization and URL allocation', async () => {
+      const test = setup()
+      const sources = Array.from({ length: 3000 }, (_, index) => ({
+        src: `local-media:///images/${index}.png`,
+        sourceWidthHint: 32,
+        sourceHeightHint: 24
+      }))
+      const items = await test.result.current.addImagesToCanvas(sources)
+      expect(items).toHaveLength(3000)
+      expect(authorizeCanvasLocalMediaSourceUrlMock).not.toHaveBeenCalled()
+      expect(resolveAuthorizedCanvasLocalMediaSourceUrlMock).not.toHaveBeenCalled()
+      expect(test.create).not.toHaveBeenCalled()
+    })
+
+    it.each(['ordinary', 'ocr'])(
+      'releases %s file allocations if preview resolution fails',
+      async (kind) => {
+        const test = setup()
+        officePreview.mockRejectedValue(new Error('preview failed'))
+        const file = new File(['text'], 'failed.txt')
+        if (kind === 'ordinary') await test.result.current.addFileToCanvas(file)
+        else
+          await test.result.current.addOcrResultToCanvas({
+            file,
+            ocrResult: { kind: 'text', text: 'text' }
+          })
+        expect(test.create).toHaveBeenCalledTimes(1)
+        expect(test.revoke).toHaveBeenCalledTimes(1)
+        test.unmount()
+        expect(test.revoke).toHaveBeenCalledTimes(1)
+      }
+    )
   })
 })

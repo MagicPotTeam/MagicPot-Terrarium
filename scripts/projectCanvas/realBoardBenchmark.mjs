@@ -20,6 +20,7 @@ import {
   collectProjectCanvasLargeImageResourceMetricsFromDomSnapshot,
   formatProjectCanvasLargeImageResourceMetrics
 } from './largeImageResourceMetrics.mjs'
+import { createRendererDiagnosticCollector } from './rendererDiagnostics.mjs'
 
 const CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS = [
   'workerPoolWorkerCount',
@@ -49,6 +50,12 @@ function parseFractionEnv(name, fallback) {
 const ELECTRON_LAUNCH_TIMEOUT_MS = 90000
 const FIRST_WINDOW_TIMEOUT_MS = 90000
 const HEALTH_TIMEOUT_MS = 120000
+const REAL_BOARD_VERBOSE_RENDERER_LOGS = /^(1|true|yes)$/i.test(
+  `${process.env.MAGICPOT_REAL_BOARD_VERBOSE_RENDERER_LOGS || ''}`.trim()
+)
+const REAL_BOARD_CAPTURE_CANVAS_IMPORT_DEBUG = /^(1|true|yes)$/i.test(
+  `${process.env.MAGICPOT_REAL_BOARD_CAPTURE_CANVAS_IMPORT_DEBUG || ''}`.trim()
+)
 const METRIC_WAIT_TIMEOUT_MS = Math.max(
   10000,
   Number.parseInt(process.env.MAGICPOT_REAL_BOARD_WAIT_MS || '180000', 10) || 180000
@@ -823,20 +830,68 @@ async function launchApp(userDataDir, sharedThumbnailCacheRoot) {
       ...(sharedThumbnailCacheArtifactRoot
         ? { MAGICPOT_TEST_ARTIFACT_ROOT: sharedThumbnailCacheArtifactRoot }
         : {}),
-      ...NON_INTRUSIVE_TEST_WINDOW_ENV
+      ...NON_INTRUSIVE_TEST_WINDOW_ENV,
+      ...(process.env.MAGICPOT_REAL_BOARD_SOFTWARE_GL
+        ? { MAGICPOT_REAL_BOARD_SOFTWARE_GL: process.env.MAGICPOT_REAL_BOARD_SOFTWARE_GL }
+        : {})
     },
     timeout: ELECTRON_LAUNCH_TIMEOUT_MS
   })
   const page = await app.firstWindow({ timeout: FIRST_WINDOW_TIMEOUT_MS })
   const fatalErrors = []
+  const rendererDiagnostics = createRendererDiagnosticCollector()
+  const gpuFeatureStatus = await readGpuFeatureStatus(app).catch(() => null)
+  const gpuProcessDiagnostics = await app
+    .evaluate(({ app: electronApp }) => {
+      const gpuProcess = electronApp.getGPUInfo
+      return {
+        featureStatus:
+          typeof electronApp.getGPUFeatureStatus === 'function'
+            ? electronApp.getGPUFeatureStatus()
+            : null,
+        gpuInfoAvailable: typeof gpuProcess === 'function'
+      }
+    })
+    .catch(() => null)
+  if (REAL_BOARD_CAPTURE_CANVAS_IMPORT_DEBUG) {
+    await page.addInitScript(() => {
+      const debugWindow = window
+      const debug = (debugWindow.__magicPotCanvasImportDebug ??= {})
+      const record = (event, payload = {}) => {
+        debug[event] = { at: Date.now(), ...payload }
+      }
+      document.addEventListener(
+        'change',
+        (event) => {
+          const target = event.target
+          if (
+            target instanceof HTMLInputElement &&
+            target.dataset.testid === 'project-canvas-import-input'
+          ) {
+            record('input-change', { fileCount: target.files?.length ?? 0 })
+          }
+        },
+        true
+      )
+      record('init')
+    })
+  }
 
   page.on('pageerror', (error) => {
+    rendererDiagnostics.record({ type: 'pageerror', text: error.stack || error.message })
+    if (REAL_BOARD_VERBOSE_RENDERER_LOGS) {
+      console.log(`[real-board:renderer:pageerror] ${error.message}`)
+    }
     if (isFatalPageError(error.message)) {
       fatalErrors.push(`pageerror: ${error.message}`)
     }
   })
   page.on('console', (message) => {
     const text = message.text()
+    rendererDiagnostics.record({ type: message.type(), text, location: message.location() })
+    if (REAL_BOARD_VERBOSE_RENDERER_LOGS && /\[Canvas\]|canvas|thumbnail/i.test(text)) {
+      console.log(`[real-board:renderer:${message.type()}] ${text}`)
+    }
     if (/Maximum update depth exceeded/i.test(text)) {
       fatalErrors.push(`console:${message.type()}: ${text}`)
       return
@@ -853,7 +908,14 @@ async function launchApp(userDataDir, sharedThumbnailCacheRoot) {
   })
 
   await waitForHealthyPage(page, fatalErrors)
-  return { app, page, fatalErrors }
+  return { app, page, fatalErrors, gpuFeatureStatus, gpuProcessDiagnostics, rendererDiagnostics }
+}
+
+async function readGpuFeatureStatus(app) {
+  return app.evaluate(({ app: electronApp }) => {
+    if (typeof electronApp.getGPUFeatureStatus !== 'function') return null
+    return electronApp.getGPUFeatureStatus()
+  })
 }
 
 async function readWindowPlacement(app) {
@@ -969,17 +1031,63 @@ async function getCanvasImportInput(page) {
   return fallbackImportInput
 }
 
-function buildImportFileBatches(stagedImages) {
+function buildImportFileBatches(stagedImages, configuredBatchSize = REAL_BOARD_IMPORT_BATCH_SIZE) {
+  const imageCount = stagedImages.length
   const batchSize =
-    REAL_BOARD_IMPORT_BATCH_SIZE > 0
-      ? Math.min(REAL_BOARD_IMPORT_BATCH_SIZE, stagedImages.length)
-      : stagedImages.length
-  const batchCount = Math.max(1, Math.ceil(stagedImages.length / batchSize))
+    imageCount === 0
+      ? 0
+      : configuredBatchSize > 0
+        ? Math.min(configuredBatchSize, imageCount)
+        : imageCount
+  const batchCount = imageCount > 0 ? Math.ceil(imageCount / batchSize) : 0
   return {
     enabled: batchCount > 1,
     batchSize,
     batchCount
   }
+}
+
+function summarizeImportBatchMetrics(metrics) {
+  return {
+    importedImageCount: metrics?.itemCounts?.totalImageItemCount ?? null,
+    totalItemCount: metrics?.itemCounts?.totalItemCount ?? null,
+    loadedImageCount: metrics?.webgl?.loadedImageCount ?? null,
+    failedImageCount: metrics?.webgl?.failedImageCount ?? null,
+    pendingImageCount: metrics?.webgl?.pendingImageCount ?? null,
+    residentImageCount: metrics?.webgl?.residentImageCount ?? null,
+    renderCount: metrics?.webgl?.renderCount ?? null,
+    spriteReconcilePassCount: metrics?.webgl?.spriteReconcilePassCount ?? null,
+    lastUpdateReason: metrics?.webgl?.lastUpdateReason ?? null
+  }
+}
+
+async function createImportBatchProgressError(page, context, cause) {
+  let observedMetrics
+  try {
+    const metricsSnapshot = await readBenchmarkMetrics(page)
+    observedMetrics = {
+      ...summarizeImportBatchMetrics(metricsSnapshot),
+      webgl: {
+        hasWebglContext: metricsSnapshot?.webgl?.hasWebglContext ?? null,
+        webglLayerPresent: metricsSnapshot?.webgl?.webglLayerPresent ?? null,
+        webglLayerReady: metricsSnapshot?.webgl?.webglLayerReady ?? null,
+        webglCanvasCount: metricsSnapshot?.webgl?.webglCanvasCount ?? null
+      }
+    }
+  } catch (metricsError) {
+    observedMetrics = {
+      error: toShortErrorMessage(metricsError)
+    }
+  }
+  const error = new Error(
+    `Real-board import batch ${context.phase} failed: scenario=${context.scenarioName}; ` +
+      `batch=${context.batchIndex + 1}/${context.batchCount}; batchSize=${context.batchSize}; ` +
+      `importedCount=${context.importedCount}; expectedCount=${context.expectedImageCount}; ` +
+      `stagedCount=${context.stagedCount}; observedMetrics=${JSON.stringify(observedMetrics)}; ` +
+      `cause=${toShortErrorMessage(cause)}`
+  )
+  error.cause = cause
+  return error
 }
 
 async function waitForBenchmarkImportedItemCount(page, expectedImageCount) {
@@ -1013,53 +1121,109 @@ async function importBenchmarkImageFiles(page, stagedImages, scenarioName) {
   for (let batchIndex = 0; batchIndex < plan.batchCount; batchIndex += 1) {
     const start = batchIndex * plan.batchSize
     const batch = stagedImages.slice(start, Math.min(stagedImages.length, start + plan.batchSize))
+    const expectedImageCount = importedCount + batch.length
     const batchLabel = `${scenarioName}:import-batch-${batchIndex + 1}-of-${plan.batchCount}`
-    const importInput = await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:find-input`, () =>
-      getCanvasImportInput(page)
-    )
-    // Keep this path-only upload bounded. Do not pass payload buffers here: Playwright would
-    // base64-encode them through CDP and inflate benchmark Node/Electron memory.
-    for (const filePath of batch) {
-      const expectedFileCount = importedCount + 1
-      await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:set-input-file`, () =>
-        importInput.setInputFiles([filePath], { timeout: 60000 })
-      )
-      await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:wait-input-file`, () =>
-        waitForBenchmarkImportedItemCount(page, expectedFileCount)
-      )
-      await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:clear-input-file`, () =>
-        importInput.setInputFiles([], { timeout: 10000 })
-      )
-      importedCount = expectedFileCount
+    const context = {
+      scenarioName,
+      batchIndex,
+      batchCount: plan.batchCount,
+      batchSize: batch.length,
+      stagedCount: stagedImages.length,
+      importedCount,
+      expectedImageCount,
+      phase: 'find-input'
     }
+
+    console.log(
+      `[real-board] ${batchLabel} phase=begin imported=${importedCount} ` +
+        `batchSize=${batch.length} expected=${expectedImageCount}`
+    )
+
+    try {
+      const importInput = await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:find-input`, () =>
+        getCanvasImportInput(page)
+      )
+
+      // Keep this path-only upload bounded. Do not pass payload buffers here: Playwright would
+      // base64-encode them through CDP and inflate benchmark Node/Electron memory.
+      context.phase = 'upload'
+      await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:set-input-files`, () =>
+        importInput.setInputFiles(batch, { timeout: 60000 })
+      )
+      const inputFileCount = await page
+        .evaluate(() => {
+          const input = document.querySelector('input[data-testid="project-canvas-import-input"]')
+          return input instanceof HTMLInputElement ? (input.files?.length ?? 0) : null
+        })
+        .catch(() => null)
+      const canvasImportDebug = REAL_BOARD_CAPTURE_CANVAS_IMPORT_DEBUG
+        ? await page
+            .evaluate(() => {
+              return window.__magicPotCanvasImportDebug ?? null
+            })
+            .catch(() => null)
+        : null
+      console.log(
+        `[real-board] ${batchLabel} phase=uploaded imported=${importedCount} ` +
+          `batchSize=${batch.length} inputFileCount=${inputFileCount} expected=${expectedImageCount}` +
+          `${canvasImportDebug ? ` debug=${JSON.stringify(canvasImportDebug)}` : ''}`
+      )
+
+      context.phase = 'wait-imported-items'
+      await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:wait-imported-items`, () =>
+        waitForBenchmarkImportedItemCount(page, expectedImageCount)
+      )
+      console.log(
+        `[real-board] ${batchLabel} phase=imported imported=${expectedImageCount} ` +
+          `expected=${expectedImageCount}`
+      )
+
+      context.phase = 'clear-input-files'
+      await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:clear-input-files`, async () => {
+        try {
+          await importInput.setInputFiles([], { timeout: 10000 })
+        } catch {
+          await page
+            .evaluate(() => {
+              const input = document.querySelector(
+                'input[data-testid="project-canvas-import-input"]'
+              )
+              if (input instanceof HTMLInputElement) {
+                input.value = ''
+              }
+            })
+            .catch(() => {})
+        }
+      })
+      importedCount = expectedImageCount
+      console.log(
+        `[real-board] ${batchLabel} phase=cleared imported=${importedCount} ` +
+          `expected=${expectedImageCount}`
+      )
+    } catch (error) {
+      throw await createImportBatchProgressError(page, context, error)
+    }
+
     batch.length = 0
-    await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:clear-input-files`, async () => {
-      try {
-        await importInput.setInputFiles([], { timeout: 10000 })
-      } catch {
-        await page
-          .evaluate(() => {
-            const input = document.querySelector('input[data-testid="project-canvas-import-input"]')
-            if (input instanceof HTMLInputElement) {
-              input.value = ''
-            }
-          })
-          .catch(() => {})
-      }
-    })
     runBenchmarkGarbageCollection(`${batchLabel}:after-clear-input-files`)
 
-    if (REAL_BOARD_IMPORT_BATCH_SETTLE_MS > 0) {
-      await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:settle`, () =>
-        page.waitForTimeout(REAL_BOARD_IMPORT_BATCH_SETTLE_MS)
-      )
-    }
+    try {
+      if (REAL_BOARD_IMPORT_BATCH_SETTLE_MS > 0) {
+        context.phase = 'settle'
+        await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:settle`, () =>
+          page.waitForTimeout(REAL_BOARD_IMPORT_BATCH_SETTLE_MS)
+        )
+      }
 
-    if (plan.enabled && REAL_BOARD_IMPORT_BATCH_WAIT_METRICS) {
-      await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:wait-imported-items`, () =>
-        waitForBenchmarkImportedItemCount(page, importedCount)
-      )
-      runBenchmarkGarbageCollection(`${batchLabel}:after-wait-imported-items`)
+      if (plan.enabled && REAL_BOARD_IMPORT_BATCH_WAIT_METRICS) {
+        context.phase = 'wait-metrics-between-batches'
+        await BENCHMARK_MEMORY_WATCHDOG.guard(`${batchLabel}:wait-imported-items`, () =>
+          waitForBenchmarkImportedItemCount(page, importedCount)
+        )
+        runBenchmarkGarbageCollection(`${batchLabel}:after-wait-imported-items`)
+      }
+    } catch (error) {
+      throw await createImportBatchProgressError(page, context, error)
     }
   }
 
@@ -1077,7 +1241,16 @@ async function importBenchmarkImageFiles(page, stagedImages, scenarioName) {
 }
 
 async function collectImageFiles(rootDir) {
-  const entries = await fs.readdir(rootDir, { withFileTypes: true })
+  let entries
+  try {
+    entries = await fs.readdir(rootDir, { withFileTypes: true })
+  } catch (error) {
+    const code = error && typeof error === 'object' ? error.code : undefined
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      throw new Error(`Real-board corpus directory is not accessible: ${rootDir}`)
+    }
+    throw error
+  }
   const files = []
   for (const entry of entries) {
     const absolutePath = path.join(rootDir, entry.name)
@@ -1915,7 +2088,15 @@ function readProjectCanvasRealBoardMetricsFromDomSnapshot(snapshotInput) {
       ),
       lastUpdateReason:
         snapshotWebgl?.lastUpdateReason || rootDataset.projectCanvasWebglLastUpdateReason || '',
-      hasWebglContext: Boolean(domMetrics.hasWebglContext)
+      hasWebglContext: Boolean(domMetrics.hasWebglContext),
+      webglLayerPresent: Boolean(domMetrics.webglLayerPresent),
+      webglLayerReady: Boolean(domMetrics.webglLayerReady),
+      webglCanvasCount: Number(domMetrics.webglCanvasCount || 0),
+      stageWebglInitialized: Boolean(domMetrics.stageWebglInitialized),
+      stageWebglPrimaryImageCount: Number(domMetrics.stageWebglPrimaryImageCount || 0),
+      stageWebglLastUpdateReason: domMetrics.stageWebglLastUpdateReason || '',
+      fallbackImageCount: Number(domMetrics.fallbackImageCount || 0),
+      fallbackWebglUnavailableCount: Number(domMetrics.fallbackWebglUnavailableCount || 0)
     },
     thumbnailCache: {
       metricAvailable: thumbnailCacheMetricAvailable,
@@ -1986,6 +2167,7 @@ async function readBenchmarkMetrics(page) {
     }
 
     const webglCanvas = document.querySelector('.project-canvas-webgl-layer canvas')
+    const webglLayer = document.querySelector('.project-canvas-webgl-layer')
     const overlayRoot = document.querySelector('[data-project-canvas-overlay-total-count]')
     const clientRect = root.getBoundingClientRect()
     const drawableRect =
@@ -2018,6 +2200,16 @@ async function readBenchmarkMetrics(page) {
         hasWebglContext: Boolean(
           webglCanvas instanceof HTMLCanvasElement &&
           (webglCanvas.getContext('webgl2') || webglCanvas.getContext('webgl'))
+        ),
+        webglLayerPresent: webglLayer instanceof HTMLElement,
+        webglLayerReady: webglLayer?.dataset.canvasWebglReady === 'true',
+        webglCanvasCount: document.querySelectorAll('.project-canvas-webgl-layer canvas').length,
+        stageWebglInitialized: root.dataset.projectCanvasWebglInitialized === 'true',
+        stageWebglPrimaryImageCount: Number(root.dataset.projectCanvasWebglPrimaryImageCount || 0),
+        stageWebglLastUpdateReason: root.dataset.projectCanvasWebglLastUpdateReason || '',
+        fallbackImageCount: Number(root.dataset.projectCanvasFallbackImageCount || 0),
+        fallbackWebglUnavailableCount: Number(
+          root.dataset.projectCanvasWebglUnavailableFallbackImageCount || 0
         )
       }
     }
@@ -3023,8 +3215,39 @@ function buildRealBoardAggregateReport({
   ].sort((left, right) => resultKey(left).localeCompare(resultKey(right)))
   const passedResults = mergedResults.filter((result) => result.acceptance?.passed === true).length
   const failedResults = mergedResults.length - passedResults
-  const acceptanceAllPassed = mergedResults.length > 0 && failedResults === 0
   const officialProfile = profileMetadata.officialProfile === true
+  const requiredCachePasses = officialProfile
+    ? Array.isArray(profileMetadata.policy?.cachePasses)
+      ? profileMetadata.policy.cachePasses
+      : []
+    : []
+  const missingOfficialCachePasses = []
+  if (officialProfile && requiredCachePasses.length > 0) {
+    const workloadPasses = new Map()
+    for (const result of mergedResults) {
+      const workloadKey = `${result.corpusLabel || 'unknown'}:${result.scenarioMode || 'unknown'}:${result.benchmarkImageCount || REAL_BOARD_IMAGE_COUNT}`
+      const passes = workloadPasses.get(workloadKey) || new Set()
+      if (result.cachePass) {
+        passes.add(result.cachePass)
+      }
+      workloadPasses.set(workloadKey, passes)
+    }
+    for (const [workloadKey, passes] of workloadPasses) {
+      for (const cachePass of requiredCachePasses) {
+        if (!passes.has(cachePass)) {
+          missingOfficialCachePasses.push(`${workloadKey}:${cachePass}`)
+        }
+      }
+    }
+  }
+  const aggregateDiagnosticReasons = [...(profileMetadata.diagnosticReasons ?? [])]
+  if (missingOfficialCachePasses.length > 0) {
+    aggregateDiagnosticReasons.push(
+      `Missing official benchmark result(s): ${missingOfficialCachePasses.join(', ')}.`
+    )
+  }
+  const acceptanceAllPassed =
+    mergedResults.length > 0 && failedResults === 0 && missingOfficialCachePasses.length === 0
   const officialAllPassed = acceptanceAllPassed && officialProfile
 
   return {
@@ -3033,8 +3256,8 @@ function buildRealBoardAggregateReport({
     artifactRoot: aggregateRoot,
     profile: profileMetadata,
     officialProfile,
-    diagnosticReasons: profileMetadata.diagnosticReasons ?? [],
-    cachePasses: REAL_BOARD_CACHE_PASSES,
+    diagnosticReasons: aggregateDiagnosticReasons,
+    cachePasses: requiredCachePasses.length > 0 ? requiredCachePasses : REAL_BOARD_CACHE_PASSES,
     resultCount: mergedResults.length,
     passedResults,
     failedResults,
@@ -3416,6 +3639,12 @@ async function runRealBoardScenarioPass({
       scenarioRoot,
       windowPlacement,
       windowPlacementAssessment: windowPlacementResult.assessment,
+      gpuFeatureStatus: appHandle.gpuFeatureStatus ?? null,
+      gpuProcessDiagnostics: appHandle.gpuProcessDiagnostics ?? null,
+      rendererDiagnostics: appHandle.rendererDiagnostics.getReport(),
+      softwareGlDiagnostic: Boolean(
+        /^(1|true|yes)$/i.test(`${process.env.MAGICPOT_REAL_BOARD_SOFTWARE_GL || ''}`.trim())
+      ),
       frameTime: interactionBenchmark.frameTime,
       hotPathReactCommits: interactionBurst.hotPathReactCommits,
       interactionBurst,
@@ -3483,6 +3712,7 @@ async function runRealBoardScenarioPass({
       benchmarkImageCount: REAL_BOARD_IMAGE_COUNT,
       scenarioRoot,
       errorPath,
+      rendererDiagnostics: appHandle?.rendererDiagnostics.getReport() ?? null,
       memoryWatchdog: BENCHMARK_MEMORY_WATCHDOG.getReport(),
       profile: buildRealBoardBenchmarkProfileMetadata({
         scenarioMode: REAL_BOARD_MODE,
@@ -3501,6 +3731,19 @@ async function runRealBoardScenarioPass({
       }
     }
   } finally {
+    if (appHandle) {
+      try {
+        await fs.writeFile(
+          path.join(scenarioRoot, 'renderer-diagnostics.json'),
+          JSON.stringify(appHandle.rendererDiagnostics.getReport(), null, 2),
+          'utf8'
+        )
+      } catch (error) {
+        console.error(
+          `[real-board] Could not write renderer diagnostics: ${toShortErrorMessage(error)}`
+        )
+      }
+    }
     await closeBenchmarkApp(appHandle, userDataDir)
     BENCHMARK_MEMORY_WATCHDOG.unregisterAppHandle(appHandle)
   }

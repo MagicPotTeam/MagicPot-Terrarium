@@ -9,7 +9,7 @@ import {
   initializeLocalMediaAccess,
   resolveAuthorizedLocalMediaPath
 } from './localMediaAccess'
-import { getCurrentUserDataDirectoryState } from './config/userDataDirectory'
+import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
 
 const silentErrorCodes = [
   'ECONNRESET',
@@ -166,16 +166,6 @@ export function withLocalMediaCorsHeaders(response: Response, request?: Request)
   })
 }
 
-function getLocalMediaAllowedRoots(): string[] {
-  const storageState = getCurrentUserDataDirectoryState()
-  return [
-    app.getPath('userData'),
-    path.join(app.getPath('temp'), 'magicpot-local-media'),
-    storageState.projectRoot,
-    storageState.autoSaveRoot
-  ].map((root) => path.resolve(root))
-}
-
 async function handleLocalMediaRequest(request: Request): Promise<Response> {
   try {
     if (!allowedLocalMediaMethods.has(request.method.toUpperCase())) {
@@ -217,7 +207,10 @@ function configureDefaultSession(): void {
 
 export function initializeMainProcessRuntime(getMainWindow: () => BrowserWindow | null): void {
   app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled')
-  app.commandLine.appendSwitch('disable-features', 'IsolateOrigins,site-per-process')
+  if (/^(1|true|yes)$/i.test(`${process.env.MAGICPOT_REAL_BOARD_SOFTWARE_GL || ''}`.trim())) {
+    app.commandLine.appendSwitch('disable-gpu')
+    app.commandLine.appendSwitch('disable-gpu-compositing')
+  }
   app.commandLine.appendSwitch('disable-site-isolation-trials')
 
   registerProcessErrorHandlers()

@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.25)
+project(native_canvas_experiment LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_library(native_canvas_kernel STATIC src/scene_kernel.cpp)
+target_include_directories(native_canvas_kernel PUBLIC include)
+target_compile_features(native_canvas_kernel PUBLIC cxx_std_20)
+if (MSVC)
+  target_compile_options(native_canvas_kernel PRIVATE /W4 /permissive- /EHsc)
+else()
+  target_compile_options(native_canvas_kernel PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(native_canvas_scene_kernel_test tests/scene_kernel_test.cpp)
+target_link_libraries(native_canvas_scene_kernel_test PRIVATE native_canvas_kernel)
+add_executable(native_canvas_scene_benchmark benchmarks/scene_benchmark.cpp)
+target_link_libraries(native_canvas_scene_benchmark PRIVATE native_canvas_kernel)
+
+include(CTest)
+if (BUILD_TESTING)
+  add_test(NAME native_canvas_scene_kernel_test COMMAND native_canvas_scene_kernel_test)
+endif()

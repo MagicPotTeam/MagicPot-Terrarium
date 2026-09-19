@@ -1,4 +1,6 @@
 import { normalizeLocalMediaUrl } from '../ChatPage/chatPageShared'
+import { createCanvasImageObjectUrlHandle } from './canvasImageObjectUrlRegistry'
+let nextImageFileSourceId = 0
 
 type ElectronCanvasFile = File & {
   path?: string
@@ -99,15 +101,23 @@ export async function resolveAuthorizedCanvasLocalMediaSourceUrl(
 
 export async function resolveCanvasImageFileSource(
   file: File,
-  readFileAsDataURL: (file: File) => Promise<string>
+  readFileAsDataURL: (file: File) => Promise<string>,
+  signal?: AbortSignal
 ): Promise<string> {
+  signal?.throwIfAborted()
   const localMediaUrl = await authorizeCanvasLocalMediaSourceUrl(file)
+  signal?.throwIfAborted()
   if (localMediaUrl) {
     return localMediaUrl
   }
 
   if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
-    return URL.createObjectURL(file)
+    const handle = createCanvasImageObjectUrlHandle(
+      `canvas-file-source:${++nextImageFileSourceId}`,
+      file
+    )
+    if (!handle) throw new Error('Canvas image Object URL budget exhausted.')
+    return handle.url
   }
 
   return await readFileAsDataURL(file)

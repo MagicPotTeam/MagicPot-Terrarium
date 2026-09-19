@@ -1,6 +1,6 @@
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -18,6 +18,10 @@ const result = spawnSync(
     stdio: 'inherit'
   }
 )
+if (result.error) {
+  console.error(`Failed to run cargo: ${result.error.message}`)
+  process.exit(1)
+}
 if (result.status !== 0) process.exit(result.status ?? 1)
 const source = path.join(
   repoRoot,

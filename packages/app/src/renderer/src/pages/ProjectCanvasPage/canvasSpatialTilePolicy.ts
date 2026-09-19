@@ -230,7 +230,27 @@ export function buildCanvasSpatialTilePolicy(
     geometry: tile.geometry,
     scaleDenominator,
     tileKey: tile.key,
-    priority: visibleKeys.has(tile.key) ? ('visible' as const) : ('overscan' as const)
+    priority: visibleKeys.has(tile.key) ? ('visible' as const) : ('overscan' as const),
+    ...(input.sourceIdentity?.kind === 'local-file'
+      ? {
+          nativeRegionRequest: {
+            sourcePath: input.sourceIdentity.canonicalPath,
+            allowedRoots: [],
+            sourceWidth: input.sourceWidth,
+            sourceHeight: input.sourceHeight,
+            x: tile.geometry.decodeRect.x * scaleDenominator,
+            y: tile.geometry.decodeRect.y * scaleDenominator,
+            width: tile.geometry.decodeRect.width * scaleDenominator,
+            height: tile.geometry.decodeRect.height * scaleDenominator,
+            outputWidth: tile.geometry.decodeRect.width,
+            outputHeight: tile.geometry.decodeRect.height,
+            maxOutputPixels: 4 * 1024 * 1024,
+            maxOutputBytes: 32 * 1024 * 1024,
+            timeoutMs: 15_000,
+            cacheRoot: ''
+          }
+        }
+      : {})
   }))
   return {
     enabled: true,

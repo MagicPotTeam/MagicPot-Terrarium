@@ -16,6 +16,10 @@ const result = spawnSync(cargo, cargoArgs, {
   cwd: repoRoot,
   stdio: 'inherit'
 })
+if (result.error) {
+  console.error(`Failed to run cargo: ${result.error.message}`)
+  process.exit(1)
+}
 if (result.status !== 0) {
   process.exit(result.status ?? 1)
 }

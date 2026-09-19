@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   createCanvasLocalImageObjectUrl,
+  createCanvasLocalImageObjectUrlHandle,
   readCanvasLocalImageBlobFromSource,
   resolveCanvasLocalFilePathFromSource
 } from './canvasLocalImageSource'
@@ -71,6 +72,28 @@ describe('canvasLocalImageSource', () => {
     )
     expect(readImageFromPath).not.toHaveBeenCalled()
     expect((createObjectUrl.mock.calls[0]?.[0] as Blob | undefined)?.type).toBe('image/png')
+  })
+
+  it('returns an idempotent object URL ownership handle', async () => {
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: { resolveAuthorizedLocalMediaPath: vi.fn(async (filePath: string) => filePath) }
+    })
+    globalThis.fetch = vi.fn(async () => new Response(new Uint8Array([1, 2, 3]))) as typeof fetch
+    const createObjectUrl = vi.fn((_blob: Blob) => 'blob:owned')
+    const revokeObjectUrl = vi.fn()
+    URL.createObjectURL = createObjectUrl as unknown as typeof URL.createObjectURL
+    URL.revokeObjectURL = revokeObjectUrl as typeof URL.revokeObjectURL
+
+    const handle = await createCanvasLocalImageObjectUrlHandle(
+      'local-media:///C:/Users/me/large.png',
+      'large.png'
+    )
+    expect(handle?.url).toBe('blob:owned')
+    handle?.revoke()
+    handle?.revoke()
+    expect(revokeObjectUrl).toHaveBeenCalledTimes(1)
+    expect(revokeObjectUrl).toHaveBeenCalledWith('blob:owned')
   })
 
   it('aborts an authorized local image fetch without swallowing the abort', async () => {

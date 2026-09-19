@@ -32,6 +32,9 @@ describe('local media file intake IPC', () => {
     handleMock.mockReset()
     authorizeMock.mockReset()
     resolveMock.mockReset()
+    delete process.env.MAGICPOT_PROJECT_CANVAS_REAL_BOARD_BENCHMARK
+    delete process.env.MAGICPOT_REAL_BOARD_SHARED_THUMBNAIL_CACHE_ROOT
+    delete process.env.MAGICPOT_TEST_ARTIFACT_ROOT
   })
 
   it('registers async handlers before a window exists and trusts only the current main renderer', () => {
@@ -69,5 +72,31 @@ describe('local media file intake IPC', () => {
       expect.stringMatching(/C:[\\/]project/),
       expect.stringMatching(/C:[\\/]autosave/)
     ])
+  })
+
+  it('shares the benchmark cache-only scope and never grants broad artifacts', () => {
+    process.env.MAGICPOT_PROJECT_CANVAS_REAL_BOARD_BENCHMARK = '1'
+    process.env.MAGICPOT_REAL_BOARD_SHARED_THUMBNAIL_CACHE_ROOT = 'C:/shared-thumbnail-cache'
+    process.env.MAGICPOT_TEST_ARTIFACT_ROOT = 'C:/artifacts'
+    const mainWindow: any = {
+      isDestroyed: () => false,
+      webContents: { isDestroyed: () => false }
+    }
+    registerLocalMediaFileIntakeIpc(() => mainWindow)
+
+    const resolveHandler = handleMock.mock.calls[1]?.[1]
+    resolveMock.mockReturnValue('C:/shared-thumbnail-cache/image.webp')
+    expect(
+      resolveHandler({ sender: mainWindow.webContents }, 'C:/shared-thumbnail-cache/image.webp')
+    ).toBe('C:/shared-thumbnail-cache/image.webp')
+
+    expect(resolveMock).toHaveBeenCalledWith('C:/shared-thumbnail-cache/image.webp', [
+      expect.stringMatching(/C:[\\/]userData/),
+      expect.stringMatching(/C:[\\/]temp[\\/]magicpot-local-media/),
+      expect.stringMatching(/C:[\\/]project/),
+      expect.stringMatching(/C:[\\/]autosave/),
+      expect.stringMatching(/C:[\\/]shared-thumbnail-cache/)
+    ])
+    expect(resolveMock.mock.calls[0][1]).not.toContain(expect.stringMatching(/artifacts/))
   })
 })

@@ -148,6 +148,25 @@ describe('canvas spatial tile policy', () => {
     ).toBe('not-visible')
   })
 
+  it('does not expose thumbnail cache roots as native source authorization roots', () => {
+    const localIdentity = {
+      version: 1 as const,
+      kind: 'local-file' as const,
+      canonicalPath: 'C:/images/large.png',
+      sizeBytes: 10,
+      lastModifiedMs: 1,
+      cacheKey: 'local-large',
+      cacheRootDir: 'C:/cache'
+    }
+    const decision = buildCanvasSpatialTilePolicy({ ...base, sourceIdentity: localIdentity })
+    expect(decision.tasks.length).toBeGreaterThan(0)
+    expect(decision.tasks[0]?.nativeRegionRequest).toMatchObject({
+      sourcePath: 'C:/images/large.png',
+      allowedRoots: [],
+      cacheRoot: ''
+    })
+  })
+
   it('builds visible and overscan tasks without limiting task count', () => {
     const decision = buildCanvasSpatialTilePolicy({
       ...base,

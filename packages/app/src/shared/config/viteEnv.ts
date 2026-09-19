@@ -9,5 +9,11 @@ export const UPDATE_PROVIDER_OWNER = import.meta.env.VITE_MAGICPOT_UPDATE_OWNER 
 export const UPDATE_PROVIDER_REPO = import.meta.env.VITE_MAGICPOT_UPDATE_REPO || 'magicpot-open'
 export const UPDATE_PROVIDER_CHANNEL = import.meta.env.VITE_MAGICPOT_UPDATE_CHANNEL || 'latest'
 
+// Experimental renderer paths remain opt-in. Pure builds and tests must keep
+// the established Pixi image path unless explicitly enabled by the environment.
+export const PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED = /^(1|true|yes)$/i.test(
+  import.meta.env.VITE_PROJECT_CANVAS_SPATIAL_TILE || ''
+)
+
 // Values set through Vite define.
 export const PACKAGE_VERSION = import.meta.env.PACKAGE_VERSION

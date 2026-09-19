@@ -77,6 +77,31 @@ export type CanvasThumbnailNativeResp = {
   mimeType: 'image/png'
 }
 
+export type CanvasThumbnailNativeRegionReq = {
+  fullPath: string
+  x: number
+  y: number
+  width: number
+  height: number
+  outputWidth?: number
+  outputHeight?: number
+  maxOutputPixels?: number
+  maxOutputBytes?: number
+}
+
+export type CanvasThumbnailNativeRegionResp = {
+  data: Uint8Array
+  sourceWidth: number
+  sourceHeight: number
+  x: number
+  y: number
+  width: number
+  height: number
+  outputWidth: number
+  outputHeight: number
+  mimeType: 'image/png'
+}
+
 export type CanvasThumbnailGenerateSetReq = {
   fullPath: string
   cacheRootDir?: string
@@ -110,6 +135,7 @@ export type CanvasThumbnailSvc = {
   writeThumbnailSet(req: CanvasThumbnailWriteSetReq): Promise<CanvasThumbnailWriteSetResp>
   generateThumbnailSet(req: CanvasThumbnailGenerateSetReq): Promise<CanvasThumbnailGenerateSetResp>
   createNativeThumbnail(req: CanvasThumbnailNativeReq): Promise<CanvasThumbnailNativeResp>
+  createNativeRegion(req: CanvasThumbnailNativeRegionReq): Promise<CanvasThumbnailNativeRegionResp>
 }
 
 export const canvasThumbnailSvcDef: ServiceDefSheet<CanvasThumbnailSvc> = {
@@ -129,6 +155,9 @@ export const canvasThumbnailSvcDef: ServiceDefSheet<CanvasThumbnailSvc> = {
     type: 'unary'
   },
   createNativeThumbnail: {
+    type: 'unary'
+  },
+  createNativeRegion: {
     type: 'unary'
   }
 }

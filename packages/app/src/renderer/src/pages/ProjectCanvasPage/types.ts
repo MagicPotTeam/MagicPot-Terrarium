@@ -10,13 +10,7 @@ import type { CanvasImageSourceIdentity, CanvasImageThumbnailSet } from './canva
 export type CanvasItemType = 'image' | 'model3d' | 'video' | 'text' | 'annotation' | 'html' | 'file'
 
 export type CanvasProvenanceSourceKind =
-  | 'magicpot-native'
-  | 'figma'
-  | 'psd'
-  | 'psb'
-  | 'svg'
-  | 'imported-file'
-  | 'external'
+  'magicpot-native' | 'figma' | 'psd' | 'psb' | 'svg' | 'imported-file' | 'external'
 
 export interface CanvasProvenanceSource {
   kind: CanvasProvenanceSourceKind
@@ -103,6 +97,7 @@ export interface CanvasImageItem extends CanvasItemBase {
   src: string // data URL or object URL
   fileName?: string
   sourceFile?: Blob
+  sourceUrlOwned?: boolean
   sizeBytes?: number
   hasAlpha?: boolean
   image?: CanvasImageAsset
@@ -172,6 +167,7 @@ export interface CanvasFileItem extends CanvasItemBase {
   src: string // object URL or file path
   fileName: string
   sourceFile?: Blob
+  sourceUrlOwned?: boolean
   mimeType: string
   fileKind: CanvasFileKind
   sizeBytes?: number

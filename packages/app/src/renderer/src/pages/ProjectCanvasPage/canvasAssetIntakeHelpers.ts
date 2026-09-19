@@ -9,9 +9,11 @@ import type { CanvasImageSourceIdentity, CanvasImageThumbnailSet } from './canva
 import {
   canReadCanvasLocalImageSource,
   createCanvasLocalImageObjectUrl,
+  createCanvasLocalImageObjectUrlHandle,
   readCanvasLocalImageBlobFromSource
 } from './canvasLocalImageSource'
 import { resolveAuthorizedCanvasLocalMediaSourceUrl } from './canvasLocalFileSource'
+import { createCanvasImageObjectUrlHandle } from './canvasImageObjectUrlRegistry'
 
 export const CANVAS_IMAGE_PROXY_MAX_SIDE = 2048
 export const CANVAS_IMAGE_PROXY_SMALL_BATCH_MAX_SIDE = 1024
@@ -38,6 +40,7 @@ export type CanvasImageSourceInput =
       sourceWidthHint?: number
       sourceHeightHint?: number
       sourceFile?: Blob
+      sourceUrlOwned?: boolean
       sourceIdentity?: CanvasImageSourceIdentity
       thumbnailSet?: CanvasImageThumbnailSet
       provenance?: CanvasProvenanceSource
@@ -125,13 +128,19 @@ async function buildCanvasImagePreview(
     context.drawImage(image, 0, 0, width, height)
 
     let previewSrc: string | null = null
+    let revokePreviewSrc: (() => void) | null = null
 
     if (typeof canvas.toBlob === 'function') {
       const blob = await new Promise<Blob | null>((resolve) => {
         canvas.toBlob((value) => resolve(value), 'image/png')
       })
       if (blob) {
-        previewSrc = URL.createObjectURL(blob)
+        const previewHandle = createCanvasImageObjectUrlHandle(
+          `canvas-intake:preview:${width}x${height}:${blob.size}`,
+          blob
+        )
+        previewSrc = previewHandle?.url ?? null
+        revokePreviewSrc = previewHandle?.revoke ?? null
       }
     }
 
@@ -143,7 +152,9 @@ async function buildCanvasImagePreview(
       const { img } = await loadImageFromSrc(previewSrc)
       return img
     } finally {
-      if (previewSrc.startsWith('blob:')) {
+      if (revokePreviewSrc) {
+        revokePreviewSrc()
+      } else if (previewSrc.startsWith('blob:')) {
         URL.revokeObjectURL(previewSrc)
       }
     }
@@ -503,7 +514,9 @@ export async function loadImageFromSrc(src: string): Promise<LoadedCanvasImage> 
   return loadImageElementFromSrc(authorizedSource, src)
 }
 
-async function createComfyImageObjectUrl(item: CanvasImageItem): Promise<string | null> {
+async function createComfyImageObjectUrl(
+  item: CanvasImageItem
+): Promise<{ url: string; revoke: () => void } | null> {
   if (!item.fileItem?.filename || !window.api?.svcComfy) {
     return null
   }
@@ -511,7 +524,11 @@ async function createComfyImageObjectUrl(item: CanvasImageItem): Promise<string 
   try {
     const response = await window.api.svcComfy.getView(item.fileItem)
     const mimeType = normalizeFileMimeType(item.fileItem.filename, undefined, 'image/png')
-    return URL.createObjectURL(new Blob([response.result as BlobPart], { type: mimeType }))
+    const handle = createCanvasImageObjectUrlHandle(
+      `canvas-intake:comfy:${item.id}`,
+      new Blob([response.result as BlobPart], { type: mimeType })
+    )
+    return handle
   } catch (error) {
     console.warn('[Canvas] Failed to reload image from Comfy file item:', item.id, error)
     return null
@@ -521,39 +538,44 @@ async function createComfyImageObjectUrl(item: CanvasImageItem): Promise<string 
 async function loadHydratableCanvasImageSource(
   item: CanvasImageItem,
   loadImageFromSrcFn: (src: string) => Promise<LoadedCanvasImage>
-): Promise<{ src: string; loaded: LoadedCanvasImage; revokeSrc?: string } | null> {
+): Promise<{ src: string; loaded: LoadedCanvasImage; revoke?: () => void } | null> {
   try {
     return {
       src: item.src,
       loaded: await loadImageFromSrcFn(item.src)
     }
   } catch {
-    const recoveredLocalSrc = await createCanvasLocalImageObjectUrl(item.src, item.fileName)
-    if (recoveredLocalSrc) {
+    const recoveredLocalHandle = await createCanvasLocalImageObjectUrlHandle(
+      item.src,
+      item.fileName,
+      `canvas-intake:local:${item.id}`
+    )
+    if (recoveredLocalHandle) {
       try {
         return {
           src: item.src,
-          loaded: await loadImageFromSrcFn(recoveredLocalSrc),
-          revokeSrc: recoveredLocalSrc
+          loaded: await loadImageFromSrcFn(recoveredLocalHandle.url),
+          revoke: recoveredLocalHandle.revoke
         }
       } catch (error) {
-        URL.revokeObjectURL(recoveredLocalSrc)
+        recoveredLocalHandle.revoke()
         console.warn('[Canvas] Failed to hydrate recovered local image source:', item.id, error)
       }
     }
 
     const recoveredSrc = await createComfyImageObjectUrl(item)
-    if (!recoveredSrc || recoveredSrc === item.src) {
+    if (!recoveredSrc || recoveredSrc.url === item.src) {
       return null
     }
 
     try {
       return {
-        src: recoveredSrc,
-        loaded: await loadImageFromSrcFn(recoveredSrc)
+        src: recoveredSrc.url,
+        loaded: await loadImageFromSrcFn(recoveredSrc.url),
+        revoke: recoveredSrc.revoke
       }
     } catch (error) {
-      URL.revokeObjectURL(recoveredSrc)
+      recoveredSrc.revoke()
       console.warn('[Canvas] Failed to hydrate recovered Comfy image source:', item.id, error)
       return null
     }
@@ -705,13 +727,14 @@ export async function resolveCanvasImageThumbnailDisplayAsset({
       thumbnailSet: resolvedThumbnailSet
     }
   } catch (error) {
-    const recoveredThumbnailSrc = await createCanvasLocalImageObjectUrl(
+    const recoveredThumbnailHandle = await createCanvasLocalImageObjectUrlHandle(
       thumbnailLevel.src,
-      thumbnailLevel.filename
+      thumbnailLevel.filename,
+      `canvas-intake:thumbnail:${src}:${thumbnailLevel.maxSide}`
     )
-    if (recoveredThumbnailSrc) {
+    if (recoveredThumbnailHandle) {
       try {
-        const { img } = await loadImageFromSrcFn(recoveredThumbnailSrc)
+        const { img } = await loadImageFromSrcFn(recoveredThumbnailHandle.url)
         return {
           image: img,
           thumbnailSet: resolvedThumbnailSet
@@ -723,7 +746,7 @@ export async function resolveCanvasImageThumbnailDisplayAsset({
           recoveredError
         )
       } finally {
-        URL.revokeObjectURL(recoveredThumbnailSrc)
+        recoveredThumbnailHandle.revoke()
       }
     }
 
@@ -866,8 +889,6 @@ export async function hydrateCanvasImageItemForCanvas(
     console.warn('[Canvas] Failed to hydrate imported image, skipping:', item.id)
     return null
   } finally {
-    if (resolvedSource.revokeSrc) {
-      URL.revokeObjectURL(resolvedSource.revokeSrc)
-    }
+    resolvedSource.revoke?.()
   }
 }

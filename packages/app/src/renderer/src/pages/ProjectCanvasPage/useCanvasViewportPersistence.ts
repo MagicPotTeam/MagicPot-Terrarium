@@ -12,6 +12,7 @@ import i18next from 'i18next'
 import type { Config } from '@shared/config/config'
 import type { CanvasFigmaBinding } from '@shared/figma'
 import { clearCanvasItems, loadCanvasItems, saveCanvasItems } from './canvasStorage'
+import { releaseCanvasImageObjectUrl } from './canvasImageObjectUrlRegistry'
 import { getExactSelectedGroupBounds, resolveCanvasFitBounds } from './canvasFitBoundsUtils'
 import type { CanvasExportBounds } from './groupPlaybackUtils'
 import type { CanvasGroup, CanvasGroupBranch, CanvasImageItem, CanvasItem } from './types'
@@ -354,7 +355,9 @@ export function useCanvasViewportPersistence({
 
       for (const item of items) {
         if (item.type === 'model3d' || item.type === 'video' || item.type === 'file') {
-          URL.revokeObjectURL(item.src)
+          if (item.src.startsWith('blob:')) {
+            releaseCanvasImageObjectUrl(item.src)
+          }
         }
       }
       lastPersistedCanvasSignatureRef.current = buildCanvasPersistenceSignature([], [], [], null)

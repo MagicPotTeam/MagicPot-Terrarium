@@ -1,5 +1,9 @@
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
 import { resolveAuthorizedCanvasLocalMediaSourceUrl } from './canvasLocalFileSource'
+import {
+  createCanvasImageObjectUrlHandle,
+  type CanvasImageObjectUrlHandle
+} from './canvasImageObjectUrlRegistry'
 
 const inFlightLocalImageBlobReads = new Map<string, Promise<Blob | null>>()
 
@@ -129,7 +133,6 @@ export async function readCanvasLocalImageBlobFromSource(
 
 export function readCanvasLocalImageBlobFromSourceShared(
   sourceUrl: string,
-
   fileName?: string
 ): Promise<Blob | null> {
   const fullPath = resolveCanvasLocalFilePathFromSource(sourceUrl)
@@ -157,10 +160,36 @@ export function readCanvasLocalImageBlobFromSourceShared(
   return pending
 }
 
+export type CanvasLocalImageObjectUrl = CanvasImageObjectUrlHandle
+
+export async function createCanvasLocalImageObjectUrlHandle(
+  sourceUrl: string,
+  fileName?: string,
+  ownerKey?: string
+): Promise<CanvasLocalImageObjectUrl | null> {
+  const blob = await readCanvasLocalImageBlobFromSourceShared(sourceUrl, fileName)
+  if (!blob) {
+    return null
+  }
+
+  const handle = createCanvasImageObjectUrlHandle(
+    ownerKey ?? `local-image:${sourceUrl}:${fileName ?? ''}`,
+    blob
+  )
+  if (!handle) {
+    return null
+  }
+  return handle
+}
+
 export async function createCanvasLocalImageObjectUrl(
   sourceUrl: string,
   fileName?: string
 ): Promise<string | null> {
-  const blob = await readCanvasLocalImageBlobFromSourceShared(sourceUrl, fileName)
-  return blob ? URL.createObjectURL(blob) : null
+  const handle = await createCanvasLocalImageObjectUrlHandle(
+    sourceUrl,
+    fileName,
+    `local-image:${sourceUrl}:${fileName ?? ''}`
+  )
+  return handle?.url ?? null
 }

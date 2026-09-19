@@ -12,6 +12,7 @@ interface ImportMetaEnv {
   readonly VITE_MAGICPOT_UPDATE_OWNER?: string
   readonly VITE_MAGICPOT_UPDATE_REPO?: string
   readonly VITE_MAGICPOT_UPDATE_CHANNEL?: string
+  readonly VITE_PROJECT_CANVAS_SPATIAL_TILE?: string
   readonly PACKAGE_VERSION: string
 }
 interface ImportMeta {

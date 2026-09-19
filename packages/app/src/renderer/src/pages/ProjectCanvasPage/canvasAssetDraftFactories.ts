@@ -64,6 +64,7 @@ export function createCanvasImageItemDraft(
     image?: CanvasImageAsset
     fileName?: string
     sourceFile?: Blob
+    sourceUrlOwned?: boolean
     sizeBytes?: number
     hasAlpha?: boolean
     sourceWidth?: number
@@ -86,6 +87,7 @@ export function createCanvasImageItemDraft(
     src: options.src,
     ...(options.fileName ? { fileName: options.fileName } : {}),
     ...(options.sourceFile ? { sourceFile: options.sourceFile } : {}),
+    ...(options.sourceUrlOwned ? { sourceUrlOwned: true } : {}),
     ...(typeof options.sizeBytes === 'number' ? { sizeBytes: options.sizeBytes } : {}),
     ...(typeof options.hasAlpha === 'boolean' ? { hasAlpha: options.hasAlpha } : {}),
     ...(options.image ? { image: options.image } : {}),
@@ -111,6 +113,7 @@ export function createCanvasFileItemDraft(
     src: string
     fileName: string
     sourceFile?: Blob
+    sourceUrlOwned?: boolean
     mimeType: string
     fileKind: CanvasFileItem['fileKind']
     sizeBytes?: number
@@ -136,6 +139,7 @@ export function createCanvasFileItemDraft(
     src: options.src,
     fileName: options.fileName,
     ...(options.sourceFile ? { sourceFile: options.sourceFile } : {}),
+    ...(options.sourceUrlOwned ? { sourceUrlOwned: true } : {}),
     mimeType: options.mimeType,
     fileKind: options.fileKind,
     ...(typeof options.sizeBytes === 'number' ? { sizeBytes: options.sizeBytes } : {}),

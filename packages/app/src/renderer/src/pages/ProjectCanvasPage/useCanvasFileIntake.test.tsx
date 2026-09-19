@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -8,6 +8,8 @@ import {
   resetQuickAppImagePasteTargetsForTest
 } from '@renderer/utils/quickAppPasteTarget'
 import { useCanvasFileIntake } from './useCanvasFileIntake'
+import { useCanvasAssetIntake } from './useCanvasAssetIntake'
+import { canvasImageObjectUrlRegistry } from './canvasImageObjectUrlRegistry'
 
 type TestAddImageToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addImageToCanvas']
 type TestAddImagesToCanvas = Parameters<typeof useCanvasFileIntake>[0]['addImagesToCanvas']
@@ -274,6 +276,8 @@ function FileIntakeHarness({
 
 afterEach(() => {
   cleanup()
+  canvasImageObjectUrlRegistry.revokeAll()
+  canvasImageObjectUrlRegistry.setMaxCount(128)
   delete window.electronFile
   if (originalCreateObjectURL) {
     Object.defineProperty(URL, 'createObjectURL', {
@@ -1499,5 +1503,187 @@ describe('useCanvasFileIntake', () => {
     await waitFor(() => {
       expect(addTextToCanvas).toHaveBeenCalledWith('Proxy paste payload')
     })
+  })
+
+  describe('file resolver to asset intake ownership', () => {
+    const routes = [
+      { route: 'drop', count: 1 },
+      { route: 'drop', count: 2 },
+      { route: 'clipboard-files', count: 1 },
+      { route: 'clipboard-files', count: 2 },
+      { route: 'clipboard-items', count: 1 },
+      { route: 'clipboard-items', count: 2 },
+      { route: 'clipboard-fallback', count: 1 },
+      { route: 'clipboard-fallback', count: 2 },
+      { route: 'navigator', count: 1 },
+      { route: 'navigator', count: 2 },
+      { route: 'native', count: 1 }
+    ]
+
+    function pasteImages(route: string, files: File[]) {
+      const canvas = screen.getByTestId('canvas-paste-surface')
+      if (route === 'drop') {
+        fireEvent(canvas, buildFileDragEvent('drop', files))
+        return
+      }
+      const event = buildClipboardPasteEvent({ includeItems: false })
+      if (route === 'clipboard-files') {
+        fireEvent(canvas, buildClipboardPasteEvent({ files, includeItems: false }))
+        return
+      }
+      if (route === 'clipboard-items' || route === 'clipboard-fallback') {
+        Object.defineProperty(event, 'clipboardData', {
+          value: {
+            files: [],
+            items: files.map((file) => ({
+              type: file.type,
+              // Exercise the image fallback when the initial file probe is unavailable.
+              getAsFile:
+                route === 'clipboard-fallback'
+                  ? vi.fn().mockReturnValueOnce(null).mockReturnValue(file)
+                  : () => file
+            })),
+            getData: () => ''
+          }
+        })
+      } else if (route === 'navigator') {
+        const clipboard = window.navigator.clipboard as unknown as ClipboardMock
+        clipboard.read.mockResolvedValue(
+          files.map((file) => ({
+            types: [file.type],
+            getType: vi.fn().mockResolvedValue(file)
+          }))
+        )
+      } else {
+        const nativeClipboard = window.api.svcHyper as unknown as NativeClipboardMock
+        nativeClipboard.readClipboardImage.mockResolvedValue({
+          success: true,
+          data: [112, 110, 103],
+          mimeType: 'image/png'
+        })
+      }
+      fireEvent(canvas, event)
+    }
+
+    it.each(routes.flatMap((entry) => [false, true].map((managed) => ({ ...entry, managed }))))(
+      'transfers $count $route URL(s) at capacity (managed=$managed)',
+      async ({ count, route, managed }) => {
+        canvasImageObjectUrlRegistry.setMaxCount(count)
+        let id = 0
+        const create = vi
+          .spyOn(URL, 'createObjectURL')
+          .mockImplementation(() => `blob:file-intake-${++id}`)
+        const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        const importDataUrl = vi.fn(async () => ({
+          localMediaUrl: 'local-media:///managed/image.png',
+          reference: { relativePath: 'image.png' }
+        }))
+        Object.defineProperty(window, 'api', {
+          configurable: true,
+          value: { ...window.api, ...(managed ? { svcManagedMedia: { importDataUrl } } : {}) }
+        })
+        vi.spyOn(window, 'Image').mockImplementation(function () {
+          const image = document.createElement('img')
+          Object.defineProperties(image, {
+            naturalWidth: { value: 32 },
+            naturalHeight: { value: 24 },
+            src: { set: () => queueMicrotask(() => image.onload?.(new Event('load'))) }
+          })
+          return image
+        })
+        const setItemsWithHistory = vi.fn()
+        const hook = renderHook(() =>
+          useCanvasAssetIntake({
+            nextZIndexRef: { current: 1 },
+            setItemsWithHistory,
+            setGroups: vi.fn(),
+            setGroupBranches: vi.fn(),
+            setSelectedIds: vi.fn(),
+            setTool: vi.fn(),
+            notifyError: vi.fn(),
+            notifyWarning: vi.fn(),
+            notifySuccess: vi.fn()
+          })
+        )
+        const addImage = vi.fn(hook.result.current.addImageToCanvas)
+        const addImages = vi.fn(hook.result.current.addImagesToCanvas)
+        const files = Array.from(
+          { length: count },
+          (_, index) => new File(['png'], `image-${index}.png`, { type: 'image/png' })
+        )
+        const view = render(
+          <FileIntakeHarness
+            addTextToCanvas={vi.fn()}
+            addImageToCanvas={addImage}
+            addImagesToCanvas={addImages}
+          />
+        )
+        pasteImages(route, files)
+        await waitFor(() => expect(setItemsWithHistory).toHaveBeenCalled())
+        const intakeResult = count === 1 ? addImage.mock.results[0] : addImages.mock.results[0]
+        await intakeResult.value
+        if (count === 1)
+          expect(addImage.mock.calls[0][1]).toMatchObject({ canvasOwnedObjectUrl: true })
+        else
+          expect(addImages.mock.calls[0][0]).toEqual(
+            expect.arrayContaining([expect.objectContaining({ sourceUrlOwned: true })])
+          )
+        expect(create).toHaveBeenCalledTimes(count)
+        expect(importDataUrl).toHaveBeenCalledTimes(managed ? count : 0)
+        expect(revoke).toHaveBeenCalledTimes(managed ? count : 0)
+        const committed = setItemsWithHistory.mock.calls[0][0]([])
+        expect(committed).toHaveLength(count)
+        committed.forEach((item: { sourceUrlOwned?: boolean }) => {
+          if (managed) expect(item).not.toHaveProperty('sourceUrlOwned')
+          else expect(item).toMatchObject({ sourceUrlOwned: true })
+        })
+        view.unmount()
+        expect(revoke).toHaveBeenCalledTimes(managed ? count : 0)
+        expect(canvasImageObjectUrlRegistry.getMetrics().activeCount).toBe(managed ? 0 : count)
+        hook.unmount()
+        expect(revoke).toHaveBeenCalledTimes(count)
+        expect(canvasImageObjectUrlRegistry.getMetrics().activeCount).toBe(0)
+      }
+    )
+
+    it.each([
+      { route: 'navigator', count: 1 },
+      { route: 'navigator', count: 2 },
+      { route: 'native', count: 1 }
+    ])(
+      'retains pending $route resolver claims when intake rejects ($count URLs)',
+      async ({ route, count }) => {
+        canvasImageObjectUrlRegistry.setMaxCount(count)
+        let id = 0
+        vi.spyOn(URL, 'createObjectURL').mockImplementation(() => `blob:rejected-${++id}`)
+        const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+        const addImage = vi
+          .fn<TestAddImageToCanvas>()
+          .mockRejectedValue(new Error('transfer failed'))
+        const addImages = vi
+          .fn<TestAddImagesToCanvas>()
+          .mockRejectedValue(new Error('transfer failed'))
+        const view = render(
+          <FileIntakeHarness
+            addTextToCanvas={vi.fn()}
+            addImageToCanvas={addImage}
+            addImagesToCanvas={addImages}
+          />
+        )
+        pasteImages(
+          route,
+          Array.from(
+            { length: count },
+            (_, index) => new File(['png'], `image-${index}.png`, { type: 'image/png' })
+          )
+        )
+        await waitFor(() => expect(count === 1 ? addImage : addImages).toHaveBeenCalledTimes(1))
+        expect(revoke).not.toHaveBeenCalled()
+        expect(canvasImageObjectUrlRegistry.getMetrics().activeCount).toBe(count)
+        view.unmount()
+        expect(revoke).toHaveBeenCalledTimes(count)
+        expect(canvasImageObjectUrlRegistry.getMetrics().activeCount).toBe(0)
+      }
+    )
   })
 })
