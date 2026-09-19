@@ -2,6 +2,19 @@ import path from 'node:path'
 import { app } from 'electron'
 import { getCurrentUserDataDirectoryState } from './config/userDataDirectory'
 
+function isAbsoluteLocalMediaRoot(value: string): boolean {
+  return path.isAbsolute(value) || path.win32.isAbsolute(value)
+}
+
+function normalizeLocalMediaRoot(value: string): string {
+  // Electron tests can mock Windows app paths while running on Linux CI. Preserve
+  // those paths as Windows paths instead of resolving them under the CI checkout.
+  if (path.win32.isAbsolute(value) && !path.isAbsolute(value)) {
+    return path.win32.normalize(value)
+  }
+  return path.resolve(value)
+}
+
 /** Returns the application-owned roots plus the narrowly scoped benchmark cache root. */
 export function getLocalMediaAllowedRoots(): string[] {
   const storageState = getCurrentUserDataDirectoryState()
@@ -16,7 +29,7 @@ export function getLocalMediaAllowedRoots(): string[] {
   if (
     process.env.MAGICPOT_PROJECT_CANVAS_REAL_BOARD_BENCHMARK === '1' &&
     benchmarkCacheRoot &&
-    path.isAbsolute(benchmarkCacheRoot)
+    isAbsoluteLocalMediaRoot(benchmarkCacheRoot)
   ) {
     roots.push(benchmarkCacheRoot)
   }
@@ -25,10 +38,10 @@ export function getLocalMediaAllowedRoots(): string[] {
   if (
     process.env.MAGICPOT_PROJECT_CANVAS_REAL_BOARD_BENCHMARK === '1' &&
     benchmarkArtifactRoot &&
-    path.isAbsolute(benchmarkArtifactRoot)
+    isAbsoluteLocalMediaRoot(benchmarkArtifactRoot)
   ) {
     roots.push(benchmarkArtifactRoot)
   }
 
-  return roots.map((root) => path.resolve(root))
+  return roots.map(normalizeLocalMediaRoot)
 }

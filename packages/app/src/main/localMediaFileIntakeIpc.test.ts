@@ -74,7 +74,7 @@ describe('local media file intake IPC', () => {
     ])
   })
 
-  it('shares the benchmark cache-only scope and never grants broad artifacts', () => {
+  it('shares the benchmark cache and run-artifact scopes without broad roots', () => {
     process.env.MAGICPOT_PROJECT_CANVAS_REAL_BOARD_BENCHMARK = '1'
     process.env.MAGICPOT_REAL_BOARD_SHARED_THUMBNAIL_CACHE_ROOT = 'C:/shared-thumbnail-cache'
     process.env.MAGICPOT_TEST_ARTIFACT_ROOT = 'C:/artifacts'
@@ -95,8 +95,8 @@ describe('local media file intake IPC', () => {
       expect.stringMatching(/C:[\\/]temp[\\/]magicpot-local-media/),
       expect.stringMatching(/C:[\\/]project/),
       expect.stringMatching(/C:[\\/]autosave/),
-      expect.stringMatching(/C:[\\/]shared-thumbnail-cache/)
+      expect.stringMatching(/C:[\\/]shared-thumbnail-cache/),
+      expect.stringMatching(/C:[\\/]artifacts/)
     ])
-    expect(resolveMock.mock.calls[0][1]).not.toContain(expect.stringMatching(/artifacts/))
   })
 })
