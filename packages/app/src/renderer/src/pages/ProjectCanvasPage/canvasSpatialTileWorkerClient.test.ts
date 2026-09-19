@@ -56,6 +56,57 @@ describe('CanvasSpatialTileWorkerClient', () => {
     client.dispose()
   })
 
+  it('uses the native region backend when a request provides a native region', async () => {
+    const nativeResult = {
+      data: new Uint8Array([1, 2, 3]),
+      sourceWidth: 8,
+      sourceHeight: 8,
+      x: 0,
+      y: 0,
+      width: 4,
+      height: 4,
+      outputWidth: 2,
+      outputHeight: 2,
+      mimeType: 'image/png' as const
+    }
+    const nativeRegionBackend = vi.fn().mockResolvedValue(nativeResult)
+    const worker = { postMessage: vi.fn() } as unknown as Worker
+    const client = new CanvasSpatialTileWorkerClient({
+      createWorker: () => null,
+      nativeRegionBackend,
+      nativeRegionEnabled: true
+    })
+    const result = await client.generate({
+      ...request,
+      nativeRegionRequest: {
+        sourcePath: 'C:/image.png',
+        allowedRoots: ['C:/'],
+        sourceWidth: 8,
+        sourceHeight: 8,
+        x: 0,
+        y: 0,
+        width: 4,
+        height: 4,
+        outputWidth: 2,
+        outputHeight: 2,
+        maxOutputPixels: 4096,
+        maxOutputBytes: 1024,
+        timeoutMs: 1000,
+        cacheRoot: 'C:/cache'
+      }
+    })
+    expect(nativeRegionBackend).toHaveBeenCalledOnce()
+    expect(worker.postMessage).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      width: 2,
+      height: 2,
+      mimeType: 'image/png',
+      contentRectInBitmap: { x: 0, y: 0, width: 2, height: 2 }
+    })
+    expect(result.blob.size).toBe(3)
+    expect(result.blob.type).toBe('image/png')
+  })
+
   it('dispose rejects pending Worker requests', async () => {
     const worker = {
       postMessage: vi.fn(),

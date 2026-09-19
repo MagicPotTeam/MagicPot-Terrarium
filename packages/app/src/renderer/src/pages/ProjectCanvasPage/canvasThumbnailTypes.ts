@@ -27,8 +27,7 @@ export type CanvasSessionBlobSourceIdentity = {
 }
 
 export type CanvasImageSourceIdentity =
-  | CanvasLocalFileSourceIdentity
-  | CanvasSessionBlobSourceIdentity
+  CanvasLocalFileSourceIdentity | CanvasSessionBlobSourceIdentity
 
 export type CanvasImageThumbnailLevel = {
   maxSide: CanvasThumbnailLevelSize
@@ -148,14 +147,10 @@ export type CanvasThumbnailCacheWriteFile = {
 }
 
 export type CanvasThumbnailReadManifestResponse =
-  | { manifest: CanvasThumbnailManifestLike | null }
-  | CanvasThumbnailManifestLike
-  | null
+  { manifest: CanvasThumbnailManifestLike | null } | CanvasThumbnailManifestLike | null
 
 export type CanvasThumbnailWriteSetResponse =
-  | { manifest: CanvasThumbnailManifestLike }
-  | CanvasThumbnailManifestLike
-  | null
+  { manifest: CanvasThumbnailManifestLike } | CanvasThumbnailManifestLike | null
 
 export type CanvasThumbnailIpcBridge = {
   readThumbnailManifest?: (input: {
@@ -178,6 +173,28 @@ export type CanvasThumbnailIpcBridge = {
     fullPath: string
     maxSide: CanvasThumbnailLevelSize
   }) => Promise<CanvasThumbnailNativeResult | null>
+  createNativeRegion?: (input: {
+    fullPath: string
+    x: number
+    y: number
+    width: number
+    height: number
+    outputWidth?: number
+    outputHeight?: number
+    maxOutputPixels?: number
+    maxOutputBytes?: number
+  }) => Promise<{
+    data: Uint8Array
+    sourceWidth: number
+    sourceHeight: number
+    x: number
+    y: number
+    width: number
+    height: number
+    outputWidth: number
+    outputHeight: number
+    mimeType: 'image/png'
+  } | null>
 }
 
 export type CanvasThumbnailGenerationRequest = {
@@ -217,5 +234,4 @@ export type CanvasThumbnailWorkerErrorMessage = {
 }
 
 export type CanvasThumbnailWorkerMessage =
-  | CanvasThumbnailWorkerSuccessMessage
-  | CanvasThumbnailWorkerErrorMessage
+  CanvasThumbnailWorkerSuccessMessage | CanvasThumbnailWorkerErrorMessage

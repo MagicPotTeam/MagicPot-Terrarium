@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import { createRendererDiagnosticCollector } from './rendererDiagnostics.mjs'
 import {
   CANVAS_THUMBNAIL_WORKER_POOL_RUNTIME_METRIC_KEYS,
   buildAcceptance,
+  buildImportFileBatches,
   buildAggregateScenarioResult,
   buildRealBoardAggregateReport,
   buildRealBoardBenchmarkProfileMetadata,
@@ -68,8 +70,15 @@ function buildPassingAggregateResult(overrides = {}) {
   }
 }
 
+function buildOfficialPassingAggregateResults() {
+  return [
+    buildPassingAggregateResult({ cachePass: 'cold-cache' }),
+    buildPassingAggregateResult({ cachePass: 'warm-cache' })
+  ]
+}
+
 function buildAggregateWithProfile(overrides = {}) {
-  const currentResults = overrides.currentResults ?? [buildPassingAggregateResult()]
+  const currentResults = overrides.currentResults ?? buildOfficialPassingAggregateResults()
   const profileMetadata =
     overrides.profileMetadata ?? buildOfficialProfileMetadata(overrides.profileOverrides)
 
@@ -131,6 +140,87 @@ function buildVisualFailures(overrides = {}) {
     ...overrides
   }
 }
+
+describe('bounded renderer diagnostics', () => {
+  it('retains the first failures and latest tail when warnings overflow', () => {
+    const collector = createRendererDiagnosticCollector({ eventLimit: 4, now: () => 'captured' })
+    collector.record({ type: 'log', text: 'not diagnostic' })
+    for (let index = 1; index <= 8; index += 1) {
+      collector.record({ type: 'warning', text: `failure-${index}` })
+    }
+    const report = collector.getReport()
+    expect(report.totalEventCount).toBe(8)
+    expect(report.droppedEventCount).toBe(4)
+    expect(report.events.map((event) => event.sequence)).toEqual([1, 2, 7, 8])
+    expect(report.events[0].capturedAt).toBe('captured')
+  })
+
+  it('retains a first error even when it occurs after the head window', () => {
+    const collector = createRendererDiagnosticCollector({ eventLimit: 4, now: () => 'captured' })
+    collector.record({ type: 'warning', text: 'startup warning' })
+    collector.record({ type: 'warning', text: 'second warning' })
+    collector.record({ type: 'warning', text: 'third warning' })
+    collector.record({ type: 'error', text: 'first renderer failure' })
+    collector.record({ type: 'warning', text: 'cascade warning' })
+    collector.record({ type: 'warning', text: 'latest warning' })
+
+    const report = collector.getReport()
+    expect(report.totalEventCount).toBe(6)
+    expect(report.droppedEventCount).toBe(2)
+    expect(report.events.map((event) => event.sequence)).toEqual([1, 2, 4, 6])
+    expect(report.events.find((event) => event.type === 'error')?.text).toBe(
+      'first renderer failure'
+    )
+  })
+
+  it('bounds text, preserves error location, and returns independent snapshots', () => {
+    const collector = createRendererDiagnosticCollector({ textLimit: 5 })
+    collector.record({
+      type: 'pageerror',
+      text: 'decode error stack',
+      location: { url: 'bundle.js', lineNumber: 5, columnNumber: 8 }
+    })
+    const snapshot = collector.getReport()
+    expect(snapshot.events[0].text).toBe('decod')
+    expect(snapshot.events[0].location).toEqual({ url: 'bundl', lineNumber: 5, columnNumber: 8 })
+    snapshot.events[0].location.lineNumber = 100
+    snapshot.events.length = 0
+    expect(collector.getReport().events[0].location.lineNumber).toBe(5)
+  })
+
+  it('keeps finite defaults for non-finite limits', () => {
+    const collector = createRendererDiagnosticCollector({ eventLimit: Infinity, textLimit: NaN })
+    expect(collector.getReport()).toMatchObject({ eventLimit: 128, textLimit: 4096 })
+  })
+})
+
+describe('realBoardBenchmark import batching', () => {
+  it('plans whole-file batches without per-file imports', () => {
+    const plan = buildImportFileBatches(
+      Array.from({ length: 3000 }, (_, index) => `image-${index}`),
+      128
+    )
+
+    expect(plan).toEqual({
+      enabled: true,
+      batchSize: 128,
+      batchCount: 24
+    })
+  })
+
+  it('uses one batch for smaller workloads and handles empty staging', () => {
+    expect(buildImportFileBatches(['one', 'two', 'three'], 128)).toEqual({
+      enabled: false,
+      batchSize: 3,
+      batchCount: 1
+    })
+    expect(buildImportFileBatches([], 128)).toEqual({
+      enabled: false,
+      batchSize: 0,
+      batchCount: 0
+    })
+  })
+})
 
 describe('realBoardBenchmark acceptance gates', () => {
   it('marks the default official mixed-3000 profile as non-diagnostic', () => {
@@ -234,6 +324,18 @@ describe('realBoardBenchmark acceptance gates', () => {
     expect(aggregate.acceptanceAllPassed).toBe(true)
     expect(aggregate.officialAllPassed).toBe(false)
     expect(aggregate.allPassed).toBe(false)
+  })
+
+  it('does not report a partial aggregate as acceptance-passing when official cache passes are missing', () => {
+    const aggregate = buildAggregateWithProfile({
+      currentResults: [buildPassingAggregateResult({ cachePass: 'cold-cache' })]
+    })
+
+    expect(aggregate.resultCount).toBe(1)
+    expect(aggregate.acceptanceAllPassed).toBe(false)
+    expect(aggregate.officialAllPassed).toBe(false)
+    expect(aggregate.allPassed).toBe(false)
+    expect(aggregate.diagnosticReasons.join(' ')).toContain('Missing official benchmark result')
   })
 
   it('prevents single cache pass runs from reporting official aggregate allPassed', () => {

@@ -1,10 +1,17 @@
 import type { CanvasGroup, CanvasItem } from './types'
+import {
+  canvasImageObjectUrlRegistry,
+  createCanvasImageObjectUrlHandle,
+  releaseCanvasImageObjectUrl
+} from './canvasImageObjectUrlRegistry'
+import type { CanvasImageItem } from './types'
+let nextPsdObjectUrlId = 0
 import { PSD_IMPORT_EXTENSIONS } from './psdImportDetection'
 export { PSD_IMPORT_ACCEPT, PSD_IMPORT_EXTENSIONS, isPsdImportFile } from './psdImportDetection'
 
 export type PsdImportSourceApp = 'psd' | 'psb'
 
-export type PsdImportLimitKind = 'fileSize' | 'layerCount' | 'pixelCount'
+export type PsdImportLimitKind = 'fileSize' | 'layerCount' | 'pixelCount' | 'objectUrlCount'
 
 export type PsdImportSafetyLimits = {
   maxFileBytes: number
@@ -16,6 +23,14 @@ type PsdImportOptions = {
   importedAt?: string
   startZIndex?: number
   limits?: Partial<PsdImportSafetyLimits>
+  signal?: AbortSignal
+  persistRaster?: (
+    blob: Blob,
+    fileName: string
+  ) => Promise<{
+    src: string
+    media?: CanvasImageItem['media']
+  } | null>
 }
 
 type PsdImportResult = {
@@ -140,13 +155,6 @@ function pushWarning(warnings: string[], message: string): void {
   }
 }
 
-function createPsdObjectUrl(blob: Blob): string {
-  if (typeof URL.createObjectURL !== 'function') {
-    throw new Error('Object URL support is required for PSD import.')
-  }
-  return URL.createObjectURL(blob)
-}
-
 function createCanvasSurface(width: number, height: number) {
   const SurfaceCtor = (
     globalThis as Record<
@@ -162,11 +170,7 @@ function createCanvasSurface(width: number, height: number) {
   throw new Error('A raster surface is required for PSD import.')
 }
 
-async function rgbaToObjectUrl(
-  pixels: Uint8ClampedArray,
-  width: number,
-  height: number
-): Promise<{ src: string; sizeBytes: number }> {
+async function rgbaToBlob(pixels: Uint8ClampedArray, width: number, height: number): Promise<Blob> {
   const surface = createCanvasSurface(width, height)
   const context = surface.getContext('2d')
 
@@ -176,8 +180,7 @@ async function rgbaToObjectUrl(
 
   const imagePixels = new Uint8ClampedArray(pixels)
   context.putImageData(new ImageData(imagePixels, width, height), 0, 0)
-  const blob = await surface.convertToBlob({ type: 'image/png' })
-  return { src: createPsdObjectUrl(blob), sizeBytes: blob.size }
+  return surface.convertToBlob({ type: 'image/png' })
 }
 
 function nextId(prefix: string, state: { nextId: number }): string {
@@ -189,6 +192,7 @@ export async function materializePsdFile(
   file: Pick<File, 'name' | 'arrayBuffer'>,
   options?: PsdImportOptions
 ): Promise<PsdImportResult> {
+  options?.signal?.throwIfAborted()
   const { default: Psd } = await import('@webtoon/psd')
   const sourceApp = getSourceApp(file.name)
   const importedAt = createImportedAt(options)
@@ -199,7 +203,7 @@ export async function materializePsdFile(
   const createdObjectUrls = new Set<string>()
   const revokeCreatedObjectUrls = () => {
     for (const objectUrl of createdObjectUrls) {
-      URL.revokeObjectURL(objectUrl)
+      releaseCanvasImageObjectUrl(objectUrl)
     }
     createdObjectUrls.clear()
   }
@@ -211,231 +215,254 @@ export async function materializePsdFile(
   }
 
   const psd = Psd.parse(await file.arrayBuffer())
-
-  const appendRasterLayer = async (
-    node: ParsedPsdNode,
-    sourceNodeId: string
-  ): Promise<string[]> => {
-    const rawWidth = Math.round(toFiniteNumber(node.width, 0))
-    const rawHeight = Math.round(toFiniteNumber(node.height, 0))
-
-    if (rawWidth <= 0 || rawHeight <= 0 || !node.composite) {
-      pushWarning(
-        warnings,
-        `Skipped PSD layer "${node.name || sourceNodeId}" because it has no size.`
+  const materializeRaster = async (blob: Blob, fileName: string) => {
+    options?.signal?.throwIfAborted()
+    // Persist one raster at a time; never retain a batch of base64 strings or URLs.
+    const persisted = await options?.persistRaster?.(blob, fileName)
+    options?.signal?.throwIfAborted()
+    if (persisted) return { ...persisted, sizeBytes: blob.size }
+    const handle = createCanvasImageObjectUrlHandle(`psd:${++nextPsdObjectUrlId}`, blob)
+    if (!handle) {
+      throw new PsdImportLimitExceededError(
+        'objectUrlCount',
+        canvasImageObjectUrlRegistry.getMaxCount(),
+        canvasImageObjectUrlRegistry.getMetrics().activeCount + 1
       )
-      return []
     }
-
-    const width = Math.max(1, rawWidth)
-    const height = Math.max(1, rawHeight)
-    assertPsdImportLimit('pixelCount', getPsdNodePixelCount(width, height), limits.maxPixelCount)
-
-    const pixels = await node.composite()
-    if (!(pixels instanceof Uint8ClampedArray) || pixels.length === 0) {
-      pushWarning(
-        warnings,
-        `Skipped PSD layer "${node.name || sourceNodeId}" because its pixel data could not be decoded.`
-      )
-      return []
-    }
-
-    const { src, sizeBytes } = await rgbaToObjectUrl(pixels, width, height)
-    if (src.startsWith('blob:')) {
-      createdObjectUrls.add(src)
-    }
-    const itemId = nextId('psd-image', idState)
-    items.push({
-      id: itemId,
-      type: 'image',
-      src,
-      fileName: `${node.name || itemId}.png`,
-      sizeBytes,
-      x: toFiniteNumber(node.left, 0),
-      y: toFiniteNumber(node.top, 0),
-      width,
-      height,
-      rotation: 0,
-      scaleX: 1,
-      scaleY: 1,
-      zIndex: zIndexState.nextZIndex++,
-      locked: Boolean(node.isTransparencyLocked),
-      provenance: createProvenance(sourceApp, file.name, sourceNodeId, node.name, importedAt)
-    })
-
-    return [itemId]
+    createdObjectUrls.add(handle.url)
+    return { src: handle.url, sizeBytes: blob.size, sourceUrlOwned: true, sourceFile: blob }
   }
+  options?.signal?.addEventListener('abort', revokeCreatedObjectUrls, { once: true })
+  try {
+    const appendRasterLayer = async (
+      node: ParsedPsdNode,
+      sourceNodeId: string
+    ): Promise<string[]> => {
+      const rawWidth = Math.round(toFiniteNumber(node.width, 0))
+      const rawHeight = Math.round(toFiniteNumber(node.height, 0))
 
-  const appendTextLayer = (node: ParsedPsdNode, sourceNodeId: string): string[] => {
-    const text = node.text?.trim()
-    if (!text) return []
-
-    const itemId = nextId('psd-text', idState)
-    const width = Math.max(
-      1,
-      Math.round(toFiniteNumber(node.width, Math.max(120, text.length * 12)))
-    )
-    const height = Math.max(1, Math.round(toFiniteNumber(node.height, 32)))
-    assertPsdImportLimit('pixelCount', getPsdNodePixelCount(width, height), limits.maxPixelCount)
-
-    items.push({
-      id: itemId,
-      type: 'text',
-      text,
-      x: toFiniteNumber(node.left, 0),
-      y: toFiniteNumber(node.top, 0),
-      width,
-      height,
-      rotation: 0,
-      scaleX: 1,
-      scaleY: 1,
-      zIndex: zIndexState.nextZIndex++,
-      locked: Boolean(node.isTransparencyLocked),
-      fontSize: Math.max(12, Math.round(Math.min(height, 32))),
-      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
-      fill: DEFAULT_TEXT_FILL,
-      provenance: createProvenance(sourceApp, file.name, sourceNodeId, node.name, importedAt)
-    })
-
-    return [itemId]
-  }
-
-  let visitedLayerCount = 0
-
-  const walk = async (node: ParsedPsdNode, path: string[]): Promise<string[]> => {
-    const nodeName = node.name?.trim() || node.type
-    const sourceNodeId = [...path, nodeName].join(' / ')
-
-    if (node.type === 'Group') {
-      const descendantItemIds: string[] = []
-      for (const child of node.children ?? []) {
-        descendantItemIds.push(...(await walk(child, [...path, nodeName])))
-      }
-
-      if (descendantItemIds.length === 0) {
+      if (rawWidth <= 0 || rawHeight <= 0 || !node.composite) {
+        pushWarning(
+          warnings,
+          `Skipped PSD layer "${node.name || sourceNodeId}" because it has no size.`
+        )
         return []
       }
 
-      groups.push({
-        id: nextId('psd-group', idState),
-        name: nodeName,
-        itemIds: descendantItemIds,
-        createdAt: importedAt,
-        provenance: createProvenance(sourceApp, file.name, sourceNodeId, nodeName, importedAt)
+      const width = Math.max(1, rawWidth)
+      const height = Math.max(1, rawHeight)
+      assertPsdImportLimit('pixelCount', getPsdNodePixelCount(width, height), limits.maxPixelCount)
+
+      const pixels = await node.composite()
+      if (!(pixels instanceof Uint8ClampedArray) || pixels.length === 0) {
+        pushWarning(
+          warnings,
+          `Skipped PSD layer "${node.name || sourceNodeId}" because its pixel data could not be decoded.`
+        )
+        return []
+      }
+
+      const itemId = nextId('psd-image', idState)
+      const fileName = `${node.name || itemId}.png`
+      const source = await materializeRaster(await rgbaToBlob(pixels, width, height), fileName)
+      items.push({
+        id: itemId,
+        type: 'image',
+        ...source,
+        fileName,
+        x: toFiniteNumber(node.left, 0),
+        y: toFiniteNumber(node.top, 0),
+        width,
+        height,
+        rotation: 0,
+        scaleX: 1,
+        scaleY: 1,
+        zIndex: zIndexState.nextZIndex++,
+        locked: Boolean(node.isTransparencyLocked),
+        provenance: createProvenance(sourceApp, file.name, sourceNodeId, node.name, importedAt)
       })
 
-      return descendantItemIds
+      return [itemId]
     }
 
-    if (node.type !== 'Layer') {
-      const descendantItemIds: string[] = []
-      for (const child of node.children ?? []) {
-        descendantItemIds.push(...(await walk(child, path)))
+    const appendTextLayer = (node: ParsedPsdNode, sourceNodeId: string): string[] => {
+      const text = node.text?.trim()
+      if (!text) return []
+
+      const itemId = nextId('psd-text', idState)
+      const width = Math.max(
+        1,
+        Math.round(toFiniteNumber(node.width, Math.max(120, text.length * 12)))
+      )
+      const height = Math.max(1, Math.round(toFiniteNumber(node.height, 32)))
+      assertPsdImportLimit('pixelCount', getPsdNodePixelCount(width, height), limits.maxPixelCount)
+
+      items.push({
+        id: itemId,
+        type: 'text',
+        text,
+        x: toFiniteNumber(node.left, 0),
+        y: toFiniteNumber(node.top, 0),
+        width,
+        height,
+        rotation: 0,
+        scaleX: 1,
+        scaleY: 1,
+        zIndex: zIndexState.nextZIndex++,
+        locked: Boolean(node.isTransparencyLocked),
+        fontSize: Math.max(12, Math.round(Math.min(height, 32))),
+        fontFamily: DEFAULT_TEXT_FONT_FAMILY,
+        fill: DEFAULT_TEXT_FILL,
+        provenance: createProvenance(sourceApp, file.name, sourceNodeId, node.name, importedAt)
+      })
+
+      return [itemId]
+    }
+
+    let visitedLayerCount = 0
+
+    const walk = async (node: ParsedPsdNode, path: string[]): Promise<string[]> => {
+      options?.signal?.throwIfAborted()
+      const nodeName = node.name?.trim() || node.type
+      const sourceNodeId = [...path, nodeName].join(' / ')
+
+      if (node.type === 'Group') {
+        const descendantItemIds: string[] = []
+        for (const child of node.children ?? []) {
+          descendantItemIds.push(...(await walk(child, [...path, nodeName])))
+        }
+
+        if (descendantItemIds.length === 0) {
+          return []
+        }
+
+        groups.push({
+          id: nextId('psd-group', idState),
+          name: nodeName,
+          itemIds: descendantItemIds,
+          createdAt: importedAt,
+          provenance: createProvenance(sourceApp, file.name, sourceNodeId, nodeName, importedAt)
+        })
+
+        return descendantItemIds
       }
-      return descendantItemIds
-    }
 
-    visitedLayerCount += 1
-    assertPsdImportLimit('layerCount', visitedLayerCount, limits.maxLayerCount)
+      if (node.type !== 'Layer') {
+        const descendantItemIds: string[] = []
+        for (const child of node.children ?? []) {
+          descendantItemIds.push(...(await walk(child, path)))
+        }
+        return descendantItemIds
+      }
 
-    if (node.isHidden) {
-      return []
-    }
+      visitedLayerCount += 1
+      assertPsdImportLimit('layerCount', visitedLayerCount, limits.maxLayerCount)
 
-    const importedTextItemIds = appendTextLayer(node, sourceNodeId)
-    if (importedTextItemIds.length > 0) {
-      return importedTextItemIds
+      if (node.isHidden) {
+        return []
+      }
+
+      const importedTextItemIds = appendTextLayer(node, sourceNodeId)
+      if (importedTextItemIds.length > 0) {
+        return importedTextItemIds
+      }
+
+      try {
+        return await appendRasterLayer(node, sourceNodeId)
+      } catch (error) {
+        if (options?.signal?.aborted || error instanceof PsdImportLimitExceededError) {
+          throw error
+        }
+
+        pushWarning(
+          warnings,
+          `Skipped PSD layer "${nodeName}" because it could not be rasterized: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+        return []
+      }
     }
 
     try {
-      return await appendRasterLayer(node, sourceNodeId)
-    } catch (error) {
-      if (error instanceof PsdImportLimitExceededError) {
-        throw error
+      for (const child of (psd as ParsedPsdNode).children ?? []) {
+        await walk(child, [stripExtension(file.name)])
       }
-
-      pushWarning(
-        warnings,
-        `Skipped PSD layer "${nodeName}" because it could not be rasterized: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      )
-      return []
+    } catch (error) {
+      revokeCreatedObjectUrls()
+      throw error
     }
-  }
 
-  try {
-    for (const child of (psd as ParsedPsdNode).children ?? []) {
-      await walk(child, [stripExtension(file.name)])
+    if (items.length === 0) {
+      try {
+        const rawWidth = Math.round(toFiniteNumber(psd.width, 0))
+        const rawHeight = Math.round(toFiniteNumber(psd.height, 0))
+        assertPsdImportLimit(
+          'pixelCount',
+          getPsdNodePixelCount(rawWidth, rawHeight),
+          limits.maxPixelCount
+        )
+        const composite = await psd.composite()
+        if (composite.length > 0) {
+          const itemId = nextId('psd-image', idState)
+          const fileName = `${stripExtension(file.name) || itemId}.png`
+          const flattenedPreview = await materializeRaster(
+            await rgbaToBlob(composite, psd.width, psd.height),
+            fileName
+          )
+          items.push({
+            id: itemId,
+            type: 'image',
+            ...flattenedPreview,
+            fileName,
+            x: 0,
+            y: 0,
+            width: psd.width,
+            height: psd.height,
+            rotation: 0,
+            scaleX: 1,
+            scaleY: 1,
+            zIndex: zIndexState.nextZIndex++,
+            locked: false,
+            provenance: createProvenance(
+              sourceApp,
+              file.name,
+              stripExtension(file.name) || 'PSD document',
+              stripExtension(file.name),
+              importedAt
+            )
+          })
+          pushWarning(
+            warnings,
+            'Imported a flattened PSD preview because no visible layers could be materialized individually.'
+          )
+        }
+      } catch (error) {
+        if (options?.signal?.aborted || error instanceof PsdImportLimitExceededError) {
+          throw error
+        }
+
+        pushWarning(
+          warnings,
+          `Failed to decode a flattened PSD preview: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      }
+    }
+
+    options?.signal?.throwIfAborted()
+    return {
+      sourceApp,
+      title: stripExtension(file.name),
+      items,
+      groups,
+      warnings
     }
   } catch (error) {
     revokeCreatedObjectUrls()
     throw error
-  }
-
-  if (items.length === 0) {
-    try {
-      const rawWidth = Math.round(toFiniteNumber(psd.width, 0))
-      const rawHeight = Math.round(toFiniteNumber(psd.height, 0))
-      assertPsdImportLimit(
-        'pixelCount',
-        getPsdNodePixelCount(rawWidth, rawHeight),
-        limits.maxPixelCount
-      )
-      const composite = await psd.composite()
-      if (composite.length > 0) {
-        const flattenedPreview = await rgbaToObjectUrl(composite, psd.width, psd.height)
-        if (flattenedPreview.src.startsWith('blob:')) {
-          createdObjectUrls.add(flattenedPreview.src)
-        }
-        const itemId = nextId('psd-image', idState)
-        items.push({
-          id: itemId,
-          type: 'image',
-          src: flattenedPreview.src,
-          fileName: `${stripExtension(file.name) || itemId}.png`,
-          sizeBytes: flattenedPreview.sizeBytes,
-          x: 0,
-          y: 0,
-          width: psd.width,
-          height: psd.height,
-          rotation: 0,
-          scaleX: 1,
-          scaleY: 1,
-          zIndex: zIndexState.nextZIndex++,
-          locked: false,
-          provenance: createProvenance(
-            sourceApp,
-            file.name,
-            stripExtension(file.name) || 'PSD document',
-            stripExtension(file.name),
-            importedAt
-          )
-        })
-        pushWarning(
-          warnings,
-          'Imported a flattened PSD preview because no visible layers could be materialized individually.'
-        )
-      }
-    } catch (error) {
-      if (error instanceof PsdImportLimitExceededError) {
-        throw error
-      }
-
-      pushWarning(
-        warnings,
-        `Failed to decode a flattened PSD preview: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      )
-    }
-  }
-
-  return {
-    sourceApp,
-    title: stripExtension(file.name),
-    items,
-    groups,
-    warnings
+  } finally {
+    options?.signal?.removeEventListener('abort', revokeCreatedObjectUrls)
   }
 }

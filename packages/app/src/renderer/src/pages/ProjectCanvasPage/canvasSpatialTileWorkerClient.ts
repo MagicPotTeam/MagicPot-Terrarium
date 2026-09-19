@@ -3,14 +3,20 @@ import type {
   CanvasSpatialTileBrowserCropMessage,
   CanvasSpatialTileBrowserCropRequest,
   CanvasSpatialTileBrowserCropResult,
+  CanvasSpatialTileNativeRegionBackend,
   CanvasSpatialTileWorkerMessage
 } from './canvasSpatialTileWorkerProtocol'
 
-export type CanvasSpatialTileRequest = CanvasSpatialTileBrowserCropRequest & { key?: string }
+export type CanvasSpatialTileRequest = CanvasSpatialTileBrowserCropRequest & {
+  key?: string
+  signal?: AbortSignal
+}
 export type CanvasSpatialTileResult = CanvasSpatialTileBrowserCropResult & { key?: string }
 
 export type CanvasSpatialTileWorkerClientOptions = {
   createWorker?: () => Worker | null
+  nativeRegionBackend?: CanvasSpatialTileNativeRegionBackend | null
+  nativeRegionEnabled?: boolean
 }
 
 type PendingRequest = {
@@ -39,12 +45,16 @@ function createRequestId(): string {
 /** Independent browser-crop client; this is not the canvas thumbnail worker pool. */
 export class CanvasSpatialTileWorkerClient {
   private readonly createWorker: () => Worker | null
+  private readonly nativeRegionBackend: CanvasSpatialTileNativeRegionBackend | null
+  private readonly nativeRegionEnabled: boolean
   private worker: Worker | null = null
   private readonly pending = new Map<string, PendingRequest>()
   private readonly inFlightByKey = new Map<string, Promise<CanvasSpatialTileResult>>()
 
   constructor(options: CanvasSpatialTileWorkerClientOptions = {}) {
     this.createWorker = options.createWorker ?? createDefaultWorker
+    this.nativeRegionBackend = options.nativeRegionBackend ?? null
+    this.nativeRegionEnabled = options.nativeRegionEnabled ?? false
   }
 
   generate(request: CanvasSpatialTileRequest): Promise<CanvasSpatialTileResult> {
@@ -88,6 +98,40 @@ export class CanvasSpatialTileWorkerClient {
   }
 
   private dispatch(request: CanvasSpatialTileRequest): Promise<CanvasSpatialTileResult> {
+    const nativeRegionRequest = request.nativeRegionRequest
+    if (nativeRegionRequest && this.nativeRegionEnabled && this.nativeRegionBackend) {
+      return this.nativeRegionBackend(nativeRegionRequest, request.signal)
+        .then((result) => ({
+          blob: new Blob([new Uint8Array(result.data)], { type: result.mimeType }),
+          mimeType: result.mimeType,
+          width: result.outputWidth,
+          height: result.outputHeight,
+          contentRectInBitmap: {
+            x: 0,
+            y: 0,
+            width: result.outputWidth,
+            height: result.outputHeight
+          },
+          geometry: request.geometry,
+          ...(request.key ? { key: request.key } : {})
+        }))
+        .catch((error) => {
+          if (
+            request.signal?.aborted ||
+            (error instanceof DOMException && error.name === 'AbortError')
+          ) {
+            throw error
+          }
+          return this.dispatchBrowserCrop(request)
+        })
+    }
+    return this.dispatchBrowserCrop(request)
+  }
+
+  private dispatchBrowserCrop(request: CanvasSpatialTileRequest): Promise<CanvasSpatialTileResult> {
+    if (request.signal?.aborted) {
+      return Promise.reject(new DOMException('Spatial tile request cancelled.', 'AbortError'))
+    }
     const worker = this.ensureWorker()
     if (!worker) {
       return generateCanvasSpatialTileBrowserCrop({

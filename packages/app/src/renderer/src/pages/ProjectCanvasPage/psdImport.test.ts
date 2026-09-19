@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { canvasImageObjectUrlRegistry } from './canvasImageObjectUrlRegistry'
 
 import {
   isPsdImportFile,
@@ -57,6 +58,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  canvasImageObjectUrlRegistry.revokeAll()
+  canvasImageObjectUrlRegistry.setMaxCount(128)
   mockParsedPsd.current = null
   vi.clearAllMocks()
 
@@ -411,5 +414,65 @@ describe('psdImport', () => {
     expect(result.warnings).toContain(
       'Imported a flattened PSD preview because no visible layers could be materialized individually.'
     )
+  })
+
+  describe('bounded PSD materialization', () => {
+    it.each([false, true])('bounds 129 raster layers (persistent=%s)', async (persistent) => {
+      let id = 0
+      let peak = 0
+      URL.createObjectURL = vi.fn(() => {
+        peak = Math.max(peak, canvasImageObjectUrlRegistry.getMetrics().activeCount + 1)
+        return `blob:psd-bounded-${++id}`
+      })
+      URL.revokeObjectURL = vi.fn()
+      mockParsedPsd.current = {
+        type: 'Psd',
+        width: 1,
+        height: 1,
+        children: Array.from({ length: 129 }, (_, index) => ({
+          type: 'Layer',
+          name: `Layer ${index}`,
+          width: 1,
+          height: 1,
+          composite: async () => new Uint8ClampedArray([255, 0, 0, 255])
+        }))
+      }
+      let activePersistence = 0
+      let maxPersistence = 0
+      const persistRaster = vi.fn(async (_blob: Blob, fileName: string) => {
+        activePersistence++
+        maxPersistence = Math.max(maxPersistence, activePersistence)
+        await Promise.resolve()
+        activePersistence--
+        return { src: `local-media:///managed/${fileName}` }
+      })
+      const pending = materializePsdFile(
+        { name: 'many.psd', arrayBuffer: async () => new ArrayBuffer(8) },
+        persistent ? { persistRaster } : undefined
+      )
+      if (persistent) {
+        const result = await pending
+        expect(result.items).toHaveLength(129)
+        expect(persistRaster).toHaveBeenCalledTimes(129)
+        expect(maxPersistence).toBe(1)
+        expect(URL.createObjectURL).not.toHaveBeenCalled()
+        expect(
+          result.items.every(
+            (item) =>
+              item.type === 'image' && item.src.startsWith('local-media:') && !item.sourceUrlOwned
+          )
+        ).toBe(true)
+      } else {
+        await expect(pending).rejects.toMatchObject({
+          limitKind: 'objectUrlCount',
+          limit: 128,
+          actual: 129
+        })
+        expect(URL.createObjectURL).toHaveBeenCalledTimes(128)
+        expect(URL.revokeObjectURL).toHaveBeenCalledTimes(128)
+      }
+      expect(peak).toBeLessThanOrEqual(128)
+      expect(canvasImageObjectUrlRegistry.getMetrics().activeCount).toBe(0)
+    })
   })
 })

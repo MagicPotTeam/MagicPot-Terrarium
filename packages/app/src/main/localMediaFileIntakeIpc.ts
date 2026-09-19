@@ -1,7 +1,6 @@
-import { app, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
-import path from 'node:path'
-import { getCurrentUserDataDirectoryState } from './config/userDataDirectory'
+import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import { authorizeScopedLocalMediaPath, resolveAuthorizedLocalMediaPath } from './localMediaAccess'
+import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
 
 let localMediaFileIntakeIpcRegistered = false
 
@@ -16,16 +15,6 @@ function isTrustedRenderer(
     !mainWindow.webContents.isDestroyed() &&
     event.sender === mainWindow.webContents
   )
-}
-
-function getLocalMediaAllowedRoots(): string[] {
-  const storageState = getCurrentUserDataDirectoryState()
-  return [
-    app.getPath('userData'),
-    path.join(app.getPath('temp'), 'magicpot-local-media'),
-    storageState.projectRoot,
-    storageState.autoSaveRoot
-  ].map((root) => path.resolve(root))
 }
 
 export function registerLocalMediaFileIntakeIpc(getMainWindow: () => BrowserWindow | null): void {

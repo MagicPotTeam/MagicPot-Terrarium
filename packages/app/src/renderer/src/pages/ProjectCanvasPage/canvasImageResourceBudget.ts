@@ -4,9 +4,18 @@ export const CANVAS_IMAGE_TEXTURE_BYTES_PER_PIXEL = 4
 export const CANVAS_IMAGE_RESOURCE_BUDGET_KEYS = [
   'sourceTextureBytes',
   'thumbnailTextureBytes',
+  'gpuTextureBytesTotal',
+  'decodedResidentBytes',
   'decodedInFlightBytes',
+  'encodedBlobBytes',
+  'tileResidentBytes',
+  'gpuUploadBytesInFlight',
   'objectUrlCount',
-  'activeSourceUpgrades'
+  'activeSourceUpgrades',
+  'thumbnailJobs',
+  'sourceJobs',
+  'tileVisibleJobs',
+  'tilePrefetchJobs'
 ] as const
 
 export type CanvasImageResourceBudgetKey = (typeof CANVAS_IMAGE_RESOURCE_BUDGET_KEYS)[number]
@@ -17,19 +26,24 @@ export type CanvasImageResourceBudgetLimits = Partial<CanvasImageResourceBudgetU
 export type CanvasImageResourceBudgetPressureReason =
   | 'source-texture-budget'
   | 'thumbnail-texture-budget'
+  | 'gpu-texture-budget'
+  | 'decoded-resident-budget'
   | 'decoded-in-flight-budget'
+  | 'encoded-blob-budget'
+  | 'tile-resident-budget'
+  | 'gpu-upload-budget'
   | 'object-url-budget'
   | 'source-upgrade-budget'
+  | 'thumbnail-job-budget'
+  | 'source-job-budget'
+  | 'tile-visible-job-budget'
+  | 'tile-prefetch-job-budget'
 
 export type CanvasImageResourceBudgetAdmissionReason =
-  | 'within-budget'
-  | CanvasImageResourceBudgetPressureReason
+  'within-budget' | CanvasImageResourceBudgetPressureReason
 
 export type CanvasImageResourceBudgetPressureState =
-  | 'unbounded'
-  | 'available'
-  | 'at-limit'
-  | 'over-budget'
+  'unbounded' | 'available' | 'at-limit' | 'over-budget'
 
 export type CanvasImageResourceBudgetReservation = Partial<CanvasImageResourceBudgetUsage> & {
   id: string
@@ -82,9 +96,18 @@ export type CanvasImageResourceBudgetMetricsSnapshot = {
   evictableReservationCount: number
   sourceTextureReservationCount: number
   thumbnailTextureReservationCount: number
+  gpuTextureReservationCount: number
+  decodedResidentReservationCount: number
   decodedInFlightReservationCount: number
+  encodedBlobReservationCount: number
+  tileResidentReservationCount: number
+  gpuUploadReservationCount: number
   objectUrlReservationCount: number
   activeSourceUpgradeReservationCount: number
+  thumbnailJobReservationCount: number
+  sourceJobReservationCount: number
+  tileVisibleJobReservationCount: number
+  tilePrefetchJobReservationCount: number
 }
 
 const CANVAS_IMAGE_RESOURCE_BUDGET_REASON_BY_KEY: Record<
@@ -93,17 +116,35 @@ const CANVAS_IMAGE_RESOURCE_BUDGET_REASON_BY_KEY: Record<
 > = {
   sourceTextureBytes: 'source-texture-budget',
   thumbnailTextureBytes: 'thumbnail-texture-budget',
+  gpuTextureBytesTotal: 'gpu-texture-budget',
+  decodedResidentBytes: 'decoded-resident-budget',
   decodedInFlightBytes: 'decoded-in-flight-budget',
+  encodedBlobBytes: 'encoded-blob-budget',
+  tileResidentBytes: 'tile-resident-budget',
+  gpuUploadBytesInFlight: 'gpu-upload-budget',
   objectUrlCount: 'object-url-budget',
-  activeSourceUpgrades: 'source-upgrade-budget'
+  activeSourceUpgrades: 'source-upgrade-budget',
+  thumbnailJobs: 'thumbnail-job-budget',
+  sourceJobs: 'source-job-budget',
+  tileVisibleJobs: 'tile-visible-job-budget',
+  tilePrefetchJobs: 'tile-prefetch-job-budget'
 }
 
 const ZERO_CANVAS_IMAGE_RESOURCE_BUDGET_USAGE: CanvasImageResourceBudgetUsage = {
   sourceTextureBytes: 0,
   thumbnailTextureBytes: 0,
+  gpuTextureBytesTotal: 0,
+  decodedResidentBytes: 0,
   decodedInFlightBytes: 0,
+  encodedBlobBytes: 0,
+  tileResidentBytes: 0,
+  gpuUploadBytesInFlight: 0,
   objectUrlCount: 0,
-  activeSourceUpgrades: 0
+  activeSourceUpgrades: 0,
+  thumbnailJobs: 0,
+  sourceJobs: 0,
+  tileVisibleJobs: 0,
+  tilePrefetchJobs: 0
 }
 
 function normalizeBudgetAmount(value: unknown): number {
@@ -134,6 +175,11 @@ function addCanvasImageResourceBudgetUsage(
   CANVAS_IMAGE_RESOURCE_BUDGET_KEYS.forEach((key) => {
     next[key] = left[key] + right[key]
   })
+  // `gpuTextureBytesTotal` is normalized per reservation with `max(explicit,
+  // source + thumbnail + tile)`. Sum the normalized totals here so native/driver
+  // allocations that have no legacy bucket are retained without double-counting
+  // the legacy buckets within one reservation.
+  next.gpuTextureBytesTotal = left.gpuTextureBytesTotal + right.gpuTextureBytesTotal
   return next
 }
 
@@ -150,6 +196,12 @@ function replaceCanvasImageResourceBudgetUsage({
   CANVAS_IMAGE_RESOURCE_BUDGET_KEYS.forEach((key) => {
     projected[key] = Math.max(0, current[key] - replacing[key]) + request[key]
   })
+  // Both `current` and `replacing` are normalized aggregate snapshots. Keep
+  // explicit native/driver GPU overhead in the replacement arithmetic rather
+  // than deriving the total only from legacy buckets.
+  projected.gpuTextureBytesTotal =
+    Math.max(0, current.gpuTextureBytesTotal - replacing.gpuTextureBytesTotal) +
+    request.gpuTextureBytesTotal
   return projected
 }
 
@@ -173,13 +225,20 @@ export function normalizeCanvasImageResourceBudgetUsage(
   usage?: Partial<CanvasImageResourceBudgetUsage> | null
 ): CanvasImageResourceBudgetUsage {
   const normalized = emptyCanvasImageResourceBudgetUsage()
-  if (!usage) {
-    return normalized
+  if (usage) {
+    CANVAS_IMAGE_RESOURCE_BUDGET_KEYS.forEach((key) => {
+      normalized[key] = normalizeBudgetAmount(usage[key])
+    })
   }
 
-  CANVAS_IMAGE_RESOURCE_BUDGET_KEYS.forEach((key) => {
-    normalized[key] = normalizeBudgetAmount(usage[key])
-  })
+  // The explicit total may include native/driver allocations that have no
+  // legacy bucket. Never lose it, and never double-count legacy buckets.
+  const derivedGpuTextureBytes =
+    normalized.sourceTextureBytes + normalized.thumbnailTextureBytes + normalized.tileResidentBytes
+  normalized.gpuTextureBytesTotal = Math.max(
+    normalized.gpuTextureBytesTotal,
+    derivedGpuTextureBytes
+  )
   return normalized
 }
 
@@ -451,14 +510,41 @@ export function buildCanvasImageResourceBudgetMetricsSnapshot({
     thumbnailTextureReservationCount: reservationList.filter(
       (reservation) => normalizeBudgetAmount(reservation.thumbnailTextureBytes) > 0
     ).length,
+    gpuTextureReservationCount: reservationList.filter(
+      (reservation) => normalizeCanvasImageResourceBudgetUsage(reservation).gpuTextureBytesTotal > 0
+    ).length,
+    decodedResidentReservationCount: reservationList.filter(
+      (reservation) => normalizeBudgetAmount(reservation.decodedResidentBytes) > 0
+    ).length,
     decodedInFlightReservationCount: reservationList.filter(
       (reservation) => normalizeBudgetAmount(reservation.decodedInFlightBytes) > 0
+    ).length,
+    encodedBlobReservationCount: reservationList.filter(
+      (reservation) => normalizeBudgetAmount(reservation.encodedBlobBytes) > 0
+    ).length,
+    tileResidentReservationCount: reservationList.filter(
+      (reservation) => normalizeBudgetAmount(reservation.tileResidentBytes) > 0
+    ).length,
+    gpuUploadReservationCount: reservationList.filter(
+      (reservation) => normalizeBudgetAmount(reservation.gpuUploadBytesInFlight) > 0
     ).length,
     objectUrlReservationCount: reservationList.filter(
       (reservation) => normalizeBudgetAmount(reservation.objectUrlCount) > 0
     ).length,
     activeSourceUpgradeReservationCount: reservationList.filter(
       (reservation) => normalizeBudgetAmount(reservation.activeSourceUpgrades) > 0
+    ).length,
+    thumbnailJobReservationCount: reservationList.filter(
+      (reservation) => normalizeBudgetAmount(reservation.thumbnailJobs) > 0
+    ).length,
+    sourceJobReservationCount: reservationList.filter(
+      (reservation) => normalizeBudgetAmount(reservation.sourceJobs) > 0
+    ).length,
+    tileVisibleJobReservationCount: reservationList.filter(
+      (reservation) => normalizeBudgetAmount(reservation.tileVisibleJobs) > 0
+    ).length,
+    tilePrefetchJobReservationCount: reservationList.filter(
+      (reservation) => normalizeBudgetAmount(reservation.tilePrefetchJobs) > 0
     ).length
   }
 }

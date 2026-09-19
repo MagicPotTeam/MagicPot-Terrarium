@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { canvasImageObjectUrlRegistry } from './canvasImageObjectUrlRegistry'
 import {
   authorizeCanvasLocalMediaSourceUrl,
   getCanvasLocalMediaSourceUrl,
@@ -38,6 +39,8 @@ function setCreateObjectUrl(value: ((file: Blob | MediaSource) => string) | unde
 
 describe('canvasLocalFileSource', () => {
   afterEach(() => {
+    canvasImageObjectUrlRegistry.revokeAll()
+    canvasImageObjectUrlRegistry.setMaxCount(128)
     setElectronFileBridge(originalElectronFile)
     setElectronApiBridge(originalElectronApi as typeof window.electronFile | undefined)
     if (originalCreateObjectUrlDescriptor) {
@@ -212,5 +215,19 @@ describe('canvasLocalFileSource', () => {
       'data:image/png;base64,AAAA'
     )
     expect(readFileAsDataURL).toHaveBeenCalledWith(file)
+  })
+
+  it('does not fall back to base64 when the URL budget is full', async () => {
+    setElectronFileBridge(undefined)
+    canvasImageObjectUrlRegistry.setMaxCount(0)
+    const read = vi.fn()
+    try {
+      await expect(
+        resolveCanvasImageFileSource(new File(['png'], 'budget.png'), read)
+      ).rejects.toThrow('budget exhausted')
+      expect(read).not.toHaveBeenCalled()
+    } finally {
+      canvasImageObjectUrlRegistry.setMaxCount(128)
+    }
   })
 })

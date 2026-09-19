@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'path'
 import { pathToFileURL } from 'node:url'
+import { resolveAuthorizedLocalMediaPath } from '../localMediaAccess'
 import type {
   CanvasThumbnailManifest,
   CanvasThumbnailCacheRootReq,
@@ -10,6 +11,8 @@ import type {
   CanvasThumbnailGenerateSetResp,
   CanvasThumbnailNativeReq,
   CanvasThumbnailNativeResp,
+  CanvasThumbnailNativeRegionReq,
+  CanvasThumbnailNativeRegionResp,
   CanvasThumbnailReadManifestReq,
   CanvasThumbnailReadManifestResp,
   CanvasThumbnailSourceFileMetadataReq,
@@ -31,6 +34,9 @@ const MANIFEST_FILENAME = 'manifest.json'
 const SUPPORTED_THUMBNAIL_MIME_TYPES = new Set(['image/png', 'image/webp'])
 const DEFAULT_GENERATED_THUMBNAIL_LEVELS = [128, 256, 512, 1024, 2048]
 const DEFAULT_SIDECAR_MAX_DECODED_PIXELS = 64 * 1024 * 1024
+const NATIVE_REGION_MAX_SOURCE_BYTES = 512 * 1024 * 1024
+const NATIVE_REGION_MAX_OUTPUT_PIXELS = 4 * 1024 * 1024
+const NATIVE_REGION_MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 const REPO_TEST_CACHE_ROOT_DIRNAMES = ['.magicpot-trash', '.tmp', 'tmp', 'temp', 'test-results']
 const TEST_ARTIFACT_ROOT_DIRNAME = '.magicpot-trash'
 const TEMP_TEST_CACHE_ROOT_PATTERN =
@@ -713,6 +719,110 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
       data: new Uint8Array(thumbnail.toPNG()),
       width: size.width,
       height: size.height,
+      mimeType: 'image/png'
+    }
+  }
+
+  createNativeRegion = async (
+    req: CanvasThumbnailNativeRegionReq
+  ): Promise<CanvasThumbnailNativeRegionResp> => {
+    const requestedPath = path.resolve(req.fullPath)
+    const authorizedPath = resolveAuthorizedLocalMediaPath(requestedPath, [
+      app.getPath('userData'),
+      path.join(app.getPath('temp'), 'magicpot-local-media')
+    ])
+    if (!authorizedPath) {
+      throw new Error('Local image path is not authorized for native region decoding.')
+    }
+    const metadata = await this.getSourceFileMetadata({ fullPath: authorizedPath })
+    if (!metadata.exists) {
+      throw new Error(`Cannot create native region for missing file: ${requestedPath}`)
+    }
+    if (metadata.sizeBytes > NATIVE_REGION_MAX_SOURCE_BYTES) {
+      throw new Error('Native region source exceeds the byte budget.')
+    }
+    const normalizePositiveInteger = (
+      name: string,
+      value: number | undefined,
+      fallback: number
+    ) => {
+      const candidate = value ?? fallback
+      if (
+        !Number.isFinite(candidate) ||
+        !Number.isSafeInteger(candidate) ||
+        candidate <= 0 ||
+        candidate > Number.MAX_SAFE_INTEGER
+      ) {
+        throw new Error(`Native region ${name} must be a finite positive integer.`)
+      }
+      return candidate
+    }
+    const normalizeNonNegativeInteger = (name: string, value: number) => {
+      if (
+        !Number.isFinite(value) ||
+        !Number.isSafeInteger(value) ||
+        value < 0 ||
+        value > Number.MAX_SAFE_INTEGER
+      ) {
+        throw new Error(`Native region ${name} must be a finite non-negative integer.`)
+      }
+      return value
+    }
+    const x = normalizeNonNegativeInteger('x', req.x)
+    const y = normalizeNonNegativeInteger('y', req.y)
+    const width = normalizePositiveInteger('width', req.width, 1)
+    const height = normalizePositiveInteger('height', req.height, 1)
+    const maxOutputPixels = Math.min(
+      NATIVE_REGION_MAX_OUTPUT_PIXELS,
+      normalizePositiveInteger(
+        'maxOutputPixels',
+        req.maxOutputPixels,
+        NATIVE_REGION_MAX_OUTPUT_PIXELS
+      )
+    )
+    const maxOutputBytes = Math.min(
+      NATIVE_REGION_MAX_OUTPUT_BYTES,
+      normalizePositiveInteger('maxOutputBytes', req.maxOutputBytes, NATIVE_REGION_MAX_OUTPUT_BYTES)
+    )
+    const outputWidth = normalizePositiveInteger('outputWidth', req.outputWidth, width)
+    const outputHeight = normalizePositiveInteger('outputHeight', req.outputHeight, height)
+    const requestedPixels = width * height
+    const outputPixels = outputWidth * outputHeight
+    if (
+      !Number.isSafeInteger(requestedPixels) ||
+      !Number.isSafeInteger(outputPixels) ||
+      requestedPixels > maxOutputPixels ||
+      outputPixels > maxOutputPixels
+    ) {
+      throw new Error('Native region output exceeds the pixel budget.')
+    }
+    const image = nativeImage.createFromPath(metadata.canonicalPath)
+    if (image.isEmpty()) {
+      throw new Error(`Failed to decode native region source: ${requestedPath}`)
+    }
+    const sourceSize = image.getSize()
+    if (x + width > sourceSize.width || y + height > sourceSize.height) {
+      throw new Error('Native region is outside source bounds.')
+    }
+    const cropped = image.crop({ x, y, width, height })
+    const resized =
+      outputWidth === width && outputHeight === height
+        ? cropped
+        : cropped.resize({ width: outputWidth, height: outputHeight })
+    const data = new Uint8Array(resized.toPNG())
+    if (data.byteLength > maxOutputBytes) {
+      throw new Error('Native region output exceeds the byte budget.')
+    }
+    return {
+      data,
+      sourceWidth: sourceSize.width,
+      sourceHeight: sourceSize.height,
+      x,
+      y,
+      width,
+      height,
+      outputWidth,
+      outputHeight,
       mimeType: 'image/png'
     }
   }

@@ -26,6 +26,7 @@ import { getCanvasImageAssetSize } from '../canvasImageAssetUtils'
 import {
   CanvasImageReleaseManager,
   type CanvasImageBitmapLike,
+  type CanvasImageReleaseHandle,
   type CanvasImageReleaseReason
 } from '../canvasImageReleaseManager'
 import {
@@ -87,8 +88,18 @@ import {
 } from '../canvasImageResourceLifecycle'
 import { CanvasSpatialTileScheduler } from '../canvasSpatialTileScheduler'
 import { createCanvasSpatialTileWorkerClient } from '../canvasSpatialTileWorkerClient'
+import { createCanvasSpatialTileNativeRegionBackendFromThumbnailBridge } from '../canvasSpatialTileWorkerProtocol'
 import { buildCanvasSpatialTilePolicy } from '../canvasSpatialTilePolicy'
 import { buildCanvasSpatialTileRenderModel } from '../canvasSpatialTileRenderModel'
+import { reconcileCanvasSpatialTiles } from '../canvasSpatialTileReconcile'
+import {
+  configureCanvasImageObjectUrlRegistry,
+  getCanvasImageObjectUrlRegistryMetrics
+} from '../canvasImageObjectUrlRegistry'
+import { PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED } from '@shared/config/viteEnv'
+
+export { PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED } from '@shared/config/viteEnv'
+
 import {
   type CanvasSpatialTileGeometry,
   type CanvasSpatialVisibleTile
@@ -114,7 +125,10 @@ type CachedImageRecord = {
   sourceRevisionKey: string
   providedImageIdentityKey: number | string
   imageBitmapOwnership: 'owned' | 'borrowed'
+  cacheKind: 'source' | 'thumbnail'
+  itemId: string
   decodedAssetReleaseId?: string
+  decodedAssetRefCount: number
 }
 
 function isCachedImageRecordCurrent(
@@ -148,6 +162,8 @@ function getCanvasImageSharedTextureKey(
 type SpatialTilePresentationAsset = {
   container: Container
   tileKeys: string[]
+  textures: Texture[]
+  textureBytes: number
 }
 
 type SpatialTileTextureAsset = {
@@ -699,22 +715,53 @@ async function loadImageElement(
     isCurrent?: () => boolean
     signal?: AbortSignal
   } = {}
-): Promise<HTMLImageElement> {
-  if (!canReadCanvasLocalImageSource(src)) {
-    return loadImageElementDirect(src, options)
+): Promise<CanvasImageAsset> {
+  if (canReadCanvasLocalImageSource(src)) {
+    let blob: Blob | null = null
+    try {
+      blob = await readCanvasLocalImageBlobFromSource(src, undefined, {
+        signal: options.signal
+      })
+    } catch (error) {
+      if (options.signal?.aborted || (error as { name?: string } | null)?.name === 'AbortError') {
+        throw error
+      }
+    }
+    if (options.signal?.aborted) {
+      throw new DOMException('Image load aborted.', 'AbortError')
+    }
+    if (options.isCurrent?.() === false) {
+      throw new Error('Image load request is stale.')
+    }
+    if (blob && typeof createImageBitmap === 'function') {
+      try {
+        const bitmap = await createImageBitmap(blob, {
+          premultiplyAlpha: PROJECT_CANVAS_IMAGE_BITMAP_PREMULTIPLY_ALPHA
+        })
+        if (options.signal?.aborted || options.isCurrent?.() === false) {
+          bitmap.close()
+          throw new DOMException('Image load aborted.', 'AbortError')
+        }
+        return bitmap
+      } catch (error) {
+        if (options.signal?.aborted || (error as { name?: string } | null)?.name === 'AbortError') {
+          throw error
+        }
+        // Fall through to the authorized image-element path for formats that the
+        // browser can display but ImageBitmap cannot decode.
+      }
+    }
+    const authorizedSource = await resolveAuthorizedCanvasLocalMediaSourceUrl(src)
+    if (!authorizedSource) {
+      throw new Error('Local image source is not authorized.')
+    }
+    if (options.isCurrent?.() === false) {
+      throw new Error('Image load request is stale.')
+    }
+    return loadImageElementDirect(authorizedSource, options)
   }
 
-  const authorizedSource = await resolveAuthorizedCanvasLocalMediaSourceUrl(src)
-  if (options.signal?.aborted) {
-    throw new DOMException('Image load aborted.', 'AbortError')
-  }
-  if (!authorizedSource) {
-    throw new Error('Local image source is not authorized.')
-  }
-  if (options.isCurrent?.() === false) {
-    throw new Error('Image load request is stale.')
-  }
-  return loadImageElementDirect(authorizedSource, options)
+  return loadImageElementDirect(src, options)
 }
 
 function resolveBoundedSourceTextureSize(width: number, height: number) {
@@ -898,68 +945,86 @@ async function loadBoundedSourceTextureFromUrl({
     resizeQuality: 'high',
     premultiplyAlpha: PROJECT_CANVAS_IMAGE_BITMAP_PREMULTIPLY_ALPHA
   })
-  if (signal?.aborted) {
-    bitmap.close()
-    return null
-  }
-  return bitmap
+  return downscaleSourceTextureForWebGL(bitmap, { imageBitmapOwnership: 'owned', signal })
 }
 
-async function downscaleSourceTextureForWebGL(image: HTMLImageElement): Promise<CanvasImageAsset> {
-  const width = image.naturalWidth || image.width || 0
-  const height = image.naturalHeight || image.height || 0
-  const maxSide = Math.max(width, height)
-  if (
-    maxSide <= PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_MAX_SIDE ||
-    width <= 0 ||
-    height <= 0 ||
-    typeof document === 'undefined'
-  ) {
-    return image
+async function downscaleSourceTextureForWebGL(
+  image: CanvasImageAsset,
+  {
+    imageBitmapOwnership,
+    signal
+  }: { imageBitmapOwnership: 'owned' | 'borrowed'; signal?: AbortSignal }
+): Promise<CanvasImageAsset> {
+  let result = image
+  let transferred = false
+  const checkAborted = () => {
+    if (signal?.aborted) throw new DOMException('Image resize aborted.', 'AbortError')
   }
-
-  const canvas = document.createElement('canvas')
-  const { width: targetWidth, height: targetHeight } = resolveBoundedSourceTextureSize(
-    width,
-    height
-  )
-  if (typeof createImageBitmap === 'function') {
-    try {
-      return await createImageBitmap(image, {
-        resizeWidth: targetWidth,
-        resizeHeight: targetHeight,
-        resizeQuality: 'high',
-        premultiplyAlpha: PROJECT_CANVAS_IMAGE_BITMAP_PREMULTIPLY_ALPHA
-      })
-    } catch {
-      // Fall through to canvas downscaling when ImageBitmap resize is unavailable.
-    }
-  }
-
-  canvas.width = targetWidth
-  canvas.height = targetHeight
-
-  const context = canvas.getContext('2d')
-  if (!context || typeof canvas.toBlob !== 'function') {
-    return image
-  }
-
-  context.imageSmoothingEnabled = true
-  context.imageSmoothingQuality = 'high'
-  context.drawImage(image, 0, 0, canvas.width, canvas.height)
-
-  const blob = await new Promise<Blob | null>((resolve) => {
-    canvas.toBlob((result) => resolve(result), 'image/webp', 0.92)
-  })
-  if (!blob || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
-    return image
-  }
-
-  const objectUrl = URL.createObjectURL(blob)
   try {
-    return await loadImageElement(objectUrl)
+    checkAborted()
+    const { width, height } = getCanvasImageAssetSize(image)
+    if (Math.max(width, height) > PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_MAX_SIDE) {
+      const target = resolveBoundedSourceTextureSize(width, height)
+      if (typeof createImageBitmap === 'function') {
+        try {
+          result = await createImageBitmap(image, {
+            resizeWidth: target.width,
+            resizeHeight: target.height,
+            resizeQuality: 'high',
+            premultiplyAlpha: PROJECT_CANVAS_IMAGE_BITMAP_PREMULTIPLY_ALPHA
+          })
+        } catch {
+          // Fall through to canvas downscaling when ImageBitmap resize is unavailable.
+        }
+        checkAborted()
+      }
+      if (result === image) {
+        const canvas = document.createElement('canvas')
+        canvas.width = target.width
+        canvas.height = target.height
+        const context = canvas.getContext('2d')
+        if (!context || typeof canvas.toBlob !== 'function') {
+          throw new Error('Source texture downscaling is unavailable.')
+        }
+        context.imageSmoothingEnabled = true
+        context.imageSmoothingQuality = 'high'
+        context.drawImage(image, 0, 0, canvas.width, canvas.height)
+        const blob = await new Promise<Blob | null>((resolve) => {
+          canvas.toBlob(resolve, 'image/webp', 0.92)
+        })
+        checkAborted()
+        if (!blob || typeof URL.createObjectURL !== 'function') {
+          throw new Error('Failed to encode downscaled source texture.')
+        }
+        const objectUrl = URL.createObjectURL(blob)
+        try {
+          result = await loadImageElementDirect(objectUrl, { signal })
+        } finally {
+          URL.revokeObjectURL(objectUrl)
+        }
+      }
+    }
+    checkAborted()
+    const resultSize = getCanvasImageAssetSize(result)
+    if (
+      resultSize.width <= 0 ||
+      resultSize.height <= 0 ||
+      Math.max(resultSize.width, resultSize.height) >
+        PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_MAX_SIDE ||
+      !canUploadProjectCanvasTexture(resultSize.width * resultSize.height * 4)
+    ) {
+      throw new Error('Decoded source texture exceeds WebGL bounds or has no pixels.')
+    }
+    transferred = true
+    return result
   } finally {
-    URL.revokeObjectURL(objectUrl)
+    // A resize transfers only its output; cancellation also disposes late completions.
+    if (imageBitmapOwnership === 'owned' && (!transferred || result !== image)) {
+      closeCanvasImageAssetIfPossible(image)
+    }
+    if (!transferred && result !== image) {
+      closeCanvasImageAssetIfPossible(result)
+    }
   }
 }
 
@@ -976,7 +1041,14 @@ async function loadBoundedSourceTextureViaImageElement({
     crossOrigin: useAnonymousCrossOrigin ? 'anonymous' : null,
     signal
   })
-  return downscaleSourceTextureForWebGL(image)
+  return downscaleSourceTextureForWebGL(image, { imageBitmapOwnership: 'owned', signal })
+}
+
+type SpatialTileReconcileInput = {
+  item: CanvasImageItem
+  renderItem: ProjectCanvasRenderableImage
+  world: Container
+  generation: number
 }
 
 const ProjectCanvasWebGLImageLayer = forwardRef<
@@ -1040,6 +1112,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const imageIdentityIdsRef = useRef(new WeakMap<object, number>())
   const nextImageIdentityIdRef = useRef(1)
   const sharedTexturePoolRef = useRef(new CanvasImageSharedResourcePool<Texture>())
+  const textureDecodedAssetRef = useRef(new WeakMap<Texture, CachedImageRecord>())
+  const nextDecodedAssetReleaseIdRef = useRef(1)
   const sharedTextureByteTrackerRef = useRef(new CanvasImageSharedResourceByteTracker())
   const imageLoadRequestTokensRef = useRef(new CanvasImageRequestTokenTracker())
   const sharedDecodedImagePoolRef = useRef(
@@ -1048,18 +1122,42 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const sharedDecodeBudgetReservationsRef = useRef(new CanvasImageSharedReservationTracker())
   const runtimeGenerationRef = useRef(0)
   const releaseManagerRef = useRef(new CanvasImageReleaseManager())
-  const spatialTileWorkerClientRef = useRef(createCanvasSpatialTileWorkerClient())
+  const objectUrlReleaseHandlesRef = useRef(new Map<string, CanvasImageReleaseHandle>())
+  const spatialTileNativeRegionBackendRef = useRef(
+    createCanvasSpatialTileNativeRegionBackendFromThumbnailBridge(
+      (typeof window !== 'undefined' ? window.api?.svcCanvasThumbnail : undefined) ?? {},
+      { sourcePath: '', maxOutputPixels: 4 * 1024 * 1024, maxOutputBytes: 32 * 1024 * 1024 }
+    )
+  )
+  const spatialTileWorkerClientRef = useRef(
+    createCanvasSpatialTileWorkerClient({
+      nativeRegionBackend: spatialTileNativeRegionBackendRef.current,
+      nativeRegionEnabled: PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED
+    })
+  )
   const spatialTileSchedulerRef = useRef(
     new CanvasSpatialTileScheduler(spatialTileWorkerClientRef.current)
   )
   const spatialTileResourceManagerRef = useRef(new CanvasSpatialTileResourceManager())
   const spatialTileRuntimeByIdRef = useRef(new Map<string, SpatialTileItemRuntime>())
   const spatialTileSourceBlobByKeyRef = useRef(new Map<string, Promise<Blob | null>>())
+  const spatialTilePresentationAbortByIdRef = useRef(new Map<string, AbortController>())
+  const spatialTilePresentationTaskByIdRef = useRef(new Map<string, Promise<void>>())
+  const spatialTilePresentationSourceKeyByIdRef = useRef(new Map<string, string>())
+  const spatialTilePresentationGenerationByIdRef = useRef(new Map<string, number>())
+  const spatialTilePresentationVisibleTileCountRef = useRef(new Map<string, number>())
+  const spatialTilePresentationPrefetchTileCountRef = useRef(new Map<string, number>())
+  const spatialTilePresentationTextureBytesByIdRef = useRef(new Map<string, number>())
+  const spatialTilePresentationBudgetReservationIdsRef = useRef(new Map<string, string>())
+  const spatialTileUploadReservationIdsRef = useRef(new Map<string, Set<string>>())
+  const objectUrlRegistryConfiguredRef = useRef(false)
   const resourceBudgetTrackerRef = useRef(
     new CanvasImageResourceBudgetTracker({
       sourceTextureBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
       thumbnailTextureBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
+      gpuTextureBytesTotal: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
       decodedInFlightBytes: PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES,
+      gpuUploadBytesInFlight: PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES,
       objectUrlCount: PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET,
       activeSourceUpgrades: PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_CONCURRENCY
     })
@@ -1105,12 +1203,18 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const spriteReconcileFrameRef = useRef<number | null>(null)
   const imageVersionFrameRef = useRef<number | null>(null)
   const imageElementLoadTimeoutsRef = useRef<Set<number>>(new Set())
+
   const metricsRef = useRef<ProjectCanvasWebGLImageLayerMetrics>(
     createProjectCanvasWebGLRuntimeMetrics({
       residentTextureBudgetBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
       lastUpdateReason: 'initialize'
     })
   )
+  if (!objectUrlRegistryConfiguredRef.current) {
+    configureCanvasImageObjectUrlRegistry(PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET)
+    objectUrlRegistryConfiguredRef.current = true
+  }
+
   const [isInitialized, setIsInitialized] = useState(false)
   const [imageVersion, setImageVersion] = useState(0)
   const [viewportVersion, setViewportVersion] = useState(0)
@@ -1164,29 +1268,97 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     queueImageVersionFrame()
   }, [queueImageVersionFrame])
 
+  const trackRuntimeObjectUrl = useCallback(
+    (id: string, objectUrl: string): CanvasImageReleaseHandle => {
+      objectUrlReleaseHandlesRef.current.get(id)?.release('replaced')
+      const handle = releaseManagerRef.current.trackObjectUrl(id, objectUrl)
+      objectUrlReleaseHandlesRef.current.set(id, handle)
+      return handle
+    },
+    []
+  )
+
   const collectResourceRuntimeMetrics = useCallback(() => {
     const releaseMetrics = releaseManagerRef.current.getMetricsSnapshot()
+    const objectUrlRegistryMetrics = getCanvasImageObjectUrlRegistryMetrics()
     const budgetMetrics = resourceBudgetTrackerRef.current.getMetricsSnapshot()
+    const objectUrlReservationId = 'project-canvas-webgl:object-url-runtime'
+    const activeObjectUrlCount = objectUrlRegistryMetrics.activeCount
+    if (activeObjectUrlCount > 0) {
+      resourceBudgetTrackerRef.current.upsert({
+        id: objectUrlReservationId,
+        objectUrlCount: activeObjectUrlCount,
+        evictable: true,
+        visible: true,
+        priority: 0,
+        lastAccessedAt: window.performance.now()
+      })
+    } else {
+      resourceBudgetTrackerRef.current.remove(objectUrlReservationId)
+    }
     const textureBudgetPressureCount = [
       budgetMetrics.pressure.sourceTextureBytes,
-      budgetMetrics.pressure.thumbnailTextureBytes
+      budgetMetrics.pressure.thumbnailTextureBytes,
+      budgetMetrics.pressure.gpuTextureBytesTotal
     ].filter((pressure) => pressure === 'over-budget' || pressure === 'at-limit').length
+    const tileSchedulerMetrics = spatialTileSchedulerRef.current.getMetrics()
+    const tileResourceMetrics = spatialTileResourceManagerRef.current.getMetricsSnapshot()
+    let tileEnabledItemCount = 0
+    spatialTileRuntimeByIdRef.current.forEach((runtime) => {
+      const state = runtime.stateMachine.getState()
+      if (state.mode === 'tiled' || state.candidate?.mode === 'tiled') {
+        tileEnabledItemCount += 1
+      }
+    })
+    const budgetUsage = budgetMetrics.usage
+    const tileVisibleJobs = Array.from(
+      spatialTilePresentationVisibleTileCountRef.current.values()
+    ).reduce((total, count) => total + count, 0)
+    const tilePrefetchJobs = Array.from(
+      spatialTilePresentationPrefetchTileCountRef.current.values()
+    ).reduce((total, count) => total + count, 0)
+    const tileResidentBytes = Array.from(
+      spatialTilePresentationTextureBytesByIdRef.current.values()
+    ).reduce((total, bytes) => total + bytes, 0)
 
     return {
-      activeObjectUrlCount: releaseMetrics.activeObjectUrlCount,
+      activeObjectUrlCount,
       revokedObjectUrlCount: releaseMetrics.revokedObjectUrlCount,
       activeImageBitmapCount: releaseMetrics.activeImageBitmapCount,
       closedImageBitmapCount: releaseMetrics.closedImageBitmapCount,
       releaseErrorCount: releaseMetrics.releaseErrors.length,
-      decodedInFlightBytes: budgetMetrics.usage.decodedInFlightBytes,
-      activeSourceUpgradeCount: budgetMetrics.usage.activeSourceUpgrades,
+      gpuTextureBytesTotal: budgetUsage.gpuTextureBytesTotal,
+      decodedResidentBytes: budgetUsage.decodedResidentBytes,
+      decodedInFlightBytes: budgetUsage.decodedInFlightBytes,
+      encodedBlobBytes: budgetUsage.encodedBlobBytes,
+      gpuUploadBytesInFlight: budgetUsage.gpuUploadBytesInFlight,
+      resourceBudgetReservationCount: budgetMetrics.reservationCount,
+      resourceBudgetEvictableReservationCount: budgetMetrics.evictableReservationCount,
+      activeSourceUpgradeCount: budgetUsage.activeSourceUpgrades,
+      thumbnailJobs: activeThumbnailLoadCountRef.current,
+      sourceJobs: activeInitialLoadCountRef.current + activeSourceUpgradeCountRef.current,
       residentTextureBudgetPressureCount: textureBudgetPressureCount,
       textureBudgetEvictionCount: textureBudgetEvictionCountRef.current,
       sourceImageCacheCount: imageCacheRef.current.size,
       thumbnailImageCacheCount: thumbnailCacheRef.current.size,
       sourceUpgradeQueueCount: sourceUpgradeQueueRef.current.length,
       thumbnailLoadQueueCount: thumbnailLoadQueueRef.current.length,
-      initialLoadQueueCount: initialLoadQueueRef.current.length
+      initialLoadQueueCount: initialLoadQueueRef.current.length,
+      tileEnabledItemCount,
+      tileQueuedCount: tileSchedulerMetrics.queued,
+      tileRunningCount: tileSchedulerMetrics.running,
+      tileCompletedCount: tileSchedulerMetrics.completed,
+      tileCancelledCount: tileSchedulerMetrics.cancelled,
+      tileDedupedCount: tileSchedulerMetrics.deduped,
+      tileFailedCount: tileSchedulerMetrics.failed,
+      tileStaleDisposedCount: tileSchedulerMetrics.staleDisposed,
+      tileActiveCount: tileResourceMetrics.activeTileCount,
+      tileActiveAssetCount: tileResourceMetrics.activeAssetCount,
+      tileDisposedAssetCount: tileResourceMetrics.disposedAssetCount,
+      tileDisposeErrorCount: tileResourceMetrics.disposeErrorCount,
+      tileVisibleJobs,
+      tilePrefetchJobs,
+      tileResidentBytes
     }
   }, [])
 
@@ -1291,17 +1463,40 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     [getCanvasImageLoadSource]
   )
 
+  const getCanvasImageDecodedByteSize = useCallback(
+    (image: CanvasImageAsset | null | undefined) => {
+      const { width, height } = getCanvasImageAssetSize(image)
+      return estimateCanvasImageTextureBytes(width, height)
+    },
+    []
+  )
+
   const releaseCachedImageRecord = useCallback(
     (record: CachedImageRecord | undefined, reason: CanvasImageReleaseReason) => {
       if (!record) {
         return
       }
 
-      if (record.decodedAssetReleaseId) {
+      if (record.decodedAssetReleaseId && record.decodedAssetRefCount > 0) {
+        record.decodedAssetRefCount -= 1
+        if (record.decodedAssetRefCount > 0) return
         releaseManagerRef.current.release(record.decodedAssetReleaseId, reason)
+        resourceBudgetTrackerRef.current.remove(
+          `project-canvas-webgl:decoded-resident:${record.decodedAssetReleaseId}`
+        )
       }
     },
     []
+  )
+
+  const destroySharedTexture = useCallback(
+    (texture: Texture) => {
+      destroyProjectCanvasTexture(texture, true)
+      const decodedAsset = textureDecodedAssetRef.current.get(texture)
+      textureDecodedAssetRef.current.delete(texture)
+      releaseCachedImageRecord(decodedAsset, 'manual')
+    },
+    [releaseCachedImageRecord]
   )
 
   const deleteCachedImageRecord = useCallback(
@@ -1404,12 +1599,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         decodedAssetRelease ||
         (imageBitmapOwnership === 'owned' && isCanvasImageBitmapLike(image))
       ) {
-        decodedAssetReleaseId = getProjectCanvasCachedImageReleaseId(
+        decodedAssetReleaseId = `${getProjectCanvasCachedImageReleaseId(
           cacheKind,
           'imageBitmap',
           itemId,
           sourceRevisionKey
-        )
+        )}:${nextDecodedAssetReleaseIdRef.current++}`
         if (decodedAssetRelease) {
           releaseManagerRef.current.trackLease(decodedAssetReleaseId, decodedAssetRelease)
         } else if (isCanvasImageBitmapLike(image)) {
@@ -1427,12 +1622,24 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         sourceRevisionKey,
         providedImageIdentityKey,
         imageBitmapOwnership,
-        decodedAssetReleaseId
+        cacheKind,
+        itemId,
+        decodedAssetReleaseId,
+        decodedAssetRefCount: 1
       }
       cache.set(itemId, record)
+      if (decodedAssetReleaseId) {
+        resourceBudgetTrackerRef.current.upsert({
+          id: `project-canvas-webgl:decoded-resident:${decodedAssetReleaseId}`,
+          decodedResidentBytes: getCanvasImageDecodedByteSize(image),
+          evictable: true,
+          visible: true,
+          lastAccessedAt: window.performance.now()
+        })
+      }
       return record
     },
-    [releaseCachedImageRecord]
+    [getCanvasImageDecodedByteSize, releaseCachedImageRecord]
   )
 
   const setTextureBudgetReservation = useCallback(
@@ -1459,6 +1666,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         id: `project-canvas-webgl:texture:${sharedTextureKey}`,
         sourceTextureBytes: isSourceTexture ? textureByteSize : 0,
         thumbnailTextureBytes: isSourceTexture ? 0 : textureByteSize,
+        gpuTextureBytesTotal: textureByteSize,
         evictable: true,
         visible: true,
         selected,
@@ -1485,6 +1693,11 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               Math.max(0, decodeByteSize),
               PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES
             ),
+            gpuUploadBytesInFlight: Math.min(
+              Math.max(0, decodeByteSize),
+              PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES
+            ),
+            sourceJobs: mode === 'source-upgrade' ? 1 : 0,
             activeSourceUpgrades: mode === 'source-upgrade' ? 1 : 0,
             evictable: false
           }).allowed,
@@ -2142,9 +2355,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       destroyProjectCanvasSpriteRecord(record, () => {
-        sharedTexturePoolRef.current.release(record.sharedTextureKey, (texture) =>
-          destroyProjectCanvasTexture(texture, true)
-        )
+        sharedTexturePoolRef.current.release(record.sharedTextureKey, destroySharedTexture)
         const releasedBytes = sharedTextureByteTrackerRef.current.release(record.sharedTextureKey)
         if (releasedBytes > 0) {
           removeTextureBudgetReservation(record.sharedTextureKey)
@@ -2157,7 +2368,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         previewStateRef.current.delete(itemId)
       }
     },
-    [removeTextureBudgetReservation]
+    [destroySharedTexture, removeTextureBudgetReservation]
   )
 
   const evictOldestResidentSprite = useCallback(
@@ -2287,16 +2498,19 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       skippedSourceUpgradeSrcByIdRef.current.clear()
       clearCachedImageRecords(imageCacheRef.current, 'component-unmount')
       clearCachedImageRecords(thumbnailCacheRef.current, 'component-unmount')
-      releaseManagerRef.current.releaseAll('component-unmount')
+      objectUrlReleaseHandlesRef.current.forEach((handle) => handle.release('component-unmount'))
+      objectUrlReleaseHandlesRef.current.clear()
+      resourceBudgetTrackerRef.current.remove('project-canvas-webgl:object-url-runtime')
+      getCanvasImageObjectUrlRegistryMetrics()
+
       spriteRecords.forEach((record) => {
         destroyProjectCanvasSpriteRecord(record, () => {
-          sharedTexturePoolRef.current.release(record.sharedTextureKey, (texture) =>
-            destroyProjectCanvasTexture(texture, true)
-          )
+          sharedTexturePoolRef.current.release(record.sharedTextureKey, destroySharedTexture)
         })
       })
       spriteRecords.clear()
-      sharedTexturePoolRef.current.clear((texture) => destroyProjectCanvasTexture(texture, true))
+      sharedTexturePoolRef.current.clear(destroySharedTexture)
+      releaseManagerRef.current.releaseAll('component-unmount')
       itemReconcileSnapshotByIdRef.current.clear()
       sharedTextureByteTrackerRef.current.clear()
       sharedDecodeBudgetReservationsRef.current.clear((sharedDecodedKey) => {
@@ -2329,6 +2543,24 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         { immediate: true }
       )
 
+      spatialTilePresentationAbortByIdRef.current.forEach((controller) => controller.abort())
+      spatialTilePresentationAbortByIdRef.current.clear()
+      spatialTilePresentationTaskByIdRef.current.clear()
+      spatialTilePresentationSourceKeyByIdRef.current.clear()
+      spatialTilePresentationGenerationByIdRef.current.clear()
+      spatialTilePresentationVisibleTileCountRef.current.clear()
+      spatialTilePresentationPrefetchTileCountRef.current.clear()
+      spatialTilePresentationTextureBytesByIdRef.current.clear()
+      spatialTilePresentationBudgetReservationIdsRef.current.forEach((reservationId) => {
+        resourceBudgetTrackerRef.current.remove(reservationId)
+      })
+      spatialTilePresentationBudgetReservationIdsRef.current.clear()
+      spatialTileUploadReservationIdsRef.current.forEach((reservationIds) => {
+        reservationIds.forEach((reservationId) =>
+          resourceBudgetTrackerRef.current.remove(reservationId)
+        )
+      })
+      spatialTileUploadReservationIdsRef.current.clear()
       spatialTileWorkerClientRef.current.dispose()
       spatialTileResourceManagerRef.current.clear()
       spatialTileRuntimeByIdRef.current.forEach((runtime) => runtime.stateMachine.leavePolicy())
@@ -2400,6 +2632,18 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         if (disposed || runtimeDisposed) {
           return
         }
+        const context =
+          (app.renderer as PixiRendererWithWebGLContext).gl ??
+          (app.renderer as PixiRendererWithWebGLContext).context?.gl
+        if (
+          !context ||
+          typeof context.getError !== 'function' ||
+          typeof context.NO_ERROR !== 'number'
+        ) {
+          console.warn('[Canvas WebGL] Pixi initialized without a usable WebGL context.')
+          cleanupRuntime('cleanup')
+          return
+        }
         setIsInitialized(true)
         onReadyChange?.(true)
         reportMetrics(
@@ -2410,7 +2654,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           { immediate: true }
         )
         scheduleRender()
-      } catch {
+      } catch (error) {
+        console.warn('[Canvas WebGL] Failed to initialize Pixi WebGL runtime.', error)
         onReadyChange?.(false)
       }
     }
@@ -2427,6 +2672,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
   }, [
     clearCachedImageRecords,
+    destroySharedTexture,
     onResidentIdsChange,
     onReadyChange,
     onResolvedIdsChange,
@@ -2655,13 +2901,14 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         pumpSourceUpgradeQueue()
       }
 
-      const markUnavailableSource = (outcome: 'skipped' | 'failed') => {
+      const markUnavailableSource = (outcome: 'skipped' | 'failed', error?: unknown) => {
         const currentItem = currentItemByIdRef.current.get(item.id)
         if (currentItem && isRequestCurrent()) {
           if (mode === 'source-upgrade' && outcome === 'skipped') {
             skippedSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
           } else if (mode === 'source-upgrade') {
             failedSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
+            console.warn('[Canvas WebGL] Source texture decode failed:', item.id, item.src, error)
           } else {
             failedLoadSrcByIdRef.current.set(item.id, item.src)
           }
@@ -2675,7 +2922,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         sourceWidth: item.sourceWidth ?? item.width,
         sourceHeight: item.sourceHeight ?? item.height
       })
-      const requiresBoundedDecode = !canUploadProjectCanvasTexture(sourceDecodeByteSize)
+      const requiresBoundedDecode =
+        !canUploadProjectCanvasTexture(sourceDecodeByteSize) ||
+        Math.max(item.sourceWidth ?? item.width, item.sourceHeight ?? item.height) >
+          PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_MAX_SIDE
       if (mode === 'source-upgrade') {
         activeSourceUpgradeCountRef.current += 1
         activeSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
@@ -2755,7 +3005,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
                 'Timed out loading bounded source texture.',
                 abortDecode
               )
-            } catch {
+            } catch (error) {
+              if (decodeSignal.aborted) throw error
               resolvedImage = null
             }
             if (
@@ -2776,28 +3027,16 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             return resolvedImage
           }
 
-          const image = await withProjectCanvasWebGLTimeout(
-            loadImageElement(item.src, {
-              crossOrigin: shouldUseAnonymousCrossOrigin(item.src) ? 'anonymous' : null,
+          return await withProjectCanvasWebGLTimeout(
+            loadBoundedSourceTextureViaImageElement({
+              src: item.src,
+              useAnonymousCrossOrigin: shouldUseAnonymousCrossOrigin(item.src),
               signal: decodeSignal
             }),
             PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS,
             'Timed out loading source texture through an image element.',
             abortDecode
           )
-          if (mode !== 'source-upgrade') {
-            return image
-          }
-          try {
-            return await withProjectCanvasWebGLTimeout(
-              downscaleSourceTextureForWebGL(image),
-              PROJECT_CANVAS_WEBGL_SOURCE_TEXTURE_LOAD_TIMEOUT_MS,
-              'Timed out downscaling source texture.',
-              abortDecode
-            )
-          } catch {
-            return image
-          }
         } finally {
           signal.removeEventListener('abort', abortDecode)
           releaseProducerDecodeBudgetReservation()
@@ -2842,7 +3081,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           src: item.src,
           sourceRevisionKey: getCanvasImageSourceRevisionKey(item),
           providedImageIdentityKey: getCanvasImageAssetIdentityKey(item.image),
-          imageBitmapOwnership: 'borrowed',
+          imageBitmapOwnership: isCanvasImageBitmapLike(resolvedImage) ? 'owned' : 'borrowed',
           decodedAssetRelease: release
         })
         scheduleImageVersionUpdate()
@@ -2852,9 +3091,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         loadDecodedAsset,
         closeCanvasImageAssetIfPossible,
         handleDecodedLease,
-        () => {
+        (error) => {
           finalizeRequest()
-          markUnavailableSource('failed')
+          markUnavailableSource('failed', error)
         }
       )
       if (!finalized) {
@@ -3091,7 +3330,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               src: queued.src,
               sourceRevisionKey: requestRevisionKey,
               providedImageIdentityKey: getCanvasImageAssetIdentityKey(nextItem.image),
-              imageBitmapOwnership: 'borrowed'
+              imageBitmapOwnership: 'owned'
             })
             scheduleImageVersionUpdate()
           })
@@ -3644,6 +3883,33 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     const residentCandidateImageCount = residentCandidateIds.size
     residentCandidateImageCountForThumbnailLod = residentCandidateImageCount
     const viewportCulledImageCount = Math.max(0, items.length - residentCandidateImageCount)
+    const spatialTilePresentationIds = new Set([
+      ...spatialTilePresentationTaskByIdRef.current.keys(),
+      ...spatialTilePresentationBudgetReservationIdsRef.current.keys()
+    ])
+    for (const itemId of spatialTilePresentationIds) {
+      if (!nextIds.has(itemId) || !residentCandidateIds.has(itemId)) {
+        spatialTilePresentationAbortByIdRef.current.get(itemId)?.abort()
+        spatialTilePresentationAbortByIdRef.current.delete(itemId)
+        spatialTilePresentationTaskByIdRef.current.delete(itemId)
+        spatialTilePresentationSourceKeyByIdRef.current.delete(itemId)
+        spatialTilePresentationGenerationByIdRef.current.delete(itemId)
+        spatialTilePresentationVisibleTileCountRef.current.delete(itemId)
+        spatialTilePresentationPrefetchTileCountRef.current.delete(itemId)
+        spatialTilePresentationTextureBytesByIdRef.current.delete(itemId)
+        const uploadReservationIds = spatialTileUploadReservationIdsRef.current.get(itemId)
+        uploadReservationIds?.forEach((reservationId) =>
+          resourceBudgetTrackerRef.current.remove(reservationId)
+        )
+        spatialTileUploadReservationIdsRef.current.delete(itemId)
+        spatialTileResourceManagerRef.current.invalidateTile(itemId)
+        const tileReservationId = spatialTilePresentationBudgetReservationIdsRef.current.get(itemId)
+        if (tileReservationId) {
+          resourceBudgetTrackerRef.current.remove(tileReservationId)
+          spatialTilePresentationBudgetReservationIdsRef.current.delete(itemId)
+        }
+      }
+    }
     const spriteReconcileBatchSize = getProjectCanvasSpriteReconcileBatchSize(
       safeScale,
       isPerformanceThrottledRef.current
@@ -3659,11 +3925,205 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     let worldOrderDirty = false
     const nextRenderItems = new Map<string, ProjectCanvasRenderableImage>()
 
+    const reconcileSpatialTilePresentation = (input: SpatialTileReconcileInput) => {
+      if (
+        !PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED ||
+        !input.item.sourceFile ||
+        !input.item.sourceIdentity
+      ) {
+        return
+      }
+      const sourceKey = input.item.sourceIdentity?.cacheKey ?? input.item.src
+      const previousSourceKey = spatialTilePresentationSourceKeyByIdRef.current.get(input.item.id)
+      const tileSourceKey = [
+        sourceKey,
+        input.renderItem.sourceWidth,
+        input.renderItem.sourceHeight,
+        input.renderItem.crop?.x ?? 0,
+        input.renderItem.crop?.y ?? 0,
+        input.renderItem.crop?.width ?? input.renderItem.sourceWidth,
+        input.renderItem.crop?.height ?? input.renderItem.sourceHeight,
+        safeScale,
+        currentStagePos.x,
+        currentStagePos.y,
+        viewportBounds?.x ?? 0,
+        viewportBounds?.y ?? 0,
+        viewportBounds?.width ?? currentStageSize?.width ?? input.renderItem.width,
+        viewportBounds?.height ?? currentStageSize?.height ?? input.renderItem.height,
+        deviceScaleForReconcileSnapshot,
+        input.renderItem.x,
+        input.renderItem.y,
+        input.renderItem.width,
+        input.renderItem.height,
+        input.renderItem.scaleX,
+        input.renderItem.scaleY,
+        input.renderItem.rotation
+      ].join(':')
+      const previousTask = spatialTilePresentationTaskByIdRef.current.get(input.item.id)
+      if (previousTask && previousSourceKey === tileSourceKey) {
+        previousTask.catch(() => undefined)
+        return
+      }
+      if (previousTask) {
+        previousTask.catch(() => undefined)
+        spatialTilePresentationAbortByIdRef.current.get(input.item.id)?.abort()
+      }
+      const previousController = spatialTilePresentationAbortByIdRef.current.get(input.item.id)
+      previousController?.abort()
+      const controller = new AbortController()
+      spatialTilePresentationAbortByIdRef.current.set(input.item.id, controller)
+      spatialTilePresentationSourceKeyByIdRef.current.set(input.item.id, tileSourceKey)
+      const presentationGeneration =
+        (spatialTilePresentationGenerationByIdRef.current.get(input.item.id) ?? 0) + 1
+      spatialTilePresentationGenerationByIdRef.current.set(input.item.id, presentationGeneration)
+      const task = reconcileCanvasSpatialTiles(
+        {
+          itemId: input.item.id,
+          zIndex: input.renderItem.zIndex,
+          interactionProxy: input.renderItem.interactionProxy,
+          transform: input.renderItem,
+          sourceWidth: input.renderItem.sourceWidth,
+          sourceHeight: input.renderItem.sourceHeight,
+          crop: input.renderItem.crop,
+          sourceIdentity: input.item.sourceIdentity,
+          source: input.item.sourceFile,
+          policyInput: {
+            sourceWidth: input.renderItem.sourceWidth,
+            sourceHeight: input.renderItem.sourceHeight,
+            crop: input.renderItem.crop ?? {
+              x: 0,
+              y: 0,
+              width: input.renderItem.sourceWidth,
+              height: input.renderItem.sourceHeight
+            },
+            item: input.renderItem,
+            stageScale: safeScale,
+            stagePos: currentStagePos,
+            deviceScale: deviceScaleForReconcileSnapshot,
+            viewport: viewportBounds ?? {
+              x: 0,
+              y: 0,
+              width: currentStageSize?.width ?? input.renderItem.width,
+              height: currentStageSize?.height ?? input.renderItem.height
+            },
+            visible: residentCandidateIds.has(input.item.id),
+            overscanTiles: 1
+          }
+        },
+        {
+          world: worldRef.current!,
+          scheduler: spatialTileSchedulerRef.current,
+          resourceManager: spatialTileResourceManagerRef.current,
+          onTextureAllocationStart: (bytes, tileIndex) => {
+            const reservationId = `project-canvas-webgl:tile-upload:${input.item.id}:${presentationGeneration}:${tileIndex}`
+            const decision = resourceBudgetTrackerRef.current.admit({
+              id: reservationId,
+              gpuUploadBytesInFlight: bytes,
+              evictable: false
+            })
+            if (decision.allowed) {
+              const reservationIds =
+                spatialTileUploadReservationIdsRef.current.get(input.item.id) ?? new Set<string>()
+              reservationIds.add(reservationId)
+              spatialTileUploadReservationIdsRef.current.set(input.item.id, reservationIds)
+            }
+            return decision.allowed
+          },
+          onTextureAllocationComplete: (_bytes, tileIndex) => {
+            const reservationId = `project-canvas-webgl:tile-upload:${input.item.id}:${presentationGeneration}:${tileIndex}`
+            resourceBudgetTrackerRef.current.remove(reservationId)
+            const reservationIds = spatialTileUploadReservationIdsRef.current.get(input.item.id)
+            reservationIds?.delete(reservationId)
+            if (reservationIds?.size === 0) {
+              spatialTileUploadReservationIdsRef.current.delete(input.item.id)
+            }
+          },
+          createTexture: async (result) => {
+            const image = await createImageBitmap(result.blob)
+            const texture = createProjectCanvasTexture(image)
+            return {
+              texture,
+              dispose: () => {
+                texture.destroy(true)
+                image.close()
+              }
+            }
+          },
+          itemRuntimeKey: input.item.id,
+          generation: presentationGeneration,
+          signal: controller.signal,
+          onPresentationCommit: ({ tileCount, textureBytes }) => {
+            const reservationId = `project-canvas-webgl:tile:${input.item.id}`
+            const admission = resourceBudgetTrackerRef.current.admit({
+              id: reservationId,
+              gpuTextureBytesTotal: textureBytes,
+              tileResidentBytes: textureBytes,
+              tileVisibleJobs: tileCount,
+              evictable: true,
+              visible: true,
+              selected: selectedIdsRef.current?.has(input.item.id) === true,
+              priority: 1,
+              lastAccessedAt: window.performance.now()
+            })
+            if (!admission.allowed) {
+              spatialTileResourceManagerRef.current.invalidateTile(
+                input.item.id,
+                presentationGeneration
+              )
+              return false
+            }
+            const previousReservationId =
+              spatialTilePresentationBudgetReservationIdsRef.current.get(input.item.id)
+            if (previousReservationId && previousReservationId !== reservationId) {
+              resourceBudgetTrackerRef.current.remove(previousReservationId)
+            }
+            spatialTilePresentationBudgetReservationIdsRef.current.set(input.item.id, reservationId)
+            spatialTilePresentationVisibleTileCountRef.current.set(input.item.id, tileCount)
+            spatialTilePresentationTextureBytesByIdRef.current.set(input.item.id, textureBytes)
+            if (spriteRecordsRef.current.has(input.item.id)) {
+              destroySpriteRecord(input.item.id, { retainPreview: true })
+              renderItemsRef.current.delete(input.item.id)
+            }
+            queueImageVersionFrame()
+            scheduleRender()
+            return true
+          },
+          onPresentationDispose: () => {
+            spatialTilePresentationVisibleTileCountRef.current.delete(input.item.id)
+            spatialTilePresentationTextureBytesByIdRef.current.delete(input.item.id)
+            const reservationId = spatialTilePresentationBudgetReservationIdsRef.current.get(
+              input.item.id
+            )
+            if (reservationId) {
+              resourceBudgetTrackerRef.current.remove(reservationId)
+              spatialTilePresentationBudgetReservationIdsRef.current.delete(input.item.id)
+            }
+            queueImageVersionFrame()
+          }
+        }
+      )
+      const settledTask = task.then(
+        () => undefined,
+        () => undefined
+      )
+      spatialTilePresentationTaskByIdRef.current.set(input.item.id, settledTask)
+      void settledTask.finally(() => {
+        if (spatialTilePresentationAbortByIdRef.current.get(input.item.id) === controller) {
+          spatialTilePresentationAbortByIdRef.current.delete(input.item.id)
+        }
+        if (spatialTilePresentationTaskByIdRef.current.get(input.item.id) === settledTask) {
+          spatialTilePresentationTaskByIdRef.current.delete(input.item.id)
+          spatialTilePresentationSourceKeyByIdRef.current.delete(input.item.id)
+        }
+      })
+    }
+
     for (const [itemId, record] of spriteRecordsRef.current) {
       if (
         nextIds.has(itemId) &&
         residentCandidateIds.has(itemId) &&
-        residentTargetIds.has(itemId)
+        residentTargetIds.has(itemId) &&
+        !spatialTilePresentationBudgetReservationIdsRef.current.has(itemId)
       ) {
         continue
       }
@@ -3742,6 +4202,57 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
       const existingRecord = spriteRecordsRef.current.get(item.id)
       const previousRenderItem = renderItemsRef.current.get(item.id)
+      const previousTileReservationId = spatialTilePresentationBudgetReservationIdsRef.current.get(
+        item.id
+      )
+      if (PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED && item.sourceFile && item.sourceIdentity) {
+        const spatialRenderItem =
+          previousRenderItem ?? buildProjectCanvasRenderableImage(item, item.image)
+        if (spatialRenderItem) {
+          reconcileSpatialTilePresentation({
+            item,
+            renderItem: spatialRenderItem,
+            world,
+            generation: spriteReconcileGeneration
+          })
+        }
+      } else {
+        spatialTilePresentationAbortByIdRef.current.get(item.id)?.abort()
+        spatialTilePresentationAbortByIdRef.current.delete(item.id)
+        spatialTilePresentationTaskByIdRef.current.delete(item.id)
+        spatialTilePresentationSourceKeyByIdRef.current.delete(item.id)
+        spatialTilePresentationGenerationByIdRef.current.delete(item.id)
+        spatialTilePresentationVisibleTileCountRef.current.delete(item.id)
+        spatialTilePresentationPrefetchTileCountRef.current.delete(item.id)
+        spatialTilePresentationTextureBytesByIdRef.current.delete(item.id)
+        const uploadReservationIds = spatialTileUploadReservationIdsRef.current.get(item.id)
+        uploadReservationIds?.forEach((reservationId) =>
+          resourceBudgetTrackerRef.current.remove(reservationId)
+        )
+        spatialTileUploadReservationIdsRef.current.delete(item.id)
+        spatialTileResourceManagerRef.current.invalidateTile(item.id)
+        const tileReservationId = spatialTilePresentationBudgetReservationIdsRef.current.get(
+          item.id
+        )
+        if (tileReservationId) {
+          resourceBudgetTrackerRef.current.remove(tileReservationId)
+          spatialTilePresentationBudgetReservationIdsRef.current.delete(item.id)
+        }
+      }
+      const hasActiveSpatialTilePresentation =
+        Boolean(previousTileReservationId) ||
+        Boolean(spatialTilePresentationTaskByIdRef.current.get(item.id))
+      if (hasActiveSpatialTilePresentation) {
+        if (existingRecord) {
+          destroySpriteRecord(item.id, { retainPreview: true })
+          worldOrderDirty = true
+        }
+        if (previousRenderItem) {
+          nextRenderItems.set(item.id, previousRenderItem)
+        }
+        reconciledSnapshotItems.set(item.id, item)
+        return
+      }
       const currentReconcileSnapshot = buildItemReconcileSnapshot(item)
       if (
         existingRecord &&
@@ -3815,6 +4326,20 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       residentCandidateTextureBytes += textureByteSize
 
       const sourceRevisionKey = getCanvasImageSourceRevisionKey(item)
+      const encodedBlobReservationId = `project-canvas-webgl:encoded-blob:${item.id}:${sourceRevisionKey}`
+      const encodedBlobBytes = item.sourceFile?.size ?? 0
+      resourceBudgetTrackerRef.current.remove(encodedBlobReservationId)
+      if (encodedBlobBytes > 0) {
+        resourceBudgetTrackerRef.current.upsert({
+          id: encodedBlobReservationId,
+          encodedBlobBytes,
+          evictable: true,
+          visible: true,
+          lastAccessedAt: window.performance.now()
+        })
+      } else {
+        resourceBudgetTrackerRef.current.remove(encodedBlobReservationId)
+      }
       const decodedVariantKey = isProjectCanvasCachedSourceImage(
         renderItem.image,
         imageCacheRef.current.get(item.id)
@@ -3939,7 +4464,17 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         let createdSharedTexture = false
         baseTexture = sharedTexturePoolRef.current.acquire(sharedTextureKey, () => {
           createdSharedTexture = true
-          return createProjectCanvasTexture(image)
+          const createdTexture = createProjectCanvasTexture(image)
+          const cachedSource = imageCacheRef.current.get(item.id)
+          const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
+          const decodedAsset = cachedSource?.image === image ? cachedSource : cachedThumbnail
+          if (decodedAsset?.image === image && decodedAsset.decodedAssetReleaseId) {
+            // Pixi may upload again after unload. Retain the actual shared texture
+            // input, not a sprite's potentially different decoded object.
+            decodedAsset.decodedAssetRefCount += 1
+            textureDecodedAssetRef.current.set(createdTexture, decodedAsset)
+          }
+          return createdTexture
         })
         if (createdSharedTexture) {
           webglErrorCheckRequestedRef.current = true
@@ -4007,6 +4542,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       } catch (error) {
         if (item.image && image !== item.image) {
           failedSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
+          console.warn('[Canvas WebGL] Source texture upload failed:', item.id, item.src, error)
           if (!existingRecord) {
             deferredNewSpriteCount += 1
           }
@@ -4021,9 +4557,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           texture.destroy(false)
         }
         if (baseTexture) {
-          sharedTexturePoolRef.current.release(sharedTextureKey, (sharedTexture) =>
-            destroyProjectCanvasTexture(sharedTexture, true)
-          )
+          sharedTexturePoolRef.current.release(sharedTextureKey, destroySharedTexture)
           const releasedBytes = sharedTextureByteTrackerRef.current.release(sharedTextureKey)
           if (releasedBytes > 0) {
             removeTextureBudgetReservation(sharedTextureKey)
@@ -4121,6 +4655,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   }, [
     beginDecodeBudgetReservation,
     beginImageLoadToken,
+    destroySharedTexture,
     destroySpriteRecord,
     collectImageHealthCounts,
     deleteCachedImageRecord,

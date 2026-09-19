@@ -13,12 +13,14 @@ import {
 
 const electronMock = vi.hoisted(() => ({
   userDataRoot: '',
-  createThumbnailFromPath: vi.fn()
+  createThumbnailFromPath: vi.fn(),
+  createFromPath: vi.fn()
 }))
 
 vi.mock('electron', () => ({
   app: {
     getPath: vi.fn((name: string) => {
+      if (name === 'temp') return path.join(electronMock.userDataRoot, 'temp')
       if (name !== 'userData') {
         throw new Error(`Unexpected app path request: ${name}`)
       }
@@ -26,7 +28,8 @@ vi.mock('electron', () => ({
     })
   },
   nativeImage: {
-    createThumbnailFromPath: electronMock.createThumbnailFromPath
+    createThumbnailFromPath: electronMock.createThumbnailFromPath,
+    createFromPath: electronMock.createFromPath
   }
 }))
 
@@ -615,6 +618,114 @@ describe('CanvasThumbnailSvcImpl', () => {
         message: 'disabled'
       }
     })
+  })
+
+  it('creates native regions with bounded crop and resize', async () => {
+    const sourcePath = await createSourceFile()
+    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'source.png')
+    fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
+    fs.copyFileSync(sourcePath, authorizedSourcePath)
+    const png = Buffer.from([1, 2, 3, 4])
+    electronMock.createFromPath.mockReturnValue({
+      isEmpty: () => false,
+      getSize: () => ({ width: 640, height: 480 }),
+      crop: vi.fn(() => ({
+        resize: vi.fn(() => ({ toPNG: () => png })),
+        toPNG: () => png
+      }))
+    })
+
+    const response = await service.createNativeRegion({
+      fullPath: sourcePath.replace(testRoot, electronMock.userDataRoot),
+      x: 4,
+      y: 8,
+      width: 64,
+      height: 32,
+      outputWidth: 32,
+      outputHeight: 16,
+      maxOutputPixels: 4096,
+      maxOutputBytes: 1024
+    })
+
+    expect(electronMock.createFromPath).toHaveBeenCalledWith(
+      fs.realpathSync.native(authorizedSourcePath)
+    )
+    expect(response).toMatchObject({
+      sourceWidth: 640,
+      sourceHeight: 480,
+      x: 4,
+      y: 8,
+      width: 64,
+      height: 32,
+      outputWidth: 32,
+      outputHeight: 16,
+      mimeType: 'image/png'
+    })
+    expect(Array.from(response.data)).toEqual([1, 2, 3, 4])
+  })
+
+  it('rejects native regions above the output pixel budget', async () => {
+    const sourcePath = await createSourceFile()
+    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'budget-source.png')
+    fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
+    fs.copyFileSync(sourcePath, authorizedSourcePath)
+    const callsBefore = electronMock.createFromPath.mock.calls.length
+    await expect(
+      service.createNativeRegion({
+        fullPath: authorizedSourcePath,
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+        maxOutputPixels: 99
+      })
+    ).rejects.toThrow('pixel budget')
+    expect(electronMock.createFromPath.mock.calls.length).toBe(callsBefore)
+  })
+
+  it('rejects non-finite native region dimensions before decoding', async () => {
+    const sourcePath = await createSourceFile('invalid-region.png')
+    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'invalid-region.png')
+    fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
+    fs.copyFileSync(sourcePath, authorizedSourcePath)
+    const callsBefore = electronMock.createFromPath.mock.calls.length
+
+    await expect(
+      service.createNativeRegion({
+        fullPath: authorizedSourcePath,
+        x: Number.NaN,
+        y: 0,
+        width: 32,
+        height: 32,
+        maxOutputPixels: 4096,
+        maxOutputBytes: 1024
+      })
+    ).rejects.toThrow(/x must be a finite/)
+    expect(electronMock.createFromPath.mock.calls.length).toBe(callsBefore)
+  })
+
+  it('rejects native sources above the source byte budget before decoding', async () => {
+    const sourcePath = await createSourceFile('oversized-region.png')
+    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'oversized-region.png')
+    fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
+    fs.copyFileSync(sourcePath, authorizedSourcePath)
+    const originalSize = fs.statSync(authorizedSourcePath).size
+    fs.truncateSync(authorizedSourcePath, 512 * 1024 * 1024 + 1)
+    const callsBefore = electronMock.createFromPath.mock.calls.length
+
+    await expect(
+      service.createNativeRegion({
+        fullPath: authorizedSourcePath,
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        maxOutputPixels: 4096,
+        maxOutputBytes: 1024
+      })
+    ).rejects.toThrow(/source exceeds the byte budget/)
+    expect(electronMock.createFromPath.mock.calls.length).toBe(callsBefore)
+    fs.truncateSync(authorizedSourcePath, originalSize)
   })
 
   it('creates native PNG thumbnails with Electron nativeImage fallback', async () => {

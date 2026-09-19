@@ -17,6 +17,7 @@ import {
   type CanvasThumbnailRuntimeMetrics,
   type CanvasThumbnailWorkerGeneratedLevel
 } from './canvasThumbnailTypes'
+import { createCanvasImageObjectUrlHandle } from './canvasImageObjectUrlRegistry'
 import {
   canvasThumbnailManifestFromSet,
   canvasThumbnailSetFromManifest,
@@ -72,8 +73,7 @@ type WarmCanvasThumbnailReadResult = {
 
 function getCanvasThumbnailIpcBridge(): CanvasThumbnailIpcBridge | null {
   const api = (typeof window !== 'undefined' ? window.api : undefined) as
-    | { svcCanvasThumbnail?: CanvasThumbnailIpcBridge }
-    | undefined
+    { svcCanvasThumbnail?: CanvasThumbnailIpcBridge } | undefined
   return api?.svcCanvasThumbnail ?? null
 }
 
@@ -120,14 +120,22 @@ export function resetCanvasThumbnailRuntimeMetrics(): void {
   canvasThumbnailWorkerPool.resetCounters()
 }
 
-function createObjectUrl(blob: Blob): string {
-  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
-    return URL.createObjectURL(blob)
-  }
-  return ''
+const thumbnailObjectUrlReleases = new Map<string, () => void>()
+
+function createObjectUrl(blob: Blob, ownerKey: string): string {
+  const handle = createCanvasImageObjectUrlHandle(ownerKey, blob)
+  if (!handle) return ''
+  thumbnailObjectUrlReleases.set(handle.url, handle.revoke)
+  return handle.url
 }
 
 function revokeObjectUrl(src: string): void {
+  const release = thumbnailObjectUrlReleases.get(src)
+  if (release) {
+    thumbnailObjectUrlReleases.delete(src)
+    release()
+    return
+  }
   if (
     src.startsWith('blob:') &&
     typeof URL !== 'undefined' &&
@@ -205,12 +213,14 @@ function createWorker(): Worker | null {
 }
 
 function finalizeGeneratedThumbnailLevel(
-  level: CanvasThumbnailWorkerGeneratedLevel
+  level: CanvasThumbnailWorkerGeneratedLevel,
+  ownerKey: string
 ): CanvasGeneratedThumbnailLevel {
+  const src = createObjectUrl(level.blob, ownerKey)
   return {
     ...level,
     filename: getLevelFilename(level.maxSide, level.mimeType),
-    src: createObjectUrl(level.blob),
+    src,
     sizeBytes: level.blob.size
   }
 }
@@ -224,7 +234,14 @@ async function generateLevelsWithWorker(
   request: CanvasThumbnailGenerationRequest
 ): Promise<CanvasGeneratedThumbnailLevel[] | null> {
   const workerLevels = await canvasThumbnailWorkerPool.generate(request)
-  return workerLevels ? workerLevels.map(finalizeGeneratedThumbnailLevel) : null
+  return workerLevels
+    ? workerLevels.map((level) =>
+        finalizeGeneratedThumbnailLevel(
+          level,
+          `canvas-thumbnail:${request.identity.cacheKey}:${level.maxSide}:${level.blob.size}`
+        )
+      )
+    : null
 }
 
 export function getCanvasThumbnailWorkerPoolMetrics(): CanvasThumbnailWorkerPoolMetrics {
@@ -251,7 +268,12 @@ async function generateLevelsInRenderer(
     preferWebp: request.preferWebp ?? true
   })
 
-  return levels.map(finalizeGeneratedThumbnailLevel)
+  return levels.map((level) =>
+    finalizeGeneratedThumbnailLevel(
+      level,
+      `canvas-thumbnail:renderer:${request.identity.cacheKey}:${level.maxSide}:${level.blob.size}`
+    )
+  )
 }
 
 export async function generateCanvasThumbnailLevels(
@@ -274,17 +296,15 @@ function createThumbnailSetFromGeneratedLevels({
 }): CanvasImageThumbnailSet {
   return createCanvasThumbnailSet({
     identity,
-    levels: levels.map(
-      (level): CanvasImageThumbnailLevel => ({
-        maxSide: level.maxSide,
-        width: level.width,
-        height: level.height,
-        mimeType: level.mimeType,
-        filename: level.filename,
-        src: level.src,
-        sizeBytes: level.sizeBytes
-      })
-    )
+    levels: levels.map((level): CanvasImageThumbnailLevel => ({
+      maxSide: level.maxSide,
+      width: level.width,
+      height: level.height,
+      mimeType: level.mimeType,
+      filename: level.filename,
+      src: level.src,
+      sizeBytes: level.sizeBytes
+    }))
   })
 }
 
@@ -489,7 +509,10 @@ async function generateNativeThumbnailLevels({
       filename: getLevelFilename(maxSide, 'image/png'),
       sizeBytes: blob.size,
       blob,
-      src: createObjectUrl(blob)
+      src: createObjectUrl(
+        blob,
+        `canvas-thumbnail:${identity.cacheKey}:native:${maxSide}:${blob.size}`
+      )
     })
   }
 

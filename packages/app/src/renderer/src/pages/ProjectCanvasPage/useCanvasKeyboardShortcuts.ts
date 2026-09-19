@@ -1,6 +1,7 @@
 import { useEffect, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
 import { api } from '../../utils/windowUtils'
 import { removeCanvasItemsWithAttachedCaptions } from './canvasAttachedCaptionUtils'
+import { releaseCanvasImageObjectUrl } from './canvasImageObjectUrlRegistry'
 import type {
   CanvasSaveOptions,
   CanvasTool,
@@ -412,7 +413,9 @@ export function useCanvasKeyboardShortcuts({
               deletedIds.has(item.id) &&
               (item.type === 'model3d' || item.type === 'video' || item.type === 'file')
             ) {
-              URL.revokeObjectURL(item.src)
+              if (item.src.startsWith('blob:')) {
+                releaseCanvasImageObjectUrl(item.src)
+              }
             }
           }
           return nextItems

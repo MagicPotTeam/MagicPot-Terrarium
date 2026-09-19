@@ -12,6 +12,17 @@ export type ProjectCanvasWebGLRuntimeMetrics = {
   residentTextureBytes: number
   residentCandidateTextureBytes: number
   residentTextureBudgetBytes: number
+  gpuTextureBytesTotal: number
+  decodedResidentBytes: number
+  encodedBlobBytes: number
+  tileResidentBytes: number
+  gpuUploadBytesInFlight: number
+  thumbnailJobs: number
+  sourceJobs: number
+  tileVisibleJobs: number
+  tilePrefetchJobs: number
+  resourceBudgetReservationCount: number
+  resourceBudgetEvictableReservationCount: number
   pendingImageCount: number
   spriteCount: number
   residentCandidateImageCount: number
@@ -49,6 +60,18 @@ export type ProjectCanvasWebGLRuntimeMetrics = {
   sourceUpgradeQueueCount: number
   thumbnailLoadQueueCount: number
   initialLoadQueueCount: number
+  tileEnabledItemCount: number
+  tileQueuedCount: number
+  tileRunningCount: number
+  tileCompletedCount: number
+  tileCancelledCount: number
+  tileDedupedCount: number
+  tileFailedCount: number
+  tileStaleDisposedCount: number
+  tileActiveCount: number
+  tileActiveAssetCount: number
+  tileDisposedAssetCount: number
+  tileDisposeErrorCount: number
   renderCount: number
   lastRenderDurationMs: number | null
   lastUpdateReason: 'initialize' | 'items' | 'preview' | 'cleanup'
@@ -125,6 +148,17 @@ const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   residentTextureBytes: 0,
   residentCandidateTextureBytes: 0,
   residentTextureBudgetBytes: 0,
+  gpuTextureBytesTotal: 0,
+  decodedResidentBytes: 0,
+  encodedBlobBytes: 0,
+  tileResidentBytes: 0,
+  gpuUploadBytesInFlight: 0,
+  thumbnailJobs: 0,
+  sourceJobs: 0,
+  tileVisibleJobs: 0,
+  tilePrefetchJobs: 0,
+  resourceBudgetReservationCount: 0,
+  resourceBudgetEvictableReservationCount: 0,
   pendingImageCount: 0,
   spriteCount: 0,
   residentCandidateImageCount: 0,
@@ -162,6 +196,18 @@ const fallbackWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = {
   sourceUpgradeQueueCount: 0,
   thumbnailLoadQueueCount: 0,
   initialLoadQueueCount: 0,
+  tileEnabledItemCount: 0,
+  tileQueuedCount: 0,
+  tileRunningCount: 0,
+  tileCompletedCount: 0,
+  tileCancelledCount: 0,
+  tileDedupedCount: 0,
+  tileFailedCount: 0,
+  tileStaleDisposedCount: 0,
+  tileActiveCount: 0,
+  tileActiveAssetCount: 0,
+  tileDisposedAssetCount: 0,
+  tileDisposeErrorCount: 0,
   renderCount: 0,
   lastRenderDurationMs: null,
   lastUpdateReason: 'cleanup'
@@ -185,6 +231,17 @@ const PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS = [
   'residentTextureBytes',
   'residentCandidateTextureBytes',
   'residentTextureBudgetBytes',
+  'gpuTextureBytesTotal',
+  'decodedResidentBytes',
+  'encodedBlobBytes',
+  'tileResidentBytes',
+  'gpuUploadBytesInFlight',
+  'thumbnailJobs',
+  'sourceJobs',
+  'tileVisibleJobs',
+  'tilePrefetchJobs',
+  'resourceBudgetReservationCount',
+  'resourceBudgetEvictableReservationCount',
   'pendingImageCount',
   'spriteCount',
   'residentCandidateImageCount',
@@ -222,6 +279,18 @@ const PROJECT_CANVAS_WEBGL_RUNTIME_METRIC_KEYS = [
   'sourceUpgradeQueueCount',
   'thumbnailLoadQueueCount',
   'initialLoadQueueCount',
+  'tileEnabledItemCount',
+  'tileQueuedCount',
+  'tileRunningCount',
+  'tileCompletedCount',
+  'tileCancelledCount',
+  'tileDedupedCount',
+  'tileFailedCount',
+  'tileStaleDisposedCount',
+  'tileActiveCount',
+  'tileActiveAssetCount',
+  'tileDisposedAssetCount',
+  'tileDisposeErrorCount',
   'renderCount',
   'lastRenderDurationMs',
   'lastUpdateReason'

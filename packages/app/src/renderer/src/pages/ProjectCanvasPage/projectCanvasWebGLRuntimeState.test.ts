@@ -81,9 +81,22 @@ describe('projectCanvasWebGLRuntimeState', () => {
 
     expect(areProjectCanvasWebGLRuntimeMetricsEqual(null, metrics)).toBe(false)
     expect(areProjectCanvasWebGLRuntimeMetricsEqual(createMetrics(), metrics)).toBe(true)
+    expect(createProjectCanvasWebGLRuntimeMetrics()).toMatchObject({
+      gpuTextureBytesTotal: 0,
+      decodedResidentBytes: 0,
+      tileResidentBytes: 0,
+      tileQueuedCount: 0,
+      tileActiveCount: 0
+    })
     expect(
       areProjectCanvasWebGLRuntimeMetricsEqual(
         createMetrics({ residentCandidateTextureBytes: metrics.residentCandidateTextureBytes + 1 }),
+        metrics
+      )
+    ).toBe(false)
+    expect(
+      areProjectCanvasWebGLRuntimeMetricsEqual(
+        createMetrics({ tileRunningCount: metrics.tileRunningCount + 1 }),
         metrics
       )
     ).toBe(false)
