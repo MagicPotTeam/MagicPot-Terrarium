@@ -58,6 +58,8 @@ export type ComfyBatchStatus = {
   averageItemMs?: number
   etaMs?: number
   queuePosition?: number
+  /** Running batch has stopped admitting new prompts until it reaches queue head. */
+  yielding?: boolean
   recentItems?: ComfyBatchItemTiming[]
   runningItems?: ComfyBatchRunningItem[]
   lastItem?: ComfyBatchItemTiming
@@ -82,6 +84,8 @@ export type CancelComfyBatchReq = { jobId: string }
 export type CancelComfyBatchResp = { status: ComfyBatchStatus }
 export type DismissComfyBatchReq = { jobId: string }
 export type DismissComfyBatchResp = { status: ComfyBatchStatus }
+export type ReorderComfyBatchReq = { jobId: string; queuePosition: number }
+export type ReorderComfyBatchResp = { status: ComfyBatchStatus }
 
 export type ListComfyBatchProfilesReq = Record<string, never>
 export type ListComfyBatchProfilesResp = { profiles: ComfyBatchProfile[] }
@@ -100,6 +104,7 @@ export type ComfyBatchSvc = {
   retryFailed(req: RetryFailedComfyBatchReq): Promise<RetryFailedComfyBatchResp>
   cancel(req: CancelComfyBatchReq): Promise<CancelComfyBatchResp>
   dismiss(req: DismissComfyBatchReq): Promise<DismissComfyBatchResp>
+  reorder(req: ReorderComfyBatchReq): Promise<ReorderComfyBatchResp>
 }
 
 export const comfyBatchSvcDef: ServiceDefSheet<ComfyBatchSvc> = {
@@ -111,5 +116,6 @@ export const comfyBatchSvcDef: ServiceDefSheet<ComfyBatchSvc> = {
   listJobs: { type: 'unary' },
   retryFailed: { type: 'unary' },
   cancel: { type: 'unary' },
-  dismiss: { type: 'unary' }
+  dismiss: { type: 'unary' },
+  reorder: { type: 'unary' }
 }

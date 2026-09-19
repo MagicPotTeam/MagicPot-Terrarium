@@ -48,6 +48,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-embedded-python-
 
+      - name: Set release asset timestamp
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $timestamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+          "MAGICPOT_RELEASE_TIMESTAMP=$timestamp" >> $env:GITHUB_ENV
+
       - name: Build embedded candidate
         env:
           PIP_NO_CACHE_DIR: '1'

@@ -21,6 +21,8 @@ import type {
   ProbeComfyBatchProfileResp,
   ReplaceComfyBatchProfilesReq,
   ReplaceComfyBatchProfilesResp,
+  ReorderComfyBatchReq,
+  ReorderComfyBatchResp,
   RetryFailedComfyBatchReq,
   RetryFailedComfyBatchResp,
   StartComfyBatchReq,
@@ -82,6 +84,7 @@ type PersistedStore = {
   latestJobId?: string
   nextSequence?: number
   jobs?: PersistedJob[]
+  queue?: string[]
 }
 
 const JOB_STORE_FILENAME = 'comfy-batch-jobs.json'
@@ -360,7 +363,16 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       status.finishedAt = status.finishedAt ?? record.status.finishedAt
       status.queuePosition = undefined
     }
-    if (status.state === 'running') status.queuePosition = undefined
+    const queueIndex = record.status.jobId ? this.jobQueue.indexOf(record.status.jobId) : -1
+    if (
+      !record.cancelRequested &&
+      queueIndex >= 0 &&
+      (status.state === 'queued' || status.state === 'running')
+    ) {
+      status.queuePosition = queueIndex + 1
+    } else {
+      status.queuePosition = undefined
+    }
     return cloneJson(status)
   }
 
@@ -402,6 +414,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
   private removeFromQueue(jobId: string): void {
     this.jobQueue = this.jobQueue.filter((candidate) => candidate !== jobId)
     this.updateQueuePositions()
+    this.updateRunnerYieldRequests()
   }
 
   private forgetJob(jobId: string): void {
@@ -418,20 +431,27 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     this.jobQueue.forEach((jobId, index) => {
       const record = this.jobs.get(jobId)
       if (!record) return
-      if (record.status.state === 'queued' && !record.cancelRequested) {
+      if (
+        (record.status.state === 'queued' || record.status.state === 'running') &&
+        !record.cancelRequested
+      ) {
         record.status = {
           ...record.status,
           submittedAt: record.submittedAt,
           queuePosition: index + 1
         }
-      } else if (record.status.state === 'running') {
-        record.status = {
-          ...record.status,
-          submittedAt: record.submittedAt,
-          queuePosition: undefined
-        }
       }
     })
+  }
+
+  private updateRunnerYieldRequests(): void {
+    for (const record of this.jobs.values()) {
+      if (!record.runActive || !record.runner || record.cancelRequested) continue
+      const queueIndex = record.status.jobId ? this.jobQueue.indexOf(record.status.jobId) : -1
+      if (queueIndex < 0) continue
+      if (queueIndex > 0) record.runner.requestYield?.()
+      else record.runner.clearYield?.()
+    }
   }
 
   private isActiveRecord(record: JobRecord): boolean {
@@ -475,7 +495,8 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         version: JOB_STORE_VERSION,
         latestJobId: this.latestJobId,
         nextSequence: this.nextSequence,
-        jobs: records
+        jobs: records,
+        queue: [...this.jobQueue]
       }
       const compressed = await gzipAsync(Buffer.from(JSON.stringify(payload), 'utf8'))
       await atomicWriteBytes(filename, compressed)
@@ -731,6 +752,30 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
         if (state === 'queued' && !record.invalid) this.jobQueue.push(jobId)
         this.nextSequence = Math.max(this.nextSequence, sequence + 1)
       }
+      const restoredQueue = Array.isArray(raw.queue)
+        ? raw.queue.filter((jobId): jobId is string => typeof jobId === 'string')
+        : []
+      if (Array.isArray(raw.queue)) {
+        const queuedIds = new Set(this.jobQueue)
+        const orderedIds: string[] = []
+        const seenIds = new Set<string>()
+        for (const jobId of restoredQueue) {
+          if (!queuedIds.has(jobId) || seenIds.has(jobId)) continue
+          seenIds.add(jobId)
+          orderedIds.push(jobId)
+        }
+        for (const jobId of this.jobQueue) {
+          if (seenIds.has(jobId)) continue
+          seenIds.add(jobId)
+          orderedIds.push(jobId)
+        }
+        if (orderedIds.some((jobId, index) => jobId !== this.jobQueue[index])) migrated = true
+        this.jobQueue = orderedIds
+      } else if (this.jobQueue.length > 0) {
+        // Older stores did not persist the explicit queue array; the sequence
+        // order used above is the best available FIFO fallback.
+        migrated = true
+      }
       const rawLatest = typeof raw.latestJobId === 'string' ? raw.latestJobId : undefined
       const latestRecord = rawLatest ? this.jobs.get(rawLatest) : undefined
       if (latestRecord) {
@@ -746,6 +791,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       if (persistedNext > this.nextSequence) this.nextSequence = Math.floor(persistedNext)
       if (raw.nextSequence !== undefined && persistedNext !== raw.nextSequence) migrated = true
       this.updateQueuePositions()
+      this.updateRunnerYieldRequests()
 
       if (malformedCount > 0) {
         console.error(
@@ -864,6 +910,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     this.rememberJob(record)
     this.jobQueue.push(jobId)
     this.updateQueuePositions()
+    this.updateRunnerYieldRequests()
     try {
       // A successful start does not return until its descriptor is durable.
       await this.persistJobs()
@@ -928,6 +975,7 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       const starting = runner.startingStatus()
       this.setRecordStatus(record, { ...starting, state: 'running', queuePosition: undefined })
       this.updateQueuePositions()
+      this.updateRunnerYieldRequests()
       await this.persistBestEffort()
 
       if (record.cancelRequested) {
@@ -949,6 +997,11 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       }
       if (record.cancelRequested) {
         this.forceCancelled(record, finalStatus)
+      } else if (finalStatus.state === 'queued' && finalStatus.yielding) {
+        // Yielding is an intentional non-terminal return. Keep the durable
+        // queue entry so pump can run the new head and a later runner can
+        // resume this job from its staged input/manifest.
+        this.setRecordStatus(record, { ...finalStatus, state: 'queued' })
       } else if (!isTerminalState(finalStatus.state)) {
         this.markError(record, 'ComfyUI batch runner returned a non-terminal status')
       } else {
@@ -960,7 +1013,10 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
     } finally {
       record.runActive = false
       record.runner = undefined
-      this.removeFromQueue(nextId)
+      // A yielded runner intentionally returns to the queue. Only terminal
+      // outcomes (including cancellation) release its queue slot.
+      if (isTerminalState(record.status.state)) this.removeFromQueue(nextId)
+      else this.updateQueuePositions()
       await this.persistBestEffort()
     }
   }
@@ -1141,6 +1197,34 @@ export class ComfyBatchSvcImpl implements ComfyBatchSvc {
       this.forgetJob(req.jobId)
       await this.persistJobs()
       return { status: retryStatus }
+    })
+
+  reorder = async (req: ReorderComfyBatchReq): Promise<ReorderComfyBatchResp> =>
+    this.serialize(async () => {
+      await this.ensureRestored()
+      const jobId = String(req.jobId || '').trim()
+      const record = this.jobs.get(jobId)
+      if (!record) throw new Error('Batch job not found: ' + jobId)
+      const current = this.liveStatus(record)
+      if (
+        (current.state !== 'queued' && current.state !== 'running') ||
+        record.cancelRequested ||
+        !this.jobQueue.includes(jobId)
+      ) {
+        throw new Error('Only queued or running batch jobs can be reordered')
+      }
+      if (!Number.isInteger(req.queuePosition)) throw new Error('Queue position must be an integer')
+      const oldIndex = this.jobQueue.indexOf(jobId)
+      const nextIndex = Math.max(0, Math.min(this.jobQueue.length - 1, req.queuePosition - 1))
+      if (oldIndex !== nextIndex) {
+        this.jobQueue.splice(oldIndex, 1)
+        this.jobQueue.splice(nextIndex, 0, jobId)
+        this.updateQueuePositions()
+        await this.persistJobs()
+      }
+      this.updateRunnerYieldRequests()
+      this.schedulePump()
+      return { status: this.liveStatus(record) }
     })
 
   dismiss = async (req: DismissComfyBatchReq): Promise<DismissComfyBatchResp> =>

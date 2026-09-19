@@ -59,6 +59,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-embedded-python-
 
+      - name: Set release asset timestamp
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $timestamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+          "MAGICPOT_RELEASE_TIMESTAMP=$timestamp" >> $env:GITHUB_ENV
+          Write-Host "Release asset timestamp: $timestamp"
+
       - name: Build embedded package
         env:
           PIP_NO_CACHE_DIR: '1'
@@ -169,7 +177,7 @@ jobs:
 
           $embeddedArchives = @(
             Get-ChildItem -LiteralPath 'dist/embedded' -File |
-              Where-Object { $_.Name -like 'magicpot-*-win.7z' }
+              Where-Object { $_.Name -match '^magicpot-\d+\.\d+\.\d+-\d{8}T\d{6}Z-win\.7z$' }
           )
           if ($embeddedArchives.Count -ne 1) {
             throw "Expected exactly one embedded Windows .7z archive, found $($embeddedArchives.Count)"
@@ -177,23 +185,13 @@ jobs:
 
           $pureSetups = @(
             Get-ChildItem -LiteralPath 'dist/pure' -File |
-              Where-Object { $_.Name -like 'magicpot-*-setup.exe' }
+              Where-Object { $_.Name -match '^magicpot-\d+\.\d+\.\d+-\d{8}T\d{6}Z-setup\.exe$' }
           )
           if ($pureSetups.Count -ne 1) {
             throw "Expected exactly one pure setup.exe, found $($pureSetups.Count)"
           }
 
-          $pureBlockmaps = @(
-            Get-ChildItem -LiteralPath 'dist/pure' -File |
-              Where-Object { $_.Name -like 'magicpot-*-setup.exe.blockmap' }
-          )
-          if ($pureBlockmaps.Count -ne 1) {
-            throw "Expected exactly one pure setup.exe.blockmap, found $($pureBlockmaps.Count)"
-          }
-
-          $pureLatest = Get-Item -LiteralPath 'dist/pure/latest.yml'
-
-          $releaseFiles = @($embeddedArchives[0], $pureSetups[0], $pureBlockmaps[0], $pureLatest)
+          $releaseFiles = @($embeddedArchives[0], $pureSetups[0])
           [int64]$githubLimitBytes = [int64]2147483648
 
           foreach ($releaseFile in $releaseFiles) {
@@ -205,21 +203,83 @@ jobs:
 
           Get-ChildItem -LiteralPath $assetsDir | Select-Object Name,Length
 
-      - name: Create Release
+      - name: Create draft release with exact asset contract
         id: create_release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: release/${{ inputs.tag_name }}
-          target_commitish: ${{ inputs.ref }}
-          name: ${{ inputs.release_name }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          body: |
-            Windows releases include:
-            - embedded `.7z` for first-time full runtime delivery
-            - `setup.exe`, `.blockmap`, and `latest.yml` for app-body auto-updates
-          files: |
-            dist/release-assets/*
+        shell: pwsh
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: release/${{ inputs.tag_name }}
+          RELEASE_NAME: ${{ inputs.release_name }}
+          RELEASE_REF: ${{ inputs.ref }}
+          RELEASE_ASSET_DIR: dist/release-assets
+          RELEASE_VERSION: ${{ inputs.tag_name }}
+          RELEASE_TIMESTAMP: ${{ env.MAGICPOT_RELEASE_TIMESTAMP }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $package = Get-Content -Raw -LiteralPath package.json | ConvertFrom-Json
+          $version = [string]$package.version
+          if ($env:RELEASE_VERSION -notmatch '-(\d+\.\d+\.\d+)$') { throw 'Release tag does not contain a stable SemVer' }
+          if ($Matches[1] -ne $version) { throw "Release tag version $($Matches[1]) does not match package.json $version" }
+          if ($env:RELEASE_TIMESTAMP -notmatch '^\d{8}T\d{6}Z$') { throw 'Release timestamp is invalid' }
+          $expectedNames = @(
+            "magicpot-$version-$env:RELEASE_TIMESTAMP-setup.exe",
+            "magicpot-$version-$env:RELEASE_TIMESTAMP-win.7z"
+          )
+          $assets = @(Get-ChildItem -LiteralPath $env:RELEASE_ASSET_DIR -File | Sort-Object Name)
+          if ($assets.Count -ne 2 -or (@($assets.Name | Where-Object { $_ -notin $expectedNames }).Count -ne 0) -or (@($expectedNames | Where-Object { $_ -notin $assets.Name }).Count -ne 0)) {
+            throw "Release assets must be exactly: $($expectedNames -join ', ')"
+          }
+          $sha = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          $tree = (git rev-parse 'HEAD^{tree}').Trim().ToLowerInvariant()
+          $runId = [int64]$env:GITHUB_RUN_ID
+          $runAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+          $markerObject = [ordered]@{
+            schema = 1
+            runId = $runId
+            runAttempt = $runAttempt
+            sourceCommit = $sha
+            sourceTree = $tree
+            version = $version
+            timestamp = $env:RELEASE_TIMESTAMP
+          }
+          $marker = '<!-- magicpot-release: ' + ($markerObject | ConvertTo-Json -Compress) + ' -->'
+          $body = @"
+          Windows releases include:
+          - embedded `.7z` for first-time full runtime delivery
+          - timestamped `setup.exe` for app-body updates
+
+          $marker
+          "@
+          $assetArgs = @($assets | ForEach-Object { $_.FullName })
+          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_REF --title $env:RELEASE_NAME --notes $body --draft --verify-tag=false $assetArgs
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed with exit code $LASTEXITCODE" }
+          $releaseUrl = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json url --jq .url
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($releaseUrl)) { throw "Unable to resolve created release URL" }
+          "url=$releaseUrl" >> $env:GITHUB_OUTPUT
+
+      - name: Publish verified Windows release
+        id: publish_verified_release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: release/${{ inputs.tag_name }}
+          RELEASE_ASSET_DIR: dist/release-assets
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,isPrerelease,body,assets,tagName,targetCommitish | ConvertFrom-Json
+          if (-not $release.isDraft -or $release.isPrerelease) { throw 'Release must be a draft and non-prerelease before final publication' }
+          if (($release.assets | Measure-Object).Count -ne 2) { throw 'Release must contain exactly two uploaded assets' }
+          $names = @($release.assets | ForEach-Object name)
+          if ($names | Where-Object { $_ -like '*.blockmap' -or $_ -eq 'latest.yml' }) { throw 'Release contains forbidden latest.yml/blockmap assets' }
+          foreach ($asset in $release.assets) {
+            if ([int64]$asset.size -le 0 -or [string]::IsNullOrWhiteSpace([string]$asset.digest)) { throw "Release asset $($asset.name) has invalid size or digest" }
+          }
+          $body = [string]$release.body
+          if ($body -notmatch '<!-- magicpot-release: \{') { throw 'Release marker is missing before publication' }
+          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false
+          if ($LASTEXITCODE -ne 0) { throw "gh release publish failed with exit code $LASTEXITCODE" }
+          $published = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,isPrerelease,assets | ConvertFrom-Json
+          if ($published.isDraft -or $published.isPrerelease -or (($published.assets | Measure-Object).Count -ne 2)) { throw 'Published release verification failed' }
+          Write-Host "Published verified Windows release $env:RELEASE_TAG with assets: $($names -join ', ')"

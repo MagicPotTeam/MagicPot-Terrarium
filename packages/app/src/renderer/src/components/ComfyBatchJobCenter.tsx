@@ -15,7 +15,9 @@ import {
   Stack,
   Typography
 } from '@mui/material'
-import { Close as CloseIcon } from '@mui/icons-material'
+import { Close as CloseIcon, DragIndicator as DragIndicatorIcon } from '@mui/icons-material'
+import { DragDropContext, Draggable, Droppable } from '@hello-pangea/dnd'
+import type { DraggableProvided, DraggableStateSnapshot, DropResult } from '@hello-pangea/dnd'
 import type { ComfyBatchJobState, ComfyBatchStatus } from '@shared/api/svcComfyBatch'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -30,6 +32,7 @@ import {
   openComfyBatchJob,
   removeComfyBatchJob,
   refreshComfyBatchJobs,
+  reorderComfyBatchJob,
   retryComfyBatchJob,
   updateComfyTaskProgress,
   useComfyBatchJobs
@@ -115,7 +118,14 @@ const stateColor = (
   }
 }
 
-const stateLabelKey = (state: ComfyBatchJobState): string => {
+type ComfyBatchStatusWithYielding = ComfyBatchStatus & { yielding?: boolean }
+
+const isYielding = (status: ComfyBatchStatus): boolean =>
+  (status as ComfyBatchStatusWithYielding).yielding === true
+
+const stateLabelKey = (state: ComfyBatchJobState, yielding = false): string => {
+  if (state === 'running' && yielding) return 'qapp.batch.state_yielding'
+
   switch (state) {
     case 'queued':
       return 'qapp.batch.state_queued'
@@ -175,6 +185,14 @@ const ComfyBatchJobCenter = ({
     progressByPromptId
   } = useComfyBatchJobs()
   const jobs = useMemo(() => allJobs.filter((job) => job.state !== 'cancelled'), [allJobs])
+  const reorderableJobs = useMemo(
+    () => jobs.filter((job) => job.state === 'running' || job.state === 'queued'),
+    [jobs]
+  )
+  const terminalJobs = useMemo(
+    () => jobs.filter((job) => job.state !== 'running' && job.state !== 'queued'),
+    [jobs]
+  )
   const singleTasks = useMemo(
     () => getComfySingleTaskEntries(queue, progressByPromptId),
     [progressByPromptId, queue]
@@ -225,6 +243,32 @@ const ComfyBatchJobCenter = ({
   const closeDetails = useCallback(() => closeComfyBatchJobDetails(), [])
   const refresh = useCallback(() => void refreshComfyBatchJobs(), [])
 
+  const handleDragEnd = useCallback(
+    (result: DropResult) => {
+      const { destination, source, draggableId } = result
+      if (
+        !destination ||
+        source.droppableId !== 'comfy-batch-active-jobs' ||
+        destination.droppableId !== source.droppableId ||
+        destination.index < 0 ||
+        destination.index >= reorderableJobs.length ||
+        destination.index === source.index ||
+        !reorderableJobs.some((job) => job.jobId === draggableId)
+      ) {
+        return
+      }
+
+      // The drag list contains the same active records as the backend queue.
+      // Use the visual destination as the absolute one-based queue position;
+      // this also allows a queued job to move in front of the running job.
+      void reorderComfyBatchJob(draggableId, destination.index + 1).catch((caught) => {
+        notifyError(caught instanceof Error ? caught.message : String(caught))
+        void refreshComfyBatchJobs()
+      })
+    },
+    [notifyError, reorderableJobs]
+  )
+
   const cancelSingleTask = useCallback(
     async (promptId: string) => {
       try {
@@ -259,86 +303,57 @@ const ComfyBatchJobCenter = ({
     <>
       <Dialog open fullWidth maxWidth="md" onClose={closeCenter}>
         <DialogTitle>{t('qapp.batch.center_title')}</DialogTitle>
-        <DialogContent dividers>
+        <DialogContent dividers sx={{ px: 0 }}>
           <Stack spacing={1.5}>
-            {loading && jobs.length === 0 && <LinearProgress />}
+            {loading && jobs.length === 0 && <LinearProgress sx={{ mx: 2 }} />}
             {error && (
-              <Typography color="error.main" variant="body2">
+              <Typography color="error.main" variant="body2" sx={{ px: 2 }}>
                 {error}
               </Typography>
             )}
             {jobs.length === 0 && singleTasks.length === 0 && !loading ? (
-              <Typography color="text.secondary">{t('qapp.batch.no_jobs')}</Typography>
+              <Typography color="text.secondary" sx={{ px: 2 }}>
+                {t('qapp.batch.no_jobs')}
+              </Typography>
             ) : (
-              <List disablePadding>
-                {jobs.map((job) => {
-                  const jobId = job.jobId || ''
-                  const progress = getProgress(job)
-                  return (
-                    <ListItem key={jobId} disablePadding divider sx={{ position: 'relative' }}>
-                      <ListItemButton
-                        selected={jobId === selectedJobId}
-                        onClick={() => showDetails(jobId)}
-                        sx={{ pr: 6 }}
-                      >
-                        <ListItemText
-                          primary={
-                            <Stack direction="row" spacing={1} alignItems="center" useFlexGap>
-                              <Typography variant="body2" noWrap sx={{ maxWidth: '55%' }}>
-                                {job.sourceDir || jobId}
-                              </Typography>
-                              <Chip
-                                size="small"
-                                color={stateColor(job.state)}
-                                label={t(stateLabelKey(job.state))}
+              <DragDropContext onDragEnd={handleDragEnd}>
+                <List disablePadding>
+                  <Droppable droppableId="comfy-batch-active-jobs" direction="vertical">
+                    {(provided) => (
+                      <div ref={provided.innerRef} {...provided.droppableProps}>
+                        {reorderableJobs.map((job, index) => (
+                          <Draggable key={job.jobId} draggableId={job.jobId || ''} index={index}>
+                            {(dragProvided, dragSnapshot) => (
+                              <ComfyBatchJobRow
+                                job={job}
+                                selected={job.jobId === selectedJobId}
+                                onSelect={showDetails}
+                                onRemove={remove}
+                                provided={dragProvided}
+                                dragSnapshot={dragSnapshot}
+                                dragHint={t('qapp.batch.drag_to_reorder')}
                               />
-                            </Stack>
-                          }
-                          secondary={
-                            <Stack spacing={0.5} sx={{ mt: 0.75 }}>
-                              <LinearProgress variant="determinate" value={progress} />
-                              <Typography variant="caption" color="text.secondary">
-                                {t(
-                                  job.state === 'error' || job.failed > 0
-                                    ? 'qapp.batch.processed_summary'
-                                    : 'qapp.batch.progress_summary',
-                                  {
-                                    finished: job.success + job.skipped,
-                                    total: job.total
-                                  }
-                                )}
-                                {job.state === 'queued' && job.queuePosition
-                                  ? ` · ${t('qapp.batch.queue_position', { position: job.queuePosition })}`
-                                  : ''}
-                              </Typography>
-                            </Stack>
-                          }
-                        />
-                      </ListItemButton>
-                      <IconButton
-                        size="small"
-                        aria-label={t('qapp.batch.cancel_and_remove')}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          void remove(jobId)
-                        }}
-                        sx={{
-                          position: 'absolute',
-                          top: 8,
-                          right: 8,
-                          zIndex: 1,
-                          color: 'text.secondary'
-                        }}
-                      >
-                        <CloseIcon fontSize="small" />
-                      </IconButton>
-                    </ListItem>
-                  )
-                })}
-                {singleTasks.map((task) => (
-                  <ComfySingleTaskRow key={task.id} task={task} onCancel={cancelSingleTask} />
-                ))}
-              </List>
+                            )}
+                          </Draggable>
+                        ))}
+                        {provided.placeholder}
+                      </div>
+                    )}
+                  </Droppable>
+                  {terminalJobs.map((job) => (
+                    <ComfyBatchJobRow
+                      key={job.jobId}
+                      job={job}
+                      selected={job.jobId === selectedJobId}
+                      onSelect={showDetails}
+                      onRemove={remove}
+                    />
+                  ))}
+                  {singleTasks.map((task) => (
+                    <ComfySingleTaskRow key={task.id} task={task} onCancel={cancelSingleTask} />
+                  ))}
+                </List>
+              </DragDropContext>
             )}
           </Stack>
         </DialogContent>
@@ -362,6 +377,108 @@ const ComfyBatchJobCenter = ({
   )
 }
 
+type ComfyBatchJobRowProps = {
+  job: ComfyBatchStatus
+  selected: boolean
+  onSelect: (jobId: string) => void
+  onRemove: (jobId: string) => Promise<void>
+  provided?: DraggableProvided
+  dragSnapshot?: DraggableStateSnapshot
+  dragHint?: string
+}
+
+const ComfyBatchJobRow = ({
+  job,
+  selected,
+  onSelect,
+  onRemove,
+  provided,
+  dragSnapshot,
+  dragHint
+}: ComfyBatchJobRowProps): React.JSX.Element => {
+  const { t } = useTranslation()
+  const jobId = job.jobId || ''
+  const progress = getProgress(job)
+  return (
+    <ListItem
+      ref={provided?.innerRef}
+      {...provided?.draggableProps}
+      {...provided?.dragHandleProps}
+      disablePadding
+      divider
+      sx={{
+        display: 'flex',
+        minWidth: 0,
+        position: 'relative',
+        cursor: provided ? (dragSnapshot?.isDragging ? 'grabbing' : 'grab') : 'default',
+        bgcolor: dragSnapshot?.isDragging ? 'action.hover' : undefined,
+        zIndex: dragSnapshot?.isDragging ? 1 : undefined
+      }}
+    >
+      <ListItemButton
+        selected={selected}
+        onClick={() => onSelect(jobId)}
+        sx={{ minWidth: 0, flex: 1, px: 1.5, py: 1 }}
+      >
+        {provided && (
+          <DragIndicatorIcon
+            fontSize="small"
+            titleAccess={dragHint}
+            sx={{ mr: 1, color: 'text.secondary', flexShrink: 0 }}
+          />
+        )}
+        <ListItemText
+          sx={{ minWidth: 0, flex: 1 }}
+          primary={
+            <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ minWidth: 0 }}>
+              <Typography variant="body2" noWrap sx={{ minWidth: 0, flex: 1 }}>
+                {job.sourceDir || jobId}
+              </Typography>
+              <Chip
+                size="small"
+                color={stateColor(job.state)}
+                label={t(stateLabelKey(job.state, isYielding(job)))}
+                sx={{ flexShrink: 0 }}
+              />
+            </Stack>
+          }
+          secondaryTypographyProps={{ component: 'div' }}
+          secondary={
+            <Stack spacing={0.5} sx={{ mt: 0.75, minWidth: 0 }}>
+              <LinearProgress variant="determinate" value={progress} />
+              <Typography component="span" variant="caption" color="text.secondary">
+                {t(
+                  job.state === 'error' || job.failed > 0
+                    ? 'qapp.batch.processed_summary'
+                    : 'qapp.batch.progress_summary',
+                  {
+                    finished: job.success + job.skipped,
+                    total: job.total
+                  }
+                )}
+                {job.state === 'queued' && job.queuePosition
+                  ? ` · ${t('qapp.batch.queue_position', { position: job.queuePosition })}`
+                  : ''}
+              </Typography>
+            </Stack>
+          }
+        />
+      </ListItemButton>
+      <IconButton
+        size="small"
+        aria-label={t('qapp.batch.cancel_and_remove')}
+        onClick={(event) => {
+          event.stopPropagation()
+          void onRemove(jobId)
+        }}
+        sx={{ mx: 1, flexShrink: 0, color: 'text.secondary' }}
+      >
+        <CloseIcon fontSize="small" />
+      </IconButton>
+    </ListItem>
+  )
+}
+
 type ComfySingleTaskRowProps = {
   task: ComfySingleTaskEntry
   onCancel: (promptId: string) => Promise<void>
@@ -374,23 +491,25 @@ const ComfySingleTaskRow = ({ task, onCancel }: ComfySingleTaskRowProps): React.
   const progressVariant = task.state === 'running' && !hasProgress ? 'indeterminate' : 'determinate'
 
   return (
-    <ListItem disablePadding divider sx={{ position: 'relative' }}>
+    <ListItem disablePadding divider sx={{ display: 'flex', minWidth: 0, position: 'relative' }}>
       <ListItemText
-        sx={{ px: 2, py: 1, pr: 6 }}
+        sx={{ minWidth: 0, flex: 1, px: 1.5, py: 1 }}
         primary={
-          <Stack direction="row" spacing={1} alignItems="center" useFlexGap>
-            <Typography variant="body2" noWrap sx={{ maxWidth: '55%' }}>
+          <Stack direction="row" spacing={1} alignItems="center" useFlexGap sx={{ minWidth: 0 }}>
+            <Typography variant="body2" noWrap sx={{ minWidth: 0, flex: 1 }}>
               {t('qapp.batch.single_task')} · {getQueueItemDisplayLabel(task.item)}
             </Typography>
             <Chip
               size="small"
               color={stateColor(task.state)}
               label={t(stateLabelKey(task.state))}
+              sx={{ flexShrink: 0 }}
             />
           </Stack>
         }
+        secondaryTypographyProps={{ component: 'div' }}
         secondary={
-          <Stack spacing={0.5} sx={{ mt: 0.75 }}>
+          <Stack spacing={0.5} sx={{ mt: 0.75, minWidth: 0 }}>
             <LinearProgress
               variant={progressVariant}
               value={progress}
@@ -409,13 +528,7 @@ const ComfySingleTaskRow = ({ task, onCancel }: ComfySingleTaskRowProps): React.
           event.stopPropagation()
           void onCancel(task.id)
         }}
-        sx={{
-          position: 'absolute',
-          top: 8,
-          right: 8,
-          zIndex: 1,
-          color: 'text.secondary'
-        }}
+        sx={{ mx: 1, flexShrink: 0, color: 'text.secondary' }}
       >
         <CloseIcon fontSize="small" />
       </IconButton>
@@ -444,10 +557,13 @@ const ComfyBatchJobDetails = ({
   return (
     <>
       <DialogTitle>{t('qapp.batch.detail_title')}</DialogTitle>
-      <DialogContent dividers>
-        <Stack spacing={1.5}>
+      <DialogContent dividers sx={{ px: 0 }}>
+        <Stack spacing={1.5} sx={{ px: 1.5 }}>
           <Stack direction="row" spacing={1} alignItems="center">
-            <Chip color={stateColor(status.state)} label={t(stateLabelKey(status.state))} />
+            <Chip
+              color={stateColor(status.state)}
+              label={t(stateLabelKey(status.state, isYielding(status)))}
+            />
             {status.queuePosition !== undefined && (
               <Typography variant="body2" color="text.secondary">
                 {t('qapp.batch.queue_position', { position: status.queuePosition })}
@@ -510,13 +626,24 @@ type MetricRowProps = {
 }
 
 const MetricRow = ({ label, value, multiline = false }: MetricRowProps): React.JSX.Element => (
-  <Stack direction="row" spacing={1} justifyContent="space-between" alignItems="flex-start">
-    <Typography variant="body2" color="text.secondary">
+  <Stack
+    direction="row"
+    spacing={1}
+    justifyContent="space-between"
+    alignItems="flex-start"
+    sx={{ minWidth: 0 }}
+  >
+    <Typography variant="body2" color="text.secondary" sx={{ flexShrink: 0 }}>
       {label}
     </Typography>
     <Typography
       variant="body2"
-      sx={{ maxWidth: '72%', textAlign: 'right', wordBreak: multiline ? 'break-all' : 'normal' }}
+      sx={{
+        minWidth: 0,
+        flex: 1,
+        textAlign: 'right',
+        wordBreak: multiline ? 'break-all' : 'normal'
+      }}
     >
       {value}
     </Typography>

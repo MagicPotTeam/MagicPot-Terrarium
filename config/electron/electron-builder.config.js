@@ -5,7 +5,7 @@
 // default to pure mode
 const packageMode = process.env.PACKAGE_MODE || 'pure'
 const updateOwner = process.env.MAGICPOT_UPDATE_OWNER || 'MagicPotTeam'
-const updateRepo = process.env.MAGICPOT_UPDATE_REPO || 'magicpot-open'
+const updateRepo = process.env.MAGICPOT_UPDATE_REPO || 'MagicPot-Terrarium'
 const updateChannel = process.env.MAGICPOT_UPDATE_CHANNEL || 'latest'
 const runtimeAssetsDir = 'packages/runtime-assets'
 const buildResourcesDir = `${runtimeAssetsDir}/build`
@@ -13,6 +13,9 @@ const appResourcesDir = `${runtimeAssetsDir}/resources`
 const nativeBinDir = `${appResourcesDir}/bin`
 const comfySourceDir = 'vendor/comfyui'
 const packagedComfyDir = 'ComfyUI_windows_portable'
+const releaseTimestamp = process.env.MAGICPOT_RELEASE_TIMESTAMP
+const releaseArtifactSuffix = releaseTimestamp ? `-${releaseTimestamp}` : ''
+const releaseArtifactName = `\${productName}-\${version}${releaseArtifactSuffix}`
 
 const embeddedComfyUIStageFiles = {
   from: '.staging/embedded/ComfyUI',
@@ -46,7 +49,7 @@ const modeMap = {
       comfySourceFile('advanced'),
       comfySourceFile('update')
     ],
-    winTarget: ['dir', '7z'],
+    winTarget: ['dir', '7z', 'nsis'],
     nsis: {
       oneClick: false, // 允许选择安装目录 (对于大包建议 false)
       allowToChangeInstallationDirectory: true,
@@ -54,7 +57,7 @@ const modeMap = {
       createDesktopShortcut: true,
       createStartMenuShortcut: true,
       unicode: true,
-      artifactName: '${productName}-${version}-setup.${ext}',
+      artifactName: `${releaseArtifactName}-setup.\${ext}`,
       shortcutName: '${productName}',
       uninstallDisplayName: '${productName}',
       include: `${buildResourcesDir}/magicpot-uninstall-cleanup.nsh`
@@ -73,7 +76,7 @@ const modeMap = {
     executableName: 'magicpot',
     distDir: 'dist/pure',
     winExtraFiles: [],
-    winTarget: ['dir', 'zip', 'nsis'],
+    winTarget: ['dir', '7z', 'nsis'],
     macExtraFiles: [],
     linuxExtraFiles: [],
     nsis: {
@@ -84,20 +87,11 @@ const modeMap = {
       createStartMenuShortcut: true,
       // allowToChangeInstallationDirectory: true, // oneClick 模式不支持
       unicode: true,
-      artifactName: '${productName}-${version}-setup.${ext}',
+      artifactName: `${releaseArtifactName}-setup.\${ext}`,
       shortcutName: '${productName}',
       uninstallDisplayName: '${productName}',
       include: `${buildResourcesDir}/pure-installer.nsh` // pure installer options plus uninstall cleanup
-    },
-    publish: [
-      {
-        provider: 'github',
-        owner: updateOwner,
-        repo: updateRepo,
-        channel: updateChannel,
-        releaseType: 'release'
-      }
-    ]
+    }
   }
 }
 
@@ -143,6 +137,7 @@ const config = {
   asarUnpack: ['**/*.safetensors', '**/*.ckpt', '**/*.pt', '**/*.pth', '**/models/**/*'],
   win: {
     icon: `${buildResourcesDir}/icon.png`,
+    artifactName: `${releaseArtifactName}-win.\${ext}`,
     defaultArch: 'x64',
     executableName: modeConfig.executableName,
     extraFiles: modeConfig.winExtraFiles,
@@ -180,7 +175,6 @@ const config = {
   electronDownload: {
     mirror: 'https://npmmirror.com/mirrors/electron/'
   },
-  publish: modeConfig.publish,
   afterPack: modeConfig.afterPack || `${buildResourcesDir}/afterPack.js`
 }
 

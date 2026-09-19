@@ -6,7 +6,8 @@ export const BUILD_MODE_NAME =
   import.meta.env.VITE_BUILD_MODE_NAME || (BUILD_MODE === 'embedded' ? 'Embedded' : 'Pure')
 
 export const UPDATE_PROVIDER_OWNER = import.meta.env.VITE_MAGICPOT_UPDATE_OWNER || 'MagicPotTeam'
-export const UPDATE_PROVIDER_REPO = import.meta.env.VITE_MAGICPOT_UPDATE_REPO || 'magicpot-open'
+export const UPDATE_PROVIDER_REPO =
+  import.meta.env.VITE_MAGICPOT_UPDATE_REPO || 'MagicPot-Terrarium'
 export const UPDATE_PROVIDER_CHANNEL = import.meta.env.VITE_MAGICPOT_UPDATE_CHANNEL || 'latest'
 
 // Experimental renderer paths remain opt-in. Pure builds and tests must keep
