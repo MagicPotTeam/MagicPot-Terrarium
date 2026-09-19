@@ -230,9 +230,8 @@ async function importCanvasImageSourceToManagedMedia(
   const sizeBytes = source.sizeBytes ?? sourceFile?.size ?? 0
   if (!canImportCanvasImageAsManagedMedia(sizeBytes, mimeType, fileName)) return source
 
-  let imported: Awaited<ReturnType<NonNullable<Window['api']>['svcManagedMedia']['importFile']>>
-  try {
-    imported = sourcePath
+  const imported: Awaited<ReturnType<NonNullable<Window['api']>['svcManagedMedia']['importFile']>> =
+    sourcePath
       ? await managedMedia.importFile({
           sourcePath,
           mimeType,
@@ -242,9 +241,6 @@ async function importCanvasImageSourceToManagedMedia(
           dataUrl: await readFileAsDataURL(sourceFile!),
           originalFileName: fileName
         })
-  } catch (error) {
-    throw error
-  }
 
   const {
     sourceFile: _sourceFile,
