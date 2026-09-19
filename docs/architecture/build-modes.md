@@ -65,16 +65,18 @@ The repository does not currently auto-generate the macOS embedded Python direct
 
 ## Release assets and updates
 
-The README describes a dual-package release model for GitHub Releases:
+The private repository's updater contract intentionally has only these two Release assets:
 
-| Asset                                   | Purpose                                               | Updated by in-app updater |
-| --------------------------------------- | ----------------------------------------------------- | ------------------------- |
-| `magicpot-<version>-win.7z`             | First-time full package with bundled Windows runtime. | No                        |
-| `magicpot-<version>-setup.exe`          | App-body installer used by `electron-updater`.        | Yes                       |
-| `magicpot-<version>-setup.exe.blockmap` | Differential metadata for the app-body installer.     | Yes                       |
-| `latest.yml`                            | Update feed read by packaged builds.                  | Yes                       |
+| Asset                                                | Purpose                                               | Updated by in-app updater |
+| ---------------------------------------------------- | ----------------------------------------------------- | ------------------------- |
+| `magicpot-<semver>-<UTC yyyyMMddTHHmmssZ>-win.7z`    | First-time full package with bundled Windows runtime. | No                        |
+| `magicpot-<semver>-<UTC yyyyMMddTHHmmssZ>-setup.exe` | Signed app-body NSIS installer.                       | Yes                       |
 
-The app-body updater does not update, delete, or overwrite embedded runtime directories such as `ComfyUI_windows_portable`. If the embedded runtime must be refreshed, maintainers publish a new embedded `.7z` and users replace or reinstall the runtime explicitly.
+`latest.yml` and `.blockmap` files are not part of this contract. Packaged Windows builds query the GitHub Releases API directly for `MagicPotTeam/MagicPot-Terrarium` by default. A candidate must be a non-draft, non-prerelease `release/<name>` release containing both assets with the exact same SemVer and UTC timestamp, canonical HTTPS release URLs, positive sizes, and valid GitHub SHA-256 digests. The updater compares SemVer numerically, never downgrades, and chooses the latest timestamp deterministically for equal versions.
+
+Only the setup executable is downloaded. It is streamed into a unique private `.part` directory with partial-write/backpressure handling, verified by size and SHA-256, and reverified immediately before install. Failed downloads and failed pre-install checks remove the temporary directory. The installer receives `/D=<current executable directory>` as one raw argument (`shell: false`); the suffix is deliberately not quoted, including when the directory contains spaces. The app quits only after asynchronous process spawn succeeds. The installer targets the current app directory and leaves embedded `ComfyUI_windows_portable` and user data untouched.
+
+A private-repository HTTP 404/401/403 is an update-access failure, not an up-to-date result. The UI should tell the user to provide GitHub access or install manually. The updater never embeds or invents access tokens.
 
 ## User data location
 

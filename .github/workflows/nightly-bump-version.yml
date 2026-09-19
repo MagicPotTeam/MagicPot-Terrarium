@@ -69,10 +69,8 @@ jobs:
                 MISSING_ASSETS=$(echo "$RELEASE_JSON" | jq -r '
                   .assetNames as $names |
                   [
-                    {"label":"embedded .7z","ok": any($names[]; test("^magicpot-.*-win\\.7z$"))},
-                    {"label":"setup.exe","ok": any($names[]; test("^magicpot-.*-setup\\.exe$"))},
-                    {"label":"blockmap","ok": any($names[]; test("^magicpot-.*-setup\\.exe\\.blockmap$"))},
-                    {"label":"latest.yml","ok": any($names[]; . == "latest.yml")}
+                    {"label":"embedded .7z","ok": any($names[]; test("^magicpot-.*-\\d{8}T\\d{6}Z-win\\.7z$"))},
+                    {"label":"timestamped setup.exe","ok": any($names[]; test("^magicpot-.*-\\d{8}T\\d{6}Z-setup\\.exe$"))}
                   ] |
                   map(select(.ok | not) | .label) |
                   join(", ")

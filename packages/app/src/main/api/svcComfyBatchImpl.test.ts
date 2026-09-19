@@ -57,6 +57,7 @@ function status(jobId: string, state: ComfyBatchStatus['state']): ComfyBatchStat
 
 async function readPersistedStore(dataDir: string): Promise<{
   jobs: Array<{ status: ComfyBatchStatus }>
+  queue?: string[]
 }> {
   const bytes = await fs.readFile(path.join(dataDir, 'comfy-batch-jobs.bin'))
   return JSON.parse(gunzipSync(bytes).toString('utf8')) as {
@@ -465,6 +466,210 @@ describe('ComfyBatchSvcImpl live status', () => {
     await vi.waitFor(() => expect(runners).toHaveLength(2))
     runners[1].resolve({ ...status(secondResult.status.jobId!, 'completed'), success: 1 })
     await vi.waitFor(() => expect(runners[1].resolve).toBeDefined())
+  })
+
+  it('reorders queued jobs, updates positions, and persists the order', async () => {
+    const runners: Array<{ jobId: string; run: ReturnType<typeof vi.fn> }> = []
+    vi.mocked(ComfyBatchRunner).mockImplementation(
+      function MockRunner(_request, _profiles, options) {
+        const jobId = options?.jobId || `runner-${runners.length + 1}`
+        const runner = {
+          jobId,
+          status: status(jobId, 'running'),
+          startingStatus: vi.fn(() => status(jobId, 'running')),
+          run: vi.fn(() => new Promise<ComfyBatchStatus>(() => undefined)),
+          requestYield: vi.fn(),
+          clearYield: vi.fn(),
+          cancel: vi.fn()
+        }
+        runners.push(runner)
+        return runner as never
+      }
+    )
+    const svc = new ComfyBatchSvcImpl()
+    const first = await svc.start({ ...request, sourceDir: '/tmp/first' })
+    await vi.waitFor(() => expect(runners).toHaveLength(1))
+    const second = await svc.start({ ...request, sourceDir: '/tmp/second' })
+    const third = await svc.start({ ...request, sourceDir: '/tmp/third' })
+    expect((await svc.status({ jobId: second.status.jobId })).status.queuePosition).toBe(2)
+    await expect(
+      svc.reorder({ jobId: second.status.jobId!, queuePosition: 3 })
+    ).resolves.toMatchObject({
+      status: { jobId: second.status.jobId, queuePosition: 3 }
+    })
+    expect((await svc.status({ jobId: third.status.jobId })).status.queuePosition).toBe(2)
+    const persisted = await readPersistedStore(dataDir)
+    expect(persisted.queue).toEqual([first.status.jobId, third.status.jobId, second.status.jobId])
+  })
+
+  it('reorders the active runner without interrupting it and starts the new queue head next', async () => {
+    const runners: Array<{
+      jobId: string
+      startingStatus: ReturnType<typeof vi.fn>
+      run: ReturnType<typeof vi.fn>
+      resolve: (value: ComfyBatchStatus) => void
+    }> = []
+    vi.mocked(ComfyBatchRunner).mockImplementation(
+      function MockRunner(_request, _profiles, options) {
+        const jobId = options?.jobId || `runner-${runners.length + 1}`
+        let current = status(jobId, 'idle')
+        let resolveRun!: (value: ComfyBatchStatus) => void
+        const runPromise = new Promise<ComfyBatchStatus>((resolve) => {
+          resolveRun = resolve
+        })
+        const runner = {
+          jobId,
+          get status() {
+            return current
+          },
+          startingStatus: vi.fn(() => {
+            current = status(jobId, 'running')
+            return current
+          }),
+          run: vi.fn(() => runPromise),
+          requestYield: vi.fn(),
+          clearYield: vi.fn(),
+          resolve: (value: ComfyBatchStatus) => {
+            current = value
+            resolveRun(value)
+          }
+        }
+        runners.push(runner)
+        return runner as never
+      }
+    )
+
+    const svc = new ComfyBatchSvcImpl()
+    const first = await svc.start({ ...request, sourceDir: '/tmp/active' })
+    const second = await svc.start({ ...request, sourceDir: '/tmp/queued-1' })
+    const third = await svc.start({ ...request, sourceDir: '/tmp/queued-2' })
+    await vi.waitFor(() => expect(runners).toHaveLength(1))
+    expect((await svc.status({ jobId: first.status.jobId })).status).toMatchObject({
+      state: 'running',
+      queuePosition: 1
+    })
+
+    await expect(
+      svc.reorder({ jobId: second.status.jobId!, queuePosition: 1 })
+    ).resolves.toMatchObject({
+      status: { jobId: second.status.jobId, state: 'queued', queuePosition: 1 }
+    })
+    expect((await svc.status({ jobId: first.status.jobId })).status.queuePosition).toBe(2)
+    expect((await svc.status({ jobId: third.status.jobId })).status.queuePosition).toBe(3)
+    expect((await readPersistedStore(dataDir)).queue).toEqual([
+      second.status.jobId,
+      first.status.jobId,
+      third.status.jobId
+    ])
+    expect(runners[0].run).toHaveBeenCalledTimes(1)
+
+    runners[0].resolve({ ...status(first.status.jobId!, 'completed'), success: 1 })
+    await vi.waitFor(() => expect(runners).toHaveLength(2))
+    expect(runners[1].jobId).toBe(second.status.jobId)
+    expect(runners[1].startingStatus).toHaveBeenCalled()
+    expect(runners[0].run).toHaveBeenCalledTimes(1)
+
+    runners[1].resolve({ ...status(second.status.jobId!, 'completed'), success: 1 })
+    await vi.waitFor(() => expect(runners).toHaveLength(3))
+    expect(runners[2].jobId).toBe(third.status.jobId)
+  })
+
+  it('yields a reordered running job, lets the new head run, then resumes it', async () => {
+    const runners: Array<{
+      jobId: string
+      startingStatus: ReturnType<typeof vi.fn>
+      run: ReturnType<typeof vi.fn>
+      requestYield: ReturnType<typeof vi.fn>
+      clearYield: ReturnType<typeof vi.fn>
+      resolve: (value: ComfyBatchStatus) => void
+    }> = []
+    vi.mocked(ComfyBatchRunner).mockImplementation(
+      function MockRunner(_request, _profiles, options) {
+        const jobId = options?.jobId || `runner-${runners.length + 1}`
+        let current = status(jobId, 'idle')
+        let resolveRun!: (value: ComfyBatchStatus) => void
+        const runPromise = new Promise<ComfyBatchStatus>((resolve) => {
+          resolveRun = resolve
+        })
+        const runner = {
+          jobId,
+          get status() {
+            return current
+          },
+          startingStatus: vi.fn(() => {
+            current = status(jobId, 'running')
+            return current
+          }),
+          run: vi.fn(() => runPromise),
+          requestYield: vi.fn(),
+          clearYield: vi.fn(),
+          resolve: (value: ComfyBatchStatus) => {
+            current = value
+            resolveRun(value)
+          }
+        }
+        runners.push(runner)
+        return runner as never
+      }
+    )
+
+    const svc = new ComfyBatchSvcImpl()
+    const first = await svc.start({ ...request, sourceDir: '/tmp/yield-first' })
+    const second = await svc.start({ ...request, sourceDir: '/tmp/yield-second' })
+    await vi.waitFor(() => expect(runners).toHaveLength(1))
+
+    await expect(
+      svc.reorder({ jobId: second.status.jobId!, queuePosition: 1 })
+    ).resolves.toMatchObject({
+      status: { jobId: second.status.jobId, queuePosition: 1 }
+    })
+    expect(runners[0].requestYield).toHaveBeenCalledTimes(1)
+
+    runners[0].resolve({ ...status(first.status.jobId!, 'queued'), pending: 1, yielding: true })
+    await vi.waitFor(() => expect(runners).toHaveLength(2))
+    expect(runners[1].jobId).toBe(second.status.jobId)
+    expect((await svc.status({ jobId: first.status.jobId })).status).toMatchObject({
+      state: 'queued',
+      queuePosition: 2
+    })
+
+    runners[1].resolve({ ...status(second.status.jobId!, 'completed'), success: 1 })
+    await vi.waitFor(() => expect(runners).toHaveLength(3))
+    expect(runners[2].jobId).toBe(first.status.jobId)
+    runners[2].resolve({ ...status(first.status.jobId!, 'completed'), success: 1 })
+  })
+
+  it('clears a yield request when a running job is reordered back to the head', async () => {
+    const runners: Array<{
+      jobId: string
+      requestYield: ReturnType<typeof vi.fn>
+      clearYield: ReturnType<typeof vi.fn>
+    }> = []
+    vi.mocked(ComfyBatchRunner).mockImplementation(
+      function MockRunner(_request, _profiles, options) {
+        const jobId = options?.jobId || `runner-${runners.length + 1}`
+        const runner = {
+          jobId,
+          status: status(jobId, 'running'),
+          startingStatus: vi.fn(() => status(jobId, 'running')),
+          run: vi.fn(() => new Promise<ComfyBatchStatus>(() => undefined)),
+          requestYield: vi.fn(),
+          clearYield: vi.fn()
+        }
+        runners.push(runner)
+        return runner as never
+      }
+    )
+
+    const svc = new ComfyBatchSvcImpl()
+    const first = await svc.start({ ...request, sourceDir: '/tmp/clear-yield-first' })
+    const second = await svc.start({ ...request, sourceDir: '/tmp/clear-yield-second' })
+    await vi.waitFor(() => expect(runners).toHaveLength(1))
+
+    await svc.reorder({ jobId: first.status.jobId!, queuePosition: 2 })
+    expect(runners[0].requestYield).toHaveBeenCalledTimes(1)
+    await svc.reorder({ jobId: first.status.jobId!, queuePosition: 1 })
+    expect(runners[0].clearYield).toHaveBeenCalled()
   })
 
   it('persists queued descriptors and restores running jobs as queued', async () => {

@@ -3,16 +3,46 @@ import { ThemeProvider } from '@mui/material'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComfyBatchStatus } from '@shared/api/svcComfyBatch'
 import type { GetQueueResp } from '@shared/api/svcComfy'
+import type { DropResult } from '@hello-pangea/dnd'
+import type { ReactNode } from 'react'
 import { theme } from '@renderer/theme'
 import ComfyBatchJobCenter from './ComfyBatchJobCenter'
 
-const { cancelMock, removeMock, retryMock, progressMock, clearProgressMock } = vi.hoisted(() => ({
-  cancelMock: vi.fn(),
-  removeMock: vi.fn(),
-  retryMock: vi.fn(),
-  progressMock: vi.fn(),
-  clearProgressMock: vi.fn()
+const { dndState } = vi.hoisted(() => ({
+  dndState: {
+    onDragEnd: undefined as ((result: DropResult) => void) | undefined
+  }
 }))
+
+vi.mock('@hello-pangea/dnd', () => ({
+  DragDropContext: ({
+    children,
+    onDragEnd
+  }: {
+    children: ReactNode
+    onDragEnd: (result: DropResult) => void
+  }) => {
+    dndState.onDragEnd = onDragEnd
+    return children as React.JSX.Element
+  },
+  Droppable: ({ children }: { children: (provided: never) => ReactNode }) =>
+    children({ innerRef: vi.fn(), droppableProps: {} } as never) as React.JSX.Element,
+  Draggable: ({ children }: { children: (provided: never, snapshot: never) => ReactNode }) =>
+    children(
+      { innerRef: vi.fn(), draggableProps: {}, dragHandleProps: {} } as never,
+      { isDragging: false } as never
+    ) as React.JSX.Element
+}))
+
+const { cancelMock, removeMock, retryMock, reorderMock, progressMock, clearProgressMock } =
+  vi.hoisted(() => ({
+    cancelMock: vi.fn(),
+    removeMock: vi.fn(),
+    retryMock: vi.fn(),
+    reorderMock: vi.fn(),
+    progressMock: vi.fn(),
+    clearProgressMock: vi.fn()
+  }))
 let comfyEventCallback: ((event: { type: string; data: Record<string, unknown> }) => void) | null =
   null
 const state = {
@@ -55,6 +85,7 @@ vi.mock('../pages/QuickAppPage/QAppExecutePanel/comfyBatchJobState', () => ({
   openComfyBatchJob: vi.fn(),
   refreshComfyBatchJobs: vi.fn(),
   retryComfyBatchJob: retryMock,
+  reorderComfyBatchJob: reorderMock,
   updateComfyTaskProgress: progressMock,
   clearComfyTaskProgress: clearProgressMock,
   useComfyBatchJobs: () => state
@@ -76,9 +107,16 @@ describe('ComfyBatchJobCenter', () => {
     removeMock.mockResolvedValue({})
     retryMock.mockReset()
     retryMock.mockResolvedValue({})
+    reorderMock.mockReset()
+    reorderMock.mockResolvedValue({})
     progressMock.mockReset()
     clearProgressMock.mockReset()
     comfyEventCallback = null
+    dndState.onDragEnd = undefined
+    state.selectedJobId = undefined
+    state.centerOpen = true
+    state.detailOpen = false
+    state.error = undefined
     state.jobs = [
       {
         jobId: 'job-1',
@@ -145,6 +183,53 @@ describe('ComfyBatchJobCenter', () => {
     renderCenter()
 
     expect(screen.queryByRole('button', { name: 'qapp.batch.retry' })).not.toBeInTheDocument()
+  })
+
+  it('renders running and queued batches in one draggable list and sends absolute positions', async () => {
+    state.jobs = [
+      {
+        ...state.jobs[0],
+        jobId: 'running-job',
+        state: 'running',
+        sourceDir: 'running-source',
+        total: 2,
+        running: 1,
+        pending: 1,
+        success: 0,
+        queuePosition: 2
+      },
+      {
+        ...state.jobs[0],
+        jobId: 'queued-job',
+        state: 'queued',
+        sourceDir: 'queued-source',
+        total: 1,
+        running: 0,
+        pending: 1,
+        success: 0,
+        queuePosition: 1
+      },
+      {
+        ...state.jobs[0],
+        jobId: 'terminal-job',
+        state: 'completed',
+        sourceDir: 'terminal-source'
+      }
+    ]
+    renderCenter()
+
+    expect(screen.getAllByTitle('qapp.batch.drag_to_reorder')).toHaveLength(2)
+    expect(screen.getByText('running-source')).toBeInTheDocument()
+    expect(screen.getByText('queued-source')).toBeInTheDocument()
+    expect(screen.getByText('terminal-source')).toBeInTheDocument()
+
+    dndState.onDragEnd?.({
+      draggableId: 'queued-job',
+      source: { droppableId: 'comfy-batch-active-jobs', index: 1 },
+      destination: { droppableId: 'comfy-batch-active-jobs', index: 0 }
+    } as DropResult)
+
+    await vi.waitFor(() => expect(reorderMock).toHaveBeenCalledWith('queued-job', 1))
   })
 
   it('forwards ComfyUI progress events to the unified task store', () => {

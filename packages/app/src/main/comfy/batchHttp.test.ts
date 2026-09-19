@@ -188,4 +188,53 @@ describe('ComfyBatchHttpClient retry and boundary behavior', () => {
     await expect(client.objectInfo()).rejects.toThrow(/redirects are not allowed/i)
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
+
+  it('downloads only raw PNG output with no-store and no preview transcoding', async () => {
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==',
+      'base64'
+    )
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(png, {
+        headers: { 'content-type': 'image/png', 'content-length': String(png.length) }
+      })
+    )
+    const client = new ComfyBatchHttpClient('http://127.0.0.1:8188', fetchMock as typeof fetch)
+    await expect(
+      client.view({ filename: 'output.png', subfolder: 'test', type: 'output' })
+    ).resolves.toEqual(new Uint8Array(png))
+    const url = new URL(String(fetchMock.mock.calls[0][0]))
+    expect(Array.from(url.searchParams.keys()).sort()).toEqual(['filename', 'subfolder', 'type'])
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache, no-store' }
+    })
+  })
+
+  it('reports byte length and PNG truncation without nested HTTP retries', async () => {
+    const png = Buffer.from('89504e470d0a1a0a', 'hex')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(png, { headers: { 'content-type': 'image/png', 'content-length': '100' } })
+      )
+    const client = new ComfyBatchHttpClient('http://127.0.0.1:8188', fetchMock as typeof fetch)
+    await expect(client.view({ filename: 'output.png', type: 'output' })).rejects.toThrow(
+      /byteLength=8 contentLength=100 reason=PNG truncation/
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a genuine non-PNG MIME response without retrying', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response('<html>not PNG</html>', { headers: { 'content-type': 'text/html' } })
+      )
+    const client = new ComfyBatchHttpClient('http://127.0.0.1:8188', fetchMock as typeof fetch)
+    await expect(client.view({ filename: 'output.png', type: 'output' })).rejects.toThrow(
+      /type=text\/html.*non-PNG format/
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
 })

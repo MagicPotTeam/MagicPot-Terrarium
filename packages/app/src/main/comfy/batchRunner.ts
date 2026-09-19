@@ -14,6 +14,31 @@ import {
   ComfyBatchHttpClient,
   ComfyBatchHttpError
 } from './batchHttp'
+import {
+  addBatchPngMetadata,
+  inspectBatchPng,
+  inspectPng,
+  isPngSignature,
+  isValidPng,
+  readBatchPngMetadata
+} from './batchPng'
+import type { BatchPngInspection, ComfyBatchOutputMetadata } from './batchPng'
+import { downloadCompletedBatchPng } from './batchOutput'
+
+export {
+  addBatchPngMetadata,
+  inspectBatchPng,
+  inspectPng,
+  isPngSignature,
+  isValidPng,
+  readBatchPngMetadata
+} from './batchPng'
+export type {
+  BatchPngInspection,
+  ComfyBatchOutputMetadata,
+  PngInspection,
+  PngValidationFailure
+} from './batchPng'
 
 export const COMFY_BATCH_IMAGE_EXTENSIONS = new Set([
   '.png',
@@ -56,6 +81,9 @@ const COMFY_BATCH_PREPARATION_HEADROOM = 1
 const COMFY_BATCH_RETRY_BASE_DELAY_MS = 50
 const COMFY_BATCH_RETRY_MAX_DELAY_MS = 1_000
 const COMFY_BATCH_EXECUTION_RETRY_LIMIT = 3
+// Retry the /view download for a completed prompt without submitting the
+// workflow again. Local ComfyUI may finish writing the output immediately
+// before it serves the first response.
 // Embedded ComfyUI can take well over a minute to load custom nodes and expose
 // /object_info. Keep the batch pending during that startup window instead of
 // converting every source image into a permanent failure.
@@ -451,165 +479,11 @@ export function buildComfyBatchPlanFingerprint(input: {
   return createHash('sha256').update(stableJson(input)).digest('hex')
 }
 
-export function isPngSignature(bytes: Uint8Array): boolean {
-  return (
-    bytes.byteLength >= PNG_SIGNATURE.byteLength &&
-    PNG_SIGNATURE.every((value, index) => bytes[index] === value)
-  )
-}
-
-function readUint32Be(bytes: Uint8Array, offset: number): number {
-  return (
-    bytes[offset] * 0x1000000 +
-    bytes[offset + 1] * 0x10000 +
-    bytes[offset + 2] * 0x100 +
-    bytes[offset + 3]
-  )
-}
-
-function chunkType(bytes: Uint8Array, offset: number): string {
-  return String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3])
-}
-
-let pngCrcTable: Uint32Array | undefined
-function pngCrc32(bytes: Uint8Array, start: number, end: number): number {
-  if (!pngCrcTable) {
-    pngCrcTable = Uint32Array.from({ length: 256 }, (_, index) => {
-      let value = index
-      for (let bit = 0; bit < 8; bit += 1) {
-        value = (value & 1) !== 0 ? 0xedb88320 ^ (value >>> 1) : value >>> 1
-      }
-      return value >>> 0
-    })
-  }
-  let crc = 0xffffffff
-  for (let index = start; index < end; index += 1) {
-    crc = pngCrcTable[(crc ^ bytes[index]) & 0xff] ^ (crc >>> 8)
-  }
-  return (crc ^ 0xffffffff) >>> 0
-}
-
-export function isValidPng(bytes: Uint8Array): boolean {
-  if (!isPngSignature(bytes) || bytes.byteLength < 45) return false
-
-  let offset = PNG_SIGNATURE.byteLength
-  let chunkIndex = 0
-  let hasIdat = false
-  while (offset <= bytes.byteLength - 12) {
-    const dataLength = readUint32Be(bytes, offset)
-    const dataOffset = offset + 8
-    const crcOffset = dataOffset + dataLength
-    const nextOffset = crcOffset + 4
-    if (!Number.isSafeInteger(nextOffset) || nextOffset > bytes.byteLength) return false
-
-    const type = chunkType(bytes, offset + 4)
-    if (chunkIndex === 0 && (type !== 'IHDR' || dataLength !== 13)) return false
-    if (readUint32Be(bytes, crcOffset) !== pngCrc32(bytes, offset + 4, crcOffset)) return false
-    if (type === 'IDAT') hasIdat = true
-    if (type === 'IEND') return dataLength === 0 && hasIdat && nextOffset === bytes.byteLength
-
-    offset = nextOffset
-    chunkIndex += 1
-  }
-  return false
-}
-
-export type ComfyBatchOutputMetadata = {
-  sourceSha256: string
-  planFingerprint: string
-}
-
-const BATCH_PNG_TEXT_KEY = 'MagicPotBatch'
-
-function makePngChunk(type: string, data: Uint8Array): Uint8Array {
-  const typeBytes = new TextEncoder().encode(type)
-  const crcInput = new Uint8Array(typeBytes.length + data.length)
-  crcInput.set(typeBytes)
-  crcInput.set(data, typeBytes.length)
-  const chunk = new Uint8Array(12 + data.length)
-  chunk.set(
-    Uint8Array.from([
-      (data.length >>> 24) & 0xff,
-      (data.length >>> 16) & 0xff,
-      (data.length >>> 8) & 0xff,
-      data.length & 0xff
-    ])
-  )
-  chunk.set(typeBytes, 4)
-  chunk.set(data, 8)
-  const crc = pngCrc32(crcInput, 0, crcInput.length)
-  chunk.set(
-    Uint8Array.from([(crc >>> 24) & 0xff, (crc >>> 16) & 0xff, (crc >>> 8) & 0xff, crc & 0xff]),
-    8 + data.length
-  )
-  return chunk
-}
-
-function addBatchPngMetadata(bytes: Uint8Array, metadata: ComfyBatchOutputMetadata): Uint8Array {
-  if (!isValidPng(bytes)) throw new Error('ComfyUI output is not a valid PNG')
-  const text = new TextEncoder().encode(`${BATCH_PNG_TEXT_KEY}\0${JSON.stringify(metadata)}`)
-  let offset = PNG_SIGNATURE.length
-  while (offset <= bytes.length - 12) {
-    const dataLength = readUint32Be(bytes, offset)
-    const nextOffset = offset + 12 + dataLength
-    if (chunkType(bytes, offset + 4) === 'IEND') {
-      const chunk = makePngChunk('tEXt', text)
-      const result = new Uint8Array(bytes.length + chunk.length)
-      result.set(bytes.slice(0, offset))
-      result.set(chunk, offset)
-      result.set(bytes.slice(offset), offset + chunk.length)
-      return result
-    }
-    offset = nextOffset
-  }
-  throw new Error('PNG is missing IEND')
-}
-
-type BatchPngInspection = {
-  valid: boolean
-  metadata: ComfyBatchOutputMetadata | null
-}
-
-function inspectBatchPng(bytes: Uint8Array): BatchPngInspection {
-  if (!isValidPng(bytes)) return { valid: false, metadata: null }
-  let metadata: ComfyBatchOutputMetadata | null = null
-  let offset = PNG_SIGNATURE.length
-  while (offset <= bytes.length - 12) {
-    const dataLength = readUint32Be(bytes, offset)
-    const dataOffset = offset + 8
-    const nextOffset = offset + 12 + dataLength
-    if (chunkType(bytes, offset + 4) === 'tEXt') {
-      const data = new TextDecoder().decode(bytes.slice(dataOffset, dataOffset + dataLength))
-      const separator = data.indexOf('\0')
-      if (separator >= 0 && data.slice(0, separator) === BATCH_PNG_TEXT_KEY) {
-        try {
-          const parsed = JSON.parse(data.slice(separator + 1)) as Partial<ComfyBatchOutputMetadata>
-          if (
-            typeof parsed.sourceSha256 === 'string' &&
-            typeof parsed.planFingerprint === 'string'
-          ) {
-            metadata = parsed as ComfyBatchOutputMetadata
-          }
-        } catch {
-          return { valid: true, metadata: null }
-        }
-      }
-    }
-    if (chunkType(bytes, offset + 4) === 'IEND') break
-    offset = nextOffset
-  }
-  return { valid: true, metadata }
-}
-
-function readBatchPngMetadata(bytes: Uint8Array): ComfyBatchOutputMetadata | null {
-  return inspectBatchPng(bytes).metadata
-}
-
 async function readBatchPngInspection(filename: string): Promise<BatchPngInspection> {
   try {
     return inspectBatchPng(new Uint8Array(await fs.readFile(filename)))
   } catch {
-    return { valid: false, metadata: null }
+    return { valid: false, byteLength: 0, failure: 'truncated', metadata: null }
   }
 }
 
@@ -979,6 +853,7 @@ function isPermanentBatchError(error: unknown, attempt: number): boolean {
   const permanentMessageHint = [
     'no output or preview image was produced',
     'expected exactly one image from the bound output nodes',
+    'comfyui output png download failed',
     'comfyui output is not a valid png',
     'png is missing iend',
     'comfyui output must be png',
@@ -1082,6 +957,7 @@ export class ComfyBatchRunner {
   private lastProfileRefreshAt = 0
   private statusValue: ComfyBatchStatus
   private nextQueueIndex = 0
+  private yieldRequested = false
 
   constructor(
     private readonly request: StartComfyBatchReq,
@@ -1140,6 +1016,7 @@ export class ComfyBatchRunner {
     }
     return {
       ...this.statusValue,
+      yielding: this.yieldRequested ? true : undefined,
       elapsedMs,
       averageItemMs,
       etaMs,
@@ -1163,6 +1040,25 @@ export class ComfyBatchRunner {
     for (const [promptId, client] of this.activePrompts) {
       void client.cancelPrompt(promptId).catch(() => undefined)
     }
+    this.emit()
+  }
+
+  requestYield(): void {
+    if (this.abortController.signal.aborted) return
+    if (
+      this.statusValue.state === 'completed' ||
+      this.statusValue.state === 'cancelled' ||
+      this.statusValue.state === 'error'
+    )
+      return
+    if (this.yieldRequested) return
+    this.yieldRequested = true
+    this.emit()
+  }
+
+  clearYield(): void {
+    if (!this.yieldRequested) return
+    this.yieldRequested = false
     this.emit()
   }
 
@@ -1658,7 +1554,7 @@ export class ComfyBatchRunner {
     prepared: PreparedBatchSource,
     onExecutionStarted?: () => void,
     onExecutionFinished?: () => void
-  ): Promise<void> {
+  ): Promise<boolean> {
     const bytes = prepared.bytes
     const extension = path.extname(item.source.relativePath).toLowerCase()
     const uploadName = `magicpot-batch-${this.jobId}-${randomUUID()}${extension || '.png'}`
@@ -1676,6 +1572,13 @@ export class ComfyBatchRunner {
       this.abortController.signal
     )
     this.trackUploadedInput(runtime.profile, uploadName, uploaded)
+    // A worker may have been preparing this item when the service asked the
+    // runner to yield. Do not publish a new prompt after that request; the
+    // staged input remains durable and will be retried by the next runner.
+    if (this.yieldRequested) {
+      await this.cleanupUploadedInput({ profile: runtime.profile, file: uploaded })
+      return false
+    }
     const workflow = cloneWorkflow(this.request.workflow)
     bindUploadedImage(workflow, this.imageInputBinding, uploadedValue(uploaded))
     const requestedPromptId = randomUUID()
@@ -1721,12 +1624,17 @@ export class ComfyBatchRunner {
       // remote filesystem or /view response cannot leave the GPU idle.
       onExecutionFinished?.()
       const output = selectBoundOutputImage(history, this.request.outputNodeIds)
-      const outputBytes = await runtime.client.view(output, this.abortController.signal)
+      const outputBytes = await downloadCompletedBatchPng(
+        () => runtime.client.view(output, this.abortController.signal),
+        { profileId: runtime.profile.id, promptId, file: output },
+        { delayMs: 75 }
+      )
       await atomicCommitPng(item.outputPath, outputBytes, {
         sourceSha256: item.source.sha256,
         planFingerprint: this.manifest.planFingerprint
       })
       await this.cleanupUploadedInput({ profile: runtime.profile, file: uploaded })
+      return true
     } finally {
       this.activePrompts.delete(promptId)
     }
@@ -1819,6 +1727,11 @@ export class ComfyBatchRunner {
     let runtime = initialRuntime
     let prepared: PreparedBatchSource | undefined
     while (!this.abortController.signal.aborted) {
+      if (this.yieldRequested) {
+        this.statusValue.pending += 1
+        this.emit()
+        return
+      }
       if (!runtime) {
         try {
           await this.refreshProfilesIfNeeded()
@@ -1867,13 +1780,23 @@ export class ComfyBatchRunner {
       try {
         prepared ??= await this.prepareItem(item)
         if (await this.skipIfOutputCurrent(item)) return
-        await this.runOneOnInstance(
+        if (this.yieldRequested) {
+          this.statusValue.pending += 1
+          this.emit()
+          return
+        }
+        const dispatched = await this.runOneOnInstance(
           item,
           activeRuntime,
           prepared,
           markExecutionStarted,
           releaseExecutionSlot
         )
+        if (!dispatched) {
+          this.statusValue.pending += 1
+          this.emit()
+          return
+        }
         delete this.manifest.items[item.source.relativePath]
         this.manifest.completed = (this.manifest.completed ?? 0) + 1
         await this.persistManifest()
@@ -1993,7 +1916,7 @@ export class ComfyBatchRunner {
     let lastSupervisorRefreshAt = 0
     while (
       !this.abortController.signal.aborted &&
-      (this.nextQueueIndex < this.queue.length || workers.size > 0)
+      (workers.size > 0 || (!this.yieldRequested && this.nextQueueIndex < this.queue.length))
     ) {
       if (Date.now() - lastSupervisorRefreshAt >= PROFILE_RETRY_INTERVAL_MS) {
         // Successful probes publish incrementally; don't block dispatch on a
@@ -2002,7 +1925,11 @@ export class ComfyBatchRunner {
         lastSupervisorRefreshAt = Date.now()
       }
 
-      while (!this.abortController.signal.aborted && this.nextQueueIndex < this.queue.length) {
+      while (
+        !this.abortController.signal.aborted &&
+        !this.yieldRequested &&
+        this.nextQueueIndex < this.queue.length
+      ) {
         const runtime = this.scheduler.pick(this.runtimes)
         if (!runtime) break
         const item = this.queue[this.nextQueueIndex]
@@ -2026,7 +1953,7 @@ export class ComfyBatchRunner {
         )
       }
 
-      if (!workers.size && this.nextQueueIndex < this.queue.length) {
+      if (!workers.size && !this.yieldRequested && this.nextQueueIndex < this.queue.length) {
         // No usable instance is also a retryable condition. Keep the queued
         // files pending and continue probing until an instance becomes ready
         // or the user cancels the batch.
@@ -2041,7 +1968,9 @@ export class ComfyBatchRunner {
       }
     }
     await Promise.allSettled(workers)
-    this.statusValue.pending = Math.max(0, this.queue.length - this.nextQueueIndex)
+    if (!this.yieldRequested) {
+      this.statusValue.pending = Math.max(0, this.queue.length - this.nextQueueIndex)
+    }
   }
 
   private async cleanupCompletedInput(): Promise<void> {
@@ -2057,6 +1986,9 @@ export class ComfyBatchRunner {
       await this.manifestWriteQueue
       if (this.abortController.signal.aborted) {
         this.statusValue.state = 'cancelled'
+      } else if (this.yieldRequested) {
+        this.statusValue.state = 'queued'
+        this.statusValue.finishedAt = undefined
       } else if (
         this.statusValue.failed > 0 ||
         this.statusValue.pending > 0 ||
@@ -2072,7 +2004,7 @@ export class ComfyBatchRunner {
         await this.cleanupCompletedInput()
         await this.cleanupTrackedUploadedInputs()
       }
-      this.statusValue.finishedAt = Date.now()
+      if (this.statusValue.state !== 'queued') this.statusValue.finishedAt = Date.now()
       this.emit()
       return this.status
     } catch (error) {

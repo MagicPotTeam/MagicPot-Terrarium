@@ -129,20 +129,14 @@ GitHub release workflows are maintainer-only automation. They expect repository 
 
 ## Release assets and update policy
 
-MagicPot uses a dual-package release model on GitHub Releases:
+MagicPot publishes exactly two updater-consumable Windows Release assets in the configured private repository (`MagicPotTeam/MagicPot-Terrarium` by default):
 
-| Asset                                   | Purpose                                                    | Updated by the in-app updater |
-| --------------------------------------- | ---------------------------------------------------------- | ----------------------------- |
-| `magicpot-<version>-win.7z`             | First-time full package with the bundled Windows runtime.  | No                            |
-| `magicpot-<version>-setup.exe`          | App-body installer used by `electron-updater`.             | Yes                           |
-| `magicpot-<version>-setup.exe.blockmap` | Differential download metadata for the app-body installer. | Yes                           |
-| `latest.yml`                            | Update feed read by packaged builds.                       | Yes                           |
+| Asset                                                | Purpose                                                                                                      |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `magicpot-<semver>-<UTC yyyyMMddTHHmmssZ>-setup.exe` | Signed NSIS app-body installer. Used by the in-app updater.                                                  |
+| `magicpot-<semver>-<UTC yyyyMMddTHHmmssZ>-win.7z`    | Full embedded Windows package. Used for first-time delivery/manual replacement, not self-updated by the app. |
 
-Users who need the bundled runtime start from the embedded `.7z`. Later app-body updates are delivered through the app-body updater and read only `latest.yml`. The updater is disabled in development builds, so unsupported environments show an unavailable state instead of attempting an update. On Windows, the updater pins the NSIS `/D=` target to the current executable directory, allowing extracted embedded builds to apply the app-body installer back into the embedded folder while preserving the bundled runtime.
-
-The app-body updater does not update, delete, or overwrite the embedded runtime directory such as `ComfyUI_windows_portable`. Runtime resources, local ComfyUI nodes, models, generated outputs, Python caches, and other user data remain outside the app-body update target. The Windows package uses a unified executable filename (`magicpot.exe`) so app-body updates replace the user's existing launcher entry when applied inside an extracted embedded folder. If the embedded runtime itself must be refreshed, publish a new embedded `.7z` and ask users to replace or reinstall that runtime explicitly; this project intentionally does not implement embedded `.7z` self-overwrite updates.
-
-Default storage is kept outside the app installation directory under the OS app-data location. On Windows the default root is `%APPDATA%\\MagicPot`, with `Data`, `Projects`, and `AutoSave` as sibling directories. `MAGICPOT_STORAGE_ROOT` overrides that unified root and derives all three directories. `MAGICPOT_USER_DATA_DIR` is a legacy compatibility override for the exact user-data leaf only; even a leaf named `Data` is not treated as a unified root. Root changes are recorded in `user-data-bootstrap.json`; if a startup migration is incomplete, the app retains the pending source and retries Data, Projects, and AutoSave before activating the new Data directory. This avoids placing settings, chat records, cache, QApps, skills, target schemes, projects, or exports in paths that NSIS may remove during pure app updates.
+Downloads are streamed into a unique private `.part` directory, written with backpressure and partial-write handling, then checked against GitHub’s size and SHA-256 metadata. The file is rechecked immediately before installation. On Windows the verified NSIS installer receives `/D=<current executable directory>` as one raw, unquoted argument; this preserves paths containing spaces without incorrectly quoting the NSIS suffix. The app quits only after the child reports successful spawn. App-body updates target the current app directory and do not overwrite the embedded `ComfyUI_windows_portable` runtime or user data.
 
 ## 运行模式
 

@@ -1,5 +1,6 @@
 import type { ComfyHistoryResp, FileItem, ObjectInfoMap, Workflow } from '@shared/comfy/types'
 import type { ComfyQueueResp } from '@shared/comfy/types'
+import { describePngFailure, inspectPng } from './batchPng'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 // Remote/custom-node instances can return a multi-megabyte object_info map.
@@ -257,22 +258,78 @@ export class ComfyBatchHttpClient {
       subfolder: file.subfolder || '',
       type: file.type || ''
     })
-    return this.consume(`/view?${query.toString()}`, {}, { signal }, async (response) => {
-      const contentType = String(response.headers.get('content-type') || '')
-        .split(';', 1)[0]
-        .trim()
-        .toLowerCase()
-      if (
-        contentType &&
-        contentType !== 'image/png' &&
-        contentType !== 'application/octet-stream'
-      ) {
-        throw new Error(`ComfyUI output must be PNG, got ${contentType}`)
+    return this.consume(
+      '/view?' + query.toString(),
+      {
+        cache: 'no-store',
+        headers: {
+          Accept: 'image/png, application/octet-stream',
+          'Cache-Control': 'no-cache, no-store',
+          Pragma: 'no-cache'
+        }
+      },
+      { signal, retry: false },
+      async (response) => {
+        const contentType = String(response.headers.get('content-type') || '')
+          .split(';', 1)[0]
+          .trim()
+          .toLowerCase()
+        const contentLengthHeader = response.headers.get('content-length')
+        const declaredLength = contentLengthHeader ? Number(contentLengthHeader) : undefined
+        const bytes = new Uint8Array(await response.arrayBuffer())
+        const type = contentType || 'unknown'
+        const length = 'byteLength=' + bytes.byteLength
+        const contentLength =
+          declaredLength !== undefined && Number.isSafeInteger(declaredLength)
+            ? ' contentLength=' + declaredLength
+            : ''
+        if (
+          contentType &&
+          contentType !== 'image/png' &&
+          contentType !== 'application/octet-stream'
+        ) {
+          throw new ComfyBatchHttpError(
+            'ComfyUI output PNG validation failed: type=' +
+              type +
+              ' ' +
+              length +
+              contentLength +
+              ' reason=non-PNG format',
+            false
+          )
+        }
+        const inspection = inspectPng(bytes)
+        if (!inspection.valid) {
+          throw new ComfyBatchHttpError(
+            'ComfyUI output PNG validation failed: type=' +
+              type +
+              ' ' +
+              length +
+              contentLength +
+              ' reason=' +
+              describePngFailure(inspection.failure),
+            inspection.failure === 'truncated' || inspection.failure === 'crc'
+          )
+        }
+        if (
+          declaredLength !== undefined &&
+          Number.isSafeInteger(declaredLength) &&
+          declaredLength !== bytes.byteLength
+        ) {
+          throw new ComfyBatchHttpError(
+            'ComfyUI output PNG validation failed: type=' +
+              type +
+              ' ' +
+              length +
+              contentLength +
+              ' reason=Content-Length mismatch',
+            true
+          )
+        }
+        return bytes
       }
-      return new Uint8Array(await response.arrayBuffer())
-    })
+    )
   }
-
   async promptAdmission(
     promptId: string,
     signal?: AbortSignal,

@@ -57,7 +57,25 @@ const getPollInterval = (): number =>
 const sortJobs = (jobs: ComfyBatchStatus[]): ComfyBatchStatus[] =>
   [...jobs]
     .filter((job) => Boolean(job.jobId) && job.state !== 'cancelled')
-    .sort((left, right) => (right.submittedAt || 0) - (left.submittedAt || 0))
+    .sort((left, right) => {
+      // Active jobs use absolute backend queue positions. This is important
+      // when the currently running batch is moved behind a queued batch: it
+      // keeps the UI in the same order that the pump will use after the
+      // current runner finishes.
+      const leftActive = left.state === 'queued' || left.state === 'running'
+      const rightActive = right.state === 'queued' || right.state === 'running'
+      if (leftActive !== rightActive) return leftActive ? -1 : 1
+
+      const leftPosition = leftActive ? left.queuePosition : undefined
+      const rightPosition = rightActive ? right.queuePosition : undefined
+      if (leftPosition !== undefined && rightPosition !== undefined) {
+        return leftPosition - rightPosition
+      }
+      if (leftPosition !== undefined || rightPosition !== undefined) {
+        return leftPosition !== undefined ? -1 : 1
+      }
+      return (right.submittedAt || 0) - (left.submittedAt || 0)
+    })
 
 export const filterDismissedComfyBatchJobs = (
   jobs: ComfyBatchStatus[],
@@ -283,6 +301,16 @@ export const cancelComfyBatchJob = async (jobId: string): Promise<ComfyBatchStat
   const result = await api().svcComfyBatch.cancel({ jobId })
   await refreshComfyBatchJobs()
   mergeJob(result.status)
+  return result.status
+}
+
+export const reorderComfyBatchJob = async (
+  jobId: string,
+  queuePosition: number
+): Promise<ComfyBatchStatus> => {
+  const result = await api().svcComfyBatch.reorder({ jobId, queuePosition })
+  mergeJob(result.status)
+  await refreshComfyBatchJobs()
   return result.status
 }
 

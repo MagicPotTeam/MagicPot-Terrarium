@@ -627,10 +627,8 @@ describe('Comfy batch paths and discovery', () => {
     const runner = new ComfyBatchRunner(makeBatchRequest(sourceDir), [profile('one')], {
       createClient: () => fakeClient
     })
-    const cancelTimer = setTimeout(() => runner.cancel(), 250)
 
     const result = await runner.run()
-    clearTimeout(cancelTimer)
 
     expect(result).toMatchObject({
       state: 'error',
@@ -638,6 +636,7 @@ describe('Comfy batch paths and discovery', () => {
       failed: 1,
       failedFiles: ['invalid.jpg']
     })
+    expect(result.error).toMatch(/PNG download failed|not a valid PNG/i)
   })
 })
 
