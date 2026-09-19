@@ -40,7 +40,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LAST_RELEASE_COMMIT=$(git log --format=%H --grep="^release: " origin/master | head -1)
+          set -euo pipefail
+
+          LAST_RELEASE_COMMIT=$(git log -1 --format=%H --grep="^release: " origin/master)
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
 
           if [ -n "$LAST_RELEASE_COMMIT" ]; then
@@ -50,6 +52,19 @@ jobs:
               VERSION="${BASH_REMATCH[4]}"
               TAG_NAME="nightly-${BASH_REMATCH[1]}${BASH_REMATCH[2]}${BASH_REMATCH[3]}-${VERSION}"
               RELEASE_NAME="Nightly Release ${RELEASE_DATE} - ${VERSION}"
+
+              # New source takes precedence over repairing an older release. In
+              # particular, legacy asset names must not send current packaging
+              # workflows back to source that predates the timestamp contract.
+              if [ "$VERSION" = "$PACKAGE_VERSION" ]; then
+                COMMITS=$(git rev-list --count "${LAST_RELEASE_COMMIT}..origin/master")
+                if [ "$COMMITS" -gt 0 ]; then
+                  echo "Found $COMMITS new commits; preparing a new release instead of retrying ${TAG_NAME}"
+                  echo "release_mode=bump" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+              fi
+
               RELEASE_JSON=$(gh release view "release/${TAG_NAME}" \
                 --json isDraft,assets \
                 --jq '{isDraft: .isDraft, assetNames: [.assets[].name]}' 2>/dev/null || true)
@@ -93,7 +108,7 @@ jobs:
             exit 0
           fi
 
-          COMMITS=$(git log --oneline "${LAST_RELEASE_COMMIT}..origin/master" | wc -l)
+          COMMITS=$(git rev-list --count "${LAST_RELEASE_COMMIT}..origin/master")
 
           if [ "$COMMITS" -eq 0 ]; then
             echo "No new commits found on master, skipping workflow"
