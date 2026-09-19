@@ -49,7 +49,11 @@ const modeMap = {
       comfySourceFile('advanced'),
       comfySourceFile('update')
     ],
-    winTarget: ['dir', '7z', 'nsis'],
+    // The embedded delivery is the standalone .7z runtime package; the
+    // app-body installer is produced by the pure build. Building an NSIS
+    // installer here would duplicate the multi-GB embedded runtime and is
+    // not consumed by any release contract.
+    winTarget: ['dir', '7z'],
     nsis: {
       oneClick: false, // 允许选择安装目录 (对于大包建议 false)
       allowToChangeInstallationDirectory: true,
