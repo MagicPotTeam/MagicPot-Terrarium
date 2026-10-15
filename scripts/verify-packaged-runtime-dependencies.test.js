@@ -95,8 +95,7 @@ async function createTempApp(
   fs.writeFileSync(helper, 'trusted-helper')
   fs.writeFileSync(
     `${helper}.sha256`,
-    `${createHash('sha256').update(fs.readFileSync(helper)).digest('hex')}
-`
+    `${createHash('sha256').update(fs.readFileSync(helper)).digest('hex')}\n`
   )
   return createPackage(sourceDir, path.join(appOutDir, 'resources', 'app.asar')).then(
     () => appOutDir
@@ -176,19 +175,37 @@ describe('verify-packaged-runtime-dependencies', () => {
       'node_modules/hono': { name: 'hono' },
       'node_modules/zod-to-json-schema': { name: 'zod-to-json-schema' }
     })
-    expect(() => verifyPackagedRuntimeDependencies(appOutDir)).not.toThrow()
+    expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')).not.toThrow()
   })
 
-  it('rejects a missing or tampered Windows Job Object helper', async () => {
+  it('rejects a missing or tampered Windows Job Object helper for a Windows target', async () => {
     const appOutDir = await createTempApp(requiredRuntimeFiles, {
       'node_modules/@modelcontextprotocol/sdk': { name: '@modelcontextprotocol/sdk' }
     })
     const helper = path.join(appOutDir, 'bin', 'magicpot-command-job', 'magicpot-command-job.exe')
     fs.writeFileSync(helper, 'tampered-helper')
-    expect(() => verifyPackagedRuntimeDependencies(appOutDir)).toThrow('SHA-256 mismatch')
+    expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')).toThrow(
+      'SHA-256 mismatch'
+    )
     fs.rmSync(helper)
-    expect(() => verifyPackagedRuntimeDependencies(appOutDir)).toThrow('helper was not found')
+    expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')).toThrow(
+      'helper was not found'
+    )
   })
+
+  it.each(['darwin', 'linux'])(
+    'does not require the Windows Job Object helper for a %s target',
+    async (electronPlatformName) => {
+      const appOutDir = await createTempApp(requiredRuntimeFiles, {
+        'node_modules/@modelcontextprotocol/sdk': { name: '@modelcontextprotocol/sdk' }
+      })
+      fs.rmSync(path.join(appOutDir, 'bin'), { recursive: true, force: true })
+
+      expect(() =>
+        verifyPackagedRuntimeDependencies(appOutDir, undefined, electronPlatformName)
+      ).not.toThrow()
+    }
+  )
 
   it('reports missing transitive MCP runtime dependencies', async () => {
     const appOutDir = await createTempApp(
@@ -202,7 +219,7 @@ describe('verify-packaged-runtime-dependencies', () => {
         }
       }
     )
-    expect(() => verifyPackagedRuntimeDependencies(appOutDir)).toThrow(
+    expect(() => verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')).toThrow(
       '@modelcontextprotocol/sdk -> zod-to-json-schema'
     )
   })
@@ -215,6 +232,8 @@ describe('verify-packaged-runtime-dependencies', () => {
     const platformAppOutDir = path.join(path.dirname(appOutDir), 'MagicPot.app')
     const packager = { getResourcesDir: () => resourcesDir }
 
-    expect(() => verifyPackagedRuntimeDependencies(platformAppOutDir, packager)).not.toThrow()
+    expect(() =>
+      verifyPackagedRuntimeDependencies(platformAppOutDir, packager, 'win32')
+    ).not.toThrow()
   })
 })

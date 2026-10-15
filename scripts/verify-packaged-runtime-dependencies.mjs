@@ -206,11 +206,17 @@ export function verifyPackagedDocumentWorker(asarPath) {
     throw new Error('Packaged document worker PDF resolution mismatch')
 }
 
-export function verifyPackagedRuntimeDependencies(appOutDir, packager) {
+export function verifyPackagedRuntimeDependencies(
+  appOutDir,
+  packager,
+  electronPlatformName = 'win32'
+) {
   const resourcesDir = packager?.getResourcesDir
     ? packager.getResourcesDir(appOutDir)
     : path.join(appOutDir, 'resources')
-  verifyPackagedWindowsCommandJobHelper(path.dirname(resourcesDir))
+  if (electronPlatformName === 'win32') {
+    verifyPackagedWindowsCommandJobHelper(path.dirname(resourcesDir))
+  }
   const asarPath = path.join(resourcesDir, 'app.asar')
   if (!fs.existsSync(asarPath)) {
     throw new Error(`Packaged app.asar was not found: ${asarPath}`)
