@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'"
+    />
+    <title>MagicPot local development</title>
+    <style>
+      body { margin: 16px; font: 13px system-ui, sans-serif; }
+      button { margin: 0 8px 12px 0; }
+      pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    </style>
+  </head>
+  <body>
+    <h1>MagicPot</h1>
+    <p>Local development selection reader.</p>
+    <p id="connection-status">Desktop not paired.</p>
+    <p>
+      Capabilities disabled: HostAdapter, pairing, dialogue, background removal (rembg), and
+      document writes. No bridge connection is available.
+    </p>
+    <p>
+      Read selection displays up to 100 selected nodes locally. Names may contain sensitive
+      information. No text contents, images, descendants, or other pages are read.
+    </p>
+    <button id="read-selection" type="button">Read selection</button>
+    <button id="close" type="button">Close</button>
+    <pre id="selection" aria-live="polite">Selection has not been read.</pre>
+    <script>
+      const output = document.getElementById('selection')
+      document.getElementById('read-selection').addEventListener('click', () => {
+        parent.postMessage({ pluginMessage: { type: 'read-selection' } }, '*')
+      })
+      document.getElementById('close').addEventListener('click', () => {
+        parent.postMessage({ pluginMessage: { type: 'close' } }, '*')
+      })
+      window.addEventListener('message', (event) => {
+        if (event.source !== parent) return
+        const message = event.data && event.data.pluginMessage
+        if (
+          !message ||
+          message.kind !== 'selection-context' ||
+          message.protocol !== 1 ||
+          message.host !== 'figma' ||
+          !Array.isArray(message.nodes) ||
+          message.nodes.length > 100 ||
+          typeof message.truncated !== 'boolean'
+        ) return
+        try {
+          const text = JSON.stringify(message, null, 2)
+          if (text.length <= 256 * 1024) output.textContent = text
+        } catch {
+          // Ignore malformed messages without rendering exception details.
+        }
+      })
+    </script>
+  </body>
+</html>

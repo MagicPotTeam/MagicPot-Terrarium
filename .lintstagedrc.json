@@ -1,0 +1,8 @@
+{
+  "*": [
+    "node scripts/check-text-encoding.mjs"
+  ],
+  "*.{js,jsx,ts,tsx}": [
+    "prettier --write --config config/prettier/prettier.config.cjs --ignore-path config/prettier/prettierignore"
+  ]
+}

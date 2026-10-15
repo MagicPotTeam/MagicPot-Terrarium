@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-size: 12px; padding: 16px; }
+    textarea { width: 100%; min-height: 70px; }
+    button { margin: 6px 4px 6px 0; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+    label { display: block; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h2>MagicPot connected review</h2>
+  <p id="configuration">Waiting for plugin configuration.</p>
+  <button id="read-only-capture">Review complete selection locally (read-only)</button>
+  <p>Local read-only observation. Not authenticated host identity, native revision, mutation exclusion or permission to write.</p>
+  <p>This local review reads metadata only; it does not execute commands or connect to desktop.</p>
+  <pre id="read-only-output" aria-live="polite"></pre>
+  <label for="ticket">Paste desktop pairing ticket JSON (memory only)</label>
+  <textarea id="ticket" maxlength="4096" autocomplete="off" spellcheck="false"></textarea>
+  <button id="pair" disabled>Pair with desktop</button>
+  <button id="capture" disabled>Capture selection metadata</button>
+  <p>Only the first 100 active layers are captured. Changing selection does not update this snapshot. Capture again to replace it and cancel any pending review.</p>
+  <pre id="selection"></pre>
+  <label for="prompt">Prompt</label>
+  <textarea id="prompt" maxlength="16384" autocomplete="off" spellcheck="false"></textarea>
+  <label><input id="consent" type="checkbox">Send this prompt and selection metadata to MagicPot for desktop approval; may incur model charges only after approval</label>
+  <button id="share" disabled>Share for desktop approval</button>
+  <button id="cancel" disabled>Cancel review</button>
+  <button id="close">Close session</button>
+  <p id="status" role="status">Not connected.</p>
+  <pre id="result"></pre>
+  <p>Results are plain text only. Nothing is applied to the document. Closing is best effort; desktop expiry covers interrupted shutdown.</p>
+  <script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="referrer" content="no-referrer">
+  <style>
+    body { font: 12px system-ui, sans-serif; margin: 16px; }
+    textarea { box-sizing: border-box; width: 100%; min-height: 70px; }
+    button { margin: 6px 4px 6px 0; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+    label { display: block; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h2>MagicPot connected review</h2>
+  <p id="configuration">Waiting for plugin configuration.</p>
+  <button id="read-only-capture">Review complete selection locally (read-only)</button>
+  <p>Local read-only observation. Not authenticated host identity, native revision, mutation exclusion or permission to write.</p>
+  <pre id="read-only-output" aria-live="polite"></pre>
+  <label for="ticket">Paste desktop pairing ticket JSON (memory only)</label>
+  <textarea id="ticket" maxlength="4096" autocomplete="off" spellcheck="false"></textarea>
+  <button id="pair" disabled>Pair with desktop</button>
+  <button id="capture" disabled>Capture selection metadata</button>
+  <p>Only the first 100 selected items are captured. Changing selection does not update this snapshot. Capture again to replace it and cancel any pending review.</p>
+  <pre id="selection"></pre>
+  <label for="prompt">Prompt</label>
+  <textarea id="prompt" maxlength="16384" autocomplete="off" spellcheck="false"></textarea>
+  <label><input id="consent" type="checkbox">Send this prompt and selection metadata to MagicPot for desktop approval; may incur model charges only after approval</label>
+  <button id="share" disabled>Share for desktop approval</button>
+  <button id="cancel" disabled>Cancel review</button>
+  <button id="close">Close session</button>
+  <button id="dispose">Close plugin</button>
+  <p id="status" role="status">Not connected.</p>
+  <pre id="result"></pre>
+  <p>Results are plain text only. Nothing is applied to the document. Closing is best effort; desktop expiry covers interrupted shutdown.</p>
+  <script>
+    ;(() => {
+      const el = (id) => document.getElementById(id)
+      const keys = (value, required, optional = []) => value !== null && typeof value === 'object' &&
+        !Array.isArray(value) && required.every((key) => Object.prototype.hasOwnProperty.call(value, key)) &&
+        Object.keys(value).every((key) => required.includes(key) || optional.includes(key))
+      const bounded = (value, max) => typeof value === 'string' && value.length <= max && new TextEncoder().encode(value).length <= max
+      const hex = (value) => typeof value === 'string' && /^[a-f0-9]{32}$(?![\s\S])/.test(value)
+      let configured = false
+      let paired = false
+      let busy = false
+      let revision = ''
+      let instanceEpoch = null
+      let snapshotPending = null
+      let disposed = false
+      const secure = () => typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function'
+      const send = (message) => parent.postMessage({ pluginMessage: { protocol: 1, ...message } }, '*')
+      function nonce() {
+        if (!secure()) throw new Error('CRYPTO')
+        const data = new Uint8Array(16)
+        crypto.getRandomValues(data)
+        return Array.from(data, (value) => value.toString(16).padStart(2, '0')).join('')
+      }
+      function refresh() {
+        el('read-only-capture').disabled = disposed || !secure() || snapshotPending !== null
+        el('pair').disabled = !configured || !secure() || paired || busy
+        el('capture').disabled = !configured || !secure()
+        el('share').disabled = !configured || !secure() || !paired || busy || !revision ||
+          !el('consent').checked || !el('prompt').value.trim() || el('prompt').value.length > 16384
+        el('cancel').disabled = !busy
+      }
+      function localError() { el('status').textContent = 'Secure randomness or valid bounded input is unavailable.'; refresh() }
+      function clearSnapshotPending() {
+        if (snapshotPending !== null) clearTimeout(snapshotPending.timer)
+        snapshotPending = null
+      }
+      el('read-only-capture').addEventListener('click', () => {
+        if (disposed || snapshotPending) return
+        el('read-only-output').textContent = ''
+        try {
+          if (instanceEpoch === null) instanceEpoch = nonce()
+          const pending = { requestId: nonce(), instanceEpoch, timer: null, deadline: Date.now() + 10000 }
+          snapshotPending = pending
+          pending.timer = setTimeout(() => {
+            if (snapshotPending !== pending) return
+            clearSnapshotPending()
+            el('read-only-output').textContent = 'SNAPSHOT_TIMEOUT'
+            refresh()
+          }, 10000)
+          refresh()
+          send({ type: 'capture-read-only-snapshot', instanceEpoch, requestId: pending.requestId })
+        } catch {
+          clearSnapshotPending()
+          el('read-only-output').textContent = 'SNAPSHOT_UNAVAILABLE'
+          refresh()
+        }
+      })
+      el('pair').addEventListener('click', () => {
+        let ticket = el('ticket').value
+        el('ticket').value = ''
+        if (!configured || paired || busy) return
+        try {
+          if (!bounded(ticket, 4096)) throw new Error('INPUT')
+          const value = JSON.parse(ticket)
+          if (!keys(value, ['ticketId', 'pairingSecret', 'expiresAt', 'bridgeOrigin', 'pluginId', 'host', 'artifactSha256'])) throw new Error('INPUT')
+          const random = nonce()
+          busy = true
+          refresh()
+          send({ type: 'pair', ticket, nonce: random })
+        } catch { localError() }
+        finally { ticket = ''; el('ticket').value = '' }
+      })
+      el('capture').addEventListener('click', () => {
+        if (!configured) return
+        try {
+          const random = nonce()
+          revision = ''
+          el('consent').checked = false
+          el('selection').textContent = ''
+          el('result').textContent = ''
+          refresh()
+          send({ type: 'capture', nonce: random })
+        } catch { localError() }
+      })
+      el('share').addEventListener('click', () => {
+        if (!configured || !paired || busy || !revision || !el('consent').checked) return
+        const prompt = el('prompt').value.trim()
+        if (!prompt || prompt.length > 16384) { localError(); return }
+        try {
+          const message = { type: 'share', nonce: nonce(), revision, prompt, consent: true }
+          revision = ''
+          busy = true
+          el('consent').checked = false
+          refresh()
+          send(message)
+        } catch { localError() }
+      })
+      el('prompt').addEventListener('input', () => { el('consent').checked = false; refresh() })
+      el('consent').addEventListener('change', refresh)
+      el('cancel').addEventListener('click', () => send({ type: 'cancel' }))
+      function close(type) {
+        clearSnapshotPending()
+        el('read-only-output').textContent = ''
+        if (type === 'dispose') {
+          disposed = true
+          instanceEpoch = null
+        }
+        revision = ''
+        paired = false
+        busy = false
+        el('ticket').value = ''
+        el('consent').checked = false
+        el('selection').textContent = ''
+        el('result').textContent = ''
+        refresh()
+        send({ type })
+      }
+      el('close').addEventListener('click', () => close('close'))
+      el('dispose').addEventListener('click', () => close('dispose'))
+      window.addEventListener('pagehide', () => close('dispose'))
+      window.addEventListener('message', (event) => {
+        if (event.source !== parent || !keys(event.data, ['pluginMessage'], ['pluginId'])) return
+        const value = event.data.pluginMessage
+        if (!value || value.protocol !== 1) return
+        if (value.type === 'read-only-snapshot' && keys(value, ['protocol', 'type', 'instanceEpoch', 'requestId', 'result'])) {
+          if (disposed || snapshotPending === null || !hex(value.instanceEpoch) || !hex(value.requestId) ||
+            value.instanceEpoch !== snapshotPending.instanceEpoch || value.requestId !== snapshotPending.requestId) return
+          if (Date.now() >= snapshotPending.deadline) {
+            clearSnapshotPending()
+            el('read-only-output').textContent = 'SNAPSHOT_TIMEOUT'
+            refresh()
+            return
+          }
+          clearSnapshotPending()
+          let text = 'SNAPSHOT_FAILED'
+          try {
+            const result = value.result
+            if (keys(result, ['ok', 'snapshot']) && result.ok === true) text = JSON.stringify(result.snapshot, null, 2)
+            else if (keys(result, ['ok', 'error']) && result.ok === false && keys(result.error, ['code']) &&
+              typeof result.error.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$(?![\s\S])/.test(result.error.code)) text = result.error.code
+          } catch {}
+          el('read-only-output').textContent = typeof text === 'string' ? text : 'SNAPSHOT_FAILED'
+          refresh()
+          return
+        }
+        if (value.type === 'config' && keys(value, ['protocol', 'type', 'origin', 'pluginId', 'host']) && value.host === 'figma' &&
+          typeof value.origin === 'string' && /^http:\/\/127\.0\.0\.1:[1-9][0-9]{3,4}$(?![\s\S])/.test(value.origin) &&
+          Number(value.origin.slice(17)) >= 1024 && Number(value.origin.slice(17)) <= 65535 && bounded(value.pluginId, 128)) {
+          configured = true
+          el('configuration').textContent = value.host + ' / ' + value.pluginId + ' / ' + value.origin
+        } else if (value.type === 'state' && keys(value, ['protocol', 'type', 'label', 'paired', 'busy']) &&
+          bounded(value.label, 256) && typeof value.paired === 'boolean' && typeof value.busy === 'boolean') {
+          paired = value.paired
+          busy = value.busy
+          el('status').textContent = value.label
+        } else if (value.type === 'preview' && keys(value, ['protocol', 'type', 'text', 'revision']) &&
+          bounded(value.text, 128 * 1024) && (value.revision === '' || hex(value.revision))) {
+          revision = value.revision
+          el('selection').textContent = value.text
+          el('consent').checked = false
+        } else if (value.type === 'content' && keys(value, ['protocol', 'type', 'text']) && bounded(value.text, 32 * 1024)) {
+          el('result').textContent = value.text
+        }
+        refresh()
+      })
+      refresh()
+      send({ type: 'ready' })
+    })()
+  </script>
+</body>
+</html>
