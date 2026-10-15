@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "status": "UNWIRED; documentation only, not a launch policy or production checkpoint manifest",
+  "distribution": "local transparent-background 1.3.4",
+  "source_path_base": "repository root",
+  "hash_encoding": "SHA-256 of raw local file bytes; checkout newline conversion changes bundle digests",
+  "adaptations": [
+    "InSPyReNet imports are package-relative; removed os/sys imports and filepath/repopath/sys.path.append mutation.",
+    "Removed custom cuda convenience methods from InSPyReNet, ImagePyramid and Transition; execution uses explicit to(device).",
+    "Attention module imports .layers rather than transparent_background.modules.layers.",
+    "Swin Microsoft header retained verbatim. Non-license docstrings/comments and blank lines shortened; executable model mathematics unchanged.",
+    "SwinT/SwinS/SwinL and SwinTransformer.init_weights removed; SwinB requires explicit pretrained=False and rejects other values before construction. Removed all backbone pathname deserialization/default checkpoint paths.",
+    "Other module mathematics retained, including upstream interpolation and normalization expressions. AST comparison checks executable definitions after the enumerated import/device/pretraining removals and ignores docstrings.",
+    "LICENSE.inspyrenet retains the exact local MIT text including final newline; this Windows text writer uses CRLF instead of the source LF. Source and destination raw digests are separately recorded; not byte-identical.",
+    "New stdlib policy, artifact inspection, inference adapter and PNG writer are separate from the model snapshot. The fixed bilinear preprocessing is not an asserted upstream Remover visual equivalent."
+  ],
+  "sources": [
+    {
+      "source_path": "vendor/comfyui/python_embeded/Lib/site-packages/transparent_background/InSPyReNet.py",
+      "bundle_path": "_inspyrenet/InSPyReNet.py",
+      "source_sha256": "9bf8c73a361200888e48677c1df55b81bb1bdb669cfd91d73a01c01d24efbef4",
+      "bundle_sha256": "69dd5fb4411702040da9d09b374944028c8211c49c56b20d552f66ab4ca379de"
+    },
+    {
+      "source_path": "vendor/comfyui/python_embeded/Lib/site-packages/transparent_background/backbones/SwinTransformer.py",
+      "bundle_path": "_inspyrenet/backbones/SwinTransformer.py",
+      "source_sha256": "78c53d0cbd05f9a0d3cbd1dfbf86f6b989f8708281b6915e5267b03850cd8d82",
+      "bundle_sha256": "b4c7837b7f7d9d4050809e2fa754a98b1bb904fffe316bdfea867d2657b42261"
+    },
+    {
+      "source_path": "vendor/comfyui/python_embeded/Lib/site-packages/transparent_background/modules/layers.py",
+      "bundle_path": "_inspyrenet/modules/layers.py",
+      "source_sha256": "e57eedd05bece9f14cf6b2798e0c2ed09382e60d200ed6352895a979f80ed5e8",
+      "bundle_sha256": "506c5bcfae84a70a099fad6b914fb0a597c3633152331bace1b0d9df0a40722d"
+    },
+    {
+      "source_path": "vendor/comfyui/python_embeded/Lib/site-packages/transparent_background/modules/context_module.py",
+      "bundle_path": "_inspyrenet/modules/context_module.py",
+      "source_sha256": "b5b612e4d86848a3e69b66d89effcc8698e434d6f50270595605c1d42cb844d4",
+      "bundle_sha256": "688627dcd6f65e170feecc9cea8f389673542c9e674ee8190bb1de71fd130d12"
+    },
+    {
+      "source_path": "vendor/comfyui/python_embeded/Lib/site-packages/transparent_background/modules/attention_module.py",
+      "bundle_path": "_inspyrenet/modules/attention_module.py",
+      "source_sha256": "7f34d941393fb9dfc69f14ff02f731e5e1487f55cde9e79a7195d328922db2fb",
+      "bundle_sha256": "e64744ce3d5ff878a5f833e609ed19de35d383dd46e5ed8587f80d87a5c94579"
+    },
+    {
+      "source_path": "vendor/comfyui/python_embeded/Lib/site-packages/transparent_background/modules/decoder_module.py",
+      "bundle_path": "_inspyrenet/modules/decoder_module.py",
+      "source_sha256": "a6c99bfdfed9cefd4184662b4a093d179e6a0c805d92ad21122ebaf95e05ee20",
+      "bundle_sha256": "8ba037cddf0a60f3ed10d564fda369fb968329027a2e2d27142f00cd48b4888b"
+    },
+    {
+      "source_path": "vendor/comfyui/python_embeded/Lib/site-packages/transparent_background-1.3.4.dist-info/licenses/LICENSE",
+      "bundle_path": "LICENSE.inspyrenet",
+      "source_sha256": "a08a7c43ff8fe90648f889d4f937b178c29ab9be1f92244f685bf7f97cb53f91",
+      "bundle_sha256": "3782616ff1453493982579985f57c51fbc0fb43b43cc71961fbef7a072d9ca87"
+    }
+  ],
+  "licenses": {
+    "inspyrenet": "MIT, Copyright (c) 2022 Taehun Kim; LICENSE.inspyrenet",
+    "swin": "MIT, Copyright (c) 2021 Microsoft; preserved source header, NOTICE and LICENSE.swin"
+  },
+  "not_included": ["weights", "Remover", "GUI", "downloaders", "home configuration", "albumentations", "transparent_background.utils"],
+  "runtime_dependencies_not_installed_here": ["torch with weights_only support", "numpy", "opencv-python (cv2)", "kornia", "timm"],
+  "validation_scope": "stdlib actual local files plus fake torch/model protocol; not real tensor/model/Comfy/GPU validation"
+}

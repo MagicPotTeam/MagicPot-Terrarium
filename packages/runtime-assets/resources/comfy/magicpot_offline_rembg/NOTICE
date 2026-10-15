@@ -1,0 +1,13 @@
+InSPyReNet model code is adapted from the locally installed transparent-background
+1.3.4 distribution, Copyright (c) 2022 Taehun Kim, under the MIT License.
+The verbatim local distribution license is included as LICENSE.inspyrenet.
+
+The Swin Transformer backbone retains its original source header:
+  Copyright (c) 2021 Microsoft
+  Licensed under The MIT License
+  Written by Ze Liu, Yutong Lin, Yixuan Wei
+The MIT permission and disclaimer text is included in LICENSE.swin.
+
+This snapshot does not include model weights. These notices do not establish
+rights to a checkpoint, training data, inputs, or third-party dependencies.
+See provenance.json for exact local source digests and adaptations.
