@@ -1,16 +1,26 @@
 import fs from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createPackage } from '@electron/asar'
 import {
   requiredRuntimeFiles,
+  documentWorkerRuntimeAssets,
+  verifyPackagedDocumentWorker,
   verifyPackagedRuntimeDependencies
 } from './verify-packaged-runtime-dependencies.mjs'
 
 const tempRoots = []
+const require = createRequire(import.meta.url)
+const { createTransformer } = require('app-builder-lib/out/fileTransformer.js')
 
-function createTempApp(includedFiles, packageJsonByRoot = {}) {
+async function createTempApp(
+  includedFiles,
+  packageJsonByRoot = {},
+  corruptDocument = false,
+  transformPdfMetadata = false
+) {
   const trashRoot = path.join(process.cwd(), '.magicpot-trash')
   fs.mkdirSync(trashRoot, { recursive: true })
   const root = fs.mkdtempSync(path.join(trashRoot, 'packaged-runtime-dependencies-test-'))
@@ -32,6 +42,54 @@ function createTempApp(includedFiles, packageJsonByRoot = {}) {
     )
   }
 
+  // Synthetic packaged closure: real hashes of owned fixture bytes, not production assets.
+  const manifestPath = path.join(sourceDir, 'out/document-worker/manifest.json')
+  if (fs.existsSync(manifestPath)) {
+    const pdfPackagePath = path.join(sourceDir, 'node_modules/pdfjs-dist/package.json')
+    if (fs.existsSync(pdfPackagePath))
+      fs.writeFileSync(
+        pdfPackagePath,
+        JSON.stringify({
+          name: 'pdfjs-dist',
+          version: '6.3.289',
+          main: 'build/pdf.mjs',
+          keywords: ['fixture'],
+          bugs: 'https://fixture.invalid/',
+          scripts: {},
+          ...packageJsonByRoot['node_modules/pdfjs-dist']
+        })
+      )
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        protocol: 'magicpot-document-worker-assets/v2',
+        pdfjsVersion: '6.3.289',
+        saxesVersion: '6.0.0',
+        files: documentWorkerRuntimeAssets.map((relative) => ({
+          path: relative,
+          sha256: fs.existsSync(path.join(sourceDir, relative))
+            ? createHash('sha256')
+                .update(fs.readFileSync(path.join(sourceDir, relative)))
+                .digest('hex')
+            : '0'.repeat(64)
+        }))
+      })
+    )
+  }
+
+  if (transformPdfMetadata) {
+    const metadata = path.join(sourceDir, 'node_modules/pdfjs-dist/package.json')
+    const transformer = createTransformer(sourceDir, {}, {})
+    const changed = await transformer(metadata)
+    expect(changed).not.toBeNull()
+    expect(JSON.parse(changed)).not.toHaveProperty('scripts')
+    expect(JSON.parse(changed)).not.toHaveProperty('keywords')
+    fs.writeFileSync(metadata, changed)
+  }
+
+  if (corruptDocument)
+    fs.writeFileSync(path.join(sourceDir, 'out/document-worker/index.cjs'), 'corrupt owned bytes')
+
   const helper = path.join(appOutDir, 'bin', 'magicpot-command-job', 'magicpot-command-job.exe')
   fs.mkdirSync(path.dirname(helper), { recursive: true })
   fs.writeFileSync(helper, 'trusted-helper')
@@ -52,6 +110,54 @@ afterEach(() => {
 })
 
 describe('verify-packaged-runtime-dependencies', () => {
+  it('rejects a missing PDF module in the packaged document closure', async () => {
+    const appOutDir = await createTempApp(
+      requiredRuntimeFiles.filter(
+        (file) => file !== 'node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs'
+      )
+    )
+    expect(() => verifyPackagedDocumentWorker(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+      'asset missing'
+    )
+  })
+
+  it('rejects an altered document asset rather than trusting a stale manifest', async () => {
+    const appOutDir = await createTempApp(requiredRuntimeFiles, {}, true)
+    expect(() => verifyPackagedDocumentWorker(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+      'SHA-256 mismatch'
+    )
+  })
+
+  it('accepts real electron-builder metadata rewriting without weakening code asset hashes', async () => {
+    const appOutDir = await createTempApp(requiredRuntimeFiles, {}, false, true)
+    expect(() =>
+      verifyPackagedDocumentWorker(path.join(appOutDir, 'resources/app.asar'))
+    ).not.toThrow()
+  })
+
+  it('rejects missing PDF metadata even though it is not a code byte-hash entry', async () => {
+    const appOutDir = await createTempApp(
+      requiredRuntimeFiles.filter((file) => file !== 'node_modules/pdfjs-dist/package.json')
+    )
+    expect(() => verifyPackagedDocumentWorker(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+      'PDF metadata unavailable'
+    )
+  })
+
+  it.each([
+    { name: 'wrong-owned-name' },
+    { version: '0.0.0' },
+    { main: '../../wrong-owned-entry.mjs' },
+    { exports: null }
+  ])('rejects module resolution metadata mismatch %j', async (metadata) => {
+    const appOutDir = await createTempApp(requiredRuntimeFiles, {
+      'node_modules/pdfjs-dist': metadata
+    })
+    expect(() => verifyPackagedDocumentWorker(path.join(appOutDir, 'resources/app.asar'))).toThrow(
+      'PDF resolution mismatch'
+    )
+  })
+
   it('accepts an app.asar containing the required MCP runtime closure', async () => {
     const appOutDir = await createTempApp(requiredRuntimeFiles, {
       'node_modules/@modelcontextprotocol/sdk': {
