@@ -14,6 +14,7 @@ export default defineConfig({
       'packages/app/src/main/appUpdate/artifactPreparer.test.ts'
     ],
     include: [
+      'scripts/check-text-encoding.test.mjs',
       'scripts/**/*.test.{ts,js}',
       'packages/app/src/main/**/*.test.{ts,js}',
       'packages/app/src/preload/**/*.test.{ts,js}',
