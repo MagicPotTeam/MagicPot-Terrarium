@@ -26,7 +26,7 @@ function createProcess(env: NodeJS.ProcessEnv = {}): CanvasThumbnailSidecarProce
     arch: 'x64',
     resourcesPath: 'C:/MagicPot/resources',
     execPath: 'C:/MagicPot/MagicPot.exe',
-    cwd: () => 'C:/repo/magicpot-open'
+    cwd: () => 'C:/repo/MagicPot-Terrarium'
   }
 }
 
@@ -110,7 +110,7 @@ describe('canvasThumbnailSidecarAdapter', () => {
     )
     expect(candidates).toContain(
       path.join(
-        'C:/repo/magicpot-open',
+        'C:/repo/MagicPot-Terrarium',
         'packages',
         'runtime-assets',
         'resources',
@@ -122,7 +122,7 @@ describe('canvasThumbnailSidecarAdapter', () => {
     )
     expect(candidates).toContain(
       path.join(
-        'C:/repo/magicpot-open',
+        'C:/repo/MagicPot-Terrarium',
         '.cache',
         'cargo-target',
         'canvas-thumbnail-sidecar',

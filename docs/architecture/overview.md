@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the architecture of the public `magicpot-open` workspace. It is based on the repository README, package scripts, and public TypeScript contracts. It intentionally avoids private implementation details; private integrations are described only as extension and packaging boundaries.
+This document describes the architecture of the public `MagicPot-Terrarium` workspace. It is based on the repository README, package scripts, and public TypeScript contracts. It intentionally avoids private implementation details; private integrations are described only as extension and packaging boundaries.
 
 ## Product shape
 

@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-MagicPot is maintained as a public open application under `open/magicpot-open` and a private wrapper at the repository root. Private Codex and Tripo integrations add provider behavior, optional IPC services, and renderer UI contributions.
+MagicPot is maintained as the public open application in `open/MagicPot-Terrarium` and a private wrapper at the repository root. Private Codex and Tripo integrations add provider behavior, optional IPC services, and renderer UI contributions.
 
 Historically, private overlays could patch high-churn open files such as chat pages, settings panels, IPC assembly, LLM proxy implementation, and shared LLM/config files. That is workable for short-lived experiments but creates long-term merge risk and can accidentally leak private assumptions into public candidates.
 
