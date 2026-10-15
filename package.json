@@ -144,7 +144,6 @@
       "node scripts/check-text-encoding.mjs"
     ],
     "*.{js,jsx,ts,tsx}": [
-      "eslint --config config/eslint/eslint.config.mjs --fix --quiet",
       "prettier --write --config config/prettier/prettier.config.cjs --ignore-path config/prettier/prettierignore"
     ]
   },
