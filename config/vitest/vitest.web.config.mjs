@@ -21,6 +21,13 @@ export default defineConfig({
       'packages/app/src/shared/**/*.test.{ts,js}',
       'packages/app/src/renderer/**/*.test.{ts,js,tsx,jsx}'
     ],
+    // Node-native Response/streams and the owned TCP listener run in the node suite.
+    // Keep them out of the jsdom setup (which requires HTMLCanvasElement).
+    exclude: [
+      'packages/app/src/shared/llm/openaiFileSearch.control.test.ts',
+      'packages/app/src/shared/llm/openaiFileSearch.lifecycle.test.ts',
+      'packages/app/src/shared/llm/openaiFileSearch.http.test.ts'
+    ],
     setupFiles: ['packages/app/src/renderer/src/tests/setup.ts']
   }
 })

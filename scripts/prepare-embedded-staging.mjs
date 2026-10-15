@@ -4,6 +4,10 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { materializeGitFileSymlinks } from './embedded-staging-symlinks.mjs'
+import { parseOfflineRembgFlag, stageOfflineRembg } from './comfy/stage-offline-rembg.mjs'
+
+// Default remains unchanged; the owned node bundle is copied only with this explicit build flag.
+const offlineRembgEnabled = parseOfflineRembgFlag(process.argv.slice(2))
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
@@ -248,6 +252,7 @@ function main() {
   copyTree(customNodesSrc, customNodesDst, shouldSkipCustomNodeSource)
   removeRepositoryMetadata(customNodesDst)
   applySeedVr2CpuDeviceFallback()
+  stageOfflineRembg({ projectRoot: repoRoot, enabled: offlineRembgEnabled })
 
   validateStaging()
   console.log(`[prepare-embedded-staging] Wrote ${comfyDst}`)
