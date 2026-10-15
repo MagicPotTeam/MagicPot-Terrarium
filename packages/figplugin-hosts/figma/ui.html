@@ -8,9 +8,19 @@
     />
     <title>MagicPot local development</title>
     <style>
-      body { margin: 16px; font: 13px system-ui, sans-serif; }
-      button { margin: 0 8px 12px 0; }
-      pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+      body {
+        margin: 16px;
+        font:
+          13px system-ui,
+          sans-serif;
+      }
+      button {
+        margin: 0 8px 12px 0;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
     </style>
   </head>
   <body>
@@ -47,7 +57,8 @@
           !Array.isArray(message.nodes) ||
           message.nodes.length > 100 ||
           typeof message.truncated !== 'boolean'
-        ) return
+        )
+          return
         try {
           const text = JSON.stringify(message, null, 2)
           if (text.length <= 256 * 1024) output.textContent = text

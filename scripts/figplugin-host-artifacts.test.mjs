@@ -306,9 +306,10 @@ test('runtime sources have no network, storage, document-write, or arbitrary-exe
     )
     assert.doesNotMatch(source, /https?:\/\/|\bimport\s|document\.write\s*\(/)
   }
-  assert.deepEqual([...photoshopCode.matchAll(/require\('([^']+)'\)/g)].map((m) => m[1]), [
-    'photoshop'
-  ])
+  assert.deepEqual(
+    [...photoshopCode.matchAll(/require\('([^']+)'\)/g)].map((m) => m[1]),
+    ['photoshop']
+  )
   for (const html of [figmaHtml, photoshopHtml]) {
     assert.match(html, /Desktop not paired\./)
     assert.match(html, /Capabilities disabled:/)
@@ -362,7 +363,8 @@ test('Figma ignores unknown, inherited, oversized, extra-field and malformed com
     { type: { toString: () => 'read-selection' } },
     Object.create({ type: 'read-selection' }),
     circular
-  ]) main.receive(input)
+  ])
+    main.receive(input)
   assert.equal(main.state.pageReads, 0)
   assert.equal(main.state.closed, 0)
   assert.deepEqual(main.state.posts, [])
@@ -385,8 +387,10 @@ for (const count of [0, 1, 100, 101]) {
     assert.equal(context.nodes.length, Math.min(count, 100))
     assert.equal(context.truncated, count > 100)
     assert.equal(main.state.selectionReads, 1)
-    assert.deepEqual(context.nodes.map((node) => node.id),
-      Array.from({ length: Math.min(count, 100) }, (_, index) => `1:${index}`))
+    assert.deepEqual(
+      context.nodes.map((node) => node.id),
+      Array.from({ length: Math.min(count, 100) }, (_, index) => `1:${index}`)
+    )
     assert.deepEqual(violations, [])
   })
 }
@@ -394,29 +398,34 @@ for (const count of [0, 1, 100, 101]) {
 test('Figma filters host data and control characters, retaining only finite geometry', () => {
   const violations = []
   const name = '<img src=x onerror=alert(1)>\u0000\n\u202e' + 'n'.repeat(200)
-  const main = figmaFixture([
-    figmaNode(violations, {
-      id: 'i'.repeat(200),
-      type: 'TEXT',
-      name,
-      locked: true,
-      x: -5,
-      y: NaN,
-      width: 12.5,
-      height: Infinity,
-      rotation: '90'
-    })
-  ], violations)
+  const main = figmaFixture(
+    [
+      figmaNode(violations, {
+        id: 'i'.repeat(200),
+        type: 'TEXT',
+        name,
+        locked: true,
+        x: -5,
+        y: NaN,
+        width: 12.5,
+        height: Infinity,
+        rotation: '90'
+      })
+    ],
+    violations
+  )
   main.receive({ type: 'read-selection' })
   assert.deepEqual(main.state.posts[0], {
     ...emptyContext('figma'),
-    nodes: [{
-      id: 'i'.repeat(120),
-      type: 'TEXT',
-      name: name.slice(0, 120).replace(/[\u0000\n\u202e]/g, ''),
-      locked: true,
-      geometry: { x: -5, width: 12.5 }
-    }]
+    nodes: [
+      {
+        id: 'i'.repeat(120),
+        type: 'TEXT',
+        name: name.slice(0, 120).replace(/[\u0000\n\u202e]/g, ''),
+        locked: true,
+        geometry: { x: -5, width: 12.5 }
+      }
+    ]
   })
   const ui = figmaUiFixture(violations)
   ui.deliver(main.state.posts[0])
@@ -443,7 +452,8 @@ test('Figma UI ignores foreign, unknown, malformed, and oversized replies', () =
     { ...valid, truncated: 'false' },
     { ...valid, nodes: [{ name: 'x'.repeat(300000) }] },
     circular
-  ]) ui.deliver(message)
+  ])
+    ui.deliver(message)
   assert.equal(ui.dom.text, '')
   assert.deepEqual(ui.posts, [])
   ui.deliver(valid)
@@ -482,8 +492,10 @@ for (const count of [0, 1, 100, 101]) {
     const context = JSON.parse(panel.dom.text)
     assert.equal(context.nodes.length, Math.min(count, 100))
     assert.equal(context.truncated, count > 100)
-    assert.deepEqual(context.nodes.map((node) => node.id),
-      Array.from({ length: Math.min(count, 100) }, (_, index) => index))
+    assert.deepEqual(
+      context.nodes.map((node) => node.id),
+      Array.from({ length: Math.min(count, 100) }, (_, index) => index)
+    )
     assert.equal(panel.state.selectionReads, 1)
     assert.deepEqual(violations, [])
   })
@@ -493,18 +505,21 @@ test('Photoshop reads only allowlisted layer data and renders names as plain tex
   const violations = []
   const name = '<script>alert(1)</script>\u0000\r\u2066' + 'n'.repeat(200)
   const kind = 'group\u0001' + 'k'.repeat(200)
-  const panel = photoshopFixture([
-    photoshopLayer(violations, { id: NaN, name, kind, allLocked: true })
-  ], violations)
+  const panel = photoshopFixture(
+    [photoshopLayer(violations, { id: NaN, name, kind, allLocked: true })],
+    violations
+  )
   panel.dom.click('read-selection')
   assert.deepEqual(JSON.parse(panel.dom.text), {
     ...emptyContext('photoshop'),
-    nodes: [{
-      id: null,
-      name: name.slice(0, 120).replace(/[\u0000\r\u2066]/g, ''),
-      kind: kind.slice(0, 120).replace(/\u0001/g, ''),
-      locked: true
-    }]
+    nodes: [
+      {
+        id: null,
+        name: name.slice(0, 120).replace(/[\u0000\r\u2066]/g, ''),
+        kind: kind.slice(0, 120).replace(/\u0001/g, ''),
+        locked: true
+      }
+    ]
   })
   assert.match(panel.dom.text, /<script>alert\(1\)<\/script>/)
   assert.deepEqual(violations, [])
