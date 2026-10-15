@@ -69,6 +69,7 @@ __pycache__/
 # Temporary & Generated files
 *.tsbuildinfo
 *.txt
+!/scripts/licenses/saxes-6.0.0-LICENSE.txt
 !/vendor/comfyui/update/current_requirements.txt
 
 .cache/
