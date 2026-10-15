@@ -3,34 +3,34 @@ import { spawnSync } from 'node:child_process'
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { getNativeBuildOptions } from './native-build-options.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-if (process.platform !== 'win32') {
+const manifestPath = path.join(repoRoot, 'packages', 'magicpot-command-job', 'Cargo.toml')
+let build
+try {
+  // Normal non-Windows builds still skip; unsupported opt-in builds fail closed.
+  build = getNativeBuildOptions({ repoRoot, manifestPath, windowsOnly: true })
+} catch (error) {
+  console.error(`Native build preflight failed: ${error.message}`)
+  process.exit(1)
+}
+if (!build) {
   console.log('Skipping Windows command Job Object helper build on non-Windows host.')
   process.exit(0)
 }
-const manifest = path.join(repoRoot, 'packages', 'magicpot-command-job', 'Cargo.toml')
-const result = spawnSync(
-  process.env.CARGO || 'cargo',
-  ['build', '--release', '--locked', '--manifest-path', manifest],
-  {
-    cwd: repoRoot,
-    stdio: 'inherit'
-  }
-)
+const result = spawnSync(build.cargo, build.args, {
+  cwd: build.cwd,
+  env: build.env,
+  shell: false,
+  stdio: 'inherit'
+})
 if (result.error) {
   console.error(`Failed to run cargo: ${result.error.message}`)
   process.exit(1)
 }
 if (result.status !== 0) process.exit(result.status ?? 1)
-const source = path.join(
-  repoRoot,
-  'packages',
-  'magicpot-command-job',
-  'target',
-  'release',
-  'magicpot-command-job.exe'
-)
+const source = path.join(build.releaseDir, 'magicpot-command-job.exe')
 const outputDir = path.join(
   repoRoot,
   'packages',

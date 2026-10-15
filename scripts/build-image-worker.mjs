@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, win32 } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { getNativeBuildOptions } from './native-build-options.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const defaultRepoRoot = resolve(__dirname, '..')
@@ -51,7 +52,10 @@ export function buildImageWorker({
   repoRoot = defaultRepoRoot,
   platform = process.platform,
   arch = process.arch,
-  spawn = spawnSync
+  env = process.env,
+  spawn = spawnSync,
+  realpath,
+  stat
 } = {}) {
   const paths = getImageWorkerBuildPaths({ repoRoot, platform, arch })
 
@@ -59,24 +63,46 @@ export function buildImageWorker({
     throw new Error(`Cargo manifest not found: ${paths.manifestPath}`)
   }
 
+  const reproducible = Object.entries(env).some(
+    ([key, value]) =>
+      (platform === 'win32' ? key.toUpperCase() : key) === 'MAGICPOT_REPRODUCIBLE_NATIVE' &&
+      value === '1'
+  )
+  if (reproducible && platform === 'win32' && arch !== 'x64') {
+    throw new Error(
+      'Reproducible native build: image worker requires native Windows x64 architecture'
+    )
+  }
+  // The helper validates the gate (including malformed/ambiguous values). Normal
+  // image-worker builds still use their original command, flags and fixed cache.
+  const options = getNativeBuildOptions({
+    repoRoot,
+    manifestPath: paths.manifestPath,
+    platform,
+    env: reproducible ? env : { ...env, CARGO_TARGET_DIR: paths.cargoTargetDir },
+    spawn,
+    realpath,
+    stat
+  })
+  if (reproducible) {
+    paths.cargoTargetDir = win32.dirname(win32.dirname(options.releaseDir))
+    paths.sourceBinaryPath = win32.join(options.releaseDir, `${sidecarPackageName}.exe`)
+  } else {
+    options.cargo = 'cargo'
+    options.args = ['build', '--release', '--manifest-path', paths.manifestPath]
+  }
+
   console.log(`[image-worker] repo root: ${repoRoot}`)
   console.log(`[image-worker] cargo manifest: ${paths.manifestPath}`)
   console.log(`[image-worker] CARGO_TARGET_DIR: ${paths.cargoTargetDir}`)
   console.log(`[image-worker] package output: ${paths.outputBinaryPath}`)
 
-  const result = spawn(
-    'cargo',
-    ['build', '--release', '--manifest-path', paths.manifestPath],
-    {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        CARGO_TARGET_DIR: paths.cargoTargetDir
-      },
-      shell: false,
-      stdio: 'inherit'
-    }
-  )
+  const result = spawn(options.cargo, options.args, {
+    cwd: options.cwd,
+    env: options.env,
+    shell: false,
+    stdio: 'inherit'
+  })
 
   if (result.error) {
     throw new Error(`Failed to start cargo: ${result.error.message}`)
