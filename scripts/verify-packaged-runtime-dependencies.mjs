@@ -51,6 +51,20 @@ export const requiredRuntimeFiles = [
 ]
 
 const runtimeRootPackages = ['@modelcontextprotocol/sdk']
+const supportedElectronPlatformNames = new Set(['win32', 'darwin', 'linux'])
+
+function assertSupportedElectronPlatformName(electronPlatformName) {
+  if (electronPlatformName === undefined) {
+    throw new Error(
+      'electronPlatformName is required (expected win32, darwin, or linux)'
+    )
+  }
+  if (!supportedElectronPlatformNames.has(electronPlatformName)) {
+    throw new Error(
+      `Unsupported electronPlatformName "${String(electronPlatformName)}" (expected win32, darwin, or linux)`
+    )
+  }
+}
 
 export function verifyPackagedWindowsCommandJobHelper(packagedRoot) {
   const helper = path.join(packagedRoot, 'bin', 'magicpot-command-job', 'magicpot-command-job.exe')
@@ -209,8 +223,9 @@ export function verifyPackagedDocumentWorker(asarPath) {
 export function verifyPackagedRuntimeDependencies(
   appOutDir,
   packager,
-  electronPlatformName = 'win32'
+  electronPlatformName
 ) {
+  assertSupportedElectronPlatformName(electronPlatformName)
   const resourcesDir = packager?.getResourcesDir
     ? packager.getResourcesDir(appOutDir)
     : path.join(appOutDir, 'resources')
@@ -247,7 +262,7 @@ function main(argv = process.argv.slice(2)) {
   const appOutDir = argv[0]
     ? path.resolve(argv[0])
     : path.join(repoRoot, 'dist', process.env.PACKAGE_MODE || 'pure', 'win-unpacked')
-  verifyPackagedRuntimeDependencies(appOutDir)
+  verifyPackagedRuntimeDependencies(appOutDir, undefined, 'win32')
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

@@ -207,6 +207,15 @@ describe('verify-packaged-runtime-dependencies', () => {
     }
   )
 
+  it('rejects a missing or unknown electron platform name', () => {
+    expect(() => verifyPackagedRuntimeDependencies('/unused', undefined)).toThrow(
+      'electronPlatformName is required'
+    )
+    expect(() => verifyPackagedRuntimeDependencies('/unused', undefined, 'freebsd')).toThrow(
+      'Unsupported electronPlatformName "freebsd"'
+    )
+  })
+
   it('reports missing transitive MCP runtime dependencies', async () => {
     const appOutDir = await createTempApp(
       requiredRuntimeFiles.filter(
