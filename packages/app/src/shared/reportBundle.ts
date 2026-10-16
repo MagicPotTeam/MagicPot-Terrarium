@@ -8,6 +8,7 @@ export type ReportBundleManifestEntry = {
   relativePath?: string
   sourceUrl?: string
   sizeBytes?: number
+  imageCount?: number
 }
 
 export type ReportBundleManifest = {

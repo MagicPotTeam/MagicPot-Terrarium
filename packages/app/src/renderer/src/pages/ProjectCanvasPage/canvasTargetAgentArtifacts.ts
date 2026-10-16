@@ -870,10 +870,12 @@ function attachBundleMetadata(
   attachment: ChatAttachment,
   materialization: CanvasTargetBundleMaterialization,
   role: ReportBundleManifestEntry['role'],
-  refName: string
+  refName: string,
+  reportBundleImageCount?: number
 ): ChatAttachment {
   return {
     ...attachment,
+    ...(typeof reportBundleImageCount === 'number' ? { reportBundleImageCount } : {}),
     reportBundleId: materialization.bundleId,
     reportBundleRole: role,
     reportBundleRefName: refName,
@@ -923,7 +925,8 @@ async function buildBundleImageAttachment(options: {
       },
       options.materialization,
       'report-image',
-      refName
+      refName,
+      undefined
     )
 
     return {
@@ -948,7 +951,8 @@ async function buildBundleImageAttachment(options: {
       options.attachment,
       options.materialization,
       'report-image',
-      refName
+      refName,
+      undefined
     )
 
     return {
@@ -1076,6 +1080,8 @@ export async function materializeCanvasTargetAgentMessagePayload(
     content: stageReportContent
   })
 
+  const reportBundleImageCount = payload.attachments.filter(isBundleImageAttachment).length
+
   const primaryAttachment = attachBundleMetadata(
     {
       ...stageReportAttachment,
@@ -1085,7 +1091,8 @@ export async function materializeCanvasTargetAgentMessagePayload(
     },
     materialization,
     'primary-report',
-    stageReportFileName
+    stageReportFileName,
+    reportBundleImageCount
   )
 
   materialization.manifest.entries.push({
@@ -1094,7 +1101,8 @@ export async function materializeCanvasTargetAgentMessagePayload(
     mimeType: primaryAttachment.mimeType,
     refName: primaryAttachment.reportBundleRefName,
     relativePath: primaryAttachment.fileName,
-    sizeBytes: primaryAttachment.sizeBytes
+    sizeBytes: primaryAttachment.sizeBytes,
+    imageCount: reportBundleImageCount
   })
 
   const persistedBundleAttachments: ChatAttachment[] = [primaryAttachment]

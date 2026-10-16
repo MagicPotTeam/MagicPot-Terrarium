@@ -424,6 +424,7 @@ describe('canvasTargetAgentArtifacts', () => {
       fileName: 'canvas-target-Visual_Check.md',
       reportBundleRole: 'primary-report',
       reportBundleId: 'canvas-target-stage-1',
+      reportBundleImageCount: 1,
       reportBundleManifestUrl:
         'local-media:///C:/bundle-cache/.report_bundles/canvas-target-stage-1/manifest.json'
     })
@@ -442,6 +443,17 @@ describe('canvasTargetAgentArtifacts', () => {
       expect.objectContaining({
         outputPath: 'C:/bundle-cache/.report_bundles/canvas-target-stage-1/images'
       })
+    )
+    const manifestWrite = writeTextFile.mock.calls.find(
+      ([request]) => request.filename === 'manifest.json'
+    )?.[0] as { content: string } | undefined
+    expect(manifestWrite).toBeDefined()
+    const manifest = JSON.parse(manifestWrite!.content)
+    expect(manifest.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'primary-report', imageCount: 1 }),
+        expect.objectContaining({ role: 'report-image' })
+      ])
     )
   })
 })
