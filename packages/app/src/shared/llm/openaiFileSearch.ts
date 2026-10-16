@@ -4,7 +4,240 @@ import type { ChatAttachment, ChatMessage } from './types'
 
 const FILE_SEARCH_READY_TIMEOUT_MS = 30_000
 const FILE_SEARCH_POLL_INTERVAL_MS = 1_000
+const FILE_SEARCH_CLEANUP_TIMEOUT_MS = 5_000
+const FILE_SEARCH_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 const providerFileIdCache = new ProviderFileIdCache()
+
+type BoundedOperationSignal = {
+  signal: AbortSignal
+  cleanup: () => void
+}
+
+const createBoundedOperationSignal = (
+  parent: AbortSignal | undefined,
+  timeoutMs: number
+): BoundedOperationSignal => {
+  const controller = new AbortController()
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+
+  const abortFromParent = () => {
+    if (controller.signal.aborted) return
+    if (parent?.reason !== undefined) controller.abort(parent.reason)
+    else controller.abort()
+  }
+
+  if (parent?.aborted) {
+    abortFromParent()
+  } else {
+    parent?.addEventListener('abort', abortFromParent, { once: true })
+    timeoutId = setTimeout(() => {
+      if (controller.signal.aborted) return
+      const error = new Error('OpenAI file search setup timed out.')
+      error.name = 'TimeoutError'
+      controller.abort(error)
+    }, timeoutMs)
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      if (timeoutId !== undefined) clearTimeout(timeoutId)
+      parent?.removeEventListener('abort', abortFromParent)
+    }
+  }
+}
+
+const abortReason = (signal: AbortSignal): Error => {
+  if (signal.reason instanceof Error) return signal.reason
+  const error = new Error(
+    typeof signal.reason === 'string' && signal.reason.trim()
+      ? signal.reason
+      : 'The operation was aborted.'
+  )
+  error.name = 'AbortError'
+  return error
+}
+
+const awaitWithAbort = <T>(
+  value: PromiseLike<T> | T,
+  signal?: AbortSignal,
+  abortTransport?: () => void
+): Promise<T> => {
+  const promise = Promise.resolve(value)
+  if (!signal) return promise
+  if (signal.aborted) {
+    void promise.catch(() => undefined)
+    try {
+      abortTransport?.()
+    } catch {
+      // Transport cleanup must not replace the authoritative abort reason.
+    }
+    return Promise.reject(abortReason(signal))
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const onAbort = () => {
+      finishReject(abortReason(signal))
+      try {
+        abortTransport?.()
+      } catch {
+        // Injected transports may throw while cancelling; the operation still settles.
+      }
+    }
+    const onAbortCleanup = () => signal.removeEventListener('abort', onAbort)
+    const finishResolve = (result: T) => {
+      if (settled) return
+      settled = true
+      onAbortCleanup()
+      resolve(result)
+    }
+    const finishReject = (error: unknown) => {
+      if (settled) return
+      settled = true
+      onAbortCleanup()
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(finishResolve, finishReject)
+  })
+}
+
+const cancelResponseBody = (response: Response): void => {
+  try {
+    void response.body?.cancel().catch(() => undefined)
+  } catch {
+    // The body may already be consumed or closed.
+  }
+}
+
+const getResponseContentLength = (response: Response): number | undefined => {
+  const value = response.headers?.get('content-length')
+  if (!value) return undefined
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined
+}
+
+const readResponseBlobWithinLimit = async (
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal
+): Promise<Blob> => {
+  const limitError = () =>
+    new Error(`OpenAI file search response body exceeds the ${maxBytes}-byte limit.`)
+  const contentLength = getResponseContentLength(response)
+  if (contentLength !== undefined && contentLength > maxBytes) {
+    cancelResponseBody(response)
+    throw limitError()
+  }
+
+  const body = response.body
+  if (!body || typeof body.getReader !== 'function') {
+    const blob = await awaitWithAbort(response.blob(), signal, () => cancelResponseBody(response))
+    if (blob.size > maxBytes) {
+      cancelResponseBody(response)
+      throw limitError()
+    }
+    return blob
+  }
+
+  const reader = body.getReader()
+  const cancelReader = () => {
+    try {
+      void reader.cancel().catch(() => undefined)
+    } catch {
+      // Best effort, including injected readers that throw synchronously.
+    }
+  }
+  const chunks: BlobPart[] = []
+  let totalBytes = 0
+  try {
+    while (true) {
+      const result = await awaitWithAbort(reader.read(), signal, cancelReader)
+      if (result.done) break
+      const chunk = result.value instanceof Uint8Array ? result.value : new Uint8Array(result.value)
+      if (chunk.byteLength > maxBytes - totalBytes) throw limitError()
+      totalBytes += chunk.byteLength
+      const ownedChunk = new ArrayBuffer(chunk.byteLength)
+      new Uint8Array(ownedChunk).set(chunk)
+      chunks.push(ownedChunk)
+    }
+  } catch (error) {
+    cancelReader()
+    throw error
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // Do not mask the primary failure when an injected reader cannot release.
+    }
+  }
+
+  return new Blob(chunks, {
+    type: response.headers?.get('content-type') || ''
+  })
+}
+
+const readResponseTextWithinLimit = async (
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal
+): Promise<string> => {
+  const blob = await readResponseBlobWithinLimit(response, maxBytes, signal)
+  const bytes = await awaitWithAbort(blob.arrayBuffer(), signal)
+  return new TextDecoder().decode(bytes)
+}
+
+const readResponseJsonWithinLimit = async <T>(
+  response: Response,
+  signal?: AbortSignal,
+  maxBytes = 1024 * 1024
+): Promise<T> => {
+  if (!response.body && typeof response.json === 'function') {
+    const payload = await awaitWithAbort(response.json(), signal, () =>
+      cancelResponseBody(response)
+    )
+    if (new TextEncoder().encode(JSON.stringify(payload)).byteLength > maxBytes) {
+      throw new Error(`OpenAI file search response body exceeds the ${maxBytes}-byte limit.`)
+    }
+    return payload as T
+  }
+  const text = await readResponseTextWithinLimit(response, maxBytes, signal)
+  return JSON.parse(text) as T
+}
+
+const createBoundedFetch = (fetchImpl: FetchImpl, signal: AbortSignal): FetchImpl =>
+  ((input, init) => {
+    if (signal.aborted) return Promise.reject(abortReason(signal))
+
+    return new Promise<Response>((resolve, reject) => {
+      let settled = false
+      const cleanup = () => signal.removeEventListener('abort', onAbort)
+      const finishResolve = (value: Response) => {
+        if (settled) {
+          cancelResponseBody(value)
+          return
+        }
+        settled = true
+        cleanup()
+        resolve(value)
+      }
+      const finishReject = (error: unknown) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
+      const onAbort = () => finishReject(abortReason(signal))
+      signal.addEventListener('abort', onAbort, { once: true })
+
+      try {
+        Promise.resolve(fetchImpl(input, { ...init, signal })).then(finishResolve, finishReject)
+      } catch (error) {
+        finishReject(error)
+      }
+    })
+  }) as FetchImpl
 
 const hashIdentity = async (value: string): Promise<string> => {
   const bytes = new TextEncoder().encode(value)
@@ -17,11 +250,6 @@ const normalizeBaseUrl = (value: string): string => value.trim().replace(/\/+$/,
 const getStableString = (value: unknown): string | undefined =>
   typeof value === 'string' && value.trim() ? value.trim() : undefined
 
-const normalizeSha256 = (value: unknown): string | undefined => {
-  const sha256 = getStableString(value)
-  return sha256 && /^[a-f0-9]{64}$/i.test(sha256) ? sha256.toLowerCase() : undefined
-}
-
 const buildCacheKey = async (
   baseUrl: string,
   apiKey: string,
@@ -32,22 +260,12 @@ const buildCacheKey = async (
   const accountFingerprint = stableAccountIdentifier
     ? `id:${stableAccountIdentifier}`
     : `key-sha256:${await hashIdentity(apiKey)}`
-  const sha256 = normalizeSha256(attachment.media?.sha256)
-  const mediaId = getStableString(attachment.metadata?.mediaId)
-  const sourceIdentity =
-    mediaId ||
-    (attachment.media?.kind === 'managed' ? attachment.media.relativePath : undefined) ||
-    attachment.relativePath ||
-    attachment.url
-
+  // Request bytes, not caller-supplied media IDs, hashes or paths, own cache identity.
+  // Managed originals must already have been resolved by the guarded main-process flow.
   return {
     provider: 'openai',
     accountIdentity: `${normalizeBaseUrl(baseUrl)}:${accountFingerprint}`,
-    contentIdentity: sha256
-      ? `content-sha256:${sha256}`
-      : mediaId
-        ? `media:${mediaId}`
-        : `source-sha256:${await hashIdentity(sourceIdentity)}`
+    contentIdentity: `source-sha256:${await hashIdentity(attachment.url.trim())}`
   }
 }
 
@@ -189,46 +407,46 @@ export const isOpenAIFileSearchAttachment = (attachment: ChatAttachment, index =
   return FILE_SEARCH_SUPPORTED_EXTENSIONS.has(extension)
 }
 
-const dataUrlToBlob = (value: string): Blob | null => {
-  const match = value.match(/^data:([^;,]+)?;base64,(.+)$/i)
-  if (!match) {
-    return null
-  }
-
-  const mimeType = normalizeMimeType(match[1]) || 'application/octet-stream'
+const inspectFileDataUrl = (value: string): { mimeType: string; base64: string } | null => {
+  const match = /^data:([^;,]+)?;base64,([a-z0-9+/]*={0,2})$/i.exec(value.trim())
+  if (!match || match[2].length % 4 !== 0) return null
   const base64 = match[2]
-  const bytes = Uint8Array.from(Buffer.from(base64, 'base64'))
-  return new Blob([bytes], { type: mimeType })
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+  const decodedBytes = (base64.length / 4) * 3 - padding
+  if (decodedBytes > FILE_SEARCH_MAX_ATTACHMENT_BYTES) {
+    throw new Error('OpenAI file search attachment exceeds the 50 MiB limit.')
+  }
+  return { mimeType: normalizeMimeType(match[1]) || 'application/octet-stream', base64 }
 }
 
-const loadAttachmentBlob = async (
-  attachment: ChatAttachment,
-  index: number,
-  signal?: AbortSignal,
-  fetchImpl: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl
-): Promise<{ blob: Blob; fileName: string }> => {
-  const fileName = inferAttachmentFileName(attachment, index)
-  const directBlob = dataUrlToBlob(attachment.url)
-  if (directBlob) {
-    return { blob: directBlob, fileName }
+const dataUrlToBlob = (value: string): Blob | null => {
+  const inspected = inspectFileDataUrl(value)
+  if (!inspected) return null
+  const bytes = Buffer.from(inspected.base64, 'base64')
+  if (bytes.toString('base64') !== inspected.base64) {
+    throw new Error('OpenAI file search attachment has invalid base64 content.')
   }
+  return new Blob([Uint8Array.from(bytes)], { type: inspected.mimeType })
+}
 
-  const response = await fetchImpl(attachment.url, { signal })
-  if (!response.ok) {
+const assertSupportedFileSearchSources = (attachments: ChatAttachment[]): void => {
+  for (const attachment of attachments) {
+    if (inspectFileDataUrl(attachment.url)) continue
     throw new Error(
-      `OpenAI file search could not download ${fileName}: ${response.status} ${response.statusText}`
+      'OpenAI file search requires materialized base64 data URLs; local-media, remote and file URLs must be resolved by a guarded main-process flow first.'
     )
   }
+}
 
-  const blob = await response.blob()
-  const mimeType = normalizeMimeType(attachment.mimeType) || 'application/octet-stream'
-  return {
-    blob:
-      blob.type || !(typeof blob.arrayBuffer === 'function')
-        ? blob
-        : new Blob([await blob.arrayBuffer()], { type: mimeType }),
-    fileName
-  }
+const loadAttachmentBlob = (
+  attachment: ChatAttachment,
+  index: number,
+  signal?: AbortSignal
+): { blob: Blob; fileName: string } => {
+  if (signal?.aborted) throw abortReason(signal)
+  const blob = dataUrlToBlob(attachment.url)
+  if (!blob) throw new Error('OpenAI file search requires materialized base64 data URLs.')
+  return { blob, fileName: inferAttachmentFileName(attachment, index) }
 }
 
 const authHeaders = (apiKey: string): Record<string, string> =>
@@ -243,7 +461,17 @@ const jsonHeaders = (apiKey: string): Record<string, string> => ({
   ...authHeaders(apiKey)
 })
 
-const safeText = async (response: Response): Promise<string> => response.text().catch(() => '')
+const safeText = async (response: Response, signal?: AbortSignal): Promise<string> => {
+  try {
+    if (!response.body && typeof response.text === 'function') {
+      return await awaitWithAbort(response.text(), signal, () => cancelResponseBody(response))
+    }
+    return await readResponseTextWithinLimit(response, 64 * 1024, signal)
+  } catch (error) {
+    if (signal?.aborted) throw error
+    return ''
+  }
+}
 
 const uploadFile = async (
   apiKey: string,
@@ -253,7 +481,7 @@ const uploadFile = async (
   signal?: AbortSignal,
   fetchImpl: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl
 ): Promise<string> => {
-  const { blob, fileName } = await loadAttachmentBlob(attachment, index, signal, fetchImpl)
+  const { blob, fileName } = loadAttachmentBlob(attachment, index, signal)
   const formData = new FormData()
   formData.append('purpose', 'assistants')
   formData.append('file', blob, fileName)
@@ -268,12 +496,13 @@ const uploadFile = async (
   if (!response.ok) {
     throw new Error(
       `OpenAI file upload failed for ${fileName}: ${response.status} ${response.statusText} ${await safeText(
-        response
+        response,
+        signal
       )}`
     )
   }
 
-  const payload = (await response.json()) as { id?: string }
+  const payload = await readResponseJsonWithinLimit<{ id?: string }>(response, signal)
   if (!payload.id) {
     throw new Error(`OpenAI file upload returned no file id for ${fileName}.`)
   }
@@ -299,12 +528,13 @@ const createVectorStore = async (
   if (!response.ok) {
     throw new Error(
       `OpenAI vector store creation failed: ${response.status} ${response.statusText} ${await safeText(
-        response
+        response,
+        signal
       )}`
     )
   }
 
-  const payload = (await response.json()) as { id?: string }
+  const payload = await readResponseJsonWithinLimit<{ id?: string }>(response, signal)
   if (!payload.id) {
     throw new Error('OpenAI vector store creation returned no id.')
   }
@@ -344,11 +574,13 @@ const addFileToVectorStore = async (
   if (!response.ok) {
     throw new OpenAIFileAttachError(
       `OpenAI vector store file attach failed: ${response.status} ${response.statusText} ${await safeText(
-        response
+        response,
+        signal
       )}`,
       response.status
     )
   }
+  cancelResponseBody(response)
 }
 
 const waitForVectorStoreFiles = async (
@@ -360,60 +592,73 @@ const waitForVectorStoreFiles = async (
   fetchImpl: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl
 ): Promise<void> => {
   const deadline = Date.now() + FILE_SEARCH_READY_TIMEOUT_MS
+  const expectedIds = new Set(fileIds)
+  type FileRecord = { id?: string; last_error?: { message?: string }; status?: string }
 
   while (Date.now() < deadline) {
-    const response = await fetchImpl(
-      `${baseUrl}/vector_stores/${encodeURIComponent(vectorStoreId)}/files`,
-      {
-        method: 'GET',
-        headers: authHeaders(apiKey),
-        signal
-      }
-    )
-
-    if (!response.ok) {
-      throw new Error(
-        `OpenAI vector store polling failed: ${response.status} ${response.statusText} ${await safeText(
-          response
-        )}`
+    const relevantRecords = new Map<string, FileRecord>()
+    const cursors = new Set<string>()
+    let after = ''
+    do {
+      const response = await fetchImpl(
+        `${baseUrl}/vector_stores/${encodeURIComponent(vectorStoreId)}/files${
+          after ? `?after=${encodeURIComponent(after)}` : ''
+        }`,
+        { method: 'GET', headers: authHeaders(apiKey), signal }
       )
-    }
-
-    const payload = (await response.json()) as {
-      data?: Array<{
-        file_id?: string
-        last_error?: { message?: string }
-        status?: string
-      }>
-    }
-    const records = Array.isArray(payload.data) ? payload.data : []
-    const relevantRecords = records.filter(
-      (record) => record.file_id && fileIds.includes(record.file_id)
-    )
-
-    if (relevantRecords.length === fileIds.length) {
-      const failedRecord = relevantRecords.find((record) =>
-        ['cancelled', 'expired', 'failed'].includes(String(record.status || '').toLowerCase())
-      )
-      if (failedRecord) {
+      if (!response.ok) {
         throw new Error(
-          failedRecord.last_error?.message ||
-            `OpenAI file search indexing failed with status "${failedRecord.status || 'unknown'}".`
+          `OpenAI vector store polling failed: ${response.status} ${response.statusText} ${await safeText(
+            response,
+            signal
+          )}`
         )
       }
-
-      if (
-        relevantRecords.every(
-          (record) =>
+      const payload = await readResponseJsonWithinLimit<{
+        data?: FileRecord[]
+        has_more?: boolean
+        last_id?: string
+      }>(response, signal)
+      for (const record of Array.isArray(payload.data) ? payload.data : []) {
+        if (!record?.id || !expectedIds.has(record.id)) continue
+        if (
+          ['cancelled', 'expired', 'failed'].includes(
             String(record.status || '')
               .trim()
-              .toLowerCase() === 'completed'
-        )
-      ) {
-        return
+              .toLowerCase()
+          )
+        ) {
+          throw new Error(
+            record.last_error?.message ||
+              `OpenAI file search indexing failed with status "${record.status || 'unknown'}".`
+          )
+        }
+        relevantRecords.set(record.id, record)
       }
-    }
+      after = ''
+      if (payload.has_more) {
+        if (
+          typeof payload.last_id !== 'string' ||
+          !payload.last_id ||
+          cursors.has(payload.last_id)
+        ) {
+          throw new Error('OpenAI vector store polling returned an invalid pagination cursor.')
+        }
+        after = payload.last_id
+        cursors.add(after)
+      }
+    } while (after)
 
+    if (
+      relevantRecords.size === expectedIds.size &&
+      [...relevantRecords.values()].every(
+        (record) =>
+          String(record.status || '')
+            .trim()
+            .toLowerCase() === 'completed'
+      )
+    )
+      return
     await sleep(FILE_SEARCH_POLL_INTERVAL_MS, signal)
   }
 
@@ -425,13 +670,68 @@ const safeDelete = async (
   url: string,
   fetchImpl: FetchImpl = globalThis.fetch.bind(globalThis) as FetchImpl
 ): Promise<void> => {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => {
+    const error = new Error('OpenAI file search cleanup timed out.')
+    error.name = 'TimeoutError'
+    controller.abort(error)
+  }, FILE_SEARCH_CLEANUP_TIMEOUT_MS)
+
   try {
-    await fetchImpl(url, {
+    const response = await createBoundedFetch(fetchImpl, controller.signal)(url, {
       method: 'DELETE',
       headers: authHeaders(apiKey)
     })
+    cancelResponseBody(response)
   } catch {
-    // Best-effort cleanup only.
+    // Best-effort cleanup only; never delay the original result forever.
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+type SharedUploadLease = {
+  references: number
+  cacheKeys: Map<string, ProviderFileIdCacheKey>
+  deleteOwned?: () => Promise<void>
+}
+
+// Cache entries are only lookup hints. Leases must survive eviction/replacement so
+// an owner cannot delete an upload while another live session is still using it.
+const uploadLeases = new WeakMap<ProviderFileIdCache, Map<string, SharedUploadLease>>()
+
+const retainUploadedFile = (
+  cache: ProviderFileIdCache,
+  cacheKey: ProviderFileIdCacheKey,
+  fileId: string,
+  deleteOwned?: () => Promise<void>
+): (() => Promise<void>) => {
+  let leases = uploadLeases.get(cache)
+  if (!leases) {
+    leases = new Map()
+    uploadLeases.set(cache, leases)
+  }
+  const identity = JSON.stringify([cacheKey.provider, cacheKey.accountIdentity, fileId])
+  let lease = leases.get(identity)
+  if (!lease) {
+    lease = { references: 0, cacheKeys: new Map(), deleteOwned }
+    leases.set(identity, lease)
+  } else if (deleteOwned && !lease.deleteOwned) {
+    lease.deleteOwned = deleteOwned
+  }
+  lease.cacheKeys.set(JSON.stringify(cacheKey), cacheKey)
+  lease.references += 1
+  let released = false
+  return async () => {
+    if (released) return
+    released = true
+    if (--lease.references > 0) return
+    leases.delete(identity)
+    if (!lease.deleteOwned) return // A pre-existing external cache entry is not ours to delete.
+    for (const key of lease.cacheKeys.values()) {
+      if (cache.get(key)?.fileId === fileId) cache.invalidate(key)
+    }
+    await lease.deleteOwned()
   }
 }
 
@@ -484,40 +784,60 @@ export async function createOpenAIFileSearchSession(options: {
   if (!attachments.length) {
     return null
   }
+  if (options.signal?.aborted) {
+    throw abortReason(options.signal)
+  }
+  assertSupportedFileSearchSources(attachments)
 
+  const boundedOperation = createBoundedOperationSignal(
+    options.signal,
+    FILE_SEARCH_READY_TIMEOUT_MS
+  )
+  const operationSignal = boundedOperation.signal
+  const baseFetch = options.fetchImpl ?? (globalThis.fetch.bind(globalThis) as FetchImpl)
+  const operationFetch = createBoundedFetch(baseFetch, operationSignal)
   const files: Array<{
     cacheKey: ProviderFileIdCacheKey
     fileId: string
-    sessionOwned: boolean
+    release: () => Promise<void>
   }> = []
+  const seenContentKeys = new Set<string>()
   let vectorStoreId = ''
+  let cleanupPromise: Promise<void> | undefined
 
-  const deleteSessionOwnedFiles = async (): Promise<void> => {
-    await Promise.allSettled(
-      files
-        .filter((file) => file.sessionOwned)
-        .map(async (file) => {
-          fileIdCache.invalidate(file.cacheKey)
-          await safeDelete(
+  const cleanupSessionResources = (): Promise<void> => {
+    if (!cleanupPromise) {
+      const cleanupTasks = files.map((file) => file.release())
+      if (vectorStoreId) {
+        cleanupTasks.push(
+          safeDelete(
             options.apiKey,
-            `${options.baseUrl}/files/${encodeURIComponent(file.fileId)}`,
-            options.fetchImpl
+            `${options.baseUrl}/vector_stores/${encodeURIComponent(vectorStoreId)}`,
+            baseFetch
           )
-        })
-    )
+        )
+      }
+      cleanupPromise = Promise.allSettled(cleanupTasks).then(() => undefined)
+    }
+    return cleanupPromise
   }
 
   try {
     for (const [index, attachment] of attachments.entries()) {
-      const cacheKey = await buildCacheKey(
-        options.baseUrl,
-        options.apiKey,
-        attachment,
-        options.accountIdentifier
+      const cacheKey = await awaitWithAbort(
+        buildCacheKey(options.baseUrl, options.apiKey, attachment, options.accountIdentifier),
+        operationSignal
       )
+      const contentKey = JSON.stringify(cacheKey)
+      if (seenContentKeys.has(contentKey)) continue
+      seenContentKeys.add(contentKey)
       const cached = fileIdCache.get(cacheKey)
       if (cached) {
-        files.push({ cacheKey, fileId: cached.fileId, sessionOwned: false })
+        files.push({
+          cacheKey,
+          fileId: cached.fileId,
+          release: retainUploadedFile(fileIdCache, cacheKey, cached.fileId)
+        })
         continue
       }
 
@@ -526,34 +846,45 @@ export async function createOpenAIFileSearchSession(options: {
         options.baseUrl,
         attachment,
         index,
-        options.signal,
-        options.fetchImpl
+        operationSignal,
+        operationFetch
       )
       fileIdCache.set(cacheKey, { fileId })
-      files.push({ cacheKey, fileId, sessionOwned: true })
+      files.push({
+        cacheKey,
+        fileId,
+        release: retainUploadedFile(fileIdCache, cacheKey, fileId, () =>
+          safeDelete(
+            options.apiKey,
+            `${options.baseUrl}/files/${encodeURIComponent(fileId)}`,
+            baseFetch
+          )
+        )
+      })
     }
 
     vectorStoreId = await createVectorStore(
       options.apiKey,
       options.baseUrl,
-      options.signal,
-      options.fetchImpl
+      operationSignal,
+      operationFetch
     )
-    for (const file of files) {
+    const uniqueFiles = [...new Map(files.map((file) => [file.fileId, file])).values()]
+    for (const file of uniqueFiles) {
       try {
         await addFileToVectorStore(
           options.apiKey,
           options.baseUrl,
           vectorStoreId,
           file.fileId,
-          options.signal,
-          options.fetchImpl
+          operationSignal,
+          operationFetch
         )
       } catch (error) {
         if (
-          !file.sessionOwned &&
           error instanceof OpenAIFileAttachError &&
-          [400, 404].includes(error.status)
+          [400, 404].includes(error.status) &&
+          fileIdCache.get(file.cacheKey)?.fileId === file.fileId
         ) {
           fileIdCache.invalidate(file.cacheKey)
         }
@@ -565,35 +896,19 @@ export async function createOpenAIFileSearchSession(options: {
       options.apiKey,
       options.baseUrl,
       vectorStoreId,
-      files.map((file) => file.fileId),
-      options.signal,
-      options.fetchImpl
+      uniqueFiles.map((file) => file.fileId),
+      operationSignal,
+      operationFetch
     )
 
+    boundedOperation.cleanup()
     return {
       vectorStoreIds: [vectorStoreId],
-      cleanup: async () => {
-        if (vectorStoreId) {
-          await safeDelete(
-            options.apiKey,
-            `${options.baseUrl}/vector_stores/${encodeURIComponent(vectorStoreId)}`,
-            options.fetchImpl
-          )
-        }
-
-        await deleteSessionOwnedFiles()
-      }
+      cleanup: cleanupSessionResources
     }
   } catch (error) {
-    if (vectorStoreId) {
-      await safeDelete(
-        options.apiKey,
-        `${options.baseUrl}/vector_stores/${encodeURIComponent(vectorStoreId)}`,
-        options.fetchImpl
-      )
-    }
-
-    await deleteSessionOwnedFiles()
+    boundedOperation.cleanup()
+    await cleanupSessionResources()
 
     throw error
   }

@@ -13,6 +13,7 @@ export type LLMModelUse = 'chat' | 'agent' | 'multimodal' | 'vision' | 'ocr' | '
 export type LLMProviderOption = LLMProvider | 'default'
 export type LLMModelUseOption = LLMModelUse | 'default'
 export type LLMProfileAuthMode = string
+export type LLMOpenAIApiMode = 'auto' | 'responses' | 'chat-completions' | 'images'
 export type LLMProfileCallType = 'api' | 'local' | (string & {})
 export type TaggerProviderId = 'wdtagger' | 'cl_tagger' | 'paddle_ocr'
 export type TaggerProviderOption = TaggerProviderId | 'default'
@@ -32,6 +33,7 @@ export type LLMAPIProfile = {
   base_url: string
   api_key: string
   api_secret?: string
+  request_timeout_ms?: number
   call_type?: LLMProfileCallType
   local_model_path?: string
   auth_mode?: LLMProfileAuthMode
@@ -42,9 +44,21 @@ export type LLMAPIProfile = {
   context_budget_tokens?: number
   /** Only enable when the provider request path actually consumes and returns a continuation id/url. */
   supports_session_continuation?: boolean
+  supportsSessionContinuation?: boolean
+  /** Provider/profile-declared maximum number of input images for the selected route. Omitted means unlimited/unknown, never inferred from a model name. */
+  max_input_images?: number
+  /** Camel-case wire alias accepted from remote profile discovery. */
+  maxInputImages?: number
+  /** Provider/profile-declared Responses image policy, when finite. */
+  max_images?: number
+  maxImages?: number
   provider?: LLMProviderOption
   deployment?: LLMDeployment
   model_use?: LLMModelUseOption
+  /** Optional explicit OpenAI-compatible request API mode. */
+  api_mode?: LLMOpenAIApiMode
+  attachment_transports?: string[]
+  preferred_attachment_transport?: string
   tencent_secret_id?: string
   tencent_secret_key?: string
   api_region?: string
@@ -330,11 +344,19 @@ export type ProjectTraceConfig = {
   enable_agent_terminal: boolean
 }
 
+/** Explicit opt-in only; id is referenced as local-comfy-rembg:<id>, never an image LLM slot. */
+export type LocalComfyBackgroundRemovalConfig = {
+  id: string
+  enabled: boolean
+  comfy_instance_id: string
+}
+
 type ConfigShape = {
   config_version: '>1.0.53'
   client_id: string
   use_remote_comfyui: boolean
   comfy_batch_profiles?: ComfyBatchProfile[]
+  background_removal_capability?: LocalComfyBackgroundRemovalConfig
 
   local_comfyui_config: {
     python_cmd: string

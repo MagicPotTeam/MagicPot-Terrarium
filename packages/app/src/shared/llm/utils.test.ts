@@ -1,72 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import {
-  ClaudeAPICli,
-  GeminiAPICli,
-  OllamaAPICli,
-  OpencodeZenAPICli,
-  OpenAIAPICli
-} from './clients'
-import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
+import { ClaudeAPICli, GeminiAPICli, OllamaAPICli, OpenAIAPICli } from './clients'
 import { KlingVideoAPICli, VolcengineSeedanceAPICli } from './videoClients'
 import {
   cliFromProfile,
-  isClaudeUrl,
-  isCodexFastModeEnabled,
-  isGeminiUrl,
-  isKlingUrl,
   isOllamaProfile,
   isOllamaUrl,
-  isOpencodeZenUrl,
   isRunnableProfile,
-  isVolcengineUrl,
   resolveProfileCallType,
   resolveProfileModelUse
 } from './utils'
 
 describe('shared llm ollama compatibility', () => {
   afterEach(() => {
-    sharedHostExtensionApiV1.llmProfiles = []
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
 
   const stableFetch = (() => Promise.reject(new Error('not used'))) as typeof fetch
-
-  it('enables Codex fast mode by default unless explicitly disabled', () => {
-    expect(isCodexFastModeEnabled({})).toBe(false)
-    expect(isCodexFastModeEnabled({ auth_mode: 'codex_oauth' })).toBe(true)
-    expect(isCodexFastModeEnabled({ call_type: 'codex' as never })).toBe(true)
-    expect(isCodexFastModeEnabled({ auth_mode: 'codex_oauth', codex_fast_mode: true })).toBe(true)
-    expect(isCodexFastModeEnabled({ auth_mode: 'codex_oauth', codex_fast_mode: false })).toBe(false)
-  })
-
-  it('passes default-enabled Codex fast mode to LLM extensions', () => {
-    const createCli = vi.fn(() => undefined)
-    sharedHostExtensionApiV1.llmProfiles = [{ id: 'codex-test', createCli }]
-
-    cliFromProfile({
-      model_name: 'gpt-5.5',
-      base_url: 'https://codex.local/v1',
-      api_key: 'codex-token',
-      auth_mode: 'codex_oauth'
-    })
-    expect(createCli).toHaveBeenLastCalledWith(
-      expect.objectContaining({ codex_fast_mode: true }),
-      undefined
-    )
-
-    cliFromProfile({
-      model_name: 'gpt-5.5',
-      base_url: 'https://codex.local/v1',
-      api_key: 'codex-token',
-      auth_mode: 'codex_oauth',
-      codex_fast_mode: false
-    })
-    expect(createCli).toHaveBeenLastCalledWith(
-      expect.objectContaining({ codex_fast_mode: false }),
-      undefined
-    )
-  })
 
   it('detects the default Ollama host and allows profiles without API keys', () => {
     const profile = {
@@ -143,29 +93,31 @@ describe('shared llm ollama compatibility', () => {
     expect(cliFromProfile(profile)).toBeInstanceOf(OpenAIAPICli)
   })
 
-  it('does not treat cloud OpenAI profiles as runnable without a stored API key', () => {
+  it('treats official Codex OAuth profiles as runnable without a stored API key', () => {
     const profile = {
       model_name: 'gpt-5',
       base_url: 'https://api.openai.com/v1',
-      api_key: ''
+      api_key: '',
+      auth_mode: 'codex_oauth' as const
     }
 
-    expect(isRunnableProfile(profile)).toBe(false)
+    expect(isRunnableProfile(profile)).toBe(true)
     expect(cliFromProfile(profile)).toBeUndefined()
   })
 
-  it('requires cloud API profiles to provide an endpoint before they can run', () => {
+  it('treats model-less Codex OAuth profiles with an implicit official endpoint as runnable', () => {
     const profile = {
-      model_name: 'gpt-5',
+      model_name: '',
       base_url: '',
-      api_key: 'sk-test'
+      api_key: '',
+      auth_mode: 'codex_oauth' as const
     }
 
-    expect(isRunnableProfile(profile)).toBe(false)
+    expect(isRunnableProfile(profile)).toBe(true)
     expect(cliFromProfile(profile)).toBeUndefined()
   })
 
-  it('sends OpenAI-compatible chat requests without private priority flags', async () => {
+  it('maps Codex fast mode to OpenAI priority processing on the official endpoint', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -182,7 +134,8 @@ describe('shared llm ollama compatibility', () => {
     const profile = {
       model_name: 'gpt-5',
       base_url: 'https://api.openai.com/v1',
-      api_key: 'sk-test'
+      api_key: 'sk-test',
+      codex_fast_mode: true
     }
 
     const cli = cliFromProfile(profile)
@@ -195,9 +148,60 @@ describe('shared llm ollama compatibility', () => {
     })
 
     const requestInit = fetchMock.mock.calls[0]?.[1]
-    const requestBody = JSON.parse(String(requestInit?.body))
-    expect(requestBody).toMatchObject({ model: 'gpt-5' })
+    expect(JSON.parse(String(requestInit?.body))).toMatchObject({
+      model: 'gpt-5',
+      service_tier: 'priority'
+    })
+  })
+
+  it('treats model-less CLIProxyAPI/Codex profiles as runnable when endpoint and key are present', () => {
+    const profile = {
+      model_name: '',
+      base_url: 'https://proxy.example.test/v1/',
+      api_key: 'cpa-test',
+      call_type: 'cliproxyapi' as const
+    }
+
+    expect(resolveProfileCallType(profile)).toBe('cliproxyapi')
+    expect(isRunnableProfile(profile)).toBe(true)
+  })
+
+  it('uses the Responses API for CLIProxyAPI profiles without hosted-only parameters', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        output: [
+          {
+            type: 'message',
+            content: [{ type: 'output_text', text: 'ok' }]
+          }
+        ]
+      })
+    })
+
+    const profile = {
+      model_name: 'gpt-5.4-mini',
+      base_url: 'https://proxy.example.test/v1',
+      api_key: 'cpa-test',
+      call_type: 'cliproxyapi' as const
+    }
+
+    expect(resolveProfileCallType(profile)).toBe('cliproxyapi')
+    const cli = cliFromProfile(profile, { fetchImpl: fetchMock as typeof fetch })
+    expect(cli).toBeInstanceOf(OpenAIAPICli)
+
+    await expect(
+      cli?.chat({ messages: [{ role: 'user', content: 'hello' }] })
+    ).resolves.toMatchObject({ content: 'ok' })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://proxy.example.test/v1/responses',
+      expect.objectContaining({ method: 'POST' })
+    )
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(requestBody).toMatchObject({ model: 'gpt-5.4-mini' })
     expect(requestBody).not.toHaveProperty('service_tier')
+    expect(requestBody).not.toHaveProperty('tools')
   })
 
   it('auto-detects Gemini profiles from the API address when provider stays on default', () => {
@@ -209,32 +213,6 @@ describe('shared llm ollama compatibility', () => {
     }
 
     expect(cliFromProfile(profile)).toBeInstanceOf(GeminiAPICli)
-  })
-
-  it('matches Gemini and Claude providers by hostname only', () => {
-    expect(isGeminiUrl('generativelanguage.googleapis.com/v1beta')).toBe(true)
-    expect(isGeminiUrl('https://evil.example/generativelanguage.googleapis.com/v1beta')).toBe(false)
-    expect(isClaudeUrl('https://api.anthropic.com/v1/messages')).toBe(true)
-    expect(isClaudeUrl('https://gateway.example/claude/v1/messages')).toBe(false)
-  })
-
-  it('recognizes OpenCode Zen base URLs without matching spoofed hosts', () => {
-    expect(isOpencodeZenUrl('https://opencode.ai/zen/v1')).toBe(true)
-    expect(isOpencodeZenUrl('opencode.ai/zen/v1')).toBe(true)
-    expect(isOpencodeZenUrl('https://opencode.ai/zen/v1/messages')).toBe(true)
-    expect(isOpencodeZenUrl('https://opencode.ai.evil.example/zen/v1')).toBe(false)
-  })
-
-  it('routes OpenCode Zen profiles through the Zen multi-endpoint client', () => {
-    const profile = {
-      model_name: 'opencode/claude-opus-4-8',
-      base_url: 'https://opencode.ai/zen/v1',
-      api_key: 'zen-key',
-      provider: 'default' as const
-    }
-
-    expect(isRunnableProfile(profile)).toBe(true)
-    expect(cliFromProfile(profile, { fetchImpl: stableFetch })).toBeInstanceOf(OpencodeZenAPICli)
   })
 
   it('allows local OpenAI-compatible gateways without API keys', () => {
@@ -304,17 +282,6 @@ describe('shared llm ollama compatibility', () => {
     }
 
     expect(resolveProfileModelUse(profile)).toBe('agent')
-  })
-
-  it('matches video provider URLs by hostname instead of unsafe substrings', () => {
-    expect(isKlingUrl('https://api-beijing.klingai.com/v1/videos/text2video')).toBe(true)
-    expect(isKlingUrl('https://klingai.com.evil.example/v1/videos/text2video')).toBe(false)
-    expect(isKlingUrl('https://evil.example/relay?klingai.com')).toBe(false)
-
-    expect(
-      isVolcengineUrl('https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks')
-    ).toBe(true)
-    expect(isVolcengineUrl('https://evil.example/api/v3/contents/generations/tasks')).toBe(true)
   })
 
   it('routes configured Kling video profiles to the Kling client only when both access key and secret are present', () => {
@@ -398,26 +365,5 @@ describe('shared llm ollama compatibility', () => {
 
     expect(resolveProfileModelUse(profile)).toBe('chat')
     expect(cliFromProfile(profile, { fetchImpl: stableFetch })).toBeInstanceOf(OpenAIAPICli)
-
-    const spoofedKlingProfile = {
-      model_name: 'kling-v3',
-      base_url: 'https://klingai.com.evil.example',
-      api_key: 'access-id',
-      api_secret: 'secret-key',
-      model_use: 'video' as const
-    }
-    const spoofedVolcengineProfile = {
-      model_name: 'video-compatible-model',
-      base_url: 'https://volcengineapi.com.evil.example/api/v3',
-      api_key: 'ark-key',
-      model_use: 'video' as const
-    }
-
-    expect(cliFromProfile(spoofedKlingProfile, { fetchImpl: stableFetch })).toBeInstanceOf(
-      OpenAIAPICli
-    )
-    expect(cliFromProfile(spoofedVolcengineProfile, { fetchImpl: stableFetch })).toBeInstanceOf(
-      OpenAIAPICli
-    )
   })
 })

@@ -22,6 +22,18 @@ export type {
   OpenAIImageGenerationQuality
 } from './types'
 export { normalizeLLMChatResult, parseStructuredLLMChatResult } from './types'
+export type {
+  ImageRequestAction,
+  ImageHistoryContinuationRefs,
+  ImageRequestLimits,
+  ImageRequestPermission,
+  ImageRequestControl,
+  ImageRequestUsage,
+  ImageRequestError,
+  ImageRequestContract,
+  ImageRequestContractInput
+} from './imageRequestContract'
+export { buildImageRequestContract, validateImageRequestContract } from './imageRequestContract'
 export {
   getReasoningEffortLabel,
   normalizeReasoningEffort,
@@ -48,9 +60,15 @@ export {
   normalizeGeminiModelName,
   normalizeGeminiBaseUrl,
   normalizeClaudeBaseUrl,
-  normalizeOllamaBaseUrl
+  normalizeOllamaBaseUrl,
+  UpstreamHttpError
 } from './clients'
-export type { FetchImpl } from './clients'
+export type {
+  FetchImpl,
+  OpenAIClientApiMode,
+  OpenAIClientOptions,
+  OpenAIImageAttachmentLoader
+} from './clients'
 export {
   isGeminiUrl,
   isClaudeUrl,
@@ -65,6 +83,7 @@ export {
   resolveProfileDeployment,
   resolveProfileModelUse,
   isRunnableProfile,
+  isCodexFastModeEnabled,
   cliFromProfile
 } from './utils'
 export {
@@ -74,6 +93,7 @@ export {
   createOpenAIFileSearchSession
 } from './openaiFileSearch'
 export { normalizeOpenAIImageGenerationSize } from './openaiResponses'
+export { readOpenAIStream } from './openaiStreaming'
 export {
   KlingVideoAPICli,
   VolcengineSeedanceAPICli,

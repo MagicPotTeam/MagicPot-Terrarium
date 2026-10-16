@@ -19,7 +19,9 @@ export type ApiExtensionServices = {}
 
 export const apiExtensionDef: ApiDefSheet<ApiExtensionServices> = {}
 
-export type LlmProfileLikeV1 = Partial<LLMAPIProfile>
+export type LlmProfileLikeV1 = Omit<Partial<LLMAPIProfile>, 'provider'> & {
+  provider?: LLMProvider | (string & {})
+}
 
 export type SharedLlmProfileExtensionV1 = {
   id: string
@@ -32,8 +34,37 @@ export type SharedLlmProfileExtensionV1 = {
     discoveredModelNames?: readonly (string | ModelCatalogOption | null | undefined)[]
     observedModelNames?: readonly (string | ModelCatalogOption | null | undefined)[]
   }) => ModelCatalogOption[] | undefined
-  createCli?: (profile: LlmProfileLikeV1, options?: { fetchImpl?: FetchImpl }) => LLMCli | undefined
+  createCli?: (
+    profile: LlmProfileLikeV1,
+    options?: {
+      fetchImpl?: FetchImpl
+      imageAttachmentLoader?: (
+        url: URL,
+        signal?: AbortSignal
+      ) => Promise<{ blob: Blob; finalUrl?: URL }>
+      requireImageAttachmentLoader?: boolean
+    }
+  ) => LLMCli | undefined
+  stripExternalAuthProfile?: (profile: LLMAPIProfile) => LLMAPIProfile | undefined
+  stripProviderMetadataProfile?: (profile: LLMAPIProfile) => LLMAPIProfile | undefined
+  disconnectExternalProfile?: (profile: LLMAPIProfile) => LLMAPIProfile | undefined
   isRunnableProfile?: (profile: LlmProfileLikeV1) => boolean | undefined
+  isVisionCapableProfile?: (profile: LlmProfileLikeV1) => boolean | undefined
+  isChatProfileDiscoveryCandidate?: (profile: LlmProfileLikeV1) => boolean | undefined
+  expandChatModelProfiles?: (
+    profile: LLMAPIProfile,
+    discoveredModelNames: readonly string[]
+  ) => LLMAPIProfile[] | undefined
+  resolveChatProfileSelection?: (options: {
+    availableProfiles: readonly Pick<LLMAPIProfile, 'id'>[]
+    configuredProfiles: readonly (Pick<LLMAPIProfile, 'id'> & Partial<LLMAPIProfile>)[]
+    profileId: string
+  }) => string | null | undefined
+  isQAppLlmProfileUsableInWorkflow?: (profile: LLMAPIProfile, config: Config) => boolean | undefined
+  resolveQAppLlmProfileSlotValues?: (
+    profile: LLMAPIProfile,
+    config: Config
+  ) => { modelName: string; baseUrl: string; apiKey: string; isOllama: boolean } | undefined
   resolveCapabilities?: (
     profile: ChatCapabilityProfile | null | undefined,
     baseCapabilities: ChatProfileCapabilities
@@ -51,6 +82,8 @@ export type SharedHostExtensionApiV1 = {
   llmProfiles: SharedLlmProfileExtensionV1[]
 }
 
+// The public checkout owns this registry. Private workspace materialization
+// generates provider entries from overlay-owned sources at run time.
 export const sharedHostExtensionApiV1: SharedHostExtensionApiV1 = {
   llmProfiles: []
 }

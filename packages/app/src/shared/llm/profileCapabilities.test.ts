@@ -7,6 +7,50 @@ import {
 } from './profileCapabilities'
 
 describe('resolveChatProfileCapabilities', () => {
+  it('does not advertise Responses continuation without an implemented mapping', () => {
+    for (const profile of [
+      {
+        provider: 'openai',
+        call_type: 'api',
+        api_mode: 'responses',
+        supports_session_continuation: true
+      },
+      {
+        provider: 'openai',
+        call_type: 'api',
+        openai_api_modes: { default: 'responses' },
+        supports_session_continuation: true
+      }
+    ]) {
+      expect(resolveChatProfileCapabilities(profile).supportsSessionContinuation).toBe(false)
+    }
+
+    expect(
+      resolveChatProfileCapabilities({
+        provider: 'openai',
+        call_type: 'api',
+        api_mode: 'chat-completions',
+        supports_session_continuation: true
+      }).supportsSessionContinuation
+    ).toBe(true)
+    expect(
+      resolveChatProfileCapabilities({
+        provider: 'openai',
+        base_url: 'https://api.openai.com/v1',
+        api_mode: 'auto',
+        supports_session_continuation: true
+      }).supportsSessionContinuation
+    ).toBe(false)
+    expect(
+      resolveChatProfileCapabilities({
+        provider: 'openai',
+        base_url: 'https://openai-compatible.example/v1',
+        api_mode: 'auto',
+        supports_session_continuation: true
+      }).supportsSessionContinuation
+    ).toBe(true)
+  })
+
   // Generated opaque names: no release catalog to maintain when channels add models.
   it.each([{ call_type: 'codex' }, { call_type: 'cliproxyapi' }, { auth_mode: 'codex_oauth' }])(
     'offers reasoning controls independent of scanned model names: %j',

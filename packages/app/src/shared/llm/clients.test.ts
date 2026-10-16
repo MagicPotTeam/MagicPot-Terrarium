@@ -3,6 +3,69 @@ import { ClaudeAPICli, GeminiAPICli, OpencodeZenAPICli, OpenAIAPICli } from './c
 import type { LLMReasoningEffort } from './profileCapabilities'
 
 describe('shared llm endpoint normalization', () => {
+  it.each([
+    {
+      name: 'Responses SSE',
+      apiMode: 'responses' as const,
+      contentType: 'text/event-stream',
+      body: 'data: {"type":"response.output_text.delta","delta":"hello"}\n\ndata: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}\n\n',
+      expected: { upstreamProtocol: 'sse', upstreamIncremental: true }
+    },
+    {
+      name: 'Responses JSON fallback',
+      apiMode: 'responses' as const,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'hello' }] }]
+      }),
+      expected: {
+        upstreamProtocol: 'json',
+        upstreamIncremental: false,
+        fallbackReason: 'upstream-json'
+      }
+    },
+    {
+      name: 'Chat Completions SSE',
+      apiMode: 'chat-completions' as const,
+      contentType: 'text/event-stream',
+      body: 'data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      expected: { upstreamProtocol: 'sse', upstreamIncremental: true }
+    },
+    {
+      name: 'Chat Completions JSON fallback',
+      apiMode: 'chat-completions' as const,
+      contentType: 'application/json',
+      body: JSON.stringify({ choices: [{ message: { content: 'hello' } }] }),
+      expected: {
+        upstreamProtocol: 'json',
+        upstreamIncremental: false,
+        fallbackReason: 'upstream-json'
+      }
+    }
+  ])(
+    'reports upstream streaming metadata for $name',
+    async ({ apiMode, contentType, body, expected }) => {
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response(body, { headers: { 'content-type': contentType } }))
+      const events: Array<Record<string, unknown>> = []
+      const client = new OpenAIAPICli('', 'https://example.test/v1', 'model', {
+        apiMode,
+        enableHostedTools: false,
+        fetchImpl: fetchMock
+      })
+
+      const result = await client.chat({
+        messages: [{ role: 'user', content: 'hello' }],
+        onDelta: (event) => events.push(event.metadata?.streaming as Record<string, unknown>)
+      })
+
+      expect(events.length).toBeGreaterThan(0)
+      expect(events[0]).toEqual(expected)
+      expect(result.metadata?.streaming).toEqual(expected)
+    }
+  )
+
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
@@ -166,7 +229,217 @@ describe('shared llm endpoint normalization', () => {
     expect(requestBody).not.toHaveProperty('messages')
   })
 
-  it('forces the OpenAI image generation tool for image profiles', async () => {
+  it('uses all eleven Images edit references and preserves multipart semantics', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ b64_json: 'aW1hZ2U=' }] })
+    })
+    const imageAttachmentLoader = vi.fn(async () => ({
+      blob: new Blob(['owned'], { type: 'image/png' })
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new OpenAIAPICli('sk-test', 'https://api.openai.com/v1', 'gpt-image-2.5', {
+      apiMode: 'images',
+      fetchImpl: fetchMock,
+      imageAttachmentLoader
+    })
+    const references = Array.from({ length: 11 }, (_, index) => ({
+      type: 'image' as const,
+      url: `https://owned.example/reference-${index + 1}.png`,
+      fileName: `reference-${index + 1}.png`,
+      mimeType: 'image/png'
+    }))
+
+    await expect(
+      client.chat({
+        messages: [{ role: 'user', content: 'Edit all references.', attachments: references }],
+        imageHistoryPolicy: 'latest-user-turn',
+        imageGenerationOptions: {
+          action: 'edit',
+          outputFormat: 'png',
+          size: '1024x1024'
+        }
+      })
+    ).resolves.toMatchObject({ attachments: [expect.objectContaining({ type: 'image' })] })
+
+    expect(imageAttachmentLoader).toHaveBeenCalledTimes(11)
+    const requestInit = fetchMock.mock.calls[0]?.[1]
+    const formEntries = Array.from((requestInit?.body as FormData).entries())
+    expect(formEntries.filter(([key]) => key === 'image[]')).toHaveLength(11)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.openai.com/v1/images/edits',
+      expect.objectContaining({ method: 'POST' })
+    )
+  })
+
+  it('rejects a finite Images edit capability before loading any reference', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ b64_json: 'aW1hZ2U=' }] })
+    })
+    const imageAttachmentLoader = vi.fn(async () => ({
+      blob: new Blob(['owned'], { type: 'image/png' })
+    }))
+    const client = new OpenAIAPICli('', 'https://owned.example/v1', 'opaque', {
+      apiMode: 'images',
+      maxInputImages: 1,
+      fetchImpl: fetchMock,
+      imageAttachmentLoader
+    })
+
+    await expect(
+      client.chat({
+        messages: [
+          {
+            role: 'user',
+            content: 'Edit both references.',
+            attachments: [
+              { type: 'image', url: 'https://owned.example/one.png' },
+              { type: 'image', url: 'https://owned.example/two.png' }
+            ]
+          }
+        ],
+        imageGenerationOptions: { action: 'edit' }
+      })
+    ).rejects.toThrow('Too many images; the limit is 1.')
+    expect(imageAttachmentLoader).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('uses all historical user images for Images edits regardless of incremental policy', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ b64_json: 'aW1hZ2U=' }] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new OpenAIAPICli('sk-test', 'https://api.example.com/v1', 'custom-image-model', {
+      apiMode: 'images',
+      fetchImpl: fetchMock
+    })
+    const historicalReferences = [1, 2].map((index) => ({
+      type: 'image' as const,
+      url: 'data:image/png;base64,aW1hZ2U=',
+      fileName: `history-${index}.png`,
+      mimeType: 'image/png'
+    }))
+    const currentReference = {
+      type: 'image' as const,
+      url: 'data:image/png;base64,aW1hZ2U=',
+      fileName: 'current.png',
+      mimeType: 'image/png'
+    }
+
+    await client.chat({
+      messages: [
+        { role: 'user', content: 'historical references', attachments: historicalReferences },
+        { role: 'assistant', content: 'previous result' },
+        { role: 'user', content: 'edit with all context', attachments: [currentReference] }
+      ],
+      imageHistoryPolicy: 'latest-user-turn',
+      imageGenerationOptions: { action: 'edit' }
+    })
+
+    const requestInit = fetchMock.mock.calls[0]?.[1]
+    const formEntries = Array.from((requestInit?.body as FormData).entries())
+    expect(formEntries.filter(([key]) => key === 'image[]')).toHaveLength(3)
+  })
+
+  it('preserves Images multipart requests above the Responses aggregate decoded-byte policy', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ b64_json: 'aW1hZ2U=' }] })
+    })
+    const imageAttachmentLoader = vi.fn(async () => ({
+      blob: new Blob([new Uint8Array(6 * 1024 * 1024)], { type: 'image/png' })
+    }))
+    const client = new OpenAIAPICli('owned-no-credential', 'https://owned.example/v1', 'opaque', {
+      apiMode: 'images',
+      fetchImpl: fetchMock,
+      imageAttachmentLoader
+    })
+    const references = [1, 2].map((index) => ({
+      type: 'image' as const,
+      url: `https://owned.example/reference-${index}.png`,
+      fileName: `reference-${index}.png`,
+      mimeType: 'image/png'
+    }))
+
+    await expect(
+      client.chat({
+        messages: [{ role: 'user', content: 'Edit both references.', attachments: references }],
+        imageGenerationOptions: { action: 'edit' }
+      })
+    ).resolves.toMatchObject({ attachments: [expect.objectContaining({ type: 'image' })] })
+
+    expect(imageAttachmentLoader).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('routes a custom image model to the Images API in auto mode', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ b64_json: 'aW1hZ2U=' }] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new OpenAIAPICli('sk-test', 'https://api.example.com/v1', 'custom-image-model', {
+      modelUse: 'image',
+      fetchImpl: fetchMock
+    })
+
+    await expect(
+      client.chat({
+        messages: [
+          {
+            role: 'user',
+            content: 'edit this image',
+            attachments: [{ type: 'image', url: 'data:image/png;base64,aW1hZ2U=' }]
+          }
+        ],
+        imageGenerationOptions: { action: 'edit' }
+      })
+    ).resolves.toMatchObject({ attachments: [expect.objectContaining({ type: 'image' })] })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.example.com/v1/images/edits',
+      expect.objectContaining({ method: 'POST' })
+    )
+  })
+
+  it('keeps explicit Images mode separate from Responses image-generation tools', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }]
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new OpenAIAPICli('sk-test', 'https://api.example.com/v1', 'custom-image-model', {
+      modelUse: 'image',
+      apiMode: 'responses',
+      fetchImpl: fetchMock,
+      enableHostedTools: false,
+      reasoningProfile: { model_name: 'gpt-5.4' }
+    })
+
+    await expect(
+      client.chat({ messages: [{ role: 'user', content: 'describe this' }] })
+    ).resolves.toMatchObject({ content: 'ok' })
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.example.com/v1/responses',
+      expect.objectContaining({ method: 'POST' })
+    )
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(requestBody.model).toBe('gpt-5.4')
+    expect(requestBody.tools).toEqual([
+      expect.objectContaining({ type: 'image_generation', model: 'gpt-image-2.5-sunburst' })
+    ])
+  })
+
+  it('forces the OpenAI image generation tool for explicit Responses image profiles', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -181,7 +454,9 @@ describe('shared llm endpoint normalization', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const client = new OpenAIAPICli('sk-test', 'https://api.openai.com/v1', 'gpt-5.4', {
-      modelUse: 'image'
+      modelUse: 'image',
+      apiMode: 'responses',
+      reasoningProfile: { model_name: 'gpt-5.4' }
     })
 
     const result = await client.chat({
@@ -212,6 +487,7 @@ describe('shared llm endpoint normalization', () => {
     expect(requestBody.tools).toEqual([
       expect.objectContaining({
         type: 'image_generation',
+        model: 'gpt-image-2.5-sunburst',
         action: 'generate',
         output_format: 'png',
         size: '3840x2160',
@@ -668,7 +944,7 @@ describe('shared llm endpoint normalization', () => {
       ) {
         return {
           ok: true,
-          json: async () => ({ id: 'vsf-1', file_id: 'file-1', status: 'in_progress' })
+          json: async () => ({ id: 'file-1', object: 'vector_store.file', status: 'in_progress' })
         }
       }
 
@@ -679,7 +955,7 @@ describe('shared llm endpoint normalization', () => {
         return {
           ok: true,
           json: async () => ({
-            data: [{ id: 'vsf-1', file_id: 'file-1', status: 'completed' }]
+            data: [{ id: 'file-1', object: 'vector_store.file', status: 'completed' }]
           })
         }
       }

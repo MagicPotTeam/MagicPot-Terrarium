@@ -1,4 +1,6 @@
 import type { OCRResult } from '@shared/api/svcLLMProxy'
+import type { ImageRequestContract } from './imageRequestContract'
+export type { ImageRequestContract } from './imageRequestContract'
 import type { MediaReference } from '@shared/mediaReference'
 import type { ReportBundleRole } from '@shared/reportBundle'
 import type { LLMReasoningEffort } from './profileCapabilities'
@@ -26,6 +28,8 @@ export interface ChatAttachment {
   reportBundleRefName?: string
   reportBundleManifestUrl?: string
   reportBundleLabel?: string
+  /** Optional pre-discovered image count for a provider-owned report bundle; no I/O is implied. */
+  reportBundleImageCount?: number
 }
 
 /** A single chat message */
@@ -87,10 +91,11 @@ export interface LLMDeltaEvent {
 export type OpenAIImageGenerationAction = 'auto' | 'generate' | 'edit'
 export type OpenAIImageGenerationBackground = 'auto' | 'opaque' | 'transparent'
 export type OpenAIImageGenerationOutputFormat = 'png' | 'webp' | 'jpeg'
-export type OpenAIImageGenerationQuality = 'auto' | 'low' | 'medium' | 'high'
+export type OpenAIImageGenerationQuality = 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export interface OpenAIImageGenerationOptions {
   action?: OpenAIImageGenerationAction
+  model?: string
   background?: OpenAIImageGenerationBackground
   enabled?: boolean
   outputFormat?: OpenAIImageGenerationOutputFormat
@@ -171,7 +176,7 @@ export interface LLMChatParams {
   maxOutputTokens?: number
   temperature?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
-  /** Controls whether provider requests reconstruct historical image bytes from local artifacts. */
+  imageRequest?: ImageRequestContract
   imageHistoryPolicy?: LLMImageHistoryPolicy
   videoGenerationOptions?: VideoGenerationOptions
   signal?: AbortSignal

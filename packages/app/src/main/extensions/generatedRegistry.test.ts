@@ -1,4 +1,17 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
+
+vi.mock('electron', () => ({
+  app: {
+    isPackaged: false,
+    getPath: vi.fn(() => 'C:/userData')
+  }
+}))
+
+vi.mock('@electron-toolkit/utils', () => ({
+  is: { dev: true },
+  platform: { isWindows: true, isMacOS: false }
+}))
+
 import type { BaseApi } from '@shared/api'
 import type { LLMChatReq, LLMChatResp } from '@shared/api/svcLLMProxy'
 import type { ApiExtensionServices } from '@shared/api/extensionServices'
@@ -155,6 +168,8 @@ describe('main extension registry', () => {
           options: {
             config: Config
             fetchImpl?: FetchImpl
+            imageAttachmentLoader?: import('@shared/llm/clients').OpenAIImageAttachmentLoader
+            requireImageAttachmentLoader?: boolean
             rawProfileId?: string
             requestedProfileId?: string
             signal?: AbortSignal
@@ -168,6 +183,8 @@ describe('main extension registry', () => {
           options: {
             config: Config
             fetchImpl?: FetchImpl
+            imageAttachmentLoader?: import('@shared/llm/clients').OpenAIImageAttachmentLoader
+            requireImageAttachmentLoader?: boolean
             rawProfileId?: string
             requestedProfileId?: string
             signal?: AbortSignal
