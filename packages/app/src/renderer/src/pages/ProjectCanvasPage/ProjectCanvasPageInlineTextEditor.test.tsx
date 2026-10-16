@@ -133,8 +133,7 @@ describe('ProjectCanvasPageInlineTextEditor', () => {
     expect(setItemsWithHistory).toHaveBeenCalledTimes(1)
 
     const updateItems = setItemsWithHistory.mock.calls[0]?.[0] as
-      | ((previousItems: CanvasItem[]) => CanvasItem[])
-      | undefined
+      ((previousItems: CanvasItem[]) => CanvasItem[]) | undefined
     expect(updateItems).toBeTypeOf('function')
     expect(updateItems?.([item])).toEqual([
       expect.objectContaining({
@@ -152,6 +151,94 @@ describe('ProjectCanvasPageInlineTextEditor', () => {
     expect(setSelectedIds).toHaveBeenCalledWith(new Set([item.id]))
     expect(setTool).toHaveBeenCalledWith('select')
     expect(setInlineTextEdit).toHaveBeenCalledWith(null)
+  })
+
+  it('discards an Escape-cancelled draft even if blur follows, without committing canvas history', () => {
+    const canvasContainer = document.createElement('div')
+    document.body.appendChild(canvasContainer)
+    const item = createTextItem()
+    const setItemsWithHistory = vi.fn()
+    const setInlineTextEdit = vi.fn()
+    const setTool = vi.fn()
+    render(
+      <ProjectCanvasPageInlineTextEditor
+        canvasContainerRef={{ current: canvasContainer }}
+        inlineTextEdit={{
+          id: item.id,
+          x: item.x,
+          y: item.y,
+          w: item.width,
+          h: item.height,
+          text: 'cancelled private draft',
+          isNew: false,
+          fontSize: item.fontSize
+        }}
+        setInlineTextEdit={setInlineTextEdit}
+        inlineTextAreaRef={{ current: null }}
+        mediaCaptionPlaceholder="Media caption"
+        stageScale={1}
+        stagePos={{ x: 0, y: 0 }}
+        annotationColor="#f00"
+        items={[item]}
+        nextZIndexRef={{ current: 1 }}
+        setItemsWithHistory={setItemsWithHistory}
+        setSelectedIds={vi.fn()}
+        setTool={setTool}
+      />
+    )
+    const textarea = screen.getByLabelText('Media caption')
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    fireEvent.blur(textarea)
+    expect(setItemsWithHistory).not.toHaveBeenCalled()
+    expect(setInlineTextEdit).toHaveBeenCalledWith(null)
+    expect(setTool).toHaveBeenCalledWith('select')
+  })
+
+  it('does not consume a new empty draft when its initial blur is intentionally deferred', () => {
+    vi.useFakeTimers()
+    try {
+      const canvasContainer = document.createElement('div')
+      document.body.appendChild(canvasContainer)
+      const setInlineTextEdit = vi.fn()
+      const setItemsWithHistory = vi.fn()
+      render(
+        <ProjectCanvasPageInlineTextEditor
+          canvasContainerRef={{ current: canvasContainer }}
+          inlineTextEdit={{
+            id: 'anno-new',
+            x: 0,
+            y: 0,
+            w: 200,
+            h: 60,
+            text: '',
+            isNew: true,
+            _createdAt: Date.now()
+          }}
+          setInlineTextEdit={setInlineTextEdit}
+          inlineTextAreaRef={{ current: null }}
+          mediaCaptionPlaceholder="Media caption"
+          stageScale={1}
+          stagePos={{ x: 0, y: 0 }}
+          annotationColor="#f00"
+          items={[]}
+          nextZIndexRef={{ current: 1 }}
+          setItemsWithHistory={setItemsWithHistory}
+          setSelectedIds={vi.fn()}
+          setTool={vi.fn()}
+        />
+      )
+      const textarea = screen.getByLabelText('Media caption')
+      fireEvent.blur(textarea)
+      expect(setInlineTextEdit).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(600)
+      fireEvent.blur(textarea)
+      expect(setInlineTextEdit).toHaveBeenCalledExactlyOnceWith(null)
+      expect(setItemsWithHistory).not.toHaveBeenCalled()
+      fireEvent.blur(textarea)
+      expect(setInlineTextEdit).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('keeps text annotations visually aligned with the selected canvas style while editing', () => {
@@ -282,8 +369,7 @@ describe('ProjectCanvasPageInlineTextEditor', () => {
 
     expect(measureCanvasTextNaturalWidthMock).not.toHaveBeenCalled()
     const updateItems = setItemsWithHistory.mock.calls[0]?.[0] as
-      | ((previousItems: CanvasItem[]) => CanvasItem[])
-      | undefined
+      ((previousItems: CanvasItem[]) => CanvasItem[]) | undefined
     expect(updateItems).toBeTypeOf('function')
     expect(updateItems?.([annotationItem])).toEqual([
       expect.objectContaining({

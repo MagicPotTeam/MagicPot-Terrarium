@@ -79,6 +79,12 @@ export type ProjectCanvasPageTopToolbarProps = ProjectCanvasPageToolbarGroupTree
   exportSubmenuPlacement: 'left' | 'right'
   exportableItems: readonly unknown[]
   generationTraceRecentRecords: readonly unknown[]
+  historyRevision?: number
+  historySnapshots?: ReadonlyArray<{ index: number; items: CanvasItem[] }>
+  historyCount?: number
+  selectedHistoryRevision?: number | null
+  restoreHistoryRevision?: (index: number) => void
+  setSelectedHistoryRevision?: React.Dispatch<React.SetStateAction<number | null>>
   groupMenuAnchor: HTMLElement | null
   groupPlayback: CanvasGroupPlaybackState | null
   handleAutoArrangeGroup: (group: CanvasGroup) => void

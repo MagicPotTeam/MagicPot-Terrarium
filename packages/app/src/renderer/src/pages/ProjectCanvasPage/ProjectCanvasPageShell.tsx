@@ -389,6 +389,7 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
     setItems,
     setItemsWithHistory,
     setLabelDialogItemId,
+    setSelectedHistoryRevision,
     setLabelDialogOpen,
     setLabelDialogText,
     setLinePickerAnchor,

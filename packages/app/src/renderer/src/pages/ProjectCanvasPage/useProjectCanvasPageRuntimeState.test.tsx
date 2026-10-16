@@ -1,4 +1,5 @@
 import { act, renderHook } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useCanvasAssetIntake } from './useCanvasAssetIntake'
@@ -6,11 +7,86 @@ import { useCanvasLayerRuntime } from './useCanvasLayerRuntime'
 import { useCanvasMediaRuntime } from './useCanvasMediaRuntime'
 import { useProjectCanvasPageRuntimeState } from './useProjectCanvasPageRuntimeState'
 
+import type { CanvasTextItem } from './types'
+
+const makeText = (id: string, text: string): CanvasTextItem => ({
+  id,
+  type: 'text',
+  text,
+  fontSize: 16,
+  fontFamily: 'sans-serif',
+  fill: '#fff',
+  x: 0,
+  y: 0,
+  width: 100,
+  height: 32,
+  rotation: 0,
+  scaleX: 1,
+  scaleY: 1,
+  zIndex: 0,
+  locked: false
+})
+
 function buildElectronFile(name: string, type: string, fullPath: string): File {
   const file = new File(['payload'], name, { type }) as File & { path?: string }
   file.path = fullPath
   return file
 }
+
+describe('history state transitions', () => {
+  it('records one snapshot per edit under StrictMode and preserves edit order', () => {
+    const { result } = renderHook(() => useProjectCanvasPageRuntimeState(), {
+      wrapper: StrictMode
+    })
+    const first = makeText('text', 'first')
+    const second = makeText('text', 'second')
+
+    act(() => {
+      result.current.setItemsWithHistory([first])
+      result.current.setItemsWithHistory([second])
+    })
+
+    expect(result.current.items).toEqual([second])
+    expect(result.current.historyCount).toBe(2)
+    expect(result.current.historySnapshots.map((entry) => entry.items)).toEqual([[first], []])
+  })
+
+  it('undoes and redoes without duplicate or lost states', () => {
+    const { result } = renderHook(() => useProjectCanvasPageRuntimeState(), {
+      wrapper: StrictMode
+    })
+    const first = makeText('text', 'first')
+    const second = makeText('text', 'second')
+    act(() => result.current.setItemsWithHistory([first]))
+    act(() => result.current.setItemsWithHistory([second]))
+
+    act(() => result.current.handleUndo())
+    expect(result.current.items).toEqual([first])
+    expect(result.current.historyCount).toBe(1)
+    act(() => result.current.handleRedo())
+    expect(result.current.items).toEqual([second])
+    expect(result.current.historyCount).toBe(2)
+  })
+
+  it('restores a valid history index without mutating the original snapshot and ignores invalid indexes', () => {
+    const { result } = renderHook(() => useProjectCanvasPageRuntimeState(), {
+      wrapper: StrictMode
+    })
+    const first = makeText('text', 'first')
+    const second = makeText('text', 'second')
+    act(() => result.current.setItemsWithHistory([first]))
+    act(() => result.current.setItemsWithHistory([second]))
+    const original = structuredClone(result.current.historySnapshots)
+
+    act(() => result.current.restoreHistoryRevision(1))
+    expect(result.current.items).toEqual([first])
+    expect(result.current.historySnapshots).toEqual(original)
+    const afterValid = result.current.items
+    act(() => result.current.restoreHistoryRevision(999))
+    expect(result.current.items).toBe(afterValid)
+    expect(result.current.historyRevision).toBe(3)
+  })
+})
 
 describe('useProjectCanvasPageRuntimeState model split undo flow', () => {
   const notifyError = vi.fn()

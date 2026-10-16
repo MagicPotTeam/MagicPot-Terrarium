@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type SetStateAction
+} from 'react'
 
 import { CANVAS_OCR_HOVER_EVENT, type CanvasOcrHoverDetail } from './ocrCanvasUtils'
 import {
@@ -9,6 +17,91 @@ import {
 import type { AnnotationShape, CanvasGroup, CanvasGroupBranch, CanvasItem } from './types'
 import type { InlineTextEditState } from './ProjectCanvasPageInlineTextEditor'
 import type { CanvasTool } from './projectCanvasPageShared'
+
+type CanvasItemsUpdate = SetStateAction<CanvasItem[]>
+
+type RuntimeItemsState = {
+  items: CanvasItem[]
+  history: CanvasItem[][]
+  future: CanvasItem[][]
+  historyRevision: number
+}
+
+type RuntimeItemsAction =
+  | { type: 'set'; updater: CanvasItemsUpdate }
+  | { type: 'edit'; updater: CanvasItemsUpdate }
+  | { type: 'undo' }
+  | { type: 'redo' }
+  | { type: 'restore'; index: number }
+
+function resolveCanvasItemsUpdate(
+  updater: CanvasItemsUpdate,
+  previous: CanvasItem[]
+): CanvasItem[] {
+  return typeof updater === 'function' ? updater(previous) : updater
+}
+
+function reduceRuntimeItemsState(
+  state: RuntimeItemsState,
+  action: RuntimeItemsAction
+): RuntimeItemsState {
+  if (action.type === 'set') {
+    const items = resolveCanvasItemsUpdate(action.updater, state.items)
+    return items === state.items ? state : { ...state, items }
+  }
+
+  if (action.type === 'edit') {
+    return {
+      items: resolveCanvasItemsUpdate(action.updater, state.items),
+      history: [
+        ...state.history.slice(-CANVAS_HISTORY_LIMIT + 1),
+        createCanvasHistorySnapshot(state.items)
+      ],
+      future: [],
+      historyRevision: state.historyRevision + 1
+    }
+  }
+
+  if (action.type === 'undo') {
+    const previous = state.history.at(-1)
+    if (!previous) return state
+    return {
+      items: restoreCanvasHistorySnapshot(previous, state.items),
+      history: state.history.slice(0, -1),
+      future: [
+        createCanvasHistorySnapshot(state.items),
+        ...state.future.slice(0, CANVAS_HISTORY_LIMIT - 1)
+      ],
+      historyRevision: state.historyRevision + 1
+    }
+  }
+
+  if (action.type === 'redo') {
+    const next = state.future[0]
+    if (!next) return state
+    return {
+      items: restoreCanvasHistorySnapshot(next, state.items),
+      history: [
+        ...state.history.slice(-CANVAS_HISTORY_LIMIT + 1),
+        createCanvasHistorySnapshot(state.items)
+      ],
+      future: state.future.slice(1),
+      historyRevision: state.historyRevision + 1
+    }
+  }
+
+  const snapshot = state.history[action.index]
+  if (!snapshot) return state
+  return {
+    items: restoreCanvasHistorySnapshot(snapshot, state.items),
+    history: state.history,
+    future: [
+      createCanvasHistorySnapshot(state.items),
+      ...state.future.slice(0, CANVAS_HISTORY_LIMIT - 1)
+    ],
+    historyRevision: state.historyRevision + 1
+  }
+}
 
 type CanvasDrawingState = {
   shape: AnnotationShape
@@ -42,13 +135,44 @@ function areSelectedIdsEqual(current: Set<string>, next: Set<string>) {
 }
 
 export function useProjectCanvasPageRuntimeState() {
-  const [items, setItems] = useState<CanvasItem[]>([])
+  const [itemsState, dispatchItems] = useReducer(reduceRuntimeItemsState, {
+    items: [],
+    history: [],
+    future: [],
+    historyRevision: 0
+  })
+  const { items, history, future, historyRevision } = itemsState
+  const historySnapshots = history.map((snapshot, index) => ({ index, items: snapshot })).reverse()
+  const historyCount = history.length
   const [groups, setGroups] = useState<CanvasGroup[]>([])
   const [groupBranches, setGroupBranches] = useState<CanvasGroupBranch[]>([])
   const [selectedIds, setSelectedIdsState] = useState<Set<string>>(new Set())
   const selectedIdsRef = useRef(selectedIds)
-  const historyRef = useRef<CanvasItem[][]>([])
-  const futureRef = useRef<CanvasItem[][]>([])
+  const [selectedHistoryRevision, setSelectedHistoryRevision] = useState<number | null>(null)
+  const setSelectedIds = useCallback(
+    (updater: Set<string> | ((prev: Set<string>) => Set<string>)) => {
+      const next =
+        typeof updater === 'function'
+          ? (updater as (prev: Set<string>) => Set<string>)(selectedIdsRef.current)
+          : updater
+      if (areSelectedIdsEqual(selectedIdsRef.current, next)) return
+
+      selectedIdsRef.current = next
+      setSelectedIdsState(next)
+    },
+    []
+  )
+
+  const restoreHistoryRevision = useCallback(
+    (index: number) => {
+      if (!history[index]) return
+      dispatchItems({ type: 'restore', index })
+      setSelectedIds(new Set())
+      setSelectedHistoryRevision(index)
+    },
+    [history, setSelectedIds]
+  )
+
   const lastClickedIdRef = useRef<string | null>(null)
   const [tool, setTool] = useState<CanvasTool>('select')
 
@@ -68,20 +192,6 @@ export function useProjectCanvasPageRuntimeState() {
   const [activeOcrHover, setActiveOcrHover] = useState<CanvasOcrHoverDetail | null>(null)
 
   selectedIdsRef.current = selectedIds
-
-  const setSelectedIds = useCallback(
-    (updater: Set<string> | ((prev: Set<string>) => Set<string>)) => {
-      const next =
-        typeof updater === 'function'
-          ? (updater as (prev: Set<string>) => Set<string>)(selectedIdsRef.current)
-          : updater
-      if (areSelectedIdsEqual(selectedIdsRef.current, next)) return
-
-      selectedIdsRef.current = next
-      setSelectedIdsState(next)
-    },
-    []
-  )
 
   useEffect(() => {
     const handleOcrHover = (event: Event) => {
@@ -112,50 +222,27 @@ export function useProjectCanvasPageRuntimeState() {
     stageScaleRef.current = stageScale
   }, [stageScale])
 
+  useEffect(() => {
+    setSelectedHistoryRevision(null)
+  }, [historyRevision, setSelectedHistoryRevision])
+
+  const setItems = useCallback(
+    (updater: CanvasItemsUpdate) => dispatchItems({ type: 'set', updater }),
+    []
+  )
+
   const setItemsWithHistory = useCallback(
-    (updater: CanvasItem[] | ((prev: CanvasItem[]) => CanvasItem[])) => {
-      setItems((prev) => {
-        const next = typeof updater === 'function' ? updater(prev) : updater
-        historyRef.current = [
-          ...historyRef.current.slice(-CANVAS_HISTORY_LIMIT + 1),
-          createCanvasHistorySnapshot(prev)
-        ]
-        futureRef.current = []
-        return next
-      })
-    },
+    (updater: CanvasItemsUpdate) => dispatchItems({ type: 'edit', updater }),
     []
   )
 
   const handleUndo = useCallback(() => {
-    const history = historyRef.current
-    if (history.length === 0) return
-
-    setItems((prev) => {
-      const prevState = history[history.length - 1]
-      historyRef.current = history.slice(0, -1)
-      futureRef.current = [
-        createCanvasHistorySnapshot(prev),
-        ...futureRef.current.slice(0, CANVAS_HISTORY_LIMIT - 1)
-      ]
-      return restoreCanvasHistorySnapshot(prevState, prev)
-    })
+    dispatchItems({ type: 'undo' })
     setSelectedIds(new Set())
   }, [setSelectedIds])
 
   const handleRedo = useCallback(() => {
-    const future = futureRef.current
-    if (future.length === 0) return
-
-    setItems((prev) => {
-      const nextState = future[0]
-      futureRef.current = future.slice(1)
-      historyRef.current = [
-        ...historyRef.current.slice(-CANVAS_HISTORY_LIMIT + 1),
-        createCanvasHistorySnapshot(prev)
-      ]
-      return restoreCanvasHistorySnapshot(nextState, prev)
-    })
+    dispatchItems({ type: 'redo' })
     setSelectedIds(new Set())
   }, [setSelectedIds])
 
@@ -168,6 +255,9 @@ export function useProjectCanvasPageRuntimeState() {
       groupBranches,
       handleRedo,
       handleUndo,
+      historyRevision,
+      historySnapshots,
+      historyCount,
       inlineTextEdit,
       isPanning,
       items,
@@ -175,6 +265,8 @@ export function useProjectCanvasPageRuntimeState() {
       lastPanPosRef,
       selectedIds,
       selectedIdsRef,
+      selectedHistoryRevision,
+      restoreHistoryRevision,
       setActiveOcrHover,
       setAnnoTool,
       setDrawingState,
@@ -185,6 +277,7 @@ export function useProjectCanvasPageRuntimeState() {
       setItems,
       setItemsWithHistory,
       setSelectedIds,
+      setSelectedHistoryRevision,
       setStagePos,
       setStageScale,
       setStageSize,
@@ -204,12 +297,19 @@ export function useProjectCanvasPageRuntimeState() {
       groupBranches,
       handleRedo,
       handleUndo,
+      historyRevision,
+      historySnapshots,
+      historyCount,
       inlineTextEdit,
       isPanning,
       items,
+      setItems,
       setSelectedIds,
       setItemsWithHistory,
+      setSelectedHistoryRevision,
       selectedIds,
+      selectedHistoryRevision,
+      restoreHistoryRevision,
       stagePos,
       stageScale,
       stageSize,
