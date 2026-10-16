@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   Alert,
   Box,
@@ -48,7 +49,8 @@ import { api } from '@renderer/utils/windowUtils'
 import { useMessage } from '@renderer/hooks/useMessage'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { resolveCompositeLlmProfile } from '@renderer/utils/llmProfileUtils'
-import { listProjects } from '../../pages/MainPage/projectStore'
+import { listProjects, PROJECTS_CHANGED_EVENT } from '../../pages/MainPage/projectStore'
+import ProjectOneShotPanel from './ProjectOneShotPanel'
 import { resolveCanvasProjectTraceProjectRef } from './projectTraceProjectRef'
 import {
   PROJECT_TRACE_CAPTURE_STATE_EVENT,
@@ -75,6 +77,100 @@ import {
   isDraftTraceTagSet,
   isReferenceReadyTraceTagSet
 } from './projectTraceCapture'
+
+export default function ProjectTraceManagerPanel(
+  props: ProjectTraceManagerPanelProps
+): React.JSX.Element {
+  const { t } = useTranslation()
+  const [projects, setProjects] = useState(listProjects)
+  const [selectedId, setSelectedId] = useState(() => props.projectId || projects[0]?.id || '')
+  const [showLegacy, setShowLegacy] = useState(false)
+  useEffect(() => {
+    const refresh = () => setProjects(listProjects())
+    window.addEventListener(PROJECTS_CHANGED_EVENT, refresh)
+    window.addEventListener('storage', refresh)
+    return () => {
+      window.removeEventListener(PROJECTS_CHANGED_EVENT, refresh)
+      window.removeEventListener('storage', refresh)
+    }
+  }, [])
+  const projectId =
+    props.projectId ||
+    (projects.some((project) => project.id === selectedId) ? selectedId : projects[0]?.id || '')
+  const project = projects.find((entry) => entry.id === projectId)
+  const legacyAllowed = Boolean(project)
+  const legacyReadOnly = project?.analysisMode === 'manual'
+  useEffect(() => setShowLegacy(false), [projectId, legacyAllowed])
+
+  return (
+    <Box
+      sx={{
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: 0,
+        p: props.compact ? 1 : 2
+      }}
+    >
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ pb: 1, flexWrap: 'wrap' }}>
+        <Typography variant="subtitle1" sx={{ flex: 1 }}>
+          {t('project.once.title', { defaultValue: 'Once trace' })}
+        </Typography>
+        {props.onClose ? (
+          <IconButton aria-label={t('general.close')} onClick={props.onClose} size="small">
+            <CloseIcon />
+          </IconButton>
+        ) : null}
+      </Stack>
+      {!props.projectId ? (
+        <TextField
+          select
+          size="small"
+          label={t('project.once.project', { defaultValue: 'Project' })}
+          value={projectId}
+          onChange={(event) => setSelectedId(event.target.value)}
+          sx={{ mb: 1 }}
+        >
+          {projects.map((entry) => (
+            <MenuItem key={entry.id} value={entry.id}>
+              {entry.name}
+            </MenuItem>
+          ))}
+        </TextField>
+      ) : null}
+      {legacyAllowed ? (
+        <Button size="small" onClick={() => setShowLegacy((value) => !value)}>
+          {showLegacy
+            ? t('project.once.return', { defaultValue: 'Return to manual comparison' })
+            : legacyReadOnly
+              ? t('project.once.savedTraces', { defaultValue: 'Saved trace records' })
+              : t('project.once.legacy', {
+                  defaultValue: 'Legacy trace records and realtime controls'
+                })}
+        </Button>
+      ) : null}
+      <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+        {projectId ? (
+          showLegacy && legacyAllowed ? (
+            <LegacyProjectTraceManagerPanel
+              key={`${projectId}:${legacyReadOnly}`}
+              {...props}
+              readOnly={legacyReadOnly}
+              projectId={projectId}
+              projectName={project?.name || props.projectName}
+            />
+          ) : (
+            <ProjectOneShotPanel key={projectId} projectId={projectId} />
+          )
+        ) : (
+          <Alert severity="info">
+            {t('project.once.emptyProject', { defaultValue: 'Create or select a project first.' })}
+          </Alert>
+        )}
+      </Box>
+    </Box>
+  )
+}
 
 type ProjectTraceTab = 'create' | 'realtime' | 'records'
 
@@ -321,8 +417,7 @@ function normalizeModelTraceMemory(
   const errors: string[] = []
   const skill = value.skillSummary as Partial<ProjectTraceSkillSummary> | undefined
   const rulesDocument = value.executableRules as
-    | Partial<ProjectTraceExecutableRulesDocument>
-    | undefined
+    Partial<ProjectTraceExecutableRulesDocument> | undefined
   const rules = Array.isArray(rulesDocument?.rules)
     ? rulesDocument.rules
         .map((rule, index) => normalizeModelRule(rule, index, errors))
@@ -474,16 +569,17 @@ async function enhanceTraceMemoryWithModel(options: {
   return null
 }
 
-export default function ProjectTraceManagerPanel({
+function LegacyProjectTraceManagerPanel({
   projectId,
   projectName,
   compact = false,
-  onClose
-}: ProjectTraceManagerPanelProps): React.JSX.Element {
+  onClose,
+  readOnly = false
+}: ProjectTraceManagerPanelProps & { readOnly?: boolean }): React.JSX.Element {
   const isChineseUi = isChineseLanguage()
   const { config } = useConfig()
   const { notifySuccess, notifyError, notifyWarning, notifyInfo } = useMessage()
-  const [activeTab, setActiveTab] = useState<ProjectTraceTab>('create')
+  const [activeTab, setActiveTab] = useState<ProjectTraceTab>(readOnly ? 'records' : 'create')
   const [projects, setProjects] = useState<TraceProjectOption[]>([])
   const [selectedProjectId, setSelectedProjectId] = useState('')
   const [projectRef, setProjectRef] = useState<ProjectTraceProjectRef | null>(null)
@@ -1835,8 +1931,8 @@ export default function ProjectTraceManagerPanel({
         variant="fullWidth"
         sx={{ minHeight: 36, '& .MuiTab-root': { minHeight: 36, fontWeight: 700 } }}
       >
-        <Tab value="create" label={copy.createTab} />
-        <Tab value="realtime" label={copy.realtimeTab} />
+        {!readOnly ? <Tab value="create" label={copy.createTab} /> : null}
+        {!readOnly ? <Tab value="realtime" label={copy.realtimeTab} /> : null}
         <Tab value="records" label={copy.recordsTab} />
       </Tabs>
 
