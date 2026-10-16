@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ProjectTraceEventSummary } from '@shared/projectTrace'
+import { createProjectRecord, PROJECTS_STORAGE_KEY } from '@renderer/pages/MainPage/projectStore'
 
 const mockReadProjectTraceDocument = vi.fn()
 const mockReadProjectTraceReferences = vi.fn()
@@ -27,6 +29,7 @@ import {
   PROJECT_TRACE_RUNTIME_EVENT,
   PROJECT_TRACE_REALTIME_ADVICE_EVENT,
   clearActiveProjectTraceRealtime,
+  clearRecentProjectTraceEvents,
   emitProjectTraceRuntimeEvent,
   extractProjectTraceMovementLimitPx,
   readActiveProjectTraceCapture,
@@ -35,15 +38,32 @@ import {
   readRecentProjectTraceEvents,
   writeActiveProjectTraceCapture,
   writeActiveProjectTraceRealtime,
-  writeProjectTraceTargetReferenceState
+  writeProjectTraceTargetReferenceState,
+  writeRecentProjectTraceEvents
 } from './projectTraceRuntime'
+
+function storedEvent(overrides: Partial<ProjectTraceEventSummary> = {}): ProjectTraceEventSummary {
+  return {
+    id: 'event-1',
+    at: new Date().toISOString(),
+    scope: 'canvas',
+    action: 'canvas_items_changed',
+    status: 'success',
+    safeSummary: 'Moved 1 item.',
+    ...overrides
+  }
+}
 
 describe('projectTraceRuntime', () => {
   beforeEach(() => {
     localStorage.clear()
     mockReadProjectTraceDocument.mockReset()
-    mockReadProjectTraceReferences.mockReset()
+    mockReadProjectTraceReferences.mockReset().mockResolvedValue({ references: [] })
     mockChat.mockReset()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it('redacts sensitive details before dispatching and caching runtime events', () => {
@@ -60,16 +80,269 @@ describe('projectTraceRuntime', () => {
         'Used Bearer abcdefghijklmnopqrstuvwxyz123456 token=secret C:\\Users\\alice\\secret.png file:///C:/tmp/a.png'
     })
 
-    expect(event.label).toBe('[redacted-email]')
-    expect(event.safeSummary).toContain('Bearer [redacted-token]')
+    expect(event.label).toBe('[redacted]')
+    expect(event.safeSummary).toContain('Used [redacted]')
     expect(event.safeSummary).toContain('token=[redacted]')
-    expect(event.safeSummary).toContain('[redacted-local-path]')
-    expect(event.safeSummary).toContain('[redacted-local-media]')
-    expect(event.safeSummary).not.toContain('abcdefghijklmnopqrstuvwxyz')
+    expect(event.safeSummary).toContain('[redacted]')
+    expect(event.safeSummary).not.toMatch(/C:\\|file:\/\//)
+    expect(event.safeSummary).not.toMatch(/abcdefghijklmnopqrstuvwxyz|token=secret|alice|tmp\/a/)
     expect(readRecentProjectTraceEvents('project-1')[0].safeSummary).toBe(event.safeSummary)
     expect(listener).toHaveBeenCalledOnce()
+    expect(listener.mock.calls[0][0].detail.event).toEqual(event)
 
     window.removeEventListener(PROJECT_TRACE_RUNTIME_EVENT, listener)
+  })
+
+  it('sanitizes all emitted arrays and project metadata before persistence and dispatch', () => {
+    const listener = vi.fn()
+    window.addEventListener(PROJECT_TRACE_RUNTIME_EVENT, listener)
+    const event = emitProjectTraceRuntimeEvent({
+      projectId: 'project-1',
+      projectName: '/fixture-data/project',
+      scope: 'canvas',
+      action: 'canvas_items_changed',
+      safeSummary: 'Moved 1 item.',
+      inputKinds: ['text', 'owner@example.com', 'Bearer private-credential'],
+      outputKinds: [
+        'image',
+        'C:\\Users\\fixture-data\\picture.png',
+        'https://private.example/file'
+      ],
+      riskSignals: ['destructive_action', '/fixture-data/secret', 'sk-privatecredential'],
+      movementDistancePx: 30.123,
+      maxScaleChangeRatio: 2,
+      maxRotationDeltaDeg: 90,
+      maxLayerDelta: 2,
+      canvasMutation: true
+    })
+    expect(event.inputKinds).toEqual(['text', '[redacted]', '[redacted]'])
+    expect(event.outputKinds).toEqual(['image', '[redacted]', '[redacted]'])
+    expect(event.riskSignals).toEqual(['destructive_action', '[redacted]', '[redacted]'])
+    expect(event).toMatchObject({
+      movementDistancePx: 30.12,
+      maxScaleChangeRatio: 2,
+      maxRotationDeltaDeg: 90,
+      maxLayerDelta: 2,
+      canvasMutation: true
+    })
+    const detail = listener.mock.calls[0][0].detail
+    expect(detail).toEqual({ projectId: 'project-1', projectName: '[redacted]', event })
+    expect(JSON.stringify(detail)).not.toMatch(/private|fixture-data|owner@example/)
+    expect(JSON.parse(localStorage.getItem('projectTrace.recentEvents.project-1')!)).toEqual([
+      event
+    ])
+    expect(readRecentProjectTraceEvents('project-1')).toEqual([event])
+    window.removeEventListener(PROJECT_TRACE_RUNTIME_EVENT, listener)
+  })
+
+  it('drops corrupt, future, and expired history and keeps the newest duplicate ID', () => {
+    const now = Date.now()
+    const recent = storedEvent({ at: new Date(now - 1000).toISOString() })
+    const newest = { ...recent, at: new Date(now).toISOString(), safeSummary: 'Latest change.' }
+    localStorage.setItem(
+      'projectTrace.recentEvents.project-1',
+      JSON.stringify([
+        null,
+        {},
+        { ...recent, scope: 'invalid' },
+        { ...recent, at: 'not a timestamp' },
+        { ...recent, id: 'old', at: new Date(now - 31 * 86400000).toISOString() },
+        { ...recent, id: 'future', at: new Date(now + 86400000).toISOString() },
+        recent,
+        newest
+      ])
+    )
+    expect(readRecentProjectTraceEvents('project-1')).toEqual([newest])
+    expect(JSON.parse(localStorage.getItem('projectTrace.recentEvents.project-1')!)).toEqual([
+      newest
+    ])
+  })
+
+  it('bounds history at 120 sanitized events when writing the compatible storage key', () => {
+    const now = Date.now()
+    const events = Array.from({ length: 130 }, (_, index) =>
+      storedEvent({
+        id: `event-${index}`,
+        at: new Date(now - 130 + index).toISOString(),
+        safeSummary: 'owner@example.com',
+        inputKinds: ['text', '/fixture-data/file'],
+        riskSignals: Array(20).fill('destructive_action')
+      })
+    )
+    writeRecentProjectTraceEvents('project-1', [...events, events[129]])
+    const raw = localStorage.getItem('projectTrace.recentEvents.project-1')!
+    expect(raw).not.toMatch(/owner@example|\/fixture-data/)
+    const saved = JSON.parse(raw)
+    expect(saved).toHaveLength(120)
+    expect(saved[0].id).toBe('event-10')
+    expect(saved[119].id).toBe('event-129')
+    expect(saved[119].riskSignals).toHaveLength(12)
+    expect(saved[119].inputKinds).toEqual(['text', '[redacted]'])
+    expect(readRecentProjectTraceEvents('project-1')).toEqual(saved)
+  })
+
+  it.each(['{broken', '{}', 'null', '[null, {}, 4]', ' '.repeat(1024 * 1024 + 1)])(
+    'returns no malformed or oversized raw history (%#)',
+    (raw) => {
+      localStorage.setItem('projectTrace.recentEvents.project-1', raw)
+      expect(readRecentProjectTraceEvents('project-1')).toEqual([])
+      writeRecentProjectTraceEvents('project-1', [
+        null,
+        {}
+      ] as unknown as ProjectTraceEventSummary[])
+      expect(localStorage.getItem('projectTrace.recentEvents.project-1')).toBe('[]')
+    }
+  )
+
+  it.each([
+    '',
+    '  ',
+    'x'.repeat(161),
+    'C:\\Users\\fixture-data',
+    '/fixture-data',
+    '\\\\server\\fixture-data',
+    'file:fixture-data'
+  ])('rejects invalid or plaintext path project identities (%#)', (projectId) => {
+    const listener = vi.fn()
+    window.addEventListener(PROJECT_TRACE_RUNTIME_EVENT, listener)
+    const getItem = vi.spyOn(Storage.prototype, 'getItem')
+    const setItem = vi.spyOn(Storage.prototype, 'setItem')
+    expect(readRecentProjectTraceEvents(projectId)).toEqual([])
+    writeRecentProjectTraceEvents(projectId, [storedEvent()])
+    expect(() => clearRecentProjectTraceEvents(projectId)).toThrow('Invalid project')
+    emitProjectTraceRuntimeEvent({
+      projectId,
+      scope: 'canvas',
+      action: 'move',
+      safeSummary: 'Moved.'
+    })
+    expect(getItem).not.toHaveBeenCalled()
+    expect(setItem).not.toHaveBeenCalled()
+    expect(listener.mock.calls[0][0].detail.projectId).toBeUndefined()
+    window.removeEventListener(PROJECT_TRACE_RUNTIME_EVENT, listener)
+  })
+
+  it('clears only this project local history and emits a data-free refresh', () => {
+    const otherKeys = [
+      'projectTrace.recentEvents.project-2',
+      'projectTrace.activeCapture.project-1',
+      'projectTrace.activeRealtime.project-1',
+      'projectTrace.targetReferences.project-1',
+      'projectTrace.comparisons.project-1',
+      'qapp.currentQAppKey.project-1',
+      PROJECTS_STORAGE_KEY
+    ]
+    otherKeys.forEach((key) => localStorage.setItem(key, 'untouched'))
+    writeRecentProjectTraceEvents('project-1', [storedEvent()])
+    const listener = vi.fn()
+    window.addEventListener(PROJECT_TRACE_RUNTIME_EVENT, listener)
+
+    clearRecentProjectTraceEvents('project-1')
+
+    expect(localStorage.getItem('projectTrace.recentEvents.project-1')).toBeNull()
+    otherKeys.forEach((key) => expect(localStorage.getItem(key)).toBe('untouched'))
+    expect(listener).toHaveBeenCalledOnce()
+    expect(listener.mock.calls[0][0].detail).toEqual({ projectId: 'project-1' })
+    expect(mockReadProjectTraceReferences).not.toHaveBeenCalled()
+    expect(mockChat).not.toHaveBeenCalled()
+    window.removeEventListener(PROJECT_TRACE_RUNTIME_EVENT, listener)
+  })
+
+  it('does not overwrite recent history when reading the history key is unavailable', () => {
+    const projectId = 'project-read-unavailable'
+    const storageKey = `projectTrace.recentEvents.${projectId}`
+    const previous = [storedEvent({ id: 'existing-event' })]
+    const previousRaw = JSON.stringify(previous)
+    localStorage.setItem(storageKey, previousRaw)
+
+    const originalGetItem = Storage.prototype.getItem
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation((key) => {
+      if (key === storageKey) {
+        throw new Error('storage read unavailable')
+      }
+      return originalGetItem.call(localStorage, key)
+    })
+    const setItem = vi.spyOn(Storage.prototype, 'setItem')
+
+    try {
+      expect(() =>
+        emitProjectTraceRuntimeEvent({
+          projectId,
+          scope: 'canvas',
+          action: 'move',
+          safeSummary: 'Moved.'
+        })
+      ).not.toThrow()
+      expect(setItem.mock.calls.filter(([key]) => key === storageKey)).toHaveLength(0)
+    } finally {
+      getItem.mockRestore()
+      expect(localStorage.getItem(storageKey)).toBe(previousRaw)
+      readRecentProjectTraceEvents(projectId)
+    }
+  })
+
+  it('keeps quota failures local and reports clear failure without raw storage errors', () => {
+    writeRecentProjectTraceEvents('project-1', [storedEvent()])
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('Quota token=private-value /fixture-data/file')
+    })
+    expect(() =>
+      emitProjectTraceRuntimeEvent({
+        projectId: 'project-1',
+        scope: 'canvas',
+        action: 'move',
+        safeSummary: 'Moved.'
+      })
+    ).not.toThrow()
+    const listener = vi.fn()
+    window.addEventListener(PROJECT_TRACE_RUNTIME_EVENT, listener)
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw new Error('Storage token=private-value /fixture-data/file')
+    })
+    expect(() => clearRecentProjectTraceEvents('project-1')).toThrow(
+      new Error('Unable to clear project history')
+    )
+    expect(readRecentProjectTraceEvents('project-1')).toHaveLength(1)
+    expect(listener).not.toHaveBeenCalled()
+    expect(warn).not.toHaveBeenCalled()
+    expect(error).not.toHaveBeenCalled()
+    window.removeEventListener(PROJECT_TRACE_RUNTIME_EVENT, listener)
+  })
+
+  it('never reads references or calls a model for a new manual project with old realtime state', async () => {
+    const project = createProjectRecord({
+      id: 'manual-project',
+      name: 'New',
+      createdAt: Date.now()
+    })
+    expect(project.analysisMode).toBe('manual')
+    const registry = JSON.stringify([project])
+    localStorage.setItem(PROJECTS_STORAGE_KEY, registry)
+    writeActiveProjectTraceRealtime({
+      projectId: project.id,
+      referenceTraceIds: ['old-trace'],
+      modelProfileId: 'old-model'
+    })
+    const setItem = vi.spyOn(Storage.prototype, 'setItem')
+    emitProjectTraceRuntimeEvent({
+      projectId: project.id,
+      scope: 'canvas',
+      action: 'canvas_items_changed',
+      safeSummary: 'Moved 1 image.',
+      movementDistancePx: 700,
+      canvasMutation: true
+    })
+    await vi.dynamicImportSettled()
+    await Promise.resolve()
+    expect(mockReadProjectTraceReferences).not.toHaveBeenCalled()
+    expect(mockReadProjectTraceDocument).not.toHaveBeenCalled()
+    expect(mockChat).not.toHaveBeenCalled()
+    expect(setItem).toHaveBeenCalledOnce()
+    expect(setItem.mock.calls[0][0]).toBe('projectTrace.recentEvents.manual-project')
+    expect(localStorage.getItem(PROJECTS_STORAGE_KEY)).toBe(registry)
+    expect(readRecentProjectTraceEvents(project.id)).toHaveLength(1)
   })
 
   it('does not persist absolute project roots in active capture settings', () => {
@@ -181,7 +454,154 @@ describe('projectTraceRuntime', () => {
     expect(extractProjectTraceMovementLimitPx('只记录普通移动操作')).toBeNull()
   })
 
-  it('dispatches realtime feedback when a selected trace rule is hit', async () => {
+  it('does not start the next semantic model review after manual mode is chosen mid-request', async () => {
+    const projectId = 'project-semantic-switch'
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ id: projectId, name: 'Legacy' }]))
+    writeActiveProjectTraceRealtime({
+      projectId,
+      referenceTraceIds: ['semantic-switch'],
+      modelProfileId: 'reference-only'
+    })
+    mockReadProjectTraceReferences.mockResolvedValue({
+      references: [
+        {
+          id: 'semantic-switch',
+          name: 'Legacy trace',
+          sourceKind: 'manual',
+          tags: [],
+          eventCount: 1,
+          updatedAt: new Date().toISOString(),
+          contentPreview: 'Safe local summary',
+          executableRules: {
+            version: 1,
+            generatedAt: new Date().toISOString(),
+            rules: [],
+            unsupportedNotes: [],
+            semanticRules: ['first', 'second'].map((id) => ({
+              id,
+              requirement: 'Keep layout aligned',
+              feedback: 'Review alignment',
+              mode: 'model_review',
+              source: 'trace_intent',
+              confidence: 0.9
+            }))
+          }
+        }
+      ]
+    })
+    let resolveFirst!: (value: { content: string }) => void
+    mockChat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirst = resolve
+        })
+    )
+    const advice = vi.fn()
+    window.addEventListener(PROJECT_TRACE_REALTIME_ADVICE_EVENT, advice)
+    try {
+      emitProjectTraceRuntimeEvent({
+        projectId,
+        scope: 'canvas',
+        action: 'canvas_items_changed',
+        status: 'success',
+        safeSummary: 'Moved one item.',
+        canvasMutation: true
+      })
+      await vi.waitFor(() => expect(mockChat).toHaveBeenCalledTimes(1))
+      localStorage.setItem(
+        PROJECTS_STORAGE_KEY,
+        JSON.stringify([{ id: projectId, name: 'Legacy', analysisMode: 'manual' }])
+      )
+      resolveFirst({ content: JSON.stringify({ shouldFeedback: true, advice: 'Late old advice' }) })
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(mockChat).toHaveBeenCalledTimes(1)
+      expect(advice).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener(PROJECT_TRACE_REALTIME_ADVICE_EVENT, advice)
+    }
+  })
+
+  it('drops a late model review after the active realtime target is cleared', async () => {
+    const projectId = 'project-cleared-late-review'
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ id: projectId, name: 'Legacy' }]))
+    writeActiveProjectTraceRealtime({
+      projectId,
+      referenceTraceIds: ['cleared-late-trace'],
+      modelProfileId: 'reference-only'
+    })
+    mockReadProjectTraceReferences.mockResolvedValue({
+      references: [
+        {
+          id: 'cleared-late-trace',
+          name: 'Cleared late review trace',
+          sourceKind: 'manual',
+          updatedAt: new Date().toISOString(),
+          tags: [],
+          eventCount: 1,
+          contentPreview: 'Safe local summary',
+          runtimePolicy: {
+            allowRealtime: true,
+            allowTargetReference: true,
+            allowModelReview: true,
+            allowTerminal: false
+          },
+          executableRules: {
+            version: 1,
+            generatedAt: new Date().toISOString(),
+            rules: [],
+            semanticRules: [
+              {
+                id: 'semantic-cleared-late',
+                requirement: 'Keep layout aligned',
+                feedback: 'Review alignment',
+                mode: 'model_review',
+                source: 'trace_intent',
+                confidence: 0.9
+              }
+            ],
+            unsupportedNotes: []
+          }
+        }
+      ]
+    })
+    let resolveReview!: (value: { content: string }) => void
+    mockChat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveReview = resolve
+        })
+    )
+    const advice = vi.fn()
+    window.addEventListener(PROJECT_TRACE_REALTIME_ADVICE_EVENT, advice)
+    try {
+      emitProjectTraceRuntimeEvent({
+        projectId,
+        scope: 'canvas',
+        action: 'canvas_items_changed',
+        status: 'success',
+        safeSummary: 'Moved one item.',
+        canvasMutation: true
+      })
+      await vi.waitFor(() => expect(mockChat).toHaveBeenCalledTimes(1))
+      clearActiveProjectTraceRealtime(projectId)
+      resolveReview({
+        content: JSON.stringify({ shouldFeedback: true, advice: 'Late cleared advice' })
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(advice).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener(PROJECT_TRACE_REALTIME_ADVICE_EVENT, advice)
+    }
+  })
+  it('dispatches realtime feedback when a selected trace rule is hit for a legacy project', async () => {
+    localStorage.setItem(
+      PROJECTS_STORAGE_KEY,
+      JSON.stringify([{ id: 'project-1', name: 'Legacy' }])
+    )
     const adviceListener = vi.fn()
     window.addEventListener(PROJECT_TRACE_REALTIME_ADVICE_EVENT, adviceListener)
     mockReadProjectTraceDocument.mockResolvedValue({
