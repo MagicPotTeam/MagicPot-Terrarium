@@ -7,15 +7,22 @@ import type { AgentRouteLike } from '@shared/agent'
 import {
   LLMDeployment,
   LLMModelUse,
+  LLMOpenAIApiMode,
+  LLMProfileCallType,
+  LLMProvider,
   TaggerProviderOption,
   TaggerRuntimeCacheScopeOption
 } from '@shared/config/config'
 import type {
+  ImageRequestContract,
   LLMImageHistoryPolicy,
   OpenAIImageGenerationOptions,
   VideoGenerationOptions
 } from '@shared/llm/types'
-import type { LLMReasoningEffort } from '@shared/llm/profileCapabilities'
+import type {
+  LLMReasoningEffort,
+  ProviderAttachmentTransport
+} from '@shared/llm/profileCapabilities'
 import type { MediaReference } from '@shared/mediaReference'
 import type { ReportBundleRole } from '@shared/reportBundle'
 
@@ -40,6 +47,8 @@ export type ChatAttachment = {
   reportBundleRefName?: string
   reportBundleManifestUrl?: string
   reportBundleLabel?: string
+  /** Optional pre-discovered image count for a provider-owned report bundle; no I/O is implied. */
+  reportBundleImageCount?: number
 }
 
 export type ChatMessage = {
@@ -132,12 +141,19 @@ export type LLMChatReq = {
   maxOutputTokens?: number
   temperature?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
+  imageRequest?: ImageRequestContract
   imageHistoryPolicy?: LLMImageHistoryPolicy
   videoGenerationOptions?: VideoGenerationOptions
   skillRuntime?: LLMChatSkillRuntime
   route?: AgentRouteLike
   /** 指定使用的模型配置 ID，如果不指定则使用服务端默认配置 */
   profileId?: string
+  /** Opaque main-issued revision for explicit consent to a model configuration snapshot. */
+  expectedProfileRevision?: string
+  /** Explicit comparison transport; local is for the authenticated receiving proxy, never recursive. */
+  comparisonRouting?: 'configured' | 'local'
+  /** Optional per-request override for OpenAI-compatible API routing. */
+  apiMode?: LLMOpenAIApiMode
   profileScope?: LLMProfileScope
   /** 会话续传 URL（可选） */
   sessionUrl?: string
@@ -193,6 +209,10 @@ export type LLMChatStreamResp = {
   ocrResult?: OCRResult
   finishReason?: 'stop' | 'length' | 'tool_call' | 'cancelled' | 'error'
   error?: string
+  /** Sanitized diagnostic HTTP status from the main process, when available. */
+  status?: number
+  /** Bounded/redacted diagnostic body from the main process; never raw upstream content. */
+  body?: string
   metadata?: Record<string, unknown>
   usage?: {
     promptTokens?: number
@@ -206,20 +226,42 @@ export type LLMChatStreamResp = {
 /**
  * 获取可用的模型配置列表
  */
-export type LLMListProfilesReq = {}
+export type LLMListProfilesReq = {
+  includeConfigurationRevision?: boolean
+  comparisonRouting?: 'configured' | 'local'
+}
 
 export type LLMListProfilesResp = {
+  comparisonDestination?: { kind: 'local' } | { kind: 'remote'; origin: string }
   profiles: Array<{
     id: string
     /** Base config profile ID when `id` represents a model-specific composite selection. */
     base_profile_id?: string
+    /** Opaque consent revision; absent when snapshot-pinned requests are unavailable. */
+    configurationRevision?: string
     model_name: string
+    /** Resolved standard API route; absent for extension-owned/local runtime routes. */
+    provider?: LLMProvider
+    /** Effective OpenAI wire mode, not the configured `auto` value. */
+    api_mode?: Exclude<LLMOpenAIApiMode, 'auto'>
+    /** Wire modes by request override; `default` keeps config, `auto` forces auto resolution. */
+    openai_api_modes?: Record<'default' | LLMOpenAIApiMode, Exclude<LLMOpenAIApiMode, 'auto'>>
+    call_type?: LLMProfileCallType
+    auth_mode?: string
     deployment?: LLMDeployment
     model_use?: LLMModelUse
     context_window_tokens?: number
     context_budget_tokens?: number
+    max_input_images?: number
+    maxInputImages?: number
+    max_images?: number
+    maxImages?: number
     is_vision_model?: boolean
     is_ocr_model?: boolean
+    /** Normalized declared capabilities, never inferred from model names. */
+    attachment_transports?: ProviderAttachmentTransport[]
+    preferred_attachment_transport?: ProviderAttachmentTransport
+    supports_session_continuation?: boolean
     tagger_provider?: TaggerProviderOption
     tagger_endpoint?: string
     tagger_runtime_cache_scope?: TaggerRuntimeCacheScopeOption

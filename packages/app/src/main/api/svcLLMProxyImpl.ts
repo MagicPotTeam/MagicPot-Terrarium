@@ -24,11 +24,12 @@ import {
   LLMClearHy3DCosPrefixReq,
   LLMClearHy3DCosPrefixResp,
   ChatMessage,
-  ChatAttachment
+  ChatAttachment,
+  OCRResult
 } from '@shared/api/svcLLMProxy'
 import { ServerStreaming } from '@shared/api/apiUtils/streaming'
 import { ServiceError } from '@shared/api/apiUtils/serviceValidation'
-import { getConfig } from '../config/config'
+import { getConfig, onConfigCommitted } from '../config/config'
 import { Config, LLMAPIProfile, resolveCustomSkillContextMessageLimit } from '@shared/config/config'
 import {
   findHunyuan3DQAppProfile,
@@ -56,6 +57,7 @@ import {
   type LLMChatResult,
   type LLMDeltaEvent
 } from '@shared/llm'
+import { resolveRemoteProfileRouting } from '@shared/llm/remoteProfileRouting'
 import { getAssistantRuntime } from '../assistantRuntime/runtime'
 import { normalizeAllowedToolNames } from '../assistantRuntime/toolAccess'
 import type { AssistantRoute } from '../assistantRuntime/types'
@@ -68,17 +70,16 @@ import {
   uploadLocalHy3dModel
 } from '../llmProxy/hunyuan3dCos'
 import { validateStructuredSkillOutput } from './skillRuntimeStructuredOutput'
-import { DEFAULT_MANAGED_MEDIA_MAX_BYTES } from '../llmProxy/managedMediaStore'
 import { syncMcpClientManager } from '../mcp/runtime'
 import fs from 'node:fs/promises'
 import { isLocalFileSource } from '../utils/localFileUrl'
-import {
-  MAX_REMOTE_FETCH_RESPONSE_BYTES,
-  isPrivateOrLocalRemoteFetchHost,
-  parseAndValidateRemoteFetchRequest
-} from './remoteFetchPolicy'
+import { isPrivateOrLocalRemoteFetchHost } from './remoteFetchPolicy'
+import { remoteFetch as executeRemoteFetch } from './remoteFetch'
 import { consumeTrustedLocalFileSelection } from './trustedFileSelection'
+import { safeRemoteDownload } from './safeRemoteDownload'
 import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
+import { LlmProfileRevision } from './llmProfileRevision'
+import { RemoteProjectComparisonClient } from './remoteProjectComparison'
 import {
   DEFAULT_HY3D_API_REGION,
   normalizeConfiguredSecret,
@@ -114,8 +115,11 @@ const getElectronNetFetch = (): typeof net.fetch | null => {
 }
 
 export type ElectronIncomingMessageLike = {
-  headers: Record<string, string[] | undefined>
-  on: (event: 'data', listener: (chunk: Buffer | string) => void) => unknown
+  headers: Record<string, string | string[] | undefined>
+  on: {
+    (event: 'data', listener: (chunk: Buffer | string) => void): unknown
+    (event: 'error', listener: (error: unknown) => void): unknown
+  }
   pause?: () => void
   resume?: () => void
   once: {
@@ -129,6 +133,7 @@ export type ElectronIncomingMessageLike = {
 export type ElectronClientRequestLike = {
   abort: () => void
   end: (chunk?: string | Buffer) => unknown
+  on: (event: 'error', listener: (error: unknown) => void) => unknown
   once: {
     (event: 'response', listener: (response: ElectronIncomingMessageLike) => void): unknown
     (event: 'abort', listener: () => void): unknown
@@ -140,7 +145,9 @@ export type ElectronClientRequestLike = {
 export type ElectronRequestFactory = (options: {
   method: string
   url: string
-  redirect: 'follow'
+  redirect: 'follow' | 'error' | 'manual'
+  credentials?: 'omit' | 'include'
+  useSessionCookies?: boolean
 }) => ElectronClientRequestLike
 
 export const createElectronRequestFetch = (electronRequest: ElectronRequestFactory): FetchImpl =>
@@ -160,71 +167,145 @@ export const createElectronRequestFetch = (electronRequest: ElectronRequestFacto
       const clientRequest = electronRequest({
         method: request.method,
         url: request.url,
-        redirect: 'follow'
+        redirect:
+          request.redirect === 'manual'
+            ? 'manual'
+            : request.redirect === 'error'
+              ? 'error'
+              : 'follow',
+        // Electron's same-origin mode requires an origin; retain legacy defaults otherwise.
+        ...(request.credentials === 'omit'
+          ? { credentials: 'omit' as const, useSessionCookies: false }
+          : request.credentials === 'include'
+            ? { credentials: 'include' as const }
+            : {})
       })
       let settled = false
+      let requestAborted = false
+      let abortResponseStream: ((reason: unknown) => void) | null = null
 
       const cleanup = (): void => request.signal.removeEventListener('abort', handleAbort)
+      const abortClientRequest = (): void => {
+        if (requestAborted) return
+        requestAborted = true
+        clientRequest.abort()
+      }
       const fail = (error: unknown): void => {
         if (settled) return
         settled = true
         cleanup()
         reject(error instanceof Error ? error : new Error(String(error)))
       }
+      const failRequest = (error: unknown): void => {
+        if (settled && !abortResponseStream) return
+        abortResponseStream?.(error)
+        fail(error)
+        abortClientRequest()
+      }
       const handleAbort = (): void => {
-        clientRequest.abort()
-        fail(request.signal.reason || new DOMException('The operation was aborted.', 'AbortError'))
+        const reason =
+          request.signal.reason || new DOMException('The operation was aborted.', 'AbortError')
+        failRequest(reason)
       }
 
-      request.headers.forEach((value, name) => {
-        if (name.toLowerCase() === 'content-length') return
-        clientRequest.setHeader(name, value)
+      // Keep error listeners installed so late errors after cancellation remain harmless.
+      clientRequest.on('error', failRequest)
+      clientRequest.once('abort', () => {
+        requestAborted = true
+        failRequest(new DOMException('The operation was aborted.', 'AbortError'))
       })
-
-      clientRequest.once('error', fail)
-      clientRequest.once('abort', () =>
-        fail(new DOMException('The operation was aborted.', 'AbortError'))
-      )
       clientRequest.once('response', (incoming) => {
-        const responseBody = new ReadableStream<Uint8Array>({
-          start(controller) {
-            incoming.on('data', (chunk: Buffer | string) => {
-              controller.enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
-              if (controller.desiredSize != null && controller.desiredSize <= 0) incoming.pause?.()
-            })
-            incoming.once('error', (error) => controller.error(error))
-            incoming.once('aborted', () =>
-              controller.error(new Error('Electron network response was aborted.'))
-            )
-            incoming.once('end', () => controller.close())
-          },
-          pull() {
-            incoming.resume?.()
-          },
-          cancel() {
-            clientRequest.abort()
+        let streamFinished = false
+        let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+        const finishStream = (reason?: unknown): void => {
+          if (streamFinished) return
+          streamFinished = true
+          abortResponseStream = null
+          cleanup()
+          if (!streamController) return
+          if (reason === undefined) {
+            streamController.close()
+          } else {
+            streamController.error(reason instanceof Error ? reason : new Error(String(reason)))
           }
-        })
-
-        if (settled) return
-        settled = true
-        cleanup()
-
-        const headers = new Headers()
-        for (const [name, values] of Object.entries(incoming.headers)) {
-          for (const value of values ?? []) headers.append(name, value)
         }
-        const response = new Response(responseBody, {
-          status: incoming.statusCode,
-          statusText: incoming.statusMessage,
-          headers
-        })
-        Object.defineProperty(response, 'url', { configurable: true, value: request.url })
-        resolve(response)
+
+        incoming.on('error', failRequest)
+        incoming.once('aborted', () =>
+          failRequest(new Error('Electron network response was aborted.'))
+        )
+        incoming.once('end', () => finishStream())
+        if (settled) {
+          finishStream()
+          abortClientRequest()
+          return
+        }
+        abortResponseStream = (reason) => finishStream(reason)
+
+        try {
+          const headers = new Headers()
+          for (const [name, values] of Object.entries(incoming.headers)) {
+            for (const value of typeof values === 'string' ? [values] : (values ?? [])) {
+              headers.append(name, value)
+            }
+          }
+          const hasNullBody =
+            request.method === 'HEAD' || [204, 205, 304].includes(incoming.statusCode)
+          const responseStream = hasNullBody
+            ? null
+            : new ReadableStream<Uint8Array>({
+                start(controller) {
+                  streamController = controller
+                  incoming.on('data', (chunk: Buffer | string) => {
+                    if (streamFinished) return
+                    controller.enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+                    if (controller.desiredSize != null && controller.desiredSize <= 0)
+                      incoming.pause?.()
+                  })
+                },
+                pull() {
+                  if (!streamFinished) incoming.resume?.()
+                },
+                cancel() {
+                  if (streamFinished) return
+                  streamFinished = true
+                  abortResponseStream = null
+                  cleanup()
+                  abortClientRequest()
+                }
+              })
+          const response = new Response(responseStream, {
+            status: incoming.statusCode,
+            statusText: incoming.statusMessage,
+            headers
+          })
+          Object.defineProperty(response, 'url', { configurable: true, value: request.url })
+          settled = true
+          resolve(response)
+          if (hasNullBody) {
+            // Do not read or drain a body Fetch cannot expose, even if the peer keeps sending.
+            finishStream()
+            abortClientRequest()
+          }
+        } catch (error) {
+          failRequest(error)
+        }
       })
 
       request.signal.addEventListener('abort', handleAbort, { once: true })
-      clientRequest.end(body || undefined)
+      if (request.signal.aborted) {
+        handleAbort()
+        return
+      }
+      try {
+        request.headers.forEach((value, name) => {
+          if (name.toLowerCase() === 'content-length') return
+          clientRequest.setHeader(name, value)
+        })
+        clientRequest.end(body || undefined)
+      } catch (error) {
+        failRequest(error)
+      }
     })
   }) as FetchImpl
 
@@ -274,7 +355,6 @@ const dedupeChatAttachments = (
 
   const unique: ChatAttachment[] = []
   const seen = new Set<string>()
-
   for (const attachment of attachments) {
     const key = `${attachment.type}:${attachment.url}:${attachment.fileName || ''}`
     if (seen.has(key)) {
@@ -305,6 +385,278 @@ const STRICT_RASTER_DATA_URL = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-
 const QAPP_INLINE_IMAGE_POLICY_MARKER = 'qapp-renderer-materialized-v1'
 const MAX_PROVIDER_ACCESSIBLE_URL_LENGTH = 8 * 1024
 const RASTER_SIGNATURE_BASE64_LENGTH = 16
+const REMOTE_STREAM_ENDPOINTS = [
+  '/api/chat',
+  '/api/bot/chat',
+  '/api/bot/message',
+  '/api/message'
+] as const
+export const REMOTE_STREAM_DEADLINE_MS = 2 * 60 * 1000
+const REMOTE_STREAM_MAX_REQUEST_BYTES = 16 * 1024 * 1024
+const REMOTE_STREAM_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+const REMOTE_STREAM_MAX_FRAME_BYTES = 512 * 1024
+const REMOTE_STREAM_MAX_EVENTS = 4096
+const REMOTE_STREAM_MAX_TEXT_BYTES = 4 * 1024 * 1024
+const REMOTE_ERROR_DETAIL_MAX_BYTES = 64 * 1024
+const REMOTE_OUTPUT_URL_MAX_LENGTH = 8192
+
+const truncateUtf8 = (value: string, maxBytes: number): string => {
+  const bytes = Buffer.from(value, 'utf8')
+  if (bytes.byteLength <= maxBytes) return value
+  return `${bytes.subarray(0, maxBytes).toString('utf8')}…`
+}
+
+const redactRemoteErrorText = (value: string): string =>
+  value
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[redacted]')
+    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[redacted]@')
+    .replace(
+      /(["']?(?:access[_-]?token|api[_-]?key|authorization|cookie|password|secret)["']?\s*[:=]\s*["']?)[^"'&,\s}]+/gi,
+      '$1[redacted]'
+    )
+
+const extractRemoteErrorDetail = (body: string): string => {
+  const trimmed = body.trim()
+  if (!trimmed) return '(empty response body)'
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    if (isPlainRecord(parsed)) {
+      const values: string[] = []
+      const collect = (value: unknown): void => {
+        if (typeof value === 'string' && value.trim()) values.push(value.trim())
+        else if (isPlainRecord(value)) {
+          for (const key of ['code', 'type', 'message', 'detail', 'error']) collect(value[key])
+        }
+      }
+      collect(parsed)
+      if (values.length > 0) return values.join(': ')
+    }
+  } catch {
+    // Fall through to bounded plain-text detail.
+  }
+  return trimmed
+}
+
+const boundRemoteErrorDetail = (body: string): string =>
+  truncateUtf8(redactRemoteErrorText(extractRemoteErrorDetail(body)), REMOTE_ERROR_DETAIL_MAX_BYTES)
+
+const createRemoteErrorBody = (body: string): string => {
+  try {
+    const parsed: unknown = JSON.parse(body)
+    if (isPlainRecord(parsed)) {
+      const safeKeys = new Set([
+        'code',
+        'type',
+        'status',
+        'continuation',
+        'is_continuation',
+        'error_code',
+        'error_type',
+        'errorType',
+        'message',
+        'detail',
+        'error',
+        'details',
+        'cause'
+      ])
+      const project = (value: unknown, depth: number): unknown => {
+        if (depth > 3) return undefined
+        if (typeof value === 'string') return truncateUtf8(redactRemoteErrorText(value), 16 * 1024)
+        if (!isPlainRecord(value)) return undefined
+        const result: Record<string, unknown> = {}
+        for (const [key, nested] of Object.entries(value)) {
+          if (!safeKeys.has(key)) continue
+          const projected = project(nested, depth + 1)
+          if (projected !== undefined) result[key] = projected
+        }
+        return result
+      }
+      const projected = project(parsed, 0)
+      if (isPlainRecord(projected) && Object.keys(projected).length > 0) {
+        return truncateUtf8(JSON.stringify(projected), REMOTE_ERROR_DETAIL_MAX_BYTES)
+      }
+    }
+  } catch {
+    // Fall through to bounded, redacted plain text.
+  }
+  return truncateUtf8(redactRemoteErrorText(body), REMOTE_ERROR_DETAIL_MAX_BYTES)
+}
+
+type RemoteUpstreamError = Error & {
+  status: number
+  statusCode: number
+  body: string
+}
+
+export const createRemoteUpstreamError = (
+  status: number,
+  statusText: string,
+  body: string
+): RemoteUpstreamError =>
+  Object.assign(
+    new Error(
+      `Remote LLM streaming request failed (HTTP ${status}${statusText ? ` ${statusText}` : ''}): ${boundRemoteErrorDetail(body)}`
+    ),
+    { status, statusCode: status, body: createRemoteErrorBody(body) }
+  )
+
+const isSafeRemoteOutputUrl = (value: string, trustedRemoteOrigin?: string): boolean => {
+  if (!value || value.length > REMOTE_OUTPUT_URL_MAX_LENGTH) return false
+  try {
+    const parsed = new URL(value)
+    if (
+      !['http:', 'https:'].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password ||
+      parsed.hash
+    ) {
+      return false
+    }
+    if (trustedRemoteOrigin && parsed.origin === trustedRemoteOrigin) return true
+    return parsed.protocol === 'https:' && !isPrivateOrLocalRemoteFetchHost(parsed.hostname)
+  } catch {
+    return false
+  }
+}
+
+const isSafeRemoteSessionRef = (value: string, trustedRemoteOrigin?: string): boolean => {
+  const trimmed = value.trim()
+  const hasControlCharacter = [...trimmed].some((character) => {
+    const code = character.charCodeAt(0)
+    return code <= 0x1f || code === 0x7f
+  })
+  if (!trimmed || trimmed.length > REMOTE_OUTPUT_URL_MAX_LENGTH || hasControlCharacter) {
+    return false
+  }
+  if (/^(?:blob|data|file|javascript|local-media):/i.test(trimmed)) return false
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return isSafeRemoteOutputUrl(trimmed, trustedRemoteOrigin)
+    }
+  } catch {
+    // Opaque session references are intentionally not parsed as fetch URLs.
+  }
+  return true
+}
+
+const assertSafeRemoteOutputUrl = (
+  value: string | undefined,
+  label: string,
+  trustedRemoteOrigin?: string
+): void => {
+  if (value !== undefined && value !== '' && !isSafeRemoteOutputUrl(value, trustedRemoteOrigin)) {
+    throw new Error(`Remote LLM streaming response contained an unsafe ${label} URL.`)
+  }
+}
+
+const assertSafeRemoteSessionRef = (
+  value: string | undefined,
+  trustedRemoteOrigin?: string
+): void => {
+  if (value !== undefined && value !== '' && !isSafeRemoteSessionRef(value, trustedRemoteOrigin)) {
+    throw new Error('Remote LLM streaming response contained an unsafe session reference.')
+  }
+}
+
+const assertSafeRemoteOcrResult = (
+  ocrResult: OCRResult | undefined,
+  label: string,
+  trustedRemoteOrigin?: string
+): void => {
+  assertSafeRemoteOutputUrl(
+    ocrResult?.sourceImageUrl,
+    `${label} OCR source image`,
+    trustedRemoteOrigin
+  )
+}
+
+const assertSafeRemoteAttachment = (
+  attachment: ChatAttachment,
+  label: string,
+  trustedRemoteOrigin?: string
+): void => {
+  if (
+    !attachment ||
+    typeof attachment.url !== 'string' ||
+    !isSafeRemoteOutputUrl(attachment.url, trustedRemoteOrigin)
+  ) {
+    throw new Error(`Remote LLM streaming response contained an unsafe ${label} attachment URL.`)
+  }
+  assertSafeRemoteOcrResult(attachment.ocrResult, label, trustedRemoteOrigin)
+}
+
+const assertSafeRemoteEventUrls = (
+  event: LLMChatStreamResp,
+  trustedRemoteOrigin?: string
+): void => {
+  assertSafeRemoteOutputUrl(event.imageUrl, 'image', trustedRemoteOrigin)
+  assertSafeRemoteSessionRef(event.sessionUrl, trustedRemoteOrigin)
+  assertSafeRemoteOcrResult(event.ocrResult, 'event', trustedRemoteOrigin)
+  if (event.attachment) assertSafeRemoteAttachment(event.attachment, 'event', trustedRemoteOrigin)
+  for (const attachment of event.attachments || []) {
+    assertSafeRemoteAttachment(attachment, 'event', trustedRemoteOrigin)
+  }
+}
+
+const REMOTE_STALE_CONTINUATION_CODES = new Set([
+  'conversation_expired',
+  'conversation_not_found',
+  'continuation_expired',
+  'continuation_not_found',
+  'continuation_stale',
+  'invalid_continuation',
+  'invalid_session',
+  'previous_response_not_found',
+  'session_expired',
+  'session_not_found',
+  'stale_session'
+])
+
+type RemoteErrorRecord = Record<string, unknown>
+
+const normalizeRemoteErrorCode = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim().toLowerCase().replace(/[ -]+/g, '_')
+  return normalized || undefined
+}
+
+const parseRemoteErrorRecords = (body: string): RemoteErrorRecord[] => {
+  try {
+    const parsed: unknown = JSON.parse(body)
+    if (!isPlainRecord(parsed)) return []
+    const records: RemoteErrorRecord[] = [parsed]
+    for (const key of ['error', 'details', 'cause']) {
+      const value = parsed[key]
+      if (isPlainRecord(value)) records.push(value)
+    }
+    return records
+  } catch {
+    return []
+  }
+}
+
+const isRemoteContinuationDetail = (
+  status: number,
+  body: string,
+  hasSessionUrl: boolean
+): boolean => {
+  if (![404, 405, 410].includes(status) || !hasSessionUrl) return false
+
+  const records = parseRemoteErrorRecords(body)
+  for (const record of records) {
+    const code = normalizeRemoteErrorCode(record.code)
+    const type = normalizeRemoteErrorCode(record.type)
+    if ([code, type].some((value) => value && REMOTE_STALE_CONTINUATION_CODES.has(value))) {
+      return true
+    }
+  }
+
+  // Unstructured route errors are deliberately not treated as stale continuation
+  // details. This keeps legacy endpoint probing safe when a generic body happens
+  // to mention a session or continuation.
+  return false
+}
 
 const inferRasterMimeTypeFromBytes = (bytes: Buffer): string | undefined => {
   if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
@@ -347,13 +699,65 @@ const stripQAppInlineImagePolicyMarker = (messages: ChatMessage[]): ChatMessage[
       : {})
   }))
 
+const countProviderBoundImageAttachments = (messages: readonly ChatMessage[]): number => {
+  const expandedReportBundleIds = new Set(
+    messages.flatMap((message) =>
+      (message.attachments || [])
+        .filter(
+          (attachment) =>
+            attachment.type === 'image' &&
+            attachment.reportBundleRole === 'report-image' &&
+            Boolean(attachment.reportBundleId)
+        )
+        .map((attachment) => attachment.reportBundleId as string)
+    )
+  )
+
+  return messages.reduce(
+    (total, message) =>
+      total +
+      (message.role === 'system'
+        ? 0
+        : (message.attachments || []).reduce((count, attachment) => {
+            if (attachment.type === 'image') return count + 1
+            if (
+              expandedReportBundleIds.has(attachment.reportBundleId || '') ||
+              typeof attachment.reportBundleImageCount !== 'number' ||
+              !Number.isSafeInteger(attachment.reportBundleImageCount) ||
+              attachment.reportBundleImageCount < 0
+            ) {
+              return count
+            }
+            return count + attachment.reportBundleImageCount
+          }, 0)),
+    0
+  )
+}
+
 const validateInlineImageAttachmentTransport = (
   profile: LLMAPIProfile,
   messages: ChatMessage[],
-  profileScope?: LLMChatReq['profileScope']
+  profileScope?: LLMChatReq['profileScope'],
+  requestApiMode?: LLMChatReq['apiMode']
 ): void => {
-  const provider = resolveProfileProvider(profile)
-  if (provider !== 'gemini' && provider !== 'claude' && provider !== 'ollama') {
+  // Match discovery and client dispatch, including overrides and Zen aliases.
+  const routing = resolveRemoteProfileRouting({
+    ...profile,
+    ...(requestApiMode ? { api_mode: requestApiMode } : {})
+  })
+  const provider = routing.provider ?? resolveProfileProvider(profile)
+  const isOpenAIImageProfile = routing.provider === 'openai' && routing.api_mode === 'images'
+  const supportsAccessibleUrl =
+    routing.provider === 'openai' &&
+    (routing.api_mode === 'responses' || routing.api_mode === 'chat-completions')
+  if (
+    !isOpenAIImageProfile &&
+    !supportsAccessibleUrl &&
+    provider !== 'openai' &&
+    provider !== 'gemini' &&
+    provider !== 'claude' &&
+    provider !== 'ollama'
+  ) {
     return
   }
 
@@ -364,23 +768,75 @@ const validateInlineImageAttachmentTransport = (
     return
   }
 
+  const capabilities = resolveChatProfileCapabilities(profile)
+  const effectiveImageCount = countProviderBoundImageAttachments(messages)
+  if (
+    capabilities.maxInputImages !== undefined &&
+    effectiveImageCount > capabilities.maxInputImages
+  ) {
+    throw new Error(`Too many images; the limit is ${capabilities.maxInputImages}.`)
+  }
+
   const hasValidatedQAppInlineImagePolicy =
     profileScope === 'qapp' &&
     imageAttachments.every(
       (attachment) => attachment.metadata?.internalTransport === QAPP_INLINE_IMAGE_POLICY_MARKER
     )
-  const capabilities = resolveChatProfileCapabilities(profile)
   const requestDataUrlTransport = selectProviderAttachmentTransport(capabilities, {
     available: { 'request-data-url': true },
     requested: 'request-data-url'
   })
-  if (!hasValidatedQAppInlineImagePolicy && requestDataUrlTransport !== 'request-data-url') {
-    throw new Error(
-      `Attachment transport error: ${provider} profile "${profile.id}" must declare "request-data-url" before accepting inline image attachments.`
-    )
+  if (isOpenAIImageProfile) {
+    return
   }
 
+  const accessibleUrlTransport = selectProviderAttachmentTransport(capabilities, {
+    available: { 'accessible-url': supportsAccessibleUrl },
+    requested: 'accessible-url'
+  })
+
   for (const attachment of imageAttachments) {
+    if (supportsAccessibleUrl && !attachment.url.startsWith('data:')) {
+      if (accessibleUrlTransport !== 'accessible-url') {
+        throw new Error(
+          `Attachment transport error: ${provider} profile "${profile.id}" must declare "accessible-url" before accepting image URLs.`
+        )
+      }
+      // This only validates a provider-bound URL, not a download. Materialization
+      // and Images edits retain their guarded DNS/redirect-aware loader.
+      try {
+        if (
+          attachment.url.length > MAX_PROVIDER_ACCESSIBLE_URL_LENGTH ||
+          !/^https:\/\/[^\s\\]+$/i.test(attachment.url) ||
+          attachment.url.slice('https://'.length).startsWith('/')
+        ) {
+          throw new Error('invalid URL')
+        }
+        const parsed = new URL(attachment.url)
+        if (
+          parsed.protocol !== 'https:' ||
+          parsed.username ||
+          parsed.password ||
+          parsed.hash ||
+          (!parsed.hostname.includes('.') && !parsed.hostname.includes(':')) ||
+          isPrivateOrLocalRemoteFetchHost(parsed.hostname)
+        ) {
+          throw new Error('unsafe URL')
+        }
+      } catch {
+        throw new Error(
+          `Attachment transport error: ${provider} profile "${profile.id}" requires a public HTTPS image URL without credentials or fragments; local references and file IDs are not supported.`
+        )
+      }
+      continue
+    }
+
+    if (!hasValidatedQAppInlineImagePolicy && requestDataUrlTransport !== 'request-data-url') {
+      throw new Error(
+        `Attachment transport error: ${provider} profile "${profile.id}" must declare "request-data-url" before accepting inline image attachments.`
+      )
+    }
+
     const match = STRICT_RASTER_DATA_URL.exec(attachment.url)
     if (!match) {
       throw new Error(
@@ -392,14 +848,6 @@ const validateInlineImageAttachmentTransport = (
     if (base64.length % 4 !== 0) {
       throw new Error(
         `Attachment transport error: ${provider} profile "${profile.id}" received malformed image base64.`
-      )
-    }
-
-    const paddingLength = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
-    const decodedByteLength = (base64.length / 4) * 3 - paddingLength
-    if (decodedByteLength > DEFAULT_MANAGED_MEDIA_MAX_BYTES) {
-      throw new Error(
-        `Attachment transport error: ${provider} profile "${profile.id}" image exceeds the ${DEFAULT_MANAGED_MEDIA_MAX_BYTES}-byte request attachment limit.`
       )
     }
 
@@ -998,7 +1446,6 @@ const collectBigModelOcrAttachments = (messages: ChatMessage[]): ChatAttachment[
   const supportedAttachments = (lastUserMessage?.attachments || []).filter(
     isBigModelOcrSupportedAttachment
   )
-
   if (supportedAttachments.length === 0) {
     return []
   }
@@ -1076,6 +1523,10 @@ const buildBigModelOcrBoxes = (payload: {
 
 export class LLMProxySvcImpl implements LLMProxySvc {
   private readonly conversationAbortControllers = new Map<string, AbortController>()
+  private readonly profileRevisions = new LlmProfileRevision()
+  private readonly remoteComparisons = new RemoteProjectComparisonClient((input, init) =>
+    this.getFetchImpl()(input, init)
+  )
 
   private getFetchImpl(): FetchImpl {
     if (isMockFetchFunction(globalThis.fetch)) {
@@ -1092,6 +1543,27 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     }
 
     throw new Error('Electron network APIs are unavailable in the main process runtime.')
+  }
+
+  private loadOpenAIReferenceImage = async (
+    url: URL,
+    signal?: AbortSignal
+  ): Promise<{ blob: Blob; finalUrl?: URL }> => {
+    const downloaded = await safeRemoteDownload(url.toString(), {
+      allowedContentTypes: ['image/'],
+      // Do not add an application image-size cap here. The downloader still
+      // enforces HTTPS/public-host, MIME, redirect, timeout, and abort safety.
+      maxBytes: Number.MAX_SAFE_INTEGER,
+      maxRedirects: 3,
+      errorLabel: 'OpenAI reference image',
+      signal
+    })
+    const bytes = new Uint8Array(downloaded.buffer.byteLength)
+    bytes.set(downloaded.buffer)
+    return {
+      blob: new Blob([bytes.buffer], { type: downloaded.contentType }),
+      finalUrl: downloaded.finalUrl
+    }
   }
 
   private createConversationAbortContext(
@@ -1534,6 +2006,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     })
 
     try {
+      if (req.comparisonRouting === 'configured') {
+        const config = structuredClone(getConfig())
+        if (config.use_remote_llm) {
+          const { conversationId: _conversationId, ...remoteRequest } = req
+          return await this.remoteComparisons.chat(config, remoteRequest, abortContext.signal)
+        }
+      }
       // Standard API chat remains the fallback path after specialized handlers decline the request.
       console.log('[LLMProxy] routing request through the standard API path')
       return await this.chatViaAPI(req, {
@@ -1560,7 +2039,16 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   ): Promise<LLMChatResp> => {
     throwIfAborted(options?.signal)
     req = applySkillRuntimeContextMessageLimit(req)
-    const config = getConfig()
+    const config =
+      req.expectedProfileRevision === undefined ? getConfig() : structuredClone(getConfig())
+    if (req.expectedProfileRevision !== undefined) {
+      this.profileRevisions.verify(
+        config,
+        req.profileId,
+        req.expectedProfileRevision,
+        req.comparisonRouting === 'local'
+      )
+    }
     const requestedProfileId = this.normalizeRequestedProfileId(req.profileId)
 
     for (const extension of mainHostExtensionApiV1.llmProxy) {
@@ -1730,7 +2218,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           (p) => p.model_name === profile?.model_name && p.base_url === profile?.base_url
         )
 
-        if (siblings.length > 1) {
+        if (siblings.length > 1 && req.expectedProfileRevision === undefined) {
           const poolKey = `${profile.base_url}|${profile.model_name}`
           let nextIndex = LLMProxySvcImpl.loadBalancingCounters.get(poolKey)
           if (nextIndex === undefined) {
@@ -1773,20 +2261,42 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       signal: options?.signal
     }
     const extensionCli = mainHostExtensionApiV1.llmProxy
-      .map((extension) => extension.createCli?.(profileWithSelectedKey, extensionContext))
+      .map((extension) =>
+        extension.createCli?.(profileWithSelectedKey, {
+          ...extensionContext,
+          imageAttachmentLoader: this.loadOpenAIReferenceImage,
+          requireImageAttachmentLoader: true
+        })
+      )
       .find((client) => Boolean(client))
     const modelUse = resolveProfileModelUse(profileWithSelectedKey)
     if (!extensionCli && modelUse !== 'video') {
-      validateInlineImageAttachmentTransport(profileWithSelectedKey, req.messages, req.profileScope)
+      validateInlineImageAttachmentTransport(
+        profileWithSelectedKey,
+        req.messages,
+        req.profileScope,
+        req.apiMode
+      )
     }
     if (modelUse === 'video') {
       validateVideoImageAttachmentTransport(profileWithSelectedKey, req.messages)
     }
     const cli =
       extensionCli ??
-      cliFromProfile(profileWithSelectedKey, {
-        fetchImpl: this.getFetchImpl()
-      })
+      cliFromProfile(
+        {
+          ...profileWithSelectedKey,
+          ...(req.apiMode ? { api_mode: req.apiMode } : {}),
+          ...(req.apiMode === 'responses' || req.apiMode === 'chat-completions'
+            ? { attachment_transports: profileWithSelectedKey.attachment_transports ?? [] }
+            : {})
+        },
+        {
+          fetchImpl: this.getFetchImpl(),
+          imageAttachmentLoader: this.loadOpenAIReferenceImage,
+          requireImageAttachmentLoader: true
+        }
+      )
     if (!cli) {
       throw new Error('Unable to create an LLM client.')
     }
@@ -1836,6 +2346,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         maxOutputTokens: req.maxOutputTokens,
         temperature: req.temperature,
         imageGenerationOptions: req.imageGenerationOptions,
+        imageRequest: req.imageRequest,
         imageHistoryPolicy: req.imageHistoryPolicy,
         videoGenerationOptions: req.videoGenerationOptions,
         signal: options?.signal,
@@ -1922,12 +2433,90 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       req.conversationId,
       streamAbortController.signal
     )
-    resp.abortReceiver?.onAbort(() => {
-      abortContext.abort(createAbortError('Streaming request aborted by the renderer.'))
-    })
+    const rendererAbortMessage = 'Streaming request aborted by the renderer.'
+    const userCancellationMessage = 'Conversation cancelled by the user.'
+    let streamClosed = false
+    let terminalStarted = false
     let streamedText = ''
     let lastSessionUrl = req.sessionUrl?.trim() || undefined
     const seenAttachmentKeys = new Set<string>()
+
+    const isUserCancellation = (): boolean => {
+      const reason = abortContext.signal?.reason
+      return (
+        !streamClosed &&
+        abortContext.signal?.aborted === true &&
+        reason instanceof Error &&
+        reason.name === 'AbortError' &&
+        reason.message === userCancellationMessage
+      )
+    }
+
+    const canWriteData = (): boolean =>
+      !streamClosed && !terminalStarted && !abortContext.signal?.aborted
+    const canWriteTerminal = (): boolean =>
+      !streamClosed && (!abortContext.signal?.aborted || isUserCancellation())
+
+    const emitData = (data: LLMChatStreamResp): boolean => {
+      if (!canWriteData()) return false
+      resp.onData(data)
+      return canWriteData()
+    }
+
+    const emitCancelledTerminal = (): void => {
+      if (!canWriteTerminal() || terminalStarted) return
+      terminalStarted = true
+      resp.onData({
+        type: 'done',
+        delta: '',
+        done: true,
+        fullContent: streamedText || undefined,
+        content: streamedText || '',
+        finishReason: 'cancelled'
+      })
+    }
+
+    const emitErrorTerminal = (message: string, error?: unknown): void => {
+      if (!canWriteTerminal() || terminalStarted) return
+      terminalStarted = true
+      const diagnostic =
+        error && typeof error === 'object'
+          ? (error as { status?: unknown; statusCode?: unknown; body?: unknown })
+          : undefined
+      const status =
+        typeof diagnostic?.status === 'number'
+          ? diagnostic.status
+          : typeof diagnostic?.statusCode === 'number'
+            ? diagnostic.statusCode
+            : undefined
+      const body = typeof diagnostic?.body === 'string' ? diagnostic.body : undefined
+      const diagnosticFields = {
+        ...(status !== undefined ? { status } : {}),
+        ...(body !== undefined ? { body } : {})
+      }
+      resp.onData({
+        type: 'error',
+        delta: '',
+        done: false,
+        fullContent: streamedText || undefined,
+        content: streamedText || '',
+        error: message,
+        finishReason: 'error',
+        ...diagnosticFields
+      })
+      if (canWriteTerminal()) {
+        resp.onData({
+          type: 'done',
+          delta: '',
+          done: true,
+          fullContent: streamedText || undefined,
+          content: streamedText || '',
+          error: message,
+          finishReason: 'error',
+          ...diagnosticFields
+        })
+      }
+    }
 
     const rememberAttachment = (attachment: ChatAttachment): boolean => {
       const key = `${attachment.type}:${attachment.url}:${attachment.fileName || ''}`
@@ -1938,20 +2527,22 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       return true
     }
 
-    const emitEvent = (event: LLMDeltaEvent): void => {
+    const emitEvent = (event: LLMDeltaEvent): boolean => {
+      if (!canWriteData()) return false
+
       if (event.type === 'text-delta' && event.delta) {
         streamedText += event.delta
       }
 
       if (event.type === 'attachment' && event.attachment) {
-        rememberAttachment(event.attachment)
+        if (!rememberAttachment(event.attachment)) return true
       }
 
       if (event.type === 'session' && event.sessionUrl) {
         lastSessionUrl = event.sessionUrl
       }
 
-      resp.onData({
+      return emitData({
         type: event.type,
         delta: event.delta || '',
         done: false,
@@ -1967,28 +2558,477 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       })
     }
 
+    let cleanupRemoteStream: (() => void) | undefined
+    const remoteStream = async (): Promise<void> => {
+      const remoteConfig = getConfig().remote_llm_server_config
+      const origin = remoteConfig?.server_origin?.trim()
+      const accessToken = remoteConfig?.access_token?.trim()
+      if (!origin || !accessToken) {
+        throw new Error('Remote LLM streaming is enabled but the remote server is not configured.')
+      }
+
+      let endpointOrigin: string
+      let trustedRemoteOrigin: string
+      try {
+        const parsedOrigin = new URL(origin)
+        if (
+          !['http:', 'https:'].includes(parsedOrigin.protocol) ||
+          parsedOrigin.username ||
+          parsedOrigin.password ||
+          parsedOrigin.hash
+        ) {
+          throw new Error('only HTTP(S) origins without credentials or fragments are allowed')
+        }
+        endpointOrigin = parsedOrigin.toString()
+        trustedRemoteOrigin = parsedOrigin.origin
+      } catch {
+        throw new Error('Remote LLM streaming server origin is invalid.')
+      }
+
+      let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined
+      const cancelReader = (reader?: ReadableStreamDefaultReader<Uint8Array>): void => {
+        try {
+          if (reader) void reader.cancel().catch(() => undefined)
+        } catch {
+          // Cleanup must still abort the request and release the captured reader.
+        }
+      }
+      const remoteAbortController = new AbortController()
+      const abortRemoteStream = (reason?: unknown): void => {
+        cancelReader(activeReader)
+        if (!remoteAbortController.signal.aborted) remoteAbortController.abort(reason)
+      }
+      const runWithRemoteAbort = async <T>(operation: () => Promise<T>): Promise<T> => {
+        const signal = remoteAbortController.signal
+        throwIfAborted(signal)
+        let onAbort!: () => void
+        const aborted = new Promise<never>((_resolve, reject) => {
+          onAbort = () =>
+            reject(signal.reason || createAbortError('Remote LLM streaming was aborted.'))
+          signal.addEventListener('abort', onAbort, { once: true })
+        })
+        try {
+          const result = await Promise.race([operation(), aborted])
+          throwIfAborted(signal)
+          return result
+        } finally {
+          signal.removeEventListener('abort', onAbort)
+        }
+      }
+      const relayAbort = (): void => {
+        abortRemoteStream(
+          abortContext.signal?.reason || createAbortError('Remote LLM streaming was aborted.')
+        )
+      }
+      const deadlineTimer = setTimeout(
+        () => abortRemoteStream(createAbortError('Remote LLM streaming deadline exceeded.')),
+        REMOTE_STREAM_DEADLINE_MS
+      )
+      abortContext.signal?.addEventListener('abort', relayAbort, { once: true })
+      cleanupRemoteStream = () => {
+        clearTimeout(deadlineTimer)
+        abortContext.signal?.removeEventListener('abort', relayAbort)
+        abortRemoteStream()
+      }
+      let responseBytes = 0
+      let eventCount = 0
+      let textBytes = 0
+      const readResponseBody = async (
+        response: Response,
+        enforceFrameLimit = false
+      ): Promise<string> => {
+        if (!response.body) return ''
+        const reader = response.body.getReader()
+        activeReader = reader
+        const chunks: Uint8Array[] = []
+        let total = 0
+        try {
+          while (true) {
+            const next = await runWithRemoteAbort(() => reader.read())
+            if (next.done) break
+            total += next.value.byteLength
+            responseBytes += next.value.byteLength
+            if (responseBytes > REMOTE_STREAM_MAX_RESPONSE_BYTES) {
+              throw new Error('Remote LLM streaming response exceeded the byte limit.')
+            }
+            chunks.push(next.value)
+          }
+          if (enforceFrameLimit && total > REMOTE_STREAM_MAX_FRAME_BYTES) {
+            throw new Error('Remote LLM streaming frame exceeded the byte limit.')
+          }
+          const bytes = new Uint8Array(total)
+          let offset = 0
+          for (const chunk of chunks) {
+            bytes.set(chunk, offset)
+            offset += chunk.byteLength
+          }
+          return new TextDecoder().decode(bytes)
+        } finally {
+          cancelReader(reader)
+          if (activeReader === reader) activeReader = undefined
+          reader.releaseLock()
+        }
+      }
+
+      const requestBody = JSON.stringify({ ...req, stream: true })
+      if (new TextEncoder().encode(requestBody).byteLength > REMOTE_STREAM_MAX_REQUEST_BYTES) {
+        throw new Error('Remote LLM streaming request exceeded the request byte limit.')
+      }
+      const headers = {
+        Accept: 'text/event-stream, application/x-ndjson, application/json',
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+        'X-MagicPot-Proxy-Token': accessToken,
+        'X-MagicPot-Bot-Secret': accessToken,
+        'X-Bot-Secret': accessToken
+      }
+      let response: Response | undefined
+      let responseBodyText = ''
+      for (const path of REMOTE_STREAM_ENDPOINTS) {
+        response = await runWithRemoteAbort(() => {
+          const pendingResponse = this.getFetchImpl()(new URL(path, endpointOrigin).toString(), {
+            method: 'POST',
+            headers,
+            body: requestBody,
+            signal: remoteAbortController.signal
+          })
+          void pendingResponse.then(
+            (lateResponse) => {
+              if (remoteAbortController.signal.aborted) {
+                void lateResponse.body?.cancel().catch(() => undefined)
+              }
+            },
+            () => undefined
+          )
+          return pendingResponse
+        })
+        if (response.ok) break
+        responseBodyText = await readResponseBody(response)
+        const isLastEndpoint = path === REMOTE_STREAM_ENDPOINTS.at(-1)
+        if (
+          !isLastEndpoint &&
+          [404, 405, 410].includes(response.status) &&
+          !isRemoteContinuationDetail(
+            response.status,
+            responseBodyText,
+            Boolean(req.sessionUrl?.trim())
+          )
+        ) {
+          continue
+        }
+        throw createRemoteUpstreamError(response.status, response.statusText, responseBodyText)
+      }
+      const successfulResponse = response
+      if (!successfulResponse || !successfulResponse.ok) {
+        throw createRemoteUpstreamError(
+          successfulResponse?.status ?? 502,
+          successfulResponse?.statusText ?? 'Bad Gateway',
+          responseBodyText
+        )
+      }
+      const responseBody = async (): Promise<string> => readResponseBody(successfulResponse, true)
+
+      const accountRemoteEvent = (event: LLMChatStreamResp): void => {
+        eventCount += 1
+        if (eventCount > REMOTE_STREAM_MAX_EVENTS) {
+          throw new Error('Remote LLM streaming response exceeded the event limit.')
+        }
+        if (event.type === 'text-delta' && event.delta) {
+          textBytes += new TextEncoder().encode(event.delta).byteLength
+          if (textBytes > REMOTE_STREAM_MAX_TEXT_BYTES) {
+            throw new Error('Remote LLM streaming response exceeded the text limit.')
+          }
+        }
+      }
+
+      const emitRemoteEvent = (event: LLMChatStreamResp, trustedRemoteOrigin?: string): boolean => {
+        if (!isPlainRecord(event) || typeof event.type !== 'string') {
+          throw new Error('Remote LLM streaming response contained an invalid event.')
+        }
+        const safeEvent =
+          event.type === 'error' && event.error
+            ? { ...event, error: boundRemoteErrorDetail(event.error) }
+            : event
+        assertSafeRemoteEventUrls(safeEvent, trustedRemoteOrigin)
+        accountRemoteEvent(safeEvent)
+        if (!['text-delta', 'attachment', 'session', 'done', 'error'].includes(safeEvent.type)) {
+          throw new Error(
+            `Remote LLM streaming response contained an unknown event type: ${safeEvent.type}`
+          )
+        }
+        if (safeEvent.type === 'text-delta' && safeEvent.delta) streamedText += safeEvent.delta
+        if (safeEvent.type === 'attachment' && safeEvent.attachment) {
+          if (!rememberAttachment(safeEvent.attachment)) return true
+        }
+        if (safeEvent.type === 'session' && safeEvent.sessionUrl)
+          lastSessionUrl = safeEvent.sessionUrl
+        if (safeEvent.type === 'done') {
+          if (terminalStarted || !canWriteData()) return false
+          terminalStarted = true
+          resp.onData({ ...safeEvent, type: 'done', done: true })
+          return false
+        }
+        if (safeEvent.type === 'error') {
+          if (terminalStarted || !canWriteData()) return false
+          if (!emitData(safeEvent)) return false
+          terminalStarted = true
+          resp.onData({
+            type: 'done',
+            delta: '',
+            done: true,
+            fullContent: streamedText || undefined,
+            content: streamedText || '',
+            ...(safeEvent.attachments ? { attachments: safeEvent.attachments } : {}),
+            ...(safeEvent.imageUrl ? { imageUrl: safeEvent.imageUrl } : {}),
+            ...(safeEvent.sessionUrl ? { sessionUrl: safeEvent.sessionUrl } : {}),
+            ...(safeEvent.ocrResult ? { ocrResult: safeEvent.ocrResult } : {}),
+            error: safeEvent.error || 'Remote LLM streaming request failed.',
+            finishReason: 'error'
+          })
+          return false
+        }
+        return emitData(safeEvent)
+      }
+
+      const emitRemoteResponse = (result: LLMChatResp, trustedRemoteOrigin?: string): void => {
+        assertSafeRemoteOutputUrl(result.imageUrl, 'image', trustedRemoteOrigin)
+        assertSafeRemoteSessionRef(result.sessionUrl, trustedRemoteOrigin)
+        assertSafeRemoteOcrResult(result.ocrResult, 'response', trustedRemoteOrigin)
+        for (const attachment of result.attachments || []) {
+          assertSafeRemoteAttachment(attachment, 'response', trustedRemoteOrigin)
+        }
+        if (result.content) {
+          emitRemoteEvent(
+            {
+              type: 'text-delta',
+              delta: result.content,
+              done: false,
+              fullContent: result.content,
+              content: result.content,
+              ...(result.usage ? { usage: result.usage } : {})
+            },
+            trustedRemoteOrigin
+          )
+        }
+        for (const attachment of result.attachments || []) {
+          emitRemoteEvent(
+            {
+              type: 'attachment',
+              delta: '',
+              done: false,
+              fullContent: streamedText || undefined,
+              attachment
+            },
+            trustedRemoteOrigin
+          )
+        }
+        if (result.sessionUrl && result.sessionUrl !== lastSessionUrl) {
+          emitRemoteEvent(
+            {
+              type: 'session',
+              delta: '',
+              done: false,
+              fullContent: streamedText || undefined,
+              sessionUrl: result.sessionUrl
+            },
+            trustedRemoteOrigin
+          )
+        }
+        emitRemoteEvent(
+          {
+            type: 'done',
+            delta: '',
+            done: true,
+            fullContent: streamedText || undefined,
+            content: result.content,
+            ...(result.imageUrl ? { imageUrl: result.imageUrl } : {}),
+            ...(result.attachments ? { attachments: result.attachments } : {}),
+            ...(result.sessionUrl ? { sessionUrl: result.sessionUrl } : {}),
+            ...(result.ocrResult ? { ocrResult: result.ocrResult } : {}),
+            ...(result.finishReason
+              ? { finishReason: result.finishReason }
+              : { finishReason: 'stop' }),
+            ...(result.metadata ? { metadata: result.metadata } : {}),
+            ...(result.usage ? { usage: result.usage } : {})
+          },
+          trustedRemoteOrigin
+        )
+      }
+
+      const fallbackHeader =
+        response!.headers.get('X-MagicPot-Stream-Fallback')?.trim().toLowerCase() ===
+        'non-stream-json'
+      const contentType = response!.headers.get('content-type')?.toLowerCase() || ''
+      const isNdjson = contentType.includes('application/x-ndjson')
+      const isSse = contentType.includes('text/event-stream')
+      if (fallbackHeader || contentType.includes('application/json')) {
+        const body = await responseBody()
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(body)
+        } catch {
+          throw new Error(
+            `Remote LLM streaming response was not valid JSON: ${boundRemoteErrorDetail(body)}`
+          )
+        }
+        if (isPlainRecord(parsed) && typeof parsed.type === 'string') {
+          emitRemoteEvent(parsed as unknown as LLMChatStreamResp, trustedRemoteOrigin)
+        } else if (isPlainRecord(parsed)) {
+          emitRemoteResponse(parsed as unknown as LLMChatResp, trustedRemoteOrigin)
+        } else {
+          throw new Error('Remote LLM streaming response was not an object.')
+        }
+        return
+      }
+
+      if (!successfulResponse.body) throw new Error('Remote LLM streaming response had no body.')
+      if (!isSse && !isNdjson) {
+        throw new Error(
+          `Remote LLM streaming response has unsupported content type: ${contentType || '(missing)'}`
+        )
+      }
+      const reader = successfulResponse.body.getReader()
+      activeReader = reader
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let dataLines: string[] = []
+      let pendingFrameBytes = 0
+      let sawDone = false
+      const dispatch = (payload: string): void => {
+        const normalizedPayload = payload.trim()
+        if (!normalizedPayload) return
+        if (normalizedPayload === '[DONE]') {
+          if (!terminalStarted && canWriteData()) {
+            terminalStarted = true
+            resp.onData({
+              type: 'done',
+              delta: '',
+              done: true,
+              fullContent: streamedText || undefined,
+              content: streamedText,
+              finishReason: 'stop'
+            })
+          }
+          sawDone = true
+          return
+        }
+        if (
+          new TextEncoder().encode(normalizedPayload).byteLength > REMOTE_STREAM_MAX_FRAME_BYTES
+        ) {
+          throw new Error('Remote LLM streaming frame exceeded the byte limit.')
+        }
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(normalizedPayload)
+        } catch {
+          throw new Error(
+            `Remote LLM streaming ${isNdjson ? 'NDJSON record' : 'SSE frame'} was not valid JSON: ${boundRemoteErrorDetail(normalizedPayload)}`
+          )
+        }
+        const keepReading = emitRemoteEvent(parsed as LLMChatStreamResp, trustedRemoteOrigin)
+        if (!keepReading) sawDone = terminalStarted
+      }
+      const flushSseFrame = (): void => {
+        if (dataLines.length === 0) return
+        const payload = dataLines.join('\n')
+        dataLines = []
+        pendingFrameBytes = 0
+        dispatch(payload)
+      }
+      const processChunk = (chunk: string): void => {
+        buffer += chunk
+        const lines = buffer.split(/\n/)
+        buffer = lines.pop() || ''
+        if (new TextEncoder().encode(buffer).byteLength > REMOTE_STREAM_MAX_FRAME_BYTES) {
+          throw new Error('Remote LLM streaming frame exceeded the byte limit.')
+        }
+        for (const line of lines) {
+          if (sawDone || streamClosed || remoteAbortController.signal.aborted) break
+          const normalized = line.endsWith('\r') ? line.slice(0, -1) : line
+          if (isNdjson) {
+            if (normalized.trim()) dispatch(normalized)
+          } else if (normalized === '') {
+            flushSseFrame()
+          } else if (normalized.startsWith('data:')) {
+            const data = normalized.slice(5).trimStart()
+            pendingFrameBytes += new TextEncoder().encode(data).byteLength
+            if (dataLines.length > 0) pendingFrameBytes += 1
+            if (pendingFrameBytes > REMOTE_STREAM_MAX_FRAME_BYTES) {
+              throw new Error('Remote LLM streaming frame exceeded the byte limit.')
+            }
+            dataLines.push(data)
+          }
+        }
+      }
+      try {
+        while (true) {
+          const next = await runWithRemoteAbort(() => reader.read())
+          if (next.done) break
+          responseBytes += next.value.byteLength
+          if (responseBytes > REMOTE_STREAM_MAX_RESPONSE_BYTES) {
+            throw new Error('Remote LLM streaming response exceeded the byte limit.')
+          }
+          processChunk(decoder.decode(next.value, { stream: true }))
+          if (sawDone || streamClosed || abortContext.signal?.aborted) return
+        }
+        processChunk(decoder.decode())
+        if (buffer.trim()) processChunk('\n')
+        if (isSse) flushSseFrame()
+        if (!sawDone && !streamClosed && !abortContext.signal?.aborted) {
+          throw new Error('Remote LLM streaming response ended without a done event.')
+        }
+      } finally {
+        cancelReader(reader)
+        if (activeReader === reader) activeReader = undefined
+        reader.releaseLock()
+      }
+    }
+
     try {
+      const closeRenderer = () => {
+        streamClosed = true
+        cleanupRemoteStream?.()
+        abortContext.abort(createAbortError(rendererAbortMessage))
+      }
+      resp.abortReceiver?.onAbort(closeRenderer)
+      if (resp.abortReceiver?.isAborted()) closeRenderer()
+      if (streamClosed) return
+      if (getConfig().use_remote_llm) {
+        await remoteStream()
+        return
+      }
+
       const result = await this.chatViaAPI(req, {
         signal: abortContext.signal,
         onDelta: emitEvent
       })
+
+      if (streamClosed) return
+      if (isUserCancellation()) {
+        emitCancelledTerminal()
+        return
+      }
+      if (abortContext.signal?.aborted) return
+
       const firstAttachmentUrl = result.attachments?.[0]?.url || ''
-      const fallbackContent = result.content || result.imageUrl || firstAttachmentUrl || ''
       const finalFullContent =
         result.content || streamedText || result.imageUrl || firstAttachmentUrl || undefined
 
-      if (!streamedText && fallbackContent) {
-        streamedText = fallbackContent
-        resp.onData({
-          type: 'text-delta',
-          delta: fallbackContent,
-          done: false,
-          fullContent: fallbackContent,
-          content: result.content,
-          ...(result.imageUrl ? { imageUrl: result.imageUrl } : {}),
-          ...(result.attachments ? { attachments: result.attachments } : {}),
-          ...(result.usage ? { usage: result.usage } : {})
-        })
+      if (!streamedText && result.content) {
+        streamedText = result.content
+        if (
+          !emitData({
+            type: 'text-delta',
+            delta: result.content,
+            done: false,
+            fullContent: result.content,
+            content: result.content,
+            ...(result.usage ? { usage: result.usage } : {})
+          })
+        ) {
+          if (isUserCancellation()) emitCancelledTerminal()
+          return
+        }
       }
 
       for (const attachment of result.attachments || []) {
@@ -1996,26 +3036,41 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           continue
         }
 
-        resp.onData({
-          type: 'attachment',
-          delta: '',
-          done: false,
-          fullContent: finalFullContent,
-          attachment
-        })
+        if (
+          !emitData({
+            type: 'attachment',
+            delta: '',
+            done: false,
+            fullContent: finalFullContent,
+            attachment
+          })
+        ) {
+          if (isUserCancellation()) emitCancelledTerminal()
+          return
+        }
       }
 
       if (result.sessionUrl && result.sessionUrl !== lastSessionUrl) {
         lastSessionUrl = result.sessionUrl
-        resp.onData({
-          type: 'session',
-          delta: '',
-          done: false,
-          fullContent: finalFullContent,
-          sessionUrl: result.sessionUrl
-        })
+        if (
+          !emitData({
+            type: 'session',
+            delta: '',
+            done: false,
+            fullContent: finalFullContent,
+            sessionUrl: result.sessionUrl
+          })
+        ) {
+          if (isUserCancellation()) emitCancelledTerminal()
+          return
+        }
       }
 
+      if (!canWriteData()) {
+        if (isUserCancellation()) emitCancelledTerminal()
+        return
+      }
+      terminalStarted = true
       resp.onData({
         type: 'done',
         delta: '',
@@ -2031,32 +3086,41 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         ...(result.usage ? { usage: result.usage } : {})
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      resp.onData({
-        type: 'error',
-        delta: '',
-        done: false,
-        fullContent: streamedText || undefined,
-        content: streamedText || '',
-        error: message,
-        finishReason: 'error'
-      })
-      resp.onData({
-        type: 'done',
-        delta: '',
-        done: true,
-        fullContent: streamedText || undefined,
-        content: streamedText || '',
-        error: message,
-        finishReason: 'error'
-      })
+      if (streamClosed) return
+      if (isUserCancellation()) {
+        emitCancelledTerminal()
+        return
+      }
+      const message = boundRemoteErrorDetail(error instanceof Error ? error.message : String(error))
+      emitErrorTerminal(message, error)
     } finally {
+      cleanupRemoteStream?.()
+      cleanupRemoteStream = undefined
+      terminalStarted = true
       abortContext.cleanup()
     }
   }
 
-  listProfiles = async (_req: LLMListProfilesReq): Promise<LLMListProfilesResp> => {
-    const config = getConfig()
+  /** Main-process only; deliberately absent from the renderer service definition. No metadata discovery/network. */
+  isProfileRevisionCurrent(profileId: string, revision: string): boolean {
+    try {
+      this.profileRevisions.verify(structuredClone(getConfig()), profileId, revision)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Main-only lifetime subscription. Not registered as renderer IPC or exposed to a host. */
+  onProfileConfigurationChanged(listener: () => void): () => void {
+    return onConfigCommitted(listener)
+  }
+
+  listProfiles = async (req: LLMListProfilesReq): Promise<LLMListProfilesResp> => {
+    const config = structuredClone(getConfig())
+    if (req.comparisonRouting === 'configured' && config.use_remote_llm) {
+      return this.remoteComparisons.list(config)
+    }
     const validProfiles = config.llm_config.api_profiles.filter(isRunnableProfile)
 
     let profiles: LLMListProfilesResp['profiles'] = validProfiles.map((p) => {
@@ -2069,14 +3133,29 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         Boolean(p.is_vision_model)
       const isOcrModel = modelUse === 'ocr' || Boolean(p.is_ocr_model)
       const taggerDescriptor = resolveTaggerRuntimeDescriptor(p)
+      const capabilities = resolveChatProfileCapabilities(p)
 
       return {
         id: p.id,
         model_name: p.model_name,
+        ...resolveRemoteProfileRouting(p),
         deployment: resolveProfileDeployment(p),
         model_use: modelUse,
         is_vision_model: isVisionModel,
         is_ocr_model: isOcrModel,
+        attachment_transports: capabilities.attachmentTransports,
+        ...(capabilities.preferredAttachmentTransport
+          ? { preferred_attachment_transport: capabilities.preferredAttachmentTransport }
+          : {}),
+        supports_session_continuation: capabilities.supportsSessionContinuation,
+        ...(capabilities.maxInputImages !== undefined
+          ? {
+              max_input_images: capabilities.maxInputImages,
+              maxInputImages: capabilities.maxInputImages,
+              max_images: capabilities.maxInputImages,
+              maxImages: capabilities.maxInputImages
+            }
+          : {}),
         ...(p.tagger_provider ? { tagger_provider: p.tagger_provider } : {}),
         ...(p.tagger_endpoint?.trim() ? { tagger_endpoint: p.tagger_endpoint.trim() } : {}),
         ...(p.tagger_runtime_cache_scope
@@ -2102,7 +3181,16 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       }
     }
 
-    return { profiles }
+    return {
+      ...(req.comparisonRouting ? { comparisonDestination: { kind: 'local' as const } } : {}),
+      profiles: profiles.map((profile) => ({
+        ...profile,
+        ...(req.includeConfigurationRevision === true &&
+        (!config.use_remote_llm || req.comparisonRouting === 'local')
+          ? { configurationRevision: this.profileRevisions.create(config, profile.id) }
+          : {})
+      }))
+    }
   }
 
   serverStatus = async (req: LLMServerStatusReq): Promise<LLMServerStatusResp> => {
@@ -2192,100 +3280,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   }
 
   remoteFetch = async (req: LLMRemoteFetchReq): Promise<LLMRemoteFetchResp> => {
-    const https = await import('https')
-    const http = await import('http')
-
-    const { parsedUrl, headers, timeoutMs, resolvedAddress } =
-      await parseAndValidateRemoteFetchRequest(req, getConfig())
-    const isHttps = parsedUrl.protocol === 'https:'
-    const transport = isHttps ? https : http
-    const maxRetries = 3
+    // Register before validation/DNS so cancellation covers the entire bounded operation.
     const abortContext = this.createConversationAbortContext(req.conversationId)
-
-    const doRequest = (attempt: number): Promise<LLMRemoteFetchResp> =>
-      new Promise((resolve, reject) => {
-        throwIfAborted(abortContext.signal)
-        const options: import('https').RequestOptions = {
-          hostname: parsedUrl.hostname,
-          port: parsedUrl.port || (isHttps ? 443 : 80),
-          path: parsedUrl.pathname + parsedUrl.search,
-          method: req.method,
-          headers,
-          timeout: timeoutMs,
-          lookup: (_hostname, _options, callback) => {
-            callback(null, resolvedAddress.address, resolvedAddress.family)
-          }
-        }
-
-        const request = transport.request(options, (res) => {
-          const chunks: Buffer[] = []
-          let receivedBytes = 0
-          res.on('data', (chunk: Buffer) => {
-            receivedBytes += chunk.length
-            if (receivedBytes > MAX_REMOTE_FETCH_RESPONSE_BYTES) {
-              request.destroy(new Error('Remote response is too large.'))
-              return
-            }
-            chunks.push(chunk)
-          })
-          res.on('end', () => {
-            abortContext.signal?.removeEventListener('abort', handleAbort)
-            const body = Buffer.concat(chunks).toString('utf-8')
-            resolve({
-              status: res.statusCode || 500,
-              statusText: res.statusMessage || '',
-              body
-            })
-          })
-        })
-        const handleAbort = () => {
-          request.destroy(createAbortError('Remote request aborted.'))
-        }
-
-        if (abortContext.signal?.aborted) {
-          handleAbort()
-        } else {
-          abortContext.signal?.addEventListener('abort', handleAbort, { once: true })
-        }
-
-        request.on('error', (error) => {
-          abortContext.signal?.removeEventListener('abort', handleAbort)
-          if (abortContext.signal?.aborted) {
-            reject(
-              abortContext.signal.reason instanceof Error
-                ? abortContext.signal.reason
-                : createAbortError('Remote request aborted.')
-            )
-            return
-          }
-          const retryable = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN'].some(
-            (code) => error.message.includes(code)
-          )
-          if (retryable && attempt < maxRetries) {
-            console.warn(
-              '[LLMProxy] remoteFetch retry ' + attempt + '/' + maxRetries + ': ' + error.message
-            )
-            setTimeout(() => doRequest(attempt + 1).then(resolve, reject), 1000 * attempt)
-          } else {
-            console.error('[LLMProxy] remoteFetch failed:', error.message)
-            reject(new Error('Remote request failed: ' + error.message))
-          }
-        })
-
-        request.on('timeout', () => {
-          abortContext.signal?.removeEventListener('abort', handleAbort)
-          request.destroy()
-          reject(new Error('Remote request timed out'))
-        })
-
-        if (req.body) {
-          request.write(req.body)
-        }
-        request.end()
-      })
-
     try {
-      return await doRequest(1)
+      return await executeRemoteFetch(req, getConfig(), abortContext.signal)
     } finally {
       abortContext.cleanup()
     }
