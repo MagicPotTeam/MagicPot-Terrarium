@@ -65,6 +65,17 @@ const VOLCENGINE_VIDEO_MODEL_NAMES = [
   'doubao-seedance-1-0-pro-fast-251015'
 ] as const
 
+export type CodexModelProfileSelection = {
+  profileId: string
+  modelName: string
+}
+export type BuildCodexModelCatalogOptions = {
+  currentModelName?: string | null
+  discoveredModelNames?: readonly (string | ModelCatalogOption | null | undefined)[]
+  observedModelNames?: readonly (string | ModelCatalogOption | null | undefined)[]
+  fallbackModelNames?: readonly string[]
+}
+
 const normalizeCatalogValue = (value: string): string => value.trim()
 
 const toOption = (
@@ -110,7 +121,47 @@ const dedupeOptions = (options: ModelCatalogOption[]): ModelCatalogOption[] => {
   })
 }
 
-export function getSuggestedModelCatalog(options: {
+export const getFallbackCodexModelCatalog = (): ModelCatalogOption[] => []
+
+export const buildCodexModelCatalog = (
+  options: BuildCodexModelCatalogOptions = {}
+): ModelCatalogOption[] =>
+  dedupeOptions([
+    ...toOptions(options.currentModelName ? [options.currentModelName] : []),
+    ...toOptions(options.discoveredModelNames ?? []),
+    ...toOptions(options.observedModelNames ?? []),
+    ...toOptions(options.fallbackModelNames ?? [])
+  ])
+
+export const normalizeCodexModelName = (modelName: string): string =>
+  normalizeCatalogValue(modelName)
+
+export const buildCodexModelProfileId = (profileId: string, modelName: string): string => {
+  const normalizedProfileId = profileId.trim()
+  const normalizedModelName = normalizeCodexModelName(modelName)
+  if (!normalizedModelName) return normalizedProfileId
+  return `${normalizedProfileId}::codex-model::${encodeURIComponent(normalizedModelName)}`
+}
+
+export const parseCodexModelProfileId = (
+  profileId: string | null | undefined
+): CodexModelProfileSelection | null => {
+  const segments = String(profileId || '').split('::')
+  if (segments.length !== 3 || segments[1] !== 'codex-model') return null
+  const baseProfileId = segments[0]?.trim()
+  const encodedModelName = segments[2]?.trim()
+  if (!baseProfileId || !encodedModelName) return null
+  let modelName = encodedModelName
+  try {
+    modelName = decodeURIComponent(encodedModelName)
+  } catch {
+    // Keep the encoded value when a legacy id is malformed.
+  }
+  modelName = normalizeCodexModelName(modelName)
+  return modelName ? { profileId: baseProfileId, modelName } : null
+}
+
+export const getSuggestedModelCatalog = (options: {
   authMode?: string
   deployment: LLMDeployment
   modelUse: LLMModelUse
@@ -118,7 +169,7 @@ export function getSuggestedModelCatalog(options: {
   codexCurrentModelName?: string | null
   codexDiscoveredModelNames?: readonly (string | ModelCatalogOption | null | undefined)[]
   codexObservedModelNames?: readonly (string | ModelCatalogOption | null | undefined)[]
-}): ModelCatalogOption[] {
+}): ModelCatalogOption[] => {
   for (const extension of sharedHostExtensionApiV1.llmProfiles) {
     const catalog = extension.buildModelCatalog?.({
       authMode: options.authMode,
@@ -129,9 +180,16 @@ export function getSuggestedModelCatalog(options: {
       discoveredModelNames: options.codexDiscoveredModelNames,
       observedModelNames: options.codexObservedModelNames
     })
-    if (catalog) {
-      return catalog
-    }
+    if (catalog) return catalog
+  }
+
+  if (options.authMode === 'codex_oauth') {
+    return buildCodexModelCatalog({
+      currentModelName: options.codexCurrentModelName,
+      discoveredModelNames: options.codexDiscoveredModelNames,
+      observedModelNames: options.codexObservedModelNames,
+      fallbackModelNames: []
+    })
   }
 
   if (options.provider === 'openai') {

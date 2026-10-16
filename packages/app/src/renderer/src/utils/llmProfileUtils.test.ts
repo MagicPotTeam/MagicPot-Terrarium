@@ -1,15 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
+import { buildCodexModelProfileId } from '@shared/llm/modelCatalog'
 import {
   buildRemoteLlmServerErrorMessage,
   buildRemoteLlmServerHeaders,
   buildChatAvailableProfiles,
   getProfileDisplayName,
+  isChatProfileDiscoveryCandidate,
   getRemoteLlmServerAccessToken,
   getRemoteLlmServerOrigin,
+  disconnectExternalProfile,
   normalizeRemoteLlmProfiles,
   resolveAvailableChatProfileId,
-  resolveCompositeLlmProfile
+  stripProviderMetadataProfile,
+  stripExternalAuthProfile,
+  upsertLlmProfile
 } from './llmProfileUtils'
 
 const createConfig = (): Config => ({
@@ -29,35 +34,17 @@ const createConfig = (): Config => ({
   }
 })
 
-describe('resolveCompositeLlmProfile', () => {
-  it('uses base profile capabilities while preserving the selected model variant', () => {
-    const resolved = resolveCompositeLlmProfile(
-      {
-        id: 'codex-base::codex-model::gpt-5.6-sol',
-        base_profile_id: 'codex-base',
-        model_name: 'gpt-5.6-sol'
-      },
-      [
-        {
-          id: 'codex-base',
-          model_name: 'gpt-5.5',
-          auth_mode: 'codex_oauth',
-          call_type: 'codex'
-        }
-      ]
-    )
-
-    expect(resolved).toMatchObject({
-      id: 'codex-base::codex-model::gpt-5.6-sol',
-      base_profile_id: 'codex-base',
-      model_name: 'gpt-5.6-sol',
-      auth_mode: 'codex_oauth',
-      call_type: 'codex'
-    })
-  })
-})
-
 describe('buildChatAvailableProfiles', () => {
+  it('keeps generic profiles out of discovery unless an extension claims them', () => {
+    const profile: LLMAPIProfile = {
+      id: 'openai-profile',
+      model_name: '',
+      base_url: 'https://api.openai.com/v1',
+      api_key: 'sk-test'
+    }
+    expect(isChatProfileDiscoveryCandidate(profile)).toBe(false)
+  })
+
   it('keeps only configured agent profiles even when Tencent credentials are configured', () => {
     const localProfile: LLMAPIProfile = {
       id: 'gemini',
@@ -132,6 +119,67 @@ describe('buildChatAvailableProfiles', () => {
     expect(buildChatAvailableProfiles(config, [])).toEqual([localProfile])
   })
 
+  it('expands Codex OAuth profiles from the same discovered model catalog as CLIProxyAPI', () => {
+    const config = createConfig()
+    config.use_remote_llm = false
+    config.llm_config.api_profiles = [
+      {
+        id: 'codex-profile',
+        model_name: '',
+        base_url: 'https://api.openai.com/v1',
+        api_key: '',
+        auth_mode: 'codex_oauth'
+      }
+    ]
+
+    expect(
+      buildChatAvailableProfiles(config, [], {
+        'codex-profile': ['gpt-5.6-sol', 'gpt-5.5', 'gpt-5.6-sol']
+      }).map((profile) => ({
+        id: profile.id,
+        model_name: profile.model_name
+      }))
+    ).toEqual([
+      {
+        id: buildCodexModelProfileId('codex-profile', 'gpt-5.6-sol'),
+        model_name: 'gpt-5.6-sol'
+      },
+      {
+        id: buildCodexModelProfileId('codex-profile', 'gpt-5.5'),
+        model_name: 'gpt-5.5'
+      }
+    ])
+  })
+
+  it('expands CLIProxyAPI/Codex profiles from discovered endpoint models', () => {
+    const config = createConfig()
+    config.use_remote_llm = false
+    config.llm_config.api_profiles = [
+      {
+        id: 'cli-proxy',
+        model_name: '',
+        base_url: 'https://example.test/v1',
+        api_key: 'secret',
+        call_type: 'cliproxyapi'
+      }
+    ]
+
+    expect(
+      buildChatAvailableProfiles(config, [], {
+        'cli-proxy': ['gpt-5.6-custom-a', 'gpt-5.5', 'gpt-5.6-custom-a']
+      }).map((profile) => ({ id: profile.id, model_name: profile.model_name }))
+    ).toEqual([
+      {
+        id: buildCodexModelProfileId('cli-proxy', 'gpt-5.6-custom-a'),
+        model_name: 'gpt-5.6-custom-a'
+      },
+      {
+        id: buildCodexModelProfileId('cli-proxy', 'gpt-5.5'),
+        model_name: 'gpt-5.5'
+      }
+    ])
+  })
+
   it('keeps remote profiles', () => {
     const config = createConfig()
     config.use_remote_llm = true
@@ -144,6 +192,69 @@ describe('buildChatAvailableProfiles', () => {
 })
 
 describe('llmProfileUtils helpers', () => {
+  it('upserts a matching profile without mutating the source array', () => {
+    const original: LLMAPIProfile[] = [
+      { id: 'first', model_name: 'one', base_url: '', api_key: '' },
+      { id: 'second', model_name: 'two', base_url: '', api_key: '' }
+    ]
+    const replacement: LLMAPIProfile = {
+      id: 'second',
+      model_name: 'updated',
+      base_url: 'https://example.test/v1',
+      api_key: 'key'
+    }
+
+    const result = upsertLlmProfile(original, 'second', replacement)
+
+    expect(result).toEqual([original[0], replacement])
+    expect(result).not.toBe(original)
+    expect(original[1].model_name).toBe('two')
+  })
+
+  it('strips external auth and provider metadata without mutating profiles', () => {
+    const profile: LLMAPIProfile = {
+      id: 'codex',
+      model_name: 'gpt-5.4',
+      base_url: 'https://api.openai.com/v1',
+      api_key: 'secret',
+      auth_mode: 'codex_oauth',
+      auth_account_email: 'user@example.test',
+      auth_connected_at: '2026-07-11T00:00:00.000Z',
+      codex_fast_mode: true
+    }
+
+    expect(stripExternalAuthProfile(profile)).not.toHaveProperty('auth_mode')
+    expect(stripProviderMetadataProfile(profile)).not.toHaveProperty('codex_fast_mode')
+    expect(profile).toMatchObject({ auth_mode: 'codex_oauth', codex_fast_mode: true })
+  })
+
+  it('disconnects Codex OAuth profiles and clears all reusable credentials', () => {
+    const profile: LLMAPIProfile = {
+      id: 'codex',
+      model_name: 'gpt-5.4',
+      base_url: 'https://api.openai.com/v1',
+      api_key: 'secret',
+      api_secret: 'secret-2',
+      backup_api_keys: ['backup'],
+      auth_mode: 'codex_oauth',
+      auth_account_email: 'user@example.test',
+      auth_connected_at: '2026-07-11T00:00:00.000Z',
+      codex_fast_mode: true,
+      provider: 'openai'
+    }
+
+    expect(disconnectExternalProfile(profile)).toEqual({
+      id: 'codex',
+      model_name: 'gpt-5.4',
+      base_url: 'https://api.openai.com/v1',
+      api_key: '',
+      api_secret: undefined,
+      backup_api_keys: undefined,
+      provider: 'openai'
+    })
+    expect(profile.api_key).toBe('secret')
+  })
+
   it('reads the remote server origin with a safe default', () => {
     expect(getRemoteLlmServerOrigin(undefined)).toBe('http://localhost:3721')
     expect(getRemoteLlmServerOrigin(createConfig())).toBe('http://127.0.0.1:3721')
@@ -159,7 +270,7 @@ describe('llmProfileUtils helpers', () => {
     expect(getRemoteLlmServerAccessToken(config)).toBe('proxy-secret')
   })
 
-  it('injects current and legacy proxy tokens for remote server requests when configured', () => {
+  it('injects supported auth token headers for remote server requests when configured', () => {
     const config = createConfig()
     config.remote_llm_server_config.access_token = 'proxy-secret'
 
@@ -186,23 +297,6 @@ describe('llmProfileUtils helpers', () => {
       })
     ).toEqual({
       Authorization: 'Bearer existing-token'
-    })
-    expect(
-      buildRemoteLlmServerHeaders(config, {
-        'X-Bot-Secret': 'legacy-token'
-      })
-    ).toEqual({
-      'X-Bot-Secret': 'legacy-token'
-    })
-    expect(
-      buildRemoteLlmServerHeaders(config, {
-        Authorization: ''
-      })
-    ).toEqual({
-      Authorization: 'Bearer proxy-secret',
-      'X-MagicPot-Proxy-Token': 'proxy-secret',
-      'X-MagicPot-Bot-Secret': 'proxy-secret',
-      'X-Bot-Secret': 'proxy-secret'
     })
   })
 
@@ -284,46 +378,30 @@ describe('llmProfileUtils helpers', () => {
     expect(resolveAvailableChatProfileId([], 'gemini-pro')).toBe('gemini-pro')
   })
 
-  it('keeps selected model IDs while discovery is pending or the model is no longer listed', () => {
-    const selected = 'channel::codex-model::Team%2FModel'
-    expect(resolveAvailableChatProfileId([], selected)).toBe(selected)
-    expect(resolveAvailableChatProfileId([{ id: 'channel' }], selected)).toBe(selected)
-    expect(resolveAvailableChatProfileId([{ id: 'channel::codex-model::other' }], selected)).toBe(
-      selected
-    )
-    expect(resolveAvailableChatProfileId([{ id: 'other-channel' }], selected)).toBeNull()
-  })
-
-  it('prefers the saved channel model over the first scanned model', () => {
-    const available = [{ id: 'channel::codex-model::A' }, { id: 'channel::codex-model::B' }]
-    const configured = [{ id: 'channel', model_name: 'B' }]
-    expect(resolveAvailableChatProfileId(available, 'channel', configured)).toBe(
-      'channel::codex-model::B'
-    )
-    expect(resolveAvailableChatProfileId(available, 'channel::codex-model::A', configured)).toBe(
-      'channel::codex-model::A'
-    )
+  it('limits discovery to runnable Codex or CLIProxyAPI and retains a restored catalog model only for its configured base', () => {
+    const ordinary: LLMAPIProfile = {
+      id: 'ordinary',
+      model_name: 'model',
+      base_url: 'https://example.test',
+      api_key: 'synthetic'
+    }
+    const codex: LLMAPIProfile = {
+      ...ordinary,
+      id: 'codex',
+      base_url: 'https://api.openai.com/v1',
+      auth_mode: 'codex_oauth',
+      api_key: ''
+    }
+    expect(isChatProfileDiscoveryCandidate(ordinary)).toBe(false)
+    expect(isChatProfileDiscoveryCandidate(codex)).toBe(true)
+    expect(isChatProfileDiscoveryCandidate({ ...ordinary, call_type: 'cliproxyapi' })).toBe(true)
+    const selected = buildCodexModelProfileId('codex', 'owned-unlisted')
+    expect(resolveAvailableChatProfileId([{ id: 'codex' }], selected, [codex])).toBe(selected)
     expect(
-      resolveAvailableChatProfileId(available, 'channel', [{ id: 'channel', model_name: '' }])
-    ).toBe('channel::codex-model::A')
-  })
-
-  it('keeps case-sensitive scanned aliases distinct', () => {
-    const config = createConfig()
-    config.llm_config.api_profiles = [
-      {
-        id: 'channel',
-        model_name: '',
-        base_url: 'https://proxy.example/v1',
-        api_key: 'test',
-        call_type: 'cliproxyapi'
-      }
-    ]
-    expect(
-      buildChatAvailableProfiles(config, [], {
-        channel: ['Team/Model', 'team/model', 'Team/Model']
-      }).map((profile) => profile.model_name)
-    ).toEqual(['Team/Model', 'team/model'])
+      resolveAvailableChatProfileId([{ id: 'codex' }], selected, [
+        { ...codex, auth_mode: 'api_key' }
+      ])
+    ).toBe('codex')
   })
 
   it('normalizes composite ids against the available profile list', () => {
@@ -332,5 +410,11 @@ describe('llmProfileUtils helpers', () => {
       resolveAvailableChatProfileId([{ id: 'foo' }, { id: 'foo::variant' }], 'foo::variant')
     ).toBe('foo::variant')
     expect(resolveAvailableChatProfileId([{ id: 'foo' }], 'bar')).toBeNull()
+  })
+
+  it('preserves Codex virtual profile ids while profiles are still loading', () => {
+    const profileId = buildCodexModelProfileId('codex-profile', 'gpt-5.4')
+
+    expect(resolveAvailableChatProfileId([], profileId)).toBe(profileId)
   })
 })

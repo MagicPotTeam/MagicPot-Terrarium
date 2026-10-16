@@ -1,7 +1,8 @@
 import type { Config, LLMAPIProfile } from '@shared/config/config'
 import { getBaseProfileId, HUNYUAN_3D_PROFILE_ID } from '@renderer/pages/ChatPage/chatPageShared'
-import { isRunnableProfile } from '@shared/llm'
-
+import { isLocalBaseUrl, isRunnableProfile } from '@shared/llm'
+import { rendererHostExtensionApiV1 } from '@renderer/extensions/generatedRegistry'
+import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 export function resolveCompositeLlmProfile<
   TListed extends { id: string; base_profile_id?: string; model_name?: string },
   TConfigured extends { id: string }
@@ -20,46 +21,111 @@ export function resolveCompositeLlmProfile<
 
 export const DEFAULT_REMOTE_LLM_SERVER_ORIGIN = 'http://localhost:3721'
 
-export const isChatProfileDiscoveryCandidate = (profile: LLMAPIProfile): boolean => {
-  if (isRunnableProfile(profile)) {
-    return true
+const isConfiguredLocalProfile = (profile: LLMAPIProfile): boolean =>
+  profile.call_type === 'local' ||
+  profile.deployment === 'local' ||
+  (isLocalBaseUrl(profile.base_url || '') && !profile.api_key?.trim())
+
+export const upsertLlmProfile = (
+  profiles: LLMAPIProfile[],
+  profileId: string,
+  nextProfile: LLMAPIProfile
+): LLMAPIProfile[] => profiles.map((profile) => (profile.id === profileId ? nextProfile : profile))
+
+export const stripExternalAuthProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
+  for (const extension of sharedHostExtensionApiV1.llmProfiles) {
+    const resolved = extension.stripExternalAuthProfile?.(profile)
+    if (resolved !== undefined) return resolved
   }
 
-  // OAuth and proxy-backed channels can discover their actual model before a
-  // concrete model name or API key is available to the generic profile check.
-  return (
-    Boolean(profile.base_url?.trim()) &&
-    (profile.auth_mode === 'codex_oauth' ||
-      profile.call_type === 'codex' ||
-      profile.call_type === 'cliproxyapi')
-  )
+  const {
+    auth_mode: _authMode,
+    auth_account_email: _authAccountEmail,
+    auth_connected_at: _authConnectedAt,
+    ...nextProfile
+  } = profile
+  return nextProfile
 }
 
-const isConfiguredLocalProfile = isChatProfileDiscoveryCandidate
+export const disconnectExternalProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
+  for (const extension of sharedHostExtensionApiV1.llmProfiles) {
+    const resolved = extension.disconnectExternalProfile?.(profile)
+    if (resolved !== undefined) return resolved
+  }
 
-const buildDiscoveredModelProfileId = (profileId: string, modelName: string): string =>
-  `${profileId.trim()}::codex-model::${encodeURIComponent(modelName.trim())}`
+  return {
+    ...stripProviderMetadataProfile(stripExternalAuthProfile(profile)),
+    api_key: '',
+    api_secret: undefined,
+    backup_api_keys: undefined
+  }
+}
+
+export const stripProviderMetadataProfile = (profile: LLMAPIProfile): LLMAPIProfile => {
+  for (const extension of sharedHostExtensionApiV1.llmProfiles) {
+    const resolved = extension.stripProviderMetadataProfile?.(profile)
+    if (resolved !== undefined) return resolved
+  }
+
+  const { codex_fast_mode: _codexFastMode, ...nextProfile } = profile
+  return nextProfile
+}
+
+const isCompositeModelProfileId = (profileId: string | null | undefined): boolean => {
+  const segments = String(profileId || '').split('::')
+  return segments.length === 3 && segments[1] === 'codex-model' && Boolean(segments[2]?.trim())
+}
+
+export const isChatProfileDiscoveryCandidate = (profile: LLMAPIProfile): boolean => {
+  const isOrdinaryProfile =
+    profile.auth_mode !== 'codex_oauth' &&
+    profile.call_type !== 'codex' &&
+    profile.call_type !== 'cliproxyapi'
+
+  if (isOrdinaryProfile) {
+    return rendererHostExtensionApiV1.chat?.discoverModelNames !== undefined
+  }
+
+  for (const extension of sharedHostExtensionApiV1.llmProfiles) {
+    const resolved = extension.isChatProfileDiscoveryCandidate?.(profile)
+    if (resolved !== undefined) return resolved
+  }
+
+  return Boolean(profile.base_url?.trim())
+}
+const withProfileDisplayName = (profile: LLMAPIProfile): LLMAPIProfile =>
+  profile.call_type === 'cliproxyapi' && !profile.model_name.trim()
+    ? { ...profile, model_name: 'CLIProxyAPI/Codex' }
+    : profile
 
 const expandDiscoveredModelProfile = (
   profile: LLMAPIProfile,
   discoveredModelNames: readonly string[] = []
 ): LLMAPIProfile[] => {
-  if (discoveredModelNames.length === 0) {
-    return [profile]
+  for (const extension of sharedHostExtensionApiV1.llmProfiles) {
+    const resolved = extension.expandChatModelProfiles?.(profile, discoveredModelNames)
+    if (resolved !== undefined) return resolved
   }
+
+  if (discoveredModelNames.length === 0) return [profile]
+  const isCodexDiscoveryProfile =
+    profile.auth_mode === 'codex_oauth' ||
+    profile.call_type === 'codex' ||
+    profile.call_type === 'cliproxyapi'
+  if (!isCodexDiscoveryProfile) return [profile]
 
   const seen = new Set<string>()
   return discoveredModelNames
     .map((modelName) => modelName.trim())
     .filter((modelName) => {
-      const key = modelName
+      const key = modelName.toLowerCase()
       if (!key || seen.has(key)) return false
       seen.add(key)
       return true
     })
     .map((modelName) => ({
       ...profile,
-      id: buildDiscoveredModelProfileId(profile.id, modelName),
+      id: `${profile.id}::codex-model::${encodeURIComponent(modelName)}`,
       model_name: modelName
     }))
 }
@@ -115,6 +181,13 @@ const cleanRemoteProfileString = (value: unknown): string | undefined => {
 
   const normalized = String(value).trim()
   return normalized || undefined
+}
+
+const cleanRemoteProfileNumber = (value: unknown): number | undefined => {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    return undefined
+  }
+  return value
 }
 
 const collectRemoteProfileCandidatesFromMap = (value: Record<string, unknown>): unknown[] =>
@@ -179,7 +252,7 @@ const normalizeRemoteProfile = (profile: unknown): LLMAPIProfile | null => {
     ) || id
 
   const passthroughProfile = { ...profile }
-  for (const aliasKey of [
+  for (const key of [
     'profileId',
     'profile_id',
     'modelName',
@@ -190,7 +263,7 @@ const normalizeRemoteProfile = (profile: unknown): LLMAPIProfile | null => {
     'baseUrl',
     'apiKey'
   ]) {
-    delete passthroughProfile[aliasKey]
+    delete passthroughProfile[key]
   }
 
   return {
@@ -198,7 +271,31 @@ const normalizeRemoteProfile = (profile: unknown): LLMAPIProfile | null => {
     id,
     model_name: modelName,
     base_url: cleanRemoteProfileString(profile.base_url ?? profile.baseUrl) || '',
-    api_key: cleanRemoteProfileString(profile.api_key ?? profile.apiKey) || ''
+    api_key: cleanRemoteProfileString(profile.api_key ?? profile.apiKey) || '',
+    max_input_images: cleanRemoteProfileNumber(
+      profile.max_input_images ?? profile.maxInputImages ?? profile.max_images ?? profile.maxImages
+    ),
+    maxInputImages: cleanRemoteProfileNumber(
+      profile.max_input_images ?? profile.maxInputImages ?? profile.max_images ?? profile.maxImages
+    ),
+    max_images: cleanRemoteProfileNumber(
+      profile.max_input_images ?? profile.maxInputImages ?? profile.max_images ?? profile.maxImages
+    ),
+    maxImages: cleanRemoteProfileNumber(
+      profile.max_input_images ?? profile.maxInputImages ?? profile.max_images ?? profile.maxImages
+    ),
+    supports_session_continuation:
+      typeof profile.supports_session_continuation === 'boolean'
+        ? profile.supports_session_continuation
+        : typeof profile.supportsSessionContinuation === 'boolean'
+          ? profile.supportsSessionContinuation
+          : undefined,
+    supportsSessionContinuation:
+      typeof profile.supportsSessionContinuation === 'boolean'
+        ? profile.supportsSessionContinuation
+        : typeof profile.supports_session_continuation === 'boolean'
+          ? profile.supports_session_continuation
+          : undefined
   } as LLMAPIProfile
 }
 
@@ -226,7 +323,13 @@ const extractRemoteLlmServerErrorDetail = (bodyText?: string): string | undefine
 
   try {
     const parsed = JSON.parse(normalized) as
-      { error?: unknown; message?: unknown; detail?: unknown } | null | undefined
+      | {
+          error?: unknown
+          message?: unknown
+          detail?: unknown
+        }
+      | null
+      | undefined
     const detail = [parsed?.error, parsed?.message, parsed?.detail].find(
       (value): value is string => typeof value === 'string' && value.trim().length > 0
     )
@@ -256,21 +359,37 @@ export const buildRemoteLlmServerErrorMessage = (
 export const buildChatAvailableProfiles = (
   config: Config | undefined,
   remoteProfiles: LLMAPIProfile[],
-  discoveredModelsByProfileId: Readonly<Record<string, readonly string[]>> = {}
+  cliProxyModelsByProfileId: Readonly<Record<string, readonly string[]>> = {}
 ): LLMAPIProfile[] => {
   if (config?.use_remote_llm) {
     return remoteProfiles
   }
 
-  return (config?.llm_config?.api_profiles?.filter(isConfiguredLocalProfile) || []).flatMap(
-    (profile) => expandDiscoveredModelProfile(profile, discoveredModelsByProfileId[profile.id])
-  )
+  return (config?.llm_config?.api_profiles || [])
+    .filter((profile) => {
+      const isOrdinaryProfile =
+        profile.auth_mode !== 'codex_oauth' &&
+        profile.call_type !== 'codex' &&
+        profile.call_type !== 'cliproxyapi'
+      if (isOrdinaryProfile && rendererHostExtensionApiV1.chat?.discoverModelNames === undefined) {
+        return true
+      }
+      return (
+        isOrdinaryProfile ||
+        isChatProfileDiscoveryCandidate(profile) ||
+        isConfiguredLocalProfile(profile)
+      )
+    })
+    .flatMap((profile) =>
+      expandDiscoveredModelProfile(profile, cliProxyModelsByProfileId[profile.id])
+    )
+    .map(withProfileDisplayName)
 }
 
 export const resolveAvailableChatProfileId = (
   availableProfiles: Array<Pick<LLMAPIProfile, 'id'>>,
   profileId: string | null | undefined,
-  configuredProfiles: readonly Pick<LLMAPIProfile, 'id' | 'model_name'>[] = []
+  configuredProfiles: Array<Pick<LLMAPIProfile, 'id' | 'call_type' | 'auth_mode'>> = []
 ): string | null => {
   const baseProfileId = getBaseProfileId(profileId)
   if (!baseProfileId) {
@@ -278,30 +397,45 @@ export const resolveAvailableChatProfileId = (
   }
 
   if (availableProfiles.length === 0) {
-    return baseProfileId === HUNYUAN_3D_PROFILE_ID ? null : profileId || baseProfileId
+    if (isCompositeModelProfileId(profileId)) {
+      return profileId || null
+    }
+
+    return baseProfileId === HUNYUAN_3D_PROFILE_ID ? null : baseProfileId
   }
 
   if (profileId && availableProfiles.some((profile) => profile.id === profileId)) {
     return profileId
   }
 
-  const hasBaseProfile = availableProfiles.some(
-    (profile) => getBaseProfileId(profile.id) === baseProfileId
-  )
-  if (hasBaseProfile && profileId?.startsWith(`${baseProfileId}::codex-model::`)) {
-    // Discovery can be pending, stale, or incomplete. Never silently change a saved
-    // thread model; the provider should report if that selected ID is unavailable.
-    return profileId
-  }
-  const configuredModel = configuredProfiles
-    .find((profile) => profile.id === baseProfileId)
-    ?.model_name?.trim()
-  if (
-    hasBaseProfile &&
-    configuredModel &&
-    availableProfiles.some((profile) => profile.id.startsWith(`${baseProfileId}::codex-model::`))
-  ) {
-    return buildDiscoveredModelProfileId(baseProfileId, configuredModel)
+  const virtual = isCompositeModelProfileId(profileId)
+  if (virtual) {
+    const configuredProfile = configuredProfiles.find(
+      (profile) => profile.id === String(profileId || '').split('::')[0]
+    )
+    if (
+      configuredProfile &&
+      (configuredProfile.auth_mode === 'codex_oauth' ||
+        configuredProfile.call_type === 'codex' ||
+        configuredProfile.call_type === 'cliproxyapi')
+    ) {
+      return profileId || null
+    }
+
+    for (const extension of sharedHostExtensionApiV1.llmProfiles) {
+      const configuredProfile = configuredProfiles.find(
+        (profile) => profile.id === String(profileId || '').split('::')[0]
+      )
+      if (configuredProfile && configuredProfile.auth_mode !== 'codex_oauth') {
+        continue
+      }
+      const resolved = extension.resolveChatProfileSelection?.({
+        availableProfiles,
+        configuredProfiles,
+        profileId: profileId || ''
+      })
+      if (resolved !== undefined) return resolved
+    }
   }
 
   const baseProfile = availableProfiles.find((profile) => profile.id === baseProfileId)

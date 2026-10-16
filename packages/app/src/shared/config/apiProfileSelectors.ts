@@ -1,12 +1,15 @@
 import { isRunnableProfile, resolveProfileModelUse } from '@shared/llm'
 import type { Config, LLMAPIProfile } from './config'
+import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
 
 export const getQAppApiProfiles = (config: Config): LLMAPIProfile[] => {
   const pluginProfiles = config.plugin_config?.api_profiles ?? []
-  if (pluginProfiles.length > 0) {
-    return pluginProfiles
-  }
-  return config.llm_config?.api_profiles ?? []
+  const profiles =
+    pluginProfiles.length > 0 ? pluginProfiles : (config.llm_config?.api_profiles ?? [])
+  return sharedHostExtensionApiV1.llmProfiles.reduce(
+    (current, extension) => extension.transformQAppApiProfiles?.(current, config) ?? current,
+    profiles
+  )
 }
 
 export const isConfiguredApiProfile = (profile: LLMAPIProfile): boolean =>
@@ -44,6 +47,10 @@ const isOfficialTripo3DHostname = (hostname: string): boolean =>
   hostnameMatchesDomain(hostname, 'tripo3d.ai') || hostnameMatchesDomain(hostname, 'tripo3d.com')
 
 export const isVisionCapableApiProfile = (profile: LLMAPIProfile): boolean => {
+  for (const extension of sharedHostExtensionApiV1.llmProfiles) {
+    const resolved = extension.isVisionCapableProfile?.(profile)
+    if (resolved !== undefined) return resolved
+  }
   const modelUse = resolveProfileModelUse(profile)
   return (
     Boolean(profile.is_vision_model) ||
