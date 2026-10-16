@@ -257,10 +257,10 @@ const sanitizeRemoteFetchHeaders = (
   return sanitized
 }
 
-export const parseAndValidateRemoteFetchRequest = async (
+export const validateRemoteFetchRequest = (
   req: LLMRemoteFetchReq,
   config: Config
-): Promise<ValidatedRemoteFetchRequest> => {
+): Omit<ValidatedRemoteFetchRequest, 'resolvedAddress'> => {
   const parsedUrl = new URL(req.url)
   if (parsedUrl.protocol !== 'https:') {
     throw new Error('Remote fetch URL must use https.')
@@ -290,6 +290,15 @@ export const parseAndValidateRemoteFetchRequest = async (
     ),
     MAX_REMOTE_FETCH_TIMEOUT_MS
   )
-  const resolvedAddress = await resolveRemoteFetchAddress(parsedUrl.hostname)
-  return { parsedUrl, headers, timeoutMs, resolvedAddress }
+  assertRemoteFetchHostnameIsNotExplicitlyLocal(parsedUrl.hostname)
+  return { parsedUrl, headers, timeoutMs }
+}
+
+export const parseAndValidateRemoteFetchRequest = async (
+  req: LLMRemoteFetchReq,
+  config: Config
+): Promise<ValidatedRemoteFetchRequest> => {
+  const validated = validateRemoteFetchRequest(req, config)
+  const resolvedAddress = await resolveRemoteFetchAddress(validated.parsedUrl.hostname)
+  return { ...validated, resolvedAddress }
 }
