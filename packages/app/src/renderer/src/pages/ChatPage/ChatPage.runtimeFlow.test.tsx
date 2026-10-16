@@ -46,13 +46,14 @@ const hoisted = vi.hoisted(() => ({
     ] as Array<{
       id: string
       model_name: string
-      model_use?: 'chat' | 'agent' | 'multimodal' | 'vision' | 'ocr'
+      model_use?: 'chat' | 'agent' | 'multimodal' | 'vision' | 'ocr' | 'image'
       is_vision_model?: boolean
       is_ocr_model?: boolean
       auth_mode?: string
       call_type?: string
       provider?: string
       deployment?: string
+      api_mode?: 'auto' | 'responses' | 'chat-completions' | 'images'
       context_window_tokens?: number
       context_budget_tokens?: number
       supports_session_continuation?: boolean
@@ -667,6 +668,16 @@ const renderWithProviders = (ui: React.ReactElement) =>
       <ThemeProvider theme={theme}>{ui}</ThemeProvider>
     </MemoryRouter>
   )
+
+const createExpiredContinuationError = (): Error & { status: number; body: string } => {
+  const error = new Error('410 expired session continuation') as Error & {
+    status: number
+    body: string
+  }
+  error.status = 410
+  error.body = JSON.stringify({ error: { code: 'session_expired' } })
+  return error
+}
 
 const renderChatPage = (
   storageScopeOrProps: string | { acceptExternalInput?: boolean; active?: boolean } = 'runtime-flow'
@@ -1998,7 +2009,7 @@ describe('ChatPage runtime workflow integration', () => {
       session.id
     )
     hoisted.requestChatCompletionMock
-      .mockRejectedValueOnce(new Error('410 expired session continuation'))
+      .mockRejectedValueOnce(createExpiredContinuationError())
       .mockResolvedValueOnce({ content: 'recovered' })
 
     renderChatPage()
@@ -2047,10 +2058,12 @@ describe('ChatPage runtime workflow integration', () => {
       session.id
     )
     hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
-    hoisted.requestChatCompletionStreamMock.mockRejectedValueOnce(
-      new Error('410 expired session continuation')
-    )
-    hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: 'stream recovered' })
+    hoisted.requestChatCompletionStreamMock.mockRejectedValueOnce(createExpiredContinuationError())
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce(async (input) => {
+      input.onEvent({ type: 'text-delta', delta: 'stream recovered' })
+      input.onEvent({ type: 'done' })
+      return { result: { content: 'stream recovered' }, response: 'stream recovered' }
+    })
 
     renderChatPage()
     await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
@@ -2059,10 +2072,11 @@ describe('ChatPage runtime workflow integration', () => {
     })
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
 
-    await waitFor(() => expect(hoisted.requestChatCompletionStreamMock).toHaveBeenCalledTimes(1))
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-    expect(hoisted.requestChatCompletionMock.mock.calls[0]?.[0].sessionUrl).toBeUndefined()
-    expect(hoisted.requestChatCompletionMock.mock.calls[0]?.[0].imageHistoryPolicy).toBe('all')
+    await waitFor(() => expect(hoisted.requestChatCompletionStreamMock).toHaveBeenCalledTimes(2))
+    expect(hoisted.requestChatCompletionStreamMock.mock.calls[1]?.[0].sessionUrl).toBeUndefined()
+    expect(hoisted.requestChatCompletionStreamMock.mock.calls[1]?.[0].imageHistoryPolicy).toBe(
+      'all'
+    )
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
@@ -2123,7 +2137,7 @@ describe('ChatPage runtime workflow integration', () => {
       session.id
     )
     hoisted.requestChatCompletionMock
-      .mockRejectedValueOnce(new Error('410 expired session continuation'))
+      .mockRejectedValueOnce(createExpiredContinuationError())
       .mockRejectedValueOnce(new Error('503 recovery unavailable'))
 
     renderChatPage()
@@ -2137,7 +2151,7 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
-  it('blocks a reconstructed request before dispatch when image history exceeds the provider limit', async () => {
+  it('dispatches an 11-image historical request without a local image-count guard', async () => {
     const session: ChatSession = {
       id: 'too-many-history-images',
       title: 'Too many history images',
@@ -2161,12 +2175,15 @@ describe('ChatPage runtime workflow integration', () => {
     })
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
 
-    await waitFor(() => {
-      expect(readCurrentSessionState()?.messages.at(-1)?.content).toContain(
-        'exceeding the supported limit of 10'
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const request = hoisted.requestChatCompletionMock.mock.calls[0]?.[0] as {
+      messages?: ChatMessage[]
+    }
+    expect(
+      request.messages?.flatMap((message) =>
+        (message.attachments || []).filter((attachment) => attachment.type === 'image')
       )
-    })
-    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    ).toHaveLength(11)
   })
 
   it('replays prior successful attachment chunks when no continuation is available', async () => {
@@ -4350,6 +4367,160 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
+  it.each([false, true])(
+    'carries selected remote routing metadata to the request entrypoint (stream wrapper=%s)',
+    async (stream) => {
+      const remoteProfile = {
+        id: 'base-model',
+        model_name: 'Remote opaque model',
+        model_use: 'chat' as const,
+        provider: 'openai',
+        api_mode: 'responses' as const
+      }
+      hoisted.currentConfig.value!.use_remote_llm = true
+      hoisted.currentConfig.value!.llm_config.api_profiles = [
+        {
+          id: 'base-model',
+          model_name: 'Local conflicting image model',
+          base_url: 'https://api.openai.com/v1',
+          api_key: 'fixture-not-a-credential',
+          api_mode: 'images'
+        }
+      ]
+      hoisted.availableProfiles.value = [remoteProfile]
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(stream)
+      hoisted.requestChatCompletionStreamMock.mockResolvedValue({
+        result: { content: 'fixture remote response.' },
+        response: 'fixture remote response.'
+      })
+      const session: ChatSession = {
+        id: 'remote-routing-metadata',
+        title: 'Remote routing metadata',
+        profileId: remoteProfile.id,
+        messages: []
+      }
+      hoisted.storedSessions.value = [session]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        session.id
+      )
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'Send using the selected remote route.' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      const target = stream
+        ? hoisted.requestChatCompletionStreamMock
+        : hoisted.requestChatCompletionMock
+      await waitFor(() => expect(target).toHaveBeenCalledTimes(1))
+      expect(target.mock.calls[0][0]).toMatchObject({
+        profileId: remoteProfile.id,
+        apiMode: 'responses',
+        remoteProfile
+      })
+    }
+  )
+
+  it('dispatches historical image references for image generation requests', async () => {
+    const session: ChatSession = {
+      id: 'image-generation-history',
+      title: 'Image generation history',
+      profileId: 'vision-model',
+      messages: Array.from({ length: 11 }, (_, index) => ({
+        role: 'user' as const,
+        content: `historical reference ${index + 1}`,
+        attachments: [createImageAttachment(`historical-${index + 1}.png`)]
+      }))
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    localStorage.setItem(
+      scopedStorageKey('chat.imageGenerationOptions', 'runtime-flow'),
+      JSON.stringify({
+        enabled: true,
+        action: 'generate',
+        outputFormat: 'png',
+        quality: 'high',
+        background: 'auto',
+        size: 'auto'
+      })
+    )
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockResolvedValue({ content: 'generated' })
+
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'Generate a new image without old references.' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const firstCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0] as {
+      imageHistoryPolicy?: string
+      messages?: ChatMessage[]
+    }
+    expect(firstCall.imageHistoryPolicy).toBe('all')
+    expect(
+      firstCall.messages?.flatMap((message) =>
+        (message.attachments || []).filter((attachment) => attachment.type === 'image')
+      )
+    ).toHaveLength(11)
+    expect(firstCall.messages?.at(-1)?.content).toBe('Generate a new image without old references.')
+  })
+
+  it('dispatches historical image history automatically for GPT Image profiles', async () => {
+    hoisted.availableProfiles.value = [
+      {
+        id: 'gpt-image-profile',
+        model_name: 'gpt-image-2.5-sunburst',
+        model_use: 'image' as const,
+        api_mode: 'images' as const,
+        provider: 'openai',
+        is_vision_model: true
+      }
+    ]
+    const session: ChatSession = {
+      id: 'gpt-image-history',
+      title: 'GPT Image history',
+      profileId: 'gpt-image-profile',
+      messages: Array.from({ length: 11 }, (_, index) => ({
+        role: 'user' as const,
+        content: `historical reference ${index + 1}`,
+        attachments: [createImageAttachment(`gpt-history-${index + 1}.png`)]
+      }))
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockResolvedValue({ content: 'generated' })
+
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'Generate with GPT Image.' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const firstCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
+    expect(firstCall.profileId).toBe('gpt-image-profile')
+    expect(firstCall.apiMode).toBe('images')
+    expect(firstCall.imageHistoryPolicy).toBe('all')
+    expect(
+      firstCall.messages.flatMap((message) =>
+        (message.attachments || []).filter((attachment) => attachment.type === 'image')
+      )
+    ).toHaveLength(11)
+  })
+
   it('keeps multiple image references together for image generation requests', async () => {
     localStorage.setItem(
       scopedStorageKey('chat.imageGenerationOptions', 'runtime-flow'),
@@ -4390,6 +4561,7 @@ describe('ChatPage runtime workflow integration', () => {
       action: 'edit',
       size: '1024x1024'
     })
+    expect(firstCall.imageHistoryPolicy).toBe('all')
     const lastRequestMessage = firstCall.messages[firstCall.messages.length - 1]
     expect(lastRequestMessage.attachments).toEqual([
       expect.objectContaining({
@@ -4401,6 +4573,46 @@ describe('ChatPage runtime workflow integration', () => {
         fileName: 'ghost.png'
       })
     ])
+  })
+
+  it('sends current-turn image references without triggering a local image-count guard', async () => {
+    localStorage.setItem(
+      scopedStorageKey('chat.imageGenerationOptions', 'runtime-flow'),
+      JSON.stringify({
+        enabled: true,
+        action: 'edit',
+        outputFormat: 'png',
+        quality: 'high',
+        background: 'auto',
+        size: 'auto'
+      })
+    )
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockResolvedValue({
+      content: 'generated from ten current-turn references'
+    })
+
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+
+    await dispatchNewSession({
+      profileId: 'vision-model',
+      initialMessage: 'Use all ten references together.',
+      initialAttachments: Array.from({ length: 10 }, (_, index) =>
+        createImageAttachment(`current-${index + 1}.png`)
+      )
+    })
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const firstCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0] as {
+      imageHistoryPolicy?: string
+      messages?: ChatMessage[]
+    }
+    expect(firstCall.imageHistoryPolicy).toBe('all')
+    expect(firstCall.messages?.at(-1)?.attachments).toHaveLength(10)
+    expect(
+      firstCall.messages?.at(-1)?.attachments?.map((attachment) => attachment.fileName)
+    ).toEqual(Array.from({ length: 10 }, (_, index) => `current-${index + 1}.png`))
   })
 
   it('warns and blocks skill execution when the selected model supports neither images nor documents', async () => {
