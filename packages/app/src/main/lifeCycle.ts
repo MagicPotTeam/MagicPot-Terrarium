@@ -93,7 +93,7 @@ function startBackgroundTasks(): void {
   if (!managedMediaCleanupScheduler) {
     managedMediaCleanupScheduler = createManagedMediaCleanupScheduler()
   }
-  initServerIpc(managedMediaCleanupScheduler)
+  initServerIpc(managedMediaCleanupScheduler, () => winController.getMainWindow())
 }
 
 function registerRuntimeServiceManager(
