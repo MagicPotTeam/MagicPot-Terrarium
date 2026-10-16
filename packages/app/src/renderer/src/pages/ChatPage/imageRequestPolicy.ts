@@ -9,14 +9,17 @@ export const resolveChatPageRequestExecutionImagePolicy = (options: {
   supportsSessionContinuation: boolean
   hasUsableSessionContinuation: boolean
   shouldResetContinuation: boolean
+  isImageGenerationRequest?: boolean
 }): ChatPageRequestExecutionImagePolicy => {
   const canUseIncrementalImageHistory =
     options.supportsSessionContinuation &&
     options.hasUsableSessionContinuation &&
     !options.shouldResetContinuation
-  const imageHistoryPolicy: LLMImageHistoryPolicy = canUseIncrementalImageHistory
-    ? 'latest-user-turn'
-    : 'all'
+  const imageHistoryPolicy: LLMImageHistoryPolicy = options.isImageGenerationRequest
+    ? 'all'
+    : canUseIncrementalImageHistory
+      ? 'latest-user-turn'
+      : 'all'
 
   return {
     preliminaryImageHistoryPolicy: imageHistoryPolicy,
