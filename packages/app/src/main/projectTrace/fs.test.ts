@@ -174,6 +174,23 @@ describe('ProjectTraceFSCli', () => {
     )
   })
 
+  it('redacts sensitive project trace names before persistence and derived summaries', async () => {
+    const { cli, project } = await createCli()
+    const trace = await cli.saveTrace(project, {
+      id: 'trace-redacted-name',
+      name: 'C:\\Users\\fixture-data\\secret.png token=abcd123456',
+      sourceKind: 'manual',
+      markdown: 'Safe trace content.'
+    })
+
+    expect(trace.manifest.name).not.toContain('C:\\Users\\fixture-data')
+    expect(trace.manifest.name).not.toContain('abcd123456')
+    expect(trace.manifest.name).toContain('[redacted-local-path]')
+    expect(trace.redactionReport.containsSensitiveData).toBe(false)
+    await expect(cli.readTrace(project, trace.manifest.id)).resolves.toMatchObject({
+      manifest: { name: trace.manifest.name }
+    })
+  })
   it('persists valid reasoning effort and drops invalid manifest values', async () => {
     const { cli, project } = await createCli()
     const saved = await cli.saveTrace(project, {

@@ -829,7 +829,7 @@ function normalizeTraceDraft(draft: ProjectTraceDocumentDraft): ProjectTraceDocu
   }
   const now = new Date().toISOString()
   const id = assertSafeTraceId(draft.id?.trim() || createTraceId())
-  const name = sanitizeName(draft.name, 'Project trace')
+  const name = sanitizeName(redactText(draft.name, state, 160), 'Project trace')
   const sourceKind = normalizeSourceKind(draft.sourceKind)
   const eventSummaries = (draft.eventSummaries || [])
     .slice(0, TRACE_EVENT_LIMIT)
