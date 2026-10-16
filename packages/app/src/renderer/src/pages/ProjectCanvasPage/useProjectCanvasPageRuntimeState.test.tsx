@@ -81,10 +81,30 @@ describe('history state transitions', () => {
     act(() => result.current.restoreHistoryRevision(1))
     expect(result.current.items).toEqual([first])
     expect(result.current.historySnapshots).toEqual(original)
+    expect(result.current.selectedHistoryRevision).toBe(1)
     const afterValid = result.current.items
     act(() => result.current.restoreHistoryRevision(999))
     expect(result.current.items).toBe(afterValid)
     expect(result.current.historyRevision).toBe(3)
+  })
+
+  it('clears the selected history node after a later edit or undo/redo', () => {
+    const { result } = renderHook(() => useProjectCanvasPageRuntimeState())
+    const first = makeText('text', 'first')
+    const second = makeText('text', 'second')
+    act(() => result.current.setItemsWithHistory([first]))
+    act(() => result.current.setItemsWithHistory([second]))
+
+    act(() => result.current.restoreHistoryRevision(1))
+    expect(result.current.selectedHistoryRevision).toBe(1)
+
+    act(() => result.current.setItemsWithHistory([makeText('text', 'third')]))
+    expect(result.current.selectedHistoryRevision).toBeNull()
+
+    act(() => result.current.restoreHistoryRevision(2))
+    expect(result.current.selectedHistoryRevision).toBe(2)
+    act(() => result.current.handleUndo())
+    expect(result.current.selectedHistoryRevision).toBeNull()
   })
 })
 

@@ -222,26 +222,24 @@ export function useProjectCanvasPageRuntimeState() {
     stageScaleRef.current = stageScale
   }, [stageScale])
 
-  useEffect(() => {
+  const setItems = useCallback((updater: CanvasItemsUpdate) => {
     setSelectedHistoryRevision(null)
-  }, [historyRevision, setSelectedHistoryRevision])
+    dispatchItems({ type: 'set', updater })
+  }, [])
 
-  const setItems = useCallback(
-    (updater: CanvasItemsUpdate) => dispatchItems({ type: 'set', updater }),
-    []
-  )
-
-  const setItemsWithHistory = useCallback(
-    (updater: CanvasItemsUpdate) => dispatchItems({ type: 'edit', updater }),
-    []
-  )
+  const setItemsWithHistory = useCallback((updater: CanvasItemsUpdate) => {
+    setSelectedHistoryRevision(null)
+    dispatchItems({ type: 'edit', updater })
+  }, [])
 
   const handleUndo = useCallback(() => {
+    setSelectedHistoryRevision(null)
     dispatchItems({ type: 'undo' })
     setSelectedIds(new Set())
   }, [setSelectedIds])
 
   const handleRedo = useCallback(() => {
+    setSelectedHistoryRevision(null)
     dispatchItems({ type: 'redo' })
     setSelectedIds(new Set())
   }, [setSelectedIds])
