@@ -33,6 +33,28 @@ function getConfigPath() {
 let configCache: Config | null = null
 let saveQueue: Promise<void> = Promise.resolve()
 const eventCenter: EventCenter<Config> = new EventCenter<Config>()
+const commitListeners = new Set<() => void>()
+
+/** Main-only synchronous invalidation, before asynchronous configuration consumers run.
+ * No configuration or secrets are carried by this notification. Callers must unsubscribe.
+ */
+export function onConfigCommitted(listener: () => void): () => void {
+  commitListeners.add(listener)
+  return () => {
+    commitListeners.delete(listener)
+  }
+}
+
+function notifyConfigCommitted(): void {
+  for (const listener of [...commitListeners]) {
+    if (!commitListeners.has(listener)) continue
+    try {
+      listener()
+    } catch {
+      // One consumer must not suppress security invalidation in the others. Never log secrets.
+    }
+  }
+}
 
 async function loadConfigFromFile(): Promise<Config> {
   const configPath = getConfigPath()
@@ -80,6 +102,7 @@ async function loadConfigFromFile(): Promise<Config> {
 
 export async function initConfig() {
   await loadConfigFromFile()
+  notifyConfigCommitted()
   await eventCenter.emit(configCache!)
 }
 
@@ -97,6 +120,7 @@ export function saveConfig(config: DeepPartial<Config>): Promise<void> {
 
     await writeConfigAtomically(configPath, serializeConfig(newConfig))
     configCache = newConfig
+    notifyConfigCommitted()
     await eventCenter.emit(newConfig)
   })
 

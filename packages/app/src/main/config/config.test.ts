@@ -256,6 +256,68 @@ describe('config', () => {
     )
   })
 
+  it('notifies main-only subscribers after a committed snapshot and before fallible legacy listeners', async () => {
+    const configModule = await loadConfigModule()
+    const observed: boolean[] = []
+    const failed = vi.fn(() => {
+      throw new Error('private listener failure')
+    })
+    const stopFailed = configModule.onConfigCommitted(failed)
+    const stop = configModule.onConfigCommitted(() => {
+      observed.push(configModule.getConfig().use_remote_llm)
+    })
+    await configModule.initConfig()
+    expect(observed).toEqual([DEFAULT_CONFIG.use_remote_llm])
+    configModule.listenConfig({
+      id: 'legacy-failure',
+      onEnd: vi.fn(),
+      onEvent() {
+        throw new Error('legacy listener failed after commit')
+      }
+    })
+    await expect(
+      configModule.saveConfig({ use_remote_llm: !DEFAULT_CONFIG.use_remote_llm })
+    ).rejects.toThrow('legacy listener failed after commit')
+    expect(observed).toEqual([DEFAULT_CONFIG.use_remote_llm, !DEFAULT_CONFIG.use_remote_llm])
+    expect(configModule.getConfig().use_remote_llm).toBe(!DEFAULT_CONFIG.use_remote_llm)
+    expect(failed).toHaveBeenCalledTimes(2)
+    stopFailed()
+    stop()
+    stop()
+    await expect(
+      configModule.saveConfig({ use_remote_llm: DEFAULT_CONFIG.use_remote_llm })
+    ).rejects.toThrow('legacy listener failed after commit')
+    expect(observed).toHaveLength(2)
+    expect(failed).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not notify invalidation before rename or after a failed configuration commit', async () => {
+    const configModule = await loadConfigModule()
+    await configModule.initConfig()
+    const onCommit = vi.fn()
+    const stop = configModule.onConfigCommitted(onCommit)
+    const gate = Promise.withResolvers<void>()
+    const rename = vi.spyOn(fs, 'rename').mockImplementationOnce(async () => {
+      await gate.promise
+      throw new Error('synthetic rename denied')
+    })
+    try {
+      const saving = configModule.saveConfig({ use_remote_llm: !DEFAULT_CONFIG.use_remote_llm })
+      const rejected = expect(saving).rejects.toThrow('synthetic rename denied')
+      await vi.waitFor(() => expect(rename).toHaveBeenCalledTimes(1))
+      expect(onCommit).not.toHaveBeenCalled()
+      expect(configModule.getConfig().use_remote_llm).toBe(DEFAULT_CONFIG.use_remote_llm)
+      gate.resolve()
+      await rejected
+      expect(onCommit).not.toHaveBeenCalled()
+      expect(configModule.getConfig().use_remote_llm).toBe(DEFAULT_CONFIG.use_remote_llm)
+    } finally {
+      gate.resolve()
+      stop()
+      rename.mockRestore()
+    }
+  })
+
   it('writes config atomically through a temp file and rename', async () => {
     const configPath = path.join(tempDir, 'config.json')
     await fs.writeFile(configPath, JSON.stringify(DEFAULT_CONFIG, null, 2), 'utf8')
