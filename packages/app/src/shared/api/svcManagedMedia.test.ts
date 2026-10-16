@@ -147,10 +147,13 @@ describe('svcManagedMedia contract', () => {
         validateImportManagedMediaDataUrlReq({ dataUrl, originalFileName: 'paste.png' })
       ).toThrow(ServiceValidationError)
     }
-    const oversized = `data:image/png;base64,${'AAAA'.repeat(Math.ceil((25 * 1024 * 1024 + 1) / 3))}`
-    expect(() =>
-      validateImportManagedMediaDataUrlReq({ dataUrl: oversized, originalFileName: 'paste.png' })
-    ).toThrow(ServiceValidationError)
+    const largeButValid = `data:image/png;base64,${'AAAA'.repeat(Math.ceil((256 * 1024) / 3))}`
+    expect(
+      validateImportManagedMediaDataUrlReq({
+        dataUrl: largeButValid,
+        originalFileName: 'paste.png'
+      }).dataUrl
+    ).toBe(largeButValid)
   })
 
   it('accepts only a matching managed reference and local-media import URL', () => {

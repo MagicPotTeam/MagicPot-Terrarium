@@ -410,7 +410,7 @@ describe('useCanvasAssetIntake', () => {
     expect(results).toEqual(inputs.filter((value) => value !== 2))
   })
 
-  it('imports path-backed images through managed media without retaining sourceFile', async () => {
+  it('imports path-backed images above the former cap without retaining sourceFile', async () => {
     const originalImageCtor = window.Image
     const originalApi = window.api
     const importFile = vi.fn().mockResolvedValue({
@@ -437,7 +437,7 @@ describe('useCanvasAssetIntake', () => {
       const source = {
         src: 'local-media:///C:/incoming/path-image.png',
         fileName: 'path-image.png',
-        sizeBytes: 4,
+        sizeBytes: 26 * 1024 * 1024,
         sourcePath: String.raw`C:\incoming\hash#query?\literal%2F-%25-图像.png`
       } satisfies CanvasImageSourceInput & { sourcePath: string }
       const onComplete = vi.fn()

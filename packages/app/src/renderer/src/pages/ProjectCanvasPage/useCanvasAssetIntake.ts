@@ -8,7 +8,6 @@ import {
 } from 'react'
 import type { ChatAttachment, OCRResult } from '@shared/api/svcLLMProxy'
 import type { FileItem } from '@shared/comfy/types'
-import { MAX_MANAGED_MEDIA_IMPORT_BYTES } from '@shared/api/svcManagedMedia'
 import {
   getDownloadFileNameFromUrl,
   normalizeLocalMediaUrl,
@@ -194,7 +193,7 @@ function canImportCanvasImageAsManagedMedia(
 ): boolean {
   return (
     sizeBytes > 0 &&
-    sizeBytes <= MAX_MANAGED_MEDIA_IMPORT_BYTES &&
+    Number.isSafeInteger(sizeBytes) &&
     mimeType.startsWith('image/') &&
     fileName.length > 0 &&
     fileName.length <= 255 &&

@@ -138,8 +138,6 @@ function localMediaUrlMatchesRelativePath(url: unknown, relativePath: string): b
 }
 
 const MIME_TYPE_PATTERN = /^[-!#$%&'*+.^_`|~0-9A-Za-z]+\/[-!#$%&'*+.^_`|~0-9A-Za-z]+$/
-const MAX_IMPORT_DATA_URL_LENGTH = 35 * 1024 * 1024
-export const MAX_MANAGED_MEDIA_IMPORT_BYTES = 25 * 1024 * 1024
 const isSafeOriginalFileName = (value: unknown): value is string =>
   typeof value === 'string' &&
   value.length > 0 &&
@@ -193,7 +191,7 @@ const isCanonicalAbsoluteFileSource = (value: unknown): value is string => {
 }
 
 const validImportDataUrl = (value: unknown): value is string => {
-  if (typeof value !== 'string' || value.length > MAX_IMPORT_DATA_URL_LENGTH) return false
+  if (typeof value !== 'string') return false
   const match =
     /^data:([-!#$%&'*+.^_`|~0-9A-Za-z]+\/[-!#$%&'*+.^_`|~0-9A-Za-z]+);base64,([A-Za-z0-9+/]+={0,2})$/.exec(
       value
@@ -203,7 +201,7 @@ const validImportDataUrl = (value: unknown): value is string => {
   if (payload.length % 4 !== 0) return false
   const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0
   const decodedBytes = (payload.length / 4) * 3 - padding
-  return decodedBytes > 0 && decodedBytes <= MAX_MANAGED_MEDIA_IMPORT_BYTES
+  return decodedBytes > 0
 }
 
 export const validateImportManagedMediaFileReq = (value: unknown): ImportManagedMediaFileReq => {
