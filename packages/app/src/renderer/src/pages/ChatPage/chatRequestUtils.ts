@@ -1,4 +1,4 @@
-import type { Config, CustomSkill } from '@shared/config/config'
+import type { Config, CustomSkill, LLMAPIProfile, LLMOpenAIApiMode } from '@shared/config/config'
 import type { LLMChatSkillRuntime, LLMChatStreamResp, OCRResult } from '@shared/api/svcLLMProxy'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import type { AgentRouteLike } from '@shared/agent'
@@ -11,7 +11,9 @@ import {
   selectProviderAttachmentTransport,
   type LLMImageHistoryPolicy,
   type LLMReasoningEffort,
-  type OpenAIImageGenerationOptions
+  resolveProfileModelUse,
+  type OpenAIImageGenerationOptions,
+  type ImageRequestContract
 } from '@shared/llm'
 import type {
   ChatAttachment,
@@ -36,6 +38,8 @@ import {
   resolveSkillOutputImageGenerationOptions
 } from './chatSkillOutputMode'
 import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
+import { isRunnableProfile, usesOpenAIResponsesImagePolicy } from '@shared/llm/utils'
+import { DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY } from '@shared/llm/openaiResponses'
 export { resolveChatPageRequestExecutionImagePolicy } from './imageRequestPolicy'
 
 type ChatRequestPayload = {
@@ -46,28 +50,60 @@ type ChatRequestPayload = {
   }>
   route?: AgentRouteLike
   profileId?: string
+  stream?: boolean
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
   maxOutputTokens?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
+  imageRequest?: ImageRequestContract
   imageHistoryPolicy?: LLMImageHistoryPolicy
+  apiMode?: LLMOpenAIApiMode
   skillRuntime?: LLMChatSkillRuntime
   sessionUrl?: string
   conversationId?: string
   isEdit?: boolean
 }
 
+type OpenAIRequestMode = Exclude<LLMOpenAIApiMode, 'auto'>
+type RemoteOpenAIModeMap = Record<'default' | LLMOpenAIApiMode, OpenAIRequestMode>
+
+type RemoteRequestProfile = Pick<
+  LLMAPIProfile,
+  | 'id'
+  | 'model_name'
+  | 'base_url'
+  | 'provider'
+  | 'model_use'
+  | 'api_mode'
+  | 'call_type'
+  | 'auth_mode'
+  | 'deployment'
+  | 'attachment_transports'
+  | 'preferred_attachment_transport'
+  | 'max_input_images'
+  | 'maxInputImages'
+  | 'max_images'
+  | 'supports_session_continuation'
+  | 'supportsSessionContinuation'
+  | 'maxImages'
+> & { openai_api_modes?: RemoteOpenAIModeMap }
+
 type RequestChatCompletionInput = {
   config: Config
   messages: ChatMessage[]
+  // Discovery metadata from the selected remote destination; never serialized.
+  remoteProfile?: RemoteRequestProfile | null
   route?: AgentRouteLike
   storageScope?: string
   profileId?: string | null
+  stream?: boolean
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
   maxOutputTokens?: number
   imageGenerationOptions?: OpenAIImageGenerationOptions
+  imageRequest?: ImageRequestContract
   imageHistoryPolicy?: LLMImageHistoryPolicy
+  apiMode?: LLMOpenAIApiMode
   skillRuntime?: LLMChatSkillRuntime
   externalAgentSkill?: CustomSkill | null
   sessionUrl?: string
@@ -115,6 +151,17 @@ const createAbortError = (message: string): Error => {
   return error
 }
 
+const createLocalTimeoutError = (message: string): Error => {
+  const error = new Error(message)
+  error.name = 'TimeoutError'
+  return error
+}
+
+const createRemoteDeadlineError = (): Error =>
+  createLocalTimeoutError('Remote chat request timed out locally after 15 minutes.')
+
+const IPC_STREAM_DEADLINE_MS = 15 * 60 * 1000
+
 const throwIfAborted = (signal?: AbortSignal): void => {
   if (!signal?.aborted) return
 
@@ -130,17 +177,81 @@ const RESPONSES_SCOPE_ERROR_FRAGMENT = 'Missing scopes: api.responses.write'
 const RESPONSES_SCOPE_ERROR_MESSAGE =
   'The current OpenAI account is missing the required Responses permission (`api.responses.write`). Check the configured account or workspace, then try again.'
 
-export const isInvalidSessionContinuationError = (error: unknown): boolean => {
-  const message = (error instanceof Error ? error.message : String(error || ''))
-    .trim()
-    .toLowerCase()
-  if (!message || !/\b(?:400|404|409|410|422)\b/.test(message)) {
-    return false
+const REMOTE_STALE_CONTINUATION_CODES = new Set([
+  'conversation_expired',
+  'conversation_not_found',
+  'continuation_expired',
+  'continuation_not_found',
+  'continuation_stale',
+  'invalid_continuation',
+  'invalid_session',
+  'previous_response_not_found',
+  'session_expired',
+  'session_not_found',
+  'stale_session'
+])
+
+const normalizeRemoteErrorCode = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim().toLowerCase().replace(/[ -]+/g, '_')
+  return normalized || undefined
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+
+const parseRemoteErrorRecords = (value: unknown): Record<string, unknown>[] => {
+  if (typeof value !== 'string' || !value.trim()) return []
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (!isRecord(parsed)) return []
+    const records: Record<string, unknown>[] = [parsed]
+    for (const key of ['error', 'details', 'cause']) {
+      const nested = parsed[key]
+      if (isRecord(nested)) records.push(nested)
+      else if (typeof nested === 'string' && nested.trim()) records.push({ message: nested })
+    }
+    return records
+  } catch {
+    return []
   }
-  return (
-    /(?:invalid|expired|stale|unknown|not found|no longer available)/.test(message) &&
-    /(?:session|continuation|previous[_ -]?response)/.test(message)
-  )
+}
+
+export const isInvalidSessionContinuationError = (
+  error: unknown,
+  hasSessionUrl = false
+): boolean => {
+  if (!hasSessionUrl) return false
+
+  const status = error instanceof Error ? (error as Error & { status?: unknown }).status : undefined
+  if (typeof status !== 'number' || ![404, 405, 410].includes(status)) return false
+
+  const body = error instanceof Error ? (error as Error & { body?: unknown }).body : undefined
+  for (const record of parseRemoteErrorRecords(body)) {
+    const code = normalizeRemoteErrorCode(record.code)
+    const type = normalizeRemoteErrorCode(record.type)
+    if ([code, type].some((value) => value && REMOTE_STALE_CONTINUATION_CODES.has(value))) {
+      return true
+    }
+  }
+
+  return false
+}
+
+type LocalChatRequestError = Error & {
+  status?: number
+  body?: string
+}
+
+const createLocalChatRequestError = (
+  message: string,
+  status?: unknown,
+  body?: unknown
+): LocalChatRequestError => {
+  const error = new Error(message) as LocalChatRequestError
+  if (typeof status === 'number') error.status = status
+  if (typeof body === 'string') error.body = body
+  return error
 }
 
 const mapLocalChatRequestErrorMessage = (message: string): string => {
@@ -152,6 +263,17 @@ const mapLocalChatRequestErrorMessage = (message: string): string => {
   return normalized
 }
 
+const responseToBlob = async (response: Response): Promise<Blob> => {
+  if (typeof response.blob === 'function') return response.blob()
+  if (typeof response.arrayBuffer === 'function') {
+    const bytes = await response.arrayBuffer()
+    return new Blob([bytes], {
+      type: response.headers?.get?.('content-type') || 'application/octet-stream'
+    })
+  }
+  throw new Error('Response body cannot be read as a blob')
+}
+
 const blobToDataUrl = (blob: Blob): Promise<string> =>
   new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -160,7 +282,10 @@ const blobToDataUrl = (blob: Blob): Promise<string> =>
     reader.readAsDataURL(blob)
   })
 
-const isRequestDataImageUrl = (value: string): boolean => /^data:image\/[^;,]+;base64,/i.test(value)
+const isRequestDataImageUrl = (value: string): boolean =>
+  /^data:image\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(value.trim())
+
+const isRequestDataFileUrl = (value: string): boolean => /^data:[^;,]+;base64,/i.test(value.trim())
 
 const isPublicHttpsUrl = (value: string): boolean => {
   try {
@@ -191,13 +316,18 @@ const isPublicHttpsUrl = (value: string): boolean => {
 
 const normalizeImageAttachmentForRequest = async (
   attachment: ChatAttachment,
-  options: { allowRequestDataUrl?: boolean; allowAccessibleUrl?: boolean }
+  options: {
+    allowRequestDataUrl?: boolean
+    allowAccessibleUrl?: boolean
+    preserveRemoteUrl?: boolean
+  }
 ): Promise<ChatAttachment> => {
   if (
     attachment.type !== 'image' ||
     !attachment.url ||
     isRequestDataImageUrl(attachment.url) ||
-    (options.allowAccessibleUrl && isPublicHttpsUrl(attachment.url))
+    (options.allowAccessibleUrl && isPublicHttpsUrl(attachment.url)) ||
+    (options.preserveRemoteUrl && isPublicHttpsUrl(attachment.url))
   ) {
     return attachment
   }
@@ -214,7 +344,7 @@ const normalizeImageAttachmentForRequest = async (
       throw new Error(`Failed to load image attachment (${response.status})`)
     }
 
-    const blob = await response.blob()
+    const blob = await responseToBlob(response)
     const dataUrl = await blobToDataUrl(blob)
 
     return {
@@ -241,7 +371,7 @@ const normalizeFileAttachmentForRequest = async (
   if (
     attachment.type !== 'file' ||
     !attachment.url ||
-    attachment.url.startsWith('data:') ||
+    isRequestDataFileUrl(attachment.url) ||
     !normalizeLocalMediaUrl(attachment.url).startsWith('local-media://')
   ) {
     return attachment
@@ -259,7 +389,7 @@ const normalizeFileAttachmentForRequest = async (
       throw new Error(`Failed to load file attachment (${response.status})`)
     }
 
-    const blob = await response.blob()
+    const blob = await responseToBlob(response)
     const dataUrl = await blobToDataUrl(blob)
 
     return {
@@ -286,6 +416,7 @@ export const normalizeChatAttachmentsForRequest = async (
     allowManagedRequestDataUrl?: boolean
     allowRequestDataUrl?: boolean
     allowAccessibleUrl?: boolean
+    preserveRemoteUrl?: boolean
     imageHistoryPolicy?: LLMImageHistoryPolicy
   } = {}
 ): Promise<ChatAttachment[] | undefined> => {
@@ -309,8 +440,10 @@ export const normalizeChatAttachmentsForRequest = async (
           reference: media,
           transport: 'request-data-url'
         })
+        const requestAttachment = { ...attachment }
+        delete requestAttachment.media
         return {
-          ...attachment,
+          ...requestAttachment,
           url: materialized.dataUrl,
           mimeType: materialized.mimeType,
           sizeBytes: materialized.sizeBytes
@@ -363,11 +496,95 @@ const resolveRequestProfile = (
     return undefined
   }
 
-  return config.llm_config.api_profiles.find((profile) => profile.id === baseProfileId)
+  // The remote destination owns its profile IDs. A same-name local profile is
+  // not routing or capability evidence for it.
+  if (config.use_remote_llm) return undefined
+  return [
+    ...(config.llm_config.api_profiles || []),
+    ...(config.plugin_config?.api_profiles || [])
+  ].find((profile) => profile.id === baseProfileId)
 }
 
-const supportsNativeOpenAIFileSearch = (config: Config, profileId?: string | null): boolean => {
-  const profile = resolveRequestProfile(config, profileId)
+const resolveSelectedRequestProfile = (
+  input: Pick<RequestChatCompletionInput, 'config' | 'profileId' | 'remoteProfile'>
+): RemoteRequestProfile | undefined => {
+  if (input.config.use_remote_llm) {
+    const profile = input.remoteProfile ?? undefined
+    if (profile && input.profileId && profile.id !== input.profileId) {
+      throw new Error('Remote profile metadata does not match the selected profile.')
+    }
+    return profile
+  }
+  return getBaseProfileId(input.profileId)
+    ? resolveRequestProfile(input.config, input.profileId)
+    : input.config.llm_config.api_profiles.find(isRunnableProfile)
+}
+
+const resolveRemoteOpenAIRequestMode = (
+  profile: RemoteRequestProfile | undefined,
+  apiMode?: LLMOpenAIApiMode
+): OpenAIRequestMode | undefined => {
+  if (
+    !profile ||
+    (profile.call_type && profile.call_type !== 'api') ||
+    (profile.auth_mode && profile.auth_mode !== 'api_key') ||
+    profile.openai_api_modes === undefined
+  ) {
+    return undefined
+  }
+  const modes = profile.openai_api_modes
+  const validModes: OpenAIRequestMode[] = ['responses', 'chat-completions', 'images']
+  const keys = ['default', 'auto', 'responses', 'chat-completions', 'images'] as const
+  if (
+    !modes ||
+    typeof modes !== 'object' ||
+    Array.isArray(modes) ||
+    !keys.every((key) => Object.hasOwn(modes, key) && validModes.includes(modes[key]))
+  ) {
+    throw new Error('Remote image routing metadata is invalid. Refresh the remote profiles.')
+  }
+  return modes[apiMode || 'default']
+}
+
+const resolveRemoteApiModeForPayload = (
+  profile: RemoteRequestProfile | undefined,
+  requestedMode?: LLMOpenAIApiMode
+): OpenAIRequestMode | undefined => {
+  // An explicit non-auto override is part of the request contract. Keep it on
+  // the wire; the remote service may use its published route map to dispatch
+  // aliases (for example a Zen Responses route receiving an Images override).
+  if (requestedMode && requestedMode !== 'auto') return requestedMode
+
+  const advertisedMode = resolveRemoteOpenAIRequestMode(
+    profile,
+    requestedMode === 'auto' ? 'auto' : undefined
+  )
+  if (advertisedMode) return advertisedMode
+
+  // Older remote discovery records may omit openai_api_modes while still
+  // exposing a usable base URL. Infer only the standard OpenAI route and never
+  // from the colliding local profile.
+  if (profile?.base_url?.trim() && resolveProfileProvider(profile) === 'openai') {
+    return usesOpenAIResponsesImagePolicy(profile) ? 'responses' : 'chat-completions'
+  }
+
+  return undefined
+}
+
+const isGPTImageProfile = (
+  profile: RemoteRequestProfile | undefined,
+  apiMode?: LLMOpenAIApiMode
+): boolean => {
+  if (!profile) return false
+  const effectiveApiMode = apiMode ?? profile.api_mode
+  // An explicitly selected non-Images API always wins over model-name inference.
+  if (effectiveApiMode === 'responses' || effectiveApiMode === 'chat-completions') return false
+  const provider = resolveProfileProvider(profile)
+  if (provider !== 'openai') return false
+  return effectiveApiMode === 'images' || resolveProfileModelUse(profile) === 'image'
+}
+
+const supportsNativeOpenAIFileSearch = (profile: RemoteRequestProfile | undefined): boolean => {
   if (!profile) {
     return false
   }
@@ -379,22 +596,32 @@ const supportsNativeOpenAIFileSearch = (config: Config, profileId?: string | nul
   )
 }
 
-export const supportsStreamingChatCompletion = (
-  input: Pick<RequestChatCompletionInput, 'config' | 'profileId' | 'externalAgentSkill'>
+const supportsRemoteOpenAIResponsesStreaming = (
+  input: Pick<
+    RequestChatCompletionInput,
+    'config' | 'profileId' | 'remoteProfile' | 'apiMode' | 'externalAgentSkill'
+  >
 ): boolean => {
-  if (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent') {
-    return false
-  }
-
-  return false
+  if (!input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent') return false
+  const profile = resolveSelectedRequestProfile(input)
+  if (!profile || resolveProfileProvider(profile) !== 'openai') return false
+  const mappedMode = resolveRemoteOpenAIRequestMode(profile, input.apiMode)
+  return mappedMode === 'responses'
 }
 
-const shouldSkipInlineAttachmentSummary = (
-  config: Config,
-  profileId: string | null | undefined,
-  attachment: ChatAttachment
+export const supportsStreamingChatCompletion = (
+  input: Pick<
+    RequestChatCompletionInput,
+    'config' | 'profileId' | 'remoteProfile' | 'apiMode' | 'externalAgentSkill'
+  >
 ): boolean =>
-  supportsNativeOpenAIFileSearch(config, profileId) && isOpenAIFileSearchAttachment(attachment)
+  (!input.config.use_remote_llm && input.externalAgentSkill?.type !== 'agent') ||
+  supportsRemoteOpenAIResponsesStreaming(input)
+
+const shouldSkipInlineAttachmentSummary = (
+  profile: RemoteRequestProfile | undefined,
+  attachment: ChatAttachment
+): boolean => supportsNativeOpenAIFileSearch(profile) && isOpenAIFileSearchAttachment(attachment)
 
 const normalizeAttachmentOcrResults = (
   attachments: ChatAttachment[] | undefined,
@@ -420,7 +647,7 @@ const normalizeAttachmentOcrResults = (
 }
 
 const MAX_REMOTE_RETRIES = 3
-const REMOTE_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
+const REMOTE_REQUEST_TIMEOUT_MS = 15 * 60 * 1000
 const RETRY_DELAY_MS = 2000
 const REMOTE_CHAT_ENDPOINTS = ['/api/chat', '/api/bot/chat', '/api/bot/message', '/api/message']
 const REMOTE_CHAT_FALLBACK_STATUSES = new Set([404, 405, 410])
@@ -478,6 +705,14 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
     input.imageGenerationOptions
   )
 
+  const selectedProfile = resolveSelectedRequestProfile(input)
+  const explicitApiMode = selectedProfile?.api_mode
+  const remoteApiMode = input.config.use_remote_llm
+    ? (resolveRemoteApiModeForPayload(selectedProfile, input.apiMode) ??
+      (input.apiMode === 'auto' ? undefined : input.apiMode) ??
+      (explicitApiMode === 'auto' ? undefined : explicitApiMode))
+    : undefined
+
   return {
     messages: input.messages.map((message) => ({
       role: message.role,
@@ -485,7 +720,15 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
       attachments: message.attachments
     })),
     ...(input.route ? { route: input.route } : {}),
-    profileId: input.profileId || undefined,
+    profileId: input.profileId || (input.config.use_remote_llm ? selectedProfile?.id : undefined),
+    ...(input.stream ? { stream: true } : {}),
+    ...(input.config.use_remote_llm
+      ? remoteApiMode
+        ? { apiMode: remoteApiMode }
+        : {}
+      : input.apiMode || explicitApiMode
+        ? { apiMode: input.apiMode || explicitApiMode }
+        : {}),
     systemPrompt: resolvedSystemPrompt,
     ...(input.reasoningEffort && input.externalAgentSkill?.type !== 'agent'
       ? { reasoningEffort: input.reasoningEffort }
@@ -494,6 +737,7 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
     ...(requestImageGenerationOptions
       ? { imageGenerationOptions: requestImageGenerationOptions }
       : {}),
+    ...(input.imageRequest ? { imageRequest: input.imageRequest } : {}),
     ...(input.imageHistoryPolicy ? { imageHistoryPolicy: input.imageHistoryPolicy } : {}),
     ...(input.skillRuntime ? { skillRuntime: input.skillRuntime } : {}),
     sessionUrl: input.sessionUrl,
@@ -647,6 +891,39 @@ const mergeHiddenContextIntoMessageContent = (message: ChatMessage, content: str
   return visibleContent ? `${hiddenContext}\n\n${visibleContent}` : hiddenContext
 }
 
+const expandMessagesForImagePreflight = async (
+  messages: ChatMessage[],
+  imageHistoryPolicy: LLMImageHistoryPolicy | undefined,
+  maxImages: number | undefined
+): Promise<ChatMessage[]> => {
+  if (maxImages === undefined) return messages
+  // Metadata may reveal more images. Check the aggregate again before report
+  // capability probes, uploads or image materialization, and do not resurrect
+  // images excluded by the history policy when expanding an older bundle.
+  const expandedMessages: ChatMessage[] = []
+  const messagesSelectedForExpansion = selectMessagesForImageHistoryPolicy(
+    messages,
+    imageHistoryPolicy
+  )
+  for (const message of messagesSelectedForExpansion) {
+    const canExpandReportBundle = message.role === 'user'
+    expandedMessages.push({
+      ...message,
+      attachments: canExpandReportBundle
+        ? await expandReportBundleAttachments(message.attachments)
+        : message.attachments
+    })
+  }
+  const selectedMessages = selectMessagesForImageHistoryPolicy(expandedMessages, imageHistoryPolicy)
+  if (maxImages !== Infinity) {
+    const imageCount = countProviderBoundImages(selectedMessages)
+    if (imageCount > maxImages) {
+      throw new Error(`Too many images; the limit is ${maxImages}.`)
+    }
+  }
+  return selectedMessages
+}
+
 const prepareMessagesForRequest = async (
   messages: ChatMessage[],
   options: {
@@ -657,15 +934,20 @@ const prepareMessagesForRequest = async (
     allowManagedRequestDataUrl?: boolean
     allowRequestDataUrl?: boolean
     allowAccessibleUrl?: boolean
+    preserveRemoteUrl?: boolean
     imageHistoryPolicy?: LLMImageHistoryPolicy
+    reportBundlesExpanded?: boolean
   } = {}
 ): Promise<ChatMessage[]> => {
   const prepared: ChatMessage[] = []
   const selectedMessages = selectMessagesForImageHistoryPolicy(messages, options.imageHistoryPolicy)
+  const latestUserIndex = messages.findLastIndex((message) => message.role === 'user')
 
-  for (const message of selectedMessages) {
+  for (const [index, message] of selectedMessages.entries()) {
+    const canExpandReportBundle =
+      message.role === 'user' && (options.imageHistoryPolicy === 'all' || index === latestUserIndex)
     const attachments =
-      message.role === 'user'
+      canExpandReportBundle && !options.reportBundlesExpanded
         ? await expandReportBundleAttachments(message.attachments)
         : message.attachments
     const normalizedAttachments = await normalizeChatAttachmentsForRequest(attachments, options)
@@ -890,44 +1172,134 @@ const requestExternalAgentSkillCompletion = async (
   }
 }
 
+const remoteResponseCleanup = new WeakMap<Response, () => void>()
+const remoteResponseDeadline = new WeakMap<Response, Promise<never>>()
+
+const releaseRemoteResponse = (response: Response): void => {
+  remoteResponseCleanup.get(response)?.()
+  remoteResponseCleanup.delete(response)
+  remoteResponseDeadline.delete(response)
+  void response.body?.cancel().catch(() => undefined)
+}
+
+const readRemoteResponse = async <T>(response: Response, read: () => Promise<T>): Promise<T> => {
+  const deadline = remoteResponseDeadline.get(response)
+  try {
+    return deadline ? await Promise.race([read(), deadline]) : await read()
+  } finally {
+    releaseRemoteResponse(response)
+  }
+}
+
 const shouldFallbackRemoteChatEndpoint = (response: Response): boolean =>
   REMOTE_CHAT_FALLBACK_STATUSES.has(response.status)
+
+const waitForRemoteRetry = async (
+  input: RequestChatCompletionInput,
+  delayMs: number,
+  deadlineAt: number
+): Promise<void> => {
+  throwIfAborted(input.signal)
+  const remainingMs = deadlineAt - Date.now()
+  if (remainingMs <= 0) throw createRemoteDeadlineError()
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false
+    const finish = (callback: () => void) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timerId)
+      window.clearTimeout(deadlineId)
+      input.signal?.removeEventListener('abort', onAbort)
+      callback()
+    }
+    const onAbort = () => {
+      const reason = input.signal?.reason
+      finish(() =>
+        reject(reason instanceof Error ? reason : createAbortError('The request was aborted.'))
+      )
+    }
+    const timerId = window.setTimeout(() => finish(resolve), Math.min(delayMs, remainingMs))
+    const deadlineId = window.setTimeout(
+      () => finish(() => reject(createRemoteDeadlineError())),
+      remainingMs
+    )
+    input.signal?.addEventListener('abort', onAbort, { once: true })
+    if (input.signal?.aborted) onAbort()
+  })
+}
 
 const requestRemoteChatEndpoint = async (
   input: RequestChatCompletionInput,
   serverOrigin: string,
   endpoint: string,
-  requestBody: string
+  requestBody: string,
+  deadlineAt: number
 ): Promise<Response> => {
   let lastError: Error | null = null
 
   for (let attempt = 1; attempt <= MAX_REMOTE_RETRIES; attempt += 1) {
+    const remainingMs = deadlineAt - Date.now()
+    if (remainingMs <= 0) throw createRemoteDeadlineError()
+
     const controller = new AbortController()
+    let timeoutId: number | undefined
+    let rejectDeadline: ((reason: Error) => void) | undefined
+    let responseReturned = false
+    const deadline = new Promise<never>((_resolve, reject) => {
+      rejectDeadline = reject
+    })
+    // The deadline is only raced once fetch has returned a Response. Attach a
+    // handler immediately so an abort while fetch is still pending cannot
+    // become an unhandled rejection.
+    void deadline.catch(() => undefined)
     const handleAbort = () => {
-      controller.abort(
-        input.signal?.reason instanceof Error
+      const reason =
+        input.signal?.reason !== undefined
           ? input.signal.reason
           : createAbortError('The request was aborted.')
-      )
+      controller.abort(reason)
+      rejectDeadline?.(reason)
     }
     if (input.signal?.aborted) {
       handleAbort()
     } else if (input.signal) {
       input.signal.addEventListener('abort', handleAbort, { once: true })
     }
-    const timeoutId = window.setTimeout(
-      () => controller.abort(createAbortError('Remote chat request timed out.')),
-      REMOTE_REQUEST_TIMEOUT_MS
-    )
+    timeoutId = window.setTimeout(() => {
+      const timeoutError = createRemoteDeadlineError()
+      controller.abort(timeoutError)
+      rejectDeadline?.(timeoutError)
+    }, remainingMs)
+
+    const cleanup = () => {
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId)
+        timeoutId = undefined
+      }
+      input.signal?.removeEventListener('abort', handleAbort)
+    }
 
     try {
       throwIfAborted(input.signal)
-      const response = await fetch(`${serverOrigin}${endpoint}`, {
+      const request = fetch(`${serverOrigin}${endpoint}`, {
         method: 'POST',
         headers: buildRemoteLlmServerHeaders(input.config, { 'Content-Type': 'application/json' }),
         signal: controller.signal,
         body: requestBody
       })
+      void request.then(
+        (lateResponse) => {
+          if (controller.signal.aborted) {
+            void lateResponse.body?.cancel().catch(() => undefined)
+          }
+        },
+        () => undefined
+      )
+      const response = await Promise.race([request, deadline])
+      responseReturned = true
+      remoteResponseCleanup.set(response, cleanup)
+      remoteResponseDeadline.set(response, deadline)
       return response
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
@@ -935,19 +1307,19 @@ const requestRemoteChatEndpoint = async (
         throwIfAborted(input.signal)
         throw lastError
       }
+      if (controller.signal.aborted && controller.signal.reason instanceof Error) {
+        throw controller.signal.reason
+      }
       console.warn(
         `[ChatPage] remote request failed for ${endpoint} (${attempt}/${MAX_REMOTE_RETRIES}):`,
         lastError.message
       )
 
       if (attempt < MAX_REMOTE_RETRIES) {
-        await new Promise((resolve) => window.setTimeout(resolve, RETRY_DELAY_MS))
+        await waitForRemoteRetry(input, RETRY_DELAY_MS, deadlineAt)
       }
     } finally {
-      if (input.signal) {
-        input.signal.removeEventListener('abort', handleAbort)
-      }
-      window.clearTimeout(timeoutId)
+      if (!responseReturned) cleanup()
     }
   }
 
@@ -959,27 +1331,41 @@ const requestRemoteChatCompletion = async (
 ): Promise<RequestChatCompletionResult> => {
   const serverOrigin = getRemoteLlmServerOrigin(input.config).replace(/\/+$/, '')
   const requestBody = JSON.stringify(buildChatRequestPayload(input))
-  let response: Response | null = null
+  const deadlineAt = Date.now() + REMOTE_REQUEST_TIMEOUT_MS
+  for (let index = 0; index < REMOTE_CHAT_ENDPOINTS.length; index += 1) {
+    const endpoint = REMOTE_CHAT_ENDPOINTS[index]
+    const response = await requestRemoteChatEndpoint(
+      input,
+      serverOrigin,
+      endpoint,
+      requestBody,
+      deadlineAt
+    )
+    if (response.ok) {
+      return normalizeResponse(await readRemoteResponse(response, () => response.json()))
+    }
 
-  for (const endpoint of REMOTE_CHAT_ENDPOINTS) {
-    response = await requestRemoteChatEndpoint(input, serverOrigin, endpoint, requestBody)
-    if (!shouldFallbackRemoteChatEndpoint(response)) {
-      break
+    // Read once under the existing deadline and release its body/listener/timer.
+    // Application continuation failures must reach ChatPage's history-replay
+    // recovery, not be replaced by a later legacy endpoint's 404.
+    const body = await readRemoteResponse(response, () => response.text())
+    const error = Object.assign(
+      new Error(buildRemoteLlmServerErrorMessage('chat', response, body)),
+      { body, status: response.status }
+    )
+    if (
+      isInvalidSessionContinuationError(error, Boolean(input.sessionUrl?.trim())) ||
+      !shouldFallbackRemoteChatEndpoint(response) ||
+      index === REMOTE_CHAT_ENDPOINTS.length - 1
+    ) {
+      throw error
     }
     console.warn(
       `[ChatPage] remote endpoint ${endpoint} returned ${response.status}; trying legacy endpoint.`
     )
   }
 
-  if (!response) {
-    throw new Error('Remote chat request failed')
-  }
-
-  if (!response.ok) {
-    throw new Error(buildRemoteLlmServerErrorMessage('chat', response, await response.text()))
-  }
-
-  return normalizeResponse(await response.json())
+  throw new Error('Remote chat request failed')
 }
 
 const requestLocalChatCompletion = async (
@@ -1004,7 +1390,16 @@ const requestLocalChatCompletion = async (
       error instanceof Error ? error.message : String(error)
     )
     if (error instanceof Error && message === error.message) {
+      const diagnostic = error as LocalChatRequestError
+      if (diagnostic.status !== undefined || diagnostic.body !== undefined) {
+        throw createLocalChatRequestError(message, diagnostic.status, diagnostic.body)
+      }
       throw error
+    }
+
+    if (error instanceof Error) {
+      const diagnostic = error as LocalChatRequestError
+      throw createLocalChatRequestError(message, diagnostic.status, diagnostic.body)
     }
 
     throw new Error(message)
@@ -1052,9 +1447,23 @@ const requestLocalChatCompletionStream = async (
   throwIfAborted(input.signal)
 
   const [abortSender, abortReceiver] = newAbortHandler()
+  let streamActive = true
+  let resolveControl: (() => void) | undefined
+  let rejectControl: ((reason: unknown) => void) | undefined
+  const control = new Promise<void>((resolve, reject) => {
+    resolveControl = resolve
+    rejectControl = reject
+  })
+  void control.catch(() => undefined)
+  const rejectStream = (reason: unknown): void => {
+    streamActive = false
+    rejectControl?.(reason)
+  }
   const handleAbort = () => {
+    const reason = input.signal?.reason
     abortSender.abort()
     void cancelConversationSilently(input.conversationId)
+    rejectStream(reason instanceof Error ? reason : createAbortError('The request was aborted.'))
   }
   if (input.signal) {
     input.signal.addEventListener('abort', handleAbort, { once: true })
@@ -1064,13 +1473,27 @@ const requestLocalChatCompletionStream = async (
     result: { content: '' },
     response: ''
   }
-  let observedError: string | null = null
+  let observedError: LocalChatRequestError | null = null
+  let streamDeadlineTimer: number | undefined
+  const streamDeadline = new Promise<never>((_resolve, reject) => {
+    const timerId = window.setTimeout(() => {
+      const timeoutError = createLocalTimeoutError(
+        'Local IPC chat stream timed out after 15 minutes.'
+      )
+      abortSender.abort()
+      void cancelConversationSilently(input.conversationId)
+      rejectStream(timeoutError)
+      reject(timeoutError)
+    }, IPC_STREAM_DEADLINE_MS)
+    streamDeadlineTimer = timerId
+  })
+  void streamDeadline.catch(() => undefined)
 
   try {
-    await window.api.svcLLMProxy.chatStream(buildChatRequestPayload(input), {
+    const streamPromise = window.api.svcLLMProxy.chatStream(buildChatRequestPayload(input), {
       abortReceiver,
       onData: (chunk) => {
-        if (input.signal?.aborted) {
+        if (!streamActive || input.signal?.aborted) {
           return
         }
 
@@ -1096,7 +1519,11 @@ const requestLocalChatCompletionStream = async (
         }
 
         if (chunk.type === 'error' && chunk.error) {
-          observedError = chunk.error
+          observedError = createLocalChatRequestError(
+            mapLocalChatRequestErrorMessage(chunk.error),
+            chunk.status,
+            chunk.body
+          )
           input.onEvent({
             type: 'error',
             error: chunk.error
@@ -1104,6 +1531,7 @@ const requestLocalChatCompletionStream = async (
         }
 
         if (chunk.type === 'done') {
+          streamActive = false
           streamedResponse = toRequestChatCompletionStreamResult({
             ...chunk,
             attachments: chunk.attachments ?? streamedResponse.result.attachments,
@@ -1113,20 +1541,30 @@ const requestLocalChatCompletionStream = async (
             usage:
               (chunk as { usage?: Record<string, unknown> }).usage ?? streamedResponse.result.usage
           })
+          resolveControl?.()
           input.onEvent({ type: 'done' })
           if (chunk.error) {
-            observedError = chunk.error
+            const diagnostic = createLocalChatRequestError(
+              mapLocalChatRequestErrorMessage(chunk.error),
+              chunk.status,
+              chunk.body
+            )
+            observedError = observedError
+              ? Object.assign(observedError, {
+                  status: diagnostic.status ?? observedError.status,
+                  body: diagnostic.body ?? observedError.body
+                })
+              : diagnostic
           }
         }
       }
     })
 
-    if (input.signal?.aborted) {
-      throwIfAborted(input.signal)
-    }
+    void streamPromise.catch(() => undefined)
+    await Promise.race([streamPromise, control, streamDeadline])
 
     if (observedError) {
-      throw new Error(mapLocalChatRequestErrorMessage(observedError))
+      throw observedError
     }
 
     return streamedResponse
@@ -1135,11 +1573,25 @@ const requestLocalChatCompletionStream = async (
       error instanceof Error ? error.message : String(error)
     )
     if (error instanceof Error && message === error.message) {
+      const diagnostic = error as LocalChatRequestError
+      if (diagnostic.status !== undefined || diagnostic.body !== undefined) {
+        throw createLocalChatRequestError(message, diagnostic.status, diagnostic.body)
+      }
       throw error
+    }
+
+    if (error instanceof Error) {
+      const diagnostic = error as LocalChatRequestError
+      throw createLocalChatRequestError(message, diagnostic.status, diagnostic.body)
     }
 
     throw new Error(message)
   } finally {
+    if (streamDeadlineTimer !== undefined) {
+      window.clearTimeout(streamDeadlineTimer)
+      streamDeadlineTimer = undefined
+    }
+    streamActive = false
     if (input.signal) {
       input.signal.removeEventListener('abort', handleAbort)
     }
@@ -1168,7 +1620,7 @@ const dispatchChatCompletionStreamRequest = async (
     return requestLocalChatCompletionStream(input)
   }
 
-  const result = await dispatchChatCompletionRequest(input)
+  const result = await dispatchChatCompletionRequest({ ...input, stream: false })
   if (result.content) {
     input.onEvent({
       type: 'text-delta',
@@ -1287,13 +1739,30 @@ export const resolveAttachmentBatchCapability = async (
 
 export const resolveAttachmentRequestCapabilities = (
   config: Config,
-  profileId?: string | null
+  profileId?: string | null,
+  apiMode?: LLMOpenAIApiMode,
+  remoteProfile?: RemoteRequestProfile | null
 ): {
   allowManagedRequestDataUrl: boolean
   allowRequestDataUrl: boolean
   allowAccessibleUrl: boolean
+  preserveRemoteUrl: boolean
 } => {
-  const capabilities = resolveChatProfileCapabilities(resolveRequestProfile(config, profileId))
+  const profile = resolveSelectedRequestProfile({ config, profileId, remoteProfile })
+  const effectiveApiMode =
+    (config.use_remote_llm ? resolveRemoteOpenAIRequestMode(profile, apiMode) : undefined) ??
+    apiMode ??
+    profile?.api_mode
+  const maxInputImages =
+    profile?.max_input_images ??
+    profile?.maxInputImages ??
+    profile?.max_images ??
+    profile?.maxImages
+  const capabilities = resolveChatProfileCapabilities({
+    ...profile,
+    ...(maxInputImages !== undefined ? { max_input_images: maxInputImages } : {})
+  })
+  const gptImageProfile = isGPTImageProfile(profile, effectiveApiMode)
   const requestDataUrlTransport = selectProviderAttachmentTransport(capabilities, {
     available: { 'request-data-url': true },
     requested: 'request-data-url'
@@ -1303,9 +1772,10 @@ export const resolveAttachmentRequestCapabilities = (
     requested: 'accessible-url'
   })
   return {
-    allowManagedRequestDataUrl: requestDataUrlTransport === 'request-data-url',
-    allowRequestDataUrl: requestDataUrlTransport === 'request-data-url',
-    allowAccessibleUrl: accessibleUrlTransport === 'accessible-url'
+    allowManagedRequestDataUrl: requestDataUrlTransport === 'request-data-url' || gptImageProfile,
+    allowRequestDataUrl: requestDataUrlTransport === 'request-data-url' || gptImageProfile,
+    allowAccessibleUrl: accessibleUrlTransport === 'accessible-url',
+    preserveRemoteUrl: gptImageProfile
   }
 }
 
@@ -1313,29 +1783,173 @@ const resolveManagedMediaRequestOptions = (input: RequestChatCompletionInput) =>
   return {
     managedMediaService: (api() as unknown as { svcManagedMedia?: ManagedMediaSvc })
       .svcManagedMedia,
-    ...resolveAttachmentRequestCapabilities(input.config, input.profileId)
+    ...resolveAttachmentRequestCapabilities(
+      input.config,
+      input.profileId,
+      input.apiMode,
+      input.remoteProfile
+    )
   }
+}
+
+const resolveRemoteResponsesImagePolicy = (
+  input: RequestChatCompletionInput,
+  profile: RemoteRequestProfile | undefined
+): boolean | undefined => {
+  if (
+    profile &&
+    ((profile.call_type && profile.call_type !== 'api') ||
+      (profile.auth_mode && profile.auth_mode !== 'api_key'))
+  ) {
+    // Extension-owned protocols must publish their own policy contract.
+    return false
+  }
+  const resolvedRemoteMode = resolveRemoteOpenAIRequestMode(profile, input.apiMode)
+  if (resolvedRemoteMode) return resolvedRemoteMode === 'responses'
+  const provider = profile && resolveProfileProvider(profile)
+  if (provider && provider !== 'openai') return false
+  const mode = input.apiMode ?? profile?.api_mode
+  if (profile?.base_url?.trim()) return usesOpenAIResponsesImagePolicy(profile, input.apiMode)
+  if (mode && mode !== 'auto') return mode === 'responses'
+  return undefined
+}
+
+const countProviderBoundImages = (messages: readonly ChatMessage[]): number => {
+  const expandedReportBundleIds = new Set(
+    messages.flatMap((message) =>
+      (message.attachments || [])
+        .filter(
+          (attachment) =>
+            attachment.type === 'image' &&
+            attachment.reportBundleRole === 'report-image' &&
+            Boolean(attachment.reportBundleId)
+        )
+        .map((attachment) => attachment.reportBundleId as string)
+    )
+  )
+
+  return messages.reduce(
+    (total, message) =>
+      total +
+      (message.role === 'system'
+        ? 0
+        : (message.attachments || []).reduce((count, attachment) => {
+            if (attachment.type === 'image') return count + 1
+            if (
+              expandedReportBundleIds.has(attachment.reportBundleId || '') ||
+              typeof attachment.reportBundleImageCount !== 'number' ||
+              !Number.isSafeInteger(attachment.reportBundleImageCount) ||
+              attachment.reportBundleImageCount < 0
+            ) {
+              return count
+            }
+            return count + attachment.reportBundleImageCount
+          }, 0)),
+    0
+  )
+}
+
+const preflightRequestImageCount = (
+  input: RequestChatCompletionInput,
+  profile: RemoteRequestProfile | undefined
+): number | undefined => {
+  if (input.externalAgentSkill?.type === 'agent') return undefined
+  const selectedMessages = selectMessagesForImageHistoryPolicy(
+    input.messages,
+    input.imageHistoryPolicy
+  )
+  const latestUserIndex = input.messages.findLastIndex((message) => message.role === 'user')
+  const selectedUserMessages = selectedMessages.filter(
+    (message) =>
+      message.role === 'user' &&
+      (input.imageHistoryPolicy === 'all' || input.messages.indexOf(message) === latestUserIndex)
+  )
+  const hasSelectedImages = selectedMessages.some(
+    (message) =>
+      message.role !== 'system' &&
+      message.attachments?.some((attachment) => attachment.type === 'image')
+  )
+  const knownImageCount = countProviderBoundImages(selectedMessages)
+  const hasSelectedReportBundle = selectedUserMessages.some((message) =>
+    message.attachments?.some((attachment) => attachment.reportBundleRole === 'primary-report')
+  )
+  const usesResponses = input.config.use_remote_llm
+    ? resolveRemoteResponsesImagePolicy(input, profile)
+    : profile && usesOpenAIResponsesImagePolicy(profile, input.apiMode)
+  if (
+    input.config.use_remote_llm &&
+    (hasSelectedImages || hasSelectedReportBundle) &&
+    usesResponses === undefined
+  ) {
+    throw new Error(
+      'Remote image routing metadata is unavailable. Refresh the remote profiles before sending images.'
+    )
+  }
+  const hasKnownImages = hasSelectedImages || knownImageCount > 0
+  if (!hasKnownImages && !hasSelectedReportBundle) return undefined
+  if (usesResponses !== true) return undefined
+  const maxInputImages =
+    profile?.max_input_images ??
+    profile?.maxInputImages ??
+    profile?.max_images ??
+    profile?.maxImages
+  const capabilities = resolveChatProfileCapabilities({
+    ...profile,
+    ...(maxInputImages !== undefined ? { max_input_images: maxInputImages } : {})
+  })
+  const maxImages = capabilities.maxInputImages ?? DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY.maxImages
+  if (maxImages === undefined) return undefined
+  if (maxImages !== undefined && knownImageCount > maxImages) {
+    throw new Error(`Too many images; the limit is ${maxImages}.`)
+  }
+  return maxImages
+}
+
+// Pure descriptor-only guard for UI planning before blob persistence or resource reads.
+// Request entrypoints still recheck their final selected/expanded attachments.
+export const preflightChatRequestImages = (
+  input: Pick<
+    RequestChatCompletionInput,
+    | 'config'
+    | 'messages'
+    | 'profileId'
+    | 'remoteProfile'
+    | 'externalAgentSkill'
+    | 'imageHistoryPolicy'
+    | 'apiMode'
+  >
+): number | undefined => {
+  validateCustomSkillForSend(input.externalAgentSkill)
+  return preflightRequestImageCount(input, resolveSelectedRequestProfile(input))
 }
 
 export const requestChatCompletion = async (
   input: RequestChatCompletionInput
 ): Promise<RequestChatCompletionResult> => {
   validateCustomSkillForSend(input.externalAgentSkill)
+  const profile = resolveSelectedRequestProfile(input)
+  const maxImages = preflightRequestImageCount(input, profile)
+  const preflightMessages = await expandMessagesForImagePreflight(
+    input.messages,
+    input.imageHistoryPolicy,
+    maxImages
+  )
 
-  const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(input.config, input.profileId)
+  const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
     !useNativeOpenAIFileSearch && hasPrimaryReportBundleInMessages(input.messages)
       ? await ensureReportInlineCapability(input)
       : null
   const skipAttachmentContentAugmentation =
     getBaseProfileId(input.profileId) === HUNYUAN_3D_PROFILE_ID
-  const requestMessages = await prepareMessagesForRequest(input.messages, {
+  const requestMessages = await prepareMessagesForRequest(preflightMessages, {
+    reportBundlesExpanded: maxImages !== undefined,
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
     ...resolveManagedMediaRequestOptions(input),
     imageHistoryPolicy: input.imageHistoryPolicy,
     skipInlineAttachmentSummary: (attachment) =>
-      shouldSkipInlineAttachmentSummary(input.config, input.profileId, attachment)
+      shouldSkipInlineAttachmentSummary(profile, attachment)
   })
 
   return dispatchChatCompletionRequest({
@@ -1348,21 +1962,29 @@ export const requestChatCompletionStream = async (
   input: RequestChatCompletionStreamInput
 ): Promise<RequestChatCompletionStreamResult> => {
   validateCustomSkillForSend(input.externalAgentSkill)
+  const profile = resolveSelectedRequestProfile(input)
+  const maxImages = preflightRequestImageCount(input, profile)
+  const preflightMessages = await expandMessagesForImagePreflight(
+    input.messages,
+    input.imageHistoryPolicy,
+    maxImages
+  )
 
-  const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(input.config, input.profileId)
+  const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
     !useNativeOpenAIFileSearch && hasPrimaryReportBundleInMessages(input.messages)
       ? await ensureReportInlineCapability(input)
       : null
   const skipAttachmentContentAugmentation =
     getBaseProfileId(input.profileId) === HUNYUAN_3D_PROFILE_ID
-  const requestMessages = await prepareMessagesForRequest(input.messages, {
+  const requestMessages = await prepareMessagesForRequest(preflightMessages, {
+    reportBundlesExpanded: maxImages !== undefined,
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
     ...resolveManagedMediaRequestOptions(input),
     imageHistoryPolicy: input.imageHistoryPolicy,
     skipInlineAttachmentSummary: (attachment) =>
-      shouldSkipInlineAttachmentSummary(input.config, input.profileId, attachment)
+      shouldSkipInlineAttachmentSummary(profile, attachment)
   })
 
   const result = await dispatchChatCompletionStreamRequest({

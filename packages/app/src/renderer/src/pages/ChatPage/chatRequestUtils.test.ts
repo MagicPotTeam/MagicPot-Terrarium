@@ -34,23 +34,106 @@ const createConfig = (): Config => ({
 
 const messages: ChatMessage[] = [{ role: 'user', content: 'hello' }]
 
+describe('supportsStreamingChatCompletion', () => {
+  it('keeps the local main-process path streamable, including Codex Responses extensions', () => {
+    expect(
+      supportsStreamingChatCompletion({
+        config: createConfig(),
+        profileId: 'codex-profile',
+        externalAgentSkill: null
+      })
+    ).toBe(true)
+  })
+
+  it('follows the remote route map when profile api_mode contradicts it', () => {
+    expect(
+      supportsStreamingChatCompletion({
+        config: { ...createConfig(), use_remote_llm: true },
+        profileId: 'remote-profile',
+        remoteProfile: {
+          id: 'remote-profile',
+          model_name: 'remote',
+          provider: 'openai',
+          api_mode: 'responses',
+          openai_api_modes: {
+            default: 'chat-completions',
+            auto: 'chat-completions',
+            responses: 'chat-completions',
+            'chat-completions': 'chat-completions',
+            images: 'images'
+          }
+        },
+        apiMode: 'responses',
+        externalAgentSkill: null
+      })
+    ).toBe(false)
+  })
+
+  it('does not claim streaming for remote or external-agent HTTP transports', () => {
+    expect(
+      supportsStreamingChatCompletion({
+        config: { ...createConfig(), use_remote_llm: true },
+        profileId: 'remote-profile',
+        externalAgentSkill: null
+      })
+    ).toBe(false)
+    expect(
+      supportsStreamingChatCompletion({
+        config: createConfig(),
+        profileId: 'agent-profile',
+        externalAgentSkill: { type: 'agent' } as never
+      })
+    ).toBe(false)
+  })
+})
+
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   localStorage.clear()
 })
 
 describe('isInvalidSessionContinuationError', () => {
-  it('classifies only definitive client-side continuation rejections', () => {
-    expect(isInvalidSessionContinuationError(new Error('410 expired session continuation'))).toBe(
-      true
-    )
-    expect(isInvalidSessionContinuationError(new Error('404 previous_response not found'))).toBe(
-      true
-    )
-    expect(isInvalidSessionContinuationError(new Error('503 session service unavailable'))).toBe(
-      false
-    )
+  it('requires a structured continuation code, eligible status, and session URL', () => {
+    expect(
+      isInvalidSessionContinuationError(new Error('410 expired session continuation'), true)
+    ).toBe(false)
+    expect(
+      isInvalidSessionContinuationError(
+        Object.assign(new Error('Remote chat request failed'), {
+          status: 410,
+          body: JSON.stringify({ error: { code: 'session_expired' } })
+        }),
+        true
+      )
+    ).toBe(true)
+    expect(
+      isInvalidSessionContinuationError(
+        Object.assign(new Error('Remote chat request failed'), {
+          status: 503,
+          body: JSON.stringify({ error: { code: 'session_expired' } })
+        }),
+        true
+      )
+    ).toBe(false)
+    expect(
+      isInvalidSessionContinuationError(
+        Object.assign(new Error('Remote chat request failed'), {
+          status: 410,
+          body: JSON.stringify({ error: { code: 'upstream_failure', continuation: true } })
+        }),
+        true
+      )
+    ).toBe(false)
+    expect(
+      isInvalidSessionContinuationError(
+        Object.assign(new Error('Remote chat request failed'), {
+          status: 410,
+          body: JSON.stringify({ error: { code: 'session_expired' } })
+        })
+      )
+    ).toBe(false)
     expect(isInvalidSessionContinuationError(new Error('network timeout'))).toBe(false)
   })
 })
@@ -80,8 +163,10 @@ describe('normalizeChatAttachmentsForRequest', () => {
       managedMediaService: { materializeForRequest } as never,
       allowManagedRequestDataUrl: true
     })
-    expect(normalized?.[0]).toMatchObject({ url: 'data:image/png;base64,YWJj', media })
+    expect(normalized?.[0]).toMatchObject({ url: 'data:image/png;base64,YWJj' })
+    expect(normalized?.[0]).not.toHaveProperty('media')
     expect(attachment.url).toBe('local-media:///durable.png')
+    expect(attachment.media).toEqual(media)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -175,6 +260,187 @@ describe('normalizeChatAttachmentsForRequest', () => {
     ])
   })
 
+  it.each(['local-media:///C:/magicpot/lv1.png', 'file:///C:/magicpot/lv1.png'])(
+    'materializes an un-managed local image URL through the guarded local-media fetch: %s',
+    async (url) => {
+      const imageBlob = new Blob(['image-bytes'], { type: 'image/png' })
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        blob: async () => imageBlob
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const attachment: ChatAttachment = {
+        type: 'image',
+        url,
+        fileName: 'lv1.png',
+        mimeType: 'image/png'
+      }
+      const normalized = await normalizeChatAttachmentsForRequest([attachment], {
+        allowRequestDataUrl: true
+      })
+
+      expect(fetchMock).toHaveBeenCalledWith('local-media:///C:/magicpot/lv1.png')
+      expect(normalized?.[0]).toMatchObject({
+        type: 'image',
+        fileName: 'lv1.png',
+        mimeType: 'image/png',
+        sizeBytes: imageBlob.size,
+        url: expect.stringMatching(/^data:image\/png;base64,/)
+      })
+      expect(attachment.url).toBe(url)
+    }
+  )
+
+  it.each(['local-media:///durable.png', 'file:///C:/magicpot/durable.png'])(
+    'materializes a managed image through svcManagedMedia instead of fetching its URL: %s',
+    async (url) => {
+      const media = {
+        version: 1 as const,
+        kind: 'managed' as const,
+        relativePath:
+          'originals/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png',
+        sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        sizeBytes: 3,
+        mimeType: 'image/png',
+        originalFileName: 'durable.png'
+      }
+      const fetchMock = vi.fn()
+      vi.stubGlobal('fetch', fetchMock)
+      const materializeForRequest = vi.fn().mockResolvedValue({
+        transport: 'request-data-url',
+        dataUrl: 'data:image/png;base64,YWJj',
+        mimeType: 'image/png',
+        sizeBytes: 3
+      })
+      const attachment: ChatAttachment = {
+        type: 'image',
+        url,
+        fileName: 'durable.png',
+        mimeType: 'image/png',
+        media
+      }
+
+      const normalized = await normalizeChatAttachmentsForRequest([attachment], {
+        managedMediaService: { materializeForRequest } as never,
+        allowManagedRequestDataUrl: true
+      })
+
+      expect(materializeForRequest).toHaveBeenCalledWith({
+        reference: media,
+        transport: 'request-data-url'
+      })
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(normalized?.[0]).toMatchObject({
+        url: 'data:image/png;base64,YWJj',
+        mimeType: 'image/png',
+        sizeBytes: 3
+      })
+      expect(normalized?.[0]).not.toHaveProperty('media')
+      expect(attachment.url).toBe(url)
+      expect(attachment.media).toEqual(media)
+    }
+  )
+
+  it('does not fall back to fetching a managed URL when materialization fails', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const materializeForRequest = vi.fn().mockRejectedValue(new Error('managed media is missing'))
+
+    await expect(
+      normalizeChatAttachmentsForRequest(
+        [
+          {
+            type: 'image',
+            url: 'local-media:///managed/originals/aa/durable.png',
+            fileName: 'durable.png',
+            media: {
+              version: 1,
+              kind: 'managed',
+              relativePath:
+                'originals/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png',
+              sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              sizeBytes: 3,
+              mimeType: 'image/png',
+              originalFileName: 'durable.png'
+            }
+          }
+        ],
+        {
+          managedMediaService: { materializeForRequest } as never,
+          allowManagedRequestDataUrl: true
+        }
+      )
+    ).rejects.toThrow('managed media is missing')
+    expect(materializeForRequest).toHaveBeenCalledTimes(1)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('uses request apiMode precedence for GPT Image attachment capabilities', () => {
+    const config = createConfig()
+    config.llm_config.api_profiles = [
+      {
+        id: 'image-mode-profile',
+        model_name: 'gpt-image-2.5',
+        base_url: 'https://api.openai.com/v1',
+        api_key: 'test-key',
+        provider: 'openai',
+        api_mode: 'responses'
+      }
+    ]
+
+    expect(
+      resolveAttachmentRequestCapabilities(config, 'image-mode-profile', 'images')
+    ).toMatchObject({
+      allowRequestDataUrl: true,
+      allowManagedRequestDataUrl: true,
+      preserveRemoteUrl: true
+    })
+    expect(
+      resolveAttachmentRequestCapabilities(config, 'image-mode-profile', 'responses')
+    ).toMatchObject({
+      allowRequestDataUrl: false,
+      allowManagedRequestDataUrl: false,
+      preserveRemoteUrl: false
+    })
+  })
+
+  it('does not treat explicitly visual profiles as GPT Image profiles', () => {
+    const config = createConfig()
+    config.llm_config.api_profiles = [
+      {
+        id: 'visual-profile',
+        model_name: 'gpt-image-2.5',
+        base_url: 'https://gateway.example/v1',
+        api_key: 'test-key',
+        provider: 'openai',
+        model_use: 'vision',
+        api_mode: 'auto'
+      },
+      {
+        id: 'other-provider-visual-profile',
+        model_name: 'gpt-image-2.5',
+        base_url: 'https://gateway.example/v1',
+        api_key: 'test-key',
+        provider: 'ollama',
+        api_mode: 'images'
+      }
+    ]
+
+    expect(resolveAttachmentRequestCapabilities(config, 'visual-profile')).toMatchObject({
+      allowRequestDataUrl: false,
+      allowManagedRequestDataUrl: false,
+      preserveRemoteUrl: false
+    })
+    expect(
+      resolveAttachmentRequestCapabilities(config, 'other-provider-visual-profile')
+    ).toMatchObject({
+      allowRequestDataUrl: false,
+      allowManagedRequestDataUrl: false,
+      preserveRemoteUrl: false
+    })
+  })
+
   it('preserves a public HTTPS image URL only when accessible-url is allowed, without mutation', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
@@ -219,6 +485,40 @@ describe('normalizeChatAttachmentsForRequest', () => {
     expect(normalized?.[0].url).toMatch(/^data:image\/png;base64,/)
     expect(normalized?.[0]).not.toBe(attachment)
     expect(attachment.url).toBe('https://cdn.example.com/reference.png')
+  })
+
+  it('materializes public HTTPS images when request-data-url is the only available transport', async () => {
+    const imageBlob = new Blob(['remote-image'], { type: 'image/png' })
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      blob: async () => imageBlob
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const attachment: ChatAttachment = {
+      type: 'image',
+      url: 'https://cdn.example.com/reference.png',
+      fileName: 'reference.png',
+      mimeType: 'image/png'
+    }
+    const normalized = await normalizeChatAttachmentsForRequest([attachment], {
+      allowRequestDataUrl: true,
+      allowAccessibleUrl: false
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith('https://cdn.example.com/reference.png')
+    expect(normalized?.[0].url).toMatch(/^data:image\/png;base64,/)
+  })
+
+  it('rejects public HTTPS images when neither attachment transport is available', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(
+      normalizeChatAttachmentsForRequest([
+        { type: 'image', url: 'https://cdn.example.com/reference.png', fileName: 'reference.png' }
+      ])
+    ).rejects.toThrow('request-data-url transport is not supported')
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('rejects attachments requiring data URL materialization without fetching', async () => {
@@ -295,12 +595,55 @@ describe('resolveAttachmentRequestCapabilities', () => {
     expect(resolveAttachmentRequestCapabilities(config, 'url-profile')).toEqual({
       allowManagedRequestDataUrl: false,
       allowRequestDataUrl: false,
-      allowAccessibleUrl: true
+      allowAccessibleUrl: true,
+      preserveRemoteUrl: false
     })
     expect(resolveAttachmentRequestCapabilities(config, 'missing-profile')).toEqual({
       allowManagedRequestDataUrl: false,
       allowRequestDataUrl: false,
-      allowAccessibleUrl: false
+      allowAccessibleUrl: false,
+      preserveRemoteUrl: false
+    })
+  })
+
+  it('enables request-scoped data URLs for GPT Image without persisted transport flags', () => {
+    const config = createConfig()
+    config.llm_config.api_profiles = [
+      {
+        id: 'gpt-image-profile',
+        model_name: 'gpt-image-2.5-sunburst',
+        base_url: 'https://images.example/v1/responses',
+        api_key: 'key',
+        provider: 'openai'
+      }
+    ]
+
+    expect(resolveAttachmentRequestCapabilities(config, 'gpt-image-profile')).toEqual({
+      allowManagedRequestDataUrl: true,
+      allowRequestDataUrl: true,
+      allowAccessibleUrl: false,
+      preserveRemoteUrl: true
+    })
+  })
+
+  it('does not infer GPT Image transport when an explicit non-images API mode wins', () => {
+    const config = createConfig()
+    config.llm_config.api_profiles = [
+      {
+        id: 'gpt-image-responses-profile',
+        model_name: 'gpt-image-2.5-sunburst',
+        base_url: 'https://images.example/v1/responses',
+        api_key: 'key',
+        provider: 'openai',
+        api_mode: 'responses'
+      }
+    ]
+
+    expect(resolveAttachmentRequestCapabilities(config, 'gpt-image-responses-profile')).toEqual({
+      allowManagedRequestDataUrl: false,
+      allowRequestDataUrl: false,
+      allowAccessibleUrl: false,
+      preserveRemoteUrl: false
     })
   })
 
@@ -319,7 +662,8 @@ describe('resolveAttachmentRequestCapabilities', () => {
     expect(resolveAttachmentRequestCapabilities(config, 'data-profile')).toEqual({
       allowManagedRequestDataUrl: true,
       allowRequestDataUrl: true,
-      allowAccessibleUrl: false
+      allowAccessibleUrl: false,
+      preserveRemoteUrl: false
     })
   })
 })
@@ -347,6 +691,49 @@ describe('requestChatCompletion', () => {
       conversationId: undefined,
       isEdit: undefined
     })
+  })
+
+  it('filters historical images before dispatching a latest-user-turn request', async () => {
+    const config = createConfig()
+    config.use_remote_llm = false
+
+    const chat = vi.fn().mockResolvedValue({ content: 'local reply' })
+    ;(window as typeof window & { api: unknown }).api = {
+      svcLLMProxy: { chat }
+    } as unknown as Window['api']
+
+    const oldImage: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,b2xk',
+      fileName: 'old.png',
+      mimeType: 'image/png'
+    }
+    const currentImage: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,bmV3',
+      fileName: 'current.png',
+      mimeType: 'image/png'
+    }
+
+    await requestChatCompletion({
+      config,
+      profileId: 'foo',
+      imageHistoryPolicy: 'latest-user-turn',
+      messages: [
+        { role: 'user', content: 'old request', attachments: [oldImage] },
+        { role: 'assistant', content: 'old response' },
+        { role: 'user', content: 'current request', attachments: [currentImage] }
+      ]
+    })
+
+    const call = chat.mock.calls[0]?.[0] as {
+      imageHistoryPolicy?: string
+      messages?: ChatMessage[]
+    }
+    expect(call.imageHistoryPolicy).toBe('latest-user-turn')
+    expect(call.messages?.[0]?.attachments).toBeUndefined()
+    expect(call.messages?.[1]?.attachments).toBeUndefined()
+    expect(call.messages?.[2]?.attachments).toEqual([currentImage])
   })
 
   it('cancels local IPC chat requests when the caller aborts the conversation signal', async () => {
@@ -705,6 +1092,81 @@ describe('requestChatCompletion', () => {
     })
   })
 
+  it('does not retry a local remote-request timeout', async () => {
+    vi.useFakeTimers()
+    const config = createConfig()
+    config.use_remote_llm = true
+    config.remote_llm_server_config.server_origin = 'http://example.com:3721/'
+    config.remote_llm_server_config.access_token = 'proxy-secret'
+
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason ?? new DOMException('Aborted', 'AbortError')),
+          { once: true }
+        )
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const request = requestChatCompletion({ config, messages, profileId: 'bar' })
+    const expectation = expect(request).rejects.toMatchObject({
+      name: 'TimeoutError',
+      message: 'Remote chat request timed out locally after 15 minutes.'
+    })
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000)
+
+    await expectation
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('times out a remote response body that never completes', async () => {
+    vi.useFakeTimers()
+    const config = createConfig()
+    config.use_remote_llm = true
+    config.remote_llm_server_config.server_origin = 'http://example.com:3721/'
+    config.remote_llm_server_config.access_token = 'proxy-secret'
+
+    const jsonMock = vi.fn(() => new Promise<never>(() => undefined))
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: jsonMock
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const request = requestChatCompletion({ config, messages, profileId: 'bar' })
+    const expectation = expect(request).rejects.toMatchObject({
+      name: 'TimeoutError',
+      message: 'Remote chat request timed out locally after 15 minutes.'
+    })
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000)
+
+    await expectation
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(jsonMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry an upstream HTTP 504 response', async () => {
+    const config = createConfig()
+    config.use_remote_llm = true
+    config.remote_llm_server_config.server_origin = 'http://example.com:3721/'
+    config.remote_llm_server_config.access_token = 'proxy-secret'
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 504,
+      statusText: 'Gateway Timeout',
+      text: async () => JSON.stringify({ error: { code: 'bad_response_status_code' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(requestChatCompletion({ config, messages, profileId: 'bar' })).rejects.toThrow(
+      '504 Gateway Timeout'
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('falls back to legacy remote chat endpoints and response aliases', async () => {
     const config = createConfig()
     config.use_remote_llm = true
@@ -817,6 +1279,14 @@ describe('requestChatCompletion', () => {
           }
         ],
         profileId: 'bar',
+        remoteProfile: {
+          id: 'bar',
+          model_name: 'remote-vision-model',
+          base_url: '',
+          provider: 'openai',
+          api_mode: 'chat-completions',
+          attachment_transports: ['request-data-url']
+        },
         conversationId: 'conversation-1',
         storageScope: 'canvas-1.agent-2'
       })
