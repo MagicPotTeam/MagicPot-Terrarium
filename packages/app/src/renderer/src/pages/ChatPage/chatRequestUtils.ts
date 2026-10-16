@@ -605,7 +605,7 @@ const supportsRemoteOpenAIResponsesStreaming = (
   if (!input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent') return false
   const profile = resolveSelectedRequestProfile(input)
   if (!profile || resolveProfileProvider(profile) !== 'openai') return false
-  const mappedMode = resolveRemoteOpenAIRequestMode(profile, input.apiMode)
+  const mappedMode = resolveRemoteApiModeForPayload(profile, input.apiMode)
   return mappedMode === 'responses'
 }
 

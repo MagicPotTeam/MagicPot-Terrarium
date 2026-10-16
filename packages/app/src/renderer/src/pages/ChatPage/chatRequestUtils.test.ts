@@ -53,6 +53,7 @@ describe('supportsStreamingChatCompletion', () => {
         remoteProfile: {
           id: 'remote-profile',
           model_name: 'remote',
+          base_url: 'https://remote.example/v1',
           provider: 'openai',
           api_mode: 'responses',
           openai_api_modes: {
