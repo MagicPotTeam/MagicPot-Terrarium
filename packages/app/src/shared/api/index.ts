@@ -10,6 +10,8 @@ import { DccBridgeSvc, dccBridgeSvcDef } from './svcDccBridge'
 import { DialogSvc, dialogSvcDef } from './svcDialog'
 import { DuplicateCheckSvc, duplicateCheckSvcDef } from './svcDuplicateCheck'
 import { FigmaSvc, figmaSvcDef } from './svcFigma'
+import { FigPluginCenterSvc, figPluginCenterSvcDef } from './svcFigPluginCenter'
+import { AgentLocalFilesSvc, agentLocalFilesSvcDef } from './svcAgentLocalFiles'
 import { FsSvc, fsSvcDef } from './svcFs'
 import { HyperSvc, hyperSvcDef } from './svcHyper'
 import { LogSvc, logSvcDef } from './svcLog'
@@ -38,6 +40,8 @@ export type BaseApi = {
   svcPysssss: PysssssSvc
   svcDialog: DialogSvc
   svcFigma: FigmaSvc
+  svcFigPluginCenter: FigPluginCenterSvc
+  svcAgentLocalFiles: AgentLocalFilesSvc
   svcShell: ShellSvc
   svcPhotoshop: PhotoshopSvc
   svcLLMProxy: LLMProxySvc
@@ -66,6 +70,8 @@ export const apiDef: ApiDefSheet<Api> = {
   svcPysssss: pysssssSvcDef,
   svcDialog: dialogSvcDef,
   svcFigma: figmaSvcDef,
+  svcFigPluginCenter: figPluginCenterSvcDef,
+  svcAgentLocalFiles: agentLocalFilesSvcDef,
   svcShell: shellSvcDef,
   svcPhotoshop: photoshopSvcDef,
   svcLLMProxy: llmProxySvcDef,
