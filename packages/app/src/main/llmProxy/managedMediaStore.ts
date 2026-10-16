@@ -5,13 +5,14 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   MEDIA_REFERENCE_VERSION,
+  isNormalizedMediaRelativePath,
   normalizeMediaReference,
   type MediaReference
 } from '../../shared/mediaReference'
 
 export const MANAGED_MEDIA_METADATA_VERSION = 1 as const
-export const DEFAULT_MANAGED_MEDIA_MAX_BYTES = 20 * 1024 * 1024
-
+/** Legacy compatibility limit for remote/derived callers; local selected-file imports omit it. */
+export const DEFAULT_MANAGED_MEDIA_MAX_BYTES = Number.MAX_SAFE_INTEGER
 const METADATA_SCHEMA = 'magicpot.managed-media/v1'
 const MAX_METADATA_BYTES = 64 * 1024
 const MAX_JPEG_HEADER_BYTES = 1024 * 1024
@@ -113,11 +114,11 @@ function abortError(): Error {
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError()
 }
-function sizeLimit(value?: number): number {
-  const maxBytes = value ?? DEFAULT_MANAGED_MEDIA_MAX_BYTES
-  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)
+function sizeLimit(value?: number): number | undefined {
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || value <= 0)
     throw new ManagedMediaImportError('MANAGED_MEDIA_INVALID', 'Invalid managed media size limit')
-  return Math.min(maxBytes, DEFAULT_MANAGED_MEDIA_MAX_BYTES)
+  return value
 }
 function canonicalOriginalFileName(value: string): string {
   const normalized = String(value || '')
@@ -342,20 +343,62 @@ async function hashHandle(handle: FileHandle, expectedSize: number): Promise<str
   }
   return hash.digest('hex')
 }
+function sameFileState(
+  left: Awaited<ReturnType<FileHandle['stat']>>,
+  right: Awaited<ReturnType<FileHandle['stat']>>
+): boolean {
+  return (
+    left.isFile() &&
+    right.isFile() &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink
+  )
+}
 async function readRegularFile(
   filePath: string,
-  maxBytes: number,
-  fileSystem: typeof fs
+  maxBytes: number | undefined,
+  fileSystem: typeof fs,
+  verifyFileState = false
 ): Promise<Buffer> {
   const before = await fileSystem.lstat(filePath)
-  if (before.isSymbolicLink() || !before.isFile() || before.size > maxBytes)
+  if (
+    before.isSymbolicLink() ||
+    !before.isFile() ||
+    (maxBytes !== undefined && before.size > maxBytes)
+  )
     throw new Error('Managed media destination conflicts with existing content')
   const handle = await fileSystem.open(filePath, fsConstants.O_RDONLY | NOFOLLOW)
   try {
     const opened = await handle.stat()
-    if (!opened.isFile() || opened.size !== before.size)
+    if (
+      verifyFileState
+        ? !sameFileState(before, opened)
+        : !opened.isFile() || opened.size !== before.size
+    )
       throw new Error('Managed media destination changed while reading')
-    return await readAt(handle, 0, opened.size)
+    if (!verifyFileState) return await readAt(handle, 0, opened.size)
+    const bytes = Buffer.alloc(opened.size)
+    let position = 0
+    while (position < bytes.length) {
+      const { bytesRead } = await handle.read(
+        bytes,
+        position,
+        Math.min(IO_CHUNK_BYTES, bytes.length - position),
+        position
+      )
+      if (!bytesRead) throw new Error('Managed media destination was truncated')
+      position += bytesRead
+    }
+    const after = await handle.stat()
+    const current = await fileSystem.lstat(filePath)
+    if (current.isSymbolicLink() || !sameFileState(opened, after) || !sameFileState(after, current))
+      throw new Error('Managed media destination changed while reading')
+    return bytes
   } finally {
     await handle.close()
   }
@@ -698,7 +741,7 @@ async function nextWithAbort<T>(
 async function stageIterable(
   canonicalRoot: string,
   iterable: AsyncIterable<Uint8Array | string>,
-  maxBytes: number,
+  maxBytes: number | undefined,
   signal: AbortSignal | undefined,
   fileSystem: typeof fs,
   randomId: () => string
@@ -728,7 +771,7 @@ async function stageIterable(
       const byteLength =
         typeof result.value === 'string' ? Buffer.byteLength(result.value) : result.value.byteLength
       if (!byteLength) continue
-      if (byteLength > maxBytes - size)
+      if (maxBytes !== undefined && byteLength > maxBytes - size)
         throw new ManagedMediaImportError(
           'MANAGED_MEDIA_TOO_LARGE',
           `Managed media exceeds the ${maxBytes} byte limit`
@@ -909,7 +952,7 @@ export async function importManagedMediaFile(
     throw new Error('Managed media source cannot be a managed target or temporary file')
   const maxBytes = sizeLimit(input.maxBytes)
   if (!sourceLstat.size) throw new Error('Managed media cannot be empty')
-  if (sourceLstat.size > maxBytes)
+  if (maxBytes !== undefined && sourceLstat.size > maxBytes)
     throw new Error(`Managed media exceeds the ${maxBytes} byte limit`)
   const sourceHandle = await fileSystem.open(resolvedSource, fsConstants.O_RDONLY | NOFOLLOW)
   let staged: { stagedPath: string; size: number; sha256: string } | undefined
@@ -970,7 +1013,7 @@ export async function importManagedMedia(
   dependencies: ManagedMediaStoreDependencies
 ): Promise<ImportedManagedMedia> {
   const maxBytes = sizeLimit(input.maxBytes)
-  if (input.bytes.byteLength > maxBytes)
+  if (maxBytes !== undefined && input.bytes.byteLength > maxBytes)
     throw new ManagedMediaImportError(
       'MANAGED_MEDIA_TOO_LARGE',
       `Managed media exceeds the ${maxBytes} byte limit`
@@ -992,6 +1035,55 @@ export async function importManagedMedia(
     },
     dependencies
   )
+}
+
+/** Materialize only the selected content, never a later unverified pathname read. */
+export async function readManagedMediaBytes(
+  chatMediaRoot: string,
+  selected: Pick<ManagedMediaMetadata, 'relativePath' | 'mimeType' | 'sizeBytes' | 'sha256'>,
+  dependencies: Pick<ManagedMediaStoreDependencies, 'authorizedRoot' | 'fs'> & {
+    maxBytes?: number
+  }
+): Promise<Buffer> {
+  const fileSystem = dependencies.fs ?? fs
+  try {
+    const { maxBytes } = dependencies
+    if (
+      (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)) ||
+      !Number.isSafeInteger(selected.sizeBytes) ||
+      selected.sizeBytes <= 0 ||
+      (maxBytes !== undefined && selected.sizeBytes > maxBytes) ||
+      !/^[a-f0-9]{64}$/.test(selected.sha256) ||
+      !isNormalizedMediaRelativePath(selected.relativePath) ||
+      normalizeMime(selected.mimeType) !== selected.mimeType ||
+      !selected.relativePath.endsWith('.' + extensions[selected.mimeType])
+    )
+      throw new Error('Invalid selected managed media metadata')
+    const authorizedRoot = await canonicalAuthorizedRoot(dependencies.authorizedRoot, fileSystem)
+    const canonicalRoot = await existingStoreRoot(chatMediaRoot, authorizedRoot, fileSystem)
+    const absolutePath = path.join(canonicalRoot, ...selected.relativePath.split('/'))
+    await validateExistingPath(canonicalRoot, absolutePath, 'file', fileSystem)
+    // Cap allocation to the selected size, not just the transport limit. Hash the exact returned
+    // buffer so even an in-place write with restored timestamps cannot substitute request bytes.
+    const bytes = await readRegularFile(absolutePath, selected.sizeBytes, fileSystem, true)
+    if (
+      bytes.length !== selected.sizeBytes ||
+      createHash('sha256').update(bytes).digest('hex') !== selected.sha256
+    )
+      throw new Error('Selected managed media failed integrity validation')
+    await canonicalAuthorizedRoot(authorizedRoot, fileSystem)
+    await validateExistingPath(canonicalRoot, absolutePath, 'file', fileSystem)
+    return bytes
+  } catch (error) {
+    if (error instanceof ManagedMediaResolutionError) throw error
+    throw new ManagedMediaResolutionError(
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? 'MANAGED_MEDIA_MISSING'
+        : 'MANAGED_MEDIA_CORRUPT',
+      'Unable to read selected managed media',
+      { cause: error }
+    )
+  }
 }
 
 export async function resolveManagedMediaReference(

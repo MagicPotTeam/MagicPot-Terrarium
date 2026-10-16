@@ -4,7 +4,6 @@ import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { ServiceError } from '@shared/api/apiUtils/serviceValidation'
 import {
-  DEFAULT_MANAGED_MEDIA_MAX_BYTES,
   ManagedMediaResolutionError,
   type ResolvedManagedMedia
 } from '../llmProxy/managedMediaStore'
@@ -122,7 +121,7 @@ describe('ManagedMediaSvcImpl', () => {
     expect(importFile).not.toHaveBeenCalled()
   })
 
-  it('lets the store reject symlink and managed-root sources and enforce max size', async () => {
+  it('lets the store reject symlink and managed-root sources without an implicit size cap', async () => {
     await withImportFixture(async ({ root, media, source }) => {
       const { rememberTrustedLocalFileSelections } = await import('./trustedFileSelection')
       rememberTrustedLocalFileSelections([source])
@@ -154,16 +153,6 @@ describe('ManagedMediaSvcImpl', () => {
           originalFileName: 'managed.png'
         })
       ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_FAILED' })
-
-      const large = path.join(root, 'large.png')
-      await fs.writeFile(large, Buffer.alloc(DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1, 1))
-      await expect(
-        service.importFile({
-          sourcePath: large,
-          mimeType: 'image/png',
-          originalFileName: 'large.png'
-        })
-      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_FAILED' })
     })
   })
 
@@ -179,7 +168,7 @@ describe('ManagedMediaSvcImpl', () => {
     })
   })
 
-  it('uses the processed WebP for request materialization and falls back to original on failure', async () => {
+  it('uses the fully verified original for request materialization and never selects a derivative', async () => {
     const original = Buffer.from('original')
     const processed = Buffer.from('processed')
     const resolved: ResolvedManagedMedia = {
@@ -202,42 +191,28 @@ describe('ManagedMediaSvcImpl', () => {
     const resolveReference = vi.fn<
       NonNullable<ManagedMediaSvcImplDependencies['resolveReference']>
     >(async () => resolved)
-    const readFile = vi.fn(async (filePath: Parameters<typeof fs.readFile>[0]) =>
-      filePath.toString().endsWith('image.webp') ? processed : original
-    ) as unknown as typeof fs.readFile
-    const derivative = {
+    const readMediaBytes = vi.fn<NonNullable<ManagedMediaSvcImplDependencies['readMediaBytes']>>(
+      async (_root, selected) =>
+        selected.relativePath.endsWith('image.webp') ? processed : original
+    )
+    const ensureDerivative = vi.fn(async () => ({
       ...descriptor,
       maxEdge: 2048 as const,
       relativePath: 'derivatives/x/committed/image.webp'
-    }
-    const service = create(
-      vi.fn(async () => derivative),
-      { resolveReference, readFile }
-    )
+    }))
+    const service = create(ensureDerivative, { resolveReference, readMediaBytes })
     await expect(
       service.materializeForRequest({ reference, transport: 'request-data-url' })
-    ).resolves.toMatchObject({
-      mimeType: 'image/webp',
-      sizeBytes: processed.length,
-      dataUrl: `data:image/webp;base64,${processed.toString('base64')}`
-    })
-
-    const fallback = create(
-      vi.fn(async () => {
-        throw new Error('derive failed')
-      }),
-      {
-        resolveReference,
-        readFile
-      }
-    )
-    await expect(
-      fallback.materializeForRequest({ reference, transport: 'request-data-url' })
     ).resolves.toMatchObject({
       mimeType: 'image/png',
       sizeBytes: original.length,
       dataUrl: `data:image/png;base64,${original.toString('base64')}`
     })
+    expect(ensureDerivative).not.toHaveBeenCalled()
+    expect(readMediaBytes).toHaveBeenCalledWith('/canonical/media', resolved.metadata, {
+      authorizedRoot: '/canonical/media'
+    })
+    expect(processed).not.toEqual(original)
   })
 
   it('keeps import successful when automatic preprocessing fails', async () => {
@@ -342,14 +317,14 @@ describe('ManagedMediaSvcImpl', () => {
     'preserves typed %s errors without leaking paths',
     async (code) => {
       const derive = vi.fn(async () => {
-        throw new ManagedMediaResolutionError(code, 'secret /private/path')
+        throw new ManagedMediaResolutionError(code, 'secret /fixture-data/path')
       })
       await expect(
         create(derive).ensureDerivative({ reference, maxEdge: 512 })
       ).rejects.toMatchObject({ code })
       await create(derive)
         .ensureDerivative({ reference, maxEdge: 512 })
-        .catch((error: ServiceError) => expect(error.message).not.toContain('/private/path'))
+        .catch((error: ServiceError) => expect(error.message).not.toContain('/fixture-data/path'))
     }
   )
 
@@ -367,7 +342,7 @@ describe('ManagedMediaSvcImpl', () => {
 
   it('sanitizes generic errors', async () => {
     const derive = vi.fn(async () => {
-      throw new Error('secret /private/path')
+      throw new Error('secret /fixture-data/path')
     })
     await expectSanitizedFailure(create(derive).ensureDerivative({ reference, maxEdge: 512 }))
   })

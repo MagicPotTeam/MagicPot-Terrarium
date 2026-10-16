@@ -36,10 +36,12 @@ async function add(root: string, id: string) {
 }
 async function fixture() {
   const root = await createNodeTestArtifactDir('managed-media-cleanup')
+  await fs.mkdir(root, { recursive: true })
+  const canonicalRoot = await fs.realpath(root)
   created.push(root)
-  await add(root, referenced)
-  await add(root, orphan)
-  return root
+  await add(canonicalRoot, referenced)
+  await add(canonicalRoot, orphan)
+  return canonicalRoot
 }
 afterEach(async () => {
   await Promise.all(created.splice(0).map((p) => fs.rm(p, { recursive: true, force: true })))

@@ -4,8 +4,10 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
+vi.unmock('node:fs')
+vi.unmock('node:fs/promises')
+
 import {
-  DEFAULT_MANAGED_MEDIA_MAX_BYTES,
   importManagedMedia,
   importManagedMediaFile,
   importManagedMediaStream,
@@ -26,6 +28,16 @@ function png(width = 1, height = 1): Buffer {
   return Buffer.concat([signature, ihdr, iend])
 }
 const pngBytes = png()
+function largePng(extraBytes: number): Buffer {
+  const payload = Buffer.alloc(extraBytes)
+  const chunk = Buffer.alloc(12 + payload.length)
+  chunk.writeUInt32BE(payload.length, 0)
+  chunk.write('tEXt', 4, 'ascii')
+  payload.copy(chunk, 8)
+  const iend = Buffer.alloc(12)
+  iend.write('IEND', 4, 'ascii')
+  return Buffer.concat([pngBytes.subarray(0, 33), chunk, iend])
+}
 
 function input(overrides: Record<string, unknown> = {}) {
   return {
@@ -111,13 +123,14 @@ describe('managedMediaStore', () => {
     })
   })
 
-  it('enforces a 20 MiB hard limit even when a larger override is requested', async () => {
-    expect(DEFAULT_MANAGED_MEDIA_MAX_BYTES).toBe(20 * 1024 * 1024)
-    const bytes = Buffer.alloc(DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1)
-    pngBytes.copy(bytes)
-    await expect(
-      importMedia({ bytes, maxBytes: DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1024 })
-    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_TOO_LARGE' })
+  it('allows a trusted import above the former default while retaining explicit finite limits', async () => {
+    const bytes = largePng(256 * 1024)
+    await expect(importMedia({ bytes })).resolves.toMatchObject({
+      reference: { sizeBytes: bytes.length }
+    })
+    await expect(importMedia({ bytes, maxBytes: bytes.length - 1 })).rejects.toMatchObject({
+      code: 'MANAGED_MEDIA_TOO_LARGE'
+    })
   })
 
   it.each(['CON.png', 'name. ', 'bad?.png', '../escape.png', 'folder/file.png'])(

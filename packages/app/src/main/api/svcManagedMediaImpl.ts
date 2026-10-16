@@ -37,6 +37,7 @@ import {
   ManagedMediaResolutionError,
   importManagedMedia,
   importManagedMediaFile,
+  readManagedMediaBytes,
   type ImportedManagedMedia,
   resolveManagedMediaReference
 } from '../llmProxy/managedMediaStore'
@@ -47,7 +48,7 @@ export type ManagedMediaSvcImplDependencies = {
   ensureDerivative?: typeof ensureManagedMediaDerivative
   getMediaDir?: typeof getChatMediaDir
   realpath?: typeof fs.realpath
-  readFile?: typeof fs.readFile
+  readMediaBytes?: typeof readManagedMediaBytes
   resolveReference?: typeof resolveManagedMediaReference
   migrateLegacy?: typeof migrateLegacyBase64MediaOnDemand
   updateReferenceSnapshot?: (snapshot: {
@@ -339,36 +340,16 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
   ): Promise<MaterializeManagedMediaForRequestResp> {
     const getMediaDir = this.dependencies.getMediaDir ?? getChatMediaDir
     const realpath = this.dependencies.realpath ?? fs.realpath
-    const readFile = this.dependencies.readFile ?? fs.readFile
+    const readMediaBytes = this.dependencies.readMediaBytes ?? readManagedMediaBytes
     const resolveReference = this.dependencies.resolveReference ?? resolveManagedMediaReference
     try {
       const mediaDir = getMediaDir()
       const authorizedRoot = await realpath(mediaDir)
       const resolved = await resolveReference(mediaDir, req.reference, { authorizedRoot })
-      let selected = {
-        absolutePath: resolved.absolutePath,
-        mimeType: resolved.reference.mimeType,
-        sizeBytes: resolved.reference.sizeBytes!
-      }
-      try {
-        const derivative = await (
-          this.dependencies.ensureDerivative ?? ensureManagedMediaDerivative
-        )({
-          authorizedRoot,
-          reference: req.reference,
-          maxEdge: 2048
-        })
-        if (derivative.purpose === 'managed-media-derivative') {
-          selected = {
-            absolutePath: path.join(authorizedRoot, ...derivative.relativePath.split('/')),
-            mimeType: derivative.mimeType,
-            sizeBytes: derivative.sizeBytes
-          }
-        }
-      } catch {
-        // Request preprocessing is best-effort; the verified immutable original remains valid.
-      }
-      const bytes = await readFile(selected.absolutePath)
+      const selected: Parameters<typeof readManagedMediaBytes>[1] = resolved.metadata
+      const bytes = await readMediaBytes(authorizedRoot, selected, {
+        authorizedRoot
+      })
       return validateMaterializeManagedMediaForRequestResp({
         transport: 'request-data-url',
         dataUrl: `data:${selected.mimeType};base64,${bytes.toString('base64')}`,

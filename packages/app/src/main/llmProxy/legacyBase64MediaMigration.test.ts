@@ -27,12 +27,17 @@ describe('lazy legacy Base64 media migration', () => {
   let tempRoot = ''
   let authorizedRoot = ''
   let chatMediaRoot = ''
+  let uncreatedChatMediaRoot = ''
 
   beforeEach(async () => {
     tempRoot = await createNodeTestArtifactDir('legacy-base64-media-migration')
     authorizedRoot = path.join(tempRoot, 'userData', '.chat_media')
     chatMediaRoot = path.join(authorizedRoot, 'managed')
+    uncreatedChatMediaRoot = path.join(authorizedRoot, 'uncreated-managed')
     await fs.mkdir(authorizedRoot, { recursive: true })
+    await fs.mkdir(chatMediaRoot, { recursive: true })
+    authorizedRoot = await fs.realpath(authorizedRoot)
+    chatMediaRoot = await fs.realpath(chatMediaRoot)
   })
 
   afterEach(async () => fs.rm(tempRoot, { recursive: true, force: true }))
@@ -83,8 +88,16 @@ describe('lazy legacy Base64 media migration', () => {
 
   it('leaves unrelated persistence values untouched without creating the managed root', async () => {
     const value = { url: 'https://example.test/image.png' }
-    await expect(migrate(value)).resolves.toEqual({ status: 'unchanged', value })
-    await expect(fs.stat(chatMediaRoot)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(
+      migrateLegacyBase64MediaOnDemand({
+        value,
+        authorizedRoot,
+        chatMediaRoot: uncreatedChatMediaRoot
+      })
+    ).resolves.toEqual({ status: 'unchanged', value })
+    await expect(fs.stat(uncreatedChatMediaRoot)).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
   })
 
   it.each([
@@ -96,21 +109,21 @@ describe('lazy legacy Base64 media migration', () => {
     await expect(migrate(value)).rejects.toMatchObject({
       code: 'LEGACY_MEDIA_MALFORMED'
     } satisfies Partial<LegacyMediaMigrationError>)
-    await expect(fs.stat(chatMediaRoot)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readdir(chatMediaRoot)).toEqual([])
   })
 
   it('rejects unsupported image media before importing', async () => {
     await expect(migrate('data:image/svg+xml;base64,PHN2Zy8+')).rejects.toMatchObject({
       code: 'LEGACY_MEDIA_UNSUPPORTED'
     } satisfies Partial<LegacyMediaMigrationError>)
-    await expect(fs.stat(chatMediaRoot)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readdir(chatMediaRoot)).toEqual([])
   })
 
   it('rejects oversized payloads from encoded length before decoding or importing', async () => {
     await expect(migrate('data:image/png;base64,QUJDRA==', { maxBytes: 3 })).rejects.toMatchObject({
       code: 'LEGACY_MEDIA_TOO_LARGE'
     } satisfies Partial<LegacyMediaMigrationError>)
-    await expect(fs.stat(chatMediaRoot)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readdir(chatMediaRoot)).toEqual([])
   })
 
   it('rejects immediately when the migration signal is already aborted', async () => {
@@ -119,6 +132,6 @@ describe('lazy legacy Base64 media migration', () => {
     controller.abort(reason)
 
     await expect(migrate(legacyValue, { signal: controller.signal })).rejects.toBe(reason)
-    await expect(fs.stat(chatMediaRoot)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readdir(chatMediaRoot)).toEqual([])
   })
 })

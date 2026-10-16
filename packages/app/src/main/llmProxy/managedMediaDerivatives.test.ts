@@ -78,8 +78,9 @@ describe('ensureManagedMediaDerivative', () => {
 
   beforeEach(async () => {
     tempRoot = await createNodeTestArtifactDir('managed-media-derivatives')
-    root = path.join(tempRoot, 'managed')
+    root = path.resolve(path.join(tempRoot, 'managed'))
     await fs.mkdir(root, { recursive: true })
+    root = await fs.realpath(root)
     sidecar.generate.mockReset()
     sidecar.generate.mockImplementation(async (request) => {
       const sourceBytes = await fs.readFile(request.items[0].path)
