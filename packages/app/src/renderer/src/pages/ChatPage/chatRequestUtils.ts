@@ -470,7 +470,7 @@ type AttachmentBatchCapability = {
 
 export type ResolveAttachmentBatchCapabilityInput = Pick<
   RequestChatCompletionInput,
-  'config' | 'profileId' | 'systemPrompt' | 'externalAgentSkill'
+  'config' | 'profileId' | 'remoteProfile' | 'apiMode' | 'systemPrompt' | 'externalAgentSkill'
 >
 
 const isOfficialOpenAIBaseUrl = (baseUrl: string | undefined): boolean => {
@@ -605,8 +605,17 @@ const supportsRemoteOpenAIResponsesStreaming = (
   if (!input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent') return false
   const profile = resolveSelectedRequestProfile(input)
   if (!profile || resolveProfileProvider(profile) !== 'openai') return false
-  const mappedMode = resolveRemoteApiModeForPayload(profile, input.apiMode)
-  return mappedMode === 'responses'
+  // Prefer the published route map for stream eligibility. Legacy discovery
+  // records may not include the map, so retain the standard OpenAI fallback.
+  const mappedMode = resolveRemoteOpenAIRequestMode(profile, input.apiMode)
+  if (mappedMode) return mappedMode === 'responses'
+
+  // Without a route map, only standard API profiles may use the legacy
+  // OpenAI inference fallback. Extension-owned routes must not inherit the
+  // payload mode as evidence that their transport can stream.
+  if (profile.call_type && profile.call_type !== 'api') return false
+  if (profile.auth_mode && profile.auth_mode !== 'api_key') return false
+  return resolveRemoteApiModeForPayload(profile, input.apiMode) === 'responses'
 }
 
 export const supportsStreamingChatCompletion = (
@@ -1712,6 +1721,8 @@ export const resolveAttachmentBatchCapability = async (
       config: input.config,
       messages: [{ role: 'user', content: ATTACHMENT_BATCH_CAPABILITY_PROBE }],
       profileId: input.profileId,
+      remoteProfile: input.remoteProfile,
+      apiMode: input.apiMode,
       systemPrompt: undefined,
       externalAgentSkill: input.externalAgentSkill,
       sessionUrl: undefined,

@@ -32,9 +32,12 @@ import {
   type LLMReasoningEffort,
   type OpenAIImageGenerationOptions,
   normalizeReasoningEffort,
-  resolveChatProfileCapabilities
+  resolveChatProfileCapabilities,
+  resolveProfileModelUse,
+  resolveProfileProvider
 } from '@shared/llm'
 import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
+import { shouldUseOpenAIImageGeneration } from '@shared/llm/openaiResponses'
 import type { AgentRouteLike } from '@shared/agent'
 import type { ProjectTraceEventStatus } from '@shared/projectTrace'
 import {
@@ -116,6 +119,7 @@ import {
 } from './chatSessionUtils'
 import { getLocalizedConversationTitle } from './chatLocaleUtils'
 import {
+  preflightChatRequestImages,
   requestChatCompletion,
   requestChatCompletionStream,
   isInvalidSessionContinuationError,
@@ -2699,6 +2703,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
             storageScope,
             route,
             profileId: compactProfileSelection.profileId,
+            remoteProfile: config.use_remote_llm
+              ? availableProfiles.find(
+                  (profile) => profile.id === compactProfileSelection.profileId
+                )
+              : undefined,
             reasoningEffort: compactReasoningEffort,
             maxOutputTokens: compactSummaryMaxTokens,
             conversationId: `${options.sessionId}:compact:${now}`,
@@ -2913,6 +2922,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return true
     },
     [
+      availableProfiles,
       config,
       emitChatActivity,
       emitCompactSkipped,
@@ -4655,28 +4665,31 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
   // ==================== 发送消息 ====================
   const persistUserImageAttachments = useCallback(
-    async (attachments: ChatAttachment[] | undefined): Promise<ChatAttachment[] | undefined> => {
+    async (
+      attachments: ChatAttachment[] | undefined,
+      persistenceByBlobUrl?: Map<string, Promise<string | null>>
+    ): Promise<ChatAttachment[] | undefined> => {
       if (!attachments?.length) return attachments
 
       const targetDir = resolveAssistantImageAutoSaveDir({
         config: { download_dir: config.download_dir },
         storageScope
       })
-      const persistenceByBlobUrl = new Map<string, Promise<string | null>>()
+      const persistenceMap = persistenceByBlobUrl || new Map<string, Promise<string | null>>()
       const persistedAttachments = await Promise.all(
         attachments.map(async (attachment, attachmentIndex): Promise<ChatAttachment> => {
           if (attachment.type !== 'image' || !attachment.url.startsWith('blob:')) {
             return attachment
           }
 
-          let persistence = persistenceByBlobUrl.get(attachment.url)
+          let persistence = persistenceMap.get(attachment.url)
           if (!persistence) {
             persistence = saveChatImageAttachmentBlobToDir({
               attachment,
               attachmentIndex,
               targetDir
             })
-            persistenceByBlobUrl.set(attachment.url, persistence)
+            persistenceMap.set(attachment.url, persistence)
           }
           const savedPath = await persistence
 
@@ -4697,21 +4710,24 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const prepareOutgoingUserMessage = useCallback(
-    async (content: string, attachments?: ChatAttachment[]): Promise<ChatMessage> => {
-      const persistedAttachments = await persistUserImageAttachments(attachments)
-      const preparedMessage: ChatMessage = {
-        role: 'user',
-        content: content || '',
-        attachments: persistedAttachments
-      }
-
-      const augmentedMessage = await augmentAttachmentsWithVideoBoundaryFrames(
+    async (
+      content: string,
+      attachments?: ChatAttachment[],
+      validate?: (message: ChatMessage) => void,
+      persistenceByBlobUrl?: Map<string, Promise<string | null>>,
+      preAugmentedMessage?: Pick<ChatMessage, 'content' | 'attachments'>
+    ): Promise<ChatMessage> => {
+      const descriptor: ChatMessage = { role: 'user', content: content || '', attachments }
+      validate?.(descriptor)
+      const augmentedMessage =
+        preAugmentedMessage ||
+        (await augmentAttachmentsWithVideoBoundaryFrames(attachments, descriptor.content))
+      const preparedMessage: ChatMessage = { ...descriptor, ...augmentedMessage }
+      validate?.(preparedMessage)
+      preparedMessage.attachments = await persistUserImageAttachments(
         preparedMessage.attachments,
-        preparedMessage.content
+        persistenceByBlobUrl
       )
-      preparedMessage.content = augmentedMessage.content
-      preparedMessage.attachments = augmentedMessage.attachments
-
       return preparedMessage
     },
     [persistUserImageAttachments]
@@ -4774,13 +4790,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const activeSystemPrompt = buildSystemPromptFromSkillRuntime(activeSkillRuntime)
       const activeUserPrompt = buildUserPromptFromSkillRuntime(activeSkillRuntime)
       const activeSkillCapabilityContext = buildSkillRuntimeCapabilityContext(activeSkillRuntime)
-      const activeSkillResources = await resolveSkillRuntimeResourceEntries({
-        runtime: activeSkillRuntime,
-        config,
-        runtimeApps: availableRuntimeApps,
-        runtimeMcpStatus
-      })
-      const activeSkillResourceContext = buildSkillRuntimeResourceContext(activeSkillResources)
       const preScriptReport = resolveSkillRuntimePreScripts({
         runtime: activeSkillRuntime,
         content: requestContent
@@ -4832,10 +4841,32 @@ const ChatPage: React.FC<ChatPageProps> = ({
           availableProfiles.find((profile) => profile.id === baseProfileId) ||
           null
         : null
+      const remoteRequestProfile = config.use_remote_llm
+        ? availableProfiles.find((profile) => profile.id === profileId)
+        : undefined
       const activeCapabilityProfile = activeProfile as ChatCapabilityProfile | null
       const activeProfileCapabilities = resolveChatProfileCapabilities(activeCapabilityProfile)
       const responseModelName =
         (activeProfile?.model_name || baseProfileId || '').trim() || undefined
+      const activeProfileProvider = activeProfile
+        ? resolveProfileProvider(activeProfile)
+        : undefined
+      const activeProfileModelUse = activeProfile
+        ? resolveProfileModelUse(activeProfile)
+        : undefined
+      const isGPTImageProfile =
+        activeProfileProvider === 'openai' &&
+        (activeProfile?.api_mode === 'images' || activeProfileModelUse === 'image')
+      const currentTurnImageGenerationRequest =
+        isImageGenerationSelected ||
+        activeSkillRuntime.execution.outputMode === 'image' ||
+        (activeProfileProvider === 'openai' &&
+          shouldUseOpenAIImageGeneration({
+            messages: [{ ...userMessage, content: requestContent }],
+            modelUse: activeProfileModelUse,
+            imageGenerationOptions
+          }))
+      const isImageGenerationRequest = currentTurnImageGenerationRequest || isGPTImageProfile
       const skillAttachmentSupport =
         activeSkill && activeProfile
           ? inspectSkillAttachmentSupport(rawAttachments, activeProfile)
@@ -4858,6 +4889,58 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
 
       const explicitToolCommand = parseExplicitToolCommand(requestContent)
+      const historyMessages = executionContext.historyMessages
+      const currentSessionUrl = executionContext.sessionUrl
+      const activeContinuationProfileId = normalizeChatProfileIdForStorage(baseProfileId)
+      const continuationProfileMatches =
+        !currentSessionUrl ||
+        !cs.sessionProfileId ||
+        normalizeChatProfileIdForStorage(cs.sessionProfileId) === activeContinuationProfileId
+      const preflightImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
+        supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
+        hasUsableSessionContinuation: Boolean(
+          activeProfileCapabilities.supportsSessionContinuation &&
+          continuationProfileMatches &&
+          currentSessionUrl?.trim()
+        ),
+        shouldResetContinuation: false,
+        isImageGenerationRequest
+      }).imageHistoryPolicy
+      const shouldPreserveMultiAttachmentRequest = isImageGenerationRequest
+      const requestImageGenerationOptions = resolveImageGenerationOptionsForAttachments(
+        imageGenerationOptions,
+        rawAttachments
+      )
+      const useAttachmentBatching =
+        shouldBatchAttachments(rawAttachments) && !shouldPreserveMultiAttachmentRequest
+      const provisionalUserMessage: ChatMessage = {
+        ...userMessage,
+        content: requestContent,
+        attachments: rawAttachments
+      }
+      try {
+        preflightChatRequestImages({
+          config,
+          messages: [...historyMessages, provisionalUserMessage],
+          profileId,
+          remoteProfile: remoteRequestProfile,
+          externalAgentSkill: activeExternalAgentSkill,
+          imageHistoryPolicy: preflightImageHistoryPolicy,
+          apiMode: activeProfile?.api_mode
+        })
+      } catch (error) {
+        notifyError(error instanceof Error ? error.message : String(error))
+        return
+      }
+      const latestContextCompressionSummary = cs.contextCompression
+      const activeSkillResourceContext = buildSkillRuntimeResourceContext(
+        await resolveSkillRuntimeResourceEntries({
+          runtime: activeSkillRuntime,
+          config,
+          runtimeApps: availableRuntimeApps,
+          runtimeMcpStatus
+        })
+      )
       userMessage = await prepareOutgoingUserMessage(requestContent, rawAttachments)
       const resolvedHiddenContext = explicitToolCommand
         ? msgHiddenContext || ''
@@ -4871,22 +4954,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (resolvedHiddenContext) {
         userMessage.hiddenContext = resolvedHiddenContext
       }
-      const historyMessages = executionContext.historyMessages
-      const currentSessionUrl = executionContext.sessionUrl
-      const shouldPreserveMultiAttachmentRequest = isImageGenerationSelected
-      const requestImageGenerationOptions = resolveImageGenerationOptionsForAttachments(
-        imageGenerationOptions,
-        rawAttachments
-      )
-      const useAttachmentBatching =
-        shouldBatchAttachments(rawAttachments) && !shouldPreserveMultiAttachmentRequest
-      const latestContextCompressionSummary = cs.contextCompression
       let shouldDiscardSessionUrlForContextCompact = false
-      const activeContinuationProfileId = normalizeChatProfileIdForStorage(baseProfileId)
-      const continuationProfileMatches =
-        !currentSessionUrl ||
-        !cs.sessionProfileId ||
-        normalizeChatProfileIdForStorage(cs.sessionProfileId) === activeContinuationProfileId
       let requestContinuationUrl =
         activeProfileCapabilities.supportsSessionContinuation && continuationProfileMatches
           ? currentSessionUrl?.trim() || undefined
@@ -4895,6 +4963,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
         shouldDiscardSessionUrlForContextCompact = true
       }
       let requestHistoryMessages = historyMessages
+      const completionApiMode =
+        activeProfile?.api_mode && activeProfile.api_mode !== 'auto'
+          ? activeProfile.api_mode
+          : undefined
       const sessionAbortController = new AbortController()
       sessionAbortControllersRef.current.set(targetSessionId, sessionAbortController)
 
@@ -5007,7 +5079,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const preliminaryImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
           supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
           hasUsableSessionContinuation,
-          shouldResetContinuation: false
+          shouldResetContinuation: false,
+          isImageGenerationRequest
         }).preliminaryImageHistoryPolicy
         const preliminaryCalibrationFingerprint = buildChatContextTokenCalibrationFingerprint({
           profileId,
@@ -5033,7 +5106,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const imageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
           supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
           hasUsableSessionContinuation,
-          shouldResetContinuation: shouldDropSessionUrlForCompressedRequest
+          shouldResetContinuation: shouldDropSessionUrlForCompressedRequest,
+          isImageGenerationRequest
         }).imageHistoryPolicy
         const calibrationFingerprint = buildChatContextTokenCalibrationFingerprint({
           profileId,
@@ -5115,17 +5189,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
           requestMessages,
           imageHistoryPolicy
         )
-        const selectedImageCount = selectedRequestMessages.reduce(
-          (total, message) =>
-            total +
-            (message.attachments || []).filter((attachment) => attachment.type === 'image').length,
-          0
-        )
-        if (selectedImageCount > 10) {
-          throw new Error(
-            `This request reconstructs ${selectedImageCount} images, exceeding the supported limit of 10. Start a new session or remove older image references.`
-          )
-        }
         return {
           compressionPlan,
           calibrationFingerprint,
@@ -5187,6 +5250,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const shouldStreamStandardResponse = supportsStreamingChatCompletion({
         config,
         profileId,
+        remoteProfile: remoteRequestProfile,
+        apiMode: completionApiMode,
         externalAgentSkill: activeExternalAgentSkill
       })
       let streamedResponse = ''
@@ -5225,6 +5290,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
             storageScope,
             route,
             profileId,
+            remoteProfile: remoteRequestProfile,
+            apiMode: completionApiMode,
             systemPrompt: activeSystemPrompt,
             reasoningEffort: selectedReasoningEffort,
             imageGenerationOptions: requestImageGenerationOptions,
@@ -5241,7 +5308,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         try {
           result = await dispatchCompletion(requestState)
         } catch (error) {
-          if (!requestState.sessionUrl || !isInvalidSessionContinuationError(error)) {
+          if (!requestState.sessionUrl || !isInvalidSessionContinuationError(error, true)) {
             throw error
           }
           requestContinuationUrl = undefined
@@ -5320,6 +5387,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           storageScope,
           route,
           profileId,
+          remoteProfile: remoteRequestProfile,
+          apiMode: completionApiMode,
           systemPrompt: activeSystemPrompt,
           reasoningEffort: selectedReasoningEffort,
           imageGenerationOptions: requestImageGenerationOptions,
@@ -5383,7 +5452,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         } catch (error) {
           if (
             !requestState.sessionUrl ||
-            !isInvalidSessionContinuationError(error) ||
+            !isInvalidSessionContinuationError(error, true) ||
             streamedResponse ||
             streamedAttachments.length > 0
           ) {
@@ -5391,7 +5460,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
           requestContinuationUrl = undefined
           shouldDiscardSessionUrlForContextCompact = true
-          return requestCompletionForUserMessage(requestMessage, undefined)
+          return requestStreamedCompletionForUserMessage(requestMessage, undefined)
         }
 
         maybeStartContextCompactFromUsage(streamedResult.result.usage)
@@ -5538,6 +5607,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const maxAttachmentsPerRequest = await resolveAttachmentBatchCapability({
             config,
             profileId,
+            remoteProfile: remoteRequestProfile,
+            apiMode: completionApiMode,
             systemPrompt: activeSystemPrompt,
             externalAgentSkill: activeExternalAgentSkill
           })
@@ -5876,6 +5947,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setSessions,
       storageScope,
       t,
+      notifyError,
       notifyWarning,
       isAutoContextCompressionAvailable,
       selectedCapabilityProfile,
