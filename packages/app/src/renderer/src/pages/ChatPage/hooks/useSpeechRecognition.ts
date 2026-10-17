@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import type { TFunction } from 'i18next'
 import {
   SpeechRecognition,
   SpeechRecognitionErrorEvent,
@@ -10,7 +11,7 @@ import {
  */
 export function useSpeechRecognition(
   setInputValue: React.Dispatch<React.SetStateAction<string>>,
-  t: (key: string) => string,
+  t: TFunction<'translation'>,
   active: boolean = true
 ) {
   const [isListening, setIsListening] = useState(false)

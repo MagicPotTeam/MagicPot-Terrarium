@@ -36,6 +36,7 @@ import {
   ContentCopy as ContentCopyIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism } from 'react-syntax-highlighter'
@@ -931,7 +932,7 @@ const ContextCompressionSummaryCard: React.FC<{
   coveredMessageCount: number
   updatedAt?: number
   manual?: boolean
-  t: (key: string, options?: any) => string
+  t: TFunction<'translation'>
   theme: any
 }> = ({ summary, coveredMessageCount, updatedAt, manual, t, theme }) => {
   const [expanded, setExpanded] = React.useState(false)
@@ -1131,7 +1132,7 @@ const ModelAttachmentCard: React.FC<{
   attachment: ChatAttachment
   onDownloadAttachment: (attachment: ChatAttachment) => void
   onSendModelToDcc: (attachment: ChatAttachment, target: DccBridgeTarget) => void
-  t: (key: string, options?: any) => string
+  t: TFunction<'translation'>
   theme: any
 }> = ({ attachment, onDownloadAttachment, onSendModelToDcc, t, theme }) => {
   const sourceUrl = attachment.url || ''
@@ -1228,7 +1229,7 @@ const FileAttachmentCard: React.FC<{
   attachment: ChatAttachment
   ocrResult?: ChatAttachment['ocrResult']
   onDownloadAttachment: (attachment: ChatAttachment) => void
-  t: (key: string, options?: any) => string
+  t: TFunction<'translation'>
   theme: any
 }> = ({ attachment, ocrResult, onDownloadAttachment, t, theme }) => {
   const folderBodyColor = theme.palette.mode === 'light' ? '#f8fafc' : '#1f2937'
@@ -1303,7 +1304,7 @@ const FileAttachmentCard: React.FC<{
             whiteSpace: 'nowrap'
           }}
         >
-          {attachment.fileName || t('chat.file')}
+          {attachment.fileName || t('chat.file', { defaultValue: 'File' })}
         </Typography>
       </Box>
       <IconButton
@@ -1410,7 +1411,7 @@ const getAttachmentDownloadFileName = (attachment: ChatAttachment): string => {
 
 const buildAttachmentDownloadMenuLabel = (
   attachment: ChatAttachment,
-  t: (key: string, options?: any) => string
+  t: TFunction<'translation'>
 ): string => {
   const fileName = getAttachmentDownloadFileName(attachment)
 
@@ -1646,7 +1647,7 @@ const UserMessageBubble: React.FC<{
   onDownloadAttachment: (attachment: ChatAttachment) => void
   onSendModelToDcc: (attachment: ChatAttachment, target: DccBridgeTarget) => void
   notifySuccess: (msg: string) => void
-  t: (key: string, options?: any) => string
+  t: TFunction<'translation'>
   theme: any
 }> = ({
   message,
@@ -1831,7 +1832,7 @@ const AssistantMessageBubble: React.FC<{
   onDownloadAttachment: (attachment: ChatAttachment) => void
   onSendModelToDcc: (attachment: ChatAttachment, target: DccBridgeTarget) => void
   notifySuccess: (msg: string) => void
-  t: (key: string, options?: any) => string
+  t: TFunction<'translation'>
   theme: any
 }> = ({
   message,
@@ -2126,7 +2127,7 @@ const AssistantMarkdownContent: React.FC<{
   onImageContextMenu: (event: React.MouseEvent, imageUrl: string) => void
   onDownloadAttachment: (attachment: ChatAttachment) => void
   notifySuccess: (msg: string) => void
-  t: (key: string, options?: any) => string
+  t: TFunction<'translation'>
 }> = ({
   content,
   replyDownloadBaseName,
