@@ -1782,6 +1782,8 @@ describe('ChatPage runtime workflow integration', () => {
       title: 'Supported continuation image replay',
       profileId: 'continuation-model',
       sessionUrl: 'session-supported',
+      sessionProfileId: 'continuation-model',
+      sessionRouteFingerprint: 'local-continuation-model',
       messages: [
         {
           role: 'user',
@@ -1995,6 +1997,8 @@ describe('ChatPage runtime workflow integration', () => {
       title: 'Expired continuation',
       profileId: 'continuation-model',
       sessionUrl: 'expired-session',
+      sessionProfileId: 'continuation-model',
+      sessionRouteFingerprint: 'local-continuation-model',
       messages: [
         {
           role: 'user',
@@ -2094,6 +2098,8 @@ describe('ChatPage runtime workflow integration', () => {
       title: 'Generic continuation failure',
       profileId: 'continuation-model',
       sessionUrl: 'usable-session',
+      sessionProfileId: 'continuation-model',
+      sessionRouteFingerprint: 'local-continuation-model',
       messages: []
     }
     hoisted.storedSessions.value = [session]
@@ -2129,6 +2135,7 @@ describe('ChatPage runtime workflow integration', () => {
       profileId: 'continuation-model',
       sessionUrl: 'expired-session',
       sessionProfileId: 'continuation-model',
+      sessionRouteFingerprint: 'local-continuation-model',
       messages: []
     }
     hoisted.storedSessions.value = [session]
@@ -3127,14 +3134,9 @@ describe('ChatPage runtime workflow integration', () => {
         onload: (() => void) | null = null
         onerror: (() => void) | null = null
 
-        readAsDataURL(blob: Blob) {
-          void blob.arrayBuffer().then((buffer) => {
-            const bytes = new Uint8Array(buffer)
-            let binary = ''
-            for (const byte of bytes) binary += String.fromCharCode(byte)
-            this.result = `data:${blob.type};base64,${btoa(binary)}`
-            this.onload?.()
-          })
+        readAsDataURL(_blob: Blob) {
+          this.result = 'data:image/png;base64,Y2FudmFz'
+          void Promise.resolve().then(() => this.onload?.())
         }
       }
     )
@@ -4416,9 +4418,9 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(target).toHaveBeenCalledTimes(1))
       expect(target.mock.calls[0][0]).toMatchObject({
         profileId: remoteProfile.id,
-        apiMode: 'responses',
         remoteProfile
       })
+      expect(target.mock.calls[0][0].apiMode).toBeUndefined()
     }
   )
 
@@ -4512,7 +4514,7 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
     const firstCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
     expect(firstCall.profileId).toBe('gpt-image-profile')
-    expect(firstCall.apiMode).toBe('images')
+    expect(firstCall.apiMode).toBeUndefined()
     expect(firstCall.imageHistoryPolicy).toBe('all')
     expect(
       firstCall.messages.flatMap((message) =>

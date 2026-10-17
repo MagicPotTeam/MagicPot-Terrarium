@@ -86,6 +86,8 @@ type RemoteRequestProfile = Pick<
   | 'supports_session_continuation'
   | 'supportsSessionContinuation'
   | 'maxImages'
+  | 'is_ocr_model'
+  | 'is_vision_model'
 > & { openai_api_modes?: RemoteOpenAIModeMap }
 
 type RequestChatCompletionInput = {
@@ -561,6 +563,10 @@ const resolveRemoteApiModeForPayload = (
   )
   if (advertisedMode) return advertisedMode
 
+  // Keep explicitly selected profile modes authoritative when discovery does not
+  // provide a complete route map (notably legacy Images profiles).
+  if (profile?.api_mode && profile.api_mode !== 'auto') return profile.api_mode
+
   // Older remote discovery records may omit openai_api_modes while still
   // exposing a usable base URL. Infer only the standard OpenAI route and never
   // from the colliding local profile.
@@ -762,25 +768,110 @@ const hasPrimaryReportBundleInMessages = (messages: ChatMessage[]): boolean =>
       message.attachments?.some((attachment) => attachment.reportBundleRole === 'primary-report')
   )
 
-const getReportInlineCapabilityStorageKey = (profileId?: string | null): string =>
-  `${REPORT_INLINE_CAPABILITY_STORAGE_PREFIX}${getBaseProfileId(profileId) || 'default'}`
+const stableSerialize = (value: unknown): string => {
+  if (value === undefined) return 'undefined'
+  if (value === null || typeof value !== 'object') {
+    const serialized = JSON.stringify(value)
+    return serialized === undefined ? 'undefined' : serialized
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(',')}]`
+  }
+
+  return `{${Object.keys(value as Record<string, unknown>)
+    .sort()
+    .map(
+      (key) => `${JSON.stringify(key)}:${stableSerialize((value as Record<string, unknown>)[key])}`
+    )
+    .join(',')}}`
+}
+
+const hashFingerprint = (value: string): string => {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+const sanitizeFingerprintPart = (value: string): string =>
+  value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 96)
+
+const buildRemoteRouteFingerprint = (
+  profileId?: string | null,
+  remoteProfile?: RemoteRequestProfile | null
+): string => {
+  if (!remoteProfile) return sanitizeFingerprintPart(getBaseProfileId(profileId) || 'default')
+
+  // Include every non-secret field in the renderer's remote-route contract. The
+  // stable serialization keeps the cache key unchanged when discovery changes
+  // object insertion order, while the hash prevents truncation collisions.
+  const route = {
+    id: remoteProfile.id,
+    model_name: remoteProfile.model_name,
+    base_url: remoteProfile.base_url,
+    provider: remoteProfile.provider,
+    model_use: remoteProfile.model_use,
+    api_mode: remoteProfile.api_mode,
+    call_type: remoteProfile.call_type,
+    auth_mode: remoteProfile.auth_mode,
+    deployment: remoteProfile.deployment,
+    attachment_transports: remoteProfile.attachment_transports,
+    preferred_attachment_transport: remoteProfile.preferred_attachment_transport,
+    max_input_images: remoteProfile.max_input_images,
+    maxInputImages: remoteProfile.maxInputImages,
+    max_images: remoteProfile.max_images,
+    maxImages: remoteProfile.maxImages,
+    supports_session_continuation: remoteProfile.supports_session_continuation,
+    supportsSessionContinuation: remoteProfile.supportsSessionContinuation,
+    is_ocr_model: remoteProfile.is_ocr_model,
+    is_vision_model: remoteProfile.is_vision_model,
+    openai_api_modes: remoteProfile.openai_api_modes
+  }
+  const serialized = stableSerialize(route)
+  const readableRoute = sanitizeFingerprintPart(
+    `${remoteProfile.id || 'remote'}-${remoteProfile.model_name || 'route'}`
+  )
+  return `remote-${readableRoute}-${hashFingerprint(serialized)}`
+}
+
+export const resolveChatRequestRouteFingerprint = (
+  config: Config,
+  profileId?: string | null,
+  remoteProfile?: RemoteRequestProfile | null
+): string =>
+  config.use_remote_llm
+    ? buildRemoteRouteFingerprint(profileId, remoteProfile)
+    : sanitizeFingerprintPart(getBaseProfileId(profileId) || 'default')
+
+const getReportInlineCapabilityStorageKey = (
+  profileId?: string | null,
+  remoteProfile?: RemoteRequestProfile | null
+): string =>
+  `${REPORT_INLINE_CAPABILITY_STORAGE_PREFIX}${buildRemoteRouteFingerprint(profileId, remoteProfile)}`
 
 const getAttachmentBatchCapabilityStorageKey = (
   input: ResolveAttachmentBatchCapabilityInput
 ): string => {
+  const routeFingerprint = buildRemoteRouteFingerprint(input.profileId, input.remoteProfile)
   const skillKey =
-    input.externalAgentSkill?.type === 'agent' ? `agent:${input.externalAgentSkill.id}` : null
+    input.externalAgentSkill?.type === 'agent'
+      ? `agent-${sanitizeFingerprintPart(input.externalAgentSkill.id)}`
+      : null
 
   return `${ATTACHMENT_BATCH_CAPABILITY_STORAGE_PREFIX}${
-    skillKey || getBaseProfileId(input.profileId) || 'default'
+    skillKey ? `${skillKey}-${routeFingerprint}` : routeFingerprint
   }`
 }
 
 const readCachedReportInlineCapability = (
-  profileId?: string | null
+  profileId?: string | null,
+  remoteProfile?: RemoteRequestProfile | null
 ): ReportInlineCapability | null => {
   try {
-    const raw = localStorage.getItem(getReportInlineCapabilityStorageKey(profileId))
+    const raw = localStorage.getItem(getReportInlineCapabilityStorageKey(profileId, remoteProfile))
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<ReportInlineCapability>
     if (typeof parsed.maxInlineChars !== 'number' || !Number.isFinite(parsed.maxInlineChars)) {
@@ -800,11 +891,12 @@ const readCachedReportInlineCapability = (
 
 const writeCachedReportInlineCapability = (
   profileId: string | null | undefined,
+  remoteProfile: RemoteRequestProfile | null | undefined,
   capability: ReportInlineCapability
 ): void => {
   try {
     localStorage.setItem(
-      getReportInlineCapabilityStorageKey(profileId),
+      getReportInlineCapabilityStorageKey(profileId, remoteProfile),
       JSON.stringify({
         ...capability,
         updatedAt: new Date().toISOString()
@@ -857,10 +949,7 @@ const writeCachedAttachmentBatchCapability = (
 }
 
 const buildFallbackReportInlineChars = (input: RequestChatCompletionInput): number => {
-  const baseProfileId = getBaseProfileId(input.profileId)
-  const profile = baseProfileId
-    ? input.config.llm_config.api_profiles.find((candidate) => candidate.id === baseProfileId)
-    : undefined
+  const profile = resolveSelectedRequestProfile(input)
 
   if (profile?.is_ocr_model) return 8000
   if (profile?.is_vision_model) return 10000
@@ -1663,7 +1752,7 @@ const ensureReportInlineCapability = async (
     return null
   }
 
-  const cachedCapability = readCachedReportInlineCapability(input.profileId)
+  const cachedCapability = readCachedReportInlineCapability(input.profileId, input.remoteProfile)
   if (cachedCapability) {
     return cachedCapability
   }
@@ -1684,7 +1773,7 @@ const ensureReportInlineCapability = async (
     })
     const reportedChars = parseReportedInlineChars(probeResult.content)
     if (!reportedChars) {
-      writeCachedReportInlineCapability(input.profileId, fallbackCapability)
+      writeCachedReportInlineCapability(input.profileId, input.remoteProfile, fallbackCapability)
       return fallbackCapability
     }
 
@@ -1692,11 +1781,11 @@ const ensureReportInlineCapability = async (
       maxInlineChars: reportedChars,
       source: 'probe'
     }
-    writeCachedReportInlineCapability(input.profileId, probedCapability)
+    writeCachedReportInlineCapability(input.profileId, input.remoteProfile, probedCapability)
     return probedCapability
   } catch (error) {
     console.warn('[ChatPage] Failed to probe report inline capability:', error)
-    writeCachedReportInlineCapability(input.profileId, fallbackCapability)
+    writeCachedReportInlineCapability(input.profileId, input.remoteProfile, fallbackCapability)
     return fallbackCapability
   }
 }

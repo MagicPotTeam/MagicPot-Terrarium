@@ -123,6 +123,7 @@ import {
   requestChatCompletion,
   requestChatCompletionStream,
   isInvalidSessionContinuationError,
+  resolveChatRequestRouteFingerprint,
   resolveChatPageRequestExecutionImagePolicy,
   resolveAttachmentBatchCapability,
   supportsStreamingChatCompletion,
@@ -610,6 +611,71 @@ const hasDuplicateAttachment = (
         attachment.sizeBytes === candidate.sizeBytes)
   )
 
+const attachmentDescriptorsMatch = (left: ChatAttachment, right: ChatAttachment): boolean =>
+  left.type === right.type && left.url === right.url && left.fileName === right.fileName
+
+const getVideoBoundaryFrameFileNames = (attachment: ChatAttachment): string[] => {
+  const sourceName = attachment.fileName || 'video'
+  const lastDotIndex = sourceName.lastIndexOf('.')
+  const baseName = lastDotIndex > 0 ? sourceName.slice(0, lastDotIndex) : sourceName
+  return [`${baseName}-first-frame.png`, `${baseName}-last-frame.png`]
+}
+
+const mergePreAugmentedVideoFramesWithResolvedAttachments = (
+  content: string,
+  attachments: ChatAttachment[] | undefined,
+  preAugmentedMessage: Pick<ChatMessage, 'content' | 'attachments'> | undefined
+): Pick<ChatMessage, 'content' | 'attachments'> | undefined => {
+  if (!preAugmentedMessage) return undefined
+  const resolvedAttachments = attachments || []
+  const preparedAttachments = preAugmentedMessage.attachments || []
+  const exactMatch =
+    preparedAttachments.length === resolvedAttachments.length &&
+    resolvedAttachments.every((attachment) =>
+      preparedAttachments.some((preparedAttachment) =>
+        attachmentDescriptorsMatch(attachment, preparedAttachment)
+      )
+    )
+  if (exactMatch) {
+    return {
+      content: preAugmentedMessage.content,
+      attachments: resolvedAttachments
+    }
+  }
+
+  const matchingVideos = resolvedAttachments.filter(
+    (attachment) =>
+      attachment.type === 'video' &&
+      preparedAttachments.some((preparedAttachment) =>
+        attachmentDescriptorsMatch(attachment, preparedAttachment)
+      )
+  )
+  if (matchingVideos.length === 0) return undefined
+
+  const matchingFrameNames = new Set(matchingVideos.flatMap(getVideoBoundaryFrameFileNames))
+  const supplementalFrames = preparedAttachments.filter(
+    (attachment) => attachment.type === 'image' && matchingFrameNames.has(attachment.fileName || '')
+  )
+  const selectedNotes = preAugmentedMessage.content
+    .split('\n')
+    .filter((line) =>
+      matchingVideos.some((video) => line.includes(`video "${video.fileName || 'unnamed-video'}"`))
+    )
+  const mergedAttachments = [...resolvedAttachments]
+  for (const frame of supplementalFrames) {
+    if (!mergedAttachments.some((attachment) => attachmentDescriptorsMatch(attachment, frame))) {
+      mergedAttachments.push(frame)
+    }
+  }
+
+  return {
+    content: [content.trim(), ...selectedNotes.filter((line) => !content.includes(line))]
+      .filter(Boolean)
+      .join('\n\n'),
+    attachments: mergedAttachments
+  }
+}
+
 const convertInlineImageToAttachment = async (
   imageUrl: string,
   fileName = 'pasted-image.png'
@@ -996,7 +1062,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return false
       }
     },
-    [storageScope]
+    [setSessions, storageScope]
   )
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(() => {
     try {
@@ -1707,10 +1773,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           content: normalizedText,
           hiddenContext: hiddenText || '',
           queueKey: detail.requestId ?? detail.eventId ?? detail.runId,
-          queuedAttachmentTypes: [
-            ...rawAttachments.map((item) => item.type),
-            ...(image ? (['image'] as ChatAttachment['type'][]) : [])
-          ],
+          attachments: rawAttachments.length ? rawAttachments : undefined,
           resolveAttachments: async () => {
             const resolvedAttachments = await resolveAttachments(false)
             if (!image) return resolvedAttachments
@@ -2502,7 +2565,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       pendingAttachments,
       pendingHiddenContext,
       selectedCapabilityProfile,
-      selectedProfileCapabilities.supportsSessionContinuation
+      selectedProfileCapabilities.supportsSessionContinuation,
+      currentSession?.sessionUrl
     ]
   )
   const canCompressCurrentContext = Boolean(currentSession && currentSession.messages.length > 0)
@@ -2819,7 +2883,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 ...candidate,
                 messages: candidate.messages.slice(messagesToCompress.length),
                 contextCompression: summary,
-                sessionUrl: undefined
+                sessionUrl: undefined,
+                sessionProfileId: undefined,
+                sessionRouteFingerprint: undefined
               }
               updatedSessionToPersist = updatedSession
               changed = true
@@ -4518,7 +4584,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
             ? {
                 ...s,
                 profileId: nextProfileId ?? undefined,
-                ...(profileChanged ? { sessionUrl: undefined, sessionProfileId: undefined } : {})
+                ...(profileChanged
+                  ? {
+                      sessionUrl: undefined,
+                      sessionProfileId: undefined,
+                      sessionRouteFingerprint: undefined
+                    }
+                  : {})
               }
             : s
         )
@@ -4719,8 +4791,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
     ): Promise<ChatMessage> => {
       const descriptor: ChatMessage = { role: 'user', content: content || '', attachments }
       validate?.(descriptor)
+      const reusablePreparedMessage = mergePreAugmentedVideoFramesWithResolvedAttachments(
+        descriptor.content,
+        attachments,
+        preAugmentedMessage
+      )
       const augmentedMessage =
-        preAugmentedMessage ||
+        reusablePreparedMessage ||
         (await augmentAttachmentsWithVideoBoundaryFrames(attachments, descriptor.content))
       const preparedMessage: ChatMessage = { ...descriptor, ...augmentedMessage }
       validate?.(preparedMessage)
@@ -4744,9 +4821,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         : pendingAttachmentsRef.current.length > 0
           ? [...pendingAttachmentsRef.current]
           : undefined
-      if (overrides?.resolveAttachments) {
-        msgAttachments = await overrides.resolveAttachments()
-      }
+      const provisionalAttachments = msgAttachments || []
       const msgHiddenContext = (
         overrides ? overrides.hiddenContext : pendingHiddenContextRef.current
       )?.trim()
@@ -4757,12 +4832,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
         overrides?.forcedSkillId ?? cs.skillId ?? selectedSkillId
       )
       const activeSkill = findCustomSkillById(customSkills, activeSkillId)
-      const rawAttachments = mergeChatAttachmentsWithSkillReferenceAttachments(
-        msgAttachments,
-        activeSkill?.type === 'agent' ? undefined : activeSkill?.referenceAttachments
-      )
+      let rawAttachments =
+        mergeChatAttachmentsWithSkillReferenceAttachments(
+          provisionalAttachments,
+          activeSkill?.type === 'agent' ? undefined : activeSkill?.referenceAttachments
+        ) || []
 
-      if (!msgContent && !rawAttachments?.length) return
+      if (!msgContent && !rawAttachments?.length && !overrides?.resolveAttachments) return
 
       console.log(
         '[ChatPage] sendMessage: attachments:',
@@ -4815,35 +4891,184 @@ const ChatPage: React.FC<ChatPageProps> = ({
           : resolveProfileIdForSkill(activeSkillId, cs.profileId || selectedProfileId, {
               preferConfiguredProfile: Boolean(overrides?.forcedSkillId)
             }))
+      let baseProfileId = getBaseProfileId(profileId)
+      let remoteRequestProfile = config.use_remote_llm
+        ? availableProfiles.find((profile) => profile.id === profileId)
+        : undefined
+      if (config.use_remote_llm && !activeExternalAgentSkill && !remoteRequestProfile) {
+        notifyError(
+          'Remote profile metadata is unavailable. Refresh the remote profiles before sending.'
+        )
+        return
+      }
+
+      let earlyPreparedMessage: Pick<ChatMessage, 'content' | 'attachments'> | undefined
+      if (!activeExternalAgentSkill) {
+        const provisionalPreparedMessage = await augmentAttachmentsWithVideoBoundaryFrames(
+          rawAttachments,
+          requestContent
+        )
+        earlyPreparedMessage = provisionalPreparedMessage
+        rawAttachments = provisionalPreparedMessage.attachments || rawAttachments
+        requestContent = provisionalPreparedMessage.content
+        userMessage = {
+          ...userMessage,
+          content: requestContent,
+          attachments: rawAttachments
+        }
+      }
+
+      const provisionalActiveProfile = config.use_remote_llm
+        ? remoteRequestProfile || null
+        : profileId
+          ? availableProfiles.find((profile) => profile.id === profileId) ||
+            availableProfiles.find((profile) => profile.id === baseProfileId) ||
+            null
+          : null
+      const provisionalActiveCapabilityProfile =
+        provisionalActiveProfile as ChatCapabilityProfile | null
+      const provisionalCapabilities = resolveChatProfileCapabilities(
+        provisionalActiveCapabilityProfile
+      )
+      const provisionalProvider = provisionalActiveProfile
+        ? resolveProfileProvider(provisionalActiveProfile)
+        : undefined
+      const provisionalModelUse = provisionalActiveProfile
+        ? resolveProfileModelUse(provisionalActiveProfile)
+        : undefined
+      const provisionalIsImageGenerationRequest =
+        isImageGenerationSelected ||
+        activeSkillRuntime.execution.outputMode === 'image' ||
+        (provisionalProvider === 'openai' &&
+          (provisionalActiveProfile?.api_mode === 'images' || provisionalModelUse === 'image')) ||
+        (provisionalProvider === 'openai' &&
+          shouldUseOpenAIImageGeneration({
+            messages: [{ ...userMessage, content: requestContent }],
+            modelUse: provisionalModelUse,
+            imageGenerationOptions
+          }))
+      const historyMessages = executionContext.historyMessages
+      const currentSessionUrl = executionContext.sessionUrl
+      const provisionalContinuationProfileId = normalizeChatProfileIdForStorage(baseProfileId)
+      const provisionalRouteFingerprint = resolveChatRequestRouteFingerprint(
+        config,
+        profileId,
+        remoteRequestProfile
+      )
+      const provisionalContinuationMatches =
+        !currentSessionUrl ||
+        (Boolean(cs.sessionProfileId) &&
+          normalizeChatProfileIdForStorage(cs.sessionProfileId) ===
+            provisionalContinuationProfileId &&
+          (!config.use_remote_llm ||
+            (Boolean(cs.sessionRouteFingerprint) &&
+              cs.sessionRouteFingerprint === provisionalRouteFingerprint)))
+      const provisionalImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
+        supportsSessionContinuation: provisionalCapabilities.supportsSessionContinuation,
+        hasUsableSessionContinuation: Boolean(
+          provisionalCapabilities.supportsSessionContinuation &&
+          provisionalContinuationMatches &&
+          currentSessionUrl?.trim()
+        ),
+        shouldResetContinuation: false,
+        isImageGenerationRequest: provisionalIsImageGenerationRequest
+      }).imageHistoryPolicy
+      const provisionalUserMessage: ChatMessage = {
+        ...userMessage,
+        content: requestContent,
+        attachments: rawAttachments
+      }
+      try {
+        preflightChatRequestImages({
+          config,
+          messages: [...historyMessages, provisionalUserMessage],
+          profileId,
+          remoteProfile: remoteRequestProfile,
+          externalAgentSkill: activeExternalAgentSkill,
+          imageHistoryPolicy: provisionalImageHistoryPolicy
+        })
+      } catch (error) {
+        notifyError(error instanceof Error ? error.message : String(error))
+        return
+      }
+
+      if (overrides?.resolveAttachments) {
+        msgAttachments = await overrides.resolveAttachments()
+        rawAttachments =
+          mergeChatAttachmentsWithSkillReferenceAttachments(
+            msgAttachments,
+            activeSkill?.type === 'agent' ? undefined : activeSkill?.referenceAttachments
+          ) || []
+        if (!requestContent && !rawAttachments?.length) return
+
+        const resolvedPreparedMessage = mergePreAugmentedVideoFramesWithResolvedAttachments(
+          requestContent,
+          rawAttachments,
+          earlyPreparedMessage
+        )
+        if (resolvedPreparedMessage) {
+          earlyPreparedMessage = resolvedPreparedMessage
+          rawAttachments = resolvedPreparedMessage.attachments || rawAttachments
+          requestContent = resolvedPreparedMessage.content
+        } else {
+          earlyPreparedMessage = undefined
+        }
+
+        userMessage = {
+          ...userMessage,
+          content: requestContent,
+          attachments: rawAttachments
+        }
+        try {
+          preflightChatRequestImages({
+            config,
+            messages: [...historyMessages, userMessage],
+            profileId,
+            remoteProfile: remoteRequestProfile,
+            externalAgentSkill: activeExternalAgentSkill,
+            imageHistoryPolicy: provisionalImageHistoryPolicy
+          })
+        } catch (error) {
+          notifyError(error instanceof Error ? error.message : String(error))
+          return
+        }
+      }
+
       if (getBaseProfileId(profileId) === HUNYUAN_3D_PROFILE_ID) {
         const hp = overrides?.hy3dParams
           ? await refreshHy3dModelUrlIfNeeded(overrides.hy3dParams)
           : await refreshHy3dModelUrlIfNeeded(getHy3dParams())
         profileId = buildHy3dProfileId(hp)
 
-        // For post-processing modes that need a model URL, inject it into message content
         if (HY3D_POST_PROCESS_ACTIONS.has(hp.apiAction) && hp.modelUrl) {
-          // Prepend model URL to message content so backend can parse it
           const urlPrefix = hp.modelUrl.trim()
           if (urlPrefix && !requestContent.includes(urlPrefix)) {
             requestContent = `${urlPrefix}\n${requestContent}`.trim()
           }
         }
-        // For texture mode, inject texturePrompt if user didn't type anything
         if (hp.apiAction === 'SubmitTextureTo3DJob' && !msgContent && hp.texturePrompt) {
           requestContent = `${hp.modelUrl || ''}\n${hp.texturePrompt}`.trim()
         }
       }
 
-      const baseProfileId = getBaseProfileId(profileId)
-      const activeProfile = profileId
-        ? availableProfiles.find((profile) => profile.id === profileId) ||
-          availableProfiles.find((profile) => profile.id === baseProfileId) ||
-          null
-        : null
-      const remoteRequestProfile = config.use_remote_llm
+      baseProfileId = getBaseProfileId(profileId)
+      remoteRequestProfile = config.use_remote_llm
         ? availableProfiles.find((profile) => profile.id === profileId)
         : undefined
+      if (config.use_remote_llm && !activeExternalAgentSkill && !remoteRequestProfile) {
+        notifyError(
+          'Remote profile metadata is unavailable. Refresh the remote profiles before sending.'
+        )
+        return
+      }
+
+      const activeProfile = config.use_remote_llm
+        ? remoteRequestProfile || null
+        : profileId
+          ? availableProfiles.find((profile) => profile.id === profileId) ||
+            availableProfiles.find((profile) => profile.id === baseProfileId) ||
+            null
+          : null
       const activeCapabilityProfile = activeProfile as ChatCapabilityProfile | null
       const activeProfileCapabilities = resolveChatProfileCapabilities(activeCapabilityProfile)
       const responseModelName =
@@ -4854,19 +5079,91 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const activeProfileModelUse = activeProfile
         ? resolveProfileModelUse(activeProfile)
         : undefined
-      const isGPTImageProfile =
-        activeProfileProvider === 'openai' &&
-        (activeProfile?.api_mode === 'images' || activeProfileModelUse === 'image')
-      const currentTurnImageGenerationRequest =
+      const isImageGenerationRequest =
         isImageGenerationSelected ||
         activeSkillRuntime.execution.outputMode === 'image' ||
         (activeProfileProvider === 'openai' &&
+          (activeProfile?.api_mode === 'images' || activeProfileModelUse === 'image')) ||
+        (activeProfileProvider === 'openai' &&
           shouldUseOpenAIImageGeneration({
-            messages: [{ ...userMessage, content: requestContent }],
+            messages: [{ ...userMessage, content: requestContent, attachments: rawAttachments }],
             modelUse: activeProfileModelUse,
             imageGenerationOptions
           }))
-      const isImageGenerationRequest = currentTurnImageGenerationRequest || isGPTImageProfile
+      const activeContinuationProfileId = normalizeChatProfileIdForStorage(baseProfileId)
+      const routeFingerprint = resolveChatRequestRouteFingerprint(
+        config,
+        profileId,
+        remoteRequestProfile
+      )
+      const continuationProfileMatches =
+        !currentSessionUrl ||
+        (Boolean(cs.sessionProfileId) &&
+          normalizeChatProfileIdForStorage(cs.sessionProfileId) === activeContinuationProfileId &&
+          (!config.use_remote_llm ||
+            (Boolean(cs.sessionRouteFingerprint) &&
+              cs.sessionRouteFingerprint === routeFingerprint)))
+      const preflightImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
+        supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
+        hasUsableSessionContinuation: Boolean(
+          activeProfileCapabilities.supportsSessionContinuation &&
+          continuationProfileMatches &&
+          currentSessionUrl?.trim()
+        ),
+        shouldResetContinuation: false,
+        isImageGenerationRequest
+      }).imageHistoryPolicy
+      const explicitToolCommand = parseExplicitToolCommand(requestContent)
+      const shouldPreserveMultiAttachmentRequest = isImageGenerationRequest
+      const requestImageGenerationOptions = resolveImageGenerationOptionsForAttachments(
+        imageGenerationOptions,
+        rawAttachments
+      )
+      const useAttachmentBatching =
+        shouldBatchAttachments(rawAttachments) && !shouldPreserveMultiAttachmentRequest
+
+      try {
+        preflightChatRequestImages({
+          config,
+          messages: [
+            ...historyMessages,
+            {
+              ...userMessage,
+              content: requestContent,
+              attachments: rawAttachments
+            }
+          ],
+          profileId,
+          remoteProfile: remoteRequestProfile,
+          externalAgentSkill: activeExternalAgentSkill,
+          imageHistoryPolicy: preflightImageHistoryPolicy
+        })
+      } catch (error) {
+        notifyError(error instanceof Error ? error.message : String(error))
+        return
+      }
+
+      if (!activeExternalAgentSkill) {
+        try {
+          preflightChatRequestImages({
+            config,
+            messages: [
+              ...historyMessages,
+              {
+                ...userMessage,
+                ...earlyPreparedMessage
+              }
+            ],
+            profileId,
+            remoteProfile: remoteRequestProfile,
+            externalAgentSkill: activeExternalAgentSkill,
+            imageHistoryPolicy: preflightImageHistoryPolicy
+          })
+        } catch (error) {
+          notifyError(error instanceof Error ? error.message : String(error))
+          return
+        }
+      }
       const skillAttachmentSupport =
         activeSkill && activeProfile
           ? inspectSkillAttachmentSupport(rawAttachments, activeProfile)
@@ -4888,50 +5185,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
 
-      const explicitToolCommand = parseExplicitToolCommand(requestContent)
-      const historyMessages = executionContext.historyMessages
-      const currentSessionUrl = executionContext.sessionUrl
-      const activeContinuationProfileId = normalizeChatProfileIdForStorage(baseProfileId)
-      const continuationProfileMatches =
-        !currentSessionUrl ||
-        !cs.sessionProfileId ||
-        normalizeChatProfileIdForStorage(cs.sessionProfileId) === activeContinuationProfileId
-      const preflightImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
-        supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
-        hasUsableSessionContinuation: Boolean(
-          activeProfileCapabilities.supportsSessionContinuation &&
-          continuationProfileMatches &&
-          currentSessionUrl?.trim()
-        ),
-        shouldResetContinuation: false,
-        isImageGenerationRequest
-      }).imageHistoryPolicy
-      const shouldPreserveMultiAttachmentRequest = isImageGenerationRequest
-      const requestImageGenerationOptions = resolveImageGenerationOptionsForAttachments(
-        imageGenerationOptions,
-        rawAttachments
-      )
-      const useAttachmentBatching =
-        shouldBatchAttachments(rawAttachments) && !shouldPreserveMultiAttachmentRequest
-      const provisionalUserMessage: ChatMessage = {
-        ...userMessage,
-        content: requestContent,
-        attachments: rawAttachments
-      }
-      try {
-        preflightChatRequestImages({
-          config,
-          messages: [...historyMessages, provisionalUserMessage],
-          profileId,
-          remoteProfile: remoteRequestProfile,
-          externalAgentSkill: activeExternalAgentSkill,
-          imageHistoryPolicy: preflightImageHistoryPolicy,
-          apiMode: activeProfile?.api_mode
-        })
-      } catch (error) {
-        notifyError(error instanceof Error ? error.message : String(error))
-        return
-      }
       const latestContextCompressionSummary = cs.contextCompression
       const activeSkillResourceContext = buildSkillRuntimeResourceContext(
         await resolveSkillRuntimeResourceEntries({
@@ -4941,7 +5194,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
           runtimeMcpStatus
         })
       )
-      userMessage = await prepareOutgoingUserMessage(requestContent, rawAttachments)
+      userMessage = await prepareOutgoingUserMessage(
+        requestContent,
+        rawAttachments,
+        undefined,
+        undefined,
+        earlyPreparedMessage
+      )
       const resolvedHiddenContext = explicitToolCommand
         ? msgHiddenContext || ''
         : mergeHiddenContext(
@@ -4963,10 +5222,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         shouldDiscardSessionUrlForContextCompact = true
       }
       let requestHistoryMessages = historyMessages
-      const completionApiMode =
-        activeProfile?.api_mode && activeProfile.api_mode !== 'auto'
-          ? activeProfile.api_mode
-          : undefined
       const sessionAbortController = new AbortController()
       sessionAbortControllersRef.current.set(targetSessionId, sessionAbortController)
 
@@ -5251,7 +5506,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         config,
         profileId,
         remoteProfile: remoteRequestProfile,
-        apiMode: completionApiMode,
         externalAgentSkill: activeExternalAgentSkill
       })
       let streamedResponse = ''
@@ -5291,7 +5545,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
             route,
             profileId,
             remoteProfile: remoteRequestProfile,
-            apiMode: completionApiMode,
             systemPrompt: activeSystemPrompt,
             reasoningEffort: selectedReasoningEffort,
             imageGenerationOptions: requestImageGenerationOptions,
@@ -5388,7 +5641,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
           route,
           profileId,
           remoteProfile: remoteRequestProfile,
-          apiMode: completionApiMode,
           systemPrompt: activeSystemPrompt,
           reasoningEffort: selectedReasoningEffort,
           imageGenerationOptions: requestImageGenerationOptions,
@@ -5518,6 +5770,44 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
 
       const completedAssistantMessages: ChatMessage[] = []
+      const buildPreparedMessageForAttachments = (
+        content: string,
+        selectedAttachments: ChatAttachment[]
+      ): Pick<ChatMessage, 'content' | 'attachments'> | undefined => {
+        if (!earlyPreparedMessage) return undefined
+        const selectedVideos = selectedAttachments.filter(
+          (attachment) => attachment.type === 'video'
+        )
+        const selectedVideoFrameNames = new Set(
+          selectedVideos.flatMap((attachment) => {
+            const sourceName = attachment.fileName || 'video'
+            const lastDotIndex = sourceName.lastIndexOf('.')
+            const baseName = lastDotIndex > 0 ? sourceName.slice(0, lastDotIndex) : sourceName
+            return [`${baseName}-first-frame.png`, `${baseName}-last-frame.png`]
+          })
+        )
+        const selected = (earlyPreparedMessage.attachments || []).filter(
+          (attachment) =>
+            selectedAttachments.some(
+              (selectedAttachment) =>
+                selectedAttachment.type === attachment.type &&
+                selectedAttachment.url === attachment.url &&
+                selectedAttachment.fileName === attachment.fileName
+            ) ||
+            (attachment.type === 'image' && selectedVideoFrameNames.has(attachment.fileName || ''))
+        )
+        const selectedNotes = earlyPreparedMessage.content
+          .split('\n')
+          .filter((line) =>
+            selectedVideos.some((videoAttachment) =>
+              line.includes(`video "${videoAttachment.fileName || 'unnamed-video'}"`)
+            )
+          )
+        return {
+          content: [content.trim(), ...selectedNotes].filter(Boolean).join('\n\n'),
+          attachments: selected.length > 0 ? selected : selectedAttachments
+        }
+      }
       const traceProjectId = resolveTraceProjectIdFromAgentRoute(route)
       const traceInputKinds = summarizeChatAttachmentKindsForTrace(rawAttachments)
       const traceLabel = activeSkill ? getCustomSkillName(activeSkill) : 'Agent'
@@ -5608,7 +5898,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
             config,
             profileId,
             remoteProfile: remoteRequestProfile,
-            apiMode: completionApiMode,
             systemPrompt: activeSystemPrompt,
             externalAgentSkill: activeExternalAgentSkill
           })
@@ -5621,9 +5910,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const executeSingleAttachmentEntry = async (
             entry: (typeof attachmentBatchEntries)[number]
           ) => {
-            const singleUserMessage = await prepareOutgoingUserMessage(requestContent, [
-              entry.attachment
-            ])
+            const singleUserMessage = await prepareOutgoingUserMessage(
+              requestContent,
+              [entry.attachment],
+              undefined,
+              undefined,
+              buildPreparedMessageForAttachments(requestContent, [entry.attachment])
+            )
             const singleResult = await requestCompletionForUserMessage(
               singleUserMessage,
               requestContinuationUrl
@@ -5660,9 +5953,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
 
             const batchPrompt = buildAttachmentBatchPrompt(requestContent, chunk)
+            const chunkAttachments = chunk.map((entry) => entry.attachment)
             const chunkUserMessage = await prepareOutgoingUserMessage(
               batchPrompt,
-              chunk.map((entry) => entry.attachment)
+              chunkAttachments,
+              undefined,
+              undefined,
+              buildPreparedMessageForAttachments(batchPrompt, chunkAttachments)
             )
             const { result, response } = await requestCompletionForUserMessage(
               chunkUserMessage,
@@ -5721,7 +6018,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
               sessionId: targetSessionId,
               messages: completedAssistantMessages,
               sessionUrl: resolvePersistedSessionUrl(returnedSessionUrl),
-              sessionProfileId: returnedSessionUrl ? activeContinuationProfileId : null
+              sessionProfileId: returnedSessionUrl ? activeContinuationProfileId : null,
+              sessionRouteFingerprint: returnedSessionUrl ? routeFingerprint : null
             })
           )
 
@@ -5753,7 +6051,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 }
               ),
               sessionUrl: resolvePersistedSessionUrl(result.sessionUrl),
-              sessionProfileId: result.sessionUrl ? activeContinuationProfileId : null
+              sessionProfileId: result.sessionUrl ? activeContinuationProfileId : null,
+              sessionRouteFingerprint: result.sessionUrl ? routeFingerprint : null
             })
           )
 
@@ -5786,7 +6085,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 sessionId: targetSessionId,
                 messages: completedAssistantMessages,
                 sessionUrl: resolvePersistedSessionUrl(streamedSessionUrl),
-                sessionProfileId: streamedSessionUrl ? activeContinuationProfileId : null
+                sessionProfileId: streamedSessionUrl ? activeContinuationProfileId : null,
+                sessionRouteFingerprint: streamedSessionUrl ? routeFingerprint : null
               })
             }
 
@@ -5801,7 +6101,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   ...(responseModelName ? { modelName: responseModelName } : {})
                 },
                 sessionUrl: resolvePersistedSessionUrl(streamedSessionUrl),
-                sessionProfileId: streamedSessionUrl ? activeContinuationProfileId : null
+                sessionProfileId: streamedSessionUrl ? activeContinuationProfileId : null,
+                sessionRouteFingerprint: streamedSessionUrl ? routeFingerprint : null
               })
             }
 
@@ -5851,19 +6152,25 @@ const ChatPage: React.FC<ChatPageProps> = ({
             payload: archivePayload
           })
           const errorSessionUrl = shouldDiscardSessionUrlForContextCompact ? null : undefined
+          const errorSessionProfileId = errorSessionUrl ? activeContinuationProfileId : null
+          const errorSessionRouteFingerprint = errorSessionUrl ? routeFingerprint : null
           const errorUpdater = withLatestContextCompression((prev: ChatSession[]) => {
             if (completedAssistantMessages.length > 0) {
               return replaceLastMessageWithMessagesInSession(prev, {
                 sessionId: targetSessionId,
                 messages: [...completedAssistantMessages, errorMessage],
-                sessionUrl: errorSessionUrl
+                sessionUrl: errorSessionUrl,
+                sessionProfileId: errorSessionProfileId,
+                sessionRouteFingerprint: errorSessionRouteFingerprint
               })
             }
 
             return replaceLastMessageInSession(prev, {
               sessionId: targetSessionId,
               message: errorMessage,
-              sessionUrl: errorSessionUrl
+              sessionUrl: errorSessionUrl,
+              sessionProfileId: errorSessionProfileId,
+              sessionRouteFingerprint: errorSessionRouteFingerprint
             })
           })
           setSessions(errorUpdater)

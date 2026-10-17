@@ -43,6 +43,8 @@ export interface ChatSession {
   sessionUrl?: string
   /** Base profile id that owns sessionUrl; prevents reuse after a profile/provider switch. */
   sessionProfileId?: string
+  /** Canonical remote route fingerprint that owns sessionUrl, when applicable. */
+  sessionRouteFingerprint?: string
   createdAt?: number
 }
 
@@ -420,6 +422,7 @@ function normalizeSession(session: ChatSession | LegacyChatSession, scope?: stri
   const {
     sessionUrl,
     sessionProfileId,
+    sessionRouteFingerprint,
     draft,
     storageKey: _storageKey,
     ...rest
@@ -438,6 +441,9 @@ function normalizeSession(session: ChatSession | LegacyChatSession, scope?: stri
     ...(sessionUrl || legacySessionUrl ? { sessionUrl: sessionUrl || legacySessionUrl } : {}),
     ...(typeof sessionProfileId === 'string' && sessionProfileId.trim()
       ? { sessionProfileId: normalizeChatProfileIdForStorage(sessionProfileId) }
+      : {}),
+    ...(typeof sessionRouteFingerprint === 'string' && sessionRouteFingerprint.trim()
+      ? { sessionRouteFingerprint: sessionRouteFingerprint.trim() }
       : {}),
     ...(normalizedDraft ? { draft: normalizedDraft } : {}),
     profileId: normalizeChatProfileIdForStorage(session.profileId),
