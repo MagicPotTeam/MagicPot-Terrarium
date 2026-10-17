@@ -33,6 +33,15 @@ import { getProjectById, listProjects, PROJECTS_CHANGED_EVENT } from '../MainPag
 
 type Live = () => boolean
 type ProjectChoice = { id: string; name: string }
+type BridgeErrorCode = keyof typeof FIGPLUGIN_BRIDGE_ERRORS | 'UNKNOWN'
+type BridgeErrorKey = `figplugin.bridge.errors.${BridgeErrorCode}`
+type BridgeNoticeKey =
+  | 'figplugin.bridge.monitorStopped'
+  | 'figplugin.bridge.declined'
+  | 'figplugin.bridge.revoked'
+  | 'figplugin.bridge.approvalAccepted'
+  | 'figplugin.bridge.denied'
+
 const emptyState = (): FigPluginBridgeDesktopState => ({ sessions: [], previews: [] })
 const eligible = (item: FigPluginManagedSummary) =>
   !!item.bridgeOrigin &&
@@ -45,18 +54,25 @@ const eligible = (item: FigPluginManagedSummary) =>
 // Consent covers every displayed field, not just a server-supplied hash. Main verifies the
 // payload digest and runtime binding; the desktop preview does not contain the whole binding.
 const reviewKey = (call: FigPluginBridgePreview): string => canonicalFigPluginJson(call)
-const safeError = (error: unknown): string => {
+const isBridgeErrorCode = (value: string): value is keyof typeof FIGPLUGIN_BRIDGE_ERRORS =>
+  Object.hasOwn(FIGPLUGIN_BRIDGE_ERRORS, value)
+const bridgeErrorKey = (code: BridgeErrorCode): BridgeErrorKey => `figplugin.bridge.errors.${code}`
+const safeError = (error: unknown): BridgeErrorCode => {
   if (
     error &&
     typeof error === 'object' &&
     'code' in error &&
     typeof error.code === 'string' &&
-    Object.hasOwn(FIGPLUGIN_BRIDGE_ERRORS, error.code)
+    isBridgeErrorCode(error.code)
   )
     return error.code
   if (error instanceof Error) {
     for (const [code, message] of Object.entries(FIGPLUGIN_BRIDGE_ERRORS)) {
-      if (error.message === message || error.message.endsWith(`: ${message}`)) return code
+      if (
+        isBridgeErrorCode(code) &&
+        (error.message === message || error.message.endsWith(`: ${message}`))
+      )
+        return code
     }
   }
   return 'UNKNOWN'
@@ -95,8 +111,8 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
   const [busy, setBusy] = useState(false)
   const [revoking, setRevoking] = useState(false)
   const locked = busy || revoking
-  const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
+  const [error, setError] = useState<BridgeErrorKey | ''>('')
+  const [notice, setNotice] = useState<BridgeNoticeKey | ''>('')
   const mounted = useRef(false)
   const epoch = useRef(0)
   const pending = useRef<symbol | null>(null)
@@ -173,7 +189,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         if (live()) {
           stopMonitoring()
           setNotice('')
-          setError(`figplugin.bridge.errors.${safeError(failure)}`)
+          setError(bridgeErrorKey(safeError(failure)))
         }
       } finally {
         // Keep serialization even after invalidation: a late revoke must not revoke a new ticket.
@@ -390,7 +406,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         if (live()) setNotice('figplugin.bridge.revoked')
       })
       .catch((failure: unknown) => {
-        if (live()) setError(`figplugin.bridge.errors.${safeError(failure)}`)
+        if (live()) setError(bridgeErrorKey(safeError(failure)))
       })
       .finally(() => {
         if (revokePending.current === operation) {

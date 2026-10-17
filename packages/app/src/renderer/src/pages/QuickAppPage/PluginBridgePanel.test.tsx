@@ -900,7 +900,9 @@ describe('Bridge localization', () => {
       resources: { [lng]: { translation: locale } },
       interpolation: { escapeValue: false }
     })
-    mocks.translate.mockImplementation((key, values) => i18n.t(key, values))
+    mocks.translate.mockImplementation((key, values) =>
+      i18n.t(key, { ...(values ?? {}), defaultValue: key })
+    )
     mount()
     expect(screen.getByRole('heading', { name: locale.figplugin.bridge.title })).toBeInTheDocument()
     expect(screen.getByText(locale.figplugin.bridge.secretWarning)).toBeInTheDocument()
