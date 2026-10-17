@@ -660,9 +660,14 @@ export class HyperSvcImpl implements HyperSvc {
     resp: ServerStreaming<ListComfyFilesResp>
   ): Promise<void> {
     const fs = new ComfyFSCli()
-    await fs.forEachFileInfo(req.dir, req.exts, async (file) => {
-      resp.onData({ file })
-    })
+    await fs.forEachFileInfo(
+      req.dir,
+      req.exts,
+      async (file) => {
+        resp.onData({ file })
+      },
+      resp.abortReceiver
+    )
   }
 
   async listDirShallow(req: {
