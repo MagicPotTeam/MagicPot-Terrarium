@@ -95,12 +95,6 @@ vi.mock('@renderer/utils/messageUtils', () => ({
   getMessageText: (message: { content?: string }) => message.content || ''
 }))
 
-vi.mock('@renderer/utils/llmUtils', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@renderer/utils/llmUtils')>()),
-  getLLMConfig: () => fixture.config?.llm_config,
-  resolveLLMProfile: () => fixture.profiles[0]
-}))
-
 vi.mock('./chatStorage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./chatStorage')>()
   return {
