@@ -23,7 +23,13 @@ import {
 import { useTranslation } from 'react-i18next'
 import { api } from '@renderer/utils/windowUtils'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
-import type { AppUpdateStatus, AppUpdateSvc, LauncherManagedState } from '@shared/api/svcAppUpdate'
+import type {
+  AppUpdateState,
+  AppUpdateStatus,
+  AppUpdateSvc,
+  LauncherManagedState,
+  LauncherUpdateResultStatus
+} from '@shared/api/svcAppUpdate'
 import type { UpdateChannel, UpdateMode } from '@shared/appUpdate/launcherProtocol'
 import {
   PACKAGE_VERSION,
@@ -34,7 +40,58 @@ import {
 import SettingSection from './components/SettingSection'
 import type { PanelProps } from './PanelProps'
 
+type UpdateStateTranslationKey =
+  | 'about.update.state.idle'
+  | 'about.update.state.managed_by_launcher'
+  | 'about.update.state.unsupported'
+  | 'about.update.state.checking'
+  | 'about.update.state.available'
+  | 'about.update.state.not_available'
+  | 'about.update.state.downloading'
+  | 'about.update.state.downloaded'
+  | 'about.update.state.installing'
+  | 'about.update.state.error'
+type LauncherStatusTranslationKey = `about.update.launcher.status_${LauncherUpdateResultStatus}`
 type BridgeState = 'unavailable' | 'loading' | 'available' | 'error'
+type ChannelLabelTranslationKey = `about.update.launcher.channel_${UpdateChannel}`
+type ChannelDescriptionTranslationKey = `about.update.channel_${UpdateChannel}_description`
+
+const UPDATE_STATE_KEYS: Record<AppUpdateState, UpdateStateTranslationKey> = {
+  idle: 'about.update.state.idle',
+  'managed-by-launcher': 'about.update.state.managed_by_launcher',
+  unsupported: 'about.update.state.unsupported',
+  checking: 'about.update.state.checking',
+  available: 'about.update.state.available',
+  'not-available': 'about.update.state.not_available',
+  downloading: 'about.update.state.downloading',
+  downloaded: 'about.update.state.downloaded',
+  installing: 'about.update.state.installing',
+  error: 'about.update.state.error'
+}
+
+const LAUNCHER_STATUS_KEYS: Record<LauncherUpdateResultStatus, LauncherStatusTranslationKey> = {
+  manual: 'about.update.launcher.status_manual',
+  disabled: 'about.update.launcher.status_disabled',
+  unavailable: 'about.update.launcher.status_unavailable',
+  'up-to-date': 'about.update.launcher.status_up-to-date',
+  available: 'about.update.launcher.status_available',
+  activated: 'about.update.launcher.status_activated',
+  installed: 'about.update.launcher.status_installed',
+  locked: 'about.update.launcher.status_locked',
+  failed: 'about.update.launcher.status_failed'
+}
+
+const CHANNEL_LABEL_KEYS: Record<UpdateChannel, ChannelLabelTranslationKey> = {
+  stable: 'about.update.launcher.channel_stable',
+  beta: 'about.update.launcher.channel_beta',
+  nightly: 'about.update.launcher.channel_nightly'
+}
+
+const CHANNEL_DESCRIPTION_KEYS: Record<UpdateChannel, ChannelDescriptionTranslationKey> = {
+  stable: 'about.update.channel_stable_description',
+  beta: 'about.update.channel_beta_description',
+  nightly: 'about.update.channel_nightly_description'
+}
 
 const DEFAULT_RELEASE_REPO = 'MagicPotTeam/MagicPot-Terrarium'
 const FALLBACK_UPDATE_STATUS: AppUpdateStatus = {
@@ -405,7 +462,7 @@ const PanelUpdates: React.FC<PanelProps> = () => {
                     v{currentVersion || t('about.update.version_unknown')}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    {t(`about.update.state.${updateStatus.state.replaceAll('-', '_')}`)}
+                    {t(UPDATE_STATE_KEYS[updateStatus.state])}
                   </Typography>
                 </Stack>
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
@@ -418,7 +475,7 @@ const PanelUpdates: React.FC<PanelProps> = () => {
                 >
                   {t('about.update.launcher_status')}:{' '}
                   {launcherManaged && launcherState?.launchStatus
-                    ? `${t(`about.update.launcher.status_${launcherState.launchStatus}`)}${launcherState.launchVersion ? ` (${launcherState.launchVersion})` : ''}`
+                    ? `${t(LAUNCHER_STATUS_KEYS[launcherState.launchStatus])}${launcherState.launchVersion ? ` (${launcherState.launchVersion})` : ''}`
                     : launcherManaged
                       ? t('about.update.launcher.managed')
                       : launcherReason}
@@ -529,8 +586,8 @@ const PanelUpdates: React.FC<PanelProps> = () => {
                     value={value}
                     control={<Radio size="small" />}
                     label={radioLabel(
-                      t(`about.update.launcher.channel_${value}`),
-                      t(`about.update.channel_${value}_description`)
+                      t(CHANNEL_LABEL_KEYS[value]),
+                      t(CHANNEL_DESCRIPTION_KEYS[value])
                     )}
                     sx={{ alignItems: 'flex-start', m: 0 }}
                   />

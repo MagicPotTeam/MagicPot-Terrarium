@@ -45,6 +45,7 @@ import { FastSettingErrorModal } from './components/FastSettingErrorModal'
 import { DeepPartial } from '@shared/utils/utilTypes'
 import InputSwitch from '@renderer/components/inputs/InputSwitch'
 import { useConfig } from '@renderer/hooks/useConfig'
+import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
 import { useAppSelector } from '@renderer/store'
 import FigmaBindingDialog from '@renderer/pages/ProjectCanvasPage/Dialogs/FigmaBindingDialog'
@@ -70,7 +71,7 @@ import type {
 type ProxyModeSectionProps = {
   saveSettings: PanelProps['saveSettings']
   settingsValue: PanelProps['settingsValue']
-  t: ReturnType<typeof useTranslation>['t']
+  t: TFunction<'translation'>
   text: (fallbackChinese: string, fallbackEnglish: string) => string
 }
 
