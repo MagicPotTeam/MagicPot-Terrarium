@@ -1,5 +1,12 @@
+import type { TFunction } from 'i18next'
+
 import type { CustomSkill } from '@shared/config/config'
 import type { QAppMenuItem } from '@shared/api/svcQApp'
+
+type CustomSkillValidationKey =
+  | 'custom_workshop.error_skill_name_required'
+  | 'custom_workshop.error_prompt_required'
+  | 'custom_workshop.error_api_address_required'
 
 const normalizeText = (value: string | null | undefined): string => value?.trim() || ''
 
@@ -89,11 +96,11 @@ export const buildUniqueCustomSkillName = (
 
 export const getCustomSkillValidationIssues = (
   skill: CustomSkill,
-  t?: (key: string, options?: Record<string, unknown>) => string
+  t?: TFunction<'translation'>
 ): string[] => {
   const issues: string[] = []
 
-  const getMsg = (key: string, defaultMsg: string) =>
+  const getMsg = (key: CustomSkillValidationKey, defaultMsg: string): string =>
     t ? t(key, { defaultValue: defaultMsg }) : defaultMsg
 
   if (!normalizeText(skill.skillName)) {
@@ -162,7 +169,7 @@ export const summarizeCustomSkills = (skills: CustomSkill[]): CustomSkillOvervie
 
 export const getCustomSkillsNeedingAttention = (
   skills: CustomSkill[],
-  t?: (key: string, options?: Record<string, unknown>) => string
+  t?: TFunction<'translation'>
 ): CustomSkillAttentionItem[] =>
   skills
     .map((skill) => ({

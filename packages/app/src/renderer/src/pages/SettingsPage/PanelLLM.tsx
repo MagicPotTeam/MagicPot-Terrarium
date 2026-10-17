@@ -1,4 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
+import type { TFunction } from 'i18next'
 import React from 'react'
 import { Alert, Box, Button, IconButton, Stack, TextField, Typography } from '@mui/material'
 import { Add as AddIcon, Delete } from '@mui/icons-material'
@@ -51,6 +52,38 @@ import {
 import type { DeepPartial } from '@shared/utils/utilTypes'
 
 export type SaveSettings = (value: DeepPartial<Config>) => void
+
+type QuickAppTranslationKey =
+  | 'hunyuan_api_key_optional'
+  | 'volcengine_api_key'
+  | 'hunyuan_api_key_placeholder'
+  | 'model_use_video'
+  | 'video_provider_volcengine_seedance'
+  | 'clear_cos_dialog_title'
+  | 'clear_cos_dialog_message'
+  | 'clear_cos_cancel'
+  | 'clear_cos_confirm'
+  | 'clear_cos_progress'
+  | 'clear_cos_empty'
+  | 'clear_cos_partial'
+  | 'clear_cos_success'
+  | 'clear_cos_failed'
+  | 'video_provider'
+  | 'kling_video_info'
+  | 'seedance_video_info'
+  | 'hunyuan_profile_credentials_info'
+  | 'tencent_secret_id'
+  | 'tencent_secret_key'
+  | 'tencent_secret_key_placeholder'
+  | 'api_region'
+  | 'api_region_hint'
+  | 'cos_bucket'
+  | 'cos_region'
+  | 'cos_key_prefix'
+  | 'clear_cos_hint'
+  | 'clear_cos_loading'
+  | 'clear_cos_button'
+  | 'clear_cos_requirements'
 
 const DEFAULT_PROVIDER_OPTION = 'default' as const
 const DEFAULT_MODEL_USE_OPTION = 'default' as const
@@ -491,7 +524,7 @@ const useApiProfiles = (
 type BackupKeysEditorProps = {
   profile: LLMAPIProfile
   onChange: (nextProfile: LLMAPIProfile) => void
-  t: ReturnType<typeof useTranslation>['t']
+  t: TFunction<'translation'>
 }
 
 const BackupKeysEditor: React.FC<BackupKeysEditorProps> = ({ profile, onChange, t }) => (
@@ -538,7 +571,7 @@ type ApiProfileCardProps = {
   profile: LLMAPIProfile
   profiles: LLMAPIProfile[]
   isChineseUi: boolean
-  t: ReturnType<typeof useTranslation>['t']
+  t: TFunction<'translation'>
 }
 
 const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
@@ -556,8 +589,11 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
   const isLight = theme.palette.mode === 'light'
   const copy = (chinese: string, english: string) => (isChineseUi ? chinese : english)
   const quickAppText = React.useCallback(
-    (key: string, defaultValue: string, values: Record<string, string | number> = {}) =>
-      t(`quickapp_api.${key}`, { defaultValue, ...values }),
+    <K extends QuickAppTranslationKey>(
+      key: K,
+      defaultValue: string,
+      values: Record<string, string | number> = {}
+    ): string => t(`quickapp_api.${key}`, { defaultValue, ...values }),
     [t]
   )
   const resolvedProfileCallType = resolveProfileCallType(profile)
@@ -1239,7 +1275,7 @@ type ApiProfilesSectionProps = {
   onUpdate: (profileId: string, nextProfile: LLMAPIProfile) => void
   profiles: LLMAPIProfile[]
   isChineseUi: boolean
-  t: ReturnType<typeof useTranslation>['t']
+  t: TFunction<'translation'>
   title?: string
 }
 
