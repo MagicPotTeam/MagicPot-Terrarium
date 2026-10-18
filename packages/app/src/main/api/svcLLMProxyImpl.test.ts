@@ -4,9 +4,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
 import { cliFromProfile } from '@shared/llm'
+import { validateImageRequestImageDescriptors } from '@shared/llm/imageRequestContract'
 import * as configModule from '../config/config'
 import type { AssistantRuntime } from '../assistantRuntime/runtime'
-import { DEFAULT_MANAGED_MEDIA_MAX_BYTES } from '../llmProxy/managedMediaStore'
 import { mainHostExtensionApiV1 } from '../extensions/generatedRegistry'
 import { tripoMainLlmProxyExtension } from '../extensions/tripoMainExtension'
 import {
@@ -446,8 +446,19 @@ describe('LLMProxySvcImpl', () => {
       })
     )
     expect(agentChat).toHaveBeenCalledWith({
+      conversationId: undefined,
+      imageGenerationOptions: undefined,
+      imageHistoryPolicy: undefined,
+      imageRequest: undefined,
+      maxOutputTokens: undefined,
       messages: [{ role: 'user', content: 'hello' }],
-      systemPrompt: 'system prompt'
+      onDelta: expect.any(Function),
+      reasoningEffort: undefined,
+      sessionUrl: undefined,
+      signal: undefined,
+      systemPrompt: 'system prompt',
+      temperature: undefined,
+      videoGenerationOptions: undefined
     })
     expect(resp.content).toBe('agent response')
   })
@@ -500,8 +511,19 @@ describe('LLMProxySvcImpl', () => {
       })
     )
     expect(quickChat).toHaveBeenCalledWith({
+      conversationId: undefined,
+      imageGenerationOptions: undefined,
+      imageHistoryPolicy: undefined,
+      imageRequest: undefined,
+      maxOutputTokens: undefined,
       messages: [{ role: 'user', content: 'hello' }],
-      systemPrompt: undefined
+      onDelta: expect.any(Function),
+      reasoningEffort: undefined,
+      sessionUrl: undefined,
+      signal: undefined,
+      systemPrompt: undefined,
+      temperature: undefined,
+      videoGenerationOptions: undefined
     })
     expect(resp.content).toBe('quick response')
   })
@@ -679,8 +701,18 @@ describe('LLMProxySvcImpl', () => {
     })
 
     expect(videoChat).toHaveBeenCalledWith({
+      conversationId: undefined,
+      imageGenerationOptions: undefined,
+      imageHistoryPolicy: undefined,
+      imageRequest: undefined,
+      maxOutputTokens: undefined,
       messages: [{ role: 'user', content: 'make a video' }],
+      onDelta: expect.any(Function),
+      reasoningEffort: undefined,
+      sessionUrl: undefined,
+      signal: undefined,
       systemPrompt: undefined,
+      temperature: undefined,
       videoGenerationOptions
     })
   })
@@ -818,6 +850,168 @@ describe('LLMProxySvcImpl', () => {
     expect(agentChat).toHaveBeenCalledTimes(2)
   })
 
+  it('passes the active tool-call signal and stable run/tool ids into runtime execution', async () => {
+    const agentChat = vi
+      .fn()
+      .mockResolvedValueOnce('{"toolName":"session.status","args":{"verbose":true}}')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+    listToolsMock.mockReturnValue([
+      {
+        name: 'session.status',
+        description: 'Status',
+        inputSchema: { type: 'object' }
+      }
+    ])
+
+    let capturedOptions: Record<string, unknown> | undefined
+    let releaseTool: (() => void) | undefined
+    callToolMock.mockImplementation(
+      (
+        _route: unknown,
+        _name: string,
+        _args: Record<string, unknown>,
+        options: Record<string, unknown>
+      ) => {
+        capturedOptions = options
+        return new Promise((resolve) => {
+          releaseTool = () => resolve({ content: 'tool result' })
+        })
+      }
+    )
+    mockAgentProfile()
+    const controller = new AbortController()
+    const svc = new LLMProxySvcImpl()
+    const pending = svc.chat(
+      {
+        conversationId: 'conversation-signal',
+        profileId: 'agent-profile',
+        messages: [{ role: 'user', content: 'use the status tool' }],
+        skillRuntime: {
+          skillId: 'signal-skill',
+          bindings: [{ appId: 'magicpot.core', toolNames: ['session.status'] }]
+        }
+      },
+      { signal: controller.signal }
+    )
+
+    await vi.waitFor(() => expect(callToolMock).toHaveBeenCalledOnce())
+    expect(capturedOptions).toEqual(
+      expect.objectContaining({
+        allowedToolNames: ['session.status'],
+        signal: expect.any(AbortSignal),
+        runId: expect.stringMatching(/^run-/),
+        toolCallId: expect.stringMatching(/^run-.*:tool:/)
+      })
+    )
+
+    const runId = capturedOptions?.runId
+    const toolCallId = capturedOptions?.toolCallId
+    expect(runId).toEqual(expect.stringMatching(/^run-/))
+    expect(runId).not.toBe('conversation-signal')
+    expect(toolCallId).toBe(`${String(runId)}:tool:0`)
+
+    controller.abort()
+    expect((capturedOptions?.signal as AbortSignal | undefined)?.aborted).toBe(true)
+    releaseTool?.()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('does not rotate sibling profiles or backup ownership while continuing a session', async () => {
+    const agentChat = vi.fn().mockResolvedValue('continued response')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+    mockConfig({
+      llm_config: {
+        ...DEFAULT_CONFIG.llm_config,
+        api_profiles: [
+          {
+            id: 'profile-a',
+            model_name: 'Shared Model',
+            base_url: 'https://shared.example/v1',
+            api_key: 'key-a',
+            backup_api_keys: ['backup-a']
+          },
+          {
+            id: 'profile-b',
+            model_name: 'Shared Model',
+            base_url: 'https://shared.example/v1',
+            api_key: 'key-b'
+          }
+        ]
+      }
+    })
+
+    const svc = new LLMProxySvcImpl()
+    const request = {
+      conversationId: 'continuation-owner',
+      profileId: 'profile-a',
+      sessionUrl: 'session-owner-a',
+      messages: [{ role: 'user' as const, content: 'continue' }]
+    }
+    await svc.chat(request)
+    await svc.chat(request)
+
+    expect(
+      vi.mocked(cliFromProfile).mock.calls.map(([profile]) => (profile as LLMAPIProfile).id)
+    ).toEqual(['profile-a', 'profile-a'])
+    expect(vi.mocked(cliFromProfile).mock.calls.map(([profile]) => profile.api_key)).toEqual([
+      'key-a',
+      'key-a'
+    ])
+  })
+
+  it('aggregates usage across a tool loop and keeps the last step usage for context calibration', async () => {
+    const agentChat = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: '{"toolName":"session.status","args":{"secret":"do-not-leak"}}',
+        usage: { promptTokens: 8, completionTokens: 5, totalTokens: 13 }
+      })
+      .mockResolvedValueOnce({
+        content: 'The status is ready.',
+        usage: { promptTokens: 12, completionTokens: 8, totalTokens: 20 }
+      })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+    listToolsMock.mockReturnValue([
+      {
+        name: 'session.status',
+        description: 'Status',
+        inputSchema: { type: 'object' }
+      }
+    ])
+    callToolMock.mockResolvedValue({ content: 'ready', metadata: { state: 'ok' } })
+    mockAgentProfile()
+
+    const svc = new LLMProxySvcImpl()
+    const response = await svc.chat({
+      conversationId: 'usage-tool-loop',
+      profileId: 'agent-profile',
+      messages: [{ role: 'user', content: 'check status' }],
+      skillRuntime: {
+        skillId: 'usage-skill',
+        bindings: [{ appId: 'magicpot.core', toolNames: ['session.status'] }]
+      }
+    })
+
+    expect(response.usage).toMatchObject({
+      promptTokens: 20,
+      completionTokens: 13,
+      totalTokens: 33
+    })
+    expect(response.metadata).toEqual(
+      expect.objectContaining({
+        runId: expect.stringMatching(/^run-/),
+        lastStepUsage: { promptTokens: 12, completionTokens: 8, totalTokens: 20 }
+      })
+    )
+
+    const followUpMessages = agentChat.mock.calls[1]?.[0]?.messages as Array<{
+      content?: string
+      metadata?: Record<string, unknown>
+    }>
+    expect(JSON.stringify(followUpMessages)).toContain('do-not-leak')
+    expect(JSON.stringify(followUpMessages)).toContain('[Tool Result]')
+  })
+
   it('aborts an upstream streaming request without a conversationId when the renderer closes the stream', async () => {
     let upstreamSignal: AbortSignal | undefined
     const agentChat = vi.fn(
@@ -855,13 +1049,7 @@ describe('LLMProxySvcImpl', () => {
       name: 'AbortError',
       message: 'Streaming request aborted by the renderer.'
     })
-    expect(onData).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'done',
-        done: true,
-        error: 'Streaming request aborted by the renderer.'
-      })
-    )
+    expect(onData).not.toHaveBeenCalled()
   })
 
   it('aborts an upstream streaming request when the renderer closes the stream', async () => {
@@ -902,13 +1090,7 @@ describe('LLMProxySvcImpl', () => {
       name: 'AbortError',
       message: 'Streaming request aborted by the renderer.'
     })
-    expect(onData).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'done',
-        done: true,
-        error: 'Streaming request aborted by the renderer.'
-      })
-    )
+    expect(onData).not.toHaveBeenCalled()
     await expect(
       svc.cancelConversation({ conversationId: 'conversation-stream' })
     ).resolves.toEqual({
@@ -1049,7 +1231,10 @@ describe('LLMProxySvcImpl', () => {
       'mcp.github.issues.list',
       { repo: 'magicpot' },
       {
-        allowedToolNames: ['mcp.github.issues.list']
+        allowedToolNames: ['mcp.github.issues.list'],
+        signal: expect.any(AbortSignal),
+        runId: expect.stringMatching(/^run-/),
+        toolCallId: expect.stringMatching(/^run-.*:tool:0$/)
       }
     )
     expect(agentChat.mock.calls[1]?.[0].messages).toEqual([
@@ -1341,9 +1526,19 @@ describe('LLMProxySvcImpl', () => {
     })
 
     expect(agentChat).toHaveBeenCalledWith({
+      conversationId: undefined,
+      imageGenerationOptions: undefined,
+      imageHistoryPolicy: undefined,
+      imageRequest: undefined,
+      maxOutputTokens: undefined,
       messages: [{ role: 'user', content: 'latest question' }],
+      onDelta: expect.any(Function),
+      reasoningEffort: undefined,
+      sessionUrl: undefined,
+      signal: undefined,
       systemPrompt: 'system prompt',
-      signal: undefined
+      temperature: undefined,
+      videoGenerationOptions: undefined
     })
     expect(resp.content).toBe('agent response')
   })
@@ -1370,9 +1565,19 @@ describe('LLMProxySvcImpl', () => {
     })
 
     expect(agentChat).toHaveBeenCalledWith({
+      conversationId: undefined,
+      imageGenerationOptions: undefined,
+      imageHistoryPolicy: undefined,
+      imageRequest: undefined,
+      maxOutputTokens: undefined,
       messages: [{ role: 'user', content: 'latest question' }],
+      onDelta: expect.any(Function),
+      reasoningEffort: undefined,
+      sessionUrl: undefined,
+      signal: undefined,
       systemPrompt: undefined,
-      signal: undefined
+      temperature: undefined,
+      videoGenerationOptions: undefined
     })
     expect(resp.content).toBe('agent response')
   })
@@ -1798,10 +2003,22 @@ describe('LLMProxySvcImpl', () => {
       {
         id: 'agent-profile',
         model_name: 'Agent Model',
+        api_mode: 'chat-completions',
+        provider: 'openai',
+        call_type: 'api',
         deployment: 'cloud',
         model_use: 'chat',
         is_vision_model: false,
-        is_ocr_model: false
+        is_ocr_model: false,
+        attachment_transports: [],
+        supports_session_continuation: false,
+        openai_api_modes: {
+          auto: 'chat-completions',
+          default: 'chat-completions',
+          'chat-completions': 'chat-completions',
+          responses: 'responses',
+          images: 'images'
+        }
       }
     ])
     expect(status.availableProfiles).toBe(1)
@@ -1838,10 +2055,14 @@ describe('LLMProxySvcImpl', () => {
       {
         id: 'ollama-profile',
         model_name: 'llama3.2',
+        provider: 'ollama',
+        call_type: 'api',
         deployment: 'local',
         model_use: 'chat',
         is_vision_model: false,
-        is_ocr_model: false
+        is_ocr_model: false,
+        attachment_transports: [],
+        supports_session_continuation: false
       }
     ])
     expect(status.availableProfiles).toBe(1)
@@ -1883,10 +2104,22 @@ describe('LLMProxySvcImpl', () => {
       {
         id: 'multimodal-profile',
         model_name: 'GPT-4o',
+        api_mode: 'chat-completions',
+        provider: 'openai',
+        call_type: 'api',
         deployment: 'cloud',
         model_use: 'multimodal',
         is_vision_model: true,
-        is_ocr_model: false
+        is_ocr_model: false,
+        attachment_transports: [],
+        supports_session_continuation: false,
+        openai_api_modes: {
+          auto: 'chat-completions',
+          default: 'chat-completions',
+          'chat-completions': 'chat-completions',
+          responses: 'responses',
+          images: 'images'
+        }
       }
     ])
   })
@@ -1914,10 +2147,22 @@ describe('LLMProxySvcImpl', () => {
       {
         id: 'agent-profile',
         model_name: 'gpt-5.4',
+        api_mode: 'responses',
+        provider: 'openai',
+        call_type: 'api',
         deployment: 'cloud',
         model_use: 'agent',
         is_vision_model: true,
-        is_ocr_model: false
+        is_ocr_model: false,
+        attachment_transports: [],
+        supports_session_continuation: false,
+        openai_api_modes: {
+          auto: 'responses',
+          default: 'responses',
+          'chat-completions': 'chat-completions',
+          responses: 'responses',
+          images: 'images'
+        }
       }
     ])
   })
@@ -2021,53 +2266,21 @@ describe('LLMProxySvcImpl', () => {
     }
   )
 
-  it('rejects an oversized qapp image arithmetically before decoding base64', async () => {
-    const providerChat = vi.fn().mockResolvedValue('should not run')
-    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
-    mockConfig({
-      plugin_config: {
-        ...DEFAULT_CONFIG.plugin_config!,
-        api_profiles: [
-          {
-            id: 'quick-ollama',
-            model_name: 'llava',
-            base_url: 'http://localhost:11434',
-            api_key: '',
-            provider: 'ollama'
-          }
-        ]
-      }
-    })
-    const bufferFromSpy = vi.spyOn(Buffer, 'from')
-    const oversizedBase64 = `iVBORw0KGgoAAAAA${'A'.repeat(34_952_540 - 16)}`
+  it('enforces a finite per-image request limit without allocating an oversized buffer', () => {
+    const limits = {
+      maxImages: 4,
+      maxBytesPerImage: 4,
+      maxTotalBytes: 8,
+      maxRequestBodyBytes: 16
+    }
 
-    await expect(
-      new LLMProxySvcImpl().chat({
-        profileScope: 'qapp',
-        profileId: 'quick-ollama',
-        messages: [
-          {
-            role: 'user',
-            content: 'describe this image',
-            attachments: [
-              {
-                type: 'image',
-                url: `data:image/png;base64,${oversizedBase64}`,
-                mimeType: 'image/png',
-                metadata: { internalTransport: 'qapp-renderer-materialized-v1' }
-              }
-            ]
-          }
-        ]
-      })
-    ).rejects.toThrow(/exceeds/)
-    expect(
-      bufferFromSpy.mock.calls.some((call) => {
-        const args = Array.from(call)
-        return args[1] === 'base64' && typeof args[0] === 'string'
-      })
-    ).toBe(false)
-    expect(providerChat).not.toHaveBeenCalled()
+    expect(() => validateImageRequestImageDescriptors([{ sizeBytes: 5 }], limits)).toThrow(
+      'Image exceeds the 4-byte decoded limit.'
+    )
+    expect(validateImageRequestImageDescriptors([{ sizeBytes: 4 }], limits)).toEqual({
+      imageCount: 1,
+      totalBytes: 4
+    })
   })
 
   it('rejects a marked qapp malformed image before built-in provider chat', async () => {
@@ -2363,43 +2576,21 @@ describe('LLMProxySvcImpl', () => {
     expect(providerChat).not.toHaveBeenCalled()
   })
 
-  it('rejects oversized inline images before built-in provider chat', async () => {
-    const providerChat = vi.fn().mockResolvedValue('should not run')
-    vi.mocked(cliFromProfile).mockReturnValue({ chat: providerChat } as never)
-    mockConfig({
-      llm_config: {
-        ...DEFAULT_CONFIG.llm_config,
-        api_profiles: [
-          {
-            id: 'ollama-profile',
-            model_name: 'llava',
-            base_url: 'http://localhost:11434',
-            api_key: '',
-            provider: 'ollama',
-            ...({ attachment_transports: ['request-data-url'] } as Partial<LLMAPIProfile> & {
-              attachment_transports: string[]
-            })
-          }
-        ]
-      }
-    })
-    const oversized = Buffer.alloc(DEFAULT_MANAGED_MEDIA_MAX_BYTES + 1, 1).toString('base64')
+  it('enforces a finite aggregate request limit without allocating oversized buffers', () => {
+    const limits = {
+      maxImages: 4,
+      maxBytesPerImage: 6,
+      maxTotalBytes: 8,
+      maxRequestBodyBytes: 16
+    }
 
-    await expect(
-      new LLMProxySvcImpl().chat({
-        profileId: 'ollama-profile',
-        messages: [
-          {
-            role: 'user',
-            content: 'describe this image',
-            attachments: [
-              { type: 'image', url: `data:image/png;base64,${oversized}`, mimeType: 'image/png' }
-            ]
-          }
-        ]
-      })
-    ).rejects.toThrow(/exceeds the .*request attachment limit/)
-    expect(providerChat).not.toHaveBeenCalled()
+    expect(() =>
+      validateImageRequestImageDescriptors([{ sizeBytes: 5 }, { sizeBytes: 4 }], limits)
+    ).toThrow('Images exceed the 8-byte aggregate decoded limit.')
+    expect(validateImageRequestImageDescriptors([{ sizeBytes: 5 }], limits)).toEqual({
+      imageCount: 1,
+      totalBytes: 5
+    })
   })
 
   it('accepts explicit Ollama providers on generic Agent gateways without API keys', async () => {
@@ -2433,10 +2624,14 @@ describe('LLMProxySvcImpl', () => {
       {
         id: 'ollama-profile',
         model_name: 'llama3.2',
+        provider: 'ollama',
+        call_type: 'api',
         deployment: 'cloud',
         model_use: 'chat',
         is_vision_model: false,
-        is_ocr_model: false
+        is_ocr_model: false,
+        attachment_transports: [],
+        supports_session_continuation: false
       }
     ])
     expect(status.availableProfiles).toBe(1)

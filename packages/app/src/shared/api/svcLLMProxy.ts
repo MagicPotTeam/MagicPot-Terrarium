@@ -298,6 +298,22 @@ export type LLMRemoteFetchResp = {
   body: string
 }
 
+export type LLMExternalAgentStreamReq = {
+  url: string
+  method: 'POST'
+  body?: string
+  headers?: Record<string, string>
+  timeoutMs?: number
+  conversationId?: string
+  runId?: string
+}
+
+export type LLMExternalAgentStreamResp = LLMChatStreamResp & {
+  eventId?: string
+  runId?: string
+  terminal?: boolean
+}
+
 export type LLMCancelConversationReq = {
   conversationId: string
 }
@@ -380,6 +396,16 @@ export type LLMProxySvc = {
    */
   remoteFetch(req: LLMRemoteFetchReq): Promise<LLMRemoteFetchResp>
 
+  /**
+   * Stream a configured external-agent endpoint without buffering the response.
+   * The main process validates the endpoint and forwards only raw SSE/NDJSON
+   * events; JSON-only responses use an explicit non-stream fallback event.
+   */
+  externalAgentStream(
+    req: LLMExternalAgentStreamReq,
+    resp: ServerStreaming<LLMExternalAgentStreamResp>
+  ): Promise<void>
+
   cancelConversation(req: LLMCancelConversationReq): Promise<LLMCancelConversationResp>
 
   uploadHy3DModel(req: LLMUploadHy3DModelReq): Promise<LLMUploadHy3DModelResp>
@@ -404,6 +430,9 @@ export const llmProxySvcDef: ServiceDefSheet<LLMProxySvc> = {
   },
   remoteFetch: {
     type: 'unary'
+  },
+  externalAgentStream: {
+    type: 'serverStreaming'
   },
   cancelConversation: {
     type: 'unary'

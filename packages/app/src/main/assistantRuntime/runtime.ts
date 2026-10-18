@@ -1826,6 +1826,39 @@ export class AssistantRuntime {
       throw new Error(`Cannot resume run ${runId}: ${eligibility.reason}`)
     }
 
+    const sourceSession = await this.sessionStore.getSession(normalizedRoute)
+    const sourceToolActions = (sourceSession?.eventLog || [])
+      .filter((event) => event.runId === sourceRun.runId)
+      .map((event) => event.metadata?.agentAction)
+      .filter(
+        (value): value is { type: string; payload: Record<string, unknown> } =>
+          value !== null &&
+          typeof value === 'object' &&
+          'type' in value &&
+          'payload' in value &&
+          typeof value.type === 'string' &&
+          Boolean(value.payload) &&
+          typeof value.payload === 'object'
+      )
+    const settledToolIds = new Set(
+      sourceToolActions
+        .filter((action) => action.type === 'tool.result')
+        .map((action) => action.payload.invocationId)
+    )
+    if (
+      sourceToolActions.some(
+        (action) =>
+          action.type === 'tool.invoke' && !settledToolIds.has(action.payload.invocationId)
+      )
+    ) {
+      throw Object.assign(
+        new Error(
+          'This run has a tool with an unknown outcome; review its effects before resuming.'
+        ),
+        { code: 'TOOL_REPLAY_REQUIRES_REVIEW' }
+      )
+    }
+
     const requestText = cleanString(sourceRun.requestText)
     if (!requestText) {
       throw new Error(`Cannot resume run ${runId}: no stored request text found.`)
@@ -2701,8 +2734,13 @@ export class AssistantRuntime {
     args: Record<string, unknown>,
     options?: {
       allowedToolNames?: string[] | null
+      signal?: AbortSignal
+      runId?: string
+      toolCallId?: string
     }
   ) {
+    if (options?.signal?.aborted)
+      throw options.signal.reason || new Error('Tool invocation cancelled.')
     const normalizedRoute = normalizeAssistantRoute(route)
     const workspace = await this.resolveWorkspaceState(normalizedRoute)
     await syncMcpClientManager(this.configProvider())
@@ -2710,6 +2748,7 @@ export class AssistantRuntime {
       name,
       args,
       this.buildToolContext(normalizedRoute, workspace, this.getTaskState(normalizedRoute), {
+        signal: options?.signal,
         startTaskGroup: this.startTaskGroup.bind(this),
         progressTaskGroup: this.progressTaskGroup.bind(this),
         approveTaskGroup: this.approveTaskGroup.bind(this),

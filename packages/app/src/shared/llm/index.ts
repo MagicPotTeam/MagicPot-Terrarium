@@ -5,6 +5,7 @@
 export type {
   ChatAttachment,
   ChatMessage,
+  ToolHistoryEntry,
   GeneratePromptParams,
   LLMChatFinishReason,
   LLMChatMetadata,

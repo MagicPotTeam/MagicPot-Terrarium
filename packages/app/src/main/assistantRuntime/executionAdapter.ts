@@ -44,6 +44,7 @@ export type AssistantToolActionDescriptor = {
   toolName: string
   args: Record<string, unknown>
   requestedAt: number
+  toolCallId?: string
 }
 
 type AssistantToolExecutionContext = Omit<
@@ -51,6 +52,8 @@ type AssistantToolExecutionContext = Omit<
   'messages' | 'req' | 'runId' | 'profileId' | 'systemPrompt' | 'cooperativeExecution'
 > & {
   cooperativeExecution?: AssistantExecutionRequest['cooperativeExecution']
+  runId?: string
+  toolCallId?: string
 }
 
 type AssistantExecutionRequest = {
@@ -227,6 +230,7 @@ const asJsonObject = (value: unknown, label: string): JsonObject => {
 
 export const buildAssistantToolInvokeAction = (options: {
   runId: string
+  toolCallId?: string
   toolCallIndex: number
   toolName: string
   args: Record<string, unknown>
@@ -236,14 +240,18 @@ export const buildAssistantToolInvokeAction = (options: {
   if (!toolName) throw new TypeError('Tool name is required.')
   const args = asJsonObject(options.args, 'Tool invocation args')
   const digest = createHash('sha256')
-    .update(`${options.runId}\n${options.toolCallIndex}\n${toolName}\n${canonicalJson(args)}`)
+    .update(
+      `${options.runId}\n${options.toolCallId || options.toolCallIndex}\n${toolName}\n${canonicalJson(args)}`
+    )
     .digest('hex')
   const invocationId = `${options.runId}:tool:${options.toolCallIndex}:${digest.slice(0, 24)}`
+  const toolCallId = cleanString(options.toolCallId)?.slice(0, 200)
   return createToolInvokeAction({
     actionId: invocationId,
     correlationId: options.runId,
     payload: {
       invocationId,
+      ...(toolCallId ? { toolCallId } : {}),
       toolName,
       args,
       requestedAt: options.requestedAt ?? Date.now(),
@@ -355,6 +363,84 @@ export class AssistantExecutionAdapter {
     return filterAssistantToolsByAllowlist(this.toolRegistry.listTools(), allowedToolNames)
   }
 
+  /** Persist intent before executing and outcome before reporting completion. */
+  private async recordToolAction(
+    request: AssistantToolExecutionContext,
+    action: ToolInvokeAction | ToolResultAction
+  ): Promise<void> {
+    if (typeof request.sessionStore?.appendEvents !== 'function') return
+    await request.sessionStore.appendEvents(request.route, [
+      {
+        eventId: action.actionId,
+        runId: action.correlationId || request.runId || action.actionId,
+        sessionKey: getAssistantSessionKey(request.route),
+        route: request.route,
+        type: 'tool',
+        level: action.type === 'tool.result' && !action.payload.ok ? 'error' : 'info',
+        message:
+          action.type === 'tool.invoke'
+            ? `Tool requested: ${action.payload.toolName}`
+            : `Tool finished: ${action.payload.toolName}`,
+        createdAt: Date.now(),
+        metadata: { agentAction: action }
+      }
+    ])
+  }
+
+  private async readSettledToolAction(
+    request: AssistantToolExecutionContext,
+    requestedAction: ToolInvokeAction,
+    allowedToolNames?: string[] | null
+  ): Promise<ToolResultAction | undefined> {
+    if (typeof request.sessionStore?.getSession === 'function') {
+      const stored = await request.sessionStore.getSession(request.route)
+      const actions = (stored?.eventLog || [])
+        .map((event) => event.metadata?.agentAction)
+        .filter(
+          (value): value is ToolInvokeAction | ToolResultAction =>
+            value !== null &&
+            typeof value === 'object' &&
+            'type' in value &&
+            (value.type === 'tool.invoke' || value.type === 'tool.result') &&
+            'payload' in value &&
+            Boolean(value.payload) &&
+            typeof value.payload === 'object'
+        )
+      const previousResult = actions.find(
+        (action) =>
+          action.type === 'tool.result' &&
+          action.payload.invocationId === requestedAction.payload.invocationId
+      ) as ToolResultAction | undefined
+      if (previousResult) {
+        assertAssistantToolAllowed(requestedAction.payload.toolName, allowedToolNames)
+        if (!previousResult.payload.ok) {
+          throw Object.assign(
+            new Error(
+              previousResult.payload.error?.message || 'The previous tool execution failed.'
+            ),
+            { code: 'TOOL_EXECUTION_ALREADY_SETTLED' }
+          )
+        }
+        return previousResult
+      }
+      if (
+        actions.some(
+          (action) =>
+            action.type === 'tool.invoke' &&
+            action.payload.invocationId === requestedAction.payload.invocationId
+        )
+      ) {
+        throw Object.assign(
+          new Error(
+            'Tool execution outcome is unknown after interruption; review it before retrying.'
+          ),
+          { code: 'TOOL_REPLAY_REQUIRES_REVIEW' }
+        )
+      }
+    }
+    return undefined
+  }
+
   async executeToolInvokeAction(
     action: ToolInvokeAction,
     descriptor: AssistantToolActionDescriptor,
@@ -362,8 +448,19 @@ export class AssistantExecutionAdapter {
     allowedToolNames?: string[] | null
   ): Promise<{ action: ToolResultAction; result: AssistantToolCallResult }> {
     validateAssistantToolInvokeAction(action, descriptor)
+    const settledAction = await this.readSettledToolAction(request, action, allowedToolNames)
+    if (settledAction) {
+      return {
+        action: settledAction,
+        result: {
+          content: settledAction.payload.content || '',
+          metadata: settledAction.payload.metadata
+        }
+      }
+    }
     const toolName = action.payload.toolName
     const args = action.payload.args
+    await this.recordToolAction(request, action)
     await this.onAgentAction(action)
     const startedAt = Date.now()
     let leaveTool: (() => void) | undefined
@@ -404,6 +501,7 @@ export class AssistantExecutionAdapter {
         correlationId: action.correlationId,
         payload: {
           invocationId: action.payload.invocationId,
+          ...(action.payload.toolCallId ? { toolCallId: action.payload.toolCallId } : {}),
           toolName,
           ok: true,
           content: result.content,
@@ -415,6 +513,7 @@ export class AssistantExecutionAdapter {
       })
       executionCompleted = true
       // Terminal observer failure is surfaced, but tool execution is never retried.
+      await this.recordToolAction(request, resultAction)
       await this.onAgentAction(resultAction)
       return { action: resultAction, result }
     } catch (error) {
@@ -425,6 +524,7 @@ export class AssistantExecutionAdapter {
         correlationId: action.correlationId,
         payload: {
           invocationId: action.payload.invocationId,
+          ...(action.payload.toolCallId ? { toolCallId: action.payload.toolCallId } : {}),
           toolName,
           ok: false,
           error: toSafeError(error),
@@ -434,6 +534,7 @@ export class AssistantExecutionAdapter {
         }
       })
       try {
+        await this.recordToolAction(request, resultAction)
         await this.onAgentAction(resultAction)
       } catch {
         // Preserve the original execution or authorization failure.
@@ -453,24 +554,32 @@ export class AssistantExecutionAdapter {
     >,
     options?: {
       allowedToolNames?: string[] | null
+      signal?: AbortSignal
+      runId?: string
+      toolCallId?: string
     }
   ): Promise<AssistantToolCallResult> {
     const descriptor: AssistantToolActionDescriptor = {
-      runId: `call-tool:${crypto.randomUUID()}`,
+      runId: cleanString(options?.runId) || `call-tool:${crypto.randomUUID()}`,
+      ...(options?.toolCallId ? { toolCallId: options.toolCallId } : {}),
       toolCallIndex: 0,
       toolName: name,
       args,
       requestedAt: Date.now()
     }
+    const invokeAction = buildAssistantToolInvokeAction(descriptor)
+    if (options?.signal?.aborted)
+      throw options.signal.reason || new Error('Tool invocation cancelled.')
     const execution = await this.executeToolInvokeAction(
-      buildAssistantToolInvokeAction(descriptor),
+      invokeAction,
       descriptor,
-      request,
+      { ...request, signal: options?.signal ?? request.signal },
       options?.allowedToolNames
     )
     return execution.result
   }
   async run(request: AssistantExecutionRequest): Promise<AssistantExecutionResult> {
+    const executionRunId = request.req.resumeFromRunId || request.runId
     const startedAt = Date.now()
     const executionMetadata = buildExecutionMetadata(request)
     const toolInvocation = parseToolInvocation(request.req.text)
@@ -478,7 +587,8 @@ export class AssistantExecutionAdapter {
       if (request.maxToolCalls !== undefined && request.maxToolCalls < 1)
         throw new Error('Assistant tool-call budget exhausted.')
       const toolAction = buildAssistantToolInvokeAction({
-        runId: request.runId,
+        runId: executionRunId,
+        toolCallId: `${executionRunId}:tool:0`,
         toolCallIndex: 0,
         toolName: toolInvocation.toolName,
         args: toolInvocation.args,
@@ -499,7 +609,8 @@ export class AssistantExecutionAdapter {
       const toolExecution = await this.executeToolInvokeAction(
         toolAction,
         {
-          runId: request.runId,
+          runId: executionRunId,
+          toolCallId: `${executionRunId}:tool:0`,
           toolCallIndex: 0,
           toolName: toolInvocation.toolName,
           args: toolInvocation.args,
@@ -570,11 +681,60 @@ export class AssistantExecutionAdapter {
     const systemPrompt = [request.systemPrompt, reusableContextPrompt].filter(Boolean).join('\n\n')
     await request.cooperativeExecution?.checkpoint('llm-inference')
     const leaveLlm = request.cooperativeExecution?.enter('llm-inference')
+    const executionPolicy = request.req.execution
+    const skillRuntime = Array.isArray(executionPolicy?.allowedToolNames)
+      ? {
+          execution: {
+            ...(executionPolicy.mode
+              ? {
+                  mode:
+                    executionPolicy.mode === 'no-history'
+                      ? ('isolated' as const)
+                      : ('inherit' as const)
+                }
+              : {}),
+            ...(executionPolicy.allowHistory === undefined
+              ? {}
+              : { allowHistory: executionPolicy.allowHistory }),
+            ...(executionPolicy.contextMessageLimit === undefined
+              ? {}
+              : { contextMessageLimit: executionPolicy.contextMessageLimit })
+          },
+          bindings: [
+            {
+              appId: 'assistant-runtime',
+              source: 'assistant-runtime',
+              toolNames: this.listTools(executionPolicy.allowedToolNames).map((tool) => tool.name)
+            }
+          ]
+        }
+      : undefined
+
+    const chatOptions = {
+      signal: request.signal,
+      runId: executionRunId,
+      executeTool: (invocation: {
+        toolName: string
+        args: Record<string, unknown>
+        runId: string
+        toolCallId: string
+        signal?: AbortSignal
+      }) =>
+        this.callTool(invocation.toolName, invocation.args, request, {
+          allowedToolNames: executionPolicy?.allowedToolNames,
+          signal: invocation.signal,
+          runId: invocation.runId,
+          toolCallId: invocation.toolCallId
+        })
+    }
     let reply
     try {
       reply = await this.chatService.chat(
         {
           messages: request.messages,
+          imageHistoryPolicy: 'all',
+          route: request.route,
+          ...(skillRuntime ? { skillRuntime } : {}),
           ...(request.profileId ? { profileId: request.profileId } : {}),
           ...(request.maxOutputTokens === undefined
             ? {}
@@ -582,9 +742,7 @@ export class AssistantExecutionAdapter {
           ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
           ...(systemPrompt ? { systemPrompt } : {})
         },
-        {
-          signal: request.signal
-        }
+        chatOptions
       )
     } finally {
       leaveLlm?.()

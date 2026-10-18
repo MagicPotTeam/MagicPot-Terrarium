@@ -32,6 +32,17 @@ export interface ChatAttachment {
   reportBundleImageCount?: number
 }
 
+export type ToolHistoryEntry = {
+  runId: string
+  toolCallId: string
+  toolName: string
+  args: Record<string, unknown>
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
+  content?: string
+  error?: string
+  metadata?: Record<string, unknown>
+}
+
 /** A single chat message */
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -41,6 +52,8 @@ export interface ChatMessage {
   hiddenContext?: string
   preferredDownloadBaseName?: string
   modelName?: string
+  /** Structured tool-loop records persisted separately from visible assistant prose. */
+  toolHistory?: ToolHistoryEntry[]
 }
 
 /** Parameters for prompt generation (renderer-only feature) */

@@ -23,10 +23,17 @@ const dispose = (stream: ClientRequest | IncomingMessage, closed = false): void 
   if (!stream.destroyed) stream.destroy()
 }
 
+export type RemoteFetchStreamObserver = {
+  onResponse?: (response: { status: number; statusText: string; contentType: string }) => void
+  /** Return false only after an explicit protocol terminal event to stop the owned transport. */
+  onChunk?: (chunk: Buffer) => boolean | void
+}
+
 export const remoteFetch = async (
   req: LLMRemoteFetchReq,
   config: Config,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  observer?: RemoteFetchStreamObserver
 ): Promise<LLMRemoteFetchResp> => {
   const started = performance.now()
   const { parsedUrl, headers, timeoutMs } = validateRemoteFetchRequest(req, config)
@@ -134,7 +141,23 @@ export const remoteFetch = async (
           finish(new Error('Remote response is too large.'))
           return
         }
-        chunks.push(chunk)
+        if (observer?.onChunk) {
+          try {
+            if (observer.onChunk(chunk) === false) {
+              finish(undefined, {
+                status: response?.statusCode || 500,
+                statusText: response?.statusMessage || '',
+                body: ''
+              })
+              return
+            }
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error(String(error)))
+            return
+          }
+        } else {
+          chunks.push(chunk)
+        }
       }
       const onEnd = () => {
         if (done || !active() || !response) return
@@ -148,7 +171,7 @@ export const remoteFetch = async (
         finish(undefined, {
           status: response.statusCode || 500,
           statusText: response.statusMessage || '',
-          body: Buffer.concat(chunks, receivedBytes).toString('utf8')
+          body: observer?.onChunk ? '' : Buffer.concat(chunks, receivedBytes).toString('utf8')
         })
       }
       const onResponse = (incoming: IncomingMessage) => {
@@ -176,6 +199,17 @@ export const remoteFetch = async (
           // 304 may advertise the size of the cached representation without sending a body.
           if (response.statusCode !== 304) expectedBytes = size
         }
+        try {
+          observer?.onResponse?.({
+            status: response.statusCode || 500,
+            statusText: response.statusMessage || '',
+            contentType: String(response.headers['content-type'] || '')
+          })
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)))
+          return
+        }
+        if (!active()) return
         response.on('data', onData)
         response.on('end', onEnd)
       }

@@ -238,3 +238,117 @@ describe('AssistantExecutionAdapter tool lifecycle', () => {
     expect(bridge.invoke).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('durable tool intent and outcome', () => {
+  it('persists intent before effect and reuses the recorded outcome for the same invocation', async () => {
+    const journal: Array<{ metadata?: Record<string, unknown> }> = []
+    const order: string[] = []
+    const sessionStore = {
+      getSession: vi.fn(async () => ({ eventLog: structuredClone(journal) })),
+      appendEvents: vi.fn(async (_route, events) => {
+        order.push((events[0].metadata.agentAction as { type: string }).type)
+        journal.push(...structuredClone(events))
+      })
+    }
+    bridge.invoke.mockReset()
+    bridge.invoke.mockImplementation(async (input) => {
+      order.push('effect')
+      expect(input.signal).toBe(controller.signal)
+      return { content: 'durable result', metadata: { owned: true } }
+    })
+    const controller = new AbortController()
+    const adapter = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+    const request = {
+      ...makeRequest(),
+      route: { channel: 'test', scopeType: 'dm', scopeId: 'durable' },
+      sessionStore
+    } as unknown as ToolCallRequest
+    const options = {
+      runId: 'owned-run',
+      toolCallId: 'owned-run:tool:0',
+      allowedToolNames: ['demo.echo'],
+      signal: controller.signal
+    }
+    expect(await adapter.callTool('demo.echo', { value: 1 }, request, options)).toMatchObject({
+      content: 'durable result'
+    })
+    expect(order).toEqual(['tool.invoke', 'effect', 'tool.result'])
+    const reopenedAdapter = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+    expect(
+      await reopenedAdapter.callTool('demo.echo', { value: 1 }, request, options)
+    ).toMatchObject({ content: 'durable result' })
+    expect(bridge.invoke).toHaveBeenCalledOnce()
+    expect(journal).toHaveLength(2)
+  })
+
+  it('does not repeat an invocation whose intent persisted but outcome is unknown', async () => {
+    const action = buildAssistantToolInvokeAction({
+      runId: 'interrupted',
+      toolCallId: 'interrupted:tool:0',
+      toolCallIndex: 0,
+      toolName: 'demo.echo',
+      args: { value: 1 }
+    })
+    const request = {
+      ...makeRequest(),
+      sessionStore: {
+        getSession: async () => ({ eventLog: [{ metadata: { agentAction: action } }] }),
+        appendEvents: vi.fn()
+      }
+    } as unknown as ToolCallRequest
+    bridge.invoke.mockReset()
+    const adapter = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+    await expect(
+      adapter.callTool('demo.echo', { value: 1 }, request, {
+        runId: 'interrupted',
+        toolCallId: 'interrupted:tool:0'
+      })
+    ).rejects.toMatchObject({ code: 'TOOL_REPLAY_REQUIRES_REVIEW' })
+    expect(bridge.invoke).not.toHaveBeenCalled()
+  })
+
+  it('never executes a tool when the intent cannot be persisted', async () => {
+    const request = {
+      ...makeRequest(),
+      sessionStore: {
+        appendEvents: vi.fn(async () => {
+          throw new Error('owned disk failure')
+        })
+      }
+    } as unknown as ToolCallRequest
+    bridge.invoke.mockReset()
+    const adapter = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+    await expect(adapter.callTool('demo.echo', {}, request)).rejects.toThrow('owned disk failure')
+    expect(bridge.invoke).not.toHaveBeenCalled()
+  })
+})
+
+it('does not mistake another completed invocation for the requested tool result', async () => {
+  const journal: Array<{ metadata?: Record<string, unknown> }> = []
+  const sessionStore = {
+    getSession: async () => ({ eventLog: structuredClone(journal) }),
+    appendEvents: async (
+      _route: unknown,
+      events: Array<{ metadata?: Record<string, unknown> }>
+    ) => {
+      journal.push(...structuredClone(events))
+    }
+  }
+  const request = { ...makeRequest(), sessionStore } as unknown as ToolCallRequest
+  bridge.invoke.mockReset()
+  bridge.invoke.mockImplementation(async ({ args }) => ({ content: String(args.value) }))
+  const adapter = new AssistantExecutionAdapter({ chatService: { chat: vi.fn() } })
+  expect(
+    await adapter.callTool('demo.echo', { value: 'first' }, request, {
+      runId: 'same-run',
+      toolCallId: 'call-1'
+    })
+  ).toMatchObject({ content: 'first' })
+  expect(
+    await adapter.callTool('demo.echo', { value: 'second' }, request, {
+      runId: 'same-run',
+      toolCallId: 'call-2'
+    })
+  ).toMatchObject({ content: 'second' })
+  expect(bridge.invoke).toHaveBeenCalledTimes(2)
+})

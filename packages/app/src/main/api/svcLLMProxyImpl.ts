@@ -2,6 +2,9 @@
 // This file centralizes provider selection and media-aware request handling.
 
 import { net } from 'electron'
+import { createSkillToolStream } from './skillToolStream'
+import { streamExternalAgent } from './externalAgentStream'
+import type { LLMExternalAgentStreamReq, LLMExternalAgentStreamResp } from '@shared/api/svcLLMProxy'
 import {
   LLMProxySvc,
   LLMChatReq,
@@ -343,6 +346,14 @@ const createMainProcessElectronFetch = (): FetchImpl | null => {
 // ==================== Chat execution helpers ====================
 
 type ChatExecutionOptions = LLMChatOptions & {
+  runId?: string
+  executeTool?: (invocation: {
+    toolName: string
+    args: Record<string, unknown>
+    runId: string
+    toolCallId: string
+    signal?: AbortSignal
+  }) => Promise<{ content: string; metadata?: Record<string, unknown> }>
   onDelta?: (event: LLMDeltaEvent) => void
 }
 
@@ -994,6 +1005,30 @@ type ToolSummary = {
 type RequestedToolInvocation = {
   toolName: string
   args: Record<string, unknown>
+}
+
+type ToolLoopUsage = NonNullable<LLMChatResult['usage']>
+
+const addToolLoopUsage = (
+  total: ToolLoopUsage | undefined,
+  step: ToolLoopUsage | undefined
+): ToolLoopUsage | undefined => {
+  if (!total && !step) return undefined
+  const result: ToolLoopUsage = { ...(total || {}) }
+  for (const key of [
+    'promptTokens',
+    'inputTextTokens',
+    'inputImageTokens',
+    'completionTokens',
+    'totalTokens'
+  ] as const) {
+    const value = step?.[key]
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      const previous = result[key]
+      result[key] = (typeof previous === 'number' ? previous : 0) + value
+    }
+  }
+  return result
 }
 
 const MAX_SKILL_RUNTIME_TOOL_CALLS = 4
@@ -2196,7 +2231,9 @@ export class LLMProxySvcImpl implements LLMProxySvc {
 
     let selectedApiKey = profile?.api_key || ''
 
-    if (profile) {
+    // A named conversation keeps one identity from its first request onward.
+    // Stateless batch callers can still opt into the existing rotation behavior.
+    if (profile && !req.sessionUrl?.trim() && !req.conversationId?.trim()) {
       const allKeys = [profile.api_key, ...(profile.backup_api_keys || [])].filter((k) => k)
 
       if (allKeys.length > 1) {
@@ -2336,58 +2373,108 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let content = ''
     let chatResult: LLMChatResult = { content: '' }
 
-    for (let step = 0; step <= MAX_SKILL_RUNTIME_TOOL_CALLS; step += 1) {
-      const bufferedEvents: LLMDeltaEvent[] = []
-      const shouldBufferStepEvents = availableSkillTools.length > 0
-      const nextChatResult = await cli.chat({
-        messages: conversationMessages,
-        systemPrompt: toolAwareSystemPrompt,
-        reasoningEffort: req.reasoningEffort,
-        maxOutputTokens: req.maxOutputTokens,
-        temperature: req.temperature,
-        imageGenerationOptions: req.imageGenerationOptions,
-        imageRequest: req.imageRequest,
-        imageHistoryPolicy: req.imageHistoryPolicy,
-        videoGenerationOptions: req.videoGenerationOptions,
-        signal: options?.signal,
-        sessionUrl: req.sessionUrl,
-        conversationId: req.conversationId,
-        onDelta: shouldBufferStepEvents ? (event) => bufferedEvents.push(event) : options?.onDelta
-      })
-      chatResult = normalizeLLMChatResult(nextChatResult)
-      content = chatResult.content
-      throwIfAborted(options?.signal)
+    const runId = options?.runId || `run-${crypto.randomUUID()}`
+    let totalUsage: ToolLoopUsage | undefined
+    let lastStepUsage: ToolLoopUsage | undefined
+    let continuationUrl = req.sessionUrl
+    let modelStepCount = 0
+    const toolHistory: Array<Record<string, unknown>> = []
 
-      const requestedTool =
-        availableSkillTools.length > 0
-          ? parseRequestedToolInvocation(content, availableSkillToolNames)
-          : null
-      if (!requestedTool) {
-        if (shouldBufferStepEvents) {
-          bufferedEvents.forEach((event) => options?.onDelta?.(event))
+    try {
+      for (let step = 0; step <= MAX_SKILL_RUNTIME_TOOL_CALLS; step += 1) {
+        const stepStream =
+          availableSkillTools.length > 0 ? createSkillToolStream(options?.onDelta) : undefined
+        const nextChatResult = await cli.chat({
+          messages: conversationMessages,
+          systemPrompt: toolAwareSystemPrompt,
+          reasoningEffort: req.reasoningEffort,
+          maxOutputTokens: req.maxOutputTokens,
+          temperature: req.temperature,
+          imageGenerationOptions: req.imageGenerationOptions,
+          imageRequest: req.imageRequest,
+          imageHistoryPolicy: req.imageHistoryPolicy,
+          videoGenerationOptions: req.videoGenerationOptions,
+          signal: options?.signal,
+          sessionUrl: continuationUrl,
+          conversationId: req.conversationId,
+          onDelta:
+            stepStream?.onDelta ??
+            ((event) => {
+              if (event.type !== 'done') options?.onDelta?.(event)
+            })
+        })
+        chatResult = normalizeLLMChatResult(nextChatResult)
+        modelStepCount += 1
+        lastStepUsage = chatResult.usage
+        totalUsage = addToolLoopUsage(totalUsage, lastStepUsage)
+        content = chatResult.content
+        if (chatResult.sessionUrl) continuationUrl = chatResult.sessionUrl
+        throwIfAborted(options?.signal)
+
+        const requestedTool =
+          availableSkillTools.length > 0
+            ? parseRequestedToolInvocation(content, availableSkillToolNames)
+            : null
+        stepStream?.finish(Boolean(requestedTool))
+        throwIfAborted(options?.signal)
+        if (!requestedTool) break
+        if (step === MAX_SKILL_RUNTIME_TOOL_CALLS) {
+          throw new Error('Skill runtime tool-call loop exceeded the maximum number of steps.')
         }
-        break
-      }
 
-      if (step === MAX_SKILL_RUNTIME_TOOL_CALLS) {
-        throw new Error('Skill runtime tool-call loop exceeded the maximum number of steps.')
-      }
-
-      const toolResult = await runtime.callTool(
-        buildSkillRuntimeRoute(req),
-        requestedTool.toolName,
-        requestedTool.args,
-        {
-          allowedToolNames
+        const toolCallId = `${runId}:tool:${step}`
+        const toolOptions = { allowedToolNames, signal: options?.signal, runId, toolCallId }
+        const record: Record<string, unknown> = {
+          runId,
+          toolCallId,
+          toolName: requestedTool.toolName,
+          args: requestedTool.args,
+          status: 'running'
         }
-      )
-      throwIfAborted(options?.signal)
-
-      conversationMessages.push({
-        role: 'assistant',
-        content
-      })
-      conversationMessages.push(buildToolResultMessage(requestedTool, toolResult.content))
+        toolHistory.push(record)
+        try {
+          const toolResult = options?.executeTool
+            ? await options.executeTool({
+                toolName: requestedTool.toolName,
+                args: requestedTool.args,
+                runId,
+                toolCallId,
+                signal: options.signal
+              })
+            : await runtime.callTool(
+                buildSkillRuntimeRoute(req),
+                requestedTool.toolName,
+                requestedTool.args,
+                toolOptions
+              )
+          record.status = 'completed'
+          record.content = toolResult.content
+          if (toolResult.metadata) record.metadata = toolResult.metadata
+          throwIfAborted(options?.signal)
+          // Preserve the legacy provider projection until native tool items are negotiated.
+          // The parallel structured record never replaces model-visible call/result context.
+          conversationMessages.push({ role: 'assistant', content })
+          conversationMessages.push(buildToolResultMessage(requestedTool, toolResult.content))
+        } catch (error) {
+          if (record.status !== 'completed') {
+            record.status = options?.signal?.aborted ? 'cancelled' : 'failed'
+            record.error = error instanceof Error ? error.message : String(error)
+          }
+          throw error
+        }
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        Object.assign(error, {
+          ...(totalUsage ? { usage: totalUsage } : {}),
+          metadata: { runId, lastStepUsage, toolHistory }
+        })
+      }
+      throw error
+    }
+    if (totalUsage) chatResult.usage = totalUsage
+    if (modelStepCount > 1 || toolHistory.length > 0) {
+      chatResult.metadata = { ...(chatResult.metadata || {}), runId, lastStepUsage, toolHistory }
     }
 
     const structuredSkillContent = validateStructuredSkillOutput(content, req.skillRuntime)
@@ -3277,6 +3364,59 @@ export class LLMProxySvcImpl implements LLMProxySvc {
 
     controller.abort(createAbortError('Conversation cancelled by the user.'))
     return { cancelled: true }
+  }
+
+  externalAgentStream = async (
+    req: LLMExternalAgentStreamReq,
+    resp: ServerStreaming<LLMExternalAgentStreamResp>
+  ): Promise<void> => {
+    const context = this.createConversationAbortContext(req.conversationId)
+    let closed = false
+    let terminal = false
+    const close = (): void => {
+      closed = true
+      context.abort(createAbortError('External Agent stream closed by the renderer.'))
+    }
+    resp.abortReceiver?.onAbort(close)
+    if (resp.abortReceiver?.isAborted()) close()
+    try {
+      if (closed) return
+      const origin = new URL(req.url).origin
+      await streamExternalAgent(req, getConfig(), {
+        signal: context.signal,
+        validate: (event) => assertSafeRemoteEventUrls(event, origin),
+        emit: (event) => {
+          if (closed || terminal || context.signal?.aborted) return
+          if (event.type === 'done') terminal = true
+          resp.onData(event)
+        }
+      })
+    } catch (error) {
+      if (closed || terminal) return
+      terminal = true
+      const cancelled = context.signal?.aborted === true
+      const partialContent =
+        error &&
+        typeof error === 'object' &&
+        'partialContent' in error &&
+        typeof error.partialContent === 'string'
+          ? error.partialContent
+          : ''
+      resp.onData({
+        type: 'done',
+        delta: '',
+        done: true,
+        terminal: true,
+        content: partialContent,
+        fullContent: partialContent,
+        ...(req.runId ? { runId: req.runId } : {}),
+        error: boundRemoteErrorDetail(error instanceof Error ? error.message : String(error)),
+        finishReason: cancelled ? 'cancelled' : 'error'
+      })
+    } finally {
+      terminal = true
+      context.cleanup()
+    }
   }
 
   remoteFetch = async (req: LLMRemoteFetchReq): Promise<LLMRemoteFetchResp> => {
