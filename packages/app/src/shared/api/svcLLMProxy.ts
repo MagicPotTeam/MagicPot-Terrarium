@@ -17,6 +17,7 @@ import type {
   ImageRequestContract,
   LLMImageHistoryPolicy,
   OpenAIImageGenerationOptions,
+  ToolHistoryEntry,
   VideoGenerationOptions
 } from '@shared/llm/types'
 import type {
@@ -60,6 +61,8 @@ export type ChatMessage = {
   /** 生成此消息的模型名称（仅 assistant 消息，用于 UI 显示） */
   preferredDownloadBaseName?: string
   modelName?: string
+  /** Structured tool-loop records persisted with assistant messages. */
+  toolHistory?: ToolHistoryEntry[]
 }
 
 export type OCRBoundingBox = {
