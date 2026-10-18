@@ -9,6 +9,7 @@ import {
 } from 'react'
 import { flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
+import type { CanvasTranslate, CanvasTranslationKey } from './canvasTranslation'
 import type { CanvasFigmaBinding } from '@shared/figma'
 import { api } from '../../utils/windowUtils'
 import { exportCanvasFile, exportCanvasFileAsStandalone } from './canvasStorage'
@@ -1606,7 +1607,7 @@ export function useCanvasExportWorkflow({
       targetItems: CanvasItem[],
       scope: Extract<ExportMenuScope, 'scene' | 'selected-scene'>,
       format: RasterExportImageFormat,
-      emptyKey: string
+      emptyKey: CanvasTranslationKey
     ) => {
       closeExportMenus()
 
@@ -1653,7 +1654,7 @@ export function useCanvasExportWorkflow({
     async (
       targetItems: CanvasItem[],
       scope: Extract<ExportMenuScope, 'scene' | 'selected-scene'>,
-      emptyKey: string
+      emptyKey: CanvasTranslationKey
     ) => {
       closeExportMenus()
 
@@ -1693,7 +1694,7 @@ export function useCanvasExportWorkflow({
   const exportCanvasElementsAsImages = useCallback(
     async (
       targetItems: CanvasExportableItem[],
-      emptyKey: string,
+      emptyKey: CanvasTranslationKey,
       format: RasterExportImageFormat
     ) => {
       closeExportMenus()
@@ -1742,7 +1743,7 @@ export function useCanvasExportWorkflow({
   )
 
   const exportCanvasElementsAsSvg = useCallback(
-    async (targetItems: CanvasExportableItem[], emptyKey: string) => {
+    async (targetItems: CanvasExportableItem[], emptyKey: CanvasTranslationKey) => {
       closeExportMenus()
 
       if (targetItems.length === 0) {

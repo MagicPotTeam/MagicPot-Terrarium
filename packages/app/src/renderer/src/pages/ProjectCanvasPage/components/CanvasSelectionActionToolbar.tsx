@@ -7,7 +7,7 @@ import SendRoundedIcon from '@mui/icons-material/SendRounded'
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline'
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome'
 import LayersOutlinedIcon from '@mui/icons-material/LayersOutlined'
-import { useTranslation } from 'react-i18next'
+import type { CanvasTranslate, CanvasTranslationKey } from '../canvasTranslation'
 import type { CanvasItem } from '../types'
 
 const GROUP_LABEL = '\u7ec4\u5408'
@@ -35,6 +35,7 @@ type CanvasSelectionActionToolbarProps = {
   stagePos: { x: number; y: number }
   stageScale: number
   groupCreateLabel?: string
+  t: CanvasTranslate
   onDragSelectedItems: (items: CanvasItem[], dataTransfer: DataTransfer) => void
   onCopySelectedItems: (items: CanvasItem[]) => void
   onDownloadSelectedItems: (items: CanvasItem[], fileName: string) => void
@@ -42,6 +43,11 @@ type CanvasSelectionActionToolbarProps = {
   onChatSelectedItems: (items: CanvasItem[]) => void
   onGenerateSelectedItems: (items: CanvasItem[]) => void
   onCreateGroupFromSelection: (anchor: HTMLElement) => void
+}
+
+const getLabel = (t: CanvasTranslate, key: CanvasTranslationKey, fallback: string): string => {
+  const value = t(key, { defaultValue: fallback })
+  return typeof value === 'string' ? value : fallback
 }
 
 type ToolbarActionButtonProps = {
@@ -52,12 +58,9 @@ type ToolbarActionButtonProps = {
   onDragStart?: (event: React.DragEvent<HTMLButtonElement>) => void
   onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void
 }
-
 const stopToolbarPointerPropagation = (
   event:
-    | React.MouseEvent<HTMLElement>
-    | React.PointerEvent<HTMLElement>
-    | React.TouchEvent<HTMLElement>
+    React.MouseEvent<HTMLElement> | React.PointerEvent<HTMLElement> | React.TouchEvent<HTMLElement>
 ) => {
   event.stopPropagation()
   event.nativeEvent.stopImmediatePropagation?.()
@@ -126,6 +129,7 @@ export default function CanvasSelectionActionToolbar({
   stagePos,
   stageScale,
   groupCreateLabel,
+  t: providedT,
   onDragSelectedItems,
   onCopySelectedItems,
   onDownloadSelectedItems,
@@ -134,19 +138,15 @@ export default function CanvasSelectionActionToolbar({
   onGenerateSelectedItems,
   onCreateGroupFromSelection
 }: CanvasSelectionActionToolbarProps) {
-  const { t } = useTranslation()
-  const getLabel = (key: string, fallback: string) => {
-    const value = t(key)
-    return value === key ? fallback : value
-  }
-
-  const sendLabel = getLabel('canvas.action_send', '\u53d1\u9001')
-  const chatLabel = getLabel('canvas.action_send_agent', '\u53d1\u9001\u8d44\u6599\u5230 Agent')
+  const t = providedT
+  const sendLabel = getLabel(t, 'canvas.action_send', '\u53d1\u9001')
+  const chatLabel = getLabel(t, 'canvas.action_send_agent', '\u53d1\u9001\u8d44\u6599\u5230 Agent')
   const generateLabel = getLabel(
+    t,
     'canvas.action_generate_from_selection',
     '\u6309\u9700\u6c42\u751f\u6210'
   )
-  const groupLabel = groupCreateLabel || getLabel('canvas.group_create_button', GROUP_LABEL)
+  const groupLabel = groupCreateLabel || getLabel(t, 'canvas.group_create_button', GROUP_LABEL)
 
   const toolbarItems = exactSelectedGroup?.validItems ?? selectedItems
   const toolbarFileName = exactSelectedGroup?.name ?? 'canvas-selection'

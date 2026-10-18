@@ -4,13 +4,26 @@ import { describe, expect, it, vi } from 'vitest'
 import { ThemeProvider } from '@mui/material'
 import { theme } from '@renderer/theme'
 import CanvasSelectionActionToolbar from './CanvasSelectionActionToolbar'
+import type { CanvasTranslate } from '../canvasTranslation'
 import type { CanvasItem } from '../types'
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => key
-  })
-}))
+function createTranslate(): CanvasTranslate {
+  const translate = (key: string, options?: Record<string, unknown>) => {
+    switch (key) {
+      case 'canvas.action_send':
+        return 'Send'
+      case 'canvas.action_send_agent':
+        return 'Send selected items to Agent'
+      case 'canvas.action_generate_from_selection':
+        return 'Generate from selection'
+      case 'canvas.group_create_button':
+        return 'Group'
+      default:
+        return key
+    }
+  }
+  return translate as CanvasTranslate
+}
 
 function createImageItem(id: string): CanvasItem {
   return {
@@ -51,6 +64,7 @@ describe('CanvasSelectionActionToolbar', () => {
           selectionActionStackPosition={{ left: 12, top: 24 }}
           stagePos={{ x: 8, y: 16 }}
           stageScale={1}
+          t={createTranslate()}
           onDragSelectedItems={onDragSelectedItems}
           onCopySelectedItems={vi.fn()}
           onDownloadSelectedItems={vi.fn()}
@@ -92,6 +106,7 @@ describe('CanvasSelectionActionToolbar', () => {
           selectionActionStackPosition={{ left: 120, top: 240 }}
           stagePos={{ x: 8, y: 16 }}
           stageScale={1}
+          t={createTranslate()}
           onDragSelectedItems={vi.fn()}
           onCopySelectedItems={vi.fn()}
           onDownloadSelectedItems={vi.fn()}
@@ -122,6 +137,7 @@ describe('CanvasSelectionActionToolbar', () => {
           selectionActionStackPosition={{ left: 12, top: 24 }}
           stagePos={{ x: 8, y: 16 }}
           stageScale={1}
+          t={createTranslate()}
           onDragSelectedItems={vi.fn()}
           onCopySelectedItems={vi.fn()}
           onDownloadSelectedItems={vi.fn()}
@@ -149,6 +165,7 @@ describe('CanvasSelectionActionToolbar', () => {
           selectionActionStackPosition={{ left: 12, top: 24 }}
           stagePos={{ x: 8, y: 16 }}
           stageScale={1}
+          t={createTranslate()}
           onDragSelectedItems={vi.fn()}
           onCopySelectedItems={vi.fn()}
           onDownloadSelectedItems={vi.fn()}

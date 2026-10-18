@@ -1,5 +1,6 @@
 import CanvasSelectionActionToolbar from './CanvasSelectionActionToolbar'
 import type { CanvasItem } from '../types'
+import type { CanvasTranslate } from '../canvasTranslation'
 
 type ExactSelectedGroup = {
   id: string
@@ -19,7 +20,8 @@ type CanvasMultiSelectionOverlayProps = {
   selectionActionStackPosition: SelectionActionStackPosition
   stagePos: { x: number; y: number }
   stageScale: number
-  groupCreateLabel: string
+  groupCreateLabel?: string
+  t: CanvasTranslate
   onDragSelectedItems: (items: CanvasItem[], dataTransfer: DataTransfer) => void
   onCopySelectedItems: (items: CanvasItem[]) => void
   onDownloadSelectedItems: (items: CanvasItem[], fileName: string) => void
@@ -28,6 +30,7 @@ type CanvasMultiSelectionOverlayProps = {
   onGenerateSelectedItems: (items: CanvasItem[]) => void
   onCreateGroup: () => void
 }
+
 export default function CanvasMultiSelectionOverlay({
   selectedItems,
   exactSelectedGroup,
@@ -35,6 +38,7 @@ export default function CanvasMultiSelectionOverlay({
   stagePos,
   stageScale,
   groupCreateLabel,
+  t,
   onDragSelectedItems,
   onCopySelectedItems,
   onDownloadSelectedItems,
@@ -56,6 +60,7 @@ export default function CanvasMultiSelectionOverlay({
       stagePos={stagePos}
       stageScale={stageScale}
       groupCreateLabel={groupCreateLabel}
+      t={t}
       onDragSelectedItems={onDragSelectedItems}
       onCopySelectedItems={onCopySelectedItems}
       onDownloadSelectedItems={onDownloadSelectedItems}

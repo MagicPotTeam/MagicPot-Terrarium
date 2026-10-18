@@ -630,6 +630,7 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
           legacySelectionToolbarEnabled: isLegacySelectionToolbarEnabled(),
           suppressSelectionChrome: Boolean(suppressSelectionChromeAfterMarquee),
           groupCreateLabel: t('canvas.group_create_button'),
+          t,
           handleFocusGroup,
           buildCanvasDragPayload,
           setCanvasDragPayload,
