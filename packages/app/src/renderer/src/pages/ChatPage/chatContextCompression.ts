@@ -649,15 +649,15 @@ export const buildChatContextCompressionPlan = (input: {
   const messagesToCompress = input.historyMessages.slice(0, compressionCount)
   const requestHistoryMessages = input.historyMessages.slice(compressionCount)
   const currentReplayImageMessages = messagesToCompress.flatMap((message, index) => {
-    if (message.role !== 'user') return []
+    if (message.role !== 'user' && message.role !== 'assistant') return []
     const imageAttachments = (message.attachments || []).filter(
       (attachment) => attachment.type === 'image'
     )
     if (imageAttachments.length === 0) return []
     return [
       {
-        role: 'user' as const,
-        content: `Historical image replay from compacted user message ${index + 1}.`,
+        role: message.role,
+        content: `Historical image replay from compacted ${message.role} message ${index + 1}.`,
         attachments: imageAttachments
       }
     ]

@@ -61,9 +61,6 @@ const DELETE_TOMBSTONE_STORAGE_KEY_PREFIX = 'magicpot-chat-delete-tombstone:'
 
 let dbInstance: IDBDatabase | null = null
 let dbInitPromise: Promise<IDBDatabase> | null = null
-let fatalStorageError: Error | null = null
-let fatalStorageErrorLogged = false
-let storageRecoveryPromise: Promise<boolean> | null = null
 const sessionMutationQueues = new Map<string, Promise<void>>()
 const legacyMigrationFlights = new Map<string, Promise<ChatSession>>()
 
@@ -487,132 +484,23 @@ function describeStorageError(error: unknown): string {
   return 'Unknown error'
 }
 
-function isFatalStorageError(error: Error): boolean {
-  return (
-    error.name === 'NotReadableError' ||
-    error.name === 'InvalidStateError' ||
-    /missing file/i.test(error.message) ||
-    /irrecoverable/i.test(error.message)
-  )
-}
-
+/** Invalidate only our connection. A read failure is never permission to delete history. */
 function closeCachedDb(): void {
-  if (!dbInstance) {
-    dbInitPromise = null
-    return
-  }
-
-  try {
-    dbInstance.close()
-  } catch {
-    /* ignore close failure */
-  }
-
+  const previous = dbInstance
   dbInstance = null
   dbInitPromise = null
-}
-
-function rememberFatalStorageError(error: Error): void {
-  if (!isFatalStorageError(error)) {
-    return
+  try {
+    previous?.close()
+  } catch {
+    // Preserve the original operation error if the failed connection cannot close.
   }
-
-  fatalStorageError = error
-  closeCachedDb()
-}
-
-function clearFatalStorageError(): void {
-  fatalStorageError = null
-  fatalStorageErrorLogged = false
-}
-
-async function resetCorruptedStorage(error: Error): Promise<boolean> {
-  if (!isFatalStorageError(error)) {
-    return false
-  }
-
-  if (storageRecoveryPromise) {
-    return storageRecoveryPromise
-  }
-
-  rememberFatalStorageError(error)
-
-  storageRecoveryPromise = new Promise<boolean>((resolve) => {
-    const finalize = (recovered: boolean) => {
-      storageRecoveryPromise = null
-      if (recovered) {
-        clearFatalStorageError()
-      }
-      resolve(recovered)
-    }
-
-    try {
-      const request = indexedDB.deleteDatabase(DB_NAME)
-      request.onsuccess = () => {
-        console.warn(`[ChatStorage] Reset corrupted IndexedDB database "${DB_NAME}".`)
-        finalize(true)
-      }
-      request.onerror = () => {
-        const resetError = createStorageError(
-          request.error ?? error,
-          'IndexedDB failed to reset corrupted chat storage.'
-        )
-        rememberFatalStorageError(resetError)
-        console.error(
-          `[ChatStorage] Failed to reset corrupted IndexedDB database: ${describeStorageError(resetError)}`
-        )
-        finalize(false)
-      }
-      request.onblocked = () => {
-        console.warn('[ChatStorage] IndexedDB reset is blocked by another open connection.')
-      }
-    } catch (resetError) {
-      const nextError = createStorageError(
-        resetError,
-        'IndexedDB failed to reset corrupted chat storage.'
-      )
-      rememberFatalStorageError(nextError)
-      console.error(
-        `[ChatStorage] Failed to reset corrupted IndexedDB database: ${describeStorageError(nextError)}`
-      )
-      finalize(false)
-    }
-  })
-
-  return storageRecoveryPromise
-}
-
-function isStorageDisabled(): boolean {
-  if (!fatalStorageError) {
-    return false
-  }
-
-  if (storageRecoveryPromise) {
-    return true
-  }
-
-  if (!fatalStorageErrorLogged) {
-    console.error(
-      `[ChatStorage] IndexedDB disabled due to fatal error: ${describeStorageError(fatalStorageError)}`
-    )
-    fatalStorageErrorLogged = true
-  }
-
-  return true
-}
-
-async function ensureStorageAvailable(): Promise<boolean> {
-  if (storageRecoveryPromise) {
-    await storageRecoveryPromise
-  }
-
-  return !isStorageDisabled()
 }
 
 async function handleStorageFailure(error: Error, operation: string): Promise<void> {
-  rememberFatalStorageError(error)
+  closeCachedDb()
   console.error(`[ChatStorage] ${operation}: ${describeStorageError(error)}`)
-  await resetCorruptedStorage(error)
+  // The caller receives the failure. Its next explicit attempt opens the same database;
+  // there is no automatic reset, destructive migration, or unbounded retry loop.
 }
 
 /** Open (or create) the IndexedDB database. */
@@ -660,24 +548,27 @@ function openDB(): Promise<IDBDatabase> {
       }
       settled = true
       clearTimeout(openTimeout)
-      dbInstance = request.result
-      dbInstance.onclose = () => {
-        dbInstance = null
-        dbInitPromise = null
+      const openedDb = request.result
+      dbInstance = openedDb
+      openedDb.onclose = () => {
+        if (dbInstance === openedDb) {
+          dbInstance = null
+          dbInitPromise = null
+        }
       }
-      dbInstance.onversionchange = () => {
-        dbInstance?.close()
-        dbInstance = null
-        dbInitPromise = null
+      openedDb.onversionchange = () => {
+        openedDb.close()
+        if (dbInstance === openedDb) {
+          dbInstance = null
+          dbInitPromise = null
+        }
       }
-      resolve(dbInstance)
+      resolve(openedDb)
     }
 
     request.onerror = () => {
       clearTimeout(openTimeout)
       const error = createStorageError(request.error, 'IndexedDB failed to open chat storage.')
-      rememberFatalStorageError(error)
-      void resetCorruptedStorage(error)
       rejectOpen(error)
     }
 
@@ -691,10 +582,6 @@ function openDB(): Promise<IDBDatabase> {
 
 /** Load all sessions, sorted by creation order. */
 export async function loadAllSessions(scope = 'default'): Promise<ChatSession[]> {
-  if (!(await ensureStorageAvailable())) {
-    return []
-  }
-
   let sessions: ChatSession[]
   const targetScope = normalizeScope(scope)
   try {
@@ -716,7 +603,7 @@ export async function loadAllSessions(scope = 'default'): Promise<ChatSession[]>
   } catch (error) {
     const storageError = createStorageError(error, 'IndexedDB failed to load chat sessions.')
     await handleStorageFailure(storageError, 'loadAllSessions failed')
-    return []
+    throw storageError
   }
 
   // Listing stays cheap. Legacy media is migrated only when its session is opened, preserving
@@ -729,10 +616,6 @@ async function loadSessionRawFromDB(
   sessionId: string,
   scope = 'default'
 ): Promise<ChatSession | null> {
-  if (!(await ensureStorageAvailable())) {
-    return null
-  }
-
   try {
     const db = await openDB()
     return await new Promise((resolve, reject) => {
@@ -760,7 +643,7 @@ async function loadSessionRawFromDB(
   } catch (error) {
     const storageError = createStorageError(error, 'IndexedDB failed to load the chat session.')
     await handleStorageFailure(storageError, 'loadSession failed')
-    return null
+    throw storageError
   }
 }
 
@@ -789,10 +672,6 @@ export async function compareAndUpdateSessionInDB(
   options: CompareAndUpdateSessionOptions
 ): Promise<ChatSession | null> {
   return queueSessionMutation(sessionId, scope, async () => {
-    if (!(await ensureStorageAvailable())) {
-      throw fatalStorageError || new Error('Chat storage is unavailable.')
-    }
-
     try {
       const db = await openDB()
       return await new Promise<ChatSession | null>((resolve, reject) => {
@@ -840,10 +719,6 @@ export async function saveSessionToDB(session: ChatSession, scope = 'default'): 
     if (hasSessionDeleteTombstone(session.id, scope)) {
       return
     }
-    if (!(await ensureStorageAvailable())) {
-      throw fatalStorageError || new Error('Chat storage is unavailable.')
-    }
-
     try {
       const db = await openDB()
       await new Promise<void>((resolve, reject) => {
@@ -864,10 +739,6 @@ export async function saveSessionToDB(session: ChatSession, scope = 'default'): 
 
 /** Save all sessions (replace entire store). */
 export async function saveAllSessions(sessions: ChatSession[], scope = 'default'): Promise<void> {
-  if (!(await ensureStorageAvailable())) {
-    throw fatalStorageError || new Error('Chat storage is unavailable.')
-  }
-
   try {
     const db = await openDB()
     const targetScope = normalizeScope(scope)
@@ -904,10 +775,6 @@ export async function saveAllSessions(sessions: ChatSession[], scope = 'default'
 export async function deleteSessionFromDB(sessionId: string, scope = 'default'): Promise<void> {
   cancelDebouncedSessionSave(sessionId, scope)
   return queueSessionMutation(sessionId, scope, async () => {
-    if (!(await ensureStorageAvailable())) {
-      throw fatalStorageError || new Error('Chat storage is unavailable.')
-    }
-
     try {
       const db = await openDB()
       await new Promise<void>((resolve, reject) => {
@@ -932,10 +799,6 @@ export async function deleteSessionFromDB(sessionId: string, scope = 'default'):
  */
 export async function migrateFromLocalStorage(): Promise<ChatSession[] | null> {
   const STORAGE_KEY = 'chat.sessions'
-  if (!(await ensureStorageAvailable())) {
-    return null
-  }
-
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
     if (!saved) return null

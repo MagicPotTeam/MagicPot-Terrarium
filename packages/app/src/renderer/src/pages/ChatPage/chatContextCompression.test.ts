@@ -162,4 +162,34 @@ describe('chatContextCompression', () => {
       'local-media:///already-compacted.png'
     )
   })
+
+  it('replays assistant-generated images with their original role after compaction', () => {
+    const generatedImage = {
+      type: 'image' as const,
+      url: 'local-media:///generated/assistant.png',
+      mimeType: 'image/png',
+      fileName: 'assistant-generated.png'
+    }
+    const historyMessages: ChatMessage[] = [
+      { role: 'user', content: 'Generate a reference image.' },
+      { role: 'assistant', content: 'Generated it.', attachments: [generatedImage] },
+      ...createTurnMessages(8)
+    ]
+
+    const plan = buildChatContextCompressionPlan({
+      historyMessages,
+      requestMessage: { role: 'user', content: 'Edit the generated image.' },
+      enabled: true,
+      force: true,
+      imageHistoryPolicy: 'all',
+      profile: { context_budget_tokens: 1_000, context_window_tokens: 2_000 }
+    })
+
+    expect(plan.shouldCompress).toBe(true)
+    expect(plan.requestReplayImageMessages).toContainEqual({
+      role: 'assistant',
+      content: 'Historical image replay from compacted assistant message 2.',
+      attachments: [generatedImage]
+    })
+  })
 })

@@ -845,20 +845,16 @@ describe('chatStorage', () => {
     expect(fakeIndexedDb.deletedNames).toEqual([])
   })
 
-  it('resets corrupted IndexedDB storage after fatal read errors and accepts future saves', async () => {
+  it('preserves corrupted IndexedDB data and surfaces read errors for a later retry', async () => {
     const fakeIndexedDb = createFakeIndexedDb()
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     vi.stubGlobal('indexedDB', fakeIndexedDb.api)
 
     const storage = await import('./chatStorage')
 
-    await expect(storage.loadAllSessions('default')).resolves.toEqual([])
-    expect(fakeIndexedDb.deletedNames).toEqual(['magicpot-chat'])
-    expect(consoleWarnSpy).toHaveBeenCalledWith(
-      '[ChatStorage] Reset corrupted IndexedDB database "magicpot-chat".'
-    )
+    await expect(storage.loadAllSessions('default')).rejects.toThrow(/missing file|irrecoverable/i)
+    expect(fakeIndexedDb.deletedNames).toEqual([])
 
     await storage.saveSessionToDB(
       {
