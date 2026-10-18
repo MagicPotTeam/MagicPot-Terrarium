@@ -634,7 +634,8 @@
       "video": "Video",
       "hunyuan_hint_title": "Hunyuan3D lives in Quick Apps",
       "hunyuan_hint": "Select Hunyuan3D from the right-side Quick Apps list. Its Tencent Cloud credentials are configured in Settings > Quick App API.",
-      "open_quickapp_api": "Configure"
+      "open_quickapp_api": "Configure",
+      "more_categories": "More categories"
     }
   },
   "qapp": {
@@ -712,6 +713,10 @@
       "preview_open": "Try Quick App >>>",
       "preview_close": "<<< Close Preview",
       "preview_panel_title": "Quick App Panel Preview",
+      "unsaved_changes_title": "Unsaved changes",
+      "unsaved_changes_message": "There are unsaved changes. Are you sure you want to discard them?",
+      "continue_editing": "Continue editing",
+      "discard_changes": "Discard changes",
       "err_invalid_workflow": "The loaded workflow is not a valid workflow\nPlease go to ComfyUI and export the workflow as a JSON file via API, then load that JSON file",
       "err_load_qapp": "Failed to load QApp",
       "node": "Node",

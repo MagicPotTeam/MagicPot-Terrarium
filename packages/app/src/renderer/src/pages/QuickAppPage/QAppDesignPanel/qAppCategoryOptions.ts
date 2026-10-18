@@ -1,6 +1,8 @@
+import type { TFunction } from 'i18next'
+
 import type { QAppCategory } from '@shared/qApp/category'
 
-type Translate = (key: string, options?: { defaultValue?: string }) => string
+type Translate = TFunction<'translation'>
 
 export const getQAppCategoryOptions = (
   t: Translate
