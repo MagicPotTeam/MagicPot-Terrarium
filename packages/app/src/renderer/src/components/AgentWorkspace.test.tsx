@@ -542,7 +542,8 @@ describe('AgentWorkspace', () => {
 
     await waitFor(() => {
       expect(consoleErrorSpy).toHaveBeenCalledWith(
-        '[AgentWorkspace] Failed to refresh pane previews',
+        '[AgentWorkspace] Failed to load pane preview',
+        'agent-1',
         expect.any(DOMException)
       )
     })

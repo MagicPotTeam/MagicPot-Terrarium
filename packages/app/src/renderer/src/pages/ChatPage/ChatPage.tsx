@@ -89,6 +89,7 @@ import {
 import {
   buildChatContextCompactPromptMessages,
   buildChatContextCompressionPlan,
+  assertChatContextBudget,
   buildChatContextTokenCalibrationFingerprint,
   createContextCompressionSourceHash,
   estimateChatMessagesTokenBreakdown,
@@ -102,7 +103,7 @@ import {
   type ChatContextTokenCalibration
 } from './chatContextCompression'
 import type { ChatLoadingStatus } from './chatLoadingStatus'
-import { buildAssistantMessageFromResult } from './chatMessageUtils'
+import { buildAssistantMessageFromResult, normalizeChatToolHistory } from './chatMessageUtils'
 import {
   appendAssistantDeltaToSession,
   appendAssistantPlaceholderToSession,
@@ -298,6 +299,7 @@ type ExternalInitialChatMessage = {
   content?: string
   attachments?: ChatAttachment[]
   ocrResult?: ChatMessage['ocrResult']
+  toolHistory?: ChatMessage['toolHistory']
   modelName?: string
 }
 
@@ -872,6 +874,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // ==================== Sessions 状态 ====================
   const [sessions, setSessionsState] = useState<ChatSession[]>([])
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
+  const [sessionLoadError, setSessionLoadError] = useState<string | null>(null)
+  const [sessionSaveError, setSessionSaveError] = useState<string | null>(null)
   const storageScopeRef = useRef(storageScope)
   const previousStorageScopeRef = useRef(storageScope)
   const sessionLoadEpochRef = useRef(0)
@@ -886,6 +890,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const pendingDeleteRetryTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const sessionPersistenceGateRef = useRef(true)
   const persistedSessionsRef = useRef<Map<string, ChatSession>>(new Map())
+  const dirtySessionSnapshotsRef = useRef<Map<string, ChatSession>>(new Map())
   const sessionsRef = useRef<ChatSession[]>([])
   const compactingSessionIdsRef = useRef<Set<string>>(new Set())
   const contextCompactAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
@@ -904,26 +909,84 @@ const ChatPage: React.FC<ChatPageProps> = ({
     sessionsRef.current = next
     setSessionsState(next)
   }, [])
+  const getSessionStorageKey = useCallback(
+    (scope: string, sessionId: string): string => `${scope}\u0000${sessionId}`,
+    []
+  )
+  const getDirtySessionSnapshots = useCallback((scope: string): ChatSession[] => {
+    const prefix = `${scope}\u0000`
+    return [...dirtySessionSnapshotsRef.current.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([, session]) => session)
+  }, [])
+  const getDirtySessionIds = useCallback(
+    (scope: string): string[] => getDirtySessionSnapshots(scope).map((session) => session.id),
+    [getDirtySessionSnapshots]
+  )
+  const setDirtySessionSnapshot = useCallback(
+    (scope: string, session: ChatSession): void => {
+      dirtySessionSnapshotsRef.current.set(getSessionStorageKey(scope, session.id), session)
+    },
+    [getSessionStorageKey]
+  )
+  const clearDirtySessionSnapshotIfCurrent = useCallback(
+    (scope: string, session: ChatSession): void => {
+      const key = getSessionStorageKey(scope, session.id)
+      if (storageScopeRef.current !== scope) {
+        if (dirtySessionSnapshotsRef.current.get(key) === session)
+          dirtySessionSnapshotsRef.current.delete(key)
+        return
+      }
+      const current = sessionsRef.current.find((candidate) => candidate.id === session.id)
+      if (current === session) {
+        dirtySessionSnapshotsRef.current.delete(key)
+        persistedSessionsRef.current.set(session.id, session)
+      } else if (current) {
+        dirtySessionSnapshotsRef.current.set(key, current)
+      }
+    },
+    [getSessionStorageKey]
+  )
   const persistCurrentSessionSnapshot = useCallback(
     async (
       sessionId: string,
       label = '',
       refreshReason: ChatPreviewRefreshReason = 'storage-updated'
-    ): Promise<void> => {
-      try {
-        const session = sessionsRef.current.find((candidate) => candidate.id === sessionId)
-        if (!session) {
-          return
-        }
+    ): Promise<boolean> => {
+      const requestScope = storageScope
+      if (storageScopeRef.current !== requestScope) return false
+      const session = sessionsRef.current.find((candidate) => candidate.id === sessionId)
+      if (!session) return false
+      setDirtySessionSnapshot(requestScope, session)
 
-        await saveSessionToDB(session, storageScope)
+      try {
+        await saveSessionToDB(session, requestScope)
+        clearDirtySessionSnapshotIfCurrent(requestScope, session)
+        if (storageScopeRef.current !== requestScope) return true
+        if (getDirtySessionIds(requestScope).length === 0) setSessionSaveError(null)
         emitPreviewRefresh(refreshReason)
         console.log(`[ChatPage] persistCurrentSessionSnapshot(${label}): saved`)
+        return true
       } catch (e) {
+        if (storageScopeRef.current !== requestScope) return false
+        const current = sessionsRef.current.find((candidate) => candidate.id === sessionId)
+        if (current) setDirtySessionSnapshot(requestScope, current)
+        const message = e instanceof Error ? e.message : String(e)
+        const detail = `Failed to save chat session: ${message}`
+        setSessionSaveError(detail)
+        notifyError(detail)
         console.warn('[ChatPage] persistCurrentSessionSnapshot failed:', e)
+        return false
       }
     },
-    [emitPreviewRefresh, storageScope]
+    [
+      clearDirtySessionSnapshotIfCurrent,
+      getDirtySessionIds,
+      emitPreviewRefresh,
+      notifyError,
+      setDirtySessionSnapshot,
+      storageScope
+    ]
   )
   const migrateLoadedChatMediaSessions = useCallback(
     async (
@@ -1100,6 +1163,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     storageScopeRef.current = storageScope
     const loadEpoch = ++sessionLoadEpochRef.current
     setSessionsLoaded(false)
+    setSessionLoadError(null)
     sessionPersistenceGateRef.current = true
     persistedSessionsRef.current = new Map()
     sessionMutationEpochRef.current += 1
@@ -1111,6 +1175,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
     sessionPersistenceRetryCountRef.current = 0
     if (scopeChanged) {
+      // Old-scope dirty data remains in its own keyed snapshot, never in the new scope UI.
+      const restoredDirty = getDirtySessionSnapshots(storageScope)
+      setSessions(restoredDirty)
+      setSessionSaveError(
+        restoredDirty.length
+          ? 'This thread has unsaved changes. Retry saving before closing it.'
+          : null
+      )
       pendingSessionIdRef.current = null
       let rememberedSessionId: string | null = null
       try {
@@ -1120,7 +1192,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       currentSessionIdRef.current = rememberedSessionId
       setCurrentSessionId(rememberedSessionId)
-      setSessions([])
     }
     ;(async () => {
       let storedSessions: ChatSession[] | null = null
@@ -1129,6 +1200,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         storedSessions = migrated || (await loadAllSessions(storageScope))
         if (loadEpoch !== sessionLoadEpochRef.current) return
 
+        setSessionLoadError(null)
         const migrationMutationEpoch = sessionMutationEpochRef.current
         const migratedSessions = await migrateLoadedChatMediaSessions(
           storedSessions,
@@ -1157,15 +1229,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
             sortedStoredSessions,
             prev,
             [pendingSessionIdRef.current, currentSessionIdRef.current],
-            locallyMutatedSessionIds
+            [...locallyMutatedSessionIds, ...getDirtySessionIds(storageScope)]
           )
         )
       } catch (e) {
         if (loadEpoch === sessionLoadEpochRef.current) {
+          const message = e instanceof Error ? e.message : String(e)
+          const detail = `Failed to load chat sessions: ${message}`
+          setSessionLoadError(detail)
+          notifyError(detail)
           console.error('[ChatPage] 加载会话失败', e)
         }
       } finally {
-        if (loadEpoch === sessionLoadEpochRef.current) {
+        if (loadEpoch === sessionLoadEpochRef.current && storedSessions !== null) {
           sessionPersistenceGateRef.current = false
           setSessionsLoaded(true)
         }
@@ -1177,7 +1253,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
         sessionLoadEpochRef.current += 1
       }
     }
-  }, [currentSessionStorageKey, migrateLoadedChatMediaSessions, setSessions, storageScope])
+  }, [
+    currentSessionStorageKey,
+    getDirtySessionIds,
+    getDirtySessionSnapshots,
+    migrateLoadedChatMediaSessions,
+    notifyError,
+    setSessions,
+    storageScope
+  ])
 
   const refreshSessionsFromStorage = useCallback(async (): Promise<void> => {
     const refreshEpoch = sessionLoadEpochRef.current
@@ -1211,20 +1295,53 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       persistedSessionsRef.current = new Map(visibleStored.map((session) => [session.id, session]))
       setSessions((prev) =>
-        mergeLoadedSessionsWithLocal(visibleStored, prev, [
-          pendingSessionIdRef.current,
-          currentSessionIdRef.current
-        ])
+        mergeLoadedSessionsWithLocal(
+          visibleStored,
+          prev,
+          [pendingSessionIdRef.current, currentSessionIdRef.current],
+          getDirtySessionIds(storageScope)
+        )
       )
+      setSessionLoadError(null)
+      sessionPersistenceGateRef.current = false
+      setSessionsLoaded(true)
     } catch (e) {
       if (
         refreshEpoch === sessionLoadEpochRef.current &&
         storageScope === storageScopeRef.current
       ) {
+        const message = e instanceof Error ? e.message : String(e)
+        const detail = `Failed to refresh chat sessions: ${message}`
+        setSessionLoadError(detail)
+        notifyError(detail)
         console.warn('[ChatPage] refreshSessionsFromStorage failed:', e)
       }
     }
-  }, [migrateLoadedChatMediaSessions, setSessions, storageScope])
+  }, [getDirtySessionIds, migrateLoadedChatMediaSessions, notifyError, setSessions, storageScope])
+
+  const retrySessionLoad = useCallback(async () => {
+    const requestScope = storageScope
+    const dirty = getDirtySessionSnapshots(requestScope)
+    let allSaved = true
+    for (const snapshot of dirty) {
+      if (storageScopeRef.current !== requestScope) return
+      if (!(await persistCurrentSessionSnapshot(snapshot.id, 'retry-unsaved'))) allSaved = false
+    }
+    if (
+      storageScopeRef.current !== requestScope ||
+      !allSaved ||
+      getDirtySessionIds(requestScope).length
+    )
+      return
+    setSessionSaveError(null)
+    await refreshSessionsFromStorage()
+  }, [
+    getDirtySessionIds,
+    getDirtySessionSnapshots,
+    persistCurrentSessionSnapshot,
+    refreshSessionsFromStorage,
+    storageScope
+  ])
 
   useEffect(() => {
     for (const key of deletedSessionKeysRef.current) {
@@ -1312,6 +1429,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
     return new Set(readScopedExternalLoadingSessionIds(storageScope))
   })
   const externalLoadingSessionIdsRef = useRef<Set<string>>(externalLoadingSessionIds)
+  const runIdRef = useRef(0)
+  const activeRunIdBySessionRef = useRef<Map<string, number>>(new Map())
   const sessionAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
   const cancelledSessionsRef = useRef<Set<string>>(new Set())
   const [loadingStatusBySessionId, setLoadingStatusBySessionId] = useState<
@@ -1384,7 +1503,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
 
   const clearLoadingSessionTracking = useCallback(
-    (sessionId: string, completed = true) => {
+    (sessionId: string, completed = true, runId?: number) => {
+      if (runId !== undefined && activeRunIdBySessionRef.current.get(sessionId) !== runId) {
+        return
+      }
       const nextLoadingIds = new Set(loadingSessionIdsRef.current)
       nextLoadingIds.delete(sessionId)
       loadingSessionIdsRef.current = nextLoadingIds
@@ -1418,7 +1540,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ?.abort('Chat context compression cancelled.')
       contextCompactAbortControllersRef.current.delete(sessionId)
       compactingSessionIdsRef.current.delete(sessionId)
-      clearLoadingSessionTracking(sessionId, false)
+      clearLoadingSessionTracking(sessionId, false, activeRunIdBySessionRef.current.get(sessionId))
       setSessions((prev) => removeTrailingEmptyAssistantMessage(prev, sessionId))
       emitPreviewRefresh('preview-only')
       window.dispatchEvent(
@@ -1469,10 +1591,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
               visibleStored.map((session) => [session.id, session])
             )
             setSessions((prev) =>
-              mergeLoadedSessionsWithLocal(visibleStored, prev, [
-                pendingSessionIdRef.current,
-                currentSessionIdRef.current
-              ])
+              mergeLoadedSessionsWithLocal(
+                visibleStored,
+                prev,
+                [pendingSessionIdRef.current, currentSessionIdRef.current],
+                getDirtySessionIds(storageScope)
+              )
             )
             setLoadingSessionIds(new Set())
             if (intervalId) clearInterval(intervalId)
@@ -1496,10 +1620,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
               visibleStored.map((session) => [session.id, session])
             )
             setSessions((prev) =>
-              mergeLoadedSessionsWithLocal(visibleStored, prev, [
-                pendingSessionIdRef.current,
-                currentSessionIdRef.current
-              ])
+              mergeLoadedSessionsWithLocal(
+                visibleStored,
+                prev,
+                [pendingSessionIdRef.current, currentSessionIdRef.current],
+                getDirtySessionIds(storageScope)
+              )
             )
             setLoadingSessionIds((prev) => {
               const prevIds = [...prev].sort().join(',')
@@ -1515,7 +1641,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     return () => {
       if (intervalId) clearInterval(intervalId)
     }
-  }, [active, loadingIdsStorageKey, setSessions, storageScope])
+  }, [active, getDirtySessionIds, loadingIdsStorageKey, setSessions, storageScope])
 
   // 校验 loading IDs：实时请求可以已经写入流式内容，controller/external run 才是权威状态。
   useEffect(() => {
@@ -1996,11 +2122,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       try {
         await saveSessionToDB(updatedSession, storageScope)
+        setSessionLoadError(null)
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const detail = `Failed to save chat draft: ${message}`
+        setSessionLoadError(detail)
+        notifyError(detail)
         console.error('[ChatPage] Failed to persist session draft:', error)
       }
     },
-    [storageScope]
+    [notifyError, storageScope]
   )
 
   const clearScheduledDraftPersistence = useCallback(() => {
@@ -3415,8 +3546,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const changedSessions = sessions.filter(
       (session) => previousSessions.get(session.id) !== session
     )
+    for (const session of changedSessions) setDirtySessionSnapshot(storageScope, session)
     debouncedSaveSessions(changedSessions, 500, storageScope, {
       onSuccess: (savedSessions) => {
+        for (const session of savedSessions)
+          clearDirtySessionSnapshotIfCurrent(storageScope, session)
+        if (storageScope !== storageScopeRef.current) return
+        if (getDirtySessionIds(storageScope).length === 0) setSessionSaveError(null)
         sessionPersistenceRetryCountRef.current = 0
         if (sessionPersistenceRetryTimerRef.current) {
           clearTimeout(sessionPersistenceRetryTimerRef.current)
@@ -3428,10 +3564,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         }
       },
-      onError: () => {
-        if (storageScope !== storageScopeRef.current || sessionPersistenceRetryTimerRef.current) {
-          return
-        }
+      onError: (error) => {
+        if (storageScope !== storageScopeRef.current) return
+        const detail = error instanceof Error ? error.message : String(error)
+        setSessionSaveError(`Failed to save chat session: ${detail}`)
+        if (sessionPersistenceRetryTimerRef.current) return
         const retryDelayMs = Math.min(
           30_000,
           1_000 * 2 ** Math.min(sessionPersistenceRetryCountRef.current, 5)
@@ -3445,7 +3582,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }, retryDelayMs)
       }
     })
-  }, [sessions, sessionsLoaded, storageScope])
+  }, [
+    clearDirtySessionSnapshotIfCurrent,
+    getDirtySessionIds,
+    sessions,
+    sessionsLoaded,
+    setDirtySessionSnapshot,
+    storageScope
+  ])
 
   // ==================== 同步 currentSessionId 与 profile ====================
   useEffect(() => {
@@ -3556,7 +3700,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   // 自动创建初始 session
   useEffect(() => {
-    if (!sessionsLoaded) return
+    if (!sessionsLoaded || sessionLoadError) return
     const canCreateSession =
       availableProfiles.length > 0 || config?.use_remote_llm || hasExternalAgentSkills
     if (sessions.length === 0 && canCreateSession) {
@@ -3599,7 +3743,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     setSessions,
     sessions.length,
     sessionsLoaded,
-    setActiveSessionId,
+    sessionLoadError,
     storageScope,
     t
   ])
@@ -4038,7 +4182,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 {
                   content: message.content,
                   attachments: message.attachments,
-                  ocrResult: message.ocrResult
+                  ocrResult: message.ocrResult,
+                  toolHistory: message.toolHistory
                 },
                 message.modelName,
                 {
@@ -5224,8 +5369,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
         shouldDiscardSessionUrlForContextCompact = true
       }
       let requestHistoryMessages = historyMessages
+      const runId = ++runIdRef.current
+      activeRunIdBySessionRef.current.set(targetSessionId, runId)
       const sessionAbortController = new AbortController()
       sessionAbortControllersRef.current.set(targetSessionId, sessionAbortController)
+      cancelledSessionsRef.current.delete(targetSessionId)
+      const isCurrentRun = (): boolean =>
+        activeRunIdBySessionRef.current.get(targetSessionId) === runId
+      const staleRunError = Symbol('stale-chat-run')
+      const assertCurrentRun = (): void => {
+        if (!isCurrentRun()) throw staleRunError
+      }
 
       const withLatestContextCompression = (
         updater: (prev: ChatSession[]) => ChatSession[]
@@ -5236,6 +5390,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         step: number,
         totalSteps = CHAT_LOADING_TOTAL_STEPS
       ) => {
+        if (!isCurrentRun()) return
         setSessionLoadingStatus(targetSessionId, {
           label,
           detail,
@@ -5303,14 +5458,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
         1
       )
 
-      // 同步保存到 IndexedDB
-      void persistCurrentSessionSnapshot(targetSessionId, 'request-placeholder')
+      // 同步保存到 IndexedDB; the helper reports failures and notifies the user.
+      void persistCurrentSessionSnapshot(targetSessionId, 'request-placeholder').catch(
+        () => undefined
+      )
 
+      let sessionSnapshotSaveFailed = false
       const persistSessionsToStorage = async (
         _updater: (prev: ChatSession[]) => ChatSession[],
         label = ''
       ): Promise<void> => {
-        await persistCurrentSessionSnapshot(targetSessionId, label)
+        if (!(await persistCurrentSessionSnapshot(targetSessionId, label)))
+          sessionSnapshotSaveFailed = true
       }
 
       const buildRequestMessageWithRuntimeContext = (requestMessage: ChatMessage): ChatMessage =>
@@ -5387,6 +5546,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
             force: compressionPlan.shouldCompress
           })
         }
+
+        assertChatContextBudget(compressionPlan)
 
         if (shouldDropSessionUrlForCompressedRequest) {
           shouldDiscardSessionUrlForContextCompact = true
@@ -5541,8 +5702,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }),
           3
         )
-        const dispatchCompletion = (state: ReturnType<typeof buildRequestExecutionState>) =>
-          requestChatCompletion({
+        const dispatchCompletion = (state: ReturnType<typeof buildRequestExecutionState>) => {
+          assertCurrentRun()
+          return requestChatCompletion({
             config,
             messages: state.requestMessages,
             storageScope,
@@ -5560,11 +5722,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
             isEdit: !!overrides?.baseMessages,
             signal: sessionAbortController.signal
           })
+        }
         let completedRequestState = requestState
         let result
         try {
           result = await dispatchCompletion(requestState)
         } catch (error) {
+          if (!isCurrentRun()) throw staleRunError
           if (!requestState.sessionUrl || !isInvalidSessionContinuationError(error, true)) {
             throw error
           }
@@ -5573,6 +5737,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           completedRequestState = buildRequestExecutionState(requestMessage, undefined)
           result = await dispatchCompletion(completedRequestState)
         }
+        assertCurrentRun()
         maybeStartContextCompactFromUsage(result.usage)
         contextTokenCalibrationByFingerprintRef.current.set(
           completedRequestState.calibrationFingerprint,
@@ -5656,6 +5821,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
           isEdit: !!overrides?.baseMessages,
           signal: sessionAbortController.signal,
           onEvent: (event) => {
+            if (targetSessionId && activeRunIdBySessionRef.current.get(targetSessionId) !== runId) {
+              return
+            }
             if (targetSessionId && cancelledSessionsRef.current.has(targetSessionId)) {
               return
             }
@@ -5673,6 +5841,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   4
                 )
               }
+              if (
+                targetSessionId &&
+                activeRunIdBySessionRef.current.get(targetSessionId) !== runId
+              ) {
+                return
+              }
               streamedResponse += event.delta
               setSessions((prev) =>
                 appendAssistantDeltaToSession(prev, {
@@ -5684,6 +5858,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
 
             if (event.type === 'attachment') {
+              if (
+                targetSessionId &&
+                activeRunIdBySessionRef.current.get(targetSessionId) !== runId
+              ) {
+                return
+              }
               updateLoadingStatus(
                 t('chat.loading_collect_attachments', {
                   defaultValue: '整理结果'
@@ -5698,6 +5878,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
 
             if (event.type === 'session') {
+              if (
+                targetSessionId &&
+                activeRunIdBySessionRef.current.get(targetSessionId) !== runId
+              ) {
+                return
+              }
               streamedSessionUrl = event.sessionUrl
             }
           }
@@ -5706,6 +5892,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         try {
           streamedResult = await streamedResultPromise
         } catch (error) {
+          if (!isCurrentRun()) throw staleRunError
           if (
             !requestState.sessionUrl ||
             !isInvalidSessionContinuationError(error, true) ||
@@ -5719,6 +5906,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           return requestStreamedCompletionForUserMessage(requestMessage, undefined)
         }
 
+        assertCurrentRun()
         maybeStartContextCompactFromUsage(streamedResult.result.usage)
         contextTokenCalibrationByFingerprintRef.current.set(
           requestState.calibrationFingerprint,
@@ -5882,7 +6070,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   content: runSkillRuntimePostScripts({
                     runtime: activeSkillRuntime,
                     content: toolResult.content || ''
-                  })
+                  }),
+                  metadata: toolResult.metadata
                 },
                 undefined,
                 {
@@ -5938,7 +6127,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     content: singleResult.response
                   }),
                   attachments: singleResult.result.attachments,
-                  ocrResult: singleResult.result.ocrResult
+                  ocrResult: singleResult.result.ocrResult,
+                  metadata: singleResult.result.metadata
                 },
                 responseModelName,
                 {
@@ -5986,7 +6176,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                       content: runSkillRuntimePostScripts({
                         runtime: activeSkillRuntime,
                         content: responseContent
-                      })
+                      }),
+                      ...(index === 0 ? { metadata: result.metadata } : {})
                     },
                     responseModelName,
                     {
@@ -6047,7 +6238,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     content: response
                   }),
                   attachments: result.attachments,
-                  ocrResult: result.ocrResult
+                  ocrResult: result.ocrResult,
+                  metadata: result.metadata
                 },
                 responseModelName,
                 {
@@ -6061,7 +6253,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           )
 
           setSessions(responseUpdater)
-          clearLoadingSessionTracking(targetSessionId, true)
+          clearLoadingSessionTracking(targetSessionId, true, runId)
           await persistSessionsToStorage(responseUpdater, 'response')
           traceOutputKinds = summarizeChatAttachmentKindsForTrace(result.attachments)
           traceResponseCount = 1
@@ -6075,6 +6267,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         )
       } catch (error) {
+        if (error === staleRunError || !isCurrentRun()) return
+        const failedResult =
+          error && typeof error === 'object'
+            ? (error as {
+                metadata?: Record<string, unknown>
+                partialResult?: { content?: string; metadata?: Record<string, unknown> }
+              })
+            : undefined
+        const failedToolHistory = normalizeChatToolHistory(
+          failedResult?.metadata?.toolHistory ?? failedResult?.partialResult?.metadata?.toolHistory
+        )
         const wasCancelled = Boolean(
           targetSessionId && cancelledSessionsRef.current.has(targetSessionId)
         )
@@ -6082,7 +6285,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const hasPartialStreamedResponse =
             Boolean(streamedResponse.trim()) ||
             streamedAttachments.length > 0 ||
-            Boolean(streamedOcrResult)
+            Boolean(streamedOcrResult) ||
+            Boolean(failedToolHistory?.length)
           const cancelledUpdater = withLatestContextCompression((prev: ChatSession[]) => {
             if (completedAssistantMessages.length > 0) {
               return replaceLastMessageWithMessagesInSession(prev, {
@@ -6100,6 +6304,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 message: {
                   role: 'assistant',
                   content: streamedResponse,
+                  ...(failedToolHistory ? { toolHistory: failedToolHistory } : {}),
                   ...(streamedAttachments.length > 0 ? { attachments: streamedAttachments } : {}),
                   ...(streamedOcrResult ? { ocrResult: streamedOcrResult } : {}),
                   ...(responseModelName ? { modelName: responseModelName } : {})
@@ -6129,15 +6334,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
           )
         } else {
+          if (error === staleRunError || !isCurrentRun()) return
           console.error('[ChatPage] Send message error:', error)
           const runId = targetSessionId || null
           const rawErrorMessage = error instanceof Error ? error.message : String(error)
           const decoratedErrorMessage = formatChatFailureMessage(rawErrorMessage, runId)
           const errorMessage: ChatMessage = {
             role: 'assistant',
-            content: t('chat.error_message', {
-              error: decoratedErrorMessage
-            })
+            content: [
+              failedResult?.partialResult?.content || streamedResponse,
+              t('chat.error_message', {
+                error: decoratedErrorMessage
+              })
+            ]
+              .filter(Boolean)
+              .join('\n\n'),
+            ...(failedToolHistory ? { toolHistory: failedToolHistory } : {})
           }
           const archivePayload = buildChatFailureArchivePayload({
             sessionId: runId,
@@ -6158,6 +6370,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const errorSessionUrl = shouldDiscardSessionUrlForContextCompact ? null : undefined
           const errorSessionProfileId = errorSessionUrl ? activeContinuationProfileId : null
           const errorSessionRouteFingerprint = errorSessionUrl ? routeFingerprint : null
+          assertCurrentRun()
           const errorUpdater = withLatestContextCompression((prev: ChatSession[]) => {
             if (completedAssistantMessages.length > 0) {
               return replaceLastMessageWithMessagesInSession(prev, {
@@ -6186,13 +6399,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
       } finally {
         if (targetSessionId) {
           const wasCancelled = cancelledSessionsRef.current.has(targetSessionId)
+          const isCurrentRun = activeRunIdBySessionRef.current.get(targetSessionId) === runId
+          if (!isCurrentRun) {
+            return
+          }
           if (sessionAbortControllersRef.current.get(targetSessionId) === sessionAbortController) {
             sessionAbortControllersRef.current.delete(targetSessionId)
           }
-          clearLoadingSessionTracking(targetSessionId, !wasCancelled)
+          clearLoadingSessionTracking(targetSessionId, !wasCancelled, runId)
           emitPreviewRefresh('preview-only')
 
-          if (!wasCancelled) {
+          if (!wasCancelled && !sessionSnapshotSaveFailed) {
             try {
               const requestScope = storageScope
               const requestEpoch = sessionLoadEpochRef.current
@@ -6213,10 +6430,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   visibleStored.map((session) => [session.id, session])
                 )
                 setSessions((prev) =>
-                  mergeLoadedSessionsWithLocal(visibleStored, prev, [
-                    pendingSessionIdRef.current,
-                    currentSessionIdRef.current
-                  ])
+                  mergeLoadedSessionsWithLocal(
+                    visibleStored,
+                    prev,
+                    [pendingSessionIdRef.current, currentSessionIdRef.current],
+                    getDirtySessionIds(storageScope)
+                  )
                 )
               }
             } catch (e) {
@@ -6224,6 +6443,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
           }
           cancelledSessionsRef.current.delete(targetSessionId)
+          activeRunIdBySessionRef.current.delete(targetSessionId)
         }
       }
     },
@@ -6929,7 +7149,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
           </Box>
         )}
 
-        {/* 左侧会话列表（非 compact 模式） */}
+        {sessionSaveError || sessionLoadError ? (
+          <Alert
+            severity="error"
+            action={
+              <Button color="inherit" size="small" onClick={retrySessionLoad}>
+                Retry
+              </Button>
+            }
+            sx={{ m: 1 }}
+          >
+            {sessionSaveError || sessionLoadError}
+          </Alert>
+        ) : null}
         {!compact && (
           <SessionSidebar
             sessions={sessions}

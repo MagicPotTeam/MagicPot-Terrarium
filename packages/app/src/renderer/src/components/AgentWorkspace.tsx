@@ -257,20 +257,6 @@ const buildPanePreview = (
   }
 }
 
-const loadPreviewMap = async (
-  panes: AgentPane[],
-  projectId: string,
-  strings: AgentWorkspaceStrings
-): Promise<Record<string, PanePreview>> => {
-  const entries = await Promise.all(
-    panes.map(async (pane, index) => {
-      return loadPanePreview(pane, index, projectId, strings)
-    })
-  )
-
-  return Object.fromEntries(entries) as Record<string, PanePreview>
-}
-
 const loadPanePreview = async (
   pane: AgentPane,
   index: number,
@@ -283,6 +269,46 @@ const loadPanePreview = async (
     pane.id,
     buildPanePreview(pane.id, index, sessions, isPaneRunning(scope), strings)
   ] as const
+}
+
+const loadPanePreviewWithFallback = async (
+  pane: AgentPane,
+  index: number,
+  projectId: string,
+  strings: AgentWorkspaceStrings,
+  previousPreviews: Record<string, PanePreview>
+): Promise<readonly [string, PanePreview]> => {
+  try {
+    return await loadPanePreview(pane, index, projectId, strings)
+  } catch (error) {
+    console.error('[AgentWorkspace] Failed to load pane preview', pane.id, error)
+    return [
+      pane.id,
+      previousPreviews[pane.id] ||
+        buildPanePreview(
+          pane.id,
+          index,
+          [],
+          isPaneRunning(buildAgentPaneScope(projectId, pane.id)),
+          strings
+        )
+    ] as const
+  }
+}
+
+const loadPreviewMap = async (
+  panes: AgentPane[],
+  projectId: string,
+  strings: AgentWorkspaceStrings,
+  previousPreviews: Record<string, PanePreview>
+): Promise<Record<string, PanePreview>> => {
+  const entries = await Promise.all(
+    panes.map((pane, index) =>
+      loadPanePreviewWithFallback(pane, index, projectId, strings, previousPreviews)
+    )
+  )
+
+  return Object.fromEntries(entries) as Record<string, PanePreview>
 }
 
 const PaneStatusIndicator: React.FC<{ status?: PanePreviewStatus }> = ({ status = 'idle' }) => {
@@ -527,6 +553,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
     () => readLocalStorage(collapsedStorageKey) === '1'
   )
   const [panePreviews, setPanePreviews] = useState<Record<string, PanePreview>>({})
+  const panePreviewsRef = useRef<Record<string, PanePreview>>({})
   const [unreadPaneIds, setUnreadPaneIds] = useState<Set<string>>(new Set())
   const clearPaneUnread = useCallback((paneId: string) => {
     setUnreadPaneIds((prev) => {
@@ -750,25 +777,36 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ projectId, projectName 
           const targetPane = paneEntriesByScope.get(targetScope)
           if (!targetPane) return
 
-          const [paneId, preview] = await loadPanePreview(
+          const [paneId, preview] = await loadPanePreviewWithFallback(
             targetPane.pane,
             targetPane.index,
             projectId,
-            workspaceStrings
+            workspaceStrings,
+            panePreviewsRef.current
           )
           if (cancelled || sequence !== previewRefreshSequenceRef.current) return
 
           setPanePreviews((prev) => {
             const nextPreviews = { ...prev, [paneId]: preview }
+            panePreviewsRef.current = nextPreviews
             return arePanePreviewsEqual(prev, nextPreviews) ? prev : nextPreviews
           })
           return
         }
 
-        const nextPreviews = await loadPreviewMap(openPanes, projectId, workspaceStrings)
+        const nextPreviews = await loadPreviewMap(
+          openPanes,
+          projectId,
+          workspaceStrings,
+          panePreviewsRef.current
+        )
         if (cancelled || sequence !== previewRefreshSequenceRef.current) return
 
-        setPanePreviews((prev) => (arePanePreviewsEqual(prev, nextPreviews) ? prev : nextPreviews))
+        setPanePreviews((prev) => {
+          const next = arePanePreviewsEqual(prev, nextPreviews) ? prev : nextPreviews
+          panePreviewsRef.current = next
+          return next
+        })
       } catch (error) {
         console.error('[AgentWorkspace] Failed to refresh pane previews', error)
       }

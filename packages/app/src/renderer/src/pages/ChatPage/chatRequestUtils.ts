@@ -1,5 +1,10 @@
 import type { Config, CustomSkill, LLMAPIProfile, LLMOpenAIApiMode } from '@shared/config/config'
-import type { LLMChatSkillRuntime, LLMChatStreamResp, OCRResult } from '@shared/api/svcLLMProxy'
+import type {
+  LLMChatSkillRuntime,
+  LLMChatStreamResp,
+  LLMExternalAgentStreamReq,
+  OCRResult
+} from '@shared/api/svcLLMProxy'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
 import type { AgentRouteLike } from '@shared/agent'
 import {
@@ -47,6 +52,7 @@ type ChatRequestPayload = {
     role: ChatMessage['role']
     content: string
     attachments?: ChatAttachment[]
+    toolHistory?: ChatMessage['toolHistory']
   }>
   route?: AgentRouteLike
   profileId?: string
@@ -127,6 +133,7 @@ type RequestChatCompletionResult = {
   sessionUrl?: string
   attachments?: ChatAttachment[]
   ocrResult?: OCRResult
+  finishReason?: LLMChatStreamResp['finishReason']
   metadata?: Record<string, unknown>
   usage?: RequestChatTokenUsage
 }
@@ -141,6 +148,13 @@ export type RequestChatCompletionStreamEvent =
 type RequestChatCompletionStreamInput = RequestChatCompletionInput & {
   onEvent: (event: RequestChatCompletionStreamEvent) => void
 }
+
+type RendererStreamResponse = {
+  abortReceiver: ReturnType<typeof newAbortHandler>[1]
+  onData: (chunk: LLMChatStreamResp) => void
+}
+
+type RendererStreamInvoker = (request: unknown, response: RendererStreamResponse) => Promise<void>
 
 export type RequestChatCompletionStreamResult = {
   result: RequestChatCompletionResult
@@ -173,6 +187,34 @@ const throwIfAborted = (signal?: AbortSignal): void => {
   }
 
   throw createAbortError(typeof reason === 'string' ? reason : 'The request was aborted.')
+}
+
+const awaitWithAbort = async <T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  onAbort?: () => void
+): Promise<T> => {
+  if (!signal) return promise
+
+  let rejectAbort!: (reason: unknown) => void
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject
+  })
+  const handleAbort = (): void => {
+    onAbort?.()
+    const reason = signal.reason
+    rejectAbort(reason instanceof Error ? reason : createAbortError('The request was aborted.'))
+  }
+
+  signal.addEventListener('abort', handleAbort, { once: true })
+  if (signal.aborted) handleAbort()
+
+  try {
+    return await Promise.race([promise, abortPromise])
+  } finally {
+    signal.removeEventListener('abort', handleAbort)
+    void promise.catch(() => undefined)
+  }
 }
 
 const RESPONSES_SCOPE_ERROR_FRAGMENT = 'Missing scopes: api.responses.write'
@@ -243,6 +285,10 @@ export const isInvalidSessionContinuationError = (
 type LocalChatRequestError = Error & {
   status?: number
   body?: string
+  partialContent?: string
+  finishReason?: LLMChatStreamResp['finishReason']
+  metadata?: Record<string, unknown>
+  partialResult?: RequestChatCompletionResult
 }
 
 const createLocalChatRequestError = (
@@ -255,6 +301,50 @@ const createLocalChatRequestError = (
   if (typeof body === 'string') error.body = body
   return error
 }
+
+const mergeStreamMetadata = (
+  current: Record<string, unknown> | undefined,
+  next: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined => {
+  if (current === undefined) return next
+  if (next === undefined) return current
+  return { ...current, ...next }
+}
+
+const attachStreamPartialToError = (
+  error: unknown,
+  partialContent: string,
+  finishReason?: LLMChatStreamResp['finishReason'],
+  metadata?: Record<string, unknown>
+): LocalChatRequestError => {
+  const diagnostic: LocalChatRequestError =
+    error instanceof Error
+      ? (error as LocalChatRequestError)
+      : createLocalChatRequestError(String(error))
+  diagnostic.partialContent = partialContent
+  if (finishReason !== undefined) diagnostic.finishReason = finishReason
+  if (metadata !== undefined) diagnostic.metadata = metadata
+  diagnostic.partialResult = {
+    content: partialContent,
+    ...(finishReason !== undefined ? { finishReason } : {}),
+    ...(metadata !== undefined ? { metadata } : {})
+  }
+  return diagnostic
+}
+
+const createIncompleteStreamError = (
+  partialContent: string,
+  finishReason?: LLMChatStreamResp['finishReason'],
+  metadata?: Record<string, unknown>
+): LocalChatRequestError =>
+  attachStreamPartialToError(
+    createLocalChatRequestError(
+      'incomplete-stream: the IPC stream ended before a terminal done event.'
+    ),
+    partialContent,
+    finishReason,
+    metadata
+  ) as LocalChatRequestError
 
 const mapLocalChatRequestErrorMessage = (message: string): string => {
   const normalized = message.trim()
@@ -624,14 +714,19 @@ const supportsRemoteOpenAIResponsesStreaming = (
   return resolveRemoteApiModeForPayload(profile, input.apiMode) === 'responses'
 }
 
+const hasExternalAgentStreamTransport = (): boolean =>
+  typeof window !== 'undefined' &&
+  typeof window.api?.svcLLMProxy?.externalAgentStream === 'function'
+
 export const supportsStreamingChatCompletion = (
   input: Pick<
     RequestChatCompletionInput,
     'config' | 'profileId' | 'remoteProfile' | 'apiMode' | 'externalAgentSkill'
   >
 ): boolean =>
-  (!input.config.use_remote_llm && input.externalAgentSkill?.type !== 'agent') ||
-  supportsRemoteOpenAIResponsesStreaming(input)
+  input.externalAgentSkill?.type === 'agent'
+    ? hasExternalAgentStreamTransport()
+    : !input.config.use_remote_llm || supportsRemoteOpenAIResponsesStreaming(input)
 
 const shouldSkipInlineAttachmentSummary = (
   profile: RemoteRequestProfile | undefined,
@@ -661,7 +756,9 @@ const normalizeAttachmentOcrResults = (
   })
 }
 
-const MAX_REMOTE_RETRIES = 3
+// A chat POST may already have executed tools when the connection fails.
+// Without a negotiated idempotency contract it must never be replayed automatically.
+const MAX_REMOTE_RETRIES = 1
 const REMOTE_REQUEST_TIMEOUT_MS = 15 * 60 * 1000
 const RETRY_DELAY_MS = 2000
 const REMOTE_CHAT_ENDPOINTS = ['/api/chat', '/api/bot/chat', '/api/bot/message', '/api/message']
@@ -769,6 +866,77 @@ const projectRequestInputForTransport = <T extends RequestChatCompletionInput>(i
   }
 }
 
+const stableSerializeToolHistoryValue = (value: unknown): string => {
+  if (value === undefined) return 'undefined'
+  if (value === null || typeof value !== 'object') {
+    const serialized = JSON.stringify(value)
+    return serialized === undefined ? 'undefined' : serialized
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerializeToolHistoryValue(item)).join(',')}]`
+  }
+
+  return `{${Object.keys(value as Record<string, unknown>)
+    .sort()
+    .map(
+      (key) =>
+        `${JSON.stringify(key)}:${stableSerializeToolHistoryValue((value as Record<string, unknown>)[key])}`
+    )
+    .join(',')}}`
+}
+
+const projectToolHistoryForProvider = (
+  message: ChatMessage
+): {
+  content: string
+  toolHistory?: ChatMessage['toolHistory']
+} => {
+  const history = message.toolHistory
+  if (history === undefined) {
+    return { content: message.content }
+  }
+
+  const preservedToolHistory = history.map((entry) => ({
+    ...entry,
+    args: { ...entry.args },
+    ...(entry.metadata ? { metadata: { ...entry.metadata } } : {})
+  }))
+  if (history.length === 0) {
+    return { content: message.content, toolHistory: preservedToolHistory }
+  }
+
+  const projection = [
+    '[assistant.toolHistory]',
+    ...history.map((entry, index) => {
+      const lines = [
+        `entry[${index + 1}].runId=${JSON.stringify(entry.runId)}`,
+        `entry[${index + 1}].toolCallId=${JSON.stringify(entry.toolCallId)}`,
+        `entry[${index + 1}].toolName=${JSON.stringify(entry.toolName)}`,
+        `entry[${index + 1}].status=${JSON.stringify(entry.status)}`,
+        `entry[${index + 1}].args=${stableSerializeToolHistoryValue(entry.args)}`
+      ]
+      if (entry.content !== undefined) {
+        lines.push(`entry[${index + 1}].content=${JSON.stringify(entry.content)}`)
+      }
+      if (entry.error !== undefined) {
+        lines.push(`entry[${index + 1}].error=${JSON.stringify(entry.error)}`)
+      }
+      if (entry.metadata !== undefined) {
+        lines.push(
+          `entry[${index + 1}].metadata=${stableSerializeToolHistoryValue(entry.metadata)}`
+        )
+      }
+      return lines.join('\n')
+    }),
+    '[/assistant.toolHistory]'
+  ].join('\n')
+
+  return {
+    content: message.content ? `${message.content}\n\n${projection}` : projection,
+    toolHistory: preservedToolHistory
+  }
+}
 const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequestPayload => {
   const resolvedSystemPrompt =
     input.externalAgentSkill?.type === 'agent'
@@ -788,11 +956,15 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
     : undefined
 
   return {
-    messages: input.messages.map((message) => ({
-      role: message.role,
-      content: message.content,
-      attachments: message.attachments
-    })),
+    messages: input.messages.map((message) => {
+      const projected = projectToolHistoryForProvider(message)
+      return {
+        role: message.role,
+        content: projected.content,
+        attachments: message.attachments,
+        ...(projected.toolHistory !== undefined ? { toolHistory: projected.toolHistory } : {})
+      }
+    }),
     ...(input.route ? { route: input.route } : {}),
     profileId: input.profileId || (input.config.use_remote_llm ? selectedProfile?.id : undefined),
     ...(input.stream ? { stream: true } : {}),
@@ -1198,6 +1370,7 @@ const normalizeResponse = (response: {
   ocrResult?: OCRResult
   metadata?: Record<string, unknown>
   usage?: Record<string, unknown>
+  finishReason?: LLMChatStreamResp['finishReason']
 }): RequestChatCompletionResult => {
   const normalizedAttachments = normalizeAttachmentOcrResults(
     response.attachments,
@@ -1222,6 +1395,7 @@ const normalizeResponse = (response: {
     content: normalizedContent,
     sessionUrl: response.sessionUrl,
     attachments,
+    ...(response.finishReason !== undefined ? { finishReason: response.finishReason } : {}),
     ...(response.metadata ? { metadata: response.metadata } : {}),
     ...(usage ? { usage } : {})
   }
@@ -1294,26 +1468,31 @@ const requestExternalAgentSkillCompletion = async (
   }
 
   try {
-    const response = await window.api.svcLLMProxy.remoteFetch({
-      url: apiAddress,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(skill.apiKey?.trim()
-          ? {
-              Authorization: `Bearer ${skill.apiKey.trim()}`
-            }
-          : {})
-      },
-      body: JSON.stringify(
-        buildChatRequestPayload({
-          ...input,
-          profileId: undefined,
-          sessionUrl: undefined
-        })
-      ),
-      conversationId: input.conversationId
-    })
+    const response = await awaitWithAbort(
+      window.api.svcLLMProxy.remoteFetch({
+        url: apiAddress,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(skill.apiKey?.trim()
+            ? {
+                Authorization: `Bearer ${skill.apiKey.trim()}`
+              }
+            : {})
+        },
+        body: JSON.stringify(
+          buildChatRequestPayload({
+            ...input,
+            profileId: undefined,
+            sessionUrl: undefined
+          })
+        ),
+        conversationId: input.conversationId
+      }),
+      input.signal,
+      handleAbort
+    )
+    throwIfAborted(input.signal)
 
     if (response.status < 200 || response.status >= 300) {
       throw new Error(
@@ -1321,7 +1500,10 @@ const requestExternalAgentSkillCompletion = async (
       )
     }
 
-    return normalizeResponse(parseExternalAgentSkillResponse(response.body))
+    throwIfAborted(input.signal)
+    const result = normalizeResponse(parseExternalAgentSkillResponse(response.body))
+    throwIfAborted(input.signal)
+    return result
   } finally {
     if (input.signal) {
       input.signal.removeEventListener('abort', handleAbort)
@@ -1576,6 +1758,7 @@ const toRequestChatCompletionStreamResult = (
     ocrResult?: OCRResult
     metadata?: Record<string, unknown>
     usage?: Record<string, unknown>
+    finishReason?: LLMChatStreamResp['finishReason']
   }
 ): RequestChatCompletionStreamResult => {
   const normalized = normalizeResponse({
@@ -1584,6 +1767,7 @@ const toRequestChatCompletionStreamResult = (
     sessionUrl: response.sessionUrl,
     attachments: response.attachments,
     ocrResult: response.ocrResult,
+    finishReason: response.finishReason,
     metadata: response.metadata,
     usage: response.usage
   })
@@ -1595,7 +1779,9 @@ const toRequestChatCompletionStreamResult = (
 }
 
 const requestLocalChatCompletionStream = async (
-  input: RequestChatCompletionStreamInput
+  input: RequestChatCompletionStreamInput,
+  invoke?: RendererStreamInvoker,
+  request?: unknown
 ): Promise<RequestChatCompletionStreamResult> => {
   if (input.signal?.aborted) {
     await cancelConversationSilently(input.conversationId)
@@ -1630,6 +1816,10 @@ const requestLocalChatCompletionStream = async (
     result: { content: '' },
     response: ''
   }
+  let partialContent = ''
+  let partialFinishReason: LLMChatStreamResp['finishReason'] | undefined
+  let partialMetadata: Record<string, unknown> | undefined
+  let receivedTerminalDone = false
   let observedError: LocalChatRequestError | null = null
   let streamDeadlineTimer: number | undefined
   const streamDeadline = new Promise<never>((_resolve, reject) => {
@@ -1647,14 +1837,20 @@ const requestLocalChatCompletionStream = async (
   void streamDeadline.catch(() => undefined)
 
   try {
-    const streamPromise = window.api.svcLLMProxy.chatStream(buildChatRequestPayload(input), {
+    const streamInvoker =
+      invoke || (window.api.svcLLMProxy.chatStream as unknown as RendererStreamInvoker)
+    const streamRequest = request ?? buildChatRequestPayload(input)
+    const streamPromise = streamInvoker(streamRequest, {
       abortReceiver,
       onData: (chunk) => {
         if (!streamActive || input.signal?.aborted) {
           return
         }
 
+        partialMetadata = mergeStreamMetadata(partialMetadata, chunk.metadata)
+        partialFinishReason = chunk.finishReason ?? partialFinishReason
         if (chunk.type === 'text-delta' && chunk.delta) {
+          partialContent += chunk.delta
           input.onEvent({
             type: 'text-delta',
             delta: chunk.delta
@@ -1676,6 +1872,7 @@ const requestLocalChatCompletionStream = async (
         }
 
         if (chunk.type === 'error' && chunk.error) {
+          partialFinishReason = chunk.finishReason ?? partialFinishReason
           observedError = createLocalChatRequestError(
             mapLocalChatRequestErrorMessage(chunk.error),
             chunk.status,
@@ -1688,13 +1885,19 @@ const requestLocalChatCompletionStream = async (
         }
 
         if (chunk.type === 'done') {
+          receivedTerminalDone = true
+          const terminalContent = chunk.fullContent ?? chunk.content
+          if (terminalContent !== undefined) {
+            partialContent = terminalContent
+          }
+          partialFinishReason = chunk.finishReason ?? partialFinishReason
           streamActive = false
           streamedResponse = toRequestChatCompletionStreamResult({
             ...chunk,
             attachments: chunk.attachments ?? streamedResponse.result.attachments,
             sessionUrl: chunk.sessionUrl ?? streamedResponse.result.sessionUrl,
             ocrResult: chunk.ocrResult ?? streamedResponse.result.ocrResult,
-            metadata: chunk.metadata ?? streamedResponse.result.metadata,
+            metadata: partialMetadata,
             usage:
               (chunk as { usage?: Record<string, unknown> }).usage ?? streamedResponse.result.usage
           })
@@ -1720,29 +1923,31 @@ const requestLocalChatCompletionStream = async (
     void streamPromise.catch(() => undefined)
     await Promise.race([streamPromise, control, streamDeadline])
 
+    if (input.signal?.aborted) {
+      throwIfAborted(input.signal)
+    }
+
+    if (!receivedTerminalDone) {
+      throw createIncompleteStreamError(partialContent, partialFinishReason, partialMetadata)
+    }
+
     if (observedError) {
       throw observedError
     }
 
     return streamedResponse
   } catch (error) {
-    const message = mapLocalChatRequestErrorMessage(
-      error instanceof Error ? error.message : String(error)
+    const diagnostic = attachStreamPartialToError(
+      error,
+      partialContent,
+      partialFinishReason,
+      partialMetadata
     )
-    if (error instanceof Error && message === error.message) {
-      const diagnostic = error as LocalChatRequestError
-      if (diagnostic.status !== undefined || diagnostic.body !== undefined) {
-        throw createLocalChatRequestError(message, diagnostic.status, diagnostic.body)
-      }
-      throw error
+    const message = mapLocalChatRequestErrorMessage(diagnostic.message)
+    if (message !== diagnostic.message) {
+      diagnostic.message = message
     }
-
-    if (error instanceof Error) {
-      const diagnostic = error as LocalChatRequestError
-      throw createLocalChatRequestError(message, diagnostic.status, diagnostic.body)
-    }
-
-    throw new Error(message)
+    throw diagnostic
   } finally {
     if (streamDeadlineTimer !== undefined) {
       window.clearTimeout(streamDeadlineTimer)
@@ -1755,6 +1960,37 @@ const requestLocalChatCompletionStream = async (
   }
 }
 
+const buildExternalAgentStreamRequest = (
+  input: RequestChatCompletionStreamInput
+): LLMExternalAgentStreamReq => {
+  const skill = input.externalAgentSkill
+  const apiAddress = skill?.apiAddress?.trim()
+  if (!skill || skill.type !== 'agent' || !apiAddress) {
+    throw new Error('External agent skill routing requires a configured API address.')
+  }
+
+  return {
+    url: apiAddress,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(skill.apiKey?.trim()
+        ? {
+            Authorization: `Bearer ${skill.apiKey.trim()}`
+          }
+        : {})
+    },
+    body: JSON.stringify(
+      buildChatRequestPayload({
+        ...input,
+        profileId: undefined,
+        sessionUrl: undefined,
+        stream: true
+      })
+    ),
+    conversationId: input.conversationId
+  }
+}
 const dispatchChatCompletionRequest = async (
   input: RequestChatCompletionInput
 ): Promise<RequestChatCompletionResult> => {
@@ -1773,29 +2009,44 @@ const dispatchChatCompletionRequest = async (
 const dispatchChatCompletionStreamRequest = async (
   input: RequestChatCompletionStreamInput
 ): Promise<RequestChatCompletionStreamResult> => {
+  if (input.externalAgentSkill?.type === 'agent' && hasExternalAgentStreamTransport()) {
+    return requestLocalChatCompletionStream(
+      input,
+      window.api.svcLLMProxy.externalAgentStream as unknown as RendererStreamInvoker,
+      buildExternalAgentStreamRequest(input)
+    )
+  }
+
   if (supportsStreamingChatCompletion(input)) {
     return requestLocalChatCompletionStream(input)
   }
 
   const result = await dispatchChatCompletionRequest({ ...input, stream: false })
+  throwIfAborted(input.signal)
   if (result.content) {
     input.onEvent({
       type: 'text-delta',
       delta: result.content
     })
+    throwIfAborted(input.signal)
   }
   for (const attachment of result.attachments || []) {
+    throwIfAborted(input.signal)
     input.onEvent({
       type: 'attachment',
       attachment
     })
+    throwIfAborted(input.signal)
   }
   if (result.sessionUrl) {
+    throwIfAborted(input.signal)
     input.onEvent({
       type: 'session',
       sessionUrl: result.sessionUrl
     })
+    throwIfAborted(input.signal)
   }
+  throwIfAborted(input.signal)
   input.onEvent({ type: 'done' })
 
   return {
