@@ -2927,20 +2927,21 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const replayImageMessages = [
             ...(previousSummary?.replayImageMessages || []),
             ...messagesToCompress.flatMap((message, index) => {
-              if (message.role !== 'user') return []
               const imageAttachments = (message.attachments || []).filter(
                 (attachment) => attachment.type === 'image'
               )
               if (imageAttachments.length === 0) return []
+              if (message.role !== 'user' && message.role !== 'assistant') return []
               return [
                 {
-                  role: 'user' as const,
-                  content: `Historical image replay from compacted user message ${index + 1}.`,
+                  role: message.role,
+                  content: `Historical image replay from compacted ${message.role} message ${index + 1}.`,
                   attachments: imageAttachments
                 }
               ]
             })
           ]
+          const contextUsage = result.contextUsage ?? result.usage
           const summary: ChatContextCompressionSummary = {
             summary: summaryText,
             coveredMessageCount:
@@ -2951,11 +2952,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
             updatedAt: Date.now(),
             lastCompactAttemptAt: now,
             lastCompactSuccessAt: Date.now(),
-            ...(result.usage?.promptTokens !== undefined
-              ? { lastPromptTokens: result.usage.promptTokens }
+            ...(contextUsage?.promptTokens !== undefined
+              ? { lastPromptTokens: contextUsage.promptTokens }
               : {}),
-            ...(result.usage?.totalTokens !== undefined
-              ? { lastTotalTokens: result.usage.totalTokens }
+            ...(contextUsage?.totalTokens !== undefined
+              ? { lastTotalTokens: contextUsage.totalTokens }
               : {}),
             ...(options.manual ? { manual: true } : {}),
             ...(replayImageMessages.length > 0 ? { replayImageMessages } : {}),
@@ -5738,7 +5739,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           result = await dispatchCompletion(completedRequestState)
         }
         assertCurrentRun()
-        maybeStartContextCompactFromUsage(result.usage)
+        const contextUsage = result.contextUsage ?? result.usage
+        maybeStartContextCompactFromUsage(contextUsage)
         contextTokenCalibrationByFingerprintRef.current.set(
           completedRequestState.calibrationFingerprint,
           recordChatContextTokenObservation(
@@ -5748,9 +5750,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
             {
               estimatedTextTokens: completedRequestState.estimatedTokens.textTokens,
               estimatedImageTokens: completedRequestState.estimatedTokens.imageTokens,
-              actualInputTextTokens: result.usage?.inputTextTokens,
-              actualInputImageTokens: result.usage?.inputImageTokens,
-              actualInputTokens: result.usage?.promptTokens
+              actualInputTextTokens: contextUsage?.inputTextTokens,
+              actualInputImageTokens: contextUsage?.inputImageTokens,
+              actualInputTokens: contextUsage?.promptTokens
             }
           )
         )
@@ -5907,7 +5909,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }
 
         assertCurrentRun()
-        maybeStartContextCompactFromUsage(streamedResult.result.usage)
+        const contextUsage = streamedResult.result.contextUsage ?? streamedResult.result.usage
+        maybeStartContextCompactFromUsage(contextUsage)
         contextTokenCalibrationByFingerprintRef.current.set(
           requestState.calibrationFingerprint,
           recordChatContextTokenObservation(
@@ -5917,9 +5920,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
             {
               estimatedTextTokens: requestState.estimatedTokens.textTokens,
               estimatedImageTokens: requestState.estimatedTokens.imageTokens,
-              actualInputTextTokens: streamedResult.result.usage?.inputTextTokens,
-              actualInputImageTokens: streamedResult.result.usage?.inputImageTokens,
-              actualInputTokens: streamedResult.result.usage?.promptTokens
+              actualInputTextTokens: contextUsage?.inputTextTokens,
+              actualInputImageTokens: contextUsage?.inputImageTokens,
+              actualInputTokens: contextUsage?.promptTokens
             }
           )
         )

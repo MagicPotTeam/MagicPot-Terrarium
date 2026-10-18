@@ -694,6 +694,24 @@ describe('requestChatCompletion', () => {
     })
   })
 
+  it('normalizes final-step context usage without replacing aggregate billing usage', async () => {
+    const config = createConfig()
+    const chat = vi.fn().mockResolvedValue({
+      content: 'local reply',
+      usage: { promptTokens: 33, completionTokens: 5, totalTokens: 38 },
+      metadata: { lastStepUsage: { promptTokens: 20, completionTokens: 3, totalTokens: 23 } }
+    })
+    ;(window as typeof window & { api: unknown }).api = {
+      svcLLMProxy: { chat }
+    } as unknown as Window['api']
+
+    await expect(requestChatCompletion({ config, messages, profileId: 'foo' })).resolves.toEqual(
+      expect.objectContaining({
+        usage: { promptTokens: 33, completionTokens: 5, totalTokens: 38 },
+        contextUsage: { promptTokens: 20, completionTokens: 3, totalTokens: 23 }
+      })
+    )
+  })
   it('filters historical images before dispatching a latest-user-turn request', async () => {
     const config = createConfig()
     config.use_remote_llm = false

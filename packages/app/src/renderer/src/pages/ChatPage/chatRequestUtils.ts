@@ -136,6 +136,7 @@ type RequestChatCompletionResult = {
   finishReason?: LLMChatStreamResp['finishReason']
   metadata?: Record<string, unknown>
   usage?: RequestChatTokenUsage
+  contextUsage?: RequestChatTokenUsage
 }
 
 export type RequestChatCompletionStreamEvent =
@@ -1352,11 +1353,23 @@ const normalizeChatTokenUsage = (
         inputTokenDetails?.imageTokens
     ),
     completionTokens: normalizeTokenCount(
-      rawUsage?.completionTokens ?? rawUsage?.completion_tokens
+      rawUsage?.completionTokens ??
+        rawUsage?.completion_tokens ??
+        rawUsage?.outputTokens ??
+        rawUsage?.output_tokens
     ),
     totalTokens: normalizeTokenCount(rawUsage?.totalTokens ?? rawUsage?.total_tokens)
   }
   return Object.values(normalized).some((value) => value !== undefined) ? normalized : undefined
+}
+
+const normalizeContextChatTokenUsage = (
+  metadata: Record<string, unknown> | undefined,
+  usage: RequestChatTokenUsage | undefined
+): RequestChatTokenUsage | undefined => {
+  const lastStepUsage = metadata?.lastStepUsage
+  if (!isRecord(lastStepUsage)) return usage
+  return normalizeChatTokenUsage(lastStepUsage) ?? usage
 }
 
 const normalizeResponse = (response: {
@@ -1391,13 +1404,15 @@ const normalizeResponse = (response: {
   const normalizedContent =
     response.content ?? response.reply ?? response.message ?? response.text ?? ''
   const usage = normalizeChatTokenUsage(response.usage, response.metadata)
+  const contextUsage = normalizeContextChatTokenUsage(response.metadata, usage)
   const normalized: RequestChatCompletionResult = {
     content: normalizedContent,
     sessionUrl: response.sessionUrl,
     attachments,
     ...(response.finishReason !== undefined ? { finishReason: response.finishReason } : {}),
     ...(response.metadata ? { metadata: response.metadata } : {}),
-    ...(usage ? { usage } : {})
+    ...(usage ? { usage } : {}),
+    ...(contextUsage ? { contextUsage } : {})
   }
 
   if (response.ocrResult) {

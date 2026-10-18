@@ -2485,6 +2485,69 @@ describe('ChatPage runtime workflow integration', () => {
     expect(hoisted.notifySuccessMock).toHaveBeenCalledWith('Context compressed.')
   })
 
+  it('preserves assistant images through manual compaction and the next request', async () => {
+    const assistantImage = createImageAttachment('assistant-generated.png')
+    const session: ChatSession = {
+      id: 'manual-assistant-image-session',
+      title: 'Manual assistant image session',
+      profileId: 'base-model',
+      messages: Array.from({ length: 24 }, (_, index) => ({
+        role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
+        content: `history message ${index + 1}`,
+        ...(index === 1 ? { attachments: [assistantImage] } : {})
+      }))
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+
+    renderChatPage()
+
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+    fireEvent.click(screen.getByTestId('chat-composer-compress-context-mock'))
+
+    await waitFor(() => {
+      const compression = readCurrentSessionState()?.contextCompression
+      expect(compression?.manual).toBe(true)
+      expect(compression?.replayImageMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: 'assistant',
+            attachments: [expect.objectContaining({ url: assistantImage.url })]
+          })
+        ])
+      )
+    })
+    await waitFor(() =>
+      expect(hoisted.storedSessions.value[0]?.contextCompression?.replayImageMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: 'assistant',
+            attachments: [expect.objectContaining({ url: assistantImage.url })]
+          })
+        ])
+      )
+    )
+
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'edit the generated image' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    const requestMessages = hoisted.requestChatCompletionMock.mock.calls.at(-1)?.[0]
+      ?.messages as ChatMessage[]
+    expect(requestMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          attachments: [expect.objectContaining({ url: assistantImage.url })]
+        })
+      ])
+    )
+  })
   it('sends manual compressed context with the next request', async () => {
     const compressedSession: ChatSession = {
       id: 'compressed-session',
@@ -2695,6 +2758,72 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
+  it('does not trigger compact from aggregate usage when context usage stays below the threshold', async () => {
+    hoisted.availableProfiles.value = [
+      {
+        id: 'base-model',
+        model_name: 'GPT-4o',
+        model_use: 'chat' as const,
+        context_window_tokens: 44,
+        context_budget_tokens: 33
+      }
+    ]
+    const activityEvents: Array<Record<string, unknown>> = []
+    const handleActivity = (event: Event) => {
+      activityEvents.push((event as CustomEvent<Record<string, unknown>>).detail)
+    }
+    window.addEventListener('chat:activity', handleActivity)
+    hoisted.requestChatCompletionMock.mockReset()
+    hoisted.requestChatCompletionMock.mockResolvedValue({
+      content: 'below-threshold response',
+      usage: { promptTokens: 33, completionTokens: 5, totalTokens: 38 },
+      contextUsage: { promptTokens: 20, completionTokens: 3, totalTokens: 23 }
+    })
+    const session: ChatSession = {
+      id: 'below-threshold-session',
+      title: 'Below threshold session',
+      profileId: 'base-model',
+      messages: [{ role: 'user', content: 'previous message' }]
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+      'base-model'
+    )
+
+    try {
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'stay below the context threshold' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('below-threshold response')
+      )
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      expect(activityEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'send_progress',
+            promptTokens: 20,
+            totalTokens: 23,
+            triggerTokens: 33
+          })
+        ])
+      )
+      expect(activityEvents.some((event) => event.type === 'compact_start')).toBe(false)
+    } finally {
+      window.removeEventListener('chat:activity', handleActivity)
+    }
+  })
   it('aborts in-flight compact without writing a summary or showing an error toast', async () => {
     let observedSignal: AbortSignal | undefined
     hoisted.requestChatCompletionMock.mockReset()
