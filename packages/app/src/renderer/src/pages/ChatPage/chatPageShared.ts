@@ -1,5 +1,18 @@
 import type { Hy3dParams } from './hy3d/types'
 import type { ChatMessage } from '@shared/api/svcLLMProxy'
+import {
+  applyScopedChatPageRunEvent,
+  CHAT_PAGE_RUN_LIFECYCLE_EVENT,
+  clearScopedChatPageRunLifecycles,
+  markScopedChatPageRunRead,
+  readScopedChatPageRunLifecycle,
+  readScopedChatPageRunLifecycles,
+  startScopedChatPageRun,
+  type ChatPageRunId,
+  type ChatPageRunLifecycleEvent,
+  type ChatPageRunStatus,
+  type ScopedChatPageRunLifecycleState
+} from '@shared/chatPageRunLifecycle'
 import { getFileNameHintFromUrl } from '@shared/utils/urlFileHints'
 
 export interface SpeechRecognition extends EventTarget {
@@ -53,6 +66,89 @@ export interface SpeechRecognitionAlternative {
   transcript: string
   confidence: number
 }
+
+export const CHAT_SESSION_RUN_STATE_EVENT = 'chat:session-run-state'
+
+export type ChatSessionRunStateEvent = ChatPageRunLifecycleEvent
+
+export type ChatSessionRunState = ScopedChatPageRunLifecycleState
+
+const getScopedRunStateEvent = (state: ChatSessionRunState): ChatSessionRunStateEvent => ({
+  scope: state.scope,
+  sessionId: state.sessionId,
+  runId: state.runId as ChatPageRunId,
+  status: state.status === 'idle' ? 'running' : state.status,
+  unread: state.unread,
+  timestamp: state.updatedAt
+})
+export const startScopedChatRun = (
+  scope: string,
+  sessionId: string,
+  runId: ChatPageRunId
+): ChatSessionRunState => {
+  const next = startScopedChatPageRun({ scope, sessionId, runId }) as ChatSessionRunState
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent(CHAT_SESSION_RUN_STATE_EVENT, {
+        detail: getScopedRunStateEvent(next)
+      })
+    )
+  }
+  return next
+}
+
+export const dispatchScopedChatRunEvent = (
+  scope: string,
+  sessionId: string,
+  event: Omit<ChatSessionRunStateEvent, 'scope' | 'sessionId'>
+): ChatSessionRunState | null => {
+  const current = readScopedChatPageRunLifecycle(scope, sessionId) as ChatSessionRunState
+  const next = applyScopedChatPageRunEvent({
+    scope,
+    sessionId,
+    ...event
+  }) as ChatSessionRunState | null
+  const changed =
+    next !== null &&
+    (current.runId !== next.runId ||
+      current.status !== next.status ||
+      current.unread !== next.unread)
+  if (changed && typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent(CHAT_SESSION_RUN_STATE_EVENT, {
+        detail: getScopedRunStateEvent(next)
+      })
+    )
+  }
+  return next
+}
+
+export const readScopedChatRun = (scope: string, sessionId: string): ChatSessionRunState =>
+  readScopedChatPageRunLifecycle(scope, sessionId) as ChatSessionRunState
+
+export const readScopedChatRuns = (scope: string): ChatSessionRunState[] =>
+  readScopedChatPageRunLifecycles(scope) as ChatSessionRunState[]
+
+export const markScopedChatRunRead = (
+  scope: string,
+  sessionId: string,
+  runId?: ChatPageRunId
+): ChatSessionRunState => {
+  const before = readScopedChatPageRunLifecycle(scope, sessionId) as ChatSessionRunState
+  const next = markScopedChatPageRunRead(scope, sessionId, runId) as ChatSessionRunState
+  const changed = before.unread !== next.unread && next.unread === false
+  if (changed && typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent(CHAT_SESSION_RUN_STATE_EVENT, {
+        detail: getScopedRunStateEvent(next)
+      })
+    )
+  }
+  return next
+}
+
+export { CHAT_PAGE_RUN_LIFECYCLE_EVENT, clearScopedChatPageRunLifecycles }
+export type { ChatPageRunId, ChatPageRunStatus } from '@shared/chatPageRunLifecycle'
 
 export const STORAGE_KEY_CURRENT_SESSION_ID = 'chat.currentSessionId'
 export const STORAGE_KEY_SELECTED_PROFILE = 'chat.selectedProfileId'

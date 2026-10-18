@@ -40,6 +40,7 @@ import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
 import { shouldUseOpenAIImageGeneration } from '@shared/llm/openaiResponses'
 import type { AgentRouteLike } from '@shared/agent'
 import type { ProjectTraceEventStatus } from '@shared/projectTrace'
+import { startScopedChatPageRun } from '@shared/chatPageRunLifecycle'
 import {
   selectFile,
   fileToBlobUrl,
@@ -67,6 +68,7 @@ import {
 import {
   buildAutoSavedChatImageKey,
   buildChatWorkspaceControlsPortalId,
+  generateUUID,
   buildHy3dProfileId,
   getBaseProfileId,
   getDownloadFileNameFromUrl,
@@ -84,7 +86,10 @@ import {
   STORAGE_KEY_LOADING_IDS,
   STORAGE_KEY_SELECTED_PROFILE,
   updateScopedActiveLoadingSessionId,
-  updateScopedExternalLoadingSessionId
+  updateScopedExternalLoadingSessionId,
+  dispatchScopedChatRunEvent,
+  readScopedChatRun,
+  startScopedChatRun
 } from './chatPageShared'
 import {
   buildChatContextCompactPromptMessages,
@@ -1431,6 +1436,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const externalLoadingSessionIdsRef = useRef<Set<string>>(externalLoadingSessionIds)
   const runIdRef = useRef(0)
   const activeRunIdBySessionRef = useRef<Map<string, number>>(new Map())
+  const lifecycleRunIdBySessionRef = useRef<Map<string, string>>(new Map())
   const sessionAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
   const cancelledSessionsRef = useRef<Set<string>>(new Set())
   const [loadingStatusBySessionId, setLoadingStatusBySessionId] = useState<
@@ -1533,6 +1539,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const terminateSession = useCallback(
     (sessionId: string) => {
       cancelledSessionsRef.current.add(sessionId)
+      const activeLifecycleId = lifecycleRunIdBySessionRef.current.get(sessionId)
+      if (activeLifecycleId) {
+        dispatchScopedChatRunEvent(storageScope, sessionId, {
+          runId: activeLifecycleId,
+          status: 'cancelled',
+          unread: false
+        })
+        lifecycleRunIdBySessionRef.current.delete(sessionId)
+      }
       sessionAbortControllersRef.current.get(sessionId)?.abort('Chat session cancelled.')
       sessionAbortControllersRef.current.delete(sessionId)
       contextCompactAbortControllersRef.current
@@ -1688,6 +1703,36 @@ const ChatPage: React.FC<ChatPageProps> = ({
     loadingSessionIdsRef.current = nextLoadingIds
     setLoadingSessionIds(nextLoadingIds)
     for (const sessionId of removedLoadingIds) {
+      const session = sessions.find((item) => item.id === sessionId)
+      const hasLiveRequest =
+        sessionAbortControllersRef.current.has(sessionId) ||
+        externalLoadingSessionIdsRef.current.has(sessionId) ||
+        activeRunIdBySessionRef.current.has(sessionId)
+
+      if (session && session.messages.length > 0 && !hasLiveRequest) {
+        const currentRun = readScopedChatRun(storageScope, sessionId)
+        if (
+          currentRun.status !== 'completed' &&
+          currentRun.status !== 'failed' &&
+          currentRun.status !== 'cancelled' &&
+          currentRun.status !== 'interrupted'
+        ) {
+          const recoveryRunId = currentRun.runId ?? `recovery:${generateUUID()}`
+          if (currentRun.runId === null) {
+            startScopedChatPageRun({
+              scope: storageScope,
+              sessionId,
+              runId: recoveryRunId
+            })
+          }
+          dispatchScopedChatRunEvent(storageScope, sessionId, {
+            runId: recoveryRunId,
+            status: 'interrupted',
+            unread: false
+          })
+        }
+      }
+
       updateScopedActiveLoadingSessionId(storageScope, sessionId, false, false)
       setSessionLoadingStatus(sessionId, null)
     }
@@ -5371,7 +5416,28 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       let requestHistoryMessages = historyMessages
       const runId = ++runIdRef.current
+      const lifecycleId = generateUUID()
+      const lifecycleScope = storageScope
+      const lifecycleSessionId = targetSessionId
+      let lifecycleTerminal = false
+      const lifecycleEvent = (
+        status: 'running' | 'waiting-tool' | 'completed' | 'failed' | 'cancelled'
+      ): void => {
+        if (lifecycleTerminal) return
+        const currentRun = activeRunIdBySessionRef.current.get(targetSessionId) === runId
+        if (!currentRun) return
+        if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+          lifecycleTerminal = true
+        }
+        dispatchScopedChatRunEvent(lifecycleScope, lifecycleSessionId, {
+          runId: lifecycleId,
+          status,
+          unread: status === 'completed'
+        })
+      }
+      startScopedChatRun(lifecycleScope, lifecycleSessionId, lifecycleId)
       activeRunIdBySessionRef.current.set(targetSessionId, runId)
+      lifecycleRunIdBySessionRef.current.set(targetSessionId, lifecycleId)
       const sessionAbortController = new AbortController()
       sessionAbortControllersRef.current.set(targetSessionId, sessionAbortController)
       cancelledSessionsRef.current.delete(targetSessionId)
@@ -5830,6 +5896,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
               return
             }
 
+            if (event.type === 'tool-status') {
+              const status = event.toolStatus.status
+              lifecycleEvent(
+                status === 'running'
+                  ? 'waiting-tool'
+                  : status === 'completed'
+                    ? 'running'
+                    : status === 'cancelled'
+                      ? 'cancelled'
+                      : 'failed'
+              )
+              return
+            }
+
             if (event.type === 'text-delta' && event.delta) {
               if (!hasMarkedStreamingOutput) {
                 hasMarkedStreamingOutput = true
@@ -6261,6 +6341,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           traceOutputKinds = summarizeChatAttachmentKindsForTrace(result.attachments)
           traceResponseCount = 1
         }
+        lifecycleEvent('completed')
         emitAgentTraceEvent(
           'success',
           `Agent response completed with ${traceResponseCount || 1} assistant message(s).`,
@@ -6285,6 +6366,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           targetSessionId && cancelledSessionsRef.current.has(targetSessionId)
         )
         if (wasCancelled) {
+          lifecycleEvent('cancelled')
           const hasPartialStreamedResponse =
             Boolean(streamedResponse.trim()) ||
             streamedAttachments.length > 0 ||
@@ -6337,8 +6419,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
           )
         } else {
+          lifecycleEvent('failed')
           if (error === staleRunError || !isCurrentRun()) return
           console.error('[ChatPage] Send message error:', error)
+          notifyError(error instanceof Error ? error.message : String(error))
           const runId = targetSessionId || null
           const rawErrorMessage = error instanceof Error ? error.message : String(error)
           const decoratedErrorMessage = formatChatFailureMessage(rawErrorMessage, runId)
@@ -6409,6 +6493,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (sessionAbortControllersRef.current.get(targetSessionId) === sessionAbortController) {
             sessionAbortControllersRef.current.delete(targetSessionId)
           }
+          lifecycleRunIdBySessionRef.current.delete(targetSessionId)
           clearLoadingSessionTracking(targetSessionId, !wasCancelled, runId)
           emitPreviewRefresh('preview-only')
 

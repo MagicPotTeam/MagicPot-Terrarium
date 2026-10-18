@@ -3,6 +3,7 @@ import type {
   LLMChatSkillRuntime,
   LLMChatStreamResp,
   LLMExternalAgentStreamReq,
+  LLMToolStatus,
   OCRResult
 } from '@shared/api/svcLLMProxy'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
@@ -143,6 +144,7 @@ export type RequestChatCompletionStreamEvent =
   | { type: 'text-delta'; delta: string }
   | { type: 'attachment'; attachment: ChatAttachment }
   | { type: 'session'; sessionUrl: string }
+  | { type: 'tool-status'; toolStatus: LLMToolStatus }
   | { type: 'done' }
   | { type: 'error'; error: string }
 
@@ -154,6 +156,30 @@ type RendererStreamResponse = {
   abortReceiver: ReturnType<typeof newAbortHandler>[1]
   onData: (chunk: LLMChatStreamResp) => void
 }
+
+const normalizeLLMToolStatus = (value: unknown): LLMToolStatus | undefined => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const runId = typeof record.runId === 'string' ? record.runId.trim() : ''
+  const toolCallId = typeof record.toolCallId === 'string' ? record.toolCallId.trim() : ''
+  const toolName = typeof record.toolName === 'string' ? record.toolName.trim() : ''
+  const status = record.status
+  if (
+    !runId ||
+    !toolCallId ||
+    !toolName ||
+    (status !== 'running' &&
+      status !== 'completed' &&
+      status !== 'failed' &&
+      status !== 'cancelled')
+  ) {
+    return undefined
+  }
+  return { runId, toolCallId, toolName, status }
+}
+
+const invalidToolStatusEventError = (): Error =>
+  new Error('The chat stream contained an invalid tool-status event.')
 
 type RendererStreamInvoker = (request: unknown, response: RendererStreamResponse) => Promise<void>
 
@@ -1883,6 +1909,17 @@ const requestLocalChatCompletionStream = async (
           input.onEvent({
             type: 'session',
             sessionUrl: chunk.sessionUrl
+          })
+        }
+
+        if (chunk.type === 'tool-status') {
+          const toolStatus = normalizeLLMToolStatus(chunk.toolStatus)
+          if (!toolStatus) {
+            throw invalidToolStatusEventError()
+          }
+          input.onEvent({
+            type: 'tool-status',
+            toolStatus
           })
         }
 
