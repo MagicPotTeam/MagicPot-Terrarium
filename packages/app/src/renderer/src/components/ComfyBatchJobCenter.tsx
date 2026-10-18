@@ -123,7 +123,16 @@ type ComfyBatchStatusWithYielding = ComfyBatchStatus & { yielding?: boolean }
 const isYielding = (status: ComfyBatchStatus): boolean =>
   (status as ComfyBatchStatusWithYielding).yielding === true
 
-const stateLabelKey = (state: ComfyBatchJobState, yielding = false): string => {
+type BatchStateLabelKey =
+  | 'qapp.batch.state_yielding'
+  | 'qapp.batch.state_queued'
+  | 'qapp.batch.state_running'
+  | 'qapp.batch.state_completed'
+  | 'qapp.batch.state_error'
+  | 'qapp.batch.state_cancelled'
+  | 'qapp.batch.state_idle'
+
+const stateLabelKey = (state: ComfyBatchJobState, yielding = false): BatchStateLabelKey => {
   if (state === 'running' && yielding) return 'qapp.batch.state_yielding'
 
   switch (state) {

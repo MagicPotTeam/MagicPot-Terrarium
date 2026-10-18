@@ -122,7 +122,7 @@ vi.mock('@renderer/utils/windowUtils', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) =>
+    t: (key: string, options?: { defaultValue?: string }) =>
       (
         ({
           'workspace.hunyuan_hint_title': 'Hunyuan3D lives in Quick Apps',
@@ -131,7 +131,9 @@ vi.mock('react-i18next', () => ({
           'qapp.names.hunyuan3d_quick_app': 'Hunyuan3D',
           'qapp.names.ai_video_generation': 'AI Video Generation'
         }) as Record<string, string>
-      )[key] ?? key
+      )[key] ??
+      options?.defaultValue ??
+      key
   })
 }))
 

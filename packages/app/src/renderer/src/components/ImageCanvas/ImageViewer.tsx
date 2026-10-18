@@ -46,7 +46,9 @@ export default function ImageViewer({ imageUrl, onDelete }: ImageViewerProps) {
       const arrayBuffer = await blob.arrayBuffer()
       const data = new Uint8Array(arrayBuffer)
       await api().svcHyper.saveImageToDir({ data, fileName, dir: downloadDir })
-      notifySuccess(t('quickapp.results.download_success') || 'Image downloaded successfully')
+      notifySuccess(
+        t('quickapp.results.download_success', { defaultValue: 'Image downloaded successfully' })
+      )
     } catch (error) {
       console.error('Failed to save image:', error)
       notifyError('Save failed: ' + (error instanceof Error ? error.message : String(error)))

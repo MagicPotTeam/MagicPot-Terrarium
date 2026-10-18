@@ -126,7 +126,10 @@ const titleBarLogoImg = new URL('../../../../../runtime-assets/build/icon.png', 
   .href
 
 // System tab ID → i18n key mapping for dynamic label resolution
-const SYSTEM_TAB_I18N_MAP: Record<string, string> = {
+type SystemTabTranslationKey =
+  'project.my' | 'menu.settings' | 'menu.custom_workshop' | 'menu.models'
+
+const SYSTEM_TAB_I18N_MAP: Record<string, SystemTabTranslationKey> = {
   'tab-home': 'project.my',
   'tab-settings': 'menu.settings',
   'tab-design': 'menu.custom_workshop',

@@ -19,6 +19,7 @@ import {
   StopCircleOutlined as StopIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
 import ChatPage from '@renderer/pages/ChatPage/ChatPage'
 import { loadAllSessions, type ChatSession } from '@renderer/pages/ChatPage/chatStorage'
 import { getLocalizedConversationTitle } from '@renderer/pages/ChatPage/chatLocaleUtils'
@@ -162,9 +163,9 @@ const getPaneLabel = (
   getLabel: AgentWorkspaceStrings['paneLabel']
 ): string => getLabel(getPaneNumber(paneId, index))
 
-const createAgentWorkspaceStrings = (
-  t: ReturnType<typeof useTranslation>['t']
-): AgentWorkspaceStrings => ({
+type AgentWorkspaceTranslator = TFunction<'translation'>
+
+const createAgentWorkspaceStrings = (t: AgentWorkspaceTranslator): AgentWorkspaceStrings => ({
   newConversation: t('chat.new_conversation'),
   latestReply: t('agent_workspace.latest_reply'),
   latestPrompt: t('agent_workspace.latest_prompt'),

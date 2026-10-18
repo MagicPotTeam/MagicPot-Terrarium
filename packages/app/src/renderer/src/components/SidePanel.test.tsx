@@ -272,7 +272,15 @@ vi.mock('../pages/ChatPage/Hunyuan3DPanel', () => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     i18n: { language: 'zh-CN' },
-    t: (key: string) => key
+    t: (key: string, options?: { defaultValue?: string }) =>
+      ({
+        'quickapp.workspace.open_quickapp_api': '配置',
+        'quickapp.workspace.title': '快应用',
+        'quickapp.workspace.more_categories': '更多分类',
+        'qapp.batch.open_jobs': '展开批处理任务'
+      })[key] ??
+      options?.defaultValue ??
+      key
   })
 }))
 
@@ -310,7 +318,7 @@ describe('SidePanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '3D' }))
 
     expect(await screen.findByText('Hunyuan3D Panel')).toBeTruthy()
-    expect(await screen.findByRole('button', { name: /API/ })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: '配置' })).toBeTruthy()
   })
 
   it('renders the built-in video app directly in inline mode when selected from the SidePanel', async () => {
@@ -364,7 +372,7 @@ describe('SidePanel', () => {
 
     expect(await screen.findByText('Hunyuan3D Panel')).toBeTruthy()
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: /API/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: '配置' })).toBeNull()
     })
   })
 

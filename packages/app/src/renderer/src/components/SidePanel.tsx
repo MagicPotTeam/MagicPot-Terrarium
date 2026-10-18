@@ -40,7 +40,7 @@ import { useConfig } from '@renderer/hooks/useConfig'
 import { useComfyEventCallback } from '@renderer/hooks/useComfyEvent'
 import { useComfyStatus } from '@renderer/store/hooks/comfyStatus'
 import { api } from '@renderer/utils/windowUtils'
-import { Config } from '@shared/config/config'
+import type { Config } from '@shared/config/config'
 import {
   findHunyuan3DQAppProfile,
   findTripo3DQAppProfile
@@ -427,16 +427,11 @@ const refreshHy3dModelUrlIfNeeded = async (params: Hy3dParams): Promise<Hy3dPara
   return nextParams
 }
 
-const getLocalizedFallbackText = (
-  t: (key: string) => string,
-  language: string | undefined,
-  key: string,
-  fallback: string
-): string => {
-  const isChineseUi = language?.toLowerCase().startsWith('zh')
-  const value = t(key)
-  return isChineseUi && value === key ? fallback : value
-}
+type QuickAppFallbackKey =
+  | 'quickapp.workspace.open_quickapp_api'
+  | 'quickapp.workspace.title'
+  | 'quickapp.workspace.more_categories'
+  | 'qapp.batch.open_jobs'
 
 const emitWorkflowFill = (qAppKey: string, workflow: Workflow): void => {
   dispatchQAppFillParams({ qAppKey, workflow })
@@ -544,10 +539,7 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
     navigate('/settings', { state: { tab: 'plugin' } })
   }, [dispatch, navigate, openTabs, t])
 
-  const qt = useCallback(
-    (key: string, fallback: string) => getLocalizedFallbackText(t, i18n.language, key, fallback),
-    [i18n.language, t]
-  )
+  const qt = useCallback((key: QuickAppFallbackKey) => t(key), [t])
 
   const handleRunReady = useCallback((runFn: () => Promise<void>, isRunning: boolean) => {
     runnerRef.current = runFn
@@ -1183,7 +1175,7 @@ const QuickAppSidePanel: React.FC<{ projectId?: string; activeCategory?: QuickAp
               sx={{ mb: 1.5, alignItems: 'center' }}
               action={
                 <Button size="small" variant="outlined" onClick={openQuickAppSettings}>
-                  {qt('quickapp.workspace.open_quickapp_api', '打开快应用 API')}
+                  {qt('quickapp.workspace.open_quickapp_api')}
                 </Button>
               }
             >
@@ -1249,10 +1241,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
   const activeBatchJobs = batchJobs.filter(
     (job) => job.state === 'queued' || job.state === 'running'
   )
-  const qt = useCallback(
-    (key: string, fallback: string) => getLocalizedFallbackText(t, i18n.language, key, fallback),
-    [i18n.language, t]
-  )
+  const qt = useCallback((key: QuickAppFallbackKey) => t(key), [t])
   const isChineseUi = i18n.language?.toLowerCase().startsWith('zh')
   const queueText = {
     expand: isChineseUi ? '展开队列详情' : 'Expand queue details',
@@ -1530,7 +1519,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
 
   const { Component } = panel
   const isQuickApp = activeSidePanel === 'quickapp'
-  const title = isQuickApp ? qt('quickapp.workspace.title', '快应用') : panel.title
+  const title = isQuickApp ? qt('quickapp.workspace.title') : panel.title
   return (
     <Box
       sx={(theme) => ({
@@ -1666,11 +1655,11 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
               })}
               {overflowQuickAppCategories.length > 0 && (
                 <>
-                  <Tooltip title={qt('quickapp.workspace.more_categories', '更多分类')} arrow>
+                  <Tooltip title={qt('quickapp.workspace.more_categories')} arrow>
                     <Button
                       size="small"
                       variant="text"
-                      aria-label={qt('quickapp.workspace.more_categories', '更多分类')}
+                      aria-label={qt('quickapp.workspace.more_categories')}
                       aria-haspopup="menu"
                       aria-expanded={isQuickAppOverflowMenuOpen ? 'true' : undefined}
                       onClick={handleQuickAppOverflowOpen}
@@ -1898,7 +1887,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
         >
           <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 0.75 }}>
             <Button size="small" onClick={openComfyBatchCenter} sx={{ minHeight: 24, py: 0 }}>
-              {qt('qapp.batch.open_jobs', 'Open task center')}
+              {qt('qapp.batch.open_jobs')}
             </Button>
           </Box>
           {queueState.queue_running.length > 0 && (
