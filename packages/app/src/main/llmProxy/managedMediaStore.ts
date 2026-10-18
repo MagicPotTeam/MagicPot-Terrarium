@@ -60,6 +60,8 @@ export type ImportedManagedMedia = {
   metadataPath: string
 }
 export type ResolvedManagedMedia = ImportedManagedMedia & {
+  /** Canonical managed-media store containing the resolved original. */
+  storeRoot?: string
   metadata: ManagedMediaMetadata
   /** Integrity was checked through an open no-follow handle immediately before this result. */
   integrityVerified: true
@@ -698,9 +700,42 @@ function metadataIsConsistent(
     metadata.relativePath === expected.relativePath
   )
 }
+type ManagedMediaReferencePath = {
+  storePrefix?: string
+  relativePath: string
+}
+
+const CODEX_MEDIA_SCOPE_PATTERN = /^[a-z0-9_](?:[a-z0-9._-]{0,126}[a-z0-9_])?$/u
+const CODEX_SCOPED_REFERENCE_PATTERN = /^codex-images\/([^/]+)\/(originals\/.+)$/u
+const CODEX_LEGACY_DASH_REFERENCE_PATTERN = /^codex-images-(.+)\/(originals\/.+)$/u
+
+function splitManagedMediaReferencePath(relativePath: string): ManagedMediaReferencePath {
+  const match =
+    CODEX_SCOPED_REFERENCE_PATTERN.exec(relativePath) ??
+    CODEX_LEGACY_DASH_REFERENCE_PATTERN.exec(relativePath)
+  if (!match) {
+    return { relativePath }
+  }
+
+  const [, scope, innerRelativePath] = match
+  if (
+    !CODEX_MEDIA_SCOPE_PATTERN.test(scope) ||
+    !isNormalizedMediaRelativePath(innerRelativePath) ||
+    (match[0].startsWith('codex-images-') && !relativePath.startsWith(`codex-images-${scope}/`))
+  ) {
+    throw new Error('Managed media reference scope is malformed')
+  }
+
+  return {
+    storePrefix: `codex-images-${scope}`,
+    relativePath: innerRelativePath
+  }
+}
+
 function metadataMatchesReference(
   value: unknown,
-  reference: MediaReference
+  reference: MediaReference,
+  expectedRelativePath = reference.relativePath
 ): value is ManagedMediaMetadata {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const metadata = value as Record<string, unknown>
@@ -712,7 +747,7 @@ function metadataMatchesReference(
     metadata.sizeBytes === reference.sizeBytes &&
     metadata.mimeType === reference.mimeType &&
     metadata.extension === expectedExtension &&
-    metadata.relativePath === reference.relativePath
+    metadata.relativePath === expectedRelativePath
   )
 }
 function localUrl(absolutePath: string): string {
@@ -1108,8 +1143,18 @@ export async function resolveManagedMediaReference(
       { cause: error }
     )
   }
+  let referencePath: ManagedMediaReferencePath
+  try {
+    referencePath = splitManagedMediaReferencePath(reference.relativePath)
+  } catch (error) {
+    throw new ManagedMediaResolutionError(
+      'MANAGED_MEDIA_CORRUPT',
+      'Malformed managed media reference path',
+      { cause: error }
+    )
+  }
   const expectedPath = `originals/${reference.sha256?.slice(0, 2)}/${reference.sha256}.${extensions[mimeType]}`
-  if (reference.relativePath !== expectedPath)
+  if (referencePath.relativePath !== expectedPath)
     throw new ManagedMediaResolutionError(
       'MANAGED_MEDIA_CORRUPT',
       'Forged managed media reference path'
@@ -1117,7 +1162,10 @@ export async function resolveManagedMediaReference(
   let canonicalRoot: string
   try {
     const authorizedRoot = await canonicalAuthorizedRoot(dependencies.authorizedRoot, fileSystem)
-    canonicalRoot = await existingStoreRoot(chatMediaRoot, authorizedRoot, fileSystem)
+    const requestedStoreRoot = referencePath.storePrefix
+      ? path.resolve(authorizedRoot, ...referencePath.storePrefix.split('/'))
+      : chatMediaRoot
+    canonicalRoot = await existingStoreRoot(requestedStoreRoot, authorizedRoot, fileSystem)
   } catch (error) {
     if (error instanceof ManagedMediaResolutionError) throw error
     throw new ManagedMediaResolutionError(
@@ -1128,7 +1176,7 @@ export async function resolveManagedMediaReference(
       }
     )
   }
-  const absolutePath = path.join(canonicalRoot, ...reference.relativePath.split('/'))
+  const absolutePath = path.join(canonicalRoot, ...referencePath.relativePath.split('/'))
   const metadataPath = path.join(canonicalRoot, 'metadata', `${reference.sha256}.json`)
   if (
     !isPathInsideRoot(canonicalRoot, absolutePath) ||
@@ -1153,9 +1201,9 @@ export async function resolveManagedMediaReference(
     )
     await validateExistingPath(canonicalRoot, metadataPath, 'file', fileSystem)
     await validateExistingPath(canonicalRoot, absolutePath, 'file', fileSystem)
-    const metadataBytes = await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem)
+    const metadataBytes = await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem, true)
     const metadata = JSON.parse(metadataBytes.toString()) as unknown
-    if (!metadataMatchesReference(metadata, reference))
+    if (!metadataMatchesReference(metadata, reference, referencePath.relativePath))
       throw new ManagedMediaResolutionError(
         'MANAGED_MEDIA_CORRUPT',
         'Managed media metadata does not match reference'
@@ -1169,12 +1217,14 @@ export async function resolveManagedMediaReference(
     const handle = await fileSystem.open(absolutePath, fsConstants.O_RDONLY | NOFOLLOW)
     try {
       const opened = await handle.stat()
+      const contentHash = await hashHandle(handle, opened.size)
+      const after = await handle.stat()
+      const current = await fileSystem.lstat(absolutePath)
       if (
-        !opened.isFile() ||
-        opened.dev !== before.dev ||
-        opened.ino !== before.ino ||
-        opened.size !== reference.sizeBytes ||
-        (await hashHandle(handle, opened.size)) !== reference.sha256
+        !sameFileState(before, opened) ||
+        !sameFileState(opened, after) ||
+        !sameFileState(after, current) ||
+        contentHash !== reference.sha256
       )
         throw new ManagedMediaResolutionError(
           'MANAGED_MEDIA_CORRUPT',
@@ -1188,6 +1238,7 @@ export async function resolveManagedMediaReference(
     return {
       reference,
       absolutePath,
+      storeRoot: canonicalRoot,
       localMediaUrl: localUrl(absolutePath),
       metadataPath,
       metadata: metadata as ManagedMediaMetadata,

@@ -48,8 +48,7 @@ export type UnsupportedManagedMediaDerivative = {
   original: Awaited<ReturnType<typeof resolveManagedMediaReference>>
 }
 export type EnsureManagedMediaDerivativeResult =
-  | ManagedMediaDerivativeDescriptor
-  | UnsupportedManagedMediaDerivative
+  ManagedMediaDerivativeDescriptor | UnsupportedManagedMediaDerivative
 export type EnsureManagedMediaDerivativeInput = {
   authorizedRoot: string
   reference: MediaReference
@@ -533,9 +532,10 @@ async function generate(
 ): Promise<ManagedMediaDerivativeDescriptor> {
   const originalSha256 = original.reference.sha256!
   const identity = identityFor(originalSha256, maxEdge, format)
+  const storeRoot = original.storeRoot ?? root
+  const derivativeRoot = path.join(storeRoot, 'derivatives')
   const identityRoot = path.join(
-    root,
-    'derivatives',
+    derivativeRoot,
     originalSha256.slice(0, 2),
     originalSha256,
     identity
@@ -673,10 +673,11 @@ export async function ensureManagedMediaDerivative(
       maxEdge: input.maxEdge,
       original
     }
-  const key = `${root}\0${original.reference.sha256}\0${input.maxEdge}\0${format}`
+  const storeRoot = original.storeRoot ?? root
+  const key = `${storeRoot}\0${original.reference.sha256}\0${input.maxEdge}\0${format}`
   const existing = inflight.get(key)
   if (existing) return existing
-  const promise = generate(root, original, input.maxEdge, format)
+  const promise = generate(storeRoot, original, input.maxEdge, format)
   inflight.set(key, promise)
   try {
     return await promise

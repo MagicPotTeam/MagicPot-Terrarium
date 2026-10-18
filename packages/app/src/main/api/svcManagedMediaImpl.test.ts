@@ -185,6 +185,7 @@ describe('ManagedMediaSvcImpl', () => {
         extension: 'png',
         relativePath: reference.relativePath
       },
+      storeRoot: '/canonical/media',
       integrityVerified: true,
       verifiedAt: new Date(0).toISOString()
     }
@@ -210,6 +211,27 @@ describe('ManagedMediaSvcImpl', () => {
     })
     expect(ensureDerivative).not.toHaveBeenCalled()
     expect(readMediaBytes).toHaveBeenCalledWith('/canonical/media', resolved.metadata, {
+      authorizedRoot: '/canonical/media'
+    })
+    const scopedRoot = '/canonical/media/codex-images/scope'
+    const scopedResolved: ResolvedManagedMedia = {
+      ...resolved,
+      absolutePath: `${scopedRoot}/originals/ab/file.png`,
+      localMediaUrl: `local-media://${scopedRoot}/originals/ab/file.png`,
+      metadataPath: `${scopedRoot}/metadata/file.json`,
+      storeRoot: scopedRoot
+    }
+    const scopedResolveReference = vi.fn(async () => scopedResolved)
+    const scopedReadMediaBytes = vi.fn(async (root: string) => {
+      expect(root).toBe(scopedRoot)
+      return original
+    })
+    const scopedService = create(ensureDerivative, {
+      resolveReference: scopedResolveReference,
+      readMediaBytes: scopedReadMediaBytes
+    })
+    await scopedService.materializeForRequest({ reference, transport: 'request-data-url' })
+    expect(scopedReadMediaBytes).toHaveBeenCalledWith(scopedRoot, scopedResolved.metadata, {
       authorizedRoot: '/canonical/media'
     })
     expect(processed).not.toEqual(original)

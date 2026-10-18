@@ -38,6 +38,7 @@ import {
   importManagedMedia,
   importManagedMediaFile,
   readManagedMediaBytes,
+  isPathInsideRoot,
   type ImportedManagedMedia,
   resolveManagedMediaReference
 } from '../llmProxy/managedMediaStore'
@@ -72,7 +73,32 @@ function importResponse(
       code: 'MANAGED_MEDIA_IMPORT_FAILED'
     })
   }
-  const absolutePath = path.join(authorizedRoot, ...reference.relativePath.split('/'))
+  const canonicalImportedPath = path.resolve(imported.absolutePath)
+  const canonicalAuthorizedRoot = path.resolve(authorizedRoot)
+  const relativePath = path
+    .relative(canonicalAuthorizedRoot, canonicalImportedPath)
+    .split(path.sep)
+    .join('/')
+  const importedReferencePath = reference.relativePath
+  const expectedReferencePath = relativePath.startsWith('codex-images/')
+    ? relativePath
+    : importedReferencePath
+  if (
+    !relativePath ||
+    path.isAbsolute(relativePath) ||
+    relativePath.startsWith('../') ||
+    relativePath.includes('\\') ||
+    (relativePath.startsWith('codex-images/') && importedReferencePath !== relativePath) ||
+    !isPathInsideRoot(
+      canonicalAuthorizedRoot,
+      path.join(canonicalAuthorizedRoot, ...expectedReferencePath.split('/'))
+    )
+  ) {
+    throw new ServiceError('Unable to import managed media', {
+      code: 'MANAGED_MEDIA_IMPORT_FAILED'
+    })
+  }
+  const absolutePath = path.join(canonicalAuthorizedRoot, ...expectedReferencePath.split('/'))
   const fileUrl = pathToFileURL(absolutePath).toString()
   return validateImportManagedMediaResp({
     reference,
@@ -347,7 +373,7 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
       const authorizedRoot = await realpath(mediaDir)
       const resolved = await resolveReference(mediaDir, req.reference, { authorizedRoot })
       const selected: Parameters<typeof readManagedMediaBytes>[1] = resolved.metadata
-      const bytes = await readMediaBytes(authorizedRoot, selected, {
+      const bytes = await readMediaBytes(resolved.storeRoot ?? authorizedRoot, selected, {
         authorizedRoot
       })
       return validateMaterializeManagedMediaForRequestResp({

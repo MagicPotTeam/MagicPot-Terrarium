@@ -4,6 +4,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
+
 vi.unmock('node:fs')
 vi.unmock('node:fs/promises')
 
@@ -409,6 +410,46 @@ describe('managedMediaStore', () => {
       )
     ).rejects.toThrow('changed during import')
     expect(await fs.readdir(path.join(storeRoot, '.staging'))).toEqual([])
+  })
+
+  it('resolves legacy scoped references beneath the authorized root and rejects traversal prefixes', async () => {
+    const scopedRoot = path.join(authorizedRoot, 'codex-images-owned-scope')
+    const imported = await importManagedMedia(scopedRoot, input(), { authorizedRoot })
+    const scopedReference = {
+      ...imported.reference,
+      relativePath: `codex-images-owned-scope/${imported.reference.relativePath}`
+    }
+    const resolved = await resolveManagedMediaReference(authorizedRoot, scopedReference, {
+      authorizedRoot
+    })
+    expect(resolved.storeRoot).toBe(await fs.realpath(scopedRoot))
+    expect(resolved.absolutePath).toBe(imported.absolutePath)
+    expect(await fs.readFile(resolved.absolutePath)).toEqual(pngBytes)
+
+    const longScope = `a${'b'.repeat(127)}a`
+    const longReference = {
+      ...scopedReference,
+      relativePath: `codex-images-${longScope}/${imported.reference.relativePath}`
+    }
+    await expect(
+      resolveManagedMediaReference(authorizedRoot, longReference, { authorizedRoot })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_CORRUPT' })
+
+    for (const relativePath of [
+      `codex-images-../outside/${imported.reference.relativePath}`,
+      `codex-images--owned-scope/${imported.reference.relativePath}`,
+      `codex-images-owned-scope-nested/x/${imported.reference.relativePath}`,
+      `arbitrary-store/owned-scope/${imported.reference.relativePath}`,
+      `../outside/${imported.reference.relativePath}`
+    ]) {
+      await expect(
+        resolveManagedMediaReference(
+          authorizedRoot,
+          { ...scopedReference, relativePath },
+          { authorizedRoot }
+        )
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_CORRUPT' })
+    }
   })
 
   it('restores a managed PNG from a JSON-safe reference after restart without adapters', async () => {

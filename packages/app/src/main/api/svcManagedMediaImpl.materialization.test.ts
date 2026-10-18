@@ -10,6 +10,7 @@ vi.unmock('node:fs/promises')
 import {
   importManagedMedia,
   readManagedMediaBytes,
+  resolveManagedMediaReference,
   type ImportedManagedMedia
 } from '../llmProxy/managedMediaStore'
 import { ManagedMediaSvcImpl } from './svcManagedMediaImpl'
@@ -109,6 +110,60 @@ describe('managed media request materialization races (real filesystem)', () => 
     expect(result.sizeBytes).toBe(bytes.length)
     expect(result.mimeType).toBe('image/gif')
     expect(ensureDerivative).not.toHaveBeenCalled()
+  })
+
+  it('resolves and materializes legacy scoped references from the real filesystem', async () => {
+    const scopedRoot = path.join(root, 'codex-images-owned-scope')
+    const imported = await importManagedMedia(
+      scopedRoot,
+      {
+        bytes: png,
+        mimeType: 'image/png',
+        originalFileName: 'scoped.png',
+        provenance: { source: 'scoped-materialization-test' }
+      },
+      { authorizedRoot: root }
+    )
+    const legacyDashReference = {
+      ...imported.reference,
+      relativePath: `codex-images-owned-scope/${imported.reference.relativePath}`
+    }
+    const reference = {
+      ...imported.reference,
+      relativePath: `codex-images/owned-scope/${imported.reference.relativePath}`
+    }
+    const resolved = await resolveManagedMediaReference(root, legacyDashReference, {
+      authorizedRoot: root
+    })
+    expect(resolved.storeRoot).toBe(await fs.realpath(scopedRoot))
+    expect(resolved.absolutePath).toBe(imported.absolutePath)
+    const restored = await resolveManagedMediaReference(root, reference, {
+      authorizedRoot: root
+    })
+    expect(restored.storeRoot).toBe(await fs.realpath(scopedRoot))
+    expect(restored.absolutePath).toBe(imported.absolutePath)
+    expect(await fs.readFile(resolved.absolutePath)).toEqual(png)
+
+    const service = new ManagedMediaSvcImpl({ getMediaDir: () => root })
+    const result = await service.materializeForRequest(
+      request({ ...imported, reference: legacyDashReference })
+    )
+    expect(result.mimeType).toBe('image/png')
+    expect(result.sizeBytes).toBe(png.length)
+    expect(Buffer.from(result.dataUrl.split(',')[1], 'base64')).toEqual(png)
+
+    for (const relativePath of [
+      `codex-images-../outside/${imported.reference.relativePath}`,
+      `codex-images--owned-scope/${imported.reference.relativePath}`
+    ]) {
+      await expect(
+        resolveManagedMediaReference(
+          root,
+          { ...legacyDashReference, relativePath },
+          { authorizedRoot: root }
+        )
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_CORRUPT' })
+    }
   })
 
   it('does not use an existing derivative when the request reference resolves to the original', async () => {
