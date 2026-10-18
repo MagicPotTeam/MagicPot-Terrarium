@@ -729,3 +729,26 @@ export const buildChatContextCompressionPlan = (input: {
     requestReplayImageMessages
   }
 }
+
+/** Stop an unsendable plan instead of repeatedly summarizing or silently removing images. */
+export const assertChatContextBudget = (
+  plan: Pick<ChatContextCompressionPlan, 'contextBudgetTokens' | 'estimatedCompressedInputTokens'>
+): void => {
+  const budget = plan.contextBudgetTokens
+  if (
+    budget !== null &&
+    Number.isFinite(budget) &&
+    budget > 0 &&
+    plan.estimatedCompressedInputTokens > budget
+  ) {
+    const error = new Error(
+      `Context remains over the model budget after compaction (${Math.ceil(plan.estimatedCompressedInputTokens)} > ${budget} tokens). Historical images were preserved; choose a larger-context model or start a separate thread.`
+    )
+    Object.assign(error, {
+      code: 'CHAT_CONTEXT_BUDGET_EXCEEDED',
+      estimatedTokens: plan.estimatedCompressedInputTokens,
+      budgetTokens: budget
+    })
+    throw error
+  }
+}
