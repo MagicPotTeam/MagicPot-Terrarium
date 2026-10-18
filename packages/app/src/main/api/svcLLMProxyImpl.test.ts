@@ -916,6 +916,130 @@ describe('LLMProxySvcImpl', () => {
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
   })
 
+  it('does not execute a tool when the running status callback cancels first', async () => {
+    const agentChat = vi
+      .fn()
+      .mockResolvedValueOnce('{"toolName":"session.status","args":{"secret":"never-run"}}')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+    listToolsMock.mockReturnValue([
+      {
+        name: 'session.status',
+        description: 'Status',
+        inputSchema: { type: 'object' }
+      }
+    ])
+    mockAgentProfile()
+
+    const conversationId = 'cancel-before-tool'
+    const svc = new LLMProxySvcImpl()
+    const events: Array<{ type: string; toolStatus?: { status?: string } }> = []
+    const onData = vi.fn((event: { type: string; toolStatus?: { status?: string } }) => {
+      events.push(event)
+      if (event.type === 'tool-status' && event.toolStatus?.status === 'running') {
+        void svc.cancelConversation({ conversationId })
+      }
+    })
+
+    await svc.chatStream(
+      {
+        conversationId,
+        profileId: 'agent-profile',
+        messages: [{ role: 'user', content: 'use the status tool' }],
+        skillRuntime: {
+          skillId: 'cancel-before-tool-skill',
+          bindings: [{ appId: 'magicpot.core', toolNames: ['session.status'] }]
+        }
+      },
+      { onData }
+    )
+
+    expect(agentChat).toHaveBeenCalledOnce()
+    expect(callToolMock).not.toHaveBeenCalled()
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool-status',
+        toolStatus: expect.objectContaining({ status: 'running' })
+      })
+    )
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        type: 'tool-status',
+        toolStatus: expect.objectContaining({ status: 'completed' })
+      })
+    )
+    expect(events.at(-1)).toMatchObject({ type: 'done', finishReason: 'cancelled' })
+  })
+
+  it('preserves completed tool history when the turn is cancelled after tool success', async () => {
+    const agentChat = vi
+      .fn()
+      .mockResolvedValueOnce('{"toolName":"session.status","args":{"secret":"do-not-leak"}}')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+    listToolsMock.mockReturnValue([
+      {
+        name: 'session.status',
+        description: 'Status',
+        inputSchema: { type: 'object' }
+      }
+    ])
+    callToolMock.mockResolvedValue({ content: 'ready', metadata: { state: 'ok' } })
+    mockAgentProfile()
+
+    const conversationId = 'cancel-after-tool-success'
+    const svc = new LLMProxySvcImpl()
+    const events: Array<{ type: string; toolStatus?: { status?: string } }> = []
+    const options = {
+      onDelta: (event: { type: string; toolStatus?: { status?: string } }): void => {
+        events.push(event)
+        if (event.type === 'tool-status' && event.toolStatus?.status === 'completed') {
+          void svc.cancelConversation({ conversationId })
+        }
+      }
+    }
+
+    const pending = svc.chat(
+      {
+        conversationId,
+        profileId: 'agent-profile',
+        messages: [{ role: 'user', content: 'use the status tool' }],
+        skillRuntime: {
+          skillId: 'cancel-after-tool-success-skill',
+          bindings: [{ appId: 'magicpot.core', toolNames: ['session.status'] }]
+        }
+      },
+      options as unknown as Parameters<typeof svc.chat>[1]
+    )
+
+    let failure: unknown
+    try {
+      await pending
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toMatchObject({
+      name: 'AbortError',
+      metadata: {
+        toolHistory: [
+          expect.objectContaining({
+            toolName: 'session.status',
+            status: 'completed',
+            content: 'ready',
+            metadata: { state: 'ok' }
+          })
+        ]
+      }
+    })
+    expect(callToolMock).toHaveBeenCalledOnce()
+    expect(agentChat).toHaveBeenCalledOnce()
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'tool-status',
+        toolStatus: expect.objectContaining({ status: 'completed' })
+      })
+    )
+  })
+
   it('does not rotate sibling profiles or backup ownership while continuing a session', async () => {
     const agentChat = vi.fn().mockResolvedValue('continued response')
     vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
@@ -1010,6 +1134,77 @@ describe('LLMProxySvcImpl', () => {
     }>
     expect(JSON.stringify(followUpMessages)).toContain('do-not-leak')
     expect(JSON.stringify(followUpMessages)).toContain('[Tool Result]')
+  })
+
+  it('forwards sanitized remote tool-status events without args or metadata', async () => {
+    const remoteStream = JSON.stringify({
+      type: 'tool-status',
+      delta: 'ignored',
+      done: true,
+      toolStatus: {
+        runId: ' backend-run-1 ',
+        toolCallId: ' backend-run-1:tool:0 ',
+        toolName: 'session.status',
+        status: 'running',
+        args: { secret: 'do-not-forward' },
+        metadata: { credential: 'do-not-forward' }
+      }
+    })
+    mockConfig({
+      use_remote_llm: true,
+      remote_llm_server_config: {
+        server_origin: 'https://remote.example',
+        access_token: 'remote-token'
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({ 'content-type': 'application/x-ndjson' }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`${remoteStream}\n`))
+          controller.enqueue(
+            new TextEncoder().encode(
+              `${JSON.stringify({ type: 'done', delta: '', done: true, finishReason: 'stop' })}\n`
+            )
+          )
+          controller.close()
+        }
+      })
+    })
+
+    const onData = vi.fn()
+    await new LLMProxySvcImpl().chatStream(
+      {
+        profileId: 'remote-profile',
+        messages: [{ role: 'user', content: 'use the remote tool' }]
+      },
+      { onData }
+    )
+
+    expect(onData).toHaveBeenCalledWith({
+      type: 'tool-status',
+      delta: '',
+      done: false,
+      fullContent: undefined,
+      toolStatus: {
+        runId: 'backend-run-1',
+        toolCallId: 'backend-run-1:tool:0',
+        toolName: 'session.status',
+        status: 'running'
+      }
+    })
+    const forwardedToolStatus = onData.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === 'tool-status')
+    expect(forwardedToolStatus.toolStatus).not.toHaveProperty('args')
+    expect(forwardedToolStatus.toolStatus).not.toHaveProperty('metadata')
+    expect(onData).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'done', done: true, finishReason: 'stop' })
+    )
   })
 
   it('aborts an upstream streaming request without a conversationId when the renderer closes the stream', async () => {

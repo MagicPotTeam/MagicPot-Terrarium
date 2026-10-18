@@ -26,6 +26,7 @@ import {
   LLMSignHy3DModelResp,
   LLMClearHy3DCosPrefixReq,
   LLMClearHy3DCosPrefixResp,
+  LLMToolStatus,
   ChatMessage,
   ChatAttachment,
   OCRResult
@@ -1035,6 +1036,32 @@ const MAX_SKILL_RUNTIME_TOOL_CALLS = 4
 
 const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+
+const normalizeRemoteToolStatus = (value: unknown): LLMToolStatus => {
+  if (!isPlainRecord(value)) {
+    throw new Error('Remote LLM streaming tool-status event was invalid.')
+  }
+
+  const runId = typeof value.runId === 'string' ? value.runId.trim() : ''
+  const toolCallId = typeof value.toolCallId === 'string' ? value.toolCallId.trim() : ''
+  const toolName = typeof value.toolName === 'string' ? value.toolName.trim() : ''
+  const status = value.status
+  if (
+    !runId ||
+    !toolCallId ||
+    !toolName ||
+    !(
+      status === 'running' ||
+      status === 'completed' ||
+      status === 'failed' ||
+      status === 'cancelled'
+    )
+  ) {
+    throw new Error('Remote LLM streaming tool-status event was invalid.')
+  }
+
+  return { runId, toolCallId, toolName, status }
+}
 
 const normalizeRequestedToolArgs = (value: unknown): Record<string, unknown> => {
   if (isPlainRecord(value)) {
@@ -2379,6 +2406,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let continuationUrl = req.sessionUrl
     let modelStepCount = 0
     const toolHistory: Array<Record<string, unknown>> = []
+    const emitToolStatus = (toolStatus: LLMToolStatus): void => {
+      if (options?.signal?.aborted) return
+      options?.onDelta?.({ type: 'tool-status', delta: '', toolStatus })
+    }
 
     try {
       for (let step = 0; step <= MAX_SKILL_RUNTIME_TOOL_CALLS; step += 1) {
@@ -2433,6 +2464,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         }
         toolHistory.push(record)
         try {
+          emitToolStatus({ runId, toolCallId, toolName: requestedTool.toolName, status: 'running' })
+          throwIfAborted(options?.signal)
           const toolResult = options?.executeTool
             ? await options.executeTool({
                 toolName: requestedTool.toolName,
@@ -2450,6 +2483,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           record.status = 'completed'
           record.content = toolResult.content
           if (toolResult.metadata) record.metadata = toolResult.metadata
+          emitToolStatus({
+            runId,
+            toolCallId,
+            toolName: requestedTool.toolName,
+            status: 'completed'
+          })
           throwIfAborted(options?.signal)
           // Preserve the legacy provider projection until native tool items are negotiated.
           // The parallel structured record never replaces model-visible call/result context.
@@ -2457,8 +2496,15 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           conversationMessages.push(buildToolResultMessage(requestedTool, toolResult.content))
         } catch (error) {
           if (record.status !== 'completed') {
-            record.status = options?.signal?.aborted ? 'cancelled' : 'failed'
+            const status = options?.signal?.aborted ? 'cancelled' : 'failed'
+            record.status = status
             record.error = error instanceof Error ? error.message : String(error)
+            emitToolStatus({
+              runId,
+              toolCallId,
+              toolName: requestedTool.toolName,
+              status
+            })
           }
           throw error
         }
@@ -2641,7 +2687,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         ...(event.ocrResult ? { ocrResult: event.ocrResult } : {}),
         ...(event.finishReason ? { finishReason: event.finishReason } : {}),
         ...(event.error ? { error: event.error } : {}),
-        ...(event.metadata ? { metadata: event.metadata } : {})
+        ...(event.metadata ? { metadata: event.metadata } : {}),
+        ...(event.toolStatus ? { toolStatus: event.toolStatus } : {})
       })
     }
 
@@ -2832,13 +2879,24 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         if (!isPlainRecord(event) || typeof event.type !== 'string') {
           throw new Error('Remote LLM streaming response contained an invalid event.')
         }
-        const safeEvent =
+        const safeEvent: LLMChatStreamResp =
           event.type === 'error' && event.error
             ? { ...event, error: boundRemoteErrorDetail(event.error) }
-            : event
+            : event.type === 'tool-status'
+              ? {
+                  type: 'tool-status',
+                  delta: '',
+                  done: false,
+                  toolStatus: normalizeRemoteToolStatus(event.toolStatus)
+                }
+              : event
         assertSafeRemoteEventUrls(safeEvent, trustedRemoteOrigin)
         accountRemoteEvent(safeEvent)
-        if (!['text-delta', 'attachment', 'session', 'done', 'error'].includes(safeEvent.type)) {
+        if (
+          !['text-delta', 'attachment', 'session', 'tool-status', 'done', 'error'].includes(
+            safeEvent.type
+          )
+        ) {
           throw new Error(
             `Remote LLM streaming response contained an unknown event type: ${safeEvent.type}`
           )

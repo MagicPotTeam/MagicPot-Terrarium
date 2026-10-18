@@ -43,6 +43,13 @@ export type ToolHistoryEntry = {
   metadata?: Record<string, unknown>
 }
 
+export type LLMToolStatus = {
+  runId: string
+  toolCallId: string
+  toolName: string
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
+}
+
 /** A single chat message */
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -89,7 +96,7 @@ export interface LLMChatResult {
 }
 
 export interface LLMDeltaEvent {
-  type: 'text-delta' | 'attachment' | 'session' | 'done' | 'error'
+  type: 'text-delta' | 'attachment' | 'session' | 'tool-status' | 'done' | 'error'
   delta?: string
   attachment?: ChatAttachment
   sessionUrl?: string
@@ -99,6 +106,7 @@ export interface LLMDeltaEvent {
   finishReason?: LLMChatFinishReason
   error?: string
   metadata?: LLMChatMetadata
+  toolStatus?: LLMToolStatus
 }
 
 export type OpenAIImageGenerationAction = 'auto' | 'generate' | 'edit'

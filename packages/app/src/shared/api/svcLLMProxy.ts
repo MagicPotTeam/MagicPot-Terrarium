@@ -18,6 +18,7 @@ import type {
   LLMImageHistoryPolicy,
   OpenAIImageGenerationOptions,
   ToolHistoryEntry,
+  LLMToolStatus,
   VideoGenerationOptions
 } from '@shared/llm/types'
 import type {
@@ -26,6 +27,8 @@ import type {
 } from '@shared/llm/profileCapabilities'
 import type { MediaReference } from '@shared/mediaReference'
 import type { ReportBundleRole } from '@shared/reportBundle'
+
+export type { LLMToolStatus } from '@shared/llm/types'
 
 // ==================== 聊天相关类型 ====================
 
@@ -197,7 +200,7 @@ export type LLMChatOptions = {
 export type LLMChatStreamReq = LLMChatReq
 
 export type LLMChatStreamResp = {
-  type: 'text-delta' | 'attachment' | 'session' | 'done' | 'error'
+  type: 'text-delta' | 'attachment' | 'session' | 'tool-status' | 'done' | 'error'
   /** 增量内容 */
   delta: string
   /** 是否完成 */
@@ -217,6 +220,7 @@ export type LLMChatStreamResp = {
   /** Bounded/redacted diagnostic body from the main process; never raw upstream content. */
   body?: string
   metadata?: Record<string, unknown>
+  toolStatus?: LLMToolStatus
   usage?: {
     promptTokens?: number
     inputTextTokens?: number
