@@ -4970,6 +4970,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           provisionalContinuationMatches &&
           currentSessionUrl?.trim()
         ),
+        hasRealSessionContinuationTransport: !activeExternalAgentSkill,
         shouldResetContinuation: false,
         isImageGenerationRequest: provisionalIsImageGenerationRequest
       }).imageHistoryPolicy
@@ -5110,6 +5111,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           continuationProfileMatches &&
           currentSessionUrl?.trim()
         ),
+        hasRealSessionContinuationTransport: !activeExternalAgentSkill,
         shouldResetContinuation: false,
         isImageGenerationRequest
       }).imageHistoryPolicy
@@ -5334,6 +5336,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const preliminaryImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
           supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
           hasUsableSessionContinuation,
+          hasRealSessionContinuationTransport: !activeExternalAgentSkill,
           shouldResetContinuation: false,
           isImageGenerationRequest
         }).preliminaryImageHistoryPolicy
@@ -5361,6 +5364,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const imageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
           supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
           hasUsableSessionContinuation,
+          hasRealSessionContinuationTransport: !activeExternalAgentSkill,
           shouldResetContinuation: shouldDropSessionUrlForCompressedRequest,
           isImageGenerationRequest
         }).imageHistoryPolicy

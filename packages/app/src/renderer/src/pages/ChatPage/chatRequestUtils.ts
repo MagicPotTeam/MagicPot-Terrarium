@@ -710,6 +710,65 @@ const validateCustomSkillForSend = (skill: CustomSkill | null | undefined): void
   }
 }
 
+/**
+ * External-agent endpoints currently expose only the unary remoteFetch contract.
+ * They cannot consume the sessionUrl emitted by a previous response, so the
+ * renderer must not optimize away historical input images on the assumption of
+ * provider-side continuation. Explicit isolated/no-history execution remains
+ * authoritative and is never widened back to all-history.
+ */
+const resolveEffectiveImageHistoryPolicy = (input: {
+  imageHistoryPolicy?: LLMImageHistoryPolicy
+  externalAgentSkill?: CustomSkill | null
+  messages: readonly ChatMessage[]
+}): LLMImageHistoryPolicy | undefined => {
+  if (input.externalAgentSkill?.type !== 'agent') {
+    return input.imageHistoryPolicy
+  }
+
+  const execution = input.externalAgentSkill.execution
+  const explicitlyIsolated =
+    execution?.mode === 'isolated' ||
+    execution?.allowHistory === false ||
+    execution?.contextMessageLimit === 0
+  if (explicitlyIsolated || input.imageHistoryPolicy === 'all') {
+    return input.imageHistoryPolicy
+  }
+
+  // Keep the historical wire shape for text-only external-agent requests that
+  // did not opt into an image policy. Image-bearing requests still need an
+  // explicit all-history projection because this transport has no continuation
+  // contract to carry omitted historical images.
+  if (
+    input.imageHistoryPolicy === undefined &&
+    !input.messages.some((message) =>
+      message.attachments?.some((attachment) => attachment.type === 'image')
+    )
+  ) {
+    return undefined
+  }
+
+  return 'all'
+}
+
+const projectRequestInputForTransport = <T extends RequestChatCompletionInput>(input: T): T => {
+  if (input.externalAgentSkill?.type !== 'agent') {
+    return input
+  }
+
+  return {
+    ...input,
+    imageHistoryPolicy: resolveEffectiveImageHistoryPolicy({
+      ...input,
+      messages: input.messages
+    }),
+    // External-agent transport has no continuation contract. Keep the returned
+    // session metadata for display/persistence, but never send it back as if it
+    // were provider-supported continuation state.
+    sessionUrl: undefined
+  }
+}
+
 const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequestPayload => {
   const resolvedSystemPrompt =
     input.externalAgentSkill?.type === 'agent'
@@ -2027,33 +2086,34 @@ export const requestChatCompletion = async (
   input: RequestChatCompletionInput
 ): Promise<RequestChatCompletionResult> => {
   validateCustomSkillForSend(input.externalAgentSkill)
-  const profile = resolveSelectedRequestProfile(input)
-  const maxImages = preflightRequestImageCount(input, profile)
+  const requestInput = projectRequestInputForTransport(input)
+  const profile = resolveSelectedRequestProfile(requestInput)
+  const maxImages = preflightRequestImageCount(requestInput, profile)
   const preflightMessages = await expandMessagesForImagePreflight(
-    input.messages,
-    input.imageHistoryPolicy,
+    requestInput.messages,
+    requestInput.imageHistoryPolicy,
     maxImages
   )
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
-    !useNativeOpenAIFileSearch && hasPrimaryReportBundleInMessages(input.messages)
-      ? await ensureReportInlineCapability(input)
+    !useNativeOpenAIFileSearch && hasPrimaryReportBundleInMessages(requestInput.messages)
+      ? await ensureReportInlineCapability(requestInput)
       : null
   const skipAttachmentContentAugmentation =
-    getBaseProfileId(input.profileId) === HUNYUAN_3D_PROFILE_ID
+    getBaseProfileId(requestInput.profileId) === HUNYUAN_3D_PROFILE_ID
   const requestMessages = await prepareMessagesForRequest(preflightMessages, {
     reportBundlesExpanded: maxImages !== undefined,
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
-    ...resolveManagedMediaRequestOptions(input),
-    imageHistoryPolicy: input.imageHistoryPolicy,
+    ...resolveManagedMediaRequestOptions(requestInput),
+    imageHistoryPolicy: requestInput.imageHistoryPolicy,
     skipInlineAttachmentSummary: (attachment) =>
       shouldSkipInlineAttachmentSummary(profile, attachment)
   })
 
   return dispatchChatCompletionRequest({
-    ...input,
+    ...requestInput,
     messages: requestMessages
   })
 }
@@ -2062,39 +2122,40 @@ export const requestChatCompletionStream = async (
   input: RequestChatCompletionStreamInput
 ): Promise<RequestChatCompletionStreamResult> => {
   validateCustomSkillForSend(input.externalAgentSkill)
-  const profile = resolveSelectedRequestProfile(input)
-  const maxImages = preflightRequestImageCount(input, profile)
+  const requestInput = projectRequestInputForTransport(input)
+  const profile = resolveSelectedRequestProfile(requestInput)
+  const maxImages = preflightRequestImageCount(requestInput, profile)
   const preflightMessages = await expandMessagesForImagePreflight(
-    input.messages,
-    input.imageHistoryPolicy,
+    requestInput.messages,
+    requestInput.imageHistoryPolicy,
     maxImages
   )
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
-    !useNativeOpenAIFileSearch && hasPrimaryReportBundleInMessages(input.messages)
-      ? await ensureReportInlineCapability(input)
+    !useNativeOpenAIFileSearch && hasPrimaryReportBundleInMessages(requestInput.messages)
+      ? await ensureReportInlineCapability(requestInput)
       : null
   const skipAttachmentContentAugmentation =
-    getBaseProfileId(input.profileId) === HUNYUAN_3D_PROFILE_ID
+    getBaseProfileId(requestInput.profileId) === HUNYUAN_3D_PROFILE_ID
   const requestMessages = await prepareMessagesForRequest(preflightMessages, {
     reportBundlesExpanded: maxImages !== undefined,
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
-    ...resolveManagedMediaRequestOptions(input),
-    imageHistoryPolicy: input.imageHistoryPolicy,
+    ...resolveManagedMediaRequestOptions(requestInput),
+    imageHistoryPolicy: requestInput.imageHistoryPolicy,
     skipInlineAttachmentSummary: (attachment) =>
       shouldSkipInlineAttachmentSummary(profile, attachment)
   })
 
   const result = await dispatchChatCompletionStreamRequest({
-    ...input,
+    ...requestInput,
     messages: requestMessages
   })
 
   const normalizedResult = applySkillOutputModeContract(
     result.result,
-    input.skillRuntime?.execution?.outputMode
+    requestInput.skillRuntime?.execution?.outputMode
   )
 
   return {
