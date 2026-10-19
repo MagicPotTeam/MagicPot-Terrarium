@@ -106,6 +106,37 @@ describe('ManagedMediaSvcImpl', () => {
     })
   })
 
+  it('preserves a scoped physical import path in the service response', async () => {
+    await withImportFixture(async ({ root, source }) => {
+      const scope = 'owned-scope'
+      const absolutePath = path.join(root, `codex-images-${scope}`, 'originals', 'imported.png')
+      const importFile = vi.fn(async () => ({
+        reference: {
+          version: 1 as const,
+          kind: 'managed' as const,
+          relativePath: `codex-images-${scope}/originals/imported.png`,
+          sha256: 'a'.repeat(64),
+          sizeBytes: 12,
+          mimeType: 'image/png' as const,
+          originalFileName: 'imported.png'
+        },
+        absolutePath,
+        localMediaUrl: 'local-media://stale',
+        metadataPath: `${absolutePath}.json`
+      }))
+      const service = new ManagedMediaSvcImpl({ getMediaDir: () => root, importFile })
+      const imported = await service.importFile({
+        sourcePath: source,
+        mimeType: 'image/png',
+        originalFileName: 'imported.png'
+      })
+      expect(imported.localMediaUrl).toBe(
+        `local-media://${pathToFileURL(absolutePath).toString().slice('file://'.length)}`
+      )
+      expect(importFile).toHaveBeenCalledOnce()
+    })
+  })
+
   it('rejects non-file URIs and noncanonical paths before store import', async () => {
     const importFile = vi.fn()
     const service = new ManagedMediaSvcImpl({

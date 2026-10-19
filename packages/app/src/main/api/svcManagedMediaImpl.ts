@@ -80,7 +80,9 @@ function importResponse(
     .split(path.sep)
     .join('/')
   const importedReferencePath = reference.relativePath
-  const expectedReferencePath = relativePath.startsWith('codex-images/')
+  const codexScopedPhysicalPath =
+    /^codex-images(?:\/|-[a-z0-9_](?:[a-z0-9._-]{0,126}[a-z0-9_])?\/)/u
+  const expectedReferencePath = codexScopedPhysicalPath.test(relativePath)
     ? relativePath
     : importedReferencePath
   if (
@@ -88,7 +90,7 @@ function importResponse(
     path.isAbsolute(relativePath) ||
     relativePath.startsWith('../') ||
     relativePath.includes('\\') ||
-    (relativePath.startsWith('codex-images/') && importedReferencePath !== relativePath) ||
+    (codexScopedPhysicalPath.test(relativePath) && importedReferencePath !== relativePath) ||
     !isPathInsideRoot(
       canonicalAuthorizedRoot,
       path.join(canonicalAuthorizedRoot, ...expectedReferencePath.split('/'))
