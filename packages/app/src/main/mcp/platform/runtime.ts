@@ -43,6 +43,11 @@ const KERNEL_SOURCE_ID = 'agent-kernel'
 const CHATBOT_TOOL_TARGET_PREFIX = 'chat.tool.'
 
 const CANVAS_APPROVED_TOOL_NAMES = new Set([
+  // Invocation admission only: FilesToolHost still checks the route root and each read permit.
+  'files.tree',
+  'files.read',
+  'files.glob',
+  'files.json.read',
   'artifacts.get',
   'artifacts.list',
   'audit.timeline',
