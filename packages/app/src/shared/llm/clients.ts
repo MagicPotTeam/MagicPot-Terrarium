@@ -622,6 +622,28 @@ const selectImageHistoryMessages = (
   policy?: LLMImageHistoryPolicy
 ): LLMChatParams['messages'] => selectMessagesForImageHistoryPolicy(messages, policy)
 
+/** Project only already-selected generated images into provider-readable user references.
+ * Keep the assistant prose and non-image history intact, without mutating stored messages.
+ */
+const projectAssistantImageReferenceTurns = (
+  messages: LLMChatParams['messages']
+): LLMChatParams['messages'] =>
+  messages.flatMap((message) => {
+    if (message.role !== 'assistant') return [message]
+    const images = (message.attachments || []).filter((attachment) => attachment.type === 'image')
+    if (!images.length) return [message]
+    const attachments = message.attachments!.filter((attachment) => attachment.type !== 'image')
+    const original = { ...message, attachments: attachments.length ? attachments : undefined }
+    return [
+      ...(message.content.trim() || attachments.length ? [original] : []),
+      {
+        role: 'user' as const,
+        content: 'Reference image(s) from the previous assistant response:',
+        attachments: images
+      }
+    ]
+  })
+
 const decodeBase64Bytes = (value: string): Uint8Array => {
   const normalized = value.replace(/\s+/g, '')
   if (typeof Buffer !== 'undefined') {
@@ -987,9 +1009,11 @@ export class OpenAIAPICli implements LLMCli {
     params: LLMChatParams,
     control: OpenAIRequestControl
   ): Promise<LLMChatResult> {
-    const selectedMessages = selectImageHistoryMessages(
-      params.messages,
-      params.imageGenerationOptions?.action === 'edit' ? 'all' : params.imageHistoryPolicy
+    const selectedMessages = projectAssistantImageReferenceTurns(
+      selectImageHistoryMessages(
+        params.messages,
+        params.imageGenerationOptions?.action === 'edit' ? 'all' : params.imageHistoryPolicy
+      )
     )
     const references = getSelectedUserImageAttachments(selectedMessages)
     const selectedImageMessages = selectedMessages.filter((message) => message.role === 'user')
@@ -1339,7 +1363,11 @@ export class OpenAIAPICli implements LLMCli {
       apiMessages.push({ role: 'system', content: systemPrompt })
     }
 
-    for (const msg of messages) {
+    const selectedMessages =
+      params.imageHistoryPolicy === undefined
+        ? messages
+        : selectImageHistoryMessages(messages, params.imageHistoryPolicy)
+    for (const msg of projectAssistantImageReferenceTurns(selectedMessages)) {
       if (msg.attachments && msg.attachments.length > 0) {
         const imageAttachments = msg.attachments.filter((a) => a.type === 'image')
         if (imageAttachments.length > 0 && msg.role === 'user') {
@@ -1802,7 +1830,11 @@ export class ClaudeAPICli implements LLMCli {
 
     const claudeMessages: ClaudeMessage[] = []
 
-    for (const msg of messages) {
+    const selectedMessages =
+      params.imageHistoryPolicy === undefined
+        ? messages
+        : selectImageHistoryMessages(messages, params.imageHistoryPolicy)
+    for (const msg of projectAssistantImageReferenceTurns(selectedMessages)) {
       // Skip system messages (handled as a separate parameter in Claude API)
       if (msg.role === 'system') continue
 
