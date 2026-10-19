@@ -334,4 +334,58 @@ describe('ChatPage persistence and run identity regressions', () => {
     expect(() => view.rerender(page())).not.toThrow()
     await waitFor(() => expect(currentSession()?.id).toBeTruthy())
   })
+
+  it('keeps the generated reply and dirty state when a guarded save conflicts with a newer record', async () => {
+    const old: ChatSession = {
+      id: 'owned-conflict',
+      title: 'Owned conflict',
+      messages: [{ role: 'user', content: 'old question' }]
+    }
+    hoisted.sessions.value = [clone(old)]
+    // The placeholder (no reply yet) saves cleanly; the reply save hits a cross-writer conflict.
+    const conflict = Object.assign(new Error('record changed in another window'), {
+      name: 'ChatSessionSaveConflictError'
+    })
+    hoisted.saveSessionToDB.mockImplementation(async (session: ChatSession) => {
+      if (session.messages.some((message) => message.content === 'reply')) throw conflict
+      hoisted.sessions.value = [clone(session)]
+    })
+    renderPage()
+    await waitFor(() => expect(currentSession()?.id).toBe(old.id))
+
+    fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'new question' } })
+    fireEvent.click(screen.getByTestId('composer-send'))
+    await waitFor(() => expect(hoisted.requestChatCompletion).toHaveBeenCalledTimes(1))
+
+    // The reply must survive in the UI (dirty) even though the guarded write was rejected.
+    await waitFor(() =>
+      expect(currentSession()?.messages.some((message) => message.content === 'reply')).toBe(true)
+    )
+    // The stale snapshot must not have overwritten the conflicting record.
+    expect(hoisted.sessions.value[0]?.messages.some((message) => message.content === 'reply')).toBe(
+      false
+    )
+    await waitFor(() => expect(screen.getAllByText(/another window/).length).toBeGreaterThan(0))
+  })
+
+  it('keeps an unsaved draft visible and dirty when draft persistence fails', async () => {
+    const old: ChatSession = { id: 'owned-draft', title: 'Owned draft', messages: [] }
+    hoisted.sessions.value = [clone(old)]
+    hoisted.saveSessionToDB.mockImplementation(async (session: ChatSession) => {
+      if (session.draft?.inputValue) throw new Error('draft disk full')
+      hoisted.sessions.value = [clone(session)]
+    })
+    renderPage()
+    await waitFor(() => expect(currentSession()?.id).toBe(old.id))
+
+    fireEvent.change(screen.getByTestId('composer-input'), {
+      target: { value: 'unsaved draft text' }
+    })
+    // Wait for the draft debounce (200ms) to fire and the guarded save to fail.
+    await waitFor(() => expect(screen.getAllByText(/draft disk full/).length).toBeGreaterThan(0), {
+      timeout: 3000
+    })
+    // The draft must remain in the session and stay dirty (not silently dropped).
+    expect(currentSession()?.draft?.inputValue).toBe('unsaved draft text')
+  })
 })

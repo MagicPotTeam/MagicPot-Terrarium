@@ -51,7 +51,6 @@ import {
 import {
   loadAllSessions,
   compareAndUpdateSessionInDB,
-  saveSessionToDB,
   deleteSessionFromDB,
   cancelDebouncedSessionSave,
   deleteSessionDraftBackup,
@@ -65,6 +64,7 @@ import {
   type ChatSession,
   type ChatSessionDraft
 } from './chatStorage'
+import { ChatSessionSaveBaseline } from './chatSaveBaseline'
 import {
   buildAutoSavedChatImageKey,
   buildChatWorkspaceControlsPortalId,
@@ -893,6 +893,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const sessionPersistenceGateRef = useRef(true)
   const persistedSessionsRef = useRef<Map<string, ChatSession>>(new Map())
   const dirtySessionSnapshotsRef = useRef<Map<string, ChatSession>>(new Map())
+  const chatSaveBaselineRef = useRef<ChatSessionSaveBaseline>(new ChatSessionSaveBaseline())
   const sessionsRef = useRef<ChatSession[]>([])
   const compactingSessionIdsRef = useRef<Set<string>>(new Set())
   const contextCompactAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
@@ -927,9 +928,27 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
   const setDirtySessionSnapshot = useCallback(
     (scope: string, session: ChatSession): void => {
+      // Freeze the save baseline synchronously on first dirty so a later external refresh cannot
+      // advance the persisted map and let a stale snapshot overwrite a newer reply.
+      chatSaveBaselineRef.current.freeze(
+        scope,
+        session.id,
+        persistedSessionsRef.current.get(session.id) ?? null
+      )
       dirtySessionSnapshotsRef.current.set(getSessionStorageKey(scope, session.id), session)
     },
     [getSessionStorageKey]
+  )
+  const replacePersistedSessions = useCallback(
+    (scope: string, sessions: ChatSession[]): void => {
+      // Replace the id-keyed persisted map AND adopt loaded baselines for clean, non-in-flight keys
+      // of this scope only. Dirty or in-flight sessions keep their frozen baseline. Centralised so
+      // every accepted external snapshot (initial load / refresh / polling / request finally) does
+      // not leave a clean window on a stale baseline that would self-conflict on the next save.
+      persistedSessionsRef.current = new Map(sessions.map((session) => [session.id, session]))
+      chatSaveBaselineRef.current.adoptLoaded(scope, sessions, new Set(getDirtySessionIds(scope)))
+    },
+    [getDirtySessionIds]
   )
   const clearDirtySessionSnapshotIfCurrent = useCallback(
     (scope: string, session: ChatSession): void => {
@@ -949,6 +968,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
     },
     [getSessionStorageKey]
   )
+  const persistSessionWithBaseline = useCallback(
+    async (session: ChatSession, scope: string): Promise<void> => {
+      await chatSaveBaselineRef.current.persist(scope, session, () => {
+        return persistedSessionsRef.current.get(session.id) ?? null
+      })
+    },
+    []
+  )
   const persistCurrentSessionSnapshot = useCallback(
     async (
       sessionId: string,
@@ -962,7 +989,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setDirtySessionSnapshot(requestScope, session)
 
       try {
-        await saveSessionToDB(session, requestScope)
+        await persistSessionWithBaseline(session, requestScope)
         clearDirtySessionSnapshotIfCurrent(requestScope, session)
         if (storageScopeRef.current !== requestScope) return true
         if (getDirtySessionIds(requestScope).length === 0) setSessionSaveError(null)
@@ -986,6 +1013,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       getDirtySessionIds,
       emitPreviewRefresh,
       notifyError,
+      persistSessionWithBaseline,
       setDirtySessionSnapshot,
       storageScope
     ]
@@ -1098,6 +1126,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           }
         })
         if (!committed) return false
+        chatSaveBaselineRef.current.advance(expectedScope, sessionId, committed)
 
         if (
           storageScopeRef.current !== expectedScope ||
@@ -1106,6 +1135,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ) {
           return true
         }
+        // Only reflect the committed snapshot into the id-keyed persisted map once we know we are
+        // still in the same live scope, so an old-scope same-id commit cannot pollute a new scope.
+        persistedSessionsRef.current.set(sessionId, committed)
         setSessions((prev) =>
           prev.map((session) => {
             if (session.id !== sessionId) return session
@@ -1217,9 +1249,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             (session) => !deletedSessionKeysRef.current.has(`${storageScope}\u0000${session.id}`)
           )
         )
-        persistedSessionsRef.current = new Map(
-          sortedStoredSessions.map((session) => [session.id, session])
-        )
+        replacePersistedSessions(storageScope, sortedStoredSessions)
         const locallyMutatedSessionIds =
           loadMutationEpoch === sessionMutationEpochRef.current
             ? []
@@ -1295,7 +1325,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (mutationEpoch !== sessionMutationEpochRef.current) {
         return
       }
-      persistedSessionsRef.current = new Map(visibleStored.map((session) => [session.id, session]))
+      replacePersistedSessions(storageScope, visibleStored)
       setSessions((prev) =>
         mergeLoadedSessionsWithLocal(
           visibleStored,
@@ -1599,9 +1629,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   !deletedSessionKeysRef.current.has(`${pollingScope}\u0000${session.id}`)
               )
             )
-            persistedSessionsRef.current = new Map(
-              visibleStored.map((session) => [session.id, session])
-            )
+            replacePersistedSessions(pollingScope, visibleStored)
             setSessions((prev) =>
               mergeLoadedSessionsWithLocal(
                 visibleStored,
@@ -1628,9 +1656,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   !deletedSessionKeysRef.current.has(`${pollingScope}\u0000${session.id}`)
               )
             )
-            persistedSessionsRef.current = new Map(
-              visibleStored.map((session) => [session.id, session])
-            )
+            replacePersistedSessions(pollingScope, visibleStored)
             setSessions((prev) =>
               mergeLoadedSessionsWithLocal(
                 visibleStored,
@@ -2163,7 +2189,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
 
       try {
-        await saveSessionToDB(updatedSession, storageScope)
+        // Mark dirty (also freezes the baseline) before the guarded save so a failed draft write
+        // stays visible and is never dropped by a later storage refresh.
+        setDirtySessionSnapshot(storageScope, updatedSession)
+        await persistSessionWithBaseline(updatedSession, storageScope)
+        clearDirtySessionSnapshotIfCurrent(storageScope, updatedSession)
         setSessionLoadError(null)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
@@ -2173,7 +2203,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
         console.error('[ChatPage] Failed to persist session draft:', error)
       }
     },
-    [notifyError, storageScope]
+    [
+      clearDirtySessionSnapshotIfCurrent,
+      notifyError,
+      persistSessionWithBaseline,
+      setDirtySessionSnapshot,
+      storageScope
+    ]
   )
 
   const clearScheduledDraftPersistence = useCallback(() => {
@@ -3048,7 +3084,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           })
 
           if (updatedSessionToPersist) {
-            await saveSessionToDB(updatedSessionToPersist, storageScope)
+            await persistSessionWithBaseline(updatedSessionToPersist, storageScope)
             emitPreviewRefresh()
             emitChatActivity('compact_complete', compactCompleteActivity)
             if (!options.manual) {
@@ -3569,6 +3605,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     )
     for (const session of changedSessions) setDirtySessionSnapshot(storageScope, session)
     debouncedSaveSessions(changedSessions, 500, storageScope, {
+      saveOne: (session) => persistSessionWithBaseline(session, storageScope),
       onSuccess: (savedSessions) => {
         for (const session of savedSessions)
           clearDirtySessionSnapshotIfCurrent(storageScope, session)
@@ -3606,6 +3643,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }, [
     clearDirtySessionSnapshotIfCurrent,
     getDirtySessionIds,
+    persistSessionWithBaseline,
     sessions,
     sessionsLoaded,
     setDirtySessionSnapshot,
@@ -4155,7 +4193,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }
       }
       setActiveSessionId(newSession.id)
-      await saveSessionToDB(newSession, storageScope)
+      await persistSessionWithBaseline(newSession, storageScope)
       emitPreviewRefresh()
     },
     [
@@ -6491,9 +6529,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                         !deletedSessionKeysRef.current.has(`${requestScope}\u0000${session.id}`)
                     )
                   )
-                  persistedSessionsRef.current = new Map(
-                    visibleStored.map((session) => [session.id, session])
-                  )
+                  replacePersistedSessions(requestScope, visibleStored)
                   setSessions((prev) =>
                     mergeLoadedSessionsWithLocal(
                       visibleStored,
