@@ -48,6 +48,38 @@ describe('canvas file tools without a persistent file form', () => {
       expect(output.skillRuntime?.bindings?.[0]?.toolNames).not.toContain('files.write')
     }
   )
+  it.each(['svcLLMProxy.chat', 'svcLLMProxy.chatStream'])(
+    'keeps read tools when %s carries the disabled image settings emitted by ChatPage',
+    (methodName) => {
+      trust()
+      const input: LLMChatReq = {
+        ...req(),
+        imageGenerationOptions: {
+          enabled: false,
+          outputFormat: 'png',
+          size: 'auto',
+          quality: 'high',
+          background: 'auto'
+        }
+      }
+      const before = JSON.stringify(input)
+      const output = withCanvasFileTools(input, { ...invoke(), methodName })
+      expect(output.skillRuntime?.bindings?.[0]?.toolNames).toEqual([...CANVAS_READ_TOOL_NAMES])
+      expect(output.imageGenerationOptions).toBe(input.imageGenerationOptions)
+      expect(output.messages).toBe(input.messages)
+      expect(JSON.stringify(input)).toBe(before)
+      expect(withCanvasFileTools(input)).toBe(input)
+      expect(withCanvasFileTools(input, { ...invoke(), senderId: 999 })).toBe(input)
+    }
+  )
+  it.each([{ enabled: true }, { action: 'edit' }, {}] as LLMChatReq['imageGenerationOptions'][])(
+    'does not add file tools to an enabled or unspecified image request %j',
+    (imageGenerationOptions) => {
+      trust()
+      const input = { ...req(), imageGenerationOptions }
+      expect(withCanvasFileTools(input, invoke())).toBe(input)
+    }
+  )
   it('does not grant defaults to a direct or remote main-process caller without IPC identity', () => {
     const r = req()
     expect(withCanvasFileTools(r)).toBe(r)

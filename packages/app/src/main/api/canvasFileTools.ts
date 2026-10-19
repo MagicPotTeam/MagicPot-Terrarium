@@ -22,7 +22,8 @@ export function withCanvasFileTools<T extends LLMChatReq>(
   if (
     request.skillRuntime ||
     request.comparisonRouting === 'configured' ||
-    request.imageGenerationOptions ||
+    // ChatPage also sends its saved image settings for ordinary text turns.
+    (request.imageGenerationOptions && request.imageGenerationOptions.enabled !== false) ||
     request.videoGenerationOptions ||
     !invocation ||
     !['svcLLMProxy.chat', 'svcLLMProxy.chatStream'].includes(invocation.methodName) ||
