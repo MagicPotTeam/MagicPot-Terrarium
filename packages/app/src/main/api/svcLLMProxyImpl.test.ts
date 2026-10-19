@@ -1215,6 +1215,19 @@ describe('LLMProxySvcImpl', () => {
   })
 
   it('forwards sanitized remote tool-status events without args or metadata', async () => {
+    const { registerMagicAgentTrustedRouteBinding, clearMagicAgentTrustedRouteBindingsForTest } =
+      await import('../magicAgentRuntime/trustedRouteBinding')
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'remote-project',
+      threadId: 'remote-pane'
+    } as const
+    const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=remote-project'
+    registerMagicAgentTrustedRouteBinding(31, route, {
+      trustedUrl: url,
+      trustedWebContents: { id: 31, isDestroyed: () => false }
+    })
     const remoteStream = JSON.stringify({
       type: 'tool-status',
       delta: 'ignored',
@@ -1255,13 +1268,33 @@ describe('LLMProxySvcImpl', () => {
     })
 
     const onData = vi.fn()
-    await new LLMProxySvcImpl().chatStream(
-      {
-        profileId: 'remote-profile',
-        messages: [{ role: 'user', content: 'use the remote tool' }]
-      },
-      { onData }
-    )
+    try {
+      await new LLMProxySvcImpl().chatStream(
+        {
+          profileId: 'remote-profile',
+          conversationId: 'remote-conversation',
+          route,
+          messages: [{ role: 'user', content: String.raw`Read "D:\Project Notes\report.txt"` }]
+        },
+        { onData },
+        {
+          methodName: 'svcLLMProxy.chatStream',
+          senderId: 31,
+          isMainFrame: true,
+          frameUrl: url,
+          senderUrl: url
+        }
+      )
+    } finally {
+      clearMagicAgentTrustedRouteBindingsForTest()
+    }
+
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      skillRuntime?: unknown
+      systemPrompt?: string
+    }
+    expect(requestBody.skillRuntime).toBeUndefined()
+    expect(requestBody.systemPrompt || '').not.toContain('Use the available read-only file tools')
 
     expect(onData).toHaveBeenCalledWith({
       type: 'tool-status',

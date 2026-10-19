@@ -80,6 +80,29 @@ describe('canvas file tools without a persistent file form', () => {
       expect(withCanvasFileTools(input, invoke())).toBe(input)
     }
   )
+  it('does not add file tools to an explicit image request contract', () => {
+    trust()
+    const input = {
+      ...req(),
+      imageGenerationOptions: { enabled: false },
+      imageRequest: {
+        version: 1,
+        schema: 'magicpot.image-request.v1',
+        requestId: 'request-1',
+        taskId: 'task-1',
+        action: 'edit',
+        history: {},
+        limits: {
+          maxImages: 1,
+          maxBytesPerImage: 1,
+          maxTotalBytes: 1,
+          maxRequestBodyBytes: 1
+        },
+        permission: { images: true, externalFetch: false }
+      }
+    } satisfies LLMChatReq
+    expect(withCanvasFileTools(input, invoke())).toBe(input)
+  })
   it('does not grant defaults to a direct or remote main-process caller without IPC identity', () => {
     const r = req()
     expect(withCanvasFileTools(r)).toBe(r)

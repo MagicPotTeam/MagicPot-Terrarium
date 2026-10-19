@@ -6464,51 +6464,52 @@ const ChatPage: React.FC<ChatPageProps> = ({
         if (targetSessionId) {
           const wasCancelled = cancelledSessionsRef.current.has(targetSessionId)
           const isCurrentRun = activeRunIdBySessionRef.current.get(targetSessionId) === runId
-          if (!isCurrentRun) {
-            return
-          }
-          if (sessionAbortControllersRef.current.get(targetSessionId) === sessionAbortController) {
-            sessionAbortControllersRef.current.delete(targetSessionId)
-          }
-          lifecycleRunIdBySessionRef.current.delete(targetSessionId)
-          clearLoadingSessionTracking(targetSessionId, !wasCancelled, runId)
-          emitPreviewRefresh('preview-only')
-
-          if (!wasCancelled && !sessionSnapshotSaveFailed) {
-            try {
-              const requestScope = storageScope
-              const requestEpoch = sessionLoadEpochRef.current
-              const requestMutationEpoch = sessionMutationEpochRef.current
-              const latestStored = await loadAllSessions(requestScope)
-              const requestIsCurrent =
-                requestEpoch === sessionLoadEpochRef.current &&
-                requestMutationEpoch === sessionMutationEpochRef.current &&
-                requestScope === storageScopeRef.current
-              if (requestIsCurrent) {
-                const visibleStored = sortSessionsByRecencyDesc(
-                  latestStored.filter(
-                    (session) =>
-                      !deletedSessionKeysRef.current.has(`${requestScope}\u0000${session.id}`)
-                  )
-                )
-                persistedSessionsRef.current = new Map(
-                  visibleStored.map((session) => [session.id, session])
-                )
-                setSessions((prev) =>
-                  mergeLoadedSessionsWithLocal(
-                    visibleStored,
-                    prev,
-                    [pendingSessionIdRef.current, currentSessionIdRef.current],
-                    getDirtySessionIds(storageScope)
-                  )
-                )
-              }
-            } catch (e) {
-              console.warn('[ChatPage] finally: 从 IndexedDB 重新加载失败:', e)
+          if (isCurrentRun) {
+            if (
+              sessionAbortControllersRef.current.get(targetSessionId) === sessionAbortController
+            ) {
+              sessionAbortControllersRef.current.delete(targetSessionId)
             }
+            lifecycleRunIdBySessionRef.current.delete(targetSessionId)
+            clearLoadingSessionTracking(targetSessionId, !wasCancelled, runId)
+            emitPreviewRefresh('preview-only')
+
+            if (!wasCancelled && !sessionSnapshotSaveFailed) {
+              try {
+                const requestScope = storageScope
+                const requestEpoch = sessionLoadEpochRef.current
+                const requestMutationEpoch = sessionMutationEpochRef.current
+                const latestStored = await loadAllSessions(requestScope)
+                const requestIsCurrent =
+                  requestEpoch === sessionLoadEpochRef.current &&
+                  requestMutationEpoch === sessionMutationEpochRef.current &&
+                  requestScope === storageScopeRef.current
+                if (requestIsCurrent) {
+                  const visibleStored = sortSessionsByRecencyDesc(
+                    latestStored.filter(
+                      (session) =>
+                        !deletedSessionKeysRef.current.has(`${requestScope}\u0000${session.id}`)
+                    )
+                  )
+                  persistedSessionsRef.current = new Map(
+                    visibleStored.map((session) => [session.id, session])
+                  )
+                  setSessions((prev) =>
+                    mergeLoadedSessionsWithLocal(
+                      visibleStored,
+                      prev,
+                      [pendingSessionIdRef.current, currentSessionIdRef.current],
+                      getDirtySessionIds(storageScope)
+                    )
+                  )
+                }
+              } catch (e) {
+                console.warn('[ChatPage] finally: 从 IndexedDB 重新加载失败:', e)
+              }
+            }
+            cancelledSessionsRef.current.delete(targetSessionId)
+            activeRunIdBySessionRef.current.delete(targetSessionId)
           }
-          cancelledSessionsRef.current.delete(targetSessionId)
-          activeRunIdBySessionRef.current.delete(targetSessionId)
         }
       }
     },

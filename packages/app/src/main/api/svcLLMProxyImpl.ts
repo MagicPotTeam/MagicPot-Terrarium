@@ -2571,7 +2571,6 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     resp: ServerStreaming<LLMChatStreamResp>,
     invocation?: ServiceInvocationContext
   ): Promise<void> => {
-    req = withCanvasFileTools(req, invocation)
     const streamAbortController = new AbortController()
     const abortContext = this.createConversationAbortContext(
       req.conversationId,
@@ -3154,6 +3153,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         return
       }
 
+      // Keep local workspace tools out of the remote transport. The remote
+      // server has its own policy and must not receive this renderer-scoped
+      // binding or its local workspace instructions.
+      req = withCanvasFileTools(req, invocation)
       const result = await this.chatViaAPI(req, {
         signal: abortContext.signal,
         onDelta: emitEvent
