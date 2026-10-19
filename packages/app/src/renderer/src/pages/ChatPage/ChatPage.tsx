@@ -146,9 +146,6 @@ import {
   resolveCustomSkillId
 } from './chatSkillUtils'
 import { shouldShowNoApiWarning } from './chatAvailability'
-import AgentLocalFilesPanel from './components/AgentLocalFilesPanel'
-import { appendLocalFileToDraft, resolveLocalFileScope } from './localFileDraft'
-import type { ReadLocalFileResponse } from '@shared/api/svcAgentLocalFiles'
 import { inspectSkillAttachmentSupport } from './chatSkillAttachmentSupport'
 import { augmentAttachmentsWithVideoBoundaryFrames } from './chatVideoAttachmentUtils'
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
@@ -2377,27 +2374,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
       selectedCustomSkill?.type === 'agent' ? [] : selectedCustomSkill?.referenceAttachments || [],
     [selectedCustomSkill?.referenceAttachments, selectedCustomSkill?.type]
   )
-  const localFileScope = useMemo(
-    () => resolveLocalFileScope(route, currentSessionId),
-    [currentSessionId, route]
-  )
-  const handleAttachLocalFile = useCallback(
-    (file: ReadLocalFileResponse): boolean => {
-      const nextDraft = appendLocalFileToDraft(inputValueRef.current, file)
-      if (nextDraft === null) {
-        notifyWarning(
-          t('chat.local_files.draft_limit', {
-            defaultValue: 'This local file preview is too large to add to the conversation draft.'
-          })
-        )
-        return false
-      }
-      setInputValue(nextDraft)
-      return true
-    },
-    [notifyWarning, setInputValue, t]
-  )
-  const localFileService = localFileScope ? api().svcAgentLocalFiles : null
   const composerPendingAttachments = useMemo(
     () =>
       mergeChatAttachmentsWithSkillReferenceAttachments(
@@ -2443,7 +2419,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [customSkills]
   )
   const isAgentSkillSelected = selectedCustomSkill?.type === 'agent'
-  const showLocalFilePanel = active && !isAgentSkillSelected && Boolean(localFileScope)
   const resolveAvailableProfileId = useCallback(
     (profileId: string | null | undefined): string | null =>
       resolveAvailableChatProfileId(
@@ -7071,29 +7046,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   // ==================== 渲染 ====================
 
-  const localFilePanel =
-    showLocalFilePanel && localFileService ? (
-      <Box
-        sx={{
-          flexShrink: 0,
-          width: '100%',
-          maxWidth: '900px',
-          mx: 'auto',
-          px: 2,
-          py: 0.75,
-          maxHeight: 330,
-          overflowY: 'auto'
-        }}
-      >
-        <AgentLocalFilesPanel
-          scope={localFileScope!}
-          service={localFileService}
-          disabled={isLoading || !currentSession}
-          onAttach={handleAttachLocalFile}
-        />
-      </Box>
-    ) : null
-
   if (!isReady || !config) {
     return (
       <Box
@@ -7190,7 +7142,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
             </Typography>
           </Alert>
         </Box>
-        {localFilePanel}
         {compactSkillPortal}
       </>
     )
@@ -7442,7 +7393,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
               ) : null}
 
               {/* 底部输入框 */}
-              {localFilePanel}
 
               <ChatComposer
                 active={active}

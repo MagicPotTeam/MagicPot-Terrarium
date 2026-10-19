@@ -2,6 +2,8 @@
 // This file centralizes provider selection and media-aware request handling.
 
 import { net } from 'electron'
+import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
+import { withCanvasFileTools } from './canvasFileTools'
 import { createSkillToolStream } from './skillToolStream'
 import { streamExternalAgent } from './externalAgentStream'
 import type { LLMExternalAgentStreamReq, LLMExternalAgentStreamResp } from '@shared/api/svcLLMProxy'
@@ -2058,7 +2060,14 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     return parseTaggerProviderResponse(rawText)
   }
 
-  chat = async (req: LLMChatReq, options?: LLMChatOptions): Promise<LLMChatResp> => {
+  chat = async (
+    req: LLMChatReq,
+    options?: LLMChatOptions & Partial<ServiceInvocationContext>
+  ): Promise<LLMChatResp> => {
+    req = withCanvasFileTools(
+      req,
+      options?.methodName ? (options as ServiceInvocationContext) : undefined
+    )
     const abortContext = this.createConversationAbortContext(req.conversationId, options?.signal)
     console.log('[LLMProxy] received chat request at top-level handler', {
       profileId: req.profileId,
@@ -2559,8 +2568,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
 
   chatStream = async (
     req: LLMChatStreamReq,
-    resp: ServerStreaming<LLMChatStreamResp>
+    resp: ServerStreaming<LLMChatStreamResp>,
+    invocation?: ServiceInvocationContext
   ): Promise<void> => {
+    req = withCanvasFileTools(req, invocation)
     const streamAbortController = new AbortController()
     const abortContext = this.createConversationAbortContext(
       req.conversationId,

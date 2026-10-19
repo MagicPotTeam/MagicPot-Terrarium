@@ -850,6 +850,84 @@ describe('LLMProxySvcImpl', () => {
     expect(agentChat).toHaveBeenCalledTimes(2)
   })
 
+  it.each(['chat', 'chatStream'] as const)(
+    'lets a trusted default canvas %s request read a path through the existing tool loop',
+    async (method) => {
+      const { registerMagicAgentTrustedRouteBinding, clearMagicAgentTrustedRouteBindingsForTest } =
+        await import('../magicAgentRuntime/trustedRouteBinding')
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'owned-project',
+        threadId: 'owned-pane'
+      } as const
+      const url = 'file:///D:/owned/app/out/renderer/index.html#/canvas?id=owned-project'
+      registerMagicAgentTrustedRouteBinding(23, route, {
+        trustedUrl: url,
+        trustedWebContents: { id: 23, isDestroyed: () => false }
+      })
+      try {
+        mockAgentProfile()
+        listToolsMock.mockReturnValue([
+          {
+            name: 'files.read',
+            description: 'Read bounded text from the workspace',
+            inputSchema: {
+              type: 'object',
+              required: ['path'],
+              properties: { path: { type: 'string' } }
+            }
+          }
+        ])
+        callToolMock.mockResolvedValue({ content: 'OWNED_FILE_CONTENT' })
+        const agentChat = vi
+          .fn()
+          .mockResolvedValueOnce('{"toolName":"files.read","args":{"path":"notes/readme.txt"}}')
+          .mockResolvedValueOnce('Read the requested file.')
+        vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+        const request = {
+          profileId: 'agent-profile',
+          conversationId: 'owned-conversation',
+          route,
+          messages: [{ role: 'user' as const, content: 'Read notes/readme.txt' }]
+        }
+        const invocation = {
+          methodName: 'svcLLMProxy.' + method,
+          senderId: 23,
+          isMainFrame: true,
+          frameUrl: url,
+          senderUrl: url
+        }
+        const svc = new LLMProxySvcImpl()
+        if (method === 'chat')
+          expect(await svc.chat(request, invocation)).toMatchObject({
+            content: 'Read the requested file.'
+          })
+        else {
+          const onData = vi.fn()
+          await svc.chatStream(request, { onData }, invocation)
+          expect(onData).toHaveBeenCalledWith(
+            expect.objectContaining({ type: 'done', content: 'Read the requested file.' })
+          )
+        }
+        expect(callToolMock).toHaveBeenCalledOnce()
+        expect(callToolMock).toHaveBeenCalledWith(
+          expect.objectContaining(route),
+          'files.read',
+          { path: 'notes/readme.txt' },
+          expect.objectContaining({
+            signal: expect.any(AbortSignal),
+            allowedToolNames: expect.arrayContaining(['files.read'])
+          })
+        )
+        expect(JSON.stringify(agentChat.mock.calls[1][0].messages)).toContain('OWNED_FILE_CONTENT')
+        expect(request.messages).toEqual([{ role: 'user', content: 'Read notes/readme.txt' }])
+      } finally {
+        clearMagicAgentTrustedRouteBindingsForTest()
+      }
+    }
+  )
+
   it('passes the active tool-call signal and stable run/tool ids into runtime execution', async () => {
     const agentChat = vi
       .fn()

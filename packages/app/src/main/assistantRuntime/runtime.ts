@@ -2743,6 +2743,11 @@ export class AssistantRuntime {
       throw options.signal.reason || new Error('Tool invocation cancelled.')
     const normalizedRoute = normalizeAssistantRoute(route)
     const workspace = await this.resolveWorkspaceState(normalizedRoute)
+    if (name.startsWith('files.')) {
+      await ensureAssistantWorkspaceState(normalizedRoute, workspace.workspaceId)
+      if (options?.signal?.aborted)
+        throw options.signal.reason || new Error('Tool invocation cancelled.')
+    }
     await syncMcpClientManager(this.configProvider())
     return this.executionAdapter.callTool(
       name,
