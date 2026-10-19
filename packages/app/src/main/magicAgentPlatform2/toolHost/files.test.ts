@@ -1259,3 +1259,143 @@ describe('FilesToolHost focused file discovery tools', () => {
     ).rejects.toMatchObject({ name: 'AbortError' })
   })
 })
+
+describe('FilesToolHost in-flight I/O cancellation', () => {
+  interface OpenHandle {
+    order: number
+    closed: boolean
+    reads: number
+    length: number
+  }
+
+  // Narrow I/O instrumentation: wrap the *real* FileHandle returned by the real
+  // fs.open for one target file only. readBounded opens the target first, then
+  // hashFile opens a second handle and reads it in 64KiB blocks. We fire the
+  // abort callback exactly once, after the real hash handle has completed its
+  // first real block read (never by starting a promise and aborting instantly).
+  async function instrumentTarget(target: string, onFirstHashBlock: () => void) {
+    const realOpen = fs.open.bind(fs)
+    // tmpdir may hand back a Windows 8.3 short path (ADMINI~1) while the real
+    // open uses the long form (Administrator); canonicalize before matching.
+    const canonicalTarget = (await fs.realpath(target)).toLowerCase()
+    const handles: OpenHandle[] = []
+    let ownOrder = 0
+    let fired = false
+    const spy = vi.spyOn(fs, 'open')
+    spy.mockImplementation((async (file: unknown, flags: unknown, ...rest: unknown[]) => {
+      const handle = await (realOpen as (...args: unknown[]) => Promise<unknown>)(
+        file,
+        flags,
+        ...rest
+      )
+      if (String(file).toLowerCase() !== canonicalTarget) return handle
+      const order = ownOrder++
+      const entry: OpenHandle = { order, closed: false, reads: 0, length: 0 }
+      handles.push(entry)
+      const real = handle as {
+        read: (...args: unknown[]) => Promise<{ bytesRead: number }>
+        close: () => Promise<void>
+      }
+      const realRead = real.read.bind(real)
+      const realClose = real.close.bind(real)
+      const wrapped = {
+        read: async (...args: unknown[]) => {
+          const result = await realRead(...args)
+          entry.reads += 1
+          entry.length = Number(args[2])
+          if (order === 1 && entry.reads === 1 && result.bytesRead > 0 && !fired) {
+            fired = true
+            onFirstHashBlock()
+          }
+          return result
+        },
+        close: async () => {
+          await realClose()
+          entry.closed = true
+        }
+      }
+      return wrapped
+    }) as never)
+    return { handles, restore: () => spy.mockRestore() }
+  }
+
+  it('aborts a real files.read mid-hash after one block, closes the handle, and audits cancellation without leaking content', async () => {
+    const { root, authorization } = setup()
+    const target = path.join(root, 'large.txt')
+    const marker = 'IN-FLIGHT-READ-MARKER-DO-NOT-LEAK'
+    const content = `${marker}${'a'.repeat(200 * 1024)}`
+    writeFileSync(target, content)
+    const evidence: FilesToolAuditEvidence[] = []
+    const host = await createFilesHost(authorization, root, (item) => void evidence.push(item))
+    const controller = new AbortController()
+    const inst = await instrumentTarget(target, () => controller.abort())
+    try {
+      await expect(
+        host.read({
+          ...call('files.read', { path: 'large.txt' }, authorization),
+          signal: controller.signal
+        })
+      ).rejects.toMatchObject({ name: 'AbortError' })
+
+      const boundedHandle = inst.handles.find((handle) => handle.order === 0)
+      const hashHandle = inst.handles.find((handle) => handle.order === 1)
+      expect(hashHandle).toBeDefined()
+      if (!hashHandle) throw new Error('hash handle was never opened')
+      expect(hashHandle.length).toBe(64 * 1024)
+      expect(hashHandle.reads).toBe(1)
+      expect(hashHandle.closed).toBe(true)
+      expect(boundedHandle?.closed).toBe(true)
+
+      expect(evidence.some((item) => item.outcome === 'cancelled')).toBe(true)
+      expect(evidence.every((item) => item.outcome !== 'completed')).toBe(true)
+      expect(JSON.stringify(evidence)).not.toContain(marker)
+    } finally {
+      inst.restore()
+    }
+  })
+
+  it('lets an independent-signal read finish while another aborts, then allows re-reading the cancelled file', async () => {
+    const { root, authorization } = setup()
+    const targetA = path.join(root, 'a.txt')
+    const markerA = 'AAA-READ-MARKER'
+    const contentA = `${markerA}${'a'.repeat(200 * 1024)}`
+    const contentB = `bbb-content-${'b'.repeat(1024)}`
+    writeFileSync(targetA, contentA)
+    writeFileSync(path.join(root, 'b.txt'), contentB)
+    const evidence: FilesToolAuditEvidence[] = []
+    const host = await createFilesHost(authorization, root, (item) => void evidence.push(item))
+    const controllerA = new AbortController()
+    const controllerB = new AbortController()
+    const inst = await instrumentTarget(targetA, () => controllerA.abort())
+    try {
+      const [resultA, resultB] = await Promise.allSettled([
+        host.read({
+          ...call('files.read', { path: 'a.txt' }, authorization),
+          signal: controllerA.signal
+        }),
+        host.read({
+          ...call('files.read', { path: 'b.txt' }, authorization),
+          signal: controllerB.signal
+        })
+      ])
+      expect(resultA.status).toBe('rejected')
+      if (resultA.status === 'rejected')
+        expect(resultA.reason).toMatchObject({ name: 'AbortError' })
+      expect(resultB.status).toBe('fulfilled')
+      if (resultB.status === 'fulfilled') {
+        expect(resultB.value.kind).toBe('text')
+        expect((resultB.value as { content?: string }).content).toBe(contentB)
+      }
+      expect(
+        evidence.some((item) => item.tool === 'files.read' && item.outcome === 'cancelled')
+      ).toBe(true)
+
+      const reread = await host.read(call('files.read', { path: 'a.txt' }, authorization))
+      expect(reread.kind).toBe('text')
+      expect((reread as { content?: string }).content).toBe(contentA)
+      expect((reread as { sha256?: string }).sha256).toBe(digest(contentA))
+    } finally {
+      inst.restore()
+    }
+  })
+})
