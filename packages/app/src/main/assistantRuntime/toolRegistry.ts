@@ -58,6 +58,8 @@ import {
   createMagicAgentToolAuditSink
 } from '../magicAgentPlatform2/toolHost'
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
+import type { CanvasPathReadHandler } from '../api/canvasPathReadApproval'
 import { ProjectTraceFSCli } from '../projectTrace/fs'
 import {
   buildProjectTraceReplayBundle,
@@ -82,6 +84,8 @@ export type AssistantToolCallContext = {
   workspacePinnedContext?: AssistantPinnedContext
   workspaceReusableContext?: AssistantReusableContextPack
   workspaceRootDir?: string
+  // Main-owned, per-request consent callback. Never sourced from tool arguments.
+  readExternalFile?: CanvasPathReadHandler
   toolPolicyOrigin?: 'assistant' | 'graph'
   terminalPolicyRuntime?: AssistantTerminalPolicyRuntime
   commandConfinementAdapter?: CommandJobsConfinementAdapter
@@ -3284,6 +3288,19 @@ export class AssistantToolRegistry {
       ].includes(normalizedName)
     ) {
       if (!context.workspaceRootDir) throw new Error('File tools require a route workspace root.')
+      if (
+        normalizedName === 'files.read' &&
+        typeof args.path === 'string' &&
+        path.isAbsolute(args.path) &&
+        context.readExternalFile
+      ) {
+        return context.readExternalFile(args.path, context.signal, {
+          maxBytes: typeof args.maxBytes === 'number' ? args.maxBytes : undefined,
+          maxStringLength:
+            typeof args.maxStringLength === 'number' ? args.maxStringLength : undefined,
+          timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined
+        })
+      }
       const runtime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
       const requestedPath =
         typeof args.path === 'string' && args.path ? args.path.replace(/\\/g, '/') : '.'

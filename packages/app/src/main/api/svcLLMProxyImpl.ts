@@ -4,6 +4,7 @@
 import { net } from 'electron'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
 import { withCanvasFileTools } from './canvasFileTools'
+import { createCanvasPathReadHandler, type CanvasPathReadHandler } from './canvasPathReadApproval'
 import { createSkillToolStream } from './skillToolStream'
 import { streamExternalAgent } from './externalAgentStream'
 import type { LLMExternalAgentStreamReq, LLMExternalAgentStreamResp } from '@shared/api/svcLLMProxy'
@@ -349,6 +350,7 @@ const createMainProcessElectronFetch = (): FetchImpl | null => {
 // ==================== Chat execution helpers ====================
 
 type ChatExecutionOptions = LLMChatOptions & {
+  readExternalFile?: CanvasPathReadHandler
   runId?: string
   executeTool?: (invocation: {
     toolName: string
@@ -2064,6 +2066,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     req: LLMChatReq,
     options?: LLMChatOptions & Partial<ServiceInvocationContext>
   ): Promise<LLMChatResp> => {
+    const readExternalFile = getConfig().use_remote_llm
+      ? undefined
+      : createCanvasPathReadHandler(
+          req,
+          options?.methodName ? (options as ServiceInvocationContext) : undefined
+        )
     req = withCanvasFileTools(
       req,
       options?.methodName ? (options as ServiceInvocationContext) : undefined
@@ -2088,6 +2096,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       console.log('[LLMProxy] routing request through the standard API path')
       return await this.chatViaAPI(req, {
         ...options,
+        readExternalFile,
         signal: abortContext.signal
       })
     } catch (e: unknown) {
@@ -2463,7 +2472,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         }
 
         const toolCallId = `${runId}:tool:${step}`
-        const toolOptions = { allowedToolNames, signal: options?.signal, runId, toolCallId }
+        const toolOptions = {
+          allowedToolNames,
+          signal: options?.signal,
+          runId,
+          toolCallId,
+          readExternalFile: options?.readExternalFile
+        }
         const record: Record<string, unknown> = {
           runId,
           toolCallId,
@@ -3156,8 +3171,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       // Keep local workspace tools out of the remote transport. The remote
       // server has its own policy and must not receive this renderer-scoped
       // binding or its local workspace instructions.
+      const readExternalFile = createCanvasPathReadHandler(req, invocation)
       req = withCanvasFileTools(req, invocation)
       const result = await this.chatViaAPI(req, {
+        readExternalFile,
         signal: abortContext.signal,
         onDelta: emitEvent
       })

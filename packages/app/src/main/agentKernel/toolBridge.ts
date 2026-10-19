@@ -1,6 +1,7 @@
 import type { AssistantSessionStore } from '../assistantRuntime/sessionStore'
 import type {
   AssistantToolCallResult,
+  AssistantToolCallContext,
   AssistantToolRegistry
 } from '../assistantRuntime/toolRegistry'
 import type {
@@ -31,6 +32,7 @@ type KernelBackedToolContext = {
   workspacePinnedContextFile?: string
   workspaceMetaFile?: string
   workspaceRootDir?: string
+  readExternalFile?: AssistantToolCallContext['readExternalFile']
   toolPolicyOrigin?: 'assistant' | 'graph'
   resumeRun?: (
     route: AssistantRoute,

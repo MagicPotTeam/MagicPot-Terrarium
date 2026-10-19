@@ -32,7 +32,9 @@ const {
   fetchMock,
   useActualHunyuan3DClient,
   listToolsMock,
-  callToolMock
+  callToolMock,
+  webContentsFromIdMock,
+  browserWindowFromWebContentsMock
 } = vi.hoisted(() => ({
   generateFromMessagesMock: vi.fn(),
   tripoGenerateFromMessagesMock: vi.fn(),
@@ -45,7 +47,9 @@ const {
   fetchMock: vi.fn(),
   useActualHunyuan3DClient: { current: false },
   listToolsMock: vi.fn(),
-  callToolMock: vi.fn()
+  callToolMock: vi.fn(),
+  webContentsFromIdMock: vi.fn(),
+  browserWindowFromWebContentsMock: vi.fn()
 }))
 
 vi.mock(import('../config/config'), () => ({
@@ -108,6 +112,16 @@ vi.mock(import('../assistantRuntime/runtime'), () => ({
 
 vi.mock(import('../mcp/runtime'), () => ({
   syncMcpClientManager: vi.fn(async () => undefined)
+}))
+
+// Minimal Electron surface: `net` is preserved for the fetch fallback; `webContents.fromId` and
+// `BrowserWindow.fromWebContents` default to undefined so the canvas approval helper is a no-op for
+// the old relative-path fixtures (no native confirmation is needed there). Eligible-window tests
+// override these to return a live sender/parent.
+vi.mock('electron', () => ({
+  net: {},
+  webContents: { fromId: webContentsFromIdMock },
+  BrowserWindow: { fromWebContents: browserWindowFromWebContentsMock }
 }))
 
 const mockConfig = (overrides: Partial<Config>): void => {
@@ -387,6 +401,8 @@ describe('LLMProxySvcImpl', () => {
     fetchMock.mockReset()
     listToolsMock.mockReset()
     callToolMock.mockReset()
+    webContentsFromIdMock.mockReset()
+    browserWindowFromWebContentsMock.mockReset()
     vi.unstubAllGlobals()
     vi.useRealTimers()
     vi.clearAllMocks()
@@ -868,6 +884,19 @@ describe('LLMProxySvcImpl', () => {
       })
       try {
         mockAgentProfile()
+        const sender = {
+          id: 23,
+          isDestroyed: () => false,
+          getURL: () => url,
+          on: vi.fn(),
+          removeListener: vi.fn()
+        }
+        webContentsFromIdMock.mockReturnValue(sender)
+        // The strengthened helper requires parent.webContents to be the exact sender instance.
+        browserWindowFromWebContentsMock.mockReturnValue({
+          isDestroyed: () => false,
+          webContents: sender
+        })
         listToolsMock.mockReturnValue([
           {
             name: 'files.read',
@@ -917,7 +946,8 @@ describe('LLMProxySvcImpl', () => {
           { path: 'notes/readme.txt' },
           expect.objectContaining({
             signal: expect.any(AbortSignal),
-            allowedToolNames: expect.arrayContaining(['files.read'])
+            allowedToolNames: expect.arrayContaining(['files.read']),
+            readExternalFile: expect.any(Function)
           })
         )
         expect(JSON.stringify(agentChat.mock.calls[1][0].messages)).toContain('OWNED_FILE_CONTENT')
@@ -1295,6 +1325,9 @@ describe('LLMProxySvcImpl', () => {
     }
     expect(requestBody.skillRuntime).toBeUndefined()
     expect(requestBody.systemPrompt || '').not.toContain('Use the available read-only file tools')
+    // Remote transport must never construct or carry the local read callback.
+    expect(webContentsFromIdMock).not.toHaveBeenCalled()
+    expect(callToolMock).not.toHaveBeenCalled()
 
     expect(onData).toHaveBeenCalledWith({
       type: 'tool-status',

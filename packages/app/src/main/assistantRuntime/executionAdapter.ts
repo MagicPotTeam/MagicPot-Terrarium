@@ -21,7 +21,11 @@ import {
   AssistantTaskGroupState,
   getAssistantSessionKey
 } from './types'
-import { AssistantToolCallResult, AssistantToolRegistry } from './toolRegistry'
+import {
+  AssistantToolCallResult,
+  AssistantToolRegistry,
+  type AssistantToolCallContext
+} from './toolRegistry'
 import {
   invokeAssistantToolViaKernel,
   syncAssistantToolsWithAgentKernel
@@ -83,6 +87,7 @@ type AssistantExecutionRequest = {
   workspacePinnedContextFile?: string
   workspaceMetaFile?: string
   workspaceRootDir?: string
+  readExternalFile?: AssistantToolCallContext['readExternalFile']
   resumeRun?: (
     route: AssistantRoute,
     runId: string,
@@ -485,6 +490,7 @@ export class AssistantExecutionAdapter {
           workspacePinnedContextFile: request.workspacePinnedContextFile,
           workspaceMetaFile: request.workspaceMetaFile,
           workspaceRootDir: request.workspaceRootDir,
+          readExternalFile: request.readExternalFile,
           resumeRun: request.resumeRun,
           resumeWorkflow: request.resumeWorkflow,
           startTaskGroup: request.startTaskGroup,

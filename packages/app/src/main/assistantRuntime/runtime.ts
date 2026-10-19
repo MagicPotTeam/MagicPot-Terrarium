@@ -2737,6 +2737,7 @@ export class AssistantRuntime {
       signal?: AbortSignal
       runId?: string
       toolCallId?: string
+      readExternalFile?: AssistantToolCallRequest['readExternalFile']
     }
   ) {
     if (options?.signal?.aborted)
@@ -2754,6 +2755,7 @@ export class AssistantRuntime {
       args,
       this.buildToolContext(normalizedRoute, workspace, this.getTaskState(normalizedRoute), {
         signal: options?.signal,
+        readExternalFile: options?.readExternalFile,
         startTaskGroup: this.startTaskGroup.bind(this),
         progressTaskGroup: this.progressTaskGroup.bind(this),
         approveTaskGroup: this.approveTaskGroup.bind(this),

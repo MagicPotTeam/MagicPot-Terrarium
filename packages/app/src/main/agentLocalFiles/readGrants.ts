@@ -173,8 +173,8 @@ function sameFile(a: BigIntStats, b: BigIntStats): boolean {
   )
 }
 
-function checkSize(stat: BigIntStats, document = false): void {
-  if (stat.size > BigInt(LIMITS.fileBytes)) fail('FILE_TOO_LARGE')
+function checkSize(stat: BigIntStats, document = false, maxBytes: number = LIMITS.fileBytes): void {
+  if (stat.size > BigInt(maxBytes)) fail('FILE_TOO_LARGE')
   if (!document && stat.size > BigInt(LIMITS.returnedBytes)) fail('TEXT_TOO_LARGE')
 }
 
@@ -236,11 +236,20 @@ export class LocalFileReadGrants {
   async read(
     senderId: number,
     scope: AgentLocalFileScope,
-    params: LocalFileReadParams
+    params: LocalFileReadParams,
+    // Main-owned callers may tighten, never expand, the existing file byte ceiling.
+    limits: Readonly<{ maxBytes?: number }> = {}
   ): Promise<ReadLocalFileResponse> {
     const scopeKey = this.owner(senderId, scope)
     const req = parseAgentLocalFileValue(readParamsSchema, params)
     const grant = this.get(senderId, scopeKey, req.grantId)
+    const maxBytes = Math.max(
+      1,
+      Math.min(
+        LIMITS.fileBytes,
+        Math.floor(Number.isFinite(limits.maxBytes) ? limits.maxBytes! : LIMITS.fileBytes)
+      )
+    )
     return this.run(senderId, scopeKey, req.requestId, grant, async (op) => {
       const target = await this.target(grant, req.relativePath, op)
       if (!target.stat.isFile()) fail('PATH_DENIED')
@@ -249,7 +258,7 @@ export class LocalFileReadGrants {
         this.documents && ['pdf', 'docx', 'xlsx', 'pptx'].includes(extension)
           ? (extension as DocumentTextFormat)
           : undefined
-      checkSize(target.stat, documentFormat !== undefined)
+      checkSize(target.stat, documentFormat !== undefined, maxBytes)
       if (!documentFormat && unsupportedExtension.test(target.path)) fail('UNSUPPORTED_FORMAT')
       if (binaryExtension.test(target.path)) fail('BINARY_FILE')
 
@@ -263,7 +272,7 @@ export class LocalFileReadGrants {
         const before = await handle.stat({ bigint: true })
         this.check(op)
         if (!before.isFile() || before.nlink !== 1n) fail('PATH_DENIED')
-        checkSize(before, documentFormat !== undefined)
+        checkSize(before, documentFormat !== undefined, maxBytes)
         if (!sameFile(target.stat, before)) fail('FILE_CHANGED')
         const opened = await this.inspect(target.path, op)
         if (!sameChain(target, opened) || !sameFile(before, opened.stat)) fail('FILE_CHANGED')
