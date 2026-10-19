@@ -5482,6 +5482,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (!overrides) {
         inputValueRef.current = ''
         setInputValue('')
+        // The debounced parent value can still be empty after a rapid send.
+        setComposerClearVersion((version) => version + 1)
         pendingAttachmentsRef.current = []
         setPendingAttachments([])
         pendingHiddenContextRef.current = ''

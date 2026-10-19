@@ -2907,6 +2907,45 @@ describe('ChatPage runtime workflow integration', () => {
     expect(messages?.[messages.length - 1]).toEqual(
       expect.objectContaining({ role: 'user', content: 'send before debounce commit' })
     )
+    await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(''))
+  })
+
+  it('keeps a newer draft after an accepted normal send clears the old draft', async () => {
+    let finishRequest: ((value: { content: string }) => void) | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRequest = resolve
+        })
+    )
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const input = screen.getByTestId('chat-composer-input-mock')
+    fireEvent.change(input, { target: { value: 'accepted old draft' } })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    try {
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(input).toHaveValue(''))
+      fireEvent.change(input, { target: { value: 'new draft while the reply is pending' } })
+      await act(async () => finishRequest?.({ content: 'accepted old reply' }))
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('accepted old reply')
+      )
+      expect(input).toHaveValue('new draft while the reply is pending')
+    } finally {
+      finishRequest?.({ content: 'accepted old reply' })
+    }
+  })
+
+  it('preserves an unsendable draft when local validation rejects a normal send', async () => {
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const input = screen.getByTestId('chat-composer-input-mock')
+    fireEvent.change(input, { target: { value: '   ' } })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    expect(input).toHaveValue('   ')
   })
 
   it('clears stale persisted loading placeholders after restart', async () => {
