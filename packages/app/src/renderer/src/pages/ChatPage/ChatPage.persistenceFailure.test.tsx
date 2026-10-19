@@ -366,6 +366,7 @@ describe('ChatPage persistence and run identity regressions', () => {
       false
     )
     await waitFor(() => expect(screen.getAllByText(/another window/).length).toBeGreaterThan(0))
+    expect(screen.getByRole('alert').closest('[data-chat-main-column="true"]')).not.toBeNull()
   })
 
   it('keeps an unsaved draft visible and dirty when draft persistence fails', async () => {

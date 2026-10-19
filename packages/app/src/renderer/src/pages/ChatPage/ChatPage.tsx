@@ -7227,19 +7227,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
           </Box>
         )}
 
-        {sessionSaveError || sessionLoadError ? (
-          <Alert
-            severity="error"
-            action={
-              <Button color="inherit" size="small" onClick={retrySessionLoad}>
-                Retry
-              </Button>
-            }
-            sx={{ m: 1 }}
-          >
-            {sessionSaveError || sessionLoadError}
-          </Alert>
-        ) : null}
         {!compact && (
           <SessionSidebar
             sessions={sessions}
@@ -7256,6 +7243,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
         {/* 主聊天区域 */}
         <Box
+          data-chat-main-column="true"
           sx={{
             flex: 1,
             display: 'flex',
@@ -7264,6 +7252,19 @@ const ChatPage: React.FC<ChatPageProps> = ({
             minWidth: 0
           }}
         >
+          {sessionSaveError || sessionLoadError ? (
+            <Alert
+              severity="error"
+              action={
+                <Button color="inherit" size="small" onClick={retrySessionLoad}>
+                  Retry
+                </Button>
+              }
+              sx={{ m: 1, flexShrink: 0, maxHeight: 144, overflow: 'auto' }}
+            >
+              {sessionSaveError || sessionLoadError}
+            </Alert>
+          ) : null}
           {/* compact 模式历史弹窗 */}
           {compact && (
             <SessionHistoryDialog
