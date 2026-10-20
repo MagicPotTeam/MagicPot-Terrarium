@@ -82,3 +82,60 @@ describe('TerminalApprovalCoordinator', () => {
     await expect(shuttingDown).rejects.toThrow('shutting down')
   })
 })
+
+describe('terminal approval lifetime', () => {
+  it('removes cancelled approval and never issues a grant for a late click', async () => {
+    const createGrant = vi.fn(() => ({ grantId: 'grant', expectedGrantUseCount: 0 }))
+    const coordinator = new TerminalApprovalCoordinator(service() as never, createGrant)
+    const controller = new AbortController()
+    const decision = coordinator.request(request(), undefined, controller.signal)
+    const observed = decision.catch((e) => e)
+    const [approval] = coordinator.list()
+    controller.abort()
+    try {
+      expect(coordinator.list()).toEqual([])
+      expect(await observed).toMatchObject({ name: 'AbortError' })
+      expect(() =>
+        coordinator.resolve({
+          approvalId: approval.approvalId,
+          expectedRevision: 0,
+          approved: true
+        })
+      ).toThrow()
+      expect(createGrant).not.toHaveBeenCalled()
+    } finally {
+      coordinator.shutdown()
+      await observed
+    }
+  })
+
+  it('claims an approval synchronously so double clicks issue only one grant', async () => {
+    const createGrant = vi.fn(() => ({ grantId: 'grant', expectedGrantUseCount: 0 }))
+    const coordinator = new TerminalApprovalCoordinator(service() as never, createGrant)
+    const decision = coordinator.request(request())
+    const [approval] = coordinator.list()
+    const choice = { approvalId: approval.approvalId, expectedRevision: 0, approved: true }
+    coordinator.resolve(choice)
+    expect(() => coordinator.resolve(choice)).toThrow()
+    expect(createGrant).toHaveBeenCalledOnce()
+    await expect(decision).resolves.toMatchObject({ grantId: 'grant' })
+    expect(coordinator.list()).toEqual([])
+  })
+
+  it('expires unattended approvals without leaving a pending decision or issuing a grant', async () => {
+    vi.useFakeTimers()
+    const createGrant = vi.fn(() => ({ grantId: 'grant', expectedGrantUseCount: 0 }))
+    const coordinator = new TerminalApprovalCoordinator(service() as never, createGrant)
+    const observed = coordinator.request(request()).catch((e) => e)
+    try {
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 1)
+      expect(coordinator.list()).toEqual([])
+      expect((await observed).message).toMatch(/expired/i)
+      expect(createGrant).not.toHaveBeenCalled()
+    } finally {
+      coordinator.shutdown()
+      await observed
+      vi.useRealTimers()
+    }
+  })
+})

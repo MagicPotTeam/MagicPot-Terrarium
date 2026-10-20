@@ -323,3 +323,59 @@ describe('TerminalRunToolHost', () => {
     ).rejects.toBeInstanceOf(TerminalRunValidationError)
   })
 })
+
+describe('TerminalRunToolHost caller cancellation', () => {
+  it('rejects an already stopped request before authorization or spawn', async () => {
+    const { root, authorization } = setup()
+    const marker = path.join(root, 'must-not-run.txt')
+    const controller = new AbortController()
+    controller.abort()
+    const authorize = vi.spyOn(authorization, 'authorize')
+    const host = new TerminalRunToolHost(authorization, { allowedRoots: [root] })
+    const task = host.run({
+      ...input(
+        root,
+        ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'bad')`],
+        authorization
+      ),
+      signal: controller.signal
+    })
+    await expect(task).rejects.toMatchObject({ name: 'AbortError' })
+    expect(authorize).not.toHaveBeenCalled()
+    expect(existsSync(marker)).toBe(false)
+  })
+
+  it('cancels a running command tree and waits for real process close before reporting cancelled', async () => {
+    const { root, authorization } = setup()
+    const ready = path.join(root, 'owned-processes.json')
+    const controller = new AbortController()
+    const script = `const child=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});require('node:fs').writeFileSync(${JSON.stringify(ready)},JSON.stringify([process.pid,child.pid]));setInterval(()=>{},1000)`
+    const audit: TerminalRunAuditEvidence[] = []
+    const host = new TerminalRunToolHost(authorization, {
+      allowedRoots: [root],
+      onAudit: (e) => {
+        audit.push(e)
+      }
+    })
+    const task = host.run({
+      ...input(root, ['-e', script], authorization),
+      signal: controller.signal,
+      timeoutMs: 2500
+    })
+    await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 1500 })
+    const ids: number[] = JSON.parse(readFileSync(ready, 'utf8'))
+    controller.abort()
+    const result = await task
+    // Even a failing baseline must finish/close its owned tree before assertions.
+    await vi.waitFor(
+      () => {
+        for (const pid of ids) expect(() => process.kill(pid, 0)).toThrow()
+      },
+      { timeout: 1500 }
+    )
+    expect(result.status).toBe('cancelled')
+    expect(result.durationMs).toBeLessThan(2000)
+    expect(audit).toHaveLength(1)
+    expect(audit[0].status).toBe('cancelled')
+  })
+})

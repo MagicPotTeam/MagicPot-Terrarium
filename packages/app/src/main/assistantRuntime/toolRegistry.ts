@@ -1967,7 +1967,7 @@ const runPythonTool = async (
       ? { ...runtime.createTrustedApproval(request), authorizationId: randomUUID() }
       : context.terminalApproval
         ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
-        : await runtime.requestTerminalApproval(request)
+        : await runtime.requestTerminalApproval(request, context.signal)
   const input = {
     ...common,
     request,
@@ -2045,17 +2045,22 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
     })
   },
   'agent.terminal.run': async (args, context) => {
+    context.signal?.throwIfAborted()
     const contextSnapshot = context.workspaceReusableContext?.contextSnapshot
     const workspaceRoots = [
+      context.workspaceRootDir,
       contextSnapshot?.downloadDir,
       contextSnapshot?.outputDir,
       contextSnapshot?.workflowDir
     ].filter((entry): entry is string => Boolean(entry))
-    const prepared = await prepareAgentTerminalCommand(args, {
-      config: context.config,
-      signal: context.signal,
-      workspaceRoots
-    })
+    const prepared = await prepareAgentTerminalCommand(
+      { ...args, cwd: args.cwd ?? context.workspaceRootDir },
+      {
+        config: context.config,
+        signal: context.signal,
+        workspaceRoots
+      }
+    )
     const sessionId = getAssistantSessionKey(context.route)
     const policyRuntime = context.terminalPolicyRuntime ?? getAssistantTerminalPolicyRuntime()
     const request = policyRuntime.createRequest({
@@ -2071,8 +2076,10 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
         ? { ...policyRuntime.createTrustedApproval(request), authorizationId: randomUUID() }
         : context.terminalApproval
           ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
-          : await policyRuntime.requestTerminalApproval(request)
+          : await policyRuntime.requestTerminalApproval(request, context.signal)
+    context.signal?.throwIfAborted()
     const result = await policyRuntime.run({
+      signal: context.signal,
       authorizationId: approval.authorizationId ?? randomUUID(),
       idempotencyKey: randomUUID(),
       request,
@@ -2084,6 +2091,7 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
       ...(approval ?? {})
     })
 
+    context.signal?.throwIfAborted()
     return jsonToolResult(result)
   },
   'python.run': async (args, context) => runPythonTool('python.run', args, context),
@@ -2114,7 +2122,8 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
         ? { ...runtime.createTrustedApproval(request), authorizationId: randomUUID() }
         : context.terminalApproval
           ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
-          : await runtime.requestTerminalApproval(request)
+          : await runtime.requestTerminalApproval(request, context.signal)
+    context.signal?.throwIfAborted()
     const result = await getCommandJobHost(context).background({
       authorizationId: approval.authorizationId ?? randomUUID(),
       idempotencyKey: randomUUID(),
@@ -3082,7 +3091,7 @@ export class AssistantToolRegistry {
           ? context.terminalApproval(request)
           : process.env.NODE_ENV === 'test'
             ? runtime.createTrustedApproval(request)
-            : await runtime.requestTerminalApproval(request)
+            : await runtime.requestTerminalApproval(request, context.signal)
         : undefined
       const common = {
         authorizationId: randomUUID(),
@@ -3155,7 +3164,7 @@ export class AssistantToolRegistry {
           ? { ...runtime.createTrustedApproval(request), authorizationId: randomUUID() }
           : context.terminalApproval
             ? { ...context.terminalApproval(request), authorizationId: randomUUID() }
-            : await runtime.requestTerminalApproval(request)
+            : await runtime.requestTerminalApproval(request, context.signal)
       const common = {
         authorizationId: approval.authorizationId ?? randomUUID(),
         idempotencyKey:
@@ -3242,7 +3251,7 @@ export class AssistantToolRegistry {
           ? context.terminalApproval(request)
           : process.env.NODE_ENV === 'test'
             ? runtime.createTrustedApproval(request)
-            : await runtime.requestTerminalApproval(request)
+            : await runtime.requestTerminalApproval(request, context.signal)
         : undefined
       const common = {
         authorizationId: randomUUID(),
@@ -3346,7 +3355,7 @@ export class AssistantToolRegistry {
           ? context.terminalApproval(request)
           : process.env.NODE_ENV === 'test'
             ? runtime.createTrustedApproval(request)
-            : await runtime.requestTerminalApproval(request)
+            : await runtime.requestTerminalApproval(request, context.signal)
         : undefined
       const common = {
         authorizationId: randomUUID(),

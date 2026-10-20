@@ -26,6 +26,8 @@ export type TerminalRunInput = Readonly<{
   maxOutputChars?: number
   grantId?: string
   expectedGrantUseCount?: number
+  /** Caller-owned cancellation, never part of the persisted authorization request. */
+  signal?: AbortSignal
 }>
 
 export type TerminalRunOutcome = Readonly<{
@@ -87,6 +89,7 @@ export class TerminalRunToolHost {
   private readonly onAudit?: (evidence: TerminalRunAuditEvidence) => void | Promise<void>
 
   async run(input: TerminalRunInput): Promise<TerminalRunOutcome> {
+    input.signal?.throwIfAborted()
     const args = validateTerminalArgs(input.args ?? [])
     const cwd = canonicalTerminalDirectory(input.cwd)
     const command = validateTerminalCommand(input.command)
@@ -119,6 +122,7 @@ export class TerminalRunToolHost {
       'maxOutputChars'
     )
 
+    input.signal?.throwIfAborted()
     // This durable, one-shot transition must succeed immediately before spawn.
     this.authorization.consumeExecutionPermit({
       permit: authorized.permit,
@@ -127,8 +131,17 @@ export class TerminalRunToolHost {
       idempotencyKey: `${input.idempotencyKey}:consume`
     })
 
+    input.signal?.throwIfAborted()
     const startedAt = Date.now()
-    const outcome = await executeProcess(command, args, cwd, env, timeoutMs, maxOutputChars)
+    const outcome = await executeProcess(
+      command,
+      args,
+      cwd,
+      env,
+      timeoutMs,
+      maxOutputChars,
+      input.signal
+    )
     const result = Object.freeze({
       ...outcome,
       authorizationId: input.authorizationId,
@@ -228,9 +241,11 @@ function executeProcess(
   cwd: string,
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
-  maxOutputChars: number
+  maxOutputChars: number,
+  signal?: AbortSignal
 ): Promise<Omit<TerminalRunOutcome, 'authorizationId' | 'durationMs'>> {
   return new Promise((resolve) => {
+    signal?.throwIfAborted()
     const child = spawn(command, args, {
       cwd,
       env,
@@ -245,24 +260,47 @@ function executeProcess(
     let truncated = false
     let outputChars = 0
     let settled = false
-    const stop = (nextStatus: 'timed-out' | 'output-limit') => {
+    let termination: Promise<void> | undefined
+    const stop = (nextStatus: 'timed-out' | 'output-limit' | 'cancelled') => {
+      if (settled || termination) return
       if (status === 'completed') status = nextStatus
       const pid = child.pid
       if (!pid) return
       if (process.platform === 'win32') {
-        const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
-          shell: false,
-          windowsHide: true,
-          stdio: 'ignore'
+        // Never resolve a kill helper from the workspace or caller-controlled PATH.
+        const taskkill = path.join(
+          process.env.SystemRoot || 'C:\\Windows',
+          'System32',
+          'taskkill.exe'
+        )
+        termination = new Promise<void>((done) => {
+          const killer = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], {
+            shell: false,
+            windowsHide: true,
+            stdio: 'ignore'
+          })
+          killer.once('error', () => {
+            child.kill('SIGKILL')
+            done()
+          })
+          killer.once('close', (code) => {
+            if (code !== 0) child.kill('SIGKILL')
+            done()
+          })
         })
-        killer.once('error', () => child.kill('SIGKILL'))
       } else {
         try {
           process.kill(-pid, 'SIGKILL')
         } catch {
           child.kill('SIGKILL')
         }
+        termination = Promise.resolve()
       }
+    }
+    const onAbort = () => stop('cancelled')
+    const cleanup = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
     }
     const timer = setTimeout(() => stop('timed-out'), timeoutMs)
     const collect = (target: 'stdout' | 'stderr', chunk: Buffer | string) => {
@@ -280,7 +318,7 @@ function executeProcess(
     child.stdout.on('data', (chunk) => collect('stdout', chunk))
     child.stderr.on('data', (chunk) => collect('stderr', chunk))
     child.once('error', (error) => {
-      clearTimeout(timer)
+      cleanup()
       if (settled) return
       settled = true
       resolve({
@@ -293,18 +331,23 @@ function executeProcess(
       })
     })
     child.once('close', (exitCode, signal) => {
-      clearTimeout(timer)
+      cleanup()
       if (settled) return
       settled = true
-      resolve({
-        status: status === 'completed' && exitCode !== 0 ? 'failed' : status,
-        exitCode,
-        signal,
-        stdout,
-        stderr,
-        truncated
-      })
+      // Wait for child stdio closure and the tree-kill helper, not just a kill request.
+      void (termination ?? Promise.resolve()).then(() =>
+        resolve({
+          status: status === 'completed' && exitCode !== 0 ? 'failed' : status,
+          exitCode,
+          signal,
+          stdout,
+          stderr,
+          truncated
+        })
+      )
     })
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
   })
 }
 

@@ -811,6 +811,48 @@ describe('AssistantToolRegistry', () => {
     }
   })
 
+  it.each([true, false])(
+    'runs a confirmed command in its main-owned route workspace (explicit cwd=%s)',
+    async (explicit) => {
+      const registry = new AssistantToolRegistry()
+      const workspaceRootDir = path.join(tempDir, 'owned-route-workspace')
+      await fs.mkdir(workspaceRootDir, { recursive: true })
+      const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'terminal-owned-root' }
+      const config = {
+        ...DEFAULT_CONFIG,
+        download_dir: process.cwd(),
+        output_dir: process.cwd(),
+        workflow_dir: process.cwd(),
+        project_trace_config: {
+          ...DEFAULT_CONFIG.project_trace_config,
+          enable_agent_terminal: true
+        }
+      }
+      const requestSpy = vi.spyOn(getAssistantTerminalPolicyRuntime(), 'createRequest')
+      try {
+        const result = await registry.callTool(
+          'agent.terminal.run',
+          {
+            command: 'node',
+            args: ['--version'],
+            confirm: true,
+            ...(explicit ? { cwd: workspaceRootDir } : {}),
+            timeoutMs: 3000
+          },
+          createToolContext(route, createTaskState(route), { config, workspaceRootDir })
+        )
+        const parsed = JSON.parse(result.content)
+        expect(parsed).toMatchObject({ status: 'completed', exitCode: 0 })
+        expect(parsed.stdout.trim()).toBe(process.version)
+        expect(requestSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ cwd: await fs.realpath(workspaceRootDir) })
+        )
+      } finally {
+        requestSpy.mockRestore()
+      }
+    }
+  )
+
   it('detaches a route from a shared workspace and archives the prior workspace identity', async () => {
     const registry = new AssistantToolRegistry()
     const route = {
