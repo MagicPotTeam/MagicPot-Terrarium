@@ -43,6 +43,12 @@
     <textarea id="ticket" maxlength="4096" autocomplete="off" spellcheck="false"></textarea>
     <button id="pair" disabled>Pair with desktop</button>
     <button id="capture" disabled>Capture selection metadata</button>
+    <button id="plan-capture" disabled>Capture native plan context (no changes)</button>
+    <p>
+      Native planning requires a complete selection of 1–100 items. It captures only properties
+      declared executable by this host. Sharing needs explicit consent; model output still requires
+      a separate desktop write approval before any document change.
+    </p>
     <p>
       Only the first 100 selected items are captured. Changing selection does not update this
       snapshot. Capture again to replace it and cancel any pending review.
@@ -61,8 +67,9 @@
     <p id="status" role="status">Not connected.</p>
     <pre id="result"></pre>
     <p>
-      Results are plain text only. Nothing is applied to the document. Closing is best effort;
-      desktop expiry covers interrupted shutdown.
+      Model output is shown as a validated plan. Nothing is applied unless you separately approve
+      the exact native plan in MagicPot desktop. Closing is best effort; desktop expiry covers
+      interrupted shutdown.
     </p>
     <script>
       ;(() => {
@@ -99,6 +106,7 @@
           el('read-only-capture').disabled = disposed || !secure() || snapshotPending !== null
           el('pair').disabled = !configured || !secure() || paired || busy
           el('capture').disabled = !configured || !secure()
+          el('plan-capture').disabled = !configured || !secure()
           el('share').disabled =
             !configured ||
             !secure() ||
@@ -188,6 +196,20 @@
             el('result').textContent = ''
             refresh()
             send({ type: 'capture', nonce: random })
+          } catch {
+            localError()
+          }
+        })
+        el('plan-capture').addEventListener('click', () => {
+          if (!configured) return
+          try {
+            if (instanceEpoch === null) instanceEpoch = nonce()
+            revision = ''
+            el('consent').checked = false
+            el('selection').textContent = ''
+            el('result').textContent = ''
+            refresh()
+            send({ type: 'capture-plan', nonce: nonce(), instanceEpoch })
           } catch {
             localError()
           }

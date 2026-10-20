@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { hostContextSchema, type HostContext } from './hostPlan'
 import { ServiceError } from '../api/apiUtils/serviceValidation'
 import { FIGPLUGIN_HOSTS, FigPluginIdSchema, FigPluginDesktopBridgeOriginSchema } from './manifest'
 
@@ -132,6 +133,40 @@ export const figPluginPairResponseSchema = z
   .strict()
 export type FigPluginPairResponse = z.output<typeof figPluginPairResponseSchema>
 
+// Planning extends data carried by the read-only model request, never its permissions.
+const planningFields = {
+  featureId: z.literal('plan-preview').optional(),
+  hostContext: hostContextSchema.optional()
+}
+const validatePlanningFields = (
+  value: { featureId?: 'plan-preview'; hostContext?: HostContext; context: FigPluginContext },
+  ctx: z.RefinementCtx
+): void => {
+  const host = value.hostContext
+  if ((value.featureId === 'plan-preview') !== Boolean(host)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Planning requires an exact context' })
+    return
+  }
+  if (!host) return
+  if (
+    host.captureId !== value.context.selectionRevision ||
+    host.nodes.length !== value.context.nodes.length ||
+    host.nodes.some((node, index) => {
+      const brief = value.context.nodes[index]
+      return (
+        !brief ||
+        node.id !== brief.id ||
+        node.type !== brief.type ||
+        brief.locked !== (node.locked || node.ancestors.some((ancestor) => ancestor.locked))
+      )
+    })
+  )
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Planning context does not match its summary'
+    })
+}
+
 // Replay/order enforcement is session-owned; the shared contract has no retry or lifecycle state.
 export const figPluginBridgePrepareRequestSchema = boundedJson(64 * 1024).pipe(
   z
@@ -140,9 +175,11 @@ export const figPluginBridgePrepareRequestSchema = boundedJson(64 * 1024).pipe(
       requestId: figPluginBridgeRequestIdSchema,
       sequence: z.number().int().min(1).max(1_000_000_000),
       prompt,
-      context: figPluginContextSchema
+      context: figPluginContextSchema,
+      ...planningFields
     })
     .strict()
+    .superRefine(validatePlanningFields)
 )
 export type FigPluginBridgePrepareRequest = z.output<typeof figPluginBridgePrepareRequestSchema>
 
@@ -222,9 +259,11 @@ export const figPluginBridgePreviewSchema = z
     prompt,
     expiresAt: safeInteger,
     payloadSha256: figPluginBridgeHashSchema,
-    estimatedInputTokens: safeInteger
+    estimatedInputTokens: safeInteger,
+    ...planningFields
   })
   .strict()
+  .superRefine(validatePlanningFields)
 export type FigPluginBridgePreview = z.output<typeof figPluginBridgePreviewSchema>
 
 export const figPluginDesktopPairRequestSchema = z

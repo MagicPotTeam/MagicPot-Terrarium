@@ -310,7 +310,12 @@ function fixture(host, options = {}) {
       ...(options.real ? {} : { MagicPotSelectionSnapshotV1: helper }),
       require(name) {
         assert.equal(name, 'photoshop')
-        return readonly({ app })
+        return readonly({
+          app,
+          core: readonly({
+            executeAsModal: async (operation) => operation({})
+          })
+        })
       }
     })
   }
@@ -393,7 +398,7 @@ for (const host of ['figma', 'photoshop']) {
     assert.deepEqual(f.factories, [])
     assert.deepEqual(f.requests, [])
     assert.match(sources[host].html, /Review complete selection locally \(read-only\)/)
-    assert.ok(sources[host].html.includes(warning))
+    assert.ok(sources[host].html.replace(/\s+/g, ' ').includes(warning))
     const text = f.local()
     assert.equal(f.captures, 1)
     assert.equal(f.factories.length, 1)

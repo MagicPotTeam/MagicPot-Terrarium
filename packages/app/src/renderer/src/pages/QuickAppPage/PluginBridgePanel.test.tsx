@@ -23,7 +23,11 @@ const mocks = vi.hoisted(() => ({
     bridgeState: vi.fn<FigPluginCenterSvc['bridgeState']>(),
     approveBridge: vi.fn<FigPluginCenterSvc['approveBridge']>(),
     denyBridge: vi.fn<FigPluginCenterSvc['denyBridge']>(),
-    revokeBridge: vi.fn<FigPluginCenterSvc['revokeBridge']>()
+    revokeBridge: vi.fn<FigPluginCenterSvc['revokeBridge']>(),
+    planState: vi.fn<FigPluginCenterSvc['planState']>(),
+    approvePlanExecution: vi.fn<FigPluginCenterSvc['approvePlanExecution']>(),
+    denyPlanExecution: vi.fn<FigPluginCenterSvc['denyPlanExecution']>(),
+    cancelPlanExecution: vi.fn<FigPluginCenterSvc['cancelPlanExecution']>()
   },
   profiles: vi.fn<() => Promise<LLMListProfilesResp>>(),
   projects: vi.fn<() => ProjectRecord[]>(),
@@ -148,6 +152,7 @@ beforeEach(() => {
   mocks.project.mockImplementation((id) => mocks.projects().find((value) => value.id === id))
   mocks.center.createPairing.mockImplementation(async () => ticket())
   mocks.center.bridgeState.mockResolvedValue({ sessions: [], previews: [] })
+  mocks.center.planState.mockResolvedValue({ previews: [], statuses: [] })
   mocks.center.approveBridge.mockResolvedValue({ completed: true })
   mocks.center.denyBridge.mockResolvedValue(undefined)
   mocks.center.revokeBridge.mockResolvedValue(undefined)

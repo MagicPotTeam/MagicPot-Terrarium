@@ -1026,12 +1026,14 @@ test('Photoshop initializes once on DOMContentLoaded and reads only explicit act
   assert.equal(f.reads, 1)
   f.clean()
 })
-test('Connected sources contain no runtime code evaluation, HTML injection, persistence or model endpoint', () => {
-  for (const { code, html } of Object.values(sources)) {
+test('Connected sources contain no runtime evaluation, HTML injection, persistence or model endpoint', () => {
+  for (const [host, { code, html }] of Object.entries(sources)) {
     assert.doesNotMatch(
       code + html,
-      /\beval\s*\(|new\s+Function\b|innerHTML|insertAdjacentHTML|document\.write|Math\.random|localStorage|sessionStorage|clientStorage|executeAsModal|batchPlay|\/authorize|\/chat\/completions|\/responses/
+      /\beval\s*\(|new\s+Function\b|innerHTML|insertAdjacentHTML|document\.write|Math\.random|localStorage|sessionStorage|clientStorage|batchPlay|\/authorize|\/chat\/completions|\/responses/
     )
+    if (host === 'figma') assert.doesNotMatch(code, /executeAsModal/)
+    else assert.match(code, /executeAsModal/)
     assert.match(
       html.replace(/\s+/g, ' '),
       /Send this prompt and selection metadata to MagicPot for desktop approval; may incur model charges only after approval/

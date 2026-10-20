@@ -284,6 +284,10 @@ export function prepareFigPluginHost(options) {
       ? readSourceRegular(SOURCE_ROOT, ['shared', 'selection-snapshot.js'])
       : null
     if (helperSource) sources.push(helperSource)
+    const planningSource = connected
+      ? readSourceRegular(SOURCE_ROOT, ['shared', 'plan-preview.js'])
+      : null
+    if (planningSource) sources.push(planningSource)
     const manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(sources[0].data))
     requireValid(manifest.id === spec.placeholder)
     requireValid(manifest.main === (host === 'figma' ? spec.code : spec.ui))
@@ -296,12 +300,14 @@ export function prepareFigPluginHost(options) {
       version: '1.0.0',
       host,
       entryPath: 'manifest.json',
-      capabilities: connected ? ['dialogue', 'asset-transfer'] : ['asset-transfer'],
+      capabilities: connected
+        ? ['dialogue', 'asset-transfer', 'result-transfer']
+        : ['asset-transfer'],
       permissions: {
         dialogue: connected ? 'prompt' : 'none',
         backgroundRemoval: 'none',
         assetTransfer: 'read',
-        resultTransfer: 'none',
+        resultTransfer: connected ? 'write' : 'none',
         filesystem: 'none',
         network: connected ? 'desktop-bridge' : 'none'
       },
@@ -348,6 +354,8 @@ export function prepareFigPluginHost(options) {
           `globalThis.MAGICPOT_BRIDGE_CONFIG = Object.freeze(${JSON.stringify(config)});\n`
         ),
         helperSource.data,
+        Buffer.from('\n;\n'),
+        planningSource.data,
         Buffer.from('\n;\n'),
         code
       ])

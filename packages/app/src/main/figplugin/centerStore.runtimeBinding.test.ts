@@ -216,6 +216,7 @@ describe('main-only FIGPLUGIN runtime descriptors', () => {
       manifestSha256: sha(canonicalFigPluginJson(verified.package.manifest)),
       bridgeOrigin,
       profileId: 'analysis-profile',
+      capabilities: verified.package.manifest.capabilities,
       limits: verified.package.manifest.limits
     })
     const list = await store.listManaged()

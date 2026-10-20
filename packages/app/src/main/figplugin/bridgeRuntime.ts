@@ -15,7 +15,38 @@ import {
   type FigPluginPairResponse,
   type FigPluginRuntimeBinding
 } from '@shared/figplugin/bridge'
+import {
+  FIGPLUGIN_EXECUTION_MAX_EVENTS,
+  FIGPLUGIN_EXECUTION_PROTOCOL,
+  figPluginExecutionClaimResponseSchema,
+  figPluginExecutionPreviewSchema,
+  figPluginExecutionProgressRequestSchema,
+  figPluginExecutionResultRequestSchema,
+  figPluginExecutionResultResponseSchema,
+  figPluginExecutionStateSchema,
+  figPluginExecutionStatusSchema,
+  figPluginExecutionClaimRequestSchema,
+  figPluginExecutionStatusRequestSchema,
+  type FigPluginExecutionClaimResponse,
+  type FigPluginExecutionPreview,
+  type FigPluginExecutionProgressRequest,
+  type FigPluginExecutionResultRequest,
+  type FigPluginExecutionResultResponse,
+  type FigPluginExecutionState,
+  type FigPluginExecutionStatus
+} from '@shared/figplugin/execution'
+import {
+  createHostPlanningPreview,
+  type HostPlanningPreview
+} from '@shared/figplugin/hostPlanPreview'
+import {
+  hostContextSchema,
+  validateHostPlanReadback,
+  type HostContext,
+  type HostPlan
+} from '@shared/figplugin/hostPlan'
 import { canonicalFigPluginJson } from '@shared/figplugin/manifest'
+import type { FigPluginExecutionAuditEvent } from './executionAudit'
 
 const TICKET_TTL = 120_000
 const SESSION_TTL = 600_000
@@ -50,6 +81,8 @@ type Options = {
   ) => Promise<{ content: string; reportedTotalTokens?: number }>
   now?: () => number
   callTimeoutMs?: number
+  audit?: (event: FigPluginExecutionAuditEvent) => void
+  allowNativeWrite?: (binding: FigPluginRuntimeBinding) => boolean
 }
 type Ticket = {
   binding: FigPluginRuntimeBinding
@@ -60,6 +93,7 @@ type Ticket = {
 }
 type Receipt = {
   sequence: number
+  requestId: string
   digest: string
   response: FigPluginBridgePrepareResponse
 }
@@ -79,13 +113,68 @@ type Call = {
   receipt: Receipt
   status: FigPluginBridgeStatusResponse
   preview?: FigPluginBridgePreview
+  hostContext?: HostContext
   controller?: AbortController
   deadline?: number
+  execution?: PlanExecution
+}
+type PlanProgress = {
+  sequence: number
+  phase: 'claimed' | 'executing' | 'readback'
+  index?: number
+  completed: number
+  effect: 'none' | 'applied' | 'rolled-back' | 'partial' | 'unknown'
+  at: number
+}
+type PlanExecution = {
+  executionId: string
+  actionId: string
+  call: Call
+  plan: HostPlan
+  context: HostContext
+  preview: FigPluginExecutionPreview
+  planSha256: string
+  contextSha256: string
+  previewSha256: string
+  state: FigPluginExecutionState
+  completed: number
+  effect: PlanProgress['effect']
+  cursor: number
+  progress: PlanProgress[]
+  intent?: {
+    protocol: typeof FIGPLUGIN_EXECUTION_PROTOCOL
+    purpose: 'execute-host-plan'
+    executionId: string
+    callId: string
+    pluginId: string
+    host: HostContext['host']
+    documentId: string
+    scopeId: string
+    captureId: string
+    plan: HostPlan
+    planSha256: string
+    expiresAt: number
+    adapterVersion: string
+    actionId: string
+  }
+  claimedAt?: number
+  resultFingerprint?: string
+  updatedAt: number
+  errorCode?: NonNullable<FigPluginExecutionStatus['errorCode']>
 }
 type TerminalCode =
   'DENIED' | 'EXPIRED' | 'CONFIGURATION_CHANGED' | 'CANCELLED' | 'TIMEOUT' | 'UPSTREAM_FAILED'
 const active = (call: Call): boolean =>
   call.status.status === 'awaiting-approval' || call.status.status === 'running'
+const terminalExecution = new Set<FigPluginExecutionState>([
+  'completed',
+  'cancelled',
+  'denied',
+  'failed',
+  'expired'
+])
+const digest = (value: unknown): string =>
+  createHash('sha256').update(canonicalFigPluginJson(value), 'utf8').digest('hex')
 
 /** Memory-only main-process authority. Never expose createPairing/approve/deny to the host.
  * The caller supplies trusted native consent and validates the entire current store binding.
@@ -98,6 +187,8 @@ export class FigPluginBridgeRuntime {
   private readonly invoke: Options['invoke']
   private readonly clock: () => number
   private readonly callTimeout: number
+  private readonly audit?: Options['audit']
+  private readonly allowNativeWrite: NonNullable<Options['allowNativeWrite']>
   private failures: number[] = []
   private timer?: ReturnType<typeof setTimeout>
   private preparing = 0
@@ -111,6 +202,138 @@ export class FigPluginBridgeRuntime {
     this.callTimeout = Number.isFinite(options.callTimeoutMs)
       ? Math.max(1, Math.min(MAX_CALL_TIMEOUT, Math.floor(options.callTimeoutMs!)))
       : MAX_CALL_TIMEOUT
+    this.audit = options.audit
+    this.allowNativeWrite = options.allowNativeWrite ?? (() => false)
+  }
+
+  private executionStatus(execution: PlanExecution): FigPluginExecutionStatus {
+    return figPluginExecutionStatusSchema.parse({
+      protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+      executionId: execution.executionId,
+      callId: execution.call.receipt.response.callId,
+      state: execution.state,
+      completed: execution.completed,
+      total: execution.plan.steps.length,
+      effect: execution.effect,
+      updatedAt: execution.updatedAt,
+      ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
+    })
+  }
+
+  private executionPreview(execution: PlanExecution): FigPluginExecutionPreview {
+    return figPluginExecutionPreviewSchema.parse({
+      ...execution.preview,
+      state: execution.state
+    })
+  }
+
+  private registerPlanExecution(
+    call: Call,
+    content: string,
+    context: HostContext
+  ): PlanExecution | undefined {
+    let checked: HostPlanningPreview
+    try {
+      const parsed = JSON.parse(content) as { plan?: unknown }
+      checked = createHostPlanningPreview(JSON.stringify(parsed.plan), context)
+    } catch {
+      return undefined
+    }
+    if (
+      checked.executable !== true ||
+      !checked.execution ||
+      !this.allowNativeWrite(call.session.binding)
+    )
+      return undefined
+    const executionId = randomBytes(16).toString('hex')
+    const planSha256 = digest(checked.plan)
+    const contextSha256 = digest(context)
+    const createdAt = this.clock()
+    const expiresAt = call.receipt.response.expiresAt
+    if (expiresAt <= createdAt) return undefined
+    const preview = figPluginExecutionPreviewSchema.parse({
+      protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+      executionId,
+      callId: call.receipt.response.callId,
+      pluginId: call.session.binding.pluginId,
+      host: call.session.binding.host,
+      projectId: call.session.binding.projectId,
+      documentId: context.documentId,
+      scopeId: context.scopeId,
+      captureId: context.captureId,
+      plan: checked.plan,
+      planSha256,
+      contextSha256,
+      adapterVersion: checked.execution.adapterVersion,
+      rollback: checked.execution.rollback,
+      visualAudit: checked.execution.visualAudit,
+      risk: checked.risk,
+      differences: checked.differences,
+      state: 'awaiting-approval',
+      requiresWriteApproval: true,
+      createdAt,
+      expiresAt
+    })
+    const previewSha256 = digest({
+      plan: checked.plan,
+      differences: checked.differences,
+      risk: checked.risk,
+      planSha256,
+      contextSha256,
+      adapterVersion: checked.execution.adapterVersion,
+      rollback: checked.execution.rollback,
+      visualAudit: checked.execution.visualAudit
+    })
+    const execution: PlanExecution = {
+      executionId,
+      actionId: executionId,
+      call,
+      plan: checked.plan,
+      context,
+      preview,
+      planSha256,
+      contextSha256,
+      previewSha256,
+      state: 'awaiting-approval',
+      completed: 0,
+      effect: 'none',
+      cursor: 0,
+      progress: [],
+      updatedAt: createdAt
+    }
+    call.execution = execution
+    this.recordExecutionAudit(execution)
+    return execution
+  }
+
+  private recordExecutionAudit(execution: PlanExecution): void {
+    if (!this.audit) return
+    try {
+      this.audit({
+        schemaVersion: 1,
+        at: this.clock(),
+        executionId: execution.executionId,
+        callId: execution.call.receipt.response.callId,
+        requestId: execution.call.receipt.requestId,
+        pluginId: execution.call.session.binding.pluginId,
+        host: execution.call.session.binding.host,
+        projectId: execution.call.session.binding.projectId,
+        state: execution.state,
+        completed: execution.completed,
+        total: execution.plan.steps.length,
+        effect: execution.effect,
+        risk: execution.preview.risk,
+        planSha256: execution.planSha256,
+        previewSha256: execution.previewSha256,
+        adapterVersion: execution.preview.adapterVersion,
+        rollback: execution.preview.rollback,
+        visualAudit: execution.preview.visualAudit,
+        durationMs: Math.max(0, execution.updatedAt - execution.preview.createdAt),
+        ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
+      })
+    } catch {
+      // Audit cannot affect document-state transitions or leak host errors.
+    }
   }
 
   async createPairing(binding: FigPluginRuntimeBinding): Promise<{
@@ -248,12 +471,21 @@ export class FigPluginBridgeRuntime {
     session.preparing += 1
     try {
       const request = parseFigPluginBridgeValue(figPluginBridgePrepareRequestSchema, input)
+      if (request.hostContext && request.hostContext.host !== session.binding.host)
+        throw new FigPluginBridgeError('INVALID_REQUEST')
+      if (request.hostContext?.execution && !this.allowNativeWrite(session.binding))
+        throw new FigPluginBridgeError('INVALID_REQUEST')
+      const planning =
+        request.featureId === 'plan-preview'
+          ? { featureId: request.featureId, hostContext: request.hostContext! }
+          : {}
       let canonical: string
       try {
         canonical = canonicalFigPluginJson({
           binding: session.binding,
           prompt: request.prompt,
-          context: request.context
+          context: request.context,
+          ...planning
         })
       } catch {
         throw new FigPluginBridgeError('INVALID_REQUEST')
@@ -291,7 +523,12 @@ export class FigPluginBridgeRuntime {
         status: 'awaiting-approval',
         expiresAt
       }
-      const receipt: Receipt = { sequence: request.sequence, digest, response }
+      const receipt: Receipt = {
+        sequence: request.sequence,
+        requestId: request.requestId,
+        digest,
+        response
+      }
       const preview: FigPluginBridgePreview = {
         callId,
         pluginId: session.binding.pluginId,
@@ -303,12 +540,14 @@ export class FigPluginBridgeRuntime {
         prompt: request.prompt,
         expiresAt,
         payloadSha256: digest,
-        estimatedInputTokens: Math.ceil(Buffer.byteLength(canonical, 'utf8') / 4)
+        estimatedInputTokens: Math.ceil(Buffer.byteLength(canonical, 'utf8') / 4),
+        ...planning
       }
       this.calls.set(callId, {
         session,
         receipt,
         preview,
+        ...(planning.hostContext ? { hostContext: planning.hostContext } : {}),
         status: { protocol: FIGPLUGIN_BRIDGE_PROTOCOL, callId, status: 'awaiting-approval' }
       })
       session.requests.set(request.requestId, receipt)
@@ -343,6 +582,7 @@ export class FigPluginBridgeRuntime {
     this.ownedReceipt(session, callId)
     const call = this.calls.get(callId)
     if (call && active(call)) this.terminate(call, 'CANCELLED')
+    else if (call?.execution) this.terminateExecution(call.execution, 'CANCELLED')
     this.scheduleCleanup()
   }
 
@@ -357,6 +597,20 @@ export class FigPluginBridgeRuntime {
     return [...this.calls.values()]
       .filter((call) => call.status.status === 'awaiting-approval' && call.preview)
       .map((call) => structuredClone(call.preview!))
+  }
+
+  listPlanExecutions(): FigPluginExecutionPreview[] {
+    this.enter()
+    return [...this.calls.values()]
+      .flatMap((call) => (call.execution ? [call.execution] : []))
+      .map((execution) => this.executionPreview(execution))
+  }
+
+  listPlanStatuses(): FigPluginExecutionStatus[] {
+    this.enter()
+    return [...this.calls.values()]
+      .flatMap((call) => (call.execution ? [call.execution] : []))
+      .map((execution) => this.executionStatus(execution))
   }
 
   async approve(callId: string, payloadSha256: string): Promise<void> {
@@ -376,6 +630,246 @@ export class FigPluginBridgeRuntime {
     this.scheduleCleanup()
     // No await between the last lifetime/state check, single-use transition and invoke.
     void this.execute(call, preview, controller)
+  }
+
+  async approvePlan(executionId: string, planSha256: string): Promise<void> {
+    this.enter()
+    const execution = this.findExecution(executionId)
+    const check = (): void => {
+      if (
+        this.calls.get(execution.call.receipt.response.callId) !== execution.call ||
+        this.sessions.get(execution.call.session.id) !== execution.call.session ||
+        execution.state !== 'awaiting-approval' ||
+        execution.call.status.status !== 'completed' ||
+        execution.preview.expiresAt <= this.clock() ||
+        !secretEquals(planSha256, execution.planSha256)
+      )
+        throw new FigPluginBridgeError(
+          execution.preview.expiresAt <= this.clock() ? 'EXPIRED' : 'INVALID_REQUEST'
+        )
+    }
+    check()
+    await this.checkSession(execution.call.session)
+    check()
+    execution.state = 'approved'
+    execution.updatedAt = this.clock()
+    this.recordExecutionAudit(execution)
+    this.scheduleCleanup()
+  }
+
+  denyPlan(executionId: string): void {
+    this.enter()
+    const execution = this.findExecution(executionId)
+    if (terminalExecution.has(execution.state)) return
+    execution.state = 'denied'
+    execution.errorCode = 'DENIED'
+    execution.updatedAt = this.clock()
+    this.recordExecutionAudit(execution)
+    this.scheduleCleanup()
+  }
+
+  cancelPlan(executionId: string): void {
+    this.enter()
+    const execution = this.findExecution(executionId)
+    if (terminalExecution.has(execution.state)) return
+    execution.state = 'cancelled'
+    execution.errorCode = 'CANCELLED'
+    execution.updatedAt = this.clock()
+    this.recordExecutionAudit(execution)
+    this.scheduleCleanup()
+  }
+
+  async planStatus(
+    sessionId: string,
+    sessionToken: string,
+    input: unknown
+  ): Promise<FigPluginExecutionStatus> {
+    const session = this.authenticate(sessionId, sessionToken)
+    const request = parseFigPluginBridgeValue(figPluginExecutionStatusRequestSchema, input)
+    this.ownedReceipt(session, request.callId)
+    await this.checkSession(session)
+    const call = this.calls.get(request.callId)
+    if (!call?.execution) throw new FigPluginBridgeError('INVALID_REQUEST')
+    this.expireExecution(call.execution)
+    return this.executionStatus(call.execution)
+  }
+
+  async claimPlan(
+    sessionId: string,
+    sessionToken: string,
+    input: unknown
+  ): Promise<FigPluginExecutionClaimResponse> {
+    const session = this.authenticate(sessionId, sessionToken)
+    const request = parseFigPluginBridgeValue(figPluginExecutionClaimRequestSchema, input)
+    this.ownedReceipt(session, request.callId)
+    await this.checkSession(session)
+    const call = this.calls.get(request.callId)
+    if (!call?.execution) throw new FigPluginBridgeError('INVALID_REQUEST')
+    const execution = call.execution
+    this.expireExecution(execution)
+    if (
+      execution.state === 'claimed' ||
+      execution.state === 'executing' ||
+      execution.state === 'readback'
+    ) {
+      if (!execution.intent) throw new FigPluginBridgeError('UPSTREAM_FAILED')
+      return figPluginExecutionClaimResponseSchema.parse({
+        protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+        status: 'ready',
+        intent: execution.intent
+      })
+    }
+    if (execution.state !== 'approved')
+      return figPluginExecutionClaimResponseSchema.parse({
+        protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+        status: terminalExecution.has(execution.state) ? 'terminal' : 'pending',
+        state: execution.state,
+        ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
+      })
+    const intent = {
+      protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+      purpose: 'execute-host-plan' as const,
+      executionId: execution.executionId,
+      callId: call.receipt.response.callId,
+      pluginId: session.binding.pluginId,
+      host: session.binding.host,
+      documentId: execution.context.documentId,
+      scopeId: execution.context.scopeId,
+      captureId: execution.context.captureId,
+      plan: execution.plan,
+      planSha256: execution.planSha256,
+      expiresAt: execution.preview.expiresAt,
+      adapterVersion: execution.preview.adapterVersion,
+      actionId: execution.actionId
+    }
+    execution.intent = Object.freeze(intent)
+    execution.state = 'claimed'
+    execution.claimedAt = this.clock()
+    execution.updatedAt = this.clock()
+    this.appendPlanProgress(execution, {
+      sequence: execution.cursor + 1,
+      phase: 'claimed',
+      completed: 0,
+      effect: 'none',
+      at: execution.updatedAt
+    })
+    this.recordExecutionAudit(execution)
+    return figPluginExecutionClaimResponseSchema.parse({
+      protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+      status: 'ready',
+      intent
+    })
+  }
+
+  planProgress(sessionId: string, sessionToken: string, input: unknown): FigPluginExecutionStatus {
+    const session = this.authenticate(sessionId, sessionToken)
+    const request = parseFigPluginBridgeValue(figPluginExecutionProgressRequestSchema, input)
+    const execution = this.ownedExecution(session, request.executionId)
+    this.expireExecution(execution)
+    if (
+      !execution.intent ||
+      execution.intent.actionId !== request.actionId ||
+      !['claimed', 'executing', 'readback'].includes(execution.state)
+    )
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    if (request.sequence <= execution.cursor || request.total !== execution.plan.steps.length)
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    execution.state = request.phase
+    execution.completed = request.completed
+    execution.effect = request.effect
+    execution.updatedAt = this.clock()
+    this.appendPlanProgress(execution, {
+      sequence: request.sequence,
+      phase: request.phase,
+      ...(request.index === undefined ? {} : { index: request.index }),
+      completed: request.completed,
+      effect: request.effect,
+      at: request.at
+    })
+    this.recordExecutionAudit(execution)
+    this.scheduleCleanup()
+    return this.executionStatus(execution)
+  }
+
+  planResult(
+    sessionId: string,
+    sessionToken: string,
+    input: unknown
+  ): FigPluginExecutionResultResponse {
+    const session = this.authenticate(sessionId, sessionToken)
+    const request = parseFigPluginBridgeValue(figPluginExecutionResultRequestSchema, input)
+    const execution = this.ownedExecution(session, request.executionId)
+    const fingerprint = digest(request)
+    this.expireExecution(execution)
+    if (terminalExecution.has(execution.state)) {
+      if (
+        execution.resultFingerprint === fingerprint &&
+        execution.intent?.actionId === request.actionId
+      )
+        return figPluginExecutionResultResponseSchema.parse({
+          protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+          executionId: execution.executionId,
+          status: this.executionStatus(execution)
+        })
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    }
+    if (
+      !execution.intent ||
+      execution.intent.actionId !== request.actionId ||
+      !['claimed', 'executing', 'readback'].includes(execution.state) ||
+      request.total !== execution.plan.steps.length
+    )
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    try {
+      validateHostPlanReadback(execution.plan, execution.context, request.readback)
+    } catch {
+      execution.state = 'failed'
+      execution.errorCode = 'STALE_CONTEXT'
+      execution.effect = 'unknown'
+      execution.updatedAt = this.clock()
+      this.recordExecutionAudit(execution)
+      this.scheduleCleanup()
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    }
+    const observations = request.readback.steps.map((step) => step.observation)
+    if (request.effect === 'applied' && observations.some((value) => value !== 'requested')) {
+      execution.state = 'failed'
+      execution.errorCode = 'QUARANTINED'
+      execution.effect = 'unknown'
+      execution.updatedAt = this.clock()
+      this.recordExecutionAudit(execution)
+      this.scheduleCleanup()
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    }
+    if (request.effect === 'rolled-back' && observations.some((value) => value !== 'original')) {
+      execution.state = 'failed'
+      execution.errorCode = 'QUARANTINED'
+      execution.effect = 'unknown'
+      execution.updatedAt = this.clock()
+      this.recordExecutionAudit(execution)
+      this.scheduleCleanup()
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    }
+    execution.completed = request.completed
+    execution.effect = request.effect
+    execution.errorCode = request.errorCode
+    execution.resultFingerprint = fingerprint
+    execution.updatedAt = this.clock()
+    execution.state =
+      request.status === 'completed' && request.effect === 'applied'
+        ? 'completed'
+        : request.status === 'cancelled'
+          ? 'cancelled'
+          : 'failed'
+    if (request.effect === 'unknown') execution.errorCode = 'QUARANTINED'
+    if (request.effect === 'rolled-back') execution.errorCode = 'ROLLED_BACK'
+    this.recordExecutionAudit(execution)
+    this.scheduleCleanup()
+    return figPluginExecutionResultResponseSchema.parse({
+      protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+      executionId: execution.executionId,
+      status: this.executionStatus(execution)
+    })
   }
 
   deny(callId: string): void {
@@ -450,6 +944,55 @@ export class FigPluginBridgeRuntime {
   private enter(): void {
     if (this.closed) throw new FigPluginBridgeError('UNAUTHORIZED')
     this.prune()
+  }
+
+  private findExecution(executionId: string): PlanExecution {
+    if (!isId(executionId)) throw new FigPluginBridgeError('INVALID_REQUEST')
+    for (const call of this.calls.values()) {
+      if (call.execution?.executionId === executionId) {
+        this.expireExecution(call.execution)
+        return call.execution
+      }
+    }
+    throw new FigPluginBridgeError('EXPIRED')
+  }
+
+  private ownedExecution(session: Session, executionId: string): PlanExecution {
+    const execution = this.findExecution(executionId)
+    if (
+      execution.call.session !== session ||
+      this.sessions.get(session.id) !== session ||
+      this.calls.get(execution.call.receipt.response.callId) !== execution.call
+    )
+      throw new FigPluginBridgeError('UNAUTHORIZED')
+    return execution
+  }
+
+  private appendPlanProgress(execution: PlanExecution, event: PlanProgress): void {
+    if (event.sequence <= execution.cursor) return
+    execution.cursor = event.sequence
+    execution.progress.push(event)
+    if (execution.progress.length > FIGPLUGIN_EXECUTION_MAX_EVENTS) execution.progress.shift()
+  }
+
+  private expireExecution(execution: PlanExecution): void {
+    if (terminalExecution.has(execution.state)) return
+    if (execution.preview.expiresAt > this.clock()) return
+    execution.state = 'expired'
+    execution.errorCode = 'EXPIRED'
+    execution.updatedAt = this.clock()
+    this.recordExecutionAudit(execution)
+  }
+
+  private terminateExecution(
+    execution: PlanExecution,
+    code: 'CANCELLED' | 'CONFIGURATION_CHANGED'
+  ): void {
+    if (terminalExecution.has(execution.state)) return
+    execution.state = 'cancelled'
+    execution.errorCode = code === 'CANCELLED' ? 'CANCELLED' : 'HOST_UNAVAILABLE'
+    execution.updatedAt = this.clock()
+    this.recordExecutionAudit(execution)
   }
 
   private authenticate(id: string, token: string): Session {
@@ -544,6 +1087,9 @@ export class FigPluginBridgeRuntime {
       // A provider/profile change while invoking also invalidates an otherwise good result.
       await this.checkSession(call.session)
       if (!this.running(call)) return
+      if (call.preview?.featureId === 'plan-preview' && call.hostContext) {
+        this.registerPlanExecution(call, result.content, call.hostContext)
+      }
       call.status = {
         protocol: FIGPLUGIN_BRIDGE_PROTOCOL,
         callId: call.receipt.response.callId,
@@ -551,6 +1097,7 @@ export class FigPluginBridgeRuntime {
         ...result
       }
       call.preview = undefined
+      call.hostContext = undefined
       call.controller = undefined
       call.deadline = undefined
       this.scheduleCleanup()

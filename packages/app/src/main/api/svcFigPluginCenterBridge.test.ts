@@ -19,6 +19,14 @@ import {
   type FigPluginDesktopPairTicket,
   type FigPluginPairResponse
 } from '@shared/figplugin/bridge'
+import {
+  figPluginExecutionClaimResponseSchema,
+  figPluginExecutionDesktopStateSchema,
+  figPluginExecutionResultResponseSchema,
+  figPluginExecutionStatusSchema,
+  type FigPluginDesktopExecutionApproval
+} from '@shared/figplugin/execution'
+import { createHostPlanReadback, type HostContext, type HostPlan } from '@shared/figplugin/hostPlan'
 import { FIGPLUGIN_MANAGEMENT_ERRORS } from '@shared/figplugin/management'
 import { FigPluginBridgeController } from '../figplugin/bridgeController'
 import { startFigPluginBridgeServer } from '../figplugin/bridgeServer'
@@ -52,7 +60,15 @@ vi.mock('electron', () => ({
 }))
 
 type BridgeMethod =
-  'createPairing' | 'bridgeState' | 'approveBridge' | 'denyBridge' | 'revokeBridge'
+  | 'createPairing'
+  | 'bridgeState'
+  | 'approveBridge'
+  | 'denyBridge'
+  | 'revokeBridge'
+  | 'planState'
+  | 'approvePlanExecution'
+  | 'denyPlanExecution'
+  | 'cancelPlanExecution'
 type Store = ConstructorParameters<typeof FigPluginBridgeController>[0]
 type Model = ConstructorParameters<typeof FigPluginBridgeController>[1]
 type Runtime = Parameters<typeof startFigPluginBridgeServer>[0]['runtime']
@@ -132,6 +148,7 @@ function fixture(options: { origin?: string; realHttp?: boolean } = {}) {
     manifestSha256: 'c'.repeat(64),
     bridgeOrigin: options.origin ?? 'http://127.0.0.1:41234',
     profileId: 'synthetic-provider::synthetic-model',
+    capabilities: ['dialogue', 'asset-transfer', 'result-transfer'],
     limits: {
       maxPayloadBytes: 64 * 1024,
       maxResultBytes: 32 * 1024,
@@ -303,7 +320,70 @@ const request = (sequence = 1): FigPluginBridgePrepareRequest => ({
     documentLabel: 'Synthetic fixture, not a user document'
   }
 })
+const executionContext: HostContext = {
+  version: 1,
+  host: 'figma',
+  documentId: 'synthetic-execution-document',
+  scopeId: 'synthetic-execution-page',
+  captureId: '4'.repeat(32),
+  nodes: [
+    {
+      id: '1:2',
+      type: 'FRAME',
+      name: 'Synthetic untrusted label',
+      parentId: null,
+      ancestors: [],
+      locked: false,
+      visible: true,
+      opacity: 1,
+      commands: ['node.rename'],
+      children: []
+    }
+  ],
+  selectedIds: ['1:2'],
+  execution: {
+    mode: 'native-write',
+    adapterVersion: 'synthetic-figma-adapter-1',
+    supports: ['node.rename'],
+    rollback: 'verified-in-place',
+    visualAudit: 'unavailable'
+  }
+}
+const executionPlan: HostPlan = {
+  schemaVersion: 2,
+  kind: 'host-plan',
+  captureId: executionContext.captureId,
+  steps: [{ command: 'node.rename', targetId: '1:2', name: 'Synthetic approved label' }]
+}
+const executionRequest = (sequence = 1): FigPluginBridgePrepareRequest => ({
+  protocol: 1,
+  requestId: `synthetic_execution_request_${sequence}`,
+  sequence,
+  prompt: 'Rename the selected layer to the approved synthetic label.',
+  context: {
+    selectionRevision: executionContext.captureId,
+    nodes: [
+      {
+        id: '1:2',
+        type: 'FRAME',
+        name: 'Synthetic untrusted label',
+        locked: false
+      }
+    ],
+    documentLabel: 'Synthetic fixture, not a user document'
+  },
+  featureId: 'plan-preview',
+  hostContext: structuredClone(executionContext)
+})
+const executedContext = (): HostContext => ({
+  ...structuredClone(executionContext),
+  nodes: executionContext.nodes.map((node) => ({
+    ...structuredClone(node),
+    name: 'Synthetic approved label'
+  }))
+})
 const desktopState = (value: Fixture) => value.service.bridgeState({}, invocation('bridgeState'))
+const planDesktopState = (value: Fixture) => value.service.planState({}, invocation('planState'))
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve))
 
 async function ticketFor(value: Fixture): Promise<FigPluginDesktopPairTicket> {
@@ -435,6 +515,20 @@ describe('FigPluginCenterSvcImpl desktop authority and pairing consent', () => {
     {
       name: 'revokeBridge',
       call: (v, c) => v.service.revokeBridge({ pluginId: pairRequest.pluginId }, c)
+    },
+    { name: 'planState', call: (v, c) => v.service.planState({}, c) },
+    {
+      name: 'approvePlanExecution',
+      call: (v, c) =>
+        v.service.approvePlanExecution({ executionId: UNKNOWN_CALL, planSha256: UNKNOWN_HASH }, c)
+    },
+    {
+      name: 'denyPlanExecution',
+      call: (v, c) => v.service.denyPlanExecution({ executionId: UNKNOWN_CALL }, c)
+    },
+    {
+      name: 'cancelPlanExecution',
+      call: (v, c) => v.service.cancelPlanExecution({ executionId: UNKNOWN_CALL }, c)
     }
   ]
   it.each(methods)(
@@ -510,10 +604,41 @@ describe('FigPluginCenterSvcImpl desktop authority and pairing consent', () => {
       ),
       'INVALID_REQUEST'
     )
+    await rejectsSafely(
+      value.service.approvePlanExecution(
+        {
+          executionId: UNKNOWN_CALL,
+          planSha256: UNKNOWN_HASH,
+          checkboxChecked: true
+        } as FigPluginDesktopExecutionApproval,
+        invocation('approvePlanExecution')
+      ),
+      'INVALID_REQUEST'
+    )
+    await rejectsSafely(
+      value.service.denyPlanExecution(
+        { executionId: UNKNOWN_CALL, approved: true } as { executionId: string },
+        invocation('denyPlanExecution')
+      ),
+      'INVALID_REQUEST'
+    )
+    await rejectsSafely(
+      value.service.cancelPlanExecution(
+        { executionId: UNKNOWN_CALL, evidence: 'forged' } as { executionId: string },
+        invocation('cancelPlanExecution')
+      ),
+      'INVALID_REQUEST'
+    )
     await expect(
       value.service.bridgeState(
         { sessionToken: UNKNOWN_HASH } as unknown as Record<string, never>,
         invocation('bridgeState')
+      )
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', cause: undefined })
+    await expect(
+      value.service.planState(
+        { executionId: UNKNOWN_CALL } as unknown as Record<string, never>,
+        invocation('planState')
       )
     ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', cause: undefined })
     await expect(
@@ -590,7 +715,7 @@ describe('FigPluginCenterSvcImpl desktop authority and pairing consent', () => {
     expect(value.model.chat).not.toHaveBeenCalled()
     modal.resolve(approved)
     const ticket = figPluginDesktopPairTicketSchema.parse(await pending)
-    const { limits: _limits, ...identity } = value.descriptor
+    const { limits: _limits, capabilities: _capabilities, ...identity } = value.descriptor
     expect(value.pairing).toHaveBeenCalledExactlyOnceWith({
       ...identity,
       projectId: pairRequest.projectId,
@@ -979,6 +1104,72 @@ function post(origin: string, endpoint: string, body: unknown, session?: FigPlug
   })
 }
 
+async function loopbackSession(value: Fixture) {
+  const ticket = await ticketFor(value)
+  const origin = ticket.bridgeOrigin
+  const paired = await post(origin, 'pair', envelope(ticket))
+  expect(paired.status).toBe(200)
+  return {
+    ticket,
+    origin,
+    session: figPluginPairResponseSchema.parse(paired.body)
+  }
+}
+
+async function waitForCall(origin: string, session: FigPluginPairResponse, callId: string) {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const response = await post(origin, 'status', { protocol: 1, callId }, session)
+    expect(response.status).toBe(200)
+    const status = figPluginBridgeStatusResponseSchema.parse(response.body)
+    if (
+      status.status === 'completed' ||
+      status.status === 'failed' ||
+      status.status === 'cancelled'
+    )
+      return status
+    await settle()
+  }
+  throw new Error('Synthetic loopback planning call did not settle')
+}
+
+async function waitForExecution(value: Fixture, callId: string, executionId?: string) {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const state = figPluginExecutionDesktopStateSchema.parse(await planDesktopState(value))
+    const preview = state.previews.find(
+      (item) =>
+        item.callId === callId && (executionId === undefined || item.executionId === executionId)
+    )
+    if (preview) return { state, preview }
+    await settle()
+  }
+  throw new Error('Synthetic native execution preview was not registered')
+}
+
+async function prepareExecutablePlan(value: Fixture) {
+  const { origin, session } = await loopbackSession(value)
+  const preparedResponse = await post(origin, 'prepare', executionRequest(), session)
+  expect(preparedResponse.status).toBe(200)
+  const prepared = figPluginBridgePrepareResponseSchema.parse(preparedResponse.body)
+  const modelPreview = (await desktopState(value)).previews.find(
+    (item) => item.callId === prepared.callId
+  )
+  if (!modelPreview) throw new Error('Missing model-request preview')
+  value.model.chat.mockResolvedValueOnce({
+    content: JSON.stringify(executionPlan),
+    finishReason: 'stop'
+  })
+  native.showMessageBox.mockResolvedValueOnce(approved)
+  expect(
+    await value.service.approveBridge(
+      { callId: prepared.callId, payloadSha256: modelPreview.payloadSha256 },
+      invocation('approveBridge')
+    )
+  ).toEqual({ completed: true })
+  expect(await waitForCall(origin, session, prepared.callId)).toMatchObject({ status: 'completed' })
+  const { preview: execution } = await waitForExecution(value, prepared.callId)
+  return { origin, session, prepared, execution }
+}
+
 it('real loopback: pair -> prepare -> native desktop approval -> one mock model result -> deny/cancel/revoke', async () => {
   const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
   const pairModal = holdModal()
@@ -1082,3 +1273,347 @@ it('real loopback: pair -> prepare -> native desktop approval -> one mock model 
   expect(native.showMessageBox).toHaveBeenCalledTimes(2)
   expect(value.model.chat).toHaveBeenCalledTimes(1)
 })
+
+it('real loopback: planning snapshot is shown in native consent, then a non-executable diff returns once', async () => {
+  const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+  const ticket = await ticketFor(value)
+  const origin = ticket.bridgeOrigin
+  const session = figPluginPairResponseSchema.parse(
+    (await post(origin, 'pair', envelope(ticket))).body
+  )
+  const context = {
+    version: 1 as const,
+    host: 'figma' as const,
+    documentId: 'owned-doc',
+    scopeId: 'owned-page',
+    captureId: '9'.repeat(32),
+    nodes: [
+      {
+        id: '1:2',
+        type: 'FRAME',
+        name: 'Synthetic untrusted label',
+        parentId: null,
+        ancestors: [],
+        locked: false,
+        visible: true,
+        commands: ['node.rename' as const],
+        text: 'OWNED_REVIEWED_FULL_CONTEXT'
+      }
+    ]
+  }
+  const input: FigPluginBridgePrepareRequest = {
+    ...request(),
+    featureId: 'plan-preview',
+    hostContext: context,
+    context: { ...request().context, selectionRevision: context.captureId }
+  }
+  const prepared = figPluginBridgePrepareResponseSchema.parse(
+    (await post(origin, 'prepare', input, session)).body
+  )
+  const preview = (await desktopState(value)).previews[0]
+  const approval = { callId: prepared.callId, payloadSha256: preview.payloadSha256 }
+  expect(value.model.chat).not.toHaveBeenCalled()
+  for (const endpoint of ['execute', 'executePlan', 'approve'])
+    expect((await post(origin, endpoint, approval, session)).status).toBe(400)
+  const modal = holdModal()
+  const approving = value.service.approveBridge(approval, invocation('approveBridge'))
+  const options = await modal.opened
+  expectDefaultCancel(options)
+  expect(options.detail).toContain('OWNED_REVIEWED_FULL_CONTEXT')
+  expect(options.detail).toContain('does not authorize any host or document changes')
+  expect(options.detail).toContain(JSON.stringify(context))
+  expect(value.model.chat).not.toHaveBeenCalled()
+  const plan = {
+    schemaVersion: 2,
+    kind: 'host-plan',
+    captureId: context.captureId,
+    steps: [{ command: 'node.rename', targetId: '1:2', name: 'Proposed owned name' }]
+  }
+  value.model.chat.mockResolvedValueOnce({ content: JSON.stringify(plan), finishReason: 'stop' })
+  modal.resolve(approved)
+  await approving
+  let result
+  for (let attempt = 0; attempt < 30; attempt++) {
+    result = figPluginBridgeStatusResponseSchema.parse(
+      (await post(origin, 'status', { protocol: 1, callId: prepared.callId }, session)).body
+    )
+    if (result.status === 'completed' || result.status === 'failed') break
+    await settle()
+  }
+  expect(result?.status).toBe('completed')
+  if (result?.status !== 'completed') throw new Error('Expected validated planning result')
+  expect(JSON.parse(result.content)).toMatchObject({
+    kind: 'host-plan-preview',
+    executable: false,
+    plan,
+    differences: [
+      {
+        targetId: '1:2',
+        command: 'node.rename',
+        before: 'Synthetic untrusted label',
+        after: 'Proposed owned name'
+      }
+    ]
+  })
+  const replay = await post(origin, 'prepare', input, session)
+  expect(replay.body).toMatchObject({ callId: prepared.callId })
+  expect(value.model.chat).toHaveBeenCalledTimes(1)
+  expect(value.model.chat.mock.calls[0][0]).not.toHaveProperty('skillRuntime')
+  await rejectsSafely(value.service.approveBridge(approval, invocation('approveBridge')), 'EXPIRED')
+  expect(context.nodes[0].name).toBe('Synthetic untrusted label')
+})
+
+it('real loopback: model send and exact native write use separate approvals and one claim', async () => {
+  const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+  const { origin, session } = await loopbackSession(value)
+  const preparedResponse = await post(origin, 'prepare', executionRequest(), session)
+  expect(preparedResponse.status).toBe(200)
+  const prepared = figPluginBridgePrepareResponseSchema.parse(preparedResponse.body)
+  const modelPreview = (await desktopState(value)).previews.find(
+    (item) => item.callId === prepared.callId
+  )
+  if (!modelPreview) throw new Error('Missing model-request preview')
+  expect(native.showMessageBox).toHaveBeenCalledTimes(1)
+  expect((await planDesktopState(value)).previews).toEqual([])
+
+  value.model.chat.mockResolvedValueOnce({
+    content: JSON.stringify(executionPlan),
+    finishReason: 'stop'
+  })
+  const sendModal = holdModal()
+  const sending = value.service.approveBridge(
+    { callId: prepared.callId, payloadSha256: modelPreview.payloadSha256 },
+    invocation('approveBridge')
+  )
+  const sendOptions = await sendModal.opened
+  expectDefaultCancel(sendOptions)
+  expect(sendOptions.title).toBe('Approve one plugin model request')
+  expect(sendOptions.detail).toContain('does not authorize any host or document changes')
+  expect(sendOptions.detail).toContain(JSON.stringify(executionContext))
+  expect(value.model.chat).not.toHaveBeenCalled()
+  expect((await planDesktopState(value)).previews).toEqual([])
+
+  sendModal.resolve(approved)
+  expect(await sending).toEqual({ completed: true })
+  const modelStatus = await waitForCall(origin, session, prepared.callId)
+  expect(modelStatus).toMatchObject({ status: 'completed' })
+  if (modelStatus.status !== 'completed') throw new Error('Expected a completed plan preview')
+  expect(JSON.parse(modelStatus.content)).toMatchObject({
+    kind: 'host-plan-preview',
+    executable: true,
+    plan: executionPlan,
+    execution: { requiresWriteApproval: true }
+  })
+  const { preview: execution } = await waitForExecution(value, prepared.callId)
+  expect(execution).toMatchObject({
+    callId: prepared.callId,
+    state: 'awaiting-approval',
+    host: 'figma',
+    adapterVersion: 'synthetic-figma-adapter-1',
+    rollback: 'verified-in-place',
+    visualAudit: 'unavailable',
+    risk: 'low'
+  })
+  expect(native.showMessageBox).toHaveBeenCalledTimes(2)
+  expect(value.model.chat).toHaveBeenCalledTimes(1)
+
+  const wrongPlanHash = execution.planSha256 === 'f'.repeat(64) ? 'e'.repeat(64) : 'f'.repeat(64)
+  await rejectsSafely(
+    value.service.approvePlanExecution(
+      { executionId: execution.executionId, planSha256: wrongPlanHash },
+      invocation('approvePlanExecution')
+    ),
+    'EXPIRED'
+  )
+  expect(native.showMessageBox).toHaveBeenCalledTimes(2)
+
+  const writeModal = holdModal()
+  const writing = value.service.approvePlanExecution(
+    { executionId: execution.executionId, planSha256: execution.planSha256 },
+    invocation('approvePlanExecution')
+  )
+  const writeOptions = await writeModal.opened
+  expectDefaultCancel(writeOptions)
+  expect(writeOptions.title).toBe('Approve one native document write')
+  expect(writeOptions.detail).toContain(`Plan SHA-256: ${execution.planSha256}`)
+  expect(writeOptions.detail).toContain(`Context SHA-256: ${execution.contextSha256}`)
+  expect(writeOptions.detail).toContain('Exact document changes:')
+  expect(writeOptions.detail).toContain('Synthetic approved label')
+  expect(writeOptions.detail).toContain('Model-send approval is separate')
+  expect((await waitForExecution(value, prepared.callId)).preview.state).toBe('awaiting-approval')
+  expect(value.model.chat).toHaveBeenCalledTimes(1)
+
+  writeModal.resolve(approved)
+  expect(await writing).toEqual({ completed: true })
+  expect((await waitForExecution(value, prepared.callId)).preview.state).toBe('approved')
+
+  const claimRequest = { protocol: 1, callId: prepared.callId }
+  const claimResponse = await post(origin, 'plan/claim', claimRequest, session)
+  expect(claimResponse.status).toBe(200)
+  const claimed = figPluginExecutionClaimResponseSchema.parse(claimResponse.body)
+  if (claimed.status !== 'ready') throw new Error('Expected an approved execution intent')
+  expect(claimed.intent).toMatchObject({
+    purpose: 'execute-host-plan',
+    executionId: execution.executionId,
+    callId: prepared.callId,
+    documentId: executionContext.documentId,
+    scopeId: executionContext.scopeId,
+    captureId: executionContext.captureId,
+    plan: executionPlan,
+    planSha256: execution.planSha256,
+    adapterVersion: execution.adapterVersion
+  })
+  const replayClaim = await post(origin, 'plan/claim', claimRequest, session)
+  expect(figPluginExecutionClaimResponseSchema.parse(replayClaim.body)).toEqual(claimed)
+
+  const progress = {
+    protocol: 1,
+    executionId: execution.executionId,
+    actionId: claimed.intent.actionId,
+    sequence: 2,
+    phase: 'executing',
+    index: 0,
+    completed: 1,
+    total: 1,
+    effect: 'applied',
+    at: Date.now()
+  }
+  const progressResponse = await post(origin, 'plan/progress', progress, session)
+  expect(progressResponse.status).toBe(200)
+  expect(figPluginExecutionStatusSchema.parse(progressResponse.body)).toMatchObject({
+    state: 'executing',
+    completed: 1,
+    total: 1,
+    effect: 'applied'
+  })
+  expect((await post(origin, 'plan/progress', progress, session)).status).toBe(400)
+
+  const result = {
+    protocol: 1,
+    executionId: execution.executionId,
+    actionId: claimed.intent.actionId,
+    status: 'completed',
+    effect: 'applied',
+    completed: 1,
+    total: 1,
+    readback: createHostPlanReadback(executionContext, executedContext(), executionPlan)
+  }
+  const resultResponse = await post(origin, 'plan/result', result, session)
+  expect(resultResponse.status).toBe(200)
+  const parsedResult = figPluginExecutionResultResponseSchema.parse(resultResponse.body)
+  expect(parsedResult.status).toMatchObject({
+    state: 'completed',
+    completed: 1,
+    total: 1,
+    effect: 'applied'
+  })
+  expect(
+    figPluginExecutionResultResponseSchema.parse(
+      (await post(origin, 'plan/result', result, session)).body
+    )
+  ).toEqual(parsedResult)
+  const statusResponse = await post(origin, 'plan/status', claimRequest, session)
+  expect(statusResponse.status).toBe(200)
+  expect(figPluginExecutionStatusSchema.parse(statusResponse.body)).toEqual(parsedResult.status)
+  expect(value.model.chat).toHaveBeenCalledTimes(1)
+  expect(executionContext.nodes[0].name).toBe('Synthetic untrusted label')
+})
+
+it('real loopback: a false applied readback is quarantined and cannot be claimed again', async () => {
+  const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+  const { origin, session, prepared, execution } = await prepareExecutablePlan(value)
+  native.showMessageBox.mockResolvedValueOnce(approved)
+  expect(
+    await value.service.approvePlanExecution(
+      { executionId: execution.executionId, planSha256: execution.planSha256 },
+      invocation('approvePlanExecution')
+    )
+  ).toEqual({ completed: true })
+
+  const claim = figPluginExecutionClaimResponseSchema.parse(
+    (await post(origin, 'plan/claim', { protocol: 1, callId: prepared.callId }, session)).body
+  )
+  if (claim.status !== 'ready') throw new Error('Expected an approved execution intent')
+
+  const falseApplied = await post(
+    origin,
+    'plan/result',
+    {
+      protocol: 1,
+      executionId: execution.executionId,
+      actionId: claim.intent.actionId,
+      status: 'completed',
+      effect: 'applied',
+      completed: 1,
+      total: 1,
+      readback: createHostPlanReadback(executionContext, executionContext, executionPlan)
+    },
+    session
+  )
+  expect(falseApplied).toEqual({
+    status: 400,
+    body: {
+      code: 'INVALID_REQUEST',
+      message: FIGPLUGIN_BRIDGE_ERRORS.INVALID_REQUEST
+    }
+  })
+  const state = figPluginExecutionDesktopStateSchema.parse(await planDesktopState(value))
+  expect(state.statuses).toContainEqual(
+    expect.objectContaining({
+      executionId: execution.executionId,
+      state: 'failed',
+      effect: 'unknown',
+      errorCode: 'QUARANTINED'
+    })
+  )
+  const terminal = figPluginExecutionClaimResponseSchema.parse(
+    (await post(origin, 'plan/claim', { protocol: 1, callId: prepared.callId }, session)).body
+  )
+  expect(terminal).toEqual({
+    protocol: 1,
+    status: 'terminal',
+    state: 'failed',
+    errorCode: 'QUARANTINED'
+  })
+  expect(value.model.chat).toHaveBeenCalledTimes(1)
+})
+
+it.each(['deny', 'cancel'] as const)(
+  'real loopback: desktop %s never releases a writable intent',
+  async (action) => {
+    const value = fixture({ origin: await freeLoopbackOrigin(), realHttp: true })
+    const { origin, session, prepared, execution } = await prepareExecutablePlan(value)
+    if (action === 'cancel') {
+      native.showMessageBox.mockResolvedValueOnce(approved)
+      expect(
+        await value.service.approvePlanExecution(
+          { executionId: execution.executionId, planSha256: execution.planSha256 },
+          invocation('approvePlanExecution')
+        )
+      ).toEqual({ completed: true })
+      await value.service.cancelPlanExecution(
+        { executionId: execution.executionId },
+        invocation('cancelPlanExecution')
+      )
+    } else {
+      await value.service.denyPlanExecution(
+        { executionId: execution.executionId },
+        invocation('denyPlanExecution')
+      )
+    }
+
+    const claim = figPluginExecutionClaimResponseSchema.parse(
+      (await post(origin, 'plan/claim', { protocol: 1, callId: prepared.callId }, session)).body
+    )
+    expect(claim).toEqual({
+      protocol: 1,
+      status: 'terminal',
+      state: action === 'deny' ? 'denied' : 'cancelled',
+      errorCode: action === 'deny' ? 'DENIED' : 'CANCELLED'
+    })
+    expect((await waitForExecution(value, prepared.callId)).preview.state).toBe(
+      action === 'deny' ? 'denied' : 'cancelled'
+    )
+    expect(value.model.chat).toHaveBeenCalledTimes(1)
+  }
+)

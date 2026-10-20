@@ -40,6 +40,14 @@ import {
   type FigPluginDesktopApproval,
   type FigPluginBridgeDesktopState
 } from '../figplugin/bridge'
+import {
+  figPluginDesktopExecutionApprovalSchema,
+  figPluginDesktopExecutionSchema,
+  figPluginExecutionDesktopStateSchema,
+  type FigPluginDesktopExecution,
+  type FigPluginDesktopExecutionApproval,
+  type FigPluginExecutionDesktopState
+} from '../figplugin/execution'
 
 /** One control plane: legacy metadata and verified materialization remain non-executing. */
 export type FigPluginCenterSvc = {
@@ -57,6 +65,10 @@ export type FigPluginCenterSvc = {
   approveBridge(req: FigPluginDesktopApproval): Promise<{ completed: boolean }>
   denyBridge(req: { callId: string }): Promise<void>
   revokeBridge(req: { pluginId: string }): Promise<void>
+  planState(req: Record<string, never>): Promise<FigPluginExecutionDesktopState>
+  approvePlanExecution(req: FigPluginDesktopExecutionApproval): Promise<{ completed: boolean }>
+  denyPlanExecution(req: FigPluginDesktopExecution): Promise<void>
+  cancelPlanExecution(req: FigPluginDesktopExecution): Promise<void>
 }
 
 const validated =
@@ -88,6 +100,26 @@ export const figPluginCenterSvcDef: ServiceDefSheet<FigPluginCenterSvc> = {
   revokeBridge: {
     type: 'unary',
     request: validated(figPluginManagedTargetSchema.pick({ pluginId: true })),
+    response: z.void()
+  },
+  planState: {
+    type: 'unary',
+    request: validated(figPluginManagementEmptyRequestSchema),
+    response: figPluginExecutionDesktopStateSchema
+  },
+  approvePlanExecution: {
+    type: 'unary',
+    request: (value) => parseFigPluginBridgeValue(figPluginDesktopExecutionApprovalSchema, value),
+    response: figPluginManagedPathResultSchema
+  },
+  denyPlanExecution: {
+    type: 'unary',
+    request: (value) => parseFigPluginBridgeValue(figPluginDesktopExecutionSchema, value),
+    response: z.void()
+  },
+  cancelPlanExecution: {
+    type: 'unary',
+    request: (value) => parseFigPluginBridgeValue(figPluginDesktopExecutionSchema, value),
     response: z.void()
   },
   listPackages: {

@@ -42,6 +42,12 @@
     <textarea id="ticket" maxlength="4096" autocomplete="off" spellcheck="false"></textarea>
     <button id="pair" disabled>Pair with desktop</button>
     <button id="capture" disabled>Capture selection metadata</button>
+    <button id="plan-capture" disabled>Capture native plan context (no changes)</button>
+    <p>
+      Native planning requires a complete selection of 1–100 active layers. It captures only
+      properties declared executable by this host. Sharing needs explicit consent; model output
+      still requires a separate desktop write approval before any document change.
+    </p>
     <p>
       Only the first 100 active layers are captured. Changing selection does not update this
       snapshot. Capture again to replace it and cancel any pending review.
@@ -59,8 +65,9 @@
     <p id="status" role="status">Not connected.</p>
     <pre id="result"></pre>
     <p>
-      Results are plain text only. Nothing is applied to the document. Closing is best effort;
-      desktop expiry covers interrupted shutdown.
+      Model output is shown as a validated plan. Nothing is applied unless you separately approve
+      the exact native plan in MagicPot desktop. Closing is best effort; desktop expiry covers
+      interrupted shutdown.
     </p>
     <script src="main.js"></script>
   </body>

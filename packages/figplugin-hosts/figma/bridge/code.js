@@ -1,5 +1,6 @@
 ;(() => {
   const HOST = 'figma'
+  const EXECUTION_ADAPTER_VERSION = 'figma-native-1'
   const keys = (value, required, optional = []) =>
     value !== null &&
     typeof value === 'object' &&
@@ -25,6 +26,8 @@
           .slice(0, limit)
           .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
       : ''
+  const exactText = (value, limit) =>
+    typeof value === 'string' && value.length <= limit && bytes(value) <= limit ? value : null
   const input = globalThis.MAGICPOT_BRIDGE_CONFIG
   const validConfig =
     keys(input, ['protocol', 'origin', 'pluginId', 'host']) &&
@@ -44,11 +47,15 @@
   let session = null
   let pairing = false
   let snapshot = null
+  let planningSnapshot = null
+  let planningNodes = null
   let review = null
+  let planReview = null
   let sequence = 0
   let epoch = 0
   let disposed = false
   let pollTimer = null
+  let planPollTimer = null
   let expiryTimer = null
   let snapshotReader = null
   let snapshotInstanceEpoch = null
@@ -61,7 +68,11 @@
     prepare: '/figplugin/v1/prepare',
     status: '/figplugin/v1/status',
     cancel: '/figplugin/v1/cancel',
-    close: '/figplugin/v1/close'
+    close: '/figplugin/v1/close',
+    planStatus: '/figplugin/v1/plan/status',
+    planClaim: '/figplugin/v1/plan/claim',
+    planProgress: '/figplugin/v1/plan/progress',
+    planResult: '/figplugin/v1/plan/result'
   })
   const emit = (message) => {
     if (disposed) return
@@ -113,6 +124,8 @@
     epoch += 1
     clearTimeout(pollTimer)
     pollTimer = null
+    clearTimeout(planPollTimer)
+    planPollTimer = null
     for (const cancel of Array.from(operations)) cancel()
   }
   // No stream API is assumed: native Figma fetch supplies text(). The desktop also bounds bodies.
@@ -196,7 +209,10 @@
     session = null
     pairing = false
     snapshot = null
+    planningSnapshot = null
+    planningNodes = null
     review = null
+    planReview = null
     sequence = 0
     clearView()
     state(text)
@@ -307,6 +323,26 @@
     }
   }
   function cancelReview() {
+    if (!review && planReview) {
+      const old = planReview
+      clearTimeout(planPollTimer)
+      planPollTimer = null
+      planReview = null
+      state('Plan cancelled locally; desktop cancellation requested.')
+      const own = epoch
+      void post('cancel', { protocol: 1, callId: old.callId }, old.auth)
+        .then(() => {
+          if (own === epoch && !disposed) {
+            touch(old.auth)
+            state('Plan cancelled.')
+          }
+        })
+        .catch(() => {
+          if (own === epoch && !disposed)
+            state('Plan cancellation could not be confirmed. Check desktop.')
+        })
+      return
+    }
     if (!review) return
     const old = review
     if (!old.callId) {
@@ -335,6 +371,7 @@
     if (pairing) return
     cancelReview()
     snapshot = null
+    planningSnapshot = null
     clearView()
     try {
       const selection = figma.currentPage.selection
@@ -372,6 +409,613 @@
       )
     } catch {
       state('Selection capture failed. Capture again before sharing.')
+    }
+  }
+  function captureFigmaHostContext(captureId) {
+    const root = figma.root
+    const page = figma.currentPage
+    const selection = page.selection
+    if (
+      !root ||
+      !page ||
+      root.type !== 'DOCUMENT' ||
+      page.type !== 'PAGE' ||
+      page.parent !== root ||
+      !selection ||
+      typeof selection.length !== 'number' ||
+      selection.length < 1 ||
+      selection.length > 100
+    )
+      throw new Error('CONTEXT')
+    const documentId = exactText(root.id, 128)
+    const scopeId = exactText(page.id, 128)
+    if (!documentId || !scopeId || documentId === scopeId) throw new Error('CONTEXT')
+    const records = new Map()
+    const selectedIds = []
+    const pending = []
+    const idOf = (node) => {
+      const value = exactText(node && node.id, 128)
+      if (!value) throw new Error('CONTEXT')
+      return value
+    }
+    const ancestorsOf = (node) => {
+      const result = []
+      let current = node.parent
+      let depth = 0
+      while (current) {
+        if (depth++ >= 32) throw new Error('CONTEXT')
+        const id = idOf(current)
+        const type = exactText(current.type, 128)
+        if (!id || !type) throw new Error('CONTEXT')
+        result.push({
+          id,
+          type,
+          locked: current === page ? false : current.locked === true
+        })
+        if (current === page) break
+        current = current.parent
+      }
+      if (current !== page) throw new Error('CONTEXT')
+      return result
+    }
+    const readLayout = (node) => {
+      const direction = node.layoutMode
+      if (!['NONE', 'HORIZONTAL', 'VERTICAL'].includes(direction)) return null
+      const values = [
+        node.itemSpacing,
+        node.paddingTop,
+        node.paddingRight,
+        node.paddingBottom,
+        node.paddingLeft
+      ]
+      if (values.some((value) => typeof value !== 'number' || !Number.isFinite(value))) return null
+      return {
+        direction,
+        gap: node.itemSpacing,
+        padding: [node.paddingTop, node.paddingRight, node.paddingBottom, node.paddingLeft]
+      }
+    }
+    const visit = (node, selected) => {
+      const id = idOf(node)
+      if (records.has(id)) {
+        if (selected) throw new Error('CONTEXT')
+        return id
+      }
+      if (records.size >= 100) throw new Error('CONTEXT')
+      const type = exactText(node.type, 128)
+      const name = exactText(node.name, 4096)
+      if (!type || name === null || typeof node.visible !== 'boolean') throw new Error('CONTEXT')
+      if (typeof node.locked !== 'boolean' || !node.parent) throw new Error('CONTEXT')
+      const ancestors = ancestorsOf(node)
+      const effectiveLocked = node.locked || ancestors.some((ancestor) => ancestor.locked)
+      const parentId = ancestors[0]?.id ?? null
+      const commands = []
+      let layout = null
+      let text
+      if (selected && !effectiveLocked) {
+        commands.push('node.rename', 'node.visibility')
+        if (typeof node.opacity === 'number' && Number.isFinite(node.opacity))
+          commands.push('node.opacity')
+        if (type === 'TEXT' && exactText(node.characters, 4096) !== null) {
+          text = node.characters
+          commands.push('text.content')
+        }
+        layout = readLayout(node)
+        if (layout) commands.push('layout.flow')
+      }
+      const record = {
+        id,
+        type,
+        name,
+        parentId,
+        ancestors,
+        locked: node.locked,
+        visible: node.visible,
+        ...(typeof node.opacity === 'number' && Number.isFinite(node.opacity)
+          ? { opacity: Math.max(0, Math.min(1, node.opacity)) }
+          : {}),
+        commands,
+        ...(text === undefined ? {} : { text }),
+        ...(layout ? { layout } : {})
+      }
+      records.set(id, { node, record })
+      if (selected) {
+        selectedIds.push(id)
+        if (commands.includes('layout.flow')) pending.push(node)
+      }
+      return id
+    }
+    for (let index = 0; index < selection.length; index += 1) visit(selection[index], true)
+    while (pending.length) {
+      const parent = pending.shift()
+      const parentRecord = records.get(idOf(parent)).record
+      const children = parent.children
+      if (!children || typeof children.length !== 'number') throw new Error('CONTEXT')
+      const childIds = []
+      for (let index = 0; index < children.length; index += 1) {
+        const child = children[index]
+        const childId = visit(child, false)
+        childIds.push(childId)
+        pending.push(child)
+      }
+      parentRecord.children = childIds
+    }
+    const nodes = Array.from(records.values(), (entry) => entry.record)
+    const context = {
+      version: 1,
+      host: HOST,
+      documentId,
+      scopeId,
+      captureId,
+      nodes,
+      selectedIds,
+      execution: {
+        mode: 'native-write',
+        adapterVersion: EXECUTION_ADAPTER_VERSION,
+        supports: ['node.rename', 'node.opacity', 'node.visibility', 'text.content', 'layout.flow'],
+        rollback: 'verified-in-place',
+        visualAudit: 'unavailable'
+      }
+    }
+    const planner = globalThis.MagicPotPlanPreviewV1
+    if (!planner || typeof planner.validateHostContext !== 'function') throw new Error('SNAPSHOT')
+    return {
+      context: planner.validateHostContext(JSON.parse(JSON.stringify(context))),
+      nodes: new Map(Array.from(records, ([id, entry]) => [id, entry.node]))
+    }
+  }
+  function capturePlan(revision, instanceEpoch) {
+    if (pairing || disposed || !config) return
+    cancelReview()
+    snapshot = null
+    planningSnapshot = null
+    planningNodes = null
+    clearView()
+    try {
+      if (snapshotInstanceEpoch !== null && snapshotInstanceEpoch !== instanceEpoch)
+        throw new Error('SNAPSHOT')
+      snapshotInstanceEpoch = instanceEpoch
+      const planner = globalThis.MagicPotPlanPreviewV1
+      if (!planner) throw new Error('SNAPSHOT')
+      const captured = captureFigmaHostContext(revision)
+      const full = captured.context
+      planningNodes = captured.nodes
+      const selected = new Set(full.selectedIds)
+      snapshot = {
+        selectionRevision: revision,
+        nodes: full.nodes
+          .filter((node) => selected.has(node.id))
+          .map((node) => ({
+            id: node.id,
+            type: node.type,
+            name: safeLabel(node.name),
+            locked: node.locked || node.ancestors.some((ancestor) => ancestor.locked)
+          }))
+      }
+      planningSnapshot = full
+      emit({ type: 'preview', text: planner.formatContext(full), revision })
+      state(
+        'Native plan context captured. Model output still requires a separate desktop write approval.'
+      )
+    } catch {
+      snapshot = null
+      planningSnapshot = null
+      planningNodes = null
+      state('Planning capture failed. No content was sent and no document was changed.')
+    }
+  }
+  const planCommands = [
+    'node.rename',
+    'node.opacity',
+    'node.visibility',
+    'text.content',
+    'layout.flow'
+  ]
+  const readNodeValue = (node, command) => {
+    switch (command) {
+      case 'node.rename':
+        return node.name
+      case 'node.opacity':
+        return node.opacity
+      case 'node.visibility':
+        return node.visible
+      case 'text.content':
+        return node.type === 'TEXT' ? node.characters : undefined
+      case 'layout.flow':
+        return readNodeLayout(node)
+      default:
+        return undefined
+    }
+  }
+  function readNodeLayout(node) {
+    const direction = node.layoutMode
+    if (!['NONE', 'HORIZONTAL', 'VERTICAL'].includes(direction)) return undefined
+    const values = [
+      node.itemSpacing,
+      node.paddingTop,
+      node.paddingRight,
+      node.paddingBottom,
+      node.paddingLeft
+    ]
+    if (values.some((value) => typeof value !== 'number' || !Number.isFinite(value)))
+      return undefined
+    return {
+      direction,
+      gap: node.itemSpacing,
+      padding: [node.paddingTop, node.paddingRight, node.paddingBottom, node.paddingLeft]
+    }
+  }
+  const samePlanValue = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+  function verifyNativeNode(record) {
+    if (!planningNodes) throw new Error('STALE_CONTEXT')
+    const node = planningNodes.get(record.id)
+    if (!node || node.id !== record.id || node.removed === true) throw new Error('STALE_CONTEXT')
+    const ancestors = []
+    let current = node.parent
+    while (current) {
+      ancestors.push(current)
+      if (current === figma.currentPage) break
+      current = current.parent
+      if (ancestors.length > 33) throw new Error('STALE_CONTEXT')
+    }
+    if (
+      ancestors.at(-1) !== figma.currentPage ||
+      ancestors.length !== record.ancestors.length ||
+      ancestors.some((ancestor, index) => {
+        const expected = record.ancestors[index]
+        return (
+          String(ancestor.id) !== expected.id ||
+          String(ancestor.type) !== expected.type ||
+          (ancestor === figma.currentPage ? false : ancestor.locked === true) !== expected.locked
+        )
+      })
+    )
+      throw new Error('STALE_CONTEXT')
+    if (node.locked === true || record.ancestors.some((ancestor) => ancestor.locked))
+      throw new Error('LOCKED_TARGET')
+    return node
+  }
+  function precheckPlan(plan, context) {
+    if (!Array.isArray(plan.steps) || plan.steps.length < 1 || plan.steps.length > 20)
+      throw new Error('INVALID_PLAN')
+    const nodes = new Map(context.nodes.map((node) => [node.id, node]))
+    const selected = new Set(context.selectedIds)
+    const checked = []
+    for (const step of plan.steps) {
+      if (
+        !step ||
+        !selected.has(step.targetId) ||
+        !planCommands.includes(step.command) ||
+        !context.execution.supports.includes(step.command)
+      )
+        throw new Error('UNSUPPORTED_COMMAND')
+      const contextNode = nodes.get(step.targetId)
+      if (!contextNode || !contextNode.commands.includes(step.command))
+        throw new Error('UNSUPPORTED_COMMAND')
+      const node = verifyNativeNode(contextNode)
+      const expected = readNodeValue(node, step.command)
+      const baseline =
+        step.command === 'node.rename'
+          ? contextNode.name
+          : step.command === 'node.opacity'
+            ? contextNode.opacity
+            : step.command === 'node.visibility'
+              ? contextNode.visible
+              : step.command === 'text.content'
+                ? contextNode.text
+                : contextNode.layout
+      if (!samePlanValue(expected, baseline)) throw new Error('STALE_CONTEXT')
+      checked.push({ node, contextNode, step })
+    }
+    return checked
+  }
+  function applyPlanStep(node, step) {
+    switch (step.command) {
+      case 'node.rename':
+        node.name = step.name
+        break
+      case 'node.opacity':
+        node.opacity = step.opacity
+        break
+      case 'node.visibility':
+        node.visible = step.visible
+        break
+      case 'text.content':
+        if (node.type !== 'TEXT') throw new Error('UNSUPPORTED_COMMAND')
+        node.characters = step.text
+        break
+      case 'layout.flow':
+        node.layoutMode = step.layout.direction
+        if (step.layout.direction !== 'NONE') {
+          node.itemSpacing = step.layout.gap
+          node.paddingTop = step.layout.padding[0]
+          node.paddingRight = step.layout.padding[1]
+          node.paddingBottom = step.layout.padding[2]
+          node.paddingLeft = step.layout.padding[3]
+        }
+        break
+      default:
+        throw new Error('UNSUPPORTED_COMMAND')
+    }
+  }
+  function rollbackPlanStep(node, contextNode, step) {
+    switch (step.command) {
+      case 'node.rename':
+        node.name = contextNode.name
+        break
+      case 'node.opacity':
+        node.opacity = contextNode.opacity
+        break
+      case 'node.visibility':
+        node.visible = contextNode.visible
+        break
+      case 'text.content':
+        node.characters = contextNode.text
+        break
+      case 'layout.flow':
+        node.layoutMode = contextNode.layout.direction
+        if (contextNode.layout.direction !== 'NONE') {
+          node.itemSpacing = contextNode.layout.gap
+          node.paddingTop = contextNode.layout.padding[0]
+          node.paddingRight = contextNode.layout.padding[1]
+          node.paddingBottom = contextNode.layout.padding[2]
+          node.paddingLeft = contextNode.layout.padding[3]
+        }
+        break
+    }
+  }
+  function createPlanReadback(context, plan) {
+    const nodes = new Map(context.nodes.map((node) => [node.id, node]))
+    return {
+      version: 1,
+      kind: 'host-plan-readback',
+      host: HOST,
+      documentId: context.documentId,
+      scopeId: context.scopeId,
+      captureId: context.captureId,
+      steps: plan.steps.map((step) => {
+        const contextNode = nodes.get(step.targetId)
+        const nativeNode = planningNodes && planningNodes.get(step.targetId)
+        const expected = contextNode
+          ? step.command === 'node.rename'
+            ? contextNode.name
+            : step.command === 'node.opacity'
+              ? contextNode.opacity
+              : step.command === 'node.visibility'
+                ? contextNode.visible
+                : step.command === 'text.content'
+                  ? contextNode.text
+                  : contextNode.layout
+          : undefined
+        const requested =
+          step.command === 'node.rename'
+            ? step.name
+            : step.command === 'node.opacity'
+              ? step.opacity
+              : step.command === 'node.visibility'
+                ? step.visible
+                : step.command === 'text.content'
+                  ? step.text
+                  : step.layout
+        let value
+        try {
+          value = nativeNode ? readNodeValue(nativeNode, step.command) : undefined
+        } catch {
+          value = undefined
+        }
+        return {
+          targetId: step.targetId,
+          command: step.command,
+          observation:
+            value === undefined
+              ? 'unknown'
+              : samePlanValue(value, requested)
+                ? 'requested'
+                : samePlanValue(value, expected)
+                  ? 'original'
+                  : 'other',
+          ...(value === undefined ? {} : { value })
+        }
+      })
+    }
+  }
+  async function postPlanProgress(item, sequence, phase, index, completed, total, effect) {
+    return post(
+      'planProgress',
+      {
+        protocol: 1,
+        executionId: item.executionId,
+        actionId: item.actionId,
+        sequence,
+        phase,
+        ...(index === undefined ? {} : { index }),
+        completed,
+        total,
+        effect,
+        at: Date.now()
+      },
+      item.auth
+    )
+  }
+  async function executeClaimedPlan(item, intent) {
+    const planner = globalThis.MagicPotPlanPreviewV1
+    let plan
+    try {
+      plan = planner.validateHostPlan(intent.plan, item.hostContext)
+    } catch {
+      state('Desktop plan validation failed. No document changes were made.')
+      return
+    }
+    let checked
+    try {
+      checked = precheckPlan(plan, item.hostContext)
+    } catch {
+      state('The document changed after capture. No plan steps were applied.')
+      return
+    }
+    const applied = []
+    let sequence = 2
+    let effect = 'none'
+    try {
+      for (let index = 0; index < checked.length; index += 1) {
+        const entry = checked[index]
+        applyPlanStep(entry.node, entry.step)
+        applied.push(entry)
+        const completed = index + 1
+        effect = completed === checked.length ? 'applied' : 'partial'
+        await postPlanProgress(
+          item,
+          sequence++,
+          'executing',
+          index,
+          completed,
+          checked.length,
+          effect
+        )
+        state('Applying approved plan to the document... ' + completed + '/' + checked.length)
+      }
+    } catch {
+      for (const entry of applied.reverse()) {
+        try {
+          rollbackPlanStep(entry.node, entry.contextNode, entry.step)
+        } catch {}
+      }
+      effect = applied.length ? 'rolled-back' : 'none'
+    }
+    const readback = createPlanReadback(item.hostContext, plan)
+    const observations = readback.steps.map((step) => step.observation)
+    if (observations.every((value) => value === 'requested')) effect = 'applied'
+    else if (observations.every((value) => value === 'original')) effect = 'rolled-back'
+    else if (observations.some((value) => value === 'requested')) effect = 'partial'
+    else effect = 'unknown'
+    const status = effect === 'applied' ? 'completed' : 'failed'
+    try {
+      const result = await post(
+        'planResult',
+        {
+          protocol: 1,
+          executionId: item.executionId,
+          actionId: item.actionId,
+          status,
+          effect,
+          completed: readback.steps.filter((step) => step.observation === 'requested').length,
+          total: plan.steps.length,
+          readback,
+          ...(effect === 'rolled-back'
+            ? { errorCode: 'ROLLED_BACK' }
+            : effect === 'unknown'
+              ? { errorCode: 'QUARANTINED' }
+              : effect === 'partial'
+                ? { errorCode: 'EXECUTION_FAILED' }
+                : {})
+        },
+        item.auth
+      )
+      if (result && result.status && result.status.state === 'completed')
+        state('Approved plan applied and verified by document readback.')
+      else if (effect === 'rolled-back')
+        state('Plan failed. Applied values were rolled back and verified.')
+      else state('Plan failed. Check MagicPot desktop for the execution receipt.')
+    } catch {
+      state('Execution result could not be confirmed. Check MagicPot desktop.')
+    }
+  }
+  function beginPlanReview(call, content) {
+    planReview = {
+      auth: call.auth,
+      callId: call.callId,
+      hostContext: call.hostContext,
+      expiresAt: call.expiresAt,
+      polls: 0,
+      display: content,
+      started: false
+    }
+    emit({ type: 'content', text: content })
+    state('Plan ready. Awaiting separate write approval in MagicPot desktop.')
+    schedulePlan(planReview)
+  }
+  const currentPlan = (item) =>
+    !disposed && planReview === item && live() && Date.now() < item.expiresAt
+  function schedulePlan(item) {
+    if (!currentPlan(item)) return
+    if (item.polls >= 120) {
+      clearTimeout(planPollTimer)
+      planPollTimer = null
+      planReview = null
+      state('Plan approval expired or polling limit reached.')
+      return
+    }
+    planPollTimer = setTimeout(() => void pollPlan(item), 1000)
+  }
+  async function pollPlan(item) {
+    if (!currentPlan(item)) return
+    item.polls += 1
+    try {
+      const status = await post('planStatus', { protocol: 1, callId: item.callId }, item.auth)
+      if (!currentPlan(item)) return
+      if (
+        !status ||
+        status.protocol !== 1 ||
+        typeof status.executionId !== 'string' ||
+        typeof status.state !== 'string'
+      )
+        throw new Error('REQUEST')
+      if (status.state === 'awaiting-approval') {
+        state('Plan ready. Awaiting separate write approval in MagicPot desktop.')
+        schedulePlan(item)
+        return
+      }
+      if (status.state === 'approved') {
+        const claim = await post('planClaim', { protocol: 1, callId: item.callId }, item.auth)
+        if (!currentPlan(item)) return
+        if (!claim || claim.protocol !== 1) throw new Error('REQUEST')
+        if (claim.status === 'pending') {
+          schedulePlan(item)
+          return
+        }
+        if (claim.status === 'terminal') {
+          planReview = null
+          state('Plan execution was denied or expired. No document changes were made.')
+          return
+        }
+        const intent = claim.intent
+        if (
+          !item.started &&
+          intent &&
+          intent.executionId === status.executionId &&
+          intent.callId === item.callId &&
+          intent.host === HOST &&
+          intent.captureId === item.hostContext.captureId &&
+          intent.expiresAt > Date.now()
+        ) {
+          item.started = true
+          planReview = null
+          item.executionId = intent.executionId
+          item.actionId = intent.actionId
+          await executeClaimedPlan(item, intent)
+          return
+        }
+        throw new Error('REQUEST')
+      }
+      if (
+        status.state === 'claimed' ||
+        status.state === 'executing' ||
+        status.state === 'readback'
+      ) {
+        state('Approved plan is running in the native host.')
+        schedulePlan(item)
+        return
+      }
+      planReview = null
+      if (status.state === 'completed')
+        state('Approved plan completed and the document readback was verified.')
+      else if (status.state === 'cancelled') state('Plan execution was cancelled.')
+      else state('Plan execution failed. Check MagicPot desktop for diagnostics.')
+    } catch {
+      if (currentPlan(item)) {
+        planReview = null
+        state('Plan status request failed. Check MagicPot desktop; polling stopped.')
+      }
     }
   }
   const callErrors = [
@@ -434,8 +1078,28 @@
         result.status === 'cancelled' ||
         result.status === 'failed'
       ) {
+        let executionReady = false
+        if (result.status === 'completed' && call.hostContext) {
+          try {
+            const parsed = JSON.parse(result.content)
+            executionReady = parsed && parsed.executable === true
+          } catch {}
+        }
+        const displayContent =
+          result.status === 'completed'
+            ? call.hostContext
+              ? globalThis.MagicPotPlanPreviewV1.reviewPlanningResult(
+                  result.content,
+                  call.hostContext
+                )
+              : result.content
+            : ''
         review = null
-        if (result.status === 'completed') emit({ type: 'content', text: result.content })
+        if (executionReady) {
+          beginPlanReview(call, displayContent)
+          return
+        }
+        if (result.status === 'completed') emit({ type: 'content', text: displayContent })
         state(
           result.status === 'completed'
             ? 'Completed. Result is plain text; nothing was applied to the document.'
@@ -478,7 +1142,8 @@
       requestId: message.nonce,
       sequence: sequence + 1,
       prompt,
-      context: snapshot
+      context: snapshot,
+      ...(planningSnapshot ? { featureId: 'plan-preview', hostContext: planningSnapshot } : {})
     }
     if (!bounded(JSON.stringify(body), 64 * 1024)) {
       state('Prompt and selection metadata are too large.')
@@ -486,7 +1151,15 @@
     }
     sequence += 1
     snapshot = null
-    const call = { epoch: ++epoch, auth: session, callId: null, polls: 0, expiresAt: 0 }
+    planningSnapshot = null
+    const call = {
+      epoch: ++epoch,
+      auth: session,
+      callId: null,
+      polls: 0,
+      expiresAt: 0,
+      hostContext: body.hostContext
+    }
     review = call
     emit({ type: 'content', text: '' })
     state('Sending for desktop approval...')
@@ -543,6 +1216,15 @@
       return
     }
     if (!config) return
+    if (
+      message.type === 'capture-plan' &&
+      keys(message, ['protocol', 'type', 'nonce', 'instanceEpoch']) &&
+      hex(message.nonce, 32) &&
+      hex(message.instanceEpoch, 32)
+    ) {
+      capturePlan(message.nonce, message.instanceEpoch)
+      return
+    }
     if (
       message.type === 'pair' &&
       keys(message, ['protocol', 'type', 'ticket', 'nonce']) &&

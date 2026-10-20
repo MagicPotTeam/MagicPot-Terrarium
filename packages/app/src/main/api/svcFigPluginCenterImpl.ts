@@ -1,3 +1,7 @@
+import {
+  buildBridgeApprovalDetails,
+  buildPlanExecutionApprovalDetails
+} from '../figplugin/bridgeApprovalDetails'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import { constants, type BigIntStats } from 'node:fs'
@@ -20,6 +24,7 @@ import type { FigPluginCenterOperation, FigPluginCenterResponse } from '@shared/
 import { FigPluginCenterStore } from '../figplugin/centerStore'
 import { verifyNativePluginManifest } from '../figplugin/nativeManifest'
 import { FigPluginBridgeController } from '../figplugin/bridgeController'
+import { FigPluginExecutionAuditStore } from '../figplugin/executionAudit'
 import {
   FigPluginBridgeError,
   figPluginDesktopPairRequestSchema,
@@ -31,6 +36,13 @@ import {
   type FigPluginDesktopApproval,
   type FigPluginBridgeDesktopState
 } from '@shared/figplugin/bridge'
+import {
+  figPluginDesktopExecutionApprovalSchema,
+  figPluginDesktopExecutionSchema,
+  type FigPluginDesktopExecution,
+  type FigPluginDesktopExecutionApproval,
+  type FigPluginExecutionDesktopState
+} from '@shared/figplugin/execution'
 import {
   readAndVerifyFigPluginPackageFile,
   type VerifiedFigPluginPackage
@@ -66,6 +78,10 @@ type BridgeControl = Pick<
   | 'approve'
   | 'deny'
   | 'revokePlugin'
+  | 'planState'
+  | 'approvePlanExecution'
+  | 'denyPlanExecution'
+  | 'cancelPlanExecution'
   | 'dispose'
 >
 const activeBridges = new Set<BridgeControl>()
@@ -280,7 +296,12 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       store
     ) => {
       const { LLMProxySvcImpl } = await import('./svcLLMProxyImpl')
-      return new FigPluginBridgeController(store, new LLMProxySvcImpl())
+      const audit = new FigPluginExecutionAuditStore(
+        path.join(app.getPath('userData'), 'figplugin-center')
+      )
+      return new FigPluginBridgeController(store, new LLMProxySvcImpl(), {
+        audit: (event) => audit.record(event)
+      })
     }
   ) {}
 
@@ -665,6 +686,15 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
     return this.bridge?.desktopState() ?? { sessions: [], previews: [] }
   }
 
+  planState = async (
+    req: Record<string, never>,
+    invocation?: ServiceInvocationContext
+  ): Promise<FigPluginExecutionDesktopState> => {
+    parseFigPluginManagementValue(figPluginManagementEmptyRequestSchema, req)
+    this.authorizeManagement('planState', invocation)
+    return this.bridge?.planState() ?? { previews: [], statuses: [] }
+  }
+
   approveBridge = async (
     req: FigPluginDesktopApproval,
     invocation?: ServiceInvocationContext
@@ -696,7 +726,7 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
         type: 'warning',
         title: 'Approve one plugin model request',
         message: `${preview.pluginId} → ${preview.profileId}`,
-        detail: `Project: ${preview.projectId}\nReviewed payload SHA-256: ${preview.payloadSha256}\nEstimated input tokens: ${preview.estimatedInputTokens}\nOutput limit: 1200 tokens. One read-only model request; no tools or document writes. Sending may incur provider charges. Context and prompt are untrusted source data.\n\nPrompt:\n${preview.prompt}\n\nContext:\n${JSON.stringify(preview.context)}`,
+        detail: buildBridgeApprovalDetails(preview),
         buttons: ['Approve and send once', 'Cancel'],
         defaultId: 1,
         cancelId: 1,
@@ -710,6 +740,73 @@ export class FigPluginCenterSvcImpl implements FigPluginCenterSvc {
       await controller.approve(request.callId, request.payloadSha256)
       return { completed: true }
     })
+  }
+
+  approvePlanExecution = async (
+    req: FigPluginDesktopExecutionApproval,
+    invocation?: ServiceInvocationContext
+  ): Promise<{ completed: boolean }> => {
+    const request = parseFigPluginBridgeValue(figPluginDesktopExecutionApprovalSchema, req)
+    const parent = this.authorizeManagement('approvePlanExecution', invocation)
+    const epoch = this.documentGenerations.get(parent)
+    const documentUrl = parent.webContents.getURL()
+    const controller = this.bridge
+    if (!controller) throw new FigPluginBridgeError('EXPIRED')
+    const check = () => {
+      if (
+        this.authorizeManagement('approvePlanExecution', invocation) !== parent ||
+        parent.webContents.getURL() !== documentUrl ||
+        this.documentGenerations.get(parent) !== epoch ||
+        this.bridge !== controller
+      )
+        throw new FigPluginBridgeError('CONFIGURATION_CHANGED')
+    }
+    return this.exclusive(async () => {
+      check()
+      const preview = controller
+        .planState()
+        .previews.find(
+          (item) =>
+            item.executionId === request.executionId &&
+            item.planSha256 === request.planSha256 &&
+            item.state === 'awaiting-approval'
+        )
+      if (!preview) throw new FigPluginBridgeError('EXPIRED')
+      const approval = await this.confirm(parent, {
+        type: 'warning',
+        title: 'Approve one native document write',
+        message: `${preview.pluginId} (${preview.host})`,
+        detail: buildPlanExecutionApprovalDetails(preview),
+        buttons: ['Approve this exact plan once', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+        checkboxLabel: 'I reviewed the exact document changes and authorize one native host write',
+        checkboxChecked: false
+      })
+      if (approval.response !== 0 || !approval.checkboxChecked) return { completed: false }
+      check()
+      await controller.approvePlanExecution(request.executionId, request.planSha256)
+      return { completed: true }
+    })
+  }
+
+  denyPlanExecution = async (
+    req: FigPluginDesktopExecution,
+    invocation?: ServiceInvocationContext
+  ): Promise<void> => {
+    const request = parseFigPluginBridgeValue(figPluginDesktopExecutionSchema, req)
+    this.authorizeManagement('denyPlanExecution', invocation)
+    this.bridge?.denyPlanExecution(request.executionId)
+  }
+
+  cancelPlanExecution = async (
+    req: FigPluginDesktopExecution,
+    invocation?: ServiceInvocationContext
+  ): Promise<void> => {
+    const request = parseFigPluginBridgeValue(figPluginDesktopExecutionSchema, req)
+    this.authorizeManagement('cancelPlanExecution', invocation)
+    this.bridge?.cancelPlanExecution(request.executionId)
   }
 
   denyBridge = async (

@@ -163,6 +163,10 @@ async function isolated(t, host = 'figma', connected = false) {
     const helper = path.join(path.dirname(sourceDir), 'shared', 'selection-snapshot.js')
     fs.mkdirSync(path.dirname(helper))
     fs.writeFileSync(helper, SYNTHETIC_HELPER)
+    fs.writeFileSync(
+      path.join(path.dirname(helper), 'plan-preview.js'),
+      '/* opaque planning validator fixture */\n'
+    )
     const bridgeDir = path.join(sourceDir, 'bridge')
     fs.mkdirSync(bridgeDir)
     // Opaque bytes, including placeholder-looking JS, must be copied without evaluation/substitution.
@@ -720,12 +724,12 @@ function checkConnected(input, sourceDir) {
   assert.equal(template.host, input.host)
   assert.equal(template.entryPath, 'manifest.json')
   assert.equal(template.id, `user.${input.host}.${hash(input.pluginId).slice(0, 32)}`)
-  assert.deepEqual(template.capabilities, ['dialogue', 'asset-transfer'])
+  assert.deepEqual(template.capabilities, ['dialogue', 'asset-transfer', 'result-transfer'])
   assert.deepEqual(template.permissions, {
     dialogue: 'prompt',
     backgroundRemoval: 'none',
     assetTransfer: 'read',
-    resultTransfer: 'none',
+    resultTransfer: 'write',
     filesystem: 'none',
     network: 'desktop-bridge'
   })
@@ -762,6 +766,8 @@ function checkConnected(input, sourceDir) {
     Buffer.concat([
       configPrefix(input),
       fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'selection-snapshot.js')),
+      HELPER_SEPARATOR,
+      fs.readFileSync(path.join(path.dirname(sourceDir), 'shared', 'plan-preview.js')),
       HELPER_SEPARATOR,
       fs.readFileSync(path.join(sourceDir, 'bridge', spec.code))
     ])
@@ -1033,7 +1039,11 @@ test('connected native byte bound includes the prepended config and helper', asy
   const { root, sourceDir, prepare, input } = await isolated(t, 'figma', true)
   const code = path.join(sourceDir, 'bridge', 'code.js')
   const content = Buffer.alloc(
-    MAX_FILE - configPrefix(input).length - SYNTHETIC_HELPER.length - HELPER_SEPARATOR.length,
+    MAX_FILE -
+      configPrefix(input).length -
+      SYNTHETIC_HELPER.length -
+      HELPER_SEPARATOR.length * 2 -
+      fs.statSync(path.join(path.dirname(sourceDir), 'shared', 'plan-preview.js')).size,
     32
   )
   content.write('throw new Error("BRIDGE_CODE_MUST_NOT_RUN");\n')

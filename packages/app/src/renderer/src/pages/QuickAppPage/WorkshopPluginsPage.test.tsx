@@ -27,7 +27,11 @@ const mocks = vi.hoisted(() => ({
     bridgeState: vi.fn<FigPluginCenterSvc['bridgeState']>(),
     approveBridge: vi.fn<FigPluginCenterSvc['approveBridge']>(),
     denyBridge: vi.fn<FigPluginCenterSvc['denyBridge']>(),
-    revokeBridge: vi.fn<FigPluginCenterSvc['revokeBridge']>()
+    revokeBridge: vi.fn<FigPluginCenterSvc['revokeBridge']>(),
+    planState: vi.fn<FigPluginCenterSvc['planState']>(),
+    approvePlanExecution: vi.fn<FigPluginCenterSvc['approvePlanExecution']>(),
+    denyPlanExecution: vi.fn<FigPluginCenterSvc['denyPlanExecution']>(),
+    cancelPlanExecution: vi.fn<FigPluginCenterSvc['cancelPlanExecution']>()
   } satisfies FigPluginCenterSvc,
   profiles: vi.fn<(req: LLMListProfilesReq) => Promise<LLMListProfilesResp>>()
 }))
@@ -148,6 +152,7 @@ beforeEach(() => {
   mocks.center.copyPackagePath.mockResolvedValue({ completed: true })
   mocks.center.revealPackage.mockResolvedValue({ completed: true })
   mocks.center.discardPreview.mockResolvedValue(undefined)
+  mocks.center.planState.mockResolvedValue({ previews: [], statuses: [] })
   mocks.profiles.mockResolvedValue({
     profiles: [
       { id: 'chat-id', model_name: 'Chat candidate', model_use: 'chat' },

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { HOST_PLAN_SYSTEM_MESSAGE, governHostPlanResponse } from './planGovernance'
 import type { LLMProxySvc } from '@shared/api/svcLLMProxy'
 import { types } from 'node:util'
 import { snapshotFigPluginPlanData } from '@shared/figplugin/plan'
@@ -20,6 +21,8 @@ import {
   figPluginManagedTargetSchema,
   type FigPluginManagedTarget
 } from '@shared/figplugin/management'
+import type { FigPluginExecutionDesktopState } from '@shared/figplugin/execution'
+import type { FigPluginExecutionAuditEvent } from './executionAudit'
 import type { FigPluginCenterStore, FigPluginRuntimeDescriptor } from './centerStore'
 import { FigPluginBridgeRuntime } from './bridgeRuntime'
 import { startFigPluginBridgeServer } from './bridgeServer'
@@ -38,6 +41,7 @@ type PlanSource = {
 type Options = {
   startServer?: typeof startFigPluginBridgeServer
   callTimeoutMs?: number
+  audit?: (event: FigPluginExecutionAuditEvent) => void
   // Main-only test/synthetic foundation, not exposed by a service or the bearer transport.
   // No native adapter is currently accepted by the independent executor descriptor contract.
   planExecution?: {
@@ -117,6 +121,7 @@ export class FigPluginBridgeController {
     }
   >()
   readonly #limits = new Map<string, Limits>()
+  readonly #writeEnabled = new Map<string, boolean>()
   readonly #inFlight = new Map<string, number>()
   readonly #pendingBindings = new Set<{ pluginId: string; revoked: boolean }>()
   readonly #resolvedBindings = new WeakMap<FigPluginRuntimeBinding, number>()
@@ -142,7 +147,10 @@ export class FigPluginBridgeController {
         return !this.#closed && this.#budgets.has(profileKey(binding)) && this.isCurrent(binding)
       },
       invoke: (binding, preview, signal) => this.invoke(binding, preview, signal),
-      callTimeoutMs: this.#callTimeout
+      callTimeoutMs: this.#callTimeout,
+      ...(options.audit ? { audit: options.audit } : {}),
+      allowNativeWrite: (binding) =>
+        this.#writeEnabled.get(bindingKey(binding)) === true && this.isCurrent(binding)
     })
     const plan = options.planExecution
     let planBinding: FigPluginRuntimeBinding | undefined
@@ -257,6 +265,11 @@ export class FigPluginBridgeController {
         profileRevision: binding.profileRevision,
         ...(budgets.length ? { tokens: Math.min(...budgets) } : {})
       })
+      remember(
+        this.#writeEnabled,
+        bindingKey(binding),
+        descriptor.capabilities?.includes('result-transfer') === true
+      )
       // The native modal holds this main-owned immutable object, not a serializable grant.
       // A fresh resolution must not revive another modal's old A->B->A authorization.
       Object.freeze(binding)
@@ -315,6 +328,25 @@ export class FigPluginBridgeController {
     return { sessions: this.#runtime.listSessions(), previews: this.#runtime.listPreviews() }
   }
 
+  planState(): FigPluginExecutionDesktopState {
+    return {
+      previews: this.#runtime.listPlanExecutions(),
+      statuses: this.#runtime.listPlanStatuses()
+    }
+  }
+
+  approvePlanExecution(executionId: string, planSha256: string): Promise<void> {
+    return this.#runtime.approvePlan(executionId, planSha256)
+  }
+
+  denyPlanExecution(executionId: string): void {
+    this.#runtime.denyPlan(executionId)
+  }
+
+  cancelPlanExecution(executionId: string): void {
+    this.#runtime.cancelPlan(executionId)
+  }
+
   approve(callId: string, payloadSha256: string): Promise<void> {
     return this.#runtime.approve(callId, payloadSha256)
   }
@@ -341,6 +373,7 @@ export class FigPluginBridgeController {
     this.detachSubscriptions()
     this.#budgets.clear()
     this.#limits.clear()
+    this.#writeEnabled.clear()
     const server = this.#server
     const starting = this.#starting
     this.#server = undefined
@@ -526,16 +559,20 @@ export class FigPluginBridgeController {
       const descriptor = await this.currentDescriptor(binding, deadlineAt)
       checkStopped()
       if (!sameLimits(limits, descriptor.limits)) throw configurationChanged()
+      const planning = preview.featureId === 'plan-preview'
+      if (planning && (!preview.hostContext || preview.hostContext.host !== binding.host))
+        throw new FigPluginBridgeError('INVALID_REQUEST')
       const content = JSON.stringify({
         projectId: binding.projectId,
         context: preview.context,
-        prompt: preview.prompt
+        prompt: preview.prompt,
+        ...(planning ? { featureId: preview.featureId, hostContext: preview.hostContext } : {})
       })
       if (Buffer.byteLength(content, 'utf8') > Math.min(limits.maxPayloadBytes, 64 * 1024)) {
         throw new FigPluginBridgeError('UPSTREAM_FAILED')
       }
       const messages = [
-        { role: 'system' as const, content: SYSTEM_MESSAGE },
+        { role: 'system' as const, content: planning ? HOST_PLAN_SYSTEM_MESSAGE : SYSTEM_MESSAGE },
         { role: 'user' as const, content }
       ]
       const inputTokens = Math.ceil(Buffer.byteLength(JSON.stringify(messages), 'utf8') / 3)
@@ -580,8 +617,15 @@ export class FigPluginBridgeController {
       if (total !== undefined && (!Number.isSafeInteger(total) || total < 0)) {
         throw new FigPluginBridgeError('UPSTREAM_FAILED')
       }
+      if (planning && response.finishReason !== 'stop')
+        throw new FigPluginBridgeError('UPSTREAM_FAILED')
+      const resultContent = planning
+        ? JSON.stringify(governHostPlanResponse(response.content, preview.hostContext!))
+        : response.content.trim()
+      if (Buffer.byteLength(resultContent, 'utf8') > Math.min(limits.maxResultBytes, 32 * 1024))
+        throw new FigPluginBridgeError('UPSTREAM_FAILED')
       return {
-        content: response.content.trim(),
+        content: resultContent,
         ...(total === undefined ? {} : { reportedTotalTokens: total })
       }
     })().finally(() => {

@@ -18,11 +18,28 @@ import {
   parseFigPluginBridgeValue,
   type FigPluginBridgeErrorCode
 } from '@shared/figplugin/bridge'
+import {
+  figPluginExecutionClaimRequestSchema,
+  figPluginExecutionClaimResponseSchema,
+  figPluginExecutionProgressRequestSchema,
+  figPluginExecutionResultRequestSchema,
+  figPluginExecutionResultResponseSchema,
+  figPluginExecutionStatusRequestSchema,
+  figPluginExecutionStatusSchema
+} from '@shared/figplugin/execution'
 import type { FigPluginBridgeRuntime } from './bridgeRuntime'
 
 type Runtime = Pick<
   FigPluginBridgeRuntime,
-  'redeem' | 'prepare' | 'status' | 'cancel' | 'closeSession'
+  | 'redeem'
+  | 'prepare'
+  | 'status'
+  | 'cancel'
+  | 'closeSession'
+  | 'planStatus'
+  | 'claimPlan'
+  | 'planProgress'
+  | 'planResult'
 >
 type Options = { origin: string; runtime: Runtime; requestTimeoutMs?: number }
 const paths = new Set([
@@ -30,7 +47,11 @@ const paths = new Set([
   '/figplugin/v1/prepare',
   '/figplugin/v1/status',
   '/figplugin/v1/cancel',
-  '/figplugin/v1/close'
+  '/figplugin/v1/close',
+  '/figplugin/v1/plan/status',
+  '/figplugin/v1/plan/claim',
+  '/figplugin/v1/plan/progress',
+  '/figplugin/v1/plan/result'
 ])
 const allowedHeaders = ['content-type', 'authorization', 'x-figplugin-session']
 const MAX_RAW_HEADERS = 32
@@ -176,6 +197,42 @@ const dispatch = async (
       parseFigPluginBridgeValue(figPluginBridgeSessionCloseRequestSchema, body)
       await runtime.closeSession(session, token)
       return undefined
+    case '/figplugin/v1/plan/status':
+      return serialize(
+        figPluginExecutionStatusSchema,
+        await runtime.planStatus(
+          session,
+          token,
+          parseFigPluginBridgeValue(figPluginExecutionStatusRequestSchema, body)
+        )
+      )
+    case '/figplugin/v1/plan/claim':
+      return serialize(
+        figPluginExecutionClaimResponseSchema,
+        await runtime.claimPlan(
+          session,
+          token,
+          parseFigPluginBridgeValue(figPluginExecutionClaimRequestSchema, body)
+        )
+      )
+    case '/figplugin/v1/plan/progress':
+      return serialize(
+        figPluginExecutionStatusSchema,
+        runtime.planProgress(
+          session,
+          token,
+          parseFigPluginBridgeValue(figPluginExecutionProgressRequestSchema, body)
+        )
+      )
+    case '/figplugin/v1/plan/result':
+      return serialize(
+        figPluginExecutionResultResponseSchema,
+        runtime.planResult(
+          session,
+          token,
+          parseFigPluginBridgeValue(figPluginExecutionResultRequestSchema, body)
+        )
+      )
     default:
       return invalid()
   }

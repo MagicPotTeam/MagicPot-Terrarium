@@ -29,6 +29,14 @@ import {
   figPluginManagedPathResultSchema,
   type FigPluginManagedSummary
 } from '@shared/figplugin/management'
+import {
+  figPluginDesktopExecutionApprovalSchema,
+  figPluginDesktopExecutionSchema,
+  figPluginExecutionDesktopStateSchema,
+  type FigPluginDesktopExecution,
+  type FigPluginExecutionDesktopState,
+  type FigPluginExecutionPreview
+} from '@shared/figplugin/execution'
 import { getProjectById, listProjects, PROJECTS_CHANGED_EVENT } from '../MainPage/projectStore'
 
 type Live = () => boolean
@@ -41,8 +49,15 @@ type BridgeNoticeKey =
   | 'figplugin.bridge.revoked'
   | 'figplugin.bridge.approvalAccepted'
   | 'figplugin.bridge.denied'
+  | 'figplugin.bridge.planApprovalAccepted'
+  | 'figplugin.bridge.planDenied'
+  | 'figplugin.bridge.planCancelled'
 
 const emptyState = (): FigPluginBridgeDesktopState => ({ sessions: [], previews: [] })
+const emptyExecutionState = (): FigPluginExecutionDesktopState => ({
+  previews: [],
+  statuses: []
+})
 const eligible = (item: FigPluginManagedSummary) =>
   !!item.bridgeOrigin &&
   item.materialization === 'verified-package' &&
@@ -54,6 +69,8 @@ const eligible = (item: FigPluginManagedSummary) =>
 // Consent covers every displayed field, not just a server-supplied hash. Main verifies the
 // payload digest and runtime binding; the desktop preview does not contain the whole binding.
 const reviewKey = (call: FigPluginBridgePreview): string => canonicalFigPluginJson(call)
+const executionReviewKey = (preview: FigPluginExecutionPreview): string =>
+  canonicalFigPluginJson(preview)
 const isBridgeErrorCode = (value: string): value is keyof typeof FIGPLUGIN_BRIDGE_ERRORS =>
   Object.hasOwn(FIGPLUGIN_BRIDGE_ERRORS, value)
 const bridgeErrorKey = (code: BridgeErrorCode): BridgeErrorKey => `figplugin.bridge.errors.${code}`
@@ -106,7 +123,9 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
   const [models, setModels] = useState<Record<string, string>>({})
   const [ticket, setTicket] = useState<FigPluginDesktopPairTicket | null>(null)
   const [state, setState] = useState(emptyState)
+  const [executions, setExecutions] = useState(emptyExecutionState)
   const [reviewed, setReviewed] = useState<Record<string, string>>({})
+  const [reviewedExecutions, setReviewedExecutions] = useState<Record<string, string>>({})
   const [monitorUntil, setMonitorUntil] = useState(0)
   const [busy, setBusy] = useState(false)
   const [revoking, setRevoking] = useState(false)
@@ -147,7 +166,9 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
   const clearView = useCallback(() => {
     setTicket(null)
     setState(emptyState())
+    setExecutions(emptyExecutionState())
     setReviewed({})
+    setReviewedExecutions({})
     setModels({})
   }, [])
 
@@ -203,9 +224,16 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
   )
 
   const refresh = useCallback(async (live: Live) => {
-    const value = await api().svcFigPluginCenter.bridgeState({})
+    const [value, executionValue] = await Promise.all([
+      api().svcFigPluginCenter.bridgeState({}),
+      api().svcFigPluginCenter.planState({})
+    ])
     if (!live()) return
     const next = parseFigPluginBridgeValue(figPluginBridgeDesktopStateSchema, value)
+    const nextExecutions = parseFigPluginBridgeValue(
+      figPluginExecutionDesktopStateSchema,
+      executionValue
+    )
     if (
       new Set(next.previews.map((call) => call.callId)).size !== next.previews.length ||
       new Set(next.sessions.map((session) => session.sessionId)).size !== next.sessions.length ||
@@ -223,11 +251,22 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         : null
     )
     setState(next)
+    setExecutions({
+      previews: nextExecutions.previews.filter((preview) => preview.expiresAt > now),
+      statuses: nextExecutions.statuses
+    })
     setReviewed((previous) =>
       Object.fromEntries(
         next.previews
           .filter((call) => previous[call.callId] === reviewKey(call))
           .map((call) => [call.callId, reviewKey(call)])
+      )
+    )
+    setReviewedExecutions((previous) =>
+      Object.fromEntries(
+        nextExecutions.previews
+          .filter((previewEx) => previous[previewEx.executionId] === executionReviewKey(previewEx))
+          .map((previewEx) => [previewEx.executionId, executionReviewKey(previewEx)])
       )
     )
     setError('')
@@ -296,7 +335,8 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
     const expiries = [
       ...(ticket ? [ticket.expiresAt] : []),
       ...state.previews.map((call) => call.expiresAt),
-      ...state.sessions.map((session) => session.expiresAt)
+      ...state.sessions.map((session) => session.expiresAt),
+      ...executions.previews.map((previewEx) => previewEx.expiresAt)
     ]
     if (!expiries.length) return
     const timer = setTimeout(
@@ -307,12 +347,17 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
           sessions: value.sessions.filter((session) => session.expiresAt > now),
           previews: value.previews.filter((call) => call.expiresAt > now)
         }))
+        setExecutions((value) => ({
+          previews: value.previews.filter((previewEx) => previewEx.expiresAt > now),
+          statuses: value.statuses
+        }))
         setReviewed({})
+        setReviewedExecutions({})
       },
       Math.min(2_147_483_647, Math.max(0, Math.min(...expiries) - Date.now()))
     )
     return () => clearTimeout(timer)
-  }, [ticket, state])
+  }, [ticket, state, executions])
 
   const create = () => {
     if (pending.current || revokePending.current || !selected || !project) return
@@ -462,6 +507,68 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
         await api().svcFigPluginCenter.denyBridge({ callId: call.callId })
         if (live()) setNotice('figplugin.bridge.denied')
       }
+      if (live()) await refresh(live)
+    })
+  }
+
+  const canApproveExecution = (preview: FigPluginExecutionPreview) =>
+    preview.expiresAt > Date.now() &&
+    preview.state === 'awaiting-approval' &&
+    projects.some((value) => value.id === preview.projectId) &&
+    candidates.some((item) => item.pluginId === preview.pluginId && item.host === preview.host)
+
+  const decideExecution = (previewEx: FigPluginExecutionPreview, approve: boolean) => {
+    if (pending.current || revokePending.current || previewEx.expiresAt <= Date.now()) return
+    if (
+      approve &&
+      (reviewedExecutions[previewEx.executionId] !== executionReviewKey(previewEx) ||
+        !canApproveExecution(previewEx))
+    )
+      return
+    if (approve && !getProjectById(previewEx.projectId)) {
+      stopMonitoring()
+      setError('figplugin.bridge.errors.CONFIGURATION_CHANGED')
+      return
+    }
+    setReviewedExecutions((previous) => {
+      const next = { ...previous }
+      delete next[previewEx.executionId]
+      return next
+    })
+    void run(async (live) => {
+      if (approve) {
+        const result = parseFigPluginBridgeValue(
+          figPluginManagedPathResultSchema,
+          await api().svcFigPluginCenter.approvePlanExecution(
+            figPluginDesktopExecutionApprovalSchema.parse({
+              executionId: previewEx.executionId,
+              planSha256: previewEx.planSha256
+            })
+          )
+        )
+        if (live())
+          setNotice(
+            result.completed
+              ? 'figplugin.bridge.planApprovalAccepted'
+              : 'figplugin.bridge.planDenied'
+          )
+      } else {
+        await api().svcFigPluginCenter.denyPlanExecution(
+          figPluginDesktopExecutionSchema.parse({ executionId: previewEx.executionId })
+        )
+        if (live()) setNotice('figplugin.bridge.planDenied')
+      }
+      if (live()) await refresh(live)
+    })
+  }
+
+  const cancelExecution = (executionId: string) => {
+    if (pending.current || revokePending.current) return
+    void run(async (live) => {
+      await api().svcFigPluginCenter.cancelPlanExecution(
+        figPluginDesktopExecutionSchema.parse({ executionId })
+      )
+      if (live()) setNotice('figplugin.bridge.planCancelled')
       if (live()) await refresh(live)
     })
   }
@@ -712,6 +819,122 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                   {t('figplugin.bridge.deny')}
                 </Button>
               </Stack>
+            </Stack>
+          </Paper>
+        ))}
+        <Typography component="h3" variant="subtitle1">
+          {t('figplugin.bridge.nativePreviews')}
+        </Typography>
+        <Typography>{t('figplugin.bridge.nativePreviewsHelp')}</Typography>
+        {!executions.previews.length && (
+          <Typography>{t('figplugin.bridge.noNativePreviews')}</Typography>
+        )}
+        {executions.previews.map((previewEx) => (
+          <Paper
+            key={previewEx.executionId}
+            component="article"
+            aria-label={t('figplugin.bridge.nativeWrite', {
+              id: previewEx.executionId
+            })}
+            variant="outlined"
+            sx={{ p: 2 }}
+          >
+            <Stack spacing={1}>
+              <Typography>
+                {t('figplugin.bridge.callSource', {
+                  plugin: previewEx.pluginId,
+                  host: previewEx.host,
+                  project: previewEx.projectId
+                })}
+              </Typography>
+              <Typography>{t('figplugin.bridge.risk', { risk: previewEx.risk })}</Typography>
+              <Typography>
+                {t('figplugin.bridge.planHash', { hash: previewEx.planSha256 })}
+              </Typography>
+              <Typography>
+                {t('figplugin.bridge.contextHash', { hash: previewEx.contextSha256 })}
+              </Typography>
+              <Typography>
+                {t('figplugin.bridge.rollback', { mode: previewEx.rollback })}
+              </Typography>
+              <Typography>
+                {t('figplugin.bridge.visualAudit', { mode: previewEx.visualAudit })}
+              </Typography>
+              <Typography>{t('figplugin.bridge.differences')}</Typography>
+              <Box
+                component="pre"
+                tabIndex={0}
+                aria-label={t('figplugin.bridge.differences')}
+                sx={{ whiteSpace: 'pre-wrap', maxHeight: 320, overflow: 'auto', m: 0 }}
+              >
+                {JSON.stringify(previewEx.differences, null, 2)}
+              </Box>
+              <FormControlLabel
+                label={t('figplugin.bridge.reviewWrite')}
+                control={
+                  <Checkbox
+                    disabled={locked || !canApproveExecution(previewEx)}
+                    checked={
+                      reviewedExecutions[previewEx.executionId] === executionReviewKey(previewEx)
+                    }
+                    onChange={(event) => {
+                      if (!pending.current && !revokePending.current)
+                        setReviewedExecutions((previous) => ({
+                          ...previous,
+                          [previewEx.executionId]: event.target.checked
+                            ? executionReviewKey(previewEx)
+                            : ''
+                        }))
+                    }}
+                  />
+                }
+              />
+              <Stack direction="row" gap={1}>
+                <Button
+                  variant="contained"
+                  disabled={
+                    locked ||
+                    !canApproveExecution(previewEx) ||
+                    reviewedExecutions[previewEx.executionId] !== executionReviewKey(previewEx)
+                  }
+                  onClick={() => decideExecution(previewEx, true)}
+                >
+                  {t('figplugin.bridge.approveWriteOnce')}
+                </Button>
+                <Button disabled={locked} onClick={() => decideExecution(previewEx, false)}>
+                  {t('figplugin.bridge.deny')}
+                </Button>
+              </Stack>
+            </Stack>
+          </Paper>
+        ))}
+        <Typography component="h3" variant="subtitle1">
+          {t('figplugin.bridge.executionStatuses')}
+        </Typography>
+        {!executions.statuses.length && (
+          <Typography>{t('figplugin.bridge.noExecutionStatuses')}</Typography>
+        )}
+        {executions.statuses.map((executionStatus) => (
+          <Paper key={executionStatus.executionId} variant="outlined" sx={{ p: 2 }}>
+            <Stack spacing={1}>
+              <Typography>
+                {t('figplugin.bridge.executionStatus', {
+                  state: executionStatus.state,
+                  completed: executionStatus.completed,
+                  total: executionStatus.total,
+                  effect: executionStatus.effect
+                })}
+              </Typography>
+              {!['completed', 'cancelled', 'denied', 'failed', 'expired'].includes(
+                executionStatus.state
+              ) && (
+                <Button
+                  disabled={locked}
+                  onClick={() => cancelExecution(executionStatus.executionId)}
+                >
+                  {t('figplugin.bridge.cancelWrite')}
+                </Button>
+              )}
             </Stack>
           </Paper>
         ))}

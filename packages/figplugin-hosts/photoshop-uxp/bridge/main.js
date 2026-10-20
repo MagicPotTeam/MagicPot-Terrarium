@@ -1,7 +1,10 @@
-// Connected source only. No document mutation, modal execution, filesystem or credential APIs.
+// Connected source only. Writes run in Photoshop's modal API after a separate desktop approval.
 ;(() => {
-  const { app } = require('photoshop')
+  const photoshop = require('photoshop')
+  const { app } = photoshop
+  const executeAsModal = photoshop.core && photoshop.core.executeAsModal
   const HOST = 'photoshop'
+  const EXECUTION_ADAPTER_VERSION = 'photoshop-uxp-native-1'
   const keys = (value, required, optional = []) =>
     value !== null &&
     typeof value === 'object' &&
@@ -27,6 +30,8 @@
           .slice(0, limit)
           .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
       : ''
+  const exactText = (value, limit) =>
+    typeof value === 'string' && value.length <= limit && bytes(value) <= limit ? value : null
   const input = globalThis.MAGICPOT_BRIDGE_CONFIG
   const validConfig =
     keys(input, ['protocol', 'origin', 'pluginId', 'host']) &&
@@ -53,12 +58,16 @@
   let session = null
   let pairing = false
   let snapshot = null
+  let planningSnapshot = null
+  let planningNodes = null
   let review = null
+  let planReview = null
   let sequence = 0
   let epoch = 0
   let disposed = false
   let initialized = false
   let pollTimer = null
+  let planPollTimer = null
   let expiryTimer = null
   let snapshotReader = null
   let snapshotInstanceEpoch = null
@@ -71,7 +80,11 @@
     prepare: '/figplugin/v1/prepare',
     status: '/figplugin/v1/status',
     cancel: '/figplugin/v1/cancel',
-    close: '/figplugin/v1/close'
+    close: '/figplugin/v1/close',
+    planStatus: '/figplugin/v1/plan/status',
+    planClaim: '/figplugin/v1/plan/claim',
+    planProgress: '/figplugin/v1/plan/progress',
+    planResult: '/figplugin/v1/plan/result'
   })
   const el = (id) => document.getElementById(id)
   function captureReadOnlySnapshot() {
@@ -116,6 +129,7 @@
     el('read-only-capture').disabled = !secure()
     el('pair').disabled = !config || !secure() || session !== null || pairing
     el('capture').disabled = !config || !secure() || pairing
+    el('plan-capture').disabled = !config || !secure() || pairing
     el('share').disabled =
       !config ||
       !secure() ||
@@ -138,6 +152,8 @@
     epoch += 1
     clearTimeout(pollTimer)
     pollTimer = null
+    clearTimeout(planPollTimer)
+    planPollTimer = null
     for (const cancel of Array.from(operations)) cancel()
   }
   // text() works in native hosts without a ReadableStream; desktop independently bounds bodies.
@@ -221,7 +237,10 @@
     session = null
     pairing = false
     snapshot = null
+    planningSnapshot = null
+    planningNodes = null
     review = null
+    planReview = null
     sequence = 0
     clearView()
     if (initialized) el('ticket').value = ''
@@ -346,6 +365,26 @@
     }
   }
   function cancelReview() {
+    if (!review && planReview) {
+      const old = planReview
+      clearTimeout(planPollTimer)
+      planPollTimer = null
+      planReview = null
+      state('Plan cancelled locally; desktop cancellation requested.')
+      const own = epoch
+      void post('cancel', { protocol: 1, callId: old.callId }, old.auth)
+        .then(() => {
+          if (own === epoch && !disposed) {
+            touch(old.auth)
+            state('Plan cancelled.')
+          }
+        })
+        .catch(() => {
+          if (own === epoch && !disposed)
+            state('Plan cancellation could not be confirmed. Check desktop.')
+        })
+      return
+    }
     if (!review || disposed) return
     const old = review
     if (!old.callId) {
@@ -373,6 +412,7 @@
     if (!config || disposed || pairing) return
     cancelReview()
     snapshot = null
+    planningSnapshot = null
     clearView()
     try {
       const selectionRevision = nonce()
@@ -405,6 +445,516 @@
       )
     } catch {
       state('Selection capture or secure randomness failed. Capture again before sharing.')
+    }
+  }
+  const layerLocked = (layer) =>
+    layer.allLocked === true ||
+    layer.pixelsLocked === true ||
+    layer.positionLocked === true ||
+    layer.transparentPixelsLocked === true ||
+    layer.isBackgroundLayer === true
+  const normalizedOpacity = (layer) => {
+    const value = Number(layer.opacity)
+    if (!Number.isFinite(value) || value < 0 || value > 100) return undefined
+    return value / 100
+  }
+  function capturePhotoshopHostContext(captureId) {
+    const document = app.activeDocument
+    if (!document || !Number.isSafeInteger(document.id) || document.id <= 0)
+      throw new Error('CONTEXT')
+    const layers = document.activeLayers
+    if (!layers || typeof layers.length !== 'number' || layers.length < 1 || layers.length > 100)
+      throw new Error('CONTEXT')
+    const documentId = String(document.id)
+    const records = new Map()
+    const objects = new Map()
+    const selectedIds = []
+    const ancestorsOf = (layer) => {
+      const ancestors = []
+      let current = layer.parent
+      let depth = 0
+      while (current) {
+        if (depth++ >= 32) throw new Error('CONTEXT')
+        if (!Number.isSafeInteger(current.id) || current.id <= 0) throw new Error('CONTEXT')
+        const type = exactText(current.kind, 128)
+        if (!type) throw new Error('CONTEXT')
+        ancestors.push({ id: String(current.id), type, locked: layerLocked(current) })
+        current = current.parent
+      }
+      return ancestors
+    }
+    const visit = (layer, selected) => {
+      if (!Number.isSafeInteger(layer.id) || layer.id <= 0) throw new Error('CONTEXT')
+      const id = String(layer.id)
+      if (records.has(id)) {
+        if (selected) throw new Error('CONTEXT')
+        return id
+      }
+      if (records.size >= 100) throw new Error('CONTEXT')
+      if (!layer.document || String(layer.document.id) !== documentId) throw new Error('CONTEXT')
+      const type = exactText(layer.kind, 128)
+      const name = exactText(layer.name, 4096)
+      if (!type || name === null || typeof layer.visible !== 'boolean') throw new Error('CONTEXT')
+      const ancestors = ancestorsOf(layer)
+      const locked = layerLocked(layer)
+      const effectiveLocked = locked || ancestors.some((ancestor) => ancestor.locked)
+      const opacity = normalizedOpacity(layer)
+      const commands = []
+      let text
+      if (selected && !effectiveLocked) {
+        commands.push('node.rename', 'node.visibility')
+        if (opacity !== undefined) commands.push('node.opacity')
+        if (type === 'textLayer' && layer.textItem) {
+          const contents = exactText(layer.textItem.contents, 4096)
+          if (contents !== null) {
+            text = contents
+            commands.push('text.content')
+          }
+        }
+      }
+      const record = {
+        id,
+        type,
+        name,
+        parentId: ancestors[0]?.id ?? null,
+        ancestors,
+        locked,
+        visible: layer.visible,
+        ...(opacity === undefined ? {} : { opacity }),
+        commands,
+        ...(text === undefined ? {} : { text })
+      }
+      records.set(id, record)
+      objects.set(id, layer)
+      if (selected) selectedIds.push(id)
+      return id
+    }
+    for (let index = 0; index < layers.length; index += 1) {
+      const selected = layers[index]
+      visit(selected, true)
+      let parent = selected.parent
+      while (parent) {
+        visit(parent, false)
+        parent = parent.parent
+      }
+    }
+    const context = {
+      version: 1,
+      host: HOST,
+      documentId,
+      scopeId: documentId,
+      captureId,
+      nodes: Array.from(records.values()),
+      selectedIds,
+      execution: {
+        mode: 'native-write',
+        adapterVersion: EXECUTION_ADAPTER_VERSION,
+        supports: ['node.rename', 'node.opacity', 'node.visibility', 'text.content'],
+        rollback: 'verified-in-place',
+        visualAudit: 'unavailable'
+      }
+    }
+    const planner = globalThis.MagicPotPlanPreviewV1
+    if (!planner || typeof planner.validateHostContext !== 'function') throw new Error('SNAPSHOT')
+    return {
+      context: planner.validateHostContext(JSON.parse(JSON.stringify(context))),
+      nodes: objects
+    }
+  }
+  function capturePlan() {
+    if (pairing || disposed || !config || !initialized) return
+    cancelReview()
+    snapshot = null
+    planningSnapshot = null
+    planningNodes = null
+    clearView()
+    try {
+      const revision = nonce()
+      if (snapshotInstanceEpoch === null) snapshotInstanceEpoch = nonce()
+      const instanceEpoch = snapshotInstanceEpoch
+      const planner = globalThis.MagicPotPlanPreviewV1
+      if (!planner) throw new Error('SNAPSHOT')
+      const captured = capturePhotoshopHostContext(revision)
+      const full = captured.context
+      planningNodes = captured.nodes
+      const selected = new Set(full.selectedIds)
+      snapshot = {
+        selectionRevision: revision,
+        nodes: full.nodes
+          .filter((node) => selected.has(node.id))
+          .map((node) => ({
+            id: node.id,
+            type: node.type,
+            name: safeLabel(node.name),
+            locked: node.locked || node.ancestors.some((ancestor) => ancestor.locked)
+          }))
+      }
+      planningSnapshot = full
+      el('selection').textContent = planner.formatContext(full)
+      state(
+        'Native plan context captured. Model output still requires a separate desktop write approval.'
+      )
+    } catch {
+      snapshot = null
+      planningSnapshot = null
+      planningNodes = null
+      state('Planning capture failed. No content was sent and no document was changed.')
+    }
+  }
+  const planCommands = ['node.rename', 'node.opacity', 'node.visibility', 'text.content']
+  const readNodeValue = (layer, command) => {
+    switch (command) {
+      case 'node.rename':
+        return layer.name
+      case 'node.opacity':
+        return normalizedOpacity(layer)
+      case 'node.visibility':
+        return layer.visible
+      case 'text.content':
+        return layer.kind === 'textLayer' && layer.textItem ? layer.textItem.contents : undefined
+      default:
+        return undefined
+    }
+  }
+  const samePlanValue = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+  function verifyNativeLayer(record, documentId) {
+    if (!planningNodes) throw new Error('STALE_CONTEXT')
+    const layer = planningNodes.get(record.id)
+    if (
+      !layer ||
+      String(layer.id) !== record.id ||
+      !layer.document ||
+      String(layer.document.id) !== documentId
+    )
+      throw new Error('STALE_CONTEXT')
+    const ancestors = []
+    let current = layer.parent
+    while (current) {
+      ancestors.push(current)
+      current = current.parent
+      if (ancestors.length > 32) throw new Error('STALE_CONTEXT')
+    }
+    if (
+      ancestors.length !== record.ancestors.length ||
+      ancestors.some((ancestor, index) => {
+        const expected = record.ancestors[index]
+        return (
+          String(ancestor.id) !== expected.id ||
+          String(ancestor.kind) !== expected.type ||
+          layerLocked(ancestor) !== expected.locked
+        )
+      })
+    )
+      throw new Error('STALE_CONTEXT')
+    if (layerLocked(layer) || record.ancestors.some((ancestor) => ancestor.locked))
+      throw new Error('LOCKED_TARGET')
+    return layer
+  }
+  function precheckPlan(plan, context) {
+    if (!Array.isArray(plan.steps) || plan.steps.length < 1 || plan.steps.length > 20)
+      throw new Error('INVALID_PLAN')
+    const nodes = new Map(context.nodes.map((node) => [node.id, node]))
+    const selected = new Set(context.selectedIds)
+    const checked = []
+    for (const step of plan.steps) {
+      if (
+        !step ||
+        !selected.has(step.targetId) ||
+        !planCommands.includes(step.command) ||
+        !context.execution.supports.includes(step.command)
+      )
+        throw new Error('UNSUPPORTED_COMMAND')
+      const contextNode = nodes.get(step.targetId)
+      if (!contextNode || !contextNode.commands.includes(step.command))
+        throw new Error('UNSUPPORTED_COMMAND')
+      const layer = verifyNativeLayer(contextNode, context.documentId)
+      const expected = readNodeValue(layer, step.command)
+      const baseline =
+        step.command === 'node.rename'
+          ? contextNode.name
+          : step.command === 'node.opacity'
+            ? contextNode.opacity
+            : step.command === 'node.visibility'
+              ? contextNode.visible
+              : contextNode.text
+      if (!samePlanValue(expected, baseline)) throw new Error('STALE_CONTEXT')
+      checked.push({ layer, contextNode, step })
+    }
+    return checked
+  }
+  function applyPlanStep(layer, step) {
+    switch (step.command) {
+      case 'node.rename':
+        layer.name = step.name
+        break
+      case 'node.opacity':
+        layer.opacity = step.opacity * 100
+        break
+      case 'node.visibility':
+        layer.visible = step.visible
+        break
+      case 'text.content':
+        if (!layer.textItem) throw new Error('UNSUPPORTED_COMMAND')
+        layer.textItem.contents = step.text
+        break
+      default:
+        throw new Error('UNSUPPORTED_COMMAND')
+    }
+  }
+  function rollbackPlanStep(layer, contextNode, step) {
+    switch (step.command) {
+      case 'node.rename':
+        layer.name = contextNode.name
+        break
+      case 'node.opacity':
+        layer.opacity = contextNode.opacity * 100
+        break
+      case 'node.visibility':
+        layer.visible = contextNode.visible
+        break
+      case 'text.content':
+        layer.textItem.contents = contextNode.text
+        break
+    }
+  }
+  function createPlanReadback(context, plan) {
+    const nodes = new Map(context.nodes.map((node) => [node.id, node]))
+    return {
+      version: 1,
+      kind: 'host-plan-readback',
+      host: HOST,
+      documentId: context.documentId,
+      scopeId: context.scopeId,
+      captureId: context.captureId,
+      steps: plan.steps.map((step) => {
+        const contextNode = nodes.get(step.targetId)
+        const layer = planningNodes && planningNodes.get(step.targetId)
+        const expected = contextNode
+          ? step.command === 'node.rename'
+            ? contextNode.name
+            : step.command === 'node.opacity'
+              ? contextNode.opacity
+              : step.command === 'node.visibility'
+                ? contextNode.visible
+                : contextNode.text
+          : undefined
+        const requested =
+          step.command === 'node.rename'
+            ? step.name
+            : step.command === 'node.opacity'
+              ? step.opacity
+              : step.command === 'node.visibility'
+                ? step.visible
+                : step.text
+        let value
+        try {
+          value = layer ? readNodeValue(layer, step.command) : undefined
+        } catch {
+          value = undefined
+        }
+        return {
+          targetId: step.targetId,
+          command: step.command,
+          observation:
+            value === undefined
+              ? 'unknown'
+              : samePlanValue(value, requested)
+                ? 'requested'
+                : samePlanValue(value, expected)
+                  ? 'original'
+                  : 'other',
+          ...(value === undefined ? {} : { value })
+        }
+      })
+    }
+  }
+  async function executeClaimedPlan(item, intent) {
+    const planner = globalThis.MagicPotPlanPreviewV1
+    let plan
+    try {
+      plan = planner.validateHostPlan(intent.plan, item.hostContext)
+    } catch {
+      state('Desktop plan validation failed. No document changes were made.')
+      return
+    }
+    if (typeof executeAsModal !== 'function') {
+      state('Photoshop modal execution is unavailable. No document changes were made.')
+      return
+    }
+    let effect = 'none'
+    let readback = createPlanReadback(item.hostContext, plan)
+    try {
+      await executeAsModal(
+        async () => {
+          const checked = precheckPlan(plan, item.hostContext)
+          const applied = []
+          try {
+            for (const entry of checked) {
+              applyPlanStep(entry.layer, entry.step)
+              applied.push(entry)
+            }
+          } catch {
+            for (const entry of applied.reverse()) {
+              try {
+                rollbackPlanStep(entry.layer, entry.contextNode, entry.step)
+              } catch {}
+            }
+            throw new Error('ROLLED_BACK')
+          }
+        },
+        { commandName: 'MagicPot approved FIGPLUGIN plan' }
+      )
+    } catch {}
+    readback = createPlanReadback(item.hostContext, plan)
+    const observations = readback.steps.map((step) => step.observation)
+    if (observations.every((value) => value === 'requested')) effect = 'applied'
+    else if (observations.every((value) => value === 'original')) effect = 'rolled-back'
+    else if (observations.some((value) => value === 'requested')) effect = 'partial'
+    else effect = 'unknown'
+    const status = effect === 'applied' ? 'completed' : 'failed'
+    try {
+      await post(
+        'planProgress',
+        {
+          protocol: 1,
+          executionId: item.executionId,
+          actionId: item.actionId,
+          sequence: 2,
+          phase: 'readback',
+          index: plan.steps.length - 1,
+          completed: readback.steps.filter((step) => step.observation === 'requested').length,
+          total: plan.steps.length,
+          effect,
+          at: Date.now()
+        },
+        item.auth
+      )
+      const result = await post(
+        'planResult',
+        {
+          protocol: 1,
+          executionId: item.executionId,
+          actionId: item.actionId,
+          status,
+          effect,
+          completed: readback.steps.filter((step) => step.observation === 'requested').length,
+          total: plan.steps.length,
+          readback,
+          ...(effect === 'rolled-back'
+            ? { errorCode: 'ROLLED_BACK' }
+            : effect === 'unknown'
+              ? { errorCode: 'QUARANTINED' }
+              : effect === 'partial'
+                ? { errorCode: 'EXECUTION_FAILED' }
+                : {})
+        },
+        item.auth
+      )
+      if (result && result.status && result.status.state === 'completed')
+        state('Approved plan applied and verified by document readback.')
+      else if (effect === 'rolled-back')
+        state('Plan failed. Applied values were rolled back and verified.')
+      else state('Plan failed. Check MagicPot desktop for the execution receipt.')
+    } catch {
+      state('Execution result could not be confirmed. Check MagicPot desktop.')
+    }
+  }
+  function beginPlanReview(call, content) {
+    planReview = {
+      auth: call.auth,
+      callId: call.callId,
+      hostContext: call.hostContext,
+      expiresAt: call.expiresAt,
+      polls: 0,
+      display: content,
+      started: false
+    }
+    el('result').textContent = content
+    state('Plan ready. Awaiting separate write approval in MagicPot desktop.')
+    schedulePlan(planReview)
+  }
+  const currentPlan = (item) =>
+    !disposed && planReview === item && live() && Date.now() < item.expiresAt
+  function schedulePlan(item) {
+    if (!currentPlan(item)) return
+    if (item.polls >= 120) {
+      clearTimeout(planPollTimer)
+      planPollTimer = null
+      planReview = null
+      state('Plan approval expired or polling limit reached.')
+      return
+    }
+    planPollTimer = setTimeout(() => void pollPlan(item), 1000)
+  }
+  async function pollPlan(item) {
+    if (!currentPlan(item)) return
+    item.polls += 1
+    try {
+      const status = await post('planStatus', { protocol: 1, callId: item.callId }, item.auth)
+      if (!currentPlan(item)) return
+      if (
+        !status ||
+        status.protocol !== 1 ||
+        typeof status.executionId !== 'string' ||
+        typeof status.state !== 'string'
+      )
+        throw new Error('REQUEST')
+      if (status.state === 'awaiting-approval') {
+        state('Plan ready. Awaiting separate write approval in MagicPot desktop.')
+        schedulePlan(item)
+        return
+      }
+      if (status.state === 'approved') {
+        const claim = await post('planClaim', { protocol: 1, callId: item.callId }, item.auth)
+        if (!currentPlan(item)) return
+        if (!claim || claim.protocol !== 1) throw new Error('REQUEST')
+        if (claim.status === 'pending') {
+          schedulePlan(item)
+          return
+        }
+        if (claim.status === 'terminal') {
+          planReview = null
+          state('Plan execution was denied or expired. No document changes were made.')
+          return
+        }
+        const intent = claim.intent
+        if (
+          !item.started &&
+          intent &&
+          intent.executionId === status.executionId &&
+          intent.callId === item.callId &&
+          intent.host === HOST &&
+          intent.captureId === item.hostContext.captureId &&
+          intent.expiresAt > Date.now()
+        ) {
+          item.started = true
+          planReview = null
+          item.executionId = intent.executionId
+          item.actionId = intent.actionId
+          await executeClaimedPlan(item, intent)
+          return
+        }
+        throw new Error('REQUEST')
+      }
+      if (
+        status.state === 'claimed' ||
+        status.state === 'executing' ||
+        status.state === 'readback'
+      ) {
+        state('Approved plan is running in the native host.')
+        schedulePlan(item)
+        return
+      }
+      planReview = null
+      if (status.state === 'completed')
+        state('Approved plan completed and the document readback was verified.')
+      else if (status.state === 'cancelled') state('Plan execution was cancelled.')
+      else state('Plan execution failed. Check MagicPot desktop for diagnostics.')
+    } catch {
+      if (currentPlan(item)) {
+        planReview = null
+        state('Plan status request failed. Check MagicPot desktop; polling stopped.')
+      }
     }
   }
   const callErrors = [
@@ -467,8 +1017,28 @@
         result.status === 'cancelled' ||
         result.status === 'failed'
       ) {
+        let executionReady = false
+        if (result.status === 'completed' && call.hostContext) {
+          try {
+            const parsed = JSON.parse(result.content)
+            executionReady = parsed && parsed.executable === true
+          } catch {}
+        }
+        const displayContent =
+          result.status === 'completed'
+            ? call.hostContext
+              ? globalThis.MagicPotPlanPreviewV1.reviewPlanningResult(
+                  result.content,
+                  call.hostContext
+                )
+              : result.content
+            : ''
         review = null
-        if (result.status === 'completed') el('result').textContent = result.content
+        if (executionReady) {
+          beginPlanReview(call, displayContent)
+          return
+        }
+        if (result.status === 'completed') el('result').textContent = displayContent
         state(
           result.status === 'completed'
             ? 'Completed. Result is plain text; nothing was applied to the document.'
@@ -507,15 +1077,30 @@
       state('Secure randomness is unavailable.')
       return
     }
-    const body = { protocol: 1, requestId, sequence: sequence + 1, prompt, context: snapshot }
+    const body = {
+      protocol: 1,
+      requestId,
+      sequence: sequence + 1,
+      prompt,
+      context: snapshot,
+      ...(planningSnapshot ? { featureId: 'plan-preview', hostContext: planningSnapshot } : {})
+    }
     if (!bounded(JSON.stringify(body), 64 * 1024)) {
       state('Prompt and selection metadata are too large.')
       return
     }
     sequence += 1
     snapshot = null
+    planningSnapshot = null
     el('consent').checked = false
-    const call = { epoch: ++epoch, auth: session, callId: null, polls: 0, expiresAt: 0 }
+    const call = {
+      epoch: ++epoch,
+      auth: session,
+      callId: null,
+      polls: 0,
+      expiresAt: 0,
+      hostContext: body.hostContext
+    }
     review = call
     el('result').textContent = ''
     state('Sending for desktop approval...')
@@ -550,6 +1135,7 @@
     el('read-only-capture').addEventListener('click', captureReadOnlySnapshot)
     el('pair').addEventListener('click', () => void pair())
     el('capture').addEventListener('click', capture)
+    el('plan-capture').addEventListener('click', capturePlan)
     el('share').addEventListener('click', () => void share())
     el('prompt').addEventListener('input', () => {
       el('consent').checked = false

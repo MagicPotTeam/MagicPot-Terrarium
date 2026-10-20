@@ -56,7 +56,11 @@ const makeRuntime = () => ({
   prepare: vi.fn<Runtime['prepare']>().mockResolvedValue(prepared),
   status: vi.fn<Runtime['status']>().mockResolvedValue({ ...call, status: 'awaiting-approval' }),
   cancel: vi.fn<Runtime['cancel']>().mockResolvedValue(undefined),
-  closeSession: vi.fn<Runtime['closeSession']>()
+  closeSession: vi.fn<Runtime['closeSession']>(),
+  planStatus: vi.fn<Runtime['planStatus']>(),
+  claimPlan: vi.fn<Runtime['claimPlan']>(),
+  planProgress: vi.fn<Runtime['planProgress']>(),
+  planResult: vi.fn<Runtime['planResult']>()
 })
 const deferred = <T>() => {
   let resolve!: (value: T) => void

@@ -57,6 +57,7 @@ export type FigPluginRuntimeDescriptor = {
   manifestSha256: string
   bridgeOrigin: string
   profileId: string
+  capabilities?: FigPluginManifest['capabilities']
   limits: FigPluginManifest['limits']
 }
 
@@ -602,6 +603,7 @@ export class FigPluginCenterStore {
             manifestSha256: digest(canonicalFigPluginJson(manifest)),
             bridgeOrigin,
             profileId,
+            capabilities: [...manifest.capabilities],
             limits: { ...manifest.limits }
           }
         },
