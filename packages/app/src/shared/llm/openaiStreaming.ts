@@ -170,181 +170,204 @@ export async function readOpenAIStream(
     onDelta({ type: 'text-delta', delta, metadata: streamMetadata })
     control.check()
   }
-  for await (const data of events(response, control)) {
-    control.check()
-    if (data === '[DONE]') {
-      if (mode !== 'chat-completions' || !finish) {
-        throw new Error('OpenAI stream ended before its terminal completion.')
-      }
-      const content = imageParts.length ? [{ type: 'text', text }, ...imageParts] : text
-      const payload = {
-        choices: [
-          {
-            message: { content, ...(toolCalls.size ? { tool_calls: [...toolCalls.values()] } : {}) }
-          }
-        ],
-        usage
-      }
+  try {
+    for await (const data of events(response, control)) {
       control.check()
-      return { payload, finishReason: finish }
-    }
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(data)
-    } catch {
-      throw new Error('OpenAI stream contains malformed JSON.')
-    }
-    control.check()
-    const event = record(parsed)
-    if (!event) throw new Error('OpenAI stream contains an invalid event.')
-    if (event.error || event.type === 'error' || event.type === 'response.failed') {
-      const error = record(event.error) || record(record(event.response)?.error)
-      const detail = error?.message || event.message
-      throw Object.assign(
-        new Error(
-          typeof detail === 'string' ? detail : 'OpenAI stream reported a provider failure.'
-        ),
-        {
-          providerError: error,
-          retryBlocked:
-            hostedWorkStarted || Boolean(text) || toolCalls.size > 0 || imageParts.length > 0
+      if (data === '[DONE]') {
+        if (mode !== 'chat-completions' || !finish) {
+          throw new Error('OpenAI stream ended before its terminal completion.')
         }
-      )
-    }
-    if (
-      typeof event.type === 'string' &&
-      (/^response\.(?:image_generation_call|web_search_call|file_search_call|code_interpreter_call)\./.test(
-        event.type
-      ) ||
-        (event.type === 'response.output_item.added' &&
-          /(?:_call|tool)$/.test(String(record(event.item)?.type ?? ''))))
-    )
-      hostedWorkStarted = true
-    if (mode === 'responses') {
-      if (event.type === 'response.output_text.delta' || event.type === 'response.refusal.delta') {
-        emit(event.delta)
-      } else if (event.type === 'response.image_generation_call.partial_image') {
-        // A preview is not a completed image. partial_image_index counts previews,
-        // not output items; never promote it to an output_index or a final result.
-        // Only completed image calls may be used by the final attachment serializer.
-        continue
-      } else if (event.type === 'response.output_item.done') {
-        // Some Responses-compatible gateways surface the image-generation call only
-        // on the item event. Keep it in the final payload so normal extraction can
-        // materialize the returned base64 image.
-        const item = record(event.item)
-        if (item) cacheResponseImageItem(item, event.output_index)
-      } else if (event.type === 'response.completed' || event.type === 'response.incomplete') {
-        const payload = record(event.response)
-        if (!payload) throw new Error('OpenAI stream completion has no response.')
-        const reason = record(payload.incomplete_details)?.reason
-        if (event.type === 'response.incomplete' && reason !== 'max_output_tokens') {
-          throw new Error(
-            `OpenAI response is incomplete: ${typeof reason === 'string' ? reason : 'unknown reason'}.`
-          )
-        }
-        // Refusals use a separate SDK field; retain them as visible text for the existing serializer.
-        const completedOutput = Array.isArray(payload.output)
-          ? payload.output.map((item) => {
-              const value = record(item)
-              if (!value || !Array.isArray(value.content)) return item
-              return {
-                ...value,
-                content: value.content.map((part) => {
-                  const content = record(part)
-                  return content?.type === 'refusal' && typeof content.refusal === 'string'
-                    ? { ...content, type: 'output_text', text: content.refusal }
-                    : part
-                })
+        const content = imageParts.length ? [{ type: 'text', text }, ...imageParts] : text
+        const payload = {
+          choices: [
+            {
+              message: {
+                content,
+                ...(toolCalls.size ? { tool_calls: [...toolCalls.values()] } : {})
               }
-            })
-          : []
-        const completedOutputKeys = new Set<string>()
-        for (let outputIndex = 0; outputIndex < completedOutput.length; outputIndex += 1) {
-          const value = record(completedOutput[outputIndex])
-          if (!value) continue
-          for (const key of responseItemKeys(value, outputIndex)) completedOutputKeys.add(key)
-        }
-        const missingCachedImages = responseImageFallbacks
-          .filter(({ keys }) => !keys.some((key) => completedOutputKeys.has(key)))
-          .map(({ item }) => item)
-        const normalizedOutput =
-          completedOutput.length || missingCachedImages.length
-            ? [...completedOutput, ...missingCachedImages]
-            : undefined
-        const normalized = {
-          ...payload,
-          ...(normalizedOutput ? { output: normalizedOutput } : {})
+            }
+          ],
+          usage
         }
         control.check()
-        return {
-          payload: normalized,
-          finishReason: event.type === 'response.incomplete' ? 'length' : 'stop'
-        }
+        return { payload, finishReason: finish }
       }
-    } else {
-      if (event.usage) usage = event.usage
-      const choices = Array.isArray(event.choices) ? event.choices : []
-      const choice = choices.map(record).find((entry) => entry?.index === 0)
-      if (!choice) continue
-      const delta = record(choice.delta)
-      if (finish && (delta?.content || delta?.refusal || delta?.images || delta?.tool_calls)) {
-        throw new Error('OpenAI stream returned content after its finish marker.')
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(data)
+      } catch {
+        throw new Error('OpenAI stream contains malformed JSON.')
       }
-      if (Array.isArray(delta?.content)) {
-        for (const part of delta.content) {
-          const value = record(part)
-          if (!value) continue
-          emit(value.text)
-          if (value.type === 'image_url' || value.url || value.image_url) imageParts.push(value)
-        }
-      } else emit(delta?.content)
-      if (Array.isArray(delta?.images)) {
-        for (const part of delta.images) {
-          const value = record(part)
-          if (value) imageParts.push(value)
-        }
-      }
-      emit(delta?.refusal)
-      if (Array.isArray(delta?.tool_calls)) {
-        for (const part of delta.tool_calls) {
-          const value = record(part)
-          if (
-            !value ||
-            !Number.isSafeInteger(value.index) ||
-            Number(value.index) < 0 ||
-            Number(value.index) > 1023
-          ) {
-            throw new Error('OpenAI stream has an invalid tool-call index.')
+      control.check()
+      const event = record(parsed)
+      if (!event) throw new Error('OpenAI stream contains an invalid event.')
+      if (event.error || event.type === 'error' || event.type === 'response.failed') {
+        const error = record(event.error) || record(record(event.response)?.error)
+        const detail = error?.message || event.message
+        throw Object.assign(
+          new Error(
+            typeof detail === 'string' ? detail : 'OpenAI stream reported a provider failure.'
+          ),
+          {
+            providerError: error,
+            retryBlocked:
+              hostedWorkStarted || Boolean(text) || toolCalls.size > 0 || imageParts.length > 0
           }
-          const index = Number(value.index)
-          const call = toolCalls.get(index) || {
-            type: 'function' as const,
-            function: { name: '', arguments: '' }
-          }
-          if (typeof value.id === 'string') call.id = value.id
-          const fn = record(value.function)
-          if (typeof fn?.name === 'string') call.function.name += fn.name
-          if (typeof fn?.arguments === 'string') call.function.arguments += fn.arguments
-          toolCalls.set(index, call)
-        }
+        )
       }
-      if (choice.finish_reason) {
-        if (choice.finish_reason === 'content_filter')
-          throw new Error('OpenAI stream was stopped by a content filter.')
+      if (
+        typeof event.type === 'string' &&
+        (/^response\.(?:image_generation_call|web_search_call|file_search_call|code_interpreter_call)\./.test(
+          event.type
+        ) ||
+          (event.type === 'response.output_item.added' &&
+            /(?:_call|tool)$/.test(String(record(event.item)?.type ?? ''))))
+      )
+        hostedWorkStarted = true
+      if (mode === 'responses') {
         if (
-          !['stop', 'length', 'tool_calls', 'function_call'].includes(String(choice.finish_reason))
+          event.type === 'response.output_text.delta' ||
+          event.type === 'response.refusal.delta'
         ) {
-          throw new Error('OpenAI stream returned an unknown finish reason.')
+          emit(event.delta)
+        } else if (event.type === 'response.image_generation_call.partial_image') {
+          // A preview is not a completed image. partial_image_index counts previews,
+          // not output items; never promote it to an output_index or a final result.
+          // Only completed image calls may be used by the final attachment serializer.
+          continue
+        } else if (event.type === 'response.output_item.done') {
+          // Some Responses-compatible gateways surface the image-generation call only
+          // on the item event. Keep it in the final payload so normal extraction can
+          // materialize the returned base64 image.
+          const item = record(event.item)
+          if (item) cacheResponseImageItem(item, event.output_index)
+        } else if (event.type === 'response.completed' || event.type === 'response.incomplete') {
+          const payload = record(event.response)
+          if (!payload) throw new Error('OpenAI stream completion has no response.')
+          const reason = record(payload.incomplete_details)?.reason
+          if (event.type === 'response.incomplete' && reason !== 'max_output_tokens') {
+            throw new Error(
+              `OpenAI response is incomplete: ${typeof reason === 'string' ? reason : 'unknown reason'}.`
+            )
+          }
+          // Refusals use a separate SDK field; retain them as visible text for the existing serializer.
+          const completedOutput = Array.isArray(payload.output)
+            ? payload.output.map((item) => {
+                const value = record(item)
+                if (!value || !Array.isArray(value.content)) return item
+                return {
+                  ...value,
+                  content: value.content.map((part) => {
+                    const content = record(part)
+                    return content?.type === 'refusal' && typeof content.refusal === 'string'
+                      ? { ...content, type: 'output_text', text: content.refusal }
+                      : part
+                  })
+                }
+              })
+            : []
+          const completedOutputKeys = new Set<string>()
+          for (let outputIndex = 0; outputIndex < completedOutput.length; outputIndex += 1) {
+            const value = record(completedOutput[outputIndex])
+            if (!value) continue
+            for (const key of responseItemKeys(value, outputIndex)) completedOutputKeys.add(key)
+          }
+          const missingCachedImages = responseImageFallbacks
+            .filter(({ keys }) => !keys.some((key) => completedOutputKeys.has(key)))
+            .map(({ item }) => item)
+          const normalizedOutput =
+            completedOutput.length || missingCachedImages.length
+              ? [...completedOutput, ...missingCachedImages]
+              : undefined
+          const normalized = {
+            ...payload,
+            ...(normalizedOutput ? { output: normalizedOutput } : {})
+          }
+          control.check()
+          return {
+            payload: normalized,
+            finishReason: event.type === 'response.incomplete' ? 'length' : 'stop'
+          }
         }
-        finish =
-          choice.finish_reason === 'length'
-            ? 'length'
-            : ['tool_calls', 'function_call'].includes(String(choice.finish_reason))
-              ? 'tool_call'
-              : 'stop'
+      } else {
+        if (event.usage) usage = event.usage
+        const choices = Array.isArray(event.choices) ? event.choices : []
+        const choice = choices.map(record).find((entry) => entry?.index === 0)
+        if (!choice) continue
+        const delta = record(choice.delta)
+        if (finish && (delta?.content || delta?.refusal || delta?.images || delta?.tool_calls)) {
+          throw new Error('OpenAI stream returned content after its finish marker.')
+        }
+        if (Array.isArray(delta?.content)) {
+          for (const part of delta.content) {
+            const value = record(part)
+            if (!value) continue
+            emit(value.text)
+            if (value.type === 'image_url' || value.url || value.image_url) imageParts.push(value)
+          }
+        } else emit(delta?.content)
+        if (Array.isArray(delta?.images)) {
+          for (const part of delta.images) {
+            const value = record(part)
+            if (value) imageParts.push(value)
+          }
+        }
+        emit(delta?.refusal)
+        if (Array.isArray(delta?.tool_calls)) {
+          for (const part of delta.tool_calls) {
+            const value = record(part)
+            if (
+              !value ||
+              !Number.isSafeInteger(value.index) ||
+              Number(value.index) < 0 ||
+              Number(value.index) > 1023
+            ) {
+              throw new Error('OpenAI stream has an invalid tool-call index.')
+            }
+            const index = Number(value.index)
+            const call = toolCalls.get(index) || {
+              type: 'function' as const,
+              function: { name: '', arguments: '' }
+            }
+            if (typeof value.id === 'string') call.id = value.id
+            const fn = record(value.function)
+            if (typeof fn?.name === 'string') call.function.name += fn.name
+            if (typeof fn?.arguments === 'string') call.function.arguments += fn.arguments
+            toolCalls.set(index, call)
+          }
+        }
+        if (choice.finish_reason) {
+          if (choice.finish_reason === 'content_filter')
+            throw new Error('OpenAI stream was stopped by a content filter.')
+          if (
+            !['stop', 'length', 'tool_calls', 'function_call'].includes(
+              String(choice.finish_reason)
+            )
+          ) {
+            throw new Error('OpenAI stream returned an unknown finish reason.')
+          }
+          finish =
+            choice.finish_reason === 'length'
+              ? 'length'
+              : ['tool_calls', 'function_call'].includes(String(choice.finish_reason))
+                ? 'tool_call'
+                : 'stop'
+        }
       }
     }
+    throw new Error('OpenAI stream ended before its terminal completion.')
+  } catch (error) {
+    // Deadline/network failures can occur outside a provider error frame. Preserve
+    // the same no-replay boundary for observed text, image and tool work.
+    if (
+      error instanceof Error &&
+      (hostedWorkStarted ||
+        Boolean(text) ||
+        toolCalls.size > 0 ||
+        imageParts.length > 0 ||
+        responseImageFallbacks.length > 0)
+    )
+      Object.assign(error, { retryBlocked: true })
+    throw error
   }
-  throw new Error('OpenAI stream ended before its terminal completion.')
 }

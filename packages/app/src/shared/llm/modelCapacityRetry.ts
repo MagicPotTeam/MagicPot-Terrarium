@@ -4,7 +4,7 @@ export type LLMRetryStatus = {
   attempt: number
   delayMs: number
   nextRetryAt: number
-  reason: 'server-overloaded' | 'rate-limited' | 'server-error'
+  reason: 'server-overloaded' | 'rate-limited' | 'server-error' | 'request-timeout'
 }
 
 const record = (value: unknown): Record<string, unknown> | undefined =>
@@ -39,7 +39,7 @@ export function modelCapacityReason(error: unknown): LLMRetryStatus['reason'] | 
     !item ||
     item.retryBlocked === true ||
     item.name === 'AbortError' ||
-    item.name === 'TimeoutError'
+    (item.name === 'TimeoutError' && item.code !== 'MODEL_REQUEST_TIMEOUT')
   )
     return undefined
   const status = Number(item.statusCode ?? item.status)
@@ -75,6 +75,8 @@ export function modelCapacityReason(error: unknown): LLMRetryStatus['reason'] | 
     (Array.isArray(partial?.attachments) && partial.attachments.length > 0)
   )
     return undefined
+  // Only model-transport deadlines are retryable; never retry tool deadlines or user aborts.
+  if (code === 'model_request_timeout' || status === 408 || status === 504) return 'request-timeout'
   if (
     /^(?:server_overloaded|overloaded_error|model_overloaded|model_at_capacity|capacity_exceeded)$/.test(
       code
@@ -118,7 +120,10 @@ export function normalizeModelRetryStatus(value: unknown): LLMRetryStatus | unde
     typeof v.nextRetryAt !== 'number' ||
     !Number.isFinite(v.nextRetryAt) ||
     v.nextRetryAt < 0 ||
-    (v.reason !== 'server-overloaded' && v.reason !== 'rate-limited' && v.reason !== 'server-error')
+    (v.reason !== 'server-overloaded' &&
+      v.reason !== 'rate-limited' &&
+      v.reason !== 'server-error' &&
+      v.reason !== 'request-timeout')
   )
     return undefined
   return {

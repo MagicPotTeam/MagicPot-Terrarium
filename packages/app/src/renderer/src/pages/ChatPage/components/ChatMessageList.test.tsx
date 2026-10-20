@@ -1970,7 +1970,7 @@ describe('ChatMessageList layout', () => {
 })
 
 describe('model capacity retry countdown', () => {
-  it.each(['server-overloaded', 'server-error'] as const)(
+  it.each(['server-overloaded', 'server-error', 'request-timeout'] as const)(
     'ticks down on the real message component for %s and removes the timer after completion',
     async (reason) => {
       vi.useFakeTimers()

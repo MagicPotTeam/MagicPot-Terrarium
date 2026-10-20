@@ -9,7 +9,7 @@
  * Renderer-only features (generatePrompt, compressImage) remain in the renderer LLM.ts.
  */
 
-import { retryModelCapacity, parseModelRetryAfter } from './modelCapacityRetry'
+import { retryModelCapacity, parseModelRetryAfter, modelCapacityReason } from './modelCapacityRetry'
 import type { LLMModelUse } from '@shared/config/config'
 import { selectMessagesForImageHistoryPolicy } from './imageHistory'
 import { validateImageRequestContract } from './imageRequestContract'
@@ -38,6 +38,7 @@ import { buildOpenAIFileSearchTool, createOpenAIFileSearchSession } from './open
 import {
   OpenAIRequestControl,
   OPENAI_CHAT_DEADLINE_MS,
+  OPENAI_INTERACTIVE_IDLE_TIMEOUT_MS,
   OPENAI_IMAGE_DEADLINE_MS,
   OPENAI_JSON_MAX_BYTES,
   OPENAI_IMAGE_JSON_MAX_BYTES,
@@ -965,7 +966,10 @@ export class OpenAIAPICli implements LLMCli {
     }
     const requestId = retryContext?.requestId
     const fetchImpl = this.getFetchImpl()
+    let modelRequestStarted = false
     const stableFetch: FetchImpl = (input, init) => {
+      // Hosted upload setup and reference-image reads must not be replayed as model timeouts.
+      if (init?.method === 'POST') modelRequestStarted = true
       if (requestId && init?.method === 'POST') {
         const headers = init.headers as Record<string, string> | undefined
         const alreadySet = Object.keys(headers || {}).some(
@@ -982,7 +986,12 @@ export class OpenAIAPICli implements LLMCli {
       stableFetch,
       params.signal,
       this.options?.requestTimeoutMs ??
-        (imageTask ? OPENAI_IMAGE_DEADLINE_MS : OPENAI_CHAT_DEADLINE_MS)
+        (imageTask
+          ? OPENAI_IMAGE_DEADLINE_MS
+          : retryContext
+            ? OPENAI_INTERACTIVE_IDLE_TIMEOUT_MS
+            : OPENAI_CHAT_DEADLINE_MS),
+      { idleTimeout: Boolean(retryContext) }
     )
     let callbackFailed = false
     let callbackError: unknown
@@ -1040,6 +1049,14 @@ export class OpenAIAPICli implements LLMCli {
       return result
     } catch (error) {
       if (callbackFailed) throw callbackError
+      if (
+        error instanceof Error &&
+        modelCapacityReason(error) === 'request-timeout' &&
+        (!modelRequestStarted || imageTask)
+      ) {
+        // A timed-out image submission may already have created an image upstream.
+        Object.assign(error, { retryBlocked: true })
+      }
       // Suboperations resolve cancellation at the point of failure. Re-reading
       // the signal here, after independent hosted cleanup, would mask that cause.
       throw error

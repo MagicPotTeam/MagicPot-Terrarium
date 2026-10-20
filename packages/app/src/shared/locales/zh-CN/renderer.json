@@ -776,6 +776,7 @@
     }
   },
   "chat": {
+    "loading_timeout_retry": "等待模型响应超时，自动重试中",
     "loading_auto_retry": "模型繁忙，自动重试中",
     "loading_auto_retry_server_error": "服务端暂时出错，自动重试中",
     "loading_auto_retry_wait": "第 {{attempt}} 次重试将在 {{seconds}} 秒后开始；可随时点击停止",

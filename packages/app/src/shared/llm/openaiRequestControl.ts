@@ -1,6 +1,15 @@
 import type { FetchImpl } from './clients'
 
 export const OPENAI_CHAT_DEADLINE_MS = 120_000
+// Interactive reasoning may be silent for minutes. Bound inactivity, not a whole live turn.
+export const OPENAI_INTERACTIVE_IDLE_TIMEOUT_MS = 600_000
+export class ModelRequestTimeoutError extends Error {
+  readonly code = 'MODEL_REQUEST_TIMEOUT'
+  constructor(message = 'OpenAI request deadline exceeded.') {
+    super(message)
+    this.name = 'TimeoutError'
+  }
+}
 export const OPENAI_IMAGE_DEADLINE_MS = 600_000
 export const OPENAI_MAX_DEADLINE_MS = 900_000
 export const OPENAI_JSON_MAX_BYTES = 64 * 1024 * 1024
@@ -25,8 +34,9 @@ const cancellationReason = (signal: AbortSignal): unknown => {
 export class OpenAIRequestControl {
   private readonly controller = new AbortController()
   readonly signal = this.controller.signal
-  private readonly expiresAt: number
-  private readonly timer: ReturnType<typeof setTimeout>
+  private expiresAt: number
+  private timer: ReturnType<typeof setTimeout>
+  private readonly duration: number
   private readonly responses = new Set<Response>()
   private readonly readers = new Set<() => void>()
   private readonly parentAbort: () => void
@@ -35,12 +45,14 @@ export class OpenAIRequestControl {
   constructor(
     private readonly fetchImpl: FetchImpl,
     private readonly parent?: AbortSignal,
-    timeoutMs = OPENAI_CHAT_DEADLINE_MS
+    timeoutMs = OPENAI_CHAT_DEADLINE_MS,
+    private readonly options: { idleTimeout?: boolean } = {}
   ) {
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       throw new RangeError('OpenAI request deadline must be a positive finite number.')
     }
     const duration = Math.min(OPENAI_MAX_DEADLINE_MS, Math.max(1_000, timeoutMs))
+    this.duration = duration
     this.expiresAt = performance.now() + duration
     this.parentAbort = () => this.abort(cancellationReason(parent!))
     this.timer = setTimeout(() => this.timeout(), duration)
@@ -54,9 +66,15 @@ export class OpenAIRequestControl {
     for (const response of this.responses) cancelBody(response)
   }
   private timeout(): void {
-    const error = new Error('OpenAI request deadline exceeded.')
-    error.name = 'TimeoutError'
-    this.abort(error)
+    this.abort(new ModelRequestTimeoutError())
+  }
+  /** Only actual response progress resets an interactive wait, never polling or UI activity. */
+  noteProgress(): void {
+    this.check()
+    if (!this.options.idleTimeout) return
+    clearTimeout(this.timer)
+    this.expiresAt = performance.now() + this.duration
+    this.timer = setTimeout(() => this.timeout(), this.duration)
   }
   check(): void {
     // Also check the monotonic clock: already-resolved promises must not starve the timer.
@@ -118,7 +136,10 @@ export class OpenAIRequestControl {
       })
       .then((response) => {
         if (this.signal.aborted || this.disposed) cancelBody(response)
-        else this.responses.add(response)
+        else {
+          this.responses.add(response)
+          this.noteProgress()
+        }
         return response
       })
     return this.wait(request)
@@ -150,6 +171,7 @@ export class OpenAIRequestControl {
           throw new Error(`OpenAI response body exceeds the ${maxBytes}-byte limit.`)
         }
         total += result.value.byteLength
+        if (result.value.byteLength > 0) this.noteProgress()
         yield result.value
       }
     } finally {

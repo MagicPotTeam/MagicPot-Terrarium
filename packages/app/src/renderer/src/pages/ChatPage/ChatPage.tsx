@@ -5916,9 +5916,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
               lifecycleEvent('running')
               setSessionLoadingStatus(targetSessionId, {
                 label: t(
-                  event.retry.reason === 'server-error'
-                    ? 'chat.loading_auto_retry_server_error'
-                    : 'chat.loading_auto_retry'
+                  event.retry.reason === 'request-timeout'
+                    ? 'chat.loading_timeout_retry'
+                    : event.retry.reason === 'server-error'
+                      ? 'chat.loading_auto_retry_server_error'
+                      : 'chat.loading_auto_retry'
                 ),
                 retry: event.retry
               })
