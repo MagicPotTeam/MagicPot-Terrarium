@@ -69,6 +69,18 @@ const eventSchema = z
     visualBaselineAcceptedAt: z.number().int().min(0).optional(),
     visualBaselineExpiresAt: z.number().int().min(0).optional(),
     maxCorrectionRounds: z.number().int().min(1).max(10).optional(),
+    visualComparisonBaselineId: z
+      .string()
+      .length(32)
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
+    visualComparisonTargetCount: z.number().int().min(1).max(20).optional(),
+    visualComparisonChangedCount: z.number().int().min(0).max(20).optional(),
+    visualComparisonSha256: z
+      .string()
+      .length(64)
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
     durationMs: z.number().int().min(0),
     errorCode: z.string().min(1).max(64).optional()
   })
@@ -107,6 +119,43 @@ const eventSchema = z
       value.visualBaselineExpiresAt <= value.visualBaselineAcceptedAt
     )
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid visual baseline audit expiry' })
+    const comparisonFields = [
+      value.visualComparisonBaselineId,
+      value.visualComparisonTargetCount,
+      value.visualComparisonChangedCount,
+      value.visualComparisonSha256
+    ]
+    const comparisonCount = comparisonFields.filter((field) => field !== undefined).length
+    if (comparisonCount !== 0 && comparisonCount !== comparisonFields.length)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Incomplete visual comparison audit' })
+    if (
+      comparisonCount !== 0 &&
+      (value.state !== 'completed' ||
+        value.effect !== 'applied' ||
+        value.visualEvidenceCount === undefined)
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual comparison is not applied success'
+      })
+    if (
+      value.visualComparisonTargetCount !== undefined &&
+      value.visualEvidenceCount !== undefined &&
+      value.visualComparisonTargetCount !== value.visualEvidenceCount
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual comparison target count mismatch'
+      })
+    if (
+      value.visualComparisonTargetCount !== undefined &&
+      value.visualComparisonChangedCount !== undefined &&
+      value.visualComparisonChangedCount > value.visualComparisonTargetCount
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual comparison changed count mismatch'
+      })
   })
 export type FigPluginExecutionAuditEvent = z.output<typeof eventSchema>
 

@@ -144,18 +144,25 @@ async function prepared(value: ReturnType<typeof fixture>) {
   return { session, receipt }
 }
 
-async function completedVisualExecution(value: ReturnType<typeof fixture>) {
+async function completedVisualExecution(
+  value: ReturnType<typeof fixture>,
+  evidence = visualEvidence
+) {
   const { session, receipt } = await prepared(value)
-  const execution = value.runtime.listPlanExecutions()[0]
+  const execution = value.runtime
+    .listPlanExecutions()
+    .find((item) => item.callId === receipt.callId)
+  if (!execution) throw new Error('missing execution')
   await value.runtime.approvePlan(execution.executionId, execution.planSha256)
   const claimed = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
     protocol: 1,
     callId: receipt.callId
   })
   if (claimed.status !== 'ready') throw new Error('not claimed')
+  const before = structuredClone(value.hostContext)
   const after: HostContext = {
-    ...hashOnlyContext,
-    nodes: hashOnlyContext.nodes.map((node) => ({ ...node, name: 'New name' }))
+    ...structuredClone(before),
+    nodes: before.nodes.map((node) => ({ ...node, name: 'New name' }))
   }
   const result = value.runtime.planResult(session.sessionId, session.sessionToken, {
     protocol: 1,
@@ -165,8 +172,8 @@ async function completedVisualExecution(value: ReturnType<typeof fixture>) {
     effect: 'applied',
     completed: 1,
     total: 1,
-    readback: createHostPlanReadback(hashOnlyContext, after, plan),
-    visualEvidence
+    readback: createHostPlanReadback(before, after, plan),
+    visualEvidence: evidence
   })
   return { session, receipt, execution, result }
 }
@@ -386,6 +393,103 @@ describe('approved native-plan execution runtime', () => {
       value.runtime.dispose()
     }
   })
+
+  it('compares later exact and changed results against an active accepted checkpoint', async () => {
+    const value = fixture(true, hashOnlyContext)
+    try {
+      const first = await completedVisualExecution(value)
+      const baseline = await value.runtime.acceptVisualBaseline(
+        first.execution.executionId,
+        first.result.status.visualEvidenceSha256!
+      )
+
+      const exact = await completedVisualExecution(value)
+      expect(exact.result.status.visualBaselineComparison).toEqual({
+        protocol: 1,
+        baselineId: baseline.baselineId,
+        executionId: exact.execution.executionId,
+        baselineEvidenceSha256: baseline.visualEvidenceSha256,
+        visualEvidenceSha256: exact.result.status.visualEvidenceSha256,
+        comparedAt: exact.result.status.updatedAt,
+        targets: [
+          {
+            targetId: 'node_1',
+            baseline: visualEvidence[0].after,
+            current: visualEvidence[0].after,
+            changed: false
+          }
+        ],
+        changedCount: 0,
+        exactMatch: true
+      })
+      expect(value.audit.at(-1)).toMatchObject({
+        state: 'completed',
+        visualComparisonBaselineId: baseline.baselineId,
+        visualComparisonTargetCount: 1,
+        visualComparisonChangedCount: 0,
+        visualComparisonSha256: expect.stringMatching(/^[a-f0-9]{64}$/)
+      })
+
+      const changedEvidence = [
+        {
+          ...visualEvidence[0],
+          after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) }
+        }
+      ]
+      const changed = await completedVisualExecution(value, changedEvidence)
+      expect(changed.result.status.visualBaselineComparison).toMatchObject({
+        baselineId: baseline.baselineId,
+        executionId: changed.execution.executionId,
+        baselineEvidenceSha256: baseline.visualEvidenceSha256,
+        visualEvidenceSha256: changed.result.status.visualEvidenceSha256,
+        changedCount: 1,
+        exactMatch: false,
+        targets: [
+          {
+            targetId: 'node_1',
+            baseline: visualEvidence[0].after,
+            current: changedEvidence[0].after,
+            changed: true
+          }
+        ]
+      })
+      expect(value.audit.at(-1)).toMatchObject({
+        state: 'completed',
+        visualComparisonBaselineId: baseline.baselineId,
+        visualComparisonTargetCount: 1,
+        visualComparisonChangedCount: 1,
+        visualComparisonSha256: expect.stringMatching(/^[a-f0-9]{64}$/)
+      })
+      expect(JSON.stringify(value.audit)).not.toMatch(/Old name|New name/)
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it.each(['scope', 'adapter'] as const)(
+    'does not compare an accepted checkpoint across a changed %s boundary',
+    async (boundary) => {
+      const ownedContext = structuredClone(hashOnlyContext)
+      const value = fixture(true, ownedContext)
+      try {
+        const first = await completedVisualExecution(value)
+        await value.runtime.acceptVisualBaseline(
+          first.execution.executionId,
+          first.result.status.visualEvidenceSha256!
+        )
+        if (boundary === 'scope') ownedContext.scopeId = 'page_2'
+        else ownedContext.execution!.adapterVersion = 'figma-native-2'
+
+        const next = await completedVisualExecution(value)
+        expect(next.result.status.visualBaselineComparison).toBeUndefined()
+        expect(value.audit.at(-1)).not.toHaveProperty('visualComparisonBaselineId')
+        expect(value.audit.at(-1)).not.toHaveProperty('visualComparisonSha256')
+        expect(value.runtime.listVisualBaselines()).toHaveLength(1)
+      } finally {
+        value.runtime.dispose()
+      }
+    }
+  )
 
   it('invalidates an accepted visual baseline when the package binding is revoked', async () => {
     const value = fixture(true, hashOnlyContext)

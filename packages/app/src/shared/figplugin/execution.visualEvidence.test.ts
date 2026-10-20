@@ -5,6 +5,7 @@ import {
   figPluginExecutionDesktopStateSchema,
   figPluginExecutionResultRequestSchema,
   figPluginExecutionStatusSchema,
+  figPluginVisualBaselineComparisonSchema,
   figPluginVisualBaselineSchema,
   figPluginVisualEvidenceSchema
 } from './execution'
@@ -165,6 +166,137 @@ describe('FIGPLUGIN visual evidence contract', () => {
         correctionRoundsUsed: FIGPLUGIN_VISUAL_MAX_CORRECTION_ROUNDS + 1
       })
     ).toThrow()
+  })
+
+  it('validates exact and changed comparisons against an accepted bounded checkpoint', () => {
+    const exact = figPluginVisualBaselineComparisonSchema.parse({
+      protocol: 1,
+      baselineId: '1'.repeat(32),
+      executionId: result.executionId,
+      baselineEvidenceSha256: '4'.repeat(64),
+      visualEvidenceSha256: 'f'.repeat(64),
+      comparedAt: 10,
+      targets: [
+        {
+          targetId: evidence.targetId,
+          baseline: evidence.after,
+          current: evidence.after,
+          changed: false
+        }
+      ],
+      changedCount: 0,
+      exactMatch: true
+    })
+    expect(
+      figPluginExecutionStatusSchema.parse({
+        protocol: 1,
+        executionId: result.executionId,
+        callId: 'f'.repeat(32),
+        state: 'completed',
+        completed: 1,
+        total: 1,
+        effect: 'applied',
+        updatedAt: 10,
+        visualEvidence: [evidence],
+        visualEvidenceSha256: exact.visualEvidenceSha256,
+        visualBaselineComparison: exact
+      }).visualBaselineComparison
+    ).toEqual(exact)
+
+    const changed = figPluginVisualBaselineComparisonSchema.parse({
+      ...exact,
+      targets: [
+        {
+          targetId: evidence.targetId,
+          baseline: point('c'),
+          current: evidence.after,
+          changed: true
+        }
+      ],
+      changedCount: 1,
+      exactMatch: false
+    })
+    expect(changed.changedCount).toBe(1)
+    expect(changed.exactMatch).toBe(false)
+  })
+
+  it('rejects forged visual comparisons and status bindings', () => {
+    const comparison = {
+      protocol: 1,
+      baselineId: '1'.repeat(32),
+      executionId: result.executionId,
+      baselineEvidenceSha256: '4'.repeat(64),
+      visualEvidenceSha256: 'f'.repeat(64),
+      comparedAt: 10,
+      targets: [
+        {
+          targetId: evidence.targetId,
+          baseline: evidence.after,
+          current: evidence.after,
+          changed: false
+        }
+      ],
+      changedCount: 0,
+      exactMatch: true
+    }
+    expect(() =>
+      figPluginVisualBaselineComparisonSchema.parse({
+        ...comparison,
+        targets: [{ ...comparison.targets[0], changed: true }]
+      })
+    ).toThrow(/change mismatch/i)
+    expect(() =>
+      figPluginVisualBaselineComparisonSchema.parse({ ...comparison, changedCount: 1 })
+    ).toThrow(/changed count mismatch/i)
+    expect(() =>
+      figPluginVisualBaselineComparisonSchema.parse({ ...comparison, exactMatch: false })
+    ).toThrow(/exact match mismatch/i)
+
+    const status = {
+      protocol: 1,
+      executionId: result.executionId,
+      callId: 'f'.repeat(32),
+      state: 'completed',
+      completed: 1,
+      total: 1,
+      effect: 'applied',
+      updatedAt: 10,
+      visualEvidence: [evidence],
+      visualEvidenceSha256: comparison.visualEvidenceSha256,
+      visualBaselineComparison: comparison
+    }
+    expect(() =>
+      figPluginExecutionStatusSchema.parse({
+        ...status,
+        visualBaselineComparison: {
+          ...comparison,
+          executionId: '2'.repeat(32)
+        }
+      })
+    ).toThrow(/execution mismatch/i)
+    expect(() =>
+      figPluginExecutionStatusSchema.parse({
+        ...status,
+        visualEvidenceSha256: 'e'.repeat(64)
+      })
+    ).toThrow(/evidence mismatch/i)
+    expect(() =>
+      figPluginExecutionStatusSchema.parse({
+        ...status,
+        visualBaselineComparison: {
+          ...comparison,
+          targets: [
+            {
+              ...comparison.targets[0],
+              current: point('d'),
+              changed: true
+            }
+          ],
+          changedCount: 1,
+          exactMatch: false
+        }
+      })
+    ).toThrow(/target mismatch/i)
   })
 
   it('does not attach visual evidence to a failed or nonterminal execution', () => {

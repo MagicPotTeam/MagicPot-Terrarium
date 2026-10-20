@@ -29,6 +29,7 @@ import {
   figPluginExecutionStatusSchema,
   figPluginExecutionClaimRequestSchema,
   figPluginExecutionStatusRequestSchema,
+  figPluginVisualBaselineComparisonSchema,
   figPluginVisualBaselineSchema,
   type FigPluginExecutionClaimResponse,
   type FigPluginExecutionPreview,
@@ -38,6 +39,7 @@ import {
   type FigPluginExecutionState,
   type FigPluginExecutionStatus,
   type FigPluginVisualBaseline,
+  type FigPluginVisualBaselineComparison,
   type FigPluginVisualEvidence
 } from '@shared/figplugin/execution'
 import {
@@ -170,6 +172,7 @@ type PlanExecution = {
   claimedAt?: number
   resultFingerprint?: string
   visualEvidence?: FigPluginVisualEvidence[]
+  visualBaselineComparison?: FigPluginVisualBaselineComparison
   updatedAt: number
   errorCode?: NonNullable<FigPluginExecutionStatus['errorCode']>
 }
@@ -238,7 +241,59 @@ export class FigPluginBridgeRuntime {
       ...(execution.visualEvidence
         ? { visualEvidence: execution.visualEvidence, visualEvidenceSha256 }
         : {}),
+      ...(execution.visualBaselineComparison
+        ? { visualBaselineComparison: execution.visualBaselineComparison }
+        : {}),
       ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
+    })
+  }
+
+  private compareVisualBaseline(
+    execution: PlanExecution,
+    visualEvidence: FigPluginVisualEvidence[]
+  ): FigPluginVisualBaselineComparison | undefined {
+    const scopeKey = visualBaselineScopeKey({
+      pluginId: execution.call.session.binding.pluginId,
+      host: execution.call.session.binding.host,
+      projectId: execution.call.session.binding.projectId,
+      documentId: execution.context.documentId,
+      scopeId: execution.context.scopeId
+    })
+    const baseline = [...this.visualBaselines.values()].find(
+      (record) => visualBaselineScopeKey(record.value) === scopeKey
+    )?.value
+    if (!baseline || baseline.adapterVersion !== execution.preview.adapterVersion) return undefined
+    const currentByTarget = new Map(
+      visualEvidence.map((item) => [item.targetId, item.after] as const)
+    )
+    if (
+      currentByTarget.size !== baseline.targets.length ||
+      baseline.targets.some((target) => !currentByTarget.has(target.targetId))
+    )
+      return undefined
+    const targets = baseline.targets.map((target) => {
+      const current = currentByTarget.get(target.targetId)!
+      return {
+        targetId: target.targetId,
+        baseline: target.accepted,
+        current,
+        changed:
+          target.accepted.sha256 !== current.sha256 ||
+          target.accepted.width !== current.width ||
+          target.accepted.height !== current.height
+      }
+    })
+    const changedCount = targets.filter((target) => target.changed).length
+    return figPluginVisualBaselineComparisonSchema.parse({
+      protocol: FIGPLUGIN_EXECUTION_PROTOCOL,
+      baselineId: baseline.baselineId,
+      executionId: execution.executionId,
+      baselineEvidenceSha256: baseline.visualEvidenceSha256,
+      visualEvidenceSha256: digest(visualEvidence),
+      comparedAt: execution.updatedAt,
+      targets,
+      changedCount,
+      exactMatch: changedCount === 0
     })
   }
 
@@ -367,6 +422,14 @@ export class FigPluginBridgeRuntime {
               visualBaselineAcceptedAt: visualBaseline.acceptedAt,
               visualBaselineExpiresAt: visualBaseline.expiresAt,
               maxCorrectionRounds: visualBaseline.maxCorrectionRounds
+            }
+          : {}),
+        ...(execution.visualBaselineComparison
+          ? {
+              visualComparisonBaselineId: execution.visualBaselineComparison.baselineId,
+              visualComparisonTargetCount: execution.visualBaselineComparison.targets.length,
+              visualComparisonChangedCount: execution.visualBaselineComparison.changedCount,
+              visualComparisonSha256: digest(execution.visualBaselineComparison)
             }
           : {}),
         ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
@@ -1013,6 +1076,10 @@ export class FigPluginBridgeRuntime {
           : 'failed'
     if (request.effect === 'unknown') execution.errorCode = 'QUARANTINED'
     if (request.effect === 'rolled-back') execution.errorCode = 'ROLLED_BACK'
+    execution.visualBaselineComparison =
+      execution.state === 'completed' && execution.visualEvidence
+        ? this.compareVisualBaseline(execution, execution.visualEvidence)
+        : undefined
     this.recordExecutionAudit(execution)
     this.scheduleCleanup()
     return figPluginExecutionResultResponseSchema.parse({

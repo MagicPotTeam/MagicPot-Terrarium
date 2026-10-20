@@ -1213,10 +1213,10 @@ async function prepareExecutablePlan(
   return { origin, session, prepared, execution }
 }
 
-async function completeVisualExecution(value: Fixture) {
+async function completeVisualExecution(value: Fixture, evidence = visualEvidence, sequence = 1) {
   const { origin, session, prepared, execution } = await prepareExecutablePlan(
     value,
-    visualExecutionRequest()
+    visualExecutionRequest(sequence)
   )
   expect(execution.visualAudit).toBe('hash-only')
   native.showMessageBox.mockResolvedValueOnce(approved)
@@ -1246,7 +1246,7 @@ async function completeVisualExecution(value: Fixture) {
         executedContext(visualExecutionContext),
         executionPlan
       ),
-      visualEvidence
+      visualEvidence: evidence
     },
     session
   )
@@ -1254,7 +1254,7 @@ async function completeVisualExecution(value: Fixture) {
   const result = figPluginExecutionResultResponseSchema.parse(resultResponse.body)
   const visualEvidenceSha256 = result.status.visualEvidenceSha256
   if (!visualEvidenceSha256) throw new Error('Expected exact visual evidence digest')
-  expect(result.status.visualEvidence).toEqual(visualEvidence)
+  expect(result.status.visualEvidence).toEqual(evidence)
   return { origin, session, prepared, execution, result, visualEvidenceSha256 }
 }
 
@@ -1676,6 +1676,60 @@ it('real loopback: exact user consent records one bounded visual checkpoint and 
     )
   ).toEqual(baseline)
   expect(native.showMessageBox).toHaveBeenCalledTimes(promptCount)
+
+  const exact = await completeVisualExecution(value, visualEvidence, 2)
+  expect(exact.result.status.visualBaselineComparison).toMatchObject({
+    baselineId: baseline.baselineId,
+    executionId: exact.execution.executionId,
+    baselineEvidenceSha256: baseline.visualEvidenceSha256,
+    visualEvidenceSha256: exact.visualEvidenceSha256,
+    changedCount: 0,
+    exactMatch: true,
+    targets: [
+      {
+        targetId: '1:2',
+        baseline: visualEvidence[0].after,
+        current: visualEvidence[0].after,
+        changed: false
+      }
+    ]
+  })
+  expect(
+    figPluginExecutionStatusSchema.parse(
+      (
+        await post(
+          exact.origin,
+          'plan/status',
+          { protocol: 1, callId: exact.prepared.callId },
+          exact.session
+        )
+      ).body
+    ).visualBaselineComparison
+  ).toEqual(exact.result.status.visualBaselineComparison)
+
+  const changedEvidence = [
+    {
+      ...visualEvidence[0],
+      after: { ...visualEvidence[0].after, sha256: '3'.repeat(64) }
+    }
+  ]
+  const changed = await completeVisualExecution(value, changedEvidence, 3)
+  expect(changed.result.status.visualBaselineComparison).toMatchObject({
+    baselineId: baseline.baselineId,
+    executionId: changed.execution.executionId,
+    baselineEvidenceSha256: baseline.visualEvidenceSha256,
+    visualEvidenceSha256: changed.visualEvidenceSha256,
+    changedCount: 1,
+    exactMatch: false,
+    targets: [
+      {
+        targetId: '1:2',
+        baseline: visualEvidence[0].after,
+        current: changedEvidence[0].after,
+        changed: true
+      }
+    ]
+  })
 
   await value.service.revokeBridge({ pluginId: pairRequest.pluginId }, invocation('revokeBridge'))
   expect((await planDesktopState(value)).baselines).toEqual([])

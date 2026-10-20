@@ -138,6 +138,59 @@ describe('bounded persistent FIGPLUGIN execution audit', () => {
     expect(JSON.stringify(records)).not.toMatch(/Old name|New name|layer content|pixels|imageData/)
   })
 
+  it('stores only a complete bounded visual comparison summary', async () => {
+    const root = path.join(path.parse(process.cwd()).root, `.figplugin-audit-test-${randomUUID()}`)
+    await fs.mkdir(root, { recursive: true })
+    roots.push(root)
+    const store = new FigPluginExecutionAuditStore(root, () => 1000)
+    const valid = {
+      ...event(7, 1000),
+      visualAudit: 'hash-only' as const,
+      visualEvidenceCount: 1,
+      visualEvidenceSha256: 'c'.repeat(64),
+      visualComparisonBaselineId: 'd'.repeat(32),
+      visualComparisonTargetCount: 1,
+      visualComparisonChangedCount: 1,
+      visualComparisonSha256: 'e'.repeat(64)
+    }
+    store.record(valid)
+    store.record({
+      ...event(8, 1000),
+      visualAudit: 'hash-only',
+      visualEvidenceCount: 1,
+      visualEvidenceSha256: 'c'.repeat(64),
+      visualComparisonBaselineId: 'd'.repeat(32),
+      visualComparisonTargetCount: 1
+    } as FigPluginExecutionAuditEvent)
+    store.record({
+      ...valid,
+      executionId: '9'.repeat(32),
+      callId: 'a'.repeat(32),
+      requestId: 'request_9',
+      visualComparisonTargetCount: 2
+    } as FigPluginExecutionAuditEvent)
+    store.record({
+      ...valid,
+      executionId: 'a'.repeat(32),
+      callId: 'b'.repeat(32),
+      requestId: 'request_10',
+      visualComparisonChangedCount: 2
+    } as FigPluginExecutionAuditEvent)
+    await store.flush()
+    const records = await store.list()
+    expect(records).toEqual([
+      expect.objectContaining({
+        requestId: 'request_7',
+        visualEvidenceCount: 1,
+        visualComparisonBaselineId: 'd'.repeat(32),
+        visualComparisonTargetCount: 1,
+        visualComparisonChangedCount: 1,
+        visualComparisonSha256: 'e'.repeat(64)
+      })
+    ])
+    expect(JSON.stringify(records)).not.toMatch(/Old name|New name|layer content|pixels|imageData/)
+  })
+
   it('drops expired and malformed lines without exposing parser failures', async () => {
     const root = path.join(path.parse(process.cwd()).root, `.figplugin-audit-test-${randomUUID()}`)
     await fs.mkdir(root, { recursive: true })

@@ -39,6 +39,7 @@ import {
   type FigPluginExecutionDesktopState,
   type FigPluginExecutionPreview,
   type FigPluginExecutionStatus,
+  type FigPluginVisualBaselineComparison,
   type FigPluginVisualEvidence
 } from '@shared/figplugin/execution'
 import { getProjectById, listProjects, PROJECTS_CHANGED_EVENT } from '../MainPage/projectStore'
@@ -85,6 +86,17 @@ const renderVisualEvidence = (items: FigPluginVisualEvidence[]): string =>
       (item) =>
         `${item.targetId}: ${shortHash(item.before.sha256)} -> ${shortHash(item.after.sha256)} ${
           item.changed ? 'changed' : 'unchanged'
+        }`
+    )
+    .join('\n')
+const renderVisualBaselineComparison = (comparison: FigPluginVisualBaselineComparison): string =>
+  comparison.targets
+    .map(
+      (item) =>
+        `${item.targetId}: ${shortHash(item.baseline.sha256)} ${item.baseline.width}x${
+          item.baseline.height
+        } -> ${shortHash(item.current.sha256)} ${item.current.width}x${item.current.height} ${
+          item.changed ? 'changed' : 'exact'
         }`
     )
     .join('\n')
@@ -1020,6 +1032,7 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
           )
           const canAccept = canAcceptVisualBaseline(executionStatus)
           const evidenceHash = executionStatus.visualEvidenceSha256
+          const comparison = executionStatus.visualBaselineComparison
           return (
             <Paper key={executionStatus.executionId} variant="outlined" sx={{ p: 2 }}>
               <Stack spacing={1}>
@@ -1054,6 +1067,44 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                       {renderVisualEvidence(executionStatus.visualEvidence)}
                     </Box>
                     <Alert severity="info">{t('figplugin.bridge.visualEvidenceBoundary')}</Alert>
+                    {comparison && (
+                      <>
+                        <Alert severity={comparison.exactMatch ? 'success' : 'warning'}>
+                          {t(
+                            comparison.exactMatch
+                              ? 'figplugin.bridge.visualComparisonExact'
+                              : 'figplugin.bridge.visualComparisonChanged',
+                            {
+                              id: shortHash(comparison.baselineId),
+                              changed: comparison.changedCount,
+                              count: comparison.targets.length
+                            }
+                          )}
+                        </Alert>
+                        <Typography>
+                          {t('figplugin.bridge.visualComparisonEvidenceHashes', {
+                            baseline: comparison.baselineEvidenceSha256,
+                            current: comparison.visualEvidenceSha256
+                          })}
+                        </Typography>
+                        <Box
+                          component="pre"
+                          tabIndex={0}
+                          aria-label={t('figplugin.bridge.visualComparisonDetails')}
+                          sx={{
+                            whiteSpace: 'pre-wrap',
+                            maxHeight: 240,
+                            overflow: 'auto',
+                            m: 0
+                          }}
+                        >
+                          {renderVisualBaselineComparison(comparison)}
+                        </Box>
+                        <Alert severity="info">
+                          {t('figplugin.bridge.visualComparisonBoundary')}
+                        </Alert>
+                      </>
+                    )}
                     {canAccept && evidenceHash && (
                       <>
                         <FormControlLabel

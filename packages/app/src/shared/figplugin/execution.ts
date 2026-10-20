@@ -65,6 +65,12 @@ export const figPluginVisualEvidencePointSchema = z
   })
   .strict()
 
+const visualPointsDiffer = (
+  left: { sha256: string; width: number; height: number },
+  right: { sha256: string; width: number; height: number }
+): boolean =>
+  left.sha256 !== right.sha256 || left.width !== right.width || left.height !== right.height
+
 export const figPluginVisualEvidenceSchema = z
   .object({
     targetId: identifier,
@@ -74,10 +80,7 @@ export const figPluginVisualEvidenceSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
-    const expectedChanged =
-      value.before.sha256 !== value.after.sha256 ||
-      value.before.width !== value.after.width ||
-      value.before.height !== value.after.height
+    const expectedChanged = visualPointsDiffer(value.before, value.after)
     if (value.changed !== expectedChanged)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Visual evidence change mismatch' })
   })
@@ -150,6 +153,55 @@ export const figPluginVisualBaselineSchema = z
       })
   })
 export type FigPluginVisualBaseline = z.output<typeof figPluginVisualBaselineSchema>
+
+export const figPluginVisualBaselineComparisonTargetSchema = z
+  .object({
+    targetId: identifier,
+    baseline: figPluginVisualEvidencePointSchema,
+    current: figPluginVisualEvidencePointSchema,
+    changed: z.boolean()
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.changed !== visualPointsDiffer(value.baseline, value.current))
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual baseline comparison change mismatch'
+      })
+  })
+
+export const figPluginVisualBaselineComparisonSchema = z
+  .object({
+    protocol,
+    baselineId: hex32,
+    executionId: hex32,
+    baselineEvidenceSha256: sha256,
+    visualEvidenceSha256: sha256,
+    comparedAt: safeInteger,
+    targets: uniqueTargetArray(
+      figPluginVisualBaselineComparisonTargetSchema,
+      'Duplicate visual comparison target'
+    ),
+    changedCount: z.number().int().min(0).max(20),
+    exactMatch: z.boolean()
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const changedCount = value.targets.filter((target) => target.changed).length
+    if (value.changedCount !== changedCount)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual comparison changed count mismatch'
+      })
+    if (value.exactMatch !== (changedCount === 0))
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual comparison exact match mismatch'
+      })
+  })
+export type FigPluginVisualBaselineComparison = z.output<
+  typeof figPluginVisualBaselineComparisonSchema
+>
 
 export const figPluginExecutionPreviewSchema = z
   .object({
@@ -233,7 +285,8 @@ const publicStatusFields = {
   effect,
   updatedAt: safeInteger,
   visualEvidence: visualEvidenceArraySchema.optional(),
-  visualEvidenceSha256: sha256.optional()
+  visualEvidenceSha256: sha256.optional(),
+  visualBaselineComparison: figPluginVisualBaselineComparisonSchema.optional()
 }
 export const figPluginExecutionStatusSchema = z
   .object({
@@ -267,6 +320,37 @@ export const figPluginExecutionStatusSchema = z
         code: z.ZodIssueCode.custom,
         message: 'Visual evidence is not applied success'
       })
+    if (value.visualBaselineComparison) {
+      if (!value.visualEvidence || !value.visualEvidenceSha256)
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Visual comparison has no evidence'
+        })
+      if (value.visualBaselineComparison.executionId !== value.executionId)
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Visual comparison execution mismatch'
+        })
+      if (value.visualBaselineComparison.visualEvidenceSha256 !== value.visualEvidenceSha256)
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Visual comparison evidence mismatch'
+        })
+      const evidenceByTarget = new Map(
+        (value.visualEvidence ?? []).map((item) => [item.targetId, item.after] as const)
+      )
+      if (
+        evidenceByTarget.size !== value.visualBaselineComparison.targets.length ||
+        value.visualBaselineComparison.targets.some((target) => {
+          const current = evidenceByTarget.get(target.targetId)
+          return !current || visualPointsDiffer(current, target.current)
+        })
+      )
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Visual comparison target mismatch'
+        })
+    }
   })
 export type FigPluginExecutionStatus = z.output<typeof figPluginExecutionStatusSchema>
 

@@ -161,6 +161,34 @@ const visualExecutionStatus = (): FigPluginExecutionStatus => ({
     }
   ]
 })
+const comparedVisualExecutionStatus = (changed = false): FigPluginExecutionStatus => {
+  const status = visualExecutionStatus()
+  const current = changed
+    ? { ...status.visualEvidence![0].after, sha256: '3'.repeat(64) }
+    : status.visualEvidence![0].after
+  return {
+    ...status,
+    visualEvidence: [{ ...status.visualEvidence![0], after: current }],
+    visualBaselineComparison: {
+      protocol: 1,
+      baselineId: 'a'.repeat(32),
+      executionId: status.executionId,
+      baselineEvidenceSha256: 'b'.repeat(64),
+      visualEvidenceSha256: status.visualEvidenceSha256!,
+      comparedAt: status.updatedAt,
+      targets: [
+        {
+          targetId: 'node-1',
+          baseline: status.visualEvidence![0].after,
+          current,
+          changed
+        }
+      ],
+      changedCount: changed ? 1 : 0,
+      exactMatch: !changed
+    }
+  }
+}
 const acceptedVisualBaseline = (): FigPluginVisualBaseline => ({
   protocol: 1,
   baselineId: 'a'.repeat(32),
@@ -980,6 +1008,43 @@ describe('PluginBridgePanel', () => {
       screen.queryByRole('button', { name: key('acceptVisualBaseline') })
     ).not.toBeInTheDocument()
   })
+
+  it.each([
+    ['exact', false, 'visualComparisonExact', 'exact'],
+    ['changed', true, 'visualComparisonChanged', 'changed']
+  ] as const)(
+    'renders a bounded %s comparison against the accepted checkpoint without claiming correction',
+    async (_case, changed, noticeKey, suffix) => {
+      const status = comparedVisualExecutionStatus(changed)
+      mocks.center.planState.mockResolvedValue({
+        previews: [],
+        statuses: [status],
+        baselines: [acceptedVisualBaseline()]
+      })
+      mount()
+      await click('refresh')
+
+      expect(
+        screen.getByText(
+          changed
+            ? `${key(noticeKey)} ${'a'.repeat(12)} 1 1`
+            : `${key(noticeKey)} ${'a'.repeat(12)} 0 1`
+        )
+      ).toBeInTheDocument()
+      expect(
+        screen.getByText(
+          `${key('visualComparisonEvidenceHashes')} ${'b'.repeat(64)} ${'9'.repeat(64)}`
+        )
+      ).toBeInTheDocument()
+      expect(screen.getByLabelText(key('visualComparisonDetails'))).toHaveTextContent(
+        `node-1: 222222222222 64x32 -> ${changed ? '333333333333' : '222222222222'} 64x32 ${suffix}`
+      )
+      expect(screen.getByText(key('visualComparisonBoundary'))).toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: key('acceptVisualBaseline') })
+      ).not.toBeInTheDocument()
+    }
+  )
 
   it('renders bounded visual checkpoint summaries without claiming automatic correction', async () => {
     mocks.center.planState.mockResolvedValue({
