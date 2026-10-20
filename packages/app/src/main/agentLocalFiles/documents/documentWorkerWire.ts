@@ -13,7 +13,7 @@ import {
 
 /** Fixed IPC framing budgets. These are wire budgets, not caller policy. */
 export const DOCUMENT_REQUEST_FRAME_BYTES = 1_400_000
-export const DOCUMENT_RESULT_FRAME_BYTES = 64 * 1024
+export const DOCUMENT_RESULT_FRAME_BYTES = 128 * 1024
 export const DOCUMENT_REQUEST_BASE64_CHARS = 1_398_104
 export const DOCUMENT_REQUEST_DECODED_BYTES = 1024 * 1024
 

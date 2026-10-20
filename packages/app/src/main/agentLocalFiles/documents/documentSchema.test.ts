@@ -31,7 +31,7 @@ describe('inert bytes-only document worker contracts', () => {
     expect(Object.isFrozen(DOCUMENT_TEXT_LIMITS)).toBe(true)
     expect(DOCUMENT_TEXT_LIMITS).toMatchObject({
       inputBytes: 1024 * 1024,
-      envelopeBytes: 64 * 1024
+      envelopeBytes: 128 * 1024
     })
     const parsed = checkDocumentTextRequest(request())
     expect(parsed.ok).toBe(true)
@@ -228,12 +228,18 @@ describe('inert bytes-only document worker contracts', () => {
 
   it('bounds the entire escaped envelope and segment count, not just raw UTF-8 text', () => {
     const raw = result()
-    raw.segments[0].text = '\u0000'.repeat(11000)
+    raw.segments[0].text = '\u0000'.repeat(Math.floor(DOCUMENT_TEXT_LIMITS.envelopeBytes / 6) + 1)
     expect(Buffer.byteLength(raw.segments[0].text)).toBeLessThan(DOCUMENT_TEXT_LIMITS.envelopeBytes)
     expect(checkDocumentTextResult(raw, jobId, 'pdf')).toEqual({ ok: false, code: 'LIMIT' })
     expect(
       checkDocumentTextResult(
-        { ...result(), segments: Array.from({ length: 513 }, () => result().segments[0]) },
+        {
+          ...result(),
+          segments: Array.from(
+            { length: DOCUMENT_TEXT_LIMITS.segments + 1 },
+            () => result().segments[0]
+          )
+        },
         jobId,
         'pdf'
       ).ok

@@ -104,7 +104,9 @@ describe('dispatch boundary with explicit parser-contract adapters, not real par
 
   it('bounds the full escaped JSON output and all locator metadata, not just text length', async () => {
     const output = success()
-    output.segments[0].text = '\u0000'.repeat(12000)
+    output.segments[0].text = '\u0000'.repeat(
+      Math.floor(DOCUMENT_TEXT_LIMITS.envelopeBytes / 6) + 1
+    )
     expect(output.segments[0].text.length).toBeLessThan(DOCUMENT_TEXT_LIMITS.envelopeBytes)
     parsers.pdf.mockResolvedValue(output)
     const result = await extractDocumentText(request())

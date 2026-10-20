@@ -86,7 +86,7 @@ describe('strict, safely logged public contract', () => {
     expect(LIMITS).toEqual({
       fileBytes: 1048576,
       returnedBytes: 65536,
-      responseBytes: 131072,
+      responseBytes: 262144,
       listEntries: 100,
       ttlMs: 1800000,
       grants: 128,

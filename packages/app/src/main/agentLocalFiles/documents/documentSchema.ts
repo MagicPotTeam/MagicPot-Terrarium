@@ -8,8 +8,9 @@ export const DOCUMENT_TEXT_PROTOCOL = 'magicpot-document-text/v1' as const
 // limits; ZIP/XML/PDF work budgets and deadline/heap enforcement belong to future components.
 export const DOCUMENT_TEXT_LIMITS = Object.freeze({
   inputBytes: 1024 * 1024,
-  envelopeBytes: 64 * 1024,
-  segments: 512,
+  // Bounded metadata budget, separate from the unchanged returned text limit.
+  envelopeBytes: 128 * 1024,
+  segments: 1024,
   zipEntries: 256,
   zipEntryBytes: 4 * 1024 * 1024,
   zipExpandedBytes: 16 * 1024 * 1024,

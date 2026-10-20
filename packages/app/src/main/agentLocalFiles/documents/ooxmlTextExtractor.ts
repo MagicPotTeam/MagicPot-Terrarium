@@ -47,6 +47,8 @@ const WORD_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 const SHEET_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 const PRESENTATION_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
 const DRAWING_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+const WORD_DRAWING_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+const PICTURE_NS = 'http://schemas.openxmlformats.org/drawingml/2006/picture'
 const MAIN_PART = {
   docx: 'word/document.xml',
   xlsx: 'xl/workbook.xml',
@@ -492,12 +494,25 @@ function extractDocxPart(
   let current = ''
   let paragraphOpen = false
   let textOpen = false
+  // Drawings are passive layout, not Word body text. Validate their XML/namespaces
+  // and package relationships, but never decode pictures or follow their targets.
+  let drawingDepth = 0
   parsePart(
     bytes,
     'document',
-    [WORD_NS],
+    [WORD_NS, WORD_DRAWING_NS, DRAWING_NS, PICTURE_NS],
     {
       opentag: (tag) => {
+        if (drawingDepth > 0) {
+          drawingDepth += 1
+          return
+        }
+        if (tag.uri !== WORD_NS) throw new DocumentParserError('UNSUPPORTED')
+        if (tag.local === 'drawing') {
+          if (!paragraphOpen || textOpen) throw new DocumentParserError('INVALID')
+          drawingDepth = 1
+          return
+        }
         const table = tables.at(-1)
         if (tag.local === 'tbl') {
           if (paragraphOpen || (table && !table.cellOpen)) throw new DocumentParserError('INVALID')
@@ -532,12 +547,16 @@ function extractDocxPart(
           current += tag.local === 'tab' ? '\t' : '\n'
       },
       text: (value) => {
-        if (paragraphOpen && textOpen) current += value
+        if (!drawingDepth && paragraphOpen && textOpen) current += value
       },
       cdata: (value) => {
-        if (paragraphOpen && textOpen) current += value
+        if (!drawingDepth && paragraphOpen && textOpen) current += value
       },
       closetag: (tag) => {
+        if (drawingDepth > 0) {
+          drawingDepth -= 1
+          return
+        }
         if (tag.local === 't') textOpen = false
         if (tag.local === 'p') {
           if (current && paragraphLocator) appendText(collector, current, paragraphLocator)

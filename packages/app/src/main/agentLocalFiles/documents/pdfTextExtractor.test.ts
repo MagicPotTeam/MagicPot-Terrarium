@@ -381,15 +381,20 @@ describe('PDF streaming budgets and output contract (mock lifecycle only)', () =
     expectBounded(result)
   })
 
-  it.each([512, 513])('makes segment truncation explicit for %i items', async (count) => {
-    const mock = adapter([[Array.from({ length: count }, () => ({ str: 'x' }))]])
-    const result = await extractPdfText(BYTES, JOB_ID, {}, mock.runtime)
-    expect(result).toMatchObject({ ok: true, truncated: count > 512 })
-    if (result.ok) expect(result.segments).toHaveLength(512)
-    expect(mock.readers[0].cancel).toHaveBeenCalledTimes(count > 512 ? 1 : 0)
-    expect(mock.readers[0].releaseLock).toHaveBeenCalledTimes(1)
-    expectBounded(result)
-  })
+  it.each([DOCUMENT_TEXT_LIMITS.segments, DOCUMENT_TEXT_LIMITS.segments + 1])(
+    'makes segment truncation explicit for %i items',
+    async (count) => {
+      const mock = adapter([[Array.from({ length: count }, () => ({ str: 'x' }))]])
+      const result = await extractPdfText(BYTES, JOB_ID, {}, mock.runtime)
+      expect(result).toMatchObject({ ok: true, truncated: count > DOCUMENT_TEXT_LIMITS.segments })
+      if (result.ok) expect(result.segments).toHaveLength(DOCUMENT_TEXT_LIMITS.segments)
+      expect(mock.readers[0].cancel).toHaveBeenCalledTimes(
+        count > DOCUMENT_TEXT_LIMITS.segments ? 1 : 0
+      )
+      expect(mock.readers[0].releaseLock).toHaveBeenCalledTimes(1)
+      expectBounded(result)
+    }
+  )
 
   it.each(['\u0000', '"\\\n', '😀'])('budgets escaped JSON plus all locators: %j', async (text) => {
     const mock = adapter([[Array.from({ length: 512 }, () => ({ str: text.repeat(100) }))]])
@@ -602,7 +607,9 @@ describe('PDF lifecycle, deadline and cancellation', () => {
     async (phase) => {
       vi.useFakeTimers()
       const mock = adapter(
-        phase === 'cancel' ? [[Array.from({ length: 513 }, () => ({ str: 'x' }))]] : undefined
+        phase === 'cancel'
+          ? [[Array.from({ length: DOCUMENT_TEXT_LIMITS.segments + 1 }, () => ({ str: 'x' }))]]
+          : undefined
       )
       if (phase === 'load')
         Object.defineProperty(mock.task, 'promise', { value: never<Document>() })
@@ -732,7 +739,9 @@ describe('PDF lifecycle, deadline and cancellation', () => {
     'does not turn a %s failure into partial success and destroys exactly once',
     async (phase) => {
       const mock = adapter(
-        phase === 'cancel' ? [[Array.from({ length: 513 }, () => ({ str: 'x' }))]] : undefined
+        phase === 'cancel'
+          ? [[Array.from({ length: DOCUMENT_TEXT_LIMITS.segments + 1 }, () => ({ str: 'x' }))]]
+          : undefined
       )
       const error = new Error('private path/password/stack')
       if (phase === 'read') mock.readers[0].read.mockRejectedValueOnce(error)
@@ -820,7 +829,9 @@ describe('PDF lifecycle, deadline and cancellation', () => {
   )
 
   it('waits for all cleanup despite an early cancellation failure', async () => {
-    const mock = adapter([[Array.from({ length: 513 }, () => ({ str: 'x' }))]])
+    const mock = adapter([
+      [Array.from({ length: DOCUMENT_TEXT_LIMITS.segments + 1 }, () => ({ str: 'x' }))]
+    ])
     mock.readers[0].cancel.mockRejectedValue(new Error('cancel failed'))
     const destroyed = deferred<void>()
     const entered = deferred<void>()

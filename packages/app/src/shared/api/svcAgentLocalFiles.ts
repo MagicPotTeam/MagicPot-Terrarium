@@ -6,7 +6,8 @@ import { ServiceError, ServiceValidationError } from './apiUtils/serviceValidati
 export const AGENT_LOCAL_FILE_LIMITS = Object.freeze({
   fileBytes: 1024 * 1024,
   returnedBytes: 64 * 1024,
-  responseBytes: 128 * 1024,
+  // Includes both content and bounded source-location metadata.
+  responseBytes: 256 * 1024,
   listEntries: 100,
   ttlMs: 30 * 60 * 1000,
   grants: 128,
@@ -170,7 +171,7 @@ export const localDocumentSchema = z
           .strict()
       )
       .min(1)
-      .max(512),
+      .max(1024),
     warnings: z.array(z.enum(['output-truncated', 'reading-order-unverified'])).max(2)
   })
   .strict()

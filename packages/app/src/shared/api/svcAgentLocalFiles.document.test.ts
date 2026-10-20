@@ -138,3 +138,31 @@ describe('local document public protocol', () => {
     ).toBe(false)
   })
 })
+
+it('accepts 560 DOCX paragraphs without losing text or source locations, retaining a bounded segment ceiling', () => {
+  const segments = Array.from({ length: 560 }, (_, paragraph) => ({
+    text: 'owned body '.repeat(6),
+    locator: { kind: 'docx-paragraph' as const, part: 'word/document.xml' as const, paragraph }
+  }))
+  const content = segments.map((s) => s.text).join('')
+  const value = {
+    ...pdf(),
+    name: 'owned.docx',
+    content,
+    returnedBytes: new TextEncoder().encode(content).length,
+    document: { format: 'docx', sourceSha256: 'e'.repeat(64), warnings: [], segments }
+  }
+  expect(readLocalFileResponseSchema.safeParse(value).success).toBe(true)
+  const tooMany = Array.from({ length: 1025 }, (_, paragraph) => ({
+    text: 'x',
+    locator: { kind: 'docx-paragraph', part: 'word/document.xml', paragraph }
+  }))
+  expect(
+    readLocalFileResponseSchema.safeParse({
+      ...value,
+      content: 'x'.repeat(1025),
+      returnedBytes: 1025,
+      document: { ...value.document, segments: tooMany }
+    }).success
+  ).toBe(false)
+})

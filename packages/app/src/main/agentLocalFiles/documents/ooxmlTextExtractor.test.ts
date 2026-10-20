@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer'
 import { describe, expect, it, vi } from 'vitest'
 import { extractOoxmlText, type OfficeTextFormat } from './ooxmlTextExtractor'
 import { checkDocumentTextResult, DOCUMENT_TEXT_LIMITS } from './documentSchema'
+import { ZipXmlReader } from './zipXmlReader'
 import { makeZip } from './__fixtures__/documentFixtures'
 
 const JOB_ID = '0123456789abcdef0123456789abcdef'
@@ -574,9 +575,9 @@ describe('bytes-only OOXML text extraction', () => {
     async (kind) => {
       const body =
         kind === 'escaped text'
-          ? `<w:p><w:r><w:t>${'&quot;\\'.repeat(20000)}</w:t></w:r></w:p>`
+          ? `<w:p><w:r><w:t>${'&quot;\\'.repeat(40000)}</w:t></w:r></w:p>`
           : Array.from(
-              { length: 512 },
+              { length: DOCUMENT_TEXT_LIMITS.segments },
               () => `<w:p><w:r><w:t>${'x'.repeat(90)}</w:t></w:r></w:p>`
             ).join('')
       const result = await extractOoxmlText(
@@ -597,7 +598,7 @@ describe('bytes-only OOXML text extraction', () => {
       const xml =
         kind === 'text bytes'
           ? documentXml('🙂'.repeat(13000))
-          : `<w:document xmlns:w="${WORD}"><w:body>${'<w:p><w:r><w:t>x</w:t></w:r></w:p>'.repeat(520)}</w:body></w:document>`
+          : `<w:document xmlns:w="${WORD}"><w:body>${'<w:p><w:r><w:t>x</w:t></w:r></w:p>'.repeat(DOCUMENT_TEXT_LIMITS.segments + 8)}</w:body></w:document>`
       const result = await extractOoxmlText(officeZip('docx', xml), JOB_ID, 'docx')
       expect(result).toMatchObject({ ok: true, truncated: true, warnings: ['output-truncated'] })
       expectBounded(result)
@@ -698,5 +699,86 @@ describe('bytes-only OOXML text extraction', () => {
     expect(
       await extractOoxmlText(bytes, JOB_ID, 'docx', { deadlineAt: Date.now() - 1 })
     ).toMatchObject({ ok: false, code: 'CANCELLED' })
+  })
+})
+
+describe('DOCX passive picture and normal multi-paragraph compatibility', () => {
+  const wp = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+  const pic = 'http://schemas.openxmlformats.org/drawingml/2006/picture'
+  const wrap = (body: string) =>
+    `<w:document xmlns:w="${WORD}" xmlns:a="${DRAWING}" xmlns:wp="${wp}" xmlns:pic="${pic}"><w:body>${body}</w:body></w:document>`
+  const image = (kind: string = 'inline') =>
+    `<w:drawing><wp:${kind}><wp:extent cx="10" cy="10"/><a:graphic><a:graphicData uri="${pic}"><pic:pic><pic:blipFill><a:blip/><a:stretch><a:fillRect/></a:stretch></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:${kind}></w:drawing>`
+  const p = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`
+  it.each(['inline', 'anchor'])(
+    'extracts text before/after a passive %s picture without opening image data',
+    async (kind) => {
+      const read = vi.spyOn(ZipXmlReader.prototype, 'readAllowedPart')
+      try {
+        const xml = wrap(
+          `<w:p><w:r><w:t>before</w:t>${image(kind)}<w:t>after</w:t></w:r></w:p><w:tbl><w:tr><w:tc>${p('cell')}</w:tc></w:tr></w:tbl>${p('end')}`
+        )
+        const result = await extractOoxmlText(
+          officeZip('docx', xml, [
+            { name: 'word/media/image1.png', data: 'owned opaque image bytes, never decode' }
+          ]),
+          JOB_ID,
+          'docx'
+        )
+        expect(result).toMatchObject({ ok: true, truncated: false })
+        if (!result.ok) return
+        expect(result.segments.map((s) => s.text)).toEqual(['beforeafter', 'cell', 'end'])
+        expect(result.segments[1].locator).toMatchObject({
+          kind: 'docx-table-cell',
+          row: 0,
+          column: 0
+        })
+        expect(read.mock.calls.some(([name]) => name.includes('/media/'))).toBe(false)
+        expectBounded(result)
+      } finally {
+        read.mockRestore()
+      }
+    }
+  )
+  it('does not confuse DrawingML text with Word paragraphs or text', async () => {
+    const drawing =
+      '<w:drawing><wp:inline><a:graphic><a:graphicData><a:p><a:r><a:t>not Word body text</a:t></a:r></a:p></a:graphicData></a:graphic></wp:inline></w:drawing>'
+    const result = await extractOoxmlText(
+      officeZip('docx', wrap(`<w:p><w:r><w:t>A</w:t>${drawing}<w:t>B</w:t></w:r></w:p>`)),
+      JOB_ID,
+      'docx'
+    )
+    expect(result).toMatchObject({ ok: true })
+    if (result.ok) expect(result.segments.map((s) => s.text)).toEqual(['AB'])
+  })
+  it.each([
+    '<w:altChunk/>',
+    '<w:control/>',
+    '<a:oleObject/>',
+    '<x:payload xmlns:x="urn:untrusted"/>'
+  ])('still rejects unsupported active or foreign markup inside a drawing: %s', async (child) => {
+    const xml = wrap(
+      `<w:p><w:r><w:t>visible</w:t><w:drawing><wp:inline>${child}</wp:inline></w:drawing></w:r></w:p>`
+    )
+    expect(await extractOoxmlText(officeZip('docx', xml), JOB_ID, 'docx')).toMatchObject({
+      ok: false,
+      code: 'UNSUPPORTED'
+    })
+  })
+  it('does not allow drawing namespaces to impersonate body text outside a Word drawing', async () => {
+    expect(
+      await extractOoxmlText(officeZip('docx', wrap('<w:p><a:t>fake</a:t></w:p>')), JOB_ID, 'docx')
+    ).toMatchObject({ ok: false, code: 'UNSUPPORTED' })
+  })
+  it('retains all 560 modest paragraphs when text is below the returned text budget', async () => {
+    const paragraphs = Array.from({ length: 560 }, (_, i) => `owned ${i} ` + 'x'.repeat(62))
+    const result = await extractOoxmlText(
+      officeZip('docx', wrap(paragraphs.map(p).join(''))),
+      JOB_ID,
+      'docx'
+    )
+    expect(result).toMatchObject({ ok: true, truncated: false, warnings: [] })
+    if (result.ok) expect(result.segments.map((s) => s.text)).toEqual(paragraphs)
+    expectBounded(result)
   })
 })
