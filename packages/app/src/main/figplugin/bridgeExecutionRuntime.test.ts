@@ -56,7 +56,22 @@ const plan: HostPlan = {
   captureId,
   steps: [{ command: 'node.rename', targetId: 'node_1', name: 'New name' }]
 }
-const prepareRequest = (): FigPluginBridgePrepareRequest => ({
+const hashOnlyContext: HostContext = {
+  ...context,
+  execution: {
+    ...context.execution!,
+    visualAudit: 'hash-only'
+  }
+}
+const visualEvidence = [
+  {
+    targetId: 'node_1',
+    before: { sha256: '1'.repeat(64), width: 64, height: 32 },
+    after: { sha256: '2'.repeat(64), width: 64, height: 32 },
+    changed: true
+  }
+]
+const prepareRequest = (hostContext: HostContext = context): FigPluginBridgePrepareRequest => ({
   protocol: 1,
   requestId: 'request_1',
   sequence: 1,
@@ -66,7 +81,7 @@ const prepareRequest = (): FigPluginBridgePrepareRequest => ({
     nodes: [{ id: 'node_1', type: 'FRAME', name: 'Old name', locked: false }]
   },
   featureId: 'plan-preview',
-  hostContext: context
+  hostContext
 })
 const pairRequest = {
   protocol: 1 as const,
@@ -78,14 +93,14 @@ const pairRequest = {
   clientNonce: '3'.repeat(32)
 }
 
-const fixture = (allowNativeWrite = true) => {
+const fixture = (allowNativeWrite = true, hostContext: HostContext = context) => {
   let now = 1_900_000_000_000
   const audit: FigPluginExecutionAuditEvent[] = []
   const runtime = new FigPluginBridgeRuntime({
     validateBinding: async () => true,
     invoke: async () =>
       ({
-        content: JSON.stringify(createHostPlanningPreview(JSON.stringify(plan), context))
+        content: JSON.stringify(createHostPlanningPreview(JSON.stringify(plan), hostContext))
       }) as never,
     allowNativeWrite: () => allowNativeWrite,
     audit: (event) => audit.push(event),
@@ -94,6 +109,7 @@ const fixture = (allowNativeWrite = true) => {
   return {
     runtime,
     audit,
+    hostContext,
     advance: (milliseconds: number) => {
       now += milliseconds
     }
@@ -110,7 +126,7 @@ async function prepared(value: ReturnType<typeof fixture>) {
   const receipt = await value.runtime.prepare(
     session.sessionId,
     session.sessionToken,
-    prepareRequest()
+    prepareRequest(value.hostContext)
   )
   const preview = value.runtime.listPreviews()[0]
   await value.runtime.approve(receipt.callId, preview.payloadSha256)
@@ -191,6 +207,118 @@ describe('approved native-plan execution runtime', () => {
           'completed'
         ])
       )
+      expect(JSON.stringify(value.audit)).not.toMatch(/Old name|New name/)
+    } finally {
+      value.runtime.dispose()
+    }
+  })
+
+  it('requires exact bounded visual checkpoints when the approved preview advertises hash-only audit', async () => {
+    const missing = fixture(true, hashOnlyContext)
+    try {
+      const { session, receipt } = await prepared(missing)
+      const execution = missing.runtime.listPlanExecutions()[0]
+      await missing.runtime.approvePlan(execution.executionId, execution.planSha256)
+      const claimed = await missing.runtime.claimPlan(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      if (claimed.status !== 'ready') throw new Error('not claimed')
+      const after: HostContext = {
+        ...hashOnlyContext,
+        nodes: hashOnlyContext.nodes.map((node) => ({ ...node, name: 'New name' }))
+      }
+      expect(() =>
+        missing.runtime.planResult(session.sessionId, session.sessionToken, {
+          protocol: 1,
+          executionId: execution.executionId,
+          actionId: claimed.intent.actionId,
+          status: 'completed',
+          effect: 'applied',
+          completed: 1,
+          total: 1,
+          readback: createHostPlanReadback(hashOnlyContext, after, plan)
+        })
+      ).toThrow()
+      expect(missing.runtime.listPlanStatuses()[0]).toMatchObject({
+        state: 'failed',
+        effect: 'unknown',
+        errorCode: 'QUARANTINED'
+      })
+    } finally {
+      missing.runtime.dispose()
+    }
+
+    const wrongTarget = fixture(true, hashOnlyContext)
+    try {
+      const { session, receipt } = await prepared(wrongTarget)
+      const execution = wrongTarget.runtime.listPlanExecutions()[0]
+      await wrongTarget.runtime.approvePlan(execution.executionId, execution.planSha256)
+      const claimed = await wrongTarget.runtime.claimPlan(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      if (claimed.status !== 'ready') throw new Error('not claimed')
+      const after: HostContext = {
+        ...hashOnlyContext,
+        nodes: hashOnlyContext.nodes.map((node) => ({ ...node, name: 'New name' }))
+      }
+      expect(() =>
+        wrongTarget.runtime.planResult(session.sessionId, session.sessionToken, {
+          protocol: 1,
+          executionId: execution.executionId,
+          actionId: claimed.intent.actionId,
+          status: 'completed',
+          effect: 'applied',
+          completed: 1,
+          total: 1,
+          readback: createHostPlanReadback(hashOnlyContext, after, plan),
+          visualEvidence: [{ ...visualEvidence[0], targetId: 'node_foreign' }]
+        })
+      ).toThrow()
+      expect(wrongTarget.runtime.listPlanStatuses()[0]).toMatchObject({
+        state: 'failed',
+        errorCode: 'QUARANTINED'
+      })
+    } finally {
+      wrongTarget.runtime.dispose()
+    }
+  })
+
+  it('stores and audits an exact bounded visual checkpoint set', async () => {
+    const value = fixture(true, hashOnlyContext)
+    try {
+      const { session, receipt } = await prepared(value)
+      const execution = value.runtime.listPlanExecutions()[0]
+      await value.runtime.approvePlan(execution.executionId, execution.planSha256)
+      const claimed = await value.runtime.claimPlan(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        callId: receipt.callId
+      })
+      if (claimed.status !== 'ready') throw new Error('not claimed')
+      const after: HostContext = {
+        ...hashOnlyContext,
+        nodes: hashOnlyContext.nodes.map((node) => ({ ...node, name: 'New name' }))
+      }
+      const result = value.runtime.planResult(session.sessionId, session.sessionToken, {
+        protocol: 1,
+        executionId: execution.executionId,
+        actionId: claimed.intent.actionId,
+        status: 'completed',
+        effect: 'applied',
+        completed: 1,
+        total: 1,
+        readback: createHostPlanReadback(hashOnlyContext, after, plan),
+        visualEvidence
+      })
+      expect(result.status.visualEvidence).toEqual(visualEvidence)
+      expect(value.runtime.listPlanStatuses()[0].visualEvidence).toEqual(visualEvidence)
+      expect(value.audit.at(-1)).toMatchObject({
+        state: 'completed',
+        visualAudit: 'hash-only',
+        visualEvidenceCount: 1,
+        visualEvidenceSha256: expect.stringMatching(/^[a-f0-9]{64}$/)
+      })
       expect(JSON.stringify(value.audit)).not.toMatch(/Old name|New name/)
     } finally {
       value.runtime.dispose()

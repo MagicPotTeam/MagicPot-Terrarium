@@ -541,6 +541,24 @@
       parentRecord.children = childIds
     }
     const nodes = Array.from(records.values(), (entry) => entry.record)
+    const visualHelper = globalThis.MagicPotVisualEvidenceV1
+    const canCaptureVisualEvidence =
+      visualHelper &&
+      typeof visualHelper.captureFigmaNode === 'function' &&
+      typeof visualHelper.combine === 'function' &&
+      selectedIds.every((id) => {
+        const node = records.get(id)?.node
+        return (
+          node &&
+          typeof node.exportAsync === 'function' &&
+          typeof node.width === 'number' &&
+          Number.isFinite(node.width) &&
+          node.width > 0 &&
+          typeof node.height === 'number' &&
+          Number.isFinite(node.height) &&
+          node.height > 0
+        )
+      })
     const context = {
       version: 1,
       host: HOST,
@@ -554,7 +572,7 @@
         adapterVersion: EXECUTION_ADAPTER_VERSION,
         supports: ['node.rename', 'node.opacity', 'node.visibility', 'text.content', 'layout.flow'],
         rollback: 'verified-in-place',
-        visualAudit: 'unavailable'
+        visualAudit: canCaptureVisualEvidence ? 'hash-only' : 'unavailable'
       }
     }
     const planner = globalThis.MagicPotPlanPreviewV1
@@ -819,6 +837,40 @@
       })
     }
   }
+  const getVisualEvidenceHelper = () => {
+    const helper = globalThis.MagicPotVisualEvidenceV1
+    if (
+      !helper ||
+      typeof helper.captureFigmaNode !== 'function' ||
+      typeof helper.combine !== 'function'
+    )
+      throw new Error('VISUAL_EVIDENCE_UNAVAILABLE')
+    return helper
+  }
+  async function capturePlanVisualPoints(checked) {
+    const helper = getVisualEvidenceHelper()
+    const captured = new Map()
+    for (const entry of checked) {
+      if (captured.has(entry.step.targetId)) continue
+      captured.set(entry.step.targetId, await helper.captureFigmaNode(entry.node))
+    }
+    return captured
+  }
+  function combinePlanVisualEvidence(checked, before, after) {
+    const helper = getVisualEvidenceHelper()
+    const evidence = []
+    const seen = new Set()
+    for (const entry of checked) {
+      const targetId = entry.step.targetId
+      if (seen.has(targetId)) continue
+      seen.add(targetId)
+      const beforePoint = before.get(targetId)
+      const afterPoint = after.get(targetId)
+      if (!beforePoint || !afterPoint) throw new Error('VISUAL_EVIDENCE_UNAVAILABLE')
+      evidence.push(helper.combine(targetId, beforePoint, afterPoint))
+    }
+    return evidence
+  }
   async function postPlanProgress(item, sequence, phase, index, completed, total, effect) {
     return post(
       'planProgress',
@@ -853,8 +905,38 @@
       state('The document changed after capture. No plan steps were applied.')
       return
     }
-    const applied = []
     let sequence = 2
+    let beforeVisual = null
+    if (item.hostContext.execution.visualAudit === 'hash-only') {
+      try {
+        beforeVisual = await capturePlanVisualPoints(checked)
+        // Exporting is asynchronous. Re-check every native target before the first write.
+        checked = precheckPlan(plan, item.hostContext)
+      } catch {
+        const readback = createPlanReadback(item.hostContext, plan)
+        try {
+          await postPlanProgress(item, sequence++, 'readback', 0, 0, plan.steps.length, 'none')
+          await post(
+            'planResult',
+            {
+              protocol: 1,
+              executionId: item.executionId,
+              actionId: item.actionId,
+              status: 'failed',
+              effect: 'none',
+              completed: 0,
+              total: plan.steps.length,
+              readback,
+              errorCode: 'HOST_UNAVAILABLE'
+            },
+            item.auth
+          )
+        } catch {}
+        state('Visual checkpoint capture failed. No document changes were made.')
+        return
+      }
+    }
+    const applied = []
     let effect = 'none'
     try {
       for (let index = 0; index < checked.length; index += 1) {
@@ -882,14 +964,42 @@
       }
       effect = applied.length ? 'rolled-back' : 'none'
     }
-    const readback = createPlanReadback(item.hostContext, plan)
-    const observations = readback.steps.map((step) => step.observation)
+    let readback = createPlanReadback(item.hostContext, plan)
+    let observations = readback.steps.map((step) => step.observation)
     if (observations.every((value) => value === 'requested')) effect = 'applied'
     else if (observations.every((value) => value === 'original')) effect = 'rolled-back'
     else if (observations.some((value) => value === 'requested')) effect = 'partial'
     else effect = 'unknown'
+
+    let visualEvidence
+    if (effect === 'applied' && item.hostContext.execution.visualAudit === 'hash-only') {
+      try {
+        const afterVisual = await capturePlanVisualPoints(checked)
+        visualEvidence = combinePlanVisualEvidence(checked, beforeVisual, afterVisual)
+      } catch {
+        for (const entry of [...applied].reverse()) {
+          try {
+            rollbackPlanStep(entry.node, entry.contextNode, entry.step)
+          } catch {}
+        }
+        visualEvidence = undefined
+        readback = createPlanReadback(item.hostContext, plan)
+        observations = readback.steps.map((step) => step.observation)
+        effect = observations.every((value) => value === 'original') ? 'rolled-back' : 'unknown'
+      }
+    }
+    const completed = readback.steps.filter((step) => step.observation === 'requested').length
     const status = effect === 'applied' ? 'completed' : 'failed'
     try {
+      await postPlanProgress(
+        item,
+        sequence++,
+        'readback',
+        plan.steps.length - 1,
+        completed,
+        plan.steps.length,
+        effect
+      )
       const result = await post(
         'planResult',
         {
@@ -898,9 +1008,10 @@
           actionId: item.actionId,
           status,
           effect,
-          completed: readback.steps.filter((step) => step.observation === 'requested').length,
+          completed,
           total: plan.steps.length,
           readback,
+          ...(visualEvidence ? { visualEvidence } : {}),
           ...(effect === 'rolled-back'
             ? { errorCode: 'ROLLED_BACK' }
             : effect === 'unknown'
@@ -912,7 +1023,11 @@
         item.auth
       )
       if (result && result.status && result.status.state === 'completed')
-        state('Approved plan applied and verified by document readback.')
+        state(
+          visualEvidence
+            ? 'Approved plan applied with bounded before/after visual checkpoints.'
+            : 'Approved plan applied and verified by document readback.'
+        )
       else if (effect === 'rolled-back')
         state('Plan failed. Applied values were rolled back and verified.')
       else state('Plan failed. Check MagicPot desktop for the execution receipt.')

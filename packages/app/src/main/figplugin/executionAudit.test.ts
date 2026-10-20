@@ -53,6 +53,40 @@ describe('bounded persistent FIGPLUGIN execution audit', () => {
     if (process.platform !== 'win32') expect(info.mode & 0o077).toBe(0)
   })
 
+  it('stores only paired terminal visual checkpoint summaries', async () => {
+    const root = path.join(path.parse(process.cwd()).root, `.figplugin-audit-test-${randomUUID()}`)
+    await fs.mkdir(root, { recursive: true })
+    roots.push(root)
+    const store = new FigPluginExecutionAuditStore(root, () => 1000)
+    store.record({
+      ...event(1, 1000),
+      visualAudit: 'hash-only',
+      visualEvidenceCount: 1,
+      visualEvidenceSha256: 'c'.repeat(64)
+    })
+    store.record({
+      ...event(2, 1000),
+      visualAudit: 'hash-only',
+      visualEvidenceCount: 1
+    } as FigPluginExecutionAuditEvent)
+    store.record({
+      ...event(3, 1000),
+      state: 'failed',
+      effect: 'unknown',
+      visualAudit: 'hash-only',
+      visualEvidenceCount: 1,
+      visualEvidenceSha256: 'd'.repeat(64)
+    } as FigPluginExecutionAuditEvent)
+    await store.flush()
+    expect(await store.list()).toEqual([
+      expect.objectContaining({
+        requestId: 'request_1',
+        visualEvidenceCount: 1,
+        visualEvidenceSha256: 'c'.repeat(64)
+      })
+    ])
+  })
+
   it('drops expired and malformed lines without exposing parser failures', async () => {
     const root = path.join(path.parse(process.cwd()).root, `.figplugin-audit-test-${randomUUID()}`)
     await fs.mkdir(root, { recursive: true })

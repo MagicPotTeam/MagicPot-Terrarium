@@ -288,6 +288,10 @@ export function prepareFigPluginHost(options) {
       ? readSourceRegular(SOURCE_ROOT, ['shared', 'plan-preview.js'])
       : null
     if (planningSource) sources.push(planningSource)
+    const visualEvidenceSource = connected
+      ? readSourceRegular(SOURCE_ROOT, ['shared', 'visual-evidence.js'])
+      : null
+    if (visualEvidenceSource) sources.push(visualEvidenceSource)
     const manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(sources[0].data))
     requireValid(manifest.id === spec.placeholder)
     requireValid(manifest.main === (host === 'figma' ? spec.code : spec.ui))
@@ -354,6 +358,8 @@ export function prepareFigPluginHost(options) {
           `globalThis.MAGICPOT_BRIDGE_CONFIG = Object.freeze(${JSON.stringify(config)});\n`
         ),
         helperSource.data,
+        Buffer.from('\n;\n'),
+        visualEvidenceSource.data,
         Buffer.from('\n;\n'),
         planningSource.data,
         Buffer.from('\n;\n'),

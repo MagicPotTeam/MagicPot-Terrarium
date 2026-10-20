@@ -55,6 +55,49 @@ const differenceSchema = z
   })
   .strict()
 
+export const figPluginVisualEvidencePointSchema = z
+  .object({
+    sha256,
+    width: z.number().int().min(1).max(512),
+    height: z.number().int().min(1).max(512)
+  })
+  .strict()
+
+export const figPluginVisualEvidenceSchema = z
+  .object({
+    targetId: identifier,
+    before: figPluginVisualEvidencePointSchema,
+    after: figPluginVisualEvidencePointSchema,
+    changed: z.boolean()
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const expectedChanged =
+      value.before.sha256 !== value.after.sha256 ||
+      value.before.width !== value.after.width ||
+      value.before.height !== value.after.height
+    if (value.changed !== expectedChanged)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Visual evidence change mismatch' })
+  })
+export type FigPluginVisualEvidence = z.output<typeof figPluginVisualEvidenceSchema>
+
+const visualEvidenceArraySchema = z
+  .array(figPluginVisualEvidenceSchema)
+  .min(1)
+  .max(20)
+  .superRefine((value, ctx) => {
+    const targets = new Set<string>()
+    for (const [index, item] of value.entries()) {
+      if (targets.has(item.targetId))
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Duplicate visual evidence target',
+          path: [index, 'targetId']
+        })
+      targets.add(item.targetId)
+    }
+  })
+
 export const figPluginExecutionPreviewSchema = z
   .object({
     protocol,
@@ -135,7 +178,8 @@ const publicStatusFields = {
   completed: z.number().int().min(0).max(20),
   total: z.number().int().min(1).max(20),
   effect,
-  updatedAt: safeInteger
+  updatedAt: safeInteger,
+  visualEvidence: visualEvidenceArraySchema.optional()
 }
 export const figPluginExecutionStatusSchema = z
   .object({
@@ -159,6 +203,11 @@ export const figPluginExecutionStatusSchema = z
   .superRefine((value, ctx) => {
     if (value.completed > value.total)
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid completed count' })
+    if (value.visualEvidence && (value.state !== 'completed' || value.effect !== 'applied'))
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual evidence is not applied success'
+      })
   })
 export type FigPluginExecutionStatus = z.output<typeof figPluginExecutionStatusSchema>
 
@@ -230,19 +279,7 @@ export const figPluginExecutionResultRequestSchema = z
         'QUARANTINED'
       ])
       .optional(),
-    visualEvidence: z
-      .array(
-        z
-          .object({
-            targetId: identifier,
-            sha256,
-            width: z.number().int().min(1).max(16_384),
-            height: z.number().int().min(1).max(16_384)
-          })
-          .strict()
-      )
-      .max(20)
-      .optional()
+    visualEvidence: visualEvidenceArraySchema.optional()
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -254,6 +291,11 @@ export const figPluginExecutionResultRequestSchema = z
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Applied result is incomplete' })
     if (value.effect === 'rolled-back' && value.status !== 'failed' && value.status !== 'cancelled')
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Rollback must be a failure' })
+    if (value.visualEvidence && (value.status !== 'completed' || value.effect !== 'applied'))
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual evidence requires an applied completed result'
+      })
     try {
       if (new TextEncoder().encode(JSON.stringify(value)).byteLength > 64 * 1024)
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Execution result is too large' })

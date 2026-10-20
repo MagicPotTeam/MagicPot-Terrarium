@@ -866,6 +866,40 @@ describe('PluginBridgePanel', () => {
     await click('revokeSelected')
     expect(screen.getByText(key('revoked'))).toBeInTheDocument()
   })
+  it('renders bounded visual checkpoint summaries without claiming automatic correction', async () => {
+    mocks.center.planState.mockResolvedValue({
+      previews: [],
+      statuses: [
+        {
+          protocol: 1,
+          executionId: 'a'.repeat(32),
+          callId: 'b'.repeat(32),
+          state: 'completed',
+          completed: 1,
+          total: 1,
+          effect: 'applied',
+          updatedAt: Date.now(),
+          visualEvidence: [
+            {
+              targetId: 'node-1',
+              before: { sha256: '1'.repeat(64), width: 64, height: 32 },
+              after: { sha256: '2'.repeat(64), width: 64, height: 32 },
+              changed: true
+            }
+          ]
+        }
+      ]
+    })
+    mount()
+    await click('refresh')
+    expect(screen.getByText(`${key('visualEvidenceSummary')} 1 1`)).toBeInTheDocument()
+    expect(screen.getByText(key('visualEvidenceBoundary'))).toBeInTheDocument()
+    expect(screen.getByLabelText(key('visualEvidenceDetails'))).toHaveTextContent(
+      'node-1: 111111111111 -> 222222222222 changed'
+    )
+    expect(document.body).not.toHaveTextContent('1'.repeat(64))
+    expect(document.body).not.toHaveTextContent('2'.repeat(64))
+  })
 })
 
 describe('Bridge localization', () => {

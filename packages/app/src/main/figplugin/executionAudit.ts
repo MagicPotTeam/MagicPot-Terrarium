@@ -50,10 +50,25 @@ const eventSchema = z
     adapterVersion: z.string().min(1).max(64),
     rollback: z.enum(['verified-in-place', 'native-history', 'none']),
     visualAudit: z.enum(['hash-only', 'unavailable']),
+    visualEvidenceCount: z.number().int().min(1).max(20).optional(),
+    visualEvidenceSha256: z
+      .string()
+      .length(64)
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
     durationMs: z.number().int().min(0),
     errorCode: z.string().min(1).max(64).optional()
   })
   .strict()
+  .superRefine((value, ctx) => {
+    if ((value.visualEvidenceCount === undefined) !== (value.visualEvidenceSha256 === undefined))
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Incomplete visual evidence audit' })
+    if (value.visualEvidenceCount !== undefined && value.state !== 'completed')
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Visual evidence audit is not completed'
+      })
+  })
 export type FigPluginExecutionAuditEvent = z.output<typeof eventSchema>
 
 type Stored = FigPluginExecutionAuditEvent

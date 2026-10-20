@@ -2,6 +2,7 @@
 ;(() => {
   const photoshop = require('photoshop')
   const { app } = photoshop
+  const imaging = photoshop.imaging
   const executeAsModal = photoshop.core && photoshop.core.executeAsModal
   const HOST = 'photoshop'
   const EXECUTION_ADAPTER_VERSION = 'photoshop-uxp-native-1'
@@ -538,6 +539,17 @@
         parent = parent.parent
       }
     }
+    const visualHelper = globalThis.MagicPotVisualEvidenceV1
+    const canCaptureVisualEvidence =
+      visualHelper &&
+      typeof visualHelper.capturePhotoshopLayer === 'function' &&
+      typeof visualHelper.combine === 'function' &&
+      imaging &&
+      typeof imaging.getPixels === 'function' &&
+      selectedIds.every((id) => {
+        const layer = objects.get(id)
+        return layer && Number.isSafeInteger(layer.id) && layer.id > 0
+      })
     const context = {
       version: 1,
       host: HOST,
@@ -551,7 +563,7 @@
         adapterVersion: EXECUTION_ADAPTER_VERSION,
         supports: ['node.rename', 'node.opacity', 'node.visibility', 'text.content'],
         rollback: 'verified-in-place',
-        visualAudit: 'unavailable'
+        visualAudit: canCaptureVisualEvidence ? 'hash-only' : 'unavailable'
       }
     }
     const planner = globalThis.MagicPotPlanPreviewV1
@@ -768,6 +780,48 @@
       })
     }
   }
+  const getVisualEvidenceHelper = () => {
+    const helper = globalThis.MagicPotVisualEvidenceV1
+    if (
+      !helper ||
+      typeof helper.capturePhotoshopLayer !== 'function' ||
+      typeof helper.combine !== 'function' ||
+      !imaging ||
+      typeof imaging.getPixels !== 'function'
+    )
+      throw new Error('VISUAL_EVIDENCE_UNAVAILABLE')
+    return helper
+  }
+  async function capturePlanVisualPoints(checked, documentId) {
+    const helper = getVisualEvidenceHelper()
+    const numericDocumentId = Number(documentId)
+    if (!Number.isSafeInteger(numericDocumentId) || numericDocumentId <= 0)
+      throw new Error('VISUAL_EVIDENCE_UNAVAILABLE')
+    const captured = new Map()
+    for (const entry of checked) {
+      if (captured.has(entry.step.targetId)) continue
+      captured.set(
+        entry.step.targetId,
+        await helper.capturePhotoshopLayer(imaging, numericDocumentId, entry.layer.id)
+      )
+    }
+    return captured
+  }
+  function combinePlanVisualEvidence(checked, before, after) {
+    const helper = getVisualEvidenceHelper()
+    const evidence = []
+    const seen = new Set()
+    for (const entry of checked) {
+      const targetId = entry.step.targetId
+      if (seen.has(targetId)) continue
+      seen.add(targetId)
+      const beforePoint = before.get(targetId)
+      const afterPoint = after.get(targetId)
+      if (!beforePoint || !afterPoint) throw new Error('VISUAL_EVIDENCE_UNAVAILABLE')
+      evidence.push(helper.combine(targetId, beforePoint, afterPoint))
+    }
+    return evidence
+  }
   async function executeClaimedPlan(item, intent) {
     const planner = globalThis.MagicPotPlanPreviewV1
     let plan
@@ -783,10 +837,18 @@
     }
     let effect = 'none'
     let readback = createPlanReadback(item.hostContext, plan)
+    let visualEvidence
+    let failureCode
     try {
       await executeAsModal(
         async () => {
-          const checked = precheckPlan(plan, item.hostContext)
+          let checked = precheckPlan(plan, item.hostContext)
+          let beforeVisual = null
+          if (item.hostContext.execution.visualAudit === 'hash-only') {
+            beforeVisual = await capturePlanVisualPoints(checked, item.hostContext.documentId)
+            // Pixel capture is asynchronous. Re-check native identities before the first mutation.
+            checked = precheckPlan(plan, item.hostContext)
+          }
           const applied = []
           try {
             for (const entry of checked) {
@@ -799,19 +861,66 @@
                 rollbackPlanStep(entry.layer, entry.contextNode, entry.step)
               } catch {}
             }
-            throw new Error('ROLLED_BACK')
+            failureCode = 'ROLLED_BACK'
+            return
+          }
+          readback = createPlanReadback(item.hostContext, plan)
+          let observations = readback.steps.map((step) => step.observation)
+          effect = observations.every((value) => value === 'requested')
+            ? 'applied'
+            : observations.every((value) => value === 'original')
+              ? 'rolled-back'
+              : observations.some((value) => value === 'requested')
+                ? 'partial'
+                : 'unknown'
+          if (effect === 'applied' && item.hostContext.execution.visualAudit === 'hash-only') {
+            try {
+              const afterVisual = await capturePlanVisualPoints(
+                checked,
+                item.hostContext.documentId
+              )
+              visualEvidence = combinePlanVisualEvidence(checked, beforeVisual, afterVisual)
+            } catch {
+              for (const entry of [...applied].reverse()) {
+                try {
+                  rollbackPlanStep(entry.layer, entry.contextNode, entry.step)
+                } catch {}
+              }
+              visualEvidence = undefined
+              readback = createPlanReadback(item.hostContext, plan)
+              observations = readback.steps.map((step) => step.observation)
+              effect = observations.every((value) => value === 'original')
+                ? 'rolled-back'
+                : 'unknown'
+              failureCode = effect === 'rolled-back' ? 'ROLLED_BACK' : 'QUARANTINED'
+            }
           }
         },
         { commandName: 'MagicPot approved FIGPLUGIN plan' }
       )
-    } catch {}
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      failureCode = message === 'VISUAL_EVIDENCE_UNAVAILABLE' ? 'HOST_UNAVAILABLE' : 'STALE_CONTEXT'
+    }
     readback = createPlanReadback(item.hostContext, plan)
     const observations = readback.steps.map((step) => step.observation)
     if (observations.every((value) => value === 'requested')) effect = 'applied'
-    else if (observations.every((value) => value === 'original')) effect = 'rolled-back'
+    else if (observations.every((value) => value === 'original'))
+      effect = failureCode === 'ROLLED_BACK' ? 'rolled-back' : failureCode ? 'none' : 'rolled-back'
     else if (observations.some((value) => value === 'requested')) effect = 'partial'
     else effect = 'unknown'
+    if (effect !== 'applied') visualEvidence = undefined
+    const completed = readback.steps.filter((step) => step.observation === 'requested').length
     const status = effect === 'applied' ? 'completed' : 'failed'
+    const errorCode =
+      failureCode ||
+      (effect === 'rolled-back'
+        ? 'ROLLED_BACK'
+        : effect === 'unknown'
+          ? 'QUARANTINED'
+          : effect === 'partial'
+            ? 'EXECUTION_FAILED'
+            : 'HOST_UNAVAILABLE')
     try {
       await post(
         'planProgress',
@@ -822,7 +931,7 @@
           sequence: 2,
           phase: 'readback',
           index: plan.steps.length - 1,
-          completed: readback.steps.filter((step) => step.observation === 'requested').length,
+          completed,
           total: plan.steps.length,
           effect,
           at: Date.now()
@@ -837,21 +946,20 @@
           actionId: item.actionId,
           status,
           effect,
-          completed: readback.steps.filter((step) => step.observation === 'requested').length,
+          completed,
           total: plan.steps.length,
           readback,
-          ...(effect === 'rolled-back'
-            ? { errorCode: 'ROLLED_BACK' }
-            : effect === 'unknown'
-              ? { errorCode: 'QUARANTINED' }
-              : effect === 'partial'
-                ? { errorCode: 'EXECUTION_FAILED' }
-                : {})
+          ...(visualEvidence ? { visualEvidence } : {}),
+          ...(status === 'failed' ? { errorCode } : {})
         },
         item.auth
       )
       if (result && result.status && result.status.state === 'completed')
-        state('Approved plan applied and verified by document readback.')
+        state(
+          visualEvidence
+            ? 'Approved plan applied with bounded before/after visual checkpoints.'
+            : 'Approved plan applied and verified by document readback.'
+        )
       else if (effect === 'rolled-back')
         state('Plan failed. Applied values were rolled back and verified.')
       else state('Plan failed. Check MagicPot desktop for the execution receipt.')

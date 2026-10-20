@@ -10,6 +10,23 @@ const flush = async () => {
   for (let i = 0; i < 80; i++) await Promise.resolve()
 }
 const plain = (value) => JSON.parse(JSON.stringify(value))
+const fakePng = (label) => {
+  const data = new Uint8Array(32)
+  data.set([137, 80, 78, 71, 13, 10, 26, 10], 0)
+  data.set([0, 0, 0, 13, 73, 72, 68, 82], 8)
+  const view = new DataView(data.buffer)
+  view.setUint32(16, 64, false)
+  view.setUint32(20, 32, false)
+  let marker = 0
+  for (const char of String(label)) marker = (marker + char.codePointAt(0)) & 0xff
+  data.set([marker, marker ^ 0x55, marker ^ 0xaa, 0xff, 1, 2, 3, 4], 24)
+  return data
+}
+const fakePixels = (label) => {
+  let marker = 0
+  for (const char of String(label)) marker = (marker + char.codePointAt(0)) & 0xff
+  return new Uint8Array([marker, marker ^ 0x55, marker ^ 0xaa, 0xff, 1, 2, 3, 0xff])
+}
 
 function fixture(
   host,
@@ -94,6 +111,13 @@ function fixture(
           transparentPixelsLocked: false,
           isBackgroundLayer: false
         }
+  if (host === 'figma') {
+    for (const item of [node, second]) {
+      item.width = 64
+      item.height = 32
+      item.exportAsync = async () => fakePng(item.name)
+    }
+  }
   if (failSecond)
     Object.defineProperty(second, 'name', {
       enumerable: true,
@@ -243,7 +267,8 @@ function fixture(
             completed: body.completed,
             total: body.total,
             effect: body.effect,
-            updatedAt: time
+            updatedAt: time,
+            ...(body.visualEvidence ? { visualEvidence: body.visualEvidence } : {})
           }
         }
       } else if (url.endsWith('/status')) {
@@ -278,7 +303,7 @@ function fixture(
               mode: 'native-write',
               adapterVersion: host === 'figma' ? 'figma-native-1' : 'photoshop-uxp-native-1',
               rollback: 'verified-in-place',
-              visualAudit: 'unavailable',
+              visualAudit: approvedContext.execution.visualAudit,
               requiresWriteApproval: true
             },
             differences: plan.steps.map((step) => ({
@@ -310,6 +335,26 @@ function fixture(
           async executeAsModal(callback) {
             return callback()
           }
+        },
+        imaging: {
+          async getPixels(request) {
+            const layer = [node, second].find((item) => item.id === request.layerID)
+            assert.ok(layer)
+            return {
+              imageData: {
+                width: 2,
+                height: 1,
+                components: 4,
+                componentSize: 8,
+                pixelFormat: 'RGBA',
+                colorSpace: 'RGB',
+                async getData() {
+                  return fakePixels(layer.name)
+                },
+                dispose() {}
+              }
+            }
+          }
         }
       }
     },
@@ -321,6 +366,7 @@ function fixture(
     `globalThis.MAGICPOT_BRIDGE_CONFIG = Object.freeze(${JSON.stringify({ protocol: 1, origin, pluginId, host })});`
   ).runInContext(vm)
   new Script(read('shared/selection-snapshot.js')).runInContext(vm)
+  new Script(read('shared/visual-evidence.js')).runInContext(vm)
   new Script(read('shared/plan-preview.js')).runInContext(vm)
   new Script(
     read(host === 'figma' ? 'figma/bridge/code.js' : 'photoshop-uxp/bridge/main.js')
@@ -419,6 +465,7 @@ for (const host of ['figma', 'photoshop']) {
       assert.equal(prepared.featureId, 'plan-preview')
       assert.equal(prepared.hostContext.nodes[0].name, 'Original owned name')
       assert.equal(prepared.hostContext.host, host)
+      assert.equal(prepared.hostContext.execution.visualAudit, 'hash-only')
       assert.equal(Object.hasOwn(prepared.hostContext.nodes[0], 'opacity'), false)
       await f.tick(1000)
       assert.match(f.output(), /PLAN READY/)
@@ -460,6 +507,12 @@ for (const host of ['figma', 'photoshop']) {
       assert.equal(result.effect, 'applied')
       assert.equal(result.status, 'completed')
       assert.equal(result.readback.steps[0].observation, 'requested')
+      assert.equal(result.visualEvidence.length, 1)
+      assert.equal(result.visualEvidence[0].targetId, result.readback.steps[0].targetId)
+      assert.match(result.visualEvidence[0].before.sha256, /^[a-f0-9]{64}$/)
+      assert.match(result.visualEvidence[0].after.sha256, /^[a-f0-9]{64}$/)
+      assert.notEqual(result.visualEvidence[0].before.sha256, result.visualEvidence[0].after.sha256)
+      assert.equal(result.visualEvidence[0].changed, true)
       const routes = f.requests.map((request) => new URL(request.url).pathname)
       assert.ok(routes.includes('/figplugin/v1/plan/status'))
       assert.ok(routes.includes('/figplugin/v1/plan/claim'))
@@ -484,6 +537,7 @@ for (const host of ['figma', 'photoshop']) {
       const result = f.planResult()
       assert.equal(result.status, 'failed')
       assert.equal(result.effect, 'rolled-back')
+      assert.equal(Object.hasOwn(result, 'visualEvidence'), false)
       assert.deepEqual(
         result.readback.steps.map((step) => step.observation),
         ['original', 'original']

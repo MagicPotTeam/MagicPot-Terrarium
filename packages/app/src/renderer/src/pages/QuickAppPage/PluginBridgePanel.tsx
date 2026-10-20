@@ -35,7 +35,8 @@ import {
   figPluginExecutionDesktopStateSchema,
   type FigPluginDesktopExecution,
   type FigPluginExecutionDesktopState,
-  type FigPluginExecutionPreview
+  type FigPluginExecutionPreview,
+  type FigPluginVisualEvidence
 } from '@shared/figplugin/execution'
 import { getProjectById, listProjects, PROJECTS_CHANGED_EVENT } from '../MainPage/projectStore'
 
@@ -71,6 +72,16 @@ const eligible = (item: FigPluginManagedSummary) =>
 const reviewKey = (call: FigPluginBridgePreview): string => canonicalFigPluginJson(call)
 const executionReviewKey = (preview: FigPluginExecutionPreview): string =>
   canonicalFigPluginJson(preview)
+const shortHash = (value: string): string => value.slice(0, 12)
+const renderVisualEvidence = (items: FigPluginVisualEvidence[]): string =>
+  items
+    .map(
+      (item) =>
+        `${item.targetId}: ${shortHash(item.before.sha256)} -> ${shortHash(item.after.sha256)} ${
+          item.changed ? 'changed' : 'unchanged'
+        }`
+    )
+    .join('\n')
 const isBridgeErrorCode = (value: string): value is keyof typeof FIGPLUGIN_BRIDGE_ERRORS =>
   Object.hasOwn(FIGPLUGIN_BRIDGE_ERRORS, value)
 const bridgeErrorKey = (code: BridgeErrorCode): BridgeErrorKey => `figplugin.bridge.errors.${code}`
@@ -925,6 +936,25 @@ const PluginBridgePanel = ({ items }: { items: FigPluginManagedSummary[] }) => {
                   effect: executionStatus.effect
                 })}
               </Typography>
+              {executionStatus.visualEvidence && (
+                <>
+                  <Typography>
+                    {t('figplugin.bridge.visualEvidenceSummary', {
+                      count: executionStatus.visualEvidence.length,
+                      changed: executionStatus.visualEvidence.filter((item) => item.changed).length
+                    })}
+                  </Typography>
+                  <Box
+                    component="pre"
+                    tabIndex={0}
+                    aria-label={t('figplugin.bridge.visualEvidenceDetails')}
+                    sx={{ whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto', m: 0 }}
+                  >
+                    {renderVisualEvidence(executionStatus.visualEvidence)}
+                  </Box>
+                  <Alert severity="info">{t('figplugin.bridge.visualEvidenceBoundary')}</Alert>
+                </>
+              )}
               {!['completed', 'cancelled', 'denied', 'failed', 'expired'].includes(
                 executionStatus.state
               ) && (

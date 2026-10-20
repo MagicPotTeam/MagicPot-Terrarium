@@ -33,7 +33,8 @@ import {
   type FigPluginExecutionResultRequest,
   type FigPluginExecutionResultResponse,
   type FigPluginExecutionState,
-  type FigPluginExecutionStatus
+  type FigPluginExecutionStatus,
+  type FigPluginVisualEvidence
 } from '@shared/figplugin/execution'
 import {
   createHostPlanningPreview,
@@ -159,6 +160,7 @@ type PlanExecution = {
   }
   claimedAt?: number
   resultFingerprint?: string
+  visualEvidence?: FigPluginVisualEvidence[]
   updatedAt: number
   errorCode?: NonNullable<FigPluginExecutionStatus['errorCode']>
 }
@@ -216,6 +218,7 @@ export class FigPluginBridgeRuntime {
       total: execution.plan.steps.length,
       effect: execution.effect,
       updatedAt: execution.updatedAt,
+      ...(execution.visualEvidence ? { visualEvidence: execution.visualEvidence } : {}),
       ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
     })
   }
@@ -329,6 +332,12 @@ export class FigPluginBridgeRuntime {
         rollback: execution.preview.rollback,
         visualAudit: execution.preview.visualAudit,
         durationMs: Math.max(0, execution.updatedAt - execution.preview.createdAt),
+        ...(execution.visualEvidence
+          ? {
+              visualEvidenceCount: execution.visualEvidence.length,
+              visualEvidenceSha256: digest(execution.visualEvidence)
+            }
+          : {}),
         ...(execution.errorCode ? { errorCode: execution.errorCode } : {})
       })
     } catch {
@@ -850,10 +859,38 @@ export class FigPluginBridgeRuntime {
       this.scheduleCleanup()
       throw new FigPluginBridgeError('INVALID_REQUEST')
     }
+    const expectedVisualTargets = new Set(execution.plan.steps.map((step) => step.targetId))
+    const suppliedVisualTargets = new Set(
+      (request.visualEvidence ?? []).map((item) => item.targetId)
+    )
+    const hasCompleteVisualEvidence = Boolean(
+      request.visualEvidence &&
+      request.visualEvidence.length === expectedVisualTargets.size &&
+      suppliedVisualTargets.size === expectedVisualTargets.size &&
+      [...expectedVisualTargets].every((targetId) => suppliedVisualTargets.has(targetId))
+    )
+    const successfulAppliedResult = request.status === 'completed' && request.effect === 'applied'
+    const visualEvidenceInvalid =
+      execution.preview.visualAudit === 'hash-only'
+        ? successfulAppliedResult && !hasCompleteVisualEvidence
+        : request.visualEvidence !== undefined
+    if (visualEvidenceInvalid) {
+      execution.state = 'failed'
+      execution.errorCode = 'QUARANTINED'
+      execution.effect = 'unknown'
+      execution.visualEvidence = undefined
+      execution.updatedAt = this.clock()
+      this.recordExecutionAudit(execution)
+      this.scheduleCleanup()
+      throw new FigPluginBridgeError('INVALID_REQUEST')
+    }
     execution.completed = request.completed
     execution.effect = request.effect
     execution.errorCode = request.errorCode
     execution.resultFingerprint = fingerprint
+    execution.visualEvidence = request.visualEvidence
+      ? structuredClone(request.visualEvidence)
+      : undefined
     execution.updatedAt = this.clock()
     execution.state =
       request.status === 'completed' && request.effect === 'applied'
