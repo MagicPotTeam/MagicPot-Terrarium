@@ -9,6 +9,7 @@
  * Renderer-only features (generatePrompt, compressImage) remain in the renderer LLM.ts.
  */
 
+import { retryModelCapacity, parseModelRetryAfter } from './modelCapacityRetry'
 import type { LLMModelUse } from '@shared/config/config'
 import { selectMessagesForImageHistoryPolicy } from './imageHistory'
 import { validateImageRequestContract } from './imageRequestContract'
@@ -234,8 +235,13 @@ export class UpstreamHttpError extends Error {
   readonly statusCode: number
   readonly statusText: string
   readonly body: string
+  readonly retryAfterMs?: number
 
-  constructor(provider: string, response: Pick<Response, 'status' | 'statusText'>, body: string) {
+  constructor(
+    provider: string,
+    response: Pick<Response, 'status' | 'statusText'> & Partial<Pick<Response, 'headers'>>,
+    body: string
+  ) {
     const detail = body.trim()
     const safeDetail = detail.slice(0, OPENAI_ERROR_MAX_BYTES)
     super(
@@ -245,6 +251,7 @@ export class UpstreamHttpError extends Error {
     this.statusCode = response.status
     this.statusText = response.statusText
     this.body = body
+    this.retryAfterMs = parseModelRetryAfter(response.headers)
     Object.setPrototypeOf(this, new.target.prototype)
   }
 }
@@ -911,6 +918,11 @@ export function normalizeOllamaBaseUrl(baseUrl: string): string {
 
 // ==================== OpenAI-compatible API Client ====================
 
+type OpenAICapacityRetryContext = {
+  requestId: string
+  fileSearchSession?: Awaited<ReturnType<typeof createOpenAIFileSearchSession>> | null
+}
+
 export class OpenAIAPICli implements LLMCli {
   constructor(
     protected readonly apiKey: string,
@@ -924,6 +936,21 @@ export class OpenAIAPICli implements LLMCli {
   }
 
   async chat(params: LLMChatParams): Promise<LLMChatResult> {
+    if (!params.retryCapacity) return this.chatOnce(params)
+    const retryContext: OpenAICapacityRetryContext = { requestId: globalThis.crypto.randomUUID() }
+    try {
+      return await retryModelCapacity(params, (onDelta) =>
+        this.chatOnce({ ...params, onDelta }, retryContext)
+      )
+    } finally {
+      await retryContext.fileSearchSession?.cleanup()
+    }
+  }
+
+  private async chatOnce(
+    params: LLMChatParams,
+    retryContext?: OpenAICapacityRetryContext
+  ): Promise<LLMChatResult> {
     const base = normalizeOpenAIBaseUrl(this.baseUrl)
     const apiMode = resolveOpenAIClientApiMode(this.baseUrl, this.modelName, this.options)
     const imageTask =
@@ -936,8 +963,23 @@ export class OpenAIAPICli implements LLMCli {
     if (params.imageRequest) {
       validateImageRequestContract(params.imageRequest, params.messages)
     }
+    const requestId = retryContext?.requestId
+    const fetchImpl = this.getFetchImpl()
+    const stableFetch: FetchImpl = (input, init) => {
+      if (requestId && init?.method === 'POST') {
+        const headers = init.headers as Record<string, string> | undefined
+        const alreadySet = Object.keys(headers || {}).some(
+          (key) => key.toLowerCase() === 'idempotency-key'
+        )
+        return fetchImpl(input, {
+          ...init,
+          headers: { ...headers, ...(alreadySet ? {} : { 'Idempotency-Key': requestId }) }
+        })
+      }
+      return fetchImpl(input, init)
+    }
     const control = new OpenAIRequestControl(
-      this.getFetchImpl(),
+      stableFetch,
       params.signal,
       this.options?.requestTimeoutMs ??
         (imageTask ? OPENAI_IMAGE_DEADLINE_MS : OPENAI_CHAT_DEADLINE_MS)
@@ -982,7 +1024,8 @@ export class OpenAIAPICli implements LLMCli {
                 controlled,
                 base,
                 control,
-                upstreamStreamingMetadataRef
+                upstreamStreamingMetadataRef,
+                retryContext
               )
             : await this.chatViaChatCompletions(
                 controlled,
@@ -1129,7 +1172,8 @@ export class OpenAIAPICli implements LLMCli {
     params: LLMChatParams,
     base: string,
     control: OpenAIRequestControl,
-    upstreamStreamingMetadataRef: OpenAIUpstreamStreamingMetadataRef
+    upstreamStreamingMetadataRef: OpenAIUpstreamStreamingMetadataRef,
+    retryContext?: OpenAICapacityRetryContext
   ): Promise<LLMChatResult> {
     let fileSearchSession: Awaited<ReturnType<typeof createOpenAIFileSearchSession>> | null = null
     const selectedMessages = selectMessagesForImageHistoryPolicy(
@@ -1227,13 +1271,17 @@ export class OpenAIAPICli implements LLMCli {
         (this.options?.enableHostedTools ?? isOfficialOpenAIBaseUrl(base))
       ) {
         try {
-          fileSearchSession = await createOpenAIFileSearchSession({
-            apiKey: this.apiKey,
-            baseUrl: base,
-            messages: params.messages,
-            signal: params.signal,
-            fetchImpl: this.getFetchImpl()
-          })
+          fileSearchSession =
+            retryContext?.fileSearchSession !== undefined
+              ? retryContext.fileSearchSession
+              : await createOpenAIFileSearchSession({
+                  apiKey: this.apiKey,
+                  baseUrl: base,
+                  messages: params.messages,
+                  signal: params.signal,
+                  fetchImpl: this.getFetchImpl()
+                })
+          if (retryContext) retryContext.fileSearchSession = fileSearchSession
         } catch (error) {
           // Hosted setup uses its own error normalization; restore a parent
           // cancellation only for its explicit AbortError, not an earlier failure.
@@ -1336,7 +1384,7 @@ export class OpenAIAPICli implements LLMCli {
           : {})
       }
     } finally {
-      if (fileSearchSession) {
+      if (fileSearchSession && !retryContext) {
         await fileSearchSession.cleanup()
       }
     }

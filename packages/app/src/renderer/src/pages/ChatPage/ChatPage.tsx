@@ -5911,6 +5911,20 @@ const ChatPage: React.FC<ChatPageProps> = ({
               return
             }
 
+            if (event.type === 'retry') {
+              hasMarkedStreamingOutput = false
+              lifecycleEvent('running')
+              setSessionLoadingStatus(targetSessionId, {
+                label: t(
+                  event.retry.reason === 'server-error'
+                    ? 'chat.loading_auto_retry_server_error'
+                    : 'chat.loading_auto_retry'
+                ),
+                retry: event.retry
+              })
+              return
+            }
+
             if (event.type === 'tool-status') {
               const status = event.toolStatus.status
               lifecycleEvent(

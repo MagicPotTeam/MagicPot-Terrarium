@@ -1852,6 +1852,20 @@ const AssistantMessageBubble: React.FC<{
   theme
 }) => {
   const visibleAttachments = sortReportBundleAttachmentsForDisplay(message.attachments)
+  const retry = isLoading ? loadingStatus?.retry : undefined
+  const [retryNow, setRetryNow] = React.useState(Date.now)
+  React.useEffect(() => {
+    if (!retry) return
+    setRetryNow(Date.now())
+    const timer = setInterval(() => setRetryNow(Date.now()), 250)
+    return () => clearInterval(timer)
+  }, [retry])
+  const retrySeconds = retry ? Math.max(0, Math.ceil((retry.nextRetryAt - retryNow) / 1000)) : 0
+  const loadingDetail = retry
+    ? retrySeconds > 0
+      ? t('chat.loading_auto_retry_wait', { attempt: retry.attempt, seconds: retrySeconds })
+      : t('chat.loading_auto_retry_active', { attempt: retry.attempt })
+    : loadingStatus?.detail
   const loadingProgress = formatChatLoadingStatusProgress(loadingStatus)
   const showLoadingStatus = isLoading && Boolean(loadingStatus?.label)
 
@@ -1928,7 +1942,7 @@ const AssistantMessageBubble: React.FC<{
               <AssistantLoadingStatus
                 label={loadingStatus?.label || ''}
                 progress={loadingProgress}
-                detail={loadingStatus?.detail}
+                detail={loadingDetail}
                 theme={theme}
               />
             ) : null}
@@ -1938,7 +1952,7 @@ const AssistantMessageBubble: React.FC<{
             <AssistantLoadingStatus
               label={loadingStatus?.label || ''}
               progress={loadingProgress}
-              detail={loadingStatus?.detail}
+              detail={loadingDetail}
               theme={theme}
             />
           ) : (
@@ -1963,7 +1977,7 @@ const AssistantMessageBubble: React.FC<{
               loadingStatus?.label || t('chat.loading_status_default', { defaultValue: '正在处理' })
             }
             progress={loadingProgress}
-            detail={loadingStatus?.detail}
+            detail={loadingDetail}
             theme={theme}
           />
         ) : message.content !== undefined && message.content !== '' ? null : (

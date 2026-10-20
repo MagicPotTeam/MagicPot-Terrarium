@@ -22,7 +22,7 @@ export const createSkillToolStream = (emit?: (event: LLMDeltaEvent) => void) => 
   const onDelta = (event: LLMDeltaEvent): void => {
     // Provider-step completion must never terminate the outer multi-step Agent turn.
     if (finished || event.type === 'done') return
-    if (ordinaryText || event.type === 'error') {
+    if (ordinaryText || event.type === 'error' || event.type === 'retry') {
       emit?.(event)
       return
     }

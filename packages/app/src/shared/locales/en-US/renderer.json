@@ -932,6 +932,10 @@
     }
   },
   "chat": {
+    "loading_auto_retry": "Model busy — retrying automatically",
+    "loading_auto_retry_server_error": "Temporary server error — retrying automatically",
+    "loading_auto_retry_wait": "Retry {{attempt}} in {{seconds}} seconds. You can stop at any time.",
+    "loading_auto_retry_active": "Retry {{attempt}} in progress. You can stop at any time.",
     "new_conversation": "New Conversation",
     "messages": "messages",
     "model": "Model",

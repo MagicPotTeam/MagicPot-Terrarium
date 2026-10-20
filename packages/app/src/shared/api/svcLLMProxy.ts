@@ -1,3 +1,4 @@
+import type { LLMRetryStatus } from '../llm/modelCapacityRetry'
 // LLM 代理服务 API 定义
 // 用于 AIEngine 实例之间的 LLM 请求转发
 
@@ -200,7 +201,8 @@ export type LLMChatOptions = {
 export type LLMChatStreamReq = LLMChatReq
 
 export type LLMChatStreamResp = {
-  type: 'text-delta' | 'attachment' | 'session' | 'tool-status' | 'done' | 'error'
+  type: 'text-delta' | 'attachment' | 'session' | 'tool-status' | 'retry' | 'done' | 'error'
+  retry?: LLMRetryStatus
   /** 增量内容 */
   delta: string
   /** 是否完成 */

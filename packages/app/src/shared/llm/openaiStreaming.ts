@@ -136,6 +136,7 @@ export async function readOpenAIStream(
     textBytes = 0,
     finish: LLMChatFinishReason | undefined
   let usage: unknown
+  let hostedWorkStarted = false
   const imageParts: Record<string, unknown>[] = []
   const responseImageFallbacks: Array<{
     item: Record<string, unknown>
@@ -199,10 +200,26 @@ export async function readOpenAIStream(
     if (event.error || event.type === 'error' || event.type === 'response.failed') {
       const error = record(event.error) || record(record(event.response)?.error)
       const detail = error?.message || event.message
-      throw new Error(
-        typeof detail === 'string' ? detail : 'OpenAI stream reported a provider failure.'
+      throw Object.assign(
+        new Error(
+          typeof detail === 'string' ? detail : 'OpenAI stream reported a provider failure.'
+        ),
+        {
+          providerError: error,
+          retryBlocked:
+            hostedWorkStarted || Boolean(text) || toolCalls.size > 0 || imageParts.length > 0
+        }
       )
     }
+    if (
+      typeof event.type === 'string' &&
+      (/^response\.(?:image_generation_call|web_search_call|file_search_call|code_interpreter_call)\./.test(
+        event.type
+      ) ||
+        (event.type === 'response.output_item.added' &&
+          /(?:_call|tool)$/.test(String(record(event.item)?.type ?? ''))))
+    )
+      hostedWorkStarted = true
     if (mode === 'responses') {
       if (event.type === 'response.output_text.delta' || event.type === 'response.refusal.delta') {
         emit(event.delta)

@@ -1,3 +1,4 @@
+import { normalizeModelRetryStatus, type LLMRetryStatus } from '@shared/llm/modelCapacityRetry'
 import type { Config, CustomSkill, LLMAPIProfile, LLMOpenAIApiMode } from '@shared/config/config'
 import type {
   LLMChatSkillRuntime,
@@ -145,6 +146,7 @@ export type RequestChatCompletionStreamEvent =
   | { type: 'attachment'; attachment: ChatAttachment }
   | { type: 'session'; sessionUrl: string }
   | { type: 'tool-status'; toolStatus: LLMToolStatus }
+  | { type: 'retry'; retry: LLMRetryStatus }
   | { type: 'done' }
   | { type: 'error'; error: string }
 
@@ -1910,6 +1912,13 @@ const requestLocalChatCompletionStream = async (
             type: 'session',
             sessionUrl: chunk.sessionUrl
           })
+        }
+
+        if (chunk.type === 'retry') {
+          const retry = normalizeModelRetryStatus(chunk.retry)
+          if (!retry) throw new Error('Invalid model retry event.')
+          input.onEvent({ type: 'retry', retry })
+          return
         }
 
         if (chunk.type === 'tool-status') {

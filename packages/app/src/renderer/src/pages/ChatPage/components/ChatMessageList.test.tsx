@@ -19,6 +19,9 @@ import type { ChatSession } from '../chatStorage'
 const notifySuccessMock = vi.fn()
 
 const chatImageTranslations: Record<string, string> = {
+  'chat.loading_auto_retry_wait':
+    'Retry {{attempt}} in {{seconds}} seconds. You can stop at any time.',
+  'chat.loading_auto_retry_active': 'Retry {{attempt}} in progress. You can stop at any time.',
   'chat.attachment_image_alt': 'Attachment image {{index}}',
   'chat.image_alt': 'Image',
   'chat.image_load_failed': 'Image failed to load',
@@ -54,6 +57,7 @@ const buildChatMessageList = (
   currentSession: ChatSession,
   options?: {
     active?: boolean
+    loadingStatus?: import('../chatLoadingStatus').ChatLoadingStatus
     isLoading?: boolean
     editingMessageIndex?: number | null
     editingContent?: string
@@ -72,6 +76,7 @@ const buildChatMessageList = (
       active={options?.active}
       currentSession={currentSession}
       isLoading={options?.isLoading ?? false}
+      loadingStatus={options?.loadingStatus}
       editingMessageIndex={options?.editingMessageIndex ?? null}
       editingContent={options?.editingContent ?? ''}
       onSetEditingIndex={options?.onSetEditingIndex ?? vi.fn()}
@@ -91,6 +96,7 @@ const renderChatMessageList = (
   currentSession: ChatSession,
   options?: {
     active?: boolean
+    loadingStatus?: import('../chatLoadingStatus').ChatLoadingStatus
     isLoading?: boolean
     editingMessageIndex?: number | null
     editingContent?: string
@@ -1961,4 +1967,64 @@ describe('ChatMessageList layout', () => {
       overflow: 'auto'
     })
   })
+})
+
+describe('model capacity retry countdown', () => {
+  it.each(['server-overloaded', 'server-error'] as const)(
+    'ticks down on the real message component for %s and removes the timer after completion',
+    async (reason) => {
+      vi.useFakeTimers()
+      const session: ChatSession = {
+        id: 'retry-ui',
+        title: 'retry',
+        createdAt: 1,
+        messages: [
+          { role: 'user', content: 'hello' },
+          { role: 'assistant', content: '' }
+        ]
+      }
+      try {
+        const { rerender, unmount } = render(
+          buildChatMessageList(session, {
+            isLoading: true,
+            loadingStatus: {
+              label: 'Model busy',
+              retry: {
+                attempt: 9,
+                delayMs: 3000,
+                nextRetryAt: Date.now() + 3000,
+                reason
+              }
+            }
+          })
+        )
+        expect(screen.getByText('Retry 9 in 3 seconds. You can stop at any time.')).toBeTruthy()
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000)
+        })
+        expect(screen.getByText('Retry 9 in 2 seconds. You can stop at any time.')).toBeTruthy()
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2000)
+        })
+        expect(screen.getByText('Retry 9 in progress. You can stop at any time.')).toBeTruthy()
+        rerender(
+          buildChatMessageList(
+            {
+              ...session,
+              messages: [
+                ...session.messages.slice(0, 1),
+                { role: 'assistant', content: 'final answer' }
+              ]
+            },
+            { isLoading: false }
+          )
+        )
+        expect(screen.queryByText('Model busy')).toBeNull()
+        unmount()
+      } finally {
+        vi.clearAllTimers()
+        vi.useRealTimers()
+      }
+    }
+  )
 })

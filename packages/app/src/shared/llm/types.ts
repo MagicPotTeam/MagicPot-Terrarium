@@ -1,3 +1,4 @@
+import type { LLMRetryStatus } from './modelCapacityRetry'
 import type { OCRResult } from '@shared/api/svcLLMProxy'
 import type { ImageRequestContract } from './imageRequestContract'
 export type { ImageRequestContract } from './imageRequestContract'
@@ -96,7 +97,8 @@ export interface LLMChatResult {
 }
 
 export interface LLMDeltaEvent {
-  type: 'text-delta' | 'attachment' | 'session' | 'tool-status' | 'done' | 'error'
+  type: 'text-delta' | 'attachment' | 'session' | 'tool-status' | 'retry' | 'done' | 'error'
+  retry?: LLMRetryStatus
   delta?: string
   attachment?: ChatAttachment
   sessionUrl?: string
@@ -191,6 +193,8 @@ export interface VideoGenerationOptions {
 }
 
 export interface LLMChatParams {
+  /** Main-owned interactive Agent policy, not a permission or remote retry directive. */
+  retryCapacity?: boolean
   messages: ChatMessage[]
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort

@@ -3,6 +3,7 @@
 
 import { net } from 'electron'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
+import { normalizeModelRetryStatus } from '@shared/llm/modelCapacityRetry'
 import { withCanvasFileTools } from './canvasFileTools'
 import { createCanvasPathReadHandler, type CanvasPathReadHandler } from './canvasPathReadApproval'
 import { createSkillToolStream } from './skillToolStream'
@@ -2434,6 +2435,9 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         const stepStream =
           availableSkillTools.length > 0 ? createSkillToolStream(options?.onDelta) : undefined
         const nextChatResult = await cli.chat({
+          ...(req.conversationId && options?.signal && !req.videoGenerationOptions
+            ? { retryCapacity: true }
+            : {}),
           messages: conversationMessages,
           systemPrompt: toolAwareSystemPrompt,
           reasoningEffort: req.reasoningEffort,
@@ -2713,7 +2717,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         ...(event.finishReason ? { finishReason: event.finishReason } : {}),
         ...(event.error ? { error: event.error } : {}),
         ...(event.metadata ? { metadata: event.metadata } : {}),
-        ...(event.toolStatus ? { toolStatus: event.toolStatus } : {})
+        ...(event.toolStatus ? { toolStatus: event.toolStatus } : {}),
+        ...(event.retry ? { retry: event.retry } : {})
       })
     }
 
@@ -2914,13 +2919,28 @@ export class LLMProxySvcImpl implements LLMProxySvc {
                   done: false,
                   toolStatus: normalizeRemoteToolStatus(event.toolStatus)
                 }
-              : event
+              : event.type === 'retry'
+                ? {
+                    type: 'retry',
+                    delta: '',
+                    done: false,
+                    retry: normalizeModelRetryStatus(event.retry)
+                  }
+                : event
+        if (safeEvent.type === 'retry' && !safeEvent.retry)
+          throw new Error('Invalid model retry event.')
         assertSafeRemoteEventUrls(safeEvent, trustedRemoteOrigin)
         accountRemoteEvent(safeEvent)
         if (
-          !['text-delta', 'attachment', 'session', 'tool-status', 'done', 'error'].includes(
-            safeEvent.type
-          )
+          ![
+            'text-delta',
+            'attachment',
+            'session',
+            'tool-status',
+            'retry',
+            'done',
+            'error'
+          ].includes(safeEvent.type)
         ) {
           throw new Error(
             `Remote LLM streaming response contained an unknown event type: ${safeEvent.type}`
