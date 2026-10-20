@@ -2047,18 +2047,22 @@ const toolHandlers: Record<string, AssistantToolHandler> = {
   'agent.terminal.run': async (args, context) => {
     context.signal?.throwIfAborted()
     const contextSnapshot = context.workspaceReusableContext?.contextSnapshot
+    const canvasWorkspaceOnly = context.route.channel === 'canvas'
+    if (canvasWorkspaceOnly && !context.workspaceRootDir)
+      throw new Error('Canvas terminal commands require their main-owned thread workspace.')
     const workspaceRoots = [
       context.workspaceRootDir,
-      contextSnapshot?.downloadDir,
-      contextSnapshot?.outputDir,
-      contextSnapshot?.workflowDir
+      ...(canvasWorkspaceOnly
+        ? []
+        : [contextSnapshot?.downloadDir, contextSnapshot?.outputDir, contextSnapshot?.workflowDir])
     ].filter((entry): entry is string => Boolean(entry))
     const prepared = await prepareAgentTerminalCommand(
       { ...args, cwd: args.cwd ?? context.workspaceRootDir },
       {
         config: context.config,
         signal: context.signal,
-        workspaceRoots
+        workspaceRoots,
+        restrictToWorkspaceRoots: canvasWorkspaceOnly
       }
     )
     const sessionId = getAssistantSessionKey(context.route)

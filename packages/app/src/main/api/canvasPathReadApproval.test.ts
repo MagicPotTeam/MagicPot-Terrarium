@@ -45,6 +45,11 @@ const h = vi.hoisted(() => {
   return state
 })
 
+// The Node suite owns its storage root; do not initialize Electron's native build environment.
+vi.mock('../config/buildEnv', () => ({
+  getBuildEnv: () => ({ pathMap: { data: h.dataRoot } })
+}))
+
 vi.mock('electron', () => ({
   app: {
     getLocale: () => h.locale,

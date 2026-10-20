@@ -70,6 +70,8 @@ export type AgentTerminalCommandInput = {
 export type AgentTerminalRunContext = {
   config: Config
   workspaceRoots?: string[]
+  /** Main-owned canvas routes must not inherit global download/output roots. */
+  restrictToWorkspaceRoots?: boolean
   signal?: AbortSignal
 }
 
@@ -172,13 +174,13 @@ const resolveExistingDirectory = async (targetPath: string): Promise<string> => 
 
 const collectAllowedRoots = async (
   config: Config,
-  workspaceRoots: string[] | undefined
+  workspaceRoots: string[] | undefined,
+  restrictToWorkspaceRoots = false
 ): Promise<string[]> => {
   const candidateRoots = uniqueResolvedPaths([
-    process.cwd(),
-    config.download_dir,
-    config.output_dir,
-    config.workflow_dir,
+    ...(restrictToWorkspaceRoots
+      ? []
+      : [process.cwd(), config.download_dir, config.output_dir, config.workflow_dir]),
     ...(workspaceRoots || [])
   ])
 
@@ -192,7 +194,11 @@ const resolveAgentTerminalCwd = async (
 ): Promise<ResolvedAgentTerminalCwd> => {
   const requestedCwd = cleanString(cwd) || process.cwd()
   const resolvedCwd = await resolveExistingDirectory(requestedCwd)
-  const allowedRoots = await collectAllowedRoots(context.config, context.workspaceRoots)
+  const allowedRoots = await collectAllowedRoots(
+    context.config,
+    context.workspaceRoots,
+    context.restrictToWorkspaceRoots
+  )
 
   if (!allowedRoots.some((root) => isSameOrInside(root, resolvedCwd))) {
     throw new Error('agent.terminal.run cwd is outside the allowed roots.')

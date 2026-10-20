@@ -853,6 +853,46 @@ describe('AssistantToolRegistry', () => {
     }
   )
 
+  it('keeps a canvas terminal inside its own workspace even when global roots allow the sibling', async () => {
+    const registry = new AssistantToolRegistry()
+    const root = path.join(tempDir, 'canvas-a')
+    const sibling = path.join(tempDir, 'canvas-b')
+    await fs.mkdir(root, { recursive: true })
+    await fs.mkdir(sibling, { recursive: true })
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread' as const,
+      scopeId: 'owned-project',
+      threadId: 'a'
+    }
+    const config = {
+      ...DEFAULT_CONFIG,
+      download_dir: tempDir,
+      project_trace_config: { ...DEFAULT_CONFIG.project_trace_config, enable_agent_terminal: true }
+    }
+    const context = createToolContext(route, createTaskState(route), {
+      config,
+      workspaceRootDir: root
+    })
+    await expect(
+      registry.callTool(
+        'agent.terminal.run',
+        { command: 'node', args: ['--version'], cwd: sibling },
+        context
+      )
+    ).rejects.toThrow('outside the allowed roots')
+    const result = await registry.callTool(
+      'agent.terminal.run',
+      { command: 'node', args: ['--version'] },
+      context
+    )
+    expect(JSON.parse(result.content)).toMatchObject({
+      status: 'completed',
+      exitCode: 0,
+      stdout: expect.stringContaining(process.version)
+    })
+  })
+
   it('detaches a route from a shared workspace and archives the prior workspace identity', async () => {
     const registry = new AssistantToolRegistry()
     const route = {

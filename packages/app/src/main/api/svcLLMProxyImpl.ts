@@ -4,7 +4,7 @@
 import { net } from 'electron'
 import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
 import { normalizeModelRetryStatus } from '@shared/llm/modelCapacityRetry'
-import { withCanvasFileTools } from './canvasFileTools'
+import { prepareCanvasAgentTools, type CanvasToolAdmission } from './canvasAgentTools'
 import { createCanvasPathReadHandler, type CanvasPathReadHandler } from './canvasPathReadApproval'
 import { createSkillToolStream } from './skillToolStream'
 import { parseSkillToolInvocation } from './skillToolProtocol'
@@ -360,6 +360,7 @@ const createMainProcessElectronFetch = (): FetchImpl | null => {
 // ==================== Chat execution helpers ====================
 
 type ChatExecutionOptions = LLMChatOptions & {
+  canvasToolAdmission?: CanvasToolAdmission
   readExternalFile?: CanvasPathReadHandler
   runId?: string
   executeTool?: (invocation: {
@@ -2040,10 +2041,15 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           req,
           options?.methodName ? (options as ServiceInvocationContext) : undefined
         )
-    req = withCanvasFileTools(
+    const canvas = prepareCanvasAgentTools(
       req,
-      options?.methodName ? (options as ServiceInvocationContext) : undefined
+      options?.methodName ? (options as ServiceInvocationContext) : undefined,
+      {
+        local: !getConfig().use_remote_llm,
+        terminalEnabled: getConfig().project_trace_config?.enable_agent_terminal === true
+      }
     )
+    req = canvas.request
     const abortContext = this.createConversationAbortContext(req.conversationId, options?.signal)
     console.log('[LLMProxy] received chat request at top-level handler', {
       profileId: req.profileId,
@@ -2065,6 +2071,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       return await this.chatViaAPI(req, {
         ...options,
         readExternalFile,
+        canvasToolAdmission: canvas.admission,
         signal: abortContext.signal
       })
     } catch (e: unknown) {
@@ -2403,7 +2410,17 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let transcriptBytes = 0
     const emitToolStatus = (toolStatus: LLMToolStatus): void => {
       if (options?.signal?.aborted) return
-      options?.onDelta?.({ type: 'tool-status', delta: '', toolStatus })
+      options?.onDelta?.({
+        type: 'tool-status',
+        delta: '',
+        toolStatus,
+        // The renderer can close its stream immediately on Stop. Deliver completed
+        // effects now, not only with the final model answer, so cancellation cannot
+        // erase the evidence needed by the next user turn.
+        ...(toolStatus.status !== 'running'
+          ? { metadata: { runId, toolHistory: structuredClone(toolHistory) } }
+          : {})
+      })
     }
 
     try {
@@ -2577,20 +2594,28 @@ export class LLMProxySvcImpl implements LLMProxySvc {
               status: 'running'
             })
             throwIfAborted(options?.signal)
-            const toolResult = options?.executeTool
-              ? await options.executeTool({
-                  toolName: requestedTool.toolName,
-                  args: requestedTool.args,
-                  runId,
-                  toolCallId,
-                  signal: options.signal
-                })
-              : await runtime.callTool(
-                  buildSkillRuntimeRoute(req),
+            const execute = async () =>
+              options?.executeTool
+                ? await options.executeTool({
+                    toolName: requestedTool.toolName,
+                    args: requestedTool.args,
+                    runId,
+                    toolCallId,
+                    signal: options.signal
+                  })
+                : await runtime.callTool(
+                    buildSkillRuntimeRoute(req),
+                    requestedTool.toolName,
+                    requestedTool.args,
+                    toolOptions
+                  )
+            const toolResult = options?.canvasToolAdmission
+              ? await options.canvasToolAdmission.run(
                   requestedTool.toolName,
-                  requestedTool.args,
-                  toolOptions
+                  options.signal,
+                  execute
                 )
+              : await execute()
             record.status = 'completed'
             record.content = toolResult.content
             if (toolResult.metadata)
@@ -3295,8 +3320,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       // server has its own policy and must not receive this renderer-scoped
       // binding or its local workspace instructions.
       const readExternalFile = createCanvasPathReadHandler(req, invocation)
-      req = withCanvasFileTools(req, invocation)
+      const canvas = prepareCanvasAgentTools(req, invocation, {
+        local: true,
+        terminalEnabled: getConfig().project_trace_config?.enable_agent_terminal === true
+      })
+      req = canvas.request
       const result = await this.chatViaAPI(req, {
+        canvasToolAdmission: canvas.admission,
         readExternalFile,
         signal: abortContext.signal,
         onDelta: emitEvent

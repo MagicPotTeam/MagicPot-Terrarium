@@ -12,6 +12,11 @@ vi.mock('../agentKernel/toolBridge', () => ({
   syncAssistantToolsWithAgentKernel: bridge.sync
 }))
 
+// The Node suite owns its storage root; do not initialize Electron's native build environment.
+vi.mock('../config/buildEnv', () => ({
+  getBuildEnv: () => ({ pathMap: { data: process.cwd() } })
+}))
+
 vi.mock('electron', () => ({
   app: { isPackaged: false, getPath: () => process.cwd() },
   BrowserWindow: class {},

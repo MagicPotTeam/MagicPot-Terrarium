@@ -1,3 +1,4 @@
+import { isCanvasApprovalToolInvocation } from '../../api/canvasAgentTools'
 import path from 'node:path'
 import type { Config } from '@shared/config/config'
 import { MAGICPOT_SESSION_STATUS_TOOL_NAME, normalizeMagicPotToolName } from '@shared/app/types'
@@ -259,6 +260,11 @@ const evaluateInternalToolPermission = (context: McpPermissionContext) => {
         reason: `Tool "${toolName}" is outside the current-canvas sandbox.`,
         policyId: 'magicpot-chat-tool-deny'
       }
+    }
+    // Only a main-issued, exact-route, live invocation can reach an approval-backed host.
+    // Neither metadata nor the model tool allowlist is an approval or a scope grant.
+    if (route && isCanvasApprovalToolInvocation(route, toolName)) {
+      return { allowed: true, policyId: 'magicpot-assistant-canvas-approval-required' }
     }
     if (CANVAS_APPROVED_TOOL_NAMES.has(toolName)) {
       return {

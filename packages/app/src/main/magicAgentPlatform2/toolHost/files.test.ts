@@ -1399,3 +1399,73 @@ describe('FilesToolHost in-flight I/O cancellation', () => {
     }
   })
 })
+
+describe('file mutation cancellation before atomic commit', () => {
+  it.each(['snapshot', 'temporary-sync'] as const)(
+    'does not replace the real target when cancelled after %s',
+    async (stage) => {
+      const { root, authorization } = writeSetup()
+      const target = path.join(root, 'owned-cancel.txt')
+      writeFileSync(target, 'ORIGINAL_OWNED_BYTES')
+      const controller = new AbortController()
+      let observed = false
+      const originalWriteFile = fs.writeFile.bind(fs)
+      const originalOpen = fs.open.bind(fs)
+      const writeSpy = vi
+        .spyOn(fs, 'writeFile')
+        .mockImplementation(async (...args: Parameters<typeof fs.writeFile>) => {
+          const result = await originalWriteFile(...args)
+          if (
+            stage === 'snapshot' &&
+            String(args[0]).includes('snapshots') &&
+            String(args[0]).endsWith('manifest.json')
+          ) {
+            observed = true
+            controller.abort()
+          }
+          return result
+        })
+      const openSpy = vi
+        .spyOn(fs, 'open')
+        .mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+          const handle = await originalOpen(...args)
+          if (
+            stage === 'temporary-sync' &&
+            String(args[0]).includes('.owned-cancel.txt.') &&
+            String(args[0]).endsWith('.tmp')
+          ) {
+            const sync = handle.sync.bind(handle)
+            handle.sync = async () => {
+              await sync()
+              observed = true
+              controller.abort()
+            }
+          }
+          return handle
+        })
+      try {
+        const host = await createFilesHost(authorization, root)
+        await expect(
+          host.write({
+            ...mutationCall(
+              'files.write',
+              {
+                path: 'owned-cancel.txt',
+                content: 'MUST_NOT_COMMIT',
+                expectedSha256: digest('ORIGINAL_OWNED_BYTES')
+              },
+              authorization
+            ),
+            signal: controller.signal
+          })
+        ).rejects.toMatchObject({ name: 'AbortError' })
+        expect(observed).toBe(true)
+        expect(readFileSync(target, 'utf8')).toBe('ORIGINAL_OWNED_BYTES')
+        expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false)
+      } finally {
+        writeSpy.mockRestore()
+        openSpy.mockRestore()
+      }
+    }
+  )
+})

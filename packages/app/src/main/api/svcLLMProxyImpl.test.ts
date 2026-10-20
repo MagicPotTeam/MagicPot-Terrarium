@@ -939,6 +939,9 @@ describe('LLMProxySvcImpl', () => {
             expect.objectContaining({ type: 'done', content: 'Read the requested file.' })
           )
         }
+        expect(listToolsMock).toHaveBeenCalledWith(
+          expect.arrayContaining(['files.read', 'files.write', 'files.edit'])
+        )
         expect(callToolMock).toHaveBeenCalledOnce()
         expect(callToolMock).toHaveBeenCalledWith(
           expect.objectContaining(route),
@@ -1018,6 +1021,59 @@ describe('LLMProxySvcImpl', () => {
       expect(events.at(-1)?.content).toBe('文档包含三个阶段。')
     }
   )
+
+  it('checkpoints completed tool results before waiting for the next model response', async () => {
+    mockAgentProfile()
+    listToolsMock.mockReturnValue([
+      { name: 'files.write', description: 'Write', inputSchema: { type: 'object' } }
+    ])
+    callToolMock.mockResolvedValue({ content: 'OWNED_COMMITTED_FILE_RESULT' })
+    const agentChat = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: '{"toolName":"files.write","args":{"path":"owned.txt","content":"owned"}}'
+      })
+      .mockImplementationOnce(
+        async ({ signal }) =>
+          new Promise((_resolve, reject) =>
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+          )
+      )
+    vi.mocked(cliFromProfile).mockReturnValue({ chat: agentChat } as never)
+    const events: Array<Record<string, unknown>> = []
+    const service = new LLMProxySvcImpl()
+    const pending = service.chatStream(
+      {
+        conversationId: 'owned-checkpoint',
+        profileId: 'agent-profile',
+        messages: [{ role: 'user', content: 'write once' }],
+        skillRuntime: { bindings: [{ appId: 'magicpot.core', toolNames: ['files.write'] }] }
+      },
+      {
+        onData: (event) => {
+          events.push(event as unknown as Record<string, unknown>)
+        }
+      }
+    )
+    try {
+      await vi.waitFor(() => expect(agentChat).toHaveBeenCalledTimes(2))
+      const checkpoint = events.find(
+        (event) =>
+          event.type === 'tool-status' &&
+          (event.toolStatus as { status: string })?.status === 'completed'
+      )
+      expect(checkpoint?.metadata).toMatchObject({
+        toolHistory: [
+          { toolName: 'files.write', status: 'completed', content: 'OWNED_COMMITTED_FILE_RESULT' }
+        ]
+      })
+      expect(events.some((event) => event.type === 'done')).toBe(false)
+    } finally {
+      await service.cancelConversation({ conversationId: 'owned-checkpoint' })
+      await pending
+    }
+    expect(callToolMock).toHaveBeenCalledOnce()
+  })
 
   it('repairs malformed Windows-path tool JSON once before dispatch without guessing file authority', async () => {
     mockAgentProfile()

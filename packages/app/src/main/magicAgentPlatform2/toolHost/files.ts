@@ -930,7 +930,10 @@ export class FilesToolHost {
         existed
       )
       audit = { ...audit, snapshotId: snapshot.snapshotId }
-      await atomicReplace(target, afterBuffer, mode)
+      // Snapshot creation and staging perform asynchronous I/O. Re-check at the
+      // last reversible boundary, not only before creating the snapshot.
+      check(call.signal, deadline)
+      await atomicReplace(target, afterBuffer, mode, () => check(call.signal, deadline))
       const output = {
         root,
         path: requestedPath,
@@ -1920,7 +1923,12 @@ async function createSnapshot(
     })
   return { snapshotId, restoreToken }
 }
-async function atomicReplace(target: string, content: Buffer, mode?: number): Promise<void> {
+async function atomicReplace(
+  target: string,
+  content: Buffer,
+  mode?: number,
+  beforeCommit?: () => void
+): Promise<void> {
   const directory = path.dirname(target)
   const temporary = path.join(
     directory,
@@ -1933,6 +1941,7 @@ async function atomicReplace(target: string, content: Buffer, mode?: number): Pr
     await handle.sync()
     await handle.close()
     handle = undefined
+    beforeCommit?.()
     await fs.rename(temporary, target)
     try {
       const dir = await fs.open(directory, 'r')
